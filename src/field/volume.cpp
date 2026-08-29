@@ -277,6 +277,25 @@ cfloat3 FieldVolume::eval_color(cfloat3 p) const {
     return mix(mix(c00, c10, fy), mix(c01, c11, fy), fz);
 }
 
+FieldVolume FieldVolume::empty_lattice(const math::Aabb& region, float cell_size, float band) {
+    // The same lattice arithmetic sample_blocks does, and deliberately only
+    // that: no fill is called, so nothing is evaluated and the cost is the
+    // index rather than the model. build_far_bounds gives every slot the
+    // reading of a volume with no surface in it, which is what one is until
+    // something is materialized into it.
+    // The fill WRITES, and must: sample_blocks scans the buffer it handed over
+    // to decide which bricks store samples, so a fill that wrote nothing would
+    // have it classifying uninitialized memory. Far outside the band on the
+    // positive side is the honest description of a volume nothing has been
+    // materialized into, and it is what every brick's far bound then records.
+    const float far = (band > 0.0f ? band : cell_size * 3.0f) * 4.0f;
+    return sample_blocks(
+        [far](const BrickGrid&, std::size_t, std::size_t count, float* out) {
+            std::fill(out, out + count * kBrickSamples, far);
+        },
+        region, cell_size, band);
+}
+
 FieldVolume FieldVolume::sample_blocks(const BrickBlockFill& fill, const math::Aabb& region,
                                        float cell_size, float band,
                                        parallel::CancelToken* token, bool* out_cancelled) {
@@ -709,7 +728,8 @@ void FieldVolume::rewrite_region(const Region& region,
 }
 
 FieldVolume::RewriteTally FieldVolume::rewrite_region_tallied(
-    const Region& region, const std::function<float(int, int, int, float)>& fn) {
+    const Region& region, const std::function<float(int, int, int, float)>& fn,
+    std::vector<BrickCoord>* out_changed) {
     RewriteTally tally;
     if (empty() || region.box.empty()) return tally;
     const int n = kBrickDim + 1;
@@ -739,6 +759,7 @@ FieldVolume::RewriteTally FieldVolume::rewrite_region_tallied(
                 if (!region.meets(box)) continue;
                 ++tally.touched_bricks;
                 tally.bounds.expand(box);
+                bool brick_moved = false;
                 for (int i = 0; i < kBrickSamples; ++i) {
                     const int lx = i % n, ly = (i / n) % n, lz = i / (n * n);
                     const std::size_t at =
@@ -749,9 +770,16 @@ FieldVolume::RewriteTally FieldVolume::rewrite_region_tallied(
                     // Compared rather than assumed: a dab whose weight came out
                     // zero everywhere still selects its bricks, and a host told
                     // it had something to redraw would redraw nothing.
-                    if (now != was) tally.changed = true;
+                    if (now != was) {
+                        tally.changed = true;
+                        brick_moved = true;
+                    }
                     data_[at] = now;
                 }
+                // The bricks whose BYTES are new, which is what a delta
+                // carries -- not every brick the region selected, most of
+                // which a brush hands back unchanged.
+                if (brick_moved && out_changed) out_changed->push_back(BrickCoord{bx, by, bz});
             }
     return tally;
 }
@@ -788,6 +816,101 @@ std::vector<std::size_t> FieldVolume::fill_region_bricks(const Region& region,
                 fill(grid, slot, 1, blocks->data() + at);
             }
     return slots;
+}
+
+bool FieldVolume::read_brick(BrickCoord c, float* out) const {
+    if (!out) return false;
+    if (c.x < 0 || c.y < 0 || c.z < 0 || c.x >= bcount_[0] || c.y >= bcount_[1] ||
+        c.z >= bcount_[2])
+        return false;
+    const std::size_t slot =
+        static_cast<std::size_t>((c.z * bcount_[1] + c.y) * bcount_[0] + c.x);
+    const std::int32_t entry = index_[slot];
+    if (entry < 0) return false;
+    std::copy(data_.begin() + entry, data_.begin() + entry + kBrickSamples, out);
+    return true;
+}
+
+FieldVolume::ResampleTally FieldVolume::materialize_region(const Region& region,
+                                                           const BrickBlockFill& fill,
+                                                           std::vector<BrickCoord>* out_added) {
+    ResampleTally tally;
+    if (index_.empty() || region.box.empty()) return tally;
+
+    const float brick = static_cast<float>(kBrickDim) * cell_size_;
+    int lo[3], hi[3];
+    if (!region_brick_range(origin_, bcount_, brick, region.box, lo, hi)) return tally;
+
+    const BrickGrid grid{origin_, cell_size_, band_, {bcount_[0], bcount_[1], bcount_[2]}};
+
+    // COLLECTED FIRST, THEN FILLED IN CONSECUTIVE RUNS.
+    //
+    // `resample_region` asks for one brick at a time because a region selects a
+    // scattered set and `BrickBlockFill` can only name a consecutive one. That
+    // is true of the SET and false of its rows: slot is
+    // (bz*bcount1 + by)*bcount0 + bx, so bricks adjacent in x are adjacent
+    // slots, and a ball's cross-section in x is an interval. Filling a row at a
+    // time therefore costs one dispatch where filling a brick at a time costs
+    // eight or ten.
+    //
+    // It is worth the two passes because the fill is a POOLED evaluation: 729
+    // points across two dozen threads is most of a dispatch and very little
+    // work, and a first Smooth dab at 5,000 roots measured 830 ms per brick
+    // against a 543 ms whole-layer bake that evaluated MORE bricks. The
+    // sparsity was being paid for twice over.
+    std::vector<std::size_t> wanted;
+    for (int bz = lo[2]; bz <= hi[2]; ++bz)
+        for (int by = lo[1]; by <= hi[1]; ++by)
+            for (int bx = lo[0]; bx <= hi[0]; ++bx) {
+                if (!region.meets(brick_box_of(origin_, cell_size_, bx, by, bz))) continue;
+                const std::size_t slot =
+                    static_cast<std::size_t>((bz * bcount_[1] + by) * bcount_[0] + bx);
+                ++tally.evaluated;
+                // A brick already materialized holds either the source values
+                // it was filled with or an operator's edits to them, and
+                // refilling it would throw the edits away -- which is the
+                // difference between a cache and a bug.
+                if (index_[slot] >= 0) {
+                    ++tally.kept;
+                    continue;
+                }
+                wanted.push_back(slot);
+            }
+    if (wanted.empty()) return tally;
+
+    std::vector<float> block;
+    for (std::size_t i = 0; i < wanted.size();) {
+        std::size_t run = 1;
+        while (i + run < wanted.size() && wanted[i + run] == wanted[i] + run) ++run;
+        block.resize(run * kBrickSamples);
+        fill(grid, wanted[i], run, block.data());
+        for (std::size_t k = 0; k < run; ++k) {
+            const std::size_t slot = wanted[i] + k;
+            const float* one = block.data() + k * kBrickSamples;
+            // APPENDED, not rebuilt. Each stored brick owns a contiguous run of
+            // `data_` and nothing before it moves, so a new brick is a
+            // push_back and an index write -- which is what makes this a dab's
+            // cost rather than the model's.
+            index_[slot] = static_cast<std::int32_t>(data_.size());
+            data_.insert(data_.end(), one, one + kBrickSamples);
+            sample_lipschitz_ =
+                std::max(sample_lipschitz_, steepest_in_block(one) / cell_size_);
+            if (out_added) {
+                const int bx = static_cast<int>(slot) % bcount_[0];
+                const int by = (static_cast<int>(slot) / bcount_[0]) % bcount_[1];
+                const int bz = static_cast<int>(slot) / (bcount_[0] * bcount_[1]);
+                out_added->push_back(BrickCoord{bx, by, bz});
+            }
+            ++tally.added;
+        }
+        i += run;
+    }
+    // A volume that carried colour cannot keep a complete channel once bricks
+    // arrive whose colours nobody supplied, and a facet of default grey in the
+    // middle of a painted surface is worse than none. The same call
+    // resample_region makes, for the same reason.
+    if (tally.added > 0) colors_.clear();
+    return tally;
 }
 
 FieldVolume::ResampleTally FieldVolume::resample_region(const Region& region,

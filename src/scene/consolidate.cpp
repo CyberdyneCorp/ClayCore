@@ -186,6 +186,17 @@ FieldReport report_layer(const Layer& layer, float advise_below_step_scale) {
     return out;
 }
 
+namespace {
+// Defined below, beside the phases it runs. Declared here because `bake_layer`
+// is the door that opens the progress scope and then hands it over.
+std::optional<field::FieldVolume> bake_tape_with(const Tape& tape,
+                                                 const ConsolidationParams& params,
+                                                 bool want_color, ConsolidationCost* out_cost,
+                                                 const BakePointEval& point_eval,
+                                                 parallel::CancelToken* token,
+                                                 parallel::ProgressScope& progress);
+}  // namespace
+
 std::optional<field::FieldVolume> bake_layer(const Layer& layer,
                                              const ConsolidationParams& params,
                                              ConsolidationCost* out_cost,
@@ -196,11 +207,41 @@ std::optional<field::FieldVolume> bake_layer(const Layer& layer,
     // lie, because their per-unit costs differ by more than an order.
     parallel::ProgressScope progress(token, 5);
     if (!(params.cell_size > 0.0f)) return std::nullopt;
+
+    // The layer's own frame, and visible whatever the artist hid: sampling the
+    // world-space field and putting the result back under the layer would apply
+    // the transform twice, and a hidden layer is still a layer whose chain has
+    // degraded. Both overrides are silent if missed, and both have a test.
+    const Layer view = local_view(layer);
+    const Tape tape = compile_layer(view);
+
+    // ...and the one thing the TAPE cannot answer. `layer_colors_vary` walks
+    // the node tree — groups and hidden nodes included — and the compiler has
+    // already folded colour into instructions by the time a tape exists, so
+    // there is no way back to the question from here. It is public for exactly
+    // this reason: a caller baking a tape owes the same rule, or it gets
+    // different bytes.
+    return bake_tape_with(tape, params, layer_colors_vary(layer), out_cost, point_eval, token,
+                          progress);
+}
+
+namespace {
+
+// The half of a bake that only needs a TAPE, with the caller's progress scope
+// so that a bake through either door reports the same five phases from the same
+// moment. Split out rather than duplicated because the prefix cache samples a
+// tape that belongs to no layer, and a second implementation of "sample,
+// redistance, compact, colour, measure" would be a second definition of what a
+// consolidated volume IS.
+std::optional<field::FieldVolume> bake_tape_with(const Tape& tape,
+                                                 const ConsolidationParams& params,
+                                                 bool want_color, ConsolidationCost* out_cost,
+                                                 const BakePointEval& point_eval,
+                                                 parallel::CancelToken* token,
+                                                 parallel::ProgressScope& progress) {
     const float band = params.band > 0.0f ? params.band : params.cell_size * 3.0f;
     const float padding = params.padding > 0.0f ? params.padding : band;
 
-    const Layer view = local_view(layer);
-    const Tape tape = compile_layer(view);
     if (tape.empty() || tape.bounds.empty() || tape.bounds.is_infinite()) return std::nullopt;
 
     math::Aabb region = params.region;
@@ -259,7 +300,7 @@ std::optional<field::FieldVolume> bake_layer(const Layer& layer,
     // against a 786 ms budget, where the release before colour landed took
     // 524 ms.
     progress.phase(3);
-    if (layer_colors_vary(layer)) {
+    if (want_color) {
         volume.fill_colors_blocks([&tape, &point_eval](const float* points_xyz, std::size_t count,
                                                       float* out_rgb) {
             std::vector<float> scratch(count);
@@ -285,6 +326,21 @@ std::optional<field::FieldVolume> bake_layer(const Layer& layer,
 
     if (out_cost) fill_cost(volume, *out_cost);
     return volume;
+}
+
+}  // namespace
+
+std::optional<field::FieldVolume> bake_tape(const Tape& tape, const ConsolidationParams& params,
+                                            bool want_color, ConsolidationCost* out_cost,
+                                            const BakePointEval& point_eval,
+                                            parallel::CancelToken* token) {
+    // The same five phases, opened here because this is a whole operation when
+    // it is entered directly. `bake_layer` opens its own before compiling, so
+    // a host polling progress sees the compile as phase 0 exactly as it always
+    // has.
+    parallel::ProgressScope progress(token, 5);
+    if (!(params.cell_size > 0.0f)) return std::nullopt;
+    return bake_tape_with(tape, params, want_color, out_cost, point_eval, token, progress);
 }
 
 // COPY-ON-WRITE before a bake, because a bake is about ONE subtool.

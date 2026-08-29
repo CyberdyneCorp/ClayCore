@@ -400,6 +400,100 @@ collapsed" — a bake absorbs those grabs into the samples — and only an empty
 chain means there is nothing left to do, which is exactly the state Smooth's
 own commit leaves behind.
 
+### Not paying for the history you are sculpting on top of
+
+The section above moved Smooth's cost from every dab to one bake at
+pointer-down. This one removes most of that bake, and the term it removes is
+the one that grows with everything the artist has already done.
+
+A dirty region over worked geometry re-walks every item that contributes there,
+and almost none of them changed. `session::SdfPrefixCache` samples an old,
+stable prefix of the root list into a volume and evaluates only the live suffix
+over it — without touching the document, and without costing anyone an item's
+parameters.
+
+**Measured on a 24-thread Linux desktop at load 3.7 → 7.9**, twelve dirty
+bricks, 64 live suffix roots. Absolutes do not transfer; the ratios do, and they
+are what `tools/check_bench.py` gates:
+
+| history | full walk | prefix + suffix | |
+|---|---:|---:|---|
+| 5,000 roots, spread | 72.7 ms | **2.39 ms** | 30× |
+| 20,000 roots, spread | 255.2 ms | **2.37 ms** | 108× |
+| 5,000 roots, piled | 72.2 ms | **2.37 ms** | 30× |
+| 20,000 roots, piled | 250.8 ms | **2.38 ms** | 105× |
+
+The prefix column barely moves between 5,000 and 20,000 roots — 2.39 against
+2.37 ms — because the suffix is 64 roots whatever the document holds. **That is
+the point, and it is a scaling law rather than a percentage**: the margin widens
+with history because the numerator is fixed.
+
+**What it costs to build one, stated where nobody has to go looking.** Measured
+in a separate run on a quiet box (load 0.26 → 8.3), since the figures above were
+taken while another tenant was on this one:
+
+| build | time | stored | bytes |
+|---|---:|---:|---:|
+| 5,000 roots | 497 ms | 268 bricks | 1.43 MiB |
+| 20,000 roots | 1,971 ms | 268 bricks | 1.43 MiB |
+
+Linear in history, and the volume is a **shell**, so its size follows the
+surface and not the history at all. At 20,000 roots a build costs about **870
+hits** of the same window. A cache that a host builds on the critical path is
+therefore a loss, which is exactly why `SdfSourceField::open` will use a cached
+prefix and will never build one — scheduling that work is the host's.
+
+### Where the whole-layer cost actually went
+
+`begin()` no longer samples. It compiles the layer, allocates a lattice index
+and takes a digest:
+
+| | |
+|---|---:|
+| `begin`, 193-node fixture | 29.6 ms → **0.124 ms** |
+| `begin`, 5,000 roots | **1.89 ms** |
+| `begin`, 20,000 roots | **8.37 ms** |
+| source samples evaluated at `begin` | **0**, gated |
+
+**It is not flat, and this document should not say it is.** It is linear in root
+count — a compile and a digest — and 4.4× for 4× the roots is exactly that. What
+went away is *sampling*, which was linear in roots **×** samples.
+
+The cost did not evaporate; it moved to the **first dab**, which materializes the
+bricks it reads. So the honest comparison is the old `begin` against the new
+`begin` plus that first dab, at the same model size:
+
+| roots | old `begin` (whole-layer bake) | lazy `begin` + first dab | |
+|---:|---:|---:|---|
+| 1,000 | 129 ms | **63 ms** | 2.05× |
+| 5,000 | 542 ms | **272 ms** | 2.0× |
+
+and with a warm prefix the first dab falls again, 319 ms → **166 ms** at 5,000
+roots.
+
+That 2× was 0.6× when this was first written — the lazy path was *slower* to
+first pixel than the bake it replaced, materializing a tenth of the bricks and
+still losing. Materialization was filling one brick per pooled dispatch, and 729
+points across two dozen threads is mostly dispatch. It now fills consecutive
+runs, which is what a ball's cross-section in x already is. Worth recording
+because the shape generalises: sparsity is not free if it costs you your
+batching.
+
+### The preview a host actually uploads
+
+`clay_sdf_smooth_preview_item` copies the whole working volume. For a host
+drawing every frame that is the model per frame, so the delta path hands over
+only the bricks whose bytes are new:
+
+| per frame | bytes copied | |
+|---|---:|---|
+| full snapshot | 431,568 | |
+| delta | **43,463** | **0.101×** |
+
+The byte ratio is exact and identical on every run — it is a count, not a
+timing — and it is gated as `delta_frac`. The time ratio is 0.15×, and matters
+less: what a host feels is the upload it does not have to make.
+
 ## What does not fit, and by how much
 
 Only three things miss, and one of them is not in the gate at all.

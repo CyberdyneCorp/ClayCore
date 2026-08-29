@@ -81,6 +81,7 @@ add_executable(clay_unit_tests
   unit/test_c_volume.cpp
   unit/test_relax.cpp
   unit/test_sdf_sculpt.cpp
+  unit/test_sdf_prefix_cache.cpp
   unit/test_flatten.cpp
   unit/test_snakehook.cpp
   unit/test_magnify.cpp

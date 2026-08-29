@@ -1,0 +1,6 @@
+schema: spec-driven
+created: 2026-08-28
+goal: Make interaction cost the work being edited rather than everything the
+  artist has already sculpted — an ephemeral field cache for the stable edit-list
+  prefix, and a Smooth gesture that materializes its working field around the
+  brush instead of baking the layer at pointer-down

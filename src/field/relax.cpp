@@ -80,7 +80,8 @@ float mask_gate(const MaskGate& mask, cfloat3 p) {
 }  // namespace
 
 RelaxResult relax_in_place(FieldVolume& volume, const RelaxSettings& settings,
-                           parallel::CancelToken* token) {
+                           parallel::CancelToken* token,
+                           std::vector<FieldVolume::BrickCoord>* out_changed) {
     RelaxResult result;
     if (volume.empty()) return result;
 
@@ -188,7 +189,7 @@ RelaxResult relax_in_place(FieldVolume& volume, const RelaxSettings& settings,
         // the weight is non-zero, on this pass and on every later one.
         if (region_bounds) {
             const FieldVolume::RewriteTally tally =
-                current.rewrite_region_tallied(*region_bounds, blend);
+                current.rewrite_region_tallied(*region_bounds, blend, out_changed);
             result.dirty_bounds.expand(tally.bounds);
             // The same region every pass selects the same bricks, so this is
             // the pass's count rather than a sum over passes -- which is what a

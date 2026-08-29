@@ -91,6 +91,30 @@ field::FieldVolume baked(const Layer& layer, float cell = kCell) {
     return *bake_layer(layer, params);
 }
 
+// The layer sampled onto `like`'s lattice with NO redistance: what the lazy
+// working field materializes, and therefore what a reference for it must be.
+field::FieldVolume raw_sample(const Layer& layer, const field::FieldVolume& like) {
+    Layer view = layer;
+    view.visible = true;
+    view.xform = math::Transform{};
+    const Tape tape = compile_layer(view);
+    const math::Aabb region{like.origin(),
+                            like.origin() + cf3(float(like.sample_extent(0) - 1),
+                                                float(like.sample_extent(1) - 1),
+                                                float(like.sample_extent(2) - 1)) *
+                                                like.cell_size()};
+    return field::FieldVolume::sample_blocks(
+        [&tape](const field::FieldVolume::BrickGrid& grid, std::size_t first, std::size_t count,
+                float* out) {
+            for (std::size_t s = 0; s < count; ++s)
+                for (int i = 0; i < field::kBrickSamples; ++i) {
+                    const cfloat3 p = grid.sample_position(first + s, i);
+                    out[s * field::kBrickSamples + i] = tape.eval(p).d;
+                }
+        },
+        region, like.cell_size(), like.band());
+}
+
 // Whether a document round-trips to the same bytes: the exact "nothing
 // happened" that a pointer comparison cannot give.
 std::vector<std::uint8_t> snapshot(const Document& doc) { return serialize_document(doc); }
@@ -139,7 +163,11 @@ TEST_CASE("sculpt: a live Smooth pushes no undo steps until it commits") {
 
 // -- 12.4: the live sequence equals the standalone sequence -------------------
 
-TEST_CASE("sculpt: a Smooth transaction equals the same dabs through field::relax") {
+TEST_CASE("sculpt: the lazy working field equals a whole-layer relax sequence") {
+    // The working field is the layer SAMPLED and then relaxed, materialized
+    // around the brush instead of everywhere. So the reference is a whole-layer
+    // sample relaxed by the same dabs -- not `bake_layer`, which redistances,
+    // and whose post-process the lazy path applies once at commit instead.
     Document doc = two_balls();
     const LayerId id = doc.layers.front().id;
 
@@ -147,60 +175,154 @@ TEST_CASE("sculpt: a Smooth transaction equals the same dabs through field::rela
     const field::RelaxSettings b = dab(cf3(0.2f, 0.40f, 0), 0.25f, 0.5f);
     const field::RelaxSettings c = dab(cf3(-0.2f, 0.40f, 0), 0.20f, 0.9f);
 
-    field::FieldVolume expected = baked(doc.layers.front());
-    expected = field::relax(expected, a);
-    expected = field::relax(expected, b);
-    expected = field::relax(expected, c);
-
     auto tx = SdfSmoothTransaction::begin(doc, id, smooth_policy());
     REQUIRE(tx);
     tx->update(a);
     tx->update(b);
     tx->update(c);
-    // BYTE-identical: relax_in_place is the same algorithm with a different
-    // owner, so anything less would mean the refactor changed the arithmetic.
-    CHECK(tx->preview_volume().serialize() == expected.serialize());
 
+    // The same lattice, sampled whole, relaxed the same way.
+    field::FieldVolume expected = raw_sample(doc.layers.front(), tx->preview_volume());
+    field::relax_in_place(expected, a);
+    field::relax_in_place(expected, b);
+    field::relax_in_place(expected, c);
+
+    // Compared only where the lazy field HAS materialized: elsewhere it holds
+    // nothing by design, which is the whole point.
+    // Split by whether the sample is IN THE BAND, because that is where the
+    // field is a distance and where anyone looks. Past the band both fields
+    // hold a bound rather than a distance, and they hold different ones on
+    // purpose: materialization force-stores every brick it fills, so relax
+    // writes bricks a normal bake would have left empty.
+    double worst_band = 0.0, worst_far = 0.0;
+    std::size_t in_band = 0, far = 0;
+    const field::FieldVolume& got = tx->preview_volume();
+    const float band = expected.band();
+    for (int gz = 0; gz < expected.sample_extent(2); ++gz)
+        for (int gy = 0; gy < expected.sample_extent(1); ++gy)
+            for (int gx = 0; gx < expected.sample_extent(0); ++gx) {
+                const std::optional<float> mine = got.sample_at(gx, gy, gz);
+                const std::optional<float> want = expected.sample_at(gx, gy, gz);
+                if (!mine || !want) continue;
+                const double d = std::abs(double(*mine) - double(*want));
+                if (std::abs(*want) <= band) {
+                    worst_band = std::max(worst_band, d);
+                    ++in_band;
+                } else {
+                    worst_far = std::max(worst_far, d);
+                    ++far;
+                }
+            }
+    MESSAGE("in band: " << in_band << " worst " << worst_band
+            << " | past band: " << far << " worst " << worst_far);
+    CHECK(in_band > 1000);
+    // 5.5e-5 measured, about a thousandth of a cell. Not float rounding, and
+    // worth naming: at the BAND EDGE a written sample's stencil reaches bricks
+    // that the lazy field force-stored and a normal bake left empty, so the tap
+    // exists here and is missing there, and relax renormalizes over a different
+    // neighbourhood. It is the price of using stored-ness as the record of what
+    // has been materialized, and it is three orders below a cell.
+    CHECK(worst_band < 1e-3);
+    // Past the band both hold a bound rather than a distance, and deliberately
+    // different ones. Bounded so a real divergence still fails.
+    CHECK(worst_far < 0.2 * kCell);
+}
+
+TEST_CASE("sculpt: how far the lazy commit sits from the whole-layer path") {
+    // The one semantic difference, MEASURED rather than asserted away. The old
+    // path relaxed a redistanced bake; this redistances a relaxed field. Both
+    // are sound distance fields and neither approximates the other, so the
+    // useful question is how far apart they land on the surface an artist sees.
+    Document doc = two_balls();
+    const LayerId id = doc.layers.front().id;
+    const field::RelaxSettings a = dab(cf3(0, 0.42f, 0), 0.30f, 0.7f);
+
+    // The old path, reproduced exactly: bake (redistanced), then relax.
+    ConsolidationParams params;
+    params.cell_size = kCell;
+    field::FieldVolume old_path = *bake_layer(doc.layers.front(), params);
+    field::relax_in_place(old_path, a);
+
+    auto tx = SdfSmoothTransaction::begin(doc, id, smooth_policy());
+    REQUIRE(tx);
+    tx->update(a);
     REQUIRE(tx->commit(nullptr));
     const Layer& after = doc.layers.front();
     REQUIRE(after.sdf->roots.size() == 1);
-    const Node* installed = after.sdf->find(after.sdf->roots.front());
-    REQUIRE(installed != nullptr);
-    // .get(), not the shared_ptr: doctest stringifies both sides of what it
-    // decomposes, and MSVC's <memory> declares an operator<< for shared_ptr
-    // that a raw element pointer cannot deduce against — so a smart pointer in
-    // an assertion is a Windows-only build error. test_cull_index.cpp already
-    // compares .get() for the same reason.
-    REQUIRE(installed->volume.get() != nullptr);
-    CHECK(installed->volume->serialize() == expected.serialize());
+    const field::FieldVolume& new_path = *after.sdf->find(after.sdf->roots.front())->volume;
+
+    // On the surface, which is what the two disagree about in a way anyone can
+    // see. Marched along +y through the seam the dab smoothed.
+    double worst = 0.0;
+    for (float x = -0.6f; x <= 0.6f; x += 0.02f)
+        for (float y = 0.0f; y <= 0.8f; y += 0.02f) {
+            const cfloat3 p = cf3(x, y, 0);
+            if (!old_path.has_samples_at(p) || !new_path.has_samples_at(p)) continue;
+            worst = std::max(worst,
+                             std::abs(double(old_path.eval(p)) - double(new_path.eval(p))));
+        }
+    MESSAGE("lazy commit vs whole-layer commit, worst on surface: " << worst
+            << " (" << (worst / kCell) << " cells)");
+    // Recorded as a bound rather than a target: what matters is that it is a
+    // fraction of a cell and not a feature.
+    CHECK(worst < 1.0 * kCell);
 }
 
 // -- 12.6: the source layer is evaluated once, at begin, and never again ------
 
-TEST_CASE("sculpt: a Smooth gesture evaluates the source layer exactly once") {
+TEST_CASE("sculpt: begin materializes nothing, and dabs materialize locally") {
+    // THE DEFINING TEST of the lazy path. `begin` used to bake the whole layer;
+    // it now evaluates nothing at all, and the first dab brings in only the
+    // bricks it will read. Counters rather than a clock, because the claim is
+    // about what is touched and has to hold on a loaded machine.
     Document doc = two_balls();
     UndoStack undo;
-    int evaluations = 0;
-    // A counting evaluator that DECLINES: bake_layer calls it per window and
-    // falls back to the serial walk, so the bytes are the bake's own while the
-    // counter still sees every request. That is the seam — the volume cannot
-    // change because of the instrument measuring it.
-    BakePointEval counting = [&evaluations](const Tape&, const float*, std::size_t, float*,
-                                            float*) {
-        ++evaluations;
-        return false;
-    };
-
-    auto tx = SdfSmoothTransaction::begin(doc, doc.layers.front().id, smooth_policy(), counting);
+    auto tx = SdfSmoothTransaction::begin(doc, doc.layers.front().id, smooth_policy());
     REQUIRE(tx);
-    const int after_begin = evaluations;
-    CHECK(after_begin > 0);
 
-    for (int i = 0; i < 50; ++i) tx->update(dab(cf3(0, 0.42f, 0)));
-    CHECK(evaluations == after_begin);  // no update re-bakes
+    CHECK(tx->materialization().materialized_bricks == 0);
+    CHECK(tx->materialization().updates == 0);
+    CHECK(tx->preview_volume().brick_count() == 0);  // a lattice, and no samples
+
+    const cfloat3 seam = cf3(0, 0.42f, 0);
+    tx->update(dab(seam, 0.25f));
+    const std::size_t first = tx->materialization().materialized_bricks;
+    CHECK(first > 0);
+    // No ratio against this fixture's own size: two balls at a 0.05 cell are
+    // about 96 stored bricks, and any correct halo is dominated by brick
+    // granularity when the brush is five cells and a brick is eight. What
+    // "local" means is that the count does not follow the MODEL, and the
+    // scaling test below is where that is asserted.
+
+    // The SAME dab again brings in nothing new and reuses what is there.
+    tx->update(dab(seam, 0.25f));
+    CHECK(tx->materialization().materialized_bricks == first);
+    CHECK(tx->materialization().reused_bricks > 0);
+
+    // A dab somewhere else materializes its own region and no more.
+    tx->update(dab(cf3(0, -0.42f, 0), 0.25f));
+    const std::size_t after_far = tx->materialization().materialized_bricks;
+    CHECK(after_far > first);
+    CHECK(after_far - first <= first + 2);  // its own ball, not the model
 
     REQUIRE(tx->commit(&undo));
-    CHECK(evaluations == after_begin);  // and neither does the commit
+    CHECK(undo.undo_depth() == 1);
+}
+
+TEST_CASE("sculpt: distant unrelated model does not change what a dab materializes") {
+    // 3.4 / 10.2: after the brush region is fixed, adding geometry far away
+    // must not change the local working set. The number is a count, so this
+    // holds whatever the machine is doing.
+    std::size_t small = 0, large = 0;
+    for (std::size_t extra : {std::size_t{0}, std::size_t{400}}) {
+        Document doc = two_balls_plus_distant(extra);
+        auto tx = SdfSmoothTransaction::begin(doc, doc.layers.front().id, smooth_policy());
+        REQUIRE(tx);
+        tx->update(dab(cf3(0, 0.42f, 0), 0.25f));
+        (extra == 0 ? small : large) = tx->materialization().materialized_bricks;
+    }
+    CHECK(small > 0);
+    CHECK(small == large);
 }
 
 // -- 12.5: undo and redo of a committed Smooth --------------------------------
@@ -275,21 +397,38 @@ TEST_CASE("sculpt: a masked Smooth freezes exactly what the mask covers") {
     // SAMPLE in them moved, which is the difference `changed` exists to report.
     CHECK(d.touched_bricks > 0);
     CHECK_FALSE(d.changed);
-    for (float y = 0.2f; y <= 0.6f; y += 0.02f)
-        CHECK(tx->preview_volume().eval(cf3(0, y, 0)) == source.eval(cf3(0, y, 0)));
-
-    // Byte-identical to a standalone masked relax, band and all: the band is
-    // narrowed by what a pass COULD have moved the surface, which is a property
-    // of the kernel rather than of the samples, and both paths narrow it alike.
-    CHECK(tx->preview_volume().serialize() == field::relax(source, s).serialize());
+    // Every materialized sample is the source's, verbatim. Against the RAW
+    // source rather than a bake: the working field is the layer sampled, and a
+    // bake's redistance is applied once at commit instead.
+    const field::FieldVolume raw = raw_sample(doc.layers.front(), tx->preview_volume());
+    std::size_t checked = 0;
+    for (int gz = 0; gz < raw.sample_extent(2); ++gz)
+        for (int gy = 0; gy < raw.sample_extent(1); ++gy)
+            for (int gx = 0; gx < raw.sample_extent(0); ++gx) {
+                const std::optional<float> mine = tx->preview_volume().sample_at(gx, gy, gz);
+                const std::optional<float> want = raw.sample_at(gx, gy, gz);
+                if (!mine || !want) continue;
+                REQUIRE(*mine == *want);  // frozen means verbatim, not nearly
+                ++checked;
+            }
+    CHECK(checked > 1000);
 
     // Half a mask scales the effect rather than gating it.
     field::RelaxSettings half = dab(frozen, 0.35f);
     half.mask = [](cfloat3) { return 0.5f; };
     auto partial = SdfSmoothTransaction::begin(doc, doc.layers.front().id, smooth_policy());
     REQUIRE(partial);
+    // Half a mask scales the effect rather than gating it: something moved,
+    // and it moved less than an unmasked dab would have.
     CHECK(partial->update(half).changed);
-    CHECK(partial->preview_volume().serialize() == field::relax(source, half).serialize());
+    auto unmasked = SdfSmoothTransaction::begin(doc, doc.layers.front().id, smooth_policy());
+    REQUIRE(unmasked);
+    unmasked->update(dab(frozen, 0.35f));
+    const cfloat3 probe = cf3(0, 0.42f, 0);
+    const double base = raw.eval(probe);
+    const double half_moved = std::abs(double(partial->preview_volume().eval(probe)) - base);
+    const double full_moved = std::abs(double(unmasked->preview_volume().eval(probe)) - base);
+    CHECK(half_moved < full_moved);
 }
 
 // -- 12.7 / 12.8: Move is transactional --------------------------------------
@@ -569,16 +708,15 @@ TEST_CASE("sculpt: a Smooth commit does not re-bake a layer it just sampled") {
     auto tx = SdfSmoothTransaction::begin(doc, id, policy);
     REQUIRE(tx);
     tx->update(dab(cf3(0, 0.42f, 0)));
-    const std::vector<std::uint8_t> preview = tx->preview_volume().serialize();
     REQUIRE(tx->commit(nullptr));
 
     CHECK(tx->budget().over_budget);
     CHECK_FALSE(tx->budget().consolidated);  // 6.6: already sampled, nothing to collapse
     const Layer& after = doc.layers.front();
     REQUIRE(after.sdf->roots.size() == 1);
-    // Byte-identical to what the stroke previewed: a re-bake would have
-    // produced a volume of a volume, at a different Lipschitz.
-    CHECK(after.sdf->find(after.sdf->roots.front())->volume->serialize() == preview);
+    // One volume item carrying no deformers: the state a bake produces, so
+    // there is nothing left for the policy to collapse.
+    CHECK(report_layer(after).longest_deformer_chain == 0);
 }
 
 TEST_CASE("sculpt: an empty policy authorises nothing and is never over budget") {
@@ -777,22 +915,21 @@ TEST_CASE("sculpt: a bare consolidated layer is still not re-baked") {
     auto tx = SdfSmoothTransaction::begin(doc, id, policy);
     REQUIRE(tx);
     tx->update(dab(cf3(0, 0.42f, 0)));
-    const std::vector<std::uint8_t> preview = tx->preview_volume().serialize();
     REQUIRE(tx->commit(nullptr));
     CHECK(tx->budget().over_budget);
     CHECK_FALSE(tx->budget().consolidated);
     CHECK(report_layer(doc.layers.front()).longest_deformer_chain == 0);
+    const std::vector<std::uint8_t> first_bytes = snapshot(doc);
 
     // A second Smooth over the already-baked layer: still nothing to collapse,
     // and still byte-identical to what it previewed.
     auto again = SdfSmoothTransaction::begin(doc, id, policy);
     REQUIRE(again);
     again->update(dab(cf3(0, 0.42f, 0)));
-    const std::vector<std::uint8_t> second = again->preview_volume().serialize();
     REQUIRE(again->commit(nullptr));
     CHECK_FALSE(again->budget().consolidated);
     const Layer& after = doc.layers.front();
     REQUIRE(after.sdf->roots.size() == 1);
-    CHECK(after.sdf->find(after.sdf->roots.front())->volume->serialize() == second);
-    CHECK(second != preview);  // the second stroke did something
+    CHECK(report_layer(after).longest_deformer_chain == 0);
+    CHECK(snapshot(doc) != first_bytes);  // the second stroke did something
 }

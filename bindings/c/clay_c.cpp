@@ -5632,6 +5632,109 @@ clay_result clay_sdf_smooth_commit(clay_sdf_smooth_tx* tx, clay_sculpt_budget* o
     return CLAY_OK;
 }
 
+namespace {
+constexpr std::size_t kPreviewDeltaInfoOriginal =
+    offsetof(clay_sdf_preview_delta_info, bounds_max) + sizeof(float) * 3;
+}  // namespace
+
+clay_result clay_sdf_smooth_preview_delta_info(const clay_sdf_smooth_tx* tx,
+                                               clay_sdf_preview_delta_info* out_info) {
+    if (!tx || !out_info) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null transaction or out");
+    // LIVE, not merely present: after a commit or a cancel the working field is
+    // released, so a delta read would describe something the host can no longer
+    // draw. Refused on the same terms as every other call here.
+    if (!tx->tx || !tx->tx->live())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "this transaction is spent");
+    clay_sdf_preview_delta_info probe;
+    clay_result r = read_desc(out_info, kPreviewDeltaInfoOriginal, &probe);
+    if (r != CLAY_OK) return r;
+
+    const std::vector<field::FieldVolume::BrickCoord>& bricks = tx->tx->preview_delta();
+    const field::FieldVolume& volume = tx->tx->preview_volume();
+    clay_sdf_preview_delta_info value{};
+    value.struct_size = sizeof(clay_sdf_preview_delta_info);
+    value.generation = tx->tx->preview_generation();
+    value.brick_count = static_cast<std::uint64_t>(bricks.size());
+    value.sample_floats =
+        static_cast<std::uint64_t>(bricks.size()) * static_cast<std::uint64_t>(field::kBrickSamples);
+    math::Aabb bounds;
+    const float span = static_cast<float>(field::kBrickDim) * volume.cell_size();
+    for (const field::FieldVolume::BrickCoord& c : bricks) {
+        const kernel::cfloat3 lo = volume.brick_origin(c);
+        bounds.expand(math::Aabb{lo, lo + kernel::cf3(span, span, span)});
+    }
+    value.has_bounds = bounds.empty() ? 0 : 1;
+    if (value.has_bounds) {
+        for (int a = 0; a < 3; ++a) {
+            value.bounds_min[a] = (&bounds.min.x)[a];
+            value.bounds_max[a] = (&bounds.max.x)[a];
+        }
+    }
+    write_desc(out_info, out_info->struct_size, value);
+    return CLAY_OK;
+}
+
+clay_result clay_sdf_smooth_preview_delta_take(clay_sdf_smooth_tx* tx,
+                                               clay_sdf_preview_brick* bricks,
+                                               uint64_t brick_capacity, float* samples,
+                                               uint64_t sample_capacity, uint64_t* out_bricks,
+                                               uint64_t* out_samples) {
+    if (!tx || !out_bricks || !out_samples)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null transaction or out counts");
+    // LIVE, not merely present: after a commit or a cancel the working field is
+    // released, so a delta read would describe something the host can no longer
+    // draw. Refused on the same terms as every other call here.
+    if (!tx->tx || !tx->tx->live())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "this transaction is spent");
+
+    const std::vector<field::FieldVolume::BrickCoord>& waiting = tx->tx->preview_delta();
+    const std::uint64_t need_bricks = static_cast<std::uint64_t>(waiting.size());
+    const std::uint64_t need_samples =
+        need_bricks * static_cast<std::uint64_t>(field::kBrickSamples);
+    *out_bricks = need_bricks;
+    *out_samples = need_samples;
+    if (need_bricks == 0) return CLAY_OK;
+    if (!bricks || !samples)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brick or sample buffer");
+    // NOTHING is taken when either buffer is short. A partial drain would
+    // strand bricks that no later call reports, because taking is what clears
+    // them -- so the caller grows its buffers and asks again, and the counts
+    // above say how far.
+    if (brick_capacity < need_bricks || sample_capacity < need_samples)
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                    "delta needs " + std::to_string(need_bricks) + " bricks and " +
+                        std::to_string(need_samples) + " sample floats");
+
+    const field::FieldVolume& volume = tx->tx->preview_volume();
+    std::uint64_t written = 0;
+    for (std::uint64_t i = 0; i < need_bricks; ++i) {
+        const field::FieldVolume::BrickCoord c = waiting[static_cast<std::size_t>(i)];
+        float* into = samples + written;
+        // A brick the working field no longer stores is not reported: the delta
+        // records what changed, and a consumer cannot patch with samples that
+        // are not there. It cannot happen through the transaction's own paths,
+        // which only ever add storage, and skipping is the honest answer if it
+        // ever does.
+        if (!volume.read_brick(c, into)) continue;
+        clay_sdf_preview_brick& out = bricks[i];
+        out.key[0] = c.x;
+        out.key[1] = c.y;
+        out.key[2] = c.z;
+        const kernel::cfloat3 lo = volume.brick_origin(c);
+        out.origin[0] = lo.x;
+        out.origin[1] = lo.y;
+        out.origin[2] = lo.z;
+        out.spacing = volume.cell_size();
+        out.sample_dim = static_cast<std::uint32_t>(field::kBrickDim + 1);
+        out.sample_offset = written;
+        written += static_cast<std::uint64_t>(field::kBrickSamples);
+    }
+    *out_bricks = written / static_cast<std::uint64_t>(field::kBrickSamples);
+    *out_samples = written;
+    tx->tx->take_preview_delta(nullptr);
+    return CLAY_OK;
+}
+
 void clay_sdf_smooth_cancel(clay_sdf_smooth_tx* tx) {
     if (tx && tx->tx) tx->tx->cancel();
 }

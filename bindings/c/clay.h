@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 59
+#define CLAY_ABI_MINOR 60
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -4385,6 +4385,13 @@ clay_result clay_sdf_smooth_update(clay_sdf_smooth_tx* tx, const clay_relax_para
 /* The preview so far, as a fresh volume item the caller owns and destroys with
  * clay_item_destroy.
  *
+ * THE SNAPSHOT PATH, and not the per-frame one. It copies the whole working
+ * volume, which a host joining mid-gesture or rebuilding a lost preview cache
+ * wants and a host drawing every frame does not: for that,
+ * clay_sdf_smooth_preview_delta_take below hands over only the bricks that
+ * changed. Kept, and kept working, because a simple host should not have to
+ * implement patching to draw anything at all.
+ *
  * A COPY of the working samples, which is honest about what it costs: the
  * transaction goes on mutating its own volume, and handing out a view of
  * something that is about to change under a compiled tape is the bug this
@@ -4403,6 +4410,67 @@ clay_result clay_sdf_smooth_preview_item(const clay_sdf_smooth_tx* tx, clay_item
  * removed or protected since begin. `out_budget` may be NULL. The transaction
  * is spent either way and must still be destroyed. */
 clay_result clay_sdf_smooth_commit(clay_sdf_smooth_tx* tx, clay_sculpt_budget* out_budget);
+
+/* -- the incremental preview: only the bricks that changed ------------------
+ *
+ * clay_sdf_smooth_preview_item above copies the WHOLE working volume, which is
+ * the wrong shape for a per-frame loop: a dab moves a ball of bricks and the
+ * host re-uploads the model. These two calls hand over exactly the bricks whose
+ * bytes are new -- the ones a dab materialized, and the ones its relax moved.
+ *
+ * Two calls, because the buffers are the CALLER'S: ask what is waiting, size
+ * the buffers, take it. That is the same shape clay_brick_cache_take_dirty and
+ * clay_voxel_take_dirty_chunks already use, and the same reason -- a host
+ * patching a GPU cache wants to own the memory it uploads from.
+ *
+ * THE DELTA ACCUMULATES until it is taken, deduplicated by brick, so a host
+ * that skips a frame loses nothing and one that reads twice is told the same
+ * thing twice. `generation` is bumped by every update that changed the preview
+ * and by nothing else, which is how a host tells a duplicate read from a
+ * skipped frame and drops an upload it began against an older one. */
+
+/* One changed brick. An ARRAY ELEMENT, so no struct_size: a caller receives
+ * thousands of them and the layout is the contract, exactly as
+ * clay_brick_request and clay_voxel_chunk_mesh_range are. */
+typedef struct clay_sdf_preview_brick {
+    int32_t key[3];        /* the brick's lattice coordinate */
+    float origin[3];       /* world position of its first sample */
+    float spacing;         /* cell size; samples are spacing apart */
+    uint32_t sample_dim;   /* samples per axis, halo included */
+    uint64_t sample_offset; /* where its samples start in the sample buffer */
+} clay_sdf_preview_brick;
+
+typedef struct clay_sdf_preview_delta_info {
+    uint32_t struct_size; /* = sizeof(clay_sdf_preview_delta_info); required */
+    uint64_t generation;
+    uint64_t brick_count;   /* bricks waiting to be taken */
+    uint64_t sample_floats; /* floats the sample buffer must hold for them */
+    int32_t has_bounds;     /* 0: nothing waiting, and the bounds are untouched */
+    float bounds_min[3];
+    float bounds_max[3];
+} clay_sdf_preview_delta_info;
+
+/* What is waiting, without taking it. Takes nothing and changes nothing, so a
+ * host may call it every frame to decide whether to bother. */
+clay_result clay_sdf_smooth_preview_delta_info(const clay_sdf_smooth_tx* tx,
+                                               clay_sdf_preview_delta_info* out_info);
+
+/* Take it. `bricks` receives one record per changed brick and `samples` their
+ * values back to back, x-fastest over sample_dim^3 -- the order
+ * clay_item_volume_* stores them in.
+ *
+ * CLAY_ERROR_BUFFER_TOO_SMALL when either buffer is short, and then NOTHING is
+ * taken: the delta is still waiting and the out-counts report what it needs, so
+ * a caller grows its buffers and asks again. A partial drain would strand
+ * bricks that nothing will report a second time.
+ *
+ * On success the delta is cleared. The generation is not: it names the state
+ * the caller now holds. */
+clay_result clay_sdf_smooth_preview_delta_take(clay_sdf_smooth_tx* tx,
+                                               clay_sdf_preview_brick* bricks,
+                                               uint64_t brick_capacity, float* samples,
+                                               uint64_t sample_capacity,
+                                               uint64_t* out_bricks, uint64_t* out_samples);
 
 /* Discard the preview. The document was never touched, so this only ends the
  * gesture; the handle must still be destroyed. */

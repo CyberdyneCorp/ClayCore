@@ -40,6 +40,12 @@ ARRAY_ELEMENT_STRUCTS = {
     # that with. Widening this one later is a break in exactly the same way.
     "clay_stroke_sample_full",
     "clay_stamp",          # packed float[10] per stamp, an output buffer
+    # One per changed brick of a live Smooth preview, and a dab produces
+    # hundreds. Read rather than filled in, like the two brick-range elements
+    # below, so there is nothing for a struct_size to negotiate: appending a
+    # field would move every element after the first, which is a break either
+    # way. The host reads it straight into an upload loop.
+    "clay_sdf_preview_brick",
     # 44 bytes that ARE brick::BrickRequest, asserted field by field with
     # offsetof in bindings/c/clay_c.cpp. A refill hands out thousands at once
     # and the drain is a single memcpy out of the engine's own vector; a
