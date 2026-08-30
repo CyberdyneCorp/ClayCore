@@ -3765,6 +3765,88 @@ def test_move_surface_coalesces_over_a_drag():
     assert stepped.safe_step_scale() == pytest.approx(once.safe_step_scale())
 
 
+def test_magnify_surface_swells_a_blended_form_as_one():
+    """Issue #391: magnify is per item and local, and had no surface resolver."""
+    base, _ = _blended_form()
+    before = {x: _top(base, x) for x in (-0.45, 0.45)}
+
+    doc, layer = _blended_form()
+    touched = layer.magnify_surface((0, 0, 0), 0.4, radius=0.8)
+    assert len(touched) == 2                    # both items take a share
+
+    lift = {x: _top(doc, x) - before[x] for x in (-0.45, 0.45)}
+    assert lift[-0.45] > 0.0 and lift[0.45] > 0.0
+    assert lift[-0.45] == pytest.approx(lift[0.45], abs=0.005)   # symmetric
+
+
+def test_a_magnify_on_one_item_is_not_a_surface_magnify():
+    """The measurement #391 asks for: one side gathers and the rest stays."""
+    base, _ = _blended_form()
+    before = {x: _top(base, x) for x in (-0.45, 0.45)}
+
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    for x in (-0.45, 0.45):
+        ball = clay.Sphere(0.5).at((x, 0, 0))
+        if x < 0:
+            ball.magnify(center=(0, 0, 0), radius=0.8, strength=0.4)
+        layer.add(ball, blend=clay.Smooth(0.25))
+
+    assert abs(_top(doc, -0.45) - before[-0.45]) > 0.01                     # its own side
+    assert _top(doc, 0.45) - before[0.45] == pytest.approx(0.0, abs=0.005)  # the other does not
+
+
+def test_magnify_surface_sign_is_magnify_versus_pinch():
+    base, _ = _blended_form()
+    before = _top(base, 0.0)
+
+    swelled, swelled_layer = _blended_form()
+    swelled_layer.magnify_surface((0, 0, 0), 0.4, radius=0.8)
+    gathered, gathered_layer = _blended_form()
+    gathered_layer.magnify_surface((0, 0, 0), -0.4, radius=0.8)
+
+    assert _top(swelled, 0.0) > before
+    assert _top(gathered, 0.0) < before
+
+
+def test_magnify_surface_preview_names_the_nodes_and_touches_nothing():
+    doc, layer = _blended_form()
+    rng = np.random.default_rng(13)
+    probes = rng.uniform(-1.3, 1.3, size=(3000, 3)).astype(np.float32)
+    before = doc.eval(probes)
+
+    planned = layer.magnify_surface_preview((0, 0, 0), 0.4, radius=0.8)
+    assert len(planned) == 2
+    assert np.array_equal(doc.eval(probes), before)      # resolving is pure
+
+    touched = layer.magnify_surface((0, 0, 0), 0.4, radius=0.8)
+    assert sorted(touched) == sorted(planned)
+
+
+def test_magnify_surface_coalesces_over_a_gesture():
+    # A live pinch grows its strength and calls this every frame; frames replace
+    # rather than stack, so five ending at -0.4 must be one gesture of -0.4.
+    stepped, stepped_layer = _blended_form()
+    for k in (-0.08, -0.16, -0.24, -0.32, -0.4):
+        stepped_layer.magnify_surface((0, 0, 0), k, radius=1.2)
+    once, once_layer = _blended_form()
+    once_layer.magnify_surface((0, 0, 0), -0.4, radius=1.2)
+
+    rng = np.random.default_rng(23)
+    probes = rng.uniform(-1.3, 1.3, size=(4000, 3)).astype(np.float32)
+    assert np.allclose(stepped.eval(probes), once.eval(probes), atol=1e-6)
+    # ...and the marcher does not pay for the frame count either.
+    assert stepped.safe_step_scale() == pytest.approx(once.safe_step_scale())
+
+
+def test_magnify_surface_refuses_what_is_not_a_gesture():
+    _, layer = _blended_form()
+    with pytest.raises(ValueError):
+        layer.magnify_surface((0, 0, 0), 0.0, radius=0.8)   # scales by one
+    with pytest.raises(ValueError):
+        layer.magnify_surface((0, 0, 0), 0.4, radius=0.0)   # not a region
+
+
 def _reach_along(doc, direction, hi=4.0):
     u = np.array(direction, np.float32)
     u = u / np.linalg.norm(u)
