@@ -2891,11 +2891,51 @@ struct TailAppend {
     scene::NodeId node = 0;
 };
 
+// Is `node` the LAST member of its chain, and is every group above it the last
+// of its own, all the way to the root list? That is what makes an append into
+// it a tail append: the compiled prefix ends where the new node goes, and the
+// only thing between there and the end of the tape is the ancestors' combines.
+//
+// A group that is NOT last has the same reuse point, but everything after it
+// would have to be recompiled — unbounded, where a tail-in-tail append is the
+// ancestors' combines and nothing else.
+bool is_tail_in_tail(const scene::SdfContent& content, scene::NodeId node) {
+    scene::NodeId cur = node;
+    for (std::size_t step = 0; step <= content.nodes().size(); ++step) {
+        scene::NodeId parent = scene::kNoNode;
+        int index = -1;
+        if (!content.locate(cur, &parent, &index)) return false;
+        const std::vector<scene::NodeId>& siblings =
+            parent == scene::kNoNode ? content.roots : content.find(parent)->children;
+        if (siblings.empty() || siblings.back() != cur) return false;
+        if (parent == scene::kNoNode) return true;
+        const scene::Node* g = content.find(parent);
+        if (!g || !g->is_group) return false;
+        // An inline group has no chain of its own — its children continue the
+        // outer one — so the compiler never takes a checkpoint in front of a
+        // combine for it, and there is no frame to unwind. Refused rather than
+        // reasoned about.
+        if (g->op == scene::Op::None) return false;
+        // A non-local combine above the append makes the whole subtree's reach
+        // infinite, which is the one shape whose prefix cannot be trusted to
+        // still be a prefix.
+        if (!scene::op_is_local(g->op)) return false;
+        cur = parent;
+    }
+    return false;
+}
+
 TailAppend tail_append(const scene::Document& doc, const scene::Command& cmd) {
     const auto* add = std::get_if<scene::AddNodeCmd>(&cmd);
-    if (!add || add->parent != scene::kNoNode || add->index != -1) return {};
+    if (!add || add->index != -1) return {};
     const scene::Layer* l = doc.find_layer(add->layer);
     if (!l || l->kind != scene::LayerKind::Sdf || !l->sdf || l->sdf->roots.empty()) return {};
+    // An append into a GROUP qualifies when that group is in tail position all
+    // the way up. `tail_append` used to require the root list outright, which
+    // is what made a dab placed inside a group cost 90x a dab placed beside it
+    // on the reference iPad — the append fast path switched off by a modelling
+    // decision with no performance meaning.
+    if (add->parent != scene::kNoNode && !is_tail_in_tail(*l->sdf, add->parent)) return {};
     // And no other layer may share this one's content. An append to shared
     // content grows the edit list of every layer holding it, while the append
     // fast path is per LAYER: it would extend the cached tape for the layer
@@ -2905,9 +2945,13 @@ TailAppend tail_append(const scene::Document& doc, const scene::Command& cmd) {
     // situation below: the legacy region drop, and a full recompile.
     for (const scene::Layer& other : doc.layers)
         if (&other != l && other.sdf == l->sdf) return {};
-    // roots.back(), not the command's own subtree: this cannot then disagree
-    // with what apply() actually did to the list.
-    return TailAppend{add->layer, l->sdf->roots.back()};
+    // The tail of the chain the node was added to, read back from the TREE
+    // rather than taken from the command's own subtree: this cannot then
+    // disagree with what apply() actually did to the list.
+    const std::vector<scene::NodeId>& chain =
+        add->parent == scene::kNoNode ? l->sdf->roots : l->sdf->find(add->parent)->children;
+    if (chain.empty()) return {};
+    return TailAppend{add->layer, chain.back()};
 }
 
 // The commands that can move a root ordinal or change WHICH layer is the last

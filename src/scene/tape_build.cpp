@@ -771,9 +771,24 @@ struct Compiler {
         // walk below unchanged.
         const std::vector<CullIndex::Entry>* pruned = plan ? plan->chain(layer, ids) : nullptr;
         const std::size_t member_count = pruned ? pruned->size() : ids.size();
+        // Whether THIS chain is on the tail path, saved because the loop below
+        // clears it for every member that is not the last one and each nested
+        // compile_list does the same to its own.
+        const bool chain_on_tail = on_tail_path_;
         for (std::size_t at = 0; at < member_count; ++at) {
             const CullIndex::Entry* e = pruned ? &(*pruned)[at] : nullptr;
             const Node* n = e ? e->node : content.find(ids[at]);
+            // The tail path is the LAST member of a chain that is itself on it.
+            // A checkpoint may only be taken where an append would land, and an
+            // append lands at a tail: anywhere else, the prefix would have to be
+            // followed by members the appended node comes before.
+            //
+            // Computed on the UNPRUNED index when a plan pruned the chain: the
+            // last surviving member of a culled chain is not the last member of
+            // the chain, and a checkpoint that thought it was would be a prefix
+            // the next compile does not reproduce.
+            on_tail_path_ = chain_on_tail && at + 1 == member_count &&
+                            (!pruned || ids.empty() || ids.back() == n->id);
             if (!n || !n->visible) continue;
             if (n->is_group) {
                 if (culled(e ? e->bound : node_influence_bound(content, n->id, layer))) {
@@ -825,6 +840,7 @@ struct Compiler {
                 have_acc = true;
             }
         }
+        on_tail_path_ = chain_on_tail;
         return have_acc;
     }
 
@@ -844,12 +860,42 @@ struct Compiler {
         std::size_t saved_strokes = tape.blob.size();
         bool seeded = !have_acc && group.op != Op::Add;
         if (seeded) emit_empty(group.color);
+        const bool group_on_tail = on_tail_path_;
         bool sub = compile_list(group.children, content, layer, false);
         if (!sub) {  // empty subtree: roll back any partial emission
             tape.instrs.resize(saved_instrs);
             tape.params.resize(saved_params);
             tape.blob.resize(saved_strokes);
+            // Nothing survives here, so nothing may be resumed from here — a
+            // checkpoint recorded inside a chain that was then rolled back
+            // would name lengths the tape no longer has. Reachable under a
+            // cull, where a group's children can all be dropped.
             return have_acc;
+        }
+        // THE POSITION, taken by the innermost tail group only: this is where
+        // an append into this group's chain would be emitted, and it is before
+        // the combine below that the prefix has not paid for. Recorded on the
+        // way OUT of the recursion, so the deepest chain gets there first.
+        if (group_on_tail) {
+            if (!tail_checkpoint_taken_) {
+                checkpoint.instrs = tape.instrs.size();
+                checkpoint.params = tape.params.size();
+                checkpoint.blob = tape.blob.size();
+                checkpoint.layer_have_acc = sub;
+                checkpoint.frames.clear();
+                tail_checkpoint_taken_ = true;
+            }
+            // ...and this group's own frame as the recursion unwinds, which
+            // puts them innermost-first without anything having to sort them.
+            TapeCheckpointFrame f;
+            f.group = group.id;
+            f.outer_have_acc = have_acc;
+            f.seeded = seeded;
+            f.emits = have_acc || seeded;
+            f.op = group.op;
+            f.blend = group.blend;
+            f.rounding = group.rounding * layer.xform.scale;
+            checkpoint.frames.push_back(f);
         }
         if (have_acc || seeded) {
             emit_combine(group.op, group.blend, group.rounding * layer.xform.scale);
@@ -868,6 +914,15 @@ struct Compiler {
     // Recorded before that layer's union with the layers below, because an
     // appended item belongs inside the chain and so in front of the union.
     TapeCheckpoint checkpoint;
+
+    // Whether the compile is currently inside the TAIL of every chain above
+    // it, which is the only place a checkpoint may be taken.
+    bool on_tail_path_ = false;
+    // Whether a tail GROUP already took the position for this layer. The
+    // deepest one wins because it finishes first; run() fills the root-list
+    // checkpoint only when this is false, which is every document that has no
+    // group at its tail — the whole of the old behaviour.
+    bool tail_checkpoint_taken_ = false;
 
     // The cull pad the whole document compiles under. Split out because a
     // PART of a document must still cull under it: a tape for one layer that
@@ -909,11 +964,27 @@ struct Compiler {
         bool have_acc = false;
         for (const Layer& layer : doc.layers) {
             if (!layer.visible || layer.kind != LayerKind::Sdf || !layer.sdf) continue;
+            // Each layer's root list IS a tail chain — an append to it lands at
+            // its end — so the walk starts on the tail path and compile_list
+            // narrows it to the last member from there.
+            on_tail_path_ = true;
+            tail_checkpoint_taken_ = false;
             bool layer_val = compile_list(layer.sdf->roots, *layer.sdf, layer, false);
-            // Recorded even when the chain emitted nothing: appending to an
-            // empty last layer is resumable too, with layer_have_acc false.
-            checkpoint = TapeCheckpoint{tape.instrs.size(), tape.params.size(),
-                                        tape.blob.size(), layer.id, layer_val, have_acc, true};
+            on_tail_path_ = false;
+            if (tail_checkpoint_taken_) {
+                // A tail GROUP took the position, deeper than this. Its frames
+                // describe everything between there and here; only what the
+                // group could not know is filled in.
+                checkpoint.layer = layer.id;
+                checkpoint.doc_have_acc = have_acc;
+                checkpoint.valid = true;
+            } else {
+                // Recorded even when the chain emitted nothing: appending to an
+                // empty last layer is resumable too, with layer_have_acc false.
+                checkpoint = TapeCheckpoint{tape.instrs.size(), tape.params.size(),
+                                            tape.blob.size(), layer.id, layer_val,
+                                            have_acc,          true, {}};
+            }
             if (!layer_val) continue;
             if (have_acc) emit_combine(Op::Add, Blend{}, 0.0f);  // layers union hard
             have_acc = true;
@@ -931,14 +1002,35 @@ struct Compiler {
         // compile_layer_suffix passes one, because there the prefix is a VALUE
         // that was itself computed under the same cull.
         begin_cull(cull_region, pad);
-        bool layer_val = compile_list(appended, *layer.sdf, layer, cp.layer_have_acc);
+        // The appended nodes continue the chain the checkpoint ends in, which
+        // is the innermost frame's group when there is one and the layer's
+        // root list when there is not.
+        bool chain_val = compile_list(appended, *layer.sdf, layer, cp.layer_have_acc);
         // Recorded exactly where run() records it — after the chain, before
-        // the union — so the NEXT append resumes from here too. Without this
-        // a stroke would take the fast path on its first dab and the slow one
-        // on every dab after it.
+        // anything the checkpoint sat in front of — so the NEXT append resumes
+        // from here too. Without this a stroke would take the fast path on its
+        // first dab and the slow one on every dab after it.
         checkpoint = TapeCheckpoint{tape.instrs.size(), tape.params.size(), tape.blob.size(),
-                                    cp.layer, layer_val, cp.doc_have_acc, true};
-        if (!layer_val) return;
+                                    cp.layer, chain_val, cp.doc_have_acc, true, cp.frames};
+        if (!chain_val) return;
+        // UNWIND THE STACK the checkpoint sat in front of: each enclosing
+        // group's combine, innermost first, then the layer union. This is
+        // compile_group's tail restated, and it has to stay that — the two
+        // produce the same bytes or the fast path is a different field.
+        bool have_acc = chain_val;
+        for (const TapeCheckpointFrame& f : cp.frames) {
+            if (f.emits) {
+                emit_combine(f.op, f.blend, f.rounding);
+                const bool smooth = f.blend.profile != BlendProfile::Hard && f.blend.k > 0.0f;
+                if (op_is_extended(f.op))
+                    tape.info = kernel::cfi_extended_blend(tape.info, tape.info,
+                                                           op_is_diagonal(f.op));
+                else if (smooth)
+                    tape.info = kernel::cfi_smooth_blend(tape.info, tape.info);
+            }
+            have_acc = true;
+        }
+        if (!have_acc) return;
         if (cp.doc_have_acc) emit_combine(Op::Add, Blend{}, 0.0f);
     }
 };
@@ -987,6 +1079,27 @@ Tape compile_document_resumable(const Document& doc, TapeCheckpoint* out_checkpo
     return std::move(c.tape);
 }
 
+// The chain a checkpoint ends in: the innermost frame's group when the
+// checkpoint was taken inside one, and the layer's root list when it was not.
+// An append resumes onto THAT chain, so it is that chain the appended ids must
+// be the tail of -- checking them against the root list is what refused every
+// group append before this.
+const std::vector<NodeId>* checkpoint_chain(const TapeCheckpoint& cp, const Layer& layer) {
+    if (cp.frames.empty()) return &layer.sdf->roots;
+    const Node* g = layer.sdf->find(cp.frames.front().group);
+    if (!g || !g->is_group) return nullptr;
+    return &g->children;
+}
+
+// `appended`, in order, is the tail of `chain`.
+bool appended_is_tail_of(const std::vector<NodeId>& chain, const std::vector<NodeId>& appended) {
+    if (appended.empty() || appended.size() > chain.size()) return false;
+    const std::size_t first = chain.size() - appended.size();
+    for (std::size_t i = 0; i < appended.size(); ++i)
+        if (chain[first + i] != appended[i]) return false;
+    return true;
+}
+
 bool compile_document_append(const Tape& prefix, const TapeCheckpoint& cp, const Document& doc,
                              const std::vector<NodeId>& appended, Tape* out,
                              TapeCheckpoint* out_checkpoint) {
@@ -998,14 +1111,12 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& cp, const
     if (cp.instrs > prefix.instrs.size() || cp.params > prefix.params.size() ||
         cp.blob > prefix.blob.size())
         return false;
-    // The appended ids must actually be at the tail of that layer's roots, in
-    // order: this is the one claim the caller makes that the compiler can
-    // check for itself, and checking it is O(appended), not O(document).
-    const std::vector<NodeId>& roots = layer->sdf->roots;
-    if (appended.size() > roots.size()) return false;
-    const std::size_t first = roots.size() - appended.size();
-    for (std::size_t i = 0; i < appended.size(); ++i)
-        if (roots[first + i] != appended[i]) return false;
+    // The appended ids must actually be at the tail of the chain the
+    // checkpoint ends in, in order: this is the one claim the caller makes
+    // that the compiler can check for itself, and checking it is
+    // O(appended), not O(document).
+    const std::vector<NodeId>* chain = checkpoint_chain(cp, *layer);
+    if (!chain || !appended_is_tail_of(*chain, appended)) return false;
 
     Compiler c;
     // The prefix, copied rather than moved: `prefix` is a tape a reader may
