@@ -116,6 +116,12 @@ EXTRA_VERBS = {
     # already measured, under the session verbs `session_magnify_pinch` and
     # `session_noise`; pose is ZBrush's Rotate and had no case at all.
     "pose",
+    # The same stroke on a SMOOTH-blended document. A hard blend contributes
+    # nothing to the chain pad, so every other SDF verb here is measured on a
+    # document whose pad is a constant zero -- which is why the pad band went
+    # unseen. Named separately because it is a different fixture, not a
+    # different call.
+    "sdf_stroke_smooth",
 }
 
 

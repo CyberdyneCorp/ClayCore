@@ -492,6 +492,148 @@ final class LatencyTests: XCTestCase {
         _ = collector.finish(abiVersion: abiVersion(), attachTo: self)
     }
 
+    /// The same stroke on a SMOOTH-blended document, across the band where the
+    /// chain pad's fit varies.
+    ///
+    /// Every other SDF case here is hard-blended, and a hard blend contributes
+    /// nothing to the chain pad — so the pad resolves to a constant zero and
+    /// the suite cannot see it at all. That is not a small blind spot: a seed
+    /// is keyed on the pad by EXACT equality (`clay_c.cpp:1501`), and the
+    /// envelope `2.80 + 0.35 log2(n/75)` changes on every node added between
+    /// n = 76 and n = 808, where it clamps at the profile's support. In that
+    /// band every dab invalidates every seed and the brick resume is dead.
+    ///
+    /// Measured on an M-series Mac, 24-dab stroke, bricks resumed per dab:
+    /// 38.5 at 30 and 50 stamps, ZERO from 75 through 700, 38.5 again at 1000.
+    /// A 784-stamp document cost 8.33 ms a dab and an 810-stamp one 0.166 —
+    /// 50x, on a document 3% larger. The boundaries match the formula to the
+    /// node.
+    ///
+    /// THE AXIS IS CHOSEN TO STRADDLE THE BAND, which is why it is not
+    /// `GrowthAxis.standard`: 10 and 1000 both sit in the constant regions and
+    /// a case that sampled only those would report nothing wrong. 300 is the
+    /// middle of the band and 800 is just below the clamp.
+    static let padBandAxis = [10, 300, 800, 2000]
+
+    func testSmoothStrokeAcrossThePadBand() throws {
+        let collector = RunCollector()
+
+        var measurements: [Measurement] = []
+        let canaryBefore = collector.sampleCanaryNow()
+        let caseStartedAtMs = collector.elapsedMs
+        let caseThermalStart = DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)
+
+        for stamps in Self.padBandAxis {
+            guard let (doc, layer) = SceneBuilder.smoothSdfDocument(stamps: stamps) else {
+                XCTFail("could not build a smooth \(stamps)-stamp document"); continue
+            }
+            defer { clay_document_destroy(doc) }
+
+            var config = clay_brick_config()
+            config.struct_size = UInt32(MemoryLayout<clay_brick_config>.size)
+            guard clay_brick_config_defaults(&config) == CLAY_OK else {
+                XCTFail("no brick defaults"); continue
+            }
+            config.voxel_size = 0.05
+            guard let cache = clay_brick_cache_create(&config) else {
+                XCTFail("could not create a brick cache"); continue
+            }
+            defer { clay_brick_cache_destroy(cache) }
+
+            let brickFloats = Int(config.dim * config.dim * config.dim)
+            var requests = [clay_brick_request](repeating: clay_brick_request(), count: 4096)
+            var values = [Float](repeating: 0, count: requests.count * brickFloats)
+
+            func pump() -> Int {
+                var refreshed = 0
+                while true {
+                    var count = requests.count
+                    var remaining = 0
+                    guard clay_brick_cache_take_dirty(cache, &requests, &count,
+                                                      &remaining) == CLAY_OK,
+                          count > 0 else { return refreshed }
+                    _ = clay_brick_cache_eval_requests(doc, "cpu", requests, count,
+                                                       &values, count * brickFloats,
+                                                       nil, 0)
+                    _ = clay_brick_cache_submit(cache, requests, count, values,
+                                                count * brickFloats, nil, 0,
+                                                nil, nil)
+                    refreshed += count
+                    if remaining == 0 { return refreshed }
+                }
+            }
+
+            _ = clay_brick_cache_mark_dirty_layer(cache, doc, layer)
+            let initial = pump()
+            XCTAssertGreaterThan(initial, 0, "the first fill refreshed nothing at \(stamps)")
+
+            var stroke: [clay_node_id] = []
+            var starved = 0, refreshedTotal = 0, refreshCalls = 0, addFailures = 0
+            var resumedBefore = resumeStats(doc).resumed_bricks
+
+            let r = Timing.measureStable(reset: {
+                guard !stroke.isEmpty else { return }
+                var all = stroke
+                _ = clay_brick_cache_mark_dirty_nodes(cache, doc, layer, &all, all.count, nil)
+                for node in stroke.reversed() { _ = clay_remove_node(doc, layer, node) }
+                stroke.removeAll(keepingCapacity: true)
+                _ = pump()
+            }) {
+                for k in 0..<Self.strokeDabs {
+                    guard let node = SceneBuilder.addSmoothStrokeDabNode(doc, layer, dab: k)
+                    else { addFailures += 1; continue }
+                    stroke.append(node)
+                    var one = [node]
+                    _ = clay_brick_cache_mark_dirty_nodes(cache, doc, layer, &one, 1, nil)
+                    let refreshed = pump()
+                    refreshedTotal += refreshed
+                    refreshCalls += 1
+                    if refreshed == 0 { starved += 1 }
+                }
+            }
+            XCTAssertEqual(addFailures, 0, "a dab could not be added at \(stamps) stamps")
+            XCTAssertLessThan(starved, refreshCalls,
+                              "every dab refreshed zero bricks at \(stamps) stamps")
+
+            // The diagnostic this case exists for. Bricks answered from a
+            // stored value per dab: it is what goes to ZERO inside the band,
+            // and a time alone would not say why.
+            let resumed = Double(resumeStats(doc).resumed_bricks - resumedBefore)
+                / Double(max(refreshCalls, 1))
+            resumedBefore = resumeStats(doc).resumed_bricks
+            print("sdf_stroke_smooth_bricks: at \(stamps) stamps "
+                  + "\(String(format: "%.1f", Double(refreshedTotal) / Double(max(refreshCalls, 1)))) "
+                  + "bricks/dab, \(String(format: "%.1f", resumed)) resumed/dab")
+
+            measurements.append(Measurement(stamps: stamps, p50Ms: r.p50, p95Ms: r.p95,
+                                            samples: r.n, repeats: r.repeats,
+                                            p95SpreadMs: r.spread, batch: Self.strokeDabs))
+        }
+
+        collector.add(CaseResult(
+            name: "sdf_stroke_smooth_bricks",
+            verb: "sdf_stroke_smooth",
+            budgetClass: .interactive,
+            backend: "cpu",
+            servedBy: "cpu",
+            measurements: measurements,
+            growthExponent: Timing.growthExponent(measurements),
+            startedAtMs: caseStartedAtMs,
+            thermalStateStart: caseThermalStart,
+            thermalStateEnd: DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState),
+            canaryBeforeMs: canaryBefore,
+            canaryAfterMs: collector.sampleCanaryNow()))
+
+        _ = collector.finish(abiVersion: abiVersion(), attachTo: self)
+    }
+
+    private func resumeStats(_ doc: OpaquePointer) -> clay_resume_stats {
+        var s = clay_resume_stats()
+        s.struct_size = UInt32(MemoryLayout<clay_resume_stats>.size)
+        _ = clay_document_resume_stats(doc, &s)
+        return s
+    }
+
     /// The same stamp, refreshed the way a host actually refreshes it.
     ///
     /// `sdf_stamp_*` above re-evaluates a lattice over the WHOLE working

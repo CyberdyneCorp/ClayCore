@@ -144,6 +144,13 @@
       "measuredMs": 1.8072,
       "rawMs": 1.8048
     },
+    "sdf_stroke_smooth_bricks": {
+      "budgetMs": 5.7932,
+      "class": "interactive",
+      "machineFactor": 1.0017,
+      "measuredMs": 3.8621,
+      "rawMs": 3.8685
+    },
     "session_voxel_build": {
       "budgetMs": 0.2616,
       "class": "gesture",
@@ -4502,6 +4509,58 @@
       "thermalStateEnd": "nominal",
       "thermalStateStart": "nominal",
       "verb": "sdf_stroke_incremental"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 132.998917,
+      "canaryBeforeMs": 130.558875,
+      "growthExponent": 0.020840080017109054,
+      "measurements": [
+        {
+          "batch": 24,
+          "p50Ms": 3.349541,
+          "p95Ms": 3.464125,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 200,
+          "stamps": 10
+        },
+        {
+          "batch": 24,
+          "p50Ms": 3.466333,
+          "p95Ms": 3.488583,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 183,
+          "stamps": 300
+        },
+        {
+          "batch": 24,
+          "p50Ms": 3.510042,
+          "p95Ms": 3.532083,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 90,
+          "stamps": 800
+        },
+        {
+          "batch": 24,
+          "p50Ms": 3.735583,
+          "p95Ms": 3.868541,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 42,
+          "stamps": 2000
+        }
+      ],
+      "name": "sdf_stroke_smooth_bricks",
+      "servedBy": "cpu",
+      "startedAtMs": 267.052625,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
+      "verb": "sdf_stroke_smooth"
     }
   ],
   "claycoreCommit": "240316506c7ab587ee041a322948b447c2cfdb53",

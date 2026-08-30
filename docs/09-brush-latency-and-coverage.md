@@ -100,9 +100,63 @@ representation, `s` the SDF one, `m` a mesh layer's own triangles.
 | — | (large brush) | `sculpt_smooth` at radius 32 | v | `voxel_smooth_r32` | 0.153 | interactive |
 | — | (display) | `VoxelGrid::mesh_greedy` | v | `voxel_mesh_whole` | 13.23 | operation |
 | — | (display, incremental) | `mesh_greedy_chunks` | v | `voxel_mesh_dirty` | **2.12** | interactive |
+| ClayBuildup etc., SMOOTH-blended | Clay / Clay Strips | `Op::Relief` along a stroke, quadratic blend | s | `sdf_stroke_smooth_bricks` | 0.161 | interactive |
 | Blob | — | *not implemented* | | | | |
 | Slice / Knife | Split | *not implemented* | | | | |
 | surface-mode mesh brushes | — | *out of scope* | | | | |
+
+## The pad band: what every SDF case was blind to
+
+A brick's stored value is keyed on the cull pad it was computed under, by EXACT
+equality (`bindings/c/clay_c.cpp:1501`). The pad comes from
+`chain_pad_envelope`:
+
+```
+n <= 75   ->  base                                (constant)
+n  > 75   ->  base + slope * log2(n / 75)         (changes on every node)
+```
+
+clamped at the profile's support. For a quadratic blend (base 2.80, slope 0.35,
+support 4k) that clamp lands at **n = 808**. So between 76 and 807 nodes the pad
+moves on every append, every stored value fails the equality gate, and the brick
+resume is not degraded — it is **dead**.
+
+Measured on the reference iPad, a 24-dab stroke on a smooth-blended document,
+before and after `hold-the-cull-pad-still`:
+
+| stamps | 10 | 300 | 800 | 2000 |
+|---|---:|---:|---:|---:|
+| ms/dab, before | 0.144 | **4.435** | **4.079** | 0.175 |
+| bricks resumed/dab, before | 38.5 | **0.0** | 26.0 | 38.5 |
+| ms/dab, **after** | 0.144 | **0.145** | **0.147** | 0.161 |
+| bricks resumed/dab, after | 38.5 | 38.5 | 38.5 | 38.5 |
+
+Before the fix a dab at 300 stamps cost **31x** a dab at 10 and cleared the
+whole 4.17 ms frame share, on a document 6.7x SMALLER than one that cost
+0.175 ms. On an M-series Mac the boundaries matched the formula to the node:
+784 stamps cost 8.33 ms a dab and 810 cost 0.166 — 50x, on a document 3%
+larger.
+
+**30.5x at 300 stamps, 27.7x at 800**, and the case is now flat across the axis
+(growth `N^0.02`). The fix quantises the envelope, rounded UP so the resolved
+pad is never below the fit, to a step sized so one stroke crosses at most one
+boundary: seven steps between 1 and 2000 nodes instead of two thousand. The
+seed gate stays exact equality — it was right; what was wrong was a key that
+moved.
+
+**Nothing here could see it, and the reason is the fixtures.** Every SDF case in
+this suite was hard-blended: `SceneBuilder.addStampNode` and
+`addStrokeDabNode` never called `clay_item_set_blend`, and the default is
+`Hard` with k = 0. A hard blend contributes nothing to the chain pad —
+`profile_chain_pad` returns 0 for k <= 0 — so the pad resolved to a constant
+zero, the envelope never engaged, and the cases were measuring a document no
+sculptor makes. The clay and build brushes are smooth by default.
+
+It was found by accident, chasing an unrelated ratio, because one fixture
+happened to carry a quadratic blend. `sdf_stroke_smooth_bricks` is the case
+that can see it, and its axis deliberately straddles the band — 10 and 2000
+both sit in the constant regions, so an axis of those alone reports nothing
+wrong, which is what the standard 10/100/1000 axis would have done.
 
 All nine of those cases were measured for the first time at **v0.30.0** — four
 arrived with the tube/Trim Curve/pose/armature work, the rest close the gaps
