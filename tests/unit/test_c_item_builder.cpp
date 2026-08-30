@@ -1851,6 +1851,24 @@ TEST_CASE("a malformed alpha is refused and leaves the item unchanged") {
     // wrong, refused rather than allocated.
     CHECK(clay_item_add_alpha(item, stamp.data(), 65536, 65536, centre, dir, tangent, 0.6f, 0.4f,
                               0.15f, 0) == CLAY_ERROR_INVALID_ARGUMENT);
+    // A direction with no length is not a plane. Accepted and silently
+    // substituted with local +Z until #392 — which is the same shape as the
+    // width < 2 case above and now refused for the same reason: a deformer
+    // that is appended, returns CLAY_OK and does nothing is harder to notice
+    // than an error.
+    //
+    // NOT the mesh brush's rule. There, all-zeroes means "the surface normal
+    // under the centre", resolved by asking the mesh. An SDF item has no
+    // surface at authoring time to ask.
+    const float no_direction[3] = {0.0f, 0.0f, 0.0f};
+    CHECK(clay_item_add_alpha(item, stamp.data(), 16, 16, centre, no_direction, tangent, 0.6f,
+                              0.4f, 0.15f, 0) == CLAY_ERROR_INVALID_ARGUMENT);
+    // A radius that reaches nothing. Floored at 1e-6 by the kernel, so it was
+    // accepted and inert too.
+    CHECK(clay_item_add_alpha(item, stamp.data(), 16, 16, centre, dir, tangent, 0.6f, 0.0f, 0.15f,
+                              0) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_item_add_alpha(item, stamp.data(), 16, 16, centre, dir, tangent, 0.6f, -0.4f, 0.15f,
+                              0) == CLAY_ERROR_INVALID_ARGUMENT);
 
     // Every refusal left the item alone: adding it now gives a bare sphere.
     CDoc built;

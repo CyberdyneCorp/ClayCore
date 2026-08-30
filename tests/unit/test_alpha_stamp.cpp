@@ -16,7 +16,9 @@
 
 #include "clay/brush/alpha_stamp.h"
 #include "clay/kernel/deform.h"
+#include "clay/eval/backend.h"
 #include "clay/scene/bounds.h"
+#include "clay/scene/document.h"
 #include "clay/scene/commands.h"
 #include "clay/scene/tape.h"
 
@@ -433,4 +435,158 @@ TEST_CASE("every corner of a stamp is sampled without leaving it") {
             REQUIRE(std::isfinite(t.eval(p).d));
         }
     }
+}
+
+// -- the frame an alpha is authored in (#392) ---------------------------------
+//
+// The reported symptom was "a correctly placed stamp does nothing and a
+// misplaced one smears". The located cause in the report was the stroke
+// resolver, and that turned out to be wrong: `stamps_to_nodes` copies the whole
+// node by value, so the alpha reaches every stamp, samples and all, and the
+// deformer chain runs on the ITEM-LOCAL point — so a template alpha authored in
+// the template's frame arrives in each stamp's frame already. That convention
+// is deliberate and is what makes an alpha usable through a stroke at all.
+//
+// What was actually broken is one step earlier. `brush::stamp_placement` takes
+// a WORLD surface hit and returns a WORLD frame, and `stamp_deformer` fed it
+// straight into `Deformer::alpha`, which reads LOCAL. On an item at the
+// identity transform those are the same thing, which is why every test in this
+// file and every example passed for the life of the feature.
+
+namespace {
+
+std::vector<float> centred_bump(int n) {
+    std::vector<float> s(static_cast<std::size_t>(n) * n);
+    for (int y = 0; y < n; ++y)
+        for (int x = 0; x < n; ++x) {
+            const float u = (static_cast<float>(x) / static_cast<float>(n - 1)) * 2.0f - 1.0f;
+            const float v = (static_cast<float>(y) / static_cast<float>(n - 1)) * 2.0f - 1.0f;
+            s[static_cast<std::size_t>(y) * n + x] = std::exp(-6.0f * (u * u + v * v));
+        }
+    return s;
+}
+
+// An item deliberately far from the identity on all three counts, because the
+// identity is the one transform that cannot tell the two frames apart.
+math::Transform displaced_item() {
+    math::Transform x;
+    x.position = cf3(0.4f, -0.2f, 0.1f);
+    x.rotation = math::Quat::from_axis_angle(cf3(0, 1, 0), 0.7f);
+    x.scale = 0.35f;
+    return x;
+}
+
+float field_at(const scene::Document& doc, kernel::cfloat3 p) {
+    const scene::Tape tape = scene::compile_document(doc);
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    REQUIRE(cpu != nullptr);
+    const float xyz[3] = {p.x, p.y, p.z};
+    eval::PointQuery q;
+    q.points_xyz = xyz;
+    q.count = 1;
+    float out = 0.0f;
+    eval::PointResults r;
+    r.distances = &out;
+    REQUIRE(cpu->eval_points(tape, q, r) == eval::Status::Ok);
+    return out;
+}
+
+scene::Document sphere_with(const math::Transform& x, float radius,
+                            const scene::Deformer* alpha) {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node n;
+    n.prim = scene::Prim::sphere(radius);
+    n.xform = x;
+    if (alpha) n.deformers.push_back(*alpha);
+    l.sdf->insert(n);
+    return doc;
+}
+
+}  // namespace
+
+TEST_CASE("alpha: a world placement fed straight in lands nowhere near the click") {
+    // The defect, pinned as a characterization so the fix cannot be read as
+    // cosmetic. Measured: the field moves 1.3e-5 at the point that was clicked.
+    const std::vector<float> samples = centred_bump(32);
+    const math::Transform x = displaced_item();
+    const float radius = 0.5f;
+    const kernel::cfloat3 world_hit = x.apply(cf3(0, 0, radius));
+    const kernel::cfloat3 world_normal = x.rotation.rotate(cf3(0, 0, 1));
+
+    const brush::StampPlacement world = brush::stamp_placement(world_hit, world_normal);
+    const scene::Deformer wrong =
+        brush::stamp_deformer(world, samples.data(), 32, 32, 0.4f, 0.4f, 0.3f);
+
+    const scene::Document plain = sphere_with(x, radius, nullptr);
+    const scene::Document stamped = sphere_with(x, radius, &wrong);
+    const double moved = std::fabs(field_at(stamped, world_hit) - field_at(plain, world_hit));
+    CAPTURE(moved);
+    CHECK(moved < 1e-4);  // i.e. nothing happened where the artist clicked
+}
+
+TEST_CASE("alpha: placement_in puts the stamp where the artist clicked") {
+    const std::vector<float> samples = centred_bump(32);
+    const math::Transform x = displaced_item();
+    const float radius = 0.5f;
+    const kernel::cfloat3 world_hit = x.apply(cf3(0, 0, radius));
+    const kernel::cfloat3 world_normal = x.rotation.rotate(cf3(0, 0, 1));
+
+    const brush::StampPlacement world = brush::stamp_placement(world_hit, world_normal);
+    const scene::Deformer right = brush::stamp_deformer_in(world, x, samples.data(), 32, 32, 0.4f,
+                                                           0.4f, 0.3f);
+
+    const scene::Document plain = sphere_with(x, radius, nullptr);
+    const scene::Document stamped = sphere_with(x, radius, &right);
+
+    // AT the click: the amplitude arrives, in world units. Measured 0.296
+    // against an authored 0.3 — the shortfall is the stamp's own falloff, not
+    // the frame.
+    const double at_click = field_at(plain, world_hit) - field_at(stamped, world_hit);
+    CAPTURE(at_click);
+    CHECK(at_click > 0.2);
+
+    // ...and it falls off, symmetrically, rather than sitting flat. A stamp
+    // read through the wrong frame CLAMPS its sample lookup and produces a
+    // constant offset, so "the field changed" is not enough to tell the two
+    // apart — the SHAPE is.
+    const kernel::cfloat3 across = x.rotation.rotate(cf3(0.3f, 0, 0));
+    const double near_edge =
+        field_at(plain, world_hit + across) - field_at(stamped, world_hit + across);
+    const double near_edge_mirror =
+        field_at(plain, world_hit - across) - field_at(stamped, world_hit - across);
+    CAPTURE(near_edge);
+    CHECK(near_edge < at_click * 0.05);
+    CHECK(std::fabs(near_edge - near_edge_mirror) < 1e-5);  // symmetric about the centre
+}
+
+TEST_CASE("alpha: an alpha rides the item's transform") {
+    // The convention the docs now promise, locked. Two items carrying the SAME
+    // local alpha, one at the identity and one displaced: the displaced one's
+    // field at the transformed point equals the other's at the original.
+    //
+    // This is the test that fails if anyone ever "fixes" #392 the way it was
+    // filed — by pre-transforming the alpha inside the stroke resolver, which
+    // would double-apply the stamp transform.
+    const std::vector<float> samples = centred_bump(24);
+    const float radius = 0.5f;
+    const scene::Deformer alpha = scene::Deformer::alpha(
+        cf3(0, 0, radius), cf3(0, 0, 1), cf3(1, 0, 0), samples.data(), 24, 24, 0.5f, 0.5f, 0.25f);
+
+    const math::Transform identity;
+    const math::Transform moved = displaced_item();
+    const scene::Document a = sphere_with(identity, radius, &alpha);
+    const scene::Document b = sphere_with(moved, radius, &alpha);
+
+    // The field is a distance, so the displaced one reads `scale` times the
+    // other at corresponding points.
+    for (float u = -0.6f; u <= 0.6f; u += 0.2f)
+        for (float v = -0.6f; v <= 0.6f; v += 0.3f) {
+            const kernel::cfloat3 p = cf3(u, v, radius * 0.9f);
+            const float here = field_at(a, p);
+            const float there = field_at(b, moved.apply(p));
+            CAPTURE(u);
+            CAPTURE(v);
+            CHECK(there == doctest::Approx(here * moved.scale).epsilon(0.002));
+        }
 }

@@ -5005,6 +5005,23 @@ clay_result clay_item_add_alpha(clay_item* item, const float* samples, int32_t w
                         " exceeds the " + std::to_string(kMaxAlphaSamples) + "-sample ceiling");
     if (!(extent > 0.0f))
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "an alpha's extent must be positive");
+    // A zero direction is not a plane, and a non-positive radius is a region
+    // that reaches nothing. Both were accepted and both were silently inert —
+    // the kernel substitutes local +Z for a zero direction and floors the
+    // radius at 1e-6 — which is exactly the case this file already refuses
+    // width < 2 for: a deformer that is appended, returns CLAY_OK and does
+    // nothing is harder to notice than an error.
+    //
+    // NOT the mesh brush descriptor's rule, and the asymmetry is deliberate:
+    // there, all-zeroes means "the surface normal under the centre", which it
+    // resolves by querying the mesh. An SDF item has no surface at authoring
+    // time to read one from, so the same spelling cannot mean the same thing.
+    if (!(kernel::clength(kernel::cf3(direction[0], direction[1], direction[2])) > 1e-9f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "an alpha's direction must have length; it is the normal of the stamp's "
+                    "plane, and all-zeroes is the mesh brush's convention, not this one");
+    if (!(radius > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "an alpha's radius must be positive");
     if (ease < 0 || ease >= CLAY_EASE_COUNT)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "ease index out of range");
 

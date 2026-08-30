@@ -713,6 +713,10 @@ struct Deformer {
     //
     // `samples` are COPIED, so a caller may free its buffer immediately, and
     // the bound is derived here rather than declared.
+    // `centre`, `dir`, `tangent`, `extent` and `radius` are in the ITEM'S OWN
+    // space, like a bend curve's guide and a lattice's box: the chain runs on
+    // the local point, so they ride the item's transform. A host holding a
+    // world-space surface hit wants brush::placement_in first.
     static Deformer alpha(kernel::cfloat3 centre, kernel::cfloat3 dir, kernel::cfloat3 tangent,
                           const float* samples, int width, int height, float extent, float radius,
                           float amplitude, std::uint8_t ease = 0) {
