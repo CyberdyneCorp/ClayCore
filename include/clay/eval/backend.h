@@ -459,6 +459,33 @@ void eval_points_blocked(const scene::Tape& tape, const PointQuery& q, const Poi
 void eval_points_seeded(const scene::Tape& suffix, const PointQuery& q, const float* seed,
                         const float* seed_rgb, const PointResults& out, std::size_t block = 0);
 
+// eval_points_seeded for a walk that starts holding SEVERAL values.
+//
+// A resume that picks up inside a group has more than one open chain:
+// compile_group emits a group's combine after its children, so a prefix that
+// stops there leaves one value per open group plus one on the stack, and the
+// suffix's own combines pop them in order. `seeds` is `levels` planes of
+// `q.count` distances, plane 0 the BOTTOM of the stack; `seeds_rgb` is the
+// same in three floats a point. One seed can only continue a chain with
+// nothing open above it, which is every append at a layer's root list and no
+// append inside a group.
+//
+// Refuses (writing nothing) when `levels` is 0 or deeper than the tape stack.
+void eval_points_seeded_stack(const scene::Tape& suffix, const PointQuery& q, const float* seeds,
+                              const float* seeds_rgb, std::size_t levels,
+                              const PointResults& out, std::size_t block = 0);
+
+// The other half: evaluate `tape` and hand back the WHOLE final stack rather
+// than only its top, which is what a prefix stopping inside a group is worth.
+//
+// `stack_out` receives `*out_levels` planes of `q.count` distances, plane 0 the
+// bottom; `stack_out_rgb`, when given, the same in three floats a point. The
+// caller sizes both for `tape_stack_depth(tape)` planes, which is the most
+// that can be written. `*out_levels` is 0 for an empty tape, which has no
+// stack and writes nothing.
+void eval_points_stack(const scene::Tape& tape, const PointQuery& q, float* stack_out,
+                       float* stack_out_rgb, std::size_t* out_levels, std::size_t block = 0);
+
 // The stack depth a tape actually reaches, which is a property of its
 // instruction sequence rather than of any point. The blocked path allocates
 // `block * depth` values, so a tape of depth 2 — which a flat chain of stamps is

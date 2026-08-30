@@ -1156,11 +1156,11 @@ bool compile_layer_suffix(const TapeCheckpoint& cp, const Document& doc,
     // the prefix's bytes -- there are none here to be out of range.
     const Layer* layer = last_visible_sdf_layer(doc);
     if (!layer || layer->id != cp.layer) return false;
-    const std::vector<NodeId>& roots = layer->sdf->roots;
-    if (appended.size() > roots.size()) return false;
-    const std::size_t first = roots.size() - appended.size();
-    for (std::size_t i = 0; i < appended.size(); ++i)
-        if (roots[first + i] != appended[i]) return false;
+    // The chain the checkpoint ends in, which is a group's children when the
+    // checkpoint was taken inside one. Checking against the root list is what
+    // refused every group append here.
+    const std::vector<NodeId>* chain = checkpoint_chain(cp, *layer);
+    if (!chain || !appended_is_tail_of(*chain, appended)) return false;
 
     Compiler c;
     // The cull pad is the DOCUMENT's, exactly as run() computes it, so a
