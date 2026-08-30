@@ -196,10 +196,12 @@
       against 1.3 ms for 20k. Fixed by naming the neighbourhood instead — in
       `split_edge` everything leaving the midpoint was created a dozen lines
       above, and in `collapse_edge` the two-ring is captured before the erases.
-      Measured after, at a fixed brush footprint and a fixed tessellation
-      density: 1.31 ms at 20k faces, 1.55 ms at 80k, 2.17 ms at 320k — one
-      band across a 16x model. Deformation alone (topology off) is 0.22 /
-      0.37 / 1.02 ms. The regression is `test_sculpt_allocation.cpp`'s
+      Measured after, by `BM_DynamicStamp` at the three sizes the requirement
+      names, fixed brush footprint and fixed tessellation density: 1.41 ms at
+      100k faces, 1.94 ms at 1M, 3.43 ms at 5M. A 50x model is a 2.4x stamp.
+      Deformation alone (topology off) is 0.33 / 1.26 / 2.47 ms, so above 1M
+      the dab is dominated by moving vertices rather than by remeshing them.
+      The regression is `test_sculpt_allocation.cpp`'s
       "a topology operator's cost does not follow the surface", which asserts
       the property in bytes rather than in wall-clock so the suite can carry it;
       reverting either half of the fix fails it at a 15.6x ratio
@@ -223,7 +225,15 @@
       correctness comes first and the colouring of independent edge sets is its
       own piece of work. The scaling gate passes without it, which is what says
       the sequencing is right
-- [x] 10.7 Four presets green plus `release_check`; `tsan` under `setarch -R`
+- [x] 10.7 Four presets green plus `release_check`; `tsan` under `setarch -R`.
+      `cpu-check`, `asan-ubsan`, `release` and `tsan` (under `setarch -R`) all
+      100%. `release_check` is 14 of 15: every gate passes except `device`,
+      which fails as "engine changed since the gate ran" — correct and
+      expected, because that gate is a recorded iPad run and no machine here
+      has one attached. It is a RELEASE-time obligation, not a merge-time one:
+      the device bench has to be re-recorded from a clean tree before the
+      version that carries this ships. `metal` cannot be built here either, for
+      the same want of hardware
 - [x] 10.8 `python3 tools/check_layering.py` green
 - [x] 10.9 Docs: `docs/07-brushes-and-features.md` gains the third mesh mode
       and what it costs; `README.md`'s "deliberately does not do" entry is

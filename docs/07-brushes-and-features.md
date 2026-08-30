@@ -1392,6 +1392,29 @@ it is storage a session's edits left behind — a surface never compacts, so a
 long session's pools grow with its history rather than its content, and
 round-tripping through `to_mesh`/`from_mesh` is how a host reclaims that.
 
+**In time, a dab costs its footprint and not the model.** That is the property
+the whole mode depends on — a sculptor works on a model too big to redraw, so a
+stamp that scales with the surface is unusable however correct it is. Measured
+on a flat patch at a fixed tessellation density, with the same brush at every
+size, so the only thing changing is how much surface surrounds the dab:
+
+| Faces | Dab, topology on | Dab, topology off |
+|-------|------------------|-------------------|
+| 100k | 1.41 ms | 0.33 ms |
+| 1M | 1.94 ms | 1.26 ms |
+| 5M | 3.43 ms | 2.47 ms |
+
+A 50x model is a 2.4x dab. Note which fixture that is: subdividing a
+fixed-radius sphere for each size would make the surface FINER, so a
+fixed-radius brush would legitimately cover quadratically more faces, and the
+resulting curve would say nothing about locality. This is a flat patch at fixed
+spacing, where only the surrounding surface grows — `BM_DynamicStamp` in
+`benchmarks/bench_main.cpp`, on a 24-core x86 box.
+
+Conversion is not local and is not meant to be: `from_mesh` on 320k faces is a
+few hundred milliseconds and on 5M it is seconds, which is why it is a
+deliberate one-off and not a mode a host toggles per stroke.
+
 ### The three parts
 
 **The operators** — split, collapse, flip. Each is ATOMIC: it decides
