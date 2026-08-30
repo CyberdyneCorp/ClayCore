@@ -40,6 +40,16 @@
       folded sheet and two-close-sheets, compared BIT FOR BIT against main, not
       within a tolerance. A tolerance would admit a reordered accumulation,
       which is the one mistake this refactor is likely to make
+- [x] 2.5b The gate is bit-for-bit PER TOOLCHAIN, which is what bit-for-bit can
+      mean here. `class_normal` reaches `acos` and the Gaussian falloff reaches
+      `exp`; neither is correctly rounded, so glibc, Apple libm and MSVC's
+      disagree on the last bit and one table cannot match them all — measured,
+      72 of 80 cases differ between Linux and macOS and 63 between Linux and
+      MSVC, with ZERO moved-count differences on either. Each toolchain
+      compares against its own table and an unlisted one prints the table it
+      would need. The MOVED COUNTS are portable and gate everywhere, so a verb
+      that stopped reaching a vertex is caught on every platform. Not a
+      tolerance, which would admit the reordered accumulation 2.5 names
 - [x] 2.6 The pre-stamp snapshot rule survives the move: one stamp resolves
       against one snapshot, so a composed verb stays a single operation
 

@@ -440,28 +440,49 @@ TEST_CASE("mesh sculpt parity: every verb on every fixture is byte-identical") {
     // did the same work; what it stops claiming is byte-identity against a
     // machine that is not this one, which it was never able to claim.
     const bool regen = std::getenv("CLAY_PARITY_REGEN") != nullptr;
-    // An unbaselined toolchain PRINTS its table without being asked. The
-    // alternative -- telling a reader to re-run with an env var set -- costs a
-    // CI round trip on exactly the machine nobody has local access to, which
-    // is the machine that needs a table. Printing is what makes this
-    // self-service: the lines below are the file.
-    const bool print_table = regen || !kHaveGoldens;
+    // An unbaselined toolchain WRITES its table out, and printing alone is not
+    // enough to make that useful. Every ctest preset here sets
+    // outputOnFailure, so a passing test's stdout never reaches a CI log --
+    // and a passing test is exactly what an unbaselined toolchain now is. The
+    // machine that needs a table is the one nobody has local access to, so the
+    // table has to leave the machine as a FILE the workflow can upload.
+    //
+    // CLAY_PARITY_OUT names it; the default sits in the working directory
+    // ctest runs the binary from, which is the build tree. `.generated` is in
+    // the name so nothing mistakes it for a committed table: it is an input to
+    // a human decision, not a baseline until someone moves it.
+    const bool write_table = regen || !kHaveGoldens;
+    const char* out_env = std::getenv("CLAY_PARITY_OUT");
+    const std::string out_path = out_env ? out_env : "mesh_sculpt_goldens.generated.inc";
+    std::FILE* out = nullptr;
+    if (write_table) {
+        out = std::fopen(out_path.c_str(), "w");
+        // A table that cannot be written is worth saying out loud rather than
+        // silently not producing: the run still passes, and someone would
+        // otherwise go looking for an artifact that was never created.
+        if (!out) MESSAGE("could not open " << out_path << " to write a table");
+    }
     if (!kHaveGoldens) {
         MESSAGE("no hash table for this toolchain: the byte comparison is "
                 "skipped and the moved counts are still checked against the "
-                "reference. The lines printed below ARE a table for it -- copy "
-                "them into mesh_sculpt_goldens_<toolchain>.inc and add the arm "
-                "to the #if above. See this file's header for why a table is "
-                "per-platform.");
+                "reference. A table for it is written to "
+                << out_path
+                << " (and printed below) -- move it to "
+                   "mesh_sculpt_goldens_<toolchain>.inc and add the arm to the "
+                   "#if above. See this file's header for why a table is "
+                   "per-platform.");
     }
     std::size_t index = 0;
     for (const Fixture& fx : kFixtures) {
         for (const VerbCase& vc : kVerbs) {
             std::uint32_t moved = 0;
             const std::uint64_t h = run_case(fx, vc.verb, &moved);
-            if (print_table) {
+            if (write_table) {
                 std::printf("    {\"%s\", \"%s\", %lluull, %uu},\n", fx.name, vc.name,
                             static_cast<unsigned long long>(h), moved);
+                if (out)
+                    std::fprintf(out, "    {\"%s\", \"%s\", %lluull, %uu},\n", fx.name,
+                                 vc.name, static_cast<unsigned long long>(h), moved);
             }
             // A DELIBERATE re-baseline prints and checks nothing. An
             // unbaselined toolchain prints AND still gates its moved counts,
@@ -495,6 +516,7 @@ TEST_CASE("mesh sculpt parity: every verb on every fixture is byte-identical") {
             ++index;
         }
     }
+    if (out) std::fclose(out);
     if (!regen) CHECK(index == kReferenceCount);
     if (kHaveGoldens) MESSAGE("golden table: " << CLAY_PARITY_TABLE);
 }
