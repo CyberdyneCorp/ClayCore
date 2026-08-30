@@ -81,15 +81,39 @@ The tasks below are kept as the record of what it would take.
       produces none, and leaving one paired it with a fresh field -- visible as
       a BAND of document sizes where the cull pad steps mid-stroke). Verified
       exact across 20..1000 stamps
-- [ ] 2.1b-ii-perf NOT YET FAST: 1.50 ms/dab at 1000 items against the root
-      list's 0.040, where before the wiring it was 2.48. The resume DOES fire
-      (2720 of 3456 refills in one trace), so the cost is elsewhere: every
-      rebuild traced carried `frames empty`, i.e. bricks whose checkpoint has
-      no frames never acquire a stack and rebuild on every dab. Skipping bricks
-      the dab cannot reach was tried and REVERTED -- it used
-      `node_influence_bound_in_document`, which is the node's own reach and not
-      its reach through the group's blend, so it wrongly skipped bricks the
-      group's combine still moves (errors at 20-80 stamps) and bought no speed
+- [x] 2.1b-ii-perf THE STACK WAS BEING DROPPED. Every consumer sized a
+      checkpoint's stack `frames.size() + 1`, but a group emits a combine only
+      where there is something to combine with -- `TapeCheckpointFrame::emits`,
+      which the header had already warned about and which four sites then
+      ignored. The refill asked for one shape, the walk reported another, and
+      the stack was discarded, so every dab paid the full walk the resume
+      exists to avoid. SILENT: a dropped stack is slow, not wrong, which is why
+      the sweep stayed exact through all of it. `checkpoint_stack_levels()` is
+      now the one rule and the four sites call it. Measured over a 24-dab
+      stroke: 6908 of 25660 brick tasks rebuilt and ZERO stored a usable stack;
+      now 1040 rebuild and all 1040 store one. 23.0 -> 1.56 ms/dab at 1000.
+      Then one walk where there were two -- `eval_points_stack` computed the
+      field (the top of the stack IS the field) and discarded it, so the
+      rebuild walked the active half again to get it back -- 1.56 -> 1.15 ms.
+      That also gives the rebuild a COLOUR stack, which it never stored, so a
+      coloured group stroke could not have converged even with the count fixed.
+      Regression test `tests/unit/test_checkpoint_stack_levels.cpp` checks the
+      claimed count against the walk's actual depth; it fails 5 assertions
+      against the old rule, `1 == 5` on four nested Add groups
+- [ ] 2.1b-ii-perf-b STILL O(n), and the cause is identified: 0.10 / 0.32 /
+      1.15 / 3.32 ms per dab at 10 / 100 / 1000 / 3000 items, against a root
+      list flat at 0.04. A brick pays ONE full walk the first time the stroke
+      reaches it, because the initial full refill stores the field and no
+      stack -- 1040 rebuilds at 1.41 ms is what is left. The root list never
+      pays it: its seed IS the field, which the first build already stored.
+      So the fix is to snapshot the stack on the FULL refill path too, the way
+      the rebuild branch now does, and then a group stroke never rebuilds.
+      NOTE the reverted wrong turn, which still stands as a warning: skipping
+      bricks the dab "cannot reach" used `node_influence_bound_in_document`,
+      the node's own reach rather than its reach through the group's blend, so
+      it skipped bricks the combine still moves (errors at 20-80 stamps) and
+      bought no speed. The right bound is `node_reach_bound`, and "no frames"
+      is not the same thing as "cannot reach"
 - [ ] 2.1b-iii ORIGINAL NOTE (superseded): See design.md "Correction 6": a
       frame's `emits` depends on whether anything before the group survived
       THAT BRICK's cull, so one plan cannot state it for a batch. ResumeEntry
