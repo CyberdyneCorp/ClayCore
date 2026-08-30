@@ -5,6 +5,8 @@
 
 #include "clay/scene/consolidate.h"
 
+#include "clay/scene/bounds.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <functional>
@@ -109,8 +111,11 @@ void walk(const SdfContent& content, const std::vector<NodeId>& ids, FieldReport
         const Node* n = content.find(id);
         if (!n) continue;
         ++out.item_count;
+        if (!n->is_group) ++out.drawable_count;
         out.longest_deformer_chain =
             std::max(out.longest_deformer_chain, static_cast<int>(n->deformers.size()));
+        out.steepest_deformer_chain =
+            std::max(out.steepest_deformer_chain, deformer_lipschitz(*n));
         if (n->volume)
             out.steepest_volume = std::max(out.steepest_volume, n->volume->sample_lipschitz());
         pending.insert(pending.end(), n->children.rbegin(), n->children.rend());
@@ -181,8 +186,31 @@ FieldReport report_layer(const Layer& layer, float advise_below_step_scale) {
     out.lipschitz = tape.info.lipschitz;
     out.safe_step_scale = tape.safe_step_scale();
     if (layer.sdf) walk(*layer.sdf, layer.sdf->roots, out);
-    out.advises_consolidation =
+    // WHAT THE ADVICE IS KEYED ON, and why it is no longer the step scale alone
+    // (issue #387). A grab chain lowers `safe_step_scale` exactly as a stack of
+    // baked volumes does, so an advisory that read only the aggregate fired
+    // hardest on the case consolidation cannot help — measured 6x WORSE on a
+    // real gesture, a 29x better step scale swamped by what it costs to
+    // evaluate a warped 3.3 MB volume where the layer had held one analytic
+    // primitive.
+    //
+    // Consolidation wins back two things and only two: the cost of walking an
+    // EDIT LIST, and the Lipschitz of STACKED VOLUMES, which the bake
+    // redistances away. A layer that is one drawable item carrying a brush
+    // chain has neither, so there the bake is a straight loss. The report
+    // already knew enough to say so; it just was not asked.
+    const bool degraded =
         advise_below_step_scale > 0.0f && out.safe_step_scale < advise_below_step_scale;
+    const bool volumes = out.steepest_volume > 1.0f || out.drawable_count > 1;
+    const bool deformers = out.steepest_deformer_chain > 1.0f;
+    if (degraded) {
+        out.degradation = volumes ? (deformers ? Degradation::Both : Degradation::Volumes)
+                                  : (deformers ? Degradation::Deformers : Degradation::Volumes);
+    }
+    // Advised whenever there IS something to absorb. On a layer degraded by
+    // both, the bake fixes both — it is the deformer-only shape that is the
+    // loss.
+    out.advises_consolidation = degraded && volumes;
     return out;
 }
 

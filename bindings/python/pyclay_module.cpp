@@ -171,6 +171,16 @@ brush::MaskExtrudeSettings extrude_settings(float thickness, const std::string& 
 // bidirectional map makes clumsier than the duplication saves.
 const char* mesh_brush_name(mesh::MeshBrush verb);
 
+const char* degradation_name(scene::Degradation d) {
+    switch (d) {
+        case scene::Degradation::Volumes: return "volumes";
+        case scene::Degradation::Deformers: return "deformers";
+        case scene::Degradation::Both: return "both";
+        case scene::Degradation::None: break;
+    }
+    return "none";
+}
+
 mesh::MeshBrush parse_mesh_brush(const std::string& verb) {
     // One spelling per verb, as parse_extrude_side already argues: every string
     // pyclay accepts is a capability the C ABI has to be able to name, and an
@@ -5381,8 +5391,11 @@ NB_MODULE(pyclay, m) {
                  out["safe_step_scale"] = r.safe_step_scale;
                  out["steepest_volume"] = r.steepest_volume;
                  out["longest_deformer_chain"] = r.longest_deformer_chain;
+                 out["steepest_deformer_chain"] = r.steepest_deformer_chain;
                  out["item_count"] = r.item_count;
+                 out["drawable_count"] = r.drawable_count;
                  out["advises_consolidation"] = r.advises_consolidation;
+                 out["degradation"] = degradation_name(r.degradation);
                  return out;
              },
              "advise_below_step_scale"_a = 0.0f,
@@ -5392,8 +5405,16 @@ NB_MODULE(pyclay, m) {
              "volume, so the second pass samples a VOLUME — `steepest_volume`\n"
              "is that. A move stroke never touches a volume at all: each drag\n"
              "appends a grab to the deformer chain and those multiply —\n"
-             "`longest_deformer_chain` is that. The aggregate step scale says\n"
-             "something is wrong; those two say which thing.\n\n"
+             "`longest_deformer_chain` is that — a COUNT, so weigh the\n"
+             "mechanisms by `steepest_volume` against `steepest_deformer_chain`,\n"
+             "which are both factors. The aggregate step scale says something is\n"
+             "wrong; those two say which thing.\n\n"
+             "`degradation` names the mechanism outright: \"none\", \"volumes\",\n"
+             "\"deformers\" or \"both\". Read it before acting, because the two\n"
+             "cures are not interchangeable — `advises_consolidation` is now\n"
+             "keyed on it and is FALSE for a layer degraded only by its brush\n"
+             "chain, where a bake swaps a cheap analytic item for a dense volume\n"
+             "and measured 6x WORSE on a real gesture.\n\n"
              "`advise_below_step_scale` is YOUR tolerance for marching cost, and\n"
              "it is an argument rather than document state because that\n"
              "tolerance belongs to a viewport and a frame budget rather than to\n"

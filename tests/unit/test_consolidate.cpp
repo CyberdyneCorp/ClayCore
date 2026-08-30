@@ -229,7 +229,17 @@ TEST_CASE("a move stroke stops decaying once it is consolidated") {
     CHECK(before.longest_deformer_chain == 9);
     CHECK(before.steepest_volume == doctest::Approx(1.0f));  // no volume is involved at all
     CHECK(before.safe_step_scale < 0.05f);
-    CHECK(before.advises_consolidation);
+    // NOT advised, and that is the point of issue #387. The bound really is
+    // this bad and consolidating really does fix it — the two checks below say
+    // so — but the layer is ONE analytic item, so the bake wins back no edit
+    // list and no stacked volume, and swaps a cheap primitive for a dense one.
+    // Measured on a real gesture: a 29x better step scale and a 6x SLOWER
+    // gesture. The advisory says which cure applies, not merely that something
+    // hurts.
+    CHECK_FALSE(before.advises_consolidation);
+    CHECK(before.degradation == scene::Degradation::Deformers);
+    CHECK(before.steepest_deformer_chain > 5.0f);
+    CHECK(before.drawable_count == 1);
 
     scene::ConsolidationCost cost;
     REQUIRE(scene::consolidate_layer(doc, layer.id, params_at(0.03f, 0.12f), nullptr, &cost));
@@ -256,10 +266,103 @@ TEST_CASE("the report names which of the two mechanisms degraded a chain") {
     const scene::FieldReport report = scene::report_layer(layer, 0.25f);
     CHECK(report.steepest_volume > 5.0f);
     CHECK(report.longest_deformer_chain == 0);
+    CHECK(report.steepest_deformer_chain == doctest::Approx(1.0f));
     CHECK(report.item_count == 1);
     CHECK(report.advises_consolidation);
+    CHECK(report.degradation == scene::Degradation::Volumes);
     // Advice only when asked for: a threshold of zero measures without judging.
     CHECK_FALSE(scene::report_layer(layer, 0.0f).advises_consolidation);
+    CHECK(scene::report_layer(layer, 0.0f).degradation == scene::Degradation::None);
+}
+
+// -- the advice names the cure, not the symptom (issue #387) -----------------
+//
+// `advises_consolidation` was `safe_step_scale < threshold` and nothing else.
+// A grab chain lowers the step scale exactly as a stack of baked volumes does,
+// so the advisory fired hardest on the case consolidation cannot help: measured
+// 6x WORSE on a real gesture, a 29x better step scale swamped by what a warped
+// 3.3 MB volume costs per sample where the layer had held one analytic item.
+//
+// Consolidation wins back two things and only two — the cost of walking an EDIT
+// LIST, and the Lipschitz of STACKED VOLUMES, which the bake redistances away.
+// The report already carried enough to say which was present.
+
+TEST_CASE("advice: a deep chain on ONE item is not consolidation's problem") {
+    scene::Document doc = sphere_document(1.0f);
+    scene::Layer& layer = doc.layers.front();
+    layer.sdf->find_mut(layer.sdf->roots.front())
+        ->deformers.push_back(scene::Deformer::grab(cf3(1.0f, 0, 0), 0.5f, cf3(0.9f, 0, 0)));
+
+    const scene::FieldReport r = scene::report_layer(layer, 0.5f);
+    REQUIRE(r.safe_step_scale < 0.5f);  // degraded, so the threshold is tripped
+    CHECK(r.drawable_count == 1);
+    CHECK(r.steepest_volume == doctest::Approx(1.0f));
+    CHECK(r.steepest_deformer_chain > 1.0f);
+    CHECK(r.degradation == scene::Degradation::Deformers);
+    CHECK_FALSE(r.advises_consolidation);
+}
+
+TEST_CASE("advice: an EDIT LIST is something to win back, chain or no chain") {
+    // The same deep grab, on a layer that is twenty items. Here the bake
+    // absorbs the list, so it is worth offering even though the chain is what
+    // tripped the threshold.
+    scene::Document doc;
+    scene::Layer& layer = doc.add_sdf_layer("l");
+    for (int i = 0; i < 20; ++i) {
+        scene::Node n;
+        n.prim = scene::Prim::sphere(0.4f);
+        n.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.2f};
+        n.xform.position = cf3(0.25f * static_cast<float>(i) - 2.5f, 0, 0);
+        layer.sdf->insert(n);
+    }
+    layer.sdf->find_mut(layer.sdf->roots.front())
+        ->deformers.push_back(scene::Deformer::grab(cf3(0, 0.4f, 0), 0.5f, cf3(0, 0.9f, 0)));
+
+    const scene::FieldReport r = scene::report_layer(layer, 0.5f);
+    REQUIRE(r.safe_step_scale < 0.5f);
+    CHECK(r.drawable_count == 20);
+    CHECK(r.degradation == scene::Degradation::Both);
+    CHECK(r.advises_consolidation);
+}
+
+TEST_CASE("advice: a GROUP is not an edit list to win back") {
+    // `item_count` counts groups, which are a transform and a name and are
+    // never evaluated. Keyed on that count, a lone item wrapped in a group
+    // would look like a list worth absorbing and get the advice that measured
+    // 6x worse.
+    scene::Document doc;
+    scene::Layer& layer = doc.add_sdf_layer("l");
+    scene::Node group;
+    group.is_group = true;
+    const scene::NodeId gid = layer.sdf->insert(group);
+    scene::Node ball;
+    ball.prim = scene::Prim::sphere(1.0f);
+    ball.deformers.push_back(scene::Deformer::grab(cf3(1.0f, 0, 0), 0.5f, cf3(0.9f, 0, 0)));
+    layer.sdf->insert(ball, gid);
+
+    const scene::FieldReport r = scene::report_layer(layer, 0.5f);
+    REQUIRE(r.safe_step_scale < 0.5f);
+    CHECK(r.item_count == 2);     // the group and the ball
+    CHECK(r.drawable_count == 1);  // ...but only one thing is evaluated
+    CHECK(r.degradation == scene::Degradation::Deformers);
+    CHECK_FALSE(r.advises_consolidation);
+}
+
+TEST_CASE("advice: the chain's FACTOR is reported, not only its length") {
+    // `longest_deformer_chain` is a count, so it cannot be weighed against
+    // `steepest_volume`. One deep grab and four gentle twists are the same
+    // length in neither and cost the marcher nothing alike.
+    scene::Document deep = sphere_document(1.0f);
+    deep.layers.front().sdf->find_mut(deep.layers.front().sdf->roots.front())
+        ->deformers.push_back(scene::Deformer::grab(cf3(1.0f, 0, 0), 0.5f, cf3(0.9f, 0, 0)));
+    scene::Document gentle = sphere_document(1.0f);
+    gentle.layers.front().sdf->find_mut(gentle.layers.front().sdf->roots.front())
+        ->deformers.push_back(scene::Deformer::grab(cf3(1.0f, 0, 0), 0.5f, cf3(0.01f, 0, 0)));
+
+    const scene::FieldReport a = scene::report_layer(deep.layers.front(), 0.0f);
+    const scene::FieldReport b = scene::report_layer(gentle.layers.front(), 0.0f);
+    CHECK(a.longest_deformer_chain == b.longest_deformer_chain);  // the same LENGTH...
+    CHECK(a.steepest_deformer_chain > b.steepest_deformer_chain * 2.0f);  // ...not the same cost
 }
 
 // -- one undoable command ---------------------------------------------------------

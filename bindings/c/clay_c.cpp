@@ -6789,6 +6789,13 @@ clay_result clay_layer_field_report(const clay_document* doc, clay_layer_id laye
     filled.longest_deformer_chain = report.longest_deformer_chain;
     filled.item_count = report.item_count;
     filled.advises_consolidation = report.advises_consolidation ? 1 : 0;
+    filled.steepest_deformer_chain = report.steepest_deformer_chain;
+    filled.drawable_count = report.drawable_count;
+    filled.degradation = static_cast<std::int32_t>(report.degradation);
+    // write_desc copies only as far as the caller's own struct_size, so a
+    // caller built against kFieldReportOriginal never sees the three fields
+    // appended in 0.70.0 and never has them written past the end of its
+    // struct.
     write_desc(out_report, declared, filled);
     return CLAY_OK;
 }
