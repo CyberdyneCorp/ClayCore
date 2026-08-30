@@ -471,9 +471,18 @@ void eval_points_seeded(const scene::Tape& suffix, const PointQuery& q, const fl
 // append inside a group.
 //
 // Refuses (writing nothing) when `levels` is 0 or deeper than the tape stack.
+// `stack_out` asks for the stack as it stood at instruction `snapshot_at`,
+// which is what the NEXT append resumes from: the seed is where the checkpoint
+// sits, not the answer the walk ends with, and evaluating the prefix again to
+// find it would give back what the resume saved. `kTapeStackAtEnd` takes it
+// after the last instruction.
 void eval_points_seeded_stack(const scene::Tape& suffix, const PointQuery& q, const float* seeds,
                               const float* seeds_rgb, std::size_t levels,
-                              const PointResults& out, std::size_t block = 0);
+                              const PointResults& out, float* stack_out = nullptr,
+                              float* stack_out_rgb = nullptr,
+                              std::size_t* stack_out_levels = nullptr,
+                              std::size_t snapshot_at = static_cast<std::size_t>(-1),
+                              std::size_t block = 0);
 
 // The other half: evaluate `tape` and hand back the WHOLE final stack rather
 // than only its top, which is what a prefix stopping inside a group is worth.
@@ -484,7 +493,9 @@ void eval_points_seeded_stack(const scene::Tape& suffix, const PointQuery& q, co
 // that can be written. `*out_levels` is 0 for an empty tape, which has no
 // stack and writes nothing.
 void eval_points_stack(const scene::Tape& tape, const PointQuery& q, float* stack_out,
-                       float* stack_out_rgb, std::size_t* out_levels, std::size_t block = 0);
+                       float* stack_out_rgb, std::size_t* out_levels,
+                       std::size_t snapshot_at = static_cast<std::size_t>(-1),
+                       std::size_t block = 0);
 
 // The stack depth a tape actually reaches, which is a property of its
 // instruction sequence rather than of any point. The blocked path allocates
