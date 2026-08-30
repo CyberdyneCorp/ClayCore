@@ -73,23 +73,28 @@ The specified behaviour is unchanged where it was specified — a source facing
 away still moves the vertex not at all — so this is a correction inside the
 contract rather than a change to it.
 
-### 5. What this change does NOT fix, and says so
+### 5. What this change did NOT fix — and what the correction was
 
 `DynamicSurface::from_mesh` refuses ANY marched mesh at its default weld
-epsilon. A plain `mesh_lattice` over an analytic sphere emits 486 edges shorter
-than 1e-5 and is refused with `DegenerateTriangle`; so is `mesh_tape`, the
-ordinary document meshing path; so is a voxel remesh, which emits ten.
+epsilon. A plain `mesh_lattice` over an analytic sphere is refused with
+`DegenerateTriangle`; so is `mesh_tape`, the ordinary document meshing path; so
+is a voxel remesh.
 
-The correct option for a marched mesh is `weld_epsilon = 0`, and that is not a
-workaround: the marcher's builder already welded it on canonical lattice-edge
-keys, so welding again by DISTANCE merges vertices it deliberately kept apart.
-The default is right for an IMPORTED mesh whose exporter duplicated a seam.
+**CORRECTED by `add-mesh-weld`.** This change originally recorded the fix as
+"pass `weld_epsilon = 0` — a marched mesh is already welded on canonical
+lattice-edge keys, so welding again by distance merges vertices it deliberately
+kept apart." That was wrong, and measuring it is what showed how wrong.
 
-No caller in the repository had ever converted a marched mesh to an adaptive
-surface — the dynamic-topology example builds its input analytically — which is
-why this had not surfaced. Documenting the option is this change's scope;
-deciding whether `from_mesh` should repair, refuse or default differently is
-that subsystem's, and wants its own change.
+The marcher emits 1458 of 70,140 triangles — two per cent — with two corners at
+BIT-IDENTICAL positions. Those are refused at any epsilon including zero. The
+voxel remesh happens to emit none of them (its field is a sampled band rather
+than an analytic function, so a crossing landing exactly on a lattice point is
+far rarer), which is why zero appeared to work here: luck, not a rule.
+
+The real fix is `mesh::weld` — merge the coincident vertices, drop the zero-area
+triangles that collapses, hand the conversion something it can express — and it
+belongs there rather than inside `from_mesh`, which would have fixed one caller
+and left the marcher emitting degenerate faces into every other one.
 
 ## Open questions
 

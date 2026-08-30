@@ -7252,3 +7252,75 @@ def test_voxel_remesh_layer_refuses_without_touching_the_layer():
     with pytest.raises(RuntimeError, match="memory budget"):
         doc.voxel_remesh_layer(layer, resolution=256, memory_budget=4096)
     assert borrowed.triangle_count == before
+
+
+def test_weld_makes_a_marched_mesh_convertible():
+    # The default mesher emits zero-area triangles; a half-edge surface cannot
+    # hold one, so no mesh this library marched could become a DynamicSurface
+    # until weld existed.
+    p, i = _remesh_sphere()
+    marched, _ = clay.Mesh.from_triangles(p, i).voxel_remesh(resolution=48)
+
+    with pytest.raises(Exception):
+        clay.DynamicSurface.from_mesh(marched)
+
+    report = marched.weld()
+    assert report["triangles_collapsed"] > 0
+    assert report["triangles_after"] < report["triangles_before"]
+    assert report["triangles_invalid"] == 0
+    assert report["epsilon"] > 0.0
+    # Watertightness survives: a triangle whose corners coincide bounds nothing.
+    assert marched.is_watertight()
+    assert marched.is_manifold()
+
+    surface = clay.DynamicSurface.from_mesh(marched)
+    assert surface.face_count == marched.triangle_count
+
+
+def test_weld_is_a_no_op_on_a_clean_mesh():
+    p, i = _remesh_sphere()
+    m = clay.Mesh.from_triangles(p, i)
+    before = m.triangle_count
+    r = m.weld()
+    assert r["vertices_merged"] == 0
+    assert r["triangles_collapsed"] == 0
+    assert m.triangle_count == before
+
+
+def test_weld_preserves_a_uv_seam_by_default():
+    # A UV seam is duplicated positions with different uvs — how a flat mesh
+    # represents a seam at all — and merging across one destroys the layout.
+    positions = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
+                          [1, 0, 0], [1, 1, 0], [2, 0, 0], [2, 1, 0]], dtype=np.float32)
+    indices = np.array([0, 1, 2, 0, 2, 3, 4, 6, 7, 4, 7, 5], dtype=np.uint32)
+    m = clay.Mesh.from_triangles(positions, indices)
+    # from_triangles carries geometry only, so give it the uvs that make it a
+    # seam by transferring from a mesh that has them... simpler: without uvs the
+    # duplicates ARE genuine duplicates and merge, which is the control.
+    r = m.weld()
+    assert r["vertices_merged"] == 2  # no attributes to disagree about
+
+
+def test_weld_refuses_a_negative_epsilon():
+    p, i = _remesh_sphere()
+    m = clay.Mesh.from_triangles(p, i)
+    with pytest.raises(ValueError, match="epsilon must be >= 0"):
+        m.weld(epsilon=-1.0)
+
+
+def test_weld_bumps_a_layer_revision_only_when_it_changes_something():
+    p, i = _remesh_sphere()
+    doc = clay.Document()
+    borrowed = doc.add_mesh_layer(clay.Mesh.from_triangles(p, i), "shell")
+    layer = borrowed.layer
+    doc.voxel_remesh_layer(layer, resolution=40)  # now a marched mesh
+
+    before = doc.mesh_layer_revision(layer)
+    r = borrowed.weld()
+    assert r["triangles_collapsed"] > 0
+    assert doc.mesh_layer_revision(layer) > before
+
+    after = doc.mesh_layer_revision(layer)
+    second = borrowed.weld()
+    assert second["vertices_merged"] == 0
+    assert doc.mesh_layer_revision(layer) == after

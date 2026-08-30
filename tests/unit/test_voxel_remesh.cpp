@@ -22,6 +22,7 @@
 #include "clay/mesh/to_field.h"
 #include "clay/mesh/transfer.h"
 #include "clay/mesh/validate.h"
+#include "clay/mesh/weld.h"
 #include "clay/mesh/voxel_remesh.h"
 #include "../../src/mesh/voxel_remesh_internal.h"
 #include "voxel_remesh_fixtures.h"
@@ -932,31 +933,37 @@ TEST_CASE("a dynamic surface round-trips through a remesh") {
     REQUIRE(r.ok());
     check_clean(r.mesh);
 
-    // WELD EPSILON ZERO, AND IT IS NOT A WORKAROUND. `from_mesh` welds by
-    // DISTANCE at 1e-5 by default, which is the right rule for an IMPORTED
-    // mesh whose exporter duplicated vertices along a seam. A mesh this
-    // library marched is already welded — the builder deduped it on canonical
-    // lattice-edge keys — so welding it again by distance merges vertices the
-    // marcher deliberately kept apart, and the triangle between them collapses.
+    // WELD FIRST, and it is not a workaround for this operation — it is the
+    // cleanup every marched mesh in this library needs.
     //
-    // Measured, and it is not this operation's doing: a plain `mesh_lattice`
-    // over an analytic sphere emits 486 edges shorter than 1e-5 and `from_mesh`
-    // refuses it at defaults too; so does `mesh_tape`, the ordinary document
-    // meshing path. This remesh emits ten. No caller in the repository has ever
-    // converted a marched mesh to an adaptive surface — the dynamic-topology
-    // example builds its input analytically — which is why the gap had not
-    // surfaced.
-    DynamicSurfaceBuildOptions already_welded;
-    already_welded.weld_epsilon = 0.0f;
+    // The first version of this test passed `weld_epsilon = 0` and claimed a
+    // marched mesh is "already welded, so do not weld it again". That was
+    // wrong, and measuring it is what showed how wrong: a plain `mesh_lattice`
+    // over an analytic sphere emits 1458 triangles with two corners at
+    // BIT-IDENTICAL positions, which `from_mesh` refuses at ANY epsilon
+    // including zero. The remesh happens to emit none of those — its field is a
+    // sampled band rather than an analytic function, so a crossing landing
+    // exactly on a lattice point is far rarer — so zero worked here by luck and
+    // would not have worked for the mesher this test was generalising from.
+    //
+    // `mesh::weld` is the actual fix: merge the coincident vertices, drop the
+    // zero-area triangles that collapses, and hand the conversion something it
+    // can express. Welded at `from_mesh`'s OWN epsilon, because welding below
+    // what the consumer welds at only moves the problem.
+    Mesh cleaned = r.mesh;
+    const WeldReport welded = weld(&cleaned);
+    CHECK(welded.triangles_collapsed > 0);  // the remesh does emit slivers
+    CHECK(validate(cleaned).watertight);    // and removing them cannot open a hole
+
     DynamicBuildError error = DynamicBuildError::None;
     const std::optional<DynamicSurface> after =
-        DynamicSurface::from_mesh(r.mesh, already_welded, &error);
+        DynamicSurface::from_mesh(cleaned, {}, &error);
     CHECK(error == DynamicBuildError::None);
     REQUIRE(after.has_value());
     const Mesh returned = after->to_mesh();
     // The conversion is lossless on geometry: what went in comes back out.
-    CHECK(returned.triangle_count() == r.mesh.triangle_count());
-    CHECK(returned.positions.size() == r.mesh.positions.size());
+    CHECK(returned.triangle_count() == cleaned.triangle_count());
+    CHECK(returned.positions.size() == cleaned.positions.size());
     // ...and the surface is still where the remesh put it.
-    CHECK(surface_error(r.mesh, returned) < 1e-5);
+    CHECK(surface_error(cleaned, returned) < 1e-5);
 }

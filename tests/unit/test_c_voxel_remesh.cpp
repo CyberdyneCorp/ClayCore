@@ -606,3 +606,109 @@ TEST_CASE("c abi: a live sculptor is refused after the layer it holds is rebuilt
 
     clay_mesh_sculptor_destroy(sculptor);
 }
+
+TEST_CASE("c abi: welding makes a marched mesh convertible, and reports what it did") {
+    // The C side of add-mesh-weld. The mesh here is the one this ABI's own
+    // mesher produces, so the fixture is the defect rather than a stand-in for
+    // it: a marched sphere carries zero-area triangles that nothing downstream
+    // had ever objected to.
+    std::vector<float> pos;
+    std::vector<std::uint32_t> idx;
+    sphere(&pos, &idx, 1.0f, 0.0f, 24, 48);
+    MeshHandle src;
+    REQUIRE(build(&src, pos, idx) == CLAY_OK);
+
+    // A UV sphere is clean, so remesh it first to get a MARCHED mesh.
+    const clay_voxel_remesh_params p = defaults_at(48);
+    MeshHandle marched;
+    REQUIRE(clay_mesh_voxel_remesh(src.m, &p, nullptr, &marched.m, nullptr) == CLAY_OK);
+
+    clay_weld_desc desc{};
+    desc.struct_size = sizeof(desc);
+    REQUIRE(clay_mesh_weld_defaults(&desc) == CLAY_OK);
+    CHECK(desc.preserve_attribute_splits == 1);
+    CHECK(desc.epsilon > 0.0f);
+
+    const std::size_t before = clay_mesh_index_count(marched.m) / 3;
+    clay_weld_report report{};
+    report.struct_size = sizeof(report);
+    REQUIRE(clay_mesh_weld(marched.m, &desc, &report) == CLAY_OK);
+    CHECK(report.triangles_before == before);
+    CHECK(report.triangles_after == clay_mesh_index_count(marched.m) / 3);
+    CHECK(report.triangles_collapsed > 0);
+    CHECK(report.triangles_invalid == 0);
+    CHECK(report.epsilon > 0.0f);
+
+    // Watertight before and after: a triangle whose corners coincide bounds
+    // nothing, so removing it cannot open a hole.
+    std::int32_t watertight = 0, manifold = 0;
+    REQUIRE(clay_mesh_validate(marched.m, &watertight, &manifold) == CLAY_OK);
+    CHECK(watertight == 1);
+    CHECK(manifold == 1);
+
+    // A second weld has nothing to do and says so.
+    clay_weld_report again{};
+    again.struct_size = sizeof(again);
+    REQUIRE(clay_mesh_weld(marched.m, &desc, &again) == CLAY_OK);
+    CHECK(again.vertices_merged == 0);
+    CHECK(again.triangles_collapsed == 0);
+    CHECK(again.triangles_after == report.triangles_after);
+}
+
+TEST_CASE("c abi: welding a layer bumps its geometry revision, and a no-op weld does not") {
+    // A weld rewrites the triangles, so it is as invalidating as a rebuild —
+    // and must say so through the same counter, or a live sculptor survives it.
+    std::vector<float> pos;
+    std::vector<std::uint32_t> idx;
+    sphere(&pos, &idx);
+    DocHandle doc;
+    doc.doc = clay_document_create();
+    REQUIRE(doc.doc != nullptr);
+    const clay_layer_id layer = attach_layer(&doc, pos, idx);
+    // Remesh so the layer holds a MARCHED mesh with something to weld.
+    const clay_voxel_remesh_params p = defaults_at(40);
+    REQUIRE(clay_document_voxel_remesh_layer(doc.doc, layer, &p, nullptr, nullptr) == CLAY_OK);
+
+    std::uint64_t before = 0;
+    REQUIRE(clay_document_mesh_layer_revision(doc.doc, layer, &before) == CLAY_OK);
+    clay_mesh* borrowed = nullptr;
+    REQUIRE(clay_document_mesh_layer_by_id(doc.doc, layer, &borrowed) == CLAY_OK);
+
+    clay_weld_report r{};
+    r.struct_size = sizeof(r);
+    REQUIRE(clay_mesh_weld(borrowed, nullptr, &r) == CLAY_OK);
+    REQUIRE(r.triangles_collapsed > 0);
+    std::uint64_t after = 0;
+    REQUIRE(clay_document_mesh_layer_revision(doc.doc, layer, &after) == CLAY_OK);
+    CHECK(after > before);
+
+    // A weld that changed nothing must NOT invalidate anything.
+    clay_weld_report second{};
+    second.struct_size = sizeof(second);
+    REQUIRE(clay_mesh_weld(borrowed, nullptr, &second) == CLAY_OK);
+    REQUIRE(second.vertices_merged == 0);
+    std::uint64_t unchanged = 0;
+    REQUIRE(clay_document_mesh_layer_revision(doc.doc, layer, &unchanged) == CLAY_OK);
+    CHECK(unchanged == after);
+}
+
+TEST_CASE("c abi: welding refuses a protected layer and a bad epsilon") {
+    std::vector<float> pos;
+    std::vector<std::uint32_t> idx;
+    sphere(&pos, &idx);
+    DocHandle doc;
+    doc.doc = clay_document_create();
+    REQUIRE(doc.doc != nullptr);
+    const clay_layer_id layer = attach_layer(&doc, pos, idx);
+    clay_mesh* borrowed = nullptr;
+    REQUIRE(clay_document_mesh_layer_by_id(doc.doc, layer, &borrowed) == CLAY_OK);
+
+    clay_weld_desc bad{};
+    bad.struct_size = sizeof(bad);
+    REQUIRE(clay_mesh_weld_defaults(&bad) == CLAY_OK);
+    bad.epsilon = -1.0f;
+    CHECK(clay_mesh_weld(borrowed, &bad, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    REQUIRE(clay_document_set_layer_protection(doc.doc, layer, 0, 1) == CLAY_OK);
+    CHECK(clay_mesh_weld(borrowed, nullptr, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+}

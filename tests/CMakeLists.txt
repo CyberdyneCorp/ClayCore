@@ -55,6 +55,7 @@ add_executable(clay_unit_tests
   unit/test_c_brush_preset.cpp
   unit/test_mesh_deform.cpp
   unit/test_mesh_transfer.cpp
+  unit/test_mesh_weld.cpp
   unit/test_voxel_remesh.cpp
   unit/test_c_voxel_remesh.cpp
   unit/test_bench_spread.cpp

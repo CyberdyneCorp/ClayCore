@@ -1632,6 +1632,16 @@ the source is a `const&` and was never written, so "cancellation leaves the
 source unchanged" is a property of the signature rather than a promise about a
 rollback.
 
+### Feeding the result to an adaptive surface
+
+`DynamicSurface::from_mesh` refuses a mesh with a face whose corners coincide,
+and a marched mesh has them — the default mesher emits about two per cent
+zero-area triangles, and `validate` calls them slivers rather than degenerates,
+so nothing had ever objected. **Weld first**: `mesh::weld` merges the coincident
+vertices, drops the triangles that collapses, and hands the conversion something
+it can express. Weld at *at least* the epsilon the conversion will use — welding
+below it only moves the problem.
+
 It is a **pure mesh → mesh operation**: no document, no layer, no history and no
 revision token. A host holds the before and after meshes and commits them as one
 undo record. A `DynamicSurface` round-trips through it the same way — `to_mesh`,
