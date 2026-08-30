@@ -866,10 +866,36 @@ struct Compiler {
             tape.instrs.resize(saved_instrs);
             tape.params.resize(saved_params);
             tape.blob.resize(saved_strokes);
-            // Nothing survives here, so nothing may be resumed from here — a
-            // checkpoint recorded inside a chain that was then rolled back
-            // would name lengths the tape no longer has. Reachable under a
-            // cull, where a group's children can all be dropped.
+            // Nothing survives here, so nothing may be resumed from INSIDE
+            // the rolled-back chain — a checkpoint naming lengths the tape no
+            // longer has. But the position in FRONT of it is still a position,
+            // and it is where an append into this group would land: a group
+            // the artist has just made and not yet drawn in is exactly this
+            // shape, and without a checkpoint its first stroke re-walks the
+            // whole active half per brick per dab.
+            //
+            // Only where something is beneath it. With `have_acc` false the
+            // group emits nothing at all, so there is no outer plane to seed
+            // from and no walk worth saving -- the document is empty here.
+            if (group_on_tail && have_acc && !tail_checkpoint_taken_) {
+                checkpoint.instrs = tape.instrs.size();  // post-rollback: the end
+                checkpoint.params = tape.params.size();
+                checkpoint.blob = tape.blob.size();
+                // The chain INSIDE the group produced nothing, so the stack
+                // stops at the plane outside it.
+                checkpoint.layer_have_acc = false;
+                checkpoint.frames.clear();
+                TapeCheckpointFrame f;
+                f.group = group.id;
+                f.outer_have_acc = have_acc;
+                f.seeded = false;  // the empty this would have emitted is rolled back
+                f.emits = have_acc;
+                f.op = group.op;
+                f.blend = group.blend;
+                f.rounding = group.rounding * layer.xform.scale;
+                checkpoint.frames.push_back(f);
+                tail_checkpoint_taken_ = true;
+            }
             return have_acc;
         }
         // THE POSITION, taken by the innermost tail group only: this is where

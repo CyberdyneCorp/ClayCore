@@ -189,8 +189,13 @@ struct TapeCheckpointFrame {
 // opens no outer slot, which is the ordinary case for a group that is the
 // first thing in its layer. Every producer and consumer of a stack SHALL size
 // it with this, or the two disagree and the seed is silently dropped.
-inline std::size_t checkpoint_stack_levels(const std::vector<TapeCheckpointFrame>& frames) {
-    std::size_t levels = 1;
+// `layer_have_acc` is the checkpoint's own: FALSE where the chain the
+// checkpoint sits in has not produced a value yet, which is what a tail group
+// that was EMPTY at compile time leaves behind. Then the bottom plane is the
+// chain OUTSIDE the group and there is no plane for the chain itself.
+inline std::size_t checkpoint_stack_levels(const std::vector<TapeCheckpointFrame>& frames,
+                                           bool layer_have_acc = true) {
+    std::size_t levels = layer_have_acc ? 1u : 0u;
     for (const TapeCheckpointFrame& f : frames)
         if (f.emits) ++levels;
     return levels;

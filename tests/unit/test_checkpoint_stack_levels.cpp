@@ -83,7 +83,7 @@ void require_levels_agree(const Document& doc, const TapeCheckpoint& cp, const T
 
     std::size_t levels = 0;
     eval::eval_points_stack(tape, q, stack.data(), nullptr, &levels, cp.instrs, 0, &out);
-    CHECK(levels == checkpoint_stack_levels(cp.frames));
+    CHECK(levels == checkpoint_stack_levels(cp.frames, cp.layer_have_acc));
 
     // The same walk's field is the tape's field: asking for both is what makes
     // one walk enough, so a caller that stopped trusting it would walk twice.
@@ -166,5 +166,65 @@ TEST_CASE("checkpoint stack levels match the walk's depth") {
             CHECK(checkpoint_stack_levels(cp.frames) == 2);
             require_levels_agree(d, cp, t);
         }
+    }
+}
+
+// A group the artist has just made and not yet drawn in compiles to NOTHING:
+// its subtree is empty, the emission is rolled back, and for a long time no
+// checkpoint was recorded there at all. That is the first stroke into a new
+// group -- the most ordinary way a group ever gets used -- and it meant every
+// brick re-walked the whole active half on every dab, because the seed it had
+// could not say where the append would land.
+//
+// The position in FRONT of the rolled-back chain is still a position. What
+// makes it different from every other checkpoint is that the chain it sits in
+// has produced nothing yet, so the stack stops at the plane OUTSIDE the group:
+// `layer_have_acc` is false and the level count is one lower than the frames
+// alone would say. Then the first dab gives the chain its value and the stack
+// GROWS by one, which the resume has to expect rather than reject.
+TEST_CASE("an empty tail group is still a place to resume from") {
+    Document d;
+    LayerRef a = add_layer(d, "a");
+    a.sdf->insert(dab(-0.4f, 0.0f, 0.0f, 0.3f, Op::Add, 0.05f));
+    a.sdf->insert(dab(0.4f, 0.0f, 0.0f, 0.3f, Op::Add, 0.05f));
+    const NodeId g = a.sdf->insert(group_node(Op::Add, 0.05f));
+
+    TapeCheckpoint cp;
+    const Tape t = compile_document_resumable(d, &cp);
+    REQUIRE(cp.valid);
+    REQUIRE(cp.frames.size() == 1);
+    CHECK(cp.frames[0].group == g);
+    CHECK(cp.frames[0].emits);
+    CHECK_FALSE(cp.frames[0].seeded);
+    // The chain inside the group produced nothing, so there is no plane for it.
+    CHECK_FALSE(cp.layer_have_acc);
+    CHECK(checkpoint_stack_levels(cp.frames, cp.layer_have_acc) == 1);
+    // The checkpoint sits at the very end -- nothing was emitted for the empty
+    // group -- so the brick's stored field IS that one plane, for free.
+    CHECK(cp.instrs == t.instrs.size());
+    require_levels_agree(d, cp, t);
+
+    SUBCASE("and the first dab into it grows the stack by one") {
+        const NodeId n = a.sdf->insert(dab(0.0f, 0.3f, 0.0f, 0.3f, Op::Add, 0.05f), g);
+        Tape reused;
+        TapeCheckpoint next;
+        REQUIRE(compile_layer_suffix(cp, d, {n}, &reused, &next));
+        // The chain has a value now, so the plane it lacked exists.
+        CHECK(next.layer_have_acc);
+        CHECK(checkpoint_stack_levels(next.frames, next.layer_have_acc) == 2);
+        CHECK(next.frames.size() == 1);
+        CHECK(next.frames[0].group == g);
+    }
+
+    SUBCASE("with nothing beneath it there is no plane to seed from") {
+        Document e;
+        LayerRef b = add_layer(e, "b");
+        b.sdf->insert(group_node(Op::Add, 0.05f));
+        TapeCheckpoint c2;
+        compile_document_resumable(e, &c2);
+        // No outer chain, so no stack at all rather than an empty one: a group
+        // alone in an empty document has nothing a resume could continue.
+        if (c2.valid && !c2.frames.empty())
+            CHECK(checkpoint_stack_levels(c2.frames, c2.layer_have_acc) == 0);
     }
 }
