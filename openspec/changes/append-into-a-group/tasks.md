@@ -167,11 +167,32 @@ The tasks below are kept as the record of what it would take.
 - [ ] 2.4 Test: per-brick culled tapes over a stroke into a group are
       band-clamp identical to the full tape, including the fully-culled-group
       case
-- [ ] 2.5 Re-run `sdf_stroke_in_group_bricks` on the reference iPad. It should
+- [x] 2.5 RE-RUN, 2026-08-30, on the reference iPad (iPad15,5, iPadOS 26.5.2)
+      at nominal thermals, against `main` at `0b8f876` on the same day and the
+      same device. p95 per dab over the 24-dab stroke: 0.1360 -> 0.0615 at 10
+      items, 0.3800 -> 0.1703 at 100, 3.2276 -> 0.9090 at 1000 (3.55x). Growth
+      exponent 0.69 -> 0.58. The `sdf_stroke_bricks` root control is flat
+      either side (0.0343 vs 0.0342 at 1000), so nothing was paid for it.
+      THE FIRST ATTEMPT WAS INVALID and worth recording: running the whole
+      Measure bundle took the iPad nominal -> serious mid-run and reported
+      `sdf_stroke_bricks` 1.88x slower at 100 and `sdf_stroke_cpu` 1.37x at
+      1000. Both were throttling; re-running those three cases alone against
+      same-day `main` gave 2.437 ms against 2.435. `check_device_bench.py`
+      REFUSES such a run outright -- a number read out of the log before that
+      refusal is not a measurement. ORIGINAL NOTE: it should
       approach `sdf_stroke_bricks` (0.034 ms/dab) and go FLAT across the axis;
       today it is 3.07 ms/dab at 1000 items and grows
-- [ ] 2.6 Re-derive its budget from the fixed run — 109.5 ms was a ceiling for
+- [x] 2.6 BUDGET RE-DERIVED: 109.5379 -> 32.954 ms, from the band top over the
+      two branch runs (normalised 21.9105 throttled, 21.9693 nominal -- 0.3%
+      apart, which is what this bundle reproduces to) times the 1.5 the
+      baseline writer uses. The old ceiling sat at 5.02x the new measurement:
+      UNDER `BUDGET_SLACK` 6.0, so the checker would not even have reported it
+      as too loose. Only this case's `budgets` and `cases` entries were
+      re-recorded; `last-gate.json` is untouched and a full clean gate run has
+      not been taken for this change. ORIGINAL NOTE: 109.5 ms was a ceiling for
       a case growing with the document, and keeping it would be a budget too
       loose to fail
-- [ ] 2.7 `docs/09-brush-latency-and-coverage.md` — the pair, and what the
+- [x] 2.7 `docs/09-brush-latency-and-coverage.md` carries the measured pair, the
+      row's new figure under its own dated footnote, the case that is not yet
+      at parity, and the thermal trap above. ORIGINAL NOTE: the pair, and what the
       ratio was before
