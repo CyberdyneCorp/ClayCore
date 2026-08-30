@@ -114,6 +114,36 @@ phase 2 is a larger change than this document originally scoped -- one that
 touches the kernel/eval boundary rather than only the compiler. It should be
 re-proposed with that boundary named, not carried here.
 
+## Correction 5: the seed a FULL walk stores cannot start a group resume
+
+The eval mechanism is exact — verified as a 24-dab chain, worst error 0.0 —
+and wiring it into the C ABI still produced wrong answers. Measured through
+the brick cache against the same document refilled cold: worst 0.033 at 1000
+items, 2529 samples of 262144, where the ROOT-LIST control is worst 0.0 with
+zero mismatches. The control is what says it was the wiring and not the test.
+
+The cause. A brick's first seed comes from a FULL refill, and what that stores
+is the finished field: ONE plane, because nothing was open when the walk
+ended. A group resume needs the open chains — N+1 planes with the group's
+combine still pending. Seeding an N+1-frame suffix from a 1-plane seed emits
+combines against a stack with nothing to pop, and the guards in the walk
+absorb them silently rather than failing.
+
+So the full refill has to store the stack AT THE CHECKPOINT, not the answer,
+which needs a cull-aware RESUMABLE compile — `compile_document_resumable`
+takes no cull, and the full refill compiles `compile_document(doc, &cull,
+index, plan)`, which reports no checkpoint. That is the missing piece, and it
+is the same one `frontier_prepare` would need to produce a group-boundary
+prefix.
+
+Refusing when the seed is too shallow is NOT a sufficient fix and was tried:
+it makes the numbers worse, because a refused brick is not simply slower. The
+gate has to sit where a brick still falls back to the full walk cleanly.
+
+**What is committed is the mechanism, not the wiring**, and the two are worth
+keeping apart: the mechanism is exact and tested, and the wiring needs the
+resumable-under-cull compile before it can be correct at all.
+
 ## What this change therefore does, in two phases
 
 **Phase 1 — the whole-document append.** `TapeCheckpoint` gains the ancestor

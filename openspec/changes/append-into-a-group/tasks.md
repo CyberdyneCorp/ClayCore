@@ -63,7 +63,20 @@ and a sculpting dab is smooth.
 the kernel/eval boundary named in its impact rather than discovered in it.
 The tasks below are kept as the record of what it would take.
 
-- [ ] 2.1 The resume's split point becomes a PATH rather than a root-list
+- [x] 2.1a THE MECHANISM, and it is exact. `eval_points_stack` reads a tape's
+      whole final stack; `eval_points_seeded_stack` starts a walk holding N
+      values; `snapshot_at` takes the stack mid-walk so one walk produces both
+      the answer and the next dab's seed. Verified as a 24-dab chain into a
+      group, each dab seeding the next and every dab checked against a full
+      compile: worst error 0.0, zero mismatches
+- [ ] 2.1b THE WIRING, attempted and reverted. See design.md "Correction 5":
+      a brick's first seed comes from a FULL refill, which stores the finished
+      field as one plane, and a group resume needs the open chains. The full
+      refill must store the stack at the checkpoint, which needs a CULL-AWARE
+      RESUMABLE COMPILE that does not exist yet -- compile_document_resumable
+      takes no cull and the culled compile reports no checkpoint. Do that
+      first; everything else in phase 2 depends on it
+- [ ] 2.1c The resume's split point becomes a PATH rather than a root-list
       ordinal. Today `compile_layer_prefix` takes `roots.begin() .. +count`,
       `compile_layer_suffix` checks the tail of `roots`, and
       `root_ordinal_of` / `prefix_boundary` / `dirty_from` are all ordinals
