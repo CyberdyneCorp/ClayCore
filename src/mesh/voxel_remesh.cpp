@@ -7,6 +7,7 @@
 #include "clay/mesh/voxel_remesh.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <vector>
 
@@ -104,6 +105,42 @@ bool source_has_colors(const Mesh& m) {
     return !m.colors.empty() && m.colors.size() == m.positions.size();
 }
 
+// The wall clock, per stage.
+//
+// Diagnostics and not a contract: nothing about the RESULT depends on a
+// reading, which is why the determinism test compares the mesh and never the
+// report. A host asking "where did my four seconds go" has no other way to find
+// out, because the stages are not separately callable.
+class StageClock {
+  public:
+    explicit StageClock(VoxelRemeshReport* report) : report_(report) {}
+    // Close the stage that was running and open `next`.
+    void enter(VoxelRemeshStage next) {
+        const auto now = std::chrono::steady_clock::now();
+        close(now);
+        open_ = next;
+        started_ = now;
+        running_ = true;
+    }
+    ~StageClock() { close(std::chrono::steady_clock::now()); }
+    StageClock(const StageClock&) = delete;
+    StageClock& operator=(const StageClock&) = delete;
+
+  private:
+    void close(std::chrono::steady_clock::time_point now) {
+        if (!running_) return;
+        const auto index = static_cast<std::size_t>(open_);
+        if (index < kVoxelRemeshStageCount)
+            report_->stage_ms[index] +=
+                std::chrono::duration<double, std::milli>(now - started_).count();
+        running_ = false;
+    }
+    VoxelRemeshReport* report_;
+    VoxelRemeshStage open_ = VoxelRemeshStage::Preflight;
+    std::chrono::steady_clock::time_point started_{};
+    bool running_ = false;
+};
+
 // Every stage ends the same way, and spelling it out at each of them was six
 // chances to set the status and forget the report's flag. A cancelled remesh
 // has to be distinguishable from every other empty result, and the flag is how.
@@ -195,16 +232,19 @@ void measure_and_repaint(const Mesh& source, const Lattice& lattice,
 // tree, the band and the result mesh, which are the allocations that matter. A
 // guard that ran after them would be a comment.
 bool within_budget(const Mesh& source, const VoxelRemeshParams& params, const Lattice& lattice,
-                   std::uint64_t active_samples) {
-    if (active_samples > kMaxVoxelRemeshActiveSamples) return false;
-    if (params.memory_budget_bytes == 0) return true;
+                   std::uint64_t active_samples, std::uint64_t* out_bytes) {
+    // Computed whatever the caller's budget is, because the REPORT carries it:
+    // a host that wants to see how close it came needs the number even on the
+    // runs that were never in danger.
     std::uint64_t triangle_min = 0, triangle_max = 0;
     estimate_triangles(surface_area(source), lattice.voxel_size, &triangle_min, &triangle_max);
-    const std::uint64_t bytes = static_cast<std::uint64_t>(
+    *out_bytes = static_cast<std::uint64_t>(
         static_cast<double>(working_bytes(lattice, active_samples, source.triangle_count(),
                                           triangle_max)) *
         kMemorySafetyFactor);
-    return bytes <= params.memory_budget_bytes;
+    if (active_samples > kMaxVoxelRemeshActiveSamples) return false;
+    if (params.memory_budget_bytes == 0) return true;
+    return *out_bytes <= params.memory_budget_bytes;
 }
 
 }  // namespace
@@ -266,9 +306,11 @@ VoxelRemeshResult voxel_remesh(const Mesh& source, const VoxelRemeshParams& para
                                parallel::CancelToken* token) {
     VoxelRemeshResult result;
     parallel::ProgressScope progress(token, kVoxelRemeshStageCount);
+    StageClock clock(&result.report);
 
     // -- preflight ----------------------------------------------------------
     progress.phase(static_cast<std::uint32_t>(VoxelRemeshStage::Preflight));
+    clock.enter(VoxelRemeshStage::Preflight);
     Lattice lattice;
     if (!preflight(source, params, &lattice, &result)) return result;
     VoxelRemeshReport& report = result.report;
@@ -285,19 +327,21 @@ VoxelRemeshResult voxel_remesh(const Mesh& source, const VoxelRemeshParams& para
     // a host can see how far the estimate ran ahead of the run.
     const std::uint64_t active_samples =
         remesh_detail::count_active(active) * static_cast<std::uint64_t>(field::kBrickSamples);
-    if (!within_budget(source, params, lattice, active_samples)) {
+    if (!within_budget(source, params, lattice, active_samples, &report.estimated_memory_bytes)) {
         result.status = VoxelRemeshStatus::ExceedsBudget;
         return result;
     }
 
     // -- the tree -----------------------------------------------------------
     progress.phase(static_cast<std::uint32_t>(VoxelRemeshStage::SourceAcceleration));
+    clock.enter(VoxelRemeshStage::SourceAcceleration);
     const Bvh bvh = Bvh::build(source);
     if (stopped(progress, &result)) return result;
 
     // -- the field ----------------------------------------------------------
     progress.phase(static_cast<std::uint32_t>(VoxelRemeshStage::Sampling),
                    lattice.brick_count());
+    clock.enter(VoxelRemeshStage::Sampling);
     bool cancelled = false;
     const field::FieldVolume volume =
         remesh_detail::sample_sparse(bvh, lattice, active, token, &cancelled);
@@ -318,6 +362,7 @@ VoxelRemeshResult voxel_remesh(const Mesh& source, const VoxelRemeshParams& para
 
     // -- extraction ---------------------------------------------------------
     progress.phase(static_cast<std::uint32_t>(VoxelRemeshStage::Extraction));
+    clock.enter(VoxelRemeshStage::Extraction);
     Mesh out = remesh_detail::extract_surface(volume, lattice, params.surface_mode);
     if (stopped(progress, &result)) return result;
     if (out.indices.empty()) {
@@ -332,6 +377,7 @@ VoxelRemeshResult voxel_remesh(const Mesh& source, const VoxelRemeshParams& para
     // -- projection ---------------------------------------------------------
     progress.phase(static_cast<std::uint32_t>(VoxelRemeshStage::Projection),
                    out.positions.size());
+    clock.enter(VoxelRemeshStage::Projection);
     if (params.project_to_source) {
         report.projected_vertices = remesh_detail::project_to_source(
             &out, source, bvh, lattice.voxel_size, params.projection_strength,
@@ -344,10 +390,17 @@ VoxelRemeshResult voxel_remesh(const Mesh& source, const VoxelRemeshParams& para
     measure_and_repaint(source, lattice, params, &out, &report);
     progress.phase(static_cast<std::uint32_t>(VoxelRemeshStage::AttributeTransfer),
                    out.positions.size());
+    clock.enter(VoxelRemeshStage::AttributeTransfer);
     if (stopped(progress, &result)) return result;
 
     // -- validation ---------------------------------------------------------
     progress.phase(static_cast<std::uint32_t>(VoxelRemeshStage::Validation));
+    clock.enter(VoxelRemeshStage::Validation);
+    const remesh_detail::SurfaceError error = remesh_detail::measure_surface_error(out, bvh);
+    report.result_to_source_rms = error.rms;
+    report.result_to_source_p95 = error.p95;
+    report.result_to_source_max = error.max;
+
     const ValidationReport check = validate(out);
     report.result_vertices = out.positions.size();
     report.result_triangles = out.triangle_count();

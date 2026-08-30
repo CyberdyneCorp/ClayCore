@@ -256,6 +256,42 @@ struct VoxelRemeshReport {
     bool uvs_dropped = false;
 
     bool cancelled = false;
+
+    // -- how far the result strayed from the source ------------------------
+    //
+    // ONE-SIDED, AND NAMED SO. Every result vertex against the source surface,
+    // through the tree the operation already built — so this costs one
+    // closest-point query per vertex and no second tree.
+    //
+    // What it CANNOT see is the other direction: a source feature the result
+    // missed entirely leaves no result vertex near it to report, so a remesh
+    // that deleted a spike scores well here. The estimate's thin-feature
+    // warning is what answers that question, before the fact rather than
+    // after, and `relative_volume_error` catches gross loss. A symmetric
+    // distance would need a tree over the RESULT, which is the size of the
+    // output and is not worth building for a diagnostic.
+    //
+    // In world units. p95 rather than a mean alone because a marched surface's
+    // error is not normally distributed — it is small nearly everywhere and
+    // concentrated where the lattice could not follow the source.
+    double result_to_source_rms = 0.0;
+    double result_to_source_p95 = 0.0;
+    double result_to_source_max = 0.0;
+
+    // Wall-clock per stage, indexed by VoxelRemeshStage. Diagnostics, not a
+    // contract: they vary run to run, and nothing about the RESULT does. A host
+    // showing "where did my four seconds go" needs them and has no other way to
+    // get them, since the stages are not separately callable.
+    double stage_ms[kVoxelRemeshStageCount] = {};
+
+    // What the resource guard actually compared against the budget — the same
+    // number `VoxelRemeshEstimate::estimated_memory_bytes` reports, recomputed
+    // from the marking this run did rather than from a separate estimate call.
+    //
+    // NOT a measured peak. This library has no allocator hook and does not want
+    // one; a caller who needs a true high-water mark measures it from outside,
+    // which is what the repository's own allocation gate does.
+    std::uint64_t estimated_memory_bytes = 0;
 };
 
 struct VoxelRemeshResult {

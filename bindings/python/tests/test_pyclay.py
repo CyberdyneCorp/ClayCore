@@ -7153,3 +7153,102 @@ def test_voxel_remesh_component_policy_is_opt_in():
     _, culled = both.voxel_remesh(resolution=64, minimum_component_volume=0.05)
     assert culled["removed_components"] == 1
     assert culled["result_components"] == 1
+
+
+def test_voxel_remesh_layer_is_one_undo_step():
+    p, i = _remesh_sphere()
+    doc = clay.Document()
+    doc.enable_undo()
+    borrowed = doc.add_mesh_layer(clay.Mesh.from_triangles(p, i), "shell")
+    layer = borrowed.layer
+    before = borrowed.triangle_count
+
+    report = doc.voxel_remesh_layer(layer, resolution=48)
+    assert borrowed.triangle_count == report["result_triangles"]
+    assert borrowed.triangle_count != before
+    assert report["result_watertight"]
+    # The report the document command returns is the same shape the pure call
+    # returns, plus what only a run can know.
+    assert report["result_to_source_rms"] >= 0.0
+    assert set(report["stage_ms"]) == {
+        "preflight", "source_acceleration", "sampling", "extraction",
+        "projection", "attribute_transfer", "validation",
+    }
+    assert report["estimated_memory_bytes"] > 0
+
+    assert doc.undo()
+    assert borrowed.triangle_count == before
+    assert doc.redo()
+    assert borrowed.triangle_count == report["result_triangles"]
+    # Redo must not have emptied the step: a second undo has to work too.
+    assert doc.undo()
+    assert borrowed.triangle_count == before
+
+
+def test_mesh_layer_revision_refuses_a_stale_commit():
+    p, i = _remesh_sphere()
+    doc = clay.Document()
+    borrowed = doc.add_mesh_layer(clay.Mesh.from_triangles(p, i), "shell")
+    layer = borrowed.layer
+
+    stale = doc.mesh_layer_revision(layer)
+    # The host's own worker: rebuild with the PURE call, which is the shape the
+    # revision exists to serve.
+    rebuilt, _ = clay.Mesh.from_triangles(p, i).voxel_remesh(resolution=40)
+    # ...and while it was thinking, something else rebuilt the layer.
+    doc.voxel_remesh_layer(layer, resolution=48)
+    survivor = borrowed.triangle_count
+    assert doc.mesh_layer_revision(layer) != stale
+
+    with pytest.raises(RuntimeError, match="rebuilt while this result"):
+        doc.replace_mesh_layer(layer, rebuilt, expected_revision=stale)
+    assert borrowed.triangle_count == survivor
+
+    doc.replace_mesh_layer(layer, rebuilt, expected_revision=doc.mesh_layer_revision(layer))
+    assert borrowed.triangle_count == rebuilt.triangle_count
+    # None means "do not check", for a caller that knows nothing could have moved.
+    doc.replace_mesh_layer(layer, rebuilt)
+
+
+def test_a_sculptor_is_refused_after_its_layer_is_rebuilt():
+    # A sculpt does not bump the revision — that is the fixed-topology contract,
+    # and it is exactly the change a cached adjacency and BVH survive. A rebuild
+    # does, and the sculptor built before it must refuse rather than stamp into
+    # an index describing triangles that no longer exist.
+    p, i = _remesh_sphere()
+    doc = clay.Document()
+    borrowed = doc.add_mesh_layer(clay.Mesh.from_triangles(p, i), "shell")
+    layer = borrowed.layer
+    start = doc.mesh_layer_revision(layer)
+
+    sculptor = clay.MeshSculptor(borrowed)
+    moved = sculptor.stamp("draw", center=(0.0, 1.0, 0.0), radius=0.4, strength=0.05)
+    assert moved > 0
+    assert doc.mesh_layer_revision(layer) == start  # a sculpt is not a rebuild
+
+    # THE REPLACEMENT NEITHER OTHER CHECK CAN SEE: the same positions and the
+    # same index COUNT with the indices reversed — different triangles,
+    # different adjacency, identical counts. A remesh normally changes the
+    # counts and the sculptor's own validity check catches it; this is the case
+    # that slipped through, so this is the case the test has to build.
+    same_counts = clay.Mesh.from_triangles(p, i[::-1].copy())
+    doc.replace_mesh_layer(layer, same_counts)
+    assert doc.mesh_layer_revision(layer) > start
+    assert borrowed.triangle_count == len(i) // 3  # the counts did not move
+    with pytest.raises(RuntimeError, match="rebuilt under this sculptor"):
+        sculptor.stamp("draw", center=(0.0, 1.0, 0.0), radius=0.4, strength=0.05)
+
+
+def test_voxel_remesh_layer_refuses_without_touching_the_layer():
+    p, i = _remesh_sphere()
+    doc = clay.Document()
+    doc.enable_undo()
+    borrowed = doc.add_mesh_layer(clay.Mesh.from_triangles(p, i), "shell")
+    layer = borrowed.layer
+    before = borrowed.triangle_count
+
+    with pytest.raises(ValueError, match="no mesh layer"):
+        doc.voxel_remesh_layer(layer + 999, resolution=48)
+    with pytest.raises(RuntimeError, match="memory budget"):
+        doc.voxel_remesh_layer(layer, resolution=256, memory_budget=4096)
+    assert borrowed.triangle_count == before

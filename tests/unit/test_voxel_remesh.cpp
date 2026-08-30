@@ -11,9 +11,13 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <map>
+#include <optional>
+#include <utility>
 #include <vector>
 
 #include "clay/mesh/bvh.h"
+#include "clay/mesh/dynamic_surface.h"
 #include "clay/mesh/marching.h"
 #include "clay/mesh/to_field.h"
 #include "clay/mesh/transfer.h"
@@ -751,4 +755,208 @@ TEST_CASE("sharp mode runs and is not held to the watertight contract") {
     const VoxelRemeshResult smooth = voxel_remesh(src, at_resolution(48));
     REQUIRE(smooth.ok());
     check_clean(smooth.mesh);
+}
+
+// -- the sheet weight, on a surface that folds through itself ----------------
+
+TEST_CASE("projection weights a back-facing sheet to nothing, without tearing") {
+    // WHAT THIS EXISTS TO CATCH, and why the fixture is this one. The first
+    // version of this test used two slabs with a gap between them, and it
+    // passed with the sheet test DELETED — because extraction places a vertex
+    // within half a voxel of its own sheet, so the closest point is that sheet
+    // and no other candidate is ever considered. A guard whose test passes
+    // without it is not a guard.
+    //
+    // A sheet folded back through itself is the configuration that actually
+    // reaches the branch: the surface passes within a fraction of a voxel of
+    // ITSELF, so a reconstructed vertex has source geometry on both sides and
+    // the nearer one is regularly the one facing the other way. Measured here:
+    // about a fifth of the vertices within the clamp have a back-facing
+    // closest point.
+    const Mesh src = clay_test::folded_sheet();
+    VoxelRemeshParams off = at_resolution(96);
+    off.open_surface_policy = VoxelRemeshOpenSurfacePolicy::Close;
+    off.project_to_source = false;
+    VoxelRemeshParams on = off;
+    on.project_to_source = true;
+
+    const VoxelRemeshResult base = voxel_remesh(src, off);
+    const VoxelRemeshResult projected = voxel_remesh(src, on);
+    REQUIRE(base.ok());
+    REQUIRE(projected.ok());
+    check_clean(projected.mesh);
+
+    // THE FIXTURE MUST EXERCISE THE BRANCH. Counted here rather than assumed,
+    // so this cannot quietly become another test that passes either way.
+    const Bvh tree = Bvh::build(src);
+    const std::vector<kernel::cfloat3> normals = vertex_normals(base.mesh);
+    const float limit = on.max_projection_distance_voxels * base.report.voxel_size;
+    std::size_t in_range = 0, back_facing = 0;
+    for (std::size_t v = 0; v < base.mesh.positions.size(); ++v) {
+        const Bvh::ClosestPoint hit = tree.closest(base.mesh.positions[v]);
+        if (!hit.found || hit.distance > limit) continue;
+        ++in_range;
+        const std::size_t t = static_cast<std::size_t>(hit.triangle) * 3;
+        const kernel::cfloat3 a = src.positions[src.indices[t]];
+        const kernel::cfloat3 n = kernel::cnormalize(
+            kernel::ccross(src.positions[src.indices[t + 1]] - a,
+                           src.positions[src.indices[t + 2]] - a));
+        if (kernel::cdot(n, normals[v]) < 0.0f) ++back_facing;
+    }
+    CHECK(in_range > 10000);
+    CHECK(back_facing * 20 > in_range);  // north of five per cent; measured ~19%
+
+    // THE PROPERTY. Projection must not make the surface worse, and the
+    // failure mode a HARD reject produces is exactly this: moving a vertex
+    // fully while leaving its neighbour where it was tears the surface into
+    // itself. Measured at this resolution, a hard reject left 17 intersecting
+    // triangle pairs where the unprojected surface had none; the continuous
+    // weight leaves none.
+    const ValidationReport before = validate(base.mesh, 20000);
+    const ValidationReport after = validate(projected.mesh, 20000);
+    CHECK(after.intersecting_pairs <= before.intersecting_pairs);
+
+    // ...and it must not move the surface away from the source either.
+    CHECK(projected.report.result_to_source_rms <= base.report.result_to_source_rms);
+}
+
+// -- the fixtures the guide names, and what each is for ----------------------
+
+TEST_CASE("a self-intersecting fold rebuilds into a clean surface") {
+    // One connected sheet passing through itself — not two shells meeting,
+    // which is a different fixture and already covered.
+    const Mesh src = clay_test::folded_sheet();
+    CHECK(component_count(src) == 1u);
+    VoxelRemeshParams p = at_resolution(96);
+    p.open_surface_policy = VoxelRemeshOpenSurfacePolicy::Close;
+    const VoxelRemeshResult r = voxel_remesh(src, p);
+    REQUIRE(r.ok());
+    check_clean(r.mesh);
+    CHECK(r.report.source_was_open);
+    CHECK(r.report.result_boundary_edges == 0);
+    // The fold is resolved volumetrically: what comes out is a solid whose
+    // surface does not pass through itself.
+    CHECK(validate(r.mesh, 40000).intersecting_pairs == 0);
+}
+
+TEST_CASE("sharp mode keeps a chamfer that smooth mode rounds") {
+    // The fixture that tells the two surface modes apart. A plain cube would
+    // not: its edges are axis-aligned and land on the lattice, so even the
+    // marcher reproduces them. A chamfer's edges cut across it.
+    const Mesh src = clay_test::chamfered_cube();
+    REQUIRE(validate(src).clean());
+
+    VoxelRemeshParams smooth = at_resolution(48);
+    VoxelRemeshParams sharp = smooth;
+    sharp.surface_mode = VoxelRemeshSurfaceMode::Sharp;
+
+    const VoxelRemeshResult a = voxel_remesh(src, smooth);
+    const VoxelRemeshResult b = voxel_remesh(src, sharp);
+    REQUIRE(a.ok());
+    REQUIRE(b.ok());
+    check_clean(a.mesh);  // the DEFAULT mode is held to the contract
+    CHECK(all_finite(b.mesh));
+    CHECK(b.mesh.triangle_count() > 0);
+
+    // THE MEASUREMENT IS SOURCE -> RESULT, and the direction is the point. How
+    // far the chamfer's own corner vertices — the sharpest thing on the model —
+    // are from the reconstructed surface. A rounded edge cuts the corner off
+    // and leaves them stranded; a reproduced one passes through them.
+    //
+    // NOT a dihedral angle over the result, which was the first attempt and was
+    // useless: marching tetrahedra emits near-degenerate slivers whose two
+    // faces are back to back, so the sharpest "edge" in a smooth mesh reads as
+    // a perfect fold every time and swamps the real creases.
+    auto corner_error = [&](const Mesh& out) {
+        const Bvh tree = Bvh::build(out);
+        double worst = 0.0;
+        for (const kernel::cfloat3& p : src.positions)
+            worst = std::max(worst, static_cast<double>(tree.unsigned_distance(p)));
+        return worst;
+    };
+    const double smooth_error = corner_error(a.mesh);
+    const double sharp_error = corner_error(b.mesh);
+    CAPTURE(smooth_error / a.report.voxel_size);
+    CAPTURE(sharp_error / b.report.voxel_size);
+    // Measured: 0.29 voxels against 0.08, a factor of three, and a third of the
+    // triangles with it. The gate is a factor of two, which is well inside what
+    // was measured and far outside what noise could produce.
+    CHECK(sharp_error * 2.0 < smooth_error);
+    CHECK(b.mesh.triangle_count() < a.mesh.triangle_count());
+
+    // THE CONTRACT IS NOT CLAIMED FOR SHARP, and the report is where that
+    // shows. At longest-axis 96 this same fixture comes out of dual contouring
+    // watertight but NOT 2-manifold — which is exactly why the mode is
+    // experimental, and why the report states what it got rather than what the
+    // default mode promises.
+    const ValidationReport got = validate(b.mesh);
+    CHECK(b.report.result_watertight == got.watertight);
+    CHECK(b.report.result_manifold == got.manifold);
+    CHECK(b.report.result_oriented == got.oriented);
+}
+
+TEST_CASE("a million-triangle source remeshes" * doctest::skip(false)) {
+    // Nothing else in this suite runs at scale, and two of the claims only
+    // mean anything there: that the cost follows the SURFACE and not the input
+    // triangle count, and that the estimate stays cheap enough to call on a
+    // slider while the model is large.
+    const Mesh src = clay_test::noisy_sphere();
+    REQUIRE(src.triangle_count() > 1000000);
+
+    const VoxelRemeshParams p = at_resolution(64);
+    const VoxelRemeshEstimate e = voxel_remesh_estimate(src, p);
+    CHECK(e.status == VoxelRemeshStatus::Ok);
+    CHECK(e.estimated_active_samples > 0);
+
+    const VoxelRemeshResult r = voxel_remesh(src, p);
+    REQUIRE(r.ok());
+    check_clean(r.mesh);
+    // A million triangles in, and the output follows the RESOLUTION rather than
+    // the input — which is the whole point of the operation.
+    CHECK(r.report.source_triangles > 1000000);
+    CHECK(r.report.result_triangles < r.report.source_triangles);
+    CHECK(r.report.active_samples <= e.estimated_active_samples);
+}
+
+TEST_CASE("a dynamic surface round-trips through a remesh") {
+    // The documented interoperability: an adaptive surface is snapshotted to a
+    // mesh, remeshed, and converted back — so an artist in a dyntopo workflow
+    // stays in it. Stated in three places and, until now, tested in none.
+    const Mesh src = clay_test::stretched_sphere();
+    const std::optional<DynamicSurface> before = DynamicSurface::from_mesh(src);
+    REQUIRE(before.has_value());
+    const Mesh snapshot = before->to_mesh();
+    CHECK(snapshot.triangle_count() > 0);
+
+    const VoxelRemeshResult r = voxel_remesh(snapshot, at_resolution(64));
+    REQUIRE(r.ok());
+    check_clean(r.mesh);
+
+    // WELD EPSILON ZERO, AND IT IS NOT A WORKAROUND. `from_mesh` welds by
+    // DISTANCE at 1e-5 by default, which is the right rule for an IMPORTED
+    // mesh whose exporter duplicated vertices along a seam. A mesh this
+    // library marched is already welded — the builder deduped it on canonical
+    // lattice-edge keys — so welding it again by distance merges vertices the
+    // marcher deliberately kept apart, and the triangle between them collapses.
+    //
+    // Measured, and it is not this operation's doing: a plain `mesh_lattice`
+    // over an analytic sphere emits 486 edges shorter than 1e-5 and `from_mesh`
+    // refuses it at defaults too; so does `mesh_tape`, the ordinary document
+    // meshing path. This remesh emits ten. No caller in the repository has ever
+    // converted a marched mesh to an adaptive surface — the dynamic-topology
+    // example builds its input analytically — which is why the gap had not
+    // surfaced.
+    DynamicSurfaceBuildOptions already_welded;
+    already_welded.weld_epsilon = 0.0f;
+    DynamicBuildError error = DynamicBuildError::None;
+    const std::optional<DynamicSurface> after =
+        DynamicSurface::from_mesh(r.mesh, already_welded, &error);
+    CHECK(error == DynamicBuildError::None);
+    REQUIRE(after.has_value());
+    const Mesh returned = after->to_mesh();
+    // The conversion is lossless on geometry: what went in comes back out.
+    CHECK(returned.triangle_count() == r.mesh.triangle_count());
+    CHECK(returned.positions.size() == r.mesh.positions.size());
+    // ...and the surface is still where the remesh put it.
+    CHECK(surface_error(r.mesh, returned) < 1e-5);
 }

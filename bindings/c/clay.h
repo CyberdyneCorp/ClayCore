@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 63
+#define CLAY_ABI_MINOR 64
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -2643,6 +2643,64 @@ clay_result clay_mesh_voxel_remesh(const clay_mesh* source,
                                    const clay_voxel_remesh_params* params,
                                    clay_cancel_token* token, clay_mesh** out_mesh,
                                    clay_voxel_remesh_report* out_report);
+
+/* -- voxel remesh THROUGH the document (add-voxel-remesh-document, 0.64.0) --- */
+
+/* The pure clay_mesh_voxel_remesh above has no document, no undo and no state.
+ * That is what makes it testable, and it is not what a host wants to call: an
+ * artist's remesh has to land on a LAYER, replace what was there, and be one
+ * step on the undo menu.
+ *
+ * A MESH LAYER'S GEOMETRY REVISION. Bumped every time a layer's triangles are
+ * replaced wholesale, and NOT by a sculpt — a brush moves vertices and leaves
+ * the topology alone, which is the fixed-topology contract and is precisely the
+ * change a cache over that mesh survives. What it exists for is the change a
+ * cache does NOT survive: a rebuild swaps every vertex and every index, and an
+ * adjacency, a BVH or a live sculptor built over the old ones is wrong in a way
+ * nothing else detects.
+ *
+ * Read it, do the slow work, then hand it back to the commit: if the layer was
+ * rebuilt in between, the commit is refused with CLAY_ERROR_FORWARD_VERSION
+ * rather than overwriting work the artist did while waiting.
+ *
+ * Zero for a layer that is not a mesh layer, or does not exist. */
+clay_result clay_document_mesh_layer_revision(const clay_document* doc, clay_layer_id layer,
+                                              uint64_t* out_revision);
+
+/* Replace a mesh layer's triangles wholesale, as ONE undo step.
+ *
+ * For a host that ran clay_mesh_voxel_remesh on a worker thread and now wants
+ * to commit it. `expected_revision` is what clay_document_mesh_layer_revision
+ * returned before the work started; pass 0 to skip the check, which is only
+ * right when nothing could have touched the layer in between.
+ *
+ * The replacement must carry triangles, must not be the layer's own borrowed
+ * mesh, and must be quad-free or quad-consistent — a quad list describing
+ * triangles that no longer exist is a lie that survives into a saved document.
+ *
+ * Refusals: CLAY_ERROR_NOT_FOUND for an unknown layer or one that is not a mesh
+ * layer, CLAY_ERROR_INVALID_ARGUMENT for a ghosted or locked layer and for an
+ * empty or inconsistent replacement, CLAY_ERROR_FORWARD_VERSION when the layer
+ * moved under the caller. A refusal leaves the layer byte-identical. */
+clay_result clay_document_replace_mesh_layer(clay_document* doc, clay_layer_id layer,
+                                             const clay_mesh* replacement,
+                                             uint64_t expected_revision);
+
+/* Remesh a mesh layer in place: capture, rebuild, validate, replace, record —
+ * one call and one undo step.
+ *
+ * The synchronous form, for a host that does not need the work off-thread. It
+ * is exactly clay_mesh_voxel_remesh followed by clay_document_replace_mesh_layer
+ * with the layer's own revision, and it fails with the same result codes as
+ * both. Nothing is written until the rebuild has succeeded AND validated, so a
+ * refusal or a cancel leaves the layer byte-identical.
+ *
+ * `token` may be NULL. A cancelled remesh returns CLAY_ERROR_CANCELLED, changes
+ * nothing, and adds no undo step. */
+clay_result clay_document_voxel_remesh_layer(clay_document* doc, clay_layer_id layer,
+                                             const clay_voxel_remesh_params* params,
+                                             clay_cancel_token* token,
+                                             clay_voxel_remesh_report* out_report);
 
 /* -- mesh layers: a document CARRIES a mesh -------------------------------- */
 

@@ -27,7 +27,10 @@
 #include <new>
 #include <vector>
 
+#include <cmath>
+
 #include "clay/mesh/sculpt.h"
+#include "clay/mesh/voxel_remesh.h"
 #include "clay/mesh/topology_ops.h"
 
 using namespace clay;
@@ -333,4 +336,119 @@ TEST_CASE("allocation gate: a topology operator's cost does not follow the surfa
     // bound is generous on purpose — this is testing an ASYMPTOTE, and a future
     // change that adds a fixed buffer should not have to edit a number.
     CHECK(large < small * 2 + 4096);
+}
+
+// -- a refused voxel remesh must not pay for what it refused ------------------
+//
+// The meshing spec says a request over budget is refused "BEFORE allocating the
+// field, the acceleration structure or the result", and adds that "the peak
+// memory of the refused call is a small fraction of the estimate it refused".
+// That second sentence had no gate: the guard's PLACEMENT was correct by
+// inspection, and inspection is not a test — a later edit that moved the tree
+// build one line earlier would have kept every other test green.
+//
+// This counts gross bytes REQUESTED rather than a true high-water mark, so a
+// path that allocated and freed repeatedly would read high. For a refusal that
+// is the conservative direction: the number can only overstate.
+
+namespace {
+
+clay::mesh::Mesh remesh_ball(int rings = 24, int segments = 48) {
+    using clay::kernel::cf3;
+    clay::mesh::Mesh m;
+    const float pi = 3.14159265358979323846f;
+    m.positions.push_back(cf3(0, 1, 0));
+    for (int r = 1; r < rings; ++r) {
+        const float phi = pi * static_cast<float>(r) / static_cast<float>(rings);
+        const float y = std::cos(phi), rr = std::sin(phi);
+        for (int s = 0; s < segments; ++s) {
+            const float th = 2.0f * pi * static_cast<float>(s) / static_cast<float>(segments);
+            m.positions.push_back(cf3(rr * std::cos(th), y, rr * std::sin(th)));
+        }
+    }
+    m.positions.push_back(cf3(0, -1, 0));
+    const std::uint32_t bottom = static_cast<std::uint32_t>(m.positions.size() - 1);
+    auto at = [&](int r, int s) {
+        return static_cast<std::uint32_t>(1 + (r - 1) * segments + (s % segments));
+    };
+    for (int s = 0; s < segments; ++s)
+        m.indices.insert(m.indices.end(), {0u, at(1, s + 1), at(1, s)});
+    for (int r = 1; r < rings - 1; ++r)
+        for (int s = 0; s < segments; ++s)
+            m.indices.insert(m.indices.end(), {at(r, s), at(r, s + 1), at(r + 1, s),
+                                               at(r, s + 1), at(r + 1, s + 1), at(r + 1, s)});
+    for (int s = 0; s < segments; ++s)
+        m.indices.insert(m.indices.end(), {bottom, at(rings - 1, s), at(rings - 1, s + 1)});
+    return m;
+}
+
+std::size_t bytes_for_refused_remesh(const clay::mesh::Mesh& source, std::uint32_t resolution) {
+    clay::mesh::VoxelRemeshParams p;
+    p.longest_axis_resolution = resolution;
+    p.memory_budget_bytes = 1;  // nothing at all fits: every request is refused
+    CountingScope scope;
+    const clay::mesh::VoxelRemeshResult r = clay::mesh::voxel_remesh(source, p);
+    const std::size_t bytes = scope.bytes();
+    REQUIRE(r.status == clay::mesh::VoxelRemeshStatus::ExceedsBudget);
+    REQUIRE(r.mesh.empty());
+    return bytes;
+}
+
+}  // namespace
+
+TEST_CASE("allocation gate: a refused voxel remesh does not pay for what it refused") {
+    const Mesh source = remesh_ball();
+
+    // WARM FIRST. The thread pool, the first hash table's buckets and any
+    // one-time state are charged to whichever call runs first, and charging
+    // them to the measurement would hide exactly what it is measuring.
+    bytes_for_refused_remesh(source, 32);
+
+    clay::mesh::VoxelRemeshParams asked;
+    asked.longest_axis_resolution = 256;
+    const clay::mesh::VoxelRemeshEstimate estimate =
+        clay::mesh::voxel_remesh_estimate(source, asked);
+    REQUIRE(estimate.estimated_memory_bytes > 0);
+
+    const std::size_t refused = bytes_for_refused_remesh(source, 256);
+
+    // THE SPEC'S OWN SENTENCE, as a number. Measured at well under a
+    // hundredth; the gate is a fiftieth, which a refusal that had started
+    // building the tree or sampling the field would blow immediately.
+    CAPTURE(refused);
+    CAPTURE(estimate.estimated_memory_bytes);
+    CHECK(refused * 50 < estimate.estimated_memory_bytes);
+
+    // ...and it does not grow like the request. The marking is one byte per
+    // brick and IS how the budget is computed, so a refusal is not free — but
+    // it is O(bricks) and not O(band), and sixty-four times the lattice must
+    // not cost sixty-four times the memory of the smallest refusal.
+    const std::size_t small = bytes_for_refused_remesh(source, 64);
+    const std::size_t large = bytes_for_refused_remesh(source, 256);
+    CAPTURE(small);
+    CAPTURE(large);
+    CHECK(large < small * 64 + 4096);
+}
+
+TEST_CASE("allocation gate: the refused-remesh counter is discriminating") {
+    // The companion to the gate above, for the same reason the file's other
+    // self-check exists: a measurement that always read zero would pass it. An
+    // ACCEPTED remesh at the same resolution must read far higher.
+    const Mesh source = remesh_ball();
+    bytes_for_refused_remesh(source, 32);  // warm
+
+    const std::size_t refused = bytes_for_refused_remesh(source, 96);
+
+    clay::mesh::VoxelRemeshParams allowed;
+    allowed.longest_axis_resolution = 96;
+    std::size_t accepted = 0;
+    {
+        CountingScope scope;
+        const clay::mesh::VoxelRemeshResult r = clay::mesh::voxel_remesh(source, allowed);
+        accepted = scope.bytes();
+        REQUIRE(r.ok());
+    }
+    CAPTURE(refused);
+    CAPTURE(accepted);
+    CHECK(accepted > refused * 20);
 }

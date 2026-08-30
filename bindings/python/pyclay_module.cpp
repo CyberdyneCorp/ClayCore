@@ -435,9 +435,28 @@ struct PyMeshQuery {
 // Owns a mesh, or borrows the one a document holds for a mesh layer, mirroring
 // PyVoxelGrid so a layer's triangles are read straight out of the document
 // rather than copied per access.
+// Per mesh layer, bumped only when its triangles are REPLACED wholesale — the
+// same counter the C ABI keeps, and for the same reason. A sculpt moves
+// vertices and leaves the topology alone, which is exactly the change an
+// adjacency, a BVH or a live sculptor SURVIVES; a rebuild swaps every vertex
+// and every index, and they do not.
+//
+// Shared rather than held by value because a `PyMesh` and a `PyMeshSculptor`
+// both need to read it and neither owns the document.
+using MeshRevisions = std::map<scene::LayerId, std::uint64_t>;
+
+std::uint64_t revision_of(const MeshRevisions& revisions, scene::LayerId layer) {
+    auto it = revisions.find(layer);
+    return it == revisions.end() ? 1u : it->second;
+}
+
 struct PyMesh {
     mesh::Mesh m;                           // the owned mesh; empty on a borrow
     std::shared_ptr<io::ClaySpaceDoc> doc;  // non-null: borrowed from a mesh layer
+    // The document's revision map, when this is a borrow. Held so a sculptor
+    // built over this mesh can tell a REBUILD from a sculpt; null on an owned
+    // mesh, which belongs to no layer and cannot be replaced under anyone.
+    std::shared_ptr<MeshRevisions> revisions;
     scene::LayerId layer = 0;
 
     // How this mesh was quad-meshed, when it was. On the wrapper rather than
@@ -568,10 +587,17 @@ mesh::VoxelRemeshSurfaceMode py_surface_mode(const std::string& name) {
     throw std::runtime_error("voxel remesh failed");
 }
 
+// The report as a dict, in one place: `Mesh.voxel_remesh` and
+// `Document.voxel_remesh_layer` return the same fields, and two copies of this
+// list would drift the first time one gained a field.
 struct PyMeshSculptor {
     nb::object owner;  // the Python Mesh, kept alive for the session's lifetime
     PyMesh* mesh = nullptr;
     mesh::Mesh* bound = nullptr;
+    // The layer's geometry revision when this was built. See MeshRevisions:
+    // it is the only one of the three checks below that can see a rebuild
+    // landing on the same vertex and index counts.
+    std::uint64_t geometry_revision = 0;
     std::shared_ptr<mesh::MeshSculptor> sculptor;
 
     mesh::MeshSculptor& live(bool for_edit) const {
@@ -582,6 +608,15 @@ struct PyMeshSculptor {
         if (!sculptor->valid())
             throw std::runtime_error(
                 "the mesh changed its vertex or index count under this sculptor");
+        // The pointer comparison above catches a layer that was REMOVED — a
+        // std::map node's address is stable, so it does not see the contents
+        // replaced — and `valid()` catches a changed COUNT. A rebuild that
+        // lands on the same counts passes both and leaves this sculptor's
+        // adjacency and BVH describing triangles that no longer exist.
+        if (mesh->revisions &&
+            revision_of(*mesh->revisions, mesh->layer) != geometry_revision)
+            throw std::runtime_error(
+                "the mesh layer was rebuilt under this sculptor; build a new one");
         return *sculptor;
     }
 };
@@ -995,7 +1030,85 @@ void apply_or_throw(scene::Document& doc, const scene::Command& cmd, const char*
 struct PyDocument {
     std::shared_ptr<io::ClaySpaceDoc> doc = std::make_shared<io::ClaySpaceDoc>();
     std::shared_ptr<UndoRef> undo = std::make_shared<UndoRef>();
+    std::shared_ptr<MeshRevisions> mesh_revisions = std::make_shared<MeshRevisions>();
 };
+
+
+// The one place a mesh layer's triangles are swapped from Python, so both
+// callers get the same guards, the same undo record and the same invalidation.
+// Mirrors replace_mesh_layer_geometry in the C ABI exactly.
+void py_replace_mesh_layer(PyDocument& d, scene::LayerId layer, mesh::Mesh replacement,
+                           nb::handle expected_revision) {
+    const scene::Layer* l = d.doc->document.find_layer(layer);
+    if (!l || l->kind != scene::LayerKind::Mesh)
+        throw std::invalid_argument("no mesh layer with that id");
+    if (l->protected_from_edits())
+        throw std::runtime_error(std::string("layer '") + l->name + "' is " +
+                                 (l->ghost ? "ghosted" : "locked") + " and takes no edits");
+    auto it = d.doc->mesh_layers.find(layer);
+    if (it == d.doc->mesh_layers.end())
+        throw std::invalid_argument("the mesh layer holds no triangles");
+    if (replacement.triangle_count() == 0)
+        throw std::invalid_argument("the replacement has no triangles");
+    // A quad list describing triangles that no longer exist is a lie that
+    // survives into a saved document — mesh_data.h states the rule, and the
+    // save path drops such a list silently, so this refuses rather than
+    // repairs.
+    if (replacement.has_quads() && !mesh::quads_consistent(replacement))
+        throw std::invalid_argument("the replacement's quads do not describe its triangles");
+
+    const std::uint64_t now = revision_of(*d.mesh_revisions, layer);
+    if (!expected_revision.is_none() &&
+        nb::cast<std::uint64_t>(expected_revision) != now)
+        throw std::runtime_error(
+            "the mesh layer was rebuilt while this result was being prepared");
+
+    // ONE UNDO STEP holding both meshes. A VertexDeltas cannot express this and
+    // must not be asked to: deltas already on the stack for this layer were
+    // recorded against the OLD vertex count.
+    if (d.undo && *d.undo) (*d.undo)->record_mesh_replace(layer, it->second, replacement);
+    it->second = std::move(replacement);
+    (*d.mesh_revisions)[layer] = now + 1;
+}
+
+nb::dict voxel_remesh_report_dict(const mesh::VoxelRemeshReport& r) {
+    nb::dict out;
+    out["voxel_size"] = r.voxel_size;
+    out["source_vertices"] = r.source_vertices;
+    out["source_triangles"] = r.source_triangles;
+    out["result_vertices"] = r.result_vertices;
+    out["result_triangles"] = r.result_triangles;
+    out["source_volume"] = r.source_volume;
+    out["result_volume"] = r.result_volume;
+    out["relative_volume_error"] = r.relative_volume_error;
+    out["source_boundary_edges"] = r.source_boundary_edges;
+    out["result_boundary_edges"] = r.result_boundary_edges;
+    out["source_components"] = r.source_components;
+    out["result_components"] = r.result_components;
+    out["removed_components"] = r.removed_components;
+    out["active_samples"] = r.active_samples;
+    out["source_was_open"] = r.source_was_open;
+    out["result_watertight"] = r.result_watertight;
+    out["result_manifold"] = r.result_manifold;
+    out["result_oriented"] = r.result_oriented;
+    out["projected_to_source"] = r.projected_to_source;
+    out["projected_vertices"] = r.projected_vertices;
+    out["volume_corrected"] = r.volume_corrected;
+    out["colors_transferred"] = r.colors_transferred;
+    out["uvs_dropped"] = r.uvs_dropped;
+    out["result_to_source_rms"] = r.result_to_source_rms;
+    out["result_to_source_p95"] = r.result_to_source_p95;
+    out["result_to_source_max"] = r.result_to_source_max;
+    out["estimated_memory_bytes"] = r.estimated_memory_bytes;
+    nb::dict stages;
+    static const char* kStageNames[] = {"preflight",  "source_acceleration", "sampling",
+                                        "extraction", "projection",          "attribute_transfer",
+                                        "validation"};
+    for (std::size_t i = 0; i < mesh::kVoxelRemeshStageCount; ++i)
+        stages[kStageNames[i]] = r.stage_ms[i];
+    out["stage_ms"] = stages;
+    return out;
+}
 
 session::History::GridFor grid_for(const PyDocument& d) {
     std::shared_ptr<io::ClaySpaceDoc> doc = d.doc;
@@ -3723,30 +3836,7 @@ NB_MODULE(pyclay, m) {
 
                 PyMesh out;
                 out.m = std::move(r.mesh);
-                nb::dict report;
-                report["voxel_size"] = r.report.voxel_size;
-                report["source_vertices"] = r.report.source_vertices;
-                report["source_triangles"] = r.report.source_triangles;
-                report["result_vertices"] = r.report.result_vertices;
-                report["result_triangles"] = r.report.result_triangles;
-                report["source_volume"] = r.report.source_volume;
-                report["result_volume"] = r.report.result_volume;
-                report["relative_volume_error"] = r.report.relative_volume_error;
-                report["source_boundary_edges"] = r.report.source_boundary_edges;
-                report["result_boundary_edges"] = r.report.result_boundary_edges;
-                report["source_components"] = r.report.source_components;
-                report["result_components"] = r.report.result_components;
-                report["removed_components"] = r.report.removed_components;
-                report["active_samples"] = r.report.active_samples;
-                report["source_was_open"] = r.report.source_was_open;
-                report["result_watertight"] = r.report.result_watertight;
-                report["result_manifold"] = r.report.result_manifold;
-                report["result_oriented"] = r.report.result_oriented;
-                report["projected_to_source"] = r.report.projected_to_source;
-                report["projected_vertices"] = r.report.projected_vertices;
-                report["volume_corrected"] = r.report.volume_corrected;
-                report["colors_transferred"] = r.report.colors_transferred;
-                report["uvs_dropped"] = r.report.uvs_dropped;
+                nb::dict report = voxel_remesh_report_dict(r.report);
                 return nb::make_tuple(std::move(out), std::move(report));
             },
             "resolution"_a = nb::none(), "voxel_size"_a = nb::none(),
@@ -4196,6 +4286,8 @@ NB_MODULE(pyclay, m) {
                 self->owner = mesh;
                 self->mesh = pm;
                 self->bound = &data;
+                self->geometry_revision =
+                    pm->revisions ? revision_of(*pm->revisions, pm->layer) : 0;
                 self->sculptor = std::make_shared<mesh::MeshSculptor>(data, weld_epsilon);
             },
             "mesh"_a, "weld_epsilon"_a = mesh::kDefaultWeldEpsilon,
@@ -5336,6 +5428,97 @@ NB_MODULE(pyclay, m) {
              },
              "name"_a, "voxel_size"_a = 0.1f,
              "Add a voxel layer and return its grid (edits are stored in the document)")
+        .def(
+            "mesh_layer_revision",
+            [](const PyDocument& d, scene::LayerId layer) {
+                const scene::Layer* l = d.doc->document.find_layer(layer);
+                if (!l || l->kind != scene::LayerKind::Mesh)
+                    throw std::invalid_argument("no mesh layer with that id");
+                return revision_of(*d.mesh_revisions, layer);
+            },
+            "layer"_a,
+            "A mesh layer's geometry revision: bumped every time its triangles\n"
+            "are REPLACED wholesale, and never by a sculpt.\n\n"
+            "A brush moves vertices and leaves the topology alone, which is the\n"
+            "fixed-topology contract and is exactly the change a cache over that\n"
+            "mesh survives. A rebuild swaps every vertex and every index, and an\n"
+            "adjacency, a BVH or a live sculptor built over the old ones is wrong\n"
+            "in a way nothing else detects.\n\n"
+            "Read it, do the slow work, then hand it to replace_mesh_layer: if\n"
+            "the layer was rebuilt in between, the commit is refused rather than\n"
+            "overwriting work done while you were waiting.")
+        .def(
+            "replace_mesh_layer",
+            [](PyDocument& d, scene::LayerId layer, const PyMesh& replacement,
+               nb::handle expected_revision) {
+                const mesh::Mesh& src = replacement.data();
+                py_replace_mesh_layer(d, layer, mesh::Mesh(src), expected_revision);
+            },
+            "layer"_a, "mesh"_a, "expected_revision"_a = nb::none(),
+            "Replace a mesh layer's triangles wholesale, as ONE undo step.\n\n"
+            "For a caller that ran Mesh.voxel_remesh itself and now wants to\n"
+            "commit it. `expected_revision` is what mesh_layer_revision returned\n"
+            "before the work started; None skips the check, which is only right\n"
+            "when nothing could have touched the layer in between.\n\n"
+            "Raises if the layer moved under you, is ghosted or locked, or the\n"
+            "replacement has no triangles. A refusal leaves the layer untouched.")
+        .def(
+            "voxel_remesh_layer",
+            [](PyDocument& d, scene::LayerId layer, nb::handle resolution,
+               nb::handle voxel_size, const std::string& open_surface,
+               bool preserve_volume, bool project_to_source, bool preserve_colors,
+               nb::handle memory_budget) {
+                const scene::Layer* l = d.doc->document.find_layer(layer);
+                if (!l || l->kind != scene::LayerKind::Mesh)
+                    throw std::invalid_argument("no mesh layer with that id");
+                // Refused BEFORE the rebuild: remeshing a locked layer for
+                // several seconds and then declining to commit is a worse
+                // answer than declining now.
+                if (l->protected_from_edits())
+                    throw std::runtime_error(std::string("layer '") + l->name + "' is " +
+                                             (l->ghost ? "ghosted" : "locked") +
+                                             " and takes no edits");
+                auto it = d.doc->mesh_layers.find(layer);
+                if (it == d.doc->mesh_layers.end())
+                    throw std::invalid_argument("the mesh layer holds no triangles");
+
+                mesh::VoxelRemeshParams p =
+                    py_remesh_params(resolution, voxel_size, memory_budget);
+                p.open_surface_policy = py_open_policy(open_surface);
+                p.preserve_volume = preserve_volume;
+                p.project_to_source = project_to_source;
+                p.preserve_colors = preserve_colors;
+
+                // A COPY, and the revision it was taken at. The copy is what
+                // makes this transactional: the rebuild reads it while the
+                // layer still holds the original, so a refusal is a discard.
+                const mesh::Mesh source = it->second;
+                const std::uint64_t at = revision_of(*d.mesh_revisions, layer);
+
+                mesh::VoxelRemeshResult r;
+                {
+                    nb::gil_scoped_release release;
+                    r = mesh::voxel_remesh(source, p);
+                }
+                if (r.status != mesh::VoxelRemeshStatus::Ok) raise_remesh(r.status);
+
+                nb::dict report = voxel_remesh_report_dict(r.report);
+                py_replace_mesh_layer(d, layer, std::move(r.mesh), nb::cast(at));
+                return report;
+            },
+            "layer"_a, "resolution"_a = nb::none(), "voxel_size"_a = nb::none(),
+            "open_surface"_a = "close", "preserve_volume"_a = true,
+            "project_to_source"_a = true, "preserve_colors"_a = true,
+            "memory_budget"_a = nb::none(),
+            "Rebuild a mesh layer through a signed volumetric representation and\n"
+            "put the result back on the layer, as ONE undo step. Returns the\n"
+            "report.\n\n"
+            "The whole operation is transactional: the rebuild reads a copy while\n"
+            "the layer still holds the original, so a refusal or a failure leaves\n"
+            "the layer byte-identical and adds no undo step.\n\n"
+            "Mesh.voxel_remesh is the same rebuild without a document, for a\n"
+            "caller that wants to run it on a worker thread — pair it with\n"
+            "mesh_layer_revision and replace_mesh_layer to commit safely.")
         .def("add_mesh_layer",
              [](PyDocument& d, const PyMesh& source, const std::string& name, float scale) {
                  const mesh::Mesh& src = source.data();
@@ -5357,6 +5540,7 @@ NB_MODULE(pyclay, m) {
                  d.doc->mesh_layers.insert_or_assign(id, std::move(stored));
                  PyMesh borrowed;
                  borrowed.doc = d.doc;
+                 borrowed.revisions = d.mesh_revisions;
                  borrowed.layer = id;
                  return borrowed;
              },
@@ -5635,6 +5819,7 @@ NB_MODULE(pyclay, m) {
                      if (!d.doc->mesh_layers.count(l.id)) continue;
                      PyMesh borrowed;
                      borrowed.doc = d.doc;
+                     borrowed.revisions = d.mesh_revisions;
                      borrowed.layer = l.id;
                      return nb::cast(borrowed);
                  }

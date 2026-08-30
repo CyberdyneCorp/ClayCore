@@ -108,6 +108,16 @@ std::uint64_t project_to_source(Mesh* m, const Mesh& source, const Bvh& source_b
                                 float voxel_size, float strength, float max_distance_voxels,
                                 parallel::CancelToken* token);
 
+// Every result vertex's distance to the source surface, reduced to an RMS, a
+// 95th percentile and a maximum. One-sided by design — see the report's own
+// note on what that cannot see.
+struct SurfaceError {
+    double rms = 0.0;
+    double p95 = 0.0;
+    double max = 0.0;
+};
+SurfaceError measure_surface_error(const Mesh& result, const Bvh& source_bvh);
+
 // Scale `m` about its own centroid toward `target_volume`, clamped to
 // kVoxelRemeshMaxVolumeCorrection. Returns whether it did anything.
 bool correct_volume(Mesh* m, double target_volume, double current_volume);
