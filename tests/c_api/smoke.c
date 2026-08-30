@@ -1747,6 +1747,73 @@ static int check_round_trip(clay_document* doc) {
     return 0;
 }
 
+/* -- a gate is world-addressed (issue #394) -------------------------------- */
+
+/* clay_item_set_gate had no C-level coverage at all, which is how it reached a
+ * host before anyone noticed it was reading the mask in the gated item's own
+ * frame: a cut placed anywhere but the origin protected somewhere the artist
+ * never painted, and from outside that is indistinguishable from a gate that
+ * does nothing.
+ *
+ * A unit ball with a channel cut through it, the cut gated by a mask over the
+ * +X half. The channel's box reaches 2.0 along X, so sliding the cut half a
+ * unit along that axis removes exactly the same material — anything that moves
+ * is the gate. */
+static int check_gate_frame(void) {
+    clay_mask* mask = clay_mask_create(0.05f);
+    REQUIRE(mask != NULL);
+    const float mask_min[3] = {0.1f, -0.8f, -0.8f};
+    const float mask_max[3] = {1.6f, 0.8f, 0.8f};
+    REQUIRE(clay_mask_fill(mask, mask_min, mask_max, 1.0f) == CLAY_OK);
+
+    /* inside the painted region, and within the half unit the cut is slid */
+    const float points[6] = {0.3f, 0.0f, 0.0f, -0.7f, 0.0f, 0.0f};
+    float solid[2] = {0.0f, 0.0f}, open_cut[2] = {0.0f, 0.0f}, gated[2] = {0.0f, 0.0f};
+
+    for (int pass = 0; pass < 3; ++pass) {
+        clay_document* doc = clay_document_create();
+        REQUIRE(doc != NULL);
+        clay_layer_id layer = 0;
+        REQUIRE(clay_add_sdf_layer(doc, "body", &layer) == CLAY_OK);
+
+        const float radius = 1.0f;
+        clay_item* ball = clay_item_create(CLAY_PRIM_SPHERE, &radius, 1);
+        REQUIRE(ball != NULL);
+        REQUIRE(clay_layer_add_item(doc, layer, ball, NULL) == CLAY_OK);
+        clay_item_destroy(ball);
+
+        if (pass > 0) {
+            const float box[3] = {2.0f, 0.25f, 0.25f};
+            clay_item* cut = clay_item_create(CLAY_PRIM_BOX, box, 3);
+            REQUIRE(cut != NULL);
+            REQUIRE(clay_item_set_op(cut, CLAY_OP_SUBTRACT) == CLAY_OK);
+            /* placed, which every earlier fixture forgot to do */
+            const float slide[3] = {0.5f, 0.0f, 0.0f};
+            REQUIRE(clay_item_set_position(cut, slide) == CLAY_OK);
+            if (pass == 2) REQUIRE(clay_item_set_gate(cut, mask, 0.5f, 0.1f) == CLAY_OK);
+            REQUIRE(clay_layer_add_item(doc, layer, cut, NULL) == CLAY_OK);
+            clay_item_destroy(cut);
+        }
+
+        float* out = pass == 0 ? solid : (pass == 1 ? open_cut : gated);
+        REQUIRE(clay_eval_points(doc, NULL, points, 2, out, NULL) == CLAY_OK);
+        clay_document_destroy(doc);
+    }
+    REQUIRE(clay_mask_destroy(mask) == CLAY_OK);
+
+    /* the ungated cut reaches both probes... */
+    REQUIREF(open_cut[0] > 0.0f && open_cut[1] > 0.0f, "ungated %f %f", open_cut[0],
+             open_cut[1]);
+    /* ...the gate holds it off where the mask was PAINTED, not where the cut
+       was placed... */
+    REQUIREF(fabsf(gated[0] - solid[0]) < 1e-4f, "protected %f vs solid %f", gated[0],
+             solid[0]);
+    /* ...and leaves the open side alone. */
+    REQUIREF(fabsf(gated[1] - open_cut[1]) < 1e-4f, "open %f vs ungated %f", gated[1],
+             open_cut[1]);
+    return 0;
+}
+
 int main(void) {
     int32_t major = -1, minor = -1, patch = -1;
     clay_version(&major, &minor, &patch);
@@ -1787,6 +1854,7 @@ int main(void) {
     if (check_sdf_smooth_preview() != 0) return 1;
     if (check_round_trip(doc) != 0) return 1;
     if (check_voxel_rasterize(doc) != 0) return 1;
+    if (check_gate_frame() != 0) return 1;
 
     clay_document_destroy(doc);
     printf("c-api smoke: OK\n");

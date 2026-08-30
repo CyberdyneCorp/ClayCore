@@ -2090,7 +2090,12 @@ NB_MODULE(pyclay, m) {
             "Painted softness is re-derived rather than preserved.\n\n"
             "`width` is how far protection fades across, in world units. A WIDE\n"
             "gate costs almost no step scale and a narrow one costs honestly;\n"
-            "read it back with `Document.safe_step_scale()`.")
+            "read it back with `Document.safe_step_scale()`.\n\n"
+            "THE GATE IS IN WORLD SPACE and does not travel with the item. A\n"
+            "mask is painted in world units on its own lattice, so the region\n"
+            "it protects is where you painted it and stays there whatever the\n"
+            "item's own position, rotation and scale then do. Gate a cut over\n"
+            "an ear and the ear stays; move the cut and the ear still stays.")
         .def(
             "lattice",
             [](nb::object self, nb::handle box, nb::handle offsets, int nx, int ny, int nz) {

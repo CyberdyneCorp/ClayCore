@@ -39,6 +39,8 @@ loss, traded for a bound you can state in advance and a falloff you can change
 without repainting.
 """
 
+import math
+
 import numpy as np
 
 import pyclay as clay
@@ -81,6 +83,40 @@ def body_with_channel(gate=None, width=0.15, op=clay.Op.SUBTRACT):
     return doc
 
 
+def protect_plus_x_slab():
+    """The +X mask again, but a SLAB: thin in Z as well as bounded in X.
+
+    `protect_plus_x` spans the whole model in Z, so sliding a cut along Z would
+    move it inside a region the mask covers either way and prove nothing. This
+    one is narrow enough in Z that a displaced gate lands outside it.
+    """
+    m = clay.MaskField(0.04)
+    m.fill(((0.0, -2.0, -0.5), (2.0, 2.0, 0.5)), 1.0)
+    return m
+
+
+def placed_channel(gate=None, position=(0.0, 0.0, 0.0), turn=None, width=0.15):
+    """The same body and channel, with the CUT placed.
+
+    The bar reaches 3.0 along Z through a unit ball and is symmetric about the
+    origin, so sliding it along Z or turning it half a turn about Y removes
+    exactly the same material. That is what makes this a fair test of where the
+    gate ended up rather than of what the cut did.
+    """
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=BODY), color="#c08a5a")
+    bar = clay.Box(size=(0.8, 0.8, 3.0))
+    if gate is not None:
+        bar = bar.gate(gate, width=width)
+    node = layer.add(bar, op=clay.Op.SUBTRACT, color="#7a8fb0")
+    if turn is not None:
+        layer.set_transform(node, rotation_axis_angle=turn)
+    else:
+        layer.set_transform(node, position=position)
+    return doc
+
+
 def solid_body():
     doc = clay.Document()
     doc.add_sdf_layer("l").add(clay.Sphere(r=BODY), color="#c08a5a")
@@ -110,6 +146,30 @@ def main():
         raise SystemExit("an unprotected region must be EXACTLY the ungated result")
     print("\n    Both ends EXACT, not approximate: the protected side is the solid")
     print("    body bit for bit, and the open side is the ungated cut bit for bit.")
+
+    # --- the gate is in WORLD space -------------------------------------------
+    # A mask is painted in world units, so the region it protects is where you
+    # painted it and stays there however the gated item is then placed. Until
+    # 0.67.0 the gate was placed by the gated item's own transform, so a cut
+    # anywhere but the origin protected somewhere the artist never painted —
+    # which from outside is indistinguishable from a gate that does nothing.
+    print("\n  the same gate, with the CUT placed (issue #394):")
+    print(f"    {'cut placement':<24}{'ungated':>10}{'gated':>10}")
+    at_rest = float(placed_channel().eval(protected)[0])
+    intact = float(solid.eval(protected)[0])
+    for name, kw in (("at the origin", {}),
+                     ("slid 0.9 along Z", {"position": (0.0, 0.0, 0.9)}),
+                     ("slid -0.9 along Z", {"position": (0.0, 0.0, -0.9)}),
+                     ("turned half a turn", {"turn": ((0.0, 1.0, 0.0), math.pi)})):
+        u = float(placed_channel(**kw).eval(protected)[0])
+        g = float(placed_channel(protect_plus_x_slab(), **kw).eval(protected)[0])
+        print(f"    {name:<24}{u:>10.4f}{g:>10.4f}")
+        if u != at_rest:
+            raise SystemExit(f"the fixture proves nothing — {name} changed what the cut removes")
+        if g != intact:
+            raise SystemExit(f"the gate moved with the cut when it was {name}")
+    print("    The cut moves; the protected region does not. A mask over an ear")
+    print("    keeps the ear wherever you then drag the tool that would take it.")
 
     # --- it gates any op, not just subtract ----------------------------------
     # A gate composes with every combine mode rather than being one — which is

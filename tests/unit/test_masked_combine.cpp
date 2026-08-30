@@ -328,3 +328,177 @@ TEST_CASE("gating does not widen an item's influence, so culling is unchanged") 
         REQUIRE(culled.eval(p).d == gated.eval(p).d);
     }
 }
+
+// -- the gate's frame (issue #394) -------------------------------------------
+//
+// A gate is WORLD-ADDRESSED. `voxel::MaskField` is stored in world units on its
+// own lattice deliberately, and `brush::mask_to_field` measures it there, so
+// the protected region is where the artist painted it and stays there however
+// the gated item is placed.
+//
+// Until 0.67.0 the tape placed the gate volume by `layer.xform * item.xform`,
+// which moved the protected region by the transform of the very item it was
+// meant to hold back. From outside that is indistinguishable from a gate that
+// does nothing: #394 was filed as "accepted and inert" by a host whose cuts all
+// carried a placement.
+//
+// Every fixture above uses an identity item transform, which is exactly why
+// none of them caught it. These place the item and keep what it carves the
+// same, so a difference in the result can only be the gate moving.
+
+namespace {
+
+// The channel again, with the cut PLACED. Its box is half-extent 2.0 along X
+// through a unit ball, so sliding it along that axis, turning it about Y, or
+// growing it removes the same material either way — anything these tests see
+// is the gate, not the carve.
+scene::Document placed_channel(std::shared_ptr<const FieldVolume> gate,
+                               const math::Transform& cut_xform,
+                               const math::Transform& layer_xform = math::Transform::identity()) {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    l.xform = layer_xform;
+    scene::Node body;
+    body.prim = scene::Prim::sphere(kBody);
+    l.sdf->insert(body);
+    scene::Node cut;
+    cut.prim = scene::Prim::box(cf3(2.0f, 0.25f, 0.25f));
+    cut.op = scene::Op::Subtract;
+    cut.xform = cut_xform;
+    if (gate) {
+        cut.gate = std::move(gate);
+        cut.gate_width = 0.1f;
+    }
+    l.sdf->insert(cut);
+    return doc;
+}
+
+// Probes chosen so a displaced gate cannot land on them by luck: 0.3 is inside
+// the painted region but within 0.5 of its border, which is how far every
+// placement below moves the gate under the old behaviour.
+constexpr float kInside = 0.3f;
+constexpr float kOutside = -0.7f;
+
+// The claim, for one placement: the gate protects the same world region it did
+// at identity, and the carve really was invariant so that means something.
+void check_gate_is_world_fixed(const math::Transform& cut_xform,
+                               const math::Transform& layer_xform = math::Transform::identity()) {
+    const scene::Tape rest = scene::compile_document(placed_channel(nullptr, {}, {}));
+    const scene::Tape moved = scene::compile_document(placed_channel(nullptr, cut_xform, layer_xform));
+    const scene::Tape gated = scene::compile_document(placed_channel(half_gate(), cut_xform, layer_xform));
+    const scene::Tape solid = scene::compile_document(bare_body());
+
+    for (const cfloat3 p : {cf3(kInside, 0, 0), cf3(kOutside, 0, 0)}) {
+        // The fixture's own claim first: this placement changes nothing about
+        // what the ungated cut removes. Without this the rest proves nothing.
+        CHECK(moved.eval(p).d == doctest::Approx(rest.eval(p).d).epsilon(1e-5));
+        CHECK(moved.eval(p).d > 0.0f);  // carved away when nothing gates it
+    }
+    // Protected where the mask was painted...
+    CHECK(gated.eval(cf3(kInside, 0, 0)).d == doctest::Approx(solid.eval(cf3(kInside, 0, 0)).d));
+    // ...and open where it was not.
+    CHECK(gated.eval(cf3(kOutside, 0, 0)).d ==
+          doctest::Approx(moved.eval(cf3(kOutside, 0, 0)).d));
+}
+
+}  // namespace
+
+TEST_CASE("a gate stays where the mask was painted when the item is moved") {
+    // Slid half a unit along its own long axis: the same channel, a gate that
+    // used to slide with it and protect half a unit further out.
+    check_gate_is_world_fixed(math::Transform{cf3(0.5f, 0, 0), math::Quat::identity(), 1.0f});
+}
+
+TEST_CASE("a gate does not turn with the item") {
+    // A box symmetric about the origin, turned onto its own footprint. The cut
+    // is bit-for-bit the same; the gate used to end up on the other side of the
+    // body, protecting the half the artist opened and opening the half they
+    // protected.
+    const math::Quat half_turn = math::Quat::from_axis_angle(cf3(0, 1, 0), 3.14159265f);
+    check_gate_is_world_fixed(math::Transform{cf3(0, 0, 0), half_turn, 1.0f});
+}
+
+TEST_CASE("a gate does not turn with the layer either") {
+    // The layer's transform reached the gate by the same route. A unit ball and
+    // an origin-centred box are both invariant under this turn, so the document
+    // renders identically and only the gate could move.
+    const math::Quat half_turn = math::Quat::from_axis_angle(cf3(0, 1, 0), 3.14159265f);
+    check_gate_is_world_fixed(math::Transform::identity(),
+                              math::Transform{cf3(0, 0, 0), half_turn, 1.0f});
+}
+
+TEST_CASE("a gate does not scale with the item") {
+    // Growing the cut grows what it removes, so this one cannot use the shared
+    // helper's invariance check — but the protected region must not grow with
+    // it. At five times, the old behaviour pushed the mask's border from 0.1
+    // out to 0.5 and left the probe at 0.3 unprotected.
+    const math::Transform big{cf3(0, 0, 0), math::Quat::identity(), 5.0f};
+    const scene::Tape ungated = scene::compile_document(placed_channel(nullptr, big));
+    const scene::Tape gated = scene::compile_document(placed_channel(half_gate(), big));
+    const scene::Tape solid = scene::compile_document(bare_body());
+
+    const cfloat3 inside = cf3(kInside, 0, 0);
+    CHECK(ungated.eval(inside).d > 0.0f);  // the bigger cut still reaches here
+    CHECK(gated.eval(inside).d == doctest::Approx(solid.eval(inside).d));
+
+    const cfloat3 outside = cf3(kOutside, 0, 0);
+    CHECK(gated.eval(outside).d == doctest::Approx(ungated.eval(outside).d));
+}
+
+TEST_CASE("a gate's declared cost is charged in world units, not the layer's") {
+    // `gate_width` is in world units and the gate is now read in world space,
+    // so the layer's scale must not multiply it. It used to, and in the
+    // dangerous direction: a WIDER gate costs less, so a layer scaled up
+    // declared a step scale it had not earned and a marcher stepping by it
+    // would punch through the masked boundary.
+    //
+    // Both documents describe the SAME world: the layer scales up by four and
+    // every item scales down by the same four, so the geometry, the gate and
+    // the width are identical and only the number the compiler charges can
+    // differ.
+    auto build = [](float layer_scale) {
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("l");
+        l.xform.scale = layer_scale;
+        const float item_scale = 1.0f / layer_scale;
+        scene::Node body;
+        body.prim = scene::Prim::sphere(kBody);
+        body.xform.scale = item_scale;
+        l.sdf->insert(body);
+        scene::Node cut;
+        cut.prim = scene::Prim::box(cf3(2.0f, 0.25f, 0.25f));
+        cut.op = scene::Op::Subtract;
+        cut.xform.scale = item_scale;
+        cut.gate = half_gate();
+        cut.gate_width = 0.15f;
+        l.sdf->insert(cut);
+        return scene::compile_document(doc);
+    };
+    const scene::Tape at_one = build(1.0f);
+    const scene::Tape at_four = build(4.0f);
+
+    // Same world, so the same field...
+    for (const cfloat3 p : {cf3(0.3f, 0, 0), cf3(-0.7f, 0, 0), cf3(0, 0.9f, 0)})
+        CHECK(at_four.eval(p).d == doctest::Approx(at_one.eval(p).d).epsilon(1e-5));
+    // ...and the same declared cost for it.
+    CHECK(at_four.safe_step_scale() == doctest::Approx(at_one.safe_step_scale()).epsilon(1e-4));
+
+    // And the bound is honest: marching the scaled document by its own number
+    // reaches the surface without stepping through it.
+    const float scale = at_four.safe_step_scale();
+    REQUIRE(scale > 0.0f);
+    for (int i = 0; i < 16; ++i) {
+        const float y = (static_cast<float>(i % 4) - 1.5f) * 0.12f;
+        const float z = (static_cast<float>(i / 4) - 1.5f) * 0.12f;
+        float travelled = 0.0f;
+        for (int step = 0; step < 4000 && travelled < 6.0f; ++step) {
+            const float d = at_four.eval(cf3(-3.0f + travelled, y, z)).d;
+            if (d <= 1e-4f) break;
+            const float advance = scale * d;
+            CAPTURE(i);
+            CAPTURE(travelled);
+            REQUIRE(at_four.eval(cf3(-3.0f + travelled + advance, y, z)).d >= -1e-3f);
+            travelled += advance;
+        }
+    }
+}

@@ -968,6 +968,15 @@ struct Node {
     // Shared for the same reason `volume` is: several items gated by one
     // painted mask should not each carry a copy of it.
     //
+    // WORLD-ADDRESSED, and NOT placed by this item's `xform`. `voxel::MaskField`
+    // is stored in world units on its own lattice deliberately (voxel/mask.h
+    // says why) and `brush::mask_to_field` measures it there, so the protected
+    // region is where the artist painted it and stays there however this item
+    // is moved, turned or scaled afterwards. Placing it by the item's transform
+    // instead — which the tape did until 0.67.0 — moves the protected region by
+    // the transform of the very item it holds back, and from outside that is
+    // indistinguishable from a gate that does nothing at all.
+    //
     // ITS BAND MUST REACH AT LEAST `gate_width`. A sampled volume stores true
     // distances only within its band and saturates past it, so a band narrower
     // than the fade means the smoothstep never reaches 1 and the "fully

@@ -207,6 +207,10 @@ typedef struct CTapeValueT {
 // gate a boolean, and a boolean is a mode. -1 in the gate slot means none.
 #define CLAY_TAPE_COMBINE_HEADER 5
 // A gate's blob record: [volume handle] [inverse transform, 12] [scale] [width].
+// The transform and scale are the IDENTITY as of 0.67.0 — a gate is measured
+// from a world-addressed mask, so it is read in world space and does not travel
+// with the item it holds back. The slots stay because this is the same record
+// every placed volume uses and reading it costs nothing.
 #define CLAY_TAPE_GATE_FLOATS 15
 #define CLAY_TAPE_PRIM_HEADER 17
 
@@ -934,6 +938,10 @@ CLAY_FN bool ctape_mode_is_transition(int mode) {
 //
 // The payload is blob-carried because it is fifteen floats and a combine record
 // cannot afford them: [volume handle] [inverse transform, 12] [scale] [width].
+// The transform and scale arrive as the identity — a gate is world-addressed —
+// so this reads the world point straight through. It still goes through the
+// same matrix as any placed volume rather than special-casing, because the
+// kernel is compiled for four backends and a branch here would be four.
 // The volume itself is an ordinary sampled field — the signed distance to the
 // protected region, negative inside — so evaluating it is `ctape_volume_dist`
 // and nothing new.
