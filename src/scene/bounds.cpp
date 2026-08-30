@@ -446,11 +446,123 @@ bool deformers_break_exactness(const Node& item) {
     return false;
 }
 
-float deformer_lipschitz(const Node& item) {
-    if (item.deformers.empty()) return 1.0f;
+// -- a chain's Lipschitz, priced where its links can actually reach ----------
+//
+// `deformer_lipschitz` used to fold the whole chain into one running product,
+// which charges every pair of links as though they compound. Most of them
+// cannot. GRAB, MAGNIFY, POSE, BLOB and ALPHA are all documented as having
+// FINITE SUPPORT — outside their own ball the field is untouched, which is what
+// makes them brushes rather than modifiers — so two whose balls are far apart
+// have no point at which both are anything but the identity, and their factors
+// have nothing to multiply.
+//
+// Measured before this (issue #386): eight `move_surface` drags of radius 0.3
+// around the equator of a radius-4 sphere, centres 3.06 apart — ten radii from
+// touching — reported a bound of k^8 and a step scale of 0.0616 against 0.7059
+// for one drag. That is the whole cost of a Move-heavy session, charged for a
+// compounding that cannot physically happen, and a sculptor nudging eight
+// different places on a head is the NORMAL case: a second drag on the same spot
+// is a correction, not a stroke.
+//
+// WHY IT IS SOUND. The chain evaluates p -> d0 -> d1 -> ... -> prim, so link k
+// sees the point after links 0..k-1 have moved it. Link k is the identity
+// unless that point is inside its ball, so two links i < k can both act on one
+// evaluation only if their balls are within the distance the chain can carry a
+// point between them. Bounding that by the TOTAL travel of every point warp in
+// the chain is conservative in the safe direction and needs no ordering
+// argument: two links whose balls are further apart than
+// `r_i + r_k + total_travel` cannot both be non-identity at any point, so the
+// bound over the whole domain is the WORST connected group rather than the
+// product of all of them.
+//
+// The residual: one entry of the easing table returns 5.96e-08 rather than 0 at
+// its zero end, so a link is the identity outside its ball only to within that.
+// It costs nothing, and not by luck — the region weight is CLAMPED, so outside
+// the ball that 5.96e-08 is a CONSTANT. A constant weight makes a grab a rigid
+// translation and a magnify a uniform scale within 1e-7 of the identity: no
+// slope, which is the only thing a Lipschitz bound measures. The translation it
+// does contribute is inside the travel budget above.
+
+namespace {
+
+// Where a deformer stops acting, in the item's own local frame.
+struct LinkSupport {
+    bool finite = false;
+    kernel::cfloat3 centre = cf3(0, 0, 0);
+    float radius = 0.0f;
+    // How far this link can move a point. Zero for a distance offset, which
+    // changes the value and hands the point on untouched.
+    float travel = 0.0f;
+};
+
+// Does this kind add to the DISTANCE rather than warp the point? The two
+// compose differently — see ChainLink::value — and it is also what makes a
+// link's travel zero.
+bool deformer_is_offset(int type) {
+    return type == kernel::cdeform_noise || type == kernel::cdeform_blob ||
+           type == kernel::cdeform_alpha || type == kernel::cdeform_displace;
+}
+
+LinkSupport link_support(const Deformer& d) {
+    LinkSupport s;
+    switch (d.type) {
+        case kernel::cdeform_grab:
+            // `front_only` gates the pull further; it never widens the ball.
+            s = {true, cf3(d.k, d.a, d.b), d.c,
+                 kernel::clength(cf3(d.ext[0], d.ext[1], d.ext[2]))};
+            break;
+        case kernel::cdeform_magnify:
+            // r -> r * (1 - strength * w), so a point moves at most r*|strength|.
+            s = {true, cf3(d.k, d.a, d.b), d.c, d.c * kernel::cabs(d.ext[0])};
+            break;
+        case kernel::cdeform_pose:
+            // A rotation about the centre: an arc of at most radius * angle.
+            s = {true, cf3(d.k, d.a, d.b), d.c, d.c * kernel::cabs(d.ext[3])};
+            break;
+        case kernel::cdeform_blob:
+            s = {true, cf3(d.k, d.a, d.b), d.c, 0.0f};
+            break;
+        case kernel::cdeform_alpha:
+            // `k` is not the centre here: the compiler overwrites slot 1 with
+            // the stamp's blob handle, so the centre starts one slot later.
+            s = {true, cf3(d.a, d.b, d.c), d.stamp.radius, 0.0f};
+            break;
+        default:
+            // Everything else — twist, bend, taper, lattice, pose along a line,
+            // the whole modifier family — acts everywhere. `pose_line` is the
+            // one that looks like it belongs above and does not: its weight
+            // CLAMPS rather than falling to zero, so material past the end is
+            // fully rotated (deform.h says so where it is defined).
+            break;
+    }
+    // A degenerate ball would make every link disjoint from everything, which
+    // is the unsafe direction; treat it as unbounded instead.
+    if (!(s.radius > 0.0f)) s.finite = false;
+    return s;
+}
+
+// One link of a chain, priced on its own rather than folded into a running
+// total — which is what lets two links that cannot both act at one point stop
+// multiplying (issue #386).
+//
+// `value` is a FACTOR for a point warp and an ADDEND for a distance offset,
+// because that is how the two compose: a warp multiplies the field's slope
+// through the chain rule, while an offset adds its own gradient to it
+// (docs/01 §2.5, and `cfi_displace` says the same in one line).
+struct ChainLink {
+    float value = 1.0f;
+    bool additive = false;
+    LinkSupport support;
+};
+
+std::vector<ChainLink> chain_links(const Node& item) {
+    std::vector<ChainLink> links;
+    links.reserve(item.deformers.size());
     Aabb local = prim_local_bounds(item);
-    kernel::CFieldInfo info = kernel::cfi_exact();
     for (const Deformer& d : item.deformers) {
+        // Priced against the identity, so the number is this link's own
+        // contribution and not the chain's total so far.
+        kernel::CFieldInfo info = kernel::cfi_exact();
         float radius = 0.0f;
         if (!local.empty()) {
             for (int i = 0; i < 8; ++i) {
@@ -606,8 +718,89 @@ float deformer_lipschitz(const Node& item) {
         } else if (d.type == kernel::cdeform_displace) {
             info = kernel::cfi_displace(info, kernel::cabs(d.k) * kernel::cabs(d.a) * 1.7320508f);
         }
+        ChainLink link;
+        link.additive = deformer_is_offset(d.type);
+        link.value = link.additive ? kernel::cmax(info.lipschitz - 1.0f, 0.0f)
+                                   : kernel::cmax(info.lipschitz, 1.0f);
+        link.support = link_support(d);
+        links.push_back(link);
     }
-    return kernel::cmax(info.lipschitz, 1.0f);
+    return links;
+}
+
+// Fold the chain with only `active` links participating, in chain order.
+float fold_chain(const std::vector<ChainLink>& links, const std::vector<bool>& active) {
+    float l = 1.0f;
+    for (std::size_t i = 0; i < links.size(); ++i) {
+        if (!active[i]) continue;
+        l = links[i].additive ? l + links[i].value : l * links[i].value;
+    }
+    return l;
+}
+
+// Which finite-support links can reach one another, as a 1-based group number
+// per link (0 for a link that acts everywhere and is therefore in every group).
+// Two links share a group when their balls are closer than the distance the
+// chain can carry a point between them, so a group is a set that MIGHT
+// compound and two groups provably cannot.
+//
+// O(n^2) over a chain of tens of links, and the arithmetic is a distance
+// compare — against `chain_links`, which samples an easing curve 512 times per
+// link, this does not show up.
+std::vector<std::size_t> group_by_reach(const std::vector<ChainLink>& links,
+                                        std::size_t* out_groups) {
+    // Summed over the WHOLE chain rather than over the links between the two
+    // being compared: looser, in the safe direction, and it saves having to
+    // reason about which links sit between them.
+    float travel = 0.0f;
+    for (const ChainLink& l : links) travel += l.support.travel;
+
+    const std::size_t n = links.size();
+    std::vector<std::size_t> group(n, 0);
+    std::size_t groups = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!links[i].support.finite) continue;
+        group[i] = ++groups;
+        for (std::size_t k = 0; k < i; ++k) {
+            if (!links[k].support.finite || group[k] == group[i]) continue;
+            const float gap = kernel::clength(links[i].support.centre - links[k].support.centre);
+            if (gap > links[i].support.radius + links[k].support.radius + travel) continue;
+            // They can meet: fold i's group into k's, and everything already
+            // gathered into i's along with it.
+            const std::size_t from = group[i], into = group[k];
+            for (std::size_t j = 0; j <= i; ++j)
+                if (group[j] == from) group[j] = into;
+        }
+    }
+    *out_groups = groups;
+    return group;
+}
+
+}  // namespace
+
+float deformer_lipschitz(const Node& item) {
+    if (item.deformers.empty()) return 1.0f;
+    const std::vector<ChainLink> links = chain_links(item);
+    const std::size_t n = links.size();
+    std::size_t groups = 0;
+    const std::vector<std::size_t> group = group_by_reach(links, &groups);
+
+    // The bound over the whole domain is the WORST place in it. A link with
+    // unbounded support acts everywhere and is always in; the finite ones only
+    // compound within their own group, so each group is priced with the other
+    // groups absent and the largest answer wins.
+    //
+    // Group 0 first, which is the chain with every finite link out — the answer
+    // for the part of the item no brush has touched, and the whole answer when
+    // there are no finite links to gather.
+    std::vector<bool> active(n);
+    float worst = 1.0f;
+    for (std::size_t g = 0; g <= groups; ++g) {
+        for (std::size_t i = 0; i < n; ++i)
+            active[i] = !links[i].support.finite || group[i] == g;
+        worst = kernel::cmax(worst, fold_chain(links, active));
+    }
+    return worst;
 }
 
 // Local bound of a repeated item: the finite grid sweeps the item across its

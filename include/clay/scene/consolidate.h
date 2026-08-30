@@ -13,9 +13,16 @@
 //     samples a volume rather than a document, and the declared Lipschitz goes
 //     from 1.7 to 24 to 39 across three passes whatever the falloff;
 //   * a Move stroke never touches a volume at all — each drag appends a `grab`
-//     to the deformer chain and deformer_lipschitz multiplies them, so the
-//     safe step scale decays by a constant factor per drag, 79x the marching
-//     cost by nine.
+//     to the deformer chain, and where the drags OVERLAP deformer_lipschitz
+//     multiplies them, so the safe step scale decays by a constant factor per
+//     drag: 79x the marching cost by nine.
+//
+//     Only where they overlap, as of 0.69.0 (issue #386). A grab is the
+//     identity outside its own ball, so drags that cannot reach one another no
+//     longer compound and eight spread around a form cost what one costs. That
+//     is the common shape of a Move session and it stopped being a reason to
+//     consolidate; a stroke worked repeatedly over ONE area is the shape that
+//     still is, and it is the shape this file was written for.
 //
 // TWO MECHANISMS, and a policy keyed on only one of them would miss the other.
 // That is why the report below names the steepest volume and the longest

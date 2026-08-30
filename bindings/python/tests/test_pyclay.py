@@ -3846,6 +3846,48 @@ def test_magnify_surface_refuses_what_is_not_a_gesture():
     with pytest.raises(ValueError):
         layer.magnify_surface((0, 0, 0), 0.4, radius=0.0)   # not a region
 
+def _ball_with_drags(count, spread, radius=0.3, pull=0.1):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=4.0))
+    for i in range(count):
+        a = i * 2.0 * math.pi / 8.0
+        u = (math.cos(a), math.sin(a), 0.0) if spread else (1.0, 0.0, 0.0)
+        layer.move_surface(tuple(4.0 * c for c in u), tuple(pull * c for c in u), radius=radius)
+    return doc
+
+
+def test_disjoint_drags_do_not_compound_the_step_scale():
+    """Issue #386: eight drags ten radii apart were charged k^8.
+
+    A grab is the identity outside its own ball, so drags that cannot reach one
+    another have no point at which more than one of them is anything but the
+    identity — and nothing to multiply. The measurement in the issue: a step
+    scale of 0.0616 for eight drags against 0.7059 for one.
+    """
+    one = _ball_with_drags(1, spread=True).safe_step_scale()
+    for count in (2, 4, 6, 8):
+        assert _ball_with_drags(count, spread=True).safe_step_scale() == pytest.approx(one)
+
+
+def test_the_relaxed_bound_is_still_a_bound():
+    """The number only helps if a marcher can still trust it."""
+    doc = _ball_with_drags(8, spread=True, radius=0.5, pull=0.35)
+    scale = doc.safe_step_scale()
+    rng = np.random.default_rng(386)
+    dirs = rng.normal(size=(60, 3))
+    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+    for u in dirs.astype(np.float32):
+        origin, travelled = -u * 9.0, 0.0
+        for _ in range(4000):
+            here = float(doc.eval((origin + u * travelled).astype(np.float32)[None, :])[0])
+            if here <= 1e-4 or travelled > 18.0:
+                break
+            step = scale * here
+            after = float(doc.eval((origin + u * (travelled + step)).astype(np.float32)[None, :])[0])
+            assert after >= -1e-3, "a full step landed past the surface"
+            travelled += step
+
 
 def _reach_along(doc, direction, hi=4.0):
     u = np.array(direction, np.float32)

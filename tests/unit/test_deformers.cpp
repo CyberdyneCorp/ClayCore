@@ -1679,3 +1679,159 @@ TEST_CASE("a blob survives the document round trip") {
         CHECK(b.eval(p).d == doctest::Approx(a.eval(p).d).epsilon(1e-5));
     }
 }
+
+// -- a chain is priced where its links can reach (issue #386) ----------------
+//
+// `deformer_lipschitz` used to fold the whole chain into one running product,
+// which charges every pair of links as though they compound. Grab, magnify,
+// pose, blob and alpha all have FINITE SUPPORT, so two whose balls are far
+// apart have no point at which both are anything but the identity and their
+// factors have nothing to multiply.
+//
+// Measured before: eight drags of radius 0.3 around the equator of a radius-4
+// sphere, centres ten radii from touching, reported k^8 — a step scale of
+// 0.0616 against 0.7059 for one drag. That is the cost of a Move-heavy session,
+// charged for a compounding that cannot physically happen.
+
+namespace {
+
+// `count` grabs of the given radius, spaced `gap` apart along X, on a bar long
+// enough to hold them all.
+scene::Document spaced_grabs(int count, float gap, float radius = 0.3f,
+                             float pull = 0.1f) {
+    std::vector<Deformer> chain;
+    for (int i = 0; i < count; ++i)
+        chain.push_back(Deformer::grab(cf3(static_cast<float>(i) * gap, 0.0f, 0.0f), radius,
+                                       cf3(0.0f, pull, 0.0f)));
+    return one_item(scene::Prim::box(cf3(12.0f, 0.4f, 0.4f)), chain);
+}
+
+}  // namespace
+
+TEST_CASE("bound: disjoint grabs do not compound") {
+    // The claim, at its sharpest: eight grabs that cannot reach one another
+    // cost what ONE costs, because at no point in space is more than one of
+    // them anything but the identity.
+    const float one = scene::compile_document(spaced_grabs(1, 3.06f)).safe_step_scale();
+    for (int count : {2, 4, 6, 8}) {
+        CAPTURE(count);
+        scene::Tape t = scene::compile_document(spaced_grabs(count, 3.06f));
+        CHECK(t.safe_step_scale() == doctest::Approx(one));
+    }
+}
+
+TEST_CASE("bound: grabs that CAN reach each other still compound") {
+    // The other half, and the one that matters more: the relaxation must not
+    // buy its speed by understating a chain that really does stack. Piled on
+    // one spot, every extra grab costs.
+    float previous = 2.0f;
+    for (int count : {1, 2, 4, 6, 8}) {
+        CAPTURE(count);
+        scene::Tape t = scene::compile_document(spaced_grabs(count, 0.0f));
+        CHECK(t.safe_step_scale() < previous);
+        previous = t.safe_step_scale();
+    }
+}
+
+TEST_CASE("bound: the threshold is the reach, not the radii alone") {
+    // Two balls that do not overlap can still compound, because the first grab
+    // carries a point toward the second: the gap that matters is
+    // r + r + travel, not r + r. A pair just inside that has to cost more than
+    // a pair just outside it.
+    const float radius = 0.3f, pull = 0.5f;
+    // The travel is summed over the WHOLE chain, so two grabs pulling 0.5 each
+    // reach 0.3 + 0.3 + 1.0 = 1.6. A gap of 1.2 is inside that and 2.0 is not,
+    // and neither pair's balls overlap — which is the point: the radii alone
+    // would call both pairs disjoint.
+    scene::Tape close = scene::compile_document(spaced_grabs(2, 1.2f, radius, pull));
+    scene::Tape apart = scene::compile_document(spaced_grabs(2, 2.0f, radius, pull));
+    scene::Tape alone = scene::compile_document(spaced_grabs(1, 2.0f, radius, pull));
+    CHECK(close.safe_step_scale() < apart.safe_step_scale());
+    CHECK(apart.safe_step_scale() == doctest::Approx(alone.safe_step_scale()));
+}
+
+TEST_CASE("bound: a disjoint chain is still safe to march by") {
+    // The relaxation is only worth having if the number it produces is still a
+    // bound. This is the case that fails if the disjointness argument is wrong.
+    for (int count : {2, 4, 8}) {
+        CAPTURE(count);
+        scene::Tape t = scene::compile_document(spaced_grabs(count, 3.06f, 0.5f, 0.35f));
+        clay_test::check_conservative_steps([&](cfloat3 p) { return t.eval(p).d; },
+                                            t.safe_step_scale(), 13.0f, 900, 2201);
+    }
+}
+
+TEST_CASE("bound: an unbounded link is charged against every group") {
+    // A twist acts everywhere, so it multiplies whichever group of brushes the
+    // marcher is standing in. Dropping it out of the per-group fold would be a
+    // hole in the bound rather than a saving.
+    //
+    // The twist is deliberately WEAKER than the grabs. Left stronger, its own
+    // factor would exceed theirs and the max over groups would come out right
+    // by accident even with the twist dropped — the number this has to catch
+    // is the PRODUCT, so the two terms have to be small enough that neither
+    // alone reaches it.
+    const scene::Prim bar = scene::Prim::box(cf3(6.0f, 0.5f, 0.5f));
+    const Deformer left = Deformer::grab(cf3(-4.0f, 0, 0), 0.4f, cf3(0, 0.2f, 0));
+    const Deformer right = Deformer::grab(cf3(4.0f, 0, 0), 0.4f, cf3(0, 0.2f, 0));
+    const Deformer gentle_twist = Deformer::twist(0.05f);
+
+    scene::Tape grabs = scene::compile_document(one_item(bar, {left, right}));
+    scene::Tape twist = scene::compile_document(one_item(bar, {gentle_twist}));
+    scene::Tape both = scene::compile_document(one_item(bar, {left, gentle_twist, right}));
+
+    // Neither term alone reaches the answer, so the max-over-groups cannot
+    // arrive at it by dropping one.
+    REQUIRE(both.safe_step_scale() < grabs.safe_step_scale());
+    REQUIRE(both.safe_step_scale() < twist.safe_step_scale());
+    // It is exactly their product: one grab's factor, times the twist's.
+    CHECK(1.0f / both.safe_step_scale() ==
+          doctest::Approx((1.0f / grabs.safe_step_scale()) * (1.0f / twist.safe_step_scale()))
+              .epsilon(1e-4));
+
+    clay_test::check_conservative_steps([&](cfloat3 p) { return both.eval(p).d; },
+                                        both.safe_step_scale(), 7.0f, 700, 3307);
+}
+
+TEST_CASE("bound: pose along a line is not treated as finite support") {
+    // It looks like it belongs with grab and magnify and does not: its weight
+    // CLAMPS rather than falling to zero, so material past the end is fully
+    // rotated (deform.h says so where it is defined). Two of them must compound
+    // however far apart their anchors sit.
+    //
+    // The anchors are placed SYMMETRICALLY about the item, so the two poses
+    // have the same factor as each other and as the single-pose case. Off
+    // centre they would not, and the test would pass on the difference between
+    // their factors rather than on whether they multiplied.
+    auto poses = [](std::vector<Deformer> chain) {
+        return scene::compile_document(one_item(scene::Prim::box(cf3(6.0f, 0.4f, 0.4f)), chain));
+    };
+    const Deformer left =
+        Deformer::pose_line(cf3(-9.0f, 0, 0), cf3(-8.6f, 0, 0), cf3(0, 1, 0), 0.5f);
+    const Deformer right =
+        Deformer::pose_line(cf3(9.0f, 0, 0), cf3(9.4f, 0, 0), cf3(0, 1, 0), 0.5f);
+    scene::Tape one = poses({left});
+    scene::Tape mirrored = poses({right});
+    REQUIRE(one.safe_step_scale() == doctest::Approx(mirrored.safe_step_scale()));
+    scene::Tape both = poses({left, right});
+    CHECK(both.safe_step_scale() < one.safe_step_scale());
+}
+
+TEST_CASE("bound: a distance offset composes by ADDING, wherever it is grouped") {
+    // blob and alpha add their gradient to the field's slope rather than
+    // multiplying it, and the per-group fold has to keep that distinction or a
+    // regrouped chain quietly changes what it charges. One blob alone, and the
+    // same blob beside a grab it cannot reach, must cost the same.
+    const Deformer far_grab = Deformer::grab(cf3(9.0f, 0, 0), 0.3f, cf3(0, 0.1f, 0));
+    const Deformer blob = Deformer::blob(cf3(0, 0, 0), 0.5f, 0.2f);
+    scene::Tape alone =
+        scene::compile_document(one_item(scene::Prim::box(cf3(12.0f, 0.4f, 0.4f)), {blob}));
+    scene::Tape beside = scene::compile_document(
+        one_item(scene::Prim::box(cf3(12.0f, 0.4f, 0.4f)), {blob, far_grab}));
+    // The grab's factor is larger than the blob's addend here, so the worst
+    // group is the grab's — but neither may be charged the other's cost.
+    scene::Tape grab_only =
+        scene::compile_document(one_item(scene::Prim::box(cf3(12.0f, 0.4f, 0.4f)), {far_grab}));
+    CHECK(beside.safe_step_scale() ==
+          doctest::Approx(std::min(alone.safe_step_scale(), grab_only.safe_step_scale())));
+}
