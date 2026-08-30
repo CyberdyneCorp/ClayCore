@@ -440,20 +440,34 @@ TEST_CASE("mesh sculpt parity: every verb on every fixture is byte-identical") {
     // did the same work; what it stops claiming is byte-identity against a
     // machine that is not this one, which it was never able to claim.
     const bool regen = std::getenv("CLAY_PARITY_REGEN") != nullptr;
+    // An unbaselined toolchain PRINTS its table without being asked. The
+    // alternative -- telling a reader to re-run with an env var set -- costs a
+    // CI round trip on exactly the machine nobody has local access to, which
+    // is the machine that needs a table. Printing is what makes this
+    // self-service: the lines below are the file.
+    const bool print_table = regen || !kHaveGoldens;
     if (!kHaveGoldens) {
         MESSAGE("no hash table for this toolchain: the byte comparison is "
                 "skipped and the moved counts are still checked against the "
-                "reference. Run with CLAY_PARITY_REGEN=1 to print a table for "
-                "it. See this file's header for why a table is per-platform.");
+                "reference. The lines printed below ARE a table for it -- copy "
+                "them into mesh_sculpt_goldens_<toolchain>.inc and add the arm "
+                "to the #if above. See this file's header for why a table is "
+                "per-platform.");
     }
     std::size_t index = 0;
     for (const Fixture& fx : kFixtures) {
         for (const VerbCase& vc : kVerbs) {
             std::uint32_t moved = 0;
             const std::uint64_t h = run_case(fx, vc.verb, &moved);
-            if (regen) {
+            if (print_table) {
                 std::printf("    {\"%s\", \"%s\", %lluull, %uu},\n", fx.name, vc.name,
                             static_cast<unsigned long long>(h), moved);
+            }
+            // A DELIBERATE re-baseline prints and checks nothing. An
+            // unbaselined toolchain prints AND still gates its moved counts,
+            // which is the difference between the two: one is being rewritten
+            // on purpose, the other is simply not listed yet.
+            if (regen) {
                 ++index;
                 continue;
             }
