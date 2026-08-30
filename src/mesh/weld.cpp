@@ -45,6 +45,46 @@ WeldReport weld(Mesh* m, const WeldOptions& options) {
     report.triangles_before = m->triangle_count();
     if (m->positions.empty() || m->indices.empty()) return report;
 
+    const std::size_t vertices = m->positions.size();
+
+    // MALFORMED TRIANGLES GO FIRST, BEFORE ANYTHING READS THEM.
+    //
+    // `Adjacency::build` indexes `class_of_[m.indices[t]]` with no bounds
+    // check — an implicit precondition of that API, and a reasonable one, since
+    // every other caller is holding a mesh this library produced. This one is
+    // not: it is the cleanup verb, so a malformed mesh is exactly what it will
+    // be handed.
+    //
+    // Removing them here rather than in the rebuild below is not tidiness. Read
+    // out of range is undefined, and undefined behaved: on Linux and GCC the
+    // read landed inside the allocation and the whole thing passed, and on MSVC
+    // and the oldest AppleClang it was a segmentation fault. The test that
+    // caught it asserts "an out-of-range index is dropped rather than read",
+    // which is precisely what was not happening.
+    std::size_t invalid = 0;
+    const bool ragged = m->indices.size() % 3 != 0;
+    {
+        std::vector<std::uint32_t> valid;
+        valid.reserve(m->indices.size());
+        for (std::size_t t = 0; t + 2 < m->indices.size(); t += 3) {
+            if (m->indices[t] >= vertices || m->indices[t + 1] >= vertices ||
+                m->indices[t + 2] >= vertices) {
+                ++invalid;
+                continue;
+            }
+            valid.insert(valid.end(),
+                         {m->indices[t], m->indices[t + 1], m->indices[t + 2]});
+        }
+        // Only when something was wrong, so a well-formed mesh keeps the array
+        // it arrived with and the byte-identical path below stays reachable.
+        if (invalid > 0 || ragged) m->indices = std::move(valid);
+    }
+    report.triangles_invalid = invalid;
+    if (m->indices.empty()) {
+        report.vertices_after = vertices;
+        return report;
+    }
+
     // THROUGH `Adjacency`, not beside it. The spatial hash, the 27-cell search
     // and the exact-bit path all live there already, and two copies of that
     // arithmetic would be two answers to "are these the same vertex" — which is
@@ -63,7 +103,6 @@ WeldReport weld(Mesh* m, const WeldOptions& options) {
     // The survivor of each class: the lowest-indexed vertex in it that this
     // vertex may actually merge with. Lowest rather than first-seen so the
     // result depends on the mesh and not on a traversal order.
-    const std::size_t vertices = m->positions.size();
     std::vector<std::uint32_t> survivor(vertices, kNone);
     std::vector<std::uint32_t> class_first(adjacency.class_count(), kNone);
     for (std::size_t v = 0; v < vertices; ++v) {
@@ -88,19 +127,6 @@ WeldReport weld(Mesh* m, const WeldOptions& options) {
         ++report.vertices_merged;
     }
 
-    // A triangle naming a vertex that does not exist has to go, and counts as
-    // work — otherwise the fast path below would hand a malformed mesh straight
-    // back whenever nothing else needed merging, which would make "every index
-    // is in range afterwards" true only sometimes.
-    std::size_t invalid = 0;
-    for (std::size_t t = 0; t + 2 < m->indices.size(); t += 3)
-        if (m->indices[t] >= vertices || m->indices[t + 1] >= vertices ||
-            m->indices[t + 2] >= vertices)
-            ++invalid;
-    // A trailing partial triangle is malformed too, and the rebuild below drops
-    // it by walking whole triples.
-    const bool ragged = m->indices.size() % 3 != 0;
-
     // Nothing merged and nothing malformed: leave the mesh exactly as it was,
     // quads and all. A weld that changed nothing must not renumber anything, or
     // every caller pays a rewrite for the common case where there was nothing
@@ -120,10 +146,9 @@ WeldReport weld(Mesh* m, const WeldOptions& options) {
     kept.reserve(m->indices.size());
     for (std::size_t t = 0; t + 2 < m->indices.size(); t += 3) {
         const std::uint32_t raw[3] = {m->indices[t], m->indices[t + 1], m->indices[t + 2]};
-        if (raw[0] >= vertices || raw[1] >= vertices || raw[2] >= vertices) {
-            ++report.triangles_invalid;
-            continue;
-        }
+        // Cannot fire: the pass above removed every such triangle. Kept as the
+        // guard it is, because the read below is the one that was undefined.
+        if (raw[0] >= vertices || raw[1] >= vertices || raw[2] >= vertices) continue;
         const std::uint32_t s[3] = {survivor[raw[0]], survivor[raw[1]], survivor[raw[2]]};
         if (s[0] == s[1] || s[1] == s[2] || s[0] == s[2]) {
             ++report.triangles_collapsed;
