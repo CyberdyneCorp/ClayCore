@@ -108,7 +108,19 @@ BOUNDED_VIA_HELPER = {
 
 # The bounded-fill helpers. Any of them appearing in a body means the function
 # writes through the size the caller declared rather than this build's sizeof.
-BOUNDED_FILLS = ("write_desc", "write_preset", "write_cost", "begin_out_cost")
+#
+# A named helper is registered here rather than the whole entry point being
+# added to BOUNDED_VIA_HELPER above: the gate then still requires SOME bounded
+# fill in the body, which is the property it exists to check. Every helper below
+# ends in write_desc.
+BOUNDED_FILLS = (
+    "write_desc",
+    "write_preset",
+    "write_cost",
+    "begin_out_cost",
+    "write_voxel_remesh_estimate",
+    "write_voxel_remesh_report",
+)
 
 
 def output_descriptor_fills() -> list[str]:

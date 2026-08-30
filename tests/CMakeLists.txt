@@ -41,11 +41,22 @@ add_executable(clay_unit_tests
   unit/test_mesh_sculpt.cpp
   unit/test_mesh_sculpt_parity.cpp
   unit/test_sculpt_kernels.cpp
+  unit/test_dynamic_surface.cpp
+  unit/test_topology_ops.cpp
+  unit/test_topology_delta.cpp
+  unit/test_dynamic_bvh.cpp
+  unit/test_remesh_local.cpp
+  unit/test_dynamic_sculpt.cpp
+  unit/test_dynamic_history.cpp
+  unit/test_c_dynamic_topology.cpp
+  unit/test_dynamic_scale.cpp
   unit/test_sculpt_allocation.cpp
   unit/test_brush_preset.cpp
   unit/test_c_brush_preset.cpp
   unit/test_mesh_deform.cpp
   unit/test_mesh_transfer.cpp
+  unit/test_voxel_remesh.cpp
+  unit/test_c_voxel_remesh.cpp
   unit/test_bench_spread.cpp
   unit/test_bvh_refit.cpp
   unit/test_meshers.cpp

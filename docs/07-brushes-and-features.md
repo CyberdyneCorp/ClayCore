@@ -1356,6 +1356,279 @@ Runnable: [`examples/45_mesh_brushes.py`](../examples/45_mesh_brushes.py),
 
 ---
 
+## 8b. Adaptive topology — the third mesh mode
+
+Section 8 is the fixed-topology mode: sixteen verbs that move vertices and never
+touch a polygon. This is the other one.
+
+**What was actually missing, stated precisely.** Not "dyntopo" — *there was no
+representation in this library whose connectivity could change.* `Mesh` is flat
+arrays a mutation renumbers. `Adjacency` is CSR that goes stale on a count
+change and says so. `Bvh::refit` refuses a topology change by design.
+`VertexDeltas` deliberately records no indices. Every one of those is the right
+decision for what it serves, and together they mean adaptive topology cannot be
+retrofitted — it has to be a representation of its own.
+
+### The two modes, and choosing between them
+
+| | Mesh layer (`MeshSculptor`) | `DynamicSurface` (`DynamicSculptor`) |
+|---|---|---|
+| Topology | **Never changes.** `indices` and `quads` byte-identical | Changes locally under the brush |
+| What a large pull does | Stretches the triangles it has | Creates the triangles it needs |
+| Quads | Preserved through every verb | **None.** Triangles, and the export derives no pairing |
+| Best for | An imported retopologised model whose UVs and edge flow are paid for | Free-form blocking out, where the form is not settled |
+| Undo | `VertexDeltas` — positions, normals, colours | `TopologyDelta` — connectivity too |
+
+**A caller converts into an adaptive surface deliberately.** It is never a mode
+the fixed sculptor slips into, and that is what keeps a mesh layer worth holding
+after a retopology pass.
+
+### What it costs
+
+A half-edge surface with stable handles costs several times a flat mesh per
+triangle: four pools of records, two half-edges per edge, and no compaction on
+erase. `DynamicSurface::bytes()` reports it, and `dead_slots` says how much of
+it is storage a session's edits left behind — a surface never compacts, so a
+long session's pools grow with its history rather than its content, and
+round-tripping through `to_mesh`/`from_mesh` is how a host reclaims that.
+
+**In time, a dab costs its footprint and not the model.** That is the property
+the whole mode depends on — a sculptor works on a model too big to redraw, so a
+stamp that scales with the surface is unusable however correct it is. Measured
+on a flat patch at a fixed tessellation density, with the same brush at every
+size, so the only thing changing is how much surface surrounds the dab:
+
+| Faces | Dab, topology on | Dab, topology off |
+|-------|------------------|-------------------|
+| 100k | 1.41 ms | 0.33 ms |
+| 1M | 1.94 ms | 1.26 ms |
+| 5M | 3.43 ms | 2.47 ms |
+
+A 50x model is a 2.4x dab. Note which fixture that is: subdividing a
+fixed-radius sphere for each size would make the surface FINER, so a
+fixed-radius brush would legitimately cover quadratically more faces, and the
+resulting curve would say nothing about locality. This is a flat patch at fixed
+spacing, where only the surrounding surface grows — `BM_DynamicStamp` in
+`benchmarks/bench_main.cpp`, on a 24-core x86 box.
+
+Conversion is not local and is not meant to be: `from_mesh` on 320k faces is a
+few hundred milliseconds and on 5M it is seconds, which is why it is a
+deliberate one-off and not a mode a host toggles per stroke.
+
+### The three parts
+
+**The operators** — split, collapse, flip. Each is ATOMIC: it decides
+completely against the untouched surface and only then writes, so a refused
+operation changes nothing at all and there is no rollback path because there is
+nothing to roll back. Each honours edge constraints itself — boundary, UV seam,
+sharp, material, user-locked — rather than trusting a caller to have filtered
+its input.
+
+Collapse has the longest refusal list because it is the dangerous one: a
+topological link-condition test, plus duplicate triangles, inversion,
+degeneracy, boundary corruption and normal flip past a threshold. The link
+condition alone is not sufficient and the tetrahedron proves it — every one of
+its edges passes, and collapsing any leaves two faces on the same three
+vertices.
+
+**The remesher** — split above `target * split_factor`, collapse below
+`target * collapse_factor`, flip toward better triangles, then relax
+tangentially.
+
+The gap between the two factors is hysteresis, and **it does not work on its
+own**: splitting halves a length, and the two thresholds are less than a factor
+of two apart, so an edge just over the split threshold becomes two just under
+the collapse one. What makes it converge is refusing a collapse whose result
+would be long enough to split again — the standard incremental-remeshing rule,
+and the reason the classic 4/3 and 4/5 factors work at all.
+
+The target is **brush-relative** by default: `radius / detail_resolution`. A
+world-unit target means an artist shrinking the brush to add detail gets the
+same triangles back; a fraction of the radius is what a sculptor means by
+"detail", and it needs no second slider.
+
+Remesh timing is **per verb, with a reason each**, because the right answer
+differs: Grab remeshes *after* (it stretches, and the stretch is what needs
+refining), Clay *before* (a deposit onto triangles too coarse to hold its shape
+is a smooth bump where the brush promised an edge), Snakehook *both*.
+
+**The chunked index** — leaves of a few hundred faces, each simultaneously the
+BVH leaf, the brush candidate set, the parallel work unit, the normal-recompute
+unit, the dirty-tracking unit and the host's upload unit. A per-face tree gives
+the first and leaves the library to invent a different granularity for each of
+the others.
+
+### Which verbs it offers
+
+Fifteen of the sixteen. **Layer is declined**, structurally rather than by
+omission: its ceiling is measured per vertex from where the surface was when the
+*stroke* began, and half the vertices under the brush at the end of an adaptive
+stroke did not exist at the start. A verb that silently became Draw for the new
+vertices and Layer for the old ones would be worse than one that says it is not
+offered.
+
+### Determinism
+
+The same verbs on the same input give the same surface, connectivity included.
+That is not a consequence of single-threading — it is an ordering rule: every
+candidate set is **sorted by stable slot id** before any operator runs. A
+spatial query returns faces in the tree's traversal order, the tree's shape
+depends on the history of edits, and a remesher that split them in that order
+would give a different surface for a differently-edited but identical input.
+
+### What a host is told
+
+Three revisions — topology, geometry, attributes — advancing independently, so
+an index buffer is re-uploaded only when connectivity changed. A stamp reports
+the chunks it touched, and chunk data is **copied into caller-owned buffers**
+behind a capacity query: a mutation can move or free anything, so a borrowed
+pointer held across one would be a use-after-free with no generation to check.
+
+Runnable: [`examples/66_dynamic_topology.py`](../examples/66_dynamic_topology.py)
+— a 1,200-triangle sphere becomes a nose, an ear and a horn, with the locality
+of the refinement measured rather than illustrated.
+
+---
+
+## 8c. Voxel remesh — throwing the topology away on purpose
+
+Section 8 preserves topology and section 8b adapts it locally. This replaces all
+of it at once, which is what sculpting applications call **DynaMesh** or **Voxel
+Remesh**.
+
+`mesh::voxel_remesh` samples a whole surface into a signed narrow-band field at
+a spatial resolution the caller chooses and reconstructs a new isosurface from
+it. Nothing about the input's topology survives, and that is the feature: after
+stretching, kitbashing or a long adaptive session, the density has to be rebuilt
+rather than repaired.
+
+### What it is for, and what it is not
+
+| | |
+|---|---|
+| Overlapping shells | **Fuse.** The field knows where material is, not which mesh claimed it |
+| Self-intersections | Resolve volumetrically |
+| Stretched triangles | Gone — no edge of the result spans more than one lattice cell |
+| Uneven density | Replaced by approximately uniform spacing at the chosen voxel size |
+| Vertex / polygon identity | **Destroyed.** No index maps an input to an output |
+| UVs | **Dropped**, not reprojected — see below |
+| Detail finer than the voxel size | May disappear, and the estimate warns before it does |
+| Vertex colour | **Survives**, resampled by closest point |
+| A caller's per-vertex mask | Survives, through `mesh::transfer_vertex_scalar` |
+
+It is **not** quad retopology. The output is a lattice-derived triangulation
+with no edge loops following the form, and no setting changes that. It is not
+decimation, which preserves the surface's own triangles. It is not the local
+remesher of section 8b, which adapts under a brush and keeps everything else.
+
+### Resolution is a physical size
+
+The canonical control is a **world voxel size**, because that is what decides
+which features survive and it means the same thing whatever the model's size. A
+longest-axis integer is offered as the convenience an artist actually turns and
+maps onto it — the longest bounding extent divided by that integer, resolved
+before any sampling padding, so the number does not drift when the padding does.
+Both the estimate and the report carry the resolved voxel size.
+
+### The cost is preflighted, and a refusal is typed
+
+`mesh::voxel_remesh_estimate` walks the source's triangles and marks the brick
+lattice — no tree, no field, no mesh — and reports the resolved voxel size, the
+grid dimensions, an upper bound on the narrow band's samples, the working
+memory, a triangle range, the source's open-boundary and component counts, and
+whether the source carries material thin enough to be lost. It is cheap enough
+for a resolution slider.
+
+A request over the caller's budget, or over the library's own ceilings, fails
+with `ExceedsBudget` **before** the field, the tree or the result is allocated.
+The library does not lower a resolution it was asked for: an engine that quietly
+halves a request produces a result the artist did not ask for and cannot
+explain. Fitting a resolution to a budget is a host policy built out of repeated
+estimates, and the estimate exists so that policy is cheap.
+
+Every other refusal is its own status too — `InvalidResolution`,
+`OpenSurfaceRejected`, `ResultNotWatertight`, `Cancelled`, `EmptySource`,
+`Unsupported` — because "lower the resolution", "your model has holes" and "you
+stopped it" are three different things for a host to say.
+
+### An open surface takes an explicit policy
+
+`Reject` fails and says why. `Close` produces the closed volumetric
+interpretation and validates it. `BestEffort` proceeds and reports what the
+result actually is. An open source is **never** silently treated as though it
+had been watertight, and the report carries the source's boundary-edge count
+whatever the policy chose.
+
+### The sampling follows the surface, not the bounding box
+
+This is the one piece of new engineering in the feature, and it is why the
+existing mesh-to-field converter is called rather than reused wholesale.
+`FieldVolume::sample_parallel` evaluates the caller's function for **every**
+brick of the region — 32³ bricks of 729 samples at longest-axis 256, each sample
+a BVH distance query carrying a generalized winding number, and 128³ bricks at
+1024. That is right for an import, where the caller chose the cell size for the
+model, and wrong for a resolution dial.
+
+So the remesh supplies its own brick fill to the same `sample_blocks` entry
+point: bricks near a source triangle are evaluated, and the rest are filled with
+the sign of the connected region they fall in, one winding query per region.
+Within an evaluated brick the distances come first and the signs second, because
+a brick whose nearest sample is further than the band cannot contain the surface
+— the samples are a voxel apart and the band is three — so its sign is constant
+and one query answers for all 729.
+
+**The samples that are stored are bit-identical to what a dense evaluation would
+have stored.** A brick holding a sample within the band of the surface is
+necessarily within the band of some triangle, and so is necessarily marked.
+Sparsity here is an optimisation of one field, not a second field, and
+`test_voxel_remesh.cpp` marches the dense field on the same lattice and requires
+the same mesh byte for byte.
+
+The one place the two differ is a source with **open boundaries**: the
+generalized winding number's half-crossing can fall away from every triangle, so
+a brick can straddle it while holding no sample near one. The dense path records
+that brick's sign per brick and this records it per region. Only sample-free
+bricks are affected — neither path stores anything there — and it is stated in
+the header rather than left to be found.
+
+### Projection is clamped twice
+
+After extraction each vertex may move part of the way toward the closest point
+on the source, which is what gives a rebuild back the detail the lattice rounded
+off. It is clamped by distance, and rejected outright where the source there
+faces away from the vertex's own reconstructed normal. Nearest-point alone jumps
+between nearby sheets — lips, fingers, a cloth fold, a mechanical gap — and a
+jump is not a small error, it is a hole pulled through the surface. The strength
+is a lerp and never a snap, so a mis-clamped projection degrades toward "no
+projection" rather than toward "corrupted".
+
+### Determinism, cancellation and the document
+
+The same source and parameters produce a **bit-identical** mesh on every run.
+That is a property of the decomposition rather than of single-threading: the
+brick fill, the marching waves, the projection and the transfer all write
+disjoint outputs computed from position-only inputs, so no scheduling can
+reorder a value into a different one.
+
+`parallel::CancelToken` stops it, and the check is inside every expensive stage
+rather than between them. A cancelled remesh returns `Cancelled` with no mesh;
+the source is a `const&` and was never written, so "cancellation leaves the
+source unchanged" is a property of the signature rather than a promise about a
+rollback.
+
+It is a **pure mesh → mesh operation**: no document, no layer, no history and no
+revision token. A host holds the before and after meshes and commits them as one
+undo record. A `DynamicSurface` round-trips through it the same way — `to_mesh`,
+remesh, `from_mesh` — and the boundary is the caller's to see rather than an
+overload's to hide.
+
+Runnable: [`examples/67_voxel_remesh.py`](../examples/67_voxel_remesh.py) —
+spikes thinner than a coarse voxel disappearing, a stretched surface's edge
+lengths before and after, and two crossing shells cut open to show the interior
+wall that fusion removes.
+
+---
+
 ## 8a. The brush model — how this vocabulary is organised
 
 Read this before the ZBrush map below, because it is the answer to the question

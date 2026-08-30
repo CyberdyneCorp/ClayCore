@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 61
+#define CLAY_ABI_MINOR 63
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -2468,6 +2468,181 @@ clay_result clay_mesh_transfer_attributes(const clay_mesh* source, clay_mesh* ta
 clay_result clay_mesh_from_triangles(const float* positions, size_t vertex_count,
                                      const uint32_t* indices, size_t index_count,
                                      clay_mesh** out_mesh);
+
+/* Resample a caller-owned per-vertex scalar — a mask, a weight — from one mesh
+ * onto another by closest point (add-voxel-remesher, ABI 0.63.0).
+ *
+ * WHY THIS EXISTS SEPARATELY FROM clay_mesh_transfer_attributes: a mask is not
+ * a mesh attribute here. It is a per-vertex gate a host owns and passes to the
+ * sculptors, and moving its storage into the mesh to suit one operation would
+ * be changing a representation to make a call convenient. But clay_mesh_voxel_
+ * remesh replaces the topology the mask was indexed by, so the mask has to be
+ * resampled from geometry like anything else that survives a rebuild.
+ *
+ * `values` is `value_count` floats and must be the SOURCE's vertex count;
+ * `out_values` is `out_count` floats and must be the TARGET's. Both lengths
+ * are required rather than inferred — the same rule clay_mesh_copy_indices
+ * follows — and a mismatch is CLAY_ERROR_INVALID_ARGUMENT with nothing
+ * written.
+ *
+ * `max_distance` of 0 derives the threshold from the source's size; a target
+ * vertex further away than it takes `fallback`. */
+clay_result clay_mesh_transfer_vertex_scalar(const clay_mesh* source, const float* values,
+                                             size_t value_count, const clay_mesh* target,
+                                             float max_distance, float fallback,
+                                             float* out_values, size_t out_count);
+
+/* -- global voxel remesh (add-voxel-remesher, ABI 0.63.0) ------------------- */
+
+/* Rebuild a whole surface through a signed volumetric representation at an
+ * explicit spatial resolution: the operation an artist calls DynaMesh.
+ *
+ * Overlapping shells fuse, self-intersections resolve, stretched triangles
+ * disappear and the topology is REPLACED — no source vertex or polygon index
+ * means anything about the result. Details finer than the voxel size may be
+ * lost, and UVs are dropped rather than reprojected. Both are reported.
+ *
+ * This is a pure mesh -> mesh operation. It has no document, no layer, no undo
+ * record and no revision token: a host holds the before and after meshes and
+ * commits them as one history entry itself. */
+
+typedef enum clay_voxel_remesh_resolution {
+    /* World units, the canonical form. */
+    CLAY_VOXEL_REMESH_VOXEL_SIZE = 0,
+    /* The source's longest bounding extent divided by an integer, resolved
+     * before any sampling padding is applied. */
+    CLAY_VOXEL_REMESH_LONGEST_AXIS = 1
+} clay_voxel_remesh_resolution;
+
+typedef enum clay_voxel_remesh_surface {
+    /* Marching tetrahedra: watertight and 2-manifold by construction. */
+    CLAY_VOXEL_REMESH_SMOOTH = 0,
+    /* Dual contouring. EXPERIMENTAL, matching its flagged status elsewhere in
+     * this ABI: the watertight guarantee is NOT claimed for it. */
+    CLAY_VOXEL_REMESH_SHARP = 1
+} clay_voxel_remesh_surface;
+
+typedef enum clay_voxel_remesh_open_policy {
+    CLAY_VOXEL_REMESH_OPEN_REJECT = 0,      /* typed failure, no mesh */
+    CLAY_VOXEL_REMESH_OPEN_CLOSE = 1,       /* close it, then validate */
+    CLAY_VOXEL_REMESH_OPEN_BEST_EFFORT = 2  /* proceed and report what it is */
+} clay_voxel_remesh_open_policy;
+
+typedef enum clay_voxel_remesh_component_policy {
+    CLAY_VOXEL_REMESH_KEEP_COMPONENTS = 0,
+    CLAY_VOXEL_REMESH_REMOVE_BELOW_VOLUME = 1
+} clay_voxel_remesh_component_policy;
+
+typedef struct clay_voxel_remesh_params {
+    uint32_t struct_size; /* = sizeof(clay_voxel_remesh_params); required */
+    int32_t resolution_mode;          /* clay_voxel_remesh_resolution */
+    float voxel_size;                 /* read in VOXEL_SIZE mode */
+    uint32_t longest_axis_resolution; /* read in LONGEST_AXIS mode */
+    int32_t surface_mode;             /* clay_voxel_remesh_surface */
+    int32_t open_surface_policy;      /* clay_voxel_remesh_open_policy */
+    int32_t small_component_policy;   /* clay_voxel_remesh_component_policy */
+    float minimum_component_volume;   /* cubic world units; REMOVE_BELOW only */
+    int32_t preserve_volume;          /* 0/1; a clamped correction, skipped
+                                       * where the comparison stopped meaning
+                                       * anything */
+    int32_t project_to_source;        /* 0/1 */
+    float projection_strength;        /* 0..1; a lerp, never a snap */
+    float max_projection_distance_voxels;
+    int32_t preserve_colors; /* 0/1; a source with none produces none */
+    uint32_t build_multires_levels; /* reserved; non-zero is UNSUPPORTED */
+    uint64_t memory_budget_bytes;   /* 0 = no caller budget */
+} clay_voxel_remesh_params;
+
+/* What a remesh would cost, before it is made. Cheap enough for a resolution
+ * slider: it walks the source's triangles and marks a brick lattice, and
+ * allocates nothing proportional to the sample count it predicts. */
+typedef struct clay_voxel_remesh_estimate {
+    uint32_t struct_size; /* = sizeof(clay_voxel_remesh_estimate); required */
+    float resolved_voxel_size;
+    uint32_t grid_dimensions[3];
+    /* An UPPER BOUND on the narrow band, not a prediction: the marking keeps
+     * every brick whose box comes within the band of a triangle's bounds, and
+     * some hold nothing near enough to store. The report's active_samples is
+     * what the run actually held and is never larger. */
+    uint64_t estimated_active_samples;
+    uint64_t estimated_memory_bytes;
+    uint64_t estimated_triangle_min;
+    uint64_t estimated_triangle_max;
+    uint32_t boundary_edge_count;
+    uint32_t component_count;
+    int32_t has_open_boundaries;
+    /* Sampled evidence that the source carries material thinner than a couple
+     * of voxels — material this resolution may delete. */
+    int32_t thin_feature_warning;
+    int32_t exceeds_memory_budget;
+} clay_voxel_remesh_estimate;
+
+typedef struct clay_voxel_remesh_report {
+    uint32_t struct_size; /* = sizeof(clay_voxel_remesh_report); required */
+    float voxel_size;
+    uint64_t source_vertices;
+    uint64_t source_triangles;
+    uint64_t result_vertices;
+    uint64_t result_triangles;
+    double source_volume;
+    double result_volume;
+    double relative_volume_error;
+    uint32_t source_boundary_edges;
+    uint32_t result_boundary_edges;
+    uint32_t source_components;
+    uint32_t result_components;
+    uint32_t removed_components;
+    uint64_t active_samples;
+    int32_t source_was_open;
+    int32_t result_watertight;
+    int32_t result_manifold;
+    int32_t result_oriented;
+    int32_t projected_to_source;
+    uint64_t projected_vertices;
+    int32_t volume_corrected;
+    int32_t colors_transferred;
+    /* Always set when the source carried UVs, and not a failure: a spatially
+     * reprojected UV across a seam is a stretched layout that looks like a
+     * preserved one, so this operation does not pretend to keep them. */
+    int32_t uvs_dropped;
+    int32_t cancelled;
+} clay_voxel_remesh_report;
+
+/* The library's documented defaults, so a caller does not transcribe them. */
+clay_result clay_mesh_voxel_remesh_defaults(clay_voxel_remesh_params* out_params);
+
+/* What the remesh would cost. `out_estimate` is filled bounded by the size the
+ * caller declared. Returns the same refusals clay_mesh_voxel_remesh would for
+ * an unusable resolution or a request over budget, and fills the estimate that
+ * justified the refusal where one could be computed. */
+clay_result clay_mesh_voxel_remesh_estimate(const clay_mesh* source,
+                                            const clay_voxel_remesh_params* params,
+                                            clay_voxel_remesh_estimate* out_estimate);
+
+/* Run it. `out_mesh` receives a NEW mesh the caller frees with
+ * clay_mesh_destroy; `source` is never modified.
+ *
+ * Refusals are distinguishable rather than collapsed:
+ *   CLAY_ERROR_INVALID_ARGUMENT  the source has no triangles, or the
+ *                                resolution or a parameter is not usable
+ *   CLAY_ERROR_BUDGET_EXCEEDED   over memory_budget_bytes or the library's
+ *                                own ceiling, refused before the field, the
+ *                                tree and the result were allocated
+ *   CLAY_ERROR_UNSUPPORTED       an open source under OPEN_REJECT, or a
+ *                                reserved parameter asked for
+ *   CLAY_ERROR_BACKEND           the field produced no surface, or the result
+ *                                failed the validation the mode promises
+ *   CLAY_ERROR_CANCELLED         `token` was cancelled
+ *
+ * `out_report` is optional and is filled for a refusal too where the numbers
+ * exist — an open-surface refusal carries the source's boundary-edge count,
+ * which is what a host puts in front of a user. `token` is optional; progress
+ * is read through clay_cancel_token_progress as it is for every other
+ * cancellable call here. */
+clay_result clay_mesh_voxel_remesh(const clay_mesh* source,
+                                   const clay_voxel_remesh_params* params,
+                                   clay_cancel_token* token, clay_mesh** out_mesh,
+                                   clay_voxel_remesh_report* out_report);
 
 /* -- mesh layers: a document CARRIES a mesh -------------------------------- */
 
@@ -5217,6 +5392,223 @@ clay_result clay_mesh_sculptor_apply_preset(clay_mesh_sculptor* sculptor,
                                             const clay_mesh_frame* mesh_to_world,
                                             int32_t defer_normals, clay_mesh_deltas* deltas,
                                             size_t* out_applied);
+
+/* -- ADAPTIVE TOPOLOGY -------------------------------------------------------
+ *
+ * A surface whose CONNECTIVITY changes under the brush: geometry is created
+ * where a stroke needs it and removed where it does not.
+ *
+ * A DIFFERENT REPRESENTATION, chosen deliberately, never a mode the fixed
+ * sculptor slips into. clay_mesh_sculptor's contract is unchanged and stays
+ * unchanged: no verb there creates, splits, deletes or reorders a polygon, and
+ * `indices` and `quads` come out byte-identical. That is what makes a mesh layer
+ * worth holding after a retopology pass, and a host relying on it is not
+ * affected by anything below.
+ *
+ * A dynamic surface is TRIANGLES. Converting to one and back gives triangles,
+ * `quads` empty, and no quad pairing is re-derived — a quad workflow does not
+ * pass through this representation. */
+
+typedef struct clay_dynamic_surface clay_dynamic_surface;
+typedef struct clay_dynamic_sculptor clay_dynamic_sculptor;
+
+/* Why a conversion was refused. A dynamic surface cannot express every triangle
+ * soup, and saying which problem it hit is what lets a caller fix the model. */
+typedef enum clay_dynamic_build_error {
+    CLAY_DYNAMIC_OK = 0,
+    CLAY_DYNAMIC_EMPTY_MESH = 1,
+    CLAY_DYNAMIC_INDEX_OUT_OF_RANGE = 2,
+    CLAY_DYNAMIC_DEGENERATE_TRIANGLE = 3,
+    /* Three or more faces on one edge. A half-edge surface cannot express it,
+     * and dropping the third face silently would be a conversion that changes
+     * the model without saying so. */
+    CLAY_DYNAMIC_NON_MANIFOLD_EDGE = 4
+} clay_dynamic_build_error;
+
+typedef struct clay_dynamic_surface_desc {
+    uint32_t struct_size; /* = sizeof(clay_dynamic_surface_desc); required */
+    /* Vertices closer than this are ONE geometric vertex. The same rule the
+     * fixed adjacency uses; 0 takes the engine default. */
+    float weld_epsilon;
+    /* Corners disagreeing by more than this across an edge mark it a UV seam,
+     * so the seam survives remeshing as an edge property rather than as a
+     * crack. 0 takes the engine default. */
+    float uv_seam_epsilon;
+} clay_dynamic_surface_desc;
+
+clay_result clay_dynamic_surface_defaults(clay_dynamic_surface_desc* out_desc);
+
+/* Build from a flat mesh. The mesh is READ, not retained. */
+clay_result clay_dynamic_surface_from_mesh(const clay_mesh* mesh,
+                                           const clay_dynamic_surface_desc* desc,
+                                           clay_dynamic_surface** out_surface,
+                                           int32_t* out_error);
+/* A fresh clay_mesh the caller destroys with clay_mesh_destroy. */
+clay_result clay_dynamic_surface_to_mesh(const clay_dynamic_surface* surface,
+                                         clay_mesh** out_mesh);
+void clay_dynamic_surface_destroy(clay_dynamic_surface* surface);
+
+typedef struct clay_dynamic_surface_stats {
+    uint32_t struct_size; /* = sizeof(clay_dynamic_surface_stats); required */
+    uint64_t vertices;
+    uint64_t edges;
+    uint64_t halfedges;
+    uint64_t faces;
+    uint64_t boundary_edges;
+    /* Slots allocated and not live. A surface never compacts, so this is what a
+     * caller watches to decide whether to round-trip it. */
+    uint64_t dead_slots;
+    uint64_t bytes;
+} clay_dynamic_surface_stats;
+
+clay_result clay_dynamic_surface_stats_get(const clay_dynamic_surface* surface,
+                                           clay_dynamic_surface_stats* out_stats);
+
+/* THREE REVISIONS, NOT ONE. Topology, geometry and attributes advance
+ * independently, so a host re-uploads an index buffer only when connectivity
+ * changed and vertex data only when it moved. The same distinction serves cache
+ * invalidation for anything derived. */
+typedef struct clay_surface_revision {
+    uint32_t struct_size; /* = sizeof(clay_surface_revision); required */
+    uint64_t topology;
+    uint64_t geometry;
+    uint64_t attributes;
+} clay_surface_revision;
+
+clay_result clay_dynamic_surface_revision(const clay_dynamic_surface* surface,
+                                          clay_surface_revision* out_revision);
+
+/* Surface <-> bytes, on the size-query pattern. A versioned format of its own:
+ * a flat mesh's encoding cannot express a half-edge structure. Generations are
+ * preserved, so a handle taken before a save still resolves after a load. */
+clay_result clay_dynamic_surface_serialize(const clay_dynamic_surface* surface,
+                                           uint8_t* out_data, size_t* count);
+clay_result clay_dynamic_surface_deserialize(const uint8_t* data, size_t size,
+                                             clay_dynamic_surface** out_surface);
+
+/* Every invariant of the half-edge structure, checked. Cheap enough for a debug
+ * build after every edit and far too slow for a release inner loop, which is
+ * why it is a call rather than an assertion. */
+clay_result clay_dynamic_surface_validate(const clay_dynamic_surface* surface,
+                                          int32_t* out_ok, char* out_message, size_t* message_len);
+
+/* -- the topology policy ----------------------------------------------------- */
+
+typedef enum clay_dynamic_detail_mode {
+    CLAY_DETAIL_WORLD = 0,        /* target_edge_length in world units */
+    CLAY_DETAIL_BRUSH_RELATIVE = 1, /* radius / detail_resolution */
+    CLAY_DETAIL_CONSTANT = 2      /* no adaptation; deformation only */
+} clay_dynamic_detail_mode;
+
+typedef struct clay_dynamic_topology_desc {
+    uint32_t struct_size; /* = sizeof(clay_dynamic_topology_desc); required */
+    int32_t enabled;
+    int32_t detail_mode; /* clay_dynamic_detail_mode */
+    float target_edge_length;
+    float detail_resolution;
+    /* Split above target * split_factor, collapse below target *
+     * collapse_factor. THE GAP IS HYSTERESIS: with one threshold an edge just
+     * above it splits into two just below it and they collapse back, for as
+     * long as the brush is held still. */
+    float split_factor;
+    float collapse_factor;
+    int32_t max_passes;
+    /* A BOUND, and a parameter rather than a constant, so a host can trade
+     * detail for latency on a slower device. */
+    int32_t max_ops_per_stamp;
+    int32_t allow_split;
+    int32_t allow_collapse;
+    int32_t allow_flip;
+    int32_t relax_after_remesh;
+    float relax_strength;
+    int32_t preserve_boundaries;
+    int32_t preserve_uv_seams;
+    int32_t preserve_sharp_edges;
+} clay_dynamic_topology_desc;
+
+clay_result clay_dynamic_topology_defaults(clay_dynamic_topology_desc* out_desc);
+
+typedef struct clay_dynamic_stamp_report {
+    uint32_t struct_size; /* = sizeof(clay_dynamic_stamp_report); required */
+    uint64_t moved_vertices;
+    uint64_t split_edges;
+    uint64_t collapsed_edges;
+    uint64_t flipped_edges;
+    uint64_t relaxed_vertices;
+    /* Whether the operation budget stopped the pass, so a host can tell "the
+     * region converged" from "it ran out of budget". */
+    int32_t hit_budget;
+    float dirty_min[3];
+    float dirty_max[3];
+    clay_surface_revision revision;
+} clay_dynamic_stamp_report;
+
+/* -- the sculptor ------------------------------------------------------------ */
+
+/* The surface must outlive the sculptor. */
+clay_result clay_dynamic_sculptor_create(clay_dynamic_surface* surface,
+                                         clay_dynamic_sculptor** out_sculptor);
+void clay_dynamic_sculptor_destroy(clay_dynamic_sculptor* sculptor);
+
+/* ONE STAMP. `brush` is the same descriptor the fixed path takes, so a host
+ * carries one brush model across both representations. LAYER is the one verb an
+ * adaptive surface does not offer, and it is refused rather than silently
+ * becoming something else — see the C++ header for why. */
+clay_result clay_dynamic_sculptor_stamp(clay_dynamic_sculptor* sculptor,
+                                        const clay_mesh_brush_desc* brush,
+                                        const clay_dynamic_topology_desc* topology,
+                                        const clay_mask* mask,
+                                        clay_dynamic_stamp_report* out_report);
+
+/* Rebuild the chunked index. BETWEEN STROKES, never mid-drag: a refit stays
+ * correct and does not stay fast, and a rebuild is not automatically an
+ * improvement. */
+clay_result clay_dynamic_sculptor_rebuild_index(clay_dynamic_sculptor* sculptor);
+
+/* -- dirty-chunk transport ---------------------------------------------------
+ *
+ * A host that copies a whole mesh per dab cannot use this at the sizes it exists
+ * for. So the surface is partitioned into CHUNKS, each with its own revision,
+ * and a stamp reports which ones it touched.
+ *
+ * CALLER-OWNED BUFFERS, with a capacity query first. Nothing here allocates a
+ * heap object per chunk per frame.
+ *
+ * NO BORROWED POINTERS INTO THE SURFACE. A mutation can move or free anything,
+ * and a pointer a caller held across one would be a use-after-free with no
+ * generation to check — so the data is COPIED into the caller's memory and the
+ * caller decides when. */
+
+typedef struct clay_dynamic_chunk_info {
+    uint32_t struct_size; /* = sizeof(clay_dynamic_chunk_info); required */
+    uint32_t index;
+    uint64_t revision;
+    uint32_t vertex_count; /* how many float3 the chunk needs */
+    uint32_t index_count;  /* how many uint32 the chunk needs */
+    int32_t geometry_dirty;
+    int32_t topology_dirty;
+    float bounds_min[3];
+    float bounds_max[3];
+} clay_dynamic_chunk_info;
+
+size_t clay_dynamic_surface_chunk_count(const clay_dynamic_sculptor* sculptor);
+clay_result clay_dynamic_surface_chunk_info(const clay_dynamic_sculptor* sculptor, size_t index,
+                                            clay_dynamic_chunk_info* out_info);
+
+/* The chunks the stamps since the last clear touched. Size-query pattern: call
+ * with out_indices == NULL for the count. */
+clay_result clay_dynamic_surface_dirty_chunks(const clay_dynamic_sculptor* sculptor,
+                                              uint32_t* out_indices, size_t* count);
+clay_result clay_dynamic_surface_clear_dirty(clay_dynamic_sculptor* sculptor);
+
+/* Copy one chunk's triangles into the caller's buffers. The indices are LOCAL to
+ * the chunk, so a host uploads it as a standalone draw. Both capacities are
+ * checked and nothing is written past them. */
+clay_result clay_dynamic_surface_copy_chunk(const clay_dynamic_sculptor* sculptor, size_t index,
+                                            float* out_positions, size_t position_capacity,
+                                            float* out_normals, size_t normal_capacity,
+                                            uint32_t* out_indices, size_t index_capacity,
+                                            clay_dynamic_chunk_info* out_written);
 
 /* Update the ray-query tree for vertices that have moved.
  *

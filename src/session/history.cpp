@@ -268,6 +268,20 @@ void History::record_mesh_step(scene::LayerId layer, mesh::VertexDeltas deltas) 
     push(std::move(step));
 }
 
+void History::record_dynamic_mesh_step(scene::LayerId layer, mesh::TopologyDelta delta) {
+    if (!enabled_ || delta.empty()) return;
+    Step step;
+    step.kind = Step::Kind::DynamicMesh;
+    step.layer = layer;
+    step.topology_delta = std::move(delta);
+    JournalEvent e;
+    e.kind = JournalEvent::Kind::DynamicMesh;
+    e.layer = step.layer;
+    e.topology_delta = step.topology_delta;
+    journal_.push_back(std::move(e));
+    push(std::move(step));
+}
+
 void History::record_barrier(std::string what) {
     if (!enabled_) return;
     Step step;
@@ -305,6 +319,15 @@ bool History::apply_step(const Step& step, bool forward, scene::Document& doc,
             // a record paired with the wrong mesh. Propagated rather than
             // ignored: the step stays on the stack and the caller is told.
             return forward ? step.deltas.apply(*m) : step.deltas.revert(*m);
+        }
+        case Step::Kind::DynamicMesh: {
+            mesh::DynamicSurface* surface = dynamic_for_ ? dynamic_for_(step.layer) : nullptr;
+            // Refused rather than skipped, for the reason a missing grid is:
+            // skipping would take the step off the stack and leave the next
+            // undo reversing something older than the user asked for.
+            if (!surface) return false;
+            return forward ? step.topology_delta.apply(*surface)
+                           : step.topology_delta.revert(*surface);
         }
         case Step::Kind::Mask: {
             voxel::MaskField* mask = mask_for ? mask_for(step.layer) : nullptr;
@@ -577,6 +600,9 @@ std::vector<std::uint8_t> History::journal_since(std::size_t from, std::size_t* 
             case JournalEvent::Kind::Mesh:
                 put_bytes(out, e.deltas.encode());
                 break;
+            case JournalEvent::Kind::DynamicMesh:
+                put_bytes(out, e.topology_delta.encode());
+                break;
             case JournalEvent::Kind::Mask:
                 put_bytes(out, encode_mask_cells(e.mask_cells));
                 break;
@@ -691,6 +717,26 @@ bool History::replay(const std::uint8_t* data, std::size_t size, scene::Document
                 push(std::move(step));
                 break;
             }
+            case JournalEvent::Kind::DynamicMesh: {
+                mesh::DynamicSurface* surface = dynamic_for_ ? dynamic_for_(layer) : nullptr;
+                mesh::TopologyDelta delta;
+                if (!surface || !mesh::TopologyDelta::decode(body, payload, &delta) ||
+                    !delta.apply(*surface)) {
+                    if (out) *out = result;
+                    return false;
+                }
+                Step step;
+                step.kind = Step::Kind::DynamicMesh;
+                step.layer = layer;
+                step.topology_delta = delta;
+                JournalEvent e;
+                e.kind = JournalEvent::Kind::DynamicMesh;
+                e.layer = layer;
+                e.topology_delta = std::move(delta);
+                journal_.push_back(std::move(e));
+                push(std::move(step));
+                break;
+            }
             case JournalEvent::Kind::Mask: {
                 voxel::MaskField* mask = mask_for ? mask_for(layer) : nullptr;
                 std::vector<voxel::MaskField::MaskChange> cells;
@@ -773,6 +819,10 @@ std::size_t History::step_bytes(const Step& s) {
     n += s.mask_cells.capacity() * sizeof(voxel::MaskField::MaskChange);
     n += s.barrier.capacity();
     n += s.deltas.bytes();
+    // A DynamicMesh step's payload is the whole gesture's connectivity, which
+    // is by far the largest a step can carry — leaving it out would make a
+    // budget blind to exactly the kind it exists to bound.
+    n += s.topology_delta.bytes();
     // A SurfaceGroup step holds two whole serialised fields, which makes this
     // the term that matters for it rather than a rounding error — the same
     // omission roll-up-document-memory found six of in node_bytes.
@@ -791,6 +841,7 @@ std::size_t History::event_bytes(const JournalEvent& e) {
     n += e.mask_cells.capacity() * sizeof(voxel::MaskField::MaskChange);
     n += e.barrier.capacity();
     n += e.deltas.bytes();
+    n += e.topology_delta.bytes();
     n += e.group_after.capacity();
     n += scene::command_bytes(e.command);
     return n;

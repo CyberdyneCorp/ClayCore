@@ -146,9 +146,9 @@ verbatim, whose vertices move and whose polygons never do.
 |---|---|---|---|
 | **What an edit is** | A node in an edit list — re-editable forever: retransform, re-blend, reorder, remove | An in-place cell write — immediate, but not replayable | A vertex move. **Topology never changes** — `indices` and `quads` come out byte for byte |
 | **History** | The document *is* the history; undo/redo, coalescing and serialization come for free | No history; a host snapshots if it wants undo | A sparse per-gesture record that reverts bit-exactly — undo, but not an edit list |
-| **Resolution** | An evaluation parameter — the field is continuous, so there is no "too coarse" | Real storage, chosen up front — with a stack of levels to refine only where the detail goes | Fixed by the import. Nothing re-tessellates, so detail is bounded by the triangles you already have |
+| **Resolution** | An evaluation parameter — the field is continuous, so there is no "too coarse" | Real storage, chosen up front — with a stack of levels to refine only where the detail goes | Fixed by the import on a **mesh layer**; a `DynamicSurface` adapts under the brush instead, at a target edge length that can be relative to the brush |
 | **Precision** | Exactness and Lipschitz bounds tracked per node; booleans are watertight by construction, raymarching provably correct | Occupancy, not distance — a bound, not a metric | Exact vertices, and no field at all — so nothing to track and nothing to steepen |
-| **Free-form sculpting** | Smooth/flatten **bake** into volumes, and chained bakes steepen the field until consolidation redistances it | Smooth, inflate, pinch, smudge chain forever at no cost — each verb is a local cell operation | Sixteen verbs chain at no field cost, but a large pull **stretches** the triangles it has, which is the signal the mesh wants retopo |
+| **Free-form sculpting** | Smooth/flatten **bake** into volumes, and chained bakes steepen the field until consolidation redistances it | Smooth, inflate, pinch, smudge chain forever at no cost — each verb is a local cell operation | Sixteen verbs chain at no field cost. On a mesh layer a large pull **stretches** the triangles it has; convert to a `DynamicSurface` and the same pull **creates** them |
 | **Colour** | Per item, plus `Paint` regions | Per cell, via the palette | Per vertex, via `paint` and `smear` |
 | **Composability** | Already an operand: boolean it, blend it, deform it, reorder it | Becomes one via `Volume.from_voxels` — non-destructive, and loses nothing the grid had not already quantised | Becomes one via `Volume.from_mesh`, which quantises exact vertices and loses the edge loops. `Mesh.transfer_attributes` refunds the colours and most of the uvs afterwards; **the topology is what it does not give back** |
 | **Scaling cost** | Deep edit lists degrade the safe step scale (grab/relief/noise items each cost some) | Flat per-cell cost however many edits landed | O(the vertices a falloff reached), after an O(vertices) adjacency build the session pays once |
@@ -457,10 +457,28 @@ back and *refine it in place*. Masks, strokes (pressure, spacing, taper, buildup
 and a sparse bit-exact undo record all reach it; a mesh layer is also pickable
 now, since a raycast against a field could never see one.
 
-Stated rather than discovered: a large grab **stretches** triangles and
-`snakehook` stretches them to the extreme. That is the artist's signal the mesh
-wants retopo, exactly as Blender behaves with Dyntopo off — it is where this
-stops, and `docs/sculpt_comparison.md` records the boundary as a decision.
+Stated rather than discovered: on a MESH LAYER a large grab **stretches**
+triangles and `snakehook` stretches them to the extreme, exactly as Blender
+behaves with Dyntopo off. That is the contract rather than a limitation — it is
+what makes a layer worth holding after a retopology pass.
+
+What it is no longer is where the engine stops. Converting to a
+`DynamicSurface` gives the same sixteen verbs over a surface whose connectivity
+changes, so the pull that used to stretch now creates geometry as it goes. The
+two are separate representations and a caller chooses between them; the fixed
+one never adapts behind a brush's back.
+
+And when the topology is past repairing rather than merely stretched,
+`mesh::voxel_remesh` throws it away and builds a new one — the operation
+sculpting applications call **DynaMesh** or **Voxel Remesh**. It samples the
+whole surface into a signed narrow-band field at a spatial resolution you
+choose and reconstructs a watertight isosurface from it, so overlapping shells
+fuse, self-intersections resolve and the density comes out uniform. The price
+is stated rather than discovered: vertex and polygon identity are gone, UVs are
+**dropped** rather than reprojected, and anything thinner than the voxel size
+may go with them. Vertex colour and a caller's per-vertex mask survive, because
+both can be resampled from the source's geometry. `examples/67_voxel_remesh.py`
+shows all of it, including what a coarse voxel size costs.
 
 `relax` is the verb that recovers a stretched *grab*, by sliding vertices along
 the surface to even their spacing. It does **not** recover a deformation, and
@@ -532,16 +550,27 @@ reference iPad is in
 Recorded as decisions rather than gaps, with the reasoning in
 [`openspec/ROADMAP.md`](openspec/ROADMAP.md):
 
-- **No dynamic topology today** — no dyntopo, multires, subdivision or
-  remeshing, so a large pull stretches the triangles it has. This was a
-  non-goal on the grounds that an SDF sidesteps topology entirely; it stopped
-  being one on 2026-08-29, because shipping mesh brushes turned "that stretch
-  is your signal to retopologise elsewhere" into a signal to leave the engine.
-  Adaptive topology and a mesh subdivision hierarchy are now scoped as separate
-  representations beside the fixed-topology one — `openspec/ROADMAP.md`
-  Phase 5 — and **none of it is implemented**. The fixed-topology guarantee is
-  not weakened by the plan: these verbs will still hand back `indices` and
-  `quads` byte for byte.
+- ~~**No dynamic topology today**~~ — **adaptive topology shipped.** A
+  `DynamicSurface` is a fourth representation beside SDF, voxel and fixed mesh:
+  a half-edge surface with stable, generation-tagged handles, local split,
+  collapse and flip, a brush-relative remesher, a chunked mutable spatial index
+  and a sparse reversible undo. A snakehook grows geometry as it pulls instead
+  of stretching what is there — `examples/66_dynamic_topology.py`.
+  **The fixed-topology guarantee is not weakened by it**, and that is the point
+  of it being a separate representation: `MeshSculptor`'s sixteen verbs still
+  hand back `indices` and `quads` byte for byte, and a caller converts into an
+  adaptive surface deliberately rather than a brush slipping into one. A quad
+  workflow does not pass through it: a dynamic surface is triangles and the
+  export says so. **Multires and subdivision are still not implemented** —
+  `openspec/ROADMAP.md` Phase 5 row 3.
+- ~~**No global topology reset**~~ — **`mesh::voxel_remesh` shipped.** A whole
+  surface rebuilt through a signed narrow-band field at an explicit world voxel
+  size: overlaps fuse, open surfaces close under an explicit policy, the result
+  is validated watertight before it is returned, and the cost is preflighted so
+  an oversized request is refused rather than answered by the allocator. **It
+  is not quad retopology** — the output is a lattice-derived triangulation with
+  no edge loops following the form, and no setting changes that. **It does not
+  preserve UVs**, and the API says dropped rather than "best effort".
 - **No PBR channels.** Polypaint works on all three representations; roughness
   and metallic want a UV parameterisation and a texture set, which live
   upstream of this library.

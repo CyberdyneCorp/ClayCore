@@ -24,6 +24,8 @@
 #include "clay/brush/move.h"
 #include "clay/brush/procedural_mask.h"
 #include "clay/brush/preset.h"
+#include "clay/mesh/dynamic_sculpt.h"
+#include "clay/mesh/dynamic_validate.h"
 #include "clay/brush/stroke.h"
 #include "clay/brush/surface_measure.h"
 #include "clay/brush/tube.h"
@@ -50,6 +52,7 @@
 #include "clay/mesh/surface_nets.h"
 #include "clay/mesh/to_field.h"
 #include "clay/mesh/transfer.h"
+#include "clay/mesh/voxel_remesh.h"
 #include "clay/mesh/validate.h"
 #include "clay/parallel/cancel.h"
 #include "clay/parallel/thread_pool.h"
@@ -11923,6 +11926,18 @@ struct clay_mesh_deltas {
     mesh::VertexDeltas deltas;
 };
 
+// The adaptive surface and its sculptor. OPAQUE, and owning: the surface must
+// outlive the sculptor, which is why the sculptor keeps the owner rather than a
+// bare reference — a report reads the owner's revisions after the stamp.
+struct clay_dynamic_surface {
+    mesh::DynamicSurface surface;
+};
+
+struct clay_dynamic_sculptor {
+    clay_dynamic_surface* owner = nullptr;
+    std::unique_ptr<mesh::DynamicSculptor> sculptor;
+};
+
 struct clay_mesh_lattice {
     mesh::Lattice cage;
 };
@@ -12226,6 +12241,195 @@ constexpr std::size_t kTransferDescOriginal =
     offsetof(clay_transfer_desc, max_distance) + sizeof(float);
 constexpr std::size_t kTransferReportOriginal =
     offsetof(clay_transfer_report, max_distance) + sizeof(float);
+
+// Original layouts (ABI 0.63.0), named by their last field so appending one
+// does not silently move the baseline.
+constexpr std::size_t kVoxelRemeshParamsOriginal =
+    offsetof(clay_voxel_remesh_params, memory_budget_bytes) + sizeof(std::uint64_t);
+constexpr std::size_t kVoxelRemeshEstimateOriginal =
+    offsetof(clay_voxel_remesh_estimate, exceeds_memory_budget) + sizeof(std::int32_t);
+constexpr std::size_t kVoxelRemeshReportOriginal =
+    offsetof(clay_voxel_remesh_report, cancelled) + sizeof(std::int32_t);
+
+// The status the engine returns, as the result code this ABI already has.
+//
+// Distinct rather than collapsed, because "lower the resolution", "your model
+// has holes" and "you stopped it" are three different things for a host to
+// say, and one generic failure would make a host guess between them.
+clay_result voxel_remesh_result_code(mesh::VoxelRemeshStatus status) {
+    switch (status) {
+        case mesh::VoxelRemeshStatus::Ok:
+            return CLAY_OK;
+        case mesh::VoxelRemeshStatus::EmptySource:
+        case mesh::VoxelRemeshStatus::InvalidResolution:
+        case mesh::VoxelRemeshStatus::InvalidParameters:
+            return CLAY_ERROR_INVALID_ARGUMENT;
+        case mesh::VoxelRemeshStatus::ExceedsBudget:
+            return CLAY_ERROR_BUDGET_EXCEEDED;
+        case mesh::VoxelRemeshStatus::Unsupported:
+        case mesh::VoxelRemeshStatus::OpenSurfaceRejected:
+            return CLAY_ERROR_UNSUPPORTED;
+        case mesh::VoxelRemeshStatus::ExtractionFailed:
+        case mesh::VoxelRemeshStatus::ResultNotWatertight:
+            return CLAY_ERROR_BACKEND;
+        case mesh::VoxelRemeshStatus::Cancelled:
+            return CLAY_ERROR_CANCELLED;
+    }
+    return CLAY_ERROR_BACKEND;
+}
+
+const char* voxel_remesh_message(mesh::VoxelRemeshStatus status) {
+    switch (status) {
+        case mesh::VoxelRemeshStatus::Ok:
+            return "";
+        case mesh::VoxelRemeshStatus::EmptySource:
+            return "a mesh with no triangles has no surface to rebuild";
+        case mesh::VoxelRemeshStatus::InvalidResolution:
+            return "the resolution must be a finite positive voxel size, or a non-zero "
+                   "longest-axis resolution";
+        case mesh::VoxelRemeshStatus::InvalidParameters:
+            return "a projection strength, projection distance or component volume is out of "
+                   "range";
+        case mesh::VoxelRemeshStatus::Unsupported:
+            return "build_multires_levels is reserved and must be zero";
+        case mesh::VoxelRemeshStatus::ExceedsBudget:
+            return "the request exceeds the memory budget; choose a coarser resolution";
+        case mesh::VoxelRemeshStatus::OpenSurfaceRejected:
+            return "the source has open boundaries and the policy rejects them";
+        case mesh::VoxelRemeshStatus::ExtractionFailed:
+            return "no surface was found at this resolution";
+        case mesh::VoxelRemeshStatus::ResultNotWatertight:
+            return "the result failed the watertight validation this surface mode promises";
+        case mesh::VoxelRemeshStatus::Cancelled:
+            return "cancelled";
+    }
+    return "voxel remesh failed";
+}
+
+clay_result read_voxel_remesh_params(const clay_voxel_remesh_params* desc,
+                                     mesh::VoxelRemeshParams* out) {
+    *out = mesh::VoxelRemeshParams{};
+    if (!desc) return CLAY_OK;  // the documented defaults
+    clay_voxel_remesh_params d;
+    const clay_result r = read_desc(desc, kVoxelRemeshParamsOriginal, &d);
+    if (r != CLAY_OK) return r;
+
+    switch (d.resolution_mode) {
+        case CLAY_VOXEL_REMESH_VOXEL_SIZE:
+            out->resolution_mode = mesh::VoxelRemeshResolutionMode::VoxelSize;
+            break;
+        case CLAY_VOXEL_REMESH_LONGEST_AXIS:
+            out->resolution_mode = mesh::VoxelRemeshResolutionMode::LongestAxisResolution;
+            break;
+        default:
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown voxel remesh resolution mode");
+    }
+    switch (d.surface_mode) {
+        case CLAY_VOXEL_REMESH_SMOOTH:
+            out->surface_mode = mesh::VoxelRemeshSurfaceMode::Smooth;
+            break;
+        case CLAY_VOXEL_REMESH_SHARP:
+            out->surface_mode = mesh::VoxelRemeshSurfaceMode::Sharp;
+            break;
+        default:
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown voxel remesh surface mode");
+    }
+    switch (d.open_surface_policy) {
+        case CLAY_VOXEL_REMESH_OPEN_REJECT:
+            out->open_surface_policy = mesh::VoxelRemeshOpenSurfacePolicy::Reject;
+            break;
+        case CLAY_VOXEL_REMESH_OPEN_CLOSE:
+            out->open_surface_policy = mesh::VoxelRemeshOpenSurfacePolicy::Close;
+            break;
+        case CLAY_VOXEL_REMESH_OPEN_BEST_EFFORT:
+            out->open_surface_policy = mesh::VoxelRemeshOpenSurfacePolicy::BestEffort;
+            break;
+        default:
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown voxel remesh open-surface policy");
+    }
+    switch (d.small_component_policy) {
+        case CLAY_VOXEL_REMESH_KEEP_COMPONENTS:
+            out->small_component_policy = mesh::VoxelRemeshSmallComponentPolicy::Preserve;
+            break;
+        case CLAY_VOXEL_REMESH_REMOVE_BELOW_VOLUME:
+            out->small_component_policy =
+                mesh::VoxelRemeshSmallComponentPolicy::RemoveBelowVolume;
+            break;
+        default:
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown voxel remesh component policy");
+    }
+
+    out->voxel_size = d.voxel_size;
+    out->longest_axis_resolution = d.longest_axis_resolution;
+    out->minimum_component_volume = d.minimum_component_volume;
+    out->preserve_volume = d.preserve_volume != 0;
+    out->project_to_source = d.project_to_source != 0;
+    out->projection_strength = d.projection_strength;
+    out->max_projection_distance_voxels = d.max_projection_distance_voxels;
+    out->preserve_colors = d.preserve_colors != 0;
+    out->build_multires_levels = d.build_multires_levels;
+    out->memory_budget_bytes = d.memory_budget_bytes;
+    return CLAY_OK;
+}
+
+clay_result write_voxel_remesh_estimate(clay_voxel_remesh_estimate* out,
+                                        const mesh::VoxelRemeshEstimate& e) {
+    if (!out) return CLAY_OK;
+    clay_voxel_remesh_estimate probe;
+    const clay_result r = read_desc(out, kVoxelRemeshEstimateOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out->struct_size;
+    clay_voxel_remesh_estimate filled{};
+    filled.resolved_voxel_size = e.resolved_voxel_size;
+    for (int a = 0; a < 3; ++a) filled.grid_dimensions[a] = e.grid_dimensions[a];
+    filled.estimated_active_samples = e.estimated_active_samples;
+    filled.estimated_memory_bytes = e.estimated_memory_bytes;
+    filled.estimated_triangle_min = e.estimated_triangle_min;
+    filled.estimated_triangle_max = e.estimated_triangle_max;
+    filled.boundary_edge_count = e.boundary_edge_count;
+    filled.component_count = e.component_count;
+    filled.has_open_boundaries = e.has_open_boundaries ? 1 : 0;
+    filled.thin_feature_warning = e.thin_feature_warning ? 1 : 0;
+    filled.exceeds_memory_budget = e.exceeds_memory_budget ? 1 : 0;
+    write_desc(out, declared, filled);
+    return CLAY_OK;
+}
+
+clay_result write_voxel_remesh_report(clay_voxel_remesh_report* out,
+                                      const mesh::VoxelRemeshReport& rep) {
+    if (!out) return CLAY_OK;
+    clay_voxel_remesh_report probe;
+    const clay_result r = read_desc(out, kVoxelRemeshReportOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out->struct_size;
+    clay_voxel_remesh_report filled{};
+    filled.voxel_size = rep.voxel_size;
+    filled.source_vertices = rep.source_vertices;
+    filled.source_triangles = rep.source_triangles;
+    filled.result_vertices = rep.result_vertices;
+    filled.result_triangles = rep.result_triangles;
+    filled.source_volume = rep.source_volume;
+    filled.result_volume = rep.result_volume;
+    filled.relative_volume_error = rep.relative_volume_error;
+    filled.source_boundary_edges = rep.source_boundary_edges;
+    filled.result_boundary_edges = rep.result_boundary_edges;
+    filled.source_components = rep.source_components;
+    filled.result_components = rep.result_components;
+    filled.removed_components = rep.removed_components;
+    filled.active_samples = rep.active_samples;
+    filled.source_was_open = rep.source_was_open ? 1 : 0;
+    filled.result_watertight = rep.result_watertight ? 1 : 0;
+    filled.result_manifold = rep.result_manifold ? 1 : 0;
+    filled.result_oriented = rep.result_oriented ? 1 : 0;
+    filled.projected_to_source = rep.projected_to_source ? 1 : 0;
+    filled.projected_vertices = rep.projected_vertices;
+    filled.volume_corrected = rep.volume_corrected ? 1 : 0;
+    filled.colors_transferred = rep.colors_transferred ? 1 : 0;
+    filled.uvs_dropped = rep.uvs_dropped ? 1 : 0;
+    filled.cancelled = rep.cancelled ? 1 : 0;
+    write_desc(out, declared, filled);
+    return CLAY_OK;
+}
 }  // namespace
 
 extern "C" {
@@ -12368,6 +12572,127 @@ clay_result clay_mesh_transfer_attributes(const clay_mesh* source, clay_mesh* ta
         filled.max_distance = report.max_distance;
         write_desc(out_report, declared, filled);
     }
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_transfer_vertex_scalar(const clay_mesh* source, const float* values,
+                                             size_t value_count, const clay_mesh* target,
+                                             float max_distance, float fallback,
+                                             float* out_values, size_t out_count) {
+    const mesh::Mesh* src = nullptr;
+    clay_result r = resolve_mesh(source, &src);
+    if (r != CLAY_OK) return r;
+    const mesh::Mesh* dst = nullptr;
+    r = resolve_mesh(target, &dst);
+    if (r != CLAY_OK) return r;
+    if (!values || !out_values) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null array");
+    // Required rather than inferred, the same rule clay_mesh_copy_indices
+    // follows: a length the caller states is a length the caller can be held
+    // to, and one this side guessed is a read past somebody's buffer.
+    if (value_count != src->positions.size())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "value_count must be the source's vertex count");
+    if (out_count != dst->positions.size())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "out_count must be the target's vertex count");
+    if (max_distance < 0.0f)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "max_distance must be >= 0; zero derives it from the source's size");
+
+    const std::vector<float> in(values, values + value_count);
+    const std::vector<float> out =
+        mesh::transfer_vertex_scalar(*src, in, *dst, max_distance, fallback);
+    if (out.size() != out_count) return fail(CLAY_ERROR_BACKEND, "transfer produced the wrong count");
+    std::memcpy(out_values, out.data(), out_count * sizeof(float));
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_voxel_remesh_defaults(clay_voxel_remesh_params* out_params) {
+    if (!out_params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_params");
+    clay_voxel_remesh_params probe;
+    clay_result r = read_desc(out_params, kVoxelRemeshParamsOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_params->struct_size;
+
+    const mesh::VoxelRemeshParams d;
+    clay_voxel_remesh_params out{};
+    out.resolution_mode = d.resolution_mode == mesh::VoxelRemeshResolutionMode::VoxelSize
+                              ? CLAY_VOXEL_REMESH_VOXEL_SIZE
+                              : CLAY_VOXEL_REMESH_LONGEST_AXIS;
+    out.voxel_size = d.voxel_size;
+    out.longest_axis_resolution = d.longest_axis_resolution;
+    out.surface_mode = d.surface_mode == mesh::VoxelRemeshSurfaceMode::Sharp
+                           ? CLAY_VOXEL_REMESH_SHARP
+                           : CLAY_VOXEL_REMESH_SMOOTH;
+    out.open_surface_policy =
+        d.open_surface_policy == mesh::VoxelRemeshOpenSurfacePolicy::Reject
+            ? CLAY_VOXEL_REMESH_OPEN_REJECT
+            : (d.open_surface_policy == mesh::VoxelRemeshOpenSurfacePolicy::BestEffort
+                   ? CLAY_VOXEL_REMESH_OPEN_BEST_EFFORT
+                   : CLAY_VOXEL_REMESH_OPEN_CLOSE);
+    out.small_component_policy =
+        d.small_component_policy == mesh::VoxelRemeshSmallComponentPolicy::RemoveBelowVolume
+            ? CLAY_VOXEL_REMESH_REMOVE_BELOW_VOLUME
+            : CLAY_VOXEL_REMESH_KEEP_COMPONENTS;
+    out.minimum_component_volume = d.minimum_component_volume;
+    out.preserve_volume = d.preserve_volume ? 1 : 0;
+    out.project_to_source = d.project_to_source ? 1 : 0;
+    out.projection_strength = d.projection_strength;
+    out.max_projection_distance_voxels = d.max_projection_distance_voxels;
+    out.preserve_colors = d.preserve_colors ? 1 : 0;
+    out.build_multires_levels = d.build_multires_levels;
+    out.memory_budget_bytes = d.memory_budget_bytes;
+    write_desc(out_params, declared, out);
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_voxel_remesh_estimate(const clay_mesh* source,
+                                            const clay_voxel_remesh_params* params,
+                                            clay_voxel_remesh_estimate* out_estimate) {
+    const mesh::Mesh* src = nullptr;
+    clay_result r = resolve_mesh(source, &src);
+    if (r != CLAY_OK) return r;
+    mesh::VoxelRemeshParams p;
+    r = read_voxel_remesh_params(params, &p);
+    if (r != CLAY_OK) return r;
+
+    const mesh::VoxelRemeshEstimate e = mesh::voxel_remesh_estimate(*src, p);
+    // Filled even for a refusal: the estimate is what JUSTIFIES the refusal,
+    // and a host that got nothing back could not say why.
+    r = write_voxel_remesh_estimate(out_estimate, e);
+    if (r != CLAY_OK) return r;
+    if (e.status != mesh::VoxelRemeshStatus::Ok)
+        return fail(voxel_remesh_result_code(e.status), voxel_remesh_message(e.status));
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_voxel_remesh(const clay_mesh* source,
+                                   const clay_voxel_remesh_params* params,
+                                   clay_cancel_token* token, clay_mesh** out_mesh,
+                                   clay_voxel_remesh_report* out_report) {
+    if (!out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_mesh");
+    *out_mesh = nullptr;
+    const mesh::Mesh* src = nullptr;
+    clay_result r = resolve_mesh(source, &src);
+    if (r != CLAY_OK) return r;
+    mesh::VoxelRemeshParams p;
+    r = read_voxel_remesh_params(params, &p);
+    if (r != CLAY_OK) return r;
+
+    mesh::VoxelRemeshResult result =
+        mesh::voxel_remesh(*src, p, token ? &token->token : nullptr);
+    // Written before the status is checked, for the same reason the estimate
+    // is: an open-surface refusal carries the source's boundary-edge count,
+    // which is exactly what a host puts in front of a user.
+    r = write_voxel_remesh_report(out_report, result.report);
+    if (r != CLAY_OK) return r;
+    if (result.status != mesh::VoxelRemeshStatus::Ok)
+        return fail(voxel_remesh_result_code(result.status),
+                    voxel_remesh_message(result.status));
+
+    auto built = std::make_unique<clay_mesh>();
+    built->data = std::move(result.mesh);
+    *out_mesh = built.release();
     return CLAY_OK;
 }
 
@@ -12678,6 +13003,441 @@ clay_result clay_mesh_sculptor_apply_preset(clay_mesh_sculptor* sculptor,
         *sculptor->sculptor, brush::resolve_stroke(samples, p.stroke), p.model.verb, p.settings,
         field_mask, deltas ? &deltas->deltas : nullptr, options);
     if (out_applied) *out_applied = applied;
+    return CLAY_OK;
+}
+
+// -- adaptive topology --------------------------------------------------------
+
+namespace {
+
+constexpr std::size_t kDynSurfaceDescOriginal =
+    offsetof(clay_dynamic_surface_desc, uv_seam_epsilon) + sizeof(float);
+constexpr std::size_t kDynStatsOriginal =
+    offsetof(clay_dynamic_surface_stats, bytes) + sizeof(std::uint64_t);
+constexpr std::size_t kRevisionOriginal =
+    offsetof(clay_surface_revision, attributes) + sizeof(std::uint64_t);
+constexpr std::size_t kDynTopologyOriginal =
+    offsetof(clay_dynamic_topology_desc, preserve_sharp_edges) + sizeof(std::int32_t);
+constexpr std::size_t kDynReportOriginal =
+    offsetof(clay_dynamic_stamp_report, revision) + sizeof(clay_surface_revision);
+constexpr std::size_t kChunkInfoOriginal =
+    offsetof(clay_dynamic_chunk_info, bounds_max) + sizeof(float) * 3;
+
+clay_surface_revision to_c_revision(const mesh::DynamicSurface& s) {
+    clay_surface_revision r{};
+    r.struct_size = sizeof(clay_surface_revision);
+    r.topology = s.topology_revision();
+    r.geometry = s.geometry_revision();
+    r.attributes = s.attribute_revision();
+    return r;
+}
+
+}  // namespace
+
+clay_result clay_dynamic_surface_defaults(clay_dynamic_surface_desc* out_desc) {
+    if (!out_desc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null descriptor");
+    clay_dynamic_surface_desc probe;
+    clay_result r = read_desc(out_desc, kDynSurfaceDescOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const mesh::DynamicSurfaceBuildOptions d;
+    clay_dynamic_surface_desc out{};
+    out.weld_epsilon = d.weld_epsilon;
+    out.uv_seam_epsilon = d.uv_seam_epsilon;
+    write_desc(out_desc, out_desc->struct_size, out);
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_surface_from_mesh(const clay_mesh* mesh_handle,
+                                           const clay_dynamic_surface_desc* desc,
+                                           clay_dynamic_surface** out_surface,
+                                           int32_t* out_error) {
+    if (out_error) *out_error = CLAY_DYNAMIC_OK;
+    if (!out_surface) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_surface");
+    *out_surface = nullptr;
+    const mesh::Mesh* src = nullptr;
+    clay_result r = resolve_mesh(mesh_handle, &src);
+    if (r != CLAY_OK) return r;
+
+    mesh::DynamicSurfaceBuildOptions options;
+    if (desc) {
+        clay_dynamic_surface_desc d;
+        r = read_desc(desc, kDynSurfaceDescOriginal, &d);
+        if (r != CLAY_OK) return r;
+        if (d.weld_epsilon > 0.0f) options.weld_epsilon = d.weld_epsilon;
+        if (d.uv_seam_epsilon > 0.0f) options.uv_seam_epsilon = d.uv_seam_epsilon;
+    }
+
+    mesh::DynamicBuildError err = mesh::DynamicBuildError::None;
+    std::optional<mesh::DynamicSurface> built = mesh::DynamicSurface::from_mesh(*src, options, &err);
+    if (!built) {
+        if (out_error) *out_error = static_cast<std::int32_t>(err);
+        // The reason is reported through `out_error` AND named in the message,
+        // because a caller fixing a model needs to know which problem it hit
+        // and a caller logging one needs it readable.
+        const char* what = "a dynamic surface cannot be built from this mesh";
+        switch (err) {
+            case mesh::DynamicBuildError::EmptyMesh:
+                what = "empty mesh, or an index count that is not a multiple of three";
+                break;
+            case mesh::DynamicBuildError::IndexOutOfRange:
+                what = "a triangle index is past the end of the position array";
+                break;
+            case mesh::DynamicBuildError::DegenerateTriangle:
+                what = "a triangle whose corners weld together has no area";
+                break;
+            case mesh::DynamicBuildError::NonManifoldEdge:
+                what = "three or more faces on one edge; a half-edge surface cannot express it";
+                break;
+            default:
+                break;
+        }
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, what);
+    }
+    *out_surface = new clay_dynamic_surface{std::move(*built)};
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_surface_to_mesh(const clay_dynamic_surface* surface,
+                                         clay_mesh** out_mesh) {
+    if (!surface) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic surface");
+    if (!out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_mesh");
+    clay_mesh* handle = new clay_mesh{};
+    handle->data = surface->surface.to_mesh();
+    *out_mesh = handle;
+    return CLAY_OK;
+}
+
+void clay_dynamic_surface_destroy(clay_dynamic_surface* surface) { delete surface; }
+
+clay_result clay_dynamic_surface_stats_get(const clay_dynamic_surface* surface,
+                                           clay_dynamic_surface_stats* out_stats) {
+    if (!surface) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic surface");
+    if (!out_stats) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_stats");
+    clay_dynamic_surface_stats probe;
+    clay_result r = read_desc(out_stats, kDynStatsOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const mesh::DynamicSurfaceStats st = surface->surface.stats();
+    clay_dynamic_surface_stats out{};
+    out.vertices = st.vertices;
+    out.edges = st.edges;
+    out.halfedges = st.halfedges;
+    out.faces = st.faces;
+    out.boundary_edges = st.boundary_edges;
+    out.dead_slots = st.dead_slots;
+    out.bytes = surface->surface.bytes();
+    write_desc(out_stats, out_stats->struct_size, out);
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_surface_revision(const clay_dynamic_surface* surface,
+                                          clay_surface_revision* out_revision) {
+    if (!surface) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic surface");
+    if (!out_revision) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_revision");
+    clay_surface_revision probe;
+    clay_result r = read_desc(out_revision, kRevisionOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    write_desc(out_revision, out_revision->struct_size, to_c_revision(surface->surface));
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_surface_serialize(const clay_dynamic_surface* surface,
+                                           uint8_t* out_data, size_t* count) {
+    if (!surface) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic surface");
+    const std::vector<std::uint8_t> bytes = surface->surface.encode();
+    return write_sized(bytes.data(), bytes.size(), out_data, count, "dynamic surface");
+}
+
+clay_result clay_dynamic_surface_deserialize(const uint8_t* data, size_t size,
+                                             clay_dynamic_surface** out_surface) {
+    if (!out_surface) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_surface");
+    *out_surface = nullptr;
+    if (!data || size == 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null or empty data");
+    mesh::DynamicSurface built;
+    if (!mesh::DynamicSurface::decode(data, size, &built))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "not a dynamic surface this build can read: malformed, truncated, or "
+                    "written by a newer schema version");
+    *out_surface = new clay_dynamic_surface{std::move(built)};
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_surface_validate(const clay_dynamic_surface* surface, int32_t* out_ok,
+                                          char* out_message, size_t* message_len) {
+    if (!surface) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic surface");
+    const mesh::DynamicValidationReport report = mesh::validate_dynamic_surface(surface->surface);
+    if (out_ok) *out_ok = report.ok ? 1 : 0;
+    const std::string text = report.summary();
+    return write_sized(reinterpret_cast<const std::uint8_t*>(text.c_str()), text.size() + 1,
+                       reinterpret_cast<std::uint8_t*>(out_message), message_len,
+                       "validation message");
+}
+
+clay_result clay_dynamic_topology_defaults(clay_dynamic_topology_desc* out_desc) {
+    if (!out_desc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null descriptor");
+    clay_dynamic_topology_desc probe;
+    clay_result r = read_desc(out_desc, kDynTopologyOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const mesh::DynamicTopologySettings d;
+    clay_dynamic_topology_desc out{};
+    out.enabled = d.enabled ? 1 : 0;
+    out.detail_mode = static_cast<std::int32_t>(d.detail_mode);
+    out.target_edge_length = d.target_edge_length;
+    out.detail_resolution = d.detail_resolution;
+    out.split_factor = d.split_factor;
+    out.collapse_factor = d.collapse_factor;
+    out.max_passes = d.max_passes;
+    out.max_ops_per_stamp = d.max_ops_per_stamp;
+    out.allow_split = d.allow_split ? 1 : 0;
+    out.allow_collapse = d.allow_collapse ? 1 : 0;
+    out.allow_flip = d.allow_flip ? 1 : 0;
+    out.relax_after_remesh = d.relax_after_remesh ? 1 : 0;
+    out.relax_strength = d.relax_strength;
+    out.preserve_boundaries = d.preserve_boundaries ? 1 : 0;
+    out.preserve_uv_seams = d.preserve_uv_seams ? 1 : 0;
+    out.preserve_sharp_edges = d.preserve_sharp_edges ? 1 : 0;
+    write_desc(out_desc, out_desc->struct_size, out);
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_sculptor_create(clay_dynamic_surface* surface,
+                                         clay_dynamic_sculptor** out_sculptor) {
+    if (!surface) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic surface");
+    if (!out_sculptor) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_sculptor");
+    clay_dynamic_sculptor* handle = new clay_dynamic_sculptor{};
+    handle->owner = surface;
+    handle->sculptor = std::make_unique<mesh::DynamicSculptor>(surface->surface);
+    *out_sculptor = handle;
+    return CLAY_OK;
+}
+
+void clay_dynamic_sculptor_destroy(clay_dynamic_sculptor* sculptor) { delete sculptor; }
+
+clay_result clay_dynamic_sculptor_stamp(clay_dynamic_sculptor* sculptor,
+                                        const clay_mesh_brush_desc* brush,
+                                        const clay_dynamic_topology_desc* topology,
+                                        const clay_mask* mask,
+                                        clay_dynamic_stamp_report* out_report) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    mesh::MeshBrush verb = mesh::MeshBrush::Draw;
+    mesh::MeshBrushSettings settings;
+    clay_result r = read_mesh_brush(brush, &verb, &settings);
+    if (r != CLAY_OK) return r;
+    if (!mesh::dynamic_offers(verb))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "an adaptive surface does not offer this verb; see dynamic_offers");
+
+    mesh::DynamicTopologySettings topo;
+    if (topology) {
+        clay_dynamic_topology_desc d;
+        r = read_desc(topology, kDynTopologyOriginal, &d);
+        if (r != CLAY_OK) return r;
+        if (d.detail_mode < 0 || d.detail_mode > 2)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "unknown detail mode: " + std::to_string(d.detail_mode));
+        topo.enabled = d.enabled != 0;
+        topo.detail_mode = static_cast<mesh::DynamicDetailMode>(d.detail_mode);
+        if (d.target_edge_length > 0.0f) topo.target_edge_length = d.target_edge_length;
+        if (d.detail_resolution > 0.0f) topo.detail_resolution = d.detail_resolution;
+        if (d.split_factor > 0.0f) topo.split_factor = d.split_factor;
+        if (d.collapse_factor > 0.0f) topo.collapse_factor = d.collapse_factor;
+        if (d.max_passes > 0) topo.max_passes = d.max_passes;
+        if (d.max_ops_per_stamp > 0) topo.max_ops_per_stamp = d.max_ops_per_stamp;
+        topo.allow_split = d.allow_split != 0;
+        topo.allow_collapse = d.allow_collapse != 0;
+        topo.allow_flip = d.allow_flip != 0;
+        topo.relax_after_remesh = d.relax_after_remesh != 0;
+        if (d.relax_strength > 0.0f) topo.relax_strength = d.relax_strength;
+        topo.preserve_boundaries = d.preserve_boundaries != 0;
+        topo.preserve_uv_seams = d.preserve_uv_seams != 0;
+        topo.preserve_sharp_edges = d.preserve_sharp_edges != 0;
+    }
+
+    field::MaskGate gate;
+    if (mask) {
+        voxel::MaskField* field_mask = nullptr;
+        r = resolve_mask(mask, &field_mask);
+        if (r != CLAY_OK) return r;
+        gate = [field_mask](kernel::cfloat3 p) { return field_mask->sample(p); };
+    }
+
+    const mesh::DynamicStampResult res =
+        sculptor->sculptor->stamp(verb, settings, topo, gate, nullptr);
+
+    if (out_report) {
+        clay_dynamic_stamp_report probe;
+        r = read_desc(out_report, kDynReportOriginal, &probe);
+        if (r != CLAY_OK) return r;
+        clay_dynamic_stamp_report out{};
+        out.moved_vertices = res.moved_vertices;
+        out.split_edges = res.remesh.split;
+        out.collapsed_edges = res.remesh.collapsed;
+        out.flipped_edges = res.remesh.flipped;
+        out.relaxed_vertices = res.remesh.relaxed;
+        out.hit_budget = res.remesh.hit_budget ? 1 : 0;
+        if (!res.dirty_bounds.empty()) {
+            write_f3(out.dirty_min, res.dirty_bounds.min);
+            write_f3(out.dirty_max, res.dirty_bounds.max);
+        }
+        out.revision = to_c_revision(sculptor->owner->surface);
+        write_desc(out_report, out_report->struct_size, out);
+    }
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_sculptor_rebuild_index(clay_dynamic_sculptor* sculptor) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    sculptor->sculptor->rebuild_index();
+    return CLAY_OK;
+}
+
+size_t clay_dynamic_surface_chunk_count(const clay_dynamic_sculptor* sculptor) {
+    if (!sculptor || !sculptor->sculptor) return 0;
+    return sculptor->sculptor->bvh().leaf_count();
+}
+
+clay_result clay_dynamic_surface_chunk_info(const clay_dynamic_sculptor* sculptor, size_t index,
+                                            clay_dynamic_chunk_info* out_info) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    if (!out_info) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_info");
+    clay_dynamic_chunk_info probe;
+    clay_result r = read_desc(out_info, kChunkInfoOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const mesh::SurfaceLeaf* leaf = sculptor->sculptor->bvh().leaf(static_cast<std::uint32_t>(index));
+    if (!leaf) return fail(CLAY_ERROR_NOT_FOUND, "chunk index " + std::to_string(index));
+
+    clay_dynamic_chunk_info out{};
+    out.index = static_cast<std::uint32_t>(index);
+    out.revision = leaf->revision;
+    // THREE VERTICES PER FACE, unwelded within the chunk. A chunk is a
+    // standalone draw, so its indices are local and its vertices are its own;
+    // welding across a chunk boundary would make one chunk's upload depend on
+    // another's.
+    out.vertex_count = static_cast<std::uint32_t>(leaf->faces.size() * 3);
+    out.index_count = out.vertex_count;
+    out.geometry_dirty = leaf->geometry_dirty ? 1 : 0;
+    out.topology_dirty = leaf->topology_dirty ? 1 : 0;
+    if (!leaf->bounds.empty()) {
+        write_f3(out.bounds_min, leaf->bounds.min);
+        write_f3(out.bounds_max, leaf->bounds.max);
+    }
+    write_desc(out_info, out_info->struct_size, out);
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_surface_dirty_chunks(const clay_dynamic_sculptor* sculptor,
+                                              uint32_t* out_indices, size_t* count) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    if (!count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null count");
+    const std::vector<std::uint32_t>& dirty = sculptor->sculptor->bvh().dirty_leaves();
+    // The size-query pattern by hand: `write_sized` copies BYTES and these are
+    // indices, so a byte-wise fill would write a quarter of each one.
+    if (!out_indices) {
+        *count = dirty.size();
+        return CLAY_OK;
+    }
+    if (*count < dirty.size()) {
+        *count = dirty.size();
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "capacity below the " + std::to_string(dirty.size()) + " dirty chunks");
+    }
+    for (std::size_t i = 0; i < dirty.size(); ++i) out_indices[i] = dirty[i];
+    *count = dirty.size();
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_surface_clear_dirty(clay_dynamic_sculptor* sculptor) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    sculptor->sculptor->bvh().clear_dirty();
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_surface_copy_chunk(const clay_dynamic_sculptor* sculptor, size_t index,
+                                            float* out_positions, size_t position_capacity,
+                                            float* out_normals, size_t normal_capacity,
+                                            uint32_t* out_indices, size_t index_capacity,
+                                            clay_dynamic_chunk_info* out_written) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    const mesh::DynamicSculptor& s = *sculptor->sculptor;
+    const mesh::SurfaceLeaf* leaf = s.bvh().leaf(static_cast<std::uint32_t>(index));
+    if (!leaf) return fail(CLAY_ERROR_NOT_FOUND, "chunk index " + std::to_string(index));
+
+    const mesh::DynamicSurface& surface = s.surface();
+    std::size_t live_faces = 0;
+    for (mesh::FaceId f : leaf->faces)
+        if (surface.live(f)) ++live_faces;
+    const std::size_t needed_floats = live_faces * 9;
+    const std::size_t needed_indices = live_faces * 3;
+
+    if (out_written) {
+        clay_dynamic_chunk_info probe;
+        clay_result r = read_desc(out_written, kChunkInfoOriginal, &probe);
+        if (r != CLAY_OK) return r;
+    }
+    // THE CAPACITY QUERY: a null buffer reports what it would need and writes
+    // nothing, so a host sizes once and copies once.
+    if (!out_positions && !out_indices) {
+        if (out_written) {
+            clay_dynamic_chunk_info out{};
+            out.index = static_cast<std::uint32_t>(index);
+            out.revision = leaf->revision;
+            out.vertex_count = static_cast<std::uint32_t>(live_faces * 3);
+            out.index_count = static_cast<std::uint32_t>(needed_indices);
+            write_desc(out_written, out_written->struct_size, out);
+        }
+        return CLAY_OK;
+    }
+    if (out_positions && position_capacity < needed_floats)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "position capacity " + std::to_string(position_capacity) + " below the " +
+                        std::to_string(needed_floats) + " floats this chunk needs");
+    if (out_normals && normal_capacity < needed_floats)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "normal capacity below what this chunk needs");
+    if (out_indices && index_capacity < needed_indices)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "index capacity below what this chunk needs");
+
+    std::size_t vi = 0;
+    for (mesh::FaceId f : leaf->faces) {
+        if (!surface.live(f)) continue;
+        mesh::VertexId v[3];
+        if (!surface.face_vertices(f, v)) continue;
+        for (int k = 0; k < 3; ++k) {
+            const mesh::DynamicVertex* rec = surface.vertex(v[k]);
+            const kernel::cfloat3 p = rec ? rec->position : kernel::cf3(0, 0, 0);
+            const kernel::cfloat3 n = rec ? rec->normal : kernel::cf3(0, 1, 0);
+            if (out_positions) {
+                out_positions[vi * 3 + 0] = p.x;
+                out_positions[vi * 3 + 1] = p.y;
+                out_positions[vi * 3 + 2] = p.z;
+            }
+            if (out_normals) {
+                out_normals[vi * 3 + 0] = n.x;
+                out_normals[vi * 3 + 1] = n.y;
+                out_normals[vi * 3 + 2] = n.z;
+            }
+            if (out_indices) out_indices[vi] = static_cast<std::uint32_t>(vi);
+            ++vi;
+        }
+    }
+    if (out_written) {
+        clay_dynamic_chunk_info out{};
+        out.index = static_cast<std::uint32_t>(index);
+        out.revision = leaf->revision;
+        out.vertex_count = static_cast<std::uint32_t>(vi);
+        out.index_count = static_cast<std::uint32_t>(vi);
+        out.geometry_dirty = leaf->geometry_dirty ? 1 : 0;
+        out.topology_dirty = leaf->topology_dirty ? 1 : 0;
+        if (!leaf->bounds.empty()) {
+            write_f3(out.bounds_min, leaf->bounds.min);
+            write_f3(out.bounds_max, leaf->bounds.max);
+        }
+        write_desc(out_written, out_written->struct_size, out);
+    }
     return CLAY_OK;
 }
 

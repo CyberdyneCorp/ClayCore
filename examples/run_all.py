@@ -96,6 +96,9 @@ EXAMPLES = [
     "62_what_this_document_costs",
     "63_surface_groups",
     "64_measuring_the_surface",
+    "65_brush_presets",
+    "66_dynamic_topology",
+    "67_voxel_remesh",
 ]
 
 
@@ -114,6 +117,7 @@ CAPABILITY_EXAMPLES = {
     "evaluation-backends": None,  # the same field on four devices — a parity test, not a render
     # plus 19_mesh_import for the reverse direction, 44_quad_export for quads,
     # and 45-47 for the fixed-topology mesh brushes
+    # plus 66_dynamic_topology for the adaptive surface — the third mesh mode
     "meshing": "08_meshing_and_io",
     "picking": "10_editing",  # plus 45_mesh_brushes for raycasting a mesh layer
     # plus 36_mesh_layers for the mesh chunk
@@ -129,6 +133,8 @@ CAPABILITY_EXAMPLES = {
     "python-bindings": None,      # every example IS this capability
     "c-abi": None,                # exercised from Swift and C, not from the gallery
     "build-packaging": None,      # a build concern; nothing to render
+    # The adaptive surface: its own capability, its own example.
+    "dynamic-topology": "66_dynamic_topology",
     "examples": None,             # this file
 }
 
@@ -172,18 +178,70 @@ def check_capability_coverage():
         return []                 # not a source checkout; nothing to guard
     living = {d for d in os.listdir(specs)
               if os.path.isdir(os.path.join(specs, d))}
+    # WHAT AN ACTIVE CHANGE DECLARES IS *KNOWN* BUT NOT YET *LIVING*, and the
+    # asymmetry is the whole point. A capability exists in this tree from the
+    # moment a change proposes it and only becomes a directory under
+    # openspec/specs when that change is ARCHIVED. So:
+    #
+    #   - it must NOT be required to have an example yet. Several active
+    #     changes propose capabilities nobody has implemented, and demanding a
+    #     gallery entry for them would make this gate fail on every proposal.
+    #   - it must be ALLOWED to have one. A change that lands its capability
+    #     with its example should add the entry in the same commit, and this
+    #     check calling that entry stale is what stops it.
+    #
+    # Symmetric treatment gets one of the two wrong whichever way it is set.
+    known = set(living)
+    changes = os.path.join(os.path.dirname(HERE), "openspec", "changes")
+    if os.path.isdir(changes):
+        for change in os.listdir(changes):
+            proposed = os.path.join(changes, change, "specs")
+            if not os.path.isdir(proposed):
+                continue
+            known |= {d for d in os.listdir(proposed)
+                      if os.path.isdir(os.path.join(proposed, d))}
     problems = []
     unlisted = living - set(CAPABILITY_EXAMPLES)
     if unlisted:
         problems.append(f"capabilities with no example and no recorded reason: "
                         f"{sorted(unlisted)} — add them to CAPABILITY_EXAMPLES")
-    stale = set(CAPABILITY_EXAMPLES) - living
+    stale = set(CAPABILITY_EXAMPLES) - known
     if stale:
         problems.append(f"CAPABILITY_EXAMPLES names capabilities that no longer exist: "
                         f"{sorted(stale)}")
     for capability, example in sorted(CAPABILITY_EXAMPLES.items()):
         if example is not None and example not in EXAMPLES:
             problems.append(f"{capability} points at {example!r}, which is not in EXAMPLES")
+    return problems
+
+
+def check_every_example_runs():
+    """Every examples/NN_*.py is in EXAMPLES.
+
+    THE GATE THAT WAS MISSING, and it cost two examples. `65_brush_presets` and
+    `66_dynamic_topology` were both written, both committed, both referenced
+    from CAPABILITY_EXAMPLES' comments — and neither was ever added to the run
+    list, so the gallery never ran either of them and nothing said so. An
+    example that does not run is not an example; it is a file that compiles in
+    someone's head.
+
+    The capability gate above cannot catch this on its own: it only looks at the
+    examples a capability POINTS AT, and a capability whose entry names an older
+    example is perfectly happy while a newer one rots unrun.
+    """
+    root = os.path.join(os.path.dirname(HERE), "examples")
+    listed = set(EXAMPLES)
+    problems = []
+    for name in sorted(os.listdir(root)):
+        if not name.endswith(".py") or not name[:2].isdigit():
+            continue
+        stem = name[:-3]
+        if stem not in listed:
+            problems.append(f"examples/{name} exists but is not in EXAMPLES, "
+                            f"so the gallery never runs it")
+    for stem in EXAMPLES:
+        if not os.path.isfile(os.path.join(root, stem + ".py")):
+            problems.append(f"EXAMPLES lists {stem}, which has no file")
     return problems
 
 
@@ -308,7 +366,8 @@ def main():
         return 1
 
     coverage = (check_duplicate_capability_keys() + check_capability_coverage()
-                + check_fast_scaling() + check_example_references())
+                + check_every_example_runs() + check_fast_scaling()
+                + check_example_references())
     if coverage:
         for problem in coverage:
             print(f"  {problem}", file=sys.stderr)

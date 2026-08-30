@@ -20,6 +20,8 @@
 #include "clay/brush/lattice_gizmo.h"
 #include "clay/brush/move.h"
 #include "clay/brush/preset.h"
+#include "clay/mesh/dynamic_sculpt.h"
+#include "clay/mesh/dynamic_validate.h"
 #include "clay/brush/stroke.h"
 #include "clay/brush/tube.h"
 #include "clay/cut/cut.h"
@@ -46,6 +48,7 @@
 #include "clay/mesh/deform.h"
 #include "clay/mesh/sculpt.h"
 #include "clay/mesh/transfer.h"
+#include "clay/mesh/voxel_remesh.h"
 #include "clay/mesh/surface_nets.h"
 #include "clay/mesh/to_field.h"
 #include "clay/mesh/validate.h"
@@ -483,6 +486,87 @@ struct PyMesh {
 struct PyLattice {
     mesh::Lattice cage{math::Aabb{}, 3, 3, 3};
 };
+
+// The two spellings of a remesh resolution, and the refusal a caller gets for
+// naming both or neither.
+//
+// Exactly one, rather than a mode enum plus a value: a Python caller who set
+// the mode and forgot the value would otherwise get whatever the other field
+// happened to hold, and the mistake would look like a resolution that did
+// nothing.
+mesh::VoxelRemeshParams py_remesh_params(nb::handle resolution, nb::handle voxel_size,
+                                         nb::handle memory_budget) {
+    mesh::VoxelRemeshParams p;
+    const bool has_resolution = !resolution.is_none();
+    const bool has_voxel = !voxel_size.is_none();
+    if (has_resolution == has_voxel)
+        throw std::invalid_argument("give exactly one of resolution= or voxel_size=");
+    if (has_resolution) {
+        const long long n = nb::cast<long long>(resolution);
+        if (n <= 0) throw std::invalid_argument("resolution must be a positive integer");
+        p.resolution_mode = mesh::VoxelRemeshResolutionMode::LongestAxisResolution;
+        p.longest_axis_resolution = static_cast<std::uint32_t>(n);
+    } else {
+        p.resolution_mode = mesh::VoxelRemeshResolutionMode::VoxelSize;
+        p.voxel_size = nb::cast<float>(voxel_size);
+    }
+    if (!memory_budget.is_none()) {
+        const long long bytes = nb::cast<long long>(memory_budget);
+        if (bytes < 0) throw std::invalid_argument("memory_budget must be >= 0");
+        p.memory_budget_bytes = static_cast<std::uint64_t>(bytes);
+    }
+    return p;
+}
+
+mesh::VoxelRemeshOpenSurfacePolicy py_open_policy(const std::string& name) {
+    if (name == "close") return mesh::VoxelRemeshOpenSurfacePolicy::Close;
+    if (name == "reject") return mesh::VoxelRemeshOpenSurfacePolicy::Reject;
+    if (name == "best_effort") return mesh::VoxelRemeshOpenSurfacePolicy::BestEffort;
+    throw std::invalid_argument("open_surface must be 'close', 'reject' or 'best_effort'");
+}
+
+mesh::VoxelRemeshSurfaceMode py_surface_mode(const std::string& name) {
+    if (name == "smooth") return mesh::VoxelRemeshSurfaceMode::Smooth;
+    if (name == "sharp") return mesh::VoxelRemeshSurfaceMode::Sharp;
+    throw std::invalid_argument("surface_mode must be 'smooth' or 'sharp'");
+}
+
+// A refusal names WHICH contract refused it. An empty mesh with no explanation
+// would make a caller diagnose the engine's decision from the geometry, which
+// is exactly what the typed status exists to prevent.
+[[noreturn]] void raise_remesh(mesh::VoxelRemeshStatus status) {
+    switch (status) {
+        case mesh::VoxelRemeshStatus::EmptySource:
+            throw std::invalid_argument("a mesh with no triangles has no surface to rebuild");
+        case mesh::VoxelRemeshStatus::InvalidResolution:
+            throw std::invalid_argument(
+                "the resolution must be a finite positive voxel size, or a non-zero "
+                "longest-axis resolution");
+        case mesh::VoxelRemeshStatus::InvalidParameters:
+            throw std::invalid_argument(
+                "a projection strength, projection distance or component volume is out of "
+                "range");
+        case mesh::VoxelRemeshStatus::Unsupported:
+            throw std::runtime_error("this voxel remesh option is not supported yet");
+        case mesh::VoxelRemeshStatus::ExceedsBudget:
+            throw std::runtime_error(
+                "the voxel remesh exceeds the memory budget; choose a coarser resolution");
+        case mesh::VoxelRemeshStatus::OpenSurfaceRejected:
+            throw std::runtime_error(
+                "the source has open boundaries and open_surface='reject' refuses them");
+        case mesh::VoxelRemeshStatus::ExtractionFailed:
+            throw std::runtime_error("no surface was found at this resolution");
+        case mesh::VoxelRemeshStatus::ResultNotWatertight:
+            throw std::runtime_error(
+                "the voxel remesh result failed the watertight validation this surface mode "
+                "promises");
+        case mesh::VoxelRemeshStatus::Cancelled:
+            throw std::runtime_error("the voxel remesh was cancelled");
+        case mesh::VoxelRemeshStatus::Ok:
+            break;
+    }
+    throw std::runtime_error("voxel remesh failed");
+}
 
 struct PyMeshSculptor {
     nb::object owner;  // the Python Mesh, kept alive for the session's lifetime
@@ -3566,6 +3650,153 @@ NB_MODULE(pyclay, m) {
             "duplicates a position into two vertices with different uvs. A target\n"
             "vertex on a seam has one slot and two right answers. Colour is\n"
             "unaffected, being continuous across a seam.")
+        .def(
+            "voxel_remesh_estimate",
+            [](const PyMesh& self, nb::handle resolution, nb::handle voxel_size,
+               nb::handle memory_budget) {
+                const mesh::VoxelRemeshParams p =
+                    py_remesh_params(resolution, voxel_size, memory_budget);
+                mesh::VoxelRemeshEstimate e;
+                {
+                    const mesh::Mesh& src = self.data();
+                    nb::gil_scoped_release release;
+                    e = mesh::voxel_remesh_estimate(src, p);
+                }
+                if (e.status != mesh::VoxelRemeshStatus::Ok &&
+                    e.status != mesh::VoxelRemeshStatus::ExceedsBudget)
+                    raise_remesh(e.status);
+                nb::dict out;
+                out["voxel_size"] = e.resolved_voxel_size;
+                out["grid_dimensions"] = nb::make_tuple(
+                    e.grid_dimensions[0], e.grid_dimensions[1], e.grid_dimensions[2]);
+                out["active_samples"] = e.estimated_active_samples;
+                out["memory_bytes"] = e.estimated_memory_bytes;
+                out["triangle_min"] = e.estimated_triangle_min;
+                out["triangle_max"] = e.estimated_triangle_max;
+                out["boundary_edges"] = e.boundary_edge_count;
+                out["components"] = e.component_count;
+                out["open_boundaries"] = e.has_open_boundaries;
+                out["thin_feature_warning"] = e.thin_feature_warning;
+                out["exceeds_memory_budget"] = e.exceeds_memory_budget;
+                return out;
+            },
+            "resolution"_a = nb::none(), "voxel_size"_a = nb::none(),
+            "memory_budget"_a = nb::none(),
+            "What a voxel remesh would cost, without performing it.\n\n"
+            "Cheap enough to call on every tick of a resolution slider: it walks\n"
+            "the triangles and marks a brick lattice, and allocates nothing\n"
+            "proportional to the samples it is predicting.\n\n"
+            "`active_samples` is an UPPER BOUND on the narrow band, not a\n"
+            "prediction -- the marking keeps bricks that turn out to hold nothing\n"
+            "near enough to store. The remesh report's `active_samples` is what\n"
+            "the run actually held.\n\n"
+            "Give exactly one of `resolution` (longest axis, an integer) or\n"
+            "`voxel_size` (world units).")
+        .def(
+            "voxel_remesh",
+            [](const PyMesh& self, nb::handle resolution, nb::handle voxel_size,
+               const std::string& open_surface, const std::string& surface_mode,
+               bool preserve_volume, bool project_to_source, float projection_strength,
+               bool preserve_colors, nb::handle minimum_component_volume,
+               nb::handle memory_budget) {
+                mesh::VoxelRemeshParams p =
+                    py_remesh_params(resolution, voxel_size, memory_budget);
+                p.open_surface_policy = py_open_policy(open_surface);
+                p.surface_mode = py_surface_mode(surface_mode);
+                p.preserve_volume = preserve_volume;
+                p.project_to_source = project_to_source;
+                p.projection_strength = projection_strength;
+                p.preserve_colors = preserve_colors;
+                if (!minimum_component_volume.is_none()) {
+                    p.small_component_policy =
+                        mesh::VoxelRemeshSmallComponentPolicy::RemoveBelowVolume;
+                    p.minimum_component_volume = nb::cast<float>(minimum_component_volume);
+                }
+
+                mesh::VoxelRemeshResult r;
+                {
+                    const mesh::Mesh& src = self.data();
+                    nb::gil_scoped_release release;
+                    r = mesh::voxel_remesh(src, p);
+                }
+                if (r.status != mesh::VoxelRemeshStatus::Ok) raise_remesh(r.status);
+
+                PyMesh out;
+                out.m = std::move(r.mesh);
+                nb::dict report;
+                report["voxel_size"] = r.report.voxel_size;
+                report["source_vertices"] = r.report.source_vertices;
+                report["source_triangles"] = r.report.source_triangles;
+                report["result_vertices"] = r.report.result_vertices;
+                report["result_triangles"] = r.report.result_triangles;
+                report["source_volume"] = r.report.source_volume;
+                report["result_volume"] = r.report.result_volume;
+                report["relative_volume_error"] = r.report.relative_volume_error;
+                report["source_boundary_edges"] = r.report.source_boundary_edges;
+                report["result_boundary_edges"] = r.report.result_boundary_edges;
+                report["source_components"] = r.report.source_components;
+                report["result_components"] = r.report.result_components;
+                report["removed_components"] = r.report.removed_components;
+                report["active_samples"] = r.report.active_samples;
+                report["source_was_open"] = r.report.source_was_open;
+                report["result_watertight"] = r.report.result_watertight;
+                report["result_manifold"] = r.report.result_manifold;
+                report["result_oriented"] = r.report.result_oriented;
+                report["projected_to_source"] = r.report.projected_to_source;
+                report["projected_vertices"] = r.report.projected_vertices;
+                report["volume_corrected"] = r.report.volume_corrected;
+                report["colors_transferred"] = r.report.colors_transferred;
+                report["uvs_dropped"] = r.report.uvs_dropped;
+                return nb::make_tuple(std::move(out), std::move(report));
+            },
+            "resolution"_a = nb::none(), "voxel_size"_a = nb::none(),
+            "open_surface"_a = "close", "surface_mode"_a = "smooth",
+            "preserve_volume"_a = true, "project_to_source"_a = true,
+            "projection_strength"_a = 0.75f, "preserve_colors"_a = true,
+            "minimum_component_volume"_a = nb::none(), "memory_budget"_a = nb::none(),
+            "Rebuild the whole surface through a signed volumetric representation\n"
+            "at an explicit spatial resolution -- the operation an artist calls\n"
+            "DynaMesh. Returns (mesh, report).\n\n"
+            "Overlapping shells fuse, self-intersections resolve, stretched\n"
+            "triangles disappear, and the topology is REPLACED: no source vertex\n"
+            "or polygon index means anything about the result. Details finer than\n"
+            "the voxel size may be lost, and UVs are DROPPED rather than\n"
+            "reprojected -- the report says both.\n\n"
+            "Give exactly one of `resolution` (longest axis) or `voxel_size`.\n"
+            "surface_mode='sharp' selects dual contouring and is EXPERIMENTAL:\n"
+            "the watertight guarantee is not claimed for it.\n\n"
+            "A refusal raises, and the message names which contract refused it.")
+        .def(
+            "transfer_vertex_scalar",
+            [](const PyMesh& self, const PyMesh& source, nb::handle values,
+               float max_distance, float fallback) {
+                if (max_distance < 0.0f)
+                    throw std::invalid_argument(
+                        "max_distance must be >= 0; zero derives it from the source's size");
+                nb::object flat = nb::module_::import_("numpy")
+                                      .attr("asarray")(values, "dtype"_a = "float32")
+                                      .attr("reshape")(-1);
+                std::vector<float> in;
+                for (nb::handle v : flat) in.push_back(nb::cast<float>(v));
+                const mesh::Mesh& src = source.data();
+                if (in.size() != src.positions.size())
+                    throw std::invalid_argument("values must hold one entry per source vertex");
+                std::vector<float> out;
+                {
+                    const mesh::Mesh& dst = self.data();
+                    nb::gil_scoped_release release;
+                    out = mesh::transfer_vertex_scalar(src, in, dst, max_distance, fallback);
+                }
+                return nb::module_::import_("numpy").attr("asarray")(nb::cast(out),
+                                                                     "dtype"_a = "float32");
+            },
+            "source"_a, "values"_a, "max_distance"_a = 0.0f, "fallback"_a = 0.0f,
+            "Resample a per-vertex scalar -- a mask, a weight -- from `source` onto\n"
+            "this mesh by closest point. Returns one float per vertex of THIS mesh.\n\n"
+            "What carries a mask across a voxel remesh: the remesh replaces the\n"
+            "topology the mask was indexed by, so anything that survives has to be\n"
+            "resampled from geometry. A vertex further than `max_distance` from the\n"
+            "source takes `fallback`; zero derives the threshold.")
         .def_static(
             "from_triangles",
             [](nb::handle positions, nb::handle indices) {
@@ -5857,6 +6088,206 @@ NB_MODULE(pyclay, m) {
                "each stamp applies at its own strength; passing twice acts twice")
         .value("CLAMPED", brush::Accumulation::Clamped,
                "the stroke reaches its strength once, however many stamps overlap");
+
+    // -- adaptive topology ----------------------------------------------------
+    nb::enum_<mesh::DynamicDetailMode>(
+        m, "DetailMode",
+        "Where a remesher's target edge length comes from.")
+        .value("WORLD", mesh::DynamicDetailMode::World, "target_edge_length in world units")
+        .value("BRUSH_RELATIVE", mesh::DynamicDetailMode::BrushRelative,
+               "radius / detail_resolution — a smaller brush makes finer geometry")
+        .value("CONSTANT", mesh::DynamicDetailMode::Constant, "no adaptation; deformation only");
+
+    nb::class_<mesh::DynamicTopologySettings>(
+        m, "TopologySettings",
+        "How a stamp adapts the surface under it.\n\n"
+        "The gap between split_factor and collapse_factor is HYSTERESIS: with\n"
+        "one threshold an edge just above it splits into two just below it and\n"
+        "they collapse back, for as long as the brush is held still.")
+        .def(nb::init<>())
+        .def_rw("enabled", &mesh::DynamicTopologySettings::enabled)
+        .def_rw("detail_mode", &mesh::DynamicTopologySettings::detail_mode)
+        .def_rw("target_edge_length", &mesh::DynamicTopologySettings::target_edge_length)
+        .def_rw("detail_resolution", &mesh::DynamicTopologySettings::detail_resolution)
+        .def_rw("split_factor", &mesh::DynamicTopologySettings::split_factor)
+        .def_rw("collapse_factor", &mesh::DynamicTopologySettings::collapse_factor)
+        .def_rw("max_passes", &mesh::DynamicTopologySettings::max_passes)
+        .def_rw("max_ops_per_stamp", &mesh::DynamicTopologySettings::max_ops_per_stamp,
+                "a bound a host sets, so detail can be traded for latency")
+        .def_rw("allow_split", &mesh::DynamicTopologySettings::allow_split)
+        .def_rw("allow_collapse", &mesh::DynamicTopologySettings::allow_collapse)
+        .def_rw("allow_flip", &mesh::DynamicTopologySettings::allow_flip)
+        .def_rw("relax_after_remesh", &mesh::DynamicTopologySettings::relax_after_remesh)
+        .def_rw("relax_strength", &mesh::DynamicTopologySettings::relax_strength)
+        .def_rw("preserve_boundaries", &mesh::DynamicTopologySettings::preserve_boundaries)
+        .def_rw("preserve_uv_seams", &mesh::DynamicTopologySettings::preserve_uv_seams)
+        .def_rw("preserve_sharp_edges", &mesh::DynamicTopologySettings::preserve_sharp_edges);
+
+    nb::class_<mesh::DynamicSurface>(
+        m, "DynamicSurface",
+        "A surface whose CONNECTIVITY changes under the brush: geometry is\n"
+        "created where a stroke needs it and removed where it does not.\n\n"
+        "A DIFFERENT REPRESENTATION, chosen deliberately, never a mode the\n"
+        "fixed sculptor slips into — MeshSculptor's contract that indices and\n"
+        "quads come out byte-identical is unchanged.\n\n"
+        "A dynamic surface is TRIANGLES. to_mesh() writes no quads and derives\n"
+        "none: a quad workflow does not pass through this representation.")
+        .def_static(
+            "from_mesh",
+            [](const PyMesh& handle, float weld_epsilon, float uv_seam_epsilon) {
+                const mesh::Mesh& src = handle.data();
+                mesh::DynamicSurfaceBuildOptions options;
+                if (weld_epsilon > 0.0f) options.weld_epsilon = weld_epsilon;
+                if (uv_seam_epsilon > 0.0f) options.uv_seam_epsilon = uv_seam_epsilon;
+                mesh::DynamicBuildError err = mesh::DynamicBuildError::None;
+                auto built = mesh::DynamicSurface::from_mesh(src, options, &err);
+                if (!built) {
+                    const char* what = "a dynamic surface cannot be built from this mesh";
+                    switch (err) {
+                        case mesh::DynamicBuildError::EmptyMesh:
+                            what = "empty mesh, or an index count not a multiple of three";
+                            break;
+                        case mesh::DynamicBuildError::IndexOutOfRange:
+                            what = "a triangle index is past the end of the positions";
+                            break;
+                        case mesh::DynamicBuildError::DegenerateTriangle:
+                            what = "a triangle whose corners weld together has no area";
+                            break;
+                        case mesh::DynamicBuildError::NonManifoldEdge:
+                            what =
+                                "three or more faces on one edge; a half-edge surface cannot "
+                                "express it";
+                            break;
+                        default:
+                            break;
+                    }
+                    throw std::invalid_argument(what);
+                }
+                return std::move(*built);
+            },
+            "mesh"_a, "weld_epsilon"_a = 0.0f, "uv_seam_epsilon"_a = 0.0f,
+            "Convert a mesh. Refuses rather than repairs: silently dropping a\n"
+            "third face on an edge would change the model without saying so.")
+        .def("to_mesh",
+             [](const mesh::DynamicSurface& s) {
+                 PyMesh out;
+                 out.m = s.to_mesh();
+                 return out;
+             },
+             "The surface as a flat mesh. Triangles, with quads empty.")
+        .def_prop_ro("vertex_count",
+                     [](const mesh::DynamicSurface& s) { return s.stats().vertices; })
+        .def_prop_ro("edge_count", [](const mesh::DynamicSurface& s) { return s.stats().edges; })
+        .def_prop_ro("face_count", [](const mesh::DynamicSurface& s) { return s.stats().faces; })
+        .def_prop_ro("boundary_edge_count",
+                     [](const mesh::DynamicSurface& s) { return s.stats().boundary_edges; })
+        .def_prop_ro("dead_slots",
+                     [](const mesh::DynamicSurface& s) { return s.stats().dead_slots; })
+        .def_prop_ro("bytes", [](const mesh::DynamicSurface& s) { return s.bytes(); })
+        .def_prop_ro("topology_revision", &mesh::DynamicSurface::topology_revision,
+                     "advances when connectivity changed")
+        .def_prop_ro("geometry_revision", &mesh::DynamicSurface::geometry_revision,
+                     "advances when a vertex moved")
+        .def_prop_ro("attribute_revision", &mesh::DynamicSurface::attribute_revision)
+        .def("validate",
+             [](const mesh::DynamicSurface& s) {
+                 const mesh::DynamicValidationReport r = mesh::validate_dynamic_surface(s);
+                 nb::dict out;
+                 out["ok"] = r.ok;
+                 out["summary"] = r.summary();
+                 return out;
+             },
+             "Every invariant of the half-edge structure. The failure mode here\n"
+             "is a surface that still renders and is quietly wrong in one fan,\n"
+             "so this is a call rather than something only a test does.")
+        .def("serialize",
+             [](const mesh::DynamicSurface& s) {
+                 std::vector<std::uint8_t> bytes = s.encode();
+                 return nb::bytes(bytes.data(), bytes.size());
+             },
+             "A versioned format of its own; generations are preserved.")
+        .def_static("deserialize",
+                    [](nb::bytes data) {
+                        mesh::DynamicSurface out;
+                        if (!mesh::DynamicSurface::decode(
+                                reinterpret_cast<const std::uint8_t*>(data.c_str()), data.size(),
+                                &out))
+                            throw std::invalid_argument(
+                                "not a dynamic surface this build can read: malformed, "
+                                "truncated, or written by a newer schema version");
+                        return out;
+                    },
+                    "data"_a);
+
+    nb::class_<mesh::DynamicSculptor>(
+        m, "DynamicSculptor",
+        "The brush engine over an adaptive surface: the same verbs, the same\n"
+        "falloffs, the same mask, and the same deformation math — the shared\n"
+        "kernels called rather than copied, so a brush means one thing on both\n"
+        "representations.\n\n"
+        "The surface must outlive the sculptor.")
+        .def("__init__",
+             [](mesh::DynamicSculptor* self, mesh::DynamicSurface& surface) {
+                 new (self) mesh::DynamicSculptor(surface);
+             },
+             "surface"_a, nb::keep_alive<1, 2>())
+        .def(
+            "stamp",
+            [](mesh::DynamicSculptor& self, const std::string& verb, nb::handle center,
+               float radius, float strength, const std::string& falloff,
+               const mesh::DynamicTopologySettings& topology, nb::handle direction,
+               nb::handle mask, bool geodesic, int smooth_iterations) {
+                mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
+                mesh::MeshBrushSettings settings = mesh_brush_settings(
+                    verb, center, radius, strength, falloff, direction, nb::none(),
+                    nb::cast(geodesic), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
+                    smooth_iterations, 0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(),
+                    &chosen);
+                if (!mesh::dynamic_offers(chosen))
+                    throw std::invalid_argument(
+                        "an adaptive surface does not offer '" + verb +
+                        "': its reference is the surface as the STROKE found it, and half the "
+                        "vertices under the brush at the end of an adaptive stroke did not "
+                        "exist at the start");
+                const voxel::MaskField* field_mask = borrow_mask(mask);
+                field::MaskGate gate;
+                if (field_mask)
+                    gate = [field_mask](kernel::cfloat3 p) { return field_mask->sample(p); };
+                mesh::DynamicStampResult r;
+                {
+                    nb::gil_scoped_release release;
+                    r = self.stamp(chosen, settings, topology, gate, nullptr);
+                }
+                nb::dict out;
+                out["moved"] = r.moved_vertices;
+                out["split"] = r.remesh.split;
+                out["collapsed"] = r.remesh.collapsed;
+                out["flipped"] = r.remesh.flipped;
+                out["relaxed"] = r.remesh.relaxed;
+                out["hit_budget"] = r.remesh.hit_budget;
+                out["topology_revision"] = r.topology_revision;
+                out["geometry_revision"] = r.geometry_revision;
+                return out;
+            },
+            "verb"_a, "center"_a, "radius"_a, "strength"_a = 0.5f, "falloff"_a = "smooth",
+            "topology"_a = mesh::DynamicTopologySettings{}, "direction"_a = nb::none(),
+            "mask"_a = nb::none(), "geodesic"_a = true, "smooth_iterations"_a = 1,
+            "One stamp: remesh where the verb's timing says, deform through the\n"
+            "shared kernels, recompute the normals of what moved, and keep the\n"
+            "chunked index in step.")
+        .def("rebuild_index", &mesh::DynamicSculptor::rebuild_index,
+             "Rebuild the chunked index. BETWEEN strokes, never mid-drag: a refit\n"
+             "stays correct and does not stay fast, and a rebuild is not\n"
+             "automatically an improvement.")
+        .def_prop_ro("chunk_count",
+                     [](const mesh::DynamicSculptor& s) { return s.bvh().leaf_count(); })
+        .def_prop_ro("dirty_chunks",
+                     [](const mesh::DynamicSculptor& s) {
+                         const std::vector<std::uint32_t>& d = s.bvh().dirty_leaves();
+                         return std::vector<std::uint32_t>(d.begin(), d.end());
+                     },
+                     "The chunks the stamps since the last clear touched.")
+        .def("clear_dirty", [](mesh::DynamicSculptor& s) { s.bvh().clear_dirty(); });
 
     // -- the brush model, and brushes as data ---------------------------------
     nb::class_<mesh::AutomaskSettings>(
