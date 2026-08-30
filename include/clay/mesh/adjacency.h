@@ -33,6 +33,7 @@
 // vertex or index count changes, which `matches` is what checks.
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "clay/mesh/mesh_data.h"
@@ -118,6 +119,16 @@ class Adjacency {
 struct WalkScratch {
     std::vector<float> distance;       // per class; kUnreached where untouched
     std::vector<std::uint32_t> dirty;  // classes to reset, so the reset is O(reached)
+    // The walk's frontier, as an explicit binary heap rather than a
+    // `std::priority_queue` built per call.
+    //
+    // THE CONTAINER IS THE WHOLE REASON. A `priority_queue` owns its vector, so
+    // one constructed inside the walk allocated on EVERY dab of every geodesic
+    // stroke — which is the default footprint for fourteen of the sixteen
+    // verbs. `std::push_heap` and `std::pop_heap` over a buffer that lives here
+    // are exactly what `priority_queue` calls internally, so the pop sequence
+    // is unchanged; what changes is that the storage is reused.
+    std::vector<std::pair<float, std::uint32_t>> frontier;
     static constexpr float kUnreached = -1.0f;
 };
 

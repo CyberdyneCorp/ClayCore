@@ -411,6 +411,25 @@ std::size_t apply_to_mask(voxel::MaskField& mask, const std::vector<Stamp>& stam
     return stamps.size();
 }
 
+void StrokeTransaction::clear() {
+    samples_.clear();
+    stamps_.clear();
+    emitted_ = 0;
+}
+
+std::vector<Stamp> StrokeTransaction::append(const std::vector<StrokeSample>& samples) {
+    samples_.insert(samples_.end(), samples.begin(), samples.end());
+    stamps_ = resolve_stroke(samples_, preset_);
+    // A re-resolve can in principle produce FEWER stamps than a previous one —
+    // the steady-stroke filter trails the cursor, so a path that doubles back
+    // can shorten. Clamping rather than subtracting keeps the tail well defined
+    // instead of wrapping a size_t.
+    const std::size_t start = std::min(emitted_, stamps_.size());
+    std::vector<Stamp> tail(stamps_.begin() + static_cast<std::ptrdiff_t>(start), stamps_.end());
+    emitted_ = stamps_.size();
+    return tail;
+}
+
 std::size_t apply_to_mesh(mesh::MeshSculptor& sculptor, const std::vector<Stamp>& stamps,
                           mesh::MeshBrush verb, const mesh::MeshBrushSettings& settings,
                           const voxel::MaskField* mask, mesh::VertexDeltas* deltas,
@@ -425,6 +444,33 @@ std::size_t apply_to_mesh(mesh::MeshSculptor& sculptor, const std::vector<Stamp>
     if (mask) {
         const math::Transform to_world = options.mesh_to_world;
         mask_gate = [mask, to_world](kernel::cfloat3 p) { return mask->sample(to_world.apply(p)); };
+    }
+
+    // The automask factors `mesh` cannot reach on its own, wired here because
+    // this is the one function that can see all three modules. Built ONCE for
+    // the stroke: they are `std::function`s, and rebuilding them per stamp
+    // would allocate on every dab.
+    if (options.cavity_field || options.groups) {
+        mesh::AutomaskInputs automask;
+        if (options.cavity_field) {
+            const std::function<float(kernel::cfloat3)>& field = options.cavity_field;
+            const MeasureSettings measure = options.cavity_measure;
+            // THE SAME ESTIMATOR a painted cavity mask uses. Not a mesh-side
+            // curvature from a vertex ring — two implementations of one measure
+            // is two answers about one surface, and the requirement is that
+            // they cannot disagree.
+            automask.cavity = [field, measure](kernel::cfloat3 p) {
+                return measure_at(field, SurfaceMeasure::Cavity, p, measure);
+            };
+        }
+        if (options.groups) {
+            const voxel::GroupField* groups = options.groups;
+            automask.group = [groups](kernel::cfloat3 p) -> std::uint32_t {
+                return static_cast<std::uint32_t>(groups->at(p));
+            };
+        }
+        automask.active_group = options.active_group;
+        sculptor.set_automask_inputs(std::move(automask));
     }
 
     const bool was_deferring = sculptor.defer_normals();
@@ -482,6 +528,38 @@ std::size_t apply_to_mesh(mesh::MeshSculptor& sculptor, const std::vector<Stamp>
             stamp_settings.center = s.position;
         }
         previous = s.position;
+
+        // THE STAMP'S ORIENTATION REACHES THE ALPHA, which is what makes a rake
+        // or a chisel expressible on a mesh layer at all.
+        //
+        // `resolve_stroke` has put rotate-along-stroke and the stylus azimuth
+        // into `Stamp::rotation` since they shipped, and `stamps_to_nodes`
+        // applies it to an SDF item's transform — but this consumer dropped it,
+        // so a mesh stamp faced the same way however the artist turned the
+        // stylus. A rotationally symmetric brush is unaffected either way,
+        // which is why the gap survived: it is only visible through an alpha.
+        //
+        // The rotation takes +X onto the direction the stamp faces (see
+        // `align_x_to`), so that image is the alpha's u axis. `calpha_frame`
+        // re-orthogonalises it against the stamp's own normal, so a tangent
+        // that is not already in the stamp plane is corrected rather than
+        // refused.
+        //
+        // OPTED INTO, not inferred from the quaternion, and the difference is
+        // a defect rather than a preference. The obvious rule — consume the
+        // rotation when it is not the identity — is DISCONTINUOUS at zero:
+        // `align_x_to` returns the identity for an azimuth of exactly 0, so
+        // that stamp would keep `calpha_frame`'s derived tangent, which for an
+        // upward direction is (0, 0, -1), while an azimuth of one
+        // ten-thousandth would take (1, 0, 0). The stamp would snap through 90
+        // degrees as the stylus crossed straight ahead.
+        //
+        // An explicit switch has neither problem: a caller that does not set it
+        // keeps its own `alpha_tangent` exactly, including the derived default,
+        // and a caller that does gets a tangent that turns continuously with
+        // the stamp.
+        if (options.orient_alpha_by_stamp && settings.has_alpha())
+            stamp_settings.alpha_tangent = s.rotation.rotate(kernel::cf3(1, 0, 0));
 
         if (sculptor.stamp(verb, stamp_settings, mask_gate, deltas) > 0) ++applied;
     }

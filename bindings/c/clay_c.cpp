@@ -23,6 +23,7 @@
 #include "clay/brush/mask_extrude.h"
 #include "clay/brush/move.h"
 #include "clay/brush/procedural_mask.h"
+#include "clay/brush/preset.h"
 #include "clay/brush/stroke.h"
 #include "clay/brush/surface_measure.h"
 #include "clay/brush/tube.h"
@@ -681,15 +682,13 @@ clay_result read_preset(const clay_stroke_preset* src, brush::StrokePreset* out)
 }
 
 // Samples arrive packed as count*5 floats, matching clay_stroke_sample.
-clay_result read_stroke(const float* samples_xyzpt, std::size_t sample_count,
-                        const clay_stroke_preset* preset,
-                        std::vector<brush::StrokeSample>* out_samples,
-                        brush::StrokePreset* out_preset) {
+// The samples alone, without a preset. Split out because a BRUSH preset already
+// carries its stroke half, so that path has no separate preset to read.
+clay_result read_samples(const float* samples_xyzpt, std::size_t sample_count,
+                         std::vector<brush::StrokeSample>* out_samples) {
     if (sample_count > 0 && !samples_xyzpt)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null stroke samples");
     clay_result r = check_batch("stroke samples", sample_count);
-    if (r != CLAY_OK) return r;
-    r = read_preset(preset, out_preset);
     if (r != CLAY_OK) return r;
     out_samples->resize(sample_count);
     for (std::size_t i = 0; i < sample_count; ++i) {
@@ -699,6 +698,15 @@ clay_result read_stroke(const float* samples_xyzpt, std::size_t sample_count,
         (*out_samples)[i].tilt = row[4];
     }
     return CLAY_OK;
+}
+
+clay_result read_stroke(const float* samples_xyzpt, std::size_t sample_count,
+                        const clay_stroke_preset* preset,
+                        std::vector<brush::StrokeSample>* out_samples,
+                        brush::StrokePreset* out_preset) {
+    clay_result r = read_preset(preset, out_preset);
+    if (r != CLAY_OK) return r;
+    return read_samples(samples_xyzpt, sample_count, out_samples);
 }
 
 // The same, from the struct array that carries the channels a tablet reports.
@@ -12000,6 +12008,13 @@ clay_result read_mesh_brush(const clay_mesh_brush_desc* src, mesh::MeshBrush* ou
     // declared only an older layout cannot reach this anyway — the colour verbs
     // did not exist then.
     out->color = kernel::cf3(d.color[0], d.color[1], d.color[2]);
+    // The automask block, appended. Zero factors is no automask, which is what
+    // a host declaring the older layout sends and exactly the behaviour it had.
+    out->automask.factors = d.automask_factors;
+    if (d.automask_normal_angle > 0.0f) out->automask.normal_angle = d.automask_normal_angle;
+    if (d.automask_boundary_rings > 0) out->automask.boundary_rings = d.automask_boundary_rings;
+    if (d.automask_cavity_strength > 0.0f)
+        out->automask.cavity_strength = d.automask_cavity_strength;
     return CLAY_OK;
 }
 
@@ -12049,18 +12064,209 @@ clay_result clay_mesh_brush_defaults(clay_mesh_brush_desc* out_desc) {
     out.smooth_iterations = d.smooth_iterations;
     out.layer_height = d.layer_height;
     write_f3(out.color, d.color);
+    out.automask_factors = d.automask.factors;
+    out.automask_normal_angle = d.automask.normal_angle;
+    out.automask_boundary_rings = d.automask.boundary_rings;
+    out.automask_cavity_strength = d.automask.cavity_strength;
     // The alpha stays null in the defaults: a stamp without one is the common
     // case, and a default pointing at nothing a caller owns would be a trap.
     write_desc(out_desc, declared, out);
     return CLAY_OK;
 }
 
+}  // extern "C" — the helpers below return C++ types and cannot have C linkage
+
+// A namespace does NOT reset language linkage: an anonymous namespace opened
+// inside extern "C" leaves everything in it with C linkage, and a function
+// returning a class type then fails -Wreturn-type-c-linkage on Clang (an
+// error under -Werror) and C4190 on MSVC. GCC is silent, which is why this
+// only broke the macOS and Windows jobs. Same shape as the close above
+// clay_mesh_sculptor_create.
 namespace {
+
+constexpr std::size_t kBrushModelOriginal = offsetof(clay_brush_model, post) + sizeof(std::int32_t);
+constexpr std::size_t kBrushPresetOriginal =
+    offsetof(clay_brush_preset, brush) + sizeof(clay_mesh_brush_desc);
+
+clay_brush_model to_c_model(const mesh::BrushModel& m) {
+    clay_brush_model out{};
+    out.verb = static_cast<std::int32_t>(m.verb);
+    out.footprint = static_cast<std::int32_t>(m.footprint);
+    out.falloff = static_cast<std::int32_t>(m.falloff);
+    out.frame = static_cast<std::int32_t>(m.frame);
+    out.kernel = static_cast<std::int32_t>(m.kernel);
+    out.target = static_cast<std::int32_t>(m.target);
+    out.post = static_cast<std::int32_t>(m.post);
+    return out;
+}
+
+mesh::BrushModel from_c_model(const clay_brush_model& d) {
+    mesh::BrushModel m;
+    m.verb = static_cast<mesh::MeshBrush>(d.verb);
+    m.footprint = static_cast<mesh::BrushFootprint>(d.footprint);
+    m.falloff = static_cast<mesh::MeshFalloff>(d.falloff);
+    m.frame = static_cast<mesh::BrushFrame>(d.frame);
+    m.kernel = static_cast<mesh::BrushKernelId>(d.kernel);
+    m.target = static_cast<mesh::BrushWriteTarget>(d.target);
+    m.post = static_cast<mesh::BrushPostPolicy>(d.post);
+    return m;
+}
+
+// The settings half of a preset, as a descriptor. PLACEMENT is deliberately not
+// written — centre, direction, seed class and the alpha block belong to a stamp
+// and to the caller, not to a brush.
+clay_mesh_brush_desc to_c_brush(const mesh::MeshBrushSettings& s, mesh::MeshBrush verb) {
+    clay_mesh_brush_desc out{};
+    out.struct_size = sizeof(clay_mesh_brush_desc);
+    out.verb = static_cast<std::int32_t>(verb);
+    out.radius = s.radius;
+    out.strength = s.strength;
+    out.falloff = static_cast<std::int32_t>(s.falloff);
+    write_f3(out.deposit_normal, s.deposit_normal);
+    out.geodesic = s.geodesic ? 1 : 0;
+    out.seed_class = CLAY_MESH_NO_CLASS;
+    out.flatten_mode = static_cast<std::int32_t>(s.flatten_mode);
+    out.use_given_plane = s.use_given_plane ? 1 : 0;
+    write_f3(out.plane_point, s.plane_point);
+    write_f3(out.plane_normal, s.plane_normal);
+    out.polish_angle = s.polish_angle;
+    out.smooth_iterations = s.smooth_iterations;
+    out.layer_height = s.layer_height;
+    write_f3(out.color, s.color);
+    out.automask_factors = s.automask.factors;
+    out.automask_normal_angle = s.automask.normal_angle;
+    out.automask_boundary_rings = s.automask.boundary_rings;
+    out.automask_cavity_strength = s.automask.cavity_strength;
+    return out;
+}
+
+clay_brush_preset to_c_preset(const brush::BrushPreset& p) {
+    clay_brush_preset out{};
+    out.struct_size = sizeof(clay_brush_preset);
+    // Truncated rather than refused: a name is a label, and losing its tail is
+    // a worse outcome than nothing only if a host was using it as a key, which
+    // is what the library's own short names exist to avoid.
+    const std::size_t n = std::min<std::size_t>(p.name.size(), CLAY_BRUSH_PRESET_NAME_MAX - 1);
+    std::memcpy(out.name, p.name.data(), n);
+    out.name[n] = '\0';
+    out.stroke = preset_fields(p.stroke);
+    out.stroke.struct_size = sizeof(clay_stroke_preset);
+    out.model = to_c_model(p.model);
+    out.model.struct_size = sizeof(clay_brush_model);
+    out.brush = to_c_brush(p.settings, p.model.verb);
+    return out;
+}
+
+clay_result read_brush_preset(const clay_brush_preset* src, brush::BrushPreset* out) {
+    if (!src) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brush preset");
+    clay_brush_preset d;
+    clay_result r = read_desc(src, kBrushPresetOriginal, &d);
+    if (r != CLAY_OK) return r;
+    d.name[CLAY_BRUSH_PRESET_NAME_MAX - 1] = '\0';
+    out->name = d.name;
+    r = read_preset(&d.stroke, &out->stroke);
+    if (r != CLAY_OK) return r;
+    if (!mesh_brush_is_known(d.model.verb))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "unknown mesh brush in preset model: " + std::to_string(d.model.verb));
+    out->model = from_c_model(d.model);
+    mesh::MeshBrush verb = mesh::MeshBrush::Draw;
+    // The settings descriptor validates itself through the same reader every
+    // stamp uses, so a preset cannot smuggle a value a stamp would refuse.
+    r = read_mesh_brush(&d.brush, &verb, &out->settings);
+    if (r != CLAY_OK) return r;
+    return CLAY_OK;
+}
+
 constexpr std::size_t kTransferDescOriginal =
     offsetof(clay_transfer_desc, max_distance) + sizeof(float);
 constexpr std::size_t kTransferReportOriginal =
     offsetof(clay_transfer_report, max_distance) + sizeof(float);
 }  // namespace
+
+extern "C" {
+
+clay_result clay_brush_model_of(int32_t verb, clay_brush_model* out_model) {
+    if (!out_model) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null model");
+    if (!mesh_brush_is_known(verb))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown mesh brush: " + std::to_string(verb));
+    clay_brush_model probe;
+    clay_result r = read_desc(out_model, kBrushModelOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    write_desc(out_model, out_model->struct_size,
+               to_c_model(mesh::model_of(static_cast<mesh::MeshBrush>(verb))));
+    return CLAY_OK;
+}
+
+clay_result clay_brush_preset_defaults(clay_brush_preset* out_preset) {
+    if (!out_preset) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null preset");
+    clay_brush_preset probe;
+    clay_result r = read_desc(out_preset, kBrushPresetOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    brush::BrushPreset d;
+    d.name = "Standard";
+    d.model = mesh::model_of(mesh::MeshBrush::Draw);
+    write_desc(out_preset, out_preset->struct_size, to_c_preset(d));
+    return CLAY_OK;
+}
+
+clay_result clay_brush_preset_serialize(const clay_brush_preset* preset, uint8_t* out_data,
+                                        size_t* count) {
+    brush::BrushPreset p;
+    clay_result r = read_brush_preset(preset, &p);
+    if (r != CLAY_OK) return r;
+    const std::vector<std::uint8_t> bytes = p.serialize();
+    return write_sized(bytes.data(), bytes.size(), out_data, count, "brush preset");
+}
+
+clay_result clay_brush_preset_deserialize(const uint8_t* data, size_t size,
+                                          clay_brush_preset* out_preset) {
+    if (!data || size == 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null or empty brush preset data");
+    if (!out_preset) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null preset");
+    clay_brush_preset probe;
+    clay_result r = read_desc(out_preset, kBrushPresetOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::optional<brush::BrushPreset> p = brush::BrushPreset::deserialize(data, size);
+    if (!p)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "not a brush preset this build can read: malformed, or written by a schema "
+                    "version newer than " +
+                        std::to_string(brush::kBrushPresetVersion));
+    write_desc(out_preset, out_preset->struct_size, to_c_preset(*p));
+    return CLAY_OK;
+}
+
+uint32_t clay_brush_preset_version(void) {
+    return static_cast<std::uint32_t>(brush::kBrushPresetVersion);
+}
+
+size_t clay_brush_preset_library_count(void) { return brush::reference_presets().size(); }
+
+clay_result clay_brush_preset_library_at(size_t index, clay_brush_preset* out_preset) {
+    if (!out_preset) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null preset");
+    clay_brush_preset probe;
+    clay_result r = read_desc(out_preset, kBrushPresetOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::vector<brush::BrushPreset> lib = brush::reference_presets();
+    if (index >= lib.size())
+        return fail(CLAY_ERROR_NOT_FOUND,
+                    "preset index " + std::to_string(index) + " of " + std::to_string(lib.size()));
+    write_desc(out_preset, out_preset->struct_size, to_c_preset(lib[index]));
+    return CLAY_OK;
+}
+
+clay_result clay_brush_preset_by_name(const char* name, clay_brush_preset* out_preset) {
+    if (!name) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null preset name");
+    if (!out_preset) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null preset");
+    clay_brush_preset probe;
+    clay_result r = read_desc(out_preset, kBrushPresetOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::optional<brush::BrushPreset> p = brush::reference_preset(name);
+    if (!p) return fail(CLAY_ERROR_NOT_FOUND, std::string("no preset named ") + name);
+    write_desc(out_preset, out_preset->struct_size, to_c_preset(*p));
+    return CLAY_OK;
+}
 
 clay_result clay_mesh_transfer_defaults(clay_transfer_desc* out_desc) {
     if (!out_desc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null descriptor");
@@ -12379,6 +12585,54 @@ clay_result clay_mesh_sculptor_apply_stroke(clay_mesh_sculptor* sculptor,
     const std::size_t applied =
         brush::apply_to_mesh(*sculptor->sculptor, brush::resolve_stroke(samples, resolved), verb,
                              settings, field_mask, deltas ? &deltas->deltas : nullptr, options);
+    if (out_applied) *out_applied = applied;
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_apply_preset(clay_mesh_sculptor* sculptor,
+                                            const float* samples_xyzpt, size_t sample_count,
+                                            const clay_brush_preset* preset, const float* alpha,
+                                            int32_t alpha_width, int32_t alpha_height,
+                                            int32_t orient_alpha_by_stamp, const clay_mask* mask,
+                                            const clay_mesh_frame* mesh_to_world,
+                                            int32_t defer_normals, clay_mesh_deltas* deltas,
+                                            size_t* out_applied) {
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/true);
+    if (r != CLAY_OK) return r;
+    brush::BrushPreset p;
+    r = read_brush_preset(preset, &p);
+    if (r != CLAY_OK) return r;
+
+    // The alpha is BORROWED, never copied and never stored in a preset: image
+    // content is the caller's, and a preset library has to cost kilobytes.
+    if (alpha) {
+        if (alpha_width < 2 || alpha_height < 2)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "an alpha needs at least 2x2 samples; there is nothing to interpolate "
+                        "below that");
+        p.settings.alpha = alpha;
+        p.settings.alpha_width = alpha_width;
+        p.settings.alpha_height = alpha_height;
+    }
+
+    brush::MeshStrokeOptions options;
+    options.defer_normals = defer_normals != 0;
+    options.orient_alpha_by_stamp = orient_alpha_by_stamp != 0;
+    r = read_mesh_frame(mesh_to_world, &options.mesh_to_world);
+    if (r != CLAY_OK) return r;
+
+    std::vector<brush::StrokeSample> samples;
+    r = read_samples(samples_xyzpt, sample_count, &samples);
+    if (r != CLAY_OK) return r;
+
+    voxel::MaskField* field_mask = nullptr;
+    if (mask) {
+        r = resolve_mask(mask, &field_mask);
+        if (r != CLAY_OK) return r;
+    }
+    const std::size_t applied = brush::apply_to_mesh(
+        *sculptor->sculptor, brush::resolve_stroke(samples, p.stroke), p.model.verb, p.settings,
+        field_mask, deltas ? &deltas->deltas : nullptr, options);
     if (out_applied) *out_applied = applied;
     return CLAY_OK;
 }

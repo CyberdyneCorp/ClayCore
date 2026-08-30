@@ -25,6 +25,19 @@ jobs:
         run: cmake --build --preset cpu-only
       - name: Test
         run: ctest --preset cpu-only
+      # A toolchain with no golden table in test_mesh_sculpt_parity.cpp writes
+      # one out instead of failing, and every ctest preset here sets
+      # outputOnFailure -- so a PASSING test's stdout never reaches this log
+      # and the table has to leave as a file. `if: always()` and
+      # `if-no-files-found: ignore` because the usual case is that no table is
+      # produced at all: a baselined toolchain writes nothing, and that is not
+      # a reason to fail or to warn.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: parity-goldens-${{ github.job }}-${{ strategy.job-index || '0' }}
+          path: '**/mesh_sculpt_goldens.generated.inc'
+          if-no-files-found: ignore
       - name: Validate FBX export with assimp (independent implementation)
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -162,6 +175,19 @@ jobs:
         run: cmake --build --preset cpu-only --config Release
       - name: Test
         run: ctest --preset cpu-only -C Release
+      # A toolchain with no golden table in test_mesh_sculpt_parity.cpp writes
+      # one out instead of failing, and every ctest preset here sets
+      # outputOnFailure -- so a PASSING test's stdout never reaches this log
+      # and the table has to leave as a file. `if: always()` and
+      # `if-no-files-found: ignore` because the usual case is that no table is
+      # produced at all: a baselined toolchain writes nothing, and that is not
+      # a reason to fail or to warn.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: parity-goldens-${{ github.job }}-${{ strategy.job-index || '0' }}
+          path: '**/mesh_sculpt_goldens.generated.inc'
+          if-no-files-found: ignore
 
   appleclang15:
     name: build+test (macos-14, AppleClang 15 — oldest gated toolchain)
@@ -178,6 +204,19 @@ jobs:
         run: cmake --build --preset cpu-only
       - name: Test
         run: ctest --preset cpu-only
+      # A toolchain with no golden table in test_mesh_sculpt_parity.cpp writes
+      # one out instead of failing, and every ctest preset here sets
+      # outputOnFailure -- so a PASSING test's stdout never reaches this log
+      # and the table has to leave as a file. `if: always()` and
+      # `if-no-files-found: ignore` because the usual case is that no table is
+      # produced at all: a baselined toolchain writes nothing, and that is not
+      # a reason to fail or to warn.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: parity-goldens-${{ github.job }}-${{ strategy.job-index || '0' }}
+          path: '**/mesh_sculpt_goldens.generated.inc'
+          if-no-files-found: ignore
 
   release-config:
     # The configuration tools/release_check.py builds, on Linux. Nothing else in

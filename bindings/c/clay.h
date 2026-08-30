@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 60
+#define CLAY_ABI_MINOR 61
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -4836,11 +4836,160 @@ typedef struct clay_mesh_brush_desc {
      * layout passes the shorter descriptor and gets exactly the fourteen verbs
      * it had. */
     float color[3];
+    /* AUTOMASKING: the gates the brush applies to ITSELF — do not cross onto a
+     * face pointing the other way, do not drag the mesh's open border, stay in
+     * the polygroup this stroke started in, protect the crevices.
+     *
+     * Composed into the per-vertex weight by multiplication rather than
+     * branched into each verb, and applied LAST of the weight's factors, so a
+     * descriptor with no factors set is bit-identical to one from before
+     * automasking existed. Appended, so a host compiled against the older
+     * layout sends zeroes and gets exactly that.
+     *
+     * THREE OF THE FIVE FACTORS CROSS HERE. The other two — CAVITY and
+     * SURFACE_GROUP — need an input this descriptor cannot carry: a field to
+     * measure cavity from, and the document's group lattice, both of which are
+     * callbacks on the C++ side. Setting their bits from C is inert rather than
+     * an error, and the descriptor that carries their inputs is a follow-up
+     * rather than a guess made against a sample of one. */
+    uint32_t automask_factors; /* clay_automask_factor, OR-ed */
+    /* NORMAL_ANGLE: how far the surface may turn from the brush's own facing
+     * before the gate closes, in radians. Full strength up to this angle, zero
+     * at twice it. Zero reads as the engine default. */
+    float automask_normal_angle;
+    /* BOUNDARY: how many rings of fade to leave at an open border. */
+    int32_t automask_boundary_rings;
+    /* CAVITY: how much of the measured cavity to apply, in [0,1]. */
+    float automask_cavity_strength;
 } clay_mesh_brush_desc;
+
+/* The automask factors. A bit set, so a host sends one integer. */
+typedef enum clay_automask_factor {
+    CLAY_AUTOMASK_NORMAL_ANGLE = 1u << 0,
+    CLAY_AUTOMASK_TOPOLOGY_CONNECTED = 1u << 1,
+    CLAY_AUTOMASK_BOUNDARY = 1u << 2,
+    /* Declared so the bit values match the C++ vocabulary exactly, and inert
+     * from C until the descriptor that carries their inputs lands. */
+    CLAY_AUTOMASK_CAVITY = 1u << 3,
+    CLAY_AUTOMASK_SURFACE_GROUP = 1u << 4
+} clay_automask_factor;
 
 /* The engine's defaults, so a host fills in what it means and takes the rest.
  * The verb defaults to DRAW and the geodesic flag to on. */
 clay_result clay_mesh_brush_defaults(clay_mesh_brush_desc* out_desc);
+
+/* -- THE BRUSH MODEL, AND BRUSHES AS DATA ------------------------------------
+ *
+ * The artist-facing families — Clay Buildup, Dam Standard, hPolish, Trim
+ * Dynamic, Snake Hook, Rake — are not new deformations. Each is a kernel plus a
+ * falloff plus a frame plus an accumulation rule plus a spacing, and a preset
+ * is that tuple. None of them has an engine path of its own; a named brush that
+ * needed one would be evidence an axis is missing. */
+
+/* How the region under the brush is REACHED. Not how it is weighed: the walk
+ * decides what is reached and the straight line decides how much. */
+typedef enum clay_brush_footprint {
+    CLAY_BRUSH_FOOTPRINT_BALL = 0,        /* everything under this disc */
+    CLAY_BRUSH_FOOTPRINT_SURFACE_WALK = 1 /* everything reachable along the surface */
+} clay_brush_footprint;
+
+/* The direction a kernel displaces along, named rather than implied. THIS AXIS
+ * IS WHY DRAW AND INFLATE ARE ONE KERNEL: they differ in exactly this column. */
+typedef enum clay_brush_frame {
+    CLAY_BRUSH_FRAME_NONE = 0,
+    CLAY_BRUSH_FRAME_REGION_NORMAL = 1, /* one direction for the whole stamp */
+    CLAY_BRUSH_FRAME_VERTEX_NORMAL = 2, /* each vertex along its own */
+    CLAY_BRUSH_FRAME_STROKE_DIRECTION = 3,
+    CLAY_BRUSH_FRAME_REGION_PLANE = 4
+} clay_brush_frame;
+
+/* The deformation itself: a shape of arithmetic rather than a verb. Displace
+ * serves draw and inflate under two frames; Laplacian serves smooth, polish,
+ * scrape and relax under different readings of one target. */
+typedef enum clay_brush_kernel {
+    CLAY_BRUSH_KERNEL_TRANSLATE = 0,
+    CLAY_BRUSH_KERNEL_DISPLACE = 1,
+    CLAY_BRUSH_KERNEL_GATHER = 2,
+    CLAY_BRUSH_KERNEL_TANGENTIAL = 3,
+    CLAY_BRUSH_KERNEL_PLANE = 4,
+    CLAY_BRUSH_KERNEL_PLANE_DEPOSIT = 5,
+    CLAY_BRUSH_KERNEL_CUT_AND_GATHER = 6,
+    CLAY_BRUSH_KERNEL_LAPLACIAN = 7,
+    CLAY_BRUSH_KERNEL_DEPOSIT_CEILING = 8,
+    CLAY_BRUSH_KERNEL_COLOR_BLEND = 9,
+    CLAY_BRUSH_KERNEL_COLOR_ADVECT = 10
+} clay_brush_kernel;
+
+/* Which buffer a kernel writes. Exclusive on purpose: a colour pass over a
+ * finished sculpt must not show up as a diff on the geometry. */
+typedef enum clay_brush_write_target {
+    CLAY_BRUSH_TARGET_POSITION = 0,
+    CLAY_BRUSH_TARGET_COLOR = 1
+} clay_brush_write_target;
+
+typedef enum clay_brush_post_policy {
+    CLAY_BRUSH_POST_NONE = 0,
+    CLAY_BRUSH_POST_RECOMPUTE_NORMALS = 1
+} clay_brush_post_policy;
+
+typedef struct clay_brush_model {
+    uint32_t struct_size; /* = sizeof(clay_brush_model); required */
+    int32_t verb;         /* clay_mesh_brush */
+    int32_t footprint;    /* clay_brush_footprint */
+    int32_t falloff;      /* clay_mesh_falloff */
+    int32_t frame;        /* clay_brush_frame */
+    int32_t kernel;       /* clay_brush_kernel */
+    int32_t target;       /* clay_brush_write_target */
+    int32_t post;         /* clay_brush_post_policy */
+} clay_brush_model;
+
+/* The axis decomposition of one verb — the table a preset chooses among. */
+clay_result clay_brush_model_of(int32_t verb, clay_brush_model* out_model);
+
+/* The longest preset name this ABI carries, including the terminator. A fixed
+ * array rather than a pointer because a preset crosses by VALUE, and a name a
+ * host has to free is a lifetime question for a string. */
+#define CLAY_BRUSH_PRESET_NAME_MAX 64
+
+typedef struct clay_brush_preset {
+    uint32_t struct_size; /* = sizeof(clay_brush_preset); required */
+    /* NUL-terminated; truncated rather than refused if the source is longer. */
+    char name[CLAY_BRUSH_PRESET_NAME_MAX];
+    /* How the stroke lays stamps down. */
+    clay_stroke_preset stroke;
+    /* What each stamp does. */
+    clay_brush_model model;
+    /* The brush's own settings. `center`, `direction`, `seed_class` and the
+     * alpha block are PLACEMENT and are not part of a preset: they come from
+     * the stroke and from the caller, and the alpha in particular is image
+     * content a preset refuses to carry. */
+    clay_mesh_brush_desc brush;
+} clay_brush_preset;
+
+clay_result clay_brush_preset_defaults(clay_brush_preset* out_preset);
+
+/* Preset <-> bytes, on the size-query pattern: call with out_data == NULL for
+ * the size. Bytes rather than a path, matching every other format this library
+ * writes, so a host holding a preset library in its own container never writes
+ * a temporary file.
+ *
+ * An OLDER schema loads, taking defaults for what it did not carry; a NEWER one
+ * is refused with CLAY_ERROR_INVALID_ARGUMENT rather than read as a prefix.
+ *
+ * NO IMAGE BYTES CROSS. An alpha stays caller-owned and borrowed for a call, so
+ * a preset library costs kilobytes and a host owns its own resource cache. */
+clay_result clay_brush_preset_serialize(const clay_brush_preset* preset, uint8_t* out_data,
+                                        size_t* count);
+clay_result clay_brush_preset_deserialize(const uint8_t* data, size_t size,
+                                          clay_brush_preset* out_preset);
+/* The schema version this build writes. */
+uint32_t clay_brush_preset_version(void);
+
+/* The reference library: the named families, as data. */
+size_t clay_brush_preset_library_count(void);
+clay_result clay_brush_preset_library_at(size_t index, clay_brush_preset* out_preset);
+/* By name, which is the library's stable key. CLAY_ERROR_NOT_FOUND otherwise. */
+clay_result clay_brush_preset_by_name(const char* name, clay_brush_preset* out_preset);
 
 /* A SCULPTING SESSION over one mesh, owning the two structures that are
  * expensive to build and cheap to keep: the vertex adjacency and the ray-query
@@ -5044,6 +5193,27 @@ clay_result clay_mesh_sculptor_apply_stroke(clay_mesh_sculptor* sculptor,
                                             const float* samples_xyzpt, size_t sample_count,
                                             const clay_stroke_preset* preset,
                                             const clay_mesh_brush_desc* desc, const clay_mask* mask,
+                                            const clay_mesh_frame* mesh_to_world,
+                                            int32_t defer_normals, clay_mesh_deltas* deltas,
+                                            size_t* out_applied);
+
+/* THE SAME STROKE, DRIVEN BY A PRESET. A preset already carries the stroke
+ * preset, the verb and the brush's own settings, so this is the call a host
+ * makes once it has a brush library rather than a set of sliders.
+ *
+ * `orient_alpha_by_stamp` lets each stamp's rotation turn the brush's alpha,
+ * which is what makes a rake or a chisel expressible — the preset's stroke half
+ * decides where that rotation comes from (the path, or the stylus barrel).
+ *
+ * The alpha itself is NOT in the preset and is passed here, because image
+ * content stays caller-owned: `alpha` is alpha_width * alpha_height samples in
+ * [0,1], borrowed for the duration of the call, or NULL for none. */
+clay_result clay_mesh_sculptor_apply_preset(clay_mesh_sculptor* sculptor,
+                                            const float* samples_xyzpt, size_t sample_count,
+                                            const clay_brush_preset* preset,
+                                            const float* alpha, int32_t alpha_width,
+                                            int32_t alpha_height,
+                                            int32_t orient_alpha_by_stamp, const clay_mask* mask,
                                             const clay_mesh_frame* mesh_to_world,
                                             int32_t defer_normals, clay_mesh_deltas* deltas,
                                             size_t* out_applied);

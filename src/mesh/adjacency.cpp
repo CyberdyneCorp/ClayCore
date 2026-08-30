@@ -1,6 +1,7 @@
 #include "clay/mesh/adjacency.h"
 
 #include <algorithm>
+#include <functional>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -224,17 +225,27 @@ void geodesic_region(const Mesh& m, const Adjacency& adj, kernel::cfloat3 seed_p
     const float budget = radius * (path_budget_scale > 0.0f ? path_budget_scale : 1.0f);
     const float radius2 = radius * radius;
 
-    using Entry = std::pair<float, std::uint32_t>;  // (path length, class)
-    std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> frontier;
+    // An explicit min-heap over the scratch's own buffer. `std::priority_queue`
+    // is `push_heap`/`pop_heap` over a container it owns, so this is the same
+    // algorithm producing the same pop sequence — and the region's ORDER is
+    // load-bearing, because the weighted normal and centroid are float sums
+    // over it and float addition is not associative.
+    using Entry = std::pair<float, std::uint32_t>;
+    const std::greater<Entry> later;
+    std::vector<Entry>& frontier = scratch.frontier;
+    frontier.clear();
+
     const float seed_d = kernel::clength(position_of(seed) - seed_position);
     if (seed_d > radius) return;
     scratch.distance[seed] = seed_d;
     scratch.dirty.push_back(seed);
-    frontier.emplace(seed_d, seed);
+    frontier.emplace_back(seed_d, seed);
+    std::push_heap(frontier.begin(), frontier.end(), later);
 
     while (!frontier.empty()) {
-        const Entry top = frontier.top();
-        frontier.pop();
+        std::pop_heap(frontier.begin(), frontier.end(), later);
+        const Entry top = frontier.back();
+        frontier.pop_back();
         // A class can be pushed more than once; the first pop is its final
         // path length and the rest are stale.
         if (top.first > scratch.distance[top.second]) continue;
@@ -256,7 +267,8 @@ void geodesic_region(const Mesh& m, const Adjacency& adj, kernel::cfloat3 seed_p
             if (known >= 0.0f && known <= d) continue;
             if (known < 0.0f) scratch.dirty.push_back(nb);
             scratch.distance[nb] = d;
-            frontier.emplace(d, nb);
+            frontier.emplace_back(d, nb);
+            std::push_heap(frontier.begin(), frontier.end(), later);
         }
     }
     for (std::uint32_t c : scratch.dirty) scratch.distance[c] = WalkScratch::kUnreached;

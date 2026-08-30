@@ -19,6 +19,7 @@
 #include "clay/brush/mask_extrude.h"
 #include "clay/brush/lattice_gizmo.h"
 #include "clay/brush/move.h"
+#include "clay/brush/preset.h"
 #include "clay/brush/stroke.h"
 #include "clay/brush/tube.h"
 #include "clay/cut/cut.h"
@@ -159,6 +160,12 @@ brush::MaskExtrudeSettings extrude_settings(float thickness, const std::string& 
     return s;
 }
 
+// The inverse of parse_mesh_brush, so a model reads its verb back in the same
+// spelling a caller passed it. One table would be better than two and is not
+// possible here: the parser has to reject unknown strings by name, which a
+// bidirectional map makes clumsier than the duplication saves.
+const char* mesh_brush_name(mesh::MeshBrush verb);
+
 mesh::MeshBrush parse_mesh_brush(const std::string& verb) {
     // One spelling per verb, as parse_extrude_side already argues: every string
     // pyclay accepts is a capability the C ABI has to be able to name, and an
@@ -184,6 +191,28 @@ mesh::MeshBrush parse_mesh_brush(const std::string& verb) {
         "'crease', 'scrape', 'polish', 'snakehook', 'relax', 'layer', 'nudge', 'paint', "
         "'smear', got '" +
         verb + "'");
+}
+
+const char* mesh_brush_name(mesh::MeshBrush verb) {
+    switch (verb) {
+        case mesh::MeshBrush::Grab: return "grab";
+        case mesh::MeshBrush::Draw: return "draw";
+        case mesh::MeshBrush::Inflate: return "inflate";
+        case mesh::MeshBrush::Smooth: return "smooth";
+        case mesh::MeshBrush::Pinch: return "pinch";
+        case mesh::MeshBrush::Flatten: return "flatten";
+        case mesh::MeshBrush::Clay: return "clay";
+        case mesh::MeshBrush::Crease: return "crease";
+        case mesh::MeshBrush::Scrape: return "scrape";
+        case mesh::MeshBrush::Polish: return "polish";
+        case mesh::MeshBrush::Snakehook: return "snakehook";
+        case mesh::MeshBrush::Relax: return "relax";
+        case mesh::MeshBrush::Layer: return "layer";
+        case mesh::MeshBrush::Nudge: return "nudge";
+        case mesh::MeshBrush::Paint: return "paint";
+        case mesh::MeshBrush::Smear: return "smear";
+    }
+    return "draw";
 }
 
 mesh::MeshFalloff parse_mesh_falloff(const std::string& falloff) {
@@ -4099,6 +4128,52 @@ NB_MODULE(pyclay, m) {
             "Topology never changes, as with every verb here, and the whole\n"
             "lattice is ONE undo step.")
         .def(
+            "apply_preset",
+            [](PyMeshSculptor& s, nb::handle samples, const brush::BrushPreset& preset,
+               nb::handle alpha, float alpha_extent, nb::handle mask, nb::handle deltas,
+               bool defer_normals, bool orient_alpha_by_stamp) {
+                std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
+                // THE ALPHA IS PASSED HERE, NOT CARRIED BY THE PRESET. Image
+                // content stays the caller's — a preset library has to cost
+                // kilobytes — and this is also the only thing that makes a
+                // stamp's ORIENTATION observable, since a round brush has
+                // nothing to orient.
+                mesh::MeshBrushSettings settings = preset.settings;
+                if (!alpha.is_none()) {
+                    auto arr =
+                        nb::cast<nb::ndarray<const float, nb::ndim<2>, nb::c_contig>>(alpha);
+                    if (arr.shape(0) < 2 || arr.shape(1) < 2)
+                        throw std::invalid_argument(
+                            "an alpha needs at least 2x2 samples; there is nothing to "
+                            "interpolate below that");
+                    settings.alpha = arr.data();
+                    settings.alpha_height = static_cast<int>(arr.shape(0));
+                    settings.alpha_width = static_cast<int>(arr.shape(1));
+                    settings.alpha_extent = alpha_extent;
+                }
+                mesh::VertexDeltas* record =
+                    deltas.is_none() ? nullptr : nb::cast<PyVertexDeltas*>(deltas)->deltas.get();
+                const voxel::MaskField* field_mask = borrow_mask(mask);
+                brush::MeshStrokeOptions options;
+                options.defer_normals = defer_normals;
+                options.orient_alpha_by_stamp = orient_alpha_by_stamp;
+                mesh::MeshSculptor& live = s.live(true);
+                nb::gil_scoped_release release;
+                return brush::apply_to_mesh(live, brush::resolve_stroke(in, preset.stroke),
+                                            preset.model.verb, settings, field_mask, record,
+                                            options);
+            },
+            "samples"_a, "preset"_a, "alpha"_a = nb::none(), "alpha_extent"_a = 0.0f,
+            "mask"_a = nb::none(), "deltas"_a = nb::none(), "defer_normals"_a = false,
+            "orient_alpha_by_stamp"_a = false,
+            "Apply a stroke driven by a BRUSH preset, which already carries the\n"
+            "stroke preset, the verb and the brush's own settings.\n\n"
+            "This is the call a host makes once it has a brush library rather\n"
+            "than a set of sliders. `orient_alpha_by_stamp` lets each stamp's\n"
+            "rotation turn the alpha, which is what makes a rake or a chisel\n"
+            "expressible; the preset's stroke half decides whether that rotation\n"
+            "follows the path or the stylus barrel.")
+        .def(
             "apply_stroke",
             [](PyMeshSculptor& s, nb::handle samples, const brush::StrokePreset& preset,
                const std::string& verb, const std::string& falloff, nb::handle deposit_normal,
@@ -5782,6 +5857,158 @@ NB_MODULE(pyclay, m) {
                "each stamp applies at its own strength; passing twice acts twice")
         .value("CLAMPED", brush::Accumulation::Clamped,
                "the stroke reaches its strength once, however many stamps overlap");
+
+    // -- the brush model, and brushes as data ---------------------------------
+    nb::class_<mesh::AutomaskSettings>(
+        m, "AutomaskSettings",
+        "Which gates a brush applies to itself, and how hard. Composed into\n"
+        "the per-vertex weight by multiplication, and applied LAST — so a\n"
+        "brush with no factors set is bit-identical to one from before\n"
+        "automasking existed.")
+        .def(nb::init<>())
+        .def_rw("factors", &mesh::AutomaskSettings::factors,
+                "AutomaskFactor values, OR-ed together")
+        .def_rw("normal_angle", &mesh::AutomaskSettings::normal_angle,
+                "radians; full strength up to this angle, zero at twice it")
+        .def_rw("boundary_rings", &mesh::AutomaskSettings::boundary_rings)
+        .def_rw("cavity_strength", &mesh::AutomaskSettings::cavity_strength);
+
+    nb::class_<mesh::MeshBrushSettings>(
+        m, "MeshBrushSettings",
+        "A brush's own settings — the fields that are its identity rather\n"
+        "than where a stamp landed. The alpha is deliberately absent: image\n"
+        "content stays caller-owned and is passed to a stamp, never stored.")
+        .def(nb::init<>())
+        .def_rw("radius", &mesh::MeshBrushSettings::radius)
+        .def_rw("strength", &mesh::MeshBrushSettings::strength)
+        .def_rw("falloff", &mesh::MeshBrushSettings::falloff)
+        .def_rw("geodesic", &mesh::MeshBrushSettings::geodesic,
+                "measure the falloff along the surface rather than in a straight line")
+        .def_rw("flatten_mode", &mesh::MeshBrushSettings::flatten_mode)
+        .def_rw("polish_angle", &mesh::MeshBrushSettings::polish_angle)
+        .def_rw("smooth_iterations", &mesh::MeshBrushSettings::smooth_iterations)
+        .def_rw("layer_height", &mesh::MeshBrushSettings::layer_height)
+        .def_rw("automask", &mesh::MeshBrushSettings::automask);
+
+    nb::enum_<mesh::BrushFootprint>(m, "BrushFootprint",
+                                    "How the region under the brush is REACHED.")
+        .value("BALL", mesh::BrushFootprint::Ball, "everything under this disc")
+        .value("SURFACE_WALK", mesh::BrushFootprint::SurfaceWalk,
+               "everything reachable along the surface");
+
+    nb::enum_<mesh::BrushFrame>(m, "BrushFrame",
+                                "The direction a kernel displaces along, named rather than\n"
+                                "implied. This axis is why draw and inflate are one kernel.")
+        .value("NONE", mesh::BrushFrame::None)
+        .value("REGION_NORMAL", mesh::BrushFrame::RegionNormal,
+               "one direction for the whole stamp — draw")
+        .value("VERTEX_NORMAL", mesh::BrushFrame::VertexNormal,
+               "each vertex along its own — inflate")
+        .value("STROKE_DIRECTION", mesh::BrushFrame::StrokeDirection)
+        .value("REGION_PLANE", mesh::BrushFrame::RegionPlane);
+
+    nb::enum_<mesh::BrushKernelId>(m, "BrushKernel",
+                                   "The deformation itself: a shape of arithmetic rather than a\n"
+                                   "verb. Displace serves draw and inflate under two frames.")
+        .value("TRANSLATE", mesh::BrushKernelId::Translate)
+        .value("DISPLACE", mesh::BrushKernelId::Displace)
+        .value("GATHER", mesh::BrushKernelId::Gather)
+        .value("TANGENTIAL", mesh::BrushKernelId::Tangential)
+        .value("PLANE", mesh::BrushKernelId::Plane)
+        .value("PLANE_DEPOSIT", mesh::BrushKernelId::PlaneDeposit)
+        .value("CUT_AND_GATHER", mesh::BrushKernelId::CutAndGather)
+        .value("LAPLACIAN", mesh::BrushKernelId::Laplacian)
+        .value("DEPOSIT_CEILING", mesh::BrushKernelId::DepositCeiling)
+        .value("COLOR_BLEND", mesh::BrushKernelId::ColorBlend)
+        .value("COLOR_ADVECT", mesh::BrushKernelId::ColorAdvect);
+
+    nb::enum_<mesh::BrushWriteTarget>(m, "BrushWriteTarget",
+                                      "Which buffer a kernel writes. Exclusive on purpose.")
+        .value("POSITION", mesh::BrushWriteTarget::Position)
+        .value("COLOR", mesh::BrushWriteTarget::Color);
+
+    nb::enum_<mesh::BrushPostPolicy>(m, "BrushPostPolicy")
+        .value("NONE", mesh::BrushPostPolicy::None)
+        .value("RECOMPUTE_NORMALS", mesh::BrushPostPolicy::RecomputeNormals);
+
+    nb::enum_<mesh::AutomaskFactor>(m, "AutomaskFactor",
+                                    "The gates a brush applies to ITSELF, composed into the\n"
+                                    "per-vertex weight by multiplication rather than branched\n"
+                                    "into each verb.")
+        .value("NORMAL_ANGLE", mesh::AutomaskFactor::NormalAngle)
+        .value("TOPOLOGY_CONNECTED", mesh::AutomaskFactor::TopologyConnected)
+        .value("BOUNDARY", mesh::AutomaskFactor::Boundary)
+        .value("CAVITY", mesh::AutomaskFactor::Cavity)
+        .value("SURFACE_GROUP", mesh::AutomaskFactor::SurfaceGroup);
+
+    nb::class_<mesh::BrushModel>(
+        m, "BrushModel",
+        "One brush, as axis values: footprint, falloff, frame, kernel, write\n"
+        "target and post policy. Every verb in the vocabulary is a value of\n"
+        "this type, and so is every named artist family — which is what makes\n"
+        "a family a preset rather than a code path.")
+        .def(nb::init<>())
+        .def_prop_ro("verb",
+                     [](const mesh::BrushModel& m) { return mesh_brush_name(m.verb); },
+                     "the verb this model decomposes, by the name pyclay uses for it")
+        .def_rw("footprint", &mesh::BrushModel::footprint)
+        .def_rw("falloff", &mesh::BrushModel::falloff)
+        .def_rw("frame", &mesh::BrushModel::frame)
+        .def_rw("kernel", &mesh::BrushModel::kernel)
+        .def_rw("target", &mesh::BrushModel::target)
+        .def_rw("post", &mesh::BrushModel::post)
+        .def_static("of",
+                    [](const std::string& verb) { return mesh::model_of(parse_mesh_brush(verb)); },
+                    "verb"_a,
+                    "The axis decomposition of one verb — the table a preset chooses among.\n"
+                    "Takes the verb by name, as every other mesh brush call here does.");
+
+    nb::class_<brush::BrushPreset>(
+        m, "BrushPreset",
+        "A brush, as data: a name, a stroke preset and a brush model.\n\n"
+        "The artist-facing families — Clay Buildup, Dam Standard, hPolish,\n"
+        "Trim Dynamic, Snake Hook, Rake — are not new deformations. Each is a\n"
+        "kernel plus a falloff plus a frame plus a spacing, and none has an\n"
+        "engine path of its own.\n\n"
+        "NO IMAGE BYTES. An alpha stays caller-owned and borrowed for a call,\n"
+        "so a preset library costs kilobytes rather than megabytes.")
+        .def(nb::init<>())
+        .def_rw("name", &brush::BrushPreset::name)
+        .def_rw("stroke", &brush::BrushPreset::stroke)
+        .def_rw("model", &brush::BrushPreset::model)
+        .def_rw("settings", &brush::BrushPreset::settings)
+        .def_prop_ro_static("version", [](nb::handle) { return brush::kBrushPresetVersion; },
+                            "the schema version serialize() writes")
+        .def("serialize",
+             [](const brush::BrushPreset& p) {
+                 std::vector<std::uint8_t> bytes = p.serialize();
+                 return nb::bytes(bytes.data(), bytes.size());
+             },
+             "Preset as bytes, tagged with its schema version")
+        .def_static("deserialize",
+                    [](nb::bytes data) {
+                        auto p = brush::BrushPreset::deserialize(
+                            reinterpret_cast<const std::uint8_t*>(data.c_str()), data.size());
+                        if (!p)
+                            throw std::invalid_argument(
+                                "not a brush preset this build can read: either malformed, or "
+                                "written by a newer schema version than " +
+                                std::to_string(brush::kBrushPresetVersion));
+                        return *p;
+                    },
+                    "data"_a,
+                    "Load a preset. An older schema loads with defaults; a newer one "
+                    "raises rather than being read as a prefix.")
+        .def_static("library", &brush::reference_presets,
+                    "The named families, as data. Every one is axis values over existing "
+                    "kernels; none has a code path.")
+        .def_static("by_name",
+                    [](const std::string& name) {
+                        auto p = brush::reference_preset(name);
+                        if (!p) throw std::invalid_argument("no preset named " + name);
+                        return *p;
+                    },
+                    "name"_a, "One reference preset by name.");
 
     nb::class_<brush::StrokePreset>(
         m, "StrokePreset",

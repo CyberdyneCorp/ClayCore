@@ -87,4 +87,6 @@ axis with two values.
 shared-kernel requirement and the allocation discipline. `c-abi` and
 `python-bindings` gain the preset surface. No behaviour changes on any existing
 path, which is the acceptance criterion rather than a hope: the fixed-mesh
-golden fixtures compare bit for bit, not within a tolerance.
+golden fixtures compare bit for bit, not within a tolerance — per toolchain,
+because the verbs reach `acos` and `exp` and no libm agrees with another on
+the last bit of those. The moved counts, which are portable, gate everywhere.
