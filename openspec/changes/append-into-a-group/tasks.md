@@ -22,7 +22,7 @@ judged by it. See design.md, "Correction 3".
       all in tail position; every other shape keeps today's refusal — an insert
       short of the end at any level, a group not last among its siblings,
       shared content, a non-local combine above the append
-- [ ] 1.5 Test: a 24-dab stroke into a group compiles a tape byte-identical to
+- [x] 1.5 Test: a 24-dab stroke into a group compiles a tape byte-identical to
       a full compile of the same document, dab by dab, at depths 1 and 2.
       PROVED OUT already with a probe over seven shapes — root list, one Add
       group, two and three nested, Subtract, hard-blend, nested Subtract — 8
@@ -30,12 +30,16 @@ judged by it. See design.md, "Correction 3".
       seventh REFUSED rather than wrong (a nested Subtract group entered with
       nothing beneath it is skipped whole by the compiler, so the tail path
       never reaches it and there is no checkpoint to resume from). Needs
-      writing up as a real test
-- [ ] 1.6 Test: the append path actually FIRES for that stroke, asserted
-      through the counters — a fast path that silently stopped firing reads as
-      correct
-- [ ] 1.7 Test: every refused shape still refuses, and each for its own reason
-      rather than incidentally
+      written up in test_tape_prefix_reuse.cpp, beside the root-list cases and
+      sharing require_identical -- which checks `info` and `bounds` too, not
+      just the three byte arrays, so a tape that matches byte for byte while
+      folding a different Lipschitz bound is caught
+- [x] 1.6 Test: the append path actually FIRES for that stroke — the 24-dab
+      case asserts `compile_document_append` returned true on every dab and
+      that each tape's `parent_id` names the one before it, so a path that
+      silently stopped firing fails rather than reading as correct
+- [x] 1.7 Test: a group not in tail position, and an insert short of the end of
+      a group, are both refused
 - [ ] 1.8 Benchmark the whole-document compile, and record that
       `sdf_stroke_in_group_bricks` is UNCHANGED by this phase. A flat device
       number here is the expected result, not a failure
