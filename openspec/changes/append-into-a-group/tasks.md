@@ -74,13 +74,29 @@ The tasks below are kept as the record of what it would take.
       now take a cull, index and plan and report the checkpoint. Verified
       byte-identical to the culled compile, and a culled group resume through
       them is exact -- worst 0.0 over 216 points at 40 and 300 items
-- [ ] 2.1b-ii THE SEED MUST CARRY ITS FRAMES. See design.md "Correction 6": a
+- [x] 2.1b-ii DONE, and it was two bugs rather than one. See the commit: the
+      stack had to live BESIDE `values` rather than in place of it (a brick at
+      the current revision is answered straight out of `values`, and a stack is
+      not the field), and `store_seed` had to clear a stale stack (a full walk
+      produces none, and leaving one paired it with a fresh field -- visible as
+      a BAND of document sizes where the cull pad steps mid-stroke). Verified
+      exact across 20..1000 stamps
+- [ ] 2.1b-ii-perf NOT YET FAST: 1.50 ms/dab at 1000 items against the root
+      list's 0.040, where before the wiring it was 2.48. The resume DOES fire
+      (2720 of 3456 refills in one trace), so the cost is elsewhere: every
+      rebuild traced carried `frames empty`, i.e. bricks whose checkpoint has
+      no frames never acquire a stack and rebuild on every dab. Skipping bricks
+      the dab cannot reach was tried and REVERTED -- it used
+      `node_influence_bound_in_document`, which is the node's own reach and not
+      its reach through the group's blend, so it wrongly skipped bricks the
+      group's combine still moves (errors at 20-80 stamps) and bought no speed
+- [ ] 2.1b-iii ORIGINAL NOTE (superseded): See design.md "Correction 6": a
       frame's `emits` depends on whether anything before the group survived
       THAT BRICK's cull, so one plan cannot state it for a batch. ResumeEntry
       gains the frames it was taken with and the suffix uses those rather than
       the plan's; the plan keeps only `appended`, which is batch-wide. This is
       the last piece, and it is a design change rather than a fix
-- [ ] 2.1b-iii THE WIRING, attempted twice and reverted twice. See design.md "Correction 5":
+      the wiring, attempted twice and reverted twice. See design.md "Correction 5":
       a brick's first seed comes from a FULL refill, which stores the finished
       field as one plane, and a group resume needs the open chains. The full
       refill must store the stack at the checkpoint, which needs a CULL-AWARE
