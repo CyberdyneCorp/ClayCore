@@ -12074,6 +12074,14 @@ clay_result clay_mesh_brush_defaults(clay_mesh_brush_desc* out_desc) {
     return CLAY_OK;
 }
 
+}  // extern "C" — the helpers below return C++ types and cannot have C linkage
+
+// A namespace does NOT reset language linkage: an anonymous namespace opened
+// inside extern "C" leaves everything in it with C linkage, and a function
+// returning a class type then fails -Wreturn-type-c-linkage on Clang (an
+// error under -Werror) and C4190 on MSVC. GCC is silent, which is why this
+// only broke the macOS and Windows jobs. Same shape as the close above
+// clay_mesh_sculptor_create.
 namespace {
 
 constexpr std::size_t kBrushModelOriginal = offsetof(clay_brush_model, post) + sizeof(std::int32_t);
@@ -12175,6 +12183,8 @@ constexpr std::size_t kTransferDescOriginal =
 constexpr std::size_t kTransferReportOriginal =
     offsetof(clay_transfer_report, max_distance) + sizeof(float);
 }  // namespace
+
+extern "C" {
 
 clay_result clay_brush_model_of(int32_t verb, clay_brush_model* out_model) {
     if (!out_model) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null model");
