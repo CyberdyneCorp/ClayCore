@@ -344,6 +344,26 @@ field::FieldVolume sample_sparse(const Bvh& bvh, const Lattice& lattice,
                     std::fill(block, block + field::kBrickSamples, brick_sign * far);
                     continue;
                 }
+                // THE NEXT LEVER, AND WHY IT IS NOT TAKEN HERE. Measured over a
+                // sphere at longest-axis 128 and 256, only 34% of the samples
+                // in a stored brick are actually within the band; the other
+                // two thirds pay a generalized winding number for a sign that
+                // is derivable without one. Between two adjacent samples both
+                // further than the band from the surface, a sign change would
+                // put a zero crossing within one voxel of a sample three
+                // voxels from it, which a 1-Lipschitz distance forbids — so
+                // sign is constant on each connected run of far samples, and
+                // one query per run would answer for all of them.
+                //
+                // That argument uses "opposite signs implies the segment
+                // crosses where d == 0", which holds only where the sign
+                // change IS the surface. On an OPEN source it is not: the
+                // winding number's half-crossing closes the hole away from
+                // every triangle, and propagating across it would move the
+                // closure. Closing a hole well is the whole value of the
+                // `Close` policy, so the optimisation is worth having only
+                // with a closed-source precondition and its own open-fixture
+                // quality tests — and is left recorded rather than half-done.
                 for (int i = 0; i < field::kBrickSamples; ++i)
                     if (bvh.is_inside(grid.sample_position(slot, i))) block[i] = -block[i];
             }
@@ -368,8 +388,73 @@ Mesh extract_surface(const field::FieldVolume& volume, const Lattice& lattice,
     // that is watertight only when the padding was enough is not watertight.
     const float outside = volume.band() * 4.0f;
 
+    // THE EMPTY MAJORITY IS AN ARRAY READ.
+    //
+    // The march visits every cell of the lattice, eight corners each, and the
+    // overwhelming majority of them are nowhere near the surface — a shell's
+    // worth of bricks store samples and the rest of the box does not. Answering
+    // those through `sample_at` costs three `locate()` searches (each of which
+    // must consider a brick and its lower neighbour, because a sample on a
+    // brick face lives in both) before concluding there is nothing there.
+    //
+    // `far_of` is what an empty brick reports, read ONCE per brick instead of
+    // once per sample. `near_stored` is the guard that makes using it exact: a
+    // brick is marked when it or any of its 26 neighbours stores samples, so
+    // the fast path is taken only where no stored brick could have supplied the
+    // value and `sample_at` would certainly have returned nothing.
+    //
+    // WHY IT CANNOT CHANGE THE OUTPUT. A cell on the fast path has all eight
+    // corners inside one unmarked brick or its neighbours, so every corner is a
+    // far bound. Adjacent empty bricks always agree in SIGN — a sign change
+    // between them would put the surface on their shared face, whose samples
+    // would then be inside the band, which would have made both bricks stored.
+    // So no cell on the fast path can hold a crossing, none of them emits a
+    // vertex, and the magnitude this returns is never read for anything. The
+    // sparse/dense equivalence test is what holds that: it marches the dense
+    // field by the SLOW rule and requires the same mesh byte for byte.
+    const std::size_t bricks = static_cast<std::size_t>(lattice.brick_count());
+    std::vector<float> far_of(bricks, outside);
+    std::vector<std::uint8_t> stores(bricks, 0);
+    for (std::size_t slot = 0; slot < bricks; ++slot) {
+        const kernel::cfloat3 centre = brick_centre(slot, lattice);
+        stores[slot] = volume.has_samples_at(centre) ? 1 : 0;
+        if (!stores[slot]) far_of[slot] = volume.eval(centre);
+    }
+    std::vector<std::uint8_t> near_stored(bricks, 0);
+    // The stored bricks' own extent, so the march can skip the padding ring
+    // outright rather than merely answering it cheaply.
+    int lo[3] = {lattice.bcount[0], lattice.bcount[1], lattice.bcount[2]};
+    int hi[3] = {-1, -1, -1};
+    for (int bz = 0; bz < lattice.bcount[2]; ++bz)
+        for (int by = 0; by < lattice.bcount[1]; ++by)
+            for (int bx = 0; bx < lattice.bcount[0]; ++bx) {
+                if (!stores[slot_of(bx, by, bz, lattice)]) continue;
+                const int at[3] = {bx, by, bz};
+                for (int a = 0; a < 3; ++a) {
+                    lo[a] = std::min(lo[a], at[a]);
+                    hi[a] = std::max(hi[a], at[a]);
+                }
+                for (int dz = -1; dz <= 1; ++dz)
+                    for (int dy = -1; dy <= 1; ++dy)
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            const int ax = bx + dx, ay = by + dy, az = bz + dz;
+                            if (ax < 0 || ay < 0 || az < 0 || ax >= lattice.bcount[0] ||
+                                ay >= lattice.bcount[1] || az >= lattice.bcount[2])
+                                continue;
+                            near_stored[slot_of(ax, ay, az, lattice)] = 1;
+                        }
+            }
+    if (hi[0] < 0) return {};  // no brick stored anything: no surface to march
+
+    const int bcount[3] = {lattice.bcount[0], lattice.bcount[1], lattice.bcount[2]};
     auto sample = [&](int i, int j, int k) -> float {
         if (i < 0 || j < 0 || k < 0 || i > nx || j > ny || k > nz) return outside;
+        const int bx = std::min(i >> 3, bcount[0] - 1);
+        const int by = std::min(j >> 3, bcount[1] - 1);
+        const int bz = std::min(k >> 3, bcount[2] - 1);
+        const std::size_t slot =
+            (static_cast<std::size_t>(bz) * bcount[1] + by) * bcount[0] + bx;
+        if (!near_stored[slot]) return far_of[slot];
         // The STORED sample where there is one — exactly, not interpolated to
         // it. `eval` at a lattice point is trilinear with zero weights and
         // ought to agree, but "ought to" is not a contract the extraction
@@ -380,13 +465,18 @@ Mesh extract_surface(const field::FieldVolume& volume, const Lattice& lattice,
                                         spacing);
     };
 
-    int cell_min[3] = {-1, -1, -1};
-    int cell_max[3] = {nx + 1, ny + 1, nz + 1};
+    // One cell of margin past the stored bricks on every side, so anything that
+    // reaches the edge of them closes against the far bounds beyond.
+    int cell_min[3] = {lo[0] * field::kBrickDim - 1, lo[1] * field::kBrickDim - 1,
+                       lo[2] * field::kBrickDim - 1};
+    int cell_max[3] = {(hi[0] + 1) * field::kBrickDim + 1,
+                       (hi[1] + 1) * field::kBrickDim + 1,
+                       (hi[2] + 1) * field::kBrickDim + 1};
     if (mode == VoxelRemeshSurfaceMode::Sharp)
         return mesh_lattice_dc(sample, cell_min, cell_max, origin, spacing);
-    // Parallel: `sample` above is a pure read of an immutable volume, which is
-    // that entry point's stated precondition, and it is byte-identical to the
-    // serial march by construction.
+    // Parallel: `sample` above is a pure read of immutable state, which is that
+    // entry point's stated precondition, and it is byte-identical to the serial
+    // march by construction.
     return mesh_lattice_parallel(sample, cell_min, cell_max, origin, spacing);
 }
 

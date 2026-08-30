@@ -326,3 +326,283 @@ TEST_CASE("c abi: a mask crosses a remesh, and a wrong length does not") {
                                            moved.data(), moved.size() - 1) ==
           CLAY_ERROR_INVALID_ARGUMENT);
 }
+
+// -- the remesh THROUGH the document (add-voxel-remesh-document) --------------
+//
+// The pure operation above has no document, no undo and no state, which is what
+// makes it testable. This is the other half: it has to land on a LAYER, replace
+// what was there, be ONE step on the undo menu, and refuse to overwrite work
+// that arrived while it was thinking.
+
+namespace {
+
+struct DocHandle {
+    clay_document* doc = nullptr;
+    ~DocHandle() { clay_document_destroy(doc); }
+    DocHandle() = default;
+    DocHandle(const DocHandle&) = delete;
+    DocHandle& operator=(const DocHandle&) = delete;
+};
+
+// A document holding one mesh layer built from `positions`/`indices`.
+clay_layer_id attach_layer(DocHandle* doc, const std::vector<float>& p,
+                           const std::vector<std::uint32_t>& i, const char* name = "shell") {
+    MeshHandle src;
+    REQUIRE(clay_mesh_from_triangles(p.data(), p.size() / 3, i.data(), i.size(), &src.m) ==
+            CLAY_OK);
+    clay_mesh_layer_desc desc{};
+    desc.struct_size = sizeof(desc);
+    desc.name = name;
+    clay_layer_id id = 0;
+    REQUIRE(clay_document_add_mesh_layer(doc->doc, src.m, &desc, &id, nullptr) == CLAY_OK);
+    return id;
+}
+
+std::size_t layer_triangles(clay_document* doc, clay_layer_id layer) {
+    clay_mesh* borrowed = nullptr;
+    REQUIRE(clay_document_mesh_layer_by_id(doc, layer, &borrowed) == CLAY_OK);
+    return clay_mesh_index_count(borrowed) / 3;
+}
+
+}  // namespace
+
+TEST_CASE("c abi: a layer remesh is one undo step that restores the old triangles") {
+    std::vector<float> pos;
+    std::vector<std::uint32_t> idx;
+    sphere(&pos, &idx);
+
+    DocHandle doc;
+    doc.doc = clay_document_create();
+    REQUIRE(doc.doc != nullptr);
+    REQUIRE(clay_document_enable_undo(doc.doc) == CLAY_OK);
+    const clay_layer_id layer = attach_layer(&doc, pos, idx);
+    const std::size_t before = layer_triangles(doc.doc, layer);
+    CHECK(before == idx.size() / 3);
+
+    std::size_t depth_before = 0;
+    REQUIRE(clay_document_undo_state(doc.doc, nullptr, &depth_before, nullptr) == CLAY_OK);
+
+    const clay_voxel_remesh_params p = defaults_at(48);
+    clay_voxel_remesh_report report{};
+    report.struct_size = sizeof(report);
+    REQUIRE(clay_document_voxel_remesh_layer(doc.doc, layer, &p, nullptr, &report) == CLAY_OK);
+
+    const std::size_t after = layer_triangles(doc.doc, layer);
+    CHECK(after != before);
+    CHECK(after == report.result_triangles);
+    CHECK(report.result_watertight == 1);
+
+    // ONE step, not two and not none.
+    std::size_t depth_after = 0;
+    REQUIRE(clay_document_undo_state(doc.doc, nullptr, &depth_after, nullptr) == CLAY_OK);
+    CHECK(depth_after == depth_before + 1);
+
+    // ...and it puts the old triangles back, exactly.
+    std::int32_t undone = 0;
+    REQUIRE(clay_document_undo(doc.doc, &undone) == CLAY_OK);
+    CHECK(undone == 1);
+    CHECK(layer_triangles(doc.doc, layer) == before);
+
+    std::int32_t redone = 0;
+    REQUIRE(clay_document_redo(doc.doc, &redone) == CLAY_OK);
+    CHECK(redone == 1);
+    CHECK(layer_triangles(doc.doc, layer) == after);
+
+    // Redo must not have emptied the step: a second undo has to work too.
+    REQUIRE(clay_document_undo(doc.doc, &undone) == CLAY_OK);
+    CHECK(layer_triangles(doc.doc, layer) == before);
+}
+
+TEST_CASE("c abi: a stale commit is refused rather than overwriting newer work") {
+    std::vector<float> pos;
+    std::vector<std::uint32_t> idx;
+    sphere(&pos, &idx);
+
+    DocHandle doc;
+    doc.doc = clay_document_create();
+    REQUIRE(doc.doc != nullptr);
+    const clay_layer_id layer = attach_layer(&doc, pos, idx);
+
+    std::uint64_t revision = 0;
+    REQUIRE(clay_document_mesh_layer_revision(doc.doc, layer, &revision) == CLAY_OK);
+    CHECK(revision > 0);
+
+    // The host's own worker: remesh the layer's triangles with the PURE call,
+    // which is the shape this exists to serve.
+    clay_mesh* borrowed = nullptr;
+    REQUIRE(clay_document_mesh_layer_by_id(doc.doc, layer, &borrowed) == CLAY_OK);
+    MeshHandle rebuilt;
+    const clay_voxel_remesh_params p = defaults_at(40);
+    REQUIRE(clay_mesh_voxel_remesh(borrowed, &p, nullptr, &rebuilt.m, nullptr) == CLAY_OK);
+
+    // ...and while it was thinking, something else rebuilt the layer.
+    REQUIRE(clay_document_voxel_remesh_layer(doc.doc, layer, &p, nullptr, nullptr) == CLAY_OK);
+    std::uint64_t moved = 0;
+    REQUIRE(clay_document_mesh_layer_revision(doc.doc, layer, &moved) == CLAY_OK);
+    CHECK(moved != revision);
+    const std::size_t survivor = layer_triangles(doc.doc, layer);
+
+    // The stale commit is REFUSED, and the newer work survives untouched.
+    CHECK(clay_document_replace_mesh_layer(doc.doc, layer, rebuilt.m, revision) ==
+          CLAY_ERROR_FORWARD_VERSION);
+    CHECK(layer_triangles(doc.doc, layer) == survivor);
+
+    // The same commit at the CURRENT revision is accepted.
+    CHECK(clay_document_replace_mesh_layer(doc.doc, layer, rebuilt.m, moved) == CLAY_OK);
+    CHECK(layer_triangles(doc.doc, layer) == clay_mesh_index_count(rebuilt.m) / 3);
+
+    // ...and zero means "do not check", for a caller that knows nothing could
+    // have moved.
+    CHECK(clay_document_replace_mesh_layer(doc.doc, layer, rebuilt.m, 0) == CLAY_OK);
+}
+
+TEST_CASE("c abi: the geometry revision moves for a rebuild and not for a sculpt") {
+    // The distinction the counter exists for. A sculpt moves vertices and
+    // leaves the topology alone — that is the fixed-topology contract, and it
+    // is exactly the change an adjacency, a BVH or a live sculptor SURVIVES. A
+    // rebuild swaps every vertex and every index, and they do not.
+    std::vector<float> pos;
+    std::vector<std::uint32_t> idx;
+    sphere(&pos, &idx);
+
+    DocHandle doc;
+    doc.doc = clay_document_create();
+    REQUIRE(doc.doc != nullptr);
+    const clay_layer_id layer = attach_layer(&doc, pos, idx);
+
+    std::uint64_t start = 0;
+    REQUIRE(clay_document_mesh_layer_revision(doc.doc, layer, &start) == CLAY_OK);
+
+    clay_mesh* borrowed = nullptr;
+    REQUIRE(clay_document_mesh_layer_by_id(doc.doc, layer, &borrowed) == CLAY_OK);
+    clay_mesh_sculptor* sculptor = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(borrowed, -1.0f, &sculptor) == CLAY_OK);
+
+    clay_mesh_brush_desc brush{};
+    brush.struct_size = sizeof(brush);
+    REQUIRE(clay_mesh_brush_defaults(&brush) == CLAY_OK);
+    brush.verb = CLAY_MESH_BRUSH_DRAW;
+    brush.center[0] = 0.0f;
+    brush.center[1] = 1.0f;
+    brush.center[2] = 0.0f;
+    brush.radius = 0.4f;
+    brush.strength = 0.05f;
+    std::size_t moved = 0;
+    REQUIRE(clay_mesh_sculptor_stamp(sculptor, &brush, nullptr, nullptr, &moved) == CLAY_OK);
+    CHECK(moved > 0);
+
+    std::uint64_t after_sculpt = 0;
+    REQUIRE(clay_document_mesh_layer_revision(doc.doc, layer, &after_sculpt) == CLAY_OK);
+    CHECK(after_sculpt == start);  // a sculpt is not a rebuild
+
+    clay_mesh_sculptor_destroy(sculptor);
+
+    const clay_voxel_remesh_params p = defaults_at(40);
+    REQUIRE(clay_document_voxel_remesh_layer(doc.doc, layer, &p, nullptr, nullptr) == CLAY_OK);
+    std::uint64_t after_remesh = 0;
+    REQUIRE(clay_document_mesh_layer_revision(doc.doc, layer, &after_remesh) == CLAY_OK);
+    CHECK(after_remesh > after_sculpt);
+}
+
+TEST_CASE("c abi: a layer remesh refuses what it should and leaves the layer alone") {
+    std::vector<float> pos;
+    std::vector<std::uint32_t> idx;
+    sphere(&pos, &idx);
+
+    DocHandle doc;
+    doc.doc = clay_document_create();
+    REQUIRE(doc.doc != nullptr);
+    REQUIRE(clay_document_enable_undo(doc.doc) == CLAY_OK);
+    const clay_layer_id layer = attach_layer(&doc, pos, idx);
+    const std::size_t before = layer_triangles(doc.doc, layer);
+
+    const clay_voxel_remesh_params p = defaults_at(48);
+    CHECK(clay_document_voxel_remesh_layer(doc.doc, layer + 999, &p, nullptr, nullptr) ==
+          CLAY_ERROR_NOT_FOUND);
+
+    // A locked layer is refused BEFORE the rebuild, not after several seconds
+    // of work.
+    REQUIRE(clay_document_set_layer_protection(doc.doc, layer, 0, 1) == CLAY_OK);
+    CHECK(clay_document_voxel_remesh_layer(doc.doc, layer, &p, nullptr, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(layer_triangles(doc.doc, layer) == before);
+    REQUIRE(clay_document_set_layer_protection(doc.doc, layer, 0, 0) == CLAY_OK);
+
+    // A cancelled remesh changes nothing and adds no undo step.
+    std::size_t depth = 0;
+    REQUIRE(clay_document_undo_state(doc.doc, nullptr, &depth, nullptr) == CLAY_OK);
+    clay_cancel_token* token = clay_cancel_token_create();
+    clay_cancel_token_cancel(token);
+    CHECK(clay_document_voxel_remesh_layer(doc.doc, layer, &p, token, nullptr) ==
+          CLAY_ERROR_CANCELLED);
+    clay_cancel_token_destroy(token);
+    CHECK(layer_triangles(doc.doc, layer) == before);
+    std::size_t depth_now = 0;
+    REQUIRE(clay_document_undo_state(doc.doc, nullptr, &depth_now, nullptr) == CLAY_OK);
+    CHECK(depth_now == depth);
+
+    // An over-budget request likewise.
+    clay_voxel_remesh_params over = defaults_at(256);
+    over.memory_budget_bytes = 1024;
+    CHECK(clay_document_voxel_remesh_layer(doc.doc, layer, &over, nullptr, nullptr) ==
+          CLAY_ERROR_BUDGET_EXCEEDED);
+    CHECK(layer_triangles(doc.doc, layer) == before);
+    REQUIRE(clay_document_undo_state(doc.doc, nullptr, &depth_now, nullptr) == CLAY_OK);
+    CHECK(depth_now == depth);
+}
+
+TEST_CASE("c abi: a live sculptor is refused after the layer it holds is rebuilt") {
+    // THE TRAP THIS CLOSES. `resolve_sculptor` compared the layer's mesh
+    // POINTER, which a std::map keeps stable across an assignment, and the
+    // sculptor's own `valid()`, which compares vertex and index COUNTS. A
+    // rebuild that happened to land on the same counts passed both and left
+    // the sculptor's adjacency and BVH describing triangles that no longer
+    // existed — every stamp after it moving the wrong vertices, silently.
+    std::vector<float> pos;
+    std::vector<std::uint32_t> idx;
+    sphere(&pos, &idx);
+
+    DocHandle doc;
+    doc.doc = clay_document_create();
+    REQUIRE(doc.doc != nullptr);
+    const clay_layer_id layer = attach_layer(&doc, pos, idx);
+
+    clay_mesh* borrowed = nullptr;
+    REQUIRE(clay_document_mesh_layer_by_id(doc.doc, layer, &borrowed) == CLAY_OK);
+    clay_mesh_sculptor* sculptor = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(borrowed, -1.0f, &sculptor) == CLAY_OK);
+
+    clay_mesh_brush_desc brush{};
+    brush.struct_size = sizeof(brush);
+    REQUIRE(clay_mesh_brush_defaults(&brush) == CLAY_OK);
+    brush.verb = CLAY_MESH_BRUSH_DRAW;
+    brush.center[1] = 1.0f;
+    brush.radius = 0.4f;
+    brush.strength = 0.05f;
+
+    // It works before the rebuild...
+    std::size_t moved = 0;
+    REQUIRE(clay_mesh_sculptor_stamp(sculptor, &brush, nullptr, nullptr, &moved) == CLAY_OK);
+    CHECK(moved > 0);
+
+    // THE REPLACEMENT THAT NEITHER OTHER CHECK CAN SEE: the same positions and
+    // the same index COUNT, with the index array reversed — different
+    // triangles, different adjacency, identical counts. A remesh normally
+    // changes the counts and `valid()` catches it; this is the case that
+    // slipped through, so this is the case the test has to build.
+    std::vector<std::uint32_t> shuffled(idx.rbegin(), idx.rend());
+    MeshHandle same_counts;
+    REQUIRE(clay_mesh_from_triangles(pos.data(), pos.size() / 3, shuffled.data(),
+                                     shuffled.size(), &same_counts.m) == CLAY_OK);
+    CHECK(clay_mesh_vertex_count(same_counts.m) == clay_mesh_vertex_count(borrowed));
+    CHECK(clay_mesh_index_count(same_counts.m) == clay_mesh_index_count(borrowed));
+    REQUIRE(clay_document_replace_mesh_layer(doc.doc, layer, same_counts.m, 0) == CLAY_OK);
+
+    // The counts still match, so the sculptor's own validity check is blind to
+    // this — and the stamp is refused anyway.
+    CHECK(clay_mesh_index_count(borrowed) == idx.size());
+    CHECK(clay_mesh_sculptor_stamp(sculptor, &brush, nullptr, nullptr, &moved) ==
+          CLAY_ERROR_NOT_FOUND);
+
+    clay_mesh_sculptor_destroy(sculptor);
+}

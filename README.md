@@ -571,6 +571,11 @@ Recorded as decisions rather than gaps, with the reasoning in
   is not quad retopology** — the output is a lattice-derived triangulation with
   no edge loops following the form, and no setting changes that. **It does not
   preserve UVs**, and the API says dropped rather than "best effort".
+  It also lands **on a layer as one undo step**, with a per-layer geometry
+  revision so a rebuild finishing on a worker thread cannot overwrite what the
+  artist did while waiting — and so a live sculptor over that layer is refused
+  rather than left stamping into an index describing triangles that no longer
+  exist.
 - **No PBR channels.** Polypaint works on all three representations; roughness
   and metallic want a UV parameterisation and a texture set, which live
   upstream of this library.

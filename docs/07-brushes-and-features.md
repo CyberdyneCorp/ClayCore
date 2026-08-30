@@ -1591,16 +1591,32 @@ that brick's sign per brick and this records it per region. Only sample-free
 bricks are affected — neither path stores anything there — and it is stated in
 the header rather than left to be found.
 
-### Projection is clamped twice
+### Projection is clamped by distance and weighted by facing
 
 After extraction each vertex may move part of the way toward the closest point
 on the source, which is what gives a rebuild back the detail the lattice rounded
-off. It is clamped by distance, and rejected outright where the source there
-faces away from the vertex's own reconstructed normal. Nearest-point alone jumps
-between nearby sheets — lips, fingers, a cloth fold, a mechanical gap — and a
-jump is not a small error, it is a hole pulled through the surface. The strength
-is a lerp and never a snap, so a mis-clamped projection degrades toward "no
-projection" rather than toward "corrupted".
+off. It is clamped by distance, and scaled by how well the source surface there
+faces the same way the vertex does — to zero where it faces away.
+
+**A weight and not a rejection, and that is a measured correction.** The first
+version rejected outright and the comment asserted the danger confidently. The
+fixture that actually reaches the branch is a sheet folded back through itself,
+where about a fifth of the vertices inside the clamp have a back-facing closest
+point — and there, at longest-axis 96, the hard reject was the *only* variant
+that made the surface worse:
+
+| | distance to source | self-intersecting pairs |
+|---|---|---|
+| no projection | 0.38643 | 0 |
+| project, no facing test | 0.38617 | 0 |
+| project, hard reject | 0.38637 | **17** |
+| project, weighted | 0.38642 | 0 |
+
+The mechanism is plain once seen: moving a vertex fully while leaving its
+neighbour untouched is a discontinuous displacement, and a discontinuous
+displacement tears. The weight goes to zero continuously and does not. The
+strength is a lerp and never a snap either way, so a mis-clamped projection
+degrades toward "no projection" rather than toward "corrupted".
 
 ### Determinism, cancellation and the document
 
@@ -1621,6 +1637,37 @@ revision token. A host holds the before and after meshes and commits them as one
 undo record. A `DynamicSurface` round-trips through it the same way — `to_mesh`,
 remesh, `from_mesh` — and the boundary is the caller's to see rather than an
 overload's to hide.
+
+### On a layer, as one undo step
+
+`mesh::voxel_remesh` has no document. `clay_document_voxel_remesh_layer` (and
+`Document.voxel_remesh_layer` in pyclay) is the other half: it captures the
+layer's triangles, rebuilds, validates, replaces and records — one call, one
+step on the undo menu, and transactional, so a refusal, a validation failure or
+a cancel leaves the layer byte-identical and adds no step. A protected layer is
+refused *before* the rebuild rather than after several seconds of it.
+
+The undo record is `session::Step::Kind::MeshReplace`, holding the mesh on each
+side. A sparse `VertexDeltas` cannot express this and must not be asked to: a
+delta records no indices — the fixed-topology contract working as intended — so
+one recorded against the old geometry applied to the new is a corruption, not an
+undo. It is by a wide margin the largest step kind there is, which is why the
+history's byte accounting had to learn it.
+
+**A mesh layer carries a geometry revision**, and the asymmetry is the whole
+point: a wholesale replacement bumps it, a sculpt does not. A brush moves
+vertices and leaves `indices` byte-identical, which is exactly what lets an
+`Adjacency`, a `Bvh` and a live `MeshSculptor` stay valid across a stroke; a
+rebuild invalidates all three.
+
+It does two jobs. A host running the rebuild on a worker thread reads the
+revision first and hands it back to the commit, so a result that arrives after
+the artist has moved on is **refused** rather than silently winning. And a live
+sculptor compares it, which catches the case neither of the older checks could:
+the layer's mesh POINTER is stable across an assignment, and the sculptor's
+vertex and index COUNTS are unchanged by a replacement that happens to land on
+the same ones — so before this, a same-count rebuild left a sculptor stamping
+into an adjacency and a BVH describing triangles that no longer existed.
 
 Runnable: [`examples/67_voxel_remesh.py`](../examples/67_voxel_remesh.py) —
 spikes thinner than a coarse voxel disappearing, a stretched surface's edge

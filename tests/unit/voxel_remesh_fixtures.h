@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 #include <cstdint>
 #include <vector>
 
@@ -235,6 +236,146 @@ inline Mesh narrow_gap(float gap = 0.05f, float thickness = 0.25f) {
     const float offset = gap * 0.5f + half;
     return combine(box(cf3(0.5f, 0.5f, half), cf3(0, 0, -offset)),
                    box(cf3(0.5f, 0.5f, half), cf3(0, 0, offset)));
+}
+
+
+// A sheet folded back through itself: a genuine SELF-intersection inside one
+// surface, which is a different fixture from two shells that overlap. The fold
+// brings the surface within a fraction of a voxel of itself, so a
+// reconstructed vertex near it has source geometry on BOTH sides — and the
+// side its own normal disagrees with is the one a nearest-point projection
+// would happily drag it onto.
+//
+// One connected grid, so `component_count` is 1 and nothing about this is two
+// objects meeting.
+inline Mesh folded_sheet(int n = 60, float fold = 0.30f, float depth = 0.35f) {
+    Mesh m;
+    const float pi = 3.14159265358979323846f;
+    for (int j = 0; j <= n; ++j)
+        for (int i = 0; i <= n; ++i) {
+            const float u = -0.5f + static_cast<float>(i) / static_cast<float>(n);
+            const float v = -0.5f + static_cast<float>(j) / static_cast<float>(n);
+            // The y displacement doubles back over itself while z sweeps, which
+            // is what makes the surface pass through the region it already
+            // occupies rather than merely bending sharply.
+            m.positions.push_back(cf3(u, v + fold * std::sin(2.0f * pi * v),
+                                      depth * std::sin(2.0f * pi * v)));
+        }
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < n; ++i) {
+            const std::uint32_t a = static_cast<std::uint32_t>(j * (n + 1) + i);
+            const std::uint32_t b = a + 1;
+            const std::uint32_t c = a + static_cast<std::uint32_t>(n + 1);
+            const std::uint32_t d = c + 1;
+            m.indices.insert(m.indices.end(), {a, c, b, b, c, d});
+        }
+    return m;
+}
+
+// A cube with its twelve edges and eight corners cut off at 45 degrees: six
+// squares, twelve chamfer rectangles and eight corner triangles, 24 vertices.
+//
+// THE fixture for sharp output. The chamfer's edges are exactly the lines a
+// dual-contouring pass is supposed to reproduce as creases and a marching pass
+// is supposed to round off, so this is what tells the two surface modes apart —
+// a plain cube would not, because its edges are axis-aligned and land on the
+// lattice.
+//
+// The solid is CONVEX and centred on the origin, which is what makes the
+// winding trivially correct rather than carefully hand-checked: outward at any
+// face is the direction from the origin to that face, so each triangle is
+// emitted and then flipped if its normal disagrees.
+inline Mesh chamfered_cube(float half = 0.5f, float chamfer = 0.16f) {
+    const float c = half - chamfer;
+    Mesh m;
+    // Vertex (corner, axis): `half` on `axis`, `c` on the other two, signs from
+    // the corner's bits. 8 corners x 3 axes = 24.
+    auto vid = [](int corner, int axis) { return static_cast<std::uint32_t>(corner * 3 + axis); };
+    for (int corner = 0; corner < 8; ++corner) {
+        const float sign[3] = {(corner & 1) ? 1.0f : -1.0f, (corner & 2) ? 1.0f : -1.0f,
+                               (corner & 4) ? 1.0f : -1.0f};
+        for (int axis = 0; axis < 3; ++axis) {
+            float p[3];
+            for (int a = 0; a < 3; ++a) p[a] = sign[a] * (a == axis ? half : c);
+            m.positions.push_back(cf3(p[0], p[1], p[2]));
+        }
+    }
+
+    std::vector<std::vector<std::uint32_t>> faces;
+    // Six axis squares: the four vertices that are `half` on this axis with
+    // this sign.
+    for (int axis = 0; axis < 3; ++axis)
+        for (int s = 0; s < 2; ++s) {
+            std::vector<std::uint32_t> loop;
+            for (int corner = 0; corner < 8; ++corner)
+                if (((corner >> axis) & 1) == s) loop.push_back(vid(corner, axis));
+            faces.push_back(loop);
+        }
+    // Twelve edge chamfers: the edge running along `axis` at fixed signs on the
+    // other two. Its rectangle is, at each end, the two vertices extreme on
+    // those other two axes.
+    for (int axis = 0; axis < 3; ++axis) {
+        const int b = (axis + 1) % 3, d = (axis + 2) % 3;
+        for (int sb = 0; sb < 2; ++sb)
+            for (int sd = 0; sd < 2; ++sd) {
+                std::vector<std::uint32_t> loop;
+                for (int s = 0; s < 2; ++s) {
+                    const int corner = (s << axis) | (sb << b) | (sd << d);
+                    loop.push_back(vid(corner, b));
+                    loop.push_back(vid(corner, d));
+                }
+                faces.push_back(loop);
+            }
+    }
+    // Eight corner triangles.
+    for (int corner = 0; corner < 8; ++corner)
+        faces.push_back({vid(corner, 0), vid(corner, 1), vid(corner, 2)});
+
+    for (const std::vector<std::uint32_t>& loop : faces) {
+        // Order the loop around its own centroid so a fan is a simple polygon —
+        // the collection order above is not a ring.
+        cfloat3 centre = cf3(0, 0, 0);
+        for (std::uint32_t v : loop) centre = centre + m.positions[v];
+        centre = centre * (1.0f / static_cast<float>(loop.size()));
+        const cfloat3 out = clay::kernel::cnormalize(centre);
+        // Two in-plane axes from the first vertex, to sort by angle.
+        const cfloat3 ex = clay::kernel::cnormalize(m.positions[loop[0]] - centre);
+        const cfloat3 ey = clay::kernel::ccross(out, ex);
+        std::vector<std::pair<float, std::uint32_t>> ring;
+        for (std::uint32_t v : loop) {
+            const cfloat3 r = m.positions[v] - centre;
+            ring.emplace_back(std::atan2(clay::kernel::cdot(r, ey), clay::kernel::cdot(r, ex)), v);
+        }
+        std::sort(ring.begin(), ring.end(),
+                  [](const std::pair<float, std::uint32_t>& a,
+                     const std::pair<float, std::uint32_t>& b) { return a.first < b.first; });
+        for (std::size_t i = 1; i + 1 < ring.size(); ++i) {
+            std::uint32_t t[3] = {ring[0].second, ring[i].second, ring[i + 1].second};
+            const cfloat3 n = clay::kernel::ccross(m.positions[t[1]] - m.positions[t[0]],
+                                                   m.positions[t[2]] - m.positions[t[0]]);
+            if (clay::kernel::cdot(n, out) < 0.0f) std::swap(t[1], t[2]);
+            m.indices.insert(m.indices.end(), {t[0], t[1], t[2]});
+        }
+    }
+    return m;
+}
+
+// A big, irregular surface for the cases that only appear at scale. `subdiv`
+// is the sphere's tessellation; 512 x 1024 is about a million triangles.
+//
+// NOISY on purpose, and deterministically so: a smooth sphere at a million
+// triangles exercises the triangle count and nothing else, while displaced
+// vertices give the tree an uneven distribution and the band an uneven
+// thickness, which is what a real sculpt looks like to this operation.
+inline Mesh noisy_sphere(int rings = 512, int segments = 1024, float amplitude = 0.06f) {
+    Mesh m = sphere(1.0f, cf3(0, 0, 0), rings, segments);
+    for (std::size_t i = 0; i < m.positions.size(); ++i) {
+        const cfloat3 p = m.positions[i];
+        const float n = std::sin(9.0f * p.x) * std::sin(11.0f * p.y) * std::sin(7.0f * p.z);
+        const float len = clay::kernel::clength(p);
+        if (len > 1e-6f) m.positions[i] = p * (1.0f + amplitude * n / len);
+    }
+    return m;
 }
 
 }  // namespace clay_test

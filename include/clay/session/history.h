@@ -45,6 +45,7 @@
 #include <vector>
 
 #include "clay/math/geom.h"
+#include "clay/mesh/mesh_data.h"
 #include "clay/mesh/sculpt.h"
 #include "clay/mesh/topology_delta.h"
 #include "clay/scene/commands.h"
@@ -87,6 +88,24 @@ struct Step {
         // promised "undo as one step" since the bracket shipped, and for every
         // representation but the edit list the promise was false.
         Compound,
+        // ONE LAYER'S WHOLE MESH, before and after. The kind a global voxel
+        // remesh needs and no existing one could carry.
+        //
+        // A SNAPSHOT where `Mesh` above stores a diff, and the reason is the
+        // one that made SurfaceGroup a snapshot: a diff has to be a diff OF
+        // something, and there is nothing to diff against. `VertexDeltas`
+        // deliberately records no indices — the fixed-topology contract paying
+        // off — and `TopologyDelta` records the split, collapse and flip an
+        // adaptive edit made, which a rebuild from a volume did not make. A
+        // remesh discards every vertex and every polygon at once, so the
+        // smallest honest record of it is both meshes.
+        //
+        // EXPENSIVE, and the budget is what makes that acceptable rather than
+        // reckless: `step_bytes` counts both meshes, so a history holding a
+        // two-million-triangle rebuild evicts to stay inside its budget exactly
+        // as it would for any other large payload. A remesh is a handful per
+        // session, which is the same frequency argument SurfaceGroup makes.
+        MeshReplace,
         Barrier  // an operation nothing records; not reversible, not silent
     };
 
@@ -120,6 +139,8 @@ struct Step {
     // removes it — so undoing scene last, and redoing it first, keeps every
     // payload applied while the layer it names is present.
     std::vector<Step> children;
+    // MeshReplace: one layer's whole mesh on each side of the rebuild.
+    mesh::Mesh mesh_before, mesh_after;
     std::string barrier;                      // Barrier: what happened, for a host to show
 
     bool reversible() const { return kind != Kind::Barrier; }
@@ -213,6 +234,14 @@ class History {
     // One adaptive gesture — every split, collapse, flip and displacement it
     // made — as ONE step.
     void record_dynamic_mesh_step(scene::LayerId layer, mesh::TopologyDelta delta);
+    // One layer's mesh REPLACED wholesale — a global voxel remesh. Both sides
+    // are taken by value because both are kept: undo needs the before and redo
+    // needs the after, and the layer holds only one of them at a time.
+    //
+    // A replacement that changed nothing is DROPPED, as every other recorder
+    // drops a no-op: a remesh that reproduced its input exactly is not a step a
+    // user should have to walk back through.
+    void record_mesh_replace(scene::LayerId layer, mesh::Mesh before, mesh::Mesh after);
 
     // An operation NO mechanism records. The examples matter, because the
     // obvious ones are wrong: consolidate IS undoable (it takes an UndoStack
@@ -286,7 +315,8 @@ class History {
             // value and an old journal still replays. A new kind at the front
             // would renumber the rest and silently reinterpret every event in
             // every file already on disk.
-            DynamicMesh
+            DynamicMesh,
+            MeshReplace  // appended, for the reason above
         };
         Kind kind = Kind::Command;
         scene::Command command;                   // Kind::Command
@@ -300,6 +330,10 @@ class History {
         // against and never runs backwards, so the before side would be bytes
         // nothing reads.
         std::vector<std::uint8_t> group_after;
+        // MeshReplace: the mesh AFTER the rebuild, encoded. Only the after
+        // side, for the reason group_after gives — a journal replays forward
+        // onto the snapshot it was taken against and never runs backwards.
+        std::vector<std::uint8_t> mesh_after;
         std::string barrier;                      // Barrier
     };
 

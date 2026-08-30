@@ -183,15 +183,29 @@ std::uint64_t project_to_source(Mesh* m, const Mesh& source, const Bvh& source_b
             if (parallel::cancelled(token)) continue;
             const Bvh::ClosestPoint hit = source_bvh.closest(p);
             if (!hit.found || hit.distance > limit) continue;
-            // THE SHEET TEST. Nearest-point alone jumps between nearby
-            // surfaces — lips, fingers, a cloth fold, a mechanical gap — and a
-            // jump is not a small error, it is a hole pulled through the
-            // surface. A candidate whose source triangle faces away from this
-            // vertex's own reconstructed normal is the wrong sheet.
-            const kernel::cfloat3 sn = triangle_normal(source, hit.triangle);
-            if (v < normals.size() && kernel::cdot(sn, normals[v]) < 0.0f) continue;
+            // THE SHEET WEIGHT: how much this candidate is trusted, from how
+            // well the source faces the way the reconstructed vertex does. Zero
+            // where the source faces away, which is the case the contract names
+            // — a candidate on a sheet pointing the other way is not this
+            // vertex's surface.
+            //
+            // A WEIGHT AND NOT A REJECTION, and the difference is measured
+            // rather than assumed. A hard reject moves a vertex fully and its
+            // neighbour not at all, and that discontinuity TEARS: on a sheet
+            // folded back through itself at longest-axis 96, projecting with a
+            // hard reject left 17 self-intersecting triangle pairs where the
+            // unprojected surface had none, and projecting with no test at all
+            // also had none. The weight removes the tear (back to zero pairs)
+            // while still refusing the back-facing sheet, because it goes to
+            // zero continuously instead of falling off a cliff.
+            float sheet = 1.0f;
+            if (v < normals.size())
+                sheet = std::clamp(kernel::cdot(triangle_normal(source, hit.triangle),
+                                                normals[v]),
+                                   0.0f, 1.0f);
+            if (sheet <= 0.0f) continue;
             const kernel::cfloat3 delta = hit.point - p;
-            moved[v] = p + delta * strength;
+            moved[v] = p + delta * (strength * sheet);
             did[v] = 1;
         }
     });
@@ -201,6 +215,35 @@ std::uint64_t project_to_source(Mesh* m, const Mesh& source, const Bvh& source_b
     std::uint64_t count = 0;
     for (std::uint8_t d : did) count += d;
     return count;
+}
+
+SurfaceError measure_surface_error(const Mesh& result, const Bvh& source_bvh) {
+    SurfaceError out;
+    const std::size_t n = result.positions.size();
+    if (n == 0 || source_bvh.empty()) return out;
+
+    std::vector<float> d(n, 0.0f);
+    // Per vertex, disjoint outputs, position-only inputs — the same shape the
+    // projection uses, so the numbers do not depend on the pool's scheduling.
+    parallel::for_range(n, 256, [&](std::size_t first, std::size_t last) {
+        for (std::size_t v = first; v < last; ++v)
+            d[v] = source_bvh.unsigned_distance(result.positions[v]);
+    });
+
+    double sum = 0.0;
+    for (float v : d) sum += static_cast<double>(v) * static_cast<double>(v);
+    out.rms = std::sqrt(sum / static_cast<double>(n));
+
+    // Sorted rather than a histogram: the array is one float per vertex and a
+    // remesh has just built a mesh many times its size, so the sort is noise
+    // against what it is measuring — and an exact percentile beats a bucketed
+    // one for a number a host will quote.
+    std::vector<float> sorted = d;
+    std::sort(sorted.begin(), sorted.end());
+    out.max = static_cast<double>(sorted.back());
+    const std::size_t at = static_cast<std::size_t>(0.95 * static_cast<double>(n - 1));
+    out.p95 = static_cast<double>(sorted[at]);
+    return out;
 }
 
 bool correct_volume(Mesh* m, double target_volume, double current_volume) {

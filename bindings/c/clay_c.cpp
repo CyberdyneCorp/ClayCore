@@ -1068,6 +1068,11 @@ struct clay_document {
     // another thread invalidating and rebuilding.
     std::atomic<std::uint64_t> revision{1};
 
+    // Per mesh layer, bumped only when its triangles are REPLACED wholesale.
+    // See mesh_layer_revision_of for why a sculpt deliberately does not bump it
+    // and why the pointer and count checks that came before it are not enough.
+    std::map<clay_layer_id, std::uint64_t> mesh_geometry_revision;
+
     // The general invalidation: everything the cache knows becomes stale.
     // This stays the DEFAULT, and the append form below is the exception you
     // have to ask for by name — a tape rebuilt from a prefix that has in fact
@@ -2749,6 +2754,26 @@ clay_voxel_grid* borrow_layer(clay_document* doc, clay_layer_id layer) {
     handle.doc = doc;
     handle.layer = layer;
     return &handle;
+}
+
+// A mesh layer's geometry revision, and why it lives on the handle rather than
+// on the mesh.
+//
+// `resolve_sculptor` compares `mesh_data_mut(s->mesh)` against the pointer the
+// sculptor was built over, which catches a layer that was REMOVED — a
+// std::map node's address is stable, so it does not catch the layer's contents
+// being replaced underneath. `MeshSculptor::valid()` catches a changed vertex
+// or index COUNT, which catches most replacements and misses the one that
+// matters most: a rebuild that happens to land on the same counts leaves a live
+// sculptor with a silently wrong adjacency and BVH over entirely different
+// triangles.
+//
+// A counter closes that. Bumped only by a wholesale replacement, never by a
+// sculpt, because a sculpt is exactly the change those caches are built to
+// survive.
+std::uint64_t mesh_layer_revision_of(const clay_document* doc, clay_layer_id layer) {
+    auto it = doc->mesh_geometry_revision.find(layer);
+    return it == doc->mesh_geometry_revision.end() ? 1u : it->second;
 }
 
 clay_mesh* borrow_mesh_layer(clay_document* doc, clay_layer_id layer) {
@@ -11919,6 +11944,11 @@ clay_result clay_brick_cache_raycast_many(const clay_brick_cache* cache,
 struct clay_mesh_sculptor {
     clay_mesh* mesh = nullptr;
     mesh::Mesh* bound = nullptr;
+    // The layer's geometry revision when this sculptor was built, and the only
+    // thing that catches the replacement neither of the two checks above can.
+    // See mesh_layer_revision_of. Zero for a standalone mesh, which belongs to
+    // no layer and cannot be replaced under anyone.
+    std::uint64_t geometry_revision = 0;
     std::unique_ptr<mesh::MeshSculptor> sculptor;
 };
 
@@ -11985,6 +12015,17 @@ clay_result resolve_sculptor(clay_mesh_sculptor* s, bool for_edit) {
     if (!s->sculptor->valid())
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     "the mesh changed its vertex or index count under this sculptor");
+    // THE CHECK THE OTHER TWO CANNOT MAKE. The pointer comparison above catches
+    // a layer that was REMOVED — a std::map node's address is stable, so it
+    // does not see the contents replaced. `valid()` catches a changed vertex or
+    // index COUNT, which catches most rebuilds and misses the one that matters:
+    // a rebuild landing on the same counts would leave this sculptor's
+    // adjacency and BVH describing triangles that no longer exist, and every
+    // stamp after it would move the wrong vertices without a word.
+    if (s->mesh && s->mesh->doc &&
+        mesh_layer_revision_of(s->mesh->doc, s->mesh->layer) != s->geometry_revision)
+        return fail(CLAY_ERROR_NOT_FOUND,
+                    "the mesh layer was rebuilt under this sculptor; build a new one");
     return for_edit ? mesh_layer_editable(s->mesh) : CLAY_OK;
 }
 
@@ -12696,6 +12737,133 @@ clay_result clay_mesh_voxel_remesh(const clay_mesh* source,
     return CLAY_OK;
 }
 
+}  // extern "C" — the helpers below return C++ types and cannot have C linkage
+
+namespace {
+
+// The one place a mesh layer's triangles are swapped, so every caller gets the
+// same guards, the same undo record and the same invalidation.
+clay_result replace_mesh_layer_geometry(clay_document* doc, clay_layer_id layer,
+                                        mesh::Mesh replacement,
+                                        std::uint64_t expected_revision) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l || l->kind != scene::LayerKind::Mesh)
+        return fail(CLAY_ERROR_NOT_FOUND, "no mesh layer with that id");
+    if (l->protected_from_edits())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    std::string("layer ") + std::to_string(layer) + " is " +
+                        (l->ghost ? "ghosted" : "locked") + " and takes no edits");
+    auto it = doc->doc.mesh_layers.find(layer);
+    if (it == doc->doc.mesh_layers.end())
+        return fail(CLAY_ERROR_NOT_FOUND, "the mesh layer holds no triangles");
+    if (replacement.triangle_count() == 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "the replacement has no triangles");
+    // A quad list describing triangles that no longer exist is a lie that
+    // survives into a saved document — mesh_data.h states the rule and the save
+    // path drops such a list silently, so this refuses rather than repairs.
+    if (replacement.has_quads() && !mesh::quads_consistent(replacement))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "the replacement's quads do not describe its triangles");
+    // The staleness check, and it happens LAST among the guards so a caller
+    // whose layer moved is told that rather than being told about the argument
+    // it would also have been refused for.
+    const std::uint64_t now = mesh_layer_revision_of(doc, layer);
+    if (expected_revision != 0 && expected_revision != now)
+        return fail(CLAY_ERROR_FORWARD_VERSION,
+                    "the mesh layer was rebuilt while this result was being prepared");
+
+    // ONE UNDO STEP, holding both meshes. A `VertexDeltas` cannot express this
+    // and must not be asked to: deltas already on the stack for this layer were
+    // recorded against the OLD vertex count, and History::apply_step would
+    // apply them to whatever mesh the resolver now returns. Recording the
+    // replacement as its own kind is what puts a boundary between them.
+    // Guarded, because undo is OPT-IN: `doc->undo` exists only after
+    // clay_document_enable_undo, and every other recording site in this file
+    // tests it the same way. Unguarded, the first remesh on a document that
+    // never enabled undo was a null dereference.
+    if (doc->undo) doc->undo->record_mesh_replace(layer, it->second, replacement);
+    it->second = std::move(replacement);
+    doc->mesh_geometry_revision[layer] = now + 1;
+    doc->touch();
+    return CLAY_OK;
+}
+
+}  // namespace
+
+extern "C" {
+
+clay_result clay_document_mesh_layer_revision(const clay_document* doc, clay_layer_id layer,
+                                              uint64_t* out_revision) {
+    if (!out_revision) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_revision");
+    *out_revision = 0;
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l || l->kind != scene::LayerKind::Mesh)
+        return fail(CLAY_ERROR_NOT_FOUND, "no mesh layer with that id");
+    *out_revision = mesh_layer_revision_of(doc, layer);
+    return CLAY_OK;
+}
+
+clay_result clay_document_replace_mesh_layer(clay_document* doc, clay_layer_id layer,
+                                             const clay_mesh* replacement,
+                                             uint64_t expected_revision) {
+    const mesh::Mesh* src = nullptr;
+    clay_result r = resolve_mesh(replacement, &src);
+    if (r != CLAY_OK) return r;
+    // A layer handed its own borrowed mesh would be assigned from itself
+    // through a copy it is about to destroy. Refused rather than special-cased:
+    // a caller doing that meant something else.
+    if (doc) {
+        auto it = doc->doc.mesh_layers.find(layer);
+        if (it != doc->doc.mesh_layers.end() && &it->second == src)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "the replacement is the layer's own mesh");
+    }
+    return replace_mesh_layer_geometry(doc, layer, *src, expected_revision);
+}
+
+clay_result clay_document_voxel_remesh_layer(clay_document* doc, clay_layer_id layer,
+                                             const clay_voxel_remesh_params* params,
+                                             clay_cancel_token* token,
+                                             clay_voxel_remesh_report* out_report) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l || l->kind != scene::LayerKind::Mesh)
+        return fail(CLAY_ERROR_NOT_FOUND, "no mesh layer with that id");
+    // Refused BEFORE the rebuild, not after: remeshing a locked layer for
+    // several seconds and then declining to commit it is a worse answer than
+    // declining immediately.
+    if (l->protected_from_edits())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    std::string("layer ") + std::to_string(layer) + " is " +
+                        (l->ghost ? "ghosted" : "locked") + " and takes no edits");
+    auto it = doc->doc.mesh_layers.find(layer);
+    if (it == doc->doc.mesh_layers.end())
+        return fail(CLAY_ERROR_NOT_FOUND, "the mesh layer holds no triangles");
+
+    mesh::VoxelRemeshParams p;
+    clay_result r = read_voxel_remesh_params(params, &p);
+    if (r != CLAY_OK) return r;
+
+    // A COPY of the source, and the revision it was taken at. The copy is what
+    // makes the whole operation transactional: `voxel_remesh` reads it while
+    // the layer still holds the original, so a cancel or a refusal is a discard
+    // and the document was never touched.
+    const mesh::Mesh source = it->second;
+    const std::uint64_t at = mesh_layer_revision_of(doc, layer);
+
+    mesh::VoxelRemeshResult result =
+        mesh::voxel_remesh(source, p, token ? &token->token : nullptr);
+    r = write_voxel_remesh_report(out_report, result.report);
+    if (r != CLAY_OK) return r;
+    if (result.status != mesh::VoxelRemeshStatus::Ok)
+        return fail(voxel_remesh_result_code(result.status),
+                    voxel_remesh_message(result.status));
+
+    return replace_mesh_layer_geometry(doc, layer, std::move(result.mesh), at);
+}
+
 clay_result clay_mesh_sculptor_create(clay_mesh* mesh, float weld_epsilon,
                                       clay_mesh_sculptor** out_sculptor) {
     if (!out_sculptor) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_sculptor");
@@ -12708,6 +12876,7 @@ clay_result clay_mesh_sculptor_create(clay_mesh* mesh, float weld_epsilon,
     auto handle = std::make_unique<clay_mesh_sculptor>();
     handle->mesh = mesh;
     handle->bound = data;
+    handle->geometry_revision = mesh->doc ? mesh_layer_revision_of(mesh->doc, mesh->layer) : 0;
     handle->sculptor = std::make_unique<mesh::MeshSculptor>(
         *data, weld_epsilon < 0.0f ? mesh::kDefaultWeldEpsilon : weld_epsilon);
     *out_sculptor = handle.release();

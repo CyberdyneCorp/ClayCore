@@ -1,5 +1,7 @@
 #include "clay/session/history.h"
 
+#include <cstring>
+
 #include <algorithm>
 #include <optional>
 #include <utility>
@@ -282,6 +284,117 @@ void History::record_dynamic_mesh_step(scene::LayerId layer, mesh::TopologyDelta
     push(std::move(step));
 }
 
+namespace {
+
+// A mesh as bytes, for the journal.
+//
+// WRITTEN HERE rather than reached for from `io`, because `session` may not
+// name `io` — check_layering.py allows session {parallel, kernel, math, scene,
+// voxel, mesh, field, brush, eval} and nothing else, and that boundary is not
+// worth spending to avoid twenty lines. It is also a DIFFERENT job from the
+// document format: this is a private, in-session encoding whose only reader is
+// the replay three lines below it, so it carries no version, no chunk header
+// and no forward-compatibility promise.
+//
+// Counts first, then each array whole. Attribute arrays are "empty or the
+// vertex count" by mesh_data.h's own rule, so one flag each is enough.
+void put_mesh(std::vector<std::uint8_t>& out, const mesh::Mesh& m) {
+    auto put = [&out](const void* data, std::size_t bytes) {
+        const std::uint8_t* p = static_cast<const std::uint8_t*>(data);
+        out.insert(out.end(), p, p + bytes);
+    };
+    const std::uint64_t vertices = m.positions.size();
+    const std::uint64_t indices = m.indices.size();
+    const std::uint8_t flags = static_cast<std::uint8_t>(
+        (m.normals.size() == m.positions.size() ? 1 : 0) |
+        (m.colors.size() == m.positions.size() ? 2 : 0) |
+        (m.uvs.size() == m.positions.size() ? 4 : 0));
+    put(&vertices, sizeof(vertices));
+    put(&indices, sizeof(indices));
+    put(&flags, sizeof(flags));
+    put(m.positions.data(), m.positions.size() * sizeof(kernel::cfloat3));
+    if (flags & 1) put(m.normals.data(), m.normals.size() * sizeof(kernel::cfloat3));
+    if (flags & 2) put(m.colors.data(), m.colors.size() * sizeof(kernel::cfloat3));
+    if (flags & 4) put(m.uvs.data(), m.uvs.size() * sizeof(kernel::cfloat2));
+    put(m.indices.data(), m.indices.size() * sizeof(std::uint32_t));
+}
+
+// Returns false on a truncated or inconsistent payload rather than reading past
+// it: a journal is a file, and a file can be short.
+bool take_mesh(const std::uint8_t* body, std::size_t size, mesh::Mesh* out) {
+    std::size_t at = 0;
+    auto take = [&](void* dst, std::size_t bytes) {
+        if (at + bytes > size) return false;
+        std::memcpy(dst, body + at, bytes);
+        at += bytes;
+        return true;
+    };
+    std::uint64_t vertices = 0, indices = 0;
+    std::uint8_t flags = 0;
+    if (!take(&vertices, sizeof(vertices))) return false;
+    if (!take(&indices, sizeof(indices))) return false;
+    if (!take(&flags, sizeof(flags))) return false;
+    // A count that could not fit in what remains is a corrupt payload, and
+    // checking it BEFORE the resize is what keeps a bad journal from asking for
+    // a terabyte.
+    const std::size_t remaining = size - at;
+    const std::size_t per_vertex =
+        sizeof(kernel::cfloat3) + ((flags & 1) ? sizeof(kernel::cfloat3) : 0) +
+        ((flags & 2) ? sizeof(kernel::cfloat3) : 0) + ((flags & 4) ? sizeof(kernel::cfloat2) : 0);
+    if (vertices > remaining / (per_vertex ? per_vertex : 1)) return false;
+    if (indices > remaining / sizeof(std::uint32_t)) return false;
+
+    mesh::Mesh m;
+    m.positions.resize(static_cast<std::size_t>(vertices));
+    if (!take(m.positions.data(), m.positions.size() * sizeof(kernel::cfloat3))) return false;
+    if (flags & 1) {
+        m.normals.resize(static_cast<std::size_t>(vertices));
+        if (!take(m.normals.data(), m.normals.size() * sizeof(kernel::cfloat3))) return false;
+    }
+    if (flags & 2) {
+        m.colors.resize(static_cast<std::size_t>(vertices));
+        if (!take(m.colors.data(), m.colors.size() * sizeof(kernel::cfloat3))) return false;
+    }
+    if (flags & 4) {
+        m.uvs.resize(static_cast<std::size_t>(vertices));
+        if (!take(m.uvs.data(), m.uvs.size() * sizeof(kernel::cfloat2))) return false;
+    }
+    m.indices.resize(static_cast<std::size_t>(indices));
+    if (!take(m.indices.data(), m.indices.size() * sizeof(std::uint32_t))) return false;
+    for (std::uint32_t index : m.indices)
+        if (index >= m.positions.size()) return false;
+    *out = std::move(m);
+    return true;
+}
+
+// Whether a rebuild actually rebuilt anything. Counts first because they
+// differ in nearly every real case and settle it without touching the arrays.
+bool same_mesh(const mesh::Mesh& a, const mesh::Mesh& b) {
+    if (a.positions.size() != b.positions.size() || a.indices.size() != b.indices.size())
+        return false;
+    if (a.indices != b.indices) return false;
+    return std::memcmp(a.positions.data(), b.positions.data(),
+                       a.positions.size() * sizeof(kernel::cfloat3)) == 0;
+}
+
+}  // namespace
+
+void History::record_mesh_replace(scene::LayerId layer, mesh::Mesh before, mesh::Mesh after) {
+    if (!enabled_) return;
+    if (same_mesh(before, after)) return;  // dropped, as every recorder drops a no-op
+    Step step;
+    step.kind = Step::Kind::MeshReplace;
+    step.layer = layer;
+    step.mesh_before = std::move(before);
+    step.mesh_after = std::move(after);
+    JournalEvent e;
+    e.kind = JournalEvent::Kind::MeshReplace;
+    e.layer = step.layer;
+    put_mesh(e.mesh_after, step.mesh_after);
+    journal_.push_back(std::move(e));
+    push(std::move(step));
+}
+
 void History::record_barrier(std::string what) {
     if (!enabled_) return;
     Step step;
@@ -319,6 +432,19 @@ bool History::apply_step(const Step& step, bool forward, scene::Document& doc,
             // a record paired with the wrong mesh. Propagated rather than
             // ignored: the step stays on the stack and the caller is told.
             return forward ? step.deltas.apply(*m) : step.deltas.revert(*m);
+        }
+        case Step::Kind::MeshReplace: {
+            mesh::Mesh* m = mesh_for ? mesh_for(step.layer) : nullptr;
+            // Refused rather than skipped, for the reason a missing grid is:
+            // skipping would take the step off the stack and leave the next
+            // undo reversing something older than the user asked for.
+            if (!m) return false;
+            // A COPY on each side, not a move. The step has to survive being
+            // applied so it can be applied again in the other direction, which
+            // is what redo is; moving out of it would empty the step the first
+            // time it was used.
+            *m = forward ? step.mesh_after : step.mesh_before;
+            return true;
         }
         case Step::Kind::DynamicMesh: {
             mesh::DynamicSurface* surface = dynamic_for_ ? dynamic_for_(step.layer) : nullptr;
@@ -611,6 +737,10 @@ std::vector<std::uint8_t> History::journal_since(std::size_t from, std::size_t* 
                 // deterministic blob, so a second encoding would buy nothing.
                 put_bytes(out, e.group_after);
                 break;
+            case JournalEvent::Kind::MeshReplace:
+                // Already a compact blob; a second encoding would buy nothing.
+                put_bytes(out, e.mesh_after);
+                break;
             case JournalEvent::Kind::Barrier:
                 put_bytes(out, std::vector<std::uint8_t>(e.barrier.begin(), e.barrier.end()));
                 break;
@@ -782,6 +912,32 @@ bool History::replay(const std::uint8_t* data, std::size_t size, scene::Document
                 push(std::move(step));
                 break;
             }
+            case JournalEvent::Kind::MeshReplace: {
+                mesh::Mesh* m = mesh_for ? mesh_for(layer) : nullptr;
+                mesh::Mesh restored;
+                if (!m || !take_mesh(body, payload, &restored)) {
+                    if (out) *out = result;
+                    return false;
+                }
+                // The BEFORE side is the mesh as it stands right now, captured
+                // before overwriting it — a replay walks forward from a
+                // snapshot, so "before" is whatever the previous event left,
+                // and taking it here is what keeps the reconstructed step
+                // undoable rather than one-way. Exactly SurfaceGroup's rule.
+                Step step;
+                step.kind = Step::Kind::MeshReplace;
+                step.layer = layer;
+                step.mesh_before = *m;
+                step.mesh_after = restored;
+                *m = std::move(restored);
+                JournalEvent e;
+                e.kind = JournalEvent::Kind::MeshReplace;
+                e.layer = layer;
+                e.mesh_after.assign(body, body + payload);
+                journal_.push_back(std::move(e));
+                push(std::move(step));
+                break;
+            }
             case JournalEvent::Kind::Barrier:
                 // STOPS rather than skips. Continuing past an operation it
                 // cannot reproduce would hand back a document quietly missing
@@ -827,6 +983,11 @@ std::size_t History::step_bytes(const Step& s) {
     // the term that matters for it rather than a rounding error — the same
     // omission roll-up-document-memory found six of in node_bytes.
     n += s.group_before.capacity() + s.group_after.capacity();
+    // A MeshReplace step holds TWO whole meshes and is by a wide margin the
+    // largest a step can be — a two-million-triangle rebuild is over a hundred
+    // megabytes on each side. Leaving it out would make the budget blind to
+    // exactly the kind that most needs bounding.
+    n += s.mesh_before.bytes() + s.mesh_after.bytes();
     // A Compound owns its children outright, so its cost is theirs. Without
     // this a folded group would report the cost of an empty Step and a budget
     // would never evict it.
@@ -843,6 +1004,7 @@ std::size_t History::event_bytes(const JournalEvent& e) {
     n += e.deltas.bytes();
     n += e.topology_delta.bytes();
     n += e.group_after.capacity();
+    n += e.mesh_after.capacity();
     n += scene::command_bytes(e.command);
     return n;
 }
