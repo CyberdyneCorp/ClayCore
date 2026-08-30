@@ -157,6 +157,32 @@ Tape compile_layer(const Layer& layer, const CullRegion* cull = nullptr);
 // layer's chain, plus the two accumulator flags needed to carry on from
 // there. Resuming copies the tape up to those lengths, compiles the appended
 // nodes onto it, and re-emits the union.
+// One GROUP the prefix ends inside, and what finishing its chain costs.
+//
+// A checkpoint used to sit only at the end of a layer's root list, where the
+// one thing left to re-emit was the union with the layers below. A checkpoint
+// inside a group sits in front of a STACK: that group's combine, then each
+// enclosing group's, then the union. compile_group emits its combine AFTER
+// its children, so this is what the prefix has not paid for yet.
+struct TapeCheckpointFrame {
+    NodeId group = kNoNode;
+    // The chain CONTAINING this group, as it stood when the group was entered.
+    // compile_group decides whether to emit on `have_acc || seeded`, and both
+    // halves of that are here rather than re-derived, because re-deriving them
+    // means replaying the chain this checkpoint exists to avoid replaying.
+    bool outer_have_acc = false;
+    bool seeded = false;
+    // Whether finishing this group's chain emits a combine at all. FALSE for
+    // an inner Add group entered with nothing beneath it: its children's value
+    // IS the chain's value and no combine is emitted. Measured — nesting
+    // all-Add groups four deep leaves the same single trailing instruction as
+    // one, which is why "one combine per level" is wrong.
+    bool emits = false;
+    Op op = Op::Add;
+    Blend blend{};
+    float rounding = 0.0f;  // already scaled by the layer transform
+};
+
 struct TapeCheckpoint {
     // Prefix lengths, not the tape's own sizes: any trailing layer union sits
     // after these and is re-emitted rather than reused.
@@ -164,15 +190,33 @@ struct TapeCheckpoint {
     std::size_t params = 0;
     std::size_t blob = 0;
     LayerId layer = 0;      // the layer whose chain the prefix ends in
-    bool layer_have_acc = false;  // that chain left a value on the stack
+    bool layer_have_acc = false;  // the INNERMOST chain left a value on the stack
     bool doc_have_acc = false;    // an EARLIER layer left one underneath it
     bool valid = false;           // false when no layer was compiled at all
+    // The groups the prefix ends inside, INNERMOST FIRST, excluding the root
+    // list itself. Empty when the checkpoint is at the layer's root list,
+    // which is what every checkpoint was before group appends existed — so an
+    // empty stack is exactly the old behaviour and not a special case.
+    std::vector<TapeCheckpointFrame> frames;
 };
 
 // The whole-document compile, plus the checkpoint an append can resume from.
 // The tape is byte-identical to compile_document(doc) — this only records
 // where the compile passed through.
 Tape compile_document_resumable(const Document& doc, TapeCheckpoint* out_checkpoint);
+
+// The same, CULLED -- byte-identical to compile_document(doc, cull, index,
+// plan), plus the checkpoint that compile passed through.
+//
+// A brick refill needs both halves at once. What it stores as a seed is the
+// stack where the checkpoint sits, not the value the walk ends with: inside a
+// group the group's combine is still pending, and the finished field has it
+// folded in already. The uncalled variant above cannot serve that, because a
+// seed taken without the brick's cull is continued from a different field
+// than the one the brick evaluates.
+Tape compile_document_resumable(const Document& doc, TapeCheckpoint* out_checkpoint,
+                                const CullRegion* cull, const CullIndex* index,
+                                const CullPlan* plan);
 
 // Compile `doc` by reusing `prefix`, which must have come from
 // compile_document_resumable together with `checkpoint`, where `doc` differs
@@ -265,6 +309,14 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& checkpoin
 // between layers. Anything else is a different field.
 Tape compile_document_part(const Document& doc, LayerId active, bool below,
                            const CullRegion* cull = nullptr, const CullIndex* index = nullptr);
+
+// The same, plus the checkpoint it passed through -- what a brick refill needs
+// to store the stack rather than the answer. For the ACTIVE half that
+// checkpoint is the one a suffix resumes from, which is why a part has to be
+// able to report it at all.
+Tape compile_document_part_resumable(const Document& doc, LayerId active, bool below,
+                                     const CullRegion* cull, const CullIndex* index,
+                                     TapeCheckpoint* out_checkpoint);
 
 bool compile_layer_suffix(const TapeCheckpoint& checkpoint, const Document& doc,
                           const std::vector<NodeId>& appended, Tape* out,

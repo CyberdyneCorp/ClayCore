@@ -91,6 +91,40 @@ void check_append(Document& doc, LayerRef layer, std::vector<Node> add) {
     CHECK(reused.compile_id != prefix.compile_id);
 }
 
+// A group, and a chain of nested ones. `group_chain` returns the innermost,
+// each the last member of its parent's chain -- the shape a tail-in-tail
+// append needs.
+Node group_node(Op op = Op::Add, float k = 0.0f) {
+    Node g;
+    g.is_group = true;
+    g.op = op;
+    g.blend = Blend{k > 0.0f ? BlendProfile::Quadratic : BlendProfile::Hard, k};
+    return g;
+}
+
+NodeId group_chain(LayerRef layer, int depth, Op op = Op::Add, float k = 0.0f) {
+    NodeId parent = kNoNode;
+    for (int d = 0; d < depth; ++d)
+        parent = parent == kNoNode ? layer.sdf->insert(group_node(op, k))
+                                   : layer.sdf->insert(group_node(op, k), parent);
+    return parent;
+}
+
+// check_append, but the nodes go into `parent` rather than the root list.
+void check_append_into(Document& doc, LayerRef layer, NodeId parent, std::vector<Node> add) {
+    TapeCheckpoint cp;
+    Tape prefix = compile_document_resumable(doc, &cp);
+    std::vector<NodeId> ids;
+    for (Node& n : add) ids.push_back(layer.sdf->insert(std::move(n), parent));
+
+    Tape reused;
+    TapeCheckpoint next;
+    REQUIRE(compile_document_append(prefix, cp, doc, ids, &reused, &next));
+    require_identical(reused, compile_document(doc));
+    CHECK(reused.compile_id != 0);
+    CHECK(reused.compile_id != prefix.compile_id);
+}
+
 }  // namespace
 
 TEST_CASE("prefix reuse: one layer") {
@@ -429,4 +463,123 @@ TEST_CASE("prefix reuse: everything that is not a tail append is refused") {
         // compiler can catch for itself in O(appended).
         CHECK_FALSE(compile_document_append(prefix, cp, d, {first}, &out, nullptr));
     }
+}
+
+// --- appending INSIDE a group (append-into-a-group) --------------------------
+//
+// The compiled prefix ends where the new node goes only when that node is at
+// the tail of its chain AND every group above it is at the tail of its own.
+// Then the whole of what the prefix has not paid for is the ancestors'
+// combines, which the checkpoint carries.
+
+TEST_CASE("group append: a dab inside a tail group resumes like one beside it") {
+    for (int depth : {1, 2, 3}) {
+        CAPTURE(depth);
+        Document doc;
+        LayerRef l = add_layer(doc, "l");
+        for (int i = 0; i < 6; ++i) l.sdf->insert(dab(0.1f * float(i), 0, 0, 0.2f));
+        const NodeId g = group_chain(l, depth, Op::Add, 0.05f);
+        l.sdf->insert(dab(0.0f, 0.3f, 0, 0.15f), g);
+        check_append_into(doc, l, g, {dab(0.1f, 0.3f, 0, 0.15f)});
+    }
+}
+
+TEST_CASE("group append: the ops a group can carry") {
+    // Each of these takes a different branch through compile_group's emit
+    // decision, which is what the checkpoint's frames have to reproduce.
+    struct Case { const char* name; Op op; float k; };
+    for (const Case& c : {Case{"add smooth", Op::Add, 0.05f}, Case{"add hard", Op::Add, 0.0f},
+                          Case{"subtract", Op::Subtract, 0.05f}}) {
+        CAPTURE(c.name);
+        Document doc;
+        LayerRef l = add_layer(doc, "l");
+        for (int i = 0; i < 6; ++i) l.sdf->insert(dab(0.1f * float(i), 0, 0, 0.2f));
+        const NodeId g = l.sdf->insert(group_node(c.op, c.k));
+        l.sdf->insert(dab(0.0f, 0.3f, 0, 0.15f), g);
+        check_append_into(doc, l, g, {dab(0.1f, 0.3f, 0, 0.15f)});
+    }
+}
+
+TEST_CASE("group append: a stroke into a group resumes from itself, dab after dab") {
+    // The shape the device case drives, and the one the whole change is for:
+    // every dab after the first must resume from what the one before it left,
+    // not from a full compile.
+    Document doc;
+    LayerRef l = add_layer(doc, "l");
+    for (int i = 0; i < 20; ++i) l.sdf->insert(dab(0.05f * float(i), 0, 0, 0.12f));
+    const NodeId g = l.sdf->insert(group_node(Op::Add, 0.05f));
+    l.sdf->insert(dab(0, 0.4f, 0, 0.1f), g);
+
+    TapeCheckpoint cp;
+    Tape tape = compile_document_resumable(doc, &cp);
+    for (int k = 0; k < 24; ++k) {
+        const NodeId id = l.sdf->insert(dab(-0.3f + 0.025f * float(k), 0.4f, 0.05f, 0.1f), g);
+        Tape grown;
+        TapeCheckpoint next;
+        CAPTURE(k);
+        REQUIRE(compile_document_append(tape, cp, doc, {id}, &grown, &next));
+        require_identical(grown, compile_document(doc));
+        // The lineage has to name the tape it grew from, or a backend patches
+        // the wrong resident buffer.
+        CHECK(grown.parent_id == tape.compile_id);
+        tape = std::move(grown);
+        cp = next;
+    }
+}
+
+TEST_CASE("group append: nesting adds no combine an Add group does not emit") {
+    // compile_group emits only under `have_acc || seeded`, so an inner Add
+    // group entered with nothing beneath it emits nothing at all. If the
+    // checkpoint assumed one combine per level it would emit combines the
+    // full compile never did, and require_identical would catch it -- this
+    // pins the COUNT so the reason is visible rather than inferred.
+    Document nested;
+    LayerRef nl = add_layer(nested, "l");
+    nl.sdf->insert(dab(0, 0, 0, 0.3f));
+    const NodeId deep = group_chain(nl, 4, Op::Add, 0.05f);
+    nl.sdf->insert(dab(0, 0.4f, 0, 0.1f), deep);
+    const Tape four_deep = compile_document(nested);
+
+    Document single;
+    LayerRef sl = add_layer(single, "l");
+    sl.sdf->insert(dab(0, 0, 0, 0.3f));
+    const NodeId shallow = group_chain(sl, 1, Op::Add, 0.05f);
+    sl.sdf->insert(dab(0, 0.4f, 0, 0.1f), shallow);
+    const Tape one_deep = compile_document(single);
+    CHECK(four_deep.instrs.size() == one_deep.instrs.size());
+}
+
+TEST_CASE("group append: a group that is not in tail position is refused") {
+    // Its reuse point is the same, but everything after it would have to be
+    // recompiled. Refusing costs a recompile; reusing a prefix that moved is
+    // silent and wrong.
+    Document doc;
+    LayerRef l = add_layer(doc, "l");
+    const NodeId g = l.sdf->insert(group_node(Op::Add, 0.05f));
+    l.sdf->insert(dab(0, 0.4f, 0, 0.1f), g);
+    l.sdf->insert(dab(0.6f, 0, 0, 0.2f));  // a sibling AFTER the group
+
+    TapeCheckpoint cp;
+    Tape prefix = compile_document_resumable(doc, &cp);
+    const NodeId id = l.sdf->insert(dab(0.1f, 0.4f, 0, 0.1f), g);
+    Tape reused;
+    TapeCheckpoint next;
+    CHECK_FALSE(compile_document_append(prefix, cp, doc, {id}, &reused, &next));
+}
+
+TEST_CASE("group append: an insert short of the end of a group is refused") {
+    Document doc;
+    LayerRef l = add_layer(doc, "l");
+    l.sdf->insert(dab(0, 0, 0, 0.3f));
+    const NodeId g = l.sdf->insert(group_node(Op::Add, 0.05f));
+    l.sdf->insert(dab(0, 0.4f, 0, 0.1f), g);
+    l.sdf->insert(dab(0.2f, 0.4f, 0, 0.1f), g);
+
+    TapeCheckpoint cp;
+    Tape prefix = compile_document_resumable(doc, &cp);
+    // index 0 rather than the tail
+    const NodeId id = l.sdf->insert(dab(0.4f, 0.4f, 0, 0.1f), g, 0);
+    Tape reused;
+    TapeCheckpoint next;
+    CHECK_FALSE(compile_document_append(prefix, cp, doc, {id}, &reused, &next));
 }

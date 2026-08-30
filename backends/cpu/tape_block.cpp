@@ -212,11 +212,27 @@ struct SlotOf<false> {
 // earlier attempt routed every store through a policy's `store()` and cost 1.30x
 // on the coloured path for no change in what it computed (#219). The rule this
 // evaluator keeps teaching: specialise the loop, never the value.
+// "no mid-walk snapshot"; a caller asking for the stack without naming an
+// instruction gets it at the end.
+constexpr std::size_t kNoSnapshot = static_cast<std::size_t>(-1);
+
 template <bool WithColour>
+// `levels` is how many stack slots the walk STARTS holding, and `stack_out`
+// asks for the whole final stack instead of only its top.
+//
+// Both exist for a resume that picks up INSIDE a group. compile_group emits a
+// group's combine after its children, so a prefix that stops there leaves one
+// value per open group plus one on the stack, and the suffix's own combines
+// pop them in order — the stack machine already does the folding, it just has
+// to be handed more than one value to fold. One seed can only continue a
+// chain that had nothing open above it.
 void walk_blocked(const kernel::CTapeInstr* in, std::size_t ni, const float* params,
                   const float* blob, const PointQuery& q, const PointResults& out,
                   std::size_t block, std::size_t depth, const float* seed = nullptr,
-                  const float* seed_rgb = nullptr) {
+                  const float* seed_rgb = nullptr, std::size_t levels = 1,
+                  float* stack_out = nullptr, float* stack_out_rgb = nullptr,
+                  std::size_t* stack_out_levels = nullptr,
+                  std::size_t snapshot_at = kNoSnapshot) {
     using Slot = typename SlotOf<WithColour>::type;
     // Thread-local so the allocation happens once per thread rather than once
     // per call, and sized to the work present rather than to `block`: the grid
@@ -244,21 +260,49 @@ void walk_blocked(const kernel::CTapeInstr* in, std::size_t ni, const float* par
         // reads whatever was in the slot. `seed_rgb` is that colour, three
         // floats a point in the same order.
         if (seed) {
-            Slot* s0 = &stack[0];
-            for (std::size_t j = 0; j < n; ++j) {
-                const std::size_t i = base + j;
-                if constexpr (WithColour) {
-                    s0[j].d = seed[i];
-                    s0[j].color =
-                        seed_rgb ? cf3(seed_rgb[i * 3], seed_rgb[i * 3 + 1], seed_rgb[i * 3 + 2])
-                                 : cf3(0.0f, 0.0f, 0.0f);
-                } else {
-                    s0[j] = seed[i];
+            // Plane `l` of the seed is stack slot `l`, so plane 0 is the
+            // BOTTOM. That is the order compile_group left them in — the
+            // outermost open chain first — and the order the suffix's combines
+            // pop them in.
+            for (std::size_t l = 0; l < levels; ++l) {
+                Slot* sl = &stack[l * block];
+                const float* plane = seed + l * q.count;
+                const float* plane_rgb = seed_rgb ? seed_rgb + l * q.count * 3 : nullptr;
+                for (std::size_t j = 0; j < n; ++j) {
+                    const std::size_t i = base + j;
+                    if constexpr (WithColour) {
+                        sl[j].d = plane[i];
+                        sl[j].color = plane_rgb ? cf3(plane_rgb[i * 3], plane_rgb[i * 3 + 1],
+                                                      plane_rgb[i * 3 + 2])
+                                                : cf3(0.0f, 0.0f, 0.0f);
+                    } else {
+                        sl[j] = plane[i];
+                    }
                 }
             }
-            top = 1;
+            top = levels;
         }
+        const auto capture = [&](std::size_t at_top) {
+            if (stack_out_levels) *stack_out_levels = at_top;
+            for (std::size_t l = 0; l < at_top; ++l) {
+                const Slot* sl = &stack[l * block];
+                for (std::size_t j = 0; j < n; ++j) {
+                    const std::size_t i = base + j;
+                    if constexpr (WithColour) {
+                        stack_out[l * q.count + i] = sl[j].d;
+                        if (stack_out_rgb) {
+                            stack_out_rgb[(l * q.count + i) * 3] = sl[j].color.x;
+                            stack_out_rgb[(l * q.count + i) * 3 + 1] = sl[j].color.y;
+                            stack_out_rgb[(l * q.count + i) * 3 + 2] = sl[j].color.z;
+                        }
+                    } else {
+                        stack_out[l * q.count + i] = sl[j];
+                    }
+                }
+            }
+        };
         for (std::size_t k = 0; k < ni; ++k) {
+            if (stack_out && k == snapshot_at) capture(top);
             const kernel::CTapeInstr& instr = in[k];
             const float* pr = params + instr.param_offset;
             if (instr.op == kernel::ctape_combine) {
@@ -368,6 +412,33 @@ void walk_blocked(const kernel::CTapeInstr* in, std::size_t ni, const float* par
                 ++top;
             }
         }
+        // THE WHOLE STACK, when a caller asked for it: this is the prefix half
+        // of a group resume, whose value is not one number but the open chains
+        // the checkpoint stopped inside. `snapshot_at` takes it MID-WALK,
+        // which is what a refill needs — the seed for the next append is the
+        // stack where the checkpoint sits, not the answer the walk ends with,
+        // and evaluating the prefix a second time to get it would give back
+        // everything the resume saves.
+        if (stack_out && snapshot_at == kNoSnapshot) {
+            if (stack_out_levels) *stack_out_levels = top;
+            for (std::size_t l = 0; l < top; ++l) {
+                const Slot* sl = &stack[l * block];
+                for (std::size_t j = 0; j < n; ++j) {
+                    const std::size_t i = base + j;
+                    if constexpr (WithColour) {
+                        stack_out[l * q.count + i] = sl[j].d;
+                        if (stack_out_rgb) {
+                            stack_out_rgb[(l * q.count + i) * 3] = sl[j].color.x;
+                            stack_out_rgb[(l * q.count + i) * 3 + 1] = sl[j].color.y;
+                            stack_out_rgb[(l * q.count + i) * 3 + 2] = sl[j].color.z;
+                        }
+                    } else {
+                        stack_out[l * q.count + i] = sl[j];
+                    }
+                }
+            }
+        }
+        if (stack_out && snapshot_at == ni) capture(top);
         const Slot* result = &stack[(top - 1) * block];
         for (std::size_t j = 0; j < n; ++j) {
             const std::size_t i = base + j;
@@ -438,6 +509,79 @@ void eval_points_seeded(const scene::Tape& suffix, const PointQuery& q, const fl
     else
         walk_blocked<false>(suffix.instrs.data(), ni, suffix.params.data(), suffix.blob.data(), q,
                             d, span, depth, seed, nullptr);
+}
+
+void eval_points_seeded_stack(const scene::Tape& suffix, const PointQuery& q, const float* seeds,
+                              const float* seeds_rgb, std::size_t levels,
+                              const PointResults& out, float* stack_out, float* stack_out_rgb,
+                              std::size_t* stack_out_levels, std::size_t snapshot_at,
+                              std::size_t block) {
+    if (block == 0) block = kDefaultBlock;
+    if (!seeds || !out.distances || levels == 0) return;
+    if (levels > static_cast<std::size_t>(CLAY_TAPE_MAX_STACK)) return;
+    const bool with_colour = out.colors_rgb != nullptr && seeds_rgb != nullptr;
+    PointResults d;
+    d.distances = out.distances;
+    if (with_colour) d.colors_rgb = out.colors_rgb;
+
+    const std::size_t ni = suffix.instrs.size();
+    if (ni == 0) {
+        // An empty suffix leaves the stack as it was, so the answer is its TOP
+        // plane -- not plane 0, which is the bottom and is what a one-level
+        // caller's seed happens to be. The snapshot, if asked for, is the seed.
+        if (stack_out) {
+            if (stack_out_levels) *stack_out_levels = levels;
+            for (std::size_t i = 0; i < levels * q.count; ++i) stack_out[i] = seeds[i];
+            if (stack_out_rgb && seeds_rgb)
+                for (std::size_t i = 0; i < levels * q.count * 3; ++i)
+                    stack_out_rgb[i] = seeds_rgb[i];
+        }
+        const float* top_plane = seeds + (levels - 1) * q.count;
+        for (std::size_t i = 0; i < q.count; ++i) out.distances[i] = top_plane[i];
+        if (with_colour) {
+            const float* top_rgb = seeds_rgb + (levels - 1) * q.count * 3;
+            for (std::size_t i = 0; i < q.count * 3; ++i) out.colors_rgb[i] = top_rgb[i];
+        }
+        return;
+    }
+    // The walk starts `levels` deep rather than one, so the depth it can reach
+    // is that much more than a one-seed walk of the same instructions.
+    const std::size_t depth = seeded_stack_depth(suffix) + (levels - 1);
+    const std::size_t span = std::min(block, q.count);
+    if (with_colour)
+        walk_blocked<true>(suffix.instrs.data(), ni, suffix.params.data(), suffix.blob.data(), q, d,
+                           span, depth, seeds, seeds_rgb, levels, stack_out, stack_out_rgb,
+                           stack_out_levels, snapshot_at);
+    else
+        walk_blocked<false>(suffix.instrs.data(), ni, suffix.params.data(), suffix.blob.data(), q,
+                            d, span, depth, seeds, nullptr, levels, stack_out, nullptr,
+                            stack_out_levels, snapshot_at);
+}
+
+void eval_points_stack(const scene::Tape& tape, const PointQuery& q, float* stack_out,
+                       float* stack_out_rgb, std::size_t* out_levels, std::size_t snapshot_at,
+                       std::size_t block) {
+    if (block == 0) block = kDefaultBlock;
+    if (!stack_out) return;
+    if (out_levels) *out_levels = 0;
+    const std::size_t ni = tape.instrs.size();
+    if (ni == 0) return;  // nothing on the stack: no levels, nothing written
+    const std::size_t depth = tape_stack_depth(tape);
+    const std::size_t span = std::min(block, q.count);
+    // `out` is unused by a stack read-out but walk_blocked writes its top
+    // through it, so it is given somewhere to land rather than a null it would
+    // have to test per point.
+    std::vector<float> ignored(q.count);
+    PointResults d;
+    d.distances = ignored.data();
+    if (stack_out_rgb)
+        walk_blocked<true>(tape.instrs.data(), ni, tape.params.data(), tape.blob.data(), q, d, span,
+                           depth, nullptr, nullptr, 1, stack_out, stack_out_rgb, out_levels,
+                           snapshot_at);
+    else
+        walk_blocked<false>(tape.instrs.data(), ni, tape.params.data(), tape.blob.data(), q, d,
+                            span, depth, nullptr, nullptr, 1, stack_out, nullptr, out_levels,
+                            snapshot_at);
 }
 
 void eval_points_blocked(const scene::Tape& tape, const PointQuery& q, const PointResults& out,
