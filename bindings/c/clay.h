@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 65
+#define CLAY_ABI_MINOR 66
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -1232,6 +1232,21 @@ clay_result clay_item_add_bend_curve(clay_item* item, const float* guide_xyz, si
  * is where the influence ends: outside it the field is untouched EXACTLY,
  * which is what makes this a brush rather than a modifier.
  *
+ * `centre`, `direction`, `tangent`, `extent` and `radius` ARE IN THE ITEM'S OWN
+ * SPACE — like a bend curve's guide and a lattice's box, and for the same
+ * reason: the deformer chain runs on the local point, after the item's inverse
+ * transform. So they RIDE the transform. Move the item and the stamp moves with
+ * it; scale it and the stamp scales; and a stroke's template alpha arrives in
+ * every stamp's own frame, turned by that stamp's rotation and scaled by its
+ * radius, which is what makes an alpha usable through the stroke engine at all.
+ *
+ * A HOST WITH A SURFACE HIT HAS A WORLD FRAME, not this one. The two coincide
+ * only on an item at the identity transform. `brush::stamp_placement` derives
+ * the world frame and `brush::placement_in` converts it into an item's; use
+ * both, or a stamp lands where the artist did not click — and silently, since
+ * a misplaced centre outside the radius does NOTHING and one inside it reads a
+ * single clamped border texel and SMEARS.
+ *
  * `amplitude` is how far the surface moves OUTWARD at a stamp value of 1, so
  * white is raised as it is in every sculpting package; a negative amplitude
  * carves.
@@ -1243,7 +1258,14 @@ clay_result clay_item_add_bend_curve(clay_item* item, const float* guide_xyz, si
  * clay_document_safe_step_scale.
  *
  * Refused, leaving the item unchanged: a null `samples`, a width or height
- * below 2 (nothing to interpolate), or a non-positive `extent`. */
+ * below 2 (nothing to interpolate), a non-positive `extent` or `radius`, or a
+ * `direction` with no length.
+ *
+ * THE ZERO DIRECTION IS NOT THE MESH BRUSH'S ZERO DIRECTION. There, all-zeroes
+ * on `alpha_direction` means "the surface normal under the centre", which it
+ * resolves by asking the mesh. An SDF item has no surface at authoring time to
+ * ask, so the same spelling cannot mean the same thing here and is refused
+ * rather than quietly becoming local +Z. */
 clay_result clay_item_add_alpha(clay_item* item, const float* samples, int32_t width,
                                 int32_t height, const float centre[3], const float direction[3],
                                 const float tangent[3], float extent, float radius, float amplitude,

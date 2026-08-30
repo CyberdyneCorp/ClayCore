@@ -8,6 +8,7 @@
 
 #include "clay/brush/stroke.h"
 #include "clay/io/clayspace.h"
+#include "clay/kernel/deform.h"
 #include "clay/scene/commands.h"
 
 using namespace clay;
@@ -449,4 +450,80 @@ TEST_CASE("stroke: a stroked voxel edit round trips through the document") {
     REQUIRE(back.voxel_layers.count(layer.id) == 1);
     CHECK(back.voxel_layers.at(layer.id).serialize() ==
           doc.voxel_layers.at(layer.id).serialize());
+}
+
+// -- a template's alpha reaches every stamp, in that stamp's frame (#392) -----
+//
+// Nothing in this suite used an alpha through a stroke, which is why the
+// reported symptom could be read as "the stroke resolver drops it". It does
+// not: `stamps_to_nodes` copies the whole node by value, so the alpha travels
+// with samples and all, and because the deformer chain runs on the ITEM-LOCAL
+// point the template's frame becomes each stamp's frame for free.
+//
+// This is the test that would notice either half going wrong — a resolver that
+// stopped copying the deformers, or one that started pre-transforming them.
+
+TEST_CASE("stroke: a template's alpha reaches every stamp, turned and scaled with it") {
+    std::vector<float> samples(16 * 16);
+    for (int y = 0; y < 16; ++y)
+        for (int x = 0; x < 16; ++x) {
+            const float u = static_cast<float>(x) / 15.0f * 2.0f - 1.0f;
+            const float v = static_cast<float>(y) / 15.0f * 2.0f - 1.0f;
+            samples[static_cast<std::size_t>(y) * 16 + x] = std::exp(-6.0f * (u * u + v * v));
+        }
+
+    // The template: a sphere carrying an alpha at its own +z pole. Local
+    // coordinates — which is the whole point.
+    const float templ_radius = 0.35f;
+    scene::Node templ;
+    templ.prim = scene::Prim::sphere(templ_radius);
+    templ.deformers.push_back(scene::Deformer::alpha(cf3(0, 0, templ_radius), cf3(0, 0, 1),
+                                                     cf3(1, 0, 0), samples.data(), 16, 16, 0.3f,
+                                                     0.3f, 0.12f));
+
+    StrokePreset preset;
+    preset.spacing = 0.5f;
+    preset.rotate_along_stroke = true;  // so each stamp gets a DIFFERENT rotation
+    preset.pressure.size = 1.0f;        // ...and a different radius
+    std::vector<StrokeSample> path;
+    for (int i = 0; i < 6; ++i) {
+        StrokeSample s;
+        const float t = static_cast<float>(i) / 5.0f;
+        s.position = cf3(-0.4f + 0.8f * t, 0.0f, 1.0f);
+        s.pressure = 0.4f + 0.6f * t;
+        path.push_back(s);
+    }
+    const std::vector<Stamp> stamps = resolve_stroke(path, preset);
+    REQUIRE(stamps.size() >= 3);
+
+    io::ClaySpaceDoc doc;
+    scene::Layer& layer = doc.document.add_sdf_layer("l");
+    const std::vector<scene::Node> nodes = stamps_to_nodes(*layer.sdf, stamps, templ);
+    REQUIRE(nodes.size() == stamps.size());
+
+    bool saw_two_radii = false;
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        const scene::Node& n = nodes[i];
+        // THE ALPHA IS THERE, samples included. A resolver that copied the node
+        // shallowly, or dropped the deformers, fails here — and this is the
+        // first test in the suite that would have noticed.
+        REQUIRE(n.deformers.size() == 1);
+        const scene::Deformer& d = n.deformers[0];
+        CHECK(d.type == kernel::cdeform_alpha);
+        CHECK(d.stamp.samples.size() == samples.size());
+        CHECK(d.stamp.amplitude == doctest::Approx(0.12f));
+
+        // ...and it is UNCHANGED, in the template's own coordinates. It has to
+        // be: the chain is evaluated after the item's inverse transform, so
+        // pre-transforming it here would apply the stamp transform twice.
+        CHECK(d.a == doctest::Approx(0.0f));
+        CHECK(d.b == doctest::Approx(0.0f));
+        CHECK(d.c == doctest::Approx(templ_radius));
+        CHECK(d.stamp.radius == doctest::Approx(0.3f));
+
+        if (i > 0 && n.xform.scale != nodes[0].xform.scale) saw_two_radii = true;
+    }
+    // The stamps really do differ, so "unchanged in local space" is a claim
+    // about the frame and not an artefact of every stamp being identical.
+    CHECK(saw_two_radii);
 }

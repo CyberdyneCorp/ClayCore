@@ -2012,10 +2012,22 @@ NB_MODULE(pyclay, m) {
                         "interpolate below that");
                 if (!(extent > 0.0f))
                     throw std::invalid_argument("an alpha's extent must be positive");
+                // Mirrors clay_item_add_alpha exactly; the two doors already
+                // share the width and extent refusals and must not drift. A
+                // zero direction is not a plane and a non-positive radius
+                // reaches nothing — both were accepted and silently inert.
+                const kernel::cfloat3 dir = to_f3(direction, "direction");
+                if (!(kernel::clength(dir) > 1e-9f))
+                    throw std::invalid_argument(
+                        "an alpha's direction must have length; it is the normal of the "
+                        "stamp's plane, and all-zeroes is the mesh brush's convention, not "
+                        "this one");
+                if (!(radius > 0.0f))
+                    throw std::invalid_argument("an alpha's radius must be positive");
                 if (ease < 0 || ease >= kernel::ease_count)
                     throw std::invalid_argument("ease must be a valid easing curve index");
                 p.deformers.push_back(
-                    scene::Deformer::alpha(to_f3(centre, "centre"), to_f3(direction, "direction"),
+                    scene::Deformer::alpha(to_f3(centre, "centre"), dir,
                                            to_f3(tangent, "tangent"), arr.data(), w, h, extent,
                                            radius, amplitude, static_cast<std::uint8_t>(ease)));
                 return self;

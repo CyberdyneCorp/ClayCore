@@ -48,5 +48,34 @@ scene::Deformer stamp_deformer(const StampPlacement& placement, const float* sam
                                   width, height, extent, radius, amplitude, ease);
 }
 
+StampPlacement placement_in(const StampPlacement& world, const math::Transform& item) {
+    StampPlacement out;
+    out.centre = item.apply_inverse(world.centre);
+    // Directions, not points: the rotation's conjugate and no translation. The
+    // scale divides out of a direction entirely, and re-normalising is what
+    // keeps a non-uniform-looking float error from tilting the stamp plane.
+    const math::Quat inv = item.rotation.conjugate();
+    const kernel::cfloat3 d = inv.rotate(world.direction);
+    const kernel::cfloat3 t = inv.rotate(world.tangent);
+    const float dlen = kernel::clength(d);
+    const float tlen = kernel::clength(t);
+    out.direction = dlen > 1e-9f ? d * (1.0f / dlen) : cf3(0, 0, 1);
+    out.tangent = tlen > 1e-9f ? t * (1.0f / tlen) : cf3(1, 0, 0);
+    return out;
+}
+
+scene::Deformer stamp_deformer_in(const StampPlacement& world, const math::Transform& item,
+                                  const float* samples, int width, int height, float extent,
+                                  float radius, float amplitude, std::uint8_t ease) {
+    // A scale of zero is not a frame. Refusing here would need an error
+    // channel this file does not have, so the degenerate case falls back to 1
+    // and leaves the placement where the caller put it — which is wrong in an
+    // obvious way rather than a silent one.
+    const float scale = item.scale > 1e-9f ? item.scale : 1.0f;
+    const float inv_scale = 1.0f / scale;
+    return stamp_deformer(placement_in(world, item), samples, width, height, extent * inv_scale,
+                          radius * inv_scale, amplitude * inv_scale, ease);
+}
+
 }  // namespace brush
 }  // namespace clay
