@@ -1039,6 +1039,25 @@ Aabb item_own_influence_bound(const Node& item, const Layer& layer) {
     return geometry_bound(item, layer, /*with_copies=*/false);
 }
 
+float group_blend_support(const Node& group, const Layer& layer) {
+    // Extended-op groups: the subtree field is not rounded, so rb comes
+    // straight from the group's rounding scaled into world units.
+    // Otherwise cmax(support, k), exactly as the item path above: paint fades
+    // over max(profile support, k), and a HARD profile has zero support — so
+    // support alone dilated a Paint group by nothing while its colour reached
+    // out to k.
+    //
+    // Lifted out of node_influence_bound so the ancestor walk below can apply
+    // the SAME expression to one child that the group path applies to the
+    // union of them. Two spellings of "how far a group's blend reaches" would
+    // be one refactor away from disagreeing, and the walk is only sound
+    // because it is the same number.
+    return op_is_extended(group.op)
+               ? kernel::ccombine_extended_support(static_cast<int>(group.op), group.blend.k,
+                                                   group.rounding * layer.xform.scale)
+               : kernel::cmax(group.blend.support(), group.blend.k);
+}
+
 Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& layer) {
     const Node* n = content.find(id);
     if (!n || !n->visible) return Aabb{};
@@ -1050,18 +1069,54 @@ Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& lay
         if (cb.is_infinite()) return Aabb::infinite();
         b.expand(cb);
     }
-    // Extended-op groups: the subtree field is not rounded, so rb comes
-    // straight from the group's rounding scaled into world units.
-    // Otherwise cmax(support, k), exactly as the item path above: paint fades
-    // over max(profile support, k), and a HARD profile has zero support — so
-    // support alone dilated a Paint group by nothing while its colour reached
-    // out to k.
-    float support = op_is_extended(n->op)
-                        ? kernel::ccombine_extended_support(
-                              static_cast<int>(n->op), n->blend.k,
-                              n->rounding * layer.xform.scale)
-                        : kernel::cmax(n->blend.support(), n->blend.k);
-    return b.empty() ? b : b.dilated(support);
+    return b.empty() ? b : b.dilated(group_blend_support(*n, layer));
+}
+
+Aabb node_reach_bound(const SdfContent& content, NodeId id, const Layer& layer) {
+    // Where an edit to `id` can change the layer's field: the node's own
+    // influence bound, then dilated once per enclosing group by that group's
+    // blend support.
+    //
+    // A group's value is a combine over its children, and a blend's SUPPORT is
+    // exactly how far changing one operand can move the result — which is why
+    // node_influence_bound already applies it to the union of the children.
+    // Applying it to ONE child is the same inequality with a smaller left-hand
+    // side. Nesting composes: the inner group's output is dilated by the inner
+    // support, and that dilated box is what the outer group sees.
+    //
+    // What this replaces is the root ancestor's whole bound, which was
+    // conservative for the right reason and far larger than the reason needs:
+    // a sibling's geometry is not something an edit to `id` can reach, so the
+    // old answer grew with the size of the GROUP rather than with the size of
+    // the edit.
+    Aabb b = node_influence_bound(content, id, layer);
+    if (b.empty() || b.is_infinite()) return b;
+
+    // Bounded by the node count rather than trusting the tree to be acyclic:
+    // SdfContent::move refuses to close a cycle, but `roots` is a public
+    // member and this walk must terminate whatever a caller wrote there. The
+    // same guard root_ancestor carried, for the same reason.
+    NodeId cur = id;
+    for (std::size_t step = 0; step <= content.nodes().size(); ++step) {
+        NodeId parent = kNoNode;
+        int index = -1;
+        if (!content.locate(cur, &parent, &index)) return Aabb{};
+        if (parent == kNoNode) return b;
+        const Node* g = content.find(parent);
+        if (!g) return Aabb{};
+        // A hidden group contributes nothing at all, so an edit inside one
+        // cannot change the field: node_influence_bound says the same about a
+        // hidden node and this must agree with it.
+        if (!g->visible) return Aabb{};
+        // The non-local check at EVERY level, not only the first. An
+        // intersect anywhere above reads the running accumulator and can move
+        // the result arbitrarily far, which is what node_influence_bound
+        // already reports for the group itself.
+        if (!op_is_local(g->op)) return Aabb::infinite();
+        b = b.dilated(group_blend_support(*g, layer));
+        cur = parent;
+    }
+    return Aabb{};
 }
 
 Aabb node_influence_bound_in_document(const Document& doc, const SdfContent& content,
