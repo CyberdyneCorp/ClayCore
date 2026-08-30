@@ -100,14 +100,38 @@ The tasks below are kept as the record of what it would take.
       Regression test `tests/unit/test_checkpoint_stack_levels.cpp` checks the
       claimed count against the walk's actual depth; it fails 5 assertions
       against the old rule, `1 == 5` on four nested Add groups
-- [ ] 2.1b-ii-perf-b STILL O(n), and the cause is identified: 0.10 / 0.32 /
-      1.15 / 3.32 ms per dab at 10 / 100 / 1000 / 3000 items, against a root
-      list flat at 0.04. A brick pays ONE full walk the first time the stroke
-      reaches it, because the initial full refill stores the field and no
-      stack -- 1040 rebuilds at 1.41 ms is what is left. The root list never
-      pays it: its seed IS the field, which the first build already stored.
-      So the fix is to snapshot the stack on the FULL refill path too, the way
-      the rebuild branch now does, and then a group stroke never rebuilds.
+- [x] 2.1b-ii-perf-b SEEDED AT THE REFILL. A brick's first seed comes from a
+      full refill, and for a root-list append the field IS that seed, which is
+      why a root-list stroke never paid for a brick's first touch. Inside a
+      group the seed is the group's own chain, which the combine has folded
+      away by the time the field exists -- so the brick re-walked the whole
+      active half on first touch. The refill already compiles a per-brick
+      culled tape, so it can take the checkpoint too, and the walk that makes
+      the field is the walk that passes it: fused, the stack is free. Where the
+      checkpoint sits at the tape's end with nothing open above it -- half the
+      bricks -- the field IS the plane and no walk is needed at all. Only taken
+      where the batch was going to run on the CPU anyway; a GPU grid batch
+      produces no stack and a second CPU pass would cost more than it saves.
+      Two things fell out. (1) A seed's frames are the BRICK's, so nothing
+      batch-wide can vouch for them and the plan states none by design; read
+      for an append to the ROOT list, a seed taken while the tail was a group
+      makes the suffix compile refuse, and a root-list stroke over a grouped
+      document fell to 0.61 ms/dab from 0.045. The check comes from the append
+      target itself -- the enclosing groups of the appended nodes are what a
+      checkpoint's frames name. (2) An EMPTY group compiles to nothing and is
+      rolled back, so no checkpoint was recorded where the first stroke into a
+      newly made group would land. The position in front of the rolled-back
+      chain is still a position; what differs is that the chain has produced
+      nothing, so `layer_have_acc` is false, the stack stops at the plane
+      OUTSIDE the group, and the first dab GROWS it by one -- which the resume
+      now expects rather than rejects. Rebuilds over the probe 1040 -> 368.
+      Regression test `test_checkpoint_stack_levels.cpp`
+- [ ] 2.1b-ii-perf-c WHAT REMAINS, and it is bounded: a first stroke into a
+      group that was EMPTY at the last full refill still pays one full walk per
+      brick on first touch, because that brick's seed predates the group.
+      1.06 ms/dab at 1000 items and 3.04 at 3000 -- both under the 4.17 ms
+      interactive frame share, where before this change 3000 was over it. A
+      stroke into a group that HAS content pays nothing: 0.172 ms/dab at 1000.
       NOTE the reverted wrong turn, which still stands as a warning: skipping
       bricks the dab "cannot reach" used `node_influence_bound_in_document`,
       the node's own reach rather than its reach through the group's blend, so
