@@ -52,6 +52,7 @@
 #include "clay/mesh/surface_nets.h"
 #include "clay/mesh/to_field.h"
 #include "clay/mesh/transfer.h"
+#include "clay/mesh/voxel_remesh.h"
 #include "clay/mesh/validate.h"
 #include "clay/parallel/cancel.h"
 #include "clay/parallel/thread_pool.h"
@@ -12196,6 +12197,195 @@ constexpr std::size_t kTransferDescOriginal =
     offsetof(clay_transfer_desc, max_distance) + sizeof(float);
 constexpr std::size_t kTransferReportOriginal =
     offsetof(clay_transfer_report, max_distance) + sizeof(float);
+
+// Original layouts (ABI 0.63.0), named by their last field so appending one
+// does not silently move the baseline.
+constexpr std::size_t kVoxelRemeshParamsOriginal =
+    offsetof(clay_voxel_remesh_params, memory_budget_bytes) + sizeof(std::uint64_t);
+constexpr std::size_t kVoxelRemeshEstimateOriginal =
+    offsetof(clay_voxel_remesh_estimate, exceeds_memory_budget) + sizeof(std::int32_t);
+constexpr std::size_t kVoxelRemeshReportOriginal =
+    offsetof(clay_voxel_remesh_report, cancelled) + sizeof(std::int32_t);
+
+// The status the engine returns, as the result code this ABI already has.
+//
+// Distinct rather than collapsed, because "lower the resolution", "your model
+// has holes" and "you stopped it" are three different things for a host to
+// say, and one generic failure would make a host guess between them.
+clay_result voxel_remesh_result_code(mesh::VoxelRemeshStatus status) {
+    switch (status) {
+        case mesh::VoxelRemeshStatus::Ok:
+            return CLAY_OK;
+        case mesh::VoxelRemeshStatus::EmptySource:
+        case mesh::VoxelRemeshStatus::InvalidResolution:
+        case mesh::VoxelRemeshStatus::InvalidParameters:
+            return CLAY_ERROR_INVALID_ARGUMENT;
+        case mesh::VoxelRemeshStatus::ExceedsBudget:
+            return CLAY_ERROR_BUDGET_EXCEEDED;
+        case mesh::VoxelRemeshStatus::Unsupported:
+        case mesh::VoxelRemeshStatus::OpenSurfaceRejected:
+            return CLAY_ERROR_UNSUPPORTED;
+        case mesh::VoxelRemeshStatus::ExtractionFailed:
+        case mesh::VoxelRemeshStatus::ResultNotWatertight:
+            return CLAY_ERROR_BACKEND;
+        case mesh::VoxelRemeshStatus::Cancelled:
+            return CLAY_ERROR_CANCELLED;
+    }
+    return CLAY_ERROR_BACKEND;
+}
+
+const char* voxel_remesh_message(mesh::VoxelRemeshStatus status) {
+    switch (status) {
+        case mesh::VoxelRemeshStatus::Ok:
+            return "";
+        case mesh::VoxelRemeshStatus::EmptySource:
+            return "a mesh with no triangles has no surface to rebuild";
+        case mesh::VoxelRemeshStatus::InvalidResolution:
+            return "the resolution must be a finite positive voxel size, or a non-zero "
+                   "longest-axis resolution";
+        case mesh::VoxelRemeshStatus::InvalidParameters:
+            return "a projection strength, projection distance or component volume is out of "
+                   "range";
+        case mesh::VoxelRemeshStatus::Unsupported:
+            return "build_multires_levels is reserved and must be zero";
+        case mesh::VoxelRemeshStatus::ExceedsBudget:
+            return "the request exceeds the memory budget; choose a coarser resolution";
+        case mesh::VoxelRemeshStatus::OpenSurfaceRejected:
+            return "the source has open boundaries and the policy rejects them";
+        case mesh::VoxelRemeshStatus::ExtractionFailed:
+            return "no surface was found at this resolution";
+        case mesh::VoxelRemeshStatus::ResultNotWatertight:
+            return "the result failed the watertight validation this surface mode promises";
+        case mesh::VoxelRemeshStatus::Cancelled:
+            return "cancelled";
+    }
+    return "voxel remesh failed";
+}
+
+clay_result read_voxel_remesh_params(const clay_voxel_remesh_params* desc,
+                                     mesh::VoxelRemeshParams* out) {
+    *out = mesh::VoxelRemeshParams{};
+    if (!desc) return CLAY_OK;  // the documented defaults
+    clay_voxel_remesh_params d;
+    const clay_result r = read_desc(desc, kVoxelRemeshParamsOriginal, &d);
+    if (r != CLAY_OK) return r;
+
+    switch (d.resolution_mode) {
+        case CLAY_VOXEL_REMESH_VOXEL_SIZE:
+            out->resolution_mode = mesh::VoxelRemeshResolutionMode::VoxelSize;
+            break;
+        case CLAY_VOXEL_REMESH_LONGEST_AXIS:
+            out->resolution_mode = mesh::VoxelRemeshResolutionMode::LongestAxisResolution;
+            break;
+        default:
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown voxel remesh resolution mode");
+    }
+    switch (d.surface_mode) {
+        case CLAY_VOXEL_REMESH_SMOOTH:
+            out->surface_mode = mesh::VoxelRemeshSurfaceMode::Smooth;
+            break;
+        case CLAY_VOXEL_REMESH_SHARP:
+            out->surface_mode = mesh::VoxelRemeshSurfaceMode::Sharp;
+            break;
+        default:
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown voxel remesh surface mode");
+    }
+    switch (d.open_surface_policy) {
+        case CLAY_VOXEL_REMESH_OPEN_REJECT:
+            out->open_surface_policy = mesh::VoxelRemeshOpenSurfacePolicy::Reject;
+            break;
+        case CLAY_VOXEL_REMESH_OPEN_CLOSE:
+            out->open_surface_policy = mesh::VoxelRemeshOpenSurfacePolicy::Close;
+            break;
+        case CLAY_VOXEL_REMESH_OPEN_BEST_EFFORT:
+            out->open_surface_policy = mesh::VoxelRemeshOpenSurfacePolicy::BestEffort;
+            break;
+        default:
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown voxel remesh open-surface policy");
+    }
+    switch (d.small_component_policy) {
+        case CLAY_VOXEL_REMESH_KEEP_COMPONENTS:
+            out->small_component_policy = mesh::VoxelRemeshSmallComponentPolicy::Preserve;
+            break;
+        case CLAY_VOXEL_REMESH_REMOVE_BELOW_VOLUME:
+            out->small_component_policy =
+                mesh::VoxelRemeshSmallComponentPolicy::RemoveBelowVolume;
+            break;
+        default:
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown voxel remesh component policy");
+    }
+
+    out->voxel_size = d.voxel_size;
+    out->longest_axis_resolution = d.longest_axis_resolution;
+    out->minimum_component_volume = d.minimum_component_volume;
+    out->preserve_volume = d.preserve_volume != 0;
+    out->project_to_source = d.project_to_source != 0;
+    out->projection_strength = d.projection_strength;
+    out->max_projection_distance_voxels = d.max_projection_distance_voxels;
+    out->preserve_colors = d.preserve_colors != 0;
+    out->build_multires_levels = d.build_multires_levels;
+    out->memory_budget_bytes = d.memory_budget_bytes;
+    return CLAY_OK;
+}
+
+clay_result write_voxel_remesh_estimate(clay_voxel_remesh_estimate* out,
+                                        const mesh::VoxelRemeshEstimate& e) {
+    if (!out) return CLAY_OK;
+    clay_voxel_remesh_estimate probe;
+    const clay_result r = read_desc(out, kVoxelRemeshEstimateOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out->struct_size;
+    clay_voxel_remesh_estimate filled{};
+    filled.resolved_voxel_size = e.resolved_voxel_size;
+    for (int a = 0; a < 3; ++a) filled.grid_dimensions[a] = e.grid_dimensions[a];
+    filled.estimated_active_samples = e.estimated_active_samples;
+    filled.estimated_memory_bytes = e.estimated_memory_bytes;
+    filled.estimated_triangle_min = e.estimated_triangle_min;
+    filled.estimated_triangle_max = e.estimated_triangle_max;
+    filled.boundary_edge_count = e.boundary_edge_count;
+    filled.component_count = e.component_count;
+    filled.has_open_boundaries = e.has_open_boundaries ? 1 : 0;
+    filled.thin_feature_warning = e.thin_feature_warning ? 1 : 0;
+    filled.exceeds_memory_budget = e.exceeds_memory_budget ? 1 : 0;
+    write_desc(out, declared, filled);
+    return CLAY_OK;
+}
+
+clay_result write_voxel_remesh_report(clay_voxel_remesh_report* out,
+                                      const mesh::VoxelRemeshReport& rep) {
+    if (!out) return CLAY_OK;
+    clay_voxel_remesh_report probe;
+    const clay_result r = read_desc(out, kVoxelRemeshReportOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out->struct_size;
+    clay_voxel_remesh_report filled{};
+    filled.voxel_size = rep.voxel_size;
+    filled.source_vertices = rep.source_vertices;
+    filled.source_triangles = rep.source_triangles;
+    filled.result_vertices = rep.result_vertices;
+    filled.result_triangles = rep.result_triangles;
+    filled.source_volume = rep.source_volume;
+    filled.result_volume = rep.result_volume;
+    filled.relative_volume_error = rep.relative_volume_error;
+    filled.source_boundary_edges = rep.source_boundary_edges;
+    filled.result_boundary_edges = rep.result_boundary_edges;
+    filled.source_components = rep.source_components;
+    filled.result_components = rep.result_components;
+    filled.removed_components = rep.removed_components;
+    filled.active_samples = rep.active_samples;
+    filled.source_was_open = rep.source_was_open ? 1 : 0;
+    filled.result_watertight = rep.result_watertight ? 1 : 0;
+    filled.result_manifold = rep.result_manifold ? 1 : 0;
+    filled.result_oriented = rep.result_oriented ? 1 : 0;
+    filled.projected_to_source = rep.projected_to_source ? 1 : 0;
+    filled.projected_vertices = rep.projected_vertices;
+    filled.volume_corrected = rep.volume_corrected ? 1 : 0;
+    filled.colors_transferred = rep.colors_transferred ? 1 : 0;
+    filled.uvs_dropped = rep.uvs_dropped ? 1 : 0;
+    filled.cancelled = rep.cancelled ? 1 : 0;
+    write_desc(out, declared, filled);
+    return CLAY_OK;
+}
 }  // namespace
 
 extern "C" {
@@ -12338,6 +12528,127 @@ clay_result clay_mesh_transfer_attributes(const clay_mesh* source, clay_mesh* ta
         filled.max_distance = report.max_distance;
         write_desc(out_report, declared, filled);
     }
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_transfer_vertex_scalar(const clay_mesh* source, const float* values,
+                                             size_t value_count, const clay_mesh* target,
+                                             float max_distance, float fallback,
+                                             float* out_values, size_t out_count) {
+    const mesh::Mesh* src = nullptr;
+    clay_result r = resolve_mesh(source, &src);
+    if (r != CLAY_OK) return r;
+    const mesh::Mesh* dst = nullptr;
+    r = resolve_mesh(target, &dst);
+    if (r != CLAY_OK) return r;
+    if (!values || !out_values) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null array");
+    // Required rather than inferred, the same rule clay_mesh_copy_indices
+    // follows: a length the caller states is a length the caller can be held
+    // to, and one this side guessed is a read past somebody's buffer.
+    if (value_count != src->positions.size())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "value_count must be the source's vertex count");
+    if (out_count != dst->positions.size())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "out_count must be the target's vertex count");
+    if (max_distance < 0.0f)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "max_distance must be >= 0; zero derives it from the source's size");
+
+    const std::vector<float> in(values, values + value_count);
+    const std::vector<float> out =
+        mesh::transfer_vertex_scalar(*src, in, *dst, max_distance, fallback);
+    if (out.size() != out_count) return fail(CLAY_ERROR_BACKEND, "transfer produced the wrong count");
+    std::memcpy(out_values, out.data(), out_count * sizeof(float));
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_voxel_remesh_defaults(clay_voxel_remesh_params* out_params) {
+    if (!out_params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_params");
+    clay_voxel_remesh_params probe;
+    clay_result r = read_desc(out_params, kVoxelRemeshParamsOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_params->struct_size;
+
+    const mesh::VoxelRemeshParams d;
+    clay_voxel_remesh_params out{};
+    out.resolution_mode = d.resolution_mode == mesh::VoxelRemeshResolutionMode::VoxelSize
+                              ? CLAY_VOXEL_REMESH_VOXEL_SIZE
+                              : CLAY_VOXEL_REMESH_LONGEST_AXIS;
+    out.voxel_size = d.voxel_size;
+    out.longest_axis_resolution = d.longest_axis_resolution;
+    out.surface_mode = d.surface_mode == mesh::VoxelRemeshSurfaceMode::Sharp
+                           ? CLAY_VOXEL_REMESH_SHARP
+                           : CLAY_VOXEL_REMESH_SMOOTH;
+    out.open_surface_policy =
+        d.open_surface_policy == mesh::VoxelRemeshOpenSurfacePolicy::Reject
+            ? CLAY_VOXEL_REMESH_OPEN_REJECT
+            : (d.open_surface_policy == mesh::VoxelRemeshOpenSurfacePolicy::BestEffort
+                   ? CLAY_VOXEL_REMESH_OPEN_BEST_EFFORT
+                   : CLAY_VOXEL_REMESH_OPEN_CLOSE);
+    out.small_component_policy =
+        d.small_component_policy == mesh::VoxelRemeshSmallComponentPolicy::RemoveBelowVolume
+            ? CLAY_VOXEL_REMESH_REMOVE_BELOW_VOLUME
+            : CLAY_VOXEL_REMESH_KEEP_COMPONENTS;
+    out.minimum_component_volume = d.minimum_component_volume;
+    out.preserve_volume = d.preserve_volume ? 1 : 0;
+    out.project_to_source = d.project_to_source ? 1 : 0;
+    out.projection_strength = d.projection_strength;
+    out.max_projection_distance_voxels = d.max_projection_distance_voxels;
+    out.preserve_colors = d.preserve_colors ? 1 : 0;
+    out.build_multires_levels = d.build_multires_levels;
+    out.memory_budget_bytes = d.memory_budget_bytes;
+    write_desc(out_params, declared, out);
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_voxel_remesh_estimate(const clay_mesh* source,
+                                            const clay_voxel_remesh_params* params,
+                                            clay_voxel_remesh_estimate* out_estimate) {
+    const mesh::Mesh* src = nullptr;
+    clay_result r = resolve_mesh(source, &src);
+    if (r != CLAY_OK) return r;
+    mesh::VoxelRemeshParams p;
+    r = read_voxel_remesh_params(params, &p);
+    if (r != CLAY_OK) return r;
+
+    const mesh::VoxelRemeshEstimate e = mesh::voxel_remesh_estimate(*src, p);
+    // Filled even for a refusal: the estimate is what JUSTIFIES the refusal,
+    // and a host that got nothing back could not say why.
+    r = write_voxel_remesh_estimate(out_estimate, e);
+    if (r != CLAY_OK) return r;
+    if (e.status != mesh::VoxelRemeshStatus::Ok)
+        return fail(voxel_remesh_result_code(e.status), voxel_remesh_message(e.status));
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_voxel_remesh(const clay_mesh* source,
+                                   const clay_voxel_remesh_params* params,
+                                   clay_cancel_token* token, clay_mesh** out_mesh,
+                                   clay_voxel_remesh_report* out_report) {
+    if (!out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_mesh");
+    *out_mesh = nullptr;
+    const mesh::Mesh* src = nullptr;
+    clay_result r = resolve_mesh(source, &src);
+    if (r != CLAY_OK) return r;
+    mesh::VoxelRemeshParams p;
+    r = read_voxel_remesh_params(params, &p);
+    if (r != CLAY_OK) return r;
+
+    mesh::VoxelRemeshResult result =
+        mesh::voxel_remesh(*src, p, token ? &token->token : nullptr);
+    // Written before the status is checked, for the same reason the estimate
+    // is: an open-surface refusal carries the source's boundary-edge count,
+    // which is exactly what a host puts in front of a user.
+    r = write_voxel_remesh_report(out_report, result.report);
+    if (r != CLAY_OK) return r;
+    if (result.status != mesh::VoxelRemeshStatus::Ok)
+        return fail(voxel_remesh_result_code(result.status),
+                    voxel_remesh_message(result.status));
+
+    auto built = std::make_unique<clay_mesh>();
+    built->data = std::move(result.mesh);
+    *out_mesh = built.release();
     return CLAY_OK;
 }
 

@@ -344,18 +344,29 @@ def render_voxels(grid, name, eye=(2.6, 2.0, 3.2), target=(0.0, 0.0, 0.0),
 
 
 def render_mesh_array(mesh, eye=(2.6, 2.0, 3.2), target=(0.0, 0.0, 0.0),
-                      width=260, height=260):
+                      width=260, height=260, colors=None):
     """Rasterise a mesh's own VERTEX COLOURS — a painter's algorithm with a
     z-buffer, barycentric interpolation per triangle, and one lambert term.
 
     `render_array` cannot do this and never will: it traces a DOCUMENT, and a
     mesh reaches a document through `Volume.from_mesh`, which carries one colour
     for the whole item. A picture of per-vertex colour has to come from the
-    vertices. Used by the mesh colour and attribute-transfer examples."""
+    vertices. Used by the mesh colour and attribute-transfer examples.
+
+    `colors` overrides the mesh's own, as an (N, 3) array in 0..1. A pyclay
+    mesh's colour buffer is a READ-ONLY view, so an example that wants to paint
+    a derived quantity over the geometry — a density map, an error map — has no
+    way to put it on the mesh; this is that way. `67_voxel_remesh` colours a
+    surface by its own edge lengths, which is how "the topology is uniform now"
+    becomes a picture rather than a number."""
     width, height = _fast_pixels(width), _fast_pixels(height)
     p = np.asarray(mesh.positions, dtype=np.float64)
     idx = np.asarray(mesh.indices, dtype=np.int64).reshape(-1, 3)
-    col = np.asarray(mesh.colors, dtype=np.float64)
+    col = np.asarray(mesh.colors if colors is None else colors, dtype=np.float64)
+    if len(col) != len(p):
+        raise ValueError(
+            f"need one colour per vertex: {len(col)} colours for {len(p)} vertices"
+        )
 
     forward = np.array(target, dtype=np.float64) - np.array(eye, dtype=np.float64)
     forward /= np.linalg.norm(forward)

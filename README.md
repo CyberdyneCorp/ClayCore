@@ -468,6 +468,18 @@ changes, so the pull that used to stretch now creates geometry as it goes. The
 two are separate representations and a caller chooses between them; the fixed
 one never adapts behind a brush's back.
 
+And when the topology is past repairing rather than merely stretched,
+`mesh::voxel_remesh` throws it away and builds a new one — the operation
+sculpting applications call **DynaMesh** or **Voxel Remesh**. It samples the
+whole surface into a signed narrow-band field at a spatial resolution you
+choose and reconstructs a watertight isosurface from it, so overlapping shells
+fuse, self-intersections resolve and the density comes out uniform. The price
+is stated rather than discovered: vertex and polygon identity are gone, UVs are
+**dropped** rather than reprojected, and anything thinner than the voxel size
+may go with them. Vertex colour and a caller's per-vertex mask survive, because
+both can be resampled from the source's geometry. `examples/67_voxel_remesh.py`
+shows all of it, including what a coarse voxel size costs.
+
 `relax` is the verb that recovers a stretched *grab*, by sliding vertices along
 the surface to even their spacing. It does **not** recover a deformation, and
 that is measured rather than assumed: after a taper, six relax passes move
@@ -551,6 +563,14 @@ Recorded as decisions rather than gaps, with the reasoning in
   workflow does not pass through it: a dynamic surface is triangles and the
   export says so. **Multires and subdivision are still not implemented** —
   `openspec/ROADMAP.md` Phase 5 row 3.
+- ~~**No global topology reset**~~ — **`mesh::voxel_remesh` shipped.** A whole
+  surface rebuilt through a signed narrow-band field at an explicit world voxel
+  size: overlaps fuse, open surfaces close under an explicit policy, the result
+  is validated watertight before it is returned, and the cost is preflighted so
+  an oversized request is refused rather than answered by the allocator. **It
+  is not quad retopology** — the output is a lattice-derived triangulation with
+  no edge loops following the form, and no setting changes that. **It does not
+  preserve UVs**, and the API says dropped rather than "best effort".
 - **No PBR channels.** Polypaint works on all three representations; roughness
   and metallic want a UV parameterisation and a texture set, which live
   upstream of this library.

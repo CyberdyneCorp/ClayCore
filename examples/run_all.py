@@ -98,6 +98,7 @@ EXAMPLES = [
     "64_measuring_the_surface",
     "65_brush_presets",
     "66_dynamic_topology",
+    "67_voxel_remesh",
 ]
 
 

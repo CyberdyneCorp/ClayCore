@@ -30,6 +30,7 @@
 #include "clay/mesh/marching.h"
 #include "clay/mesh/surface_nets.h"
 #include "clay/mesh/to_field.h"
+#include "clay/mesh/voxel_remesh.h"
 #include "clay/scene/bounds.h"
 #include "clay/scene/commands.h"
 #include "clay/scene/consolidate.h"
@@ -4016,6 +4017,182 @@ clay::mesh::Mesh bench_surface_patch(int n, float spacing) {
 }
 
 }  // namespace
+
+
+// -- global voxel remesh (add-voxel-remesher) --------------------------------
+//
+// The claim these hold is a SCALING one, not a time one: the expensive per
+// sample work follows the source's surface area and the band's thickness, and
+// not the volume of the bounding box. A remesh built on `mesh::to_field`
+// unchanged would evaluate every brick of the box — 24 million BVH queries at
+// longest-axis 256, each carrying a generalized winding number — and the
+// ratios below are what a revert to that would blow.
+namespace {
+
+// A UV sphere at a chosen radius and tessellation. Two dials, because two
+// different scaling questions are asked of it: RADIUS at a fixed voxel size
+// (surface grows as r^2 while the box grows as r^3), and TRIANGLE COUNT at a
+// fixed shape and resolution (the sampling should barely notice).
+clay::mesh::Mesh bench_sphere(float radius, int rings, int segments,
+                              clay::kernel::cfloat3 centre = clay::kernel::cf3(0, 0, 0)) {
+    using namespace clay;
+    using kernel::cf3;
+    mesh::Mesh m;
+    const float pi = 3.14159265358979323846f;
+    m.positions.push_back(centre + cf3(0, radius, 0));
+    for (int r = 1; r < rings; ++r) {
+        const float phi = pi * static_cast<float>(r) / static_cast<float>(rings);
+        const float y = std::cos(phi), rr = std::sin(phi);
+        for (int s = 0; s < segments; ++s) {
+            const float th = 2.0f * pi * static_cast<float>(s) / static_cast<float>(segments);
+            m.positions.push_back(centre + cf3(rr * std::cos(th), y, rr * std::sin(th)) * radius);
+        }
+    }
+    m.positions.push_back(centre + cf3(0, -radius, 0));
+    const std::uint32_t bottom = static_cast<std::uint32_t>(m.positions.size() - 1);
+    auto at = [&](int r, int s) {
+        return static_cast<std::uint32_t>(1 + (r - 1) * segments + (s % segments));
+    };
+    for (int s = 0; s < segments; ++s)
+        m.indices.insert(m.indices.end(), {0u, at(1, s + 1), at(1, s)});
+    for (int r = 1; r < rings - 1; ++r)
+        for (int s = 0; s < segments; ++s)
+            m.indices.insert(m.indices.end(), {at(r, s), at(r, s + 1), at(r + 1, s),
+                                               at(r, s + 1), at(r + 1, s + 1), at(r + 1, s)});
+    for (int s = 0; s < segments; ++s)
+        m.indices.insert(m.indices.end(), {bottom, at(rings - 1, s), at(rings - 1, s + 1)});
+    return m;
+}
+
+clay::mesh::VoxelRemeshParams remesh_at(std::uint32_t resolution) {
+    clay::mesh::VoxelRemeshParams p;
+    p.longest_axis_resolution = resolution;
+    return p;
+}
+
+void run_remesh(benchmark::State& state, const clay::mesh::Mesh& source,
+                const clay::mesh::VoxelRemeshParams& params) {
+    using namespace clay;
+    std::uint64_t triangles = 0, samples = 0;
+    for (auto _ : state) {
+        mesh::VoxelRemeshResult r = mesh::voxel_remesh(source, params);
+        benchmark::DoNotOptimize(r.mesh.triangle_count());
+        triangles = r.report.result_triangles;
+        samples = r.report.active_samples;
+    }
+    state.counters["result_tris"] = static_cast<double>(triangles);
+    state.counters["band_samples"] = static_cast<double>(samples);
+    state.counters["source_tris"] = static_cast<double>(source.triangle_count());
+}
+
+}  // namespace
+
+void BM_VoxelRemeshSphere128(benchmark::State& state) {
+    run_remesh(state, bench_sphere(1.0f, 32, 64), remesh_at(128));
+}
+BENCHMARK(BM_VoxelRemeshSphere128)->Unit(benchmark::kMillisecond);
+
+void BM_VoxelRemeshSphere256(benchmark::State& state) {
+    run_remesh(state, bench_sphere(1.0f, 32, 64), remesh_at(256));
+}
+BENCHMARK(BM_VoxelRemeshSphere256)->Unit(benchmark::kMillisecond);
+
+// Two spheres crossing: the fusion path, and the case where the winding number
+// is summed over a source that overlaps itself.
+void BM_VoxelRemeshIntersections256(benchmark::State& state) {
+    using namespace clay;
+    using kernel::cf3;
+    mesh::Mesh m = bench_sphere(0.6f, 24, 48, cf3(-0.35f, 0, 0));
+    const mesh::Mesh other = bench_sphere(0.6f, 24, 48, cf3(0.35f, 0, 0));
+    const std::uint32_t base = static_cast<std::uint32_t>(m.positions.size());
+    m.positions.insert(m.positions.end(), other.positions.begin(), other.positions.end());
+    for (std::uint32_t i : other.indices) m.indices.push_back(base + i);
+    run_remesh(state, m, remesh_at(256));
+}
+BENCHMARK(BM_VoxelRemeshIntersections256)->Unit(benchmark::kMillisecond);
+
+// THE SPARSITY GATE, and the pair it is a pair for.
+//
+// Same voxel size, one sphere twice the radius of the other. The surface grows
+// 4x and the bounding box 8x, so a domain that followed the box would cost
+// about 8x and one that follows the band about 4x. Measured: 815,751 band
+// samples against 3,230,930, a ratio of 3.96, and 243 ms against 1118 ms on a
+// 24-core Linux desktop. The ratio gate in check_bench.py sits between 4 and 8,
+// which is what makes a revert to the dense converter fail rather than merely
+// look slower.
+void BM_VoxelRemeshSmallBall(benchmark::State& state) {
+    clay::mesh::VoxelRemeshParams p;
+    p.resolution_mode = clay::mesh::VoxelRemeshResolutionMode::VoxelSize;
+    p.voxel_size = 0.01f;
+    run_remesh(state, bench_sphere(0.5f, 32, 64), p);
+}
+BENCHMARK(BM_VoxelRemeshSmallBall)->Unit(benchmark::kMillisecond);
+
+void BM_VoxelRemeshLargeBall(benchmark::State& state) {
+    clay::mesh::VoxelRemeshParams p;
+    p.resolution_mode = clay::mesh::VoxelRemeshResolutionMode::VoxelSize;
+    p.voxel_size = 0.01f;
+    run_remesh(state, bench_sphere(1.0f, 32, 64), p);
+}
+BENCHMARK(BM_VoxelRemeshLargeBall)->Unit(benchmark::kMillisecond);
+
+// SOURCE TRIANGLES AT A FIXED SHAPE AND RESOLUTION. The same sphere at the same
+// voxel size, tessellated sixteen times as finely. The field is sampled at the
+// same points and the BVH is deeper by four levels, so the remesh should cost
+// slightly more and not proportionally more — a remesh whose cost tracked the
+// input's triangle count would be doing per-triangle work it does not need to.
+void BM_VoxelRemeshCoarseSource(benchmark::State& state) {
+    run_remesh(state, bench_sphere(1.0f, 16, 32), remesh_at(128));
+}
+BENCHMARK(BM_VoxelRemeshCoarseSource)->Unit(benchmark::kMillisecond);
+
+void BM_VoxelRemeshDenseSource(benchmark::State& state) {
+    run_remesh(state, bench_sphere(1.0f, 64, 128), remesh_at(128));
+}
+BENCHMARK(BM_VoxelRemeshDenseSource)->Unit(benchmark::kMillisecond);
+
+// Projection and attribute transfer, isolated: the same remesh with each off
+// and on, so a regression in either is attributable rather than showing up as
+// "the remesh got slower".
+void BM_VoxelRemeshNoProjection(benchmark::State& state) {
+    clay::mesh::VoxelRemeshParams p = remesh_at(128);
+    p.project_to_source = false;
+    p.preserve_colors = false;
+    run_remesh(state, bench_sphere(1.0f, 32, 64), p);
+}
+BENCHMARK(BM_VoxelRemeshNoProjection)->Unit(benchmark::kMillisecond);
+
+void BM_VoxelRemeshProjection(benchmark::State& state) {
+    clay::mesh::VoxelRemeshParams p = remesh_at(128);
+    p.project_to_source = true;
+    p.preserve_colors = false;
+    run_remesh(state, bench_sphere(1.0f, 32, 64), p);
+}
+BENCHMARK(BM_VoxelRemeshProjection)->Unit(benchmark::kMillisecond);
+
+void BM_VoxelRemeshAttributeTransfer(benchmark::State& state) {
+    clay::mesh::Mesh m = bench_sphere(1.0f, 32, 64);
+    m.colors.assign(m.positions.size(), clay::kernel::cf3(0.5f, 0.4f, 0.3f));
+    clay::mesh::VoxelRemeshParams p = remesh_at(128);
+    p.project_to_source = true;
+    p.preserve_colors = true;
+    run_remesh(state, m, p);
+}
+BENCHMARK(BM_VoxelRemeshAttributeTransfer)->Unit(benchmark::kMillisecond);
+
+// The preflight, which a host calls on every tick of a resolution slider. It
+// must cost the triangles and the brick lattice and NOT the remesh: this is the
+// row that fails if the estimate ever starts sampling anything.
+void BM_VoxelRemeshEstimate256(benchmark::State& state) {
+    using namespace clay;
+    const mesh::Mesh source = bench_sphere(1.0f, 32, 64);
+    const mesh::VoxelRemeshParams p = remesh_at(256);
+    for (auto _ : state) {
+        mesh::VoxelRemeshEstimate e = mesh::voxel_remesh_estimate(source, p);
+        benchmark::DoNotOptimize(e);
+    }
+}
+BENCHMARK(BM_VoxelRemeshEstimate256)->Unit(benchmark::kMillisecond);
 
 // `state.range(0)` is the patch's side in quads: 2 * n^2 triangles, so 224 is
 // ~100k, 707 is ~1M and 1581 is ~5M. The brush footprint is identical in all

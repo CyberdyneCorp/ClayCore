@@ -120,5 +120,43 @@ TransferReport transfer_attributes(const Mesh& source, Mesh* target,
     return report;
 }
 
+std::vector<float> transfer_vertex_scalar(const Mesh& source, const std::vector<float>& values,
+                                          const Mesh& target, float max_distance,
+                                          float fallback) {
+    std::vector<float> out(target.positions.size(), fallback);
+    // A length that is neither zero nor the vertex count is a caller and a
+    // buffer disagreeing about what the array is. Treated as absent rather than
+    // read: the alternative is reading past it.
+    if (values.size() != source.positions.size() || source.indices.empty() ||
+        target.positions.empty())
+        return out;
+
+    const float threshold = max_distance > 0.0f ? max_distance : derived_threshold(source);
+    const Bvh bvh = Bvh::build(source);
+    const std::size_t triangles = source.indices.size() / 3;
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        const Bvh::ClosestPoint hit = bvh.closest(target.positions[i]);
+        if (!hit.found || hit.triangle >= triangles || hit.distance > threshold) continue;
+        const std::uint32_t i0 = source.indices[hit.triangle * 3];
+        const std::uint32_t i1 = source.indices[hit.triangle * 3 + 1];
+        const std::uint32_t i2 = source.indices[hit.triangle * 3 + 2];
+        if (i0 >= values.size() || i1 >= values.size() || i2 >= values.size()) continue;
+        const float w = 1.0f - hit.u - hit.v;
+        // The same corner snap `interpolate` makes, and for the same reason: an
+        // identity transfer of a mask must give the mask back bit for bit, or a
+        // round trip through a remesh that changed nothing still moves it.
+        constexpr float kCorner = 1.0f - 1e-5f;
+        if (w >= kCorner)
+            out[i] = values[i0];
+        else if (hit.u >= kCorner)
+            out[i] = values[i1];
+        else if (hit.v >= kCorner)
+            out[i] = values[i2];
+        else
+            out[i] = values[i0] * w + values[i1] * hit.u + values[i2] * hit.v;
+    }
+    return out;
+}
+
 }  // namespace mesh
 }  // namespace clay

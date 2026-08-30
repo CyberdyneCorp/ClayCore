@@ -6964,3 +6964,192 @@ def test_a_bracketed_crossing_is_one_undo_step():
     back = doc.voxel_layer("blocks")
     assert back is not None
     assert back.occupied_count == filled  # and the cells came back with it
+
+
+# -- global voxel remesh (add-voxel-remesher) ---------------------------------
+
+
+def _remesh_sphere(radius=1.0, centre=(0.0, 0.0, 0.0), rings=16, segments=32):
+    """A UV sphere as flat arrays. Built here rather than meshed from a
+    document, because two of these have to be handed over as ONE mesh with no
+    shared vertices — which is the fixture the fusion test needs and a document
+    union cannot produce."""
+    cx, cy, cz = centre
+    positions = [(cx, cy + radius, cz)]
+    for r in range(1, rings):
+        phi = math.pi * r / rings
+        y, rr = math.cos(phi) * radius, math.sin(phi) * radius
+        for s in range(segments):
+            th = 2.0 * math.pi * s / segments
+            positions.append((cx + rr * math.cos(th), cy + y, cz + rr * math.sin(th)))
+    positions.append((cx, cy - radius, cz))
+    bottom = len(positions) - 1
+
+    def at(r, s):
+        return 1 + (r - 1) * segments + (s % segments)
+
+    indices = []
+    for s in range(segments):
+        indices += [0, at(1, s + 1), at(1, s)]
+    for r in range(1, rings - 1):
+        for s in range(segments):
+            a, b, c, d = at(r, s), at(r, s + 1), at(r + 1, s), at(r + 1, s + 1)
+            indices += [a, b, c, b, d, c]
+    for s in range(segments):
+        indices += [bottom, at(rings - 1, s), at(rings - 1, s + 1)]
+    return (np.array(positions, dtype=np.float32), np.array(indices, dtype=np.uint32))
+
+
+def test_voxel_remesh_rebuilds_a_surface_and_reports_what_it_did():
+    p, i = _remesh_sphere()
+    src = clay.Mesh.from_triangles(p, i)
+    out, report = src.voxel_remesh(resolution=48)
+
+    assert out.triangle_count > 0
+    assert out.triangle_count != src.triangle_count  # identity is not preserved
+    assert report["result_watertight"] and report["result_manifold"]
+    assert report["result_oriented"]
+    assert report["result_components"] == 1
+    assert report["voxel_size"] == pytest.approx(2.0 / 48.0, rel=0.02)
+    assert report["source_triangles"] == src.triangle_count
+    assert report["result_triangles"] == out.triangle_count
+    assert report["relative_volume_error"] < 0.05
+    # A source with no colour produces a result with none: nothing invents one.
+    assert not report["colors_transferred"]
+    assert not report["uvs_dropped"]
+
+
+def test_voxel_remesh_estimate_predicts_without_performing():
+    p, i = _remesh_sphere()
+    src = clay.Mesh.from_triangles(p, i)
+    e = src.voxel_remesh_estimate(resolution=48)
+
+    assert e["voxel_size"] == pytest.approx(2.0 / 48.0, rel=0.02)
+    assert e["active_samples"] > 0
+    assert e["memory_bytes"] > 0
+    assert e["triangle_min"] < e["triangle_max"]
+    assert e["components"] == 1
+    assert not e["open_boundaries"]
+    assert e["boundary_edges"] == 0
+    assert len(e["grid_dimensions"]) == 3
+
+    out, report = src.voxel_remesh(resolution=48)
+    assert report["voxel_size"] == e["voxel_size"]
+    # A bound rather than a prediction: the marking keeps bricks that turn out
+    # to hold nothing near enough to store.
+    assert 0 < report["active_samples"] <= e["active_samples"]
+    assert e["triangle_min"] <= report["result_triangles"] <= e["triangle_max"]
+
+
+def test_voxel_remesh_fuses_overlapping_shells():
+    pa, ia = _remesh_sphere(0.6, (-0.35, 0.0, 0.0))
+    pb, ib = _remesh_sphere(0.6, (0.35, 0.0, 0.0))
+    pair = clay.Mesh.from_triangles(np.vstack([pa, pb]),
+                                    np.concatenate([ia, ib + len(pa)]))
+    out, report = pair.voxel_remesh(resolution=64)
+    assert report["source_components"] == 2
+    assert report["result_components"] == 1
+    assert report["result_watertight"]
+    assert out.triangle_count > 0
+
+
+def test_voxel_remesh_open_surface_policy_is_explicit():
+    p, i = _remesh_sphere()
+    holed = clay.Mesh.from_triangles(p, i[: -3 * 32])
+
+    with pytest.raises(RuntimeError, match="open boundaries"):
+        holed.voxel_remesh(resolution=48, open_surface="reject")
+
+    out, report = holed.voxel_remesh(resolution=48, open_surface="close")
+    assert report["source_was_open"]
+    assert report["source_boundary_edges"] > 0
+    assert report["result_boundary_edges"] == 0
+    assert report["result_watertight"]
+    assert out.triangle_count > 0
+
+    _, effort = holed.voxel_remesh(resolution=48, open_surface="best_effort")
+    assert effort["source_was_open"]
+
+
+def test_voxel_remesh_refusals_name_their_cause():
+    p, i = _remesh_sphere()
+    src = clay.Mesh.from_triangles(p, i)
+
+    with pytest.raises(ValueError, match="resolution"):
+        src.voxel_remesh(voxel_size=-1.0)
+    with pytest.raises(ValueError, match="exactly one"):
+        src.voxel_remesh()
+    with pytest.raises(ValueError, match="exactly one"):
+        src.voxel_remesh(resolution=64, voxel_size=0.01)
+    with pytest.raises(RuntimeError, match="memory budget"):
+        src.voxel_remesh(resolution=256, memory_budget=4096)
+    with pytest.raises(ValueError, match="open_surface"):
+        src.voxel_remesh(resolution=32, open_surface="nonsense")
+    with pytest.raises(ValueError, match="surface_mode"):
+        src.voxel_remesh(resolution=32, surface_mode="nonsense")
+
+
+def test_voxel_remesh_is_deterministic():
+    p, i = _remesh_sphere()
+    src = clay.Mesh.from_triangles(p, i)
+    a, _ = src.voxel_remesh(resolution=40)
+    b, _ = src.voxel_remesh(resolution=40)
+    assert np.array_equal(np.asarray(a.positions), np.asarray(b.positions))
+    assert np.array_equal(np.asarray(a.indices), np.asarray(b.indices))
+    assert np.array_equal(np.asarray(a.normals), np.asarray(b.normals))
+
+
+def test_voxel_remesh_finer_resolution_keeps_more_of_the_source():
+    p, i = _remesh_sphere()
+    src = clay.Mesh.from_triangles(p, i)
+    coarse, coarse_report = src.voxel_remesh(resolution=24)
+    fine, fine_report = src.voxel_remesh(resolution=80)
+    assert fine.triangle_count > coarse.triangle_count
+    assert fine_report["voxel_size"] < coarse_report["voxel_size"]
+
+    # Closer to the SOURCE, which is the claim — and deliberately not closer to
+    # the ideal sphere the source approximates. The source is a faceted UV
+    # sphere whose faces lie inside the unit sphere, so a finer rebuild follows
+    # the facets and its distance to the IDEAL surface goes the other way. That
+    # is not a defect in either the remesh or the metric; it is the difference
+    # between "keeps more of the source" and "is rounder", and only the first
+    # is being claimed.
+    query = clay.MeshQuery(src)
+
+    def surface_error(mesh):
+        return float(query.distance(np.asarray(mesh.positions, dtype=np.float32)).mean())
+
+    assert surface_error(fine) < surface_error(coarse)
+
+
+def test_voxel_remesh_carries_a_mask_onto_the_new_topology():
+    p, i = _remesh_sphere()
+    src = clay.Mesh.from_triangles(p, i)
+    out, report = src.voxel_remesh(resolution=48)
+
+    mask = (p[:, 0] > 0.0).astype(np.float32)
+    moved = out.transfer_vertex_scalar(src, mask, max_distance=report["voxel_size"] * 2.0)
+    assert moved.shape == (len(np.asarray(out.positions)),)
+
+    q = np.asarray(out.positions)
+    clear = np.abs(q[:, 0]) > 4.0 * report["voxel_size"]
+    assert clear.sum() > 100
+    assert np.array_equal(q[clear, 0] > 0.0, moved[clear] > 0.5)
+
+    # A wrong-length array is refused rather than read past.
+    with pytest.raises(ValueError, match="one entry per source vertex"):
+        out.transfer_vertex_scalar(src, np.zeros(5, dtype=np.float32))
+
+
+def test_voxel_remesh_component_policy_is_opt_in():
+    pa, ia = _remesh_sphere(0.7)
+    pb, ib = _remesh_sphere(0.09, (1.5, 0.0, 0.0), rings=8, segments=16)
+    both = clay.Mesh.from_triangles(np.vstack([pa, pb]),
+                                    np.concatenate([ia, ib + len(pa)]))
+    _, kept = both.voxel_remesh(resolution=64)
+    assert kept["result_components"] == 2
+    assert kept["removed_components"] == 0
+
+    _, culled = both.voxel_remesh(resolution=64, minimum_component_volume=0.05)
+    assert culled["removed_components"] == 1
+    assert culled["result_components"] == 1

@@ -17,6 +17,7 @@
 // in. This refunds the paint and most of the uvs; it does not refund the mesh.
 
 #include <cstddef>
+#include <vector>
 
 #include "clay/kernel/shim.h"
 #include "clay/mesh/mesh_data.h"
@@ -99,6 +100,28 @@ kernel::cfloat2 sample_uv(const Mesh& m, std::uint32_t triangle, float u, float 
 
 TransferReport transfer_attributes(const Mesh& source, Mesh* target,
                                    const TransferOptions& options = {});
+
+// Resample a caller-owned per-vertex scalar from `source` onto `target`, by
+// closest point and barycentric interpolation over the triangle it landed on.
+//
+// WHY THIS IS NOT A `Mesh` FIELD. A mask is a per-vertex gate the sculptors
+// take as an argument; it belongs to a layer, a document or a host, and not to
+// the interchange type. But an operation that REPLACES a mesh's topology —
+// `voxel_remesh` — destroys the vertex identity the mask was indexed by, and
+// the mask then has to be resampled from geometry like any other attribute.
+// Moving mask storage into `Mesh` to make that convenient would be changing a
+// representation to suit one operation; providing the resampling next to the
+// transfer it is a case of, is not.
+//
+// `values` must be `source.positions.size()` long; any other length is treated
+// as absent and the result is `fallback` throughout. A target vertex further
+// than `max_distance` from the source takes `fallback` too — zero derives that
+// threshold exactly as `TransferOptions::max_distance` does.
+//
+// Deterministic: each output depends only on its own vertex's position.
+std::vector<float> transfer_vertex_scalar(const Mesh& source, const std::vector<float>& values,
+                                          const Mesh& target, float max_distance = 0.0f,
+                                          float fallback = 0.0f);
 
 }  // namespace mesh
 }  // namespace clay

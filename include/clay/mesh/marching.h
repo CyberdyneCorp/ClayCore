@@ -34,6 +34,29 @@ struct MeshingOptions {
 Mesh mesh_lattice(const std::function<float(int, int, int)>& sample, int cell_min[3],
                   int cell_max[3], kernel::cfloat3 origin, float spacing);
 
+// The same march, split across the thread pool — for a `sample` that is SAFE TO
+// CALL CONCURRENTLY.
+//
+// A separate entry point rather than a change to the one above, for the reason
+// `FieldVolume::sample_parallel` is separate: `sample` is caller-supplied and
+// may hold state. `mesh_tape`'s is a pure array read of an already-evaluated
+// grid and opts in; `voxel_remesh`'s is a pure read of an immutable
+// `field::FieldVolume` and opts in. Nothing else has to.
+//
+// BYTE-IDENTICAL to the serial march, by construction rather than by tolerance:
+// a slab records its crossings WITHOUT welding, and one builder then replays
+// every recorded edge in slab order, so the builder observes exactly the call
+// sequence the serial march makes. Vertices shared across a slab boundary weld
+// because the builder sees both sides.
+//
+// A global remesh is why this is public. `mesh_lattice` is serial, and a
+// remesh marches a lattice whose cell count follows the resolution dial — at
+// longest-axis 512 that is over a hundred million cells, which the serial
+// marcher cannot finish inside the operation's own latency budget.
+Mesh mesh_lattice_parallel(const std::function<float(int, int, int)>& sample,
+                           const int cell_min[3], const int cell_max[3], kernel::cfloat3 origin,
+                           float spacing);
+
 // Ceiling on the dense sample grid a single mesh_tape call will allocate.
 // The grid is sized from the caller's voxel size, so without a ceiling an
 // over-fine size ends the process in the allocator rather than returning —

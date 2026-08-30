@@ -48,6 +48,7 @@
 #include "clay/mesh/deform.h"
 #include "clay/mesh/sculpt.h"
 #include "clay/mesh/transfer.h"
+#include "clay/mesh/voxel_remesh.h"
 #include "clay/mesh/surface_nets.h"
 #include "clay/mesh/to_field.h"
 #include "clay/mesh/validate.h"
@@ -485,6 +486,87 @@ struct PyMesh {
 struct PyLattice {
     mesh::Lattice cage{math::Aabb{}, 3, 3, 3};
 };
+
+// The two spellings of a remesh resolution, and the refusal a caller gets for
+// naming both or neither.
+//
+// Exactly one, rather than a mode enum plus a value: a Python caller who set
+// the mode and forgot the value would otherwise get whatever the other field
+// happened to hold, and the mistake would look like a resolution that did
+// nothing.
+mesh::VoxelRemeshParams py_remesh_params(nb::handle resolution, nb::handle voxel_size,
+                                         nb::handle memory_budget) {
+    mesh::VoxelRemeshParams p;
+    const bool has_resolution = !resolution.is_none();
+    const bool has_voxel = !voxel_size.is_none();
+    if (has_resolution == has_voxel)
+        throw std::invalid_argument("give exactly one of resolution= or voxel_size=");
+    if (has_resolution) {
+        const long long n = nb::cast<long long>(resolution);
+        if (n <= 0) throw std::invalid_argument("resolution must be a positive integer");
+        p.resolution_mode = mesh::VoxelRemeshResolutionMode::LongestAxisResolution;
+        p.longest_axis_resolution = static_cast<std::uint32_t>(n);
+    } else {
+        p.resolution_mode = mesh::VoxelRemeshResolutionMode::VoxelSize;
+        p.voxel_size = nb::cast<float>(voxel_size);
+    }
+    if (!memory_budget.is_none()) {
+        const long long bytes = nb::cast<long long>(memory_budget);
+        if (bytes < 0) throw std::invalid_argument("memory_budget must be >= 0");
+        p.memory_budget_bytes = static_cast<std::uint64_t>(bytes);
+    }
+    return p;
+}
+
+mesh::VoxelRemeshOpenSurfacePolicy py_open_policy(const std::string& name) {
+    if (name == "close") return mesh::VoxelRemeshOpenSurfacePolicy::Close;
+    if (name == "reject") return mesh::VoxelRemeshOpenSurfacePolicy::Reject;
+    if (name == "best_effort") return mesh::VoxelRemeshOpenSurfacePolicy::BestEffort;
+    throw std::invalid_argument("open_surface must be 'close', 'reject' or 'best_effort'");
+}
+
+mesh::VoxelRemeshSurfaceMode py_surface_mode(const std::string& name) {
+    if (name == "smooth") return mesh::VoxelRemeshSurfaceMode::Smooth;
+    if (name == "sharp") return mesh::VoxelRemeshSurfaceMode::Sharp;
+    throw std::invalid_argument("surface_mode must be 'smooth' or 'sharp'");
+}
+
+// A refusal names WHICH contract refused it. An empty mesh with no explanation
+// would make a caller diagnose the engine's decision from the geometry, which
+// is exactly what the typed status exists to prevent.
+[[noreturn]] void raise_remesh(mesh::VoxelRemeshStatus status) {
+    switch (status) {
+        case mesh::VoxelRemeshStatus::EmptySource:
+            throw std::invalid_argument("a mesh with no triangles has no surface to rebuild");
+        case mesh::VoxelRemeshStatus::InvalidResolution:
+            throw std::invalid_argument(
+                "the resolution must be a finite positive voxel size, or a non-zero "
+                "longest-axis resolution");
+        case mesh::VoxelRemeshStatus::InvalidParameters:
+            throw std::invalid_argument(
+                "a projection strength, projection distance or component volume is out of "
+                "range");
+        case mesh::VoxelRemeshStatus::Unsupported:
+            throw std::runtime_error("this voxel remesh option is not supported yet");
+        case mesh::VoxelRemeshStatus::ExceedsBudget:
+            throw std::runtime_error(
+                "the voxel remesh exceeds the memory budget; choose a coarser resolution");
+        case mesh::VoxelRemeshStatus::OpenSurfaceRejected:
+            throw std::runtime_error(
+                "the source has open boundaries and open_surface='reject' refuses them");
+        case mesh::VoxelRemeshStatus::ExtractionFailed:
+            throw std::runtime_error("no surface was found at this resolution");
+        case mesh::VoxelRemeshStatus::ResultNotWatertight:
+            throw std::runtime_error(
+                "the voxel remesh result failed the watertight validation this surface mode "
+                "promises");
+        case mesh::VoxelRemeshStatus::Cancelled:
+            throw std::runtime_error("the voxel remesh was cancelled");
+        case mesh::VoxelRemeshStatus::Ok:
+            break;
+    }
+    throw std::runtime_error("voxel remesh failed");
+}
 
 struct PyMeshSculptor {
     nb::object owner;  // the Python Mesh, kept alive for the session's lifetime
@@ -3568,6 +3650,153 @@ NB_MODULE(pyclay, m) {
             "duplicates a position into two vertices with different uvs. A target\n"
             "vertex on a seam has one slot and two right answers. Colour is\n"
             "unaffected, being continuous across a seam.")
+        .def(
+            "voxel_remesh_estimate",
+            [](const PyMesh& self, nb::handle resolution, nb::handle voxel_size,
+               nb::handle memory_budget) {
+                const mesh::VoxelRemeshParams p =
+                    py_remesh_params(resolution, voxel_size, memory_budget);
+                mesh::VoxelRemeshEstimate e;
+                {
+                    const mesh::Mesh& src = self.data();
+                    nb::gil_scoped_release release;
+                    e = mesh::voxel_remesh_estimate(src, p);
+                }
+                if (e.status != mesh::VoxelRemeshStatus::Ok &&
+                    e.status != mesh::VoxelRemeshStatus::ExceedsBudget)
+                    raise_remesh(e.status);
+                nb::dict out;
+                out["voxel_size"] = e.resolved_voxel_size;
+                out["grid_dimensions"] = nb::make_tuple(
+                    e.grid_dimensions[0], e.grid_dimensions[1], e.grid_dimensions[2]);
+                out["active_samples"] = e.estimated_active_samples;
+                out["memory_bytes"] = e.estimated_memory_bytes;
+                out["triangle_min"] = e.estimated_triangle_min;
+                out["triangle_max"] = e.estimated_triangle_max;
+                out["boundary_edges"] = e.boundary_edge_count;
+                out["components"] = e.component_count;
+                out["open_boundaries"] = e.has_open_boundaries;
+                out["thin_feature_warning"] = e.thin_feature_warning;
+                out["exceeds_memory_budget"] = e.exceeds_memory_budget;
+                return out;
+            },
+            "resolution"_a = nb::none(), "voxel_size"_a = nb::none(),
+            "memory_budget"_a = nb::none(),
+            "What a voxel remesh would cost, without performing it.\n\n"
+            "Cheap enough to call on every tick of a resolution slider: it walks\n"
+            "the triangles and marks a brick lattice, and allocates nothing\n"
+            "proportional to the samples it is predicting.\n\n"
+            "`active_samples` is an UPPER BOUND on the narrow band, not a\n"
+            "prediction -- the marking keeps bricks that turn out to hold nothing\n"
+            "near enough to store. The remesh report's `active_samples` is what\n"
+            "the run actually held.\n\n"
+            "Give exactly one of `resolution` (longest axis, an integer) or\n"
+            "`voxel_size` (world units).")
+        .def(
+            "voxel_remesh",
+            [](const PyMesh& self, nb::handle resolution, nb::handle voxel_size,
+               const std::string& open_surface, const std::string& surface_mode,
+               bool preserve_volume, bool project_to_source, float projection_strength,
+               bool preserve_colors, nb::handle minimum_component_volume,
+               nb::handle memory_budget) {
+                mesh::VoxelRemeshParams p =
+                    py_remesh_params(resolution, voxel_size, memory_budget);
+                p.open_surface_policy = py_open_policy(open_surface);
+                p.surface_mode = py_surface_mode(surface_mode);
+                p.preserve_volume = preserve_volume;
+                p.project_to_source = project_to_source;
+                p.projection_strength = projection_strength;
+                p.preserve_colors = preserve_colors;
+                if (!minimum_component_volume.is_none()) {
+                    p.small_component_policy =
+                        mesh::VoxelRemeshSmallComponentPolicy::RemoveBelowVolume;
+                    p.minimum_component_volume = nb::cast<float>(minimum_component_volume);
+                }
+
+                mesh::VoxelRemeshResult r;
+                {
+                    const mesh::Mesh& src = self.data();
+                    nb::gil_scoped_release release;
+                    r = mesh::voxel_remesh(src, p);
+                }
+                if (r.status != mesh::VoxelRemeshStatus::Ok) raise_remesh(r.status);
+
+                PyMesh out;
+                out.m = std::move(r.mesh);
+                nb::dict report;
+                report["voxel_size"] = r.report.voxel_size;
+                report["source_vertices"] = r.report.source_vertices;
+                report["source_triangles"] = r.report.source_triangles;
+                report["result_vertices"] = r.report.result_vertices;
+                report["result_triangles"] = r.report.result_triangles;
+                report["source_volume"] = r.report.source_volume;
+                report["result_volume"] = r.report.result_volume;
+                report["relative_volume_error"] = r.report.relative_volume_error;
+                report["source_boundary_edges"] = r.report.source_boundary_edges;
+                report["result_boundary_edges"] = r.report.result_boundary_edges;
+                report["source_components"] = r.report.source_components;
+                report["result_components"] = r.report.result_components;
+                report["removed_components"] = r.report.removed_components;
+                report["active_samples"] = r.report.active_samples;
+                report["source_was_open"] = r.report.source_was_open;
+                report["result_watertight"] = r.report.result_watertight;
+                report["result_manifold"] = r.report.result_manifold;
+                report["result_oriented"] = r.report.result_oriented;
+                report["projected_to_source"] = r.report.projected_to_source;
+                report["projected_vertices"] = r.report.projected_vertices;
+                report["volume_corrected"] = r.report.volume_corrected;
+                report["colors_transferred"] = r.report.colors_transferred;
+                report["uvs_dropped"] = r.report.uvs_dropped;
+                return nb::make_tuple(std::move(out), std::move(report));
+            },
+            "resolution"_a = nb::none(), "voxel_size"_a = nb::none(),
+            "open_surface"_a = "close", "surface_mode"_a = "smooth",
+            "preserve_volume"_a = true, "project_to_source"_a = true,
+            "projection_strength"_a = 0.75f, "preserve_colors"_a = true,
+            "minimum_component_volume"_a = nb::none(), "memory_budget"_a = nb::none(),
+            "Rebuild the whole surface through a signed volumetric representation\n"
+            "at an explicit spatial resolution -- the operation an artist calls\n"
+            "DynaMesh. Returns (mesh, report).\n\n"
+            "Overlapping shells fuse, self-intersections resolve, stretched\n"
+            "triangles disappear, and the topology is REPLACED: no source vertex\n"
+            "or polygon index means anything about the result. Details finer than\n"
+            "the voxel size may be lost, and UVs are DROPPED rather than\n"
+            "reprojected -- the report says both.\n\n"
+            "Give exactly one of `resolution` (longest axis) or `voxel_size`.\n"
+            "surface_mode='sharp' selects dual contouring and is EXPERIMENTAL:\n"
+            "the watertight guarantee is not claimed for it.\n\n"
+            "A refusal raises, and the message names which contract refused it.")
+        .def(
+            "transfer_vertex_scalar",
+            [](const PyMesh& self, const PyMesh& source, nb::handle values,
+               float max_distance, float fallback) {
+                if (max_distance < 0.0f)
+                    throw std::invalid_argument(
+                        "max_distance must be >= 0; zero derives it from the source's size");
+                nb::object flat = nb::module_::import_("numpy")
+                                      .attr("asarray")(values, "dtype"_a = "float32")
+                                      .attr("reshape")(-1);
+                std::vector<float> in;
+                for (nb::handle v : flat) in.push_back(nb::cast<float>(v));
+                const mesh::Mesh& src = source.data();
+                if (in.size() != src.positions.size())
+                    throw std::invalid_argument("values must hold one entry per source vertex");
+                std::vector<float> out;
+                {
+                    const mesh::Mesh& dst = self.data();
+                    nb::gil_scoped_release release;
+                    out = mesh::transfer_vertex_scalar(src, in, dst, max_distance, fallback);
+                }
+                return nb::module_::import_("numpy").attr("asarray")(nb::cast(out),
+                                                                     "dtype"_a = "float32");
+            },
+            "source"_a, "values"_a, "max_distance"_a = 0.0f, "fallback"_a = 0.0f,
+            "Resample a per-vertex scalar -- a mask, a weight -- from `source` onto\n"
+            "this mesh by closest point. Returns one float per vertex of THIS mesh.\n\n"
+            "What carries a mask across a voxel remesh: the remesh replaces the\n"
+            "topology the mask was indexed by, so anything that survives has to be\n"
+            "resampled from geometry. A vertex further than `max_distance` from the\n"
+            "source takes `fallback`; zero derives the threshold.")
         .def_static(
             "from_triangles",
             [](nb::handle positions, nb::handle indices) {

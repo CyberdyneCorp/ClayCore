@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 62
+#define CLAY_ABI_MINOR 63
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -2468,6 +2468,181 @@ clay_result clay_mesh_transfer_attributes(const clay_mesh* source, clay_mesh* ta
 clay_result clay_mesh_from_triangles(const float* positions, size_t vertex_count,
                                      const uint32_t* indices, size_t index_count,
                                      clay_mesh** out_mesh);
+
+/* Resample a caller-owned per-vertex scalar — a mask, a weight — from one mesh
+ * onto another by closest point (add-voxel-remesher, ABI 0.63.0).
+ *
+ * WHY THIS EXISTS SEPARATELY FROM clay_mesh_transfer_attributes: a mask is not
+ * a mesh attribute here. It is a per-vertex gate a host owns and passes to the
+ * sculptors, and moving its storage into the mesh to suit one operation would
+ * be changing a representation to make a call convenient. But clay_mesh_voxel_
+ * remesh replaces the topology the mask was indexed by, so the mask has to be
+ * resampled from geometry like anything else that survives a rebuild.
+ *
+ * `values` is `value_count` floats and must be the SOURCE's vertex count;
+ * `out_values` is `out_count` floats and must be the TARGET's. Both lengths
+ * are required rather than inferred — the same rule clay_mesh_copy_indices
+ * follows — and a mismatch is CLAY_ERROR_INVALID_ARGUMENT with nothing
+ * written.
+ *
+ * `max_distance` of 0 derives the threshold from the source's size; a target
+ * vertex further away than it takes `fallback`. */
+clay_result clay_mesh_transfer_vertex_scalar(const clay_mesh* source, const float* values,
+                                             size_t value_count, const clay_mesh* target,
+                                             float max_distance, float fallback,
+                                             float* out_values, size_t out_count);
+
+/* -- global voxel remesh (add-voxel-remesher, ABI 0.63.0) ------------------- */
+
+/* Rebuild a whole surface through a signed volumetric representation at an
+ * explicit spatial resolution: the operation an artist calls DynaMesh.
+ *
+ * Overlapping shells fuse, self-intersections resolve, stretched triangles
+ * disappear and the topology is REPLACED — no source vertex or polygon index
+ * means anything about the result. Details finer than the voxel size may be
+ * lost, and UVs are dropped rather than reprojected. Both are reported.
+ *
+ * This is a pure mesh -> mesh operation. It has no document, no layer, no undo
+ * record and no revision token: a host holds the before and after meshes and
+ * commits them as one history entry itself. */
+
+typedef enum clay_voxel_remesh_resolution {
+    /* World units, the canonical form. */
+    CLAY_VOXEL_REMESH_VOXEL_SIZE = 0,
+    /* The source's longest bounding extent divided by an integer, resolved
+     * before any sampling padding is applied. */
+    CLAY_VOXEL_REMESH_LONGEST_AXIS = 1
+} clay_voxel_remesh_resolution;
+
+typedef enum clay_voxel_remesh_surface {
+    /* Marching tetrahedra: watertight and 2-manifold by construction. */
+    CLAY_VOXEL_REMESH_SMOOTH = 0,
+    /* Dual contouring. EXPERIMENTAL, matching its flagged status elsewhere in
+     * this ABI: the watertight guarantee is NOT claimed for it. */
+    CLAY_VOXEL_REMESH_SHARP = 1
+} clay_voxel_remesh_surface;
+
+typedef enum clay_voxel_remesh_open_policy {
+    CLAY_VOXEL_REMESH_OPEN_REJECT = 0,      /* typed failure, no mesh */
+    CLAY_VOXEL_REMESH_OPEN_CLOSE = 1,       /* close it, then validate */
+    CLAY_VOXEL_REMESH_OPEN_BEST_EFFORT = 2  /* proceed and report what it is */
+} clay_voxel_remesh_open_policy;
+
+typedef enum clay_voxel_remesh_component_policy {
+    CLAY_VOXEL_REMESH_KEEP_COMPONENTS = 0,
+    CLAY_VOXEL_REMESH_REMOVE_BELOW_VOLUME = 1
+} clay_voxel_remesh_component_policy;
+
+typedef struct clay_voxel_remesh_params {
+    uint32_t struct_size; /* = sizeof(clay_voxel_remesh_params); required */
+    int32_t resolution_mode;          /* clay_voxel_remesh_resolution */
+    float voxel_size;                 /* read in VOXEL_SIZE mode */
+    uint32_t longest_axis_resolution; /* read in LONGEST_AXIS mode */
+    int32_t surface_mode;             /* clay_voxel_remesh_surface */
+    int32_t open_surface_policy;      /* clay_voxel_remesh_open_policy */
+    int32_t small_component_policy;   /* clay_voxel_remesh_component_policy */
+    float minimum_component_volume;   /* cubic world units; REMOVE_BELOW only */
+    int32_t preserve_volume;          /* 0/1; a clamped correction, skipped
+                                       * where the comparison stopped meaning
+                                       * anything */
+    int32_t project_to_source;        /* 0/1 */
+    float projection_strength;        /* 0..1; a lerp, never a snap */
+    float max_projection_distance_voxels;
+    int32_t preserve_colors; /* 0/1; a source with none produces none */
+    uint32_t build_multires_levels; /* reserved; non-zero is UNSUPPORTED */
+    uint64_t memory_budget_bytes;   /* 0 = no caller budget */
+} clay_voxel_remesh_params;
+
+/* What a remesh would cost, before it is made. Cheap enough for a resolution
+ * slider: it walks the source's triangles and marks a brick lattice, and
+ * allocates nothing proportional to the sample count it predicts. */
+typedef struct clay_voxel_remesh_estimate {
+    uint32_t struct_size; /* = sizeof(clay_voxel_remesh_estimate); required */
+    float resolved_voxel_size;
+    uint32_t grid_dimensions[3];
+    /* An UPPER BOUND on the narrow band, not a prediction: the marking keeps
+     * every brick whose box comes within the band of a triangle's bounds, and
+     * some hold nothing near enough to store. The report's active_samples is
+     * what the run actually held and is never larger. */
+    uint64_t estimated_active_samples;
+    uint64_t estimated_memory_bytes;
+    uint64_t estimated_triangle_min;
+    uint64_t estimated_triangle_max;
+    uint32_t boundary_edge_count;
+    uint32_t component_count;
+    int32_t has_open_boundaries;
+    /* Sampled evidence that the source carries material thinner than a couple
+     * of voxels — material this resolution may delete. */
+    int32_t thin_feature_warning;
+    int32_t exceeds_memory_budget;
+} clay_voxel_remesh_estimate;
+
+typedef struct clay_voxel_remesh_report {
+    uint32_t struct_size; /* = sizeof(clay_voxel_remesh_report); required */
+    float voxel_size;
+    uint64_t source_vertices;
+    uint64_t source_triangles;
+    uint64_t result_vertices;
+    uint64_t result_triangles;
+    double source_volume;
+    double result_volume;
+    double relative_volume_error;
+    uint32_t source_boundary_edges;
+    uint32_t result_boundary_edges;
+    uint32_t source_components;
+    uint32_t result_components;
+    uint32_t removed_components;
+    uint64_t active_samples;
+    int32_t source_was_open;
+    int32_t result_watertight;
+    int32_t result_manifold;
+    int32_t result_oriented;
+    int32_t projected_to_source;
+    uint64_t projected_vertices;
+    int32_t volume_corrected;
+    int32_t colors_transferred;
+    /* Always set when the source carried UVs, and not a failure: a spatially
+     * reprojected UV across a seam is a stretched layout that looks like a
+     * preserved one, so this operation does not pretend to keep them. */
+    int32_t uvs_dropped;
+    int32_t cancelled;
+} clay_voxel_remesh_report;
+
+/* The library's documented defaults, so a caller does not transcribe them. */
+clay_result clay_mesh_voxel_remesh_defaults(clay_voxel_remesh_params* out_params);
+
+/* What the remesh would cost. `out_estimate` is filled bounded by the size the
+ * caller declared. Returns the same refusals clay_mesh_voxel_remesh would for
+ * an unusable resolution or a request over budget, and fills the estimate that
+ * justified the refusal where one could be computed. */
+clay_result clay_mesh_voxel_remesh_estimate(const clay_mesh* source,
+                                            const clay_voxel_remesh_params* params,
+                                            clay_voxel_remesh_estimate* out_estimate);
+
+/* Run it. `out_mesh` receives a NEW mesh the caller frees with
+ * clay_mesh_destroy; `source` is never modified.
+ *
+ * Refusals are distinguishable rather than collapsed:
+ *   CLAY_ERROR_INVALID_ARGUMENT  the source has no triangles, or the
+ *                                resolution or a parameter is not usable
+ *   CLAY_ERROR_BUDGET_EXCEEDED   over memory_budget_bytes or the library's
+ *                                own ceiling, refused before the field, the
+ *                                tree and the result were allocated
+ *   CLAY_ERROR_UNSUPPORTED       an open source under OPEN_REJECT, or a
+ *                                reserved parameter asked for
+ *   CLAY_ERROR_BACKEND           the field produced no surface, or the result
+ *                                failed the validation the mode promises
+ *   CLAY_ERROR_CANCELLED         `token` was cancelled
+ *
+ * `out_report` is optional and is filled for a refusal too where the numbers
+ * exist — an open-surface refusal carries the source's boundary-edge count,
+ * which is what a host puts in front of a user. `token` is optional; progress
+ * is read through clay_cancel_token_progress as it is for every other
+ * cancellable call here. */
+clay_result clay_mesh_voxel_remesh(const clay_mesh* source,
+                                   const clay_voxel_remesh_params* params,
+                                   clay_cancel_token* token, clay_mesh** out_mesh,
+                                   clay_voxel_remesh_report* out_report);
 
 /* -- mesh layers: a document CARRIES a mesh -------------------------------- */
 
