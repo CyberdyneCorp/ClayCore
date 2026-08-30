@@ -99,7 +99,10 @@
 - [x] 8.9 Components and volume policy
 - [x] 8.10 C ABI tests, including the short-descriptor fill
 - [x] 8.11 pyclay tests
-- [x] 8.12 `mesh_lattice_parallel` equals `mesh_lattice` byte for byte
+- [x] 8.12 `mesh_lattice_parallel` equals `mesh_lattice` byte for byte,
+      called DIRECTLY through the new declaration and over the under-eight-
+      planes serial fallback — `test_mesh.cpp` already held the claim through
+      `mesh_tape`, which was the only way in before this change
 
 ## 9. Example
 
