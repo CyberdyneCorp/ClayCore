@@ -645,6 +645,41 @@ MAX_RATIO = [
     # are the headline and `delta_frac` below gates them exactly. 0.50 catches a
     # delta that started copying the model, which reads 1.0.
     ("BM_CAbiSmoothPreviewDelta", "BM_CAbiSmoothPreviewFullSnapshot", 0.50),
+    # -- global voxel remesh (add-voxel-remesher) ---------------------------
+    #
+    # THE SPARSITY GATE. Same voxel size, one sphere twice the radius of the
+    # other: the surface grows 4x and the bounding box 8x. The sampling domain
+    # is marked from the source's triangles and their band, so the expensive
+    # per-sample work — a BVH distance query carrying a generalized winding
+    # number — has to follow the surface. Measured band samples are 815,751
+    # against 3,230,930, a ratio of 3.96, which is 4 to two decimal places
+    # because that is what the geometry says; the times follow at 4.4-4.6x on
+    # a 24-core Linux desktop.
+    #
+    # The ceiling is 6.0: comfortably above the 4x this is, comfortably below
+    # the 8x a revert to `FieldVolume::sample_parallel` over the whole region
+    # would land at. That revert is the failure this exists to catch, and it is
+    # a CATEGORICAL one rather than a few per cent — which is what makes a
+    # ratio gate the right shape here, since both sides move together on a
+    # loaded runner.
+    ("BM_VoxelRemeshLargeBall", "BM_VoxelRemeshSmallBall", 6.0),
+    # SOURCE TRIANGLES SHOULD BARELY MATTER. The same sphere at the same voxel
+    # size, tessellated sixteen times as finely: 960 triangles against 16,128.
+    # The field is sampled at the same points and the extraction marches the
+    # same lattice; only the BVH is four levels deeper, which is logarithmic.
+    # 1.27x measured (334 ms against 422 ms on a 24-core Linux desktop). The
+    # ceiling of 3.0 catches a per-triangle pass creeping into a per-sample
+    # operation — the shape of
+    # mistake that makes a remesh usable on a blockout and unusable on the
+    # scan it was imported from.
+    ("BM_VoxelRemeshDenseSource", "BM_VoxelRemeshCoarseSource", 3.0),
+    # THE PREFLIGHT MUST NOT SAMPLE. A host calls the estimate on every tick of
+    # a resolution slider, so it walks the triangles and marks the brick
+    # lattice and does nothing else — no field, no marched surface. 2.3 ms
+    # against the 256 remesh's seconds, or under 0.001. The ceiling is 0.05,
+    # twenty-five times above it, and an estimate that started sampling
+    # anything would land near 1.0.
+    ("BM_VoxelRemeshEstimate256", "BM_VoxelRemeshSphere256", 0.05),
 ]
 
 # counter gates: (bench, counter, max_value) — the named counter must be at

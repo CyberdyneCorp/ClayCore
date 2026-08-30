@@ -486,15 +486,9 @@ Mesh mesh_lattice(const std::function<float(int, int, int)>& sample, int cell_mi
     return std::move(b.out);
 }
 
-namespace {
-
 // The same lattice march, split across the pool — for a `sample` that is SAFE
-// TO CALL CONCURRENTLY.
-//
-// Internal, and the public mesh_lattice above stays serial, for the reason
-// FieldVolume::sample_parallel is a separate entry point: `sample` is a
-// caller-supplied function and it may hold state. mesh_tape's is a pure array
-// read of an already-evaluated grid, so it opts in; nothing else has to.
+// TO CALL CONCURRENTLY. The precondition and the byte-identity argument are
+// stated on the declaration in marching.h; what follows is how it holds.
 //
 // THE SEAM WELD IS THE REPLAY, which is what makes this the same answer rather
 // than a nearly-identical one. A slab records its triangles WITHOUT welding;
@@ -552,8 +546,6 @@ Mesh mesh_lattice_parallel(const std::function<float(int, int, int)>& sample,
     }
     return std::move(b.out);
 }
-
-}  // namespace
 
 Mesh mesh_tape(const scene::Tape& tape, const math::Aabb& region, float voxel_size,
                const MeshingOptions& options) {

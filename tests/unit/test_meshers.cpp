@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 
 #include "clay/mesh/dual_contouring.h"
@@ -233,4 +234,68 @@ TEST_CASE("the dual walk places a cell's vertex before any quad that references 
         REQUIRE(largest >= high_water);  // never references a vertex placed later
         high_water = largest;
     }
+}
+
+TEST_CASE("the public parallel lattice march equals the serial one byte for byte") {
+    // WHAT THIS ADDS to "the parallel lattice march welds seams exactly like
+    // the serial one" in test_mesh.cpp, which already holds the byte-identity
+    // claim: that one reaches the parallel march through `mesh_tape`, because
+    // until add-voxel-remesher there was no other way in. `mesh_lattice_parallel`
+    // is now a declared entry point, so it is called DIRECTLY here — a caller
+    // can hand it a sample function `mesh_tape` would never produce — and the
+    // under-eight-planes case takes the serial fallback INSIDE the parallel
+    // entry point, which nothing exercised before.
+    //
+    // Byte-identity by CONSTRUCTION rather than by tolerance: a slab records
+    // its crossings without welding and one builder replays them in slab
+    // order, so the builder sees exactly the call sequence the serial march
+    // makes. That is a claim about a mechanism, so this compares bytes rather
+    // than counts or volumes.
+    //
+    // The sample function is a pure read of its own arithmetic, which is that
+    // entry point's stated precondition.
+    auto sample = [](int i, int j, int k) {
+        const cfloat3 p = cf3(-0.7f + 0.02f * (float)i, -0.7f + 0.02f * (float)j,
+                              -0.7f + 0.02f * (float)k);
+        // Not a sphere: a lumpy shape, so the march meets ambiguous-looking
+        // sign patterns and long diagonal runs rather than one clean shell.
+        return clength(p) - 0.5f + 0.08f * csin(9.0f * p.x) * csin(9.0f * p.y) *
+                                       csin(9.0f * p.z);
+    };
+    // Well past kMinParallelPlanes (8) and past one wave (64), so the wave loop
+    // and the slab seams are both exercised rather than the serial fallback.
+    int cmin[3] = {0, 0, 0};
+    int cmax[3] = {70, 70, 70};
+    const cfloat3 origin = cf3(-0.7f, -0.7f, -0.7f);
+
+    const Mesh serial = mesh::mesh_lattice(sample, cmin, cmax, origin, 0.02f);
+    const Mesh parallel = mesh::mesh_lattice_parallel(sample, cmin, cmax, origin, 0.02f);
+
+    // Non-empty is REQUIRED before the comparison and not merely likely: two
+    // empty meshes compare equal and prove nothing, and `positions.data()` on
+    // an empty vector is null — which `memcmp` may not be handed even for a
+    // zero count, and UBSan says so.
+    REQUIRE(serial.positions.size() > 0);
+    REQUIRE(serial.positions.size() == parallel.positions.size());
+    CHECK(std::memcmp(serial.positions.data(), parallel.positions.data(),
+                      serial.positions.size() * sizeof(cfloat3)) == 0);
+    CHECK(serial.indices == parallel.indices);
+
+    // Fewer than eight planes takes the serial fallback INSIDE the parallel
+    // entry point, which must agree too — that path is where a divergence would
+    // hide, being the one nothing else exercises.
+    //
+    // The slab is placed on the sphere's equator (world z = -0.7 + 0.02k, so
+    // k = 35 is z = 0) rather than at the range's start, where it would meet no
+    // surface at all and compare two empty meshes to each other.
+    int thin_min[3] = {0, 0, 33};
+    int thin_max[3] = {70, 70, 37};
+    const Mesh thin_serial = mesh::mesh_lattice(sample, thin_min, thin_max, origin, 0.02f);
+    const Mesh thin_parallel =
+        mesh::mesh_lattice_parallel(sample, thin_min, thin_max, origin, 0.02f);
+    REQUIRE(thin_serial.positions.size() > 0);
+    REQUIRE(thin_serial.positions.size() == thin_parallel.positions.size());
+    CHECK(std::memcmp(thin_serial.positions.data(), thin_parallel.positions.data(),
+                      thin_serial.positions.size() * sizeof(cfloat3)) == 0);
+    CHECK(thin_serial.indices == thin_parallel.indices);
 }
