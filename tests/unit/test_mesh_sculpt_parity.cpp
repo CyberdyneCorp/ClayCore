@@ -418,6 +418,11 @@ const Golden kGoldens[] = {
 const Golden kGoldens[] = {
 #include "mesh_sculpt_goldens_macos_arm64.inc"
 };
+#elif defined(_MSC_VER) && defined(_M_X64)
+#define CLAY_PARITY_TABLE "x64 MSVC"
+const Golden kGoldens[] = {
+#include "mesh_sculpt_goldens_msvc_x64.inc"
+};
 #else
 #define CLAY_PARITY_TABLE "none: this toolchain has no hash table yet"
 #define CLAY_PARITY_NO_TABLE 1
