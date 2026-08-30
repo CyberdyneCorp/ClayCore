@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 64
+#define CLAY_ABI_MINOR 65
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -2491,6 +2491,61 @@ clay_result clay_mesh_transfer_vertex_scalar(const clay_mesh* source, const floa
                                              size_t value_count, const clay_mesh* target,
                                              float max_distance, float fallback,
                                              float* out_values, size_t out_count);
+
+/* -- welding (add-mesh-weld, ABI 0.65.0) ------------------------------------ */
+
+/* Merge coincident vertices and remove the triangles that collapses.
+ *
+ * WHAT THIS IS FOR. The default mesher emits ZERO-AREA TRIANGLES — 1458 of
+ * 70,140 on a plain sphere, two per cent, with two corners at bit-identical
+ * positions. Almost everything downstream tolerates them, which is why nobody
+ * had noticed; a half-edge surface cannot, so no mesh this library marched
+ * could be converted to an adaptive one until this existed.
+ *
+ * Not the same verb as the weld epsilon a sculptor takes. That one groups
+ * vertices into classes and leaves the mesh alone, so a seam's duplicates move
+ * together; this one MERGES them and rewrites the triangles.
+ *
+ * WATERTIGHTNESS SURVIVES: a triangle whose corners coincide bounds nothing, so
+ * removing it cannot open a hole. QUADS ARE DROPPED when anything changes,
+ * because the triangles are rewritten. EVERY INDEX IS IN RANGE afterwards. A
+ * mesh with nothing to merge comes back byte-identical. */
+typedef struct clay_weld_desc {
+    uint32_t struct_size; /* = sizeof(clay_weld_desc); required */
+    /* As a fraction of the bounding-box diagonal — relative, so it means the
+     * same thing in millimetres and in metres. 0 welds only bit-identical
+     * positions. Weld at AT LEAST the epsilon whatever consumes the mesh will
+     * use: welding below it only moves the problem. */
+    float epsilon;
+    /* Refuse to merge two vertices whose uvs or colours disagree. ON by
+     * default, and the default is the safety of this verb: a UV SEAM IS
+     * DUPLICATED POSITIONS WITH DIFFERENT UVS, and merging across one silently
+     * destroys the layout. */
+    int32_t preserve_attribute_splits;
+    float attribute_epsilon; /* how far uvs/colours may differ and still agree */
+} clay_weld_desc;
+
+typedef struct clay_weld_report {
+    uint32_t struct_size; /* = sizeof(clay_weld_report); required */
+    uint64_t vertices_before;
+    uint64_t vertices_after;
+    uint64_t triangles_before;
+    uint64_t triangles_after;
+    uint64_t vertices_merged;
+    uint64_t triangles_collapsed;
+    /* Removed for naming a vertex that does not exist. Counted apart from the
+     * collapsed: a non-zero count here means a bug upstream, not geometry this
+     * verb is for. */
+    uint64_t triangles_invalid;
+    uint64_t vertices_unreferenced;
+    float epsilon; /* the relative threshold resolved against this mesh's size */
+    int32_t quads_dropped;
+} clay_weld_report;
+
+clay_result clay_mesh_weld_defaults(clay_weld_desc* out_desc);
+
+clay_result clay_mesh_weld(clay_mesh* mesh, const clay_weld_desc* desc,
+                           clay_weld_report* out_report);
 
 /* -- global voxel remesh (add-voxel-remesher, ABI 0.63.0) ------------------- */
 

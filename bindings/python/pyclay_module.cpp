@@ -49,6 +49,7 @@
 #include "clay/mesh/sculpt.h"
 #include "clay/mesh/transfer.h"
 #include "clay/mesh/voxel_remesh.h"
+#include "clay/mesh/weld.h"
 #include "clay/mesh/surface_nets.h"
 #include "clay/mesh/to_field.h"
 #include "clay/mesh/validate.h"
@@ -3763,6 +3764,71 @@ NB_MODULE(pyclay, m) {
             "duplicates a position into two vertices with different uvs. A target\n"
             "vertex on a seam has one slot and two right answers. Colour is\n"
             "unaffected, being continuous across a seam.")
+        .def(
+            "weld",
+            [](PyMesh& self, float epsilon, bool preserve_attribute_splits,
+               float attribute_epsilon) {
+                if (!(epsilon >= 0.0f))
+                    throw std::invalid_argument(
+                        "epsilon must be >= 0; zero welds only bit-identical positions");
+                if (!(attribute_epsilon >= 0.0f))
+                    throw std::invalid_argument("attribute_epsilon must be >= 0");
+                mesh::WeldOptions o;
+                o.epsilon = epsilon;
+                o.preserve_attribute_splits = preserve_attribute_splits;
+                o.attribute_epsilon = attribute_epsilon;
+                mesh::Mesh& data = self.editable();
+                mesh::WeldReport r;
+                {
+                    nb::gil_scoped_release release;
+                    r = mesh::weld(&data, o);
+                }
+                // A weld REPLACES the triangles, so anything cached over this
+                // layer is as stale as it would be after a rebuild. Bumped only
+                // when something moved: a weld that changed nothing must not
+                // invalidate a live sculptor.
+                if (self.revisions &&
+                    r.vertices_merged + r.triangles_collapsed + r.triangles_invalid > 0)
+                    (*self.revisions)[self.layer] =
+                        revision_of(*self.revisions, self.layer) + 1;
+                nb::dict out;
+                out["vertices_before"] = r.vertices_before;
+                out["vertices_after"] = r.vertices_after;
+                out["triangles_before"] = r.triangles_before;
+                out["triangles_after"] = r.triangles_after;
+                out["vertices_merged"] = r.vertices_merged;
+                out["triangles_collapsed"] = r.triangles_collapsed;
+                out["triangles_invalid"] = r.triangles_invalid;
+                out["vertices_unreferenced"] = r.vertices_unreferenced;
+                out["epsilon"] = r.epsilon;
+                out["quads_dropped"] = r.quads_dropped;
+                return out;
+            },
+            "epsilon"_a = mesh::kDefaultWeldEpsilon, "preserve_attribute_splits"_a = true,
+            "attribute_epsilon"_a = 1e-6f,
+            "Merge coincident vertices and remove the triangles that collapses.\n"
+            "Returns what it did as a dict.\n\n"
+            "WHAT THIS IS FOR. The default mesher emits ZERO-AREA TRIANGLES —\n"
+            "1458 of 70,140 on a plain sphere, two per cent, with two corners at\n"
+            "bit-identical positions. Almost everything downstream tolerates\n"
+            "them, which is why nobody had noticed; a half-edge surface cannot,\n"
+            "so no mesh this library marched could become a DynamicSurface until\n"
+            "this existed.\n\n"
+            "Not the same verb as a sculptor's weld epsilon. That one groups\n"
+            "vertices into classes and leaves the mesh alone, so a seam's\n"
+            "duplicates move together; this MERGES them and rewrites the\n"
+            "triangles.\n\n"
+            "`epsilon` is a fraction of the bounding-box diagonal. Weld at AT\n"
+            "LEAST what the consumer will weld at — welding below it only moves\n"
+            "the problem.\n\n"
+            "`preserve_attribute_splits` refuses to merge vertices whose uvs or\n"
+            "colours disagree, and the default is the safety of this verb: a UV\n"
+            "SEAM IS DUPLICATED POSITIONS WITH DIFFERENT UVS, and merging across\n"
+            "one destroys the layout.\n\n"
+            "Watertightness survives — a triangle whose corners coincide bounds\n"
+            "nothing, so removing it cannot open a hole. Quads are dropped when\n"
+            "anything changes. A mesh with nothing to merge comes back\n"
+            "byte-identical.")
         .def(
             "voxel_remesh_estimate",
             [](const PyMesh& self, nb::handle resolution, nb::handle voxel_size,

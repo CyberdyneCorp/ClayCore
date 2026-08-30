@@ -53,6 +53,7 @@
 #include "clay/mesh/to_field.h"
 #include "clay/mesh/transfer.h"
 #include "clay/mesh/voxel_remesh.h"
+#include "clay/mesh/weld.h"
 #include "clay/mesh/validate.h"
 #include "clay/parallel/cancel.h"
 #include "clay/parallel/thread_pool.h"
@@ -12289,6 +12290,10 @@ constexpr std::size_t kVoxelRemeshParamsOriginal =
     offsetof(clay_voxel_remesh_params, memory_budget_bytes) + sizeof(std::uint64_t);
 constexpr std::size_t kVoxelRemeshEstimateOriginal =
     offsetof(clay_voxel_remesh_estimate, exceeds_memory_budget) + sizeof(std::int32_t);
+constexpr std::size_t kWeldDescOriginal =
+    offsetof(clay_weld_desc, attribute_epsilon) + sizeof(float);
+constexpr std::size_t kWeldReportOriginal =
+    offsetof(clay_weld_report, quads_dropped) + sizeof(std::int32_t);
 constexpr std::size_t kVoxelRemeshReportOriginal =
     offsetof(clay_voxel_remesh_report, cancelled) + sizeof(std::int32_t);
 
@@ -12611,6 +12616,81 @@ clay_result clay_mesh_transfer_attributes(const clay_mesh* source, clay_mesh* ta
         filled.uvs = report.uvs ? 1 : 0;
         filled.normals = report.normals ? 1 : 0;
         filled.max_distance = report.max_distance;
+        write_desc(out_report, declared, filled);
+    }
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_weld_defaults(clay_weld_desc* out_desc) {
+    if (!out_desc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_desc");
+    clay_weld_desc probe;
+    clay_result r = read_desc(out_desc, kWeldDescOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_desc->struct_size;
+    const mesh::WeldOptions d;
+    clay_weld_desc out{};
+    out.epsilon = d.epsilon;
+    out.preserve_attribute_splits = d.preserve_attribute_splits ? 1 : 0;
+    out.attribute_epsilon = d.attribute_epsilon;
+    write_desc(out_desc, declared, out);
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_weld(clay_mesh* mesh, const clay_weld_desc* desc,
+                           clay_weld_report* out_report) {
+    if (!mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh");
+    mesh::Mesh* data = mesh_data_mut(mesh);
+    if (!data) return fail(CLAY_ERROR_NOT_FOUND, "the mesh layer is no longer in its document");
+    // A mesh LAYER's geometry is being rewritten, so the same protection every
+    // other edit respects applies — and a ghosted or locked layer refuses this
+    // exactly as it refuses a stamp.
+    clay_result r = mesh_layer_editable(mesh);
+    if (r != CLAY_OK) return r;
+
+    mesh::WeldOptions options;
+    if (desc) {
+        clay_weld_desc d;
+        r = read_desc(desc, kWeldDescOriginal, &d);
+        if (r != CLAY_OK) return r;
+        if (!(d.epsilon >= 0.0f) || !std::isfinite(d.epsilon))
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "epsilon must be >= 0; zero welds only bit-identical positions");
+        if (!(d.attribute_epsilon >= 0.0f) || !std::isfinite(d.attribute_epsilon))
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "attribute_epsilon must be >= 0");
+        options.epsilon = d.epsilon;
+        options.preserve_attribute_splits = d.preserve_attribute_splits != 0;
+        options.attribute_epsilon = d.attribute_epsilon;
+    }
+
+    const mesh::WeldReport report = mesh::weld(data, options);
+    // A weld REPLACES the triangles, so anything cached over this layer is as
+    // stale as it would be after a rebuild — which is exactly what the geometry
+    // revision is for. Bumped only when something actually moved: a weld that
+    // changed nothing must not invalidate a live sculptor.
+    if (mesh->doc && report.vertices_merged + report.triangles_collapsed +
+                             report.triangles_invalid >
+                         0) {
+        mesh->doc->mesh_geometry_revision[mesh->layer] =
+            mesh_layer_revision_of(mesh->doc, mesh->layer) + 1;
+        mesh->doc->touch();
+    }
+
+    if (out_report) {
+        clay_weld_report probe;
+        r = read_desc(out_report, kWeldReportOriginal, &probe);
+        if (r != CLAY_OK) return r;
+        const std::uint32_t declared = out_report->struct_size;
+        clay_weld_report filled{};
+        filled.vertices_before = report.vertices_before;
+        filled.vertices_after = report.vertices_after;
+        filled.triangles_before = report.triangles_before;
+        filled.triangles_after = report.triangles_after;
+        filled.vertices_merged = report.vertices_merged;
+        filled.triangles_collapsed = report.triangles_collapsed;
+        filled.triangles_invalid = report.triangles_invalid;
+        filled.vertices_unreferenced = report.vertices_unreferenced;
+        filled.epsilon = report.epsilon;
+        filled.quads_dropped = report.quads_dropped ? 1 : 0;
         write_desc(out_report, declared, filled);
     }
     return CLAY_OK;
