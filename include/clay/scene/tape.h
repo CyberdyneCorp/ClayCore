@@ -183,6 +183,19 @@ struct TapeCheckpointFrame {
     float rounding = 0.0f;  // already scaled by the layer transform
 };
 
+// How many stack planes a walk holds when it reaches the checkpoint: the
+// chain's own accumulator, plus one for each enclosing group that actually
+// emits a combine. NOT `frames.size() + 1` -- a frame with `emits == false`
+// opens no outer slot, which is the ordinary case for a group that is the
+// first thing in its layer. Every producer and consumer of a stack SHALL size
+// it with this, or the two disagree and the seed is silently dropped.
+inline std::size_t checkpoint_stack_levels(const std::vector<TapeCheckpointFrame>& frames) {
+    std::size_t levels = 1;
+    for (const TapeCheckpointFrame& f : frames)
+        if (f.emits) ++levels;
+    return levels;
+}
+
 struct TapeCheckpoint {
     // Prefix lengths, not the tape's own sizes: any trailing layer union sits
     // after these and is re-emitted rather than reused.

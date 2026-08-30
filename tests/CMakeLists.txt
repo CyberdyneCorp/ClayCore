@@ -6,6 +6,7 @@ add_executable(clay_unit_tests
   unit/test_suffix_tape.cpp
   unit/test_layer_prefix_tape.cpp
   unit/test_tape_block.cpp
+  unit/test_checkpoint_stack_levels.cpp
   unit/test_tape_prefix_reuse.cpp
   unit/test_xform_repeat.cpp
   unit/test_lift_ease.cpp

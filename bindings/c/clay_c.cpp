@@ -1555,7 +1555,7 @@ struct clay_document {
         // frames are written together and read together, so a half-formed one
         // simply does not appear.
         if (e->stack_levels > 0 && e->stack.size() == per * e->stack_levels &&
-            e->frames.size() + 1 == e->stack_levels &&
+            scene::checkpoint_stack_levels(e->frames) == e->stack_levels &&
             (!want_colour || e->stack_colors.size() == per * e->stack_levels * 3)) {
             s.stack = e->stack.data();
             s.stack_levels = e->stack_levels;
@@ -1724,7 +1724,8 @@ struct clay_document {
             e.colors.clear();
         // The stack, the depth and the frames go together or not at all -- a
         // reader takes all three or none, so a partial write cannot be read.
-        if (stack && stack_levels > 0 && frames && frames->size() + 1 == stack_levels) {
+        if (stack && stack_levels > 0 && frames &&
+            scene::checkpoint_stack_levels(*frames) == stack_levels) {
             e.stack.assign(stack, stack + per * stack_levels);
             if (stack_colors)
                 e.stack_colors.assign(stack_colors, stack_colors + per * stack_levels * 3);
@@ -11520,20 +11521,36 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
             eval::PointResults prr;
             prr.distances = t.active;
             prr.colors_rgb = t.active_rgb;
-            eval::Backend* cpu_b = eval::Registry::instance().find("cpu");
-            if (!cpu_b || cpu_b->eval_points(whole, pqr, prr) != eval::Status::Ok) return;
-            // The stack is a BY-PRODUCT here; the answer above is the field and
-            // is what the brick is served. A stack that came back the wrong
-            // shape is simply not stored.
+            // ONE walk where a stack is wanted: the field is the top of the
+            // stack, so asking for both costs what asking for either did. A
+            // stack that came back the wrong shape is simply not stored, but
+            // the field it produced alongside is still the brick's answer.
             if (own.valid && !own.frames.empty()) {
-                const std::size_t want = own.frames.size() + 1;
-                t.snap.assign(per * want, 0.0f);
-                eval::eval_points_stack(whole, pqr, t.snap.data(), nullptr, &t.snap_levels,
-                                        own.instrs);
-                if (t.snap_levels == want)
+                // Sized for the deepest the tape can reach, not for what the
+                // checkpoint claims: the walk writes what it finds, and the
+                // two disagreeing is the bug this once had. The shape is
+                // CHECKED below, after the write, where it is safe to be wrong.
+                const std::size_t room = eval::tape_stack_depth(whole);
+                const std::size_t want = scene::checkpoint_stack_levels(own.frames);
+                t.snap.assign(per * std::max(room, want), 0.0f);
+                float* snap_rgb = nullptr;
+                if (t.active_rgb) {
+                    t.snap_rgb.assign(per * std::max(room, want) * 3, 0.0f);
+                    snap_rgb = t.snap_rgb.data();
+                }
+                eval::eval_points_stack(whole, pqr, t.snap.data(), snap_rgb, &t.snap_levels,
+                                        own.instrs, 0, &prr);
+                if (t.snap_levels == want) {
                     t.frames = own.frames;
-                else
+                    t.snap.resize(per * want);
+                    if (snap_rgb) t.snap_rgb.resize(per * want * 3);
+                } else {
                     t.snap_levels = 0;
+                    t.snap_rgb.clear();
+                }
+            } else {
+                eval::Backend* cpu_b = eval::Registry::instance().find("cpu");
+                if (!cpu_b || cpu_b->eval_points(whole, pqr, prr) != eval::Status::Ok) return;
             }
             if (t.below)
                 fold_layers_below(t.below, t.below_rgb, t.active, t.active_rgb, per,
@@ -11624,7 +11641,8 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
         for (const ResumeTask& t : tasks) {
             if (!t.ok || t.plan->now != now) continue;
             // The FIELD always, and the stack beside it when this task made one.
-            const bool have_stack = t.snap_levels > 0 && t.frames.size() + 1 == t.snap_levels;
+            const bool have_stack =
+                t.snap_levels > 0 && scene::checkpoint_stack_levels(t.frames) == t.snap_levels;
             doc->store_active(requests[t.slot], t.plan->now, resume_pad, t.active, t.active_rgb,
                               per, have_stack ? t.snap.data() : nullptr,
                               have_stack && !t.snap_rgb.empty() ? t.snap_rgb.data() : nullptr,

@@ -560,7 +560,7 @@ void eval_points_seeded_stack(const scene::Tape& suffix, const PointQuery& q, co
 
 void eval_points_stack(const scene::Tape& tape, const PointQuery& q, float* stack_out,
                        float* stack_out_rgb, std::size_t* out_levels, std::size_t snapshot_at,
-                       std::size_t block) {
+                       std::size_t block, const PointResults* out) {
     if (block == 0) block = kDefaultBlock;
     if (!stack_out) return;
     if (out_levels) *out_levels = 0;
@@ -568,13 +568,18 @@ void eval_points_stack(const scene::Tape& tape, const PointQuery& q, float* stac
     if (ni == 0) return;  // nothing on the stack: no levels, nothing written
     const std::size_t depth = tape_stack_depth(tape);
     const std::size_t span = std::min(block, q.count);
-    // `out` is unused by a stack read-out but walk_blocked writes its top
-    // through it, so it is given somewhere to land rather than a null it would
-    // have to test per point.
-    std::vector<float> ignored(q.count);
+    // The top of the stack is the field, so a caller that wants both gets both
+    // from this one walk. Only when it wants neither does the top need
+    // somewhere to land rather than a null walk_blocked would test per point.
+    std::vector<float> ignored;
     PointResults d;
-    d.distances = ignored.data();
-    if (stack_out_rgb)
+    if (out && out->distances) {
+        d = *out;
+    } else {
+        ignored.resize(q.count);
+        d.distances = ignored.data();
+    }
+    if (stack_out_rgb || d.colors_rgb)
         walk_blocked<true>(tape.instrs.data(), ni, tape.params.data(), tape.blob.data(), q, d, span,
                            depth, nullptr, nullptr, 1, stack_out, stack_out_rgb, out_levels,
                            snapshot_at);
