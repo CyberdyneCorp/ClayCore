@@ -1028,12 +1028,22 @@ struct Compiler {
         // first dab and the slow one on every dab after it.
         checkpoint = TapeCheckpoint{tape.instrs.size(), tape.params.size(), tape.blob.size(),
                                     cp.layer, chain_val, cp.doc_have_acc, true, cp.frames};
-        if (!chain_val) return;
+        // A chain that produced nothing still has whatever the seed put on it,
+        // and the combines the checkpoint sits in front of STILL have to be
+        // emitted: without them the walk answers with the innermost chain
+        // rather than the field. Harmless where there are no frames -- a root
+        // list has nothing pending, which is why returning here was right
+        // until a checkpoint could sit inside a group -- and wrong with them,
+        // by however much the group's combine moves the value.
+        //
+        // Reachable whenever a brick's cull drops every appended node, which
+        // is most bricks of most dabs.
+        if (!chain_val && cp.frames.empty()) return;
         // UNWIND THE STACK the checkpoint sat in front of: each enclosing
         // group's combine, innermost first, then the layer union. This is
         // compile_group's tail restated, and it has to stay that — the two
         // produce the same bytes or the fast path is a different field.
-        bool have_acc = chain_val;
+        bool have_acc = chain_val || cp.layer_have_acc;
         for (const TapeCheckpointFrame& f : cp.frames) {
             if (f.emits) {
                 emit_combine(f.op, f.blend, f.rounding);
