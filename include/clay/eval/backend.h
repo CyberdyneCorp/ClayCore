@@ -492,10 +492,14 @@ void eval_points_seeded_stack(const scene::Tape& suffix, const PointQuery& q, co
 // caller sizes both for `tape_stack_depth(tape)` planes, which is the most
 // that can be written. `*out_levels` is 0 for an empty tape, which has no
 // stack and writes nothing.
+//
+// `out`, when given, receives the field the same walk produces. The walk
+// computes it either way -- the top of the stack IS the answer -- so a caller
+// that needs both SHALL ask for both here rather than walking twice.
 void eval_points_stack(const scene::Tape& tape, const PointQuery& q, float* stack_out,
                        float* stack_out_rgb, std::size_t* out_levels,
                        std::size_t snapshot_at = static_cast<std::size_t>(-1),
-                       std::size_t block = 0);
+                       std::size_t block = 0, const PointResults* out = nullptr);
 
 // The stack depth a tape actually reaches, which is a property of its
 // instruction sequence rather than of any point. The blocked path allocates

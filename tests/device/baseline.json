@@ -173,11 +173,11 @@
       "rawMs": 2.5545
     },
     "sdf_stroke_in_group_bricks": {
-      "budgetMs": 109.5379,
+      "budgetMs": 32.954,
       "class": "interactive",
-      "machineFactor": 1.008,
-      "measuredMs": 73.0253,
-      "rawMs": 73.6065
+      "machineFactor": 0.993,
+      "measuredMs": 21.9693,
+      "rawMs": 21.8161
     },
     "sdf_stroke_metal": {
       "budgetMs": 2.7109,
@@ -4823,14 +4823,14 @@
       "backend": "cpu",
       "budgetClass": "interactive",
       "bundle": "com.cyberdyne.claycore.devicemeasure",
-      "canaryAfterMs": 134.247833,
-      "canaryBeforeMs": 129.813,
-      "growthExponent": 0.6711303514534399,
+      "canaryAfterMs": 130.197583,
+      "canaryBeforeMs": 130.079417,
+      "growthExponent": 0.5849555769566073,
       "measurements": [
         {
           "batch": 24,
-          "p50Ms": 3.232084,
-          "p95Ms": 3.347,
+          "p50Ms": 1.457791,
+          "p95Ms": 1.47525,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -4838,26 +4838,26 @@
         },
         {
           "batch": 24,
-          "p50Ms": 8.625125,
-          "p95Ms": 8.886209,
+          "p50Ms": 4.057709,
+          "p95Ms": 4.087042,
           "p95SpreadMs": 0,
           "repeats": 1,
-          "samples": 167,
+          "samples": 200,
           "stamps": 100
         },
         {
           "batch": 24,
-          "p50Ms": 72.4895,
-          "p95Ms": 73.606542,
+          "p50Ms": 21.75225,
+          "p95Ms": 21.816083,
           "p95SpreadMs": 0,
           "repeats": 1,
-          "samples": 20,
+          "samples": 57,
           "stamps": 1000
         }
       ],
       "name": "sdf_stroke_in_group_bricks",
       "servedBy": "cpu",
-      "startedAtMs": 266.953958,
+      "startedAtMs": 261.880625,
       "thermalStateEnd": "nominal",
       "thermalStateStart": "nominal",
       "verb": "sdf_stroke_in_group"

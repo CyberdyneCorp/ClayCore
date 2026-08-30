@@ -105,7 +105,7 @@ representation, `s` the SDF one, `m` a mesh layer's own triangles.
 | Move / Rotate / Scale (whole layer) | Gizmo (object) | `clay_document_set_layer_transform` | s | `sdf_layer_transform_bricks` | **27.81** ‡ | interactive |
 | — | (a stamp after a drag) | `sdf_stamp` in the state a drag left | s | `sdf_stamp_after_drag_bricks` | 1.08 | interactive |
 | — | (a stamp after a drag, grouped) | as above, in a grouped document | s | `sdf_stamp_after_group_drag_bricks` | 1.15 | interactive |
-| ClayBuildup etc., dabs INSIDE A GROUP | Clay / Clay Strips | `Op::Relief` along a stroke, in a group | s | `sdf_stroke_in_group_bricks` | **3.043** ‡ | interactive |
+| ClayBuildup etc., dabs INSIDE A GROUP | Clay / Clay Strips | `Op::Relief` along a stroke, in a group | s | `sdf_stroke_in_group_bricks` | 0.909 ¶ | interactive |
 | ClayBuildup etc., SMOOTH-blended | Clay / Clay Strips | `Op::Relief` along a stroke, quadratic blend | s | `sdf_stroke_smooth_bricks` | 0.161 | interactive |
 | Blob | — | *not implemented* | | | | |
 | Slice / Knife | Split | *not implemented* | | | | |
@@ -218,6 +218,44 @@ because every dab recompiles the whole tape and pays for every item before it.
 At 1000 items, 3.07 ms a dab is 74% of the frame share with no headroom and
 still growing.
 
+**FIXED by `append-into-a-group`.** Re-measured on the reference iPad against
+`main` on the same day, both runs at nominal thermals (2026-08-30):
+
+| per dab, p95 | 10 items | 100 items | 1000 items |
+|---|---:|---:|---:|
+| `sdf_stroke_in_group_bricks`, before | 0.1360 ms | 0.3800 ms | 3.2276 ms |
+| `sdf_stroke_in_group_bricks`, after | **0.0615 ms** | **0.1703 ms** | **0.9090 ms** |
+| speed-up | 2.21x | 2.23x | **3.55x** |
+| `sdf_stroke_bricks` (root control) | 0.0342 / 0.0339 | 0.0344 / 0.0339 | 0.0378 / 0.0343 |
+
+The control moves by 1%, which is this bundle's reproducibility. The growth
+exponent falls from 0.69 to 0.58, and 0.909 ms a dab at 1000 items is 22% of
+the frame share against the 74% above.
+
+A group resume continues the group's OWN chain, which its combine has already
+folded away by the time the field exists — so the seed a brick needs is the
+open chains the checkpoint stopped inside, a STACK rather than a value. The
+refill takes it on the walk that produces the field, because that walk passes
+the checkpoint anyway; where the checkpoint sits at the tape's end with nothing
+open above it, the field IS the plane and no walk is needed. See
+`openspec/changes/append-into-a-group`.
+
+**One case is not yet at parity, and it is named.** A first stroke into a group
+that was EMPTY at the last full refill still pays one full walk per brick on
+first touch, because that brick's seed predates the group — which is what the
+device case above measures, and why its numbers are the pessimistic end. A
+stroke into a group that already HAS content costs 0.172 ms a dab at 1000
+items off-device against a root-list append's 0.040.
+
+**Beware the thermal state when reading any of this.** The first re-measurement
+of this pair ran the whole Measure bundle, took the iPad from nominal to
+`serious` mid-run, and reported `sdf_stroke_bricks` 1.88x slower at 100 items
+and `sdf_stroke_cpu` 1.37x slower at 1000 — both pure throttling, both gone
+when the same three cases were re-run alone against a same-day `main`
+(`sdf_stroke_cpu`: 2.437 ms against 2.435). `check_device_bench.py` REFUSES
+such a run outright, and it is right to; a number read out of the log before
+that refusal is not a measurement.
+
 **Verified independently**, because an earlier version of this pair was
 confounded. A C-ABI harness sharing no code with the device case, over
 10/30/100/300/1000/3000 items with the base document held identical: dabs at
@@ -236,7 +274,8 @@ reason the pair above holds the base document fixed.
 
 Grouping a character's head and sculpting on it is what groups are FOR. A
 modelling decision with no performance meaning switches off the engine's most
-valuable optimisation, silently. `append-into-a-group` is the fix.
+valuable optimisation, silently. `append-into-a-group` is the fix, and the
+measured result is the second table above.
 
 A note for whoever reads the drag rows next and finds them equal: that is the
 pair working. A change that made them differ would mean the bound had started
@@ -282,6 +321,18 @@ to return to, over the gate's tolerance and under its floor, so nothing failed
 ([#358](https://github.com/CyberdyneCorp/ClayCore/issues/358)). The fix landed
 and it measures 0.083, so the row quotes the baseline again and the exemption in
 `tools/check_doc_latency.py` is gone.
+
+¶ **Re-measured on device, 2026-08-30**, after `append-into-a-group`, and NOT
+part of the 59-case run below: three cases alone on the reference iPad
+(iPad15,5, iPadOS 26.5.2) at nominal thermals, against `main` at `0b8f876` on
+the same day and the same device. p95 at 1000 stamps, per dab over the 24-dab
+stroke that is the timed unit — 3.2276 ms before, 0.9090 ms after, with the
+`sdf_stroke_bricks` root control flat at 0.0343 either side. The full-suite
+figures for the other rows are unaffected and were not re-taken.
+
+A full clean gate run has NOT been recorded for this change:
+`tests/device/last-gate.json` is untouched, and only this case's entry and
+budget in `tests/device/baseline.json` were re-recorded.
 
 ‡ **Re-measured on device, 2026-08-25**, at the end of the bake-and-brush
 performance program. A full 59-case run on the reference iPad (iPad15,5,

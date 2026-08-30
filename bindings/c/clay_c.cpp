@@ -1233,6 +1233,31 @@ struct clay_document {
         // whole field, which is why the single-layer case needs nothing else.
         std::vector<float> values;
         std::vector<float> colors;  // empty when that refill carried none
+        // -- the group half: a resume that picks up INSIDE a group ----------
+        //
+        // `values` above is THE FIELD and keeps that meaning, because readers
+        // depend on it: a brick still at the current revision is answered
+        // straight out of it, with no walk at all. A stack is NOT the field --
+        // the field is what the frames' combines produce from it -- so putting
+        // one in `values` hands that reader the bottom of a stack as the
+        // answer. Measured, before this was separated: 0.28 against a cold
+        // document, where the root-list control is exact.
+        //
+        // So the stack lives beside the field rather than in place of it.
+        // Empty is "this brick can only resume at a root list", which is every
+        // brick until a group append gives it one.
+        std::vector<float> stack;
+        std::vector<float> stack_colors;
+        std::uint32_t stack_levels = 0;
+        // The checkpoint's own, and per brick for the same reason `frames` is:
+        // false where the chain the checkpoint sits in had produced nothing,
+        // which a tail group that was EMPTY when the seed was taken leaves
+        // behind. Part of the stack's shape, so the level check has to see it.
+        bool layer_have_acc = true;
+        // The frames the stack was taken with. Per BRICK, because a frame's
+        // `emits` depends on whether anything before the group survived THIS
+        // brick's cull -- the same reason `had_acc` is per entry.
+        std::vector<scene::TapeCheckpointFrame> frames;
         // The visible SDF layers BEFORE the active one, hard-unioned. Empty
         // when there are none. Static across a stroke -- only the active layer
         // moves -- so it is stored once and carried forward untouched.
@@ -1299,8 +1324,9 @@ struct clay_document {
     static std::size_t entry_bytes(const ResumeEntry& e) {
         return (e.values.capacity() + e.colors.capacity() + e.below.capacity() +
                 e.below_colors.capacity() + e.prefix_values.capacity() +
-                e.prefix_colors.capacity()) *
-               sizeof(float);
+                e.prefix_colors.capacity() + e.stack.capacity() + e.stack_colors.capacity()) *
+                   sizeof(float) +
+               e.frames.capacity() * sizeof(scene::TapeCheckpointFrame);
     }
 
     // Move an entry to the most-recently-used end. O(1), and it neither
@@ -1504,6 +1530,13 @@ struct clay_document {
         const float* colors = nullptr;
         const float* below = nullptr;  // null when no layer sits beneath
         const float* below_colors = nullptr;
+        // Null unless this brick has a group stack; `values` is the field
+        // either way.
+        const float* stack = nullptr;
+        const float* stack_colors = nullptr;
+        std::uint32_t stack_levels = 0;
+        bool layer_have_acc = true;
+        const std::vector<scene::TapeCheckpointFrame>* frames = nullptr;
     };
 
     Seed seed_for(const clay_brick_request& request, std::size_t per, float pad, bool want_colour,
@@ -1524,6 +1557,18 @@ struct clay_document {
         touch_lru(const_cast<ResumeEntry&>(*e));
         s.values = e->values.data();
         if (want_colour) s.colors = e->colors.data();
+        // Handed over only when it is COMPLETE: the planes, the depth and the
+        // frames are written together and read together, so a half-formed one
+        // simply does not appear.
+        if (e->stack_levels > 0 && e->stack.size() == per * e->stack_levels &&
+            scene::checkpoint_stack_levels(e->frames, e->layer_have_acc) == e->stack_levels &&
+            (!want_colour || e->stack_colors.size() == per * e->stack_levels * 3)) {
+            s.stack = e->stack.data();
+            s.stack_levels = e->stack_levels;
+            s.layer_have_acc = e->layer_have_acc;
+            s.frames = &e->frames;
+            if (want_colour) s.stack_colors = e->stack_colors.data();
+        }
         if (want_below) {
             s.below = e->below.data();
             if (want_colour) s.below_colors = e->below_colors.data();
@@ -1578,9 +1623,22 @@ struct clay_document {
         return fs;
     }
 
+    // What a full refill can hand back about where its walk passed the
+    // checkpoint. `levels` 0 means it could not, which is the ordinary case
+    // for a document with no tail group and for a backend whose grid batch
+    // does not produce one.
+    struct SeedStack {
+        const float* values = nullptr;  // per * levels, plane 0 the bottom
+        const float* colors = nullptr;  // per * levels * 3, or null
+        std::uint32_t levels = 0;
+        bool layer_have_acc = true;
+        const std::vector<scene::TapeCheckpointFrame>* frames = nullptr;
+    };
+
     void store_seed(const clay_brick_request& request, std::uint64_t at, float pad,
                     const float* values, const float* colors, const float* below,
-                    const float* below_colors, std::size_t per) const {
+                    const float* below_colors, std::size_t per,
+                    const SeedStack* stack = nullptr) const {
         const ResumeKey key = resume_key(request);
         auto [it, fresh] = resume_.try_emplace(key);
         ResumeEntry& e = it->second;
@@ -1598,6 +1656,28 @@ struct clay_document {
             e.colors.assign(colors, colors + per * 3);
         else
             e.colors.clear();
+        // A full walk produces no stack UNLESS the caller took one on the way
+        // past, and a stack that does not describe this walk is worse than
+        // none. Leaving a stale one behind pairs it with a fresh field and pad
+        // and the next resume reads it as though it described this document --
+        // measured as a BAND of document sizes where the cull pad steps
+        // mid-stroke, sending bricks down this path and back: clean at 20, 50
+        // and 80 stamps, wrong at 100 and 120, clean again from 200. So this
+        // clears first and stores only what arrived with THIS field.
+        e.stack.clear();
+        e.stack_colors.clear();
+        e.stack_levels = 0;
+        e.frames.clear();
+        if (stack && stack->levels > 0 && stack->values && stack->frames &&
+            scene::checkpoint_stack_levels(*stack->frames, stack->layer_have_acc) ==
+                stack->levels) {
+            e.stack.assign(stack->values, stack->values + per * stack->levels);
+            if (stack->colors)
+                e.stack_colors.assign(stack->colors, stack->colors + per * stack->levels * 3);
+            e.frames = *stack->frames;
+            e.layer_have_acc = stack->layer_have_acc;
+            e.stack_levels = stack->levels;
+        }
         if (below)
             e.below.assign(below, below + per);
         else
@@ -1626,7 +1706,8 @@ struct clay_document {
     // produced the document as it is now.
     void store_seeds(const clay_brick_request* requests, std::size_t count, const float* values,
                      const float* colors, const float* below, const float* below_colors,
-                     std::size_t per, std::uint64_t at, float pad) const {
+                     std::size_t per, std::uint64_t at, float pad,
+                     const SeedStack* stacks = nullptr) const {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         const std::uint64_t now = revision.load(std::memory_order_relaxed);
         if (at == 0) {
@@ -1638,13 +1719,18 @@ struct clay_document {
         for (std::size_t i = 0; i < count; ++i)
             store_seed(requests[i], at, pad, values + i * per,
                        colors ? colors + i * per * 3 : nullptr, below ? below + i * per : nullptr,
-                       below_colors ? below_colors + i * per * 3 : nullptr, per);
+                       below_colors ? below_colors + i * per * 3 : nullptr, per,
+                       stacks ? &stacks[i] : nullptr);
     }
 
     // The resumed path's store: the ACTIVE layer's value moved, the half
     // beneath it did not. Caller holds cache_mutex_.
     void store_active(const clay_brick_request& request, std::uint64_t at, float pad,
-                      const float* values, const float* colors, std::size_t per) const {
+                      const float* values, const float* colors, std::size_t per,
+                      const float* stack = nullptr, const float* stack_colors = nullptr,
+                      std::uint32_t stack_levels = 0,
+                      const std::vector<scene::TapeCheckpointFrame>* frames = nullptr,
+                      bool layer_have_acc = true) const {
         auto it = resume_.find(resume_key(request));
         if (it == resume_.end()) return;
         ResumeEntry& e = it->second;
@@ -1671,6 +1757,23 @@ struct clay_document {
             e.colors.assign(colors, colors + per * 3);
         else
             e.colors.clear();
+        // The stack, the depth and the frames go together or not at all -- a
+        // reader takes all three or none, so a partial write cannot be read.
+        if (stack && stack_levels > 0 && frames &&
+            scene::checkpoint_stack_levels(*frames, layer_have_acc) == stack_levels) {
+            e.stack.assign(stack, stack + per * stack_levels);
+            if (stack_colors)
+                e.stack_colors.assign(stack_colors, stack_colors + per * stack_levels * 3);
+            else
+                e.stack_colors.clear();
+            e.stack_levels = stack_levels;
+            e.frames = *frames;
+        } else {
+            e.stack.clear();
+            e.stack_colors.clear();
+            e.stack_levels = 0;
+            e.frames.clear();
+        }
         resume_bytes_ += entry_bytes(e);
     }
 
@@ -3562,10 +3665,20 @@ math::Aabb request_brick_box(const clay_brick_request& req) {
 // split a resumable multi-layer refill holds as two values.
 enum class ChunkHalf { Whole, Below, Active };
 
-template <typename Run>
+// `post`, when given, is called once per chunk AFTER `run` has filled it, with
+// the chunk's per-brick tapes and the checkpoint each passed through. That is
+// where a refill takes the stack a group resume needs: the tapes are compiled
+// here and nowhere else, and compiling them a second time to ask where their
+// checkpoint sits would cost more than the walk it saves.
+struct NoPost {
+    void operator()(std::size_t, std::size_t, const std::vector<scene::Tape>&,
+                    const std::vector<scene::TapeCheckpoint>&) const {}
+};
+
+template <typename Run, typename Post = NoPost>
 clay_result eval_requests_in_chunks(const clay_document* doc, const clay_brick_request* requests,
                                     std::size_t count, Run&& run, ChunkHalf half = ChunkHalf::Whole,
-                                    scene::LayerId active = 0) {
+                                    scene::LayerId active = 0, Post&& post = Post{}) {
     std::vector<kernel::cfloat3> origins(count);
     for (std::size_t i = 0; i < count; ++i) {
         eval::GridQuery q;
@@ -3585,8 +3698,10 @@ clay_result eval_requests_in_chunks(const clay_document* doc, const clay_brick_r
         batch_region.expand(request_brick_box(requests[i]).dilated(requests[i].band));
     const scene::CullPlan plan = index->plan(batch_region);
     constexpr std::size_t kChunk = 4096;
+    constexpr bool kWantCheckpoints = !std::is_same_v<std::decay_t<Post>, NoPost>;
     std::vector<scene::Tape> tapes;
     std::vector<const scene::Tape*> tape_ptrs;
+    std::vector<scene::TapeCheckpoint> cps;
     for (std::size_t base = 0; base < count;) {
         std::size_t n = 1;
         while (n < kChunk && base + n < count &&
@@ -3594,15 +3709,25 @@ clay_result eval_requests_in_chunks(const clay_document* doc, const clay_brick_r
             ++n;
         tapes.clear();
         tape_ptrs.clear();
+        cps.clear();
         tapes.reserve(n);
         tape_ptrs.reserve(n);
+        if (kWantCheckpoints) cps.resize(n);
         for (std::size_t i = base; i < base + n; ++i) {
             scene::CullRegion cull{request_brick_box(requests[i]).dilated(requests[i].band)};
-            tapes.push_back(
-                half == ChunkHalf::Whole
-                    ? scene::compile_document(doc->doc.document, &cull, index.get(), &plan)
-                    : scene::compile_document_part(doc->doc.document, active,
-                                                   half == ChunkHalf::Below, &cull, index.get()));
+            scene::TapeCheckpoint* cp = kWantCheckpoints ? &cps[i - base] : nullptr;
+            if (half == ChunkHalf::Whole)
+                tapes.push_back(cp ? scene::compile_document_resumable(doc->doc.document, cp, &cull,
+                                                                       index.get(), &plan)
+                                   : scene::compile_document(doc->doc.document, &cull, index.get(),
+                                                             &plan));
+            else if (cp && half == ChunkHalf::Active)
+                tapes.push_back(scene::compile_document_part_resumable(
+                    doc->doc.document, active, /*below=*/false, &cull, index.get(), cp));
+            else
+                tapes.push_back(scene::compile_document_part(doc->doc.document, active,
+                                                             half == ChunkHalf::Below, &cull,
+                                                             index.get()));
             tape_ptrs.push_back(&tapes.back());
         }
         eval::GridBatchQuery bq;
@@ -3615,6 +3740,7 @@ clay_result eval_requests_in_chunks(const clay_document* doc, const clay_brick_r
         bq.count = n;
         clay_result r = run(bq, base);
         if (r != CLAY_OK) return r;
+        post(base, n, tapes, cps);
         base += n;
     }
     return CLAY_OK;
@@ -11238,6 +11364,21 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
         float* active_rgb = nullptr;
         const float* below = nullptr;
         const float* below_rgb = nullptr;
+        // The group half, copied off the seed under the lock. Empty means this
+        // brick resumes at a root list, which is the path that always existed.
+        std::vector<float> stack;
+        std::vector<float> stack_rgb;
+        std::uint32_t stack_levels = 0;
+        // The checkpoint's own: false where the chain it sits in had produced
+        // nothing, which an empty tail group leaves behind. Part of the shape,
+        // so the level check has to see it.
+        bool layer_have_acc = true;
+        std::vector<scene::TapeCheckpointFrame> frames;
+        // What this task produces for the NEXT dab, when it produces one.
+        std::vector<float> snap;
+        std::vector<float> snap_rgb;
+        std::size_t snap_levels = 0;
+        bool snap_layer_have_acc = true;
         bool ok = false;
     };
     std::vector<ResumeTask> tasks;
@@ -11247,6 +11388,34 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
     // a tenth of its bricks should not allocate for all of them.
     std::vector<float> stage_active, stage_active_rgb, stage_below, stage_below_rgb;
     std::unordered_map<std::uint64_t, clay_document::ResumePlan> plans;
+    // The enclosing groups of the nodes a plan appends, innermost first --
+    // the same order compile_group pushes frames in, because it records them
+    // as the recursion unwinds. Memoised per plan: it is a property of the
+    // append, not of the brick.
+    std::unordered_map<const clay_document::ResumePlan*, std::vector<scene::NodeId>> chains;
+    auto chain_for = [&](const clay_document::ResumePlan* plan) -> const std::vector<scene::NodeId>& {
+        auto it = chains.find(plan);
+        if (it != chains.end()) return it->second;
+        std::vector<scene::NodeId> chain;
+        const scene::SdfContent* content = nullptr;
+        for (const scene::Layer& l : doc->doc.document.layers)
+            if (l.id == plan->active && l.sdf) content = l.sdf.get();
+        if (content && !plan->appended.empty()) {
+            scene::NodeId cur = plan->appended.front();
+            // Bounded by the node count for the reason node_reach_bound is:
+            // `roots` is a public member and this walk must terminate whatever
+            // a caller wrote there.
+            for (std::size_t step = 0; step <= content->nodes().size(); ++step) {
+                scene::NodeId parent = scene::kNoNode;
+                int index = -1;
+                if (!content->locate(cur, &parent, &index)) break;
+                if (parent == scene::kNoNode) break;
+                chain.push_back(parent);
+                cur = parent;
+            }
+        }
+        return chains.emplace(plan, std::move(chain)).first->second;
+    };
     // One plan per distinct prefix BOUNDARY (#360), memoized like `plans` and
     // held by address for the same reason: node-based, and nothing inserts
     // after the lock drops. A drag's bricks overwhelmingly share one boundary,
@@ -11380,6 +11549,35 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
             std::memcpy(task.active, task.seed.values, per * sizeof(float));
             if (task.active_rgb)
                 std::memcpy(task.active_rgb, task.seed.colors, per * 3 * sizeof(float));
+            // The seed's frames are THIS BRICK's -- `emits` turns on the
+            // brick's own cull, which is why they travel with the seed rather
+            // than with the batch-wide plan, and why the plan states no frames
+            // at all. So the check that the seed belongs to THIS append cannot
+            // come from the plan: it comes from the append target itself, whose
+            // enclosing groups are what a resumable checkpoint's frames name.
+            //
+            // Without it a seed taken while the tail was a group is read for an
+            // append to the ROOT list, the suffix compile refuses, and every
+            // dab of a root-list stroke over a grouped document takes a full
+            // walk -- measured at 0.045 -> 0.61 ms/dab at 1000 items.
+            const std::vector<scene::NodeId>& want_chain = chain_for(task.plan);
+            const bool groups_match = [&] {
+                if (!task.seed.frames) return false;
+                const auto& f = *task.seed.frames;
+                if (f.size() != want_chain.size()) return false;
+                for (std::size_t k = 0; k < f.size(); ++k)
+                    if (f[k].group != want_chain[k]) return false;
+                return true;
+            }();
+            if (task.seed.stack_levels > 0 && task.seed.frames && groups_match) {
+                const std::size_t n = per * task.seed.stack_levels;
+                task.stack.assign(task.seed.stack, task.seed.stack + n);
+                if (task.active_rgb && task.seed.stack_colors)
+                    task.stack_rgb.assign(task.seed.stack_colors, task.seed.stack_colors + n * 3);
+                task.stack_levels = task.seed.stack_levels;
+                task.layer_have_acc = task.seed.layer_have_acc;
+                task.frames = *task.seed.frames;
+            }
             task.seed = clay_document::Seed{};  // nothing may read it past here
         }
     }
@@ -11395,10 +11593,90 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
     auto run_task = [&](ResumeTask& t, std::vector<float>& points) {
         const math::Aabb box = request_brick_box(requests[t.slot]).dilated(requests[t.slot].band);
         scene::CullRegion cull{box};
+        // The checkpoint is PER BRICK where it has frames, because a frame's
+        // `emits` depends on this brick's own cull. The plan supplies what is
+        // batch-wide -- the layer and the appended ids -- and the seed the rest.
+        scene::TapeCheckpoint cp = t.plan->checkpoint;
+        cp.frames = t.frames;
+        // Per brick for the same reason `frames` is: whether the chain the
+        // checkpoint sits in produced anything is a statement about THIS
+        // brick's cull, and the seed is what was there when it was taken.
+        if (t.stack_levels > 0) cp.layer_have_acc = t.layer_have_acc;
         scene::Tape suffix;
-        if (!scene::compile_layer_suffix(t.plan->checkpoint, doc->doc.document, t.plan->appended,
-                                         &suffix, nullptr, &cull, index.get()))
+        scene::TapeCheckpoint next;
+        const bool resumable =
+            scene::compile_layer_suffix(cp, doc->doc.document, t.plan->appended, &suffix, &next,
+                                        &cull, index.get());
+        if (!resumable) {
+            // REBUILD: one full walk of the active half -- what this brick
+            // would have cost anyway -- taking the stack where its own
+            // checkpoint sits so the dabs after it resume. Once per stroke
+            // rather than once per dab, and it is how a brick whose seed has
+            // no stack ever gets one.
+            scene::TapeCheckpoint own;
+            const scene::Tape whole = scene::compile_document_part_resumable(
+                doc->doc.document, t.plan->active, /*below=*/false, &cull, index.get(), &own);
+            const eval::GridQuery& gq = t.grid;
+            points.resize(per * 3);
+            std::size_t m = 0;
+            for (int k = 0; k < gq.nz; ++k)
+                for (int j = 0; j < gq.ny; ++j)
+                    for (int x = 0; x < gq.nx; ++x) {
+                        const kernel::cfloat3 pt =
+                            gq.origin + kernel::cf3(static_cast<float>(x) * gq.spacing,
+                                                    static_cast<float>(j) * gq.spacing,
+                                                    static_cast<float>(k) * gq.spacing);
+                        points[m * 3] = pt.x;
+                        points[m * 3 + 1] = pt.y;
+                        points[m * 3 + 2] = pt.z;
+                        ++m;
+                    }
+            eval::PointQuery pqr;
+            pqr.points_xyz = points.data();
+            pqr.count = per;
+            eval::PointResults prr;
+            prr.distances = t.active;
+            prr.colors_rgb = t.active_rgb;
+            // ONE walk where a stack is wanted: the field is the top of the
+            // stack, so asking for both costs what asking for either did. A
+            // stack that came back the wrong shape is simply not stored, but
+            // the field it produced alongside is still the brick's answer.
+            if (own.valid && !own.frames.empty()) {
+                // Sized for the deepest the tape can reach, not for what the
+                // checkpoint claims: the walk writes what it finds, and the
+                // two disagreeing is the bug this once had. The shape is
+                // CHECKED below, after the write, where it is safe to be wrong.
+                const std::size_t room = eval::tape_stack_depth(whole);
+                const std::size_t want =
+                    scene::checkpoint_stack_levels(own.frames, own.layer_have_acc);
+                t.snap.assign(per * std::max(room, want), 0.0f);
+                float* snap_rgb = nullptr;
+                if (t.active_rgb) {
+                    t.snap_rgb.assign(per * std::max(room, want) * 3, 0.0f);
+                    snap_rgb = t.snap_rgb.data();
+                }
+                eval::eval_points_stack(whole, pqr, t.snap.data(), snap_rgb, &t.snap_levels,
+                                        own.instrs, 0, &prr);
+                if (t.snap_levels == want) {
+                    t.frames = own.frames;
+                    t.snap_layer_have_acc = own.layer_have_acc;
+                    t.snap.resize(per * want);
+                    if (snap_rgb) t.snap_rgb.resize(per * want * 3);
+                } else {
+                    t.snap_levels = 0;
+                    t.snap_rgb.clear();
+                }
+            } else {
+                eval::Backend* cpu_b = eval::Registry::instance().find("cpu");
+                if (!cpu_b || cpu_b->eval_points(whole, pqr, prr) != eval::Status::Ok) return;
+            }
+            if (t.below)
+                fold_layers_below(t.below, t.below_rgb, t.active, t.active_rgb, per,
+                                  out_values + t.slot * per,
+                                  want_colour ? out_colors_rgb + t.slot * per * 3 : nullptr);
+            t.ok = true;
             return;
+        }
         const eval::GridQuery& g = t.grid;
         points.resize(per * 3);
         std::size_t at = 0;
@@ -11422,7 +11700,39 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
         pr.colors_rgb = t.active_rgb;  // null unless the batch asked for colour
         // In place: the seed was copied here under the lock, and the answer
         // lands on top of it.
-        eval::eval_points_seeded(suffix, pq, t.active, t.active_rgb, pr);
+        if (t.stack_levels == 0) {
+            // In place, as always: with nothing open above it the answer IS
+            // the accumulator the next dab folds onto.
+            eval::eval_points_seeded(suffix, pq, t.active, t.active_rgb, pr);
+        } else {
+            // Inside a group the answer is NOT the next seed -- the group's
+            // combine has folded the chain into what sits above it -- so the
+            // walk snapshots where the checkpoint sits on its way past, and
+            // one walk produces the field and the next stack together.
+            // The NEXT checkpoint's shape, which is not always this one's: a
+            // dab into a group that was EMPTY gives the group's chain its
+            // first value, so the stack goes from one plane to two. Sizing by
+            // the incoming count would drop the stack on exactly the dab that
+            // made the group worth resuming into.
+            const std::size_t want_next =
+                scene::checkpoint_stack_levels(next.frames, next.layer_have_acc);
+            const std::size_t room_next =
+                std::max(want_next, t.stack_levels + eval::tape_stack_depth(suffix));
+            t.snap.assign(per * room_next, 0.0f);
+            if (!t.stack_rgb.empty()) t.snap_rgb.assign(per * room_next * 3, 0.0f);
+            eval::eval_points_seeded_stack(
+                suffix, pq, t.stack.data(), t.stack_rgb.empty() ? nullptr : t.stack_rgb.data(),
+                t.stack_levels, pr, t.snap.data(),
+                t.snap_rgb.empty() ? nullptr : t.snap_rgb.data(), &t.snap_levels, next.instrs);
+            if (t.snap_levels != want_next) {
+                t.snap_levels = 0;
+            } else {
+                t.snap.resize(per * want_next);
+                if (!t.snap_rgb.empty()) t.snap_rgb.resize(per * want_next * 3);
+                t.frames = next.frames;
+                t.snap_layer_have_acc = next.layer_have_acc;
+            }
+        }
         if (t.below)
             fold_layers_below(t.below, t.below_rgb, t.active, t.active_rgb, per,
                               out_values + t.slot * per,
@@ -11462,10 +11772,19 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
         doc->run_resume_store_interleave();
         std::lock_guard<std::mutex> lock(doc->cache_lock());
         const std::uint64_t now = doc->current_revision();
-        for (const ResumeTask& t : tasks)
-            if (t.ok && t.plan->now == now)
-                doc->store_active(requests[t.slot], t.plan->now, resume_pad, t.active, t.active_rgb,
-                                  per);
+        for (const ResumeTask& t : tasks) {
+            if (!t.ok || t.plan->now != now) continue;
+            // The FIELD always, and the stack beside it when this task made one.
+            const bool have_stack =
+                t.snap_levels > 0 && scene::checkpoint_stack_levels(t.frames,
+                                                                    t.snap_layer_have_acc) ==
+                                         t.snap_levels;
+            doc->store_active(requests[t.slot], t.plan->now, resume_pad, t.active, t.active_rgb,
+                              per, have_stack ? t.snap.data() : nullptr,
+                              have_stack && !t.snap_rgb.empty() ? t.snap_rgb.data() : nullptr,
+                              have_stack ? static_cast<std::uint32_t>(t.snap_levels) : 0,
+                              have_stack ? &t.frames : nullptr, t.snap_layer_have_acc);
+        }
     }
     return resumed_count;
 }
@@ -11542,6 +11861,120 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
     std::vector<float> bel(has_below ? todo_count * per : 0);
     std::vector<float> bel_rgb(has_below && want_colour ? todo_count * per * 3 : 0);
 
+    // THE SEED A GROUP RESUME NEEDS, taken here or never.
+    //
+    // A brick's first seed comes from this path, and what it stores is what
+    // the next dab continues from. For an append to the ROOT list that is the
+    // field itself -- the chain's accumulator IS the answer -- which is why a
+    // root-list stroke has never paid for a first touch. A dab inside a group
+    // continues the group's OWN chain, which the group's combine has already
+    // folded away by the time the field exists, so the field alone cannot
+    // serve and the brick had to walk the whole active half again on its first
+    // dab. Measured: 1040 such walks over a 24-dab stroke, 0.85 ms each, which
+    // was the entire remaining gap to the root list.
+    //
+    // The walk that produces the field is the same walk that passes the
+    // checkpoint, so taking the stack on the way costs nothing. It is the
+    // rebuild's own fix, moved to where the brick is first filled.
+    //
+    // NOT free on every backend: a grid batch that ran on the GPU produces no
+    // stack, and evaluating a second time on the CPU to get one would cost
+    // more than the first touch it saves. So the fused walk is taken only when
+    // the batch was going to run on the CPU anyway; elsewhere this stores what
+    // is free (below) and the first touch pays as before.
+    const bool fused = b == eval::Registry::instance().find("cpu");
+    std::vector<clay_document::SeedStack> stacks(todo_count);
+    std::vector<std::vector<float>> stack_of(todo_count);
+    std::vector<std::vector<float>> stack_rgb_of(todo_count);
+    std::vector<std::vector<scene::TapeCheckpointFrame>> frames_of(todo_count);
+
+    auto take_stacks = [&](std::size_t base, std::size_t n, const std::vector<scene::Tape>& tapes,
+                           const std::vector<scene::TapeCheckpoint>& cps) {
+        if (cps.size() < n) return;
+        parallel::ThreadPool::instance().parallel_for(
+            n, 1, [&](std::size_t lo, std::size_t hi) {
+                std::vector<float> points;
+                for (std::size_t i = lo; i < hi; ++i) {
+                    const std::size_t j = base + i;
+                    const scene::TapeCheckpoint& cp = cps[i];
+                    float* fd = act.data() + j * per;
+                    float* fc = act_rgb.empty() ? nullptr : act_rgb.data() + j * per * 3;
+                    // No frames is a root-list checkpoint: the field is the
+                    // seed and always was. Nothing to take.
+                    if (!cp.valid || cp.frames.empty()) continue;
+                    const std::size_t levels =
+                        scene::checkpoint_stack_levels(cp.frames, cp.layer_have_acc);
+                    if (levels == 0) continue;
+                    // FREE: the checkpoint sits at the very end of the tape and
+                    // nothing is open above it, so the field IS the one plane.
+                    // Half the bricks of a group stroke are this shape and cost
+                    // nothing at all to seed.
+                    if (levels == 1 && cp.instrs == tapes[i].instrs.size()) {
+                        stack_of[j].assign(fd, fd + per);
+                        if (fc) stack_rgb_of[j].assign(fc, fc + per * 3);
+                        frames_of[j] = cp.frames;
+                        stacks[j].values = stack_of[j].data();
+                        stacks[j].colors = fc ? stack_rgb_of[j].data() : nullptr;
+                        stacks[j].levels = static_cast<std::uint32_t>(levels);
+                        stacks[j].layer_have_acc = cp.layer_have_acc;
+                        stacks[j].frames = &frames_of[j];
+                        continue;
+                    }
+                    if (!fused) continue;
+                    // Otherwise the planes have to come off the walk, so the
+                    // walk produces the field here instead of the grid batch.
+                    eval::GridQuery g;
+                    std::size_t samples = 0;
+                    if (read_grid(todo[j].origin, todo[j].spacing, todo[j].dims, &g, &samples) !=
+                        CLAY_OK)
+                        continue;
+                    points.resize(per * 3);
+                    std::size_t m = 0;
+                    for (int z = 0; z < g.nz; ++z)
+                        for (int y = 0; y < g.ny; ++y)
+                            for (int x = 0; x < g.nx; ++x) {
+                                const kernel::cfloat3 pt =
+                                    g.origin + kernel::cf3(static_cast<float>(x) * g.spacing,
+                                                           static_cast<float>(y) * g.spacing,
+                                                           static_cast<float>(z) * g.spacing);
+                                points[m * 3] = pt.x;
+                                points[m * 3 + 1] = pt.y;
+                                points[m * 3 + 2] = pt.z;
+                                ++m;
+                            }
+                    eval::PointQuery pq;
+                    pq.points_xyz = points.data();
+                    pq.count = per;
+                    eval::PointResults pr;
+                    pr.distances = fd;
+                    pr.colors_rgb = fc;
+                    // Room for what the tape can reach, checked after: a count
+                    // handed to a buffer length is the bug this once had.
+                    const std::size_t room =
+                        std::max(eval::tape_stack_depth(tapes[i]), levels);
+                    stack_of[j].assign(per * room, 0.0f);
+                    if (fc) stack_rgb_of[j].assign(per * room * 3, 0.0f);
+                    std::size_t got = 0;
+                    eval::eval_points_stack(tapes[i], pq, stack_of[j].data(),
+                                            fc ? stack_rgb_of[j].data() : nullptr, &got, cp.instrs,
+                                            0, &pr);
+                    if (got != levels) {
+                        stack_of[j].clear();
+                        stack_rgb_of[j].clear();
+                        continue;
+                    }
+                    stack_of[j].resize(per * levels);
+                    if (fc) stack_rgb_of[j].resize(per * levels * 3);
+                    frames_of[j] = cp.frames;
+                    stacks[j].values = stack_of[j].data();
+                    stacks[j].colors = fc ? stack_rgb_of[j].data() : nullptr;
+                    stacks[j].levels = static_cast<std::uint32_t>(levels);
+                    stacks[j].layer_have_acc = cp.layer_have_acc;
+                    stacks[j].frames = &frames_of[j];
+                }
+            });
+    };
+
     // The ACTIVE half -- or the whole document when nothing is beneath it, in
     // which case the two are the same tape and only one batch is run.
     clay_result br = eval_requests_in_chunks(
@@ -11553,7 +11986,7 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
                 return fail(CLAY_ERROR_BACKEND, "eval_grid_batch failed");
             return CLAY_OK;
         },
-        has_below ? ChunkHalf::Active : ChunkHalf::Whole, active_layer);
+        has_below ? ChunkHalf::Active : ChunkHalf::Whole, active_layer, take_stacks);
     if (br != CLAY_OK) return br;
     if (has_below) {
         br = eval_requests_in_chunks(
@@ -11589,7 +12022,7 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
     // move while the active layer is being sculpted.
     doc->store_seeds(todo, todo_count, act.data(), act_rgb.empty() ? nullptr : act_rgb.data(),
                      has_below ? bel.data() : nullptr, bel_rgb.empty() ? nullptr : bel_rgb.data(),
-                     per, 0, 0.0f);
+                     per, 0, 0.0f, stacks.data());
     return CLAY_OK;
 }
 
