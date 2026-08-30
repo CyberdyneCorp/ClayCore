@@ -69,7 +69,18 @@ The tasks below are kept as the record of what it would take.
       the answer and the next dab's seed. Verified as a 24-dab chain into a
       group, each dab seeding the next and every dab checked against a full
       compile: worst error 0.0, zero mismatches
-- [ ] 2.1b THE WIRING, attempted and reverted. See design.md "Correction 5":
+- [x] 2.1b-i The cull-aware resumable compiles, which Correction 5 said were
+      missing: `compile_document_resumable` and `compile_document_part_resumable`
+      now take a cull, index and plan and report the checkpoint. Verified
+      byte-identical to the culled compile, and a culled group resume through
+      them is exact -- worst 0.0 over 216 points at 40 and 300 items
+- [ ] 2.1b-ii THE SEED MUST CARRY ITS FRAMES. See design.md "Correction 6": a
+      frame's `emits` depends on whether anything before the group survived
+      THAT BRICK's cull, so one plan cannot state it for a batch. ResumeEntry
+      gains the frames it was taken with and the suffix uses those rather than
+      the plan's; the plan keeps only `appended`, which is batch-wide. This is
+      the last piece, and it is a design change rather than a fix
+- [ ] 2.1b-iii THE WIRING, attempted twice and reverted twice. See design.md "Correction 5":
       a brick's first seed comes from a FULL refill, which stores the finished
       field as one plane, and a group resume needs the open chains. The full
       refill must store the stack at the checkpoint, which needs a CULL-AWARE

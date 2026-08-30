@@ -205,6 +205,19 @@ struct TapeCheckpoint {
 // where the compile passed through.
 Tape compile_document_resumable(const Document& doc, TapeCheckpoint* out_checkpoint);
 
+// The same, CULLED -- byte-identical to compile_document(doc, cull, index,
+// plan), plus the checkpoint that compile passed through.
+//
+// A brick refill needs both halves at once. What it stores as a seed is the
+// stack where the checkpoint sits, not the value the walk ends with: inside a
+// group the group's combine is still pending, and the finished field has it
+// folded in already. The uncalled variant above cannot serve that, because a
+// seed taken without the brick's cull is continued from a different field
+// than the one the brick evaluates.
+Tape compile_document_resumable(const Document& doc, TapeCheckpoint* out_checkpoint,
+                                const CullRegion* cull, const CullIndex* index,
+                                const CullPlan* plan);
+
 // Compile `doc` by reusing `prefix`, which must have come from
 // compile_document_resumable together with `checkpoint`, where `doc` differs
 // from the document that produced them ONLY by `appended` at the tail of
@@ -296,6 +309,14 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& checkpoin
 // between layers. Anything else is a different field.
 Tape compile_document_part(const Document& doc, LayerId active, bool below,
                            const CullRegion* cull = nullptr, const CullIndex* index = nullptr);
+
+// The same, plus the checkpoint it passed through -- what a brick refill needs
+// to store the stack rather than the answer. For the ACTIVE half that
+// checkpoint is the one a suffix resumes from, which is why a part has to be
+// able to report it at all.
+Tape compile_document_part_resumable(const Document& doc, LayerId active, bool below,
+                                     const CullRegion* cull, const CullIndex* index,
+                                     TapeCheckpoint* out_checkpoint);
 
 bool compile_layer_suffix(const TapeCheckpoint& checkpoint, const Document& doc,
                           const std::vector<NodeId>& appended, Tape* out,

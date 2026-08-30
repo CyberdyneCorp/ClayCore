@@ -144,6 +144,34 @@ gate has to sit where a brick still falls back to the full walk cleanly.
 keeping apart: the mechanism is exact and tested, and the wiring needs the
 resumable-under-cull compile before it can be correct at all.
 
+## Correction 6: a frame's `emits` is PER BRICK, so it cannot be planned
+
+The cull-aware resumable compile fixed Correction 5's problem and the wiring
+was still wrong -- worst 0.28 against a cold document at 100 items, with the
+root-list control at 0.0. Three distinct wiring bugs, each caught only by that
+control.
+
+The reason is structural, not a slip. `plan_resume` states ONE checkpoint for
+a whole batch of bricks, and the frames it states carry `emits` -- whether a
+group emits a combine when its chain ends. compile_group decides that on
+`have_acc || seeded`, i.e. on whether anything BEFORE the group in its own
+chain left a value.
+
+Under a per-brick cull, that is a per-brick fact. A brick the preceding
+siblings all miss has no accumulator when the group is entered and the compile
+emits nothing; a brick they reach does. One plan cannot state it for both.
+
+The existing design already meets this for the single accumulator: plan_resume
+sets `layer_have_acc = true` and says so explicitly -- "checked per brick in
+seed_for" -- with `had_acc` stored on each entry. The frames need the same
+treatment, one emit bit per frame per brick.
+
+**So the seed has to carry the frames it was taken with**, and the resume has
+to use the seed's frames rather than the plan's. The plan then supplies only
+`appended`, which is genuinely batch-wide. That is a small addition to
+ResumeEntry and a redirection in the suffix compile, and it is the last piece
+this needs -- but it is a design change, not a fix to the code that is written.
+
 ## What this change therefore does, in two phases
 
 **Phase 1 — the whole-document append.** `TapeCheckpoint` gains the ancestor

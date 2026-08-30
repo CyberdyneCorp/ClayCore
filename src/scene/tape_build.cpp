@@ -951,7 +951,23 @@ struct Compiler {
                 if (below && layer.id == stop) break;  // everything after it too
                 continue;
             }
-            if (!compile_list(layer.sdf->roots, *layer.sdf, layer, false)) continue;
+            on_tail_path_ = true;
+            tail_checkpoint_taken_ = false;
+            const bool layer_val = compile_list(layer.sdf->roots, *layer.sdf, layer, false);
+            on_tail_path_ = false;
+            // The same record run() makes, so a PART is resumable on the same
+            // terms as a whole: a refill stores the stack where this checkpoint
+            // sits, and the active half is the half a suffix continues.
+            if (tail_checkpoint_taken_) {
+                checkpoint.layer = layer.id;
+                checkpoint.doc_have_acc = have_acc;
+                checkpoint.valid = true;
+            } else {
+                checkpoint = TapeCheckpoint{tape.instrs.size(), tape.params.size(),
+                                            tape.blob.size(), layer.id, layer_val,
+                                            have_acc,          true, {}};
+            }
+            if (!layer_val) continue;
             if (have_acc) emit_combine(Op::Add, Blend{}, 0.0f);  // layers union hard
             have_acc = true;
         }
@@ -1072,8 +1088,21 @@ Tape compile_document(const Document& doc, const CullRegion* cull, const CullInd
 }
 
 Tape compile_document_resumable(const Document& doc, TapeCheckpoint* out_checkpoint) {
+    return compile_document_resumable(doc, out_checkpoint, nullptr, nullptr, nullptr);
+}
+
+Tape compile_document_resumable(const Document& doc, TapeCheckpoint* out_checkpoint,
+                                const CullRegion* cull, const CullIndex* index,
+                                const CullPlan* plan) {
     Compiler c;
-    c.run(doc, nullptr);
+    // The same index and plan discipline compile_document applies, for its
+    // reasons: an index built for another document caches bounds under other
+    // layers' addresses, and a plan without a cull could only mean a pruned
+    // whole-document tape.
+    if (index && index->document() != &doc) index = nullptr;
+    c.index = index;
+    c.plan = cull && index ? plan : nullptr;
+    c.run(doc, cull);
     c.tape.compile_id = next_compile_id();
     if (out_checkpoint) *out_checkpoint = c.checkpoint;
     return std::move(c.tape);
@@ -1218,11 +1247,18 @@ bool compile_layer_prefix(const Document& doc, std::size_t count, Tape* out,
 
 Tape compile_document_part(const Document& doc, LayerId active, bool below, const CullRegion* cull,
                            const CullIndex* index) {
+    return compile_document_part_resumable(doc, active, below, cull, index, nullptr);
+}
+
+Tape compile_document_part_resumable(const Document& doc, LayerId active, bool below,
+                                     const CullRegion* cull, const CullIndex* index,
+                                     TapeCheckpoint* out_checkpoint) {
     Compiler c;
     if (index && index->document() != &doc) index = nullptr;
     c.index = index;
     c.run_part(doc, cull, active, below);
     c.tape.compile_id = next_compile_id();
+    if (out_checkpoint) *out_checkpoint = c.checkpoint;
     return std::move(c.tape);
 }
 
