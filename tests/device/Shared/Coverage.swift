@@ -119,6 +119,14 @@ enum Coverage {
         // the same reason sdf_stroke is named apart from sdf_stamp -- one is
         // not evidence for the other.
         .measured("sdf_stroke_incremental", by: "sdf_stroke_bricks"),
+        // The same stroke with its dabs INSIDE A GROUP, which is a different
+        // path and not a variant of the row above. `tail_append` requires the
+        // added node's parent to be the root list, so a dab placed into a
+        // group misses the append fast path entirely: the edit is structural,
+        // every prefix seed is retired, and the tape recompiles whole. An
+        // artist who groups a head and keeps sculpting on it is on this path,
+        // which is the ordinary way to work and was never measured.
+        .measured("sdf_stroke_in_group", by: "sdf_stroke_in_group_bricks"),
         // The same stroke on a SMOOTH-blended document. Every other SDF row
         // here is hard-blended, and a hard blend contributes nothing to the
         // chain pad — so the pad resolves to a constant zero and the suite
@@ -126,6 +134,43 @@ enum Coverage {
         // default; the hard-blended fixture is not the document a sculptor
         // makes.
         .measured("sdf_stroke_smooth", by: "sdf_stroke_smooth_bricks"),
+
+        // -- placing what is already there ------------------------------------
+        // The gizmo. Sixty-two cases and not one of them transformed anything,
+        // so Move/Rotate/Scale had no number and no way to regress visibly.
+        //
+        // THREE entries for ONE pair of entry points, and the split is the
+        // point rather than an accident of how the cases were written. What an
+        // edit invalidates is derived from the edited node's ANCESTRY rather
+        // than from the node, so a grouped document and a flat one are two
+        // different costs through one call, and a single case would report
+        // whichever shape the fixture happened to build.
+        //
+        // The drag rows themselves come out nearly equal, and that is a
+        // finding rather than a defect: a drag walks, so each frame refills
+        // roughly what the frame before it dirtied, and those bricks lose
+        // their seeds either way. Where the ancestry is paid is in the two
+        // `sdf_stamp_after_*_drag` rows below.
+        .measured("layer_set_transform", by: "sdf_node_transform_bricks"),
+        .measured("sdf_group_transform", by: "sdf_group_transform_bricks"),
+        .measured("document_set_layer_transform", by: "sdf_layer_transform_bricks"),
+        // What a drag costs the NEXT edit, which is where a wide invalidation
+        // is actually paid and which the three rows above cannot see: a drag
+        // frame refills what the frame before it dirtied, so grouped and flat
+        // agree on the drag itself and diverge on everything that follows.
+        // Two rows for the same reason the node rows are two — the ancestry is
+        // the variable, and one row would report whichever the fixture built.
+        .measured("sdf_stamp_after_drag", by: "sdf_stamp_after_drag_bricks"),
+        .measured("sdf_stamp_after_group_drag", by: "sdf_stamp_after_group_drag_bricks"),
+        // The per-axis form takes the same path as the uniform one on
+        // everything this gate measures: it differs in what the tape records
+        // about exactness, not in what an edit invalidates or what a refill
+        // costs. Measuring it would duplicate sdf_node_transform_bricks.
+        .exempt("layer_set_transform_nonuniform", because:
+            "the same invalidation and the same refill as layer_set_transform, "
+            + "which is measured; a per-axis scale changes what the tape records "
+            + "about exactness (cfi_scale_nonuniform) rather than what a drag "
+            + "frame costs"),
 
         // -- masks ------------------------------------------------------------
         .measured("mask_paint", by: "mask_paint"),

@@ -107,8 +107,15 @@ enum SceneBuilder {
     }
 
     /// One dab of a stroke, at `strokeDabPosition(k)`.
+    ///
+    /// `group` places the dab inside a group rather than at the layer root,
+    /// which is not a cosmetic difference: the compiler's append fast path
+    /// (`tail_append`) requires a root-list parent, so a dab added into a
+    /// group takes a structural invalidation and a full recompile instead.
+    /// `sdf_stroke_in_group_bricks` is what measures that, against
+    /// `sdf_stroke_bricks` which is the same stroke at the root.
     static func addStrokeDabNode(_ doc: OpaquePointer, _ layer: clay_layer_id,
-                                 dab k: Int) -> clay_node_id? {
+                                 dab k: Int, group: clay_node_id? = nil) -> clay_node_id? {
         var params: [Float] = [0.12]
         guard let item = clay_item_create(Int32(CLAY_PRIM_SPHERE.rawValue), &params, 1) else {
             return nil
@@ -118,7 +125,12 @@ enum SceneBuilder {
         var position: [Float] = [x, y, z]
         if clay_item_set_position(item, &position) != CLAY_OK { return nil }
         var node: clay_node_id = 0
-        guard clay_layer_add_item(doc, layer, item, &node) == CLAY_OK else { return nil }
+        if let group {
+            guard clay_layer_add_item_in_group(doc, layer, group, -1, item, &node) == CLAY_OK
+            else { return nil }
+        } else {
+            guard clay_layer_add_item(doc, layer, item, &node) == CLAY_OK else { return nil }
+        }
         return node
     }
 
@@ -136,8 +148,13 @@ enum SceneBuilder {
     /// One stamp: a small blended sphere, which is what a stroke deposits.
     /// Returns the node it became, which the brick-cache case needs to dirty
     /// exactly the region the new item influences.
+    ///
+    /// `group` places the stamp inside a group instead of at the layer root.
+    /// It defaults to nil, so every existing caller is unchanged — the grouped
+    /// document the drag cases need differs from the flat one in that argument
+    /// and in nothing else, which is what makes the two cases comparable.
     static func addStampNode(_ doc: OpaquePointer, _ layer: clay_layer_id,
-                             index: Int) -> clay_node_id? {
+                             index: Int, group: clay_node_id? = nil) -> clay_node_id? {
         var params: [Float] = [0.12]
         guard let item = clay_item_create(Int32(CLAY_PRIM_SPHERE.rawValue), &params, 1) else {
             return nil
@@ -147,8 +164,100 @@ enum SceneBuilder {
         var position: [Float] = [x, y, z]
         if clay_item_set_position(item, &position) != CLAY_OK { return nil }
         var node: clay_node_id = 0
-        guard clay_layer_add_item(doc, layer, item, &node) == CLAY_OK else { return nil }
+        if let group {
+            guard clay_layer_add_item_in_group(doc, layer, group, -1, item, &node) == CLAY_OK
+            else { return nil }
+        } else {
+            guard clay_layer_add_item(doc, layer, item, &node) == CLAY_OK else { return nil }
+        }
         return node
+    }
+
+    /// Where frame `k` of a GIZMO DRAG places the node being dragged.
+    ///
+    /// A drag is not a stroke and it is not a spread. It walks: consecutive
+    /// frames land near each other, so the region a frame dirties overlaps the
+    /// one before it, and the brick store is asked the question a real drag
+    /// asks — re-evaluate what moved, keep what did not.
+    ///
+    /// It must WALK rather than alternate between two placements. A two-point
+    /// flip dirties the same pair of regions on every frame and the second
+    /// frame can be served from what the first left behind, which measures a
+    /// resume the artist never gets. `strokeDabPosition` exists for the same
+    /// reason and this is its drag-shaped sibling: a short march, 0.02 a
+    /// frame, well inside the working volume at every axis size and a step far
+    /// under the dragged node's own radius so the reaches genuinely overlap.
+    ///
+    /// The path wraps at 32 frames so a long timed pass cannot walk the node
+    /// out of the volume the document occupies — a node dragged into empty
+    /// space stops dirtying anything, and the case would then time an empty
+    /// loop while looking healthy.
+    static func dragPosition(_ k: Int) -> (Float, Float, Float) {
+        let step = k % 32
+        return (-0.30 + 0.02 * Float(step), 0.10, 0.05)
+    }
+
+    /// The radius of the node a drag case drags.
+    ///
+    /// Larger than a stamp's 0.12 because a gizmo moves an OBJECT, not a dab,
+    /// and because the region a drag dirties is what these cases are about: a
+    /// node too small to reach past one brick would measure the store's
+    /// bookkeeping rather than the refill.
+    static let dragNodeRadius: Float = 0.25
+
+    /// The node a drag case drags, added at `dragPosition(0)`.
+    static func addDragNode(_ doc: OpaquePointer, _ layer: clay_layer_id,
+                            group: clay_node_id? = nil) -> clay_node_id? {
+        var params: [Float] = [dragNodeRadius]
+        guard let item = clay_item_create(Int32(CLAY_PRIM_SPHERE.rawValue), &params, 1) else {
+            return nil
+        }
+        defer { clay_item_destroy(item) }
+        let (x, y, z) = dragPosition(0)
+        var position: [Float] = [x, y, z]
+        if clay_item_set_position(item, &position) != CLAY_OK { return nil }
+        if clay_item_set_blend(item, Int32(CLAY_BLEND_QUADRATIC.rawValue), 0.05) != CLAY_OK {
+            return nil
+        }
+        var node: clay_node_id = 0
+        if let group {
+            guard clay_layer_add_item_in_group(doc, layer, group, -1, item, &node) == CLAY_OK
+            else { return nil }
+        } else {
+            guard clay_layer_add_item(doc, layer, item, &node) == CLAY_OK else { return nil }
+        }
+        return node
+    }
+
+    /// The same document `sdfDocument` builds, with every item inside ONE
+    /// group — which is what an artist leaves behind on a document worth
+    /// grouping, and a different cost from the same items at the layer root.
+    ///
+    /// What an edit invalidates is derived from the edited node's ANCESTRY, not
+    /// from the node, so the two shapes are separate cases rather than one case
+    /// with an incidental fixture. Building the grouped form here rather than
+    /// in the case keeps the two documents identical in everything else: same
+    /// stamps, same positions, same radii, same blends.
+    static func sdfDocumentGrouped(stamps count: Int)
+        -> (OpaquePointer, clay_layer_id, clay_node_id)? {
+        guard let doc = clay_document_create() else { return nil }
+        var layer: clay_layer_id = 0
+        guard clay_add_sdf_layer(doc, "bench", &layer) == CLAY_OK else {
+            clay_document_destroy(doc); return nil
+        }
+        var group: clay_node_id = 0
+        guard clay_layer_add_group(doc, layer, 0, -1,
+                                   Int32(CLAY_OP_ADD.rawValue),
+                                   Int32(CLAY_BLEND_QUADRATIC.rawValue),
+                                   0.05, 0.0, &group) == CLAY_OK else {
+            clay_document_destroy(doc); return nil
+        }
+        for i in 0..<count {
+            guard addStampNode(doc, layer, index: i, group: group) != nil else {
+                clay_document_destroy(doc); return nil
+            }
+        }
+        return (doc, layer, group)
     }
 
     /// The same dab, carrying a smooth blend. Beside the hard-blended one

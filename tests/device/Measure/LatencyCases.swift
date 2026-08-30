@@ -359,137 +359,37 @@ final class LatencyTests: XCTestCase {
     /// because the pair that makes this number mean something is
     /// stamp-vs-stroke on ONE channel.
     func testStrokeRefreshOnTheAppendPath() throws {
-        let collector = RunCollector()
+        try runStrokeBrickCase(name: "sdf_stroke_bricks", verb: "sdf_stroke_incremental",
+                               inGroup: false)
+    }
 
-        var measurements: [Measurement] = []
-        let canaryBefore = collector.sampleCanaryNow()
-        let caseStartedAtMs = collector.elapsedMs
-        let caseThermalStart = DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)
-        for stamps in Self.axis {
-            guard let (doc, layer) = SceneBuilder.sdfDocument(stamps: stamps) else {
-                XCTFail("could not build a \(stamps)-stamp document"); continue
-            }
-            defer { clay_document_destroy(doc) }
-
-            var config = clay_brick_config()
-            config.struct_size = UInt32(MemoryLayout<clay_brick_config>.size)
-            guard clay_brick_config_defaults(&config) == CLAY_OK else {
-                XCTFail("no brick defaults"); continue
-            }
-            config.voxel_size = 0.05
-            guard let cache = clay_brick_cache_create(&config) else {
-                XCTFail("could not create a brick cache"); continue
-            }
-            defer { clay_brick_cache_destroy(cache) }
-
-            let brickFloats = Int(config.dim * config.dim * config.dim)
-            var requests = [clay_brick_request](repeating: clay_brick_request(), count: 4096)
-            var values = [Float](repeating: 0, count: requests.count * brickFloats)
-
-            func pump() -> Int {
-                var refreshed = 0
-                while true {
-                    var count = requests.count
-                    var remaining = 0
-                    guard clay_brick_cache_take_dirty(cache, &requests, &count,
-                                                      &remaining) == CLAY_OK,
-                          count > 0 else { return refreshed }
-                    _ = clay_brick_cache_eval_requests(doc, "cpu", requests, count,
-                                                       &values, count * brickFloats,
-                                                       nil, 0)
-                    _ = clay_brick_cache_submit(cache, requests, count, values,
-                                                count * brickFloats, nil, 0,
-                                                nil, nil)
-                    refreshed += count
-                    if remaining == 0 { return refreshed }
-                }
-            }
-
-            // The initial full fill is a load cost, not a stroke cost.
-            _ = clay_brick_cache_mark_dirty_layer(cache, doc, layer)
-            let initial = pump()
-            XCTAssertGreaterThan(initial, 0,
-                                 "the first fill refreshed no bricks at \(stamps) stamps; "
-                                 + "the case below would measure nothing")
-
-            var stroke: [clay_node_id] = []
-            var starved = 0
-            var refreshedTotal = 0
-            var refreshCalls = 0
-            var addFailures = 0
-
-            let r = Timing.measureStable(reset: {
-                guard !stroke.isEmpty else { return }
-                var all = stroke
-                _ = clay_brick_cache_mark_dirty_nodes(cache, doc, layer, &all, all.count, nil)
-                for node in stroke.reversed() { _ = clay_remove_node(doc, layer, node) }
-                stroke.removeAll(keepingCapacity: true)
-                _ = pump()
-            }) {
-                for k in 0..<Self.strokeDabs {
-                    // A STROKE, not a spread: SceneBuilder.strokeDabPosition
-                    // marches the dabs along a short path so consecutive ones
-                    // overlap. That is what the resumed refill continues from,
-                    // and a scattered dab reaches a brick whose seed is from a
-                    // different revision. Measured off-device, the spread
-                    // reports this work as 1.05x and the path as 7.6x.
-                    guard let node = SceneBuilder.addStrokeDabNode(doc, layer, dab: k)
-                    else { addFailures += 1; continue }
-                    stroke.append(node)
-                    var one = [node]
-                    _ = clay_brick_cache_mark_dirty_nodes(cache, doc, layer, &one, 1, nil)
-                    let refreshed = pump()
-                    refreshedTotal += refreshed
-                    refreshCalls += 1
-                    if refreshed == 0 { starved += 1 }
-                }
-            }
-            XCTAssertEqual(addFailures, 0,
-                           "a dab could not be added at \(stamps) stamps")
-            XCTAssertLessThan(starved, refreshCalls,
-                              "every dab refreshed zero bricks at \(stamps) stamps — "
-                              + "this is measuring an empty loop")
-
-            let perStamp = refreshCalls > 0
-                ? Double(refreshedTotal) / Double(refreshCalls) : 0
-            print("stroke bricks/dab at \(stamps) stamps: "
-                  + "\(String(format: "%.1f", perStamp)) (initial fill \(initial))")
-
-            // THE WHOLE STROKE, with `batch` saying how many dabs it was,
-            // rather than the per-dab quotient this used to record.
-            //
-            // The timed body has always been the whole 24-dab stroke; dividing
-            // by 24 on the way out is what put the figure under the gate's
-            // 0.05 ms floor. It cleared the floor until #355 landed, which took
-            // the 1000-stamp point from 0.164 ms to 0.047 — a 3.5x WIN that
-            // made the case unable to object to a regression, which is #337's
-            // defect arriving by the front door. Recording the batch keeps the
-            // number honest and gateable at once; a per-dab cost is `p95Ms /
-            // batch`, which is what the pair with `sdf_stamp_bricks` needs.
-            measurements.append(Measurement(stamps: stamps,
-                                            p50Ms: r.p50,
-                                            p95Ms: r.p95,
-                                            samples: r.n,
-                                            repeats: r.repeats,
-                                            p95SpreadMs: r.spread,
-                                            batch: Self.strokeDabs))
-        }
-
-        collector.add(CaseResult(
-            name: "sdf_stroke_bricks",
-            verb: "sdf_stroke_incremental",
-            budgetClass: .interactive,
-            backend: "cpu",
-            servedBy: "cpu",
-            measurements: measurements,
-            growthExponent: Timing.growthExponent(measurements),
-            startedAtMs: caseStartedAtMs,
-            thermalStateStart: caseThermalStart,
-            thermalStateEnd: DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState),
-            canaryBeforeMs: canaryBefore,
-            canaryAfterMs: collector.sampleCanaryNow()))
-
-        _ = collector.finish(abiVersion: abiVersion(), attachTo: self)
+    /// The same stroke, with every dab added INSIDE A GROUP.
+    ///
+    /// The compiler's append fast path is `tail_append`, and it requires the
+    /// added node's parent to be the ROOT LIST (`parent == kNoNode`). A dab
+    /// placed into a group misses it: the edit is classified structural, every
+    /// prefix seed is retired, and the tape is recompiled whole instead of
+    /// having a suffix appended to it. Nothing in the engine says so and
+    /// nothing measured it.
+    ///
+    /// It is not an exotic shape. An artist who groups a character's head and
+    /// then keeps sculpting on it is adding dabs into a group, which is the
+    /// ordinary way to work — so this is the append path being switched off by
+    /// a modelling decision that has nothing to do with performance.
+    ///
+    /// Paired with `sdf_stroke_bricks` deliberately, and the pairing is built
+    /// to vary ONE thing: identical base document, identical dab positions,
+    /// identical brick path, identical document size. Only the dab's parent
+    /// differs. Verified by an independent C-ABI harness that shares no code
+    /// with this one, over 10/30/100/300/1000/3000 items — dabs at the root
+    /// are FLAT at ~0.038 ms across that whole range, dabs into a group grow
+    /// 3.0x, 5.0x, 8.7x, 20.1x, 61.4x, 176x, which is the O(document) shape a
+    /// per-dab whole-tape recompile has and the append path does not.
+    ///
+    /// Read the two together or neither means much.
+    func testStrokeRefreshInsideAGroup() throws {
+        try runStrokeBrickCase(name: "sdf_stroke_in_group_bricks",
+                               verb: "sdf_stroke_in_group", inGroup: true)
     }
 
     /// The same stroke on a SMOOTH-blended document, across the band where the
@@ -634,6 +534,166 @@ final class LatencyTests: XCTestCase {
         return s
     }
 
+    private func runStrokeBrickCase(name: String, verb: String, inGroup: Bool) throws {
+        let collector = RunCollector()
+
+        var measurements: [Measurement] = []
+        let canaryBefore = collector.sampleCanaryNow()
+        let caseStartedAtMs = collector.elapsedMs
+        let caseThermalStart = DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)
+        for stamps in Self.axis {
+            // THE SAME BASE DOCUMENT IN BOTH SHAPES. The in-group case adds an
+            // EMPTY group at the tail of the root list and puts the dabs in
+            // it; the base stamps stay where the flat case leaves them.
+            //
+            // The first version built the whole document inside a group, which
+            // varied two things at once — and the second one is not small. A
+            // control run over 10/30/100/300/1000/3000 items, base grouped but
+            // dabs at the ROOT, measured 1.1x at 10, 30, 1000 and 3000 and
+            // 8.4x at 100 and 19.7x at 300: a grouped base document is
+            // sometimes an order of magnitude more expensive on its own, in a
+            // band in the middle of the axis, for reasons that are not the
+            // append path (dabs at the root take it either way). A pair built
+            // on that would have reported the bump as part of this effect at
+            // exactly the sizes the axis samples.
+            guard let (doc, layer) = SceneBuilder.sdfDocument(stamps: stamps) else {
+                XCTFail("could not build a \(stamps)-stamp document"); continue
+            }
+            defer { clay_document_destroy(doc) }
+
+            var dabGroup: clay_node_id?
+            if inGroup {
+                var g: clay_node_id = 0
+                guard clay_layer_add_group(doc, layer, 0, -1, Int32(CLAY_OP_ADD.rawValue),
+                                           Int32(CLAY_BLEND_QUADRATIC.rawValue),
+                                           0.05, 0.0, &g) == CLAY_OK else {
+                    XCTFail("could not add the dab group at \(stamps) stamps"); continue
+                }
+                dabGroup = g
+            }
+
+            var config = clay_brick_config()
+            config.struct_size = UInt32(MemoryLayout<clay_brick_config>.size)
+            guard clay_brick_config_defaults(&config) == CLAY_OK else {
+                XCTFail("no brick defaults"); continue
+            }
+            config.voxel_size = 0.05
+            guard let cache = clay_brick_cache_create(&config) else {
+                XCTFail("could not create a brick cache"); continue
+            }
+            defer { clay_brick_cache_destroy(cache) }
+
+            let brickFloats = Int(config.dim * config.dim * config.dim)
+            var requests = [clay_brick_request](repeating: clay_brick_request(), count: 4096)
+            var values = [Float](repeating: 0, count: requests.count * brickFloats)
+
+            func pump() -> Int {
+                var refreshed = 0
+                while true {
+                    var count = requests.count
+                    var remaining = 0
+                    guard clay_brick_cache_take_dirty(cache, &requests, &count,
+                                                      &remaining) == CLAY_OK,
+                          count > 0 else { return refreshed }
+                    _ = clay_brick_cache_eval_requests(doc, "cpu", requests, count,
+                                                       &values, count * brickFloats,
+                                                       nil, 0)
+                    _ = clay_brick_cache_submit(cache, requests, count, values,
+                                                count * brickFloats, nil, 0,
+                                                nil, nil)
+                    refreshed += count
+                    if remaining == 0 { return refreshed }
+                }
+            }
+
+            // The initial full fill is a load cost, not a stroke cost.
+            _ = clay_brick_cache_mark_dirty_layer(cache, doc, layer)
+            let initial = pump()
+            XCTAssertGreaterThan(initial, 0,
+                                 "the first fill refreshed no bricks at \(stamps) stamps; "
+                                 + "the case below would measure nothing")
+
+            var stroke: [clay_node_id] = []
+            var starved = 0
+            var refreshedTotal = 0
+            var refreshCalls = 0
+            var addFailures = 0
+
+            let r = Timing.measureStable(reset: {
+                guard !stroke.isEmpty else { return }
+                var all = stroke
+                _ = clay_brick_cache_mark_dirty_nodes(cache, doc, layer, &all, all.count, nil)
+                for node in stroke.reversed() { _ = clay_remove_node(doc, layer, node) }
+                stroke.removeAll(keepingCapacity: true)
+                _ = pump()
+            }) {
+                for k in 0..<Self.strokeDabs {
+                    // A STROKE, not a spread: SceneBuilder.strokeDabPosition
+                    // marches the dabs along a short path so consecutive ones
+                    // overlap. That is what the resumed refill continues from,
+                    // and a scattered dab reaches a brick whose seed is from a
+                    // different revision. Measured off-device, the spread
+                    // reports this work as 1.05x and the path as 7.6x.
+                    guard let node = SceneBuilder.addStrokeDabNode(doc, layer, dab: k,
+                                                                   group: dabGroup)
+                    else { addFailures += 1; continue }
+                    stroke.append(node)
+                    var one = [node]
+                    _ = clay_brick_cache_mark_dirty_nodes(cache, doc, layer, &one, 1, nil)
+                    let refreshed = pump()
+                    refreshedTotal += refreshed
+                    refreshCalls += 1
+                    if refreshed == 0 { starved += 1 }
+                }
+            }
+            XCTAssertEqual(addFailures, 0,
+                           "a dab could not be added at \(stamps) stamps")
+            XCTAssertLessThan(starved, refreshCalls,
+                              "every dab refreshed zero bricks at \(stamps) stamps — "
+                              + "this is measuring an empty loop")
+
+            let perStamp = refreshCalls > 0
+                ? Double(refreshedTotal) / Double(refreshCalls) : 0
+            print("\(name): bricks/dab at \(stamps) stamps: "
+                  + "\(String(format: "%.1f", perStamp)) (initial fill \(initial))")
+
+            // THE WHOLE STROKE, with `batch` saying how many dabs it was,
+            // rather than the per-dab quotient this used to record.
+            //
+            // The timed body has always been the whole 24-dab stroke; dividing
+            // by 24 on the way out is what put the figure under the gate's
+            // 0.05 ms floor. It cleared the floor until #355 landed, which took
+            // the 1000-stamp point from 0.164 ms to 0.047 — a 3.5x WIN that
+            // made the case unable to object to a regression, which is #337's
+            // defect arriving by the front door. Recording the batch keeps the
+            // number honest and gateable at once; a per-dab cost is `p95Ms /
+            // batch`, which is what the pair with `sdf_stamp_bricks` needs.
+            measurements.append(Measurement(stamps: stamps,
+                                            p50Ms: r.p50,
+                                            p95Ms: r.p95,
+                                            samples: r.n,
+                                            repeats: r.repeats,
+                                            p95SpreadMs: r.spread,
+                                            batch: Self.strokeDabs))
+        }
+
+        collector.add(CaseResult(
+            name: name,
+            verb: verb,
+            budgetClass: .interactive,
+            backend: "cpu",
+            servedBy: "cpu",
+            measurements: measurements,
+            growthExponent: Timing.growthExponent(measurements),
+            startedAtMs: caseStartedAtMs,
+            thermalStateStart: caseThermalStart,
+            thermalStateEnd: DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState),
+            canaryBeforeMs: canaryBefore,
+            canaryAfterMs: collector.sampleCanaryNow()))
+
+        _ = collector.finish(abiVersion: abiVersion(), attachTo: self)
+    }
+
     /// The same stamp, refreshed the way a host actually refreshes it.
     ///
     /// `sdf_stamp_*` above re-evaluates a lattice over the WHOLE working
@@ -770,6 +830,461 @@ final class LatencyTests: XCTestCase {
         collector.add(CaseResult(
             name: "sdf_stamp_bricks",
             verb: "sdf_stamp_incremental",
+            budgetClass: .interactive,
+            backend: "cpu",
+            servedBy: "cpu",
+            measurements: measurements,
+            growthExponent: Timing.growthExponent(measurements),
+            startedAtMs: caseStartedAtMs,
+            thermalStateStart: caseThermalStart,
+            thermalStateEnd: DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState),
+            canaryBeforeMs: canaryBefore,
+            canaryAfterMs: collector.sampleCanaryNow()))
+
+        _ = collector.finish(abiVersion: abiVersion(), attachTo: self)
+    }
+
+    /// How many frames of a drag one timed body performs.
+    ///
+    /// ONE. A drag frame is the interactive unit — the artist moves a finger,
+    /// the engine re-evaluates, the host draws — and the cost of a frame is
+    /// what has to fit the 4.17 ms share. The measured desktop figures are
+    /// tens of milliseconds, so nothing here is near the gate's 0.125 ms floor
+    /// and there is no reason to batch. If an optimisation ever takes a drag
+    /// frame under that floor, batch it and record `batch:`, as
+    /// `sdf_stroke_bricks` does — do not lower the floor.
+    static let dragFramesPerBody = 1
+
+    /// The drag cases, all three of them.
+    ///
+    /// A GIZMO DRAG, which the gate has never measured. 62 cases and not one
+    /// of them transformed anything, so Move/Rotate/Scale — which an artist
+    /// reaches for between every stroke — had no number, no budget, and no way
+    /// to regress visibly.
+    ///
+    /// THE UNIT IS A FRAME AND THERE IS NO RESET, which is the opposite of
+    /// `sdf_stamp_bricks` and worth saying plainly. That case resets because a
+    /// stamp GROWS the document and the axis point would otherwise be a lie. A
+    /// drag does not: frame k+1's placement supersedes frame k's, the document
+    /// holds the same items throughout, and a reset would be an extra edit
+    /// paid inside a case measuring edits. There is also no chain for a reset
+    /// to protect — unlike the stroke cases, whose whole subject is a chain a
+    /// reset breaks.
+    ///
+    /// THE PLACEMENT WALKS. `SceneBuilder.dragPosition` marches rather than
+    /// flipping between two points, because a flip dirties the same pair of
+    /// regions every frame and the second frame can be served from what the
+    /// first left behind. That is a resume the artist never gets, and a case
+    /// built on it would report a drag as cheap and pass. It is the same trap
+    /// `strokeDabPosition` exists for, in the other direction.
+    ///
+    /// THREE CASES, NOT ONE, because what an edit invalidates is derived from
+    /// the edited node's ANCESTRY rather than from the node:
+    ///
+    ///   - `sdf_node_transform_bricks`  a node at the layer root
+    ///   - `sdf_group_transform_bricks` the same node inside a group
+    ///   - `sdf_layer_transform_bricks` the whole layer's placement
+    ///
+    /// Measured off-device at 1000 items they differ by a factor of three, and
+    /// a single case would report whichever shape the fixture happened to
+    /// build. The layer row is the one with no lower bound in principle: a
+    /// rigid layer placement moves the layer's surface exactly and re-solves
+    /// no cross-layer blend, since layers combine by hard union — so what it
+    /// costs today is a measurement of an opportunity, not of a necessity.
+    ///
+    /// CPU, like `sdf_stamp_bricks`, and for its reason: Metal costs 288 us
+    /// per brick against the CPU's 114 and does not win at any thread count,
+    /// because 512 samples is too little work to cover a dispatch. A drag
+    /// frame refills the same bricks the same way.
+    func testNodeTransformThroughTheBrickCache() throws {
+        try runDragCase(name: "sdf_node_transform_bricks",
+                        verb: "sdf_node_transform",
+                        grouped: false)
+    }
+
+    func testGroupedNodeTransformThroughTheBrickCache() throws {
+        try runDragCase(name: "sdf_group_transform_bricks",
+                        verb: "sdf_group_transform",
+                        grouped: true)
+    }
+
+    func testLayerTransformThroughTheBrickCache() throws {
+        try runDragCase(name: "sdf_layer_transform_bricks",
+                        verb: "sdf_layer_transform",
+                        grouped: false, dragTheLayer: true)
+    }
+
+    /// What a drag COSTS THE NEXT EDIT, which is where a wide invalidation
+    /// is actually paid.
+    ///
+    /// This case exists because the three above could not see it, and finding
+    /// that out took a device run. A drag frame refills the bricks the dragged
+    /// node reaches, and those bricks lose their seeds whether or not the
+    /// document is grouped — the drag walks, so each frame refills roughly
+    /// what the frame before it dirtied. Grouped and ungrouped therefore agree
+    /// on the device to within noise, and a reader could conclude that how a
+    /// document is grouped does not matter.
+    ///
+    /// It matters for the bricks the drag DID NOT refill. The engine's seed
+    /// drop is derived from the edited node's root ancestor, so a drag inside
+    /// a group retires every seed in that group — including the ones nowhere
+    /// near the gizmo. Nothing pays for that until something else is edited,
+    /// and then it is paid in full.
+    ///
+    /// So the timed unit is a STAMP THAT FOLLOWS A DRAG FRAME, which is an
+    /// ordinary sculpting sequence: place an object, carry on sculpting. The
+    /// drag frame runs untimed before each timed stamp, because it is what
+    /// leaves the seed store in the state the stamp then pays for.
+    ///
+    /// WHAT THE PAIR ISOLATES, after a correction worth recording. The stamp
+    /// is added at the LAYER ROOT in both documents. The first version added
+    /// it into the group in the grouped case, which also cost it the append
+    /// fast path (`tail_append` requires a root-list parent) — so the pair
+    /// read 3.9x and roughly 3x of that was the append path rather than
+    /// anything about invalidation. Measured on an M2 Max at 1000 items:
+    /// stamp into the group 7.6 ms, the same stamp at the layer root in the
+    /// same grouped document 2.5 ms, flat 1.5 ms. The append-path half now
+    /// has its own case and its own name.
+    ///
+    /// What is left is the cost of the DOCUMENT'S SHAPE: a grouped chain
+    /// compiles and culls differently from a flat one, at an identical brick
+    /// count, in a state where a drag has just retired the seeds so neither
+    /// side can resume.
+    func testStampAfterADragThroughTheBrickCache() throws {
+        try runStampAfterDragCase(name: "sdf_stamp_after_drag_bricks",
+                                  verb: "sdf_stamp_after_drag", grouped: false)
+    }
+
+    func testStampAfterAGroupedDragThroughTheBrickCache() throws {
+        try runStampAfterDragCase(name: "sdf_stamp_after_group_drag_bricks",
+                                  verb: "sdf_stamp_after_group_drag", grouped: true)
+    }
+
+    /// The body all three share.
+    ///
+    /// One function rather than three, because the only differences are which
+    /// document is built, which entry point places, and what is marked dirty.
+    /// Three copies would drift, and the thing that must NOT drift is the
+    /// timed body: these cases exist to be compared with each other, and a
+    /// difference in the harness would read as a difference in the engine.
+    private func runDragCase(name: String, verb: String,
+                             grouped: Bool, dragTheLayer: Bool = false) throws {
+        let collector = RunCollector()
+
+        var measurements: [Measurement] = []
+        let canaryBefore = collector.sampleCanaryNow()
+        let caseStartedAtMs = collector.elapsedMs
+        let caseThermalStart = DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)
+
+        // The standard axis, not `brickAxis`. A drag frame invalidates a
+        // REGION, and at 30,000 items the layer row would refill the working
+        // volume on every one of its samples — minutes of wall clock for a
+        // point whose shape the three standard points already give, and the
+        // memory pattern the iPad's jetsam ends a bundle over.
+        for stamps in Self.axis {
+            var built: (OpaquePointer, clay_layer_id, clay_node_id?)?
+            if grouped {
+                guard let (doc, layer, group) = SceneBuilder.sdfDocumentGrouped(stamps: stamps)
+                else { XCTFail("could not build a grouped \(stamps)-stamp document"); continue }
+                built = (doc, layer, group)
+            } else {
+                guard let (doc, layer) = SceneBuilder.sdfDocument(stamps: stamps)
+                else { XCTFail("could not build a \(stamps)-stamp document"); continue }
+                built = (doc, layer, nil)
+            }
+            guard let (doc, layer, group) = built else { continue }
+            defer { clay_document_destroy(doc) }
+
+            // The node the gizmo holds. It is added to the document ONCE, so
+            // it is part of the document the axis point names rather than
+            // something the timed body creates.
+            guard let dragged = SceneBuilder.addDragNode(doc, layer, group: group) else {
+                XCTFail("could not add the dragged node at \(stamps) stamps"); continue
+            }
+
+            var config = clay_brick_config()
+            config.struct_size = UInt32(MemoryLayout<clay_brick_config>.size)
+            guard clay_brick_config_defaults(&config) == CLAY_OK else {
+                XCTFail("no brick defaults"); continue
+            }
+            config.voxel_size = 0.05
+            guard let cache = clay_brick_cache_create(&config) else {
+                XCTFail("could not create a brick cache"); continue
+            }
+            defer { clay_brick_cache_destroy(cache) }
+
+            let brickFloats = Int(config.dim * config.dim * config.dim)
+            var requests = [clay_brick_request](repeating: clay_brick_request(), count: 4096)
+            var values = [Float](repeating: 0, count: requests.count * brickFloats)
+
+            func pump() -> Int {
+                var refreshed = 0
+                while true {
+                    var count = requests.count
+                    var remaining = 0
+                    guard clay_brick_cache_take_dirty(cache, &requests, &count,
+                                                      &remaining) == CLAY_OK,
+                          count > 0 else { return refreshed }
+                    _ = clay_brick_cache_eval_requests(doc, "cpu", requests, count,
+                                                       &values, count * brickFloats,
+                                                       nil, 0)
+                    _ = clay_brick_cache_submit(cache, requests, count, values,
+                                                count * brickFloats, nil, 0,
+                                                nil, nil)
+                    refreshed += count
+                    if remaining == 0 { return refreshed }
+                }
+            }
+
+            // The initial full fill is a load cost, not a drag cost.
+            _ = clay_brick_cache_mark_dirty_layer(cache, doc, layer)
+            let initial = pump()
+            XCTAssertGreaterThan(initial, 0,
+                                 "the first fill refreshed no bricks at \(stamps) stamps; "
+                                 + "the case below would measure nothing")
+
+            var frame = 1
+            var starved = 0
+            var refreshedTotal = 0
+            var refreshCalls = 0
+            var placeFailures = 0
+            let axisNormal: [Float] = [0, 1, 0]
+
+            let r = Timing.measureStable {
+                for _ in 0..<Self.dragFramesPerBody {
+                    let (x, y, z) = SceneBuilder.dragPosition(frame)
+                    var position: [Float] = [x, y, z]
+                    var rotationAxis = axisNormal
+                    // A rotation as well as a translation, because a gizmo
+                    // drag is usually both and because the two cost the same
+                    // here — the layer's transform reaches the tape as one
+                    // matrix either way. Measured off-device: a layer rotate
+                    // and a layer translate agreed to 0.1%.
+                    let angle = 0.01 * Float(frame % 32)
+                    let placed: clay_result = dragTheLayer
+                        ? clay_document_set_layer_transform(doc, layer, &position,
+                                                            &rotationAxis, angle, 1.0)
+                        : clay_layer_set_transform(doc, layer, dragged, &position,
+                                                   &rotationAxis, angle, 1.0)
+                    if placed != CLAY_OK { placeFailures += 1 }
+                    frame += 1
+
+                    // Dirty the way a host would, and the way that makes the
+                    // engine derive the region rather than the harness: by
+                    // NODE for a node placement, by LAYER for a layer one.
+                    // A bound worked out by hand here would be the harness
+                    // asserting the answer the case is measuring.
+                    if dragTheLayer {
+                        _ = clay_brick_cache_mark_dirty_layer(cache, doc, layer)
+                    } else {
+                        var one = [dragged]
+                        _ = clay_brick_cache_mark_dirty_nodes(cache, doc, layer, &one, 1, nil)
+                    }
+                    let refreshed = pump()
+                    refreshedTotal += refreshed
+                    refreshCalls += 1
+                    if refreshed == 0 { starved += 1 }
+                }
+            }
+            XCTAssertEqual(placeFailures, 0,
+                           "a placement was refused at \(stamps) stamps")
+            // Bricks per frame, for the same reason `sdf_stamp_bricks` prints
+            // it: it separates "the invalidation is too wide" from "each brick
+            // is expensive", which are different defects with different fixes.
+            //
+            // For the two NODE cases it is a control rather than a diagnostic,
+            // and that took a shakedown run to establish. They refill the SAME
+            // count — 66.9 a frame at every axis point, grouped or not —
+            // because `clay_brick_cache_mark_dirty_nodes` derives the region
+            // from the node's OWN influence bound. What differs is what each
+            // of those bricks then costs: the engine's internal seed drop is
+            // derived from the node's ROOT ANCESTOR, so in the grouped
+            // document every seed inside the group is dropped and each brick
+            // takes a full walk instead of resuming.
+            //
+            // So the pair is a sharper instrument than a count would make it:
+            // the region is held fixed by construction, and the whole of the
+            // difference between the two rows is per-brick cost. A future
+            // reader tempted to "fix" the grouped row because its brick count
+            // looks the same should read that as the case working.
+            let perFrame = refreshCalls > 0
+                ? Double(refreshedTotal) / Double(refreshCalls) : 0
+            print("\(name): bricks/frame at \(stamps) stamps: "
+                  + "\(String(format: "%.1f", perFrame)) (initial fill \(initial))")
+            XCTAssertLessThan(starved, refreshCalls,
+                              "every timed frame refreshed zero bricks at \(stamps) "
+                              + "stamps — this is measuring an empty loop")
+
+            measurements.append(Measurement(stamps: stamps, p50Ms: r.p50,
+                                            p95Ms: r.p95, samples: r.n,
+                                            repeats: r.repeats,
+                                            p95SpreadMs: r.spread,
+                                            batch: Self.dragFramesPerBody))
+        }
+
+        collector.add(CaseResult(
+            name: name,
+            verb: verb,
+            budgetClass: .interactive,
+            backend: "cpu",
+            servedBy: "cpu",
+            measurements: measurements,
+            growthExponent: Timing.growthExponent(measurements),
+            startedAtMs: caseStartedAtMs,
+            thermalStateStart: caseThermalStart,
+            thermalStateEnd: DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState),
+            canaryBeforeMs: canaryBefore,
+            canaryAfterMs: collector.sampleCanaryNow()))
+
+        _ = collector.finish(abiVersion: abiVersion(), attachTo: self)
+    }
+
+    /// The body the two after-drag cases share.
+    private func runStampAfterDragCase(name: String, verb: String,
+                                       grouped: Bool) throws {
+        let collector = RunCollector()
+
+        var measurements: [Measurement] = []
+        let canaryBefore = collector.sampleCanaryNow()
+        let caseStartedAtMs = collector.elapsedMs
+        let caseThermalStart = DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)
+
+        for stamps in Self.axis {
+            var built: (OpaquePointer, clay_layer_id, clay_node_id?)?
+            if grouped {
+                guard let (doc, layer, group) = SceneBuilder.sdfDocumentGrouped(stamps: stamps)
+                else { XCTFail("could not build a grouped \(stamps)-stamp document"); continue }
+                built = (doc, layer, group)
+            } else {
+                guard let (doc, layer) = SceneBuilder.sdfDocument(stamps: stamps)
+                else { XCTFail("could not build a \(stamps)-stamp document"); continue }
+                built = (doc, layer, nil)
+            }
+            guard let (doc, layer, group) = built else { continue }
+            defer { clay_document_destroy(doc) }
+
+            guard let dragged = SceneBuilder.addDragNode(doc, layer, group: group) else {
+                XCTFail("could not add the dragged node at \(stamps) stamps"); continue
+            }
+
+            var config = clay_brick_config()
+            config.struct_size = UInt32(MemoryLayout<clay_brick_config>.size)
+            guard clay_brick_config_defaults(&config) == CLAY_OK else {
+                XCTFail("no brick defaults"); continue
+            }
+            config.voxel_size = 0.05
+            guard let cache = clay_brick_cache_create(&config) else {
+                XCTFail("could not create a brick cache"); continue
+            }
+            defer { clay_brick_cache_destroy(cache) }
+
+            let brickFloats = Int(config.dim * config.dim * config.dim)
+            var requests = [clay_brick_request](repeating: clay_brick_request(), count: 4096)
+            var values = [Float](repeating: 0, count: requests.count * brickFloats)
+
+            func pump() -> Int {
+                var refreshed = 0
+                while true {
+                    var count = requests.count
+                    var remaining = 0
+                    guard clay_brick_cache_take_dirty(cache, &requests, &count,
+                                                      &remaining) == CLAY_OK,
+                          count > 0 else { return refreshed }
+                    _ = clay_brick_cache_eval_requests(doc, "cpu", requests, count,
+                                                       &values, count * brickFloats,
+                                                       nil, 0)
+                    _ = clay_brick_cache_submit(cache, requests, count, values,
+                                                count * brickFloats, nil, 0,
+                                                nil, nil)
+                    refreshed += count
+                    if remaining == 0 { return refreshed }
+                }
+            }
+
+            _ = clay_brick_cache_mark_dirty_layer(cache, doc, layer)
+            let initial = pump()
+            XCTAssertGreaterThan(initial, 0,
+                                 "the first fill refreshed no bricks at \(stamps) stamps")
+
+            var frame = 1
+            var index = stamps
+            var starved = 0
+            var refreshedTotal = 0
+            var refreshCalls = 0
+            var lastStamp: clay_node_id?
+            let axisNormal: [Float] = [0, 1, 0]
+
+            let r = Timing.measureStable(reset: {
+                // The stamp is undone OUTSIDE the timing, so the document
+                // stays the size the axis names — the same reason
+                // `sdf_stamp_bricks` resets, and unlike the drag cases, which
+                // add nothing. Its own refresh is drained here too, untimed,
+                // or every timed sample would pay for a removal as well.
+                if let node = lastStamp {
+                    var one = [node]
+                    _ = clay_brick_cache_mark_dirty_nodes(cache, doc, layer, &one, 1, nil)
+                    _ = clay_remove_node(doc, layer, node)
+                    _ = pump()
+                }
+                // THE DRAG FRAME, and it belongs in the reset rather than in
+                // the timed body. What is under test is what a drag costs the
+                // NEXT edit, so the drag has to have happened and must not be
+                // in the number. Running it here also re-arms the measurement:
+                // it re-retires the seeds the previous timed stamp restored.
+                let (x, y, z) = SceneBuilder.dragPosition(frame)
+                var position: [Float] = [x, y, z]
+                var rotationAxis = axisNormal
+                _ = clay_layer_set_transform(doc, layer, dragged, &position,
+                                             &rotationAxis, 0.01 * Float(frame % 32), 1.0)
+                frame += 1
+                var dragOne = [dragged]
+                _ = clay_brick_cache_mark_dirty_nodes(cache, doc, layer, &dragOne, 1, nil)
+                _ = pump()
+            }) {
+                // one ordinary stamp, somewhere else, and the refresh for it.
+                //
+                // AT THE LAYER ROOT IN BOTH SHAPES, and this is the whole
+                // reason the pair means anything. `tail_append` requires
+                // `parent == kNoNode`, so a stamp added INTO the group takes a
+                // structural invalidation and a full recompile instead of the
+                // append fast path. A pair built that way compares the append
+                // path against no append path and reports it as a property of
+                // GROUPING, which is a different defect measured under the
+                // wrong name — `sdf_stroke_in_group_bricks` owns that one.
+                // Here the stamp lands identically in both documents and the
+                // only variable left is the document's own shape.
+                guard let node = SceneBuilder.addStampNode(doc, layer, index: index)
+                else { return }
+                lastStamp = node
+                index += 1
+                var one = [node]
+                _ = clay_brick_cache_mark_dirty_nodes(cache, doc, layer, &one, 1, nil)
+                let refreshed = pump()
+                refreshedTotal += refreshed
+                refreshCalls += 1
+                if refreshed == 0 { starved += 1 }
+            }
+
+            // The control that makes this pair readable: the two cases refresh
+            // the SAME number of bricks, so the difference between their times
+            // is per-brick cost and nothing else.
+            let perStamp = refreshCalls > 0
+                ? Double(refreshedTotal) / Double(refreshCalls) : 0
+            print("\(name): bricks/stamp at \(stamps) stamps: "
+                  + "\(String(format: "%.1f", perStamp)) (initial fill \(initial))")
+            XCTAssertLessThan(starved, refreshCalls,
+                              "every timed stamp refreshed zero bricks at \(stamps) "
+                              + "stamps — this is measuring an empty loop")
+
+            measurements.append(Measurement(stamps: stamps, p50Ms: r.p50,
+                                            p95Ms: r.p95, samples: r.n,
+                                            repeats: r.repeats,
+                                            p95SpreadMs: r.spread))
+        }
+
+        collector.add(CaseResult(
+            name: name,
+            verb: verb,
             budgetClass: .interactive,
             backend: "cpu",
             servedBy: "cpu",

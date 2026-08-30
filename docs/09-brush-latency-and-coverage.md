@@ -100,6 +100,12 @@ representation, `s` the SDF one, `m` a mesh layer's own triangles.
 | — | (large brush) | `sculpt_smooth` at radius 32 | v | `voxel_smooth_r32` | 0.153 | interactive |
 | — | (display) | `VoxelGrid::mesh_greedy` | v | `voxel_mesh_whole` | 13.23 | operation |
 | — | (display, incremental) | `mesh_greedy_chunks` | v | `voxel_mesh_dirty` | **2.12** | interactive |
+| Move / Rotate / Scale (gizmo, one item) | Gizmo | `clay_layer_set_transform` | s | `sdf_node_transform_bricks` | **17.27** ‡ | interactive |
+| Move / Rotate / Scale (item inside a group) | Gizmo | `clay_layer_set_transform` | s | `sdf_group_transform_bricks` | **14.07** ‡ | interactive |
+| Move / Rotate / Scale (whole layer) | Gizmo (object) | `clay_document_set_layer_transform` | s | `sdf_layer_transform_bricks` | **27.81** ‡ | interactive |
+| — | (a stamp after a drag) | `sdf_stamp` in the state a drag left | s | `sdf_stamp_after_drag_bricks` | 1.08 | interactive |
+| — | (a stamp after a drag, grouped) | as above, in a grouped document | s | `sdf_stamp_after_group_drag_bricks` | 1.15 | interactive |
+| ClayBuildup etc., dabs INSIDE A GROUP | Clay / Clay Strips | `Op::Relief` along a stroke, in a group | s | `sdf_stroke_in_group_bricks` | **3.043** ‡ | interactive |
 | ClayBuildup etc., SMOOTH-blended | Clay / Clay Strips | `Op::Relief` along a stroke, quadratic blend | s | `sdf_stroke_smooth_bricks` | 0.161 | interactive |
 | Blob | — | *not implemented* | | | | |
 | Slice / Knife | Split | *not implemented* | | | | |
@@ -157,6 +163,84 @@ happened to carry a quadratic blend. `sdf_stroke_smooth_bricks` is the case
 that can see it, and its axis deliberately straddles the band — 10 and 2000
 both sit in the constant regions, so an axis of those alone reports nothing
 wrong, which is what the standard 10/100/1000 axis would have done.
+
+## The gizmo, measured for the first time
+
+Until 2026-08-29 the gate held 62 cases and **not one of them transformed
+anything**. Move/Rotate/Scale — which an artist reaches for between every
+stroke — had no number, no budget and no way to regress visibly. Nor could
+`tools/check_device_coverage.py` report the absence: its `VERB_PATTERNS` list
+decides what "uncovered" means, and nothing in it matched a placement entry
+point. The gap was not on the record; it was invisible.
+
+Five cases close it, measured on the reference iPad at ABI 0.60.0. They say two
+separate things.
+
+**A gizmo drag does not fit an interactive frame at a thousand items.** 14.28 ms
+for one item, 27.03 ms for a whole layer, against a 4.17 ms share — 3.4x and
+6.5x over. The edit itself is 40-130 us; all of it is the refill. The layer row
+is the one with no lower bound in principle: layers combine by hard union, and a
+layer's transform reaches the tape only as a rigid matrix composed into each
+item's inverse, so after a rigid placement the layer's surface is *exactly* its
+old surface moved. Producing that by re-evaluating the field is 27 ms of work to
+arrive where a matrix multiply already is.
+
+**What grouping costs is not the drag.** The two node rows agree — 17.27 flat
+against 14.07 grouped — and that is a finding rather than a defect in the
+cases. A drag walks, so each frame refills roughly what the frame before it
+dirtied, and those bricks lose their seeds either way.
+
+**And it is not the next edit either, once the pair is honest.** The first
+version of `sdf_stamp_after_group_drag_bricks` added its stamp INTO the group,
+and read 4.32 ms against the flat row's 1.10 — a 3.9x gap reported as the cost
+of grouping. It was not. `tail_append` requires the added node's parent to be
+the root list, so that stamp also lost the append fast path. With the stamp at
+the layer root in both shapes the pair reads **1.08 against 1.15 — 1.06x**, and
+what is left is the cost of a grouped chain compiling and culling differently
+from a flat one.
+
+**The append path is where grouping is actually paid, and it is 90x.** The same
+24-dab stroke on the same base document, differing only in whether the dabs are
+appended to the layer root or into a group at the tail of it:
+
+The figures below are per dab; the timed unit is the whole 24-dab stroke.
+
+| per dab, p95 | 10 items | 100 items | 1000 items |
+|---|---:|---:|---:|
+| `sdf_stroke_bricks` (root) | 0.0339 ms | 0.0340 ms | 0.0339 ms |
+| `sdf_stroke_in_group_bricks` | 0.1395 ms | 0.3703 ms | **3.0669 ms** |
+| ratio | 4.1x | 10.9x | **90.4x** |
+
+The root row is FLAT to three decimal places across two orders of magnitude —
+that is what the append path is for, and it is what `reuse-the-tape-prefix` and
+`patch-the-resident-tape` bought. The in-group row scales with the document,
+because every dab recompiles the whole tape and pays for every item before it.
+At 1000 items, 3.07 ms a dab is 74% of the frame share with no headroom and
+still growing.
+
+**Verified independently**, because an earlier version of this pair was
+confounded. A C-ABI harness sharing no code with the device case, over
+10/30/100/300/1000/3000 items with the base document held identical: dabs at
+the root are flat at ~0.038 ms across the whole range, dabs into a group grow
+3.0x, 5.0x, 8.7x, 20.1x, 61.4x, 176x. Flat against O(document) is the signature
+of a per-dab whole-tape recompile, and `tail_append` says so in source — it
+accepts an append only when the added node's parent is the root list.
+
+That control also found something else, unrelated and unexplained: with the
+dabs at the root but the BASE document inside a group, the same stroke measures
+1.1x at 10, 30, 1000 and 3000 items and **8.4x at 100 and 19.7x at 300**. A
+grouped base document is sometimes an order of magnitude more expensive on its
+own, in a band in the middle of the axis. It is not the append path — dabs at
+the root take that either way — and it is not measured by anything. It is the
+reason the pair above holds the base document fixed.
+
+Grouping a character's head and sculpting on it is what groups are FOR. A
+modelling decision with no performance meaning switches off the engine's most
+valuable optimisation, silently. `append-into-a-group` is the fix.
+
+A note for whoever reads the drag rows next and finds them equal: that is the
+pair working. A change that made them differ would mean the bound had started
+being applied somewhere it was not before.
 
 All nine of those cases were measured for the first time at **v0.30.0** — four
 arrived with the tube/Trim Curve/pose/armature work, the rest close the gaps
