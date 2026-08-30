@@ -271,18 +271,29 @@ TEST_CASE("the public parallel lattice march equals the serial one byte for byte
     const Mesh serial = mesh::mesh_lattice(sample, cmin, cmax, origin, 0.02f);
     const Mesh parallel = mesh::mesh_lattice_parallel(sample, cmin, cmax, origin, 0.02f);
 
-    REQUIRE(!serial.empty());
+    // Non-empty is REQUIRED before the comparison and not merely likely: two
+    // empty meshes compare equal and prove nothing, and `positions.data()` on
+    // an empty vector is null — which `memcmp` may not be handed even for a
+    // zero count, and UBSan says so.
+    REQUIRE(serial.positions.size() > 0);
     REQUIRE(serial.positions.size() == parallel.positions.size());
     CHECK(std::memcmp(serial.positions.data(), parallel.positions.data(),
                       serial.positions.size() * sizeof(cfloat3)) == 0);
     CHECK(serial.indices == parallel.indices);
 
-    // Fewer than eight planes takes the serial fallback inside the parallel
+    // Fewer than eight planes takes the serial fallback INSIDE the parallel
     // entry point, which must agree too — that path is where a divergence would
     // hide, being the one nothing else exercises.
-    int small_max[3] = {70, 70, 4};
-    const Mesh thin_serial = mesh::mesh_lattice(sample, cmin, small_max, origin, 0.02f);
-    const Mesh thin_parallel = mesh::mesh_lattice_parallel(sample, cmin, small_max, origin, 0.02f);
+    //
+    // The slab is placed on the sphere's equator (world z = -0.7 + 0.02k, so
+    // k = 35 is z = 0) rather than at the range's start, where it would meet no
+    // surface at all and compare two empty meshes to each other.
+    int thin_min[3] = {0, 0, 33};
+    int thin_max[3] = {70, 70, 37};
+    const Mesh thin_serial = mesh::mesh_lattice(sample, thin_min, thin_max, origin, 0.02f);
+    const Mesh thin_parallel =
+        mesh::mesh_lattice_parallel(sample, thin_min, thin_max, origin, 0.02f);
+    REQUIRE(thin_serial.positions.size() > 0);
     REQUIRE(thin_serial.positions.size() == thin_parallel.positions.size());
     CHECK(std::memcmp(thin_serial.positions.data(), thin_parallel.positions.data(),
                       thin_serial.positions.size() * sizeof(cfloat3)) == 0);
