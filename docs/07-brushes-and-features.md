@@ -1356,6 +1356,140 @@ Runnable: [`examples/45_mesh_brushes.py`](../examples/45_mesh_brushes.py),
 
 ---
 
+## 8b. Adaptive topology — the third mesh mode
+
+Section 8 is the fixed-topology mode: sixteen verbs that move vertices and never
+touch a polygon. This is the other one.
+
+**What was actually missing, stated precisely.** Not "dyntopo" — *there was no
+representation in this library whose connectivity could change.* `Mesh` is flat
+arrays a mutation renumbers. `Adjacency` is CSR that goes stale on a count
+change and says so. `Bvh::refit` refuses a topology change by design.
+`VertexDeltas` deliberately records no indices. Every one of those is the right
+decision for what it serves, and together they mean adaptive topology cannot be
+retrofitted — it has to be a representation of its own.
+
+### The two modes, and choosing between them
+
+| | Mesh layer (`MeshSculptor`) | `DynamicSurface` (`DynamicSculptor`) |
+|---|---|---|
+| Topology | **Never changes.** `indices` and `quads` byte-identical | Changes locally under the brush |
+| What a large pull does | Stretches the triangles it has | Creates the triangles it needs |
+| Quads | Preserved through every verb | **None.** Triangles, and the export derives no pairing |
+| Best for | An imported retopologised model whose UVs and edge flow are paid for | Free-form blocking out, where the form is not settled |
+| Undo | `VertexDeltas` — positions, normals, colours | `TopologyDelta` — connectivity too |
+
+**A caller converts into an adaptive surface deliberately.** It is never a mode
+the fixed sculptor slips into, and that is what keeps a mesh layer worth holding
+after a retopology pass.
+
+### What it costs
+
+A half-edge surface with stable handles costs several times a flat mesh per
+triangle: four pools of records, two half-edges per edge, and no compaction on
+erase. `DynamicSurface::bytes()` reports it, and `dead_slots` says how much of
+it is storage a session's edits left behind — a surface never compacts, so a
+long session's pools grow with its history rather than its content, and
+round-tripping through `to_mesh`/`from_mesh` is how a host reclaims that.
+
+**In time, a dab costs its footprint and not the model.** That is the property
+the whole mode depends on — a sculptor works on a model too big to redraw, so a
+stamp that scales with the surface is unusable however correct it is. Measured
+on a flat patch at a fixed tessellation density, with the same brush at every
+size, so the only thing changing is how much surface surrounds the dab:
+
+| Faces | Dab, topology on | Dab, topology off |
+|-------|------------------|-------------------|
+| 100k | 1.41 ms | 0.33 ms |
+| 1M | 1.94 ms | 1.26 ms |
+| 5M | 3.43 ms | 2.47 ms |
+
+A 50x model is a 2.4x dab. Note which fixture that is: subdividing a
+fixed-radius sphere for each size would make the surface FINER, so a
+fixed-radius brush would legitimately cover quadratically more faces, and the
+resulting curve would say nothing about locality. This is a flat patch at fixed
+spacing, where only the surrounding surface grows — `BM_DynamicStamp` in
+`benchmarks/bench_main.cpp`, on a 24-core x86 box.
+
+Conversion is not local and is not meant to be: `from_mesh` on 320k faces is a
+few hundred milliseconds and on 5M it is seconds, which is why it is a
+deliberate one-off and not a mode a host toggles per stroke.
+
+### The three parts
+
+**The operators** — split, collapse, flip. Each is ATOMIC: it decides
+completely against the untouched surface and only then writes, so a refused
+operation changes nothing at all and there is no rollback path because there is
+nothing to roll back. Each honours edge constraints itself — boundary, UV seam,
+sharp, material, user-locked — rather than trusting a caller to have filtered
+its input.
+
+Collapse has the longest refusal list because it is the dangerous one: a
+topological link-condition test, plus duplicate triangles, inversion,
+degeneracy, boundary corruption and normal flip past a threshold. The link
+condition alone is not sufficient and the tetrahedron proves it — every one of
+its edges passes, and collapsing any leaves two faces on the same three
+vertices.
+
+**The remesher** — split above `target * split_factor`, collapse below
+`target * collapse_factor`, flip toward better triangles, then relax
+tangentially.
+
+The gap between the two factors is hysteresis, and **it does not work on its
+own**: splitting halves a length, and the two thresholds are less than a factor
+of two apart, so an edge just over the split threshold becomes two just under
+the collapse one. What makes it converge is refusing a collapse whose result
+would be long enough to split again — the standard incremental-remeshing rule,
+and the reason the classic 4/3 and 4/5 factors work at all.
+
+The target is **brush-relative** by default: `radius / detail_resolution`. A
+world-unit target means an artist shrinking the brush to add detail gets the
+same triangles back; a fraction of the radius is what a sculptor means by
+"detail", and it needs no second slider.
+
+Remesh timing is **per verb, with a reason each**, because the right answer
+differs: Grab remeshes *after* (it stretches, and the stretch is what needs
+refining), Clay *before* (a deposit onto triangles too coarse to hold its shape
+is a smooth bump where the brush promised an edge), Snakehook *both*.
+
+**The chunked index** — leaves of a few hundred faces, each simultaneously the
+BVH leaf, the brush candidate set, the parallel work unit, the normal-recompute
+unit, the dirty-tracking unit and the host's upload unit. A per-face tree gives
+the first and leaves the library to invent a different granularity for each of
+the others.
+
+### Which verbs it offers
+
+Fifteen of the sixteen. **Layer is declined**, structurally rather than by
+omission: its ceiling is measured per vertex from where the surface was when the
+*stroke* began, and half the vertices under the brush at the end of an adaptive
+stroke did not exist at the start. A verb that silently became Draw for the new
+vertices and Layer for the old ones would be worse than one that says it is not
+offered.
+
+### Determinism
+
+The same verbs on the same input give the same surface, connectivity included.
+That is not a consequence of single-threading — it is an ordering rule: every
+candidate set is **sorted by stable slot id** before any operator runs. A
+spatial query returns faces in the tree's traversal order, the tree's shape
+depends on the history of edits, and a remesher that split them in that order
+would give a different surface for a differently-edited but identical input.
+
+### What a host is told
+
+Three revisions — topology, geometry, attributes — advancing independently, so
+an index buffer is re-uploaded only when connectivity changed. A stamp reports
+the chunks it touched, and chunk data is **copied into caller-owned buffers**
+behind a capacity query: a mutation can move or free anything, so a borrowed
+pointer held across one would be a use-after-free with no generation to check.
+
+Runnable: [`examples/66_dynamic_topology.py`](../examples/66_dynamic_topology.py)
+— a 1,200-triangle sphere becomes a nose, an ear and a horn, with the locality
+of the refinement measured rather than illustrated.
+
+---
+
 ## 8a. The brush model — how this vocabulary is organised
 
 Read this before the ZBrush map below, because it is the answer to the question

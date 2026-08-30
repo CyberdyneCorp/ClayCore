@@ -998,6 +998,121 @@ do {
     clay_mesh_destroy(boxMesh)
 }
 
+// -- adaptive topology -------------------------------------------------------
+//
+// The dynamic surface across the ABI from Swift, which is the platform this
+// exists to serve. Only the shape of the surface is checked here — the maths is
+// covered in C++ — but the shape is what a host actually touches: opaque
+// handles, descriptors with struct_size, and a chunk transport into memory the
+// caller owns.
+
+do {
+    // A small closed box, built by hand so the smoke depends on no file.
+    let boxPositions: [Float] = [
+        -1, -1, -1,  1, -1, -1,  1,  1, -1, -1,  1, -1,
+        -1, -1,  1,  1, -1,  1,  1,  1,  1, -1,  1,  1,
+    ]
+    let boxIndices: [UInt32] = [
+        0, 2, 1, 0, 3, 2,  4, 5, 6, 4, 6, 7,
+        0, 1, 5, 0, 5, 4,  2, 3, 7, 2, 7, 6,
+        1, 2, 6, 1, 6, 5,  0, 4, 7, 0, 7, 3,
+    ]
+    var mesh: OpaquePointer? = nil
+    boxPositions.withUnsafeBufferPointer { p in
+        boxIndices.withUnsafeBufferPointer { i in
+            check(clay_mesh_from_triangles(p.baseAddress, 8, i.baseAddress, 36, &mesh) == CLAY_OK,
+                  "built a box mesh for the adaptive surface")
+        }
+    }
+
+    var surface: OpaquePointer? = nil
+    var buildError: Int32 = -1
+    check(clay_dynamic_surface_from_mesh(mesh, nil, &surface, &buildError) == CLAY_OK,
+          "converted a mesh into an adaptive surface")
+    check(buildError == Int32(CLAY_DYNAMIC_OK.rawValue), "the conversion reported no error")
+
+    var stats = clay_dynamic_surface_stats()
+    stats.struct_size = UInt32(MemoryLayout<clay_dynamic_surface_stats>.size)
+    check(clay_dynamic_surface_stats_get(surface, &stats) == CLAY_OK, "read the surface stats")
+    check(stats.faces == 12, "a box is twelve triangles")
+    check(stats.halfedges == stats.edges * 2, "every edge has two half-edges")
+    check(stats.boundary_edges == 0, "a closed box has no boundary")
+
+    var ok: Int32 = 0
+    var messageLen = 0
+    check(clay_dynamic_surface_validate(surface, &ok, nil, &messageLen) == CLAY_OK,
+          "validated the surface")
+    check(ok == 1, "every half-edge invariant holds")
+
+    var sculptor: OpaquePointer? = nil
+    check(clay_dynamic_sculptor_create(surface, &sculptor) == CLAY_OK,
+          "created an adaptive sculptor")
+
+    var brush = clay_mesh_brush_desc()
+    brush.struct_size = UInt32(MemoryLayout<clay_mesh_brush_desc>.size)
+    check(clay_mesh_brush_defaults(&brush) == CLAY_OK, "took the brush defaults")
+    brush.verb = Int32(CLAY_MESH_BRUSH_DRAW.rawValue)
+    brush.center = (0, 0, 1)
+    brush.radius = 1.2
+    brush.strength = 0.4
+
+    var topo = clay_dynamic_topology_desc()
+    topo.struct_size = UInt32(MemoryLayout<clay_dynamic_topology_desc>.size)
+    check(clay_dynamic_topology_defaults(&topo) == CLAY_OK, "took the topology defaults")
+    check(topo.split_factor > topo.collapse_factor,
+          "the defaults carry the hysteresis gap rather than leaving it to the caller")
+
+    var report = clay_dynamic_stamp_report()
+    report.struct_size = UInt32(MemoryLayout<clay_dynamic_stamp_report>.size)
+    check(clay_dynamic_sculptor_stamp(sculptor, &brush, &topo, nil, &report) == CLAY_OK,
+          "stamped the adaptive surface")
+    check(report.moved_vertices > 0, "the stamp moved something")
+    check(report.revision.topology > 0 && report.revision.geometry > 0,
+          "the report carries all three revisions")
+
+    // LAYER is declined rather than silently becoming something else.
+    var layerBrush = brush
+    layerBrush.verb = Int32(CLAY_MESH_BRUSH_LAYER.rawValue)
+    check(clay_dynamic_sculptor_stamp(sculptor, &layerBrush, &topo, nil, nil)
+              == CLAY_ERROR_INVALID_ARGUMENT,
+          "an adaptive surface refuses the one verb it does not offer")
+
+    // The chunk transport, into memory Swift owns. No borrowed pointers into
+    // the surface: a mutation can move or free anything.
+    let chunks = clay_dynamic_surface_chunk_count(sculptor)
+    check(chunks > 0, "the surface is partitioned into chunks")
+    var info = clay_dynamic_chunk_info()
+    info.struct_size = UInt32(MemoryLayout<clay_dynamic_chunk_info>.size)
+    check(clay_dynamic_surface_copy_chunk(sculptor, 0, nil, 0, nil, 0, nil, 0, &info) == CLAY_OK,
+          "the capacity query answers without writing")
+    check(info.vertex_count > 0, "the chunk reports what it needs")
+
+    var positions = [Float](repeating: 0, count: Int(info.vertex_count) * 3)
+    var indices = [UInt32](repeating: 0, count: Int(info.index_count))
+    var written = clay_dynamic_chunk_info()
+    written.struct_size = UInt32(MemoryLayout<clay_dynamic_chunk_info>.size)
+    positions.withUnsafeMutableBufferPointer { p in
+        indices.withUnsafeMutableBufferPointer { i in
+            check(clay_dynamic_surface_copy_chunk(sculptor, 0, p.baseAddress, p.count,
+                                                  nil, 0, i.baseAddress, i.count, &written)
+                      == CLAY_OK,
+                  "copied a chunk into caller-owned buffers")
+        }
+    }
+    check(written.vertex_count == info.vertex_count, "the copy filled what the query promised")
+
+    var exported: OpaquePointer? = nil
+    check(clay_dynamic_surface_to_mesh(surface, &exported) == CLAY_OK,
+          "exported the adaptive surface back to a mesh")
+    check(clay_mesh_quad_count(exported) == 0,
+          "a dynamic surface is triangles and derives no quads")
+    clay_mesh_destroy(exported)
+
+    clay_dynamic_sculptor_destroy(sculptor)
+    clay_dynamic_surface_destroy(surface)
+    clay_mesh_destroy(mesh)
+}
+
 // -- result ------------------------------------------------------------------
 
 print("\n\(checks - failures)/\(checks) checks passed")

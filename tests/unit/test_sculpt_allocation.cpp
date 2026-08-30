@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "clay/mesh/sculpt.h"
+#include "clay/mesh/topology_ops.h"
 
 using namespace clay;
 using namespace clay::kernel;
@@ -41,14 +42,22 @@ namespace {
 
 std::atomic<bool> g_counting{false};
 std::atomic<std::size_t> g_allocations{0};
+// Bytes as well as count, because the two catch different defects. A sweep of
+// the whole surface into a vector is ONE allocation however big the surface is;
+// only its size gives it away.
+std::atomic<std::size_t> g_bytes{0};
 
 // A scope that counts. Deliberately narrow: the count has to cover one stamp
 // and nothing around it, or a fixture's own allocations would drown the signal.
 struct CountingScope {
     std::size_t before;
-    CountingScope() : before(g_allocations.load()) { g_counting.store(true); }
+    std::size_t before_bytes;
+    CountingScope() : before(g_allocations.load()), before_bytes(g_bytes.load()) {
+        g_counting.store(true);
+    }
     ~CountingScope() { g_counting.store(false); }
     std::size_t count() const { return g_allocations.load() - before; }
+    std::size_t bytes() const { return g_bytes.load() - before_bytes; }
 };
 
 Mesh plane_grid(int n, float half) {
@@ -132,6 +141,7 @@ std::size_t allocations_for_warm_stamp(MeshBrush verb, bool with_colors, bool wi
 // find before a human does.
 void* operator new(std::size_t n) {
     if (g_counting.load()) g_allocations.fetch_add(1);
+    if (g_counting.load()) g_bytes.fetch_add(n);
     void* p = std::malloc(n ? n : 1);
     if (!p) throw std::bad_alloc();
     return p;
@@ -139,6 +149,7 @@ void* operator new(std::size_t n) {
 void* operator new[](std::size_t n) { return ::operator new(n); }
 void* operator new(std::size_t n, const std::nothrow_t&) noexcept {
     if (g_counting.load()) g_allocations.fetch_add(1);
+    if (g_counting.load()) g_bytes.fetch_add(n);
     return std::malloc(n ? n : 1);
 }
 void* operator new[](std::size_t n, const std::nothrow_t&) noexcept {
@@ -207,4 +218,119 @@ TEST_CASE("allocation gate: the counter is discriminating") {
     std::vector<int> v;
     v.reserve(1024);
     CHECK(scope.count() > 0);
+}
+
+// -- the topology operators must not read the whole surface -------------------
+
+namespace {
+
+// A patch at FIXED spacing: `n` grows the surface's extent, not its density, so
+// an operator run in the middle of it has an identical neighbourhood at every
+// size and the only thing that changes is how much surface surrounds it.
+mesh::Mesh flat_patch(int n, float spacing) {
+    mesh::Mesh m;
+    const float half = spacing * static_cast<float>(n) * 0.5f;
+    for (int z = 0; z <= n; ++z)
+        for (int x = 0; x <= n; ++x)
+            m.positions.push_back(cf3(-half + spacing * static_cast<float>(x), 0.0f,
+                                      -half + spacing * static_cast<float>(z)));
+    const std::uint32_t stride = static_cast<std::uint32_t>(n + 1);
+    for (int z = 0; z < n; ++z)
+        for (int x = 0; x < n; ++x) {
+            const std::uint32_t a =
+                static_cast<std::uint32_t>(z) * stride + static_cast<std::uint32_t>(x);
+            const std::uint32_t b = a + 1, c = a + stride, d = c + 1;
+            m.indices.insert(m.indices.end(), {a, c, b, b, c, d});
+        }
+    return m;
+}
+
+// The edge at the middle of the patch, whichever slot currently holds it.
+//
+// Re-found each round rather than cached, because a collapse retires the handle
+// the previous round used.
+bool middle_edge(const mesh::DynamicSurface& surface, std::uint32_t vertex, mesh::EdgeId* out) {
+    bool found = false;
+    surface.edges().for_each_live([&](mesh::EdgeId id, const mesh::DynamicEdge&) {
+        if (found || surface.is_boundary_edge(id)) return;
+        if (surface.origin_of(surface.halfedge_of(id)).slot == vertex) {
+            *out = id;
+            found = true;
+        }
+    });
+    return found;
+}
+
+// One split-then-collapse round in the middle of the patch. Returns false if
+// either operator was refused, so a size that cannot run the experiment fails
+// loudly rather than reporting zero bytes.
+bool split_collapse_round(mesh::DynamicSurface& surface, std::uint32_t vertex) {
+    mesh::EdgeId target;
+    if (!middle_edge(surface, vertex, &target)) return false;
+    const mesh::SplitResult split = mesh::split_edge(surface, target);
+    if (split.result != mesh::TopologyResult::Ok) return false;
+    // Collapse one of the new midpoint's edges, undoing the round's growth so
+    // the pools stay the same size across rounds.
+    std::vector<mesh::HalfEdgeId> ring;
+    if (!surface.outgoing_halfedges(split.vertex, &ring) || ring.empty()) return false;
+    for (mesh::HalfEdgeId h : ring)
+        if (mesh::collapse_edge(surface, surface.edge_of(h)).result == mesh::TopologyResult::Ok)
+            return true;
+    return false;
+}
+
+// The bytes one warm split-and-collapse round asks for.
+//
+// WARM, for the reason every other measurement in this file is warm. A pool
+// that has never grown reallocates its whole backing vector on the first
+// `create`, and `from_mesh` reserves an exact fit — so the very first split at
+// any size is charged for the entire surface, which is amortised vector growth
+// and not the property under test. After a few rounds the retired slots are on
+// the free list and a round reuses them.
+std::size_t bytes_for_warm_split_and_collapse(int n) {
+    auto surface = mesh::DynamicSurface::from_mesh(flat_patch(n, 0.02f));
+    REQUIRE(surface.has_value());
+    const auto middle = static_cast<std::uint32_t>(n / 2);
+    const auto stride = static_cast<std::uint32_t>(n + 1);
+    const std::uint32_t vertex = middle * stride + middle;
+
+    for (int i = 0; i < 8; ++i) REQUIRE(split_collapse_round(*surface, vertex));
+
+    CountingScope scope;
+    const bool ok = split_collapse_round(*surface, vertex);
+    const std::size_t bytes = scope.bytes();
+    REQUIRE(ok);
+    return bytes;
+}
+
+}  // namespace
+
+TEST_CASE("allocation gate: a topology operator's cost does not follow the surface") {
+    // THE REGRESSION FOR A DEFECT NO CORRECTNESS TEST COULD SEE, and none did.
+    //
+    // `split_edge` and `collapse_edge` each need to re-seat the outgoing handle
+    // on a handful of vertices, and each has to hand `reseat_outgoing` some
+    // live half-edges to choose from. The first version of both got that list
+    // by sweeping EVERY LIVE HALF-EDGE in the surface. It is correct — the
+    // right half-edges are certainly in there — the whole suite passed on it,
+    // and the scaling test in `test_dynamic_scale.cpp` passed on it too,
+    // because that test measures what a stamp TOUCHES and a stamp that reads a
+    // million half-edges to find four still touches four.
+    //
+    // Only the clock knew: on a 320k-face patch a stamp took 750 ms against
+    // 1.3 ms on a 20k one, at an identical brush footprint. A wall-clock
+    // assertion is not something this suite can carry, so the property is
+    // asserted here instead, in the quantity that actually grew — the bytes the
+    // operator asks for. Sweeping the surface allocates in proportion to it;
+    // naming the neighbourhood does not.
+    const std::size_t small = bytes_for_warm_split_and_collapse(40);   // ~3.2k faces
+    const std::size_t large = bytes_for_warm_split_and_collapse(200);  // ~80k faces
+    CAPTURE(small);
+    CAPTURE(large);
+
+    // Twenty-five times the surface. An operator whose appetite follows the
+    // surface shows up as roughly that ratio; one that does not is flat. The
+    // bound is generous on purpose — this is testing an ASYMPTOTE, and a future
+    // change that adds a fixed buffer should not have to edit a number.
+    CHECK(large < small * 2 + 4096);
 }

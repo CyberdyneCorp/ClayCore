@@ -137,3 +137,65 @@ changes no existing signature.
   already computes.
 - Whether the remesher's relax pass is the existing `Relax` kernel applied to a
   mutable surface or a tangential smoothing of its own.
+
+---
+
+## Decisions taken at implementation (section 1 of the tasks)
+
+### D9 — The HOST owns a dynamic surface; the document does not, yet
+
+Engine types now, document ownership as its own change. `DynamicSurface` is
+constructed from a `mesh::Mesh`, sculpted, and exported back at explicit
+boundaries; nothing in `scene` or `io` learns about it in this change.
+
+The reason is not caution for its own sake. Owning one from a mesh layer means
+a new `LayerKind` payload, a `.clayspace` chunk and a format minor, and the
+format decision that comes with it — whether a saved dynamic surface stores
+its half-edge structure or re-imports from triangles on load — is a decision
+about a representation nobody has sculpted with yet. The serialization in
+section 8 exists so that decision has a format to reach for when it is taken;
+it is not wired into the document here.
+
+### D10 — Determinism is an ordering rule over stable ids
+
+Already D5 in principle; this states the mechanism the code uses. Every place
+that gathers candidate edges or faces for a topology operation SORTS them by
+their stable slot index before running a single operator. Not by pointer, not
+by hash-map order, not by the order a spatial query returned them — the query's
+order depends on the tree's shape, and the tree's shape depends on the history
+of edits.
+
+The fixed sculptor already learned this in the small: `MeshSculptor::gather`
+sorts the euclidean region's class list precisely so that a stamp does not
+depend on whether the host happened to have built a BVH. The same reasoning at
+a larger scale is that a remesher's SEQUENCE of operations is observable in the
+final connectivity, so the sequence has to be a function of the input alone.
+
+### D11 — A dynamic surface is triangles, and export re-derives no quads
+
+`to_mesh` writes `quads` empty and the documentation says so at the boundary.
+
+Re-deriving quads would be a pairing heuristic — two triangles sharing an edge
+whose union is convex enough — and a heuristic is exactly the wrong thing here:
+the quad export is what the retopology pipeline downstream consumes, and a
+pipeline fed heuristic quads that vary with the sculpt is worse off than one
+told plainly that this representation is triangles. A caller who wants quads
+retopologises, which is what `add-sculpt-handoff-export` already serves.
+
+### D12 — Collapse places at the MIDPOINT, and constraints win over geometry
+
+For P0:
+
+- both endpoints unconstrained → the midpoint;
+- exactly one endpoint constrained (boundary, seam, sharp, user-locked) → the
+  constrained endpoint's position, so the feature does not move;
+- both endpoints constrained → **refused**, unless the edge itself carries the
+  same constraint, in which case it collapses ALONG the feature to the
+  midpoint and the feature keeps its shape.
+
+The quadric the offline decimator computes is not used. It answers "where does
+this vertex go to minimise error against the ORIGINAL surface", which is the
+right question for a one-shot simplification and the wrong one under a brush:
+the original surface is the thing being deliberately changed, and a placement
+that resists that is a placement that fights the artist. The open question
+stays open for a future decimation-quality pass over a finished sculpt.

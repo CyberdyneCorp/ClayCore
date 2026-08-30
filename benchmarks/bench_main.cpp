@@ -17,6 +17,7 @@
 #include "clay.h"
 #include "clay_internal.h"
 #include "clay/brick/cache.h"
+#include "clay/mesh/dynamic_sculpt.h"
 #include "clay/brush/move.h"
 #include "clay/eval/backend.h"
 #include "clay/eval/bake_points.h"
@@ -3968,6 +3969,124 @@ BENCHMARK(BM_CAbiSmoothPreviewFullSnapshot)->Unit(benchmark::kMillisecond)->Iter
 
 void BM_CAbiSmoothPreviewDelta(benchmark::State& state) { abi_preview(state, true); }
 BENCHMARK(BM_CAbiSmoothPreviewDelta)->Unit(benchmark::kMillisecond)->Iterations(200);
+
+// -- adaptive topology: the scaling gate --------------------------------------
+//
+// THE CLAIM THESE MEASURE, and it is the one that decides whether this feature
+// is usable at all: for a FIXED brush footprint, the stamp cost stays in one
+// band as the surface grows across orders of magnitude. A 50x model must not be
+// a 50x stamp.
+//
+// Run these at the three sizes the requirement names — 100k, 1M and 5M
+// triangles — and compare the per-stamp times. The unit test alongside them
+// asserts the band at smaller sizes so it can run in CI; these are where the
+// real numbers come from.
+
+namespace {
+
+// A GRID AT FIXED SPACING. `n` grows the model's EXTENT, not its density.
+//
+// The obvious fixture — subdivide a unit sphere further for each size — is the
+// wrong one, and measuring with it is how the O(surface) cost in the topology
+// operators stayed hidden. Subdividing a fixed-radius sphere makes the surface
+// finer, so a brush of fixed world radius covers quadratically more faces: the
+// stamp does more work because it was ASKED to, and a rising curve says nothing
+// about whether the cost is local. Here the triangles are the same size at
+// every `n`, so a fixed-radius brush covers the same face count in all three
+// rows and the only thing that changes is how much surface it is embedded in.
+// That is the question the scaling gate asks.
+clay::mesh::Mesh bench_surface_patch(int n, float spacing) {
+    using namespace clay;
+    using namespace clay::kernel;
+    mesh::Mesh m;
+    const float half = spacing * static_cast<float>(n) * 0.5f;
+    for (int z = 0; z <= n; ++z)
+        for (int x = 0; x <= n; ++x)
+            m.positions.push_back(cf3(-half + spacing * static_cast<float>(x), 0.0f,
+                                      -half + spacing * static_cast<float>(z)));
+    const std::uint32_t stride = static_cast<std::uint32_t>(n + 1);
+    for (int z = 0; z < n; ++z)
+        for (int x = 0; x < n; ++x) {
+            const std::uint32_t a =
+                static_cast<std::uint32_t>(z) * stride + static_cast<std::uint32_t>(x);
+            const std::uint32_t b = a + 1, c = a + stride, d = c + 1;
+            m.indices.insert(m.indices.end(), {a, c, b, b, c, d});
+        }
+    return m;
+}
+
+}  // namespace
+
+// `state.range(0)` is the patch's side in quads: 2 * n^2 triangles, so 224 is
+// ~100k, 707 is ~1M and 1581 is ~5M. The brush footprint is identical in all
+// three; only the surface around it grows.
+void BM_DynamicStamp(benchmark::State& state) {
+    using namespace clay;
+    using namespace clay::kernel;
+    const int n = static_cast<int>(state.range(0));
+    auto surface = mesh::DynamicSurface::from_mesh(bench_surface_patch(n, 0.02f));
+    if (!surface) {
+        state.SkipWithError("could not build the surface");
+        return;
+    }
+    mesh::DynamicSculptor sculptor(*surface);
+
+    mesh::MeshBrushSettings brush;
+    brush.radius = 0.12f;  // a FIXED footprint, whatever the model's size
+    brush.strength = 0.2f;
+    mesh::DynamicTopologySettings topo;
+    topo.detail_mode = mesh::DynamicDetailMode::BrushRelative;
+    topo.detail_resolution = 4.0f;
+
+    int i = 0;
+    for (auto _ : state) {
+        brush.center = cf3(0.02f * static_cast<float>(i % 5) - 0.04f, 0.0f, 0.0f);
+        sculptor.stamp(mesh::MeshBrush::Draw, brush, topo);
+        ++i;
+    }
+    state.counters["faces"] = static_cast<double>(surface->stats().faces);
+    state.counters["bytes_per_face"] =
+        static_cast<double>(surface->bytes()) / static_cast<double>(surface->stats().faces);
+}
+BENCHMARK(BM_DynamicStamp)
+    ->Arg(224)   // ~100k triangles
+    ->Arg(707)   // ~1M
+    ->Arg(1581)  // ~5M
+    ->Unit(benchmark::kMillisecond)
+    ->Iterations(20);
+
+// The same stamp with topology OFF, so the deformation and the remesh can be
+// told apart rather than reported as one number.
+void BM_DynamicStampNoTopology(benchmark::State& state) {
+    using namespace clay;
+    using namespace clay::kernel;
+    const int n = static_cast<int>(state.range(0));
+    auto surface = mesh::DynamicSurface::from_mesh(bench_surface_patch(n, 0.02f));
+    if (!surface) {
+        state.SkipWithError("could not build the surface");
+        return;
+    }
+    mesh::DynamicSculptor sculptor(*surface);
+    mesh::MeshBrushSettings brush;
+    brush.radius = 0.12f;
+    brush.strength = 0.2f;
+    mesh::DynamicTopologySettings topo;
+    topo.enabled = false;
+
+    int i = 0;
+    for (auto _ : state) {
+        brush.center = cf3(0.02f * static_cast<float>(i % 5) - 0.04f, 0.0f, 0.0f);
+        sculptor.stamp(mesh::MeshBrush::Draw, brush, topo);
+        ++i;
+    }
+    state.counters["faces"] = static_cast<double>(surface->stats().faces);
+}
+BENCHMARK(BM_DynamicStampNoTopology)
+    ->Arg(224)   // ~100k triangles
+    ->Arg(707)   // ~1M
+    ->Arg(1581)  // ~5M
+    ->Unit(benchmark::kMillisecond)
+    ->Iterations(20);
 
 // Resident uploaded tapes (accel/metal-persistent): the Metal backend keeps
 // the uploaded form of recent tapes resident, keyed on the process-unique

@@ -51,6 +51,10 @@ CLASS_PREFIX = {
     # functions, so a field is satisfied by the call that carries the whole
     # descriptor — the same reading StrokePreset's own scalar fields get.
     "BrushPreset": ("clay_brush_preset_",),
+    # Adaptive topology (add-dynamic-topology).
+    "DynamicSurface": ("clay_dynamic_surface_",),
+    "DynamicSculptor": ("clay_dynamic_sculptor_", "clay_dynamic_surface_"),
+    "TopologySettings": ("clay_dynamic_topology_",),
     "BrushModel": ("clay_brush_model_",),
     "AutomaskSettings": ("clay_automask_",),
     "MeshBrushSettings": ("clay_mesh_brush_",),
@@ -96,6 +100,7 @@ CLASS_ENUM_PREFIX = {
     "Prim": "CLAY_DEFORM_",  # the deformer chain; the rest falls to the prefixes
     # The brush model's axes (add-shared-brush-kernels). Each is an enumerator
     # on the C side, spelled the same way the Python member is.
+    "DetailMode": "CLAY_DETAIL_",
     "BrushFootprint": "CLAY_BRUSH_FOOTPRINT_",
     "BrushFrame": "CLAY_BRUSH_FRAME_",
     "BrushKernel": "CLAY_BRUSH_KERNEL_",
@@ -165,6 +170,28 @@ ALIASES = {
     "BrushPreset.serialize": "clay_brush_preset_serialize",
     "BrushPreset.deserialize": "clay_brush_preset_deserialize",
     "MeshSculptor.apply_preset": "clay_mesh_sculptor_apply_preset",
+    # The surface's counts and revisions all cross through the two report
+    # descriptors rather than as one call each — the same reading StrokePreset's
+    # scalar fields already get.
+    "DynamicSurface.from_mesh": "clay_dynamic_surface_from_mesh",
+    "DynamicSurface.to_mesh": "clay_dynamic_surface_to_mesh",
+    "DynamicSurface.validate": "clay_dynamic_surface_validate",
+    "DynamicSurface.serialize": "clay_dynamic_surface_serialize",
+    "DynamicSurface.deserialize": "clay_dynamic_surface_deserialize",
+    "DynamicSurface.vertex_count": "clay_dynamic_surface_stats_get",
+    "DynamicSurface.edge_count": "clay_dynamic_surface_stats_get",
+    "DynamicSurface.face_count": "clay_dynamic_surface_stats_get",
+    "DynamicSurface.boundary_edge_count": "clay_dynamic_surface_stats_get",
+    "DynamicSurface.dead_slots": "clay_dynamic_surface_stats_get",
+    "DynamicSurface.bytes": "clay_dynamic_surface_stats_get",
+    "DynamicSurface.topology_revision": "clay_dynamic_surface_revision",
+    "DynamicSurface.geometry_revision": "clay_dynamic_surface_revision",
+    "DynamicSurface.attribute_revision": "clay_dynamic_surface_revision",
+    "DynamicSculptor.stamp": "clay_dynamic_sculptor_stamp",
+    "DynamicSculptor.rebuild_index": "clay_dynamic_sculptor_rebuild_index",
+    "DynamicSculptor.chunk_count": "clay_dynamic_surface_chunk_count",
+    "DynamicSculptor.dirty_chunks": "clay_dynamic_surface_dirty_chunks",
+    "DynamicSculptor.clear_dirty": "clay_dynamic_surface_clear_dirty",
     "BrushModel.of": "clay_brush_model_of",
     "BrushModel.verb": "clay_brush_model_of",
     "BrushModel.footprint": "clay_brush_model_of",
@@ -173,6 +200,22 @@ ALIASES = {
     "BrushModel.kernel": "clay_brush_model_of",
     "BrushModel.target": "clay_brush_model_of",
     "BrushModel.post": "clay_brush_model_of",
+    "TopologySettings.enabled": "clay_dynamic_topology_defaults",
+    "TopologySettings.detail_mode": "clay_dynamic_topology_defaults",
+    "TopologySettings.target_edge_length": "clay_dynamic_topology_defaults",
+    "TopologySettings.detail_resolution": "clay_dynamic_topology_defaults",
+    "TopologySettings.split_factor": "clay_dynamic_topology_defaults",
+    "TopologySettings.collapse_factor": "clay_dynamic_topology_defaults",
+    "TopologySettings.max_passes": "clay_dynamic_topology_defaults",
+    "TopologySettings.max_ops_per_stamp": "clay_dynamic_topology_defaults",
+    "TopologySettings.allow_split": "clay_dynamic_topology_defaults",
+    "TopologySettings.allow_collapse": "clay_dynamic_topology_defaults",
+    "TopologySettings.allow_flip": "clay_dynamic_topology_defaults",
+    "TopologySettings.relax_after_remesh": "clay_dynamic_topology_defaults",
+    "TopologySettings.relax_strength": "clay_dynamic_topology_defaults",
+    "TopologySettings.preserve_boundaries": "clay_dynamic_topology_defaults",
+    "TopologySettings.preserve_uv_seams": "clay_dynamic_topology_defaults",
+    "TopologySettings.preserve_sharp_edges": "clay_dynamic_topology_defaults",
     "AutomaskSettings.factors": "clay_mesh_brush_defaults",
     "AutomaskSettings.normal_angle": "clay_mesh_brush_defaults",
     "AutomaskSettings.boundary_rings": "clay_mesh_brush_defaults",
@@ -252,6 +295,10 @@ CLASS_CTOR = {
     "AutomaskFactor": None,
     "StrokePreset": "clay_stroke_preset_defaults",
     "BrushPreset": "clay_brush_preset_defaults",
+    "DynamicSurface": "clay_dynamic_surface_from_mesh",
+    "DynamicSculptor": "clay_dynamic_sculptor_create",
+    "TopologySettings": "clay_dynamic_topology_defaults",
+    "DetailMode": None,
     "BrushModel": "clay_brush_model_of",
     # Value types carried INSIDE another descriptor rather than built on their
     # own: a host fills clay_brush_preset.brush and its automask block, so the

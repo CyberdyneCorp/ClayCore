@@ -20,6 +20,8 @@
 #include "clay/brush/lattice_gizmo.h"
 #include "clay/brush/move.h"
 #include "clay/brush/preset.h"
+#include "clay/mesh/dynamic_sculpt.h"
+#include "clay/mesh/dynamic_validate.h"
 #include "clay/brush/stroke.h"
 #include "clay/brush/tube.h"
 #include "clay/cut/cut.h"
@@ -5857,6 +5859,206 @@ NB_MODULE(pyclay, m) {
                "each stamp applies at its own strength; passing twice acts twice")
         .value("CLAMPED", brush::Accumulation::Clamped,
                "the stroke reaches its strength once, however many stamps overlap");
+
+    // -- adaptive topology ----------------------------------------------------
+    nb::enum_<mesh::DynamicDetailMode>(
+        m, "DetailMode",
+        "Where a remesher's target edge length comes from.")
+        .value("WORLD", mesh::DynamicDetailMode::World, "target_edge_length in world units")
+        .value("BRUSH_RELATIVE", mesh::DynamicDetailMode::BrushRelative,
+               "radius / detail_resolution — a smaller brush makes finer geometry")
+        .value("CONSTANT", mesh::DynamicDetailMode::Constant, "no adaptation; deformation only");
+
+    nb::class_<mesh::DynamicTopologySettings>(
+        m, "TopologySettings",
+        "How a stamp adapts the surface under it.\n\n"
+        "The gap between split_factor and collapse_factor is HYSTERESIS: with\n"
+        "one threshold an edge just above it splits into two just below it and\n"
+        "they collapse back, for as long as the brush is held still.")
+        .def(nb::init<>())
+        .def_rw("enabled", &mesh::DynamicTopologySettings::enabled)
+        .def_rw("detail_mode", &mesh::DynamicTopologySettings::detail_mode)
+        .def_rw("target_edge_length", &mesh::DynamicTopologySettings::target_edge_length)
+        .def_rw("detail_resolution", &mesh::DynamicTopologySettings::detail_resolution)
+        .def_rw("split_factor", &mesh::DynamicTopologySettings::split_factor)
+        .def_rw("collapse_factor", &mesh::DynamicTopologySettings::collapse_factor)
+        .def_rw("max_passes", &mesh::DynamicTopologySettings::max_passes)
+        .def_rw("max_ops_per_stamp", &mesh::DynamicTopologySettings::max_ops_per_stamp,
+                "a bound a host sets, so detail can be traded for latency")
+        .def_rw("allow_split", &mesh::DynamicTopologySettings::allow_split)
+        .def_rw("allow_collapse", &mesh::DynamicTopologySettings::allow_collapse)
+        .def_rw("allow_flip", &mesh::DynamicTopologySettings::allow_flip)
+        .def_rw("relax_after_remesh", &mesh::DynamicTopologySettings::relax_after_remesh)
+        .def_rw("relax_strength", &mesh::DynamicTopologySettings::relax_strength)
+        .def_rw("preserve_boundaries", &mesh::DynamicTopologySettings::preserve_boundaries)
+        .def_rw("preserve_uv_seams", &mesh::DynamicTopologySettings::preserve_uv_seams)
+        .def_rw("preserve_sharp_edges", &mesh::DynamicTopologySettings::preserve_sharp_edges);
+
+    nb::class_<mesh::DynamicSurface>(
+        m, "DynamicSurface",
+        "A surface whose CONNECTIVITY changes under the brush: geometry is\n"
+        "created where a stroke needs it and removed where it does not.\n\n"
+        "A DIFFERENT REPRESENTATION, chosen deliberately, never a mode the\n"
+        "fixed sculptor slips into — MeshSculptor's contract that indices and\n"
+        "quads come out byte-identical is unchanged.\n\n"
+        "A dynamic surface is TRIANGLES. to_mesh() writes no quads and derives\n"
+        "none: a quad workflow does not pass through this representation.")
+        .def_static(
+            "from_mesh",
+            [](const PyMesh& handle, float weld_epsilon, float uv_seam_epsilon) {
+                const mesh::Mesh& src = handle.data();
+                mesh::DynamicSurfaceBuildOptions options;
+                if (weld_epsilon > 0.0f) options.weld_epsilon = weld_epsilon;
+                if (uv_seam_epsilon > 0.0f) options.uv_seam_epsilon = uv_seam_epsilon;
+                mesh::DynamicBuildError err = mesh::DynamicBuildError::None;
+                auto built = mesh::DynamicSurface::from_mesh(src, options, &err);
+                if (!built) {
+                    const char* what = "a dynamic surface cannot be built from this mesh";
+                    switch (err) {
+                        case mesh::DynamicBuildError::EmptyMesh:
+                            what = "empty mesh, or an index count not a multiple of three";
+                            break;
+                        case mesh::DynamicBuildError::IndexOutOfRange:
+                            what = "a triangle index is past the end of the positions";
+                            break;
+                        case mesh::DynamicBuildError::DegenerateTriangle:
+                            what = "a triangle whose corners weld together has no area";
+                            break;
+                        case mesh::DynamicBuildError::NonManifoldEdge:
+                            what =
+                                "three or more faces on one edge; a half-edge surface cannot "
+                                "express it";
+                            break;
+                        default:
+                            break;
+                    }
+                    throw std::invalid_argument(what);
+                }
+                return std::move(*built);
+            },
+            "mesh"_a, "weld_epsilon"_a = 0.0f, "uv_seam_epsilon"_a = 0.0f,
+            "Convert a mesh. Refuses rather than repairs: silently dropping a\n"
+            "third face on an edge would change the model without saying so.")
+        .def("to_mesh",
+             [](const mesh::DynamicSurface& s) {
+                 PyMesh out;
+                 out.m = s.to_mesh();
+                 return out;
+             },
+             "The surface as a flat mesh. Triangles, with quads empty.")
+        .def_prop_ro("vertex_count",
+                     [](const mesh::DynamicSurface& s) { return s.stats().vertices; })
+        .def_prop_ro("edge_count", [](const mesh::DynamicSurface& s) { return s.stats().edges; })
+        .def_prop_ro("face_count", [](const mesh::DynamicSurface& s) { return s.stats().faces; })
+        .def_prop_ro("boundary_edge_count",
+                     [](const mesh::DynamicSurface& s) { return s.stats().boundary_edges; })
+        .def_prop_ro("dead_slots",
+                     [](const mesh::DynamicSurface& s) { return s.stats().dead_slots; })
+        .def_prop_ro("bytes", [](const mesh::DynamicSurface& s) { return s.bytes(); })
+        .def_prop_ro("topology_revision", &mesh::DynamicSurface::topology_revision,
+                     "advances when connectivity changed")
+        .def_prop_ro("geometry_revision", &mesh::DynamicSurface::geometry_revision,
+                     "advances when a vertex moved")
+        .def_prop_ro("attribute_revision", &mesh::DynamicSurface::attribute_revision)
+        .def("validate",
+             [](const mesh::DynamicSurface& s) {
+                 const mesh::DynamicValidationReport r = mesh::validate_dynamic_surface(s);
+                 nb::dict out;
+                 out["ok"] = r.ok;
+                 out["summary"] = r.summary();
+                 return out;
+             },
+             "Every invariant of the half-edge structure. The failure mode here\n"
+             "is a surface that still renders and is quietly wrong in one fan,\n"
+             "so this is a call rather than something only a test does.")
+        .def("serialize",
+             [](const mesh::DynamicSurface& s) {
+                 std::vector<std::uint8_t> bytes = s.encode();
+                 return nb::bytes(bytes.data(), bytes.size());
+             },
+             "A versioned format of its own; generations are preserved.")
+        .def_static("deserialize",
+                    [](nb::bytes data) {
+                        mesh::DynamicSurface out;
+                        if (!mesh::DynamicSurface::decode(
+                                reinterpret_cast<const std::uint8_t*>(data.c_str()), data.size(),
+                                &out))
+                            throw std::invalid_argument(
+                                "not a dynamic surface this build can read: malformed, "
+                                "truncated, or written by a newer schema version");
+                        return out;
+                    },
+                    "data"_a);
+
+    nb::class_<mesh::DynamicSculptor>(
+        m, "DynamicSculptor",
+        "The brush engine over an adaptive surface: the same verbs, the same\n"
+        "falloffs, the same mask, and the same deformation math — the shared\n"
+        "kernels called rather than copied, so a brush means one thing on both\n"
+        "representations.\n\n"
+        "The surface must outlive the sculptor.")
+        .def("__init__",
+             [](mesh::DynamicSculptor* self, mesh::DynamicSurface& surface) {
+                 new (self) mesh::DynamicSculptor(surface);
+             },
+             "surface"_a, nb::keep_alive<1, 2>())
+        .def(
+            "stamp",
+            [](mesh::DynamicSculptor& self, const std::string& verb, nb::handle center,
+               float radius, float strength, const std::string& falloff,
+               const mesh::DynamicTopologySettings& topology, nb::handle direction,
+               nb::handle mask, bool geodesic, int smooth_iterations) {
+                mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
+                mesh::MeshBrushSettings settings = mesh_brush_settings(
+                    verb, center, radius, strength, falloff, direction, nb::none(),
+                    nb::cast(geodesic), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
+                    smooth_iterations, 0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(),
+                    &chosen);
+                if (!mesh::dynamic_offers(chosen))
+                    throw std::invalid_argument(
+                        "an adaptive surface does not offer '" + verb +
+                        "': its reference is the surface as the STROKE found it, and half the "
+                        "vertices under the brush at the end of an adaptive stroke did not "
+                        "exist at the start");
+                const voxel::MaskField* field_mask = borrow_mask(mask);
+                field::MaskGate gate;
+                if (field_mask)
+                    gate = [field_mask](kernel::cfloat3 p) { return field_mask->sample(p); };
+                mesh::DynamicStampResult r;
+                {
+                    nb::gil_scoped_release release;
+                    r = self.stamp(chosen, settings, topology, gate, nullptr);
+                }
+                nb::dict out;
+                out["moved"] = r.moved_vertices;
+                out["split"] = r.remesh.split;
+                out["collapsed"] = r.remesh.collapsed;
+                out["flipped"] = r.remesh.flipped;
+                out["relaxed"] = r.remesh.relaxed;
+                out["hit_budget"] = r.remesh.hit_budget;
+                out["topology_revision"] = r.topology_revision;
+                out["geometry_revision"] = r.geometry_revision;
+                return out;
+            },
+            "verb"_a, "center"_a, "radius"_a, "strength"_a = 0.5f, "falloff"_a = "smooth",
+            "topology"_a = mesh::DynamicTopologySettings{}, "direction"_a = nb::none(),
+            "mask"_a = nb::none(), "geodesic"_a = true, "smooth_iterations"_a = 1,
+            "One stamp: remesh where the verb's timing says, deform through the\n"
+            "shared kernels, recompute the normals of what moved, and keep the\n"
+            "chunked index in step.")
+        .def("rebuild_index", &mesh::DynamicSculptor::rebuild_index,
+             "Rebuild the chunked index. BETWEEN strokes, never mid-drag: a refit\n"
+             "stays correct and does not stay fast, and a rebuild is not\n"
+             "automatically an improvement.")
+        .def_prop_ro("chunk_count",
+                     [](const mesh::DynamicSculptor& s) { return s.bvh().leaf_count(); })
+        .def_prop_ro("dirty_chunks",
+                     [](const mesh::DynamicSculptor& s) {
+                         const std::vector<std::uint32_t>& d = s.bvh().dirty_leaves();
+                         return std::vector<std::uint32_t>(d.begin(), d.end());
+                     },
+                     "The chunks the stamps since the last clear touched.")
+        .def("clear_dirty", [](mesh::DynamicSculptor& s) { s.bvh().clear_dirty(); });
 
     // -- the brush model, and brushes as data ---------------------------------
     nb::class_<mesh::AutomaskSettings>(
