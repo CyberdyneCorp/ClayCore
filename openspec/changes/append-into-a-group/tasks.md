@@ -44,7 +44,24 @@ judged by it. See design.md, "Correction 3".
       `sdf_stroke_in_group_bricks` is UNCHANGED by this phase. A flat device
       number here is the expected result, not a failure
 
-## Phase 2 — the per-brick resume (this is what moves the gate)
+## Phase 2 — the per-brick resume (RE-SCOPED, see design.md "Correction 4")
+
+Phase 1 landed and, exactly as predicted, moved the brick path not at all:
+2.48 ms/dab against 0.043 at 1000 items, unchanged. That is the design working,
+not a failure -- and building it is what showed phase 2 to be a bigger change
+than this file first described.
+
+The per-brick resume seeds ONE value per sample. A split inside a group needs
+one per open group plus one, which reaches past the compiler into
+`eval_points_seeded`, the kernel's tape evaluation, the seed store's per-brick
+memory and byte accounting, the seed key and the eviction budget. The
+associative shortcut does not rescue it: a hard-blend group append still
+measures 1.18 ms/dab, because it needs the APPENDED node to be hard Add too
+and a sculpting dab is smooth.
+
+**Recommendation: land phase 1 and re-propose phase 2 as its own change**, with
+the kernel/eval boundary named in its impact rather than discovered in it.
+The tasks below are kept as the record of what it would take.
 
 - [ ] 2.1 The resume's split point becomes a PATH rather than a root-list
       ordinal. Today `compile_layer_prefix` takes `roots.begin() .. +count`,

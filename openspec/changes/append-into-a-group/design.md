@@ -81,6 +81,39 @@ and they are **not sufficient**: landing only those would leave
 having done nothing. That is the trap `bound-an-edit-by-the-node-it-names`
 fell into, where the win existed but was masked until the cull pad was fixed.
 
+## Correction 4: phase 2 needs the seed to become a STACK, not a path
+
+This is the one that resizes the change, and it was found by building phase 1
+and measuring what it did not move.
+
+The per-brick resume seeds ONE value per sample. `eval_points_seeded(suffix,
+pq, t.active, ...)` hands the suffix a single accumulator and the appended
+nodes combine onto it.
+
+A split inside a group needs TWO: the accumulator of the chain CONTAINING the
+group, as it stood when the group was entered, and the group's own inner chain
+so far. `compile_group` emits its combine after its children, so the resumed
+suffix has to fold the inner chain onto the outer one -- and the outer one is
+not recoverable from the seed, because the seed already has the group's old
+inner value combined into it.
+
+So the seed becomes one value per open group plus one, and that reaches past
+the compiler into `eval_points_seeded`, the kernel's tape evaluation (which
+would seed several stack values rather than one), the seed store's per-brick
+memory and byte accounting, the seed key, and the eviction budget.
+
+**The associative shortcut does not rescue it.** For a hard Add group,
+`min(O, min(C, X)) == min(min(O, C), X)`, so one seed would suffice. But that
+needs the APPENDED node's combine to be hard Add as well, and a sculpting dab
+is smooth by default -- `smin(min(O, C), X)` is not `min(O, smin(C, X))`.
+Measured: a hard-blend group append is still 1.18 ms/dab against 0.039 at 1000
+items, because it takes the full walk either way.
+
+**Phase 1 is therefore correct, complete and worth landing on its own**, and
+phase 2 is a larger change than this document originally scoped -- one that
+touches the kernel/eval boundary rather than only the compiler. It should be
+re-proposed with that boundary named, not carried here.
+
 ## What this change therefore does, in two phases
 
 **Phase 1 — the whole-document append.** `TapeCheckpoint` gains the ancestor
