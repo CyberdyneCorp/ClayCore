@@ -145,16 +145,16 @@
       it was wrong that ownership buys nothing. Not worth reworking the C side
       for, and recorded so the next person does not have to rediscover it
 
-- [x] 7.1 The undo journal read the previous cell value with a second `get(c)`
+- [x] 6.6 The undo journal read the previous cell value with a second `get(c)`
       hash probe on the write path. `write_cell` already reads it — it is the
       one place that has it — so it hands it back through an out-parameter now.
       Measured 1.26x -> 1.005x on `sculpt_smooth`
 
 ## 7. Still open after this slice
 
-- [ ] 5.8 Sculpt-layer PROPERTY changes (strength, visibility, order) are not
+- [ ] 7.1 Sculpt-layer PROPERTY changes (strength, visibility, order) are not
       steps. Their cell effect is restorable by replay, but the property value
       is not, so an undo would restore the pixels and not the setting — a
       partial undo, which is worse than none. Needs the second voxel step kind
       (3.3) and the merge-down record retention (3.4)
-- [x] 5.9 pyclay wired. The bindings agree about what undo means again
+- [x] 7.2 pyclay wired. The bindings agree about what undo means again

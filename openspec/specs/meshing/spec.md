@@ -1,7 +1,15 @@
 # meshing Specification
 
 ## Purpose
-TBD - created by archiving change add-claycore-v1. Update Purpose after archive.
+Turning a field into triangles that a DCC, an exporter or a renderer will accept
+— and stating what those triangles GUARANTEE.
+
+The default path is watertight and 2-manifold by construction rather than by
+inspection, because "usually closed" is not a property an exporter can rely on.
+Beside it are the preview, quad and dual-contouring meshers, decimation,
+validation, attribute transfer and the sculpting a mesh accepts once it exists.
+`mesh::Mesh` — flat arrays every producer and consumer shares — is defined here,
+which is why this capability is also where its invariants are written down.
 ## Requirements
 ### Requirement: Default mesher with watertight guarantee
 `clay::mesh` SHALL provide a default cell-marching mesher whose output is watertight and 2-manifold by construction, running only over surface-crossing bricks. v1 implements this with marching tetrahedra (Freudenthal 6-tet decomposition with globally consistent face diagonals — no ambiguous configurations exist, so the guarantee is structural); a table-based marching cubes with asymptotic-decider ambiguity resolution MAY replace it later as a triangle-count optimization provided the same guarantees hold. The CPU implementation is the golden reference; GPU implementations (Metal/CUDA) SHALL match its topology invariants (watertight, manifold, Euler characteristic on golden scenes) though not bit-identical vertex positions.

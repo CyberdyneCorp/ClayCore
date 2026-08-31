@@ -51,9 +51,7 @@ def fork(cell=0.014):
 def preview(mesh, cell=0.012, colour="#b0784a"):
     """Display only: a mesh layer is never evaluated, so the renderer has
     nothing to trace until something resamples it. See 36_mesh_layers."""
-    doc = clay.Document()
-    doc.add_sdf_layer("preview").add(clay.Volume.from_mesh(mesh, cell=cell), color=colour)
-    return doc
+    return R.mesh_preview_doc(mesh, cell, colour)
 
 
 def copy_of(mesh):

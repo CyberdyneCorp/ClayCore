@@ -1,7 +1,14 @@
 # scene-model Specification
 
 ## Purpose
-TBD - created by archiving change add-claycore-v1. Update Purpose after archive.
+What a document IS and what an edit to one means: layers of either kind, the
+ordered edit list an SDF layer holds, groups, instances, the per-layer transform
+and the influence bounds that keep an edit LOCAL, the tape a document compiles
+to, and the one undo history that reverses every representation through it.
+
+The layer between the arithmetic below and everything that consumes it. A
+document is the only thing a host, a file, a binding and a renderer all agree
+about, so what it is has to be stated in one place rather than assumed in five.
 ## Requirements
 ### Requirement: Document structure
 `clay::scene` SHALL model a document as a list of layers, each `voxel` or `sdf` kind, with per-layer transform, visibility, resolution, and material. SDF layers SHALL hold an ordered edit list where each item applies to the combined result of all preceding items. Groups SHALL nest to depth ≥ 4 and carry group ops (including None). Layer instancing SHALL share content by reference such that editing the source updates all instances.

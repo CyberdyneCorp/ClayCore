@@ -16,6 +16,8 @@ import zlib
 
 import numpy as np
 
+import pyclay as clay
+
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 
 # Modest by design: the renders are committed, so they must stay small.
@@ -341,6 +343,42 @@ def render_voxels(grid, name, eye=(2.6, 2.0, 3.2), target=(0.0, 0.0, 0.0),
     print(f"  wrote {os.path.relpath(path, os.path.dirname(OUTPUT_DIR))}"
           + (f"  ({caption})" if caption else ""))
     return path
+
+
+def mesh_preview_doc(mesh, cell, colour):
+    """A DISPLAY-ONLY document for a mesh, shared by every example that shows one.
+
+    A mesh layer is never evaluated, so the renderer — which raycasts a FIELD —
+    has nothing to trace against. Resampling the mesh here is exactly the
+    approximation a mesh layer exists to avoid, and it is fine for a picture and
+    wrong for the export.
+
+    IT REFUSES AN INSIDE-OUT MESH, and that guard is the whole reason this is
+    one function rather than the nine identical copies it replaced.
+
+    A closed mesh wound inward has a generalized winding number of -1 in its
+    interior rather than +1, so `is_inside` is false everywhere and
+    `Volume.from_mesh` samples a field that is POSITIVE at the centre of the
+    model. There is then no zero crossing for a ray to find: the preview comes
+    out as scattered speckle where a ray happened to graze the marcher's
+    epsilon, and nothing anywhere says why. `66_dynamic_topology` shipped like
+    that, because its assertions are about topology and never looked at the
+    picture.
+
+    Checked only on a CLOSED mesh: `signed_volume` means nothing on an open one,
+    and previewing an open surface is a thing the examples legitimately do.
+    """
+    if mesh.is_watertight() and mesh.signed_volume < 0.0:
+        raise SystemExit(
+            "this mesh is inside-out: it is closed and its signed volume is "
+            f"{mesh.signed_volume:.4f}, so its triangles wind INWARD. "
+            "Volume.from_mesh would sample a field with no interior and the "
+            "preview would render as speckle. Reverse the triangle winding at "
+            "the source rather than here."
+        )
+    doc = clay.Document()
+    doc.add_sdf_layer("preview").add(clay.Volume.from_mesh(mesh, cell=cell), color=colour)
+    return doc
 
 
 def render_mesh_array(mesh, eye=(2.6, 2.0, 3.2), target=(0.0, 0.0, 0.0),
