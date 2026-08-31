@@ -1146,7 +1146,7 @@ do {
     var buildError: Int32 = -1
     check(clay_multires_from_mesh(mesh, &desc, &surface, &buildError) == CLAY_OK,
           "built a hierarchy from the box")
-    check(buildError == CLAY_MULTIRES_OK.rawValue, "the cage carries a hierarchy")
+    check(buildError == Int32(CLAY_MULTIRES_OK.rawValue), "the cage carries a hierarchy")
     check(clay_multires_level_count(surface) == 1, "a cage is one level")
 
     // The level is PRICED before it is added, which is the whole reason the
@@ -1175,7 +1175,7 @@ do {
     var brush = clay_mesh_brush_desc()
     brush.struct_size = UInt32(MemoryLayout<clay_mesh_brush_desc>.size)
     check(clay_mesh_brush_defaults(&brush) == CLAY_OK, "took the brush defaults")
-    brush.verb = CLAY_MESH_BRUSH_DRAW
+    brush.verb = Int32(CLAY_MESH_BRUSH_DRAW.rawValue)
     brush.center = (0, 0, 1)
     brush.radius = 0.8
     brush.strength = 0.4
@@ -1191,7 +1191,7 @@ do {
 
     // The changed-block transport: a host copies the blocks the dab reached
     // rather than the display level.
-    var blockCount: size_t = 0
+    var blockCount = 0
     check(clay_multires_dirty_blocks(surface, nil, &blockCount) == CLAY_OK,
           "asked how many blocks changed")
     check(blockCount > 0, "the dab reported blocks")
@@ -1226,7 +1226,7 @@ do {
     check(memory.total == memory.authoritative + memory.rebuildable,
           "the rows sum, and detail is never counted as rebuildable")
 
-    var size: size_t = 0
+    var size = 0
     check(clay_multires_serialize(surface, nil, &size) == CLAY_OK, "asked for the encoded size")
     check(size > 0, "the hierarchy has bytes")
     var bytes = [UInt8](repeating: 0, count: Int(size))
