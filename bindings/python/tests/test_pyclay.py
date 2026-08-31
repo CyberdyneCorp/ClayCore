@@ -5212,6 +5212,70 @@ def solid_ball():
     return doc
 
 
+def protect_plus_x_slab():
+    """The +X mask as a SLAB, thin in Z.
+
+    `protect_plus_x` spans the whole model in Z, so sliding a cut along Z moves
+    it within a region the mask covers either way. This one is narrow enough
+    that a gate displaced along Z lands outside it.
+    """
+    m = clay.MaskField(0.04)
+    m.fill(((0.0, -2.0, -0.5), (2.0, 2.0, 0.5)), 1.0)
+    return m
+
+
+def placed_bored_ball(gate=None, position=None, turn=None, width=0.15):
+    """The bored ball with the CUT placed.
+
+    The bar reaches 3.0 along Z through a unit ball and is symmetric about the
+    origin, so sliding it along Z or turning it half a turn about Y removes
+    exactly the same material — anything that changes is the gate.
+    """
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=1.0))
+    bar = clay.Box(size=(0.8, 0.8, 3.0))
+    if gate is not None:
+        bar = bar.gate(gate, width=width)
+    node = layer.add(bar, op=clay.Op.SUBTRACT)
+    if turn is not None:
+        layer.set_transform(node, rotation_axis_angle=turn)
+    elif position is not None:
+        layer.set_transform(node, position=position)
+    return doc
+
+
+@pytest.mark.parametrize(
+    "name,kwargs",
+    [
+        ("at the origin", {}),
+        ("slid +0.9 along Z", {"position": (0.0, 0.0, 0.9)}),
+        ("slid -0.9 along Z", {"position": (0.0, 0.0, -0.9)}),
+        ("turned half a turn about Y", {"turn": ((0.0, 1.0, 0.0), math.pi)}),
+    ],
+)
+def test_a_gate_stays_in_world_space_when_the_item_is_placed(name, kwargs):
+    """Issue #394: the gate was placed by the gated item's own transform.
+
+    A mask is painted in world units, so the region it protects is where it was
+    painted and must not move with the item it holds back. Every other gate
+    fixture here uses an identity transform, which is exactly why none of them
+    caught this — and why a host whose cuts all carried a placement reported the
+    call as accepted and inert.
+    """
+    probe = np.array([[0.3, 0.0, 0.0]], dtype=np.float32)
+    intact = float(solid_ball().eval(probe)[0])
+    at_rest = float(placed_bored_ball().eval(probe)[0])
+
+    # the fixture's own claim: this placement does not change what is carved
+    ungated = float(placed_bored_ball(**kwargs).eval(probe)[0])
+    assert ungated == at_rest, f"{name} changed the cut, so it proves nothing"
+    assert ungated != intact, "the ungated cut must reach the probe"
+
+    gated = float(placed_bored_ball(protect_plus_x_slab(), **kwargs).eval(probe)[0])
+    assert gated == intact, f"the gate moved with the cut when it was {name}"
+
+
 def test_a_gate_protects_a_surface_from_a_boolean():
     solid, ungated = solid_ball(), bored_ball()
     gated = bored_ball(protect_plus_x())

@@ -248,7 +248,7 @@ struct Compiler {
         tape.params.push_back(0.0f);  // profile: unread by this mode
         tape.params.push_back(0.0f);  // k: unread
         tape.params.push_back(0.0f);  // rb: unread
-        tape.params.push_back(emit_gate(&item, &layer));
+        tape.params.push_back(emit_gate(&item));
         tape.params.push_back(static_cast<float>(last_volume_blob));
         const float xf[12] = {inv.c0.x, inv.c0.y, inv.c0.z, inv.c1.x, inv.c1.y, inv.c1.z,
                               inv.c2.x, inv.c2.y, inv.c2.z, inv.c3.x, inv.c3.y, inv.c3.z};
@@ -262,27 +262,42 @@ struct Compiler {
     // returned as its offset; -1 for an ungated item, which is almost all of
     // them and costs one comparison in the kernel.
     //
-    // Fifteen floats — a volume handle, the world-to-gate transform, the scale
-    // and the falloff width — which is why it is blob-carried rather than
-    // squeezed into the combine record.
-    float emit_gate(const Node* item, const Layer* layer) {
-        if (!item || !layer || !item->gated() || item->gate->empty()) return -1.0f;
+    // Fifteen floats — a volume handle, a placement, a scale and the falloff
+    // width — which is why it is blob-carried rather than squeezed into the
+    // combine record. The placement and scale are the identity here and have
+    // been since 0.67.0; they stay in the record because it is the same one
+    // every placed volume uses and the kernel reads it the same way.
+    float emit_gate(const Node* item) {
+        if (!item || !item->gated() || item->gate->empty()) return -1.0f;
         const std::size_t rec = tape.blob.size();
         // The volume's own samples first, then the record that points at them,
         // so the offset the record stores is already known when it is written.
         const std::size_t volume_off = tape.blob.size() + CLAY_TAPE_GATE_FLOATS;
         tape.blob.push_back(static_cast<float>(volume_off));
-        // A gate is placed by the ITEM's transform, so it travels with the item
-        // it protects rather than staying where the mask was painted.
-        const math::Transform world = layer->xform * item->xform;
-        // ...and it is squashed with the item, for the reason the item's own
-        // record is: a gate that kept its round footprint under a squashed
-        // cylinder would protect a region the surface no longer occupies.
-        const kernel::cfloat4x4 inv = item_scaled_inverse(*item, world.inverse_matrix());
-        for (float v : {inv.c0.x, inv.c0.y, inv.c0.z, inv.c1.x, inv.c1.y, inv.c1.z, inv.c2.x,
-                        inv.c2.y, inv.c2.z, inv.c3.x, inv.c3.y, inv.c3.z})
+        // A gate is placed by NOTHING: identity, because the volume it carries
+        // is already world-addressed. `voxel::MaskField` is stored in world
+        // units on its own lattice deliberately (mask.h says why), and
+        // `brush::mask_to_field` measures it there, so the distances in this
+        // volume are world distances at world positions.
+        //
+        // Placing it by the item's transform instead — which is what this did
+        // until 0.67.0 — moves the protected region by the transform of the
+        // very item it is meant to hold back. A cut placed anywhere but the
+        // origin then protects somewhere the artist never painted, which from
+        // the outside is indistinguishable from a gate that does nothing at
+        // all: issue #394 was reported as "accepted and inert" for exactly
+        // this reason, from a host whose cuts all carried a placement.
+        //
+        // Nor is it squashed with the item. The tempting argument — that a
+        // gate keeping its round footprint under a squashed cylinder would
+        // protect a region the surface no longer occupies — has it backwards:
+        // the mask was painted ON the surface as it stands, so the region it
+        // names is already the right one, and squashing it is what moves it
+        // off. The item's transform is how the item got where it is; the gate
+        // did not travel with it.
+        for (float v : {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f})
             tape.blob.push_back(v);
-        tape.blob.push_back(world.scale * scale_axes_factor(item->scale_axes));
+        tape.blob.push_back(1.0f);
         tape.blob.push_back(item->gate_width);
         const std::vector<float> flat = item->gate->to_blob();
         tape.blob.insert(tape.blob.end(), flat.begin(), flat.end());
@@ -290,7 +305,7 @@ struct Compiler {
     }
 
     void emit_combine(Op op, Blend blend, float rb, const Transition* transition = nullptr,
-                      const Node* gated = nullptr, const Layer* layer = nullptr) {
+                      const Node* gated = nullptr) {
         CTapeInstr instr;
         instr.op = kernel::ctape_combine;
         instr.param_offset = static_cast<unsigned int>(tape.params.size());
@@ -299,7 +314,7 @@ struct Compiler {
         tape.params.push_back(static_cast<float>(static_cast<int>(blend.profile)));
         tape.params.push_back(blend.k);
         tape.params.push_back(rb);
-        tape.params.push_back(emit_gate(gated, layer));
+        tape.params.push_back(emit_gate(gated));
         // transition modes append their own parameters after the shared four
         if (op == Op::TransitionLinear) {
             const Transition& t = transition ? *transition : default_transition_;
@@ -315,12 +330,6 @@ struct Compiler {
 
     Transition default_transition_{};
 
-    // A gate's width is authored in the item's own units and applies in world
-    // space, so the layer's scale carries it across. Kept beside fold_info
-    // rather than threaded through it, because fold_info already takes its
-    // world rounding the same way and adding a second scale argument for one
-    // caller reads worse than a member the compile loop sets.
-    float layer_scale_for_gate_ = 1.0f;
     // The gated item's own reach, set immediately before fold_info by the
     // caller that already computed it, so the bound is not recomputed and
     // cannot drift from the one culling used.
@@ -425,8 +434,10 @@ struct Compiler {
         const math::Aabb& reach = gate_reach_;
         const float diff_bound =
             reach.empty() || reach.is_infinite() ? 1e3f : kernel::clength(reach.extent());
-        tape.info =
-            kernel::cfi_gate(tape.info, diff_bound, item.gate_width * layer_scale_for_gate_);
+        // `gate_width` is in WORLD units and the gate is evaluated in world
+        // space, so scaling it by the layer's scale would charge a step cost
+        // for a softness the kernel never sees.
+        tape.info = kernel::cfi_gate(tape.info, diff_bound, item.gate_width);
     }
 
     // The profile records for a loft or a sweep: vertices first so their
@@ -754,7 +765,6 @@ struct Compiler {
     // already on the stack below; returns whether one is there afterwards.
     bool compile_list(const std::vector<NodeId>& ids, const SdfContent& content,
                       const Layer& layer, bool have_acc) {
-        layer_scale_for_gate_ = layer.xform.scale;
         // Whether the cull dropped anything from THIS chain. A feathered
         // replace over a chain the cull emptied must still blend against the
         // far-field seed — the dropped items are real, just out of reach —
@@ -832,7 +842,7 @@ struct Compiler {
                     else
                         emit_combine(n->op, n->blend,
                                      n->rounding * layer.xform.scale * n->xform.scale,
-                                     &n->transition, n, &layer);
+                                     &n->transition, n);
                 }
                 gate_reach_ = geometry;
                 fold_info(*n, (have_acc || seeded) ? n->op : Op::Add, smooth && have_acc,

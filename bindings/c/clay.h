@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 66
+#define CLAY_ABI_MINOR 67
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -3747,6 +3747,16 @@ typedef struct clay_mask_extrude_params {
  * because a step in the field has no finite bound and nothing could march it.
  *
  * `threshold` is the paint level that counts as protected; <= 0 means 0.5.
+ *
+ * THE GATE IS IN WORLD SPACE, and does not travel with the item. A mask is
+ * painted in world units on its own lattice (see clay_mask_create), so the
+ * region it protects is where you painted it and stays there whatever
+ * clay_item_set_position, _set_rotation and _set_scale then do to the gated
+ * item. Gate a cut placed over an ear and the ear stays; move the cut and the
+ * ear still stays. Before 0.67.0 the gate was placed by the item's own
+ * transform, which moved the protected region along with the cut and made a
+ * correctly configured gate look inert to any host whose items carried a
+ * placement (issue #394).
  *
  * The gate is COPIED into the item, so the caller's mask may change or be
  * destroyed afterwards. Refused, leaving the item ungated, when the mask is
