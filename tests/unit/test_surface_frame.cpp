@@ -273,6 +273,67 @@ TEST_CASE("frames are deterministic across two independent builds") {
     }
 }
 
+TEST_CASE("a transported tangent field is coherent where a rebuilt one is not") {
+    // WHAT TRANSPORT ACTUALLY BUYS, and the reason a magnitude check cannot see
+    // it. A frame rebuilt at each level picks its tangent from whichever
+    // neighbour that level happens to offer — deterministic, and spatially
+    // INCOHERENT: two adjacent vertices of a subdivided quad get tangents
+    // pointing in unrelated directions, because their lowest-indexed neighbours
+    // are unrelated. Tangential detail stored against such a field pushes
+    // neighbouring vertices in unrelated directions, which is the swimming,
+    // smearing artefact that appears in a render and in no numeric test that
+    // only checks how far something moved.
+    //
+    // The measure is the mean alignment between a vertex's tangent and its ring
+    // neighbours'. A transported field is smooth; a rebuilt one is not.
+    Level base = base_of(plane_quads(4, 2.0f));
+    for (cfloat3& p : base.positions) p.y = 0.3f * std::sin(1.7f * p.x) * std::cos(1.3f * p.z);
+    std::vector<cfloat3> bn;
+    mesh::level_normals(base.topology, base.conn, base.positions, &bn);
+    std::vector<SurfaceFrame> bf;
+    mesh::build_base_frames(base.topology, base.conn, base.positions, bn, nullptr, &bf);
+
+    Level level = base;
+    std::vector<SurfaceFrame> transported = bf;
+    std::vector<cfloat3> normals;
+    for (int i = 0; i < 2; ++i) {
+        const Transported t = step(level, transported);
+        level.topology = t.topology;
+        level.conn = t.conn;
+        level.positions = t.positions;
+        transported = t.frames;
+        normals = t.normals;
+    }
+
+    // The control: the same level's frames REBUILT from its own geometry, which
+    // is the implementation D3 rejects.
+    std::vector<SurfaceFrame> rebuilt;
+    mesh::build_base_frames(level.topology, level.conn, level.positions, normals, nullptr,
+                            &rebuilt);
+
+    const auto coherence = [&](const std::vector<SurfaceFrame>& frames) {
+        double sum = 0.0;
+        std::size_t pairs = 0;
+        for (std::uint32_t v = 0; v < level.topology.vertex_count; ++v) {
+            std::size_t count = 0;
+            const std::uint32_t* ring = level.conn.edges_of(v, &count);
+            for (std::size_t i = 0; i < count; ++i) {
+                const mesh::LevelEdge& e = level.conn.edges[ring[i]];
+                const std::uint32_t other = (e.a == v) ? e.b : e.a;
+                sum += std::fabs(cdot(frames[v].tangent, frames[other].tangent));
+                ++pairs;
+            }
+        }
+        return pairs == 0 ? 0.0 : sum / static_cast<double>(pairs);
+    };
+
+    const double smooth = coherence(transported);
+    const double choppy = coherence(rebuilt);
+    INFO("transported " << smooth << " against rebuilt " << choppy);
+    CHECK(smooth > 0.95);
+    CHECK(choppy < smooth * 0.9);
+}
+
 TEST_CASE("a partial frame and normal update matches the full one bit for bit") {
     Level base = base_of(plane_quads(6, 3.0f));
     for (cfloat3& p : base.positions) p.y = 0.2f * p.x * p.z;

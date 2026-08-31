@@ -385,57 +385,79 @@ bool MultiresSurface::build_block(std::uint32_t level, std::uint32_t patch, Bloc
     return true;
 }
 
+namespace {
+
+// What a level's export should carry: each attribute the CAGE carried and the
+// caller still wants. A hierarchy over a mesh with no colours exports none, so
+// a layer's attribute set does not change under a round trip.
+struct ExportWants {
+    bool normals = false;
+    bool uvs = false;
+    bool colors = false;
+};
+
+ExportWants wants_of(const MultiresSurface::State& s, const MultiresExportOptions& options) {
+    const std::size_t n = s.base.positions.size();
+    ExportWants w;
+    w.normals = options.normals && !s.base.normals.empty();
+    w.uvs = options.uvs && s.base.uvs.size() == n && !s.base.uvs.empty();
+    w.colors = options.colors && s.base.colors.size() == n && !s.base.colors.empty();
+    return w;
+}
+
+// The cage's attribute connectivity IS its geometric one, so the export is the
+// level with the subdivided attributes laid over it vertex for vertex.
+void export_direct(MultiresSurface::State& s, std::uint32_t level, const ExportWants& wants,
+                   bool have_attrs, Mesh* out) {
+    const LevelCache& c = *s.levels[level].cache;
+    level_faces_into(s.levels[level].topology, out);
+    out->positions = c.mesh.positions;
+    if (wants.normals) out->normals = c.mesh.normals;
+    if (!have_attrs) return;
+    if (wants.uvs) out->uvs = s.attr[level].uvs;
+    if (wants.colors) out->colors = s.attr[level].colors;
+}
+
+// The cage splits a geometric point into several export vertices — how a flat
+// mesh writes a seam — so the export runs over the ATTRIBUTE topology and reads
+// geometry through the map.
+void export_split(MultiresSurface::State& s, std::uint32_t level, const ExportWants& wants,
+                  Mesh* out) {
+    const LevelCache& c = *s.levels[level].cache;
+    const AttrLevel& a = s.attr[level];
+    level_faces_into(a.topology, out);
+    out->positions.resize(a.topology.vertex_count);
+    for (std::uint32_t v = 0; v < a.topology.vertex_count; ++v)
+        out->positions[v] = c.mesh.positions[a.to_geom[v]];
+    if (wants.normals && c.mesh.normals.size() == c.mesh.positions.size()) {
+        out->normals.resize(a.topology.vertex_count);
+        for (std::uint32_t v = 0; v < a.topology.vertex_count; ++v)
+            out->normals[v] = c.mesh.normals[a.to_geom[v]];
+    }
+    if (wants.uvs && a.uvs.size() == a.topology.vertex_count) out->uvs = a.uvs;
+    if (wants.colors && a.colors.size() == a.topology.vertex_count) out->colors = a.colors;
+}
+
+}  // namespace
+
 Mesh MultiresSurface::mesh_at_level(std::uint32_t level, const MultiresExportOptions& options,
                                     const parallel::CancelToken* cancel) {
     Mesh out;
     if (!state_ || !state_->level_ok(level)) return out;
     evaluate_up_to(*state_, level);
+    // A cancelled export returns an EMPTY mesh rather than a partial one: a
+    // caller that ignored the cancel and drew the result would draw a fraction
+    // of the model, which is worse than drawing nothing.
     if (cancel && cancel->cancelled()) return out;
 
-    const LevelCache& c = *state_->levels[level].cache;
-    const bool want_normals = options.normals && !state_->base.normals.empty();
-    const bool want_uvs = options.uvs && state_->base.uvs.size() == state_->base.positions.size() &&
-                          !state_->base.uvs.empty();
-    const bool want_colors = options.colors &&
-                             state_->base.colors.size() == state_->base.positions.size() &&
-                             !state_->base.colors.empty();
-    const bool have_attrs = (want_uvs || want_colors) ? ensure_attributes(*state_, level) : false;
+    const ExportWants wants = wants_of(*state_, options);
+    const bool need_attrs = wants.uvs || wants.colors || state_->attribute_split;
+    const bool have_attrs = need_attrs ? ensure_attributes(*state_, level) : false;
 
-    if (!state_->attribute_split) {
-        // The attribute connectivity and the geometric one are the same graph,
-        // so the export is the level, with the subdivided attributes laid over
-        // it vertex for vertex.
-        level_faces_into(state_->levels[level].topology, &out);
-        out.positions = c.mesh.positions;
-        if (want_normals) out.normals = c.mesh.normals;
-        if (have_attrs) {
-            if (want_uvs) out.uvs = state_->attr[level].uvs;
-            if (want_colors) out.colors = state_->attr[level].colors;
-        }
-        return out;
-    }
-
-    // The cage splits a geometric point into several export vertices — how a
-    // flat mesh writes a seam — so the export runs over the ATTRIBUTE topology
-    // and reads geometry through the map.
-    if (!ensure_attributes(*state_, level)) {
-        level_faces_into(state_->levels[level].topology, &out);
-        out.positions = c.mesh.positions;
-        if (want_normals) out.normals = c.mesh.normals;
-        return out;
-    }
-    const AttrLevel& a = state_->attr[level];
-    level_faces_into(a.topology, &out);
-    out.positions.resize(a.topology.vertex_count);
-    for (std::uint32_t v = 0; v < a.topology.vertex_count; ++v)
-        out.positions[v] = c.mesh.positions[a.to_geom[v]];
-    if (want_normals && c.mesh.normals.size() == c.mesh.positions.size()) {
-        out.normals.resize(a.topology.vertex_count);
-        for (std::uint32_t v = 0; v < a.topology.vertex_count; ++v)
-            out.normals[v] = c.mesh.normals[a.to_geom[v]];
-    }
-    if (want_uvs && a.uvs.size() == a.topology.vertex_count) out.uvs = a.uvs;
-    if (want_colors && a.colors.size() == a.topology.vertex_count) out.colors = a.colors;
+    if (!state_->attribute_split || !have_attrs)
+        export_direct(*state_, level, wants, have_attrs, &out);
+    else
+        export_split(*state_, level, wants, &out);
     return out;
 }
 

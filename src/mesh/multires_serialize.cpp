@@ -173,50 +173,75 @@ std::vector<std::uint8_t> MultiresSurface::encode() const {
     return out;
 }
 
-bool MultiresSurface::decode(const std::uint8_t* data, std::size_t size, MultiresSurface* out) {
-    if (!data || !out) return false;
-    Reader r{data, size, 0};
-    std::uint32_t magic = 0, version = 0, rule = 0, levels = 0;
-    if (!r.u32(&magic) || magic != kSurfaceMagic) return false;
-    if (!r.u32(&version) || version != kSurfaceVersion) return false;
-    if (!r.u32(&rule)) return false;
-    if (rule != static_cast<std::uint32_t>(SubdivisionRule::CatmullClark)) return false;
-    if (!r.u32(&levels)) return false;
-    if (levels == 0) {
-        *out = MultiresSurface{};
-        return true;
-    }
-    if (levels > kMaxLevels) return false;
+namespace {
 
-    std::uint32_t sculpt = 0, display = 0;
-    float weld = kDefaultWeldEpsilon;
-    if (!r.u32(&sculpt) || !r.u32(&display) || !r.f32(&weld)) return false;
-    if (sculpt >= levels || display >= levels) return false;
-
-    Mesh base;
-    if (!take_positions(&r, &base.positions)) return false;
-    if (!take_positions(&r, &base.normals)) return false;
-    if (!take_positions(&r, &base.colors)) return false;
-    {
-        std::uint32_t n = 0;
-        if (!r.count(8u, &n)) return false;
-        base.uvs.resize(n);
-        for (std::uint32_t i = 0; i < n; ++i)
-            if (!r.vec2(&base.uvs[i])) return false;
-    }
-    if (!take_indices(&r, &base.indices)) return false;
-    if (!take_indices(&r, &base.quads)) return false;
+// The cage's arrays, with every declared count checked against what the buffer
+// could hold BEFORE the array it describes is reserved.
+bool read_base_mesh(Reader* r, Mesh* base) {
+    if (!take_positions(r, &base->positions)) return false;
+    if (!take_positions(r, &base->normals)) return false;
+    if (!take_positions(r, &base->colors)) return false;
+    std::uint32_t uv_count = 0;
+    if (!r->count(8u, &uv_count)) return false;
+    base->uvs.resize(uv_count);
+    for (std::uint32_t i = 0; i < uv_count; ++i)
+        if (!r->vec2(&base->uvs[i])) return false;
+    if (!take_indices(r, &base->indices)) return false;
+    if (!take_indices(r, &base->quads)) return false;
     // The optional arrays are "empty or one per vertex" on `mesh::Mesh`, and a
     // stream saying otherwise describes a mesh nothing in this library would
     // have produced.
-    const std::size_t n = base.positions.size();
-    if (!base.normals.empty() && base.normals.size() != n) return false;
-    if (!base.colors.empty() && base.colors.size() != n) return false;
-    if (!base.uvs.empty() && base.uvs.size() != n) return false;
+    const std::size_t n = base->positions.size();
+    if (!base->normals.empty() && base->normals.size() != n) return false;
+    if (!base->colors.empty() && base->colors.size() != n) return false;
+    if (!base->uvs.empty() && base->uvs.size() != n) return false;
+    return true;
+}
+
+// The header, up to but not including the cage.
+struct SurfaceHeader {
+    std::uint32_t levels = 0;
+    std::uint32_t sculpt = 0;
+    std::uint32_t display = 0;
+    float weld = kDefaultWeldEpsilon;
+    SubdivisionRule rule = SubdivisionRule::CatmullClark;
+};
+
+bool read_header(Reader* r, SurfaceHeader* out) {
+    std::uint32_t magic = 0, version = 0, rule = 0;
+    if (!r->u32(&magic) || magic != kSurfaceMagic) return false;
+    if (!r->u32(&version) || version != kSurfaceVersion) return false;
+    if (!r->u32(&rule)) return false;
+    // THE RULE IS READ RATHER THAN ASSUMED. A hierarchy reconstructed with a
+    // different rule than it was authored with is a different surface, and
+    // nothing else in the stream reveals the substitution.
+    if (rule != static_cast<std::uint32_t>(SubdivisionRule::CatmullClark)) return false;
+    out->rule = static_cast<SubdivisionRule>(rule);
+    if (!r->u32(&out->levels)) return false;
+    if (out->levels == 0) return true;
+    if (out->levels > MultiresSurface::kMaxLevels) return false;
+    if (!r->u32(&out->sculpt) || !r->u32(&out->display) || !r->f32(&out->weld)) return false;
+    return out->sculpt < out->levels && out->display < out->levels;
+}
+
+}  // namespace
+
+bool MultiresSurface::decode(const std::uint8_t* data, std::size_t size, MultiresSurface* out) {
+    if (!data || !out) return false;
+    Reader r{data, size, 0};
+    SurfaceHeader header;
+    if (!read_header(&r, &header)) return false;
+    if (header.levels == 0) {
+        *out = MultiresSurface{};
+        return true;
+    }
+
+    Mesh base;
+    if (!read_base_mesh(&r, &base)) return false;
 
     MultiresOptions options;
-    options.rule = static_cast<SubdivisionRule>(rule);
-    if (weld >= 0.0f) options.weld_epsilon = weld;
+    options.rule = header.rule;
+    if (header.weld >= 0.0f) options.weld_epsilon = header.weld;
     MultiresError err = MultiresError::None;
     std::optional<MultiresSurface> surface = from_mesh(base, options, &err);
     if (!surface) return false;
@@ -224,31 +249,30 @@ bool MultiresSurface::decode(const std::uint8_t* data, std::size_t size, Multire
     // THE DEPTH IS PRICED BEFORE IT IS BUILT. The counts follow from the cage by
     // arithmetic, so a stream declaring a hierarchy nothing could hold is
     // refused here rather than after eleven levels have been allocated.
-    {
-        const MultiresLevel& level0 = surface->state_->levels[0];
-        if (!depth_affordable(level0.topology.vertex_count, level0.edge_count,
-                              level0.topology.face_count, level0.topology.corners.size(), levels))
-            return false;
-    }
+    const MultiresLevel& level0 = surface->state_->levels[0];
+    if (!depth_affordable(level0.topology.vertex_count, level0.edge_count,
+                          level0.topology.face_count, level0.topology.corners.size(),
+                          header.levels))
+        return false;
 
-    for (std::uint32_t l = 1; l < levels; ++l)
+    for (std::uint32_t l = 1; l < header.levels; ++l)
         if (!surface->add_level(&err)) return false;
 
-    for (std::uint32_t l = 1; l < levels; ++l) {
+    for (std::uint32_t l = 1; l < header.levels; ++l) {
         std::uint32_t blob_size = 0;
         if (!r.count(1u, &blob_size)) return false;
         DetailField field;
         if (!DetailField::decode(data + r.at, blob_size, &field)) return false;
         r.at += blob_size;
-        // A level's detail must describe THAT level. A stream pairing a level's
-        // coefficients with a different vertex count is one that would silently
+        // A level's detail must describe THAT level. A stream pairing one
+        // level's coefficients with a different vertex count would silently
         // attach every wrinkle somewhere else.
         if (field.vertex_count() != surface->topology_at(l).vertex_count) return false;
         surface->state_->levels[l].detail = std::move(field);
     }
 
-    surface->state_->sculpt_level = sculpt;
-    surface->state_->display_level = display;
+    surface->state_->sculpt_level = header.sculpt;
+    surface->state_->display_level = header.display;
     *out = std::move(*surface);
     return true;
 }

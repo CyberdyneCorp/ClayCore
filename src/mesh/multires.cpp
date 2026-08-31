@@ -168,6 +168,19 @@ std::optional<MultiresSurface> MultiresSurface::from_mesh(const Mesh& mesh,
     if (out_error) *out_error = MultiresError::None;
     if (mesh.positions.empty() || mesh.indices.empty()) return fail(MultiresError::EmptyBase);
 
+    // THE INDICES ARE CHECKED FIRST, before anything is built over them. Not a
+    // formality: `Adjacency::build` walks the index buffer, and a cage whose
+    // indices point past its own vertices would be walked before
+    // `base_topology_from_mesh` below ever got to refuse it.
+    const bool quads = mesh.has_quads();
+    const std::vector<std::uint32_t>& corners = quads ? mesh.quads : mesh.indices;
+    const std::uint32_t arity = quads ? 4u : 3u;
+    if (corners.empty() || corners.size() % arity != 0) return fail(MultiresError::EmptyBase);
+    for (std::uint32_t i : mesh.indices)
+        if (i >= mesh.positions.size()) return fail(MultiresError::IndexOutOfRange);
+    for (std::uint32_t i : corners)
+        if (i >= mesh.positions.size()) return fail(MultiresError::IndexOutOfRange);
+
     auto s = std::make_unique<State>();
     s->options = options;
     s->base = mesh;
@@ -177,15 +190,8 @@ std::optional<MultiresSurface> MultiresSurface::from_mesh(const Mesh& mesh,
 
     MultiresLevel level0;
     if (!base_topology_from_mesh(s->base, s->class_of.data(), s->class_count, &level0.topology)) {
-        // The three ways a cage is refused are told apart here rather than
-        // collapsed into one, because a caller fixing a model needs to know
-        // which one it hit.
-        const bool quads = s->base.has_quads();
-        const std::vector<std::uint32_t>& src = quads ? s->base.quads : s->base.indices;
-        const std::uint32_t arity = quads ? 4u : 3u;
-        if (src.empty() || src.size() % arity != 0) return fail(MultiresError::EmptyBase);
-        for (std::uint32_t i : src)
-            if (i >= s->base.positions.size()) return fail(MultiresError::IndexOutOfRange);
+        // Everything else `base_topology_from_mesh` refuses for was ruled out
+        // above, so what is left is a face whose corners weld together.
         return fail(MultiresError::DegenerateFace);
     }
     if (cancel && cancel->cancelled()) return fail(MultiresError::Cancelled);
