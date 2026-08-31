@@ -619,9 +619,23 @@ jobs:
           CLAY_EXAMPLES_FAST=1 \
           PYTHONPATH=build/cpu-only/bindings/python python examples/run_all.py
       - name: Committed gallery is up to date with the code
-        # Renders are float output, so bytes can differ across platforms. The
-        # gate is that everything runs and produces files, not pixel equality;
-        # regenerated outputs are discarded here.
+        # This step used to be `git checkout -- examples/output`, which DISCARDS
+        # what the run just produced and therefore asserted nothing at all. That
+        # is how 182 of 251 outputs went stale unnoticed, and how
+        # 08_scene.clayspace sat in the repository at scene format minor 9 while
+        # the writer emitted minor 15 (#410).
+        #
+        # It gates STRUCTURE rather than bytes, and the distinction is the whole
+        # design: a render is float output whose bytes legitimately differ
+        # across platforms, so pixel equality on one runner would fail
+        # honestly-generated files from another. Element counts and format
+        # versions are integers no float perturbs, they are the same everywhere,
+        # and every one of the twelve drifts this found is one of them.
+        # CLAY_EXAMPLES_FAST changes only how images LOOK, so it does not reach
+        # anything gated here.
+        run: python3 tools/check_gallery.py
+      - name: Discard the regenerated outputs
+        if: always()
         run: git checkout -- examples/output || true
 
   benchmarks:
