@@ -31,6 +31,28 @@
 //
 // -- the decisions this file records ----------------------------------------
 //
+// THE ADVICE NAMES THE CURE, NOT THE SYMPTOM (0.70.0, issue #387). This was
+// once `safe_step_scale < threshold` and nothing else, which reads the
+// AGGREGATE — and the whole reason the report names two mechanisms is that the
+// aggregate cannot tell them apart. A grab chain lowers the step scale exactly
+// as a stack of baked volumes does, so the advisory fired hardest on the case
+// consolidation cannot help.
+//
+// Measured on a real form, medians over four gestures: a bake made the polish
+// brush 13x FASTER and the move brush 6x SLOWER. The move row is the striking
+// one, because the bake IMPROVES the number that triggered it — the step scale
+// went from 0.00275 to 0.08090, a 29x win, and the gesture got six times
+// slower. There was nothing in that chain to win back: the drag had already
+// collapsed to one grab per gesture and the layer was one analytic item, so
+// the bake only swapped a cheap primitive for a warped 3.3 MB volume.
+//
+// So the advice asks what a bake WINS BACK, which is exactly two things: the
+// cost of walking an EDIT LIST, and the Lipschitz of STACKED VOLUMES, which
+// redistancing removes. A layer with neither is not advised, and there is no
+// other cure to offer it — it is already parametric and cheap per sample, and
+// it is the marching that costs. Issue #386 makes that case much rarer by no
+// longer charging disjoint brushes for a compounding that cannot happen.
+//
 // THE TRIGGER IS ADVISORY, AND THE THRESHOLD IS THE CALLER'S. `report_layer`
 // measures; it never bakes. A bake discards the parameters of everything it
 // absorbs, and an engine that did that on its own would be deciding, on an
@@ -65,6 +87,7 @@
 // un-bake would have to invent parameters for a shape that no longer has any.
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <vector>
@@ -95,6 +118,21 @@ using BakePointEval = std::function<bool(const Tape& tape, const float* points_x
                                          std::size_t count, float* out_distances,
                                          float* out_colors_rgb)>;
 
+// Which mechanism is costing the marcher, and therefore which cure applies.
+// The two are not interchangeable: consolidation is the answer to one of them
+// and measurably makes the other WORSE (issue #387).
+enum class Degradation : std::uint8_t {
+    None = 0,  // the step scale is within the caller's tolerance
+    // A stack of baked volumes, or a long edit list. Consolidation is the cure:
+    // it absorbs the list and redistances the samples.
+    Volumes = 1,
+    // A chain of brushes on a layer with nothing to absorb. Consolidation is
+    // NOT the cure — it swaps a cheap analytic item for a dense volume and the
+    // marching win is swamped by what the volume costs per sample.
+    Deformers = 2,
+    Both = 3,
+};
+
 // What a layer's chain currently costs the marcher, and what is causing it.
 struct FieldReport {
     float lipschitz = 1.0f;        // the compiled tape's declared bound
@@ -103,9 +141,21 @@ struct FieldReport {
     // cures and an aggregate cannot tell them apart.
     float steepest_volume = 1.0f;  // largest sample_lipschitz among volume items
     int longest_deformer_chain = 0;
+    // The deformer mechanism's own FACTOR, which the count above is not: a
+    // chain of four gentle warps and a chain of one deep grab are the same
+    // length and cost the marcher nothing alike. Without this there is no
+    // number to weigh against `steepest_volume`, and the advice had to fall
+    // back on the aggregate — which is how it came to fire hardest on the case
+    // consolidation cannot help.
+    float steepest_deformer_chain = 1.0f;
     int item_count = 0;  // nodes in the layer's tree, groups included
-    // safe_step_scale < the caller's threshold. Advice, never an action.
+    // Of those, the ones that contribute a field. A group is a transform and a
+    // name; it is not evaluated, so it is not an edit list to win back.
+    int drawable_count = 0;
+    // safe_step_scale < the caller's threshold, AND consolidation is the cure
+    // for what is actually wrong. Advice, never an action.
     bool advises_consolidation = false;
+    Degradation degradation = Degradation::None;
 };
 
 // Where a layer's field would be resampled, and how well.

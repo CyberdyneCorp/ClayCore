@@ -4058,10 +4058,18 @@ def test_field_report_names_which_mechanism_degraded_a_chain():
     assert moved["longest_deformer_chain"] == 9
     assert moved["steepest_volume"] == pytest.approx(1.0)   # no volume is involved
     assert moved["safe_step_scale"] < 0.05
-    assert moved["advises_consolidation"] is True
+    # NOT advised, and issue #387 is why: the layer is ONE analytic item, so a
+    # bake wins back no edit list and no stacked volume and swaps a cheap
+    # primitive for a dense one. Measured on a real gesture, a 29x better step
+    # scale and a 6x SLOWER gesture. The advisory names the cure that applies.
+    assert moved["advises_consolidation"] is False
+    assert moved["degradation"] == "deformers"
+    assert moved["steepest_deformer_chain"] > 1.0
+    assert moved["drawable_count"] == 1
     # Advice only when it is asked for: the threshold is the caller's, because
     # a tolerance for marching cost belongs to a viewport, not to the artwork.
     assert layer.field_report()["advises_consolidation"] is False
+    assert layer.field_report()["degradation"] == "none"
 
     chained, chained_layer = _ball()
     for n in ((1, 0, 0), (0, 1, 0)):
@@ -4069,7 +4077,53 @@ def test_field_report_names_which_mechanism_degraded_a_chain():
     polished = chained_layer.field_report(advise_below_step_scale=0.25)
     assert polished["steepest_volume"] > 5.0
     assert polished["longest_deformer_chain"] == 0
+    assert polished["steepest_deformer_chain"] == pytest.approx(1.0)
     assert polished["advises_consolidation"] is True
+    assert polished["degradation"] == "volumes"
+
+
+def test_the_advice_names_the_cure_not_the_symptom():
+    """Issue #387: consolidation was advised on the case it makes 6x worse.
+
+    A grab chain lowers the step scale exactly as a stack of baked volumes
+    does, so an advisory keyed on the aggregate fired hardest on the layer a
+    bake cannot help. Consolidation wins back an EDIT LIST or STACKED VOLUMES
+    and nothing else — the same deep grab is worth baking over twenty items and
+    is not worth baking over one.
+    """
+    lone, lone_layer = _ball(1.0)
+    lone_layer.move_surface((1.0, 0, 0), (0.9, 0, 0), radius=0.5)
+    one = lone_layer.field_report(advise_below_step_scale=0.5)
+    assert one["safe_step_scale"] < 0.5           # degraded, so the threshold trips
+    assert one["drawable_count"] == 1
+    assert one["degradation"] == "deformers"
+    assert one["advises_consolidation"] is False
+
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    for i in range(20):
+        layer.add(clay.Sphere(0.4).at((0.25 * i - 2.5, 0, 0)), blend=clay.Smooth(0.2))
+    layer.move_surface((0.0, 0.4, 0.0), (0.0, 0.9, 0.0), radius=0.5)
+    many = layer.field_report(advise_below_step_scale=0.5)
+    assert many["safe_step_scale"] < 0.5
+    assert many["drawable_count"] == 20
+    assert many["degradation"] == "both"
+    assert many["advises_consolidation"] is True   # there IS a list to absorb
+
+
+def test_the_chains_factor_is_reported_not_only_its_length():
+    """`longest_deformer_chain` is a COUNT, so it cannot be weighed against
+    `steepest_volume`. One deep grab and one gentle one are the same length and
+    cost the marcher nothing alike."""
+    deep, deep_layer = _ball(1.0)
+    deep_layer.move_surface((1.0, 0, 0), (0.9, 0, 0), radius=0.5)
+    gentle, gentle_layer = _ball(1.0)
+    gentle_layer.move_surface((1.0, 0, 0), (0.01, 0, 0), radius=0.5)
+
+    a = deep_layer.field_report()
+    b = gentle_layer.field_report()
+    assert a["longest_deformer_chain"] == b["longest_deformer_chain"]
+    assert a["steepest_deformer_chain"] > b["steepest_deformer_chain"] * 2.0
 
 
 def test_a_polish_chain_holds_its_bound_once_consolidated():

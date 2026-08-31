@@ -1,5 +1,7 @@
 #include <doctest/doctest.h>
 
+#include <cstddef>
+
 #include <cstring>
 
 #include "clay.h"
@@ -75,7 +77,15 @@ TEST_CASE("the C ABI reports a chain's degradation and what caused it") {
     CHECK(degraded.longest_deformer_chain == 9);
     CHECK(degraded.steepest_volume == doctest::Approx(1.0f));  // no volume involved
     CHECK(degraded.safe_step_scale < 0.05f);
-    CHECK(degraded.advises_consolidation == 1);
+    // NOT advised, and issue #387 is why. The bound really is this bad, but
+    // the layer is ONE analytic item: the bake wins back no edit list and no
+    // stacked volume, and swaps a cheap primitive for a dense one. Measured on
+    // a real gesture, a 29x better step scale and a 6x SLOWER gesture. The
+    // advisory names the cure that applies rather than the symptom.
+    CHECK(degraded.advises_consolidation == 0);
+    CHECK(degraded.degradation == CLAY_DEGRADATION_DEFORMERS);
+    CHECK(degraded.steepest_deformer_chain > 1.0f);
+    CHECK(degraded.drawable_count == 1);
 
     // The advice is the CALLER's threshold, not the engine's opinion.
     clay_field_report unjudged{};
@@ -83,7 +93,57 @@ TEST_CASE("the C ABI reports a chain's degradation and what caused it") {
     REQUIRE(clay_layer_field_report(doc, layer, 0.0f, &unjudged) == CLAY_OK);
     CHECK(unjudged.advises_consolidation == 0);
 
+    CHECK(unjudged.degradation == CLAY_DEGRADATION_NONE);
+
+    // A caller built against the ORIGINAL struct — before the three fields
+    // 0.70.0 appended — still works, and nothing is written past the end of
+    // the struct it actually owns.
+    struct original_report {
+        uint32_t struct_size;
+        float lipschitz;
+        float safe_step_scale;
+        float steepest_volume;
+        int32_t longest_deformer_chain;
+        int32_t item_count;
+        int32_t advises_consolidation;
+        uint32_t canary;
+    };
+    original_report old_shape{};
+    old_shape.struct_size = static_cast<uint32_t>(offsetof(original_report, canary));
+    old_shape.canary = 0xC0FFEEu;
+    REQUIRE(clay_layer_field_report(doc, layer, 0.25f, reinterpret_cast<clay_field_report*>(
+                                                          &old_shape)) == CLAY_OK);
+    CHECK(old_shape.longest_deformer_chain == 9);
+    CHECK(old_shape.canary == 0xC0FFEEu);  // untouched
+
     CHECK(clay_layer_field_report(doc, 999, 0.25f, &unjudged) == CLAY_ERROR_NOT_FOUND);
+    clay_document_destroy(doc);
+}
+
+TEST_CASE("the C ABI advises consolidation when there IS an edit list to absorb") {
+    // The other side of #387: the same deep chain over twenty items is worth
+    // baking, because the bake wins back the cost of walking them.
+    clay_layer_id layer = 0;
+    clay_document* doc = fresh_document(&layer);
+    for (int i = 0; i < 20; ++i)
+        add_sphere(doc, layer, 0.4f, 0.25f * static_cast<float>(i) - 2.5f);
+
+    clay_move_params move{};
+    move.struct_size = sizeof(move);
+    move.radius = 0.5f;
+    const float centre[3] = {0.0f, 0.4f, 0.0f};
+    const float displacement[3] = {0.0f, 0.9f, 0.0f};
+    size_t applied = 0;
+    REQUIRE(clay_layer_move_surface(doc, layer, centre, displacement, &move, &applied) ==
+            CLAY_OK);
+
+    clay_field_report r{};
+    r.struct_size = sizeof(r);
+    REQUIRE(clay_layer_field_report(doc, layer, 0.5f, &r) == CLAY_OK);
+    REQUIRE(r.safe_step_scale < 0.5f);
+    CHECK(r.drawable_count == 20);
+    CHECK(r.degradation == CLAY_DEGRADATION_BOTH);
+    CHECK(r.advises_consolidation == 1);
     clay_document_destroy(doc);
 }
 

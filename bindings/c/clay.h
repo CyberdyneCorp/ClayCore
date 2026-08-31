@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 69
+#define CLAY_ABI_MINOR 70
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -1835,8 +1835,17 @@ clay_result clay_layer_safe_step_scale(const clay_document* doc, clay_layer_id l
  * marching cost by nine.
  *
  * Two mechanisms, so the report names them separately. An aggregate step scale
- * says something is wrong; steepest_volume and longest_deformer_chain say
- * which thing, and therefore which of the two an app should show.
+ * says something is wrong; steepest_volume and steepest_deformer_chain say
+ * which thing, and `degradation` names it outright.
+ *
+ * READ `degradation` BEFORE ACTING. `advises_consolidation` used to be
+ * `safe_step_scale < advise_below_step_scale` and nothing else, and a grab
+ * chain lowers the step scale exactly as a stack of baked volumes does — so
+ * the advisory fired hardest on the case consolidation cannot help. It is now
+ * keyed on the mechanism and is FALSE for a layer whose degradation is all
+ * deformer chain with nothing to absorb, where the bake is a straight loss
+ * (issue #387). There is no cure to offer there; the layer is parametric and
+ * cheap per sample, and it is the marching that costs.
  *
  * The trigger is ADVISORY. Nothing here bakes on its own: consolidating
  * discards the parameters of everything it absorbs, and an engine that decided
@@ -1845,6 +1854,22 @@ clay_result clay_layer_safe_step_scale(const clay_document* doc, clay_layer_id l
  * tolerance for marching cost, passed per call rather than stored in the
  * document, because that tolerance belongs to a viewport, a device and a frame
  * budget rather than to the artwork. */
+/* Which mechanism is costing the marcher, and therefore which cure applies.
+ * The two are NOT interchangeable (ABI 0.70.0, issue #387). */
+typedef enum clay_degradation {
+    CLAY_DEGRADATION_NONE = 0, /* the step scale is within the caller's tolerance */
+    /* A stack of baked volumes, or a long edit list. Consolidation is the
+     * cure: it absorbs the list and redistances the samples. */
+    CLAY_DEGRADATION_VOLUMES = 1,
+    /* A chain of brushes on a layer with nothing to absorb. Consolidation is
+     * NOT the cure and measured 6x WORSE on a real gesture: it swaps a cheap
+     * analytic item for a dense volume, and the marching win — a 29x better
+     * step scale — is swamped by what the volume costs per sample. Leave the
+     * layer parametric. */
+    CLAY_DEGRADATION_DEFORMERS = 2,
+    CLAY_DEGRADATION_BOTH = 3
+} clay_degradation;
+
 typedef struct clay_field_report {
     uint32_t struct_size; /* = sizeof(clay_field_report); required */
     float lipschitz;      /* the compiled layer's declared bound */
@@ -1852,7 +1877,19 @@ typedef struct clay_field_report {
     float steepest_volume;         /* largest sample Lipschitz among volume items */
     int32_t longest_deformer_chain;
     int32_t item_count;
-    int32_t advises_consolidation; /* safe_step_scale < advise_below_step_scale */
+    int32_t advises_consolidation; /* degraded AND consolidation is the cure */
+    /* Appended in ABI 0.70.0. A caller compiled against the older struct passes
+     * the older struct_size and never sees these; the fields below are only
+     * written when the size covers them. */
+    /* The deformer mechanism's own FACTOR, which longest_deformer_chain is
+     * not: a chain of four gentle warps and a chain of one deep grab are the
+     * same LENGTH and cost the marcher nothing alike. Weigh this against
+     * steepest_volume — both are factors — rather than the count against it. */
+    float steepest_deformer_chain;
+    /* Of item_count, the nodes that contribute a field. A group is a transform
+     * and a name; it is not evaluated, so it is not an edit list to win back. */
+    int32_t drawable_count;
+    int32_t degradation; /* clay_degradation */
 } clay_field_report;
 
 /* What a layer's chain currently costs the marcher, and what is causing it.
