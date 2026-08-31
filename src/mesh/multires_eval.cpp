@@ -433,6 +433,14 @@ void MultiresSurface::absorb_level_edit(std::uint32_t level,
             LocalDetail d;
             world_to_frame(c.frames[v], delta, &d.tangent, &d.bitangent, &d.normal);
             lev.detail.set(v, d);
+            // AND READ IT BACK. The stored coefficients are authoritative, so
+            // the cached position has to be what they reconstruct to — not what
+            // the brush wrote, which differs from it by the last bits of a
+            // round trip through the frame. Without this the surface a host is
+            // looking at and the surface a reload would produce are a few ulps
+            // apart, and a redo lands on neither.
+            c.mesh.positions[v] =
+                c.subdivided[v] + frame_to_world(c.frames[v], d.tangent, d.bitangent, d.normal);
         }
         ++state_->detail_revision;
     }

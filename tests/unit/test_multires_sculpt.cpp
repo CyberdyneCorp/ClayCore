@@ -187,32 +187,62 @@ TEST_CASE("THE SIGNATURE TEST: sculpt fine, change the form, come back") {
     CHECK(energy_after == doctest::Approx(energy_before).epsilon(0.05));
 }
 
-TEST_CASE("the same brush on the same topology gives the same surface as the fixed sculptor") {
-    // NOT a similarity check. `MultiresSculptor` calls `MeshSculptor::stamp` on
-    // the level's own mesh, so the two paths are the same instructions on the
-    // same inputs and the result must be bit-identical. If this ever drifts,
-    // "Clay" has started to mean two things.
-    MultiresSurface s = build(plane_quads(4, 2.0f), 2);
-    REQUIRE(s.set_sculpt_level(2));
+TEST_CASE("the same brush gives the same surface as the fixed sculptor") {
+    // NOT a similarity check where it can be exact. `MultiresSculptor` calls
+    // `MeshSculptor::stamp` on the level's own mesh, so the two paths are the
+    // same instructions on the same inputs. If this ever drifts, "Clay" has
+    // started to mean two things.
+    //
+    // AT THE CAGE the agreement is bit-exact, because a level-0 edit is stored
+    // as the position itself. ABOVE the cage it is exact to a round trip
+    // through the frame — the position is reconstructed from the coefficients
+    // that were derived from it, which is what keeps the surface a host sees
+    // identical to the surface a reload produces.
+    SUBCASE("at the cage, bit for bit") {
+        MultiresSurface s = build(plane_quads(4, 2.0f), 2);
+        REQUIRE(s.set_sculpt_level(0));
+        Mesh flat = s.mesh_at_level(0, {/*normals=*/false, false, false});
+        flat.normals = s.normals_at(0);
+        mesh::MeshSculptor fixed(flat, 0.0f);
 
-    Mesh flat = s.mesh_at_level(2, {/*normals=*/false, false, false});
-    // The exported level of a cage with no attributes IS the level, vertex for
-    // vertex, which is what lets the comparison be direct.
-    REQUIRE(flat.positions.size() == s.positions_at(2).size());
-    flat.normals = s.normals_at(2);
-    mesh::MeshSculptor fixed(flat, 0.0f);
+        MeshBrushSettings settings;
+        settings.center = cf3(0.3f, 0.0f, -0.2f);
+        settings.radius = 1.2f;
+        settings.strength = 0.45f;
 
-    MeshBrushSettings settings;
-    settings.center = cf3(0.3f, 0.0f, -0.2f);
-    settings.radius = 0.8f;
-    settings.strength = 0.45f;
+        MultiresSculptor sculptor(s);
+        const std::size_t a = sculptor.stamp(MeshBrush::Clay, settings);
+        const std::size_t b = fixed.stamp(MeshBrush::Clay, settings);
+        CHECK(a == b);
+        CHECK(a > 0);
+        CHECK(same_bytes(s.positions_at(0), flat.positions));
+    }
 
-    MultiresSculptor sculptor(s);
-    const std::size_t a = sculptor.stamp(MeshBrush::Clay, settings);
-    const std::size_t b = fixed.stamp(MeshBrush::Clay, settings);
-    CHECK(a == b);
-    CHECK(a > 0);
-    CHECK(same_bytes(s.positions_at(2), flat.positions));
+    SUBCASE("above the cage, to a frame round trip") {
+        MultiresSurface s = build(plane_quads(4, 2.0f), 2);
+        REQUIRE(s.set_sculpt_level(2));
+        Mesh flat = s.mesh_at_level(2, {/*normals=*/false, false, false});
+        REQUIRE(flat.positions.size() == s.positions_at(2).size());
+        flat.normals = s.normals_at(2);
+        mesh::MeshSculptor fixed(flat, 0.0f);
+
+        MeshBrushSettings settings;
+        settings.center = cf3(0.3f, 0.0f, -0.2f);
+        settings.radius = 0.8f;
+        settings.strength = 0.45f;
+
+        MultiresSculptor sculptor(s);
+        const std::size_t a = sculptor.stamp(MeshBrush::Clay, settings);
+        const std::size_t b = fixed.stamp(MeshBrush::Clay, settings);
+        CHECK(a == b);
+        CHECK(a > 0);
+        const std::vector<cfloat3>& got = s.positions_at(2);
+        REQUIRE(got.size() == flat.positions.size());
+        float worst = 0.0f;
+        for (std::size_t v = 0; v < got.size(); ++v)
+            worst = std::max(worst, clength(got[v] - flat.positions[v]));
+        CHECK(worst < 1e-5f);
+    }
 }
 
 TEST_CASE("a gesture at a fine level reverts bit-identically") {

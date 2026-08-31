@@ -60,6 +60,7 @@
 #include "clay/mesh/adjacency.h"
 #include "clay/mesh/detail_field.h"
 #include "clay/mesh/mesh_data.h"
+#include "clay/mesh/project.h"
 #include "clay/mesh/subdivide.h"
 #include "clay/mesh/surface_frame.h"
 #include "clay/parallel/cancel.h"
@@ -251,6 +252,20 @@ class MultiresSurface {
     // explicit, priced conversion rather than an implicit consequence of an
     // edit.
     bool set_base_mesh(const Mesh& mesh, MultiresError* out_error = nullptr);
+
+    // Rebuild every level's detail from a reference surface: zero the level,
+    // subdivide, project the result onto the reference, and store the
+    // difference as coefficients — level by level, so each one projects from a
+    // parent that has already been fitted.
+    //
+    // THE SUPPORTED ROUTE by which a hierarchy accepts a sculpt made somewhere
+    // else, and the operation `set_base_mesh` names when it refuses. Explicit
+    // and expensive by design: it evaluates every level twice and builds a BVH
+    // over the reference, which is the honest price of changing what a
+    // coefficient is measured against.
+    bool project_from(const Mesh& reference, const ProjectOptions& options = {},
+                      ProjectReport* out_report = nullptr,
+                      const parallel::CancelToken* cancel = nullptr);
 
     // -- evaluation -----------------------------------------------------------
     //
