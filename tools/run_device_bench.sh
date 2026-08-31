@@ -99,25 +99,78 @@ if [ -n "${CLAY_DEVICE_TEAM:-}" ]; then
     team_arg=(DEVELOPMENT_TEAM="$CLAY_DEVICE_TEAM")
 fi
 
-set +e
-xcodebuild test \
-    -project "$PROJECT/ClayCoreDevice.xcodeproj" \
-    -scheme ClayCoreDevice \
-    -destination "$DESTINATION" \
-    -resultBundlePath "$RESULTS" \
-    -allowProvisioningUpdates \
-    ${team_arg[@]+"${team_arg[@]}"}
-status=$?
-set -e
+# -- two sessions, each started cold ------------------------------------------
+#
+# A gate run is TWO xcodebuild sessions rather than one, and the reason is not
+# tidiness. The verb bundle cannot follow the latency bundle inside a session:
+# sharing its process it is killed by jetsam at 0 s, and in its own process it
+# is killed at the heavy tail (mask_extrude, sdf_consolidate, sdf_relax,
+# sdf_move and the four authoring verbs) 21 of its 31 cases in — after 30
+# minutes of idle, so cooling does not buy it. A process boundary returns that
+# process's high-water mark and does nothing about system-level memory
+# pressure or heat, which outlive it.
+#
+# Running the verb bundle FIRST inside one session fixes the kill and breaks
+# the other half: the latency cases are the most thermally sensitive here, and
+# measured behind the verb bundle they come in at 1.34-2.16x of baselines they
+# match to 1.024x when they run cold. Six of them failed a gate with nothing
+# wrong with the engine.
+#
+# So each half gets a cold start. Verb first because it is the fragile one,
+# then a cooldown, then the rest. The verb cases were baselined in second
+# position and are measured here in a cold one, which can only make them
+# faster: median 1.003x over 62 shape-matched points, worst 1.14x, nothing
+# near the 1.4x tolerance. That is the one deliberate looseness in this
+# arrangement and it is smaller than the run-to-run spread it replaces.
+COOLDOWN="${CLAY_DEVICE_COOLDOWN:-900}"
+RESULTS_VERB="${RESULTS%.xcresult}.verb.xcresult"
+RESULTS_REST="${RESULTS%.xcresult}.rest.xcresult"
+rm -rf "$RESULTS_VERB" "$RESULTS_REST"
 
+run_session() {
+    # $1 = result bundle, rest = extra xcodebuild args
+    local bundle="$1"; shift
+    set +e
+    xcodebuild test \
+        -project "$PROJECT/ClayCoreDevice.xcodeproj" \
+        -scheme ClayCoreDevice \
+        -destination "$DESTINATION" \
+        -resultBundlePath "$bundle" \
+        -allowProvisioningUpdates \
+        ${team_arg[@]+"${team_arg[@]}"} \
+        "$@"
+    local st=$?
+    set -e
+    return "$st"
+}
+
+echo "device-bench: session 1/2 — the verb cases, cold"
+run_session "$RESULTS_VERB" -only-testing:ClayCoreDeviceVerbTests
+status=$?
 if [ "$status" -ne 0 ]; then
-    echo "device-bench: FAILED (xcodebuild exit $status)" >&2
-    echo "  result bundle: $RESULTS" >&2
+    echo "device-bench: FAILED in session 1 (xcodebuild exit $status)" >&2
+    echo "  result bundle: $RESULTS_VERB" >&2
+    exit "$status"
+fi
+
+echo "device-bench: cooling ${COOLDOWN}s before session 2"
+echo "  A warm device does not fail loudly here — it returns numbers that look"
+echo "  like results. Set CLAY_DEVICE_COOLDOWN to change it; do not set it to 0"
+echo "  for a run whose numbers you intend to commit."
+sleep "$COOLDOWN"
+
+echo "device-bench: session 2/2 — latency, gallery and parity, cold"
+run_session "$RESULTS_REST" -skip-testing:ClayCoreDeviceVerbTests
+status=$?
+if [ "$status" -ne 0 ]; then
+    echo "device-bench: FAILED in session 2 (xcodebuild exit $status)" >&2
+    echo "  result bundle: $RESULTS_REST" >&2
     exit "$status"
 fi
 
 JSON="${CLAY_DEVICE_JSON:-$ROOT/build/device/device-bench.json}"
-python3 "$ROOT/tools/collect_device_bench.py" "$RESULTS" "$JSON"
+python3 "$ROOT/tools/collect_device_bench.py" "$RESULTS_VERB" "$RESULTS_REST" "$JSON"
 
 echo "device-bench: OK"
-echo "  result bundle: $RESULTS"
+echo "  result bundles: $RESULTS_VERB"
+echo "                  $RESULTS_REST"

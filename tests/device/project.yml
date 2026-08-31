@@ -156,8 +156,8 @@ targets:
   # because a process boundary is the only thing that actually returns the
   # high-water mark.
   #
-  # SECOND, which is where its 31 baselines were recorded, and the position it
-  # keeps. Promoting it was tried and reverted: measured in first position its
+  # ITS OWN SESSION, run first and cold by tools/run_device_bench.sh. Its 31
+  # baselines were recorded second-in-session; measured cold its
   # own cases barely move (median 1.003x over 62 shape-matched points, worst
   # 1.14x), but the latency bundle it displaces goes from 1.00-1.15x of
   # baseline to 1.34-2.16x and six of its cases fail a gate with nothing wrong
@@ -229,17 +229,20 @@ schemes:
         ClayCoreDeviceGalleryTests: [test]
     test:
       targets:
-        # THIS ORDER IS THE ORDER EVERY BASELINE WAS RECORDED IN, and that is
-        # the whole reason it is written down rather than left to chance.
-        # Latency first, verb second. Measured both ways against the committed
-        # baselines: the latency cases run 1.00-1.15x of baseline in first
-        # position and 1.34-2.16x in second, because they are tens-of-ms
-        # brick-cache walks and the most thermally sensitive thing here. The
-        # verb cases move 1.003x median either way. So the order is not a
-        # preference — putting the verb bundle first makes six latency cases
-        # fail a gate that has nothing wrong with it.
+        # THIS LIST IS NOT THE RUN ORDER. tools/run_device_bench.sh drives the
+        # gate as TWO xcodebuild sessions with a cooldown between them, and
+        # selects the halves with -only-testing / -skip-testing: the verb
+        # bundle alone in session 1, everything below it in session 2. Read
+        # that script's comment for why — briefly, the verb bundle cannot
+        # follow the latency bundle inside one session at all, and the latency
+        # cases cannot follow the verb bundle without being measured on a warm
+        # device at 1.34-2.16x of baselines they otherwise match to 1.024x.
         #
-        # Each bundle is its own process, so none inherits another's
+        # What this order still decides is session 2: latency first, because
+        # it is the most thermally sensitive suite here, then the gallery's
+        # pictures and the parity checks, which no budget reads.
+        #
+        # Each bundle is also its own PROCESS, so none inherits another's
         # high-water mark. That is necessary and, as the verb bundle found
         # out, not sufficient: see its note.
         - ClayCoreDeviceMeasureTests

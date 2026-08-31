@@ -6,11 +6,19 @@ the unit XCTest gives us and there is no shared teardown that could write a
 single file. This merges them into the one record `check_device_bench.py`
 compares against a baseline.
 
+MORE THAN ONE RESULT BUNDLE MAY BE GIVEN, because a gate run is more than one
+xcodebuild SESSION. The verb bundle cannot follow the latency bundle inside a
+single session at all — it is killed by jetsam, cooled or not — and the latency
+cases cannot follow the verb bundle without being measured 1.34-2.16x of their
+baselines on a warmed device. A process boundary does not settle it: system
+memory pressure and heat outlive the process that raised them. So each half
+runs in its own session, cold, and the halves are merged here.
+
 Two fields are stamped HERE rather than on the device, because the device does
 not know them: the claycore commit and the xcframework's identity. A baseline
 that cannot say what produced it is not comparable to anything.
 
-    tools/collect_device_bench.py <results.xcresult> <out.json>
+    tools/collect_device_bench.py <results.xcresult> [<more.xcresult> ...] <out.json>
 """
 
 import json
@@ -109,25 +117,33 @@ def merge(records: list[dict]) -> dict:
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
+    if len(sys.argv) < 3:
         print(__doc__, file=sys.stderr)
         return 2
-    xcresult = pathlib.Path(sys.argv[1])
-    out_path = pathlib.Path(sys.argv[2])
-    if not xcresult.exists():
-        print(f"device-bench: no result bundle at {xcresult}", file=sys.stderr)
-        return 1
+    xcresults = [pathlib.Path(a) for a in sys.argv[1:-1]]
+    out_path = pathlib.Path(sys.argv[-1])
+    for xcresult in xcresults:
+        if not xcresult.exists():
+            print(f"device-bench: no result bundle at {xcresult}", file=sys.stderr)
+            return 1
 
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="clay-bench-"))
     try:
-        manifest = export_attachments(xcresult, tmp)
+        manifest = []
+        for i, xcresult in enumerate(xcresults):
+            into = tmp / f"session{i}"
+            into.mkdir(parents=True, exist_ok=True)
+            for entry in export_attachments(xcresult, into):
+                entry = dict(entry)
+                entry["_dir"] = into
+                manifest.append(entry)
         records = []
         for entry in manifest:
             for attachment in entry.get("attachments", []):
                 name = attachment.get("suggestedHumanReadableName", "")
                 if not name.startswith("device-bench"):
                     continue
-                path = tmp / attachment["exportedFileName"]
+                path = entry["_dir"] / attachment["exportedFileName"]
                 records.append(json.loads(path.read_text()))
         # Renders come out of the same bundle. They are the half of the result
         # that can be looked AT: a brush that got fast by doing nothing passes
@@ -141,7 +157,7 @@ def main() -> int:
                 name = attachment.get("suggestedHumanReadableName", "")
                 if not name.startswith("gallery-"):
                     continue
-                src = tmp / attachment["exportedFileName"]
+                src = entry["_dir"] / attachment["exportedFileName"]
                 # xcresulttool appends "_<index>_<uuid>" before the extension.
                 # Strip exactly that: splitting on "_" instead collapsed
                 # gallery-stroke_build and gallery-stroke_carve onto one name,

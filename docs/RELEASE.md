@@ -1357,6 +1357,28 @@ python3 tools/check_device_bench.py build/device/device-bench.json
 python3 tools/check_device_coverage.py build/device/device-bench.json
 ```
 
+**The run is TWO xcodebuild sessions with a cooldown between them, and it takes
+about twenty minutes.** That is not incidental and it must not be collapsed
+back into one. The verb bundle — 31 of the 69 gated cases, and the heaviest —
+cannot follow the latency bundle inside a single session: sharing its process
+it is killed by jetsam at 0 s, and in its own process it is killed at the heavy
+tail 21 of 31 cases in, *after thirty minutes of idle*, so cooling alone does
+not buy it. Running it first inside one session fixes the kill and breaks the
+other half: the latency cases are the most thermally sensitive suite here, and
+behind the verb bundle they measure **1.34-2.16x of baselines they match to
+1.024x when they start cold** — six of them failed a gate with nothing wrong
+with the engine. So each half gets a cold start, and
+`collect_device_bench.py` takes both result bundles.
+
+`CLAY_DEVICE_COOLDOWN` sets the gap (default 900 s). **Do not set it to 0 for a
+run whose numbers you intend to commit.** A warm device does not fail loudly
+here; it returns numbers that look like results.
+
+**And give the iPad half an hour before starting a release gate at all.** Four
+runs inside half an hour will fail the verb bundle whatever the ordering. That
+failure is at least a jetsam kill rather than a quietly slower number, but it
+costs a cycle either way.
+
 `run_device_bench.sh` rebuilds the xcframework first rather than trusting what
 is on disk. This repo has been bitten by that exact staleness before: the
 Swift smoke consumes the prebuilt xcframework rather than the working tree, so
