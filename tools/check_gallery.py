@@ -9,7 +9,7 @@ committed at scene format **minor 9** while the writer emitted **minor 15** —
 six format minors, in a byte format, sitting in the repository as a claim nobody
 checked (#410).
 
-WHAT THIS GATES, AND WHY NOT BYTES.
+WHAT THIS GATES, AND WHY SO LITTLE.
 
 A render is float output and this repository already says so: bytes differ
 across platforms, and the reporter of #410 measured a `20_relax` render that
@@ -18,16 +18,32 @@ the machine the gallery was regenerated on. So byte equality can only ever be a
 per-platform claim, and a byte gate on one runner would fail honestly-generated
 files from another.
 
-What IS platform-independent is STRUCTURE — integers a float never perturbs:
+The first version of this file assumed that ELEMENT COUNTS were the safe
+alternative — integers a float never perturbs. **That was wrong, and CI proved
+it on the first cross-platform run.** Three marched meshes disagree between an
+M-series Mac and an ubuntu-latest runner:
 
-  * `.clayspace`  the magic and the format major/minor
-  * `.ply`        the declared element counts
-  * `.obj`        the vertex, texture, normal and face line counts
+    34_organic_character.ply    1764 vertices   vs   1763
+    35_hard_surface_helmet.ply  3172            vs   3174
+    37_groups.ply               6194 / 12426    vs   6192 / 12422
 
-Those are gated exactly. Every one of them would have caught this drift: the
-minor moved 9 -> 15, and the meshes changed element counts. Renders are
-REPORTED and not gated, because a number that cannot be trusted across runners
-must not be allowed to fail a build.
+A marched mesh's vertex count is not a constant of the document. It is decided
+by which samples the isosurface crosses, which is a float comparison, so the
+count inherits every bit of platform float variation the render does. Any
+number DERIVED from the geometry is out for the same reason.
+
+What survives is what is WRITTEN rather than computed:
+
+  * `.clayspace`  the magic and the format major/minor — a constant the writer
+                  emits, identical on every machine, and the thing that
+                  actually caught #410: eight documents committed at minors 9,
+                  10, 11 and 13 against a writer emitting 15.
+  * every tracked output still being produced at all.
+
+That is a narrow gate and it is the honest width. A gate that fails on a
+correct file teaches people to ignore it, which is worse than the silence it
+replaced. Everything else — renders, element counts, binary containers — is
+REPORTED, so a human reviewing a PR sees the drift and decides.
 
     tools/check_gallery.py                 # compare against git HEAD
     tools/check_gallery.py --ref <rev>     # ...or another revision
@@ -68,7 +84,13 @@ def clayspace_version(data: bytes) -> tuple | None:
 
 
 def ply_elements(data: bytes) -> tuple | None:
-    """Declared element counts, in header order: (("vertex", n), ("face", m))."""
+    """Declared element counts, in header order — REPORTED, never gated.
+
+    Kept because it names what changed in a way a reviewer can act on, and it
+    is genuinely useful in a PR that means to change a mesh. It is not a gate:
+    see the module docstring for the three files that measure differently on
+    Linux and macOS.
+    """
     head = data[:4096].split(b"end_header", 1)[0]
     try:
         text = head.decode("ascii", errors="strict")
@@ -78,29 +100,14 @@ def ply_elements(data: bytes) -> tuple | None:
     return tuple((name, int(n)) for name, n in found) if found else None
 
 
-def obj_counts(data: bytes) -> tuple | None:
-    """(v, vt, vn, f) line counts."""
-    try:
-        text = data.decode("utf-8", errors="strict")
-    except UnicodeDecodeError:
-        return None
-    counts = {"v": 0, "vt": 0, "vn": 0, "f": 0}
-    for line in text.splitlines():
-        key = line.split(" ", 1)[0]
-        if key in counts:
-            counts[key] += 1
-    return tuple(sorted(counts.items()))
-
-
 def structure(path: pathlib.Path, data: bytes):
-    """A platform-independent description, or None when there is no reader."""
-    suffix = path.suffix.lower()
-    if suffix == ".clayspace":
+    """The WRITTEN description a gate may rely on, or None when there is none.
+
+    Only `.clayspace` has one. A format version is a constant the writer emits;
+    everything else in this gallery is computed from float geometry.
+    """
+    if path.suffix.lower() == ".clayspace":
         return clayspace_version(data)
-    if suffix == ".ply":
-        return ply_elements(data)
-    if suffix == ".obj":
-        return obj_counts(data)
     return None
 
 
@@ -120,7 +127,7 @@ def main() -> int:
         ["git", "ls-files", "examples/output"], cwd=REPO,
         capture_output=True, text=True, check=True).stdout.split()
 
-    failures, changed_renders, changed_opaque, missing, unreadable = [], [], [], [], []
+    failures, changed_renders, changed_geometry, changed_opaque, missing = [], [], [], [], []
 
     for rel in sorted(tracked):
         path = REPO / rel
@@ -130,24 +137,31 @@ def main() -> int:
         if old is None:
             continue  # not in the ref: a new output, nothing to compare
         if not path.exists():
+            # The one failure every format shares: the examples stopped
+            # producing a file the repository still tracks. Nothing about that
+            # is float-dependent.
             missing.append(name)
             continue
         new = path.read_bytes()
         if new == old:
             continue
 
-        if suffix in RENDER_SUFFIXES:
-            changed_renders.append(name)
-            continue
-        if suffix in OPAQUE_SUFFIXES:
-            changed_opaque.append(name)
+        # The gate: a WRITTEN format version, and only that.
+        old_s, new_s = structure(path, old), structure(path, new)
+        if old_s is not None and new_s is not None:
+            if old_s != new_s:
+                failures.append((name, old_s, new_s))
             continue
 
-        old_s, new_s = structure(path, old), structure(path, new)
-        if old_s is None or new_s is None:
-            unreadable.append(name)
-        elif old_s != new_s:
-            failures.append((name, old_s, new_s))
+        # Everything else is reported. Geometry carries its element counts,
+        # because a reviewer deciding whether a mesh change was intended wants
+        # the numbers even though they cannot be a gate.
+        if suffix in RENDER_SUFFIXES:
+            changed_renders.append(name)
+        elif suffix == ".ply":
+            changed_geometry.append((name, ply_elements(old), ply_elements(new)))
+        else:
+            changed_opaque.append(name)
 
     print(f"check-gallery: {len(tracked)} tracked outputs, compared against {args.ref}")
 
@@ -161,9 +175,11 @@ def main() -> int:
     if missing:
         print(f"\n  {len(missing)} tracked output(s) the examples no longer produce: "
               f"{', '.join(missing[:8])}{' ...' if len(missing) > 8 else ''}")
-    if unreadable:
-        print(f"\n  {len(unreadable)} output(s) changed and could not be parsed: "
-              f"{', '.join(unreadable[:8])}")
+    if changed_geometry:
+        print(f"\n  {len(changed_geometry)} mesh(es) differ. NOT a failure: an element "
+              f"count is decided by float comparisons and differs across platforms.")
+        for name, old_s, new_s in changed_geometry[:8]:
+            print(f"    {name}: {old_s} -> {new_s}")
     if changed_renders:
         print(f"\n  {len(changed_renders)} render(s) differ in bytes. NOT a failure: a "
               f"render is float output and differs across platforms.")
@@ -175,7 +191,7 @@ def main() -> int:
         print(f"\n  {len(changed_opaque)} binary container(s) differ in bytes, reported "
               f"only: {', '.join(changed_opaque[:6])}")
 
-    bad = failures or missing or unreadable
+    bad = failures or missing
     if not bad:
         print("\ncheck-gallery: OK — every structural claim the gallery makes still holds")
         return 0
