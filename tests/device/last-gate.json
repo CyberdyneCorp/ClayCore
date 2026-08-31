@@ -1,7 +1,7 @@
 {
-  "abiVersion": "0.60.0",
-  "caseCount": 62,
-  "claycoreCommit": "1dcb52ab8f11ee4c05eb4e273ce07ac8c485d28a",
+  "abiVersion": "0.73.0",
+  "caseCount": 69,
+  "claycoreCommit": "39c2442096bc20ca153e777e362946de4c0beaed",
   "deviceModel": "iPad15,5",
   "osVersion": "Version 26.5.2 (Build 23F84)",
   "passed": true,

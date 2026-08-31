@@ -156,6 +156,110 @@ forward-refuse).
    implicit, because "unreleased" is a claim about this repository's tags and not
    about what somebody has on disk.
 
+   **0.61.0, 0.62.0, 0.63.0, 0.68.0, 0.71.0, 0.72.0 and 0.73.0 are not such
+   releases**: all seven are additive, and together they are most of what
+   v0.73.0 adds. 0.61.0 adds the brush model and preset library (appending a
+   four-field automask block to `clay_mesh_brush_desc`, behind the `struct_size`
+   it already negotiates); 0.62.0 the adaptive half-edge surface and its
+   sculptor; 0.63.0 `clay_mesh_voxel_remesh` with its estimate and defaults;
+   0.68.0 `clay_layer_magnify_surface` and its preview; 0.71.0 the seven
+   `clay_voxel_grab_*` transaction entry points; 0.72.0
+   `clay_sdf_move_preview_document` plus the three deformer-list verbs that give
+   `clay_layer_add_deformer` an inverse; and 0.73.0
+   `clay_layer_plan_region_merge` / `clay_layer_consolidate_region`. Nothing
+   that compiled against the version before each of them changes behaviour.
+
+   **0.64.0 IS such a release, in one way a caller can observe without calling
+   anything new, and it is a correction to something 0.63.0 shipped untested.**
+   `voxel_remesh`'s projection clamped by normal compatibility with a HARD
+   REJECT. Tested for the first time on a sheet folded back through itself at
+   longest-axis 96 — the fixture that actually reaches the branch, where a fifth
+   of the vertices in the clamp have a back-facing closest point — it is the
+   ONLY variant that makes the surface worse: 17 self-intersecting pairs against
+   0 for no projection, no facing test, and the weighting that replaces it.
+   Moving a vertex fully while leaving its neighbour untouched tears. The weight
+   now goes to zero continuously and still refuses a back-facing sheet, so the
+   specified behaviour is unchanged where it was specified.
+
+   0.64.0 also introduces the per-layer GEOMETRY REVISION, which moves for a
+   wholesale replacement and never for a sculpt. A host that keeps a live
+   sculptor across a rebuild must compare it. The check it replaces could not
+   see the case that matters: a `std::map` node's address is stable across an
+   assignment, and a replacement landing on the same vertex and index counts
+   passes a count check too, so a same-count rebuild left a sculptor stamping
+   into an adjacency and a BVH over triangles that no longer existed.
+
+   **0.65.0 is not such a release** — `clay_mesh_weld` and its defaults are
+   additive — **but it CORRECTS ADVICE 0.64.0 WROTE DOWN, and a host that took
+   that advice must change.** 0.64.0 recorded the fix for `from_mesh` refusing a
+   marched mesh as "pass `weld_epsilon = 0`, a marched mesh is already welded on
+   lattice-edge keys". That is wrong. The default mesher emits triangles with two
+   corners at BIT-IDENTICAL positions — 1,458 of 70,140 on a plain analytic
+   sphere at a 0.02 lattice — and those are refused at ANY epsilon including
+   zero. It appeared to work only because the voxel remesh emits almost none of
+   them, its field being a sampled band rather than an analytic function. Luck,
+   not a rule. The round trip is `from_mesh(weld(m))`.
+
+   **0.66.0 IS such a release.** No symbol removed and no signature changed, but
+   a stamp authored with an alpha lands somewhere else — on the item, which is
+   where it was always meant to be. `brush::stamp_placement` returns a WORLD
+   frame and `stamp_deformer` fed it straight into `Deformer::alpha`, which reads
+   LOCAL; no conversion existed. The two frames coincide at the identity, which
+   is every test in the suite and every example. Measured on a sphere at
+   (0.4, -0.2, 0.1) rotated 0.7 rad about y and scaled 0.35, the field moved at
+   the click goes from 0.000013 to 0.296. A host that compensated for this in its
+   own code is now applying the correction twice.
+
+   0.66.0 also turns two silently-inert inputs into refusals: a zero direction
+   (the kernel substituted local +Z) and a non-positive radius (the kernel
+   floored it). Both are `CLAY_ERROR_INVALID_ARGUMENT` at both authoring doors.
+
+   **0.67.0 IS such a release, and it is the one to read if you gate items
+   anywhere but the origin.** No format or ABI break — the gate blob keeps its
+   fifteen floats and the kernel reading them is untouched, so documents written
+   by older versions load and now evaluate CORRECTLY. What changes is that
+   `clay_item_set_gate` is read in world space. A mask field is stored in world
+   units on its own lattice, so the tape placing it by `layer.xform * item.xform`
+   moved the protected region by the transform of the very item it was meant to
+   hold back. Reported as "accepted and inert" at every threshold and width; at
+   the identity the two frames coincide, which is why no fixture caught it.
+
+   The step-scale accounting had the matching error IN THE UNSAFE DIRECTION:
+   `gate_width` is already a world length and the tape charged it against the
+   layer's scale, so a layer scaled up declared a step scale it had not earned
+   and a marcher stepping by it could punch through the masked boundary. A
+   scaled-up gated layer now reports a SMALLER step scale.
+
+   **0.69.0 IS such a release, and the direction matters.**
+   `clay_layer_safe_step_scale` returns a LARGER number for a layer whose
+   deformer chain is disjoint — 0.0616 to 0.7059 on eight drags of radius 0.3
+   spaced 3.06 apart around a radius-4 sphere. `deformer_lipschitz` folded the
+   chain into one running product, charging every pair as though it compounds,
+   which most pairs cannot: grab, magnify, pose, blob and alpha all have finite
+   support, so two whose balls are far apart have nothing to multiply.
+
+   A larger step scale is the one direction in which being wrong lets a marcher
+   step THROUGH a surface, so this is the entry to read before trusting it: the
+   bound is now the worst REACHABILITY GROUP rather than the product of all
+   links, a link with unbounded support is charged against every group, and a
+   degenerate radius is treated as unbounded rather than as an empty ball. Four
+   of the seven new cases exist only to assert that nothing was over-relaxed. It
+   is unchanged for an overlapping chain and for every layer with no deformers.
+
+   **0.70.0 IS such a release**, and additively at the ABI:
+   `advises_consolidation` STOPS FIRING on a layer degraded only by its brush
+   chain. It was `safe_step_scale < threshold` and nothing else — the aggregate —
+   and a grab chain lowers the step scale exactly as a stack of baked volumes
+   does, so the advisory fired hardest on the case consolidation cannot help.
+   Measured by the reporting host over four gestures on a real form, a bake made
+   the polish brush 13x FASTER and the move brush 6x SLOWER, while IMPROVING the
+   step scale that triggered it 29x.
+
+   `clay_field_report` gains `steepest_deformer_chain`, `drawable_count` and
+   `degradation`, appended behind `struct_size`; a caller passing the earlier
+   size sees none of them and has nothing written past the end of its struct. A
+   host wanting the old meaning has `safe_step_scale` and its own threshold.
+
    **0.54.1 is not such a release**: no symbol added or removed and no
    signature changed. It is a BEHAVIOUR fix to one existing verb, and the kind
    worth reading because the old behaviour was not wrong-looking, it was inert.
@@ -1252,6 +1356,31 @@ tools/run_device_bench.sh <udid>                 # a specific one
 python3 tools/check_device_bench.py build/device/device-bench.json
 python3 tools/check_device_coverage.py build/device/device-bench.json
 ```
+
+**The run is THREE xcodebuild sessions with a cooldown between each, and it
+takes about forty minutes.** That is not incidental and it must not be collapsed
+back into one. The verb bundle — 31 of the 69 gated cases, and the heaviest —
+cannot follow the latency bundle inside a single session: sharing its process
+it is killed by jetsam at 0 s, and in its own process it is killed at the heavy
+tail 21 of 31 cases in, *after thirty minutes of idle*, so cooling alone does
+not buy it. Running it first inside one session fixes the kill and breaks the
+other half: the latency cases are the most thermally sensitive suite here, and
+behind the verb bundle they measure **1.34-2.16x of baselines they match to
+1.024x when they start cold** — six of them failed a gate with nothing wrong
+with the engine. The gallery is the same story one level down — its volume bake costs +75 MB,
+it is killed behind the latency bundle, and it holds 25 of the 69 gated cases,
+so it cannot be dropped. So every half gets a cold start: verb, then latency
+and parity, then the gallery. `collect_device_bench.py` takes all three result
+bundles.
+
+`CLAY_DEVICE_COOLDOWN` sets the gap (default 900 s). **Do not set it to 0 for a
+run whose numbers you intend to commit.** A warm device does not fail loudly
+here; it returns numbers that look like results.
+
+**And give the iPad half an hour before starting a release gate at all.** Four
+runs inside half an hour will fail the verb bundle whatever the ordering. That
+failure is at least a jetsam kill rather than a quietly slower number, but it
+costs a cycle either way.
 
 `run_device_bench.sh` rebuilds the xcframework first rather than trusting what
 is on disk. This repo has been bitten by that exact staleness before: the
