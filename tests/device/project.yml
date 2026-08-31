@@ -87,7 +87,7 @@ targets:
         BUNDLE_LOADER: "$(TEST_HOST)"
         OTHER_LDFLAGS: -lc++
 
-  # The latency cases, alone in a process and SECOND in the run.
+  # The latency cases, alone in a process and FIRST in the run.
   #
   # ALONE, because a process keeps its high-water mark. testEveryVerbOnDevice
   # passed by itself and was killed by jetsam whenever anything ran ahead of
@@ -156,28 +156,28 @@ targets:
   # because a process boundary is the only thing that actually returns the
   # high-water mark.
   #
-  # FIRST, and that position was measured rather than assumed, because moving
-  # it is exactly the kind of change this file records a 2.7x swing for.
+  # SECOND, which is where its 31 baselines were recorded, and the position it
+  # keeps. Promoting it was tried and reverted: measured in first position its
+  # own cases barely move (median 1.003x over 62 shape-matched points, worst
+  # 1.14x), but the latency bundle it displaces goes from 1.00-1.15x of
+  # baseline to 1.34-2.16x and six of its cases fail a gate with nothing wrong
+  # with it. The thermally sensitive suite gets the cold end of the window.
   #
-  # Splitting alone was NOT enough: with the latency bundle still ahead of it
-  # the case died again, at the heavy tail (mask_extrude, sdf_consolidate,
-  # sdf_relax, sdf_move and the four authoring verbs), 21 of its 31 cases in.
-  # A separate process returns this bundle's own high-water mark and does
-  # nothing about the pressure the run before it leaves behind. Run alone it
-  # completes every case on a warm device, valid, nominal at both ends.
+  # WHAT MAKES SECOND SURVIVABLE IS THE PROCESS BOUNDARY PLUS A COLD START.
+  # Neither alone is enough, and both were established by running it:
   #
-  # Promoting it costs less than the ordering rule predicts. Its 31 cases were
-  # baselined in SECOND position; measured in first, against those baselines:
-  # median 1.003x over 62 shape-matched points, worst 1.14x (armature_edit),
-  # and NOTHING over the 1.4x regression tolerance. So the window this bundle
-  # sees is not meaningfully colder — the latency bundle ahead of it was 39 s,
-  # where the 2.7x that file measured was a three-bundle reordering. The
-  # baselines stand as recorded; none of them is re-taken here.
+  #   - sharing the process with LatencyTests: killed at 0 s, before its first
+  #     measurement
+  #   - its own process, device warm from earlier runs: killed at the heavy
+  #     tail (mask_extrude, sdf_consolidate, sdf_relax, sdf_move and the four
+  #     authoring verbs), 21 of 31 cases in
+  #   - its own process, alone: all 31, valid, nominal at both ends
+  #   - its own process, device idle ~30 min beforehand: all 31
   #
-  # LatencyTests inherits second place. It is the shorter suite, its cases are
-  # brick-cache latencies rather than volume bakes, and it does not sit near
-  # the jetsam limit — which is the whole reason the verb suite gets the
-  # cold, clean end of the window rather than it.
+  # So a gate run needs a genuinely cool device, not merely an unloaded one.
+  # Four runs inside half an hour will fail this bundle whatever the order,
+  # and the failure is a jetsam kill rather than a slow number — which is at
+  # least loud. Give the iPad half an hour before a release gate.
   ClayCoreDeviceVerbTests:
     type: bundle.unit-test
     platform: iOS
@@ -229,13 +229,20 @@ schemes:
         ClayCoreDeviceGalleryTests: [test]
     test:
       targets:
-        # The verb bundle runs FIRST and in its own process: it carries 31 of
-        # the 69 gated cases, it holds the heaviest ones, and it is the one
-        # that sits near the jetsam limit. The latency cases follow, then the
-        # gallery and the parity checks. Each is its own process, so none
-        # inherits another's high-water mark — which is necessary and, as the
-        # verb bundle found out, not sufficient.
-        - ClayCoreDeviceVerbTests
+        # THIS ORDER IS THE ORDER EVERY BASELINE WAS RECORDED IN, and that is
+        # the whole reason it is written down rather than left to chance.
+        # Latency first, verb second. Measured both ways against the committed
+        # baselines: the latency cases run 1.00-1.15x of baseline in first
+        # position and 1.34-2.16x in second, because they are tens-of-ms
+        # brick-cache walks and the most thermally sensitive thing here. The
+        # verb cases move 1.003x median either way. So the order is not a
+        # preference — putting the verb bundle first makes six latency cases
+        # fail a gate that has nothing wrong with it.
+        #
+        # Each bundle is its own process, so none inherits another's
+        # high-water mark. That is necessary and, as the verb bundle found
+        # out, not sufficient: see its note.
         - ClayCoreDeviceMeasureTests
+        - ClayCoreDeviceVerbTests
         - ClayCoreDeviceGalleryTests
         - ClayCoreDeviceTests
