@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 68
+#define CLAY_ABI_MINOR 69
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -1799,7 +1799,27 @@ clay_result clay_layer_eval_gradients(const clay_document* doc, clay_layer_id la
                                       float* out_gradients_xyz);
 
 /* Multiply a field distance by this before stepping along a ray: the tape's
- * Lipschitz safety factor, which a scaled or displaced edit lowers. */
+ * Lipschitz safety factor, which a scaled or displaced edit lowers.
+ *
+ * A CHAIN OF BRUSHES IS PRICED WHERE ITS LINKS CAN REACH (ABI 0.69.0, issue
+ * #386). CLAY_DEFORM_GRAB, _MAGNIFY, _POSE, _BLOB and _ALPHA have finite
+ * support — outside their own ball the field is untouched, which is what makes
+ * them brushes rather than modifiers — so two whose balls are far apart have no
+ * point at which both are anything but the identity, and their factors have
+ * nothing to multiply. The bound is therefore the worst GROUP of links that can
+ * reach one another, rather than the product of all of them.
+ *
+ * What that means for a host: a Move-heavy session no longer pays k^n for
+ * nudging n different places on a form, which is the normal way a sculptor
+ * works — a second drag on the same spot is a correction rather than a stroke.
+ * Eight drags of radius 0.3 spaced 3.06 apart used to report 0.0616 here and
+ * now report 0.7059, the number one drag reports. Drags PILED on one spot still
+ * compound, because there they genuinely do.
+ *
+ * A deformer that acts everywhere — twist, bend, taper, a lattice, pose along a
+ * line — is charged against every group, so nothing is saved by mixing one in.
+ * clay_layer_consolidate is still the answer for a chain that has genuinely
+ * degraded; this only stops charging for a degradation that is not there. */
 clay_result clay_safe_step_scale(const clay_document* doc, float* out_scale);
 clay_result clay_layer_safe_step_scale(const clay_document* doc, clay_layer_id layer,
                                        float* out_scale);

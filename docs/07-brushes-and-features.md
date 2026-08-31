@@ -328,6 +328,26 @@ fit the shape: radial pose carries an axis, a direction that would have to be
 mapped per image, and pose along a line has no finite support at all, so the
 reachability rule both resolvers are built on does not apply to it.
 
+**Disjoint brushes do not compound the step scale.** A chain's Lipschitz used
+to be one running product, so eight drags 3.06 apart on a radius-4 sphere were
+charged `k^8` — a step scale of 0.0616 against 0.7059 for one drag — for a
+compounding that cannot physically happen. `grab`, `magnify`, `pose`, `blob` and
+`alpha` are the finite-support family: outside their own ball the field is
+untouched, so two whose balls cannot reach one another have no point at which
+both are anything but the identity. The bound is now the worst *group* of links
+that can reach each other rather than the product of all of them, and the eight
+disjoint drags cost exactly what one costs.
+
+The gap that separates two groups is `r_i + r_k` plus the total distance the
+chain's point warps can carry a point, not the radii alone: the first grab moves
+material toward the second, so balls that do not overlap can still meet.
+Deformers that act everywhere — twist, bend, taper, a lattice, and `pose_line`,
+whose weight clamps rather than falling to zero — are charged against every
+group, so nothing is saved by mixing one in. Drags piled on one spot still
+compound, because there they genuinely do. `consolidate` remains the answer for
+a chain that has really degraded; this only stops charging for a degradation
+that is not there.
+
 `magnify`'s **centre is its fixed point** — a radial scale about a point on the
 surface bulges the neighbourhood *around* it and leaves the point itself exactly
 where it was. This surprises people (and caught the tests first); see
@@ -1827,7 +1847,7 @@ parity — the mechanism usually differs even where the result matches.
 | Crease, DamStandard | `Op::Incise` | The same op, cutting in — a thin region gives the line |
 | Inflate | `Op::Relief`, `sculpt_inflate` | Moving the surface along its own normal *is* relief; the voxel verb dilates and erodes by cells |
 | Move Topological | `field::move_topological` | Geodesic falloff — the radius is travel across the surface, so it cannot step over a gap. Bakes |
-| Move | `brush::move_brush` | Drags the assembled surface. Nudges form rather than growing it: a large pull buds rather than stretches, and a stroke's drags compound the step scale — use `snakehook` to pull a lobe out |
+| Move | `brush::move_brush` | Drags the assembled surface. Nudges form rather than growing it: a large pull buds rather than stretches. Drags that OVERLAP compound the step scale — use `snakehook` to pull a lobe out — but disjoint ones no longer do (see below) |
 | Rotate | `pose` / `pose_line` | Radial, or ramped along a line |
 | Gizmo Twist | `twist_range` | The gizmo acts inside its box: the rotation ramps across the span and holds beyond. Plain `twist` winds the whole item, which is the difference |
 | Gizmo Bend Arc | `bend_range` | Angle-limited bend, same shape |
