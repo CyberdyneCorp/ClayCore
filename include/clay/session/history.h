@@ -47,6 +47,7 @@
 #include "clay/math/geom.h"
 #include "clay/mesh/mesh_data.h"
 #include "clay/mesh/sculpt.h"
+#include "clay/mesh/multires_sculpt.h"
 #include "clay/mesh/topology_delta.h"
 #include "clay/scene/commands.h"
 #include "clay/voxel/grid.h"
@@ -106,6 +107,16 @@ struct Step {
         // as it would for any other large payload. A remesh is a handful per
         // session, which is the same frequency argument SurfaceGroup makes.
         MeshReplace,
+        // ONE GESTURE ON A SUBDIVISION HIERARCHY: the detail coefficients and
+        // cage positions it edited, at the level it was made on.
+        //
+        // Its own kind rather than an overload of Mesh, and the reason is the
+        // one that keeps the payload small. A coarse stroke on a five-level
+        // hierarchy moves millions of vertices at the top, and every one of
+        // them is `Subdivide(parent) + Detail` — derived state the hierarchy
+        // reconstructs. `VertexDeltas` would record all of them; this records
+        // what was EDITED, so the step follows the brush rather than the depth.
+        Multires,
         Barrier  // an operation nothing records; not reversible, not silent
     };
 
@@ -115,6 +126,7 @@ struct Step {
     std::vector<voxel::MaskField::MaskChange> mask_cells;  // Mask
     mesh::VertexDeltas deltas;                // Mesh
     mesh::TopologyDelta topology_delta;        // DynamicMesh
+    mesh::MultiresDelta multires_delta;        // Multires
     // SurfaceGroup: the whole field, serialised, on each side of the edit.
     //
     // A WHOLE SNAPSHOT where every other kind stores a DIFF, and deliberately.
@@ -164,6 +176,12 @@ class History {
     // names.
     using DynamicMeshFor = std::function<mesh::DynamicSurface*(scene::LayerId)>;
     void set_dynamic_resolver(DynamicMeshFor resolver) { dynamic_for_ = std::move(resolver); }
+    // A subdivision hierarchy, by the layer that holds it. Set once, for the
+    // reason `DynamicMeshFor` gives: adding a fifth parameter to undo, redo and
+    // replay would break every host compiled against this header to serve a
+    // payload most documents never carry.
+    using MultiresFor = std::function<mesh::MultiresSurface*(scene::LayerId)>;
+    void set_multires_resolver(MultiresFor resolver) { multires_for_ = std::move(resolver); }
     // The document's surface groups. NOT keyed by layer, because the lattice is
     // per document — which is also why this is set once rather than passed to
     // undo, redo and replay like the three above: those resolve a MAP lookup
@@ -234,6 +252,10 @@ class History {
     // One adaptive gesture — every split, collapse, flip and displacement it
     // made — as ONE step.
     void record_dynamic_mesh_step(scene::LayerId layer, mesh::TopologyDelta delta);
+    // One gesture on a subdivision hierarchy — every stamp of it — as ONE step.
+    // Empty records are dropped, for the reason every other recorder drops a
+    // no-op.
+    void record_multires_step(scene::LayerId layer, mesh::MultiresDelta delta);
     // One layer's mesh REPLACED wholesale — a global voxel remesh. Both sides
     // are taken by value because both are kept: undo needs the before and redo
     // needs the after, and the layer holds only one of them at a time.
@@ -316,7 +338,8 @@ class History {
             // would renumber the rest and silently reinterpret every event in
             // every file already on disk.
             DynamicMesh,
-            MeshReplace  // appended, for the reason above
+            MeshReplace,  // appended, for the reason above
+            Multires      // appended, for the reason above
         };
         Kind kind = Kind::Command;
         scene::Command command;                   // Kind::Command
@@ -325,6 +348,7 @@ class History {
         std::vector<voxel::MaskField::MaskChange> mask_cells;  // Kind::Mask  // Voxel
         mesh::VertexDeltas deltas;                // Mesh
         mesh::TopologyDelta topology_delta;        // DynamicMesh
+        mesh::MultiresDelta multires_delta;        // Multires
         // SurfaceGroup: the field AFTER the edit. Only the after side, unlike
         // the step — a journal replays forward onto the snapshot it was taken
         // against and never runs backwards, so the before side would be bytes
@@ -465,6 +489,7 @@ class History {
     bool mask_open_ = false;
     GroupsFor groups_for_;
     DynamicMeshFor dynamic_for_;
+    MultiresFor multires_for_;
     bool group_open_ = false;
     std::vector<std::uint8_t> group_snapshot_;
     scene::LayerId open_mask_layer_ = 0;

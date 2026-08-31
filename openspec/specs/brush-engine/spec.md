@@ -1,7 +1,16 @@
 # brush-engine Specification
 
 ## Purpose
-TBD - created by archiving change add-brush-stroke-engine. Update Purpose after archive.
+What a STROKE is, independently of what it lands on.
+
+Spacing along the path, pressure response, deterministic jitter, taper, steady
+stroke, buildup versus clamped accumulation, and versioned presets that survive
+an engine version — resolved once into spaced stamps that each consumer then
+applies in its own vocabulary.
+
+Apart from the representations it drives, and that separation is the point: a
+gesture must mean the same thing on a voxel layer, an SDF layer, a mask and a
+mesh, and it can only do that if "what the gesture was" is decided in one place.
 ## Requirements
 ### Requirement: Strokes resolve to stamps
 The module SHALL resolve a sequence of stroke samples — position, pressure, tilt and a monotone path parameter — into an ordered list of stamps, each carrying a position, radius, strength and orientation. Resolution SHALL be pure: it SHALL NOT read or modify a document.

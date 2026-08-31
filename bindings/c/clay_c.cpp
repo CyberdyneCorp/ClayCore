@@ -27,6 +27,9 @@
 #include "clay/brush/procedural_mask.h"
 #include "clay/brush/preset.h"
 #include "clay/mesh/dynamic_sculpt.h"
+#include "clay/brush/stroke.h"
+#include "clay/mesh/multires_sculpt.h"
+#include "clay/mesh/project.h"
 #include "clay/mesh/dynamic_validate.h"
 #include "clay/brush/stroke.h"
 #include "clay/brush/surface_measure.h"
@@ -14566,6 +14569,639 @@ clay_result clay_dynamic_surface_copy_chunk(const clay_dynamic_sculptor* sculpto
         }
         write_desc(out_written, out_written->struct_size, out);
     }
+    return CLAY_OK;
+}
+
+// -- multiresolution surfaces (mesh-multires spec, add-mesh-multires) ---------
+//
+// OPAQUE AND OWNING, the same shape the adaptive surface has: the hierarchy
+// outlives the sculptor, and the sculptor keeps the owner rather than a bare
+// reference so a report can read the owner's revisions after the stamp.
+
+namespace {
+
+constexpr std::size_t kMultiresDescOriginal =
+    offsetof(clay_multires_desc, memory_budget) + sizeof(std::uint64_t);
+constexpr std::size_t kMultiresPreflightOriginal =
+    offsetof(clay_multires_preflight, error) + sizeof(std::int32_t);
+constexpr std::size_t kMultiresMemoryOriginal =
+    offsetof(clay_multires_memory, total) + sizeof(std::uint64_t);
+constexpr std::size_t kMultiresProjectDescOriginal =
+    offsetof(clay_multires_project_desc, strength) + sizeof(float);
+constexpr std::size_t kMultiresProjectReportOriginal =
+    offsetof(clay_multires_project_report, mean_offset) + sizeof(float);
+constexpr std::size_t kMultiresStampReportOriginal =
+    offsetof(clay_multires_stamp_report, evaluated_revision) + sizeof(std::uint64_t);
+constexpr std::size_t kMultiresBlockInfoOriginal =
+    offsetof(clay_multires_block_info, index_count) + sizeof(std::uint32_t);
+
+// Two names rather than an overload: this region is `extern "C"`, where a
+// second function of the same name is a redeclaration rather than an overload.
+clay_result resolve_multires_ro(const clay_multires* handle, const mesh::MultiresSurface** out);
+clay_result resolve_multires(clay_multires* handle, mesh::MultiresSurface** out);
+
+}  // namespace
+
+struct clay_multires {
+    mesh::MultiresSurface surface;
+    // Scratch the block copy fills, kept on the handle so a host draining a
+    // hundred blocks a frame does not allocate a hundred times.
+    mesh::MultiresSurface::Block block;
+};
+
+struct clay_multires_sculptor {
+    clay_multires* owner = nullptr;
+    std::unique_ptr<mesh::MultiresSculptor> sculptor;
+};
+
+namespace {
+
+clay_result resolve_multires_ro(const clay_multires* handle, const mesh::MultiresSurface** out) {
+    if (!handle) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires surface");
+    if (!handle->surface.valid()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "empty hierarchy");
+    *out = &handle->surface;
+    return CLAY_OK;
+}
+
+clay_result resolve_multires(clay_multires* handle, mesh::MultiresSurface** out) {
+    if (!handle) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires surface");
+    if (!handle->surface.valid()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "empty hierarchy");
+    *out = &handle->surface;
+    return CLAY_OK;
+}
+
+}  // namespace
+
+const char* clay_multires_error_text(int32_t error) {
+    return mesh::multires_error_text(static_cast<mesh::MultiresError>(error));
+}
+
+clay_result clay_multires_defaults(clay_multires_desc* out_desc) {
+    if (!out_desc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_desc");
+    const std::uint32_t declared = out_desc->struct_size;
+    clay_multires_desc probe;
+    clay_result r = read_desc(out_desc, kMultiresDescOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const mesh::MultiresOptions defaults;
+    clay_multires_desc out{};
+    out.struct_size = static_cast<std::uint32_t>(sizeof(out));
+    out.rule = static_cast<std::int32_t>(defaults.rule);
+    out.weld_epsilon = defaults.weld_epsilon;
+    out.memory_budget = defaults.memory_budget;
+    write_desc(out_desc, declared, out);
+    return CLAY_OK;
+}
+
+clay_result clay_multires_from_mesh(const clay_mesh* mesh_handle, const clay_multires_desc* desc,
+                                    clay_multires** out_surface, int32_t* out_error) {
+    if (out_error) *out_error = CLAY_MULTIRES_OK;
+    if (!out_surface) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_surface");
+    *out_surface = nullptr;
+    const mesh::Mesh* src = nullptr;
+    clay_result r = resolve_mesh(mesh_handle, &src);
+    if (r != CLAY_OK) return r;
+
+    mesh::MultiresOptions options;
+    if (desc) {
+        clay_multires_desc d;
+        r = read_desc(desc, kMultiresDescOriginal, &d);
+        if (r != CLAY_OK) return r;
+        if (d.rule != CLAY_SUBDIVISION_CATMULL_CLARK)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "unknown subdivision rule: " + std::to_string(d.rule));
+        options.rule = static_cast<mesh::SubdivisionRule>(d.rule);
+        if (d.weld_epsilon > 0.0f) options.weld_epsilon = d.weld_epsilon;
+        options.memory_budget = d.memory_budget;
+    }
+
+    mesh::MultiresError err = mesh::MultiresError::None;
+    std::optional<mesh::MultiresSurface> built =
+        mesh::MultiresSurface::from_mesh(*src, options, &err);
+    if (!built) {
+        if (out_error) *out_error = static_cast<std::int32_t>(err);
+        // Reported through `out_error` AND named in the message, because a
+        // caller fixing a model needs to know which problem it hit and a caller
+        // logging one needs it readable.
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, mesh::multires_error_text(err));
+    }
+    auto* handle = new clay_multires{};
+    handle->surface = std::move(*built);
+    *out_surface = handle;
+    return CLAY_OK;
+}
+
+void clay_multires_destroy(clay_multires* surface) { delete surface; }
+
+uint32_t clay_multires_level_count(const clay_multires* surface) {
+    return surface ? surface->surface.level_count() : 0u;
+}
+
+clay_result clay_multires_sculpt_level(const clay_multires* surface, uint32_t* out_level) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_level) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_level");
+    *out_level = s->sculpt_level();
+    return CLAY_OK;
+}
+
+clay_result clay_multires_display_level(const clay_multires* surface, uint32_t* out_level) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_level) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_level");
+    *out_level = s->display_level();
+    return CLAY_OK;
+}
+
+clay_result clay_multires_set_sculpt_level(clay_multires* surface, uint32_t level) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!s->set_sculpt_level(level))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "no such level: " + std::to_string(level));
+    return CLAY_OK;
+}
+
+clay_result clay_multires_set_display_level(clay_multires* surface, uint32_t level) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!s->set_display_level(level))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "no such level: " + std::to_string(level));
+    return CLAY_OK;
+}
+
+clay_result clay_multires_level_counts(const clay_multires* surface, uint32_t level,
+                                       uint64_t* out_vertices, uint64_t* out_faces) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (level >= s->level_count())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "no such level: " + std::to_string(level));
+    if (out_vertices) *out_vertices = s->topology_at(level).vertex_count;
+    if (out_faces) *out_faces = s->topology_at(level).face_count;
+    return CLAY_OK;
+}
+
+clay_result clay_multires_preflight_add_level(const clay_multires* surface,
+                                              clay_multires_preflight* out_preflight) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_preflight) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_preflight");
+    const std::uint32_t declared = out_preflight->struct_size;
+    clay_multires_preflight probe;
+    r = read_desc(out_preflight, kMultiresPreflightOriginal, &probe);
+    if (r != CLAY_OK) return r;
+
+    const mesh::MultiresPreflight p = s->preflight_add_level();
+    clay_multires_preflight out{};
+    out.struct_size = static_cast<std::uint32_t>(sizeof(out));
+    out.level = p.level;
+    out.vertices = p.vertices;
+    out.faces = p.faces;
+    out.topology_bytes = p.topology_bytes;
+    out.detail_bytes = p.detail_bytes;
+    out.evaluated_bytes = p.evaluated_bytes;
+    out.runtime_bytes = p.runtime_bytes;
+    out.persistent_bytes = p.persistent_bytes;
+    out.peak_bytes = p.peak_bytes;
+    out.allowed = p.allowed ? 1 : 0;
+    out.error = static_cast<std::int32_t>(p.error);
+    write_desc(out_preflight, declared, out);
+    return CLAY_OK;
+}
+
+clay_result clay_multires_add_level(clay_multires* surface, clay_cancel_token* token,
+                                    int32_t* out_error) {
+    if (out_error) *out_error = CLAY_MULTIRES_OK;
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires(surface, &s);
+    if (r != CLAY_OK) return r;
+    mesh::MultiresError err = mesh::MultiresError::None;
+    const parallel::CancelToken* cancel = token ? &token->token : nullptr;
+    if (!s->add_level(&err, cancel)) {
+        if (out_error) *out_error = static_cast<std::int32_t>(err);
+        if (err == mesh::MultiresError::Cancelled) return CLAY_ERROR_CANCELLED;
+        // A BUDGET refusal is not an argument error: the caller asked a
+        // reasonable question and the answer is no. It reports through
+        // out_error and the message names the number.
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, mesh::multires_error_text(err));
+    }
+    return CLAY_OK;
+}
+
+clay_result clay_multires_remove_highest_level(clay_multires* surface, int32_t* out_error) {
+    if (out_error) *out_error = CLAY_MULTIRES_OK;
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires(surface, &s);
+    if (r != CLAY_OK) return r;
+    mesh::MultiresError err = mesh::MultiresError::None;
+    if (!s->remove_highest_level(&err)) {
+        if (out_error) *out_error = static_cast<std::int32_t>(err);
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, mesh::multires_error_text(err));
+    }
+    return CLAY_OK;
+}
+
+clay_result clay_multires_copy_level_mesh(clay_multires* surface, uint32_t level,
+                                          clay_mesh** out_mesh) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_mesh");
+    *out_mesh = nullptr;
+    if (level >= s->level_count())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "no such level: " + std::to_string(level));
+    clay_mesh* handle = new clay_mesh{};
+    handle->data = s->mesh_at_level(level);
+    *out_mesh = handle;
+    return CLAY_OK;
+}
+
+clay_result clay_multires_revision(const clay_multires* surface, uint64_t* out_base,
+                                   uint64_t* out_detail, uint64_t* out_evaluated) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (out_base) *out_base = s->base_revision();
+    if (out_detail) *out_detail = s->detail_revision();
+    if (out_evaluated) *out_evaluated = s->evaluated_revision();
+    return CLAY_OK;
+}
+
+clay_result clay_multires_detail_checksum(const clay_multires* surface, uint64_t* out_checksum) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_checksum) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_checksum");
+    *out_checksum = s->detail_checksum();
+    return CLAY_OK;
+}
+
+clay_result clay_multires_memory_get(const clay_multires* surface,
+                                     clay_multires_memory* out_memory) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_memory) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_memory");
+    const std::uint32_t declared = out_memory->struct_size;
+    clay_multires_memory probe;
+    r = read_desc(out_memory, kMultiresMemoryOriginal, &probe);
+    if (r != CLAY_OK) return r;
+
+    const mesh::MultiresMemory m = s->memory();
+    clay_multires_memory out{};
+    out.struct_size = static_cast<std::uint32_t>(sizeof(out));
+    out.resident_levels = m.resident_levels;
+    out.base = m.base;
+    out.topology = m.topology;
+    out.detail = m.detail;
+    out.authoritative = m.authoritative;
+    out.evaluated = m.evaluated;
+    out.runtime_index = m.runtime_index;
+    out.rebuildable = m.rebuildable;
+    out.total = m.total;
+    write_desc(out_memory, declared, out);
+    return CLAY_OK;
+}
+
+clay_result clay_multires_drop_inactive_caches(clay_multires* surface) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires(surface, &s);
+    if (r != CLAY_OK) return r;
+    s->drop_inactive_caches();
+    return CLAY_OK;
+}
+
+clay_result clay_multires_serialize(const clay_multires* surface, uint8_t* out_data,
+                                    size_t* size) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!size) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null size");
+    const std::vector<std::uint8_t> bytes = s->encode();
+    if (!out_data) {
+        *size = bytes.size();
+        return CLAY_OK;
+    }
+    if (*size < bytes.size()) {
+        *size = bytes.size();
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "buffer too small for the hierarchy");
+    }
+    std::memcpy(out_data, bytes.data(), bytes.size());
+    *size = bytes.size();
+    return CLAY_OK;
+}
+
+clay_result clay_multires_deserialize(const uint8_t* data, size_t size,
+                                      clay_multires** out_surface) {
+    if (!out_surface) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_surface");
+    *out_surface = nullptr;
+    if (!data || size == 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "empty buffer");
+    mesh::MultiresSurface decoded;
+    if (!mesh::MultiresSurface::decode(data, size, &decoded))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    mesh::multires_error_text(mesh::MultiresError::Decode));
+    auto* handle = new clay_multires{};
+    handle->surface = std::move(decoded);
+    *out_surface = handle;
+    return CLAY_OK;
+}
+
+clay_result clay_multires_project_defaults(clay_multires_project_desc* out_desc) {
+    if (!out_desc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_desc");
+    const std::uint32_t declared = out_desc->struct_size;
+    clay_multires_project_desc probe;
+    clay_result r = read_desc(out_desc, kMultiresProjectDescOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const mesh::ProjectOptions defaults;
+    clay_multires_project_desc out{};
+    out.struct_size = static_cast<std::uint32_t>(sizeof(out));
+    out.max_distance = defaults.max_distance;
+    out.normal_ray_first = defaults.normal_ray_first ? 1 : 0;
+    out.strength = defaults.strength;
+    write_desc(out_desc, declared, out);
+    return CLAY_OK;
+}
+
+clay_result clay_multires_project(clay_multires* surface, const clay_mesh* reference,
+                                  const clay_multires_project_desc* desc, clay_cancel_token* token,
+                                  clay_multires_project_report* out_report) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires(surface, &s);
+    if (r != CLAY_OK) return r;
+    const mesh::Mesh* src = nullptr;
+    r = resolve_mesh(reference, &src);
+    if (r != CLAY_OK) return r;
+
+    mesh::ProjectOptions options;
+    if (desc) {
+        clay_multires_project_desc d;
+        r = read_desc(desc, kMultiresProjectDescOriginal, &d);
+        if (r != CLAY_OK) return r;
+        if (d.max_distance > 0.0f) options.max_distance = d.max_distance;
+        options.normal_ray_first = d.normal_ray_first != 0;
+        if (d.strength > 0.0f) options.strength = d.strength;
+    }
+
+    mesh::ProjectReport report;
+    const parallel::CancelToken* cancel = token ? &token->token : nullptr;
+    const bool ok = s->project_from(*src, options, &report, cancel);
+    if (out_report) {
+        const std::uint32_t declared = out_report->struct_size;
+        clay_multires_project_report probe;
+        r = read_desc(out_report, kMultiresProjectReportOriginal, &probe);
+        if (r != CLAY_OK) return r;
+        clay_multires_project_report out{};
+        out.struct_size = static_cast<std::uint32_t>(sizeof(out));
+        out.moved = report.moved;
+        out.missed = report.missed;
+        out.by_ray = report.by_ray;
+        out.by_closest = report.by_closest;
+        out.max_offset = report.max_offset;
+        out.mean_offset = static_cast<float>(report.mean_offset);
+        write_desc(out_report, declared, out);
+    }
+    if (!ok) {
+        if (cancel && cancel->cancelled()) return CLAY_ERROR_CANCELLED;
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "the hierarchy has no level above its cage to project");
+    }
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculptor_create(clay_multires* surface,
+                                          clay_multires_sculptor** out_sculptor) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_sculptor) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_sculptor");
+    auto* handle = new clay_multires_sculptor{};
+    handle->owner = surface;
+    handle->sculptor = std::make_unique<mesh::MultiresSculptor>(*s);
+    *out_sculptor = handle;
+    return CLAY_OK;
+}
+
+void clay_multires_sculptor_destroy(clay_multires_sculptor* sculptor) { delete sculptor; }
+
+clay_result clay_multires_sculptor_begin_stroke(clay_multires_sculptor* sculptor) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
+    sculptor->sculptor->begin_stroke();
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculptor_stamp(clay_multires_sculptor* sculptor,
+                                         const clay_mesh_brush_desc* brush, const clay_mask* mask,
+                                         clay_multires_stamp_report* out_report) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
+    mesh::MeshBrush verb = mesh::MeshBrush::Draw;
+    mesh::MeshBrushSettings settings;
+    clay_result r = read_mesh_brush(brush, &verb, &settings);
+    if (r != CLAY_OK) return r;
+
+    field::MaskGate gate;
+    if (mask) {
+        voxel::MaskField* field_mask = nullptr;
+        r = resolve_mask(mask, &field_mask);
+        if (r != CLAY_OK) return r;
+        gate = [field_mask](kernel::cfloat3 p) { return field_mask->sample(p); };
+    }
+
+    mesh::MultiresSurface& s = sculptor->owner->surface;
+    const std::uint32_t level = s.sculpt_level();
+    const std::size_t moved = sculptor->sculptor->stamp(verb, settings, gate, nullptr);
+
+    if (out_report) {
+        const std::uint32_t declared = out_report->struct_size;
+        clay_multires_stamp_report probe;
+        r = read_desc(out_report, kMultiresStampReportOriginal, &probe);
+        if (r != CLAY_OK) return r;
+        clay_multires_stamp_report out{};
+        out.struct_size = static_cast<std::uint32_t>(sizeof(out));
+        out.level = level;
+        out.moved_vertices = moved;
+        out.base_revision = s.base_revision();
+        out.detail_revision = s.detail_revision();
+        out.evaluated_revision = s.evaluated_revision();
+        write_desc(out_report, declared, out);
+    }
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculptor_apply_stroke(clay_multires_sculptor* sculptor,
+                                                const float* samples_xyzpt, size_t sample_count,
+                                                const clay_stroke_preset* preset,
+                                                const clay_mesh_brush_desc* brush,
+                                                const clay_mask* mask,
+                                                const clay_mesh_frame* mesh_to_world,
+                                                int32_t defer_normals, size_t* out_applied,
+                                                clay_multires_stamp_report* out_report) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
+    mesh::MeshBrush verb = mesh::MeshBrush::Draw;
+    mesh::MeshBrushSettings settings;
+    clay_result r = read_mesh_brush(brush, &verb, &settings);
+    if (r != CLAY_OK) return r;
+
+    brush::MeshStrokeOptions options;
+    options.defer_normals = defer_normals != 0;
+    r = read_mesh_frame(mesh_to_world, &options.mesh_to_world);
+    if (r != CLAY_OK) return r;
+
+    std::vector<brush::StrokeSample> samples;
+    brush::StrokePreset resolved;
+    r = read_stroke(samples_xyzpt, sample_count, preset, &samples, &resolved);
+    if (r != CLAY_OK) return r;
+
+    voxel::MaskField* field_mask = nullptr;
+    if (mask) {
+        r = resolve_mask(mask, &field_mask);
+        if (r != CLAY_OK) return r;
+    }
+
+    mesh::MultiresSurface& s = sculptor->owner->surface;
+    const std::uint32_t level = s.sculpt_level();
+    const std::size_t applied =
+        brush::apply_to_multires(*sculptor->sculptor, brush::resolve_stroke(samples, resolved),
+                                 verb, settings, field_mask, nullptr, options);
+    if (out_applied) *out_applied = applied;
+    if (out_report) {
+        const std::uint32_t declared = out_report->struct_size;
+        clay_multires_stamp_report probe;
+        r = read_desc(out_report, kMultiresStampReportOriginal, &probe);
+        if (r != CLAY_OK) return r;
+        clay_multires_stamp_report out{};
+        out.struct_size = static_cast<std::uint32_t>(sizeof(out));
+        out.level = level;
+        out.moved_vertices = applied;
+        out.base_revision = s.base_revision();
+        out.detail_revision = s.detail_revision();
+        out.evaluated_revision = s.evaluated_revision();
+        write_desc(out_report, declared, out);
+    }
+    return CLAY_OK;
+}
+
+size_t clay_multires_dirty_block_count(const clay_multires* surface) {
+    if (!surface || !surface->surface.valid()) return 0;
+    return surface->surface.dirty_patches().size();
+}
+
+clay_result clay_multires_dirty_blocks(const clay_multires* surface, uint32_t* out_patches,
+                                       size_t* count) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null count");
+    const std::vector<std::uint32_t>& dirty = s->dirty_patches();
+    if (!out_patches) {
+        *count = dirty.size();
+        return CLAY_OK;
+    }
+    const std::size_t n = std::min(*count, dirty.size());
+    for (std::size_t i = 0; i < n; ++i) out_patches[i] = dirty[i];
+    *count = n;
+    return CLAY_OK;
+}
+
+clay_result clay_multires_clear_dirty(clay_multires* surface) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires(surface, &s);
+    if (r != CLAY_OK) return r;
+    s->clear_dirty();
+    return CLAY_OK;
+}
+
+namespace {
+
+// The block, built into the handle's scratch. Shared by the info query and the
+// copy so the two cannot disagree about what a block contains.
+clay_result fill_block(clay_multires* surface, std::uint32_t patch, std::uint32_t level) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (level >= s->level_count())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "no such level: " + std::to_string(level));
+    if (!s->build_block(level, patch, &surface->block))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "no such block: " + std::to_string(patch));
+    return CLAY_OK;
+}
+
+void write_block_info(clay_multires_block_info* out, std::uint32_t declared,
+                      const mesh::MultiresSurface::Block& block) {
+    clay_multires_block_info info{};
+    info.struct_size = static_cast<std::uint32_t>(sizeof(info));
+    info.patch = block.patch;
+    info.level = block.level;
+    info.vertex_count = static_cast<std::uint32_t>(block.vertices.size());
+    info.index_count = static_cast<std::uint32_t>(block.indices.size());
+    write_desc(out, declared, info);
+}
+
+}  // namespace
+
+clay_result clay_multires_block_info_get(clay_multires* surface, uint32_t patch, uint32_t level,
+                                         clay_multires_block_info* out_info) {
+    if (!out_info) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_info");
+    const std::uint32_t declared = out_info->struct_size;
+    clay_multires_block_info probe;
+    clay_result r = read_desc(out_info, kMultiresBlockInfoOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    r = fill_block(surface, patch, level);
+    if (r != CLAY_OK) return r;
+    write_block_info(out_info, declared, surface->block);
+    return CLAY_OK;
+}
+
+clay_result clay_multires_copy_block(clay_multires* surface, uint32_t patch, uint32_t level,
+                                     float* out_positions, size_t position_capacity,
+                                     float* out_normals, size_t normal_capacity,
+                                     uint32_t* out_indices, size_t index_capacity,
+                                     clay_multires_block_info* out_written) {
+    std::uint32_t declared = 0;
+    if (out_written) {
+        declared = out_written->struct_size;
+        clay_multires_block_info probe;
+        const clay_result d = read_desc(out_written, kMultiresBlockInfoOriginal, &probe);
+        if (d != CLAY_OK) return d;
+    }
+    clay_result r = fill_block(surface, patch, level);
+    if (r != CLAY_OK) return r;
+
+    const mesh::MultiresSurface::Block& block = surface->block;
+    // EVERY CAPACITY IS CHECKED FIRST and nothing is written past it. A partial
+    // fill would leave a host drawing a block that is half this frame's and
+    // half the last one's.
+    if (out_positions && position_capacity < block.vertices.size() * 3u)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "position buffer too small for this block");
+    if (out_normals && normal_capacity < block.vertices.size() * 3u)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "normal buffer too small for this block");
+    if (out_indices && index_capacity < block.indices.size())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "index buffer too small for this block");
+
+    const std::vector<kernel::cfloat3>& positions = surface->surface.positions_at(level);
+    const std::vector<kernel::cfloat3>& normals = surface->surface.normals_at(level);
+    for (std::size_t i = 0; i < block.vertices.size(); ++i) {
+        const std::uint32_t v = block.vertices[i];
+        if (out_positions) {
+            out_positions[i * 3 + 0] = positions[v].x;
+            out_positions[i * 3 + 1] = positions[v].y;
+            out_positions[i * 3 + 2] = positions[v].z;
+        }
+        if (out_normals && v < normals.size()) {
+            out_normals[i * 3 + 0] = normals[v].x;
+            out_normals[i * 3 + 1] = normals[v].y;
+            out_normals[i * 3 + 2] = normals[v].z;
+        }
+    }
+    if (out_indices)
+        for (std::size_t i = 0; i < block.indices.size(); ++i) out_indices[i] = block.indices[i];
+    if (out_written) write_block_info(out_written, declared, block);
     return CLAY_OK;
 }
 

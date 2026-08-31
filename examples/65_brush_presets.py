@@ -83,10 +83,7 @@ def preview(mesh, cell=0.014, colour="#b0784a"):
     evaluated, so the renderer — which raycasts a field — has nothing to trace
     against; resampling here is exactly the approximation a mesh layer exists to
     avoid, and it is fine for a picture and wrong for the export."""
-    doc = clay.Document()
-    doc.add_sdf_layer("preview").add(clay.Volume.from_mesh(mesh, cell=cell),
-                                     color=colour)
-    return doc
+    return R.mesh_preview_doc(mesh, cell, colour)
 
 
 def copy_of(mesh):

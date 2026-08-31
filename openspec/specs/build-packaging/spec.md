@@ -1,7 +1,14 @@
 # build-packaging Specification
 
 ## Purpose
-TBD - created by archiving change add-claycore-v1. Update Purpose after archive.
+How the library is built, layered, versioned and shipped — the requirements that
+are about the repository rather than about geometry.
+
+The module dependency rule is the one with teeth: kernel depends on nothing,
+each module names what it may include, and no module depends on a backend. It is
+enforced by a gate rather than by convention because a cycle is easy to add and
+expensive to remove. The preset matrix, the dependency policy, the test pyramid,
+the version lines that must move together and `clay-cli` are the rest of it.
 ## Requirements
 ### Requirement: CMake presets and platform matrix
 The library SHALL build with CMake presets `cpu-only` (macOS/Linux/Windows), `+metal` (Apple), `+cuda`, and `+opencl`, with warnings-as-errors everywhere and ASan/UBSan jobs in CI. The core SHALL be headless: no UI, windowing, or Apple frameworks in `include/clay/` or `src/` (Apple dependencies are confined to `backends/metal/` and packaging).

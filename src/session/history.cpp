@@ -284,6 +284,20 @@ void History::record_dynamic_mesh_step(scene::LayerId layer, mesh::TopologyDelta
     push(std::move(step));
 }
 
+void History::record_multires_step(scene::LayerId layer, mesh::MultiresDelta delta) {
+    if (!enabled_ || delta.empty()) return;
+    Step step;
+    step.kind = Step::Kind::Multires;
+    step.layer = layer;
+    step.multires_delta = std::move(delta);
+    JournalEvent e;
+    e.kind = JournalEvent::Kind::Multires;
+    e.layer = step.layer;
+    e.multires_delta = step.multires_delta;
+    journal_.push_back(std::move(e));
+    push(std::move(step));
+}
+
 namespace {
 
 // A mesh as bytes, for the journal.
@@ -454,6 +468,15 @@ bool History::apply_step(const Step& step, bool forward, scene::Document& doc,
             if (!surface) return false;
             return forward ? step.topology_delta.apply(*surface)
                            : step.topology_delta.revert(*surface);
+        }
+        case Step::Kind::Multires: {
+            mesh::MultiresSurface* surface = multires_for_ ? multires_for_(step.layer) : nullptr;
+            // Refused rather than skipped, for the reason a missing grid is:
+            // skipping would take the step off the stack and leave the next
+            // undo reversing something older than the user asked for.
+            if (!surface) return false;
+            return forward ? step.multires_delta.apply(*surface)
+                           : step.multires_delta.revert(*surface);
         }
         case Step::Kind::Mask: {
             voxel::MaskField* mask = mask_for ? mask_for(step.layer) : nullptr;
@@ -729,6 +752,9 @@ std::vector<std::uint8_t> History::journal_since(std::size_t from, std::size_t* 
             case JournalEvent::Kind::DynamicMesh:
                 put_bytes(out, e.topology_delta.encode());
                 break;
+            case JournalEvent::Kind::Multires:
+                put_bytes(out, e.multires_delta.encode());
+                break;
             case JournalEvent::Kind::Mask:
                 put_bytes(out, encode_mask_cells(e.mask_cells));
                 break;
@@ -867,6 +893,26 @@ bool History::replay(const std::uint8_t* data, std::size_t size, scene::Document
                 push(std::move(step));
                 break;
             }
+            case JournalEvent::Kind::Multires: {
+                mesh::MultiresSurface* surface = multires_for_ ? multires_for_(layer) : nullptr;
+                mesh::MultiresDelta delta;
+                if (!surface || !mesh::MultiresDelta::decode(body, payload, &delta) ||
+                    !delta.apply(*surface)) {
+                    if (out) *out = result;
+                    return false;
+                }
+                Step step;
+                step.kind = Step::Kind::Multires;
+                step.layer = layer;
+                step.multires_delta = delta;
+                JournalEvent e;
+                e.kind = JournalEvent::Kind::Multires;
+                e.layer = layer;
+                e.multires_delta = std::move(delta);
+                journal_.push_back(std::move(e));
+                push(std::move(step));
+                break;
+            }
             case JournalEvent::Kind::Mask: {
                 voxel::MaskField* mask = mask_for ? mask_for(layer) : nullptr;
                 std::vector<voxel::MaskField::MaskChange> cells;
@@ -979,6 +1025,11 @@ std::size_t History::step_bytes(const Step& s) {
     // is by far the largest a step can carry — leaving it out would make a
     // budget blind to exactly the kind it exists to bound.
     n += s.topology_delta.bytes();
+    // A Multires step follows the vertices the gesture EDITED at the level it
+    // was made on, which is what keeps it small on a deep hierarchy — but small
+    // is not free, and a budget that could not see it would evict the wrong
+    // things.
+    n += s.multires_delta.bytes();
     // A SurfaceGroup step holds two whole serialised fields, which makes this
     // the term that matters for it rather than a rounding error — the same
     // omission roll-up-document-memory found six of in node_bytes.
@@ -1003,6 +1054,7 @@ std::size_t History::event_bytes(const JournalEvent& e) {
     n += e.barrier.capacity();
     n += e.deltas.bytes();
     n += e.topology_delta.bytes();
+    n += e.multires_delta.bytes();
     n += e.group_after.capacity();
     n += e.mesh_after.capacity();
     n += scene::command_bytes(e.command);

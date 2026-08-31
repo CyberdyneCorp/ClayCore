@@ -1561,8 +1561,189 @@ pointer held across one would be a use-after-free with no generation to check.
 Runnable: [`examples/66_dynamic_topology.py`](../examples/66_dynamic_topology.py)
 — a 1,200-triangle sphere becomes a nose, an ear and a horn, with the locality
 of the refinement measured rather than illustrated.
-
 ---
+
+## 8d. Multiresolution — the fourth mesh mode
+
+Sections 8, 8b and 8c are ordered by what may change: fixed topology never
+changes, an adaptive surface's changes locally, and a voxel remesh replaces all
+of it. This is the fourth answer, and the one a production workflow spends most
+of its time in: **topology changes only by deterministic subdivision, and detail
+survives an edit to the form beneath it.**
+
+**What was actually missing, stated as an artist would.** On a mesh layer, fine
+detail and coarse form are the same edit. The detail IS the vertex positions and
+there is no record of which part of a position was form and which part was
+wrinkle — so a pass that changes proportions destroys the pass before it. Every
+sculptor who has put pores on a face and then been told the brow is wrong knows
+what that costs.
+
+### The model, and it is one line
+
+```
+P(0) = the base cage                 the production geometry, sculpted directly
+S(n) = Subdivide(P(n-1))             pure Catmull-Clark, no detail
+P(n) = S(n) + Frame(n) * Detail(n)   the level as the artist sees it
+```
+
+Levels are **not** a stack of unrelated meshes. With no relationship between a
+level and its parent, a change to the parent has no defined effect on the child,
+so either the fine detail or the coarse edit has to be discarded — and keeping
+both is the entire purpose. The relationship IS the feature.
+
+### The four modes, and choosing between them
+
+| | Mesh layer | `DynamicSurface` | `MultiresSurface` | Voxel remesh |
+|---|---|---|---|---|
+| Topology | Never changes | Changes locally | Changes only by subdivision | Replaced wholesale |
+| Detail vs form | The same edit | The same edit | **Separate, by level** | n/a |
+| Quads | Preserved | None | Preserved at the cage, produced above it | None |
+| Best for | An imported retopologised model | Free-form blocking out | Refining a settled production cage | Rebuilding density after a long session |
+| Undo | `VertexDeltas` | `TopologyDelta` | `MultiresDelta` — coefficients and cage positions |`Step::Kind::MeshReplace` |
+
+The lifecycle is explicit and one-way per stage: free-form construction on an
+adaptive surface, freeze the topology, retopologise, then a hierarchy over the
+result. Blurring that ordering is what makes multiresolution implementations
+fragile elsewhere — and it is why `MultiresSurface::set_base_mesh` **refuses** a
+cage change on a hierarchy that already carries detail. The supported route is
+`project_from`, which is explicit and priced.
+
+### Detail lives in a transported frame, not in world space
+
+A world-space offset is correct for small changes and wrong for the case the
+feature exists for: rotate or bend the parent surface and a stored world vector
+no longer points along the surface it belongs to, so wrinkles shear off the
+cheek that carried them. Detail is therefore three coefficients — tangent,
+bitangent, normal — against an orthonormal frame derived from the **pure
+subdivision** surface, never from the surface with detail already on it.
+
+The frame is **transported rather than rebuilt**. A tangent re-derived from
+whichever neighbour comes first geometrically flips under a deformation that
+barely moves the surface, and a flipped frame rotates the detail stored in it —
+a swimming, smearing artefact that appears in a render and in no numeric test
+that only checks magnitudes. So the frame is built once at the cage (a UV
+tangent where a valid parametrization exists, a deterministic index-chosen
+geometric tangent otherwise) and every level above receives its parent's tangent
+rotated by the shortest arc onto its own normal.
+
+`examples/68_mesh_multires.py` measures the difference against the
+implementation this design rejected: after a coarse form change, the detail's
+lean against the surface drifts about **10× further** when the same detail is
+carried as a world vector.
+
+### The sculpt level and the display level are independent
+
+The level a brush writes to and the level a host draws are set separately. Move
+the broad form at level 1 while watching the pores at level 4 — that is the
+workflow, and the reason both exist.
+
+Sculpting at a level writes only that level's persistent data: the cage's own
+geometry at level 0, coefficients above it. A higher level's coefficients are
+never rewritten merely because its reconstructed positions moved.
+
+### The brushes are the fixed sculptor's
+
+Not "the same behaviour" — the same code. The active level's evaluated positions
+live in a `mesh::Mesh` inside that level's cache, with an `Adjacency` over it, so
+a multires stamp is `MeshSculptor::stamp` on that level. Every verb, the
+surface-aware geodesic reach, the mask gate, automasking, alpha stamping, the
+local normal recompute and the BVH refit come along unchanged and unchangeable.
+All sixteen verbs are offered, including `Layer` — which an adaptive surface
+declines, because there the vertices under the brush at the end of a stroke did
+not all exist at the start.
+
+What the multires sculptor owns is the step after: turning the moved positions
+back into what the hierarchy stores, and propagating.
+
+**The stroke engine reaches it too.** `brush::apply_to_multires` is the
+hierarchy's counterpart to `apply_to_mesh`, and the two share the per-stamp
+resolution rather than each having their own — where a stamp lands, how far it
+reaches, how hard it presses, and how Grab and Snakehook consume the motion
+between stamps are facts about a *stroke* and not about a surface, so they are
+one implementation. An adaptive surface is now the only mesh representation
+without a stroke entry point.
+
+### What a level costs, and why adding one is priced first
+
+Catmull-Clark multiplies faces by four. Over a 20k-quad cage:
+
+| Level | Faces | Face list (authoritative) |
+|---|---|---|
+| 0 | 20 k | 320 KB |
+| 1 | 80 k | 1.3 MB |
+| 2 | 320 k | 5.1 MB |
+| 3 | 1.28 M | 20 MB |
+| 4 | 5.12 M | 82 MB |
+| 5 | 20.5 M | 328 MB |
+
+What is **authoritative** is the cage, the per-level face lists and the per-level
+detail. Everything else — subdivided positions, frames, evaluated positions,
+normals, per-level connectivity, the level's own mesh and adjacency — is a cache
+that rebuilds bit-identically, which is what `memory()` separates and
+`drop_inactive_caches()` acts on. Detail is never reported as rebuildable,
+because a host under pressure acts on that distinction.
+
+Three residency levers, in the order a host reaches for them:
+`drop_inactive_caches()` releases what is above the levels in use;
+`drop_intermediate_caches()` releases the levels *between* the cage and them,
+which is what a host wants while an artist is detailing at a fine level, since a
+stamp there reads that level's own subdivided positions and frames and nothing
+else; `drop_all_caches()` releases everything. All three leave the authoritative
+detail untouched, which the checksum is what proves.
+
+`preflight_add_level()` prices a level from the level below by arithmetic: it
+allocates nothing, has no side effects, and reports both what would remain and
+the high-water mark during the call. The estimate is a **ceiling** rather than a
+best guess — a budget that errs low says yes to a level that does not fit, which
+is the one failure it exists to prevent — and `test_multires.cpp` holds it
+against what the level actually costs once it exists. On a device that kills an app for memory
+rather than warning it twice, the peak is the number that matters.
+`add_level()` refuses over budget rather than allocating half of it, and is
+build-then-publish, so a refusal or a cancellation leaves the surface exactly as
+it was.
+
+Detail storage is **blocked sparse**: a block of 1024 vertices exists only once
+something in it is non-zero. An artist who has detailed a cheek does not pay for
+the twenty million vertices that carry nothing.
+
+The block size is a **parameter**, not a constant, and that is what makes the
+default defensible: `BM_MultiresDetailBlockSize` sweeps it across three
+footprints and reports what each choice costs to hold the same detail. 1024 is
+the least at every one — below it the block table over the level dominates,
+above it the last partly-used block does. The same discipline moved the
+dense-promotion threshold to 1.0: `BM_MultiresDetailAccess` measures 611 M/s
+sparse against 605 M/s dense, so promotion buys no measurable speed, while
+promoting early costs a third more memory than the sparse form it replaces.
+
+### A dab costs what it touched
+
+A change at a level propagates to the descendants of the vertices it moved and
+to nothing else, with a one-ring halo at each level because a vertex that did not
+move still has a changed normal when its neighbour did — and a changed normal is
+a changed frame. `MultiresEvalStats` reports what an evaluation actually did, so
+"propagation is local" is a measurement rather than a claim, and
+`test_multires_dirty.cpp` asserts that unrelated base patches come out
+**byte-identical** rather than merely close.
+
+A host uploads by **base patch**: a level-0 face owns a subtree that never moves
+between faces, so a block's identity is stable for the life of the hierarchy and
+no re-partition can invalidate what has already been uploaded. Copying the
+display level after every dab is the alternative, and on a deep hierarchy it is
+the difference between a preview that keeps up and one that does not.
+
+### Seams
+
+Geometry subdivides over **weld classes**, so a walk crosses a UV seam and the
+surface cannot crack. UVs and colours subdivide over a **second connectivity
+built from the raw indices**, where a seam is a boundary and the boundary rule
+interpolates along it — so a seam is never averaged across itself. That is a
+construction rather than a check.
+
+Runnable: [`examples/68_mesh_multires.py`](../examples/68_mesh_multires.py) —
+a ridge sculpted at level 3, the form changed at level 1, and the ridge still
+there, still attached, with the locality of the propagation and the advantage of
+the transported frame both measured.
+
 
 ## 8c. Voxel remesh — throwing the topology away on purpose
 

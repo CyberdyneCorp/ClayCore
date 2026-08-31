@@ -170,7 +170,20 @@ Adjacency Adjacency::build(const Mesh& m, float weld_epsilon) {
     std::vector<std::pair<std::uint32_t, std::uint32_t>> ring_pairs, tri_pairs;
     ring_pairs.reserve(m.indices.size() * 2);
     tri_pairs.reserve(m.indices.size());
+    const std::uint32_t vertex_count = static_cast<std::uint32_t>(a.class_of_.size());
     for (std::size_t t = 0; t < a.triangle_count_; ++t) {
+        // AN OUT-OF-RANGE CORNER IS SKIPPED rather than followed. Nothing in
+        // this library produces one and every entry point that takes indices
+        // from outside checks them, so this is not a case anyone reaches by
+        // accident — but a `Mesh` is a plain struct a C++ caller can fill by
+        // hand, this function's contract never said the indices had to be in
+        // range, and the consequence of taking one on trust is a read past the
+        // end of `class_of_` rather than a wrong answer. A malformed triangle
+        // contributes no ring and no incidence, which is the same treatment a
+        // degenerate one already gets.
+        if (m.indices[t * 3] >= vertex_count || m.indices[t * 3 + 1] >= vertex_count ||
+            m.indices[t * 3 + 2] >= vertex_count)
+            continue;
         const std::uint32_t c[3] = {a.class_of_[m.indices[t * 3]],
                                     a.class_of_[m.indices[t * 3 + 1]],
                                     a.class_of_[m.indices[t * 3 + 2]]};

@@ -99,9 +99,7 @@ def preview(mesh, cell=0.012, colour="#8fa4c0"):
     """A DISPLAY-ONLY document: a mesh layer is never evaluated, so the renderer
     has nothing to trace against. Resampling here is exactly the approximation a
     mesh layer exists to avoid — fine for a picture, wrong for the export."""
-    doc = clay.Document()
-    doc.add_sdf_layer("preview").add(clay.Volume.from_mesh(mesh, cell=cell), color=colour)
-    return doc
+    return R.mesh_preview_doc(mesh, cell, colour)
 
 
 def main():

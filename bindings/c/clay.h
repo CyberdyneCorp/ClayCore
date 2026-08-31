@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 73
+#define CLAY_ABI_MINOR 74
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -6071,6 +6071,309 @@ clay_result clay_dynamic_surface_copy_chunk(const clay_dynamic_sculptor* sculpto
                                             float* out_normals, size_t normal_capacity,
                                             uint32_t* out_indices, size_t index_capacity,
                                             clay_dynamic_chunk_info* out_written);
+
+/* -- multiresolution surfaces (mesh-multires spec, add-mesh-multires) ---------
+ *
+ * A base cage, a deterministic Catmull-Clark hierarchy over it, and per-level
+ * detail that survives an edit to the form beneath it — so an artist can add
+ * wrinkles at a fine level, change the skull underneath them, and come back to
+ * find the wrinkles still there and still attached.
+ *
+ *     P(0) = the cage    S(n) = Subdivide(P(n-1))    P(n) = S(n) + Frame(n)*D(n)
+ *
+ * A THIRD REPRESENTATION beside the fixed mesh and the adaptive surface, never a
+ * mode either of them slips into. What may change is what tells them apart:
+ * fixed topology never changes, an adaptive surface's changes locally, and this
+ * one's changes only by subdivision.
+ *
+ * OPAQUE AND OWNING, like the adaptive surface: the hierarchy outlives the
+ * sculptor, and the host holds it beside its document rather than inside one.
+ * clay_multires_serialize hands back the bytes to store with it. */
+
+typedef struct clay_multires clay_multires;
+typedef struct clay_multires_sculptor clay_multires_sculptor;
+
+/* Why an operation was refused. Mirrors mesh::MultiresError; use
+ * clay_multires_error_text for a message. */
+typedef enum clay_multires_error {
+    CLAY_MULTIRES_OK = 0,
+    CLAY_MULTIRES_EMPTY_BASE = 1,
+    CLAY_MULTIRES_INDEX_OUT_OF_RANGE = 2,
+    CLAY_MULTIRES_DEGENERATE_FACE = 3,
+    CLAY_MULTIRES_NON_MANIFOLD = 4,
+    CLAY_MULTIRES_LEVEL_OUT_OF_RANGE = 5,
+    CLAY_MULTIRES_NO_LEVEL_TO_REMOVE = 6,
+    CLAY_MULTIRES_OVER_BUDGET = 7,
+    CLAY_MULTIRES_CANCELLED = 8,
+    CLAY_MULTIRES_DETAIL_PRESENT = 9,
+    CLAY_MULTIRES_DEPTH_LIMIT = 10,
+    CLAY_MULTIRES_DECODE = 11
+} clay_multires_error;
+
+/* Never NULL, for any value. */
+const char* clay_multires_error_text(int32_t error);
+
+/* The subdivision rule. RECORDED rather than assumed in the encoding: a
+ * hierarchy reconstructed with a different rule than it was authored with is a
+ * different surface, and nothing else in the stream reveals the substitution. */
+typedef enum clay_subdivision_rule {
+    CLAY_SUBDIVISION_CATMULL_CLARK = 0
+} clay_subdivision_rule;
+
+typedef struct clay_multires_desc {
+    uint32_t struct_size; /* = sizeof(clay_multires_desc); required */
+    int32_t rule;         /* clay_subdivision_rule */
+    /* Vertices closer than this are one geometric point of the cage. <= 0 takes
+     * the same default Adjacency and the fixed sculptor use, so a mesh welds
+     * the same way on every path through this library. */
+    float weld_epsilon;
+    /* What the caller will let a level cost, in bytes. 0 means no budget, which
+     * is what a desktop host wants and what a memory-constrained one must not
+     * use — see clay_multires_preflight_add_level. */
+    uint64_t memory_budget;
+} clay_multires_desc;
+
+clay_result clay_multires_defaults(clay_multires_desc* out_desc);
+
+/* Build a hierarchy of ONE level — the cage itself. Adding levels is a separate
+ * and priced operation. Refuses rather than repairs: a conversion that quietly
+ * welds a face changes the retopology somebody paid for without saying so.
+ * `out_error` receives a clay_multires_error. */
+clay_result clay_multires_from_mesh(const clay_mesh* mesh, const clay_multires_desc* desc,
+                                    clay_multires** out_surface, int32_t* out_error);
+void clay_multires_destroy(clay_multires* surface);
+
+uint32_t clay_multires_level_count(const clay_multires* surface);
+/* WHERE THE BRUSH WRITES and WHAT THE HOST DRAWS, independently. Editing a
+ * coarse level while displaying a fine one is the workflow the feature exists
+ * for: move the broad form and watch the pores move with it. */
+clay_result clay_multires_sculpt_level(const clay_multires* surface, uint32_t* out_level);
+clay_result clay_multires_display_level(const clay_multires* surface, uint32_t* out_level);
+clay_result clay_multires_set_sculpt_level(clay_multires* surface, uint32_t level);
+clay_result clay_multires_set_display_level(clay_multires* surface, uint32_t level);
+
+/* How many vertices and faces a level holds. */
+clay_result clay_multires_level_counts(const clay_multires* surface, uint32_t level,
+                                       uint64_t* out_vertices, uint64_t* out_faces);
+
+/* What adding a level WOULD cost, asked before any of it is paid.
+ *
+ * Catmull-Clark multiplies faces by four, so a 20k-quad cage is 5.1M faces at
+ * level 4 and 20.5M at level 5 — and on a memory-constrained device it is the
+ * PEAK allocation that kills an app rather than the steady state. This is
+ * arithmetic on the level below: it allocates nothing and has no side effects. */
+typedef struct clay_multires_preflight {
+    uint32_t struct_size; /* = sizeof(clay_multires_preflight); required */
+    uint32_t level;       /* the level that would come into existence */
+    uint64_t vertices;
+    uint64_t faces;
+    uint64_t topology_bytes;  /* kept for the life of the level */
+    uint64_t detail_bytes;    /* if every vertex of it were detailed */
+    uint64_t evaluated_bytes; /* held only while the level is resident */
+    uint64_t runtime_bytes;
+    uint64_t persistent_bytes; /* what remains after the call */
+    uint64_t peak_bytes;       /* the high-water mark during it */
+    int32_t allowed;
+    int32_t error; /* clay_multires_error when allowed == 0 */
+} clay_multires_preflight;
+
+clay_result clay_multires_preflight_add_level(const clay_multires* surface,
+                                              clay_multires_preflight* out_preflight);
+
+/* Add one level. BUILD-THEN-PUBLISH: a refusal or a cancellation leaves the
+ * surface exactly as it was rather than one level into a state nothing knows
+ * how to read. Sets the sculpt and display levels to the new one, which is what
+ * an artist means by "subdivide". `token` may be NULL. */
+clay_result clay_multires_add_level(clay_multires* surface, clay_cancel_token* token,
+                                    int32_t* out_error);
+/* Drop the highest level and the detail on it. DESTRUCTIVE; a host that wants
+ * it reversible records a barrier or its own copy first. */
+clay_result clay_multires_remove_highest_level(clay_multires* surface, int32_t* out_error);
+
+/* A level as an ordinary mesh: positions, the cage's attributes subdivided over
+ * their own connectivity so a UV seam is interpolated along itself and never
+ * across itself, quads and their triangulation. The handle is the caller's to
+ * destroy with clay_mesh_destroy. */
+clay_result clay_multires_copy_level_mesh(clay_multires* surface, uint32_t level,
+                                          clay_mesh** out_mesh);
+
+/* THREE revisions, not one. A host re-uploads an index buffer only when the
+ * hierarchy's shape changed, re-reads detail only when it changed, and redraws
+ * only when the evaluated surface moved; one counter cannot say which happened.
+ * Any of the three outputs may be NULL. */
+clay_result clay_multires_revision(const clay_multires* surface, uint64_t* out_base,
+                                   uint64_t* out_detail, uint64_t* out_evaluated);
+/* A hash of every level's authoritative detail, so a host can prove to itself
+ * that releasing the caches changed nothing that matters. */
+clay_result clay_multires_detail_checksum(const clay_multires* surface, uint64_t* out_checksum);
+
+/* What the hierarchy costs, split by what a host under pressure may act on.
+ * Authoritative detail is NEVER reported as rebuildable: a host acting on that
+ * distinction would delete the user's work. */
+typedef struct clay_multires_memory {
+    uint32_t struct_size; /* = sizeof(clay_multires_memory); required */
+    uint32_t resident_levels;
+    uint64_t base;          /* the cage, with its attributes */
+    uint64_t topology;      /* every level's face list */
+    uint64_t detail;        /* every level's coefficients */
+    uint64_t authoritative; /* the three above; none of it droppable */
+    uint64_t evaluated;     /* subdivided positions, frames, positions, normals */
+    uint64_t runtime_index; /* connectivity, level meshes, adjacency */
+    uint64_t rebuildable;   /* the two above */
+    uint64_t total;
+} clay_multires_memory;
+
+clay_result clay_multires_memory_get(const clay_multires* surface,
+                                     clay_multires_memory* out_memory);
+/* Release the rebuildable caches of the levels nothing is using. Rebuilding
+ * them reproduces the surface bit-identically. */
+clay_result clay_multires_drop_inactive_caches(clay_multires* surface);
+
+/* Serialize the hierarchy: the cage, the rule, the level count, the active
+ * levels and each level's detail. The face lists and every evaluated position
+ * follow from those and are NOT written.
+ *
+ * Size-query pattern: call with out_data == NULL for the size. */
+clay_result clay_multires_serialize(const clay_multires* surface, uint8_t* out_data,
+                                    size_t* size);
+/* Refuses a truncated, hostile or newer buffer — including one declaring a
+ * depth whose reconstruction over its own cage would exceed this build's
+ * ceiling, which is refused BEFORE anything is allocated. */
+clay_result clay_multires_deserialize(const uint8_t* data, size_t size,
+                                      clay_multires** out_surface);
+
+/* -- projection --------------------------------------------------------------
+ *
+ * Fit every level to a sculpt made somewhere else — the supported route by
+ * which a hierarchy accepts a NEW cage, and the operation the library names
+ * when it refuses to swap one under a hierarchy that carries detail. Explicit
+ * and expensive by design.
+ *
+ * NORMAL RAY FIRST, CLOSEST POINT AS THE FALLBACK. A closest-point query alone
+ * snaps a vertex to whatever surface is nearest, which across a thin wall — a
+ * lip, an eyelid, the gap between two fingers — is routinely the wrong side. */
+typedef struct clay_multires_project_desc {
+    uint32_t struct_size; /* = sizeof(clay_multires_project_desc); required */
+    /* How far a vertex may travel. 0 means "as far as it takes", which an
+     * unbounded search will happily use to drag a vertex to the far wall. */
+    float max_distance;
+    int32_t normal_ray_first; /* nonzero: cast along the normal before falling back */
+    float strength;           /* <= 0 means 1: land on the reference */
+} clay_multires_project_desc;
+
+typedef struct clay_multires_project_report {
+    uint32_t struct_size; /* = sizeof(clay_multires_project_report); required */
+    uint64_t moved;
+    /* Vertices the reference had no answer for inside max_distance. LEFT WHERE
+     * THEY WERE rather than snapped to something arbitrary. */
+    uint64_t missed;
+    uint64_t by_ray;
+    uint64_t by_closest;
+    float max_offset;
+    float mean_offset;
+} clay_multires_project_report;
+
+clay_result clay_multires_project_defaults(clay_multires_project_desc* out_desc);
+clay_result clay_multires_project(clay_multires* surface, const clay_mesh* reference,
+                                  const clay_multires_project_desc* desc,
+                                  clay_cancel_token* token,
+                                  clay_multires_project_report* out_report);
+
+/* -- sculpting ---------------------------------------------------------------
+ *
+ * The same verbs, the same falloffs, the same mask, the same alpha and the same
+ * automasking as a mesh layer — because it is the same code: a stamp runs the
+ * fixed sculptor over the active level's own mesh, and what this owns is the
+ * step that turns the moved positions back into what the hierarchy stores. */
+
+typedef struct clay_multires_stamp_report {
+    uint32_t struct_size; /* = sizeof(clay_multires_stamp_report); required */
+    uint32_t level;       /* the level the stamp was made on */
+    uint64_t moved_vertices;
+    uint64_t base_revision;
+    uint64_t detail_revision;
+    uint64_t evaluated_revision;
+} clay_multires_stamp_report;
+
+clay_result clay_multires_sculptor_create(clay_multires* surface,
+                                          clay_multires_sculptor** out_sculptor);
+void clay_multires_sculptor_destroy(clay_multires_sculptor* sculptor);
+/* Start a gesture. Clears the record MeshBrush::Layer measures its ceiling
+ * against, so a second stroke over the same place deposits from the surface as
+ * THAT stroke found it. */
+clay_result clay_multires_sculptor_begin_stroke(clay_multires_sculptor* sculptor);
+/* ONE STAMP at the surface's current sculpt level. `mask` is the freeze, taken
+ * exactly as every other representation takes one, and may be NULL. */
+clay_result clay_multires_sculptor_stamp(clay_multires_sculptor* sculptor,
+                                         const clay_mesh_brush_desc* brush, const clay_mask* mask,
+                                         clay_multires_stamp_report* out_report);
+
+/* A WHOLE STROKE at the active sculpt level, resolved into spaced stamps by the
+ * same engine that drives a mesh layer.
+ *
+ * `samples_xyzpt` is five floats per sample — x, y, z, pressure, tilt — in the
+ * surface's own space, exactly as clay_mesh_sculptor_apply_stroke takes them,
+ * and `preset` is the spacing, taper and jitter. Both sides go through one
+ * resolution of what a stroke IS, so a stamp lands in the same place with the
+ * same radius and the same pressure-scaled strength on either representation.
+ *
+ * `mesh_to_world` is the layer transform and is used ONLY to find each vertex
+ * on the mask's world-addressed lattice; NULL means identity.
+ *
+ * `defer_normals` non-zero recomputes normals once at the end instead of per
+ * stamp. Faster, identical result.
+ *
+ * The whole call accumulates into `out_report`'s revisions, and a host that
+ * wants it as one undo step records the gesture through pyclay or the C++
+ * MultiresDelta — the ABI does not yet carry that record, which is stated here
+ * rather than left to be discovered. */
+clay_result clay_multires_sculptor_apply_stroke(clay_multires_sculptor* sculptor,
+                                                const float* samples_xyzpt, size_t sample_count,
+                                                const clay_stroke_preset* preset,
+                                                const clay_mesh_brush_desc* brush,
+                                                const clay_mask* mask,
+                                                const clay_mesh_frame* mesh_to_world,
+                                                int32_t defer_normals, size_t* out_applied,
+                                                clay_multires_stamp_report* out_report);
+
+/* -- changed-block transport -------------------------------------------------
+ *
+ * A host that copies the display level after every dab cannot use this at the
+ * sizes it exists for. So the surface is addressed in BASE PATCHES: a level-0
+ * face owns a subtree that never moves between faces, so a block's identity is
+ * stable for the life of the hierarchy and no re-partition can invalidate what
+ * a host has already uploaded.
+ *
+ * CALLER-OWNED BUFFERS, with a capacity query first, and no borrowed pointers
+ * into the surface — a mutation can move or free anything, and a pointer held
+ * across one would be a use-after-free with no generation to check. */
+
+typedef struct clay_multires_block_info {
+    uint32_t struct_size; /* = sizeof(clay_multires_block_info); required */
+    uint32_t patch;
+    uint32_t level;
+    uint32_t vertex_count;
+    uint32_t index_count; /* triangle indices, LOCAL to the block */
+} clay_multires_block_info;
+
+size_t clay_multires_dirty_block_count(const clay_multires* surface);
+/* The base patches the stamps since the last clear touched. Size-query pattern:
+ * call with out_patches == NULL for the count. */
+clay_result clay_multires_dirty_blocks(const clay_multires* surface, uint32_t* out_patches,
+                                       size_t* count);
+clay_result clay_multires_clear_dirty(clay_multires* surface);
+
+/* What one block would cost to copy, at a level. */
+clay_result clay_multires_block_info_get(clay_multires* surface, uint32_t patch, uint32_t level,
+                                         clay_multires_block_info* out_info);
+/* Copy one block's geometry into the caller's buffers. The indices are LOCAL to
+ * the block, so a host uploads it as a standalone draw. Every capacity is
+ * checked and nothing is written past it; pass NULL for a channel to skip it. */
+clay_result clay_multires_copy_block(clay_multires* surface, uint32_t patch, uint32_t level,
+                                     float* out_positions, size_t position_capacity,
+                                     float* out_normals, size_t normal_capacity,
+                                     uint32_t* out_indices, size_t index_capacity,
+                                     clay_multires_block_info* out_written);
 
 /* Update the ray-query tree for vertices that have moved.
  *

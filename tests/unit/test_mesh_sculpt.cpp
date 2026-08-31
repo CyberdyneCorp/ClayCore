@@ -2024,3 +2024,33 @@ TEST_CASE("automask: the cavity automask is the painted cavity mask's own estima
               brush::measure_at(sphere, brush::SurfaceMeasure::Cavity, p, measure));
     }
 }
+
+TEST_CASE("adjacency over a mesh whose indices point past its vertices reads nothing past the end") {
+    // REGRESSION (found by `test_multires.cpp`'s malformed-cage case under
+    // ASan). `Adjacency::build` indexed `class_of_` with the raw corner and
+    // never checked it, so a `Mesh` filled by hand with an out-of-range index —
+    // which nothing in this library produces and every entry point from outside
+    // rejects, but which the type itself permits — was a heap read past the end
+    // of the class array rather than a wrong answer.
+    //
+    // The build now skips such a triangle, which is the treatment a degenerate
+    // one already gets. Under ASan this case aborts without the guard; without
+    // ASan it reads whatever followed the allocation, which is why it went
+    // unnoticed.
+    mesh::Mesh m;
+    m.positions = {cf3(0, 0, 0), cf3(1, 0, 0), cf3(0, 0, 1), cf3(1, 0, 1)};
+    m.indices = {0, 1, 2, 0, 2, 99, 1, 3, 2};
+
+    const mesh::Adjacency adj = mesh::Adjacency::build(m, 0.0f);
+    CHECK(adj.vertex_count() == 4);
+    CHECK(adj.triangle_count() == 3);
+    // The two well-formed triangles are there; the malformed one contributed
+    // no ring and no incidence.
+    std::size_t count = 0;
+    adj.triangles_of(adj.class_of(0), &count);
+    CHECK(count == 1);
+    adj.triangles_of(adj.class_of(2), &count);
+    CHECK(count == 2);
+    adj.ring(adj.class_of(0), &count);
+    CHECK(count == 2);
+}

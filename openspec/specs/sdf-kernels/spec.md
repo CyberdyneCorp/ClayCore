@@ -1,7 +1,15 @@
 # sdf-kernels Specification
 
 ## Purpose
-TBD - created by archiving change add-claycore-v1. Update Purpose after archive.
+The arithmetic everything else is ultimately made of: the primitive set, the 2D
+profiles, booleans and smooth blends, transforms, symmetry, repetition and the
+deformers — written ONCE in a portable dialect that compiles for the CPU and for
+every GPU backend.
+
+It is its own capability because of what it may not name. A kernel that mentions
+a document, a layer, a host type or a threading primitive cannot be compiled for
+four devices and compared bit for bit, and that comparison is what makes a field
+one field rather than four that resemble each other.
 ## Requirements
 ### Requirement: Kernel dialect portability
 All distance functions and operators SHALL be written once, in header-only files under `include/clay/kernel/`, in a restricted C++ dialect accepted by every target compiler: no virtual functions, no exceptions, no heap allocation, no recursion, `constexpr`-friendly, using only fixed-size vector/scalar types from `shim.h` (`cfloat3`, `cfloat4x4`, …). `shim.h` SHALL map those types and qualifiers to the native types of each backend (Apple `simd`/scalar C++ for CPU, MSL vectors for Metal, CUDA vectors, OpenCL vectors) under the macros `CLAY_KERNEL_CPU`, `CLAY_KERNEL_METAL`, `CLAY_KERNEL_CUDA`, `CLAY_KERNEL_OPENCL`. The `kernel` module SHALL depend on nothing outside itself.

@@ -1,7 +1,14 @@
 # picking Specification
 
 ## Purpose
-TBD - created by archiving change add-claycore-v1. Update Purpose after archive.
+Turning a tap into a place in the model, and saying WHICH part of the model it
+landed on.
+
+A raycast against the scene that reports position, normal and attribution — the
+layer, and the item where that can be determined — plus surface snapping, the
+build plane, bounds and frustum queries, and raycasting a mesh layer directly
+because a mesh layer never enters a tape. Protection is honoured here rather
+than by the caller: a ghosted layer is not picked.
 ## Requirements
 ### Requirement: Scene raycast with attribution
 `clay::pick` SHALL raycast against the scene using either the analytic tape or the brick cache (whichever the caller marks as fresher) and return hit position, normal, and attribution (layer id, and item id where determinable).

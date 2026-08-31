@@ -1,7 +1,14 @@
 # file-io Specification
 
 ## Purpose
-TBD - created by archiving change add-claycore-v1. Update Purpose after archive.
+Getting a model in and out, and being explicit about what survives the trip.
+
+The `.clayspace` container is the one format that round-trips a document
+losslessly, and it is BACKWARD-OPEN by rule: an older reader opens a newer file
+without the parts it does not know rather than failing. The interchange formats
+— OBJ, PLY, FBX, glTF — carry geometry out to other tools and carry meshes in,
+under import guardrails, because an imported file is the one input this library
+does not control.
 ## Requirements
 ### Requirement: Document format (.clayspace)
 `clay::io` SHALL read and write the `.clayspace` single-file binary chunked container: versioned chunks for scene commands (the undo command vocabulary), palettes, voxel grids (palette+RLE compressed), thumbnails (PNG), and camera bookmarks. Readers SHALL open any older format version (backward-open) and SHALL refuse newer major versions with a clear error (forward-refuse), never crashing or partially loading. The format lives entirely in claycore so Python and CI read/write projects without the app.

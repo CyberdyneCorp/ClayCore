@@ -1,7 +1,14 @@
 # brick-cache Specification
 
 ## Purpose
-TBD - created by archiving change add-claycore-v1. Update Purpose after archive.
+What makes a document affordable to look at while it is being edited.
+
+Evaluating a whole region per frame is not a thing a sculpting application can
+do, so the surface is stored as sparse bricks with dirty tracking, and an edit
+re-evaluates the bricks it touched rather than the model. The LOD mips, the
+plain-data async request shape and the deterministic memory ceiling are all the
+same requirement seen from different sides: the cost of looking at a model must
+follow what changed, and must be bounded.
 ## Requirements
 ### Requirement: Sparse brick storage
 `clay::brick` SHALL store the evaluated field as a sparse virtual grid of bricks (8³ or 16³, configurable per document resolution) holding fp16 distance values in a narrow band of ±3 voxels around the surface. Bricks entirely inside or outside SHALL be represented implicitly (sign-only), not allocated.

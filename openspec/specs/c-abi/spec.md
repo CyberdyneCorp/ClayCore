@@ -1,7 +1,13 @@
 # c-abi Specification
 
 ## Purpose
-TBD - created by archiving change add-claycore-v1. Update Purpose after archive.
+The boundary every host crosses, and the rules that keep it crossable.
+
+Opaque handles, integer results, caller-owned buffers, no C++ type and no
+exception in a signature — so that Swift, C# or Rust can consume it without a
+shim. The versioned descriptor convention is what lets the surface GROW without
+breaking a host compiled against an older header: a caller declares the layout
+it knows, and a field appended later keeps its documented default.
 ## Requirements
 ### Requirement: Flat versioned C API
 `bindings/c/clay.h` SHALL expose documents, layers, edit commands, evaluation, brick access, meshing, picking, and file I/O through a flat C API: opaque handles, integer error codes, caller-owned buffers, no C++ types and no exceptions crossing the boundary. The header SHALL carry an ABI version triple queryable at runtime (`clay_version()`), and the ABI SHALL follow SemVer: from 1.0 breaking changes only on major, and below 1.0 under SemVer's 0.x rule a minor bump MAY break the ABI. A break below 1.0 SHALL be stated in the header, the proposal and the release notes, and SHALL be detectable rather than silent: a call made in the older layout SHALL be rejected with an error code, never read as if it were the newer one.

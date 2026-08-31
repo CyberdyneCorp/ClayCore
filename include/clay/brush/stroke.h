@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "clay/math/transform.h"
+#include "clay/mesh/multires_sculpt.h"
 #include "clay/mesh/sculpt.h"
 #include "clay/scene/document.h"
 #include "clay/voxel/grid.h"
@@ -381,6 +382,28 @@ std::size_t apply_to_mesh(mesh::MeshSculptor& sculptor, const std::vector<Stamp>
                           const voxel::MaskField* mask = nullptr,
                           mesh::VertexDeltas* deltas = nullptr,
                           const MeshStrokeOptions& options = {});
+
+// The same stroke, onto a MULTIRESOLUTION surface's active sculpt level.
+//
+// A SEPARATE ENTRY POINT AND NOT A SEPARATE STROKE. Everything above about
+// what a stroke MEANS — that radius and strength come from each stamp, that
+// Grab anchors on the first and Snakehook re-anchors on the class it is
+// dragging, that the mask becomes a gate once here rather than per verb, that
+// an alpha's tangent turns with the stylus only when the caller asks — is the
+// same code, because those are facts about a stroke rather than about a
+// representation. What differs is only where the result is stored: the cage's
+// own geometry at level 0, detail coefficients above it.
+//
+// `deltas` accumulates the whole call into ONE coalesced gesture, exactly as
+// the fixed path's does, so a multiresolution stroke is one undo step.
+//
+// Sculpting at a level while DISPLAYING another is the surface's business and
+// not this one's: a stroke writes wherever `MultiresSurface::sculpt_level` says.
+std::size_t apply_to_multires(mesh::MultiresSculptor& sculptor, const std::vector<Stamp>& stamps,
+                              mesh::MeshBrush verb, const mesh::MeshBrushSettings& settings,
+                              const voxel::MaskField* mask = nullptr,
+                              mesh::MultiresDelta* deltas = nullptr,
+                              const MeshStrokeOptions& options = {});
 
 // -- snakehook ----------------------------------------------------------------
 //
