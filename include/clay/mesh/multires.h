@@ -291,6 +291,25 @@ class MultiresSurface {
     Mesh mesh_at_level(std::uint32_t level, const MultiresExportOptions& options = {},
                        const parallel::CancelToken* cancel = nullptr);
 
+    // One base patch's faces at a level, as a STANDALONE chunk: the level
+    // vertices it uses, ascending, and triangle indices LOCAL to that list, so
+    // a host uploads it as its own draw.
+    //
+    // THE UNIT OF HOST TRANSPORT, and the reason it is a base patch rather than
+    // a spatial cell: a base face owns a subtree that never moves between
+    // faces, so a chunk's identity is stable for the life of the hierarchy and
+    // a re-partition can never invalidate what a host has already uploaded.
+    // Copying the display level after every dab is the alternative, and on a
+    // deep hierarchy it is the difference between a preview that keeps up and
+    // one that does not.
+    struct Block {
+        std::uint32_t patch = 0;
+        std::uint32_t level = 0;
+        std::vector<std::uint32_t> vertices;  // level vertex ids, ascending
+        std::vector<std::uint32_t> indices;   // triangles, local to `vertices`
+    };
+    bool build_block(std::uint32_t level, std::uint32_t patch, Block* out);
+
     // The level's own mesh and adjacency, which the sculptor drives directly.
     // Public because `multires_sculpt.cpp` is a separate translation unit and
     // these are its vocabulary, not because a caller should write through them

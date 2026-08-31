@@ -60,6 +60,7 @@ add_executable(clay_unit_tests
   unit/test_mesh_project.cpp
   unit/test_multires_history.cpp
   unit/test_multires_io.cpp
+  unit/test_c_multires.cpp
   unit/test_sculpt_allocation.cpp
   unit/test_brush_preset.cpp
   unit/test_c_brush_preset.cpp

@@ -346,6 +346,45 @@ const Adjacency& MultiresSurface::level_adjacency(std::uint32_t level) {
     return *c.adjacency;
 }
 
+bool MultiresSurface::build_block(std::uint32_t level, std::uint32_t patch, Block* out) {
+    if (!out || !state_ || !state_->level_ok(level)) return false;
+    const LevelTopology& t = state_->levels[level].topology;
+    if (patch >= t.patch_count && !(t.face_patch.empty() && patch < t.face_count)) return false;
+    evaluate_up_to(*state_, level);
+
+    out->patch = patch;
+    out->level = level;
+    out->vertices.clear();
+    out->indices.clear();
+    // Two passes over the patch's faces rather than a hash map: the first
+    // collects the vertices and sorts them, the second rewrites the corners
+    // through a binary search. The order is then a function of the topology
+    // alone, so two hosts asking for the same block get the same buffer.
+    for (std::uint32_t f = 0; f < t.face_count; ++f) {
+        if (t.patch_of(f) != patch) continue;
+        std::uint32_t arity = 0;
+        const std::uint32_t* c = t.face(f, &arity);
+        for (std::uint32_t k = 0; k < arity; ++k) out->vertices.push_back(c[k]);
+    }
+    std::sort(out->vertices.begin(), out->vertices.end());
+    out->vertices.erase(std::unique(out->vertices.begin(), out->vertices.end()),
+                        out->vertices.end());
+    const auto local_of = [&](std::uint32_t v) {
+        return static_cast<std::uint32_t>(
+            std::lower_bound(out->vertices.begin(), out->vertices.end(), v) -
+            out->vertices.begin());
+    };
+    for (std::uint32_t f = 0; f < t.face_count; ++f) {
+        if (t.patch_of(f) != patch) continue;
+        std::uint32_t arity = 0;
+        const std::uint32_t* c = t.face(f, &arity);
+        for (std::uint32_t i = 2; i < arity; ++i)
+            out->indices.insert(out->indices.end(),
+                                {local_of(c[0]), local_of(c[i - 1]), local_of(c[i])});
+    }
+    return true;
+}
+
 Mesh MultiresSurface::mesh_at_level(std::uint32_t level, const MultiresExportOptions& options,
                                     const parallel::CancelToken* cancel) {
     Mesh out;

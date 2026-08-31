@@ -19,11 +19,13 @@ A journal SHALL encode, decode and replay the new kind, and journals written bef
 - **WHEN** the highest level is removed
 - **THEN** the operation is either reversible or recorded as a barrier naming what was lost
 
-### Requirement: A document reports what a hierarchy costs
-The memory roll-up SHALL account for a multiresolution surface with its authoritative content — the base, the hierarchy metadata and the per-level detail — separate from its rebuildable caches: reconstructed positions for inactive levels, per-level adjacency, per-level spatial indices and preview staging.
+### Requirement: A hierarchy reports what it costs, separated by what may be released
+The memory report for a multiresolution surface SHALL account for its authoritative content — the base, the hierarchy metadata and the per-level detail — separately from its rebuildable caches: reconstructed positions for inactive levels, per-level adjacency, per-level spatial indices and preview staging.
 
 A host under memory pressure SHALL be able to identify what it may release. Authoritative detail SHALL never be reported as rebuildable.
 
-#### Scenario: The roll-up separates detail from cache
-- **WHEN** a document holding a hierarchy with several built level caches is measured
-- **THEN** the report names the authoritative detail bytes and the rebuildable cache bytes separately
+The accounting is PER SURFACE rather than a row in the document roll-up, and that is a consequence of where a hierarchy lives rather than a weakening. A multiresolution surface is a standalone handle that no `scene::Layer` owns — exactly as an adaptive surface is — so `io::document_memory` cannot see one to report it, and inventing a layer home for this representation ahead of the one that shipped before it would be the wider change, made here for the narrower reason. A host holds the surface beside its document and adds the two figures.
+
+#### Scenario: The report separates detail from cache
+- **WHEN** a hierarchy with several built level caches is measured
+- **THEN** the report names the authoritative detail bytes and the rebuildable cache bytes separately, and releasing the caches changes the second and not the first

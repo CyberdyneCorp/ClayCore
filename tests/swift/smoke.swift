@@ -1113,6 +1113,146 @@ do {
     clay_mesh_destroy(mesh)
 }
 
+// -- multiresolution ---------------------------------------------------------
+//
+// The subdivision hierarchy across the ABI from Swift. As above, the maths is
+// covered in C++ and what is checked here is the SHAPE a host touches: opaque
+// handles, struct_size descriptors, a level priced before it is added, and a
+// changed-block transport into memory the caller owns.
+
+do {
+    let boxPositions: [Float] = [
+        -1, -1, -1,  1, -1, -1,  1,  1, -1, -1,  1, -1,
+        -1, -1,  1,  1, -1,  1,  1,  1,  1, -1,  1,  1,
+    ]
+    let boxIndices: [UInt32] = [
+        0, 2, 1, 0, 3, 2,  4, 5, 6, 4, 6, 7,
+        0, 1, 5, 0, 5, 4,  2, 3, 7, 2, 7, 6,
+        1, 2, 6, 1, 6, 5,  0, 4, 7, 0, 7, 3,
+    ]
+    var mesh: OpaquePointer? = nil
+    boxPositions.withUnsafeBufferPointer { p in
+        boxIndices.withUnsafeBufferPointer { i in
+            check(clay_mesh_from_triangles(p.baseAddress, 8, i.baseAddress, 36, &mesh) == CLAY_OK,
+                  "built a box mesh for the hierarchy")
+        }
+    }
+
+    var desc = clay_multires_desc()
+    desc.struct_size = UInt32(MemoryLayout<clay_multires_desc>.size)
+    check(clay_multires_defaults(&desc) == CLAY_OK, "took the multires defaults")
+
+    var surface: OpaquePointer? = nil
+    var buildError: Int32 = -1
+    check(clay_multires_from_mesh(mesh, &desc, &surface, &buildError) == CLAY_OK,
+          "built a hierarchy from the box")
+    check(buildError == CLAY_MULTIRES_OK.rawValue, "the cage carries a hierarchy")
+    check(clay_multires_level_count(surface) == 1, "a cage is one level")
+
+    // The level is PRICED before it is added, which is the whole reason the
+    // call exists on a device that kills an app for memory.
+    var preflight = clay_multires_preflight()
+    preflight.struct_size = UInt32(MemoryLayout<clay_multires_preflight>.size)
+    check(clay_multires_preflight_add_level(surface, &preflight) == CLAY_OK,
+          "priced the next level")
+    check(preflight.allowed == 1, "the next level is affordable with no budget set")
+    check(preflight.vertices > 0 && preflight.peak_bytes >= preflight.persistent_bytes,
+          "the price names both what stays and the high-water mark")
+
+    var addError: Int32 = -1
+    check(clay_multires_add_level(surface, nil, &addError) == CLAY_OK, "added a level")
+    check(clay_multires_add_level(surface, nil, &addError) == CLAY_OK, "added a second level")
+    check(clay_multires_level_count(surface) == 3, "three levels now")
+
+    var sculptLevel: UInt32 = 99
+    check(clay_multires_sculpt_level(surface, &sculptLevel) == CLAY_OK, "read the sculpt level")
+    check(sculptLevel == 2, "subdividing moves the artist to the new level")
+    check(clay_multires_set_display_level(surface, 1) == CLAY_OK, "set the display level apart")
+
+    var sculptor: OpaquePointer? = nil
+    check(clay_multires_sculptor_create(surface, &sculptor) == CLAY_OK, "made a multires sculptor")
+
+    var brush = clay_mesh_brush_desc()
+    brush.struct_size = UInt32(MemoryLayout<clay_mesh_brush_desc>.size)
+    check(clay_mesh_brush_defaults(&brush) == CLAY_OK, "took the brush defaults")
+    brush.verb = CLAY_MESH_BRUSH_DRAW
+    brush.center = (0, 0, 1)
+    brush.radius = 0.8
+    brush.strength = 0.4
+
+    check(clay_multires_clear_dirty(surface) == CLAY_OK, "drained what building reported")
+    var report = clay_multires_stamp_report()
+    report.struct_size = UInt32(MemoryLayout<clay_multires_stamp_report>.size)
+    check(clay_multires_sculptor_stamp(sculptor, &brush, nil, &report) == CLAY_OK,
+          "stamped at the sculpt level")
+    check(report.level == 2, "the report names the level it wrote")
+    check(report.moved_vertices > 0, "the stamp moved something")
+    check(report.detail_revision > 1, "a fine stamp is detail, not cage geometry")
+
+    // The changed-block transport: a host copies the blocks the dab reached
+    // rather than the display level.
+    var blockCount: size_t = 0
+    check(clay_multires_dirty_blocks(surface, nil, &blockCount) == CLAY_OK,
+          "asked how many blocks changed")
+    check(blockCount > 0, "the dab reported blocks")
+    var blocks = [UInt32](repeating: 0, count: Int(blockCount))
+    blocks.withUnsafeMutableBufferPointer { b in
+        check(clay_multires_dirty_blocks(surface, b.baseAddress, &blockCount) == CLAY_OK,
+              "drained the changed blocks")
+    }
+
+    var info = clay_multires_block_info()
+    info.struct_size = UInt32(MemoryLayout<clay_multires_block_info>.size)
+    check(clay_multires_block_info_get(surface, blocks[0], 2, &info) == CLAY_OK,
+          "asked what one block costs")
+    check(info.vertex_count > 0 && info.index_count % 3 == 0, "a block is whole triangles")
+
+    var positions = [Float](repeating: 0, count: Int(info.vertex_count) * 3)
+    var indices = [UInt32](repeating: 0, count: Int(info.index_count))
+    var written = clay_multires_block_info()
+    written.struct_size = UInt32(MemoryLayout<clay_multires_block_info>.size)
+    positions.withUnsafeMutableBufferPointer { p in
+        indices.withUnsafeMutableBufferPointer { i in
+            check(clay_multires_copy_block(surface, blocks[0], 2, p.baseAddress, p.count,
+                                           nil, 0, i.baseAddress, i.count, &written) == CLAY_OK,
+                  "copied a block into memory the caller owns")
+        }
+    }
+    check(written.vertex_count == info.vertex_count, "the copy filled what the query promised")
+
+    var memory = clay_multires_memory()
+    memory.struct_size = UInt32(MemoryLayout<clay_multires_memory>.size)
+    check(clay_multires_memory_get(surface, &memory) == CLAY_OK, "read the memory rows")
+    check(memory.total == memory.authoritative + memory.rebuildable,
+          "the rows sum, and detail is never counted as rebuildable")
+
+    var size: size_t = 0
+    check(clay_multires_serialize(surface, nil, &size) == CLAY_OK, "asked for the encoded size")
+    check(size > 0, "the hierarchy has bytes")
+    var bytes = [UInt8](repeating: 0, count: Int(size))
+    bytes.withUnsafeMutableBufferPointer { b in
+        check(clay_multires_serialize(surface, b.baseAddress, &size) == CLAY_OK,
+              "encoded the hierarchy")
+    }
+    var reloaded: OpaquePointer? = nil
+    bytes.withUnsafeBufferPointer { b in
+        check(clay_multires_deserialize(b.baseAddress, b.count, &reloaded) == CLAY_OK,
+              "decoded it back")
+    }
+    check(clay_multires_level_count(reloaded) == 3, "the level count survived the round trip")
+    clay_multires_destroy(reloaded)
+
+    var level: OpaquePointer? = nil
+    check(clay_multires_copy_level_mesh(surface, 2, &level) == CLAY_OK,
+          "exported a level as an ordinary mesh")
+    check(clay_mesh_vertex_count(level) > 0, "the exported level has vertices")
+    clay_mesh_destroy(level)
+
+    clay_multires_sculptor_destroy(sculptor)
+    clay_multires_destroy(surface)
+    clay_mesh_destroy(mesh)
+}
+
 // -- result ------------------------------------------------------------------
 
 print("\n\(checks - failures)/\(checks) checks passed")
