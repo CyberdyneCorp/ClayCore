@@ -12,8 +12,8 @@
 # itself rather than inheriting it from the host, so there is exactly one copy
 # of the static library in the graph and no duplicate-symbol question.
 #
-# TWO test bundles, because a bundle is the process boundary and memory does
-# not come back. The gallery's volume bake at cell_size 0.015 with a 0.12 band
+# SEVERAL test bundles, because a bundle is the process boundary and memory
+# does not come back. The gallery's volume bake at cell_size 0.015 with a 0.12 band
 # costs +75 MB against sdf_consolidate's +6 MB, measured, and the allocator
 # does not return it to the OS when the document is destroyed — RSS plateaus
 # rather than falling. So the gallery's high-water mark became the floor every
@@ -87,12 +87,14 @@ targets:
         BUNDLE_LOADER: "$(TEST_HOST)"
         OTHER_LDFLAGS: -lc++
 
-  # Every case the gate budgets, alone in a process and FIRST in the run.
+  # The latency cases, alone in a process and FIRST in the run.
   #
   # ALONE, because a process keeps its high-water mark. testEveryVerbOnDevice
   # passed by itself and was killed by jetsam whenever anything ran ahead of
   # it: each earlier test's peak became its floor. Splitting only the gallery
-  # out was not enough — the parity and latency classes set a floor too.
+  # out was not enough — the parity and latency classes set a floor too, and
+  # eventually these latency cases set one high enough to kill the verb suite
+  # that used to share this bundle. It now has its own, below.
   #
   # FIRST, because splitting the run into bundles serialises it and the tail is
   # measured on a hotter device. Measured rather than assumed: moving the
@@ -111,6 +113,11 @@ targets:
   # latency case, and everything the gate budgets has to sit in the cold part
   # of the window. What stays in ClayCoreDeviceTests is parity and API checks,
   # which no budget reads, and the gallery makes pictures.
+  #
+  # Adding a case HERE lengthens the window every verb case is measured in.
+  # That is not free and it is not visible in this file's own numbers: it is
+  # what eventually pushed the verb suite over jetsam. Re-read the note on
+  # ClayCoreDeviceVerbTests before adding another.
   ClayCoreDeviceMeasureTests:
     type: bundle.unit-test
     platform: iOS
@@ -126,6 +133,52 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.cyberdyne.claycore.devicemeasure
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/ClayCoreDeviceHost.app/ClayCoreDeviceHost"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        OTHER_LDFLAGS: -lc++
+
+  # The 62 verb cases, alone in a process and SECOND in the run.
+  #
+  # Split out of ClayCoreDeviceMeasureTests when `testEveryVerbOnDevice` was
+  # killed by jetsam at v0.73.0's gate, having passed at v0.60.0's. Nothing
+  # about the case changed: VerbCases.swift is byte-identical across that
+  # range. What changed is that seven latency cases were added AHEAD of it in
+  # the same process (#380, #381, #385, #396), and this file already records
+  # why that is fatal — "each earlier test's peak became its floor". The case
+  # died at 0 seconds, before its first measurement, and ran the full 164 s
+  # when `-only-testing` gave it the process to itself. That is the whole
+  # diagnosis: a floor, not an engine regression.
+  #
+  # This is the THIRD time this case has hit jetsam — after the gallery's bake
+  # and after the batched walk that `walkWindow` bounds — and the first two
+  # were fixed the same way this one is. Splitting is the standing remedy
+  # because a process boundary is the only thing that actually returns the
+  # high-water mark.
+  #
+  # SECOND, deliberately, and this is the part not to "tidy" later. Within the
+  # old single process XCTest ran LatencyTests before VerbLatencyTests
+  # (alphabetical), so every one of the 62 committed baselines was recorded
+  # with the latency cases ahead of it. Keeping this bundle second preserves
+  # that thermal position and changes exactly one thing — the heap. Promoting
+  # it to first would hand it a colder window than its baseline was taken in
+  # and make the gate quietly lenient; this file's own 2.7x measurement is
+  # what that costs.
+  ClayCoreDeviceVerbTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Verb
+      - path: Shared
+    dependencies:
+      - target: ClayCoreDeviceHost
+      - framework: ../../dist/claycore.xcframework
+        embed: false
+      - sdk: Metal.framework
+      - sdk: Foundation.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.cyberdyne.claycore.deviceverb
         GENERATE_INFOPLIST_FILE: YES
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/ClayCoreDeviceHost.app/ClayCoreDeviceHost"
         BUNDLE_LOADER: "$(TEST_HOST)"
@@ -158,6 +211,7 @@ schemes:
         ClayCoreDeviceHost: all
         ClayCoreDeviceTests: [test]
         ClayCoreDeviceMeasureTests: [test]
+        ClayCoreDeviceVerbTests: [test]
         ClayCoreDeviceGalleryTests: [test]
     test:
       targets:
@@ -166,5 +220,6 @@ schemes:
         # in whatever order; each is its own process, so none inherits another's
         # high-water mark.
         - ClayCoreDeviceMeasureTests
+        - ClayCoreDeviceVerbTests
         - ClayCoreDeviceGalleryTests
         - ClayCoreDeviceTests
