@@ -15,15 +15,33 @@
       handle. Loop would have served whatever an adaptive surface produced;
       that is a second rule the abstraction takes (`SubdivisionRule`, recorded
       in the encoding) and not a second implementation this change owed
-- [x] 1.2 **BLOCKED SPARSE, fp32, 256 vertices a block.** A block exists only
-      once something in it is non-zero and is released by `compact` when it
-      returns to zero. Dense promotion above 75% of blocks allocated — and the
-      threshold is a SPEED decision rather than a memory one, which is worth
-      recording because the obvious reading is wrong: the block table costs
-      four bytes per 256 vertices, so the sparse form is smaller until coverage
-      passes 99.9% and it is never the bytes that argue for promoting. What
-      argues for it is the indirection on every read, which a smoothing pass
-      over a fully-detailed level pays a million times
+- [x] 1.2 **BLOCKED SPARSE, fp32, 1024 vertices a block, promotion at 1.0.**
+      A block exists only once something in it is non-zero and is released by
+      `compact` when it returns to zero. BOTH NUMBERS ARE MEASURED, and the
+      block size is a PARAMETER rather than a constant so that they can be:
+      `BM_MultiresDetailBlockSize` sweeps 64 / 256 / 1024 / 4096 across three
+      footprints on a level of 1,048,576 vertices and reports what each costs
+      to hold the same detail (blocks allocated plus the block table over the
+      level) —
+
+          reached      64      256     1024     4096      total KiB
+              400   72.25       25       16       49
+            4,000  139.75       94       88       97
+           40,000  814.75      769      760      769
+
+      1024 is the least at every footprint: below it the table dominates, above
+      it the last partly-used block does. The minimum is broad rather than
+      sharp, which is why this is a default rather than a tuning knob.
+
+      DENSE PROMOTION AT 1.0, and the measurement is why the first guess (0.75)
+      was wrong. The reason to promote was supposed to be the per-read
+      indirection, and `BM_MultiresDetailAccess` says there is none worth
+      having: 611 M/s sparse against 605 M/s dense over a stroke-sized index
+      set, because the block-table entry a local footprint keeps re-reading is
+      always in cache. Promotion buys no measurable speed, while promoting
+      EARLY costs real memory — a field promoted at three-quarters coverage
+      allocates a third more than the sparse form it replaced. A threshold with
+      nothing on the benefit side belongs where it cannot cost anything either
 - [x] 1.3 **A LEVEL IS WHOLE.** No region-scoped levels in this change, and the
       reason is that the voxel construction does not transfer: outside a
       refined region a voxel level has no storage and reads its parent, which
@@ -99,14 +117,19 @@
       propagated regions above, never a whole level
 - [x] 5.6 Per-level runtime cache — `Adjacency` and `Bvh` built lazily, keyed
       on the level's revision, and droppable without touching detail
-- [x] 5.7 Masks reach a multires surface exactly as they reach the other
-      representations: `MultiresSculptor::stamp` takes a `field::MaskGate` and
-      the composed weight order is unchanged, because it is the fixed
-      sculptor's. NO `brush::apply_to_multires`, and the reason is precedent
-      rather than omission — `apply_to_mesh` has no adaptive counterpart
-      either, and a stroke-engine hook for a third representation is a change
-      about the STROKE ENGINE that should make the same decision for both at
-      once rather than for one of them here
+- [x] 5.7 Masks AND the stroke engine reach a multires surface exactly as they
+      reach the other representations. The mask is a `field::MaskGate` on
+      `MultiresSculptor::stamp` and the composed weight order is unchanged,
+      because it is the fixed sculptor's. The stroke is
+      `brush::apply_to_multires`, and it shares the per-stamp resolution with
+      `apply_to_mesh` rather than copying it — `mesh_stamp_settings`,
+      `mesh_mask_gate` and `mesh_automask_inputs` are one implementation each,
+      so where a stamp lands, how far it reaches and how hard it presses cannot
+      drift between the two representations. Reachable from C
+      (`clay_multires_sculptor_apply_stroke`) and from pyclay
+      (`MultiresSculptor.apply_stroke`). An adaptive surface still has no
+      stroke entry point, which is now the only mesh representation without
+      one
 
 ## 6. Projection
 

@@ -4267,6 +4267,106 @@ BENCHMARK(BM_DynamicStampNoTopology)
     ->Iterations(20);
 
 
+// The two numbers `DetailField` is configured by, measured rather than asserted
+// (add-mesh-multires, task 1.2).
+//
+// BM_MultiresDetailBlockSize sweeps the block size over a real brush footprint
+// at a fine level and reports, through the counters, the BYTES each choice
+// allocates to hold the same detail and the block-table bytes it pays for them.
+// The trade is only visible side by side: a small block wastes little on the rim
+// of a dab, a large one spends fewer table entries over the level, and the
+// footprint decides where the crossover sits. Time is not the reading here —
+// `allocated_KiB` and `table_KiB` are.
+//
+// BM_MultiresDetailAccess is the promotion threshold's evidence: the same
+// coefficients read out of a sparse field and a dense one, over a stroke-sized
+// index set. The block table costs four bytes per block, so the sparse form is
+// smaller until coverage is almost total and memory NEVER argues for promoting;
+// what argues for it is the indirection this pair prices.
+namespace {
+
+// The vertices one dab reaches at a fine level: a contiguous-ish run with the
+// scatter a geodesic walk leaves, rather than a tidy block-aligned range that
+// would flatter every block size equally.
+std::vector<std::uint32_t> detail_footprint(std::uint32_t level_vertices, std::uint32_t reached) {
+    std::vector<std::uint32_t> out;
+    out.reserve(reached);
+    std::uint32_t v = level_vertices / 3;
+    for (std::uint32_t i = 0; i < reached; ++i) {
+        out.push_back(v % level_vertices);
+        v += 1 + (i % 5 == 0 ? 3 : 0);
+    }
+    return out;
+}
+
+}  // namespace
+
+void BM_MultiresDetailBlockSize(benchmark::State& state) {
+    const std::uint32_t block = static_cast<std::uint32_t>(state.range(0));
+    const std::uint32_t vertices = 1u << 20;  // a level-4-sized surface
+    // TWO FOOTPRINTS, because the crossover moves with the dab. A large block
+    // amortises its table over a wide dab and wastes most of itself on a
+    // narrow one, so a sweep over a single footprint picks whatever that
+    // footprint happened to favour.
+    const std::uint32_t reached = static_cast<std::uint32_t>(state.range(1));
+    const std::vector<std::uint32_t> touched = detail_footprint(vertices, reached);
+    mesh::DetailField field;
+    for (auto _ : state) {
+        field.reset(vertices, block);
+        for (std::uint32_t v : touched) field.set(v, mesh::LocalDetail{0.0f, 0.0f, 0.01f});
+        benchmark::DoNotOptimize(field);
+    }
+    const double allocated = static_cast<double>(field.resident_vertices() * sizeof(mesh::LocalDetail));
+    const double table = static_cast<double>((vertices + block - 1) / block) * sizeof(std::uint32_t);
+    state.counters["block"] = block;
+    state.counters["reached"] = reached;
+    state.counters["allocated_KiB"] = allocated / 1024.0;
+    state.counters["table_KiB"] = table / 1024.0;
+    state.counters["total_KiB"] = (allocated + table) / 1024.0;
+    state.counters["bytes_per_touched"] =
+        (allocated + table) / static_cast<double>(touched.size());
+}
+BENCHMARK(BM_MultiresDetailBlockSize)
+    ->ArgsProduct({{64, 256, 1024, 4096}, {400, 4000, 40000}})
+    ->Unit(benchmark::kMicrosecond)
+    ->Iterations(200);
+
+namespace {
+
+void detail_access(benchmark::State& state, bool dense) {
+    const std::uint32_t vertices = 1u << 18;
+    mesh::DetailField field;
+    field.reset(vertices);
+    // COVERAGE IS COUNTED IN BLOCKS, NOT VERTICES, and getting that wrong is
+    // how this pair first measured nothing: writing every OTHER vertex touches
+    // every block, so the "sparse" side promoted and both rows reported the
+    // dense field. The sparse side therefore fills a FRACTION OF THE BLOCKS.
+    const std::uint32_t block = field.block_size();
+    const std::uint32_t limit = dense ? vertices : (vertices / block) / 2 * block;
+    for (std::uint32_t v = 0; v < limit; ++v)
+        field.set(v, mesh::LocalDetail{0.0f, 0.0f, 0.01f});
+    // Read only where the sparse field actually stores something, so the pair
+    // prices the INDIRECTION rather than one side's early-out on a missing
+    // block.
+    const std::vector<std::uint32_t> touched = detail_footprint(limit, 20000);
+    for (auto _ : state) {
+        float sum = 0.0f;
+        for (std::uint32_t v : touched) sum += field.get(v).normal;
+        benchmark::DoNotOptimize(sum);
+    }
+    state.counters["dense"] = field.dense() ? 1 : 0;
+    state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations()) *
+                            static_cast<std::int64_t>(touched.size()));
+}
+
+}  // namespace
+
+void BM_MultiresDetailAccessSparse(benchmark::State& state) { detail_access(state, false); }
+BENCHMARK(BM_MultiresDetailAccessSparse)->Unit(benchmark::kMicrosecond)->Iterations(2000);
+
+void BM_MultiresDetailAccessDense(benchmark::State& state) { detail_access(state, true); }
+BENCHMARK(BM_MultiresDetailAccessDense)->Unit(benchmark::kMicrosecond)->Iterations(2000);
+
 // -- multiresolution (add-mesh-multires) --------------------------------------
 //
 // The pair that matters is COLD against LOCAL. Both reconstruct the same

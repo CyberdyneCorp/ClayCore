@@ -220,6 +220,7 @@ ALIASES = {
     "MultiresSurface.project_from": "clay_multires_project",
     "MultiresSculptor.stamp": "clay_multires_sculptor_stamp",
     "MultiresSculptor.begin_stroke": "clay_multires_sculptor_begin_stroke",
+    "MultiresSculptor.apply_stroke": "clay_multires_sculptor_apply_stroke",
     "MultiresSculptor.bound_level": "clay_multires_sculpt_level",
     "MultiresSculptor.last_write_vertices": "clay_multires_dirty_blocks",
     "DynamicSculptor.rebuild_index": "clay_dynamic_sculptor_rebuild_index",

@@ -389,6 +389,18 @@ class MultiresSurface {
     // level nor the display level nor an ancestor one of them needs. Rebuilding
     // reproduces them bit-identically; the authoritative detail is untouched.
     void drop_inactive_caches();
+    // Release every level's cache EXCEPT the sculpt level's and the display
+    // level's — including the levels between them and the cage.
+    //
+    // The middle option between the two above, and the one a host reaches for
+    // while an artist is working at a fine level: a stamp there reads that
+    // level's own subdivided positions and frames and nothing else, so on a
+    // deep hierarchy the levels below it are holding memory that the next dab
+    // will not touch. Pending work is flushed first, so nothing is lost; the
+    // cost is that the next edit BELOW the active levels rebuilds what it
+    // needs.
+    void drop_intermediate_caches();
+
     // Release every cache, including the active levels'. What a host does under
     // real pressure, and what a test does to prove the caches carry nothing.
     void drop_all_caches();

@@ -232,6 +232,62 @@ TEST_CASE("dropping the inactive levels' caches changes nothing") {
     CHECK(s.detail_checksum() == sum);
 }
 
+TEST_CASE("the levels between the cage and the brush can be released and stay released") {
+    // THE MIDDLE RESIDENCY OPTION. `drop_inactive_caches` releases what is
+    // ABOVE the active levels and `drop_all_caches` releases everything; this
+    // is the one a host wants while an artist is detailing at a fine level,
+    // because a stamp there reads that level's own subdivided positions and
+    // frames and nothing else.
+    MultiresSurface s = build(plane_quads(6, 3.0f), 3);
+    REQUIRE(s.set_sculpt_level(3));
+    REQUIRE(s.set_display_level(3));
+    MultiresSculptor sculptor(s);
+    MeshBrushSettings settings;
+    settings.center = cf3(0.0f, 0.0f, 0.0f);
+    settings.radius = 0.4f;
+    settings.strength = 0.4f;
+    REQUIRE(sculptor.stamp(MeshBrush::Draw, settings) > 0);
+
+    const std::uint64_t sum_before_trim = s.detail_checksum();
+    const mesh::MultiresMemory loaded = s.memory();
+    CHECK(loaded.resident_levels == 4);
+
+    s.drop_intermediate_caches();
+    const mesh::MultiresMemory trimmed = s.memory();
+    CHECK(trimmed.resident_levels == 1);  // only the level being worked on
+    CHECK(trimmed.rebuildable < loaded.rebuildable);
+    CHECK(trimmed.authoritative == loaded.authoritative);
+    CHECK(s.detail_checksum() == sum_before_trim);
+
+    // AND THEY STAY RELEASED. Before the evaluation short-circuit this was the
+    // half that did not work: the next touch walked from the cage and rebuilt
+    // every level it had just released, so the trim bought nothing past the
+    // call itself.
+    s.reset_eval_stats();
+    settings.center = cf3(0.3f, 0.0f, 0.2f);
+    REQUIRE(sculptor.stamp(MeshBrush::Draw, settings) > 0);
+    s.positions_at(3);
+    CHECK(s.eval_stats().full_level_rebuilds == 0);
+    CHECK(s.memory().resident_levels == 1);
+
+    // The surface the trimmed hierarchy holds is what a full one would hold,
+    // which is the property the rebuild below checks against.
+    const std::vector<cfloat3> reference = s.positions_at(3);
+    const std::uint64_t sum = s.detail_checksum();
+
+    // What it costs is an edit BELOW the active levels, which rebuilds what it
+    // needs — and reconstructs the same surface doing it.
+    REQUIRE(s.set_sculpt_level(0));
+    const std::vector<cfloat3> after_rebuild = s.positions_at(3);
+    REQUIRE(after_rebuild.size() == reference.size());
+    for (std::size_t v = 0; v < after_rebuild.size(); ++v) {
+        CHECK(after_rebuild[v].x == reference[v].x);
+        CHECK(after_rebuild[v].y == reference[v].y);
+        CHECK(after_rebuild[v].z == reference[v].z);
+    }
+    CHECK(s.detail_checksum() == sum);
+}
+
 TEST_CASE("a stamp on a level nobody is displaying still propagates when asked") {
     // Lazy evaluation: sculpting at level 1 while displaying level 1 must not
     // rebuild level 3 on the spot. It must rebuild it when something asks.

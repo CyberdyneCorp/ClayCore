@@ -224,6 +224,57 @@ TEST_CASE("c multires: a stamp moves detail and names its level") {
     CHECK(cage.detail_revision == report.detail_revision);
 }
 
+TEST_CASE("c multires: a host can drive a whole stroke, not just a stamp") {
+    // Without this a host holds a hierarchy and has to walk the stamps itself,
+    // and the moment it does, "what a stroke is" has two definitions — one in
+    // the engine and one in every host that reimplemented spacing.
+    Fixture f(5, 2);
+    REQUIRE(clay_multires_set_sculpt_level(f.surface, 2) == CLAY_OK);
+
+    clay_stroke_preset preset{};
+    preset.struct_size = sizeof(preset);
+    REQUIRE(clay_stroke_preset_defaults(&preset) == CLAY_OK);
+    preset.spacing = 0.25f;
+    preset.radius = 0.5f;
+
+    const clay_mesh_brush_desc brush = draw_brush(0.5f, 0.5f);
+    // Five floats a sample: x, y, z, pressure, tilt.
+    const float samples[] = {-0.8f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                             1.0f,  0.0f, 0.8f, 0.0f, 0.0f, 1.0f, 0.0f};
+
+    uint64_t detail_before = 0;
+    REQUIRE(clay_multires_revision(f.surface, nullptr, &detail_before, nullptr) == CLAY_OK);
+
+    size_t applied = 0;
+    clay_multires_stamp_report report{};
+    report.struct_size = sizeof(report);
+    REQUIRE(clay_multires_sculptor_apply_stroke(f.sculptor, samples, 3, &preset, &brush, nullptr,
+                                                nullptr, 0, &applied, &report) == CLAY_OK);
+    // The stroke resolved into MORE stamps than samples: spacing is the
+    // engine's, which is the whole point of going through it.
+    CHECK(applied > 3);
+    CHECK(report.level == 2);
+    CHECK(report.detail_revision > detail_before);
+
+    // Deferring the normal recompute changes nothing a caller can observe
+    // except when it happens.
+    uint64_t sum_deferred = 0, sum_eager = 0;
+    Fixture eager(5, 2), deferred(5, 2);
+    REQUIRE(clay_multires_set_sculpt_level(eager.surface, 2) == CLAY_OK);
+    REQUIRE(clay_multires_set_sculpt_level(deferred.surface, 2) == CLAY_OK);
+    REQUIRE(clay_multires_sculptor_apply_stroke(eager.sculptor, samples, 3, &preset, &brush,
+                                                nullptr, nullptr, 0, nullptr, nullptr) == CLAY_OK);
+    REQUIRE(clay_multires_sculptor_apply_stroke(deferred.sculptor, samples, 3, &preset, &brush,
+                                                nullptr, nullptr, 1, nullptr, nullptr) == CLAY_OK);
+    REQUIRE(clay_multires_detail_checksum(eager.surface, &sum_eager) == CLAY_OK);
+    REQUIRE(clay_multires_detail_checksum(deferred.surface, &sum_deferred) == CLAY_OK);
+    CHECK(sum_eager == sum_deferred);
+
+    // A null sculptor is refused rather than dereferenced.
+    CHECK(clay_multires_sculptor_apply_stroke(nullptr, samples, 3, &preset, &brush, nullptr,
+                                              nullptr, 0, &applied, nullptr) != CLAY_OK);
+}
+
 TEST_CASE("c multires: a detail stamp drains changed blocks, not the display level") {
     Fixture f(6, 2);
     // Warm the display level and clear whatever building it reported.

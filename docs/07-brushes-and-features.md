@@ -1655,6 +1655,14 @@ not all exist at the start.
 What the multires sculptor owns is the step after: turning the moved positions
 back into what the hierarchy stores, and propagating.
 
+**The stroke engine reaches it too.** `brush::apply_to_multires` is the
+hierarchy's counterpart to `apply_to_mesh`, and the two share the per-stamp
+resolution rather than each having their own — where a stamp lands, how far it
+reaches, how hard it presses, and how Grab and Snakehook consume the motion
+between stamps are facts about a *stroke* and not about a surface, so they are
+one implementation. An adaptive surface is now the only mesh representation
+without a stroke entry point.
+
 ### What a level costs, and why adding one is priced first
 
 Catmull-Clark multiplies faces by four. Over a 20k-quad cage:
@@ -1675,17 +1683,37 @@ that rebuilds bit-identically, which is what `memory()` separates and
 `drop_inactive_caches()` acts on. Detail is never reported as rebuildable,
 because a host under pressure acts on that distinction.
 
+Three residency levers, in the order a host reaches for them:
+`drop_inactive_caches()` releases what is above the levels in use;
+`drop_intermediate_caches()` releases the levels *between* the cage and them,
+which is what a host wants while an artist is detailing at a fine level, since a
+stamp there reads that level's own subdivided positions and frames and nothing
+else; `drop_all_caches()` releases everything. All three leave the authoritative
+detail untouched, which the checksum is what proves.
+
 `preflight_add_level()` prices a level from the level below by arithmetic: it
 allocates nothing, has no side effects, and reports both what would remain and
-the high-water mark during the call. On a device that kills an app for memory
+the high-water mark during the call. The estimate is a **ceiling** rather than a
+best guess — a budget that errs low says yes to a level that does not fit, which
+is the one failure it exists to prevent — and `test_multires.cpp` holds it
+against what the level actually costs once it exists. On a device that kills an app for memory
 rather than warning it twice, the peak is the number that matters.
 `add_level()` refuses over budget rather than allocating half of it, and is
 build-then-publish, so a refusal or a cancellation leaves the surface exactly as
 it was.
 
-Detail storage is **blocked sparse**: a block of 256 vertices exists only once
+Detail storage is **blocked sparse**: a block of 1024 vertices exists only once
 something in it is non-zero. An artist who has detailed a cheek does not pay for
 the twenty million vertices that carry nothing.
+
+The block size is a **parameter**, not a constant, and that is what makes the
+default defensible: `BM_MultiresDetailBlockSize` sweeps it across three
+footprints and reports what each choice costs to hold the same detail. 1024 is
+the least at every one — below it the block table over the level dominates,
+above it the last partly-used block does. The same discipline moved the
+dense-promotion threshold to 1.0: `BM_MultiresDetailAccess` measures 611 M/s
+sparse against 605 M/s dense, so promotion buys no measurable speed, while
+promoting early costs a third more memory than the sparse form it replaces.
 
 ### A dab costs what it touched
 

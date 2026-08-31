@@ -7036,6 +7036,34 @@ NB_MODULE(pyclay, m) {
         .def("begin_stroke", &mesh::MultiresSculptor::begin_stroke,
              "Start a gesture. Clears the record the Layer verb measures its\n"
              "ceiling against.")
+        .def(
+            "apply_stroke",
+            [](mesh::MultiresSculptor& self, nb::handle samples, const brush::StrokePreset& preset,
+               const std::string& verb, const std::string& falloff, float strength,
+               nb::handle geodesic, int smooth_iterations, float layer_height, nb::handle mask,
+               bool defer_normals) {
+                mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
+                // The radius is the STAMP's, so a placeholder goes in here —
+                // the same reading the fixed sculptor's stroke path takes.
+                mesh::MeshBrushSettings settings = mesh_brush_settings(
+                    verb, nb::none(), 1.0f, strength, falloff, nb::none(), nb::none(), geodesic,
+                    nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, smooth_iterations,
+                    layer_height, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), &chosen);
+                const std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
+                const voxel::MaskField* field_mask = borrow_mask(mask);
+                brush::MeshStrokeOptions options;
+                options.defer_normals = defer_normals;
+                nb::gil_scoped_release release;
+                return brush::apply_to_multires(self, brush::resolve_stroke(in, preset), chosen,
+                                                settings, field_mask, nullptr, options);
+            },
+            "samples"_a, "preset"_a, "verb"_a, "falloff"_a = "smooth", "strength"_a = 1.0f,
+            "geodesic"_a = nb::none(), "smooth_iterations"_a = 1, "layer_height"_a = 0.05f,
+            "mask"_a = nb::none(), "defer_normals"_a = false,
+            "A whole stroke at the active sculpt level, resolved into spaced\n"
+            "stamps by the same engine that drives a mesh layer — so a stamp\n"
+            "lands in the same place with the same radius and the same\n"
+            "pressure-scaled strength on either representation.")
         .def_prop_ro("bound_level", &mesh::MultiresSculptor::bound_level)
         .def_prop_ro("last_write_vertices",
                      [](const mesh::MultiresSculptor& s) {

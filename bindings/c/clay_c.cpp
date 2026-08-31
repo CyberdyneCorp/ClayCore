@@ -27,6 +27,7 @@
 #include "clay/brush/procedural_mask.h"
 #include "clay/brush/preset.h"
 #include "clay/mesh/dynamic_sculpt.h"
+#include "clay/brush/stroke.h"
 #include "clay/mesh/multires_sculpt.h"
 #include "clay/mesh/project.h"
 #include "clay/mesh/dynamic_validate.h"
@@ -15013,6 +15014,60 @@ clay_result clay_multires_sculptor_stamp(clay_multires_sculptor* sculptor,
         out.struct_size = static_cast<std::uint32_t>(sizeof(out));
         out.level = level;
         out.moved_vertices = moved;
+        out.base_revision = s.base_revision();
+        out.detail_revision = s.detail_revision();
+        out.evaluated_revision = s.evaluated_revision();
+        write_desc(out_report, declared, out);
+    }
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculptor_apply_stroke(clay_multires_sculptor* sculptor,
+                                                const float* samples_xyzpt, size_t sample_count,
+                                                const clay_stroke_preset* preset,
+                                                const clay_mesh_brush_desc* brush,
+                                                const clay_mask* mask,
+                                                const clay_mesh_frame* mesh_to_world,
+                                                int32_t defer_normals, size_t* out_applied,
+                                                clay_multires_stamp_report* out_report) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
+    mesh::MeshBrush verb = mesh::MeshBrush::Draw;
+    mesh::MeshBrushSettings settings;
+    clay_result r = read_mesh_brush(brush, &verb, &settings);
+    if (r != CLAY_OK) return r;
+
+    brush::MeshStrokeOptions options;
+    options.defer_normals = defer_normals != 0;
+    r = read_mesh_frame(mesh_to_world, &options.mesh_to_world);
+    if (r != CLAY_OK) return r;
+
+    std::vector<brush::StrokeSample> samples;
+    brush::StrokePreset resolved;
+    r = read_stroke(samples_xyzpt, sample_count, preset, &samples, &resolved);
+    if (r != CLAY_OK) return r;
+
+    voxel::MaskField* field_mask = nullptr;
+    if (mask) {
+        r = resolve_mask(mask, &field_mask);
+        if (r != CLAY_OK) return r;
+    }
+
+    mesh::MultiresSurface& s = sculptor->owner->surface;
+    const std::uint32_t level = s.sculpt_level();
+    const std::size_t applied =
+        brush::apply_to_multires(*sculptor->sculptor, brush::resolve_stroke(samples, resolved),
+                                 verb, settings, field_mask, nullptr, options);
+    if (out_applied) *out_applied = applied;
+    if (out_report) {
+        const std::uint32_t declared = out_report->struct_size;
+        clay_multires_stamp_report probe;
+        r = read_desc(out_report, kMultiresStampReportOriginal, &probe);
+        if (r != CLAY_OK) return r;
+        clay_multires_stamp_report out{};
+        out.struct_size = static_cast<std::uint32_t>(sizeof(out));
+        out.level = level;
+        out.moved_vertices = applied;
         out.base_revision = s.base_revision();
         out.detail_revision = s.detail_revision();
         out.evaluated_revision = s.evaluated_revision();

@@ -13,13 +13,14 @@
 // respectively — for a hierarchy where the artist has touched a cheek. Detail
 // is where a subdivision hierarchy is at its most local: an artist adds pores
 // to a face and nothing else on the model has any. So storage is blocked: a
-// block of `kBlockSize` vertices exists only once something in it is non-zero,
+// block of `block_size()` vertices exists only once something in it is non-zero,
 // and returns to nothing when it is zeroed again.
 //
 // DENSE ABOVE A THRESHOLD, and that is a SPEED decision rather than a memory
 // one — worth saying, because the obvious reading is wrong. The block table
-// costs four bytes per 256 vertices, so the sparse form is smaller than the
-// dense one until coverage passes 99.9%; it is never memory that argues for
+// costs four bytes per block, so at the default block size the sparse form is
+// smaller than the dense one until coverage passes 99.9%; it is never memory
+// that argues for
 // promotion. What argues for it is the indirection on every read, which a
 // smoothing pass over a fully-detailed level pays a million times. The
 // threshold and the measurement behind it are on `kDensePromotionCoverage`.
@@ -62,23 +63,58 @@ struct LocalDetail {
 
 class DetailField {
    public:
-    // 256 vertices, 3 KB of coefficients. Small enough that a brush footprint
-    // on a fine level allocates a handful rather than the level, large enough
-    // that the block table is noise against the payload — measured in
-    // `BM_MultiresDetailBlockSize`, which sweeps 64 / 256 / 1024 over a stroke
-    // footprint and reports allocated bytes against touched vertices.
-    static constexpr std::uint32_t kBlockSize = 256;
+    // 1024 vertices, 12 KB of coefficients.
+    //
+    // A PARAMETER RATHER THAN A CONSTANT, and that is what makes the number
+    // defensible rather than merely plausible: `BM_MultiresDetailBlockSize`
+    // sweeps 64 / 256 / 1024 / 4096 across three footprints on a level of
+    // 1,048,576 vertices and reports what each choice costs to hold the same
+    // detail — the blocks it allocates plus the block table it needs over the
+    // level. Total KiB, measured:
+    //
+    //     reached      64      256     1024     4096
+    //     ------------------------------------------
+    //         400   72.25       25       16       49
+    //       4,000  139.75       94       88       97
+    //      40,000  814.75      769      760      769
+    //
+    // 1024 is the least at every footprint, and the shape says why: below it
+    // the block TABLE over the level dominates (64 spends 64 KiB of table to
+    // save 12 KiB of payload on the narrow dab), above it the last partly-used
+    // BLOCK does (4096 wastes 36 KiB on a 400-vertex footprint). The minimum is
+    // broad rather than sharp — 256 and 1024 are within 7% at the two larger
+    // footprints — which is why this is a default rather than a tuning
+    // parameter, and why it is a parameter at all: a constant nobody can sweep
+    // is a number nobody can re-derive when the footprint changes. Sculpt
+    // layers, which store the same type over the same levels, can choose
+    // differently without touching this file.
+    static constexpr std::uint32_t kDefaultBlockSize = 1024;
 
-    // Above this fraction of blocks allocated, the field switches to a flat
-    // array. See the header note: the argument is the per-read indirection, not
-    // the bytes. Measured in `BM_MultiresDetailAccess`.
-    static constexpr float kDensePromotionCoverage = 0.75f;
+    // At this fraction of blocks allocated, the field switches to a flat array.
+    //
+    // ONE, AND THE MEASUREMENT IS WHY. The reason to promote was supposed to be
+    // the per-read indirection, and `BM_MultiresDetailAccess` says there is
+    // none worth having: reading a stroke-sized index set out of a sparse field
+    // runs at 611 M/s against 605 M/s dense — the block table entry a local
+    // footprint keeps re-reading is simply always in cache. So promotion buys
+    // no measurable speed, while promoting EARLY costs real memory: a field
+    // promoted at three-quarters coverage allocates a third more than the
+    // sparse form it replaced.
+    //
+    // A threshold with nothing on the benefit side belongs where it cannot
+    // cost anything either. At 1.0 the field promotes only once every block is
+    // allocated — the one case where the table and the indirection are pure
+    // overhead and the dense array is not one byte larger.
+    static constexpr float kDensePromotionCoverage = 1.0f;
 
     static constexpr std::uint32_t kNoBlock = 0xffffffffu;
 
-    // Size the field to a level. Clears everything.
-    void reset(std::uint32_t vertex_count);
+    // Size the field to a level. Clears everything. A block size of zero takes
+    // the default; anything else is rounded up to a power of two, so the
+    // division and modulo in every access stay shifts.
+    void reset(std::uint32_t vertex_count, std::uint32_t block_size = kDefaultBlockSize);
     std::uint32_t vertex_count() const { return vertex_count_; }
+    std::uint32_t block_size() const { return block_size_; }
 
     // Zero outside anything stored, which is the whole point: an unwritten
     // vertex costs no memory and reads as "no detail here".
@@ -145,8 +181,9 @@ class DetailField {
     // slot -> block, so a walk over stored blocks costs the stored ones. Empty
     // when dense.
     std::vector<std::uint32_t> slot_block_;
-    // `slots * kBlockSize` entries when sparse, `vertex_count_` when dense.
+    // `slots * block_size_` entries when sparse, `vertex_count_` when dense.
     std::vector<LocalDetail> storage_;
+    std::uint32_t block_size_ = kDefaultBlockSize;
 };
 
 }  // namespace mesh

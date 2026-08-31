@@ -6308,6 +6308,34 @@ clay_result clay_multires_sculptor_stamp(clay_multires_sculptor* sculptor,
                                          const clay_mesh_brush_desc* brush, const clay_mask* mask,
                                          clay_multires_stamp_report* out_report);
 
+/* A WHOLE STROKE at the active sculpt level, resolved into spaced stamps by the
+ * same engine that drives a mesh layer.
+ *
+ * `samples_xyzpt` is five floats per sample — x, y, z, pressure, tilt — in the
+ * surface's own space, exactly as clay_mesh_sculptor_apply_stroke takes them,
+ * and `preset` is the spacing, taper and jitter. Both sides go through one
+ * resolution of what a stroke IS, so a stamp lands in the same place with the
+ * same radius and the same pressure-scaled strength on either representation.
+ *
+ * `mesh_to_world` is the layer transform and is used ONLY to find each vertex
+ * on the mask's world-addressed lattice; NULL means identity.
+ *
+ * `defer_normals` non-zero recomputes normals once at the end instead of per
+ * stamp. Faster, identical result.
+ *
+ * The whole call accumulates into `out_report`'s revisions, and a host that
+ * wants it as one undo step records the gesture through pyclay or the C++
+ * MultiresDelta — the ABI does not yet carry that record, which is stated here
+ * rather than left to be discovered. */
+clay_result clay_multires_sculptor_apply_stroke(clay_multires_sculptor* sculptor,
+                                                const float* samples_xyzpt, size_t sample_count,
+                                                const clay_stroke_preset* preset,
+                                                const clay_mesh_brush_desc* brush,
+                                                const clay_mask* mask,
+                                                const clay_mesh_frame* mesh_to_world,
+                                                int32_t defer_normals, size_t* out_applied,
+                                                clay_multires_stamp_report* out_report);
+
 /* -- changed-block transport -------------------------------------------------
  *
  * A host that copies the display level after every dab cannot use this at the

@@ -27,18 +27,42 @@ constexpr std::uint64_t kConnBytesPerVertex = 6u * sizeof(std::uint32_t);
 constexpr std::uint64_t kRuntimeBytesPerFace = (4u + 6u) * sizeof(std::uint32_t);
 constexpr std::uint64_t kRuntimeBytesPerVertex = 10u * sizeof(std::uint32_t);
 
+// What `std::vector` holds over what it was asked for.
+//
+// THE ESTIMATE MUST ERR HIGH, and before this factor it did not: the structural
+// figures above are exact byte costs, and the arrays that carry them are grown
+// rather than reserved, so a level measured after the fact holds its CAPACITY
+// and not its size. Measured on a level 3 over a 64-quad cage: the evaluated
+// arrays came out 1.34x their structural cost and the runtime ones 1.51x.
+//
+// A budget that errs LOW is the one that gets an application killed — it says
+// yes to a level that does not fit, which is the single failure
+// `preflight_add_level` exists to prevent — so the slack is applied to the
+// prediction rather than left for the caller to remember. `test_multires.cpp`
+// holds it as a CEILING over the measured actuals, not as a two-sided band.
+constexpr double kCapacitySlack = 1.75;
+
 }  // namespace
 
-std::size_t LevelCache::bytes() const {
-    std::size_t n = conn.bytes() + subdivided.capacity() * sizeof(kernel::cfloat3) +
-                    frames.capacity() * sizeof(SurfaceFrame) + mesh.bytes();
+LevelCache::Bytes LevelCache::byte_split() const {
+    Bytes b;
+    b.evaluated = subdivided.capacity() * sizeof(kernel::cfloat3) +
+                  frames.capacity() * sizeof(SurfaceFrame) +
+                  mesh.positions.capacity() * sizeof(kernel::cfloat3) +
+                  mesh.normals.capacity() * sizeof(kernel::cfloat3);
+    // The level's own index buffers — its quads and their triangulation — plus
+    // the connectivity, plus the adjacency when one has been built.
+    b.runtime = conn.bytes() + mesh.indices.capacity() * sizeof(std::uint32_t) +
+                mesh.quads.capacity() * sizeof(std::uint32_t) +
+                mesh.colors.capacity() * sizeof(kernel::cfloat3) +
+                mesh.uvs.capacity() * sizeof(kernel::cfloat2);
     if (adjacency) {
         // The adjacency's own arrays are not exposed; its three CSR pairs are
         // close enough to ten words a vertex that pricing it any more precisely
         // would be false precision in a budget.
-        n += static_cast<std::size_t>(mesh.positions.size()) * kRuntimeBytesPerVertex;
+        b.runtime += static_cast<std::size_t>(mesh.positions.size()) * kRuntimeBytesPerVertex;
     }
-    return n;
+    return b;
 }
 
 std::size_t AttrLevel::bytes() const {
@@ -233,13 +257,23 @@ MultiresPreflight MultiresSurface::preflight_add_level() const {
                  parent.topology.face_count;
     p.faces = parent.topology.corners.size();
 
+    const auto with_slack = [](std::uint64_t exact) {
+        return static_cast<std::uint64_t>(static_cast<double>(exact) * kCapacitySlack);
+    };
+    // The face list is ONE exactly-sized allocation, so it needs no slack.
     p.topology_bytes = p.faces * kTopologyBytesPerFace;
-    p.detail_bytes = p.vertices * kDetailBytesPerVertex;
-    p.evaluated_bytes = p.vertices * kEvaluatedBytesPerVertex;
-    const std::uint64_t child_edges = 2ull * parent.edge_count + parent.topology.corners.size();
-    p.runtime_bytes = p.faces * (kConnBytesPerFace + kRuntimeBytesPerFace) +
-                      p.vertices * (kConnBytesPerVertex + kRuntimeBytesPerVertex);
-    (void)child_edges;
+    // FULLY detailed means DENSE, and a promoted field's payload is one exact
+    // allocation — so the coefficients are exact and only the block table it
+    // leaves behind is grown. Two `uint32` vectors over the blocks, at the
+    // doubling ceiling.
+    {
+        const std::uint64_t blocks =
+            (p.vertices + DetailField::kDefaultBlockSize - 1) / DetailField::kDefaultBlockSize;
+        p.detail_bytes = p.vertices * kDetailBytesPerVertex + blocks * 4u * 2u * 2u;
+    }
+    p.evaluated_bytes = with_slack(p.vertices * kEvaluatedBytesPerVertex);
+    p.runtime_bytes = with_slack(p.faces * (kConnBytesPerFace + kRuntimeBytesPerFace) +
+                                 p.vertices * (kConnBytesPerVertex + kRuntimeBytesPerVertex));
 
     // What SURVIVES the call is the face list; the detail field starts empty
     // and grows only where the artist works. What the call itself needs on top
@@ -459,14 +493,9 @@ MultiresMemory MultiresSurface::memory() const {
         m.detail += l.detail.bytes();
         if (!l.cache) continue;
         ++m.resident_levels;
-        m.evaluated += l.cache->subdivided.capacity() * sizeof(kernel::cfloat3) +
-                       l.cache->frames.capacity() * sizeof(SurfaceFrame) +
-                       l.cache->mesh.positions.capacity() * sizeof(kernel::cfloat3) +
-                       l.cache->mesh.normals.capacity() * sizeof(kernel::cfloat3);
-        m.runtime_index += l.cache->bytes() - l.cache->subdivided.capacity() * sizeof(kernel::cfloat3) -
-                           l.cache->frames.capacity() * sizeof(SurfaceFrame) -
-                           l.cache->mesh.positions.capacity() * sizeof(kernel::cfloat3) -
-                           l.cache->mesh.normals.capacity() * sizeof(kernel::cfloat3);
+        const LevelCache::Bytes split = l.cache->byte_split();
+        m.evaluated += split.evaluated;
+        m.runtime_index += split.runtime;
     }
     for (const AttrLevel& a : state_->attr) m.runtime_index += a.bytes();
     m.authoritative = m.base + m.topology + m.detail;
@@ -489,6 +518,21 @@ void MultiresSurface::drop_all_caches() {
     state_->attr.clear();
     state_->base_frames_all = true;
     state_->base_frames_dirty.clear();
+}
+
+void MultiresSurface::drop_intermediate_caches() {
+    if (!state_) return;
+    const std::uint32_t keep_a = std::min(state_->sculpt_level, max_level());
+    const std::uint32_t keep_b = std::min(state_->display_level, max_level());
+    // Flush first: a level holding unconsumed pending work is a level whose
+    // changes have not reached the one above it yet, and dropping it would drop
+    // the edit rather than the cache.
+    evaluate_up_to(*state_, std::max(keep_a, keep_b));
+    for (std::uint32_t l = 0; l < state_->levels.size(); ++l) {
+        if (l == keep_a || l == keep_b) continue;
+        state_->levels[l].cache.reset();
+    }
+    state_->attr.clear();
 }
 
 void MultiresSurface::drop_inactive_caches() {

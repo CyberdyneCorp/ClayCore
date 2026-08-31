@@ -265,6 +265,60 @@ TEST_CASE("adding a level reports its cost before paying it, and refuses over bu
     CHECK(tight->memory().topology == surface->memory().topology);
 }
 
+TEST_CASE("the preflight's estimate resembles what the level actually costs") {
+    // THE GATE THE PREFLIGHT HAD NO TEST FOR. `preflight_add_level` prices a
+    // level from per-vertex and per-face constants, and a host on a
+    // memory-constrained device budgets from those numbers — so an estimate
+    // that drifted away from the storage it describes would be worse than no
+    // estimate, because it would be believed. Nothing compared the two until
+    // this case: the constants could have been off by an order of magnitude and
+    // every other test would still have passed.
+    MultiresSurface s = build(plane_quads(8, 4.0f), 2);
+    const mesh::MultiresMemory before = s.memory();
+    const mesh::MultiresPreflight p = s.preflight_add_level();
+    REQUIRE(p.allowed);
+
+    MultiresError err = MultiresError::None;
+    REQUIRE(s.add_level(&err));
+    // Make the new level fully resident the way a sculpt would: evaluated, with
+    // its faces and its adjacency built.
+    s.level_adjacency(p.level);
+    const mesh::MultiresMemory after = s.memory();
+
+    const double topology = static_cast<double>(after.topology - before.topology);
+    const double evaluated = static_cast<double>(after.evaluated - before.evaluated);
+    const double runtime = static_cast<double>(after.runtime_index - before.runtime_index);
+    INFO("topology  predicted " << p.topology_bytes << " actual " << topology);
+    INFO("evaluated predicted " << p.evaluated_bytes << " actual " << evaluated);
+    INFO("runtime   predicted " << p.runtime_bytes << " actual " << runtime);
+
+    CHECK(after.topology > before.topology);
+    CHECK(after.evaluated > before.evaluated);
+    CHECK(after.runtime_index > before.runtime_index);
+
+    // A CEILING, NOT A BAND, and the asymmetry is the whole value of the call.
+    // A budget that errs low says yes to a level that does not fit, which is
+    // the single failure this exists to prevent; a budget that errs high costs
+    // a level somebody could have had. So the prediction must be at least the
+    // actual — and within twice it, because an estimate nobody can act on is
+    // not an estimate.
+    const auto is_ceiling = [](double predicted, double actual) {
+        return actual > 0.0 && predicted >= actual && predicted <= actual * 2.0;
+    };
+    CHECK(is_ceiling(static_cast<double>(p.topology_bytes), topology));
+    CHECK(is_ceiling(static_cast<double>(p.evaluated_bytes), evaluated));
+    CHECK(is_ceiling(static_cast<double>(p.runtime_bytes), runtime));
+
+    // And the detail estimate is what the level would cost FULLY detailed,
+    // which is the number a host needs before it lets an artist work there.
+    mesh::DetailField& detail = s.detail_mutable(p.level);
+    for (std::uint32_t v = 0; v < s.topology_at(p.level).vertex_count; ++v)
+        detail.set(v, LocalDetail{0.0f, 0.0f, 0.01f});
+    const double full = static_cast<double>(s.memory().detail - before.detail);
+    INFO("detail    predicted " << p.detail_bytes << " actual " << full);
+    CHECK(is_ceiling(static_cast<double>(p.detail_bytes), full));
+}
+
 TEST_CASE("a cancelled add_level leaves the surface exactly as it was") {
     MultiresSurface s = build(plane_quads(4, 2.0f), 1);
     const std::uint64_t before = s.detail_checksum();
@@ -353,6 +407,42 @@ TEST_CASE("the sculpt level and the display level are independent") {
     CHECK(s.display_level() == 3);
     CHECK_FALSE(s.set_sculpt_level(9));
     CHECK(s.sculpt_level() == 1);
+}
+
+TEST_CASE("a cage split for hard edges exports its own vertex count, with no attributes") {
+    // THE COMBINATION NOTHING ELSE COVERS: duplicate positions with NO uv or
+    // colour on them, which is how a flat mesh writes a HARD EDGE rather than a
+    // UV seam. The geometry still welds — the surface is one surface and a walk
+    // has to cross the crease — while the export still splits, because the
+    // duplicates are what the cage said its vertices were.
+    Mesh m;
+    m.positions = {cf3(-1, 0, -1), cf3(0, 0, -1), cf3(0, 0, 1), cf3(-1, 0, 1),
+                   cf3(0, 0, -1),  cf3(1, 0, -1), cf3(1, 0, 1), cf3(0, 0, 1)};
+    m.quads = {0, 1, 2, 3, 4, 5, 6, 7};
+    m.indices = {0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7};
+    CHECK(m.uvs.empty());
+    CHECK(m.colors.empty());
+    MultiresSurface s = build(m, 2);
+
+    // Six geometric points behind eight cage vertices: the two on the crease
+    // are one point each.
+    CHECK(s.base_vertex_count() == 6);
+    CHECK(s.positions_at(0).size() == 6);
+
+    const Mesh level0 = s.mesh_at_level(0);
+    CHECK(level0.positions.size() == 8);
+    CHECK(level0.quads == m.quads);
+    CHECK(level0.uvs.empty());
+    CHECK(level0.colors.empty());
+
+    const Mesh level2 = s.mesh_at_level(2);
+    CHECK(mesh::quads_consistent(level2));
+    CHECK(level2.uvs.empty());
+    // More export vertices than geometric ones, and the extras are exactly the
+    // duplicates along the crease rather than a level's worth of them.
+    CHECK(level2.positions.size() > s.positions_at(2).size());
+    CHECK(level2.positions.size() < s.positions_at(2).size() * 2);
+    for (const cfloat3& p : level2.positions) CHECK(std::fabs(p.y) == doctest::Approx(0.0f));
 }
 
 TEST_CASE("a UV seam is interpolated along itself and never across itself") {

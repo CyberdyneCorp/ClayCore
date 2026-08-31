@@ -41,6 +41,13 @@ void csr_from_pairs(std::uint32_t key_count, const std::vector<std::uint32_t>& k
     for (std::size_t i = 0; i < keys.size(); ++i) (*out)[cursor[keys[i]]++] = values[i];
 }
 
+bool face_has_duplicate_corner(const std::uint32_t* corners, std::uint32_t arity) {
+    for (std::uint32_t i = 0; i < arity; ++i)
+        for (std::uint32_t j = i + 1; j < arity; ++j)
+            if (corners[i] == corners[j]) return true;
+    return false;
+}
+
 }  // namespace
 
 std::size_t LevelTopology::bytes() const {
@@ -374,12 +381,8 @@ bool base_topology_from_mesh(const Mesh& m, const std::uint32_t* class_of,
     // subdividing it would produce a quad with two coincident corners at every
     // level above. Refused rather than repaired: repairing it silently changes
     // the cage the artist retopologised.
-    for (std::uint32_t f = 0; f < t.face_count; ++f) {
-        const std::uint32_t begin = f * arity;
-        for (std::uint32_t i = 0; i < arity; ++i)
-            for (std::uint32_t j = i + 1; j < arity; ++j)
-                if (t.corners[begin + i] == t.corners[begin + j]) return false;
-    }
+    for (std::uint32_t f = 0; f < t.face_count; ++f)
+        if (face_has_duplicate_corner(t.corners.data() + f * arity, arity)) return false;
     // `face_offsets` empty MEANS quads (see the header); a triangle cage has to
     // say its arity explicitly.
     if (!quads) {

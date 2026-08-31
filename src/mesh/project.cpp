@@ -39,6 +39,22 @@ Landing along_normal(const Bvh& index, kernel::cfloat3 origin, kernel::cfloat3 n
     return best;
 }
 
+// Where one vertex lands: the ray along its own normal if that finds the
+// reference, and the closest point where it does not.
+Landing find_landing(const Bvh& index, kernel::cfloat3 p, const kernel::cfloat3* normal,
+                     float max_distance) {
+    Landing landing;
+    if (normal) landing = along_normal(index, p, *normal, max_distance);
+    if (landing.found) return landing;
+    const Bvh::ClosestPoint c = index.closest(p);
+    if (!c.found || (max_distance > 0.0f && c.distance > max_distance)) return landing;
+    landing.found = true;
+    landing.by_ray = false;
+    landing.point = c.point;
+    landing.distance = c.distance;
+    return landing;
+}
+
 }  // namespace
 
 ProjectReport project_surface(const Mesh& reference, const std::vector<kernel::cfloat3>& normals,
@@ -65,17 +81,8 @@ ProjectReport project_surface(const Mesh& reference, const std::vector<kernel::c
             return report;
         }
         const kernel::cfloat3 p = (*positions)[v];
-        Landing landing;
-        if (use_ray) landing = along_normal(*index, p, normals[v], options.max_distance);
-        if (!landing.found) {
-            const Bvh::ClosestPoint c = index->closest(p);
-            if (c.found && (options.max_distance <= 0.0f || c.distance <= options.max_distance)) {
-                landing.found = true;
-                landing.by_ray = false;
-                landing.point = c.point;
-                landing.distance = c.distance;
-            }
-        }
+        const Landing landing =
+            find_landing(*index, p, use_ray ? &normals[v] : nullptr, options.max_distance);
         if (!landing.found) {
             // LEFT WHERE IT WAS. A vertex with no correspondence inside the
             // stated distance is information; snapping it to whatever the tree

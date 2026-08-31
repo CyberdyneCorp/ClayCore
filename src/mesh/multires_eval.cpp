@@ -196,9 +196,34 @@ const LevelConnectivity& connectivity_of(MultiresSurface::State& s, std::uint32_
     return ensure_cache(s, level).conn;
 }
 
+namespace {
+
+// Is `target` already the surface it should be, with nothing below it waiting
+// to be pushed up?
+//
+// WITHOUT THIS the walk from the cage is unconditional, and a level whose cache
+// was RELEASED is rebuilt on the next touch even though nothing changed —
+// which makes releasing the levels between the cage and the one being worked on
+// pointless, because the next stamp brings them all back. A detail pass at a
+// fine level reads that level's own subdivided positions and frames and nothing
+// else, so when nothing below has moved there is nothing to walk.
+bool already_current(const MultiresSurface::State& s, std::uint32_t target) {
+    if (!s.levels[target].cache || !s.levels[target].cache->evaluated) return false;
+    if (s.base_frames_all || !s.base_frames_dirty.empty()) return false;
+    if (!s.levels[target].normals_pending.empty()) return false;
+    for (std::uint32_t l = 0; l < target; ++l) {
+        const MultiresLevel& lev = s.levels[l];
+        if (lev.pending_all || !lev.pending.empty() || !lev.normals_pending.empty()) return false;
+    }
+    return true;
+}
+
+}  // namespace
+
 void evaluate_up_to(MultiresSurface::State& s, std::uint32_t level) {
     if (s.levels.empty()) return;
     const std::uint32_t target = std::min(level, static_cast<std::uint32_t>(s.levels.size() - 1));
+    if (already_current(s, target)) return;
     evaluate_level0(s);
     for (std::uint32_t l = 1; l <= target; ++l) {
         ensure_cache(s, l);
@@ -219,59 +244,85 @@ void evaluate_up_to(MultiresSurface::State& s, std::uint32_t level) {
 
 // -- attributes ---------------------------------------------------------------
 
+namespace {
+
+// Which attribute channels the CAGE carries. A hierarchy over a mesh with no
+// colours exports none, so this is what decides whether there is anything to
+// build at all.
+struct AttrChannels {
+    bool uvs = false;
+    bool colors = false;
+    bool any() const { return uvs || colors; }
+};
+
+AttrChannels channels_of(const MultiresSurface::State& s) {
+    const std::size_t n = s.base.positions.size();
+    AttrChannels c;
+    c.uvs = !s.base.uvs.empty() && s.base.uvs.size() == n;
+    c.colors = !s.base.colors.empty() && s.base.colors.size() == n;
+    return c;
+}
+
+// The cage's own attribute level. Its connectivity is the RAW index buffer, so
+// a seam's two duplicate vertices stay two vertices and the boundary rule
+// interpolates each side of the seam along itself — which is the whole of "SHALL
+// NOT average a UV across a seam", as a construction rather than a check.
+bool build_attr_base(MultiresSurface::State& s, const AttrChannels& channels, AttrLevel* out) {
+    if (s.attribute_split) {
+        std::vector<std::uint32_t> identity(s.base.positions.size());
+        for (std::size_t v = 0; v < identity.size(); ++v)
+            identity[v] = static_cast<std::uint32_t>(v);
+        if (!base_topology_from_mesh(s.base, identity.data(),
+                                     static_cast<std::uint32_t>(identity.size()), &out->topology))
+            return false;
+        out->conn = LevelConnectivity::build(out->topology);
+        out->to_geom = s.class_of;
+    }
+    if (channels.uvs) out->uvs = s.base.uvs;
+    if (channels.colors) out->colors = s.base.colors;
+    return true;
+}
+
+// One attribute level above another, built into a LOCAL and returned — so a
+// reference into `s.attr` cannot outlive the reallocation that appending to it
+// causes.
+AttrLevel build_attr_level(MultiresSurface::State& s, std::uint32_t l) {
+    AttrLevel a;
+    const bool split = s.attribute_split;
+    const LevelTopology& ptopo = split ? s.attr[l - 1].topology : s.levels[l - 1].topology;
+    const LevelConnectivity& pconn = split ? s.attr[l - 1].conn : connectivity_of(s, l - 1);
+    if (split) {
+        a.topology = subdivide_topology(ptopo, pconn);
+        a.conn = LevelConnectivity::build(a.topology);
+        // The two hierarchies emit child faces in the same order — parent face,
+        // then corner — so face f of one is face f of the other and the map
+        // falls out of walking the corners side by side.
+        const LevelTopology& gt = s.levels[l].topology;
+        a.to_geom.assign(a.topology.vertex_count, 0u);
+        const std::size_t corners = std::min(a.topology.corners.size(), gt.corners.size());
+        for (std::size_t i = 0; i < corners; ++i) a.to_geom[a.topology.corners[i]] = gt.corners[i];
+    }
+    if (!s.attr[l - 1].uvs.empty()) subdivide_attribute(ptopo, pconn, s.attr[l - 1].uvs, &a.uvs);
+    if (!s.attr[l - 1].colors.empty())
+        subdivide_attribute(ptopo, pconn, s.attr[l - 1].colors, &a.colors);
+    return a;
+}
+
+}  // namespace
+
 bool ensure_attributes(MultiresSurface::State& s, std::uint32_t level) {
-    const bool has_uvs = s.base.uvs.size() == s.base.positions.size() && !s.base.uvs.empty();
-    const bool has_colors = s.base.colors.size() == s.base.positions.size() && !s.base.colors.empty();
-    if (!has_uvs && !has_colors && !s.attribute_split) return false;
+    const AttrChannels channels = channels_of(s);
+    if (!channels.any() && !s.attribute_split) return false;
     if (s.attr.size() > level) return true;
 
     if (s.attr.empty()) {
-        AttrLevel a0;
-        if (s.attribute_split) {
-            // The cage's RAW connectivity: a seam's two duplicate vertices stay
-            // two vertices here, so the boundary rule interpolates each side of
-            // the seam along itself. That is the whole of "SHALL NOT average a
-            // UV across a seam" — it is a construction rather than a check.
-            std::vector<std::uint32_t> identity(s.base.positions.size());
-            for (std::size_t v = 0; v < identity.size(); ++v)
-                identity[v] = static_cast<std::uint32_t>(v);
-            if (!base_topology_from_mesh(s.base, identity.data(),
-                                         static_cast<std::uint32_t>(identity.size()),
-                                         &a0.topology))
-                return false;
-            a0.conn = LevelConnectivity::build(a0.topology);
-            a0.to_geom = s.class_of;
-        }
-        if (has_uvs) a0.uvs = s.base.uvs;
-        if (has_colors) a0.colors = s.base.colors;
-        s.attr.push_back(std::move(a0));
+        AttrLevel base;
+        if (!build_attr_base(s, channels, &base)) return false;
+        s.attr.push_back(std::move(base));
     }
-
     for (std::uint32_t l = static_cast<std::uint32_t>(s.attr.size());
-         l <= level && l < s.levels.size(); ++l) {
-        // Built into a local and appended, so a reference into `s.attr` cannot
-        // outlive a reallocation of the vector holding it.
-        AttrLevel a;
-        const bool split = s.attribute_split;
-        const LevelTopology& ptopo = split ? s.attr[l - 1].topology : s.levels[l - 1].topology;
-        const LevelConnectivity& pconn = split ? s.attr[l - 1].conn : connectivity_of(s, l - 1);
-        if (split) {
-            a.topology = subdivide_topology(ptopo, pconn);
-            a.conn = LevelConnectivity::build(a.topology);
-            // The two hierarchies emit child faces in the same order — parent
-            // face, then corner — so face f of one is face f of the other and
-            // the map falls out of walking the corners side by side.
-            const LevelTopology& gt = s.levels[l].topology;
-            a.to_geom.assign(a.topology.vertex_count, 0u);
-            const std::size_t corners = std::min(a.topology.corners.size(), gt.corners.size());
-            for (std::size_t i = 0; i < corners; ++i) a.to_geom[a.topology.corners[i]] = gt.corners[i];
-        }
-        if (!s.attr[l - 1].uvs.empty())
-            subdivide_attribute(ptopo, pconn, s.attr[l - 1].uvs, &a.uvs);
-        if (!s.attr[l - 1].colors.empty())
-            subdivide_attribute(ptopo, pconn, s.attr[l - 1].colors, &a.colors);
-        s.attr.push_back(std::move(a));
-    }
+         l <= level && l < s.levels.size(); ++l)
+        s.attr.push_back(build_attr_level(s, l));
     return s.attr.size() > level;
 }
 
@@ -454,10 +505,19 @@ Mesh MultiresSurface::mesh_at_level(std::uint32_t level, const MultiresExportOpt
     const bool need_attrs = wants.uvs || wants.colors || state_->attribute_split;
     const bool have_attrs = need_attrs ? ensure_attributes(*state_, level) : false;
 
-    if (!state_->attribute_split || !have_attrs)
+    if (!state_->attribute_split) {
         export_direct(*state_, level, wants, have_attrs, &out);
-    else
-        export_split(*state_, level, wants, &out);
+        return out;
+    }
+    // A SPLIT CAGE ALWAYS BUILDS ITS ATTRIBUTE CONNECTIVITY, and this is a
+    // precondition rather than a fallback. `ensure_attributes` refuses only
+    // when there is nothing to build, and it builds the raw-index topology from
+    // the same faces the class-index one was built from — so if that succeeded
+    // in `from_mesh`, this cannot fail. Falling back to the welded export would
+    // hand back a mesh with a different vertex count and its UVs silently
+    // missing, which is worse than the empty mesh a caller can test for.
+    if (!have_attrs) return Mesh{};
+    export_split(*state_, level, wants, &out);
     return out;
 }
 

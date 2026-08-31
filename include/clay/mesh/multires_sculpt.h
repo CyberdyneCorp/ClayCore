@@ -145,6 +145,14 @@ class MultiresSculptor {
     std::uint32_t bound_level() const { return bound_level_; }
     MeshSculptor* level_sculptor();
 
+    // Normals follow the vertices, and a host draining a stroke can defer the
+    // recompute to the end of it. Forwarded to whichever level sculptor is
+    // bound, because deferring is a property of the STROKE rather than of the
+    // level it lands on. Deferring changes nothing about the final surface.
+    void set_defer_normals(bool defer);
+    bool defer_normals() const { return defer_normals_; }
+    void flush_normals();
+
     // The automask factors `mesh` cannot compute for itself, set once for a
     // STROKE. Forwarded to whichever level sculptor is bound, including one
     // bound later, so changing the sculpt level mid-stroke does not silently
@@ -164,6 +172,7 @@ class MultiresSculptor {
     std::uint64_t bound_generation_ = 0;
     AutomaskInputs automask_;
     bool automask_set_ = false;
+    bool defer_normals_ = false;
     // The record the level sculptor writes, which is where a level-0 gesture's
     // "before" positions come from. Reset per stamp above level 0, kept across
     // a stroke at level 0 so the FIRST before survives.

@@ -11,6 +11,7 @@
 #include <doctest/doctest.h>
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "clay/mesh/detail_field.h"
@@ -41,7 +42,7 @@ TEST_CASE("an untouched vertex costs nothing and reads as zero") {
     CHECK_FALSE(f.empty());
     CHECK(f.get(50000).normal == doctest::Approx(0.25f));
     // Exactly one block came into existence.
-    CHECK(f.resident_vertices() == DetailField::kBlockSize);
+    CHECK(f.resident_vertices() == DetailField::kDefaultBlockSize);
     CHECK(f.bytes() > idle);
 }
 
@@ -59,7 +60,7 @@ TEST_CASE("zeroing a vertex clears it, and compaction releases the block") {
     f.set(1000, d(1.0f, 2.0f, 3.0f));
     f.set(2000, d(0.0f, 0.0f, 1.0f));
     const std::size_t two_blocks = f.resident_vertices();
-    CHECK(two_blocks == 2u * DetailField::kBlockSize);
+    CHECK(two_blocks == 2u * DetailField::kDefaultBlockSize);
 
     f.set(1000, LocalDetail{});
     CHECK(f.get(1000).zero());
@@ -67,14 +68,14 @@ TEST_CASE("zeroing a vertex clears it, and compaction releases the block") {
     // would thrash a smoothing pass that flattens and re-deposits.
     CHECK(f.resident_vertices() == two_blocks);
     f.compact();
-    CHECK(f.resident_vertices() == DetailField::kBlockSize);
+    CHECK(f.resident_vertices() == DetailField::kDefaultBlockSize);
     CHECK(f.get(2000).normal == doctest::Approx(1.0f));
     CHECK(f.get(1000).zero());
 }
 
 TEST_CASE("a field that fills up promotes to dense and still reads the same") {
     // Small enough that the promotion threshold is reachable in a test.
-    const std::uint32_t n = 4 * DetailField::kBlockSize;
+    const std::uint32_t n = 4 * DetailField::kDefaultBlockSize;
     DetailField f;
     f.reset(n);
     for (std::uint32_t v = 0; v < n; ++v) f.set(v, d(0.0f, 0.0f, static_cast<float>(v) * 0.001f));
@@ -85,7 +86,7 @@ TEST_CASE("a field that fills up promotes to dense and still reads the same") {
 }
 
 TEST_CASE("the checksum follows the content, not the representation") {
-    const std::uint32_t n = 4 * DetailField::kBlockSize;
+    const std::uint32_t n = 4 * DetailField::kDefaultBlockSize;
 
     DetailField sparse;
     sparse.reset(n);
@@ -176,11 +177,21 @@ TEST_CASE("the decoder refuses a truncated, hostile or unknown buffer") {
     // asked to allocate gigabytes from a few hundred bytes. Refused by
     // arithmetic, before anything is reserved.
     std::vector<std::uint8_t> hostile = bytes;
-    hostile[12] = 0xff;
-    hostile[13] = 0xff;
-    hostile[14] = 0xff;
-    hostile[15] = 0x0f;
+    hostile[16] = 0xff;
+    hostile[17] = 0xff;
+    hostile[18] = 0xff;
+    hostile[19] = 0x0f;
     CHECK_FALSE(DetailField::decode(hostile.data(), hostile.size(), &out));
+
+    // A BLOCK SIZE that is not a power of two in range describes a layout this
+    // reader cannot address; taking it on trust would put the block arithmetic
+    // out of step with the stream.
+    for (std::uint32_t bad : {0u, 3u, 100u, 1u << 24}) {
+        std::vector<std::uint8_t> wrong_block = bytes;
+        for (int i = 0; i < 4; ++i)
+            wrong_block[12 + i] = static_cast<std::uint8_t>((bad >> (i * 8)) & 0xffu);
+        CHECK_FALSE(DetailField::decode(wrong_block.data(), wrong_block.size(), &out));
+    }
 
     // A vertex count past the ceiling, likewise.
     std::vector<std::uint8_t> huge = bytes;
@@ -192,7 +203,69 @@ TEST_CASE("the decoder refuses a truncated, hostile or unknown buffer") {
 
     // Blocks out of order describe several overlaid fields rather than one.
     std::vector<std::uint8_t> shuffled = bytes;
-    shuffled[16] = 0xff;
-    shuffled[17] = 0x00;
+    shuffled[20] = 0xff;
+    shuffled[21] = 0x00;
     CHECK_FALSE(DetailField::decode(shuffled.data(), shuffled.size(), &out));
+}
+
+TEST_CASE("the block size is a parameter, and the content does not depend on it") {
+    // WHAT MAKES THE DEFAULT DEFENSIBLE: the number can be swept, so a
+    // benchmark can say what it costs rather than a comment asserting it is
+    // reasonable. Everything a caller can observe about the CONTENT has to be
+    // independent of the choice.
+    const std::uint32_t n = 5000;
+    std::vector<std::pair<std::uint32_t, LocalDetail>> written;
+    for (std::uint32_t v = 1200; v < 1500; v += 7)
+        written.emplace_back(v, d(static_cast<float>(v) * 1e-3f, 0.0f, 0.25f));
+
+    std::uint64_t reference = 0;
+    for (std::uint32_t block : {4u, 64u, 256u, 1024u, 4096u}) {
+        DetailField f;
+        f.reset(n, block);
+        CHECK(f.block_size() == block);
+        for (const auto& [vertex, value] : written) f.set(vertex, value);
+        for (const auto& [vertex, value] : written) CHECK(f.get(vertex) == value);
+        CHECK(f.get(0).zero());
+        CHECK(f.get(n - 1).zero());
+
+        // THE CHECKSUM IS THE CONTENT, and the block size is not part of it.
+        if (reference == 0)
+            reference = f.checksum();
+        else
+            CHECK(f.checksum() == reference);
+
+        // A round trip carries the block size, so decoding does not silently
+        // re-block a field into the reader's default and change its bytes.
+        const std::vector<std::uint8_t> encoded = f.encode();
+        DetailField back;
+        REQUIRE(DetailField::decode(encoded.data(), encoded.size(), &back));
+        CHECK(back.block_size() == block);
+        CHECK(back.checksum() == reference);
+        CHECK(back.encode() == encoded);
+    }
+
+    // A block size of zero takes the default; anything else is rounded up to a
+    // power of two so every access stays a shift.
+    DetailField defaulted;
+    defaulted.reset(n, 0);
+    CHECK(defaulted.block_size() == DetailField::kDefaultBlockSize);
+    DetailField rounded;
+    rounded.reset(n, 300);
+    CHECK(rounded.block_size() == 512);
+}
+
+TEST_CASE("a smaller block wastes less on a footprint and costs more in table") {
+    // The trade the sweep in `BM_MultiresDetailBlockSize` measures, asserted
+    // here in the direction rather than the magnitude: a footprint that touches
+    // a contiguous run of a large level allocates fewer bytes at a small block
+    // size, and the block table it pays for is the other side of that.
+    const std::uint32_t n = 200000;
+    std::size_t small_bytes = 0, large_bytes = 0;
+    for (std::uint32_t block : {64u, 4096u}) {
+        DetailField f;
+        f.reset(n, block);
+        for (std::uint32_t v = 100000; v < 100400; ++v) f.set(v, d(0, 0, 0.1f));
+        (block == 64u ? small_bytes : large_bytes) = f.resident_vertices();
+    }
+    CHECK(small_bytes < large_bytes);
 }

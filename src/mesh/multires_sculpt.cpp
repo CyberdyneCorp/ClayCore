@@ -117,6 +117,17 @@ void MultiresSculptor::set_automask_inputs(AutomaskInputs inputs) {
     if (sculptor_) sculptor_->set_automask_inputs(automask_);
 }
 
+void MultiresSculptor::set_defer_normals(bool defer) {
+    defer_normals_ = defer;
+    if (sculptor_) sculptor_->set_defer_normals(defer);
+}
+
+void MultiresSculptor::flush_normals() {
+    // No binding is made just to flush: nothing has been deferred if nothing
+    // has been stamped.
+    if (sculptor_) sculptor_->flush_normals(&level_deltas_);
+}
+
 MeshSculptor* MultiresSculptor::level_sculptor() {
     bind();
     return sculptor_.get();
@@ -141,6 +152,7 @@ void MultiresSculptor::bind() {
     // moved the generation on.
     bound_generation_ = surface_.cache_generation();
     if (automask_set_) sculptor_->set_automask_inputs(automask_);
+    sculptor_->set_defer_normals(defer_normals_);
 }
 
 std::size_t MultiresSculptor::stamp(MeshBrush verb, const MeshBrushSettings& settings,

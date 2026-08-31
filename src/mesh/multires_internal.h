@@ -42,7 +42,21 @@ struct LevelCache {
     std::unique_ptr<Adjacency> adjacency;
     bool evaluated = false;
 
-    std::size_t bytes() const;
+    // Split by what a memory report separates: the arrays that ARE the
+    // evaluated surface, and the index structures built to work on it.
+    //
+    // Reported as two positive sums rather than a total with the first
+    // subtracted out of it. The subtraction was correct — both sides measured
+    // capacity — and it was one edit away from not being: drop a term from the
+    // total and the difference underflows a `std::size_t` into a memory report
+    // of sixteen exabytes, which a host would act on.
+    struct Bytes {
+        std::size_t evaluated = 0;
+        std::size_t runtime = 0;
+        std::size_t total() const { return evaluated + runtime; }
+    };
+    Bytes byte_split() const;
+    std::size_t bytes() const { return byte_split().total(); }
 };
 
 struct MultiresLevel {

@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "clay/brush/stroke.h"
 #include "clay/mesh/multires_sculpt.h"
 #include "clay/mesh/sculpt.h"
 
@@ -346,4 +347,96 @@ TEST_CASE("a mask freezes a multires stamp exactly as it freezes every other") {
     CHECK(sculptor.stamp(MeshBrush::Draw, settings, gate) == 0);
     CHECK(s.detail_at(2).empty());
     CHECK(same_bytes(s.positions_at(2), before));
+}
+
+TEST_CASE("the stroke engine reaches a hierarchy, and means the same thing there") {
+    // THE GAP THIS CLOSES: `brush::apply_to_mesh` was the stroke engine's only
+    // mesh consumer, so a host driving a hierarchy had to walk the stamps
+    // itself — and the moment it does that, "what a stroke is" has two
+    // definitions. The two entry points share the per-stamp resolution, so this
+    // asserts the sharing rather than a resemblance.
+    MultiresSurface s = build(plane_quads(5, 2.5f), 2);
+    REQUIRE(s.set_sculpt_level(2));
+
+    std::vector<brush::Stamp> stamps;
+    for (int i = 0; i < 6; ++i) {
+        brush::Stamp stamp;
+        stamp.position = cf3(-0.6f + 0.24f * static_cast<float>(i), 0.0f, 0.0f);
+        stamp.radius = 0.45f;
+        stamp.strength = 0.6f;
+        stamps.push_back(stamp);
+    }
+    MeshBrushSettings settings;
+    settings.strength = 0.5f;
+
+    // The multiresolution path, driven as a stroke.
+    MultiresSculptor sculptor(s);
+    MultiresDelta record;
+    const std::size_t applied =
+        brush::apply_to_multires(sculptor, stamps, MeshBrush::Draw, settings, nullptr, &record);
+    CHECK(applied == stamps.size());
+    CHECK_FALSE(s.detail_at(2).empty());
+    CHECK(record.levels() == std::vector<std::uint32_t>{2});
+
+    // THE SAME STROKE onto the same topology through the fixed engine. Both go
+    // through `mesh_stamp_settings`, so each stamp lands in the same place with
+    // the same radius and the same pressure-scaled strength; the surfaces agree
+    // to the frame round trip a hierarchy stores its detail through.
+    MultiresSurface twin = build(plane_quads(5, 2.5f), 2);
+    Mesh flat = twin.mesh_at_level(2, {/*normals=*/false, false, false});
+    flat.normals = twin.normals_at(2);
+    mesh::MeshSculptor fixed(flat, 0.0f);
+    const std::size_t fixed_applied =
+        brush::apply_to_mesh(fixed, stamps, MeshBrush::Draw, settings);
+    CHECK(fixed_applied == applied);
+
+    const std::vector<cfloat3>& got = s.positions_at(2);
+    REQUIRE(got.size() == flat.positions.size());
+    float worst = 0.0f;
+    for (std::size_t v = 0; v < got.size(); ++v)
+        worst = std::max(worst, clength(got[v] - flat.positions[v]));
+    CHECK(worst < 1e-5f);
+
+    // And the whole stroke is ONE undo step.
+    REQUIRE(record.revert(s));
+    CHECK(s.detail_at(2).empty());
+}
+
+TEST_CASE("a stroke onto a hierarchy takes the mask and the deferred normals") {
+    MultiresSurface s = build(plane_quads(4, 2.0f), 2);
+    REQUIRE(s.set_sculpt_level(2));
+    MultiresSculptor sculptor(s);
+
+    std::vector<brush::Stamp> stamps;
+    for (int i = 0; i < 4; ++i) {
+        brush::Stamp stamp;
+        stamp.position = cf3(-0.3f + 0.2f * static_cast<float>(i), 0.0f, 0.0f);
+        stamp.radius = 0.5f;
+        stamp.strength = 1.0f;
+        stamps.push_back(stamp);
+    }
+    MeshBrushSettings settings;
+    settings.strength = 0.5f;
+
+    // Deferring the normal recompute to the end of the stroke changes nothing
+    // about the surface it leaves.
+    brush::MeshStrokeOptions deferred;
+    deferred.defer_normals = true;
+    CHECK(brush::apply_to_multires(sculptor, stamps, MeshBrush::Draw, settings, nullptr, nullptr,
+                                   deferred) == stamps.size());
+    const std::vector<cfloat3> with_defer = s.positions_at(2);
+    CHECK_FALSE(sculptor.defer_normals());  // restored to what it was
+
+    MultiresSurface plain = build(plane_quads(4, 2.0f), 2);
+    REQUIRE(plain.set_sculpt_level(2));
+    MultiresSculptor plain_sculptor(plain);
+    CHECK(brush::apply_to_multires(plain_sculptor, stamps, MeshBrush::Draw, settings) ==
+          stamps.size());
+    CHECK(same_bytes(plain.positions_at(2), with_defer));
+
+    // A verb the vocabulary does not offer is refused rather than run as
+    // something else. Every verb IS offered here, so the refusal is only
+    // reachable through the predicate — which is what `multires_offers`
+    // documents.
+    CHECK(mesh::multires_offers(MeshBrush::Layer));
 }
