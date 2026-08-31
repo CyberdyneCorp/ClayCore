@@ -4205,6 +4205,81 @@ def test_the_chains_factor_is_reported_not_only_its_length():
     assert a["steepest_deformer_chain"] > b["steepest_deformer_chain"] * 2.0
 
 
+def _ball_row(count=4, spacing=3.0, radius=0.5):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    for i in range(count):
+        layer.add(clay.Sphere(r=radius).at((i * spacing, 0, 0)))
+    return doc, layer
+
+
+_PATCH = ((-0.6, -0.6, -0.6), (0.6, 0.6, 0.6))
+
+
+def test_a_region_merge_takes_what_the_region_reaches_and_no_more():
+    """Issue #390: consolidation collapses a layer, and a sculptor works a patch."""
+    _, layer = _ball_row()
+    plan = layer.plan_region_merge(_PATCH)
+    assert plan["absorbed"] == 1
+    assert plan["whole_layer"] is False
+    assert plan["box"][1][0] < 2.0        # it did not reach the ball at x = 3
+
+
+def test_a_region_merge_leaves_the_rest_parametric():
+    doc, layer = _ball_row()
+    probes = np.array([[x, 0.0, 0.0] for x in np.arange(-1.5, 10.5, 0.03)], np.float32)
+    before = doc.eval(probes)
+
+    out = layer.consolidate_region(_PATCH, cell=0.02, band=0.08)
+    assert out["absorbed"] == 1
+    assert out["whole_layer"] is False
+    assert layer.field_report()["item_count"] == 4   # one baked, three still items
+
+    after = doc.eval(probes)
+    box = layer.plan_region_merge(_PATCH)  # the closure the merge used
+    # Outside the closure the SURFACE must not have moved. A bake makes the
+    # value a bound rather than a distance, so the sign is the claim.
+    inside = np.abs(probes[:, 0]) <= 1.0
+    assert np.array_equal(before[~inside] < 0, after[~inside] < 0)
+    assert inside.any()                              # the fixture straddled it
+    # ...and the merged patch still has its own surface.
+    assert float(doc.eval(np.array([[0.0, 0.0, 0.0]], np.float32))[0]) < 0.0
+
+
+def test_working_one_patch_again_does_not_stack_a_second_volume():
+    """The measurement: appending is O(n) in gestures, merging is O(1)."""
+    doc, layer = _ball_row()
+    for _ in range(6):
+        layer.consolidate_region(_PATCH, cell=0.02, band=0.08)
+        assert layer.field_report()["item_count"] == 4
+
+    # The old way, for contrast: one appended volume per gesture.
+    doc2, layer2 = _ball_row()
+    for _ in range(6):
+        layer2.add(clay.Volume.from_document(doc2, cell=0.02, band=0.08, bounds=_PATCH),
+                   op=clay.Op.REPLACE)
+    assert layer2.field_report()["item_count"] == 10
+
+
+def test_a_region_merge_refuses_what_it_cannot_make_sense_of():
+    _, layer = _ball_row()
+    with pytest.raises(ValueError):
+        layer.consolidate_region(((40.0, 40.0, 40.0), (41.0, 41.0, 41.0)),
+                                 cell=0.02, band=0.08)   # reaches no item
+
+
+def test_a_region_merge_is_one_undo_step():
+    doc, layer = _ball_row()
+    doc.enable_undo()
+    probes = np.array([[x, 0.0, 0.0] for x in np.arange(-1.0, 10.0, 0.05)], np.float32)
+    before = doc.eval(probes)
+    layer.consolidate_region(_PATCH, cell=0.02, band=0.08)
+    assert doc.undo_depth == 1
+    doc.undo()
+    assert layer.field_report()["item_count"] == 4
+    assert np.array_equal(doc.eval(probes), before)
+
+
 def test_a_polish_chain_holds_its_bound_once_consolidated():
     """The claim the change exists to make true."""
     cell, band = 0.03, 0.12

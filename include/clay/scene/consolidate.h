@@ -72,6 +72,14 @@
 // failures also live inside one layer — a polish chain and a drag stroke are
 // each one layer's worth of edits.
 //
+// ...and a REGION is the other scope that is well defined, as of 0.73.0 —
+// `consolidate_region` below. Not "the items near the stroke", which runs
+// straight into the sentence above, but the influence CLOSURE of a region: a
+// box no remaining item can reach into. That has a field of its own for the
+// same reason a layer does, and it is what a sculptor working one patch needs,
+// since collapsing the subtool on every stroke is the cure being too blunt
+// rather than wrong (issue #390).
+//
 // WHAT A HOST MAY STILL PROMISE, and how it can tell. `consolidation_state`
 // answers from the CONTENT rather than from a stored provenance flag: a layer
 // is consolidated when its edit list is a single item carrying samples. That
@@ -298,6 +306,87 @@ bool consolidate_layer(Document& doc, LayerId layer, const ConsolidationParams& 
 bool replace_layer_with_volume(Document& doc, LayerId layer, field::FieldVolume volume,
                                UndoStack* undo = nullptr,
                                ConsolidationCost* out_cost = nullptr);
+
+// -- merging a bake into a REGION of a layer ---------------------------------
+//
+// Consolidation collapses a whole layer. That is the right scope for a chain
+// that has genuinely degraded, and the wrong one for the thing a sculptor
+// actually does, which is work a PATCH: a host applying a region bake per
+// gesture can only append a volume each time (so every later bake samples all
+// the earlier ones, O(n) in gestures) or collapse the entire subtool and lose
+// the parameters of items nowhere near the stroke. Measured on a real form,
+// twelve gestures on one patch: 22 ms and 2 items at the first, 244 ms and 13
+// at the twelfth — 11x, one appended volume each (issue #390).
+//
+// THE SCOPE IS AN INFLUENCE CLOSURE, and the reason is the same one that made
+// the scope a LAYER above. An edit list is ordered and its operators are
+// relative, so "absorb the items near the stroke" has no well-defined field of
+// its own. What DOES is a region no remaining item can reach into:
+//
+//     B = the caller's region
+//     repeat:
+//       S = the items whose influence bound meets B
+//       B = B union (the influence bounds of S)
+//     until B stops growing
+//
+// It terminates because B only grows and the layer's own bound caps it. At the
+// fixed point every item that can change the field inside B is in S, and every
+// item in S can change the field only inside B. So:
+//
+//   * OUTSIDE B nothing moves. The absorbed items reached nowhere else, and a
+//     volume outside its sampled box reports a positive lower bound, so the
+//     union with it leaves the surface exactly where it was.
+//   * INSIDE B the bake is the whole answer, because no remaining item
+//     contributes there at all — which is the property simple containment does
+//     NOT give you. Absorb only the items that overlap the region and a
+//     Subtract that straddles its edge stays behind: the material it had
+//     carved comes back, and the volume cannot take it away again, because
+//     `op_replace(a, b) = min(max(a, -b), b)` still reads `a` wherever b > 0.
+//
+// The worst case is that the closure swallows the layer — one item spanning
+// everything pulls in all the rest — and then this IS `consolidate_layer`,
+// which is the honest fallback rather than a failure.
+//
+// WHAT IT BUYS. The second gesture on a patch has the first gesture's volume
+// inside its closure, so that volume is absorbed rather than stacked on. A
+// patch that gets worked stays at ONE baked item however many times it is
+// worked, which is O(1) in gestures where appending was O(n).
+struct RegionMerge {
+    // The closure: what will be sampled, which is the caller's region grown
+    // until it is self-contained. Empty when there is nothing to merge.
+    math::Aabb box;
+    // The roots it absorbs, in edit-list order. The bake lands where the first
+    // of them was, so the result keeps its place in the list.
+    std::vector<NodeId> absorb;
+    // The closure reached every visible root, so this is a whole-layer
+    // consolidation wearing a region's clothes. Worth telling a host, because
+    // it is the case where the promise "items outside are left parametric"
+    // becomes vacuous.
+    bool whole_layer = false;
+};
+
+// What `consolidate_region` would absorb and over what box, without baking
+// anything. Pure: a host can show the region it is about to lose the
+// parameters of before the artist commits to it.
+RegionMerge plan_region_merge(const Layer& layer, const math::Aabb& region);
+
+// Bake the influence closure of `region` into one volume and put it back in
+// the absorbed items' place, as ONE undo step.
+//
+// `params.region` is IGNORED and replaced by the closure — the caller says
+// where it worked, and what has to be sampled follows from the layer.
+// Everything `consolidate_layer` guarantees holds here for the same reason: it
+// is the same installer.
+//
+// Returns false, with the document unchanged, when the layer cannot be baked
+// (missing, not SDF, protected, empty), when the region reaches nothing, or on
+// cancel — `out_cancelled` tells the last apart from the others.
+bool consolidate_region(Document& doc, LayerId layer, const math::Aabb& region,
+                        const ConsolidationParams& params, UndoStack* undo = nullptr,
+                        ConsolidationCost* out_cost = nullptr,
+                        const BakePointEval& point_eval = {},
+                        parallel::CancelToken* token = nullptr, bool* out_cancelled = nullptr,
+                        RegionMerge* out_plan = nullptr);
 
 // What a host may still promise about a layer: whether its edit list is a
 // single item carrying samples, and at what resolution. False for anything

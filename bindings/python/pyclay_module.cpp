@@ -5450,6 +5450,76 @@ NB_MODULE(pyclay, m) {
              "count is where the memory is. If you mean to go ahead, call\n"
              "`consolidate` and read the same report out of it rather than\n"
              "paying for two bakes.")
+        .def("plan_region_merge",
+             [](const PyLayer& l, nb::handle region) {
+                 const scene::RegionMerge plan =
+                     scene::plan_region_merge(l.layer(), to_aabb(region));
+                 nb::dict out;
+                 out["absorbed"] = plan.absorb.size();
+                 out["whole_layer"] = plan.whole_layer;
+                 if (plan.box.empty()) {
+                     out["box"] = nb::none();
+                 } else {
+                     out["box"] = nb::make_tuple(
+                         nb::make_tuple(plan.box.min.x, plan.box.min.y, plan.box.min.z),
+                         nb::make_tuple(plan.box.max.x, plan.box.max.y, plan.box.max.z));
+                 }
+                 return out;
+             },
+             "region"_a,
+             "What `consolidate_region` WOULD absorb, and over what box, without\n"
+             "baking anything — so you can show the region whose parameters are\n"
+             "about to be lost before committing to it.\n\n"
+             "`box` is the INFLUENCE CLOSURE of your region, not the region: it\n"
+             "grows until every item that can reach inside it is wholly inside\n"
+             "it. `whole_layer` says the closure took everything, in which case\n"
+             "this is `consolidate()` and the promise to leave items outside\n"
+             "parametric is vacuous.")
+        .def("consolidate_region",
+             [](PyLayer& l, nb::handle region, float cell, nb::handle band, nb::handle padding,
+                bool redistance) {
+                 if (l.layer().protected_from_edits())
+                     throw std::invalid_argument("layer is protected (ghosted or locked)");
+                 scene::ConsolidationParams p =
+                     to_consolidation(cell, band, padding, nb::none(), redistance);
+                 scene::ConsolidationCost cost;
+                 scene::RegionMerge plan;
+                 session::History* hist = (l.undo && *l.undo) ? l.undo->get() : nullptr;
+                 if (!scene::consolidate_region(l.doc->document, l.id, to_aabb(region), p,
+                                                hist ? hist->commands() : nullptr, &cost,
+                                                eval::pooled_bake_eval(), nullptr, nullptr,
+                                                &plan)) {
+                     throw std::invalid_argument(
+                         "nothing to merge: the layer is empty or protected, or the region "
+                         "reaches no item");
+                 }
+                 if (hist) hist->sync_scene_steps();
+                 nb::dict out = cost_dict(cost);
+                 out["absorbed"] = plan.absorb.size();
+                 out["whole_layer"] = plan.whole_layer;
+                 return out;
+             },
+             "region"_a, "cell"_a, "band"_a = nb::none(), "padding"_a = nb::none(),
+             "redistance"_a = true,
+             "Bake a REGION of this layer into one volume and put it back where\n"
+             "the items it absorbed were, leaving everything outside parametric.\n\n"
+             "`consolidate()` collapses the whole layer, which is right for a\n"
+             "chain that has genuinely degraded and wrong for what a sculptor\n"
+             "does, which is work a PATCH. Applying a region bake per gesture,\n"
+             "you could only append a volume each time — so every later bake\n"
+             "sampled all the earlier ones — or collapse the whole subtool and\n"
+             "lose the parameters of items nowhere near the stroke.\n\n"
+             "`region` says where you worked. What gets SAMPLED is its INFLUENCE\n"
+             "CLOSURE: the region grown until every item that can reach inside it\n"
+             "is wholly inside it. That is not the same as the items overlapping\n"
+             "the region, and the difference is not cosmetic — absorb only those\n"
+             "and a subtract straddling the edge stays behind, the material it\n"
+             "carved comes back, and the volume cannot take it away again.\n\n"
+             "The second gesture on a patch has the first gesture's volume in its\n"
+             "closure, so it is absorbed rather than stacked on: a patch stays at\n"
+             "ONE baked item however many times it is worked.\n\n"
+             "ONE undo step, as `consolidate()` is. Use `plan_region_merge()`\n"
+             "first to see what it would take.")
         .def("consolidate",
              [](PyLayer& l, float cell, nb::handle band, nb::handle padding, nb::handle region,
                 bool redistance, parallel::CancelToken* token) {

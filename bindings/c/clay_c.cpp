@@ -6984,6 +6984,102 @@ clay_result clay_layer_consolidate_cancellable(clay_document* doc, clay_layer_id
     return CLAY_OK;
 }
 
+namespace {
+
+constexpr std::size_t kRegionMergeOriginal =
+    offsetof(clay_region_merge, whole_layer) + sizeof(std::int32_t);
+
+// The caller's region, refused rather than guessed at: a region merge without a
+// region is a whole-layer consolidate, and a host should ask for that by name.
+clay_result read_region(const float region_min[3], const float region_max[3],
+                        math::Aabb* out) {
+    if (!region_min || !region_max)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "a region merge needs both region_min and region_max; for the whole layer "
+                    "use clay_layer_consolidate");
+    *out = math::Aabb{kernel::cf3(region_min[0], region_min[1], region_min[2]),
+                      kernel::cf3(region_max[0], region_max[1], region_max[2])};
+    if (out->empty()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "the region is empty");
+    return CLAY_OK;
+}
+
+void write_merge(const scene::RegionMerge& plan, clay_region_merge* out) {
+    const std::uint32_t declared = out->struct_size;
+    clay_region_merge filled{};
+    if (!plan.box.empty()) {
+        filled.box_min[0] = plan.box.min.x;
+        filled.box_min[1] = plan.box.min.y;
+        filled.box_min[2] = plan.box.min.z;
+        filled.box_max[0] = plan.box.max.x;
+        filled.box_max[1] = plan.box.max.y;
+        filled.box_max[2] = plan.box.max.z;
+    }
+    filled.absorbed = plan.absorb.size();
+    filled.whole_layer = plan.whole_layer ? 1 : 0;
+    write_desc(out, declared, filled);
+}
+
+}  // namespace
+
+clay_result clay_layer_plan_region_merge(const clay_document* doc, clay_layer_id layer_id,
+                                         const float region_min[3], const float region_max[3],
+                                         clay_region_merge* out_merge) {
+    if (!doc || !out_merge) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or report");
+    clay_region_merge probe;
+    clay_result r = read_desc(out_merge, kRegionMergeOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    math::Aabb region;
+    if ((r = read_region(region_min, region_max, &region)) != CLAY_OK) return r;
+    const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
+    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    write_merge(scene::plan_region_merge(*layer, region), out_merge);
+    return CLAY_OK;
+}
+
+clay_result clay_layer_consolidate_region(clay_document* doc, clay_layer_id layer_id,
+                                          const float region_min[3], const float region_max[3],
+                                          const clay_consolidation_params* params,
+                                          clay_consolidation_cost* out_cost,
+                                          clay_region_merge* out_merge) {
+    if (!doc || !params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or params");
+    math::Aabb region;
+    clay_result r = read_region(region_min, region_max, &region);
+    if (r != CLAY_OK) return r;
+    if (out_merge) {
+        clay_region_merge probe;
+        if ((r = read_desc(out_merge, kRegionMergeOriginal, &probe)) != CLAY_OK) return r;
+    }
+    const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
+    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    if (layer->protected_from_edits())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "layer is protected (ghosted or locked)");
+
+    scene::ConsolidationParams p;
+    // The region goes to the merge, not through the params: the closure
+    // replaces params.region, so passing it twice would invite a caller to set
+    // one and mean the other.
+    if ((r = read_consolidation(params, nullptr, nullptr, &p)) != CLAY_OK) return r;
+    if (out_cost) {
+        if ((r = begin_out_cost(out_cost)) != CLAY_OK) return r;
+    }
+
+    scene::ConsolidationCost cost;
+    scene::RegionMerge plan;
+    scene::UndoStack* stack = doc->undo ? doc->undo->commands() : nullptr;
+    if (!scene::consolidate_region(doc->doc.document, layer_id, region, p, stack, &cost,
+                                   eval::pooled_bake_eval(), nullptr, nullptr, &plan)) {
+        if (out_merge) write_merge(plan, out_merge);
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "nothing to merge: the layer is empty or protected, or the region reaches "
+                    "no item");
+    }
+    if (doc->undo) doc->undo->sync_scene_steps();
+    doc->touch();
+    if (out_cost) write_cost(cost, out_cost);
+    if (out_merge) write_merge(plan, out_merge);
+    return CLAY_OK;
+}
+
 clay_result clay_layer_consolidation_state(const clay_document* doc, clay_layer_id layer_id,
                                            int32_t* out_consolidated,
                                            clay_consolidation_cost* out_cost) {

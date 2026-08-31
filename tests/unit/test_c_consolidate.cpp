@@ -265,3 +265,101 @@ TEST_CASE("an explicit region pins where a repeated consolidation samples") {
     CHECK(second.bytes <= first.bytes * 2);
     clay_document_destroy(doc);
 }
+
+// -- merging a bake into a REGION of a layer (issue #390) --------------------
+
+TEST_CASE("the C ABI merges a region and leaves the rest parametric") {
+    // A row of balls far enough apart that each one's influence is its own.
+    clay_layer_id layer = 0;
+    clay_document* doc = fresh_document(&layer);
+    for (int i = 0; i < 4; ++i) add_sphere(doc, layer, 0.5f, static_cast<float>(i) * 3.0f);
+
+    const float lo[3] = {-0.6f, -0.6f, -0.6f};
+    const float hi[3] = {0.6f, 0.6f, 0.6f};
+
+    // What it WOULD take, before anything is baked.
+    clay_region_merge plan{};
+    plan.struct_size = sizeof(plan);
+    REQUIRE(clay_layer_plan_region_merge(doc, layer, lo, hi, &plan) == CLAY_OK);
+    CHECK(plan.absorbed == 1);
+    CHECK(plan.whole_layer == 0);
+    CHECK(plan.box_max[0] < 2.0f);  // it did not reach the ball at x = 3
+
+    const clay_consolidation_params p = params_at(0.02f, 0.08f);
+    clay_consolidation_cost cost{};
+    cost.struct_size = sizeof(cost);
+    clay_region_merge done{};
+    done.struct_size = sizeof(done);
+    REQUIRE(clay_layer_consolidate_region(doc, layer, lo, hi, &p, &cost, &done) == CLAY_OK);
+    CHECK(done.absorbed == 1);
+    CHECK(done.whole_layer == 0);
+    CHECK(cost.brick_count > 0);
+
+    // One absorbed, one volume back in its place, three still parametric.
+    size_t nodes = 0;
+    REQUIRE(clay_layer_node_count(doc, layer, &nodes) == CLAY_OK);
+    CHECK(nodes == 4);
+    // ...and the layer is NOT reported consolidated, because it is not: the
+    // three items outside the patch still carry their parameters.
+    int32_t consolidated = 1;
+    REQUIRE(clay_layer_consolidation_state(doc, layer, &consolidated, nullptr) == CLAY_OK);
+    CHECK(consolidated == 0);
+    clay_document_destroy(doc);
+}
+
+TEST_CASE("the C ABI keeps one baked item however many gestures work the patch") {
+    // The measurement issue #390 filed: appending a volume per gesture is O(n)
+    // in gestures, because every later bake samples all the earlier ones.
+    clay_layer_id layer = 0;
+    clay_document* doc = fresh_document(&layer);
+    for (int i = 0; i < 4; ++i) add_sphere(doc, layer, 0.5f, static_cast<float>(i) * 3.0f);
+
+    const float lo[3] = {-0.6f, -0.6f, -0.6f};
+    const float hi[3] = {0.6f, 0.6f, 0.6f};
+    const clay_consolidation_params p = params_at(0.02f, 0.08f);
+
+    for (int gesture = 1; gesture <= 6; ++gesture) {
+        CAPTURE(gesture);
+        REQUIRE(clay_layer_consolidate_region(doc, layer, lo, hi, &p, nullptr, nullptr) ==
+                CLAY_OK);
+        size_t nodes = 0;
+        REQUIRE(clay_layer_node_count(doc, layer, &nodes) == CLAY_OK);
+        CHECK(nodes == 4);  // not 4 + gesture
+    }
+    clay_document_destroy(doc);
+}
+
+TEST_CASE("the C ABI refuses a region merge it cannot make sense of") {
+    clay_layer_id layer = 0;
+    clay_document* doc = fresh_document(&layer);
+    add_sphere(doc, layer, 0.5f, 0.0f);
+    const float lo[3] = {-0.6f, -0.6f, -0.6f};
+    const float hi[3] = {0.6f, 0.6f, 0.6f};
+    const clay_consolidation_params p = params_at(0.02f, 0.08f);
+
+    // No region: a region merge without one is a whole-layer consolidate, and a
+    // host should ask for that by name rather than get it by omission.
+    CHECK(clay_layer_consolidate_region(doc, layer, nullptr, hi, &p, nullptr, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_layer_consolidate_region(doc, layer, lo, nullptr, &p, nullptr, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    // An inverted box is empty, not a region.
+    CHECK(clay_layer_consolidate_region(doc, layer, hi, lo, &p, nullptr, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_layer_consolidate_region(doc, 999, lo, hi, &p, nullptr, nullptr) ==
+          CLAY_ERROR_NOT_FOUND);
+    CHECK(clay_layer_consolidate_region(doc, layer, lo, hi, nullptr, nullptr, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+
+    // A region over empty space reaches no item.
+    const float far_lo[3] = {40.0f, 40.0f, 40.0f};
+    const float far_hi[3] = {41.0f, 41.0f, 41.0f};
+    CHECK(clay_layer_consolidate_region(doc, layer, far_lo, far_hi, &p, nullptr, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+
+    // A stale struct_size on the report is refused rather than half-filled.
+    clay_region_merge stale{};
+    stale.struct_size = 0;
+    CHECK(clay_layer_plan_region_merge(doc, layer, lo, hi, &stale) == CLAY_ERROR_INVALID_ARGUMENT);
+    clay_document_destroy(doc);
+}
