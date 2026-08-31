@@ -22,6 +22,8 @@
 #include "clay/brush/move.h"
 #include "clay/brush/preset.h"
 #include "clay/mesh/dynamic_sculpt.h"
+#include "clay/mesh/multires_sculpt.h"
+#include "clay/mesh/project.h"
 #include "clay/mesh/dynamic_validate.h"
 #include "clay/brush/stroke.h"
 #include "clay/brush/tube.h"
@@ -6721,6 +6723,354 @@ NB_MODULE(pyclay, m) {
                      },
                      "The chunks the stamps since the last clear touched.")
         .def("clear_dirty", [](mesh::DynamicSculptor& s) { s.bvh().clear_dirty(); });
+
+    // -- multiresolution surfaces (add-mesh-multires) -------------------------
+    nb::class_<mesh::MultiresSurface>(
+        m, "MultiresSurface",
+        "A base cage, a deterministic Catmull-Clark hierarchy over it, and\n"
+        "per-level detail that survives an edit to the form beneath it — so an\n"
+        "artist can add wrinkles at a fine level, change the skull underneath\n"
+        "them, and come back to find the wrinkles still there and attached.\n\n"
+        "    P(0) = the cage\n"
+        "    S(n) = Subdivide(P(n-1))\n"
+        "    P(n) = S(n) + Frame(n) * Detail(n)\n\n"
+        "A THIRD REPRESENTATION beside the fixed mesh and the adaptive surface,\n"
+        "never a mode either of them slips into. What may change is what tells\n"
+        "them apart: fixed topology never changes, an adaptive surface's changes\n"
+        "locally, and this one's changes only by subdivision.")
+        .def_static(
+            "from_mesh",
+            [](const PyMesh& handle, float weld_epsilon, std::uint64_t memory_budget) {
+                mesh::MultiresOptions options;
+                if (weld_epsilon > 0.0f) options.weld_epsilon = weld_epsilon;
+                options.memory_budget = memory_budget;
+                mesh::MultiresError err = mesh::MultiresError::None;
+                auto built = mesh::MultiresSurface::from_mesh(handle.data(), options, &err);
+                if (!built) throw std::invalid_argument(mesh::multires_error_text(err));
+                return std::move(*built);
+            },
+            "mesh"_a, "weld_epsilon"_a = 0.0f, "memory_budget"_a = 0,
+            "Build a hierarchy of ONE level — the cage itself. Refuses rather\n"
+            "than repairs: a conversion that quietly welds a face changes the\n"
+            "retopology somebody paid for without saying so.")
+        .def_prop_ro("level_count", &mesh::MultiresSurface::level_count)
+        .def_prop_ro("max_level", &mesh::MultiresSurface::max_level)
+        .def_prop_ro("base_vertex_count", &mesh::MultiresSurface::base_vertex_count)
+        .def_prop_rw(
+            "sculpt_level", &mesh::MultiresSurface::sculpt_level,
+            [](mesh::MultiresSurface& s, std::uint32_t level) {
+                if (!s.set_sculpt_level(level)) throw std::invalid_argument("no such level");
+            },
+            "Where the brush writes. Independent of `display_level`, which is\n"
+            "the workflow the feature exists for: move the broad form while\n"
+            "watching the fine surface.")
+        .def_prop_rw(
+            "display_level", &mesh::MultiresSurface::display_level,
+            [](mesh::MultiresSurface& s, std::uint32_t level) {
+                if (!s.set_display_level(level)) throw std::invalid_argument("no such level");
+            },
+            "What a host draws.")
+        .def(
+            "level_counts",
+            [](const mesh::MultiresSurface& s, std::uint32_t level) {
+                if (level >= s.level_count()) throw std::invalid_argument("no such level");
+                nb::dict out;
+                out["vertices"] = s.topology_at(level).vertex_count;
+                out["faces"] = s.topology_at(level).face_count;
+                return out;
+            },
+            "level"_a)
+        .def(
+            "preflight_add_level",
+            [](const mesh::MultiresSurface& s) {
+                const mesh::MultiresPreflight p = s.preflight_add_level();
+                nb::dict out;
+                out["level"] = p.level;
+                out["vertices"] = p.vertices;
+                out["faces"] = p.faces;
+                out["topology_bytes"] = p.topology_bytes;
+                out["detail_bytes"] = p.detail_bytes;
+                out["evaluated_bytes"] = p.evaluated_bytes;
+                out["runtime_bytes"] = p.runtime_bytes;
+                out["persistent_bytes"] = p.persistent_bytes;
+                out["peak_bytes"] = p.peak_bytes;
+                out["allowed"] = p.allowed;
+                out["error"] = std::string(mesh::multires_error_text(p.error));
+                return out;
+            },
+            "What adding a level WOULD cost, asked before any of it is paid.\n"
+            "Catmull-Clark multiplies faces by four, and on a memory-constrained\n"
+            "device it is the peak allocation that kills an app rather than the\n"
+            "steady state. Allocates nothing and has no side effects.")
+        .def(
+            "add_level",
+            [](mesh::MultiresSurface& s) {
+                mesh::MultiresError err = mesh::MultiresError::None;
+                nb::gil_scoped_release release;
+                if (!s.add_level(&err)) {
+                    nb::gil_scoped_acquire acquire;
+                    throw std::invalid_argument(mesh::multires_error_text(err));
+                }
+            },
+            "Add one level. BUILD-THEN-PUBLISH: a refusal leaves the surface\n"
+            "exactly as it was. Sets the sculpt and display levels to the new\n"
+            "one, which is what an artist means by 'subdivide'.")
+        .def(
+            "remove_highest_level",
+            [](mesh::MultiresSurface& s) {
+                mesh::MultiresError err = mesh::MultiresError::None;
+                if (!s.remove_highest_level(&err))
+                    throw std::invalid_argument(mesh::multires_error_text(err));
+            },
+            "Drop the highest level and the detail on it. DESTRUCTIVE.")
+        .def(
+            "mesh_at_level",
+            [](mesh::MultiresSurface& s, std::uint32_t level) {
+                if (level >= s.level_count()) throw std::invalid_argument("no such level");
+                PyMesh out;
+                {
+                    nb::gil_scoped_release release;
+                    out.m = s.mesh_at_level(level);
+                }
+                return out;
+            },
+            "level"_a,
+            "The level as an ordinary mesh, with the cage's attributes\n"
+            "subdivided over their own connectivity so a UV seam is\n"
+            "interpolated along itself and never across itself.")
+        .def(
+            "positions_at",
+            [](nb::object self, std::uint32_t level) {
+                mesh::MultiresSurface& s = nb::cast<mesh::MultiresSurface&>(self);
+                if (level >= s.level_count()) throw std::invalid_argument("no such level");
+                return f3_view(self, s.positions_at(level));
+            },
+            "level"_a, "P(n): the level as the artist sees it.")
+        .def(
+            "subdivided_at",
+            [](nb::object self, std::uint32_t level) {
+                mesh::MultiresSurface& s = nb::cast<mesh::MultiresSurface&>(self);
+                if (level >= s.level_count()) throw std::invalid_argument("no such level");
+                return f3_view(self, s.subdivided_at(level));
+            },
+            "level"_a,
+            "S(n): the pure subdivision, with no detail applied. What a\n"
+            "coefficient is measured FROM, and why it survives an edit below it.")
+        .def(
+            "normals_at",
+            [](nb::object self, std::uint32_t level) {
+                mesh::MultiresSurface& s = nb::cast<mesh::MultiresSurface&>(self);
+                if (level >= s.level_count()) throw std::invalid_argument("no such level");
+                return f3_view(self, s.normals_at(level));
+            },
+            "level"_a)
+        .def(
+            "detail_at",
+            [](mesh::MultiresSurface& s, std::uint32_t level) {
+                if (level >= s.level_count()) throw std::invalid_argument("no such level");
+                const mesh::DetailField& field = s.detail_at(level);
+                const std::size_t n = field.vertex_count();
+                auto* values = new std::vector<float>(n * 3);
+                for (std::size_t v = 0; v < n; ++v) {
+                    const mesh::LocalDetail d = field.get(static_cast<std::uint32_t>(v));
+                    (*values)[v * 3 + 0] = d.tangent;
+                    (*values)[v * 3 + 1] = d.bitangent;
+                    (*values)[v * 3 + 2] = d.normal;
+                }
+                nb::capsule owner(values,
+                                  [](void* p) noexcept { delete static_cast<std::vector<float>*>(p); });
+                return nb::cast(
+                    nb::ndarray<nb::numpy, float>(values->data(), {n, std::size_t(3)}, owner));
+            },
+            "level"_a,
+            "The level's coefficients, as an (N, 3) array of tangent,\n"
+            "bitangent and normal. Zero where the artist has not been.")
+        .def(
+            "set_detail",
+            [](mesh::MultiresSurface& s, std::uint32_t level, std::uint32_t vertex,
+               float tangent, float bitangent, float normal) {
+                if (level == 0 || level >= s.level_count())
+                    throw std::invalid_argument(
+                        "the cage stores positions rather than coefficients; use level >= 1");
+                s.set_detail(level, vertex, mesh::LocalDetail{tangent, bitangent, normal});
+            },
+            "level"_a, "vertex"_a, "tangent"_a, "bitangent"_a, "normal"_a)
+        .def_prop_ro("detail_checksum", &mesh::MultiresSurface::detail_checksum,
+                     "A hash of every level's authoritative detail, so a caller\n"
+                     "can prove that releasing the caches changed nothing.")
+        .def_prop_ro("base_revision", &mesh::MultiresSurface::base_revision)
+        .def_prop_ro("detail_revision", &mesh::MultiresSurface::detail_revision)
+        .def_prop_ro("evaluated_revision", &mesh::MultiresSurface::evaluated_revision)
+        .def_prop_ro("dirty_patches",
+                     [](const mesh::MultiresSurface& s) {
+                         const std::vector<std::uint32_t>& d = s.dirty_patches();
+                         return std::vector<std::uint32_t>(d.begin(), d.end());
+                     },
+                     "The BASE PATCHES the stamps since the last clear touched —\n"
+                     "the unit a host uploads by, because a base face owns a\n"
+                     "subtree that never moves between faces.")
+        .def("clear_dirty", &mesh::MultiresSurface::clear_dirty)
+        .def(
+            "memory",
+            [](const mesh::MultiresSurface& s) {
+                const mesh::MultiresMemory mem = s.memory();
+                nb::dict out;
+                out["base"] = mem.base;
+                out["topology"] = mem.topology;
+                out["detail"] = mem.detail;
+                out["authoritative"] = mem.authoritative;
+                out["evaluated"] = mem.evaluated;
+                out["runtime_index"] = mem.runtime_index;
+                out["rebuildable"] = mem.rebuildable;
+                out["total"] = mem.total;
+                out["resident_levels"] = mem.resident_levels;
+                return out;
+            },
+            "What the hierarchy costs, split by what a host under pressure may\n"
+            "act on. Authoritative detail is NEVER reported as rebuildable.")
+        .def("drop_inactive_caches", &mesh::MultiresSurface::drop_inactive_caches,
+             "Release the rebuildable caches of the levels nothing is using.\n"
+             "Rebuilding them reproduces the surface bit-identically.")
+        .def(
+            "eval_stats",
+            [](const mesh::MultiresSurface& s) {
+                const mesh::MultiresEvalStats st = s.eval_stats();
+                nb::dict out;
+                out["vertices_evaluated"] = st.vertices_evaluated;
+                out["normals_recomputed"] = st.normals_recomputed;
+                out["full_level_rebuilds"] = st.full_level_rebuilds;
+                out["partial_level_updates"] = st.partial_level_updates;
+                return out;
+            },
+            "What the last evaluations actually did, so 'propagation is local'\n"
+            "is a measurement rather than a claim.")
+        .def("reset_eval_stats", &mesh::MultiresSurface::reset_eval_stats)
+        .def(
+            "project_from",
+            [](mesh::MultiresSurface& s, const PyMesh& reference, float max_distance,
+               bool normal_ray_first, float strength) {
+                mesh::ProjectOptions options;
+                options.max_distance = max_distance;
+                options.normal_ray_first = normal_ray_first;
+                if (strength > 0.0f) options.strength = strength;
+                mesh::ProjectReport report;
+                bool ok = false;
+                {
+                    nb::gil_scoped_release release;
+                    ok = s.project_from(reference.data(), options, &report);
+                }
+                if (!ok)
+                    throw std::invalid_argument(
+                        "the hierarchy has no level above its cage to project");
+                nb::dict out;
+                out["moved"] = report.moved;
+                out["missed"] = report.missed;
+                out["by_ray"] = report.by_ray;
+                out["by_closest"] = report.by_closest;
+                out["max_offset"] = report.max_offset;
+                out["mean_offset"] = report.mean_offset;
+                return out;
+            },
+            "reference"_a, "max_distance"_a = 0.0f, "normal_ray_first"_a = true,
+            "strength"_a = 1.0f,
+            "Fit every level to a sculpt made somewhere else, coarse first —\n"
+            "the supported route by which a hierarchy accepts a new cage.")
+        .def("serialize",
+             [](const mesh::MultiresSurface& s) {
+                 const std::vector<std::uint8_t> bytes = s.encode();
+                 return nb::bytes(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+             },
+             "The hierarchy as bytes: the cage, the rule, the level count, the\n"
+             "active levels and each level's detail. The face lists and every\n"
+             "evaluated position follow from those and are not written.")
+        .def_static("deserialize",
+                    [](nb::bytes data) {
+                        mesh::MultiresSurface out;
+                        if (!mesh::MultiresSurface::decode(
+                                reinterpret_cast<const std::uint8_t*>(data.c_str()), data.size(),
+                                &out))
+                            throw std::invalid_argument(
+                                "not a multiresolution surface, or from a newer writer");
+                        return out;
+                    },
+                    "data"_a);
+
+    nb::class_<mesh::MultiresSculptor>(
+        m, "MultiresSculptor",
+        "The brush engine over a hierarchy: the same verbs, the same falloffs,\n"
+        "the same mask and the same deformation math — the fixed sculptor run\n"
+        "over the active level's own mesh, so a brush means one thing on every\n"
+        "representation.\n\n"
+        "What this owns is the step that turns the moved positions back into\n"
+        "what the hierarchy stores: the cage's geometry at level 0, detail\n"
+        "coefficients in the transported frame above it.\n\n"
+        "The surface must outlive the sculptor.")
+        .def("__init__",
+             [](mesh::MultiresSculptor* self, mesh::MultiresSurface& surface) {
+                 new (self) mesh::MultiresSculptor(surface);
+             },
+             "surface"_a, nb::keep_alive<1, 2>())
+        .def(
+            "stamp",
+            [](mesh::MultiresSculptor& self, const std::string& verb, nb::handle center,
+               float radius, float strength, const std::string& falloff, nb::handle direction,
+               nb::handle mask, bool geodesic, int smooth_iterations, nb::handle alpha,
+               nb::handle alpha_direction, nb::handle alpha_tangent, float alpha_extent) {
+                mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
+                mesh::MeshBrushSettings settings = mesh_brush_settings(
+                    verb, center, radius, strength, falloff, direction, nb::none(),
+                    nb::cast(geodesic), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
+                    smooth_iterations, 0.0f, alpha, alpha_direction, alpha_tangent, alpha_extent,
+                    nb::none(), &chosen);
+                field::MaskGate gate = mask_gate_of(mask);
+                nb::gil_scoped_release release;
+                return self.stamp(chosen, settings, gate, nullptr);
+            },
+            "verb"_a, "center"_a, "radius"_a, "strength"_a = 0.5f, "falloff"_a = "smooth",
+            "direction"_a = nb::none(), "mask"_a = nb::none(), "geodesic"_a = true,
+            "smooth_iterations"_a = 1, "alpha"_a = nb::none(),
+            "alpha_direction"_a = nb::none(), "alpha_tangent"_a = nb::none(),
+            "alpha_extent"_a = 0.0f,
+            "One stamp at the surface's current sculpt level. Returns how many\n"
+            "weld classes moved.")
+        .def("begin_stroke", &mesh::MultiresSculptor::begin_stroke,
+             "Start a gesture. Clears the record the Layer verb measures its\n"
+             "ceiling against.")
+        .def(
+            "apply_stroke",
+            [](mesh::MultiresSculptor& self, nb::handle samples, const brush::StrokePreset& preset,
+               const std::string& verb, const std::string& falloff, float strength,
+               nb::handle geodesic, int smooth_iterations, float layer_height, nb::handle mask,
+               bool defer_normals) {
+                mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
+                // The radius is the STAMP's, so a placeholder goes in here —
+                // the same reading the fixed sculptor's stroke path takes.
+                mesh::MeshBrushSettings settings = mesh_brush_settings(
+                    verb, nb::none(), 1.0f, strength, falloff, nb::none(), nb::none(), geodesic,
+                    nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, smooth_iterations,
+                    layer_height, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), &chosen);
+                const std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
+                const voxel::MaskField* field_mask = borrow_mask(mask);
+                brush::MeshStrokeOptions options;
+                options.defer_normals = defer_normals;
+                nb::gil_scoped_release release;
+                return brush::apply_to_multires(self, brush::resolve_stroke(in, preset), chosen,
+                                                settings, field_mask, nullptr, options);
+            },
+            "samples"_a, "preset"_a, "verb"_a, "falloff"_a = "smooth", "strength"_a = 1.0f,
+            "geodesic"_a = nb::none(), "smooth_iterations"_a = 1, "layer_height"_a = 0.05f,
+            "mask"_a = nb::none(), "defer_normals"_a = false,
+            "A whole stroke at the active sculpt level, resolved into spaced\n"
+            "stamps by the same engine that drives a mesh layer — so a stamp\n"
+            "lands in the same place with the same radius and the same\n"
+            "pressure-scaled strength on either representation.")
+        .def_prop_ro("bound_level", &mesh::MultiresSculptor::bound_level)
+        .def_prop_ro("last_write_vertices",
+                     [](const mesh::MultiresSculptor& s) {
+                         const std::vector<std::uint32_t>& v = s.last_write_vertices();
+                         return std::vector<std::uint32_t>(v.begin(), v.end());
+                     },
+                     "The level vertices the last stamp actually moved.");
 
     // -- the brush model, and brushes as data ---------------------------------
     nb::class_<mesh::AutomaskSettings>(

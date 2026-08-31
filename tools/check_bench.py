@@ -15,6 +15,12 @@ FLOORS = {
     "BM_EvalPoints": {"min_items_per_second": 500_000},
     "BM_BrickFill": {"min_items_per_second": 100},
     "BM_MeshTape": {"max_ms": 20_000},
+    # Subdividing is the one multires operation a host WAITS on rather than
+    # drags through, so the ceiling is generous by design; what it catches is an
+    # accidental O(level^2) in the stencil walk, not noise. Measured at 4.3 ms
+    # on a 32x32 cage.
+    "BM_MultiresSubdivide": {"max_ms": 5_000},
+    "BM_MultiresEvalCold": {"max_ms": 5_000},
     "BM_SurfaceNets": {"max_ms": 20_000},
     "BM_MeshLatticeMarch": {"max_ms": 20_000},
     "BM_MeshLatticeNets": {"max_ms": 20_000},
@@ -275,6 +281,20 @@ FASTER_THAN = [
     # registered only on machines with a Metal device; FASTER_THAN skips
     # missing names, so CPU-only CI is unaffected (3.8x on an M2 Max).
     ("BM_MetalTapeResident", "BM_MetalTapeReupload"),
+    # A multires dab costs what it TOUCHED, not what the hierarchy holds
+    # (add-mesh-multires). Both sides reconstruct the same surface at the same
+    # display level: the cold one rebuilds every level from the cage, the local
+    # one propagates one dab's descendants. A hierarchy whose dab cost tracked
+    # its size rather than the brush's reach would be correct and unusable, and
+    # this pair is what makes that visible rather than asserted -- measured at
+    # 0.87 ms against 16.3 ms on a 24x24 cage at three levels (Linux desktop,
+    # loaded), and the margin widens with depth rather than narrowing.
+    ("BM_MultiresDabLocal", "BM_MultiresEvalCold"),
+    # And a dab at the FINEST level propagates to nothing at all, so it is the
+    # cheapest of the three by construction. The pair holds that: a detail pass
+    # that started costing a coarse pass would mean detail had stopped being
+    # stored where it is written.
+    ("BM_MultiresDabFine", "BM_MultiresDabLocal"),
 ]
 
 # ratio gates: (bench, reference, max_ratio) — bench must cost at most

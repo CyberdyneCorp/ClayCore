@@ -99,6 +99,7 @@ EXAMPLES = [
     "65_brush_presets",
     "66_dynamic_topology",
     "67_voxel_remesh",
+    "68_mesh_multires",
 ]
 
 
@@ -135,6 +136,10 @@ CAPABILITY_EXAMPLES = {
     "build-packaging": None,      # a build concern; nothing to render
     # The adaptive surface: its own capability, its own example.
     "dynamic-topology": "66_dynamic_topology",
+    # The subdivision hierarchy: likewise. Listed here while the change is
+    # still active, which is what the asymmetry in check_capability_coverage
+    # is for — a capability lands with its example in the same commit.
+    "mesh-multires": "68_mesh_multires",
     "examples": None,             # this file
 }
 

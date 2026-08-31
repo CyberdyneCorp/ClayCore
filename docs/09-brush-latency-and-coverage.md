@@ -493,6 +493,34 @@ says nobody has measured one, because the gesture is what was instrumented.
 first two would numerically fit a frame; they are `operation` because that is
 what they are, and a host should give them progress UI rather than a frame.
 
+### Multiresolution, measured (add-mesh-multires)
+
+`MultiresSurface` is the fourth mesh mode, and the number that matters about it
+is a RATIO rather than a level: both figures below reconstruct the same surface
+at the same display level, and what separates them is whether the propagation is
+local. Linux desktop, Release, a 24x24 quad cage at three levels (~37k vertices
+at the top), on a loaded box — so the ratios are the reading, not the absolutes:
+
+| Case | Cost | What it is |
+|---|---|---|
+| `BM_MultiresDabFine` | **0.14 ms** | a dab at the finest level: writes coefficients, propagates to nothing |
+| `BM_MultiresDabLocal` | **0.87 ms** | a dab at level 1, propagated to level 3 |
+| `BM_MultiresEvalCold` | 15.6 ms | the whole hierarchy rebuilt from the cage |
+| `BM_MultiresSubdivide` | 0.8 / 3.7 ms | adding a level over a 16x16 / 32x32 cage |
+| `BM_MultiresExportLevel` | 0.08 ms | a level copied out as an ordinary mesh |
+
+**A coarse dab is 18x cheaper than the cold rebuild it is otherwise
+indistinguishable from**, and the margin widens with depth rather than
+narrowing — which is the whole of "propagation is local". `check_bench.py` gates
+the two ratios rather than the absolutes, because a shared runner moves the
+level and cannot move the ordering.
+
+The two dab figures are **Tier 1**: both fit a frame at this size with room to
+spare, and the fine one — which is where a detail pass actually lives — fits
+several. `BM_MultiresSubdivide` is **Tier 4**: adding a level is an explicit
+action an artist takes and waits on, which is also why it is priced by
+`preflight_add_level` before it is paid.
+
 ### The tier a per-dab number cannot tell you about
 
 `sdf_relax` sits at 0.73 ms and `sdf_move` in Tier 3, and read as a table both

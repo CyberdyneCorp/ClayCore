@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(claycore
-  VERSION 0.73.0
+  VERSION 0.74.0
   DESCRIPTION "Portable C++20 SDF + voxel engine library"
   LANGUAGES C CXX)  # C: ufbx
 
@@ -87,6 +87,14 @@ add_library(claycore
   src/mesh/dynamic_bvh.cpp
   src/mesh/remesh_local.cpp
   src/mesh/dynamic_sculpt.cpp
+  src/mesh/subdivide.cpp
+  src/mesh/surface_frame.cpp
+  src/mesh/detail_field.cpp
+  src/mesh/multires.cpp
+  src/mesh/multires_eval.cpp
+  src/mesh/multires_sculpt.cpp
+  src/mesh/project.cpp
+  src/mesh/multires_serialize.cpp
   src/mesh/deform.cpp
   src/mesh/transfer.cpp
   src/mesh/to_field.cpp

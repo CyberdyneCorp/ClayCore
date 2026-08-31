@@ -430,56 +430,122 @@ std::vector<Stamp> StrokeTransaction::append(const std::vector<StrokeSample>& sa
     return tail;
 }
 
+namespace {
+
+// The automask factors `mesh` cannot reach on its own, built ONCE for a stroke.
+// Shared by both mesh consumers for the reason `mesh_stamp_settings` is: a
+// cavity gate that meant one thing on a mesh layer and another on a hierarchy
+// would be two answers about one surface.
+bool mesh_automask_inputs(const MeshStrokeOptions& options, mesh::AutomaskInputs* out) {
+    if (!options.cavity_field && !options.groups) return false;
+    if (options.cavity_field) {
+        const std::function<float(kernel::cfloat3)>& field = options.cavity_field;
+        const MeasureSettings measure = options.cavity_measure;
+        // THE SAME ESTIMATOR a painted cavity mask uses. Not a mesh-side
+        // curvature from a vertex ring — two implementations of one measure is
+        // two answers about one surface.
+        out->cavity = [field, measure](kernel::cfloat3 p) {
+            return measure_at(field, SurfaceMeasure::Cavity, p, measure);
+        };
+    }
+    if (options.groups) {
+        const voxel::GroupField* groups = options.groups;
+        out->group = [groups](kernel::cfloat3 p) -> std::uint32_t {
+            return static_cast<std::uint32_t>(groups->at(p));
+        };
+    }
+    out->active_group = options.active_group;
+    return true;
+}
+
+// One conversion from the world-addressed mask lattice to the per-vertex weight
+// the verbs already take, so a painted mask protects a surface from every verb
+// with no per-verb code.
+field::MaskGate mesh_mask_gate(const voxel::MaskField* mask, const MeshStrokeOptions& options) {
+    if (!mask) return {};
+    const math::Transform to_world = options.mesh_to_world;
+    return [mask, to_world](kernel::cfloat3 p) { return mask->sample(to_world.apply(p)); };
+}
+
+}  // namespace
+
+namespace {
+
+// How a verb consumes the motion between stamps.
+//
+// GRAB is anchored and SNAKEHOOK walks. Both drag by the motion BETWEEN stamps,
+// so a stroke that stops moving stops pulling — and that one difference is the
+// whole of the difference between them. It lives here rather than in either
+// verb because it is a fact about a STROKE.
+struct MeshStrokeDrag {
+    bool dragging = false;
+    bool anchored = false;
+    std::uint32_t anchor = mesh::kNoClass;
+};
+
+MeshStrokeDrag drag_of(mesh::MeshBrush verb) {
+    MeshStrokeDrag d;
+    d.dragging = verb == mesh::MeshBrush::Grab || verb == mesh::MeshBrush::Snakehook;
+    d.anchored = verb == mesh::MeshBrush::Grab;
+    return d;
+}
+
+// What one stamp of a mesh stroke resolves to.
+//
+// SHARED BY BOTH MESH CONSUMERS, and that is the point of extracting it: the
+// fixed sculptor and the multiresolution one must agree about what a stroke IS
+// — where a stamp lands, how far it reaches, how hard it presses, and what a
+// drag hands the verb — because those are facts about the stroke rather than
+// about the surface underneath it. Two copies would be two answers, and the
+// second would drift silently.
+//
+// `settings.radius` and `settings.strength` are IGNORED, exactly as the header
+// says: each stamp brings its own, which is what makes pressure and taper shape
+// a mesh stroke the way they shape a voxel one.
+mesh::MeshBrushSettings mesh_stamp_settings(const mesh::MeshBrushSettings& settings,
+                                            const Stamp& s, const MeshStrokeDrag& drag,
+                                            kernel::cfloat3 previous, kernel::cfloat3 first,
+                                            kernel::cfloat3 anchor_position) {
+    mesh::MeshBrushSettings out = settings;
+    out.radius = s.radius;
+    out.strength = settings.strength * s.strength;
+    if (!drag.dragging) {
+        out.center = s.position;
+        return out;
+    }
+    out.direction = s.position - previous;
+    if (drag.anchored) {
+        out.center = first;
+        out.seed_class = settings.seed_class;
+    } else {
+        out.center = anchor_position;
+        out.seed_class = drag.anchor;
+    }
+    return out;
+}
+
+}  // namespace
+
 std::size_t apply_to_mesh(mesh::MeshSculptor& sculptor, const std::vector<Stamp>& stamps,
                           mesh::MeshBrush verb, const mesh::MeshBrushSettings& settings,
                           const voxel::MaskField* mask, mesh::VertexDeltas* deltas,
                           const MeshStrokeOptions& options) {
     if (stamps.empty() || !sculptor.valid()) return 0;
 
-    // The mask reaches every verb here and nowhere else: one conversion from
-    // the world-addressed lattice to the per-vertex weight the verbs already
-    // take, so a painted mask protects polygons from all eleven of them with
-    // no per-verb code.
-    field::MaskGate mask_gate;
-    if (mask) {
-        const math::Transform to_world = options.mesh_to_world;
-        mask_gate = [mask, to_world](kernel::cfloat3 p) { return mask->sample(to_world.apply(p)); };
-    }
-
-    // The automask factors `mesh` cannot reach on its own, wired here because
-    // this is the one function that can see all three modules. Built ONCE for
-    // the stroke: they are `std::function`s, and rebuilding them per stamp
-    // would allocate on every dab.
-    if (options.cavity_field || options.groups) {
-        mesh::AutomaskInputs automask;
-        if (options.cavity_field) {
-            const std::function<float(kernel::cfloat3)>& field = options.cavity_field;
-            const MeasureSettings measure = options.cavity_measure;
-            // THE SAME ESTIMATOR a painted cavity mask uses. Not a mesh-side
-            // curvature from a vertex ring — two implementations of one measure
-            // is two answers about one surface, and the requirement is that
-            // they cannot disagree.
-            automask.cavity = [field, measure](kernel::cfloat3 p) {
-                return measure_at(field, SurfaceMeasure::Cavity, p, measure);
-            };
-        }
-        if (options.groups) {
-            const voxel::GroupField* groups = options.groups;
-            automask.group = [groups](kernel::cfloat3 p) -> std::uint32_t {
-                return static_cast<std::uint32_t>(groups->at(p));
-            };
-        }
-        automask.active_group = options.active_group;
-        sculptor.set_automask_inputs(std::move(automask));
-    }
+    // The mask reaches every verb here and nowhere else, and the automask
+    // factors `mesh` cannot reach on its own are wired here because this is the
+    // one module that can see all three vocabularies. Both are built ONCE for
+    // the stroke — they hold `std::function`s, and rebuilding them per stamp
+    // would allocate on every dab — and both are shared with the
+    // multiresolution consumer below.
+    const field::MaskGate mask_gate = mesh_mask_gate(mask, options);
+    mesh::AutomaskInputs automask;
+    if (mesh_automask_inputs(options, &automask)) sculptor.set_automask_inputs(std::move(automask));
 
     const bool was_deferring = sculptor.defer_normals();
     sculptor.set_defer_normals(options.defer_normals);
 
-    // GRAB is anchored and SNAKEHOOK walks. Both drag by the motion BETWEEN
-    // stamps, so a stroke that stops moving stops pulling.
-    const bool dragging = verb == mesh::MeshBrush::Grab || verb == mesh::MeshBrush::Snakehook;
-    const bool anchored = verb == mesh::MeshBrush::Grab;
+    MeshStrokeDrag drag = drag_of(verb);
 
     // SNAKEHOOK re-anchors ON THE SURFACE IT IS DRAGGING, not on the cursor.
     //
@@ -491,12 +557,11 @@ std::size_t apply_to_mesh(mesh::MeshSculptor& sculptor, const std::vector<Stamp>
     // exactly when the pull gets interesting. Anchoring on the class being
     // dragged fixes it outright: that class is at the centre, so its weight is
     // 1, so it moves by the full delta and the anchor keeps up by construction.
-    std::uint32_t anchor = mesh::kNoClass;
     if (verb == mesh::MeshBrush::Snakehook) {
-        anchor = settings.seed_class;
+        drag.anchor = settings.seed_class;
         // One linear scan per stroke when the caller had no pick to hand over.
-        if (anchor >= sculptor.adjacency().class_count())
-            anchor = sculptor.nearest_class(stamps.front().position);
+        if (drag.anchor >= sculptor.adjacency().class_count())
+            drag.anchor = sculptor.nearest_class(stamps.front().position);
     }
 
     std::size_t applied = 0;
@@ -512,21 +577,17 @@ std::size_t apply_to_mesh(mesh::MeshSculptor& sculptor, const std::vector<Stamp>
             continue;
         }
 
-        mesh::MeshBrushSettings stamp_settings = settings;
-        stamp_settings.radius = s.radius;
-        stamp_settings.strength = settings.strength * s.strength;
-        if (dragging) {
-            stamp_settings.direction = s.position - previous;
-            if (anchored) {
-                stamp_settings.center = stamps.front().position;
-                stamp_settings.seed_class = settings.seed_class;
-            } else {
-                stamp_settings.center = sculptor.class_position(anchor);
-                stamp_settings.seed_class = anchor;
-            }
-        } else {
-            stamp_settings.center = s.position;
-        }
+        // THE ANCHOR IS ONLY ASKED FOR WHEN THERE IS ONE. `drag.anchor` is
+        // `kNoClass` for every verb but Snakehook, and `class_position` indexes
+        // its offset array with what it is given — so evaluating this eagerly
+        // is a read past the end whose result is then discarded, which is
+        // exactly the shape that survives every test until a sanitizer or an
+        // unlucky allocation finds it.
+        const kernel::cfloat3 anchor_position =
+            (drag.dragging && !drag.anchored) ? sculptor.class_position(drag.anchor)
+                                              : kernel::cf3(0, 0, 0);
+        mesh::MeshBrushSettings stamp_settings = mesh_stamp_settings(
+            settings, s, drag, previous, stamps.front().position, anchor_position);
         previous = s.position;
 
         // THE STAMP'S ORIENTATION REACHES THE ALPHA, which is what makes a rake
@@ -565,6 +626,66 @@ std::size_t apply_to_mesh(mesh::MeshSculptor& sculptor, const std::vector<Stamp>
     }
 
     if (options.defer_normals) sculptor.flush_normals(deltas);
+    sculptor.set_defer_normals(was_deferring);
+    return applied;
+}
+
+std::size_t apply_to_multires(mesh::MultiresSculptor& sculptor, const std::vector<Stamp>& stamps,
+                              mesh::MeshBrush verb, const mesh::MeshBrushSettings& settings,
+                              const voxel::MaskField* mask, mesh::MultiresDelta* deltas,
+                              const MeshStrokeOptions& options) {
+    if (stamps.empty() || !sculptor.surface().valid()) return 0;
+    if (!mesh::multires_offers(verb)) return 0;
+
+    const field::MaskGate mask_gate = mesh_mask_gate(mask, options);
+    mesh::AutomaskInputs automask;
+    if (mesh_automask_inputs(options, &automask)) sculptor.set_automask_inputs(std::move(automask));
+
+    const bool was_deferring = sculptor.defer_normals();
+    sculptor.set_defer_normals(options.defer_normals);
+    // ONE GESTURE. The level record `MeshBrush::Layer` measures its ceiling
+    // against starts here rather than carrying over from whatever the caller
+    // did last, which is what makes two strokes over the same place deposit
+    // from the surface as EACH found it.
+    sculptor.begin_stroke();
+
+    MeshStrokeDrag drag = drag_of(verb);
+    mesh::MeshSculptor* level = sculptor.level_sculptor();
+    if (!level) return 0;
+    if (verb == mesh::MeshBrush::Snakehook) {
+        drag.anchor = settings.seed_class;
+        if (drag.anchor >= level->adjacency().class_count())
+            drag.anchor = level->nearest_class(stamps.front().position);
+    }
+
+    std::size_t applied = 0;
+    kernel::cfloat3 previous = stamps.front().position;
+    for (const Stamp& s : stamps) {
+        // The same early-out the other consumers take: a stamp whose centre is
+        // frozen costs nothing rather than gathering a region it may not move.
+        if (mask && mask->sample(options.mesh_to_world.apply(s.position)) >= 1.0f) {
+            previous = s.position;
+            continue;
+        }
+        // RE-READ THE LEVEL SCULPTOR EVERY STAMP. A stamp can rebuild the
+        // level's cache — and a host is allowed to move the sculpt level
+        // mid-stroke — so the anchor's position has to come from whatever is
+        // bound NOW rather than from a pointer taken before the loop.
+        level = sculptor.level_sculptor();
+        const kernel::cfloat3 anchor_position =
+            (drag.dragging && !drag.anchored && level) ? level->class_position(drag.anchor)
+                                                       : kernel::cf3(0, 0, 0);
+        mesh::MeshBrushSettings stamp_settings = mesh_stamp_settings(
+            settings, s, drag, previous, stamps.front().position, anchor_position);
+        previous = s.position;
+
+        if (options.orient_alpha_by_stamp && settings.has_alpha())
+            stamp_settings.alpha_tangent = s.rotation.rotate(kernel::cf3(1, 0, 0));
+
+        if (sculptor.stamp(verb, stamp_settings, mask_gate, deltas) > 0) ++applied;
+    }
+
+    if (options.defer_normals) sculptor.flush_normals();
     sculptor.set_defer_normals(was_deferring);
     return applied;
 }

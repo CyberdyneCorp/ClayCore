@@ -18,6 +18,7 @@
 #include "clay_internal.h"
 #include "clay/brick/cache.h"
 #include "clay/mesh/dynamic_sculpt.h"
+#include "clay/mesh/multires_sculpt.h"
 #include "clay/brush/move.h"
 #include "clay/eval/backend.h"
 #include "clay/eval/bake_points.h"
@@ -4264,6 +4265,226 @@ BENCHMARK(BM_DynamicStampNoTopology)
     ->Arg(1581)  // ~5M
     ->Unit(benchmark::kMillisecond)
     ->Iterations(20);
+
+
+// The two numbers `DetailField` is configured by, measured rather than asserted
+// (add-mesh-multires, task 1.2).
+//
+// BM_MultiresDetailBlockSize sweeps the block size over a real brush footprint
+// at a fine level and reports, through the counters, the BYTES each choice
+// allocates to hold the same detail and the block-table bytes it pays for them.
+// The trade is only visible side by side: a small block wastes little on the rim
+// of a dab, a large one spends fewer table entries over the level, and the
+// footprint decides where the crossover sits. Time is not the reading here —
+// `allocated_KiB` and `table_KiB` are.
+//
+// BM_MultiresDetailAccess is the promotion threshold's evidence: the same
+// coefficients read out of a sparse field and a dense one, over a stroke-sized
+// index set. The block table costs four bytes per block, so the sparse form is
+// smaller until coverage is almost total and memory NEVER argues for promoting;
+// what argues for it is the indirection this pair prices.
+namespace {
+
+// The vertices one dab reaches at a fine level: a contiguous-ish run with the
+// scatter a geodesic walk leaves, rather than a tidy block-aligned range that
+// would flatter every block size equally.
+std::vector<std::uint32_t> detail_footprint(std::uint32_t level_vertices, std::uint32_t reached) {
+    std::vector<std::uint32_t> out;
+    out.reserve(reached);
+    std::uint32_t v = level_vertices / 3;
+    for (std::uint32_t i = 0; i < reached; ++i) {
+        out.push_back(v % level_vertices);
+        v += 1 + (i % 5 == 0 ? 3 : 0);
+    }
+    return out;
+}
+
+}  // namespace
+
+void BM_MultiresDetailBlockSize(benchmark::State& state) {
+    const std::uint32_t block = static_cast<std::uint32_t>(state.range(0));
+    const std::uint32_t vertices = 1u << 20;  // a level-4-sized surface
+    // TWO FOOTPRINTS, because the crossover moves with the dab. A large block
+    // amortises its table over a wide dab and wastes most of itself on a
+    // narrow one, so a sweep over a single footprint picks whatever that
+    // footprint happened to favour.
+    const std::uint32_t reached = static_cast<std::uint32_t>(state.range(1));
+    const std::vector<std::uint32_t> touched = detail_footprint(vertices, reached);
+    mesh::DetailField field;
+    for (auto _ : state) {
+        field.reset(vertices, block);
+        for (std::uint32_t v : touched) field.set(v, mesh::LocalDetail{0.0f, 0.0f, 0.01f});
+        benchmark::DoNotOptimize(field);
+    }
+    const double allocated = static_cast<double>(field.resident_vertices() * sizeof(mesh::LocalDetail));
+    const double table = static_cast<double>((vertices + block - 1) / block) * sizeof(std::uint32_t);
+    state.counters["block"] = block;
+    state.counters["reached"] = reached;
+    state.counters["allocated_KiB"] = allocated / 1024.0;
+    state.counters["table_KiB"] = table / 1024.0;
+    state.counters["total_KiB"] = (allocated + table) / 1024.0;
+    state.counters["bytes_per_touched"] =
+        (allocated + table) / static_cast<double>(touched.size());
+}
+BENCHMARK(BM_MultiresDetailBlockSize)
+    ->ArgsProduct({{64, 256, 1024, 4096}, {400, 4000, 40000}})
+    ->Unit(benchmark::kMicrosecond)
+    ->Iterations(200);
+
+namespace {
+
+void detail_access(benchmark::State& state, bool dense) {
+    const std::uint32_t vertices = 1u << 18;
+    mesh::DetailField field;
+    field.reset(vertices);
+    // COVERAGE IS COUNTED IN BLOCKS, NOT VERTICES, and getting that wrong is
+    // how this pair first measured nothing: writing every OTHER vertex touches
+    // every block, so the "sparse" side promoted and both rows reported the
+    // dense field. The sparse side therefore fills a FRACTION OF THE BLOCKS.
+    const std::uint32_t block = field.block_size();
+    const std::uint32_t limit = dense ? vertices : (vertices / block) / 2 * block;
+    for (std::uint32_t v = 0; v < limit; ++v)
+        field.set(v, mesh::LocalDetail{0.0f, 0.0f, 0.01f});
+    // Read only where the sparse field actually stores something, so the pair
+    // prices the INDIRECTION rather than one side's early-out on a missing
+    // block.
+    const std::vector<std::uint32_t> touched = detail_footprint(limit, 20000);
+    for (auto _ : state) {
+        float sum = 0.0f;
+        for (std::uint32_t v : touched) sum += field.get(v).normal;
+        benchmark::DoNotOptimize(sum);
+    }
+    state.counters["dense"] = field.dense() ? 1 : 0;
+    state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations()) *
+                            static_cast<std::int64_t>(touched.size()));
+}
+
+}  // namespace
+
+void BM_MultiresDetailAccessSparse(benchmark::State& state) { detail_access(state, false); }
+BENCHMARK(BM_MultiresDetailAccessSparse)->Unit(benchmark::kMicrosecond)->Iterations(2000);
+
+void BM_MultiresDetailAccessDense(benchmark::State& state) { detail_access(state, true); }
+BENCHMARK(BM_MultiresDetailAccessDense)->Unit(benchmark::kMicrosecond)->Iterations(2000);
+
+// -- multiresolution (add-mesh-multires) --------------------------------------
+//
+// The pair that matters is COLD against LOCAL. Both reconstruct the same
+// surface at the same display level; one rebuilds the hierarchy from the cage
+// and the other propagates one dab's descendants. A hierarchy whose dab cost
+// tracked its SIZE rather than the brush's reach would be correct and unusable,
+// and the two names below are what make that visible — check_bench.py requires
+// the local one to be the faster, which is exactly the propagation existing.
+namespace {
+
+mesh::Mesh multires_cage(int n) {
+    mesh::Mesh m;
+    const float step = 2.0f / static_cast<float>(n);
+    for (int z = 0; z <= n; ++z)
+        for (int x = 0; x <= n; ++x)
+            m.positions.push_back(kernel::cf3(-1.0f + step * static_cast<float>(x), 0.0f,
+                                              -1.0f + step * static_cast<float>(z)));
+    const std::uint32_t stride = static_cast<std::uint32_t>(n + 1);
+    for (int z = 0; z < n; ++z)
+        for (int x = 0; x < n; ++x) {
+            const std::uint32_t a =
+                static_cast<std::uint32_t>(z) * stride + static_cast<std::uint32_t>(x);
+            const std::uint32_t b = a + 1, c = a + stride + 1, d = a + stride;
+            m.quads.insert(m.quads.end(), {a, b, c, d});
+            m.indices.insert(m.indices.end(), {a, b, c, a, c, d});
+        }
+    return m;
+}
+
+mesh::MultiresSurface multires_fixture(int n, std::uint32_t levels) {
+    auto surface = mesh::MultiresSurface::from_mesh(multires_cage(n));
+    for (std::uint32_t i = 0; i < levels; ++i) surface->add_level();
+    return std::move(*surface);
+}
+
+}  // namespace
+
+// Adding a level: the subdivision itself, which is what `preflight_add_level`
+// prices and what a host waits on when an artist presses Subdivide.
+void BM_MultiresSubdivide(benchmark::State& state) {
+    const int n = static_cast<int>(state.range(0));
+    for (auto _ : state) {
+        state.PauseTiming();
+        mesh::MultiresSurface s = multires_fixture(n, 2);
+        state.ResumeTiming();
+        s.add_level();
+        std::uint32_t added = s.topology_at(s.max_level()).vertex_count;
+        benchmark::DoNotOptimize(added);
+    }
+}
+BENCHMARK(BM_MultiresSubdivide)->Arg(16)->Arg(32)->Unit(benchmark::kMillisecond)->Iterations(20);
+
+// A COLD reconstruction of the whole hierarchy: every level rebuilt from the
+// cage. The number the local path has to beat.
+void BM_MultiresEvalCold(benchmark::State& state) {
+    mesh::MultiresSurface s = multires_fixture(24, 3);
+    for (auto _ : state) {
+        s.drop_all_caches();
+        std::size_t n = s.positions_at(3).size();
+        benchmark::DoNotOptimize(n);
+    }
+}
+BENCHMARK(BM_MultiresEvalCold)->Unit(benchmark::kMillisecond)->Iterations(20);
+
+// ONE DAB at a coarse level, propagated to the same display level. The
+// descendants of what it moved and nothing else.
+void BM_MultiresDabLocal(benchmark::State& state) {
+    mesh::MultiresSurface s = multires_fixture(24, 3);
+    s.positions_at(3);
+    s.set_sculpt_level(1);
+    mesh::MultiresSculptor sculptor(s);
+    mesh::MeshBrushSettings brush;
+    brush.radius = 0.15f;
+    brush.strength = 0.3f;
+    int i = 0;
+    for (auto _ : state) {
+        brush.center = kernel::cf3(0.02f * static_cast<float>(i % 5), 0.0f, 0.0f);
+        brush.strength = (i % 2) ? 0.3f : -0.3f;
+        sculptor.stamp(mesh::MeshBrush::Draw, brush);
+        std::size_t n = s.positions_at(3).size();
+        benchmark::DoNotOptimize(n);
+        ++i;
+    }
+}
+BENCHMARK(BM_MultiresDabLocal)->Unit(benchmark::kMillisecond)->Iterations(200);
+
+// A dab at the FINEST level, which is the interactive case a detail pass lives
+// in: it writes coefficients and propagates to nothing.
+void BM_MultiresDabFine(benchmark::State& state) {
+    mesh::MultiresSurface s = multires_fixture(24, 3);
+    s.positions_at(3);
+    s.set_sculpt_level(3);
+    mesh::MultiresSculptor sculptor(s);
+    mesh::MeshBrushSettings brush;
+    brush.radius = 0.05f;
+    brush.strength = 0.3f;
+    int i = 0;
+    for (auto _ : state) {
+        brush.center = kernel::cf3(0.01f * static_cast<float>(i % 5), 0.0f, 0.0f);
+        brush.strength = (i % 2) ? 0.3f : -0.3f;
+        sculptor.stamp(mesh::MeshBrush::Draw, brush);
+        ++i;
+    }
+}
+BENCHMARK(BM_MultiresDabFine)->Unit(benchmark::kMillisecond)->Iterations(400);
+
+// Exporting a level as an ordinary mesh — what a host copies when it takes the
+// whole display level rather than the changed blocks.
+void BM_MultiresExportLevel(benchmark::State& state) {
+    mesh::MultiresSurface s = multires_fixture(24, 3);
+    s.positions_at(3);
+    for (auto _ : state) {
+        mesh::Mesh m = s.mesh_at_level(3);
+        std::size_t tris = m.triangle_count();
+        benchmark::DoNotOptimize(tris);
+    }
+}
+BENCHMARK(BM_MultiresExportLevel)->Unit(benchmark::kMillisecond)->Iterations(20);
 
 // Resident uploaded tapes (accel/metal-persistent): the Metal backend keeps
 // the uploaded form of recent tapes resident, keyed on the process-unique
