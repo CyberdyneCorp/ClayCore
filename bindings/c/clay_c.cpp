@@ -5528,10 +5528,13 @@ namespace {
 // `out_radius` is the radius AS READ through the versioned descriptor, which is
 // the only value a caller may use: reading params->radius directly would take a
 // field an older struct version does not carry.
+// Yields the PREPARED items rather than resolved warps: the callers either want
+// node ids (the preview) or resolve one at a time (the apply). See
+// apply_surface_gesture.
 clay_result resolve_move(const clay_document* doc, clay_layer_id layer, const float centre[3],
                          const float displacement[3], const clay_move_params* params,
                          const scene::Layer** out_layer,
-                         std::vector<brush::MoveWarp>* out_warps,
+                         std::vector<brush::PreparedMove>* out_prepared,
                          float* out_radius = nullptr) {
     if (!doc || !centre || !displacement)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document, centre or displacement");
@@ -5554,10 +5557,17 @@ clay_result resolve_move(const clay_document* doc, clay_layer_id layer, const fl
 
     *out_layer = l;
     if (out_radius) *out_radius = p.radius;
-    *out_warps = brush::move_brush(*l, kernel::cf3(centre[0], centre[1], centre[2]),
-                                   kernel::cf3(displacement[0], displacement[1],
-                                               displacement[2]),
-                                   settings);
+    // A drag of zero displacement moves nothing, and `move_brush` said so by
+    // returning no warps. Said here instead, because preparing is what happens
+    // now and preparing does not look at the displacement.
+    const kernel::cfloat3 pull =
+        kernel::cf3(displacement[0], displacement[1], displacement[2]);
+    if (kernel::clength(pull) <= 0.0f) {
+        out_prepared->clear();
+        return CLAY_OK;
+    }
+    *out_prepared =
+        brush::prepare_move(*l, kernel::cf3(centre[0], centre[1], centre[2]), settings);
     return CLAY_OK;
 }
 
@@ -5589,8 +5599,11 @@ struct DragFrontier {
 // sits inside the extern "C" block, where a function RETURNING a class type
 // has no C-compatible calling convention (MSVC gates it as C4190). Parameters
 // of C++ type are fine — it is the return slot that has to be C-shaped.
+// Takes the PREPARED items rather than resolved warps, because the only thing
+// it ever read from a warp was its node id — and resolving a warp allocates.
+// See apply_surface_gesture for why that matters.
 void drag_frontier(const clay_document* doc, const scene::Layer& layer,
-                   const std::vector<brush::MoveWarp>& warps, DragFrontier* out) {
+                   const std::vector<brush::PreparedMove>& prepared, DragFrontier* out) {
     DragFrontier& df = *out;
     const scene::Document& d = doc->doc.document;
     const scene::Layer* active = nullptr;
@@ -5604,8 +5617,8 @@ void drag_frontier(const clay_document* doc, const scene::Layer& layer,
         if (l.visible && l.kind == scene::LayerKind::Sdf && l.sdf == active->sdf) return;
     }
     df.usable = true;
-    df.all_resolved = !warps.empty();
-    df.spans.reserve(warps.size());
+    df.all_resolved = !prepared.empty();
+    df.spans.reserve(prepared.size());
     // Per warp: the root ordinal it will dirty from, and its PRE-apply
     // influence. The post-apply territory a growing displacement reaches next
     // frame is dirtied by the apply itself and refilled once by the full path,
@@ -5621,14 +5634,14 @@ void drag_frontier(const clay_document* doc, const scene::Layer& layer,
     // parameter edit to the same node_command_bound and never looks at it.
     scene::Command probe_cmd{scene::SetDeformersCmd{layer.id, scene::kNoNode, {}}};
     auto& probe = std::get<scene::SetDeformersCmd>(probe_cmd);
-    for (const brush::MoveWarp& w : warps) {
+    for (const brush::PreparedMove& p : prepared) {
         std::uint32_t ordinal = 0;
-        if (!root_ordinal_of(*layer.sdf, w.node, &ordinal)) {
+        if (!root_ordinal_of(*layer.sdf, p.node, &ordinal)) {
             df.all_resolved = false;
             continue;
         }
         df.min_ordinal = std::min(df.min_ordinal, ordinal);
-        probe.node = w.node;
+        probe.node = p.node;
         const math::Aabb bound = scene::command_influence_bound(d, probe_cmd);
         if (bound.empty()) continue;
         df.spans.emplace_back(ordinal, bound);
@@ -5719,13 +5732,13 @@ clay_result clay_layer_move_surface_preview(const clay_document* doc, clay_layer
                                             size_t* out_count) {
     if (!out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_count");
     const scene::Layer* l = nullptr;
-    std::vector<brush::MoveWarp> warps;
-    clay_result r = resolve_move(doc, layer, centre, displacement, params, &l, &warps);
+    std::vector<brush::PreparedMove> prepared;
+    clay_result r = resolve_move(doc, layer, centre, displacement, params, &l, &prepared);
     if (r != CLAY_OK) return r;
-    *out_count = warps.size();
+    *out_count = prepared.size();
     if (!out_nodes) return CLAY_OK;  // size query
-    for (std::size_t i = 0; i < warps.size() && i < capacity; ++i)
-        out_nodes[i] = warps[i].node;
+    for (std::size_t i = 0; i < prepared.size() && i < capacity; ++i)
+        out_nodes[i] = prepared[i].node;
     return CLAY_OK;
 }
 
@@ -6212,9 +6225,43 @@ namespace {
 // its weight being zero outside the radius for either sign of the strength.
 // Everything after that is common, and it is a hundred lines of it, so a second
 // gesture that copied it would be a second place to fix #360 and #363.
+// ONE WARP BUFFER FOR THE WHOLE GESTURE, resolved per item as the item is
+// applied, rather than a vector of warps resolved up front.
+//
+// A MoveWarp owns two `std::vector<scene::Deformer>`, so materialising one per
+// reached item costs an allocation per item that is freed moments later — 138
+// of them on a thousand-item drag, and #372 measured itself at 1.09x on this
+// exact path when it introduced them (#375). Nothing needed them all at once:
+// `drag_frontier` reads only node ids, which the PREPARED items carry, and a
+// PreparedMove is a snapshot taken before any apply, so resolving late reads
+// nothing an earlier apply has moved. `resolve_prepared_move` clears the
+// vectors rather than reassigning them, so the buffer keeps its capacity and
+// the second item onward allocates nothing.
+//
+// Each node is applied exactly once, so `moved_chain` still reads that node's
+// pre-drag chain.
+// Which gesture is being resolved, and the one number it carries. A plain
+// struct rather than a template or a std::function: this file is compiled
+// inside `extern "C"`, where a template cannot be declared, and the set of
+// surface gestures is closed at two.
+struct GestureResolver {
+    enum class Kind { Move, Magnify };
+    Kind kind = Kind::Move;
+    kernel::cfloat3 displacement{};  // Move: the world pull
+    float strength = 0.0f;           // Magnify: the dimensionless strength
+
+    void operator()(const brush::PreparedMove& p, brush::MoveWarp* out) const {
+        if (kind == Kind::Move)
+            brush::resolve_prepared_move(p, displacement, out);
+        else
+            brush::resolve_prepared_magnify(p, strength, out);
+    }
+};
+
 clay_result apply_surface_gesture(clay_document* doc, clay_layer_id layer,
                                   const scene::Layer& l,
-                                  const std::vector<brush::MoveWarp>& warps,
+                                  const std::vector<brush::PreparedMove>& prepared,
+                                  const GestureResolver& resolve_into,
                                   std::vector<math::Aabb> reach, size_t* out_applied) {
     const scene::Layer* lp = &l;
     // ... IN ONE PLACEMENT. The ball above is stated in the dragged layer's
@@ -6247,7 +6294,7 @@ clay_result apply_surface_gesture(clay_document* doc, clay_layer_id layer,
     // below sees no commands; left unstated, the legacy drop would destroy the
     // prefix seeds every frame and the frontier path would never resume.
     DragFrontier frontier;
-    drag_frontier(doc, *lp, warps, &frontier);
+    drag_frontier(doc, *lp, prepared, &frontier);
     const bool states_frontier = frontier.usable && frontier.all_resolved;
 
     // The pre-drag seeds (#360), recorded before the applies dirty anything:
@@ -6265,10 +6312,12 @@ clay_result apply_surface_gesture(clay_document* doc, clay_layer_id layer,
                                          : clay_document::kFrontierDrop};
     if (doc->undo) doc->undo->begin_group();
     std::size_t applied = 0;
-    for (const brush::MoveWarp& w : warps) {
-        const scene::Node* n = lp->sdf->find(w.node);
+    brush::MoveWarp warp;  // reused across items; see the note above
+    for (const brush::PreparedMove& p : prepared) {
+        const scene::Node* n = lp->sdf->find(p.node);
         if (!n) continue;
-        scene::SetDeformersCmd cmd{layer, w.node, brush::moved_chain(*n, w)};
+        resolve_into(p, &warp);
+        scene::SetDeformersCmd cmd{layer, warp.node, brush::moved_chain(*n, warp)};
         const clay_result r = apply_edit_in_gesture(doc, scene::Command{cmd}, "node not found");
         if (r != CLAY_OK) {
             if (doc->undo) doc->undo->end_group();
@@ -6287,9 +6336,9 @@ clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
                                     const float centre[3], const float displacement[3],
                                     const clay_move_params* params, size_t* out_applied) {
     const scene::Layer* l = nullptr;
-    std::vector<brush::MoveWarp> warps;
+    std::vector<brush::PreparedMove> prepared;
     float radius = 0.0f;
-    clay_result r = resolve_move(doc, layer, centre, displacement, params, &l, &warps, &radius);
+    clay_result r = resolve_move(doc, layer, centre, displacement, params, &l, &prepared, &radius);
     if (r != CLAY_OK) return r;
 
     // WHAT A DRAG CAN REACH, in one box, without asking the geometry.
@@ -6331,7 +6380,13 @@ clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
                             kernel::cf3(displacement[0], displacement[1], displacement[2])))
         reach.push_back(math::Aabb{image.centre, image.centre}.dilated(radius + pull));
 
-    return apply_surface_gesture(doc, layer, *l, warps, std::move(reach), out_applied);
+    const kernel::cfloat3 world_pull =
+        kernel::cf3(displacement[0], displacement[1], displacement[2]);
+    GestureResolver resolver;
+    resolver.kind = GestureResolver::Kind::Move;
+    resolver.displacement = world_pull;
+    return apply_surface_gesture(doc, layer, *l, prepared, resolver, std::move(reach),
+                                 out_applied);
 }
 
 namespace {
@@ -6339,7 +6394,7 @@ namespace {
 clay_result resolve_magnify(const clay_document* doc, clay_layer_id layer, const float centre[3],
                             float strength, const clay_magnify_params* params,
                             const scene::Layer** out_layer,
-                            std::vector<brush::MoveWarp>* out_warps,
+                            std::vector<brush::PreparedMove>* out_prepared,
                             float* out_radius = nullptr) {
     if (!doc || !centre) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or centre");
     if (!params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null magnify parameters");
@@ -6366,8 +6421,8 @@ clay_result resolve_magnify(const clay_document* doc, clay_layer_id layer, const
 
     *out_layer = l;
     if (out_radius) *out_radius = p.radius;
-    *out_warps = brush::magnify_brush(*l, kernel::cf3(centre[0], centre[1], centre[2]), strength,
-                                      settings);
+    *out_prepared =
+        brush::prepare_magnify(*l, kernel::cf3(centre[0], centre[1], centre[2]), settings);
     return CLAY_OK;
 }
 
@@ -6380,13 +6435,13 @@ clay_result clay_layer_magnify_surface_preview(const clay_document* doc, clay_la
                                                size_t* out_count) {
     if (!out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_count");
     const scene::Layer* l = nullptr;
-    std::vector<brush::MoveWarp> warps;
-    clay_result r = resolve_magnify(doc, layer, centre, strength, params, &l, &warps);
+    std::vector<brush::PreparedMove> prepared;
+    clay_result r = resolve_magnify(doc, layer, centre, strength, params, &l, &prepared);
     if (r != CLAY_OK) return r;
-    *out_count = warps.size();
+    *out_count = prepared.size();
     if (!out_nodes) return CLAY_OK;  // size query
-    for (std::size_t i = 0; i < warps.size() && i < capacity; ++i)
-        out_nodes[i] = warps[i].node;
+    for (std::size_t i = 0; i < prepared.size() && i < capacity; ++i)
+        out_nodes[i] = prepared[i].node;
     return CLAY_OK;
 }
 
@@ -6394,9 +6449,9 @@ clay_result clay_layer_magnify_surface(clay_document* doc, clay_layer_id layer,
                                        const float centre[3], float strength,
                                        const clay_magnify_params* params, size_t* out_applied) {
     const scene::Layer* l = nullptr;
-    std::vector<brush::MoveWarp> warps;
+    std::vector<brush::PreparedMove> prepared;
     float radius = 0.0f;
-    clay_result r = resolve_magnify(doc, layer, centre, strength, params, &l, &warps, &radius);
+    clay_result r = resolve_magnify(doc, layer, centre, strength, params, &l, &prepared, &radius);
     if (r != CLAY_OK) return r;
 
     // WHAT THIS REACHES, and it is the ball with NO dilation — where a drag has
@@ -6420,7 +6475,11 @@ clay_result clay_layer_magnify_surface(clay_document* doc, clay_layer_id layer,
                             kernel::cf3(0.0f, 0.0f, 0.0f)))
         reach.push_back(math::Aabb{image.centre, image.centre}.dilated(radius));
 
-    return apply_surface_gesture(doc, layer, *l, warps, std::move(reach), out_applied);
+    GestureResolver resolver;
+    resolver.kind = GestureResolver::Kind::Magnify;
+    resolver.strength = strength;
+    return apply_surface_gesture(doc, layer, *l, prepared, resolver, std::move(reach),
+                                 out_applied);
 }
 
 namespace {
