@@ -27,12 +27,27 @@ enum Fixture {
         return [Int32(x * scale), Int32(y * scale), Int32(z * scale)]
     }
 
-    /// A document with a voxel layer carrying `stamps` stamps of material, so
-    /// the sculpt verbs have something to reshape. Returns the borrowed grid;
-    /// destroying the document frees it.
-    static func voxelGrid(stamps: Int, voxelSize: Float = 0.02)
+    /// UNDO IS ON, because that is the state a shipping host is in and the
+    /// budgets are read as though it were (#242).
+    ///
+    /// Every voxel verb funnels through `VoxelGrid::set`, which appends a
+    /// 16-byte journal record per cell it actually CHANGES once undo is
+    /// enabled. Through v0.73.0 no device fixture called
+    /// `clay_document_enable_undo`, so the eleven voxel budgets were set
+    /// against a path no host takes — measuring the engine with its history
+    /// recording switched off.
+    ///
+    /// Enabled BEFORE the priming stamps rather than after, deliberately: a
+    /// host has it on from document open, so the verb should run against a
+    /// document already carrying a journal, with the allocator in the state
+    /// that puts it in. The memory that costs was checked against this suite's
+    /// jetsam margin before making it the default — a 1,000-stamp fixture
+    /// journals about 2.4 MB and holds about 5.3 MB of history in total,
+    /// against bundle peaks measured in the tens of megabytes.
+    static func voxelGrid(stamps: Int, voxelSize: Float = 0.02, undo: Bool = true)
         -> (doc: OpaquePointer, grid: OpaquePointer)? {
         guard let doc = clay_document_create() else { return nil }
+        if undo { _ = clay_document_enable_undo(doc) }
         var layer: clay_layer_id = 0
         var grid: OpaquePointer?
         guard clay_document_add_voxel_layer(doc, "bench", voxelSize, &layer, &grid) == CLAY_OK,
@@ -56,7 +71,8 @@ enum Fixture {
         return [Int32(x * 18), Int32(y * 18), Int32(z * 18)]
     }
 
-    /// A solid block with `holes` single-cell perforations.
+    /// A solid block with `holes` single-cell perforations. Undo on, for the
+    /// reason `voxelGrid` states.
     ///
     /// The only shape `fill_cavities` acts on. The verb fills what is NARROW:
     /// a cell with five of its six face neighbours occupied, which is the
@@ -73,9 +89,10 @@ enum Fixture {
     ///
     /// `holes` is the axis: the block is a fixed 33^3 either way, so a bigger
     /// number is more pockets to find rather than more material to walk.
-    static func perforatedBlock(holes: Int, voxelSize: Float = 0.02)
+    static func perforatedBlock(holes: Int, voxelSize: Float = 0.02, undo: Bool = true)
         -> (doc: OpaquePointer, grid: OpaquePointer)? {
         guard let doc = clay_document_create() else { return nil }
+        if undo { _ = clay_document_enable_undo(doc) }
         var layer: clay_layer_id = 0
         var grid: OpaquePointer?
         guard clay_document_add_voxel_layer(doc, "bench", voxelSize, &layer, &grid) == CLAY_OK,
