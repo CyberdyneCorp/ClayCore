@@ -77,10 +77,7 @@ def preview(mesh, cell=0.013, colour="#7a8fb0"):
     renderer — which raycasts a field — has nothing to trace against.
     Resampling here is exactly the approximation a mesh layer exists to avoid:
     fine for a picture, wrong for the export."""
-    doc = clay.Document()
-    doc.add_sdf_layer("preview").add(clay.Volume.from_mesh(mesh, cell=cell),
-                                     color=colour)
-    return doc
+    return R.mesh_preview_doc(mesh, cell, colour)
 
 
 def cage_over(mesh, n=3, pad=0.02):

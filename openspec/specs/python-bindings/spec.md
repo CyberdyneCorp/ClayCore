@@ -1,7 +1,15 @@
 # python-bindings Specification
 
 ## Purpose
-TBD - created by archiving change add-claycore-v1. Update Purpose after archive.
+The surface a script, a test and a notebook use, and the reason this library can
+be exercised without an application.
+
+numpy-native throughout, because a binding that copies arrays across the
+boundary is one nobody uses twice. `pyclay` is also the test harness the examples
+and the parity gates are written in, which is why its coverage is held EQUAL to
+the C ABI's rather than allowed to be a convenience subset —
+`check_binding_parity` fails on a capability reachable from one and not the
+other.
 ## Requirements
 ### Requirement: pyclay module
 The library SHALL ship a nanobind extension module `pyclay` exposing: document/layer construction (`Document`, `add_sdf_layer`, `add_voxel_layer`), the full edit vocabulary (primitives, ops, blends, transforms, deformers, mirrors, strokes) with Pythonic parameter names, field evaluation (`eval`, `gradients`), meshing with resolution/decimation/backend selection, mesh predicates (`is_watertight()` etc.), and save/load of `.clayspace` plus mesh export (OBJ/FBX/PLY/glTF).

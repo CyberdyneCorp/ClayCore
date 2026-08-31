@@ -1,7 +1,14 @@
 # voxel-engine Specification
 
 ## Purpose
-TBD - created by archiving change add-claycore-v1. Update Purpose after archive.
+The representation for sculpting where topology must not constrain the artist:
+sparse chunked cells, the sculpting verbs, the resolution level stack, painted
+masks and surface groups, and the bridges in both directions between cells and a
+field.
+
+Its own capability rather than part of the scene model because what a voxel
+layer guarantees is different in kind — an edit is destructive and local, there
+is no edit list to replay, and undo is a recorded run of cell writes.
 ## Requirements
 ### Requirement: Voxel storage
 `clay::voxel` SHALL store colored voxel grids as palette-indexed dense chunks scaling to at least 256³ per layer, with palette + RLE compression for serialization. Voxel color SHALL be a palette index; palette edits SHALL recolor all referencing voxels without touching voxel data.

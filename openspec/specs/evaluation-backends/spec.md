@@ -1,7 +1,14 @@
 # evaluation-backends Specification
 
 ## Purpose
-TBD - created by archiving change add-claycore-v1. Update Purpose after archive.
+Where the arithmetic actually runs, and how four devices are held to one answer.
+
+One backend interface, a runtime registry a host selects from, and a scalar CPU
+implementation that is the CORRECTNESS REFERENCE rather than merely one of the
+options — every GPU backend is measured against it inside a stated tolerance,
+because a field that evaluates differently on two devices is not one field. The
+batching, device residency and dispatch amortisation live here too: they change
+what evaluation COSTS and may never change what it returns.
 ## Requirements
 ### Requirement: Backend interface
 `clay::eval::Backend` SHALL define one interface implemented identically by every backend: `eval_points(tape, points[]) → distances[]/gradients[]/colors[]` (batch field queries), `eval_bricks(tape, brick_ids[]) → narrow-band brick data`, `raycast(tape, rays[]) → hits[]`, `mesh(tape | bricks, params) → triangles` (where supported), and capability flags (fp16 storage, on-device meshing, max tape length). All evaluation requests SHALL be plain data (flat buffers) with no per-sample allocation; the caller owns threading and queues.

@@ -100,9 +100,7 @@ def dented_block(cell=0.025, amplitude=0.007, wavelength=0.26, seed=46):
 def preview(mesh, cell=0.012, colour="#9aa7b2"):
     """Display only: a mesh layer is never evaluated, so the renderer has
     nothing to trace until something resamples it. See 36_mesh_layers."""
-    doc = clay.Document()
-    doc.add_sdf_layer("preview").add(clay.Volume.from_mesh(mesh, cell=cell), color=colour)
-    return doc
+    return R.mesh_preview_doc(mesh, cell, colour)
 
 
 def copy_of(mesh):

@@ -1,7 +1,14 @@
 # examples Specification
 
 ## Purpose
-TBD - created by archiving change add-examples-gallery. Update Purpose after archive.
+The gallery, which is how a capability proves it works to a human rather than to
+a test runner.
+
+Every feature area has a numbered example that RUNS in CI, asserts what it
+claims, and commits its output — so a change that breaks a picture is caught
+with everything else rather than discovered when someone next looks. The
+constraint that they depend on nothing beyond the wheel and numpy is what keeps
+them runnable by a reader who has just installed it.
 ## Requirements
 ### Requirement: Every feature area has a runnable example
 The repository SHALL ship an `examples/` directory whose scripts collectively exercise the documented SDF vocabulary — primitives, blend kinds, extended combine modes, deformers, repetition, profile lifts, transitions and strokes — and the voxel sculpting surface — brush and box and line edits, mirroring, flood select, palettes, greedy meshing and SDF rasterization. Each script SHALL be executable standalone and SHALL write its outputs to `examples/output/`.

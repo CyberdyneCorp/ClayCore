@@ -1,7 +1,12 @@
 # cut-tool Specification
 
 ## Purpose
-TBD - created by archiving change add-cut-tool. Update Purpose after archive.
+A shape drawn on screen becoming an ordinary edit rather than a mode.
+
+The whole capability is that last clause. A cut resolves to an item in the edit
+list — swept far enough to cover what it is cutting, with the surviving side
+chosen by the combine op — so undo, serialization, picking, instancing and
+re-evaluation all apply to it without knowing it came from a drawn curve.
 ## Requirements
 ### Requirement: A drawn shape resolves to an edit item
 The module SHALL resolve a cut frame — an origin and an orthonormal basis — together with a 2D shape given in world units on that frame, into an ordinary edit item: the shape as a profile, extruded along the frame's sweep direction. Resolution SHALL be pure: it SHALL NOT read or modify a document.

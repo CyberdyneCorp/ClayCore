@@ -72,10 +72,17 @@ def coarse_sphere(n=10, radius=1.0):
             for u in range(n):
                 a = base + v * stride + u
                 b, c2, d = a + 1, a + stride, a + stride + 1
+                # OUTWARD, and it is worth a comment because it was wrong
+                # here for a long time and nothing failed. A closed mesh wound
+                # inward has a winding number of -1 inside, so `is_inside` is
+                # false everywhere, so `Volume.from_mesh` samples a field that
+                # is positive at the centre of the model — and the preview
+                # below traces it and finds almost no surface. The sculpting
+                # never cared, which is why it survived: the renders did.
                 if signs[f] > 0.0:
-                    indices += [a, c2, b, b, c2, d]
-                else:
                     indices += [a, b, c2, b, d, c2]
+                else:
+                    indices += [a, c2, b, b, c2, d]
     return clay.Mesh.from_triangles(np.array(positions, dtype=np.float32),
                                     np.array(indices, dtype=np.uint32))
 
@@ -85,9 +92,7 @@ def preview(mesh, cell=0.012, colour="#b0784a"):
     renderer — which raycasts a field — has nothing to trace against;
     resampling here is exactly the approximation a mesh layer exists to avoid,
     and it is fine for a picture and wrong for the export."""
-    doc = clay.Document()
-    doc.add_sdf_layer("preview").add(clay.Volume.from_mesh(mesh, cell=cell), color=colour)
-    return doc
+    return R.mesh_preview_doc(mesh, cell, colour)
 
 
 def triangles_near(mesh, centre, radius):
