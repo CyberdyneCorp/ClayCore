@@ -1357,8 +1357,8 @@ python3 tools/check_device_bench.py build/device/device-bench.json
 python3 tools/check_device_coverage.py build/device/device-bench.json
 ```
 
-**The run is TWO xcodebuild sessions with a cooldown between them, and it takes
-about twenty minutes.** That is not incidental and it must not be collapsed
+**The run is THREE xcodebuild sessions with a cooldown between each, and it
+takes about forty minutes.** That is not incidental and it must not be collapsed
 back into one. The verb bundle — 31 of the 69 gated cases, and the heaviest —
 cannot follow the latency bundle inside a single session: sharing its process
 it is killed by jetsam at 0 s, and in its own process it is killed at the heavy
@@ -1367,8 +1367,11 @@ not buy it. Running it first inside one session fixes the kill and breaks the
 other half: the latency cases are the most thermally sensitive suite here, and
 behind the verb bundle they measure **1.34-2.16x of baselines they match to
 1.024x when they start cold** — six of them failed a gate with nothing wrong
-with the engine. So each half gets a cold start, and
-`collect_device_bench.py` takes both result bundles.
+with the engine. The gallery is the same story one level down — its volume bake costs +75 MB,
+it is killed behind the latency bundle, and it holds 25 of the 69 gated cases,
+so it cannot be dropped. So every half gets a cold start: verb, then latency
+and parity, then the gallery. `collect_device_bench.py` takes all three result
+bundles.
 
 `CLAY_DEVICE_COOLDOWN` sets the gap (default 900 s). **Do not set it to 0 for a
 run whose numbers you intend to commit.** A warm device does not fail loudly

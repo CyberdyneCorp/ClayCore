@@ -99,10 +99,12 @@ if [ -n "${CLAY_DEVICE_TEAM:-}" ]; then
     team_arg=(DEVELOPMENT_TEAM="$CLAY_DEVICE_TEAM")
 fi
 
-# -- two sessions, each started cold ------------------------------------------
+# -- three sessions, each started cold ----------------------------------------
 #
-# A gate run is TWO xcodebuild sessions rather than one, and the reason is not
-# tidiness. The verb bundle cannot follow the latency bundle inside a session:
+# A gate run is THREE xcodebuild sessions rather than one, and the reason is not
+# tidiness. Every bundle that allocates heavily is killed by jetsam if another
+# one ran ahead of it in the same session — the verb cases and the gallery both,
+# found one after the other. The verb bundle cannot follow the latency bundle inside a session:
 # sharing its process it is killed by jetsam at 0 s, and in its own process it
 # is killed at the heavy tail (mask_extrude, sdf_consolidate, sdf_relax,
 # sdf_move and the four authoring verbs) 21 of its 31 cases in — after 30
@@ -116,16 +118,25 @@ fi
 # match to 1.024x when they run cold. Six of them failed a gate with nothing
 # wrong with the engine.
 #
-# So each half gets a cold start. Verb first because it is the fragile one,
-# then a cooldown, then the rest. The verb cases were baselined in second
-# position and are measured here in a cold one, which can only make them
-# faster: median 1.003x over 62 shape-matched points, worst 1.14x, nothing
-# near the 1.4x tolerance. That is the one deliberate looseness in this
-# arrangement and it is smaller than the run-to-run spread it replaces.
+# The gallery is the same story one level down: its volume bake at cell_size
+# 0.015 costs +75 MB, and behind the latency bundle it is killed too. It holds
+# 25 of the 69 gated cases, so it cannot simply be dropped.
+#
+# So every half gets a cold start: verb, then latency and parity, then the
+# gallery, with a cooldown between each. The verb and gallery cases were
+# baselined later in a single session and are measured cold here, which can
+# only make them faster — for the verb cases, median 1.003x over 62
+# shape-matched points, worst 1.14x, nothing near the 1.4x tolerance. That is
+# the one deliberate looseness in this arrangement, and it is smaller than the
+# run-to-run spread it replaces.
+#
+# THE RUN NOW TAKES ABOUT FORTY MINUTES. That is the price of numbers that
+# mean something on this hardware; it is not a knob to turn down.
 COOLDOWN="${CLAY_DEVICE_COOLDOWN:-900}"
 RESULTS_VERB="${RESULTS%.xcresult}.verb.xcresult"
-RESULTS_REST="${RESULTS%.xcresult}.rest.xcresult"
-rm -rf "$RESULTS_VERB" "$RESULTS_REST"
+RESULTS_CORE="${RESULTS%.xcresult}.core.xcresult"
+RESULTS_GALLERY="${RESULTS%.xcresult}.gallery.xcresult"
+rm -rf "$RESULTS_VERB" "$RESULTS_CORE" "$RESULTS_GALLERY"
 
 run_session() {
     # $1 = result bundle, rest = extra xcodebuild args
@@ -144,33 +155,38 @@ run_session() {
     return "$st"
 }
 
-echo "device-bench: session 1/2 — the verb cases, cold"
-run_session "$RESULTS_VERB" -only-testing:ClayCoreDeviceVerbTests
-status=$?
-if [ "$status" -ne 0 ]; then
-    echo "device-bench: FAILED in session 1 (xcodebuild exit $status)" >&2
-    echo "  result bundle: $RESULTS_VERB" >&2
-    exit "$status"
-fi
+session() {
+    # $1 = label, $2 = result bundle, rest = -only-testing args
+    local label="$1" bundle="$2"; shift 2
+    echo "device-bench: session $label"
+    run_session "$bundle" "$@"
+    local st=$?
+    if [ "$st" -ne 0 ]; then
+        echo "device-bench: FAILED in session $label (xcodebuild exit $st)" >&2
+        echo "  result bundle: $bundle" >&2
+        exit "$st"
+    fi
+}
 
-echo "device-bench: cooling ${COOLDOWN}s before session 2"
-echo "  A warm device does not fail loudly here — it returns numbers that look"
-echo "  like results. Set CLAY_DEVICE_COOLDOWN to change it; do not set it to 0"
-echo "  for a run whose numbers you intend to commit."
-sleep "$COOLDOWN"
+cool() {
+    echo "device-bench: cooling ${COOLDOWN}s before the next session"
+    sleep "$COOLDOWN"
+}
 
-echo "device-bench: session 2/2 — latency, gallery and parity, cold"
-run_session "$RESULTS_REST" -skip-testing:ClayCoreDeviceVerbTests
-status=$?
-if [ "$status" -ne 0 ]; then
-    echo "device-bench: FAILED in session 2 (xcodebuild exit $status)" >&2
-    echo "  result bundle: $RESULTS_REST" >&2
-    exit "$status"
-fi
+session "1/3 — the verb cases, cold" "$RESULTS_VERB" \
+    -only-testing:ClayCoreDeviceVerbTests
+cool
+session "2/3 — latency and parity, cold" "$RESULTS_CORE" \
+    -only-testing:ClayCoreDeviceMeasureTests -only-testing:ClayCoreDeviceTests
+cool
+session "3/3 — the gallery, cold" "$RESULTS_GALLERY" \
+    -only-testing:ClayCoreDeviceGalleryTests
 
 JSON="${CLAY_DEVICE_JSON:-$ROOT/build/device/device-bench.json}"
-python3 "$ROOT/tools/collect_device_bench.py" "$RESULTS_VERB" "$RESULTS_REST" "$JSON"
+python3 "$ROOT/tools/collect_device_bench.py" \
+    "$RESULTS_VERB" "$RESULTS_CORE" "$RESULTS_GALLERY" "$JSON"
 
 echo "device-bench: OK"
 echo "  result bundles: $RESULTS_VERB"
-echo "                  $RESULTS_REST"
+echo "                  $RESULTS_CORE"
+echo "                  $RESULTS_GALLERY"
