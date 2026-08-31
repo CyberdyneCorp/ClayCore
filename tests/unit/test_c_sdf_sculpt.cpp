@@ -479,3 +479,187 @@ TEST_CASE("c abi: the delta refuses a spent transaction rather than dangling") {
     CHECK(clay_sdf_smooth_preview_delta_info(nullptr, &info) == CLAY_ERROR_INVALID_ARGUMENT);
     clay_sdf_smooth_destroy(tx);
 }
+
+// -- the preview as ordinary scene content (issue #388) ----------------------
+//
+// SdfMoveTransaction::preview_layer() is what the spec names as the way a host
+// previews a drag, and it was C++-only. A C host had to write each resolved
+// grab onto the layer with clay_layer_add_deformer, sample, and then UNDO every
+// one inside the same segment — two document mutations and a full undo
+// round-trip per pointer event, to draw something the transaction was already
+// holding.
+
+TEST_CASE("c abi: a Move transaction previews as an ordinary document") {
+    CDoc d;
+    const clay_layer_id layer = blended_form(d.doc);
+    const std::vector<uint8_t> before = saved(d.doc);
+
+    // Where the surface sits above the drag's centre, in the real document.
+    auto surface_y = [](const clay_document* doc, float x) {
+        float last = 1.0f;
+        for (float y = 1.6f; y > -1.6f; y -= 0.002f) {
+            const float p[3] = {x, y, 0.0f};
+            float dist = 0.0f;
+            REQUIRE(clay_eval_points(doc, nullptr, p, 1, &dist, nullptr) == CLAY_OK);
+            if (dist <= 0.0f && last > 0.0f) return y;
+            last = dist;
+        }
+        return 0.0f;
+    };
+    const float at_rest = surface_y(d.doc, 0.0f);
+
+    const float centre[3] = {0, 0, 0};
+    const clay_move_params params = move_params(0.8f);
+    clay_sdf_move_tx* tx = clay_sdf_move_begin(d.doc, layer, centre, &params, nullptr);
+    REQUIRE(tx != nullptr);
+
+    const float pull[3] = {0.0f, 0.4f, 0.0f};
+    clay_sculpt_dirty dirty = dirty_out();
+    REQUIRE(clay_sdf_move_update(tx, pull, &dirty) == CLAY_OK);
+
+    const clay_document* preview = clay_sdf_move_preview_document(tx);
+    REQUIRE(preview != nullptr);
+
+    // It carries the drag...
+    const float lifted = surface_y(preview, 0.0f);
+    CHECK(lifted > at_rest);
+    // ...it is not the real document...
+    CHECK(preview != d.doc);
+    CHECK(surface_y(d.doc, 0.0f) == doctest::Approx(at_rest));
+    CHECK(saved(d.doc) == before);
+    // ...and it carries the WHOLE scene, not only the dragged layer, which is
+    // what lets a host draw it with the machinery it already has.
+    size_t layers = 0;
+    REQUIRE(clay_document_layer_count(preview, &layers) == CLAY_OK);
+    size_t real_layers = 0;
+    REQUIRE(clay_document_layer_count(d.doc, &real_layers) == CLAY_OK);
+    CHECK(layers == real_layers);
+
+    // An update is visible through the SAME handle: the preview shares the
+    // transaction's content, so there is nothing to refresh.
+    const float further[3] = {0.0f, 0.8f, 0.0f};
+    REQUIRE(clay_sdf_move_update(tx, further, &dirty) == CLAY_OK);
+    CHECK(surface_y(clay_sdf_move_preview_document(tx), 0.0f) > lifted);
+
+    // And what the preview showed is what the commit writes.
+    const float shown = surface_y(clay_sdf_move_preview_document(tx), 0.0f);
+    REQUIRE(clay_sdf_move_commit(tx, nullptr) == CLAY_OK);
+    CHECK(surface_y(d.doc, 0.0f) == doctest::Approx(shown));
+    // Spent: the preview borrowed the transaction's content and the gesture is
+    // over, so it is gone rather than describing a drag the document now has.
+    CHECK(clay_sdf_move_preview_document(tx) == nullptr);
+    clay_sdf_move_destroy(tx);
+}
+
+TEST_CASE("c abi: a cancelled drag's preview goes with it") {
+    CDoc d;
+    const clay_layer_id layer = blended_form(d.doc);
+    const float centre[3] = {0, 0, 0};
+    const clay_move_params params = move_params(0.8f);
+    clay_sdf_move_tx* tx = clay_sdf_move_begin(d.doc, layer, centre, &params, nullptr);
+    REQUIRE(tx != nullptr);
+    const float pull[3] = {0.0f, 0.4f, 0.0f};
+    clay_sculpt_dirty dirty = dirty_out();
+    REQUIRE(clay_sdf_move_update(tx, pull, &dirty) == CLAY_OK);
+    REQUIRE(clay_sdf_move_preview_document(tx) != nullptr);
+
+    clay_sdf_move_cancel(tx);
+    CHECK(clay_sdf_move_preview_document(tx) == nullptr);
+    CHECK(clay_sdf_move_preview_document(nullptr) == nullptr);
+    clay_sdf_move_destroy(tx);
+}
+
+TEST_CASE("c abi: a drag that reaches nothing still previews") {
+    // The honest preview of a drag that moves nothing is the layer unchanged,
+    // not a null handle a host has to branch on every frame.
+    CDoc d;
+    const clay_layer_id layer = blended_form(d.doc);
+    const float far[3] = {40.0f, 0.0f, 0.0f};
+    const clay_move_params params = move_params(0.8f);
+    clay_sdf_move_tx* tx = clay_sdf_move_begin(d.doc, layer, far, &params, nullptr);
+    REQUIRE(tx != nullptr);
+    size_t count = 99;
+    REQUIRE(clay_sdf_move_preview_nodes(tx, nullptr, 0, &count) == CLAY_OK);
+    REQUIRE(count == 0);
+    CHECK(clay_sdf_move_preview_document(tx) != nullptr);
+    clay_sdf_move_destroy(tx);
+}
+
+// -- taking a deformer back (the smaller ask in issue #388) ------------------
+//
+// clay_layer_add_deformer had no inverse, so undo was the only way to remove
+// one — which also spends an undo entry a gesture never meant to make.
+
+TEST_CASE("c abi: a placed deformer can be removed, counted and cleared") {
+    CDoc d;
+    const clay_layer_id layer = blended_form(d.doc);
+    size_t nodes = 0;
+    REQUIRE(clay_layer_node_count(d.doc, layer, &nodes) == CLAY_OK);
+    REQUIRE(nodes >= 1);
+    clay_node_id node = 0;
+    REQUIRE(clay_layer_node_at(d.doc, layer, 0, &node) == CLAY_OK);
+
+    size_t count = 99;
+    REQUIRE(clay_layer_deformer_count(d.doc, layer, node, &count) == CLAY_OK);
+    CHECK(count == 0);
+
+    const float twist[1] = {0.7f};
+    const float grab[8] = {0.0f, 0.0f, 0.0f, 0.8f, 0.0f, 0.3f, 0.0f, 0.0f};
+    REQUIRE(clay_layer_add_deformer(d.doc, layer, node, CLAY_DEFORM_TWIST, twist, 1, 0, 0) ==
+            CLAY_OK);
+    REQUIRE(clay_layer_add_deformer(d.doc, layer, node, CLAY_DEFORM_GRAB, grab, 8, 0, 0) ==
+            CLAY_OK);
+    REQUIRE(clay_layer_deformer_count(d.doc, layer, node, &count) == CLAY_OK);
+    CHECK(count == 2);
+
+    // Removing the FIRST leaves the second, and the chain really is shorter.
+    REQUIRE(clay_layer_remove_deformer(d.doc, layer, node, 0) == CLAY_OK);
+    REQUIRE(clay_layer_deformer_count(d.doc, layer, node, &count) == CLAY_OK);
+    CHECK(count == 1);
+
+    // Past the end is refused rather than ignored: a host that miscounted has
+    // a bug, and a silent success would let it ship.
+    CHECK(clay_layer_remove_deformer(d.doc, layer, node, 1) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_layer_remove_deformer(d.doc, layer, node, 99) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    REQUIRE(clay_layer_clear_deformers(d.doc, layer, node) == CLAY_OK);
+    REQUIRE(clay_layer_deformer_count(d.doc, layer, node, &count) == CLAY_OK);
+    CHECK(count == 0);
+    // Clearing an empty chain is a success that changes nothing.
+    CHECK(clay_layer_clear_deformers(d.doc, layer, node) == CLAY_OK);
+
+    // Unknown layer and node are NOT_FOUND on all three.
+    CHECK(clay_layer_deformer_count(d.doc, 999, node, &count) == CLAY_ERROR_NOT_FOUND);
+    CHECK(clay_layer_remove_deformer(d.doc, 999, node, 0) == CLAY_ERROR_NOT_FOUND);
+    CHECK(clay_layer_clear_deformers(d.doc, layer, 9999) == CLAY_ERROR_NOT_FOUND);
+    CHECK(clay_layer_deformer_count(nullptr, layer, node, &count) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_layer_deformer_count(d.doc, layer, node, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+}
+
+TEST_CASE("c abi: removing a deformer is one undoable edit") {
+    // The point of having an inverse at all: a host revising a warp should not
+    // have to spend an undo entry to take one back, and taking one back is
+    // itself undoable like any other edit.
+    CDoc d;
+    const clay_layer_id layer = blended_form(d.doc);
+    REQUIRE(clay_document_enable_undo(d.doc) == CLAY_OK);
+    size_t nodes = 0;
+    REQUIRE(clay_layer_node_count(d.doc, layer, &nodes) == CLAY_OK);
+    clay_node_id node = 0;
+    REQUIRE(clay_layer_node_at(d.doc, layer, 0, &node) == CLAY_OK);
+
+    const float twist[1] = {0.7f};
+    REQUIRE(clay_layer_add_deformer(d.doc, layer, node, CLAY_DEFORM_TWIST, twist, 1, 0, 0) ==
+            CLAY_OK);
+    const std::vector<uint8_t> with_twist = saved(d.doc);
+    const size_t after_add = undo_depth(d.doc);
+
+    REQUIRE(clay_layer_remove_deformer(d.doc, layer, node, 0) == CLAY_OK);
+    CHECK(undo_depth(d.doc) == after_add + 1);
+    CHECK(saved(d.doc) != with_twist);
+
+    int32_t undone = 0;
+    REQUIRE(clay_document_undo(d.doc, &undone) == CLAY_OK);
+    CHECK(undone == 1);
+    CHECK(saved(d.doc) == with_twist);  // the warp is back, exactly
+}
