@@ -4,7 +4,9 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <tuple>
 
+#include "clay/voxel/grab.h"
 #include "clay/voxel/grid.h"
 #include "kernel_utils.h"
 #include "scene_utils.h"
@@ -1068,4 +1070,178 @@ TEST_CASE("read_region agrees with get, cell for cell") {
     for (int z = lo.z; z <= hi.z; ++z)
         for (int y = lo.y; y <= hi.y; ++y)
             for (int x = lo.x; x <= hi.x; ++x) REQUIRE(fine[i++] == levelled.get({x, y, z}));
+}
+
+// -- a grab as a gesture (issue #393) ----------------------------------------
+//
+// A grab of N cells is not N grabs of one cell. `sculpt_grab` reads the grid,
+// resamples occupancy through the falloff and writes back, so the next call
+// reads its own output — and the displacement is rounded to whole cells AFTER
+// the falloff weights it, so at one cell only the very middle of the region
+// rounds to a cell and inside solid material that changes no occupancy at all.
+// Split finely enough, the whole drag evaporates.
+//
+// `GrabTransaction` keeps the material as it was when the gesture began and
+// resamples from THAT, so every update is measured from the anchor and a run of
+// them ends where a single one to the same total would.
+
+namespace {
+
+VoxelGrid solid_ball(int radius_cells = 8, float cell = 0.04f) {
+    VoxelGrid g(cell);
+    const std::uint8_t c = g.palette_add(cf3(0.7f, 0.5f, 0.3f));
+    for (int x = -radius_cells; x <= radius_cells; ++x)
+        for (int y = -radius_cells; y <= radius_cells; ++y)
+            for (int z = -radius_cells; z <= radius_cells; ++z)
+                if (x * x + y * y + z * z <= radius_cells * radius_cells) g.set({x, y, z}, c);
+    return g;
+}
+
+std::set<std::tuple<int, int, int>> occupied_cells(const VoxelGrid& g) {
+    std::set<std::tuple<int, int, int>> out;
+    for (int x = -14; x <= 14; ++x)
+        for (int y = -14; y <= 24; ++y)
+            for (int z = -14; z <= 14; ++z)
+                if (g.get({x, y, z})) out.insert({x, y, z});
+    return out;
+}
+
+voxel::BrushParams drag_brush(int size) {
+    voxel::BrushParams p;
+    p.size = size;
+    p.falloff = voxel::BrushFalloff::Smooth;
+    p.strength = 1.0f;
+    return p;
+}
+
+// The whole gesture, delivered in `splits` equal emissions, through the
+// transaction. The displacement handed to each update is the TOTAL so far.
+VoxelGrid dragged(int size, int splits, int total_cells = 8, float cell = 0.04f) {
+    VoxelGrid g = solid_ball(8, cell);
+    auto tx = voxel::GrabTransaction::begin(g, {0, 0, 0}, drag_brush(size), true);
+    REQUIRE(tx.has_value());
+    for (int i = 1; i <= splits; ++i) {
+        const float so_far = static_cast<float>(total_cells * i / splits) * cell;
+        tx->update(cf3(0.0f, so_far, 0.0f));
+    }
+    tx->commit();
+    return g;
+}
+
+}  // namespace
+
+TEST_CASE("grab gesture: the split does not change the result") {
+    // The measurement issue #393 filed, at the three footprints it used. Before
+    // the transaction, 24 cells lost the whole drag at four emissions and 32
+    // lost it at eight; here every split lands on the one-emission answer.
+    for (int size : {24, 32, 40}) {
+        CAPTURE(size);
+        const std::set<std::tuple<int, int, int>> once = occupied_cells(dragged(size, 1));
+        for (int splits : {2, 4, 8}) {
+            CAPTURE(splits);
+            CHECK(occupied_cells(dragged(size, splits)) == once);
+        }
+    }
+}
+
+TEST_CASE("grab gesture: a split drag actually moves material") {
+    // The claim above would be satisfied by a transaction that did nothing at
+    // all, so say what the result has to BE: material somewhere it was not, and
+    // the drag's own leading edge advanced.
+    const VoxelGrid rest = solid_ball();
+    const std::set<std::tuple<int, int, int>> before = occupied_cells(rest);
+    for (int splits : {1, 2, 4, 8}) {
+        CAPTURE(splits);
+        const std::set<std::tuple<int, int, int>> after = occupied_cells(dragged(32, splits));
+        std::size_t fresh = 0;
+        for (const auto& c : after)
+            if (!before.count(c)) ++fresh;
+        CHECK(fresh > 100);
+        CHECK(rest.get({0, 9, 0}) == 0);  // above the ball at rest...
+        CHECK(dragged(32, splits).get({0, 9, 0}) != 0);  // ...and material there after
+    }
+}
+
+TEST_CASE("grab gesture: an update is idempotent") {
+    // Repeating the same total must change nothing, which is what lets a host
+    // call this every frame without checking whether the pointer moved.
+    VoxelGrid g = solid_ball();
+    auto tx = voxel::GrabTransaction::begin(g, {0, 0, 0}, drag_brush(32), true);
+    REQUIRE(tx.has_value());
+    tx->update(cf3(0.0f, 0.32f, 0.0f));
+    const std::set<std::tuple<int, int, int>> once = occupied_cells(g);
+    for (int i = 0; i < 3; ++i) tx->update(cf3(0.0f, 0.32f, 0.0f));
+    CHECK(occupied_cells(g) == once);
+    tx->commit();
+}
+
+TEST_CASE("grab gesture: a drag can go back on itself") {
+    // The property a live preview needs and composition cannot have: the
+    // pointer moving back to where it started must put the material back.
+    VoxelGrid g = solid_ball();
+    const std::set<std::tuple<int, int, int>> before = occupied_cells(g);
+    auto tx = voxel::GrabTransaction::begin(g, {0, 0, 0}, drag_brush(32), true);
+    REQUIRE(tx.has_value());
+    for (float cells : {2.0f, 5.0f, 8.0f, 3.0f, 0.0f})
+        tx->update(cf3(0.0f, cells * 0.04f, 0.0f));
+    CHECK(occupied_cells(g) == before);
+    tx->commit();
+}
+
+TEST_CASE("grab gesture: one update equals the stateless call") {
+    // The transaction must not be a second, subtly different grab. A single
+    // update from a fresh gesture has to be cell-for-cell what sculpt_grab
+    // produces, or a host gets one answer from a drag and another from the
+    // call it is meant to be equivalent to.
+    const kernel::cfloat3 pull = cf3(0.0f, 0.32f, 0.0f);
+    VoxelGrid direct = solid_ball();
+    direct.sculpt_grab({0, 0, 0}, drag_brush(32), pull, true);
+
+    VoxelGrid gestured = solid_ball();
+    auto tx = voxel::GrabTransaction::begin(gestured, {0, 0, 0}, drag_brush(32), true);
+    REQUIRE(tx.has_value());
+    tx->update(pull);
+    tx->commit();
+    CHECK(occupied_cells(gestured) == occupied_cells(direct));
+}
+
+TEST_CASE("grab gesture: cancel puts it back exactly") {
+    VoxelGrid g = solid_ball();
+    const std::set<std::tuple<int, int, int>> before = occupied_cells(g);
+    auto tx = voxel::GrabTransaction::begin(g, {0, 0, 0}, drag_brush(32), true);
+    REQUIRE(tx.has_value());
+    tx->update(cf3(0.0f, 0.32f, 0.0f));
+    REQUIRE(occupied_cells(g) != before);
+    tx->cancel();
+    CHECK(occupied_cells(g) == before);
+    CHECK_FALSE(tx->live());
+}
+
+TEST_CASE("grab gesture: the capture grows with the drag, and only outward") {
+    // The capture cannot be sized up front — a drag does not say how far it
+    // will go — so it widens as the displacement reaches. That is only safe
+    // because a grab writes inside its FOOTPRINT and nowhere else, so the ring
+    // it later captures has never been touched. If that stopped being true, the
+    // widened capture would read back the gesture's own output and the split
+    // test above would start failing.
+    VoxelGrid g = solid_ball();
+    auto tx = voxel::GrabTransaction::begin(g, {0, 0, 0}, drag_brush(24), true);
+    REQUIRE(tx.has_value());
+    const int first = tx->captured_pad();
+    tx->update(cf3(0.0f, 0.04f, 0.0f));
+    const int narrow = tx->captured_pad();
+    tx->update(cf3(0.0f, 0.80f, 0.0f));
+    CHECK(tx->captured_pad() > narrow);
+    CHECK(narrow >= first);
+
+    // The written box does NOT grow: it is the footprint, whatever the drag did.
+    CHECK(tx->written_lo().y == -((24 - 1) / 2));
+    CHECK(tx->written_hi().y == 24 / 2);
+    tx->commit();
+}
+
+TEST_CASE("grab gesture: a malformed brush is refused") {
+    VoxelGrid g = solid_ball();
+    voxel::BrushParams p = drag_brush(0);
+    CHECK_FALSE(voxel::GrabTransaction::begin(g, {0, 0, 0}, p, true).has_value());
 }

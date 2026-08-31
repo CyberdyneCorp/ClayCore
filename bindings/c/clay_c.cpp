@@ -69,6 +69,7 @@
 #include "clay/session/history.h"
 #include "clay/session/sdf_sculpt.h"
 #include "clay/version.h"
+#include "clay/voxel/grab.h"
 #include "clay/voxel/grid.h"
 #include "clay/voxel/groups.h"
 #include "clay/voxel/hide.h"
@@ -10071,6 +10072,96 @@ clay_result clay_voxel_sculpt_grab(clay_voxel_grid* grid, const int32_t cell[3],
                    kernel::cf3(displacement[0], displacement[1], displacement[2]),
                    front_only != 0);
     return CLAY_OK;
+}
+
+/* -- a grab as a gesture (issue #393) --------------------------------------- */
+
+// The handle BORROWS the grid, as a voxel sculpt layer's does. It also holds
+// the grid's C handle, because every write has to raise the same undo step and
+// dirty-region bookkeeping a stateless verb does — a drag that skipped that
+// would leave the host's caches serving the pre-drag material.
+struct clay_voxel_grab_tx {
+    clay_voxel_grid* handle = nullptr;
+    voxel::VoxelGrid* grid = nullptr;
+    std::optional<voxel::GrabTransaction> tx;
+};
+
+clay_voxel_grab_tx* clay_voxel_grab_begin(clay_voxel_grid* grid, const int32_t cell[3],
+                                          const clay_brush_params* brush, int32_t front_only) {
+    voxel::VoxelGrid* g = nullptr;
+    voxel::BrushParams p;
+    if (resolve_brush(grid, cell, brush, &g, &p) != CLAY_OK) return nullptr;
+    std::optional<voxel::GrabTransaction> tx =
+        voxel::GrabTransaction::begin(*g, to_coord(cell), p, front_only != 0);
+    if (!tx) return nullptr;
+    auto* handle = new clay_voxel_grab_tx();
+    handle->handle = grid;
+    handle->grid = g;
+    handle->tx = std::move(tx);
+    return handle;
+}
+
+clay_result clay_voxel_grab_update(clay_voxel_grab_tx* tx, const float total_displacement[3]) {
+    if (!tx || !tx->tx || !tx->tx->live())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null or spent grab transaction");
+    if (!total_displacement) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null displacement");
+    VoxelStep step(tx->handle, tx->grid);
+    tx->tx->update(kernel::cf3(total_displacement[0], total_displacement[1],
+                               total_displacement[2]));
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_grab_written_box(const clay_voxel_grab_tx* tx, int32_t out_lo[3],
+                                        int32_t out_hi[3]) {
+    if (!tx || !tx->tx) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null grab transaction");
+    const voxel::VoxelCoord lo = tx->tx->written_lo();
+    const voxel::VoxelCoord hi = tx->tx->written_hi();
+    if (out_lo) {
+        out_lo[0] = lo.x;
+        out_lo[1] = lo.y;
+        out_lo[2] = lo.z;
+    }
+    if (out_hi) {
+        out_hi[0] = hi.x;
+        out_hi[1] = hi.y;
+        out_hi[2] = hi.z;
+    }
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_grab_live(const clay_voxel_grab_tx* tx, int32_t* out_live) {
+    if (!out_live) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_live");
+    *out_live = (tx && tx->tx && tx->tx->live()) ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_grab_commit(clay_voxel_grab_tx* tx) {
+    if (!tx || !tx->tx || !tx->tx->live())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null or spent grab transaction");
+    tx->tx->commit();
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_grab_cancel(clay_voxel_grab_tx* tx) {
+    if (!tx || !tx->tx || !tx->tx->live())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null or spent grab transaction");
+    // Restoring is a write like any other, so it raises a step too: undoing a
+    // cancelled drag must not be a no-op that leaves the previous edit exposed.
+    VoxelStep step(tx->handle, tx->grid);
+    tx->tx->cancel();
+    return CLAY_OK;
+}
+
+void clay_voxel_grab_destroy(clay_voxel_grab_tx* tx) {
+    if (!tx) return;
+    // An uncommitted drag is cancelled rather than left half-applied: a host
+    // that drops the handle on an error path should not find a partial gesture
+    // baked into the grid.
+    if (tx->tx && tx->tx->live()) {
+        VoxelStep step(tx->handle, tx->grid);
+        tx->tx->cancel();
+    }
+    delete tx;
 }
 
 clay_result clay_voxel_sculpt_fill_cavities(clay_voxel_grid* grid, const int32_t cell[3],

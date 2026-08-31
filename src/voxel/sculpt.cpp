@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "clay/parallel/thread_pool.h"
+#include "clay/voxel/grab.h"
 #include "clay/voxel/grid.h"
 
 #include "dither.h"
@@ -559,6 +560,143 @@ void VoxelGrid::sculpt_pinch(VoxelCoord c, const BrushParams& p) {
 // strength for the same reason.
 void VoxelGrid::sculpt_magnify(VoxelCoord c, const BrushParams& p) {
     radial_sculpt(*this, c, p, voxel_size(), false);
+}
+
+// -- a grab as a gesture (issue #393) ----------------------------------------
+//
+// See include/clay/voxel/grab.h for the measurement that made this necessary
+// and for why a stateless call cannot be fixed in place.
+
+namespace {
+
+// A view of a transaction's captured material, so the resample below reads it
+// exactly as `sculpt_grab` reads its own snapshot. The storage lives on the
+// transaction (a plain vector and two corners) rather than in a Region, which
+// is private to this file.
+Region view_of(VoxelCoord lo, VoxelCoord hi, const std::vector<std::uint8_t>& cells) {
+    Region r;
+    r.lo = lo;
+    r.hi = hi;
+    r.nx = hi.x - lo.x + 1;
+    r.ny = hi.y - lo.y + 1;
+    r.nz = hi.z - lo.z + 1;
+    r.cells = cells;
+    return r;
+}
+
+}  // namespace
+
+std::optional<GrabTransaction> GrabTransaction::begin(VoxelGrid& grid, VoxelCoord anchor,
+                                                      const BrushParams& brush,
+                                                      bool front_only) {
+    if (brush.size <= 0) return std::nullopt;  // not a footprint
+    GrabTransaction tx;
+    tx.grid_ = &grid;
+    tx.anchor_ = anchor;
+    tx.brush_ = brush;
+    tx.front_only_ = front_only;
+    const BrushExtent e = brush_extent(brush.size);
+    tx.written_lo_ = {anchor.x + e.lo, anchor.y + e.lo, anchor.z + e.lo};
+    tx.written_hi_ = {anchor.x + e.hi, anchor.y + e.hi, anchor.z + e.hi};
+    // The footprint itself, which is the only thing an update ever writes and
+    // therefore the only thing that must be captured before one runs.
+    tx.pad_ = -1;  // so the first capture(0) is not mistaken for a no-op
+    tx.capture(0);
+    return tx;
+}
+
+void GrabTransaction::capture(int pad) {
+    if (pad <= pad_) return;
+    const BrushExtent e = brush_extent(brush_.size);
+    const VoxelCoord lo{anchor_.x + e.lo - pad, anchor_.y + e.lo - pad, anchor_.z + e.lo - pad};
+    const VoxelCoord hi{anchor_.x + e.hi + pad, anchor_.y + e.hi + pad, anchor_.z + e.hi + pad};
+    const int nx = hi.x - lo.x + 1, ny = hi.y - lo.y + 1, nz = hi.z - lo.z + 1;
+    std::vector<std::uint8_t> grown(static_cast<std::size_t>(nx) * ny * nz);
+    // Read the whole box and then paste what we already hold over its middle.
+    // Only the RING is genuinely new — the middle has been written by earlier
+    // updates and reading it back would be reading this gesture's own output —
+    // and reading the ring alone would be six sub-boxes for a saving nobody can
+    // measure on a growth that happens once or twice a drag.
+    grid_->read_region(lo, hi, grown.data());
+    if (!source_.empty()) {
+        const int sx = source_hi_.x - source_lo_.x + 1;
+        const int sy = source_hi_.y - source_lo_.y + 1;
+        const int sz = source_hi_.z - source_lo_.z + 1;
+        for (int z = 0; z < sz; ++z)
+            for (int y = 0; y < sy; ++y) {
+                const std::size_t from = static_cast<std::size_t>(sx) *
+                                         (static_cast<std::size_t>(y) +
+                                          static_cast<std::size_t>(sy) * static_cast<std::size_t>(z));
+                const std::size_t to =
+                    static_cast<std::size_t>(source_lo_.x - lo.x) +
+                    static_cast<std::size_t>(nx) *
+                        (static_cast<std::size_t>(source_lo_.y - lo.y + y) +
+                         static_cast<std::size_t>(ny) *
+                             static_cast<std::size_t>(source_lo_.z - lo.z + z));
+                std::copy(source_.begin() + static_cast<std::ptrdiff_t>(from),
+                          source_.begin() + static_cast<std::ptrdiff_t>(from + sx),
+                          grown.begin() + static_cast<std::ptrdiff_t>(to));
+            }
+    }
+    source_ = std::move(grown);
+    source_lo_ = lo;
+    source_hi_ = hi;
+    pad_ = pad;
+}
+
+void GrabTransaction::update(kernel::cfloat3 total_displacement) {
+    if (!grid_) return;
+    const float cell = kernel::cmax(grid_->voxel_size(), 1e-6f);
+    // Everything the resample can reach for, so the capture holds it before a
+    // single cell is written.
+    capture(1 + static_cast<int>(kernel::clength(total_displacement) / cell));
+
+    const Region before = view_of(source_lo_, source_hi_, source_);
+    const float radius = static_cast<float>(brush_.size) * 0.5f;
+    const kernel::cfloat3 centre = kernel::cf3(0, 0, 0);  // offsets are relative to the anchor
+    const kernel::cfloat3 cells = total_displacement * (1.0f / cell);
+    const VoxelCoord c = anchor_;
+    const bool front = front_only_;
+
+    // The same walk and the same map `sculpt_grab` uses — deliberately, so the
+    // two agree cell for cell on a single emission and only their SOURCE
+    // differs. If this resample ever drifted from that one, a host would get a
+    // different result from a drag than from the single call it is meant to be
+    // equivalent to.
+    brush_pass(*grid_, c, brush_, cell, [&](VoxelCoord w, WriteSink& out) {
+        const kernel::cfloat3 local = kernel::cf3(static_cast<float>(w.x - c.x),
+                                                  static_cast<float>(w.y - c.y),
+                                                  static_cast<float>(w.z - c.z));
+        const kernel::cfloat3 src = cgrab_point(local, centre, radius, cells,
+                                                front ? 1.0f : 0.0f,
+                                                static_cast<int>(brush_.falloff));
+        const VoxelCoord from{c.x + static_cast<std::int32_t>(cnearest(src.x)),
+                              c.y + static_cast<std::int32_t>(cnearest(src.y)),
+                              c.z + static_cast<std::int32_t>(cnearest(src.z))};
+        out.push_back({w, before.at(from.x, from.y, from.z)});
+    });
+}
+
+void GrabTransaction::commit() {
+    // The grid already holds the last update. Ending the gesture is all there
+    // is to do, and dropping the capture is what makes a committed transaction
+    // stop holding a region's worth of memory.
+    grid_ = nullptr;
+    source_.clear();
+    source_.shrink_to_fit();
+}
+
+void GrabTransaction::cancel() {
+    if (!grid_) return;
+    // Only the footprint was ever written, so only the footprint is restored —
+    // and it is restored from the capture, which is what the material was when
+    // the gesture began.
+    const Region before = view_of(source_lo_, source_hi_, source_);
+    for (int z = written_lo_.z; z <= written_hi_.z; ++z)
+        for (int y = written_lo_.y; y <= written_hi_.y; ++y)
+            for (int x = written_lo_.x; x <= written_hi_.x; ++x)
+                grid_->set({x, y, z}, before.at(x, y, z));
+    commit();
 }
 
 }  // namespace voxel

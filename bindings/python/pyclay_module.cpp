@@ -63,6 +63,7 @@
 #include "clay/scene/curve.h"
 #include "clay/scene/tape.h"
 #include "clay/version.h"
+#include "clay/voxel/grab.h"
 #include "clay/voxel/grid.h"
 #include "clay/voxel/hide.h"
 #include "clay/voxel/mask.h"
@@ -950,6 +951,14 @@ struct PySculptLayerScope {
     PyVoxelGrid grid;
     std::string name;
     std::size_t index = 0;
+};
+
+// A voxel drag as a gesture (issue #393). Holds the grid handle as well as the
+// transaction, because every write has to raise the same undo step a stateless
+// verb does; the transaction itself knows nothing about a document.
+struct PyVoxelGrab {
+    PyVoxelGrid grid;
+    std::optional<voxel::GrabTransaction> tx;
 };
 
 field::MaskGate mask_gate_of(nb::handle mask) {
@@ -7264,6 +7273,76 @@ NB_MODULE(pyclay, m) {
              })
         .def_prop_ro("index", [](const PySculptLayerScope& s) { return s.index; });
 
+    nb::class_<PyVoxelGrab>(
+        m, "VoxelGrab",
+        "A voxel drag as a GESTURE, which grid.grab() returns.\n\n"
+        "`sculpt_grab` does not compose. Each call reads the grid, resamples\n"
+        "occupancy through the falloff and writes back, so the next call reads\n"
+        "its own output — and the displacement is rounded to whole cells AFTER\n"
+        "the falloff weights it, so at one cell only the very middle of the\n"
+        "region rounds to a cell, which inside solid material changes no\n"
+        "occupancy at all. Split a drag finely enough and it evaporates: a\n"
+        "measured 8-cell drag over a 32-cell footprint moved 205 cells in one\n"
+        "emission and 0 in eight.\n\n"
+        "This keeps the material as it was and resamples from THAT, so every\n"
+        "`update` is the TOTAL from the anchor — never an increment — and a run\n"
+        "of them ends where a single one to the same total would. Repeating an\n"
+        "update changes nothing, and a pointer that comes back to where it\n"
+        "started puts the material back.\n\n"
+        "Use it as a context manager: leaving the block commits, and an\n"
+        "exception cancels.")
+        .def("update",
+             [](PyVoxelGrab& g, nb::handle total_displacement) {
+                 if (!g.tx || !g.tx->live())
+                     throw nb::value_error("this grab is already finished");
+                 PyVoxelStep step_(g.grid, g.grid.grid());
+                 g.tx->update(to_f3(total_displacement, "total_displacement"));
+             },
+             "total_displacement"_a,
+             "The drag so far, measured from the anchor. The TOTAL, never an\n"
+             "increment on the last frame.")
+        .def("commit",
+             [](PyVoxelGrab& g) {
+                 if (g.tx && g.tx->live()) g.tx->commit();
+             },
+             "Keep what the last update wrote. The grid already holds it.")
+        .def("cancel",
+             [](PyVoxelGrab& g) {
+                 if (!g.tx || !g.tx->live()) return;
+                 PyVoxelStep step_(g.grid, g.grid.grid());
+                 g.tx->cancel();
+             },
+             "Put the captured material back, exactly as it was at the start.")
+        .def_prop_ro("live", [](const PyVoxelGrab& g) { return g.tx && g.tx->live(); })
+        .def_prop_ro("written_box",
+                     [](const PyVoxelGrab& g) {
+                         if (!g.tx) throw nb::value_error("this grab is finished");
+                         const voxel::VoxelCoord lo = g.tx->written_lo();
+                         const voxel::VoxelCoord hi = g.tx->written_hi();
+                         return nb::make_tuple(nb::make_tuple(lo.x, lo.y, lo.z),
+                                               nb::make_tuple(hi.x, hi.y, hi.z));
+                     },
+                     "The cells the gesture writes: the brush's footprint, fixed\n"
+                     "for the whole gesture whatever the displacement grows to.")
+        .def("__enter__", [](nb::object self) { return self; })
+        .def("__exit__",
+             // Variadic: the three arguments are None on a clean exit.
+             [](PyVoxelGrab& g, nb::args args) {
+                 const bool threw = args.size() >= 1 && !args[0].is_none();
+                 if (g.tx && g.tx->live()) {
+                     PyVoxelStep step_(g.grid, g.grid.grid());
+                     // A block that threw leaves the grid as it was: unlike a
+                     // sculpt layer, a half-finished drag is not something a
+                     // host could make sense of afterwards.
+                     if (threw) {
+                         g.tx->cancel();
+                     } else {
+                         g.tx->commit();
+                     }
+                 }
+                 return false;  // never swallow the exception
+             });
+
     nb::class_<PyVoxelGrid>(m, "VoxelGrid", "Palette-indexed colored voxel grid (chunked, sparse)")
         .def(
             "__init__",
@@ -7647,7 +7726,37 @@ NB_MODULE(pyclay, m) {
             "strength"_a = 1.0f, "seed"_a = 0u, "front_only"_a = false, "mask"_a = nb::none(),
             "Translate occupancy through the same map the SDF grab uses. Binary "
             "occupancy means this resamples nearest-cell, so material moves in "
-            "whole cells rather than flowing.")
+            "whole cells rather than flowing.\n\n"
+            "THIS DOES NOT COMPOSE — reach for `grab()` for a drag. Each call "
+            "reads the grid and writes back, so the next reads its own output, "
+            "and a drag delivered as a stream of small emissions moves less than "
+            "one delivered whole (and often nothing at all).")
+        .def(
+            "grab",
+            [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape,
+               const std::string& falloff, float strength, std::uint32_t seed,
+               bool front_only, nb::handle mask) {
+                PyVoxelGrab out;
+                out.grid = g;
+                out.tx = voxel::GrabTransaction::begin(
+                    g.grid(), to_coord(cell),
+                    make_brush(n, shape, falloff, strength, seed, mask), front_only);
+                if (!out.tx) throw nb::value_error("a grab needs a brush size of at least 1");
+                return out;
+            },
+            "cell"_a, "size"_a, "shape"_a = "sphere", "falloff"_a = "smooth",
+            "strength"_a = 1.0f, "seed"_a = 0u, "front_only"_a = false, "mask"_a = nb::none(),
+            "Begin a DRAG anchored at `cell`, returning a `VoxelGrab`.\n\n"
+            "`sculpt_grab` does not compose, so a drag delivered as a stream of\n"
+            "small emissions moves less than one delivered whole — often nothing\n"
+            "at all. This captures the material as it is now and resamples from\n"
+            "that, so every `update` is the TOTAL from the anchor and a run of\n"
+            "them ends where a single one would.\n\n"
+            "    with grid.grab((0, 0, 0), size=32, front_only=True) as drag:\n"
+            "        for total in trail:\n"
+            "            drag.update(total)\n"
+            "\n"
+            "Leaving the block commits; an exception cancels.")
         .def(
             "sculpt_pinch",
             [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape,

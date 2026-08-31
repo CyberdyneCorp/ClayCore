@@ -40,6 +40,9 @@ CLASS_PREFIX = {
     "Layer": ("clay_layer_",),
     "Mesh": ("clay_mesh_",),
     "VoxelGrid": ("clay_voxel_", "clay_voxel_grid_"),
+    # A voxel drag as a gesture (issue #393). Its members cross as
+    # clay_voxel_grab_update / _commit / _cancel / _written_box.
+    "VoxelGrab": ("clay_voxel_grab_",),
     "MaskField": ("clay_mask_",),
     "GroupField": ("clay_groups_",),
     "MeshSculptor": ("clay_mesh_sculptor_",),
@@ -274,6 +277,7 @@ CLASS_CTOR = {
     "Layer": "clay_add_sdf_layer",
     "Mesh": "clay_document_mesh",
     "VoxelGrid": "clay_voxel_grid_create",
+    "VoxelGrab": "clay_voxel_grab_begin",
     "MaskField": "clay_mask_create",
     # No _create: a group lattice is always the DOCUMENT's, so it is asked for
     # rather than constructed — there is no standalone form, because a group
@@ -374,6 +378,12 @@ EXEMPT = {
                               "C caller brackets the pass itself",
     "SculptLayerScope.index": "the layer index clay_voxel_begin_sculpt_layer "
                               "already returns through its out parameter",
+
+    "VoxelGrid.grab": "a Python-idiom wrapper over clay_voxel_grab_begin, which "
+                      "C reaches directly. It differs only in returning a "
+                      "context manager, and `with` is a Python statement with "
+                      "nothing in C to map to — a C caller brackets the gesture "
+                      "itself with clay_voxel_grab_commit or _cancel",
 
     "MeshQuery.distance": "an inspection surface, not a capability: C imports a "
                           "mesh with clay_item_volume_from_mesh and evaluates "
