@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <functional>
 #include <list>
 #include <map>
 #include <memory>
@@ -5727,6 +5728,20 @@ struct clay_sdf_smooth_tx {
 struct clay_sdf_move_tx {
     clay_document* doc = nullptr;
     std::optional<session::SdfMoveTransaction> tx;
+    // The drag as ordinary scene content (issue #388), built on first request.
+    //
+    // It holds the real document's LAYERS with the dragged one replaced by the
+    // transaction's preview. A scene::Layer carries its edit list by
+    // shared_ptr, so this copy is a vector of handles: every untouched layer
+    // shares its content with the real document, and the dragged one shares the
+    // transaction's own preview content — which is what makes an update visible
+    // through this handle with nothing to keep in step.
+    //
+    // Only the layers. A voxel grid, a mask and a mesh layer are not part of
+    // the field tape (compile_document takes LayerKind::Sdf and nothing else),
+    // so copying them here would charge a drag for content it cannot change,
+    // and by value at that.
+    std::unique_ptr<clay_document> preview;
 };
 
 // Defined further down, beside the other relax entry points; declared here so
@@ -6111,6 +6126,37 @@ clay_result clay_sdf_move_preview_grab(const clay_sdf_move_tx* tx, clay_node_id 
     return CLAY_OK;
 }
 
+const clay_document* clay_sdf_move_preview_document(const clay_sdf_move_tx* tx) {
+    if (!tx || !tx->tx || !tx->tx->live()) return nullptr;
+    // Const in the API and mutable here: the handle is BUILT on first request
+    // rather than at begin, so a host that never previews pays nothing for the
+    // ability to. What the caller gets back is read-only either way.
+    auto* self = const_cast<clay_sdf_move_tx*>(tx);
+    if (!self->preview) {
+        self->preview = std::make_unique<clay_document>();
+        self->preview->doc.document = tx->doc->doc.document;
+    }
+    // Re-point the dragged layer every call rather than once: `preview_layer()`
+    // is a reference into the transaction, and the layer STRUCT (its transform,
+    // its visibility) can differ from the one copied above. The edit list
+    // itself is shared, so this is a handful of words, not a walk.
+    const scene::Layer& live = tx->tx->preview_layer();
+    for (scene::Layer& l : self->preview->doc.document.layers) {
+        if (l.id == tx->tx->layer()) {
+            l = live;
+            break;
+        }
+    }
+    // ...and TOUCH it, which is the part that is easy to miss and silent when
+    // missed. A document caches its compiled tape by a revision the mutating
+    // entry points bump, and none of them ran here: the drag changed the
+    // shared edit list behind the cache's back, so without this the second
+    // frame of a gesture would be served the first frame's tape and the
+    // preview would freeze after one update.
+    self->preview->touch();
+    return self->preview.get();
+}
+
 clay_result clay_sdf_move_commit(clay_sdf_move_tx* tx, clay_sculpt_budget* out_budget) {
     if (!tx) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null transaction");
     if (!tx->tx || !tx->tx->live())
@@ -6121,12 +6167,20 @@ clay_result clay_sdf_move_commit(clay_sdf_move_tx* tx, clay_sculpt_budget* out_b
                     "the layer changed since this drag began, so the preview was discarded "
                     "rather than written over the newer edit");
     settle_commit(tx->doc);
+    // Same as cancel: the preview borrowed the transaction's content, and the
+    // gesture is over. Held past here it would describe a drag the document
+    // now carries for real.
+    tx->preview.reset();
     if (out_budget) return write_budget(tx->tx->budget(), out_budget);
     return CLAY_OK;
 }
 
 void clay_sdf_move_cancel(clay_sdf_move_tx* tx) {
     if (tx && tx->tx) tx->tx->cancel();
+    // The preview borrows the transaction's content, so it dies with the
+    // gesture rather than outliving it holding stale handles. The header says
+    // it is valid until commit, cancel or destroy; this is that.
+    if (tx) tx->preview.reset();
 }
 
 void clay_sdf_move_destroy(clay_sdf_move_tx* tx) { delete tx; }
@@ -6487,6 +6541,61 @@ clay_result clay_layer_add_deformer(clay_document* doc, clay_layer_id layer, cla
     }
     return apply_edit(doc, scene::Command{scene::SetDeformersCmd{layer, node, std::move(chain)}},
                       "node not found");
+}
+
+namespace {
+
+// The three inverses share one lookup and one command; only what they do to the
+// chain differs (issue #388).
+clay_result edit_placed_chain(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                              const std::function<clay_result(std::vector<scene::Deformer>*)>& fn) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l || !l->sdf) return fail(CLAY_ERROR_NOT_FOUND, "no SDF layer with that id");
+    const scene::Node* n = l->sdf->find(node);
+    if (!n) return fail(CLAY_ERROR_NOT_FOUND, "no node with that id in this layer");
+    std::vector<scene::Deformer> chain = n->deformers;
+    const clay_result r = fn(&chain);
+    if (r != CLAY_OK) return r;
+    return apply_edit(doc, scene::Command{scene::SetDeformersCmd{layer, node, std::move(chain)}},
+                      "node not found");
+}
+
+}  // namespace
+
+clay_result clay_layer_deformer_count(const clay_document* doc, clay_layer_id layer,
+                                      clay_node_id node, size_t* out_count) {
+    if (!doc || !out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or count");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l || !l->sdf) return fail(CLAY_ERROR_NOT_FOUND, "no SDF layer with that id");
+    const scene::Node* n = l->sdf->find(node);
+    if (!n) return fail(CLAY_ERROR_NOT_FOUND, "no node with that id in this layer");
+    *out_count = n->deformers.size();
+    return CLAY_OK;
+}
+
+clay_result clay_layer_remove_deformer(clay_document* doc, clay_layer_id layer,
+                                       clay_node_id node, size_t index) {
+    return edit_placed_chain(doc, layer, node, [index](std::vector<scene::Deformer>* chain) {
+        // Refused rather than ignored: a host that miscounted has a bug, and a
+        // silent success would let it ship.
+        if (index >= chain->size())
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "no deformer at index " + std::to_string(index) + "; the chain has " +
+                            std::to_string(chain->size()));
+        chain->erase(chain->begin() + static_cast<std::ptrdiff_t>(index));
+        return CLAY_OK;
+    });
+}
+
+clay_result clay_layer_clear_deformers(clay_document* doc, clay_layer_id layer,
+                                       clay_node_id node) {
+    // An empty chain cleared is a success that changes nothing — there is
+    // nothing wrong with clearing what is already clear.
+    return edit_placed_chain(doc, layer, node, [](std::vector<scene::Deformer>* chain) {
+        chain->clear();
+        return CLAY_OK;
+    });
 }
 
 namespace {

@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 71
+#define CLAY_ABI_MINOR 72
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -5073,6 +5073,37 @@ clay_result clay_sdf_move_preview_grab(const clay_sdf_move_tx* tx, clay_node_id 
                                        float out_displacement[3], int32_t* out_ease,
                                        int32_t* out_front_only);
 
+/* THE PREVIEW AS ORDINARY SCENE CONTENT (ABI 0.72.0, issue #388).
+ *
+ * A borrowed, read-only document carrying the drag: the real document's layers,
+ * with the dragged one replaced by the transaction's preview. It compiles,
+ * evaluates, meshes, picks and refills exactly as any document does, so a host
+ * draws the drag through machinery it already has —
+ * clay_brick_cache_eval_requests, clay_eval_points, clay_document_mesh,
+ * clay_safe_step_scale — with the document itself untouched.
+ *
+ * That is the route the spec designates and the ABI did not offer. Without it a
+ * C host had to write each resolved grab onto the layer with
+ * clay_layer_add_deformer, sample, and then UNDO every one of them inside the
+ * same segment — two document mutations and a full undo round-trip per pointer
+ * event, to draw something the transaction was already holding.
+ *
+ * VALID UNTIL commit, cancel or destroy, and NOT beyond: the handle borrows the
+ * transaction's own preview content, so an update is visible through it with no
+ * refresh and nothing to keep in step. Do not destroy it — it is not yours.
+ * NULL if the transaction is spent.
+ *
+ * IT CARRIES THE SDF LAYERS AND NOT THE OTHER REPRESENTATIONS. A voxel grid, a
+ * mask and a mesh layer are not part of the field tape — only LayerKind::Sdf
+ * layers compile — so nothing that reads the FIELD is affected, and a host that
+ * also draws voxel or mesh content reads it from the real document as it
+ * already does. Copying them here would charge a drag for a grid it cannot
+ * change.
+ *
+ * A drag that reaches NO items still returns a document: it is the layer
+ * unchanged, which is the honest preview of a drag that moves nothing. */
+const clay_document* clay_sdf_move_preview_document(const clay_sdf_move_tx* tx);
+
 /* One deformer chain per affected node, all inside ONE undo step, then the
  * complexity policy inside that same step. The final chains are rebuilt from
  * the chains captured at begin and the current total displacement, so a commit
@@ -5143,6 +5174,24 @@ clay_result clay_layer_lattice_gizmo(clay_document* doc, clay_layer_id layer,
 clay_result clay_layer_add_deformer(clay_document* doc, clay_layer_id layer, clay_node_id node,
                                     int32_t deform, const float* params, size_t param_count,
                                     int32_t ease, int32_t at_front);
+
+/* ...and the inverse, which the ABI had none of (issue #388). A deformer could
+ * only be taken back by UNDOING the command that added it, so any host verb
+ * that adds a warp and then wants to revise it had to go through the history
+ * stack — which also spends an undo entry the gesture never meant to make.
+ *
+ * All three are undoable edits like the add. `clay_layer_remove_deformer`
+ * refuses an index past the end rather than silently doing nothing, because a
+ * host that miscounted should hear about it. `_clear_deformers` on a node with
+ * no deformers succeeds and changes nothing — there is nothing wrong with
+ * clearing an empty chain. `_deformer_count` is the read the other two need to
+ * be usable at all. */
+clay_result clay_layer_deformer_count(const clay_document* doc, clay_layer_id layer,
+                                      clay_node_id node, size_t* out_count);
+clay_result clay_layer_remove_deformer(clay_document* doc, clay_layer_id layer,
+                                       clay_node_id node, size_t index);
+clay_result clay_layer_clear_deformers(clay_document* doc, clay_layer_id layer,
+                                       clay_node_id node);
 
 /* The same, for the two kinds whose payload is not a parameter list — a guide
  * and a cage are not a fixed number of floats, so they cannot go through the
