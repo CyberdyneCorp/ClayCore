@@ -99,7 +99,7 @@ if [ -n "${CLAY_DEVICE_TEAM:-}" ]; then
     team_arg=(DEVELOPMENT_TEAM="$CLAY_DEVICE_TEAM")
 fi
 
-# -- three sessions, each started cold ----------------------------------------
+# -- four sessions, each started cold -----------------------------------------
 #
 # A gate run is THREE xcodebuild sessions rather than one, and the reason is not
 # tidiness. Every bundle that allocates heavily is killed by jetsam if another
@@ -134,9 +134,10 @@ fi
 # mean something on this hardware; it is not a knob to turn down.
 COOLDOWN="${CLAY_DEVICE_COOLDOWN:-900}"
 RESULTS_VERB="${RESULTS%.xcresult}.verb.xcresult"
+RESULTS_VERBH="${RESULTS%.xcresult}.verbheavy.xcresult"
 RESULTS_CORE="${RESULTS%.xcresult}.core.xcresult"
 RESULTS_GALLERY="${RESULTS%.xcresult}.gallery.xcresult"
-rm -rf "$RESULTS_VERB" "$RESULTS_CORE" "$RESULTS_GALLERY"
+rm -rf "$RESULTS_VERB" "$RESULTS_VERBH" "$RESULTS_CORE" "$RESULTS_GALLERY"
 
 run_session() {
     # $1 = result bundle, rest = extra xcodebuild args
@@ -173,20 +174,24 @@ cool() {
     sleep "$COOLDOWN"
 }
 
-session "1/3 — the verb cases, cold" "$RESULTS_VERB" \
+session "1/4 — the light verb cases, cold" "$RESULTS_VERB" \
     -only-testing:ClayCoreDeviceVerbTests
 cool
-session "2/3 — latency and parity, cold" "$RESULTS_CORE" \
+session "2/4 — the heavy verb cases, cold" "$RESULTS_VERBH" \
+    -only-testing:ClayCoreDeviceVerbHeavyTests
+cool
+session "3/4 — latency and parity, cold" "$RESULTS_CORE" \
     -only-testing:ClayCoreDeviceMeasureTests -only-testing:ClayCoreDeviceTests
 cool
-session "3/3 — the gallery, cold" "$RESULTS_GALLERY" \
+session "4/4 — the gallery, cold" "$RESULTS_GALLERY" \
     -only-testing:ClayCoreDeviceGalleryTests
 
 JSON="${CLAY_DEVICE_JSON:-$ROOT/build/device/device-bench.json}"
 python3 "$ROOT/tools/collect_device_bench.py" \
-    "$RESULTS_VERB" "$RESULTS_CORE" "$RESULTS_GALLERY" "$JSON"
+    "$RESULTS_VERB" "$RESULTS_VERBH" "$RESULTS_CORE" "$RESULTS_GALLERY" "$JSON"
 
 echo "device-bench: OK"
 echo "  result bundles: $RESULTS_VERB"
+echo "                  $RESULTS_VERBH"
 echo "                  $RESULTS_CORE"
 echo "                  $RESULTS_GALLERY"

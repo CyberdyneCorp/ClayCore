@@ -198,6 +198,36 @@ targets:
         BUNDLE_LOADER: "$(TEST_HOST)"
         OTHER_LDFLAGS: -lc++
 
+  # The heavy half of the verb cases: mask_extrude through armature_edit.
+  #
+  # Its own bundle because together with the light half it exceeded this iPad's
+  # jetsam limit, and no amount of scheduling fixed that: split into its own
+  # process the whole suite still died at this tail, and split into its own
+  # SESSION it still died there — after 25 minutes of idle and again after 40,
+  # having passed twice at 30. A gate that depends on how long the tablet
+  # rested is a coin flip, so the peak is what got smaller rather than the
+  # schedule. The split is where the kills landed: 21 cases in on one run, 23
+  # on another.
+  ClayCoreDeviceVerbHeavyTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: VerbHeavy
+      - path: Shared
+    dependencies:
+      - target: ClayCoreDeviceHost
+      - framework: ../../dist/claycore.xcframework
+        embed: false
+      - sdk: Metal.framework
+      - sdk: Foundation.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.cyberdyne.claycore.deviceverbheavy
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/ClayCoreDeviceHost.app/ClayCoreDeviceHost"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        OTHER_LDFLAGS: -lc++
+
   ClayCoreDeviceGalleryTests:
     type: bundle.unit-test
     platform: iOS
@@ -226,6 +256,7 @@ schemes:
         ClayCoreDeviceTests: [test]
         ClayCoreDeviceMeasureTests: [test]
         ClayCoreDeviceVerbTests: [test]
+        ClayCoreDeviceVerbHeavyTests: [test]
         ClayCoreDeviceGalleryTests: [test]
     test:
       targets:
@@ -247,5 +278,6 @@ schemes:
         # out, not sufficient: see its note.
         - ClayCoreDeviceMeasureTests
         - ClayCoreDeviceVerbTests
+        - ClayCoreDeviceVerbHeavyTests
         - ClayCoreDeviceGalleryTests
         - ClayCoreDeviceTests
