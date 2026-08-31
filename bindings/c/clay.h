@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 70
+#define CLAY_ABI_MINOR 71
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -3658,6 +3658,85 @@ clay_result clay_voxel_sculpt_magnify(clay_voxel_grid* grid, const int32_t cell[
 clay_result clay_voxel_sculpt_grab(clay_voxel_grid* grid, const int32_t cell[3],
                                    const clay_brush_params* brush, const float displacement[3],
                                    int32_t front_only);
+
+/* -- a grab as a GESTURE --------------------------------------------------- */
+
+/* THE CALL ABOVE DOES NOT COMPOSE, and this is what to use for a drag.
+ *
+ * A grab of N cells is not N grabs of one cell. Each call reads the grid,
+ * resamples occupancy through the falloff and writes back, so the next call
+ * reads its own output — and the displacement is rounded to whole cells AFTER
+ * the falloff weights it, so at one cell only the very middle of the region
+ * rounds to a cell, which inside solid material changes no occupancy at all.
+ * Split finely enough, the whole drag evaporates. Measured on a solid ball 16
+ * cells across, the same total drag of 8 cells split into 1, 2, 4 and 8
+ * emissions, counting cells that ended up somewhere new (issue #393):
+ *
+ *     footprint    1 x 8    2 x 4    4 x 2    8 x 1
+ *     24 cells        59       61        0        0
+ *     32 cells       205      169      190        0
+ *     40 cells       357      376      293      126
+ *
+ * Occupancy is not conserved across the split either — 2109 cells at rest
+ * became 2235, 2298 and 2371 — so composed grabs smear and duplicate rather
+ * than translate.
+ *
+ * That is not a rounding bug to fix inside the call: a stateless verb has no
+ * gesture to be idempotent over. Accumulating past the cell size host-side and
+ * emitting whole cells, which is what the note above suggests, produces exactly
+ * the stream of one-cell grabs that moves nothing.
+ *
+ * So a drag begins a TRANSACTION. It captures the material as it was, and every
+ * update takes the TOTAL displacement from the anchor — never an increment on
+ * the last frame — resampled from that capture. update(1), update(2), update(8)
+ * ends at exactly what a single update(8) produces; repeating an update changes
+ * nothing; and a pointer that comes back to where it started puts the material
+ * back. The same shape clay_sdf_move_begin has on the field side, for the same
+ * reason.
+ *
+ * WHAT IT STILL DOES NOT DO. Occupancy is binary and the resample is
+ * nearest-cell, so a total under half a cell on every axis moves nothing: there
+ * is no sub-cell state for it to move. What changes is that the total is
+ * measured from the ANCHOR, so a slow drag accumulates toward that half cell
+ * instead of rounding to zero on every frame. */
+typedef struct clay_voxel_grab_tx clay_voxel_grab_tx;
+
+/* Begin a drag anchored at `cell`. NULL on a null grid or params, or a brush
+ * size below 1, which is not a footprint. A drag that reaches only empty space
+ * is a valid transaction that changes nothing.
+ *
+ * The grid is BORROWED and must outlive the transaction, exactly as a voxel
+ * sculpt layer's handle is. */
+clay_voxel_grab_tx* clay_voxel_grab_begin(clay_voxel_grid* grid, const int32_t cell[3],
+                                          const clay_brush_params* brush, int32_t front_only);
+
+/* The drag so far, measured from the anchor — the TOTAL, never an increment.
+ * Idempotent: calling it twice with the same displacement leaves the grid
+ * exactly as one call did, so a host may call it every frame without checking
+ * whether the pointer moved. */
+clay_result clay_voxel_grab_update(clay_voxel_grab_tx* tx, const float total_displacement[3]);
+
+/* The box the gesture writes — the brush's footprint, fixed for the whole
+ * gesture whatever the displacement grows to, because a grab writes inside its
+ * own footprint and nowhere else. A host invalidating a region has this from
+ * the first frame and never needs to widen it. Either pointer may be NULL. */
+clay_result clay_voxel_grab_written_box(const clay_voxel_grab_tx* tx, int32_t out_lo[3],
+                                        int32_t out_hi[3]);
+
+/* Whether the gesture is still open — non-zero until it is committed or
+ * cancelled. A host holding a transaction across frames has this rather than
+ * having to remember; a NULL handle reports 0. */
+clay_result clay_voxel_grab_live(const clay_voxel_grab_tx* tx, int32_t* out_live);
+
+/* Keep what the last update wrote. The grid already holds it, so this only ends
+ * the gesture and releases the capture; the handle must still be destroyed. */
+clay_result clay_voxel_grab_commit(clay_voxel_grab_tx* tx);
+/* Put the captured material back, exactly as it was at begin. */
+clay_result clay_voxel_grab_cancel(clay_voxel_grab_tx* tx);
+/* Frees the handle. An uncommitted transaction is CANCELLED first, so a host
+ * that drops one on an error path does not leave a half-finished drag in the
+ * grid. */
+void clay_voxel_grab_destroy(clay_voxel_grab_tx* tx);
 
 /* -- masks ----------------------------------------------------------------- */
 

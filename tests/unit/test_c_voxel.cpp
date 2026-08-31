@@ -1096,3 +1096,151 @@ TEST_CASE("a voxel layer whose grid did not come with the file is not found by i
     CHECK(clay_document_voxel_layer(back, "sculpt", nullptr, &missing) == CLAY_ERROR_NOT_FOUND);
     clay_document_destroy(back);
 }
+
+// -- a grab as a gesture, across the ABI (issue #393) ------------------------
+
+namespace {
+
+// Every cell in a box the drag can reach, so a comparison is over the whole
+// result rather than over a count a translation leaves alone.
+std::vector<std::int32_t> cells_in(const clay_voxel_grid* g, std::int32_t lo,
+                                   std::int32_t hi, std::int32_t hi_y) {
+    std::vector<std::int32_t> out;
+    for (std::int32_t z = lo; z <= hi; ++z)
+        for (std::int32_t y = lo; y <= hi_y; ++y)
+            for (std::int32_t x = lo; x <= hi; ++x) {
+                const std::int32_t cell[3] = {x, y, z};
+                std::int32_t index = 0;
+                REQUIRE(clay_voxel_get(g, cell, &index) == CLAY_OK);
+                out.push_back(index);
+            }
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("c voxel: a drag delivered in pieces lands where one delivered whole does") {
+    // The measurement #393 filed, at the C boundary. Composed sculpt_grab calls
+    // lose the drag; the transaction's updates are the total from the anchor,
+    // so however the pointer delivers it the result is the same.
+    const clay_brush_params verb =
+        brush(24, CLAY_BRUSH_SHAPE_SPHERE, CLAY_BRUSH_FALLOFF_SMOOTH, 1.0f, 0);
+    const float cell_size = 0.04f;
+
+    auto drag = [&](int splits) {
+        CGrid c(cell_size);
+        std::int32_t index = 0;
+        const float colour[3] = {0.8f, 0.4f, 0.2f};
+        REQUIRE(clay_voxel_palette_add(c.grid, colour, &index) == CLAY_OK);
+        const clay_brush_params stamp =
+            brush(17, CLAY_BRUSH_SHAPE_SPHERE, CLAY_BRUSH_FALLOFF_CONSTANT, 1.0f, 0);
+        REQUIRE(clay_voxel_set_brush(c.grid, kOrigin, &stamp, index) == CLAY_OK);
+
+        clay_voxel_grab_tx* tx = clay_voxel_grab_begin(c.grid, kOrigin, &verb, 1);
+        REQUIRE(tx != nullptr);
+        for (int i = 1; i <= splits; ++i) {
+            const float total[3] = {0.0f, static_cast<float>(8 * i / splits) * cell_size, 0.0f};
+            REQUIRE(clay_voxel_grab_update(tx, total) == CLAY_OK);
+        }
+        REQUIRE(clay_voxel_grab_commit(tx) == CLAY_OK);
+        clay_voxel_grab_destroy(tx);
+        return cells_in(c.grid, -14, 14, 24);
+    };
+
+    const std::vector<std::int32_t> once = drag(1);
+    // The fixture's own claim: the drag DID something, or four identical
+    // untouched grids would pass this.
+    CGrid rest(cell_size);
+    std::int32_t index = 0;
+    const float colour[3] = {0.8f, 0.4f, 0.2f};
+    REQUIRE(clay_voxel_palette_add(rest.grid, colour, &index) == CLAY_OK);
+    const clay_brush_params stamp =
+        brush(17, CLAY_BRUSH_SHAPE_SPHERE, CLAY_BRUSH_FALLOFF_CONSTANT, 1.0f, 0);
+    REQUIRE(clay_voxel_set_brush(rest.grid, kOrigin, &stamp, index) == CLAY_OK);
+    REQUIRE(once != cells_in(rest.grid, -14, 14, 24));
+
+    CHECK(drag(2) == once);
+    CHECK(drag(4) == once);
+    CHECK(drag(8) == once);
+}
+
+TEST_CASE("c voxel: a grab transaction commits, cancels and refuses") {
+    const clay_brush_params verb =
+        brush(11, CLAY_BRUSH_SHAPE_SPHERE, CLAY_BRUSH_FALLOFF_SMOOTH, 1.0f, 0);
+    const clay_brush_params stamp =
+        brush(9, CLAY_BRUSH_SHAPE_SPHERE, CLAY_BRUSH_FALLOFF_CONSTANT, 1.0f, 0);
+
+    CGrid c(0.1f);
+    std::int32_t index = 0;
+    const float colour[3] = {0.8f, 0.4f, 0.2f};
+    REQUIRE(clay_voxel_palette_add(c.grid, colour, &index) == CLAY_OK);
+    REQUIRE(clay_voxel_set_brush(c.grid, kOrigin, &stamp, index) == CLAY_OK);
+    const std::vector<std::int32_t> rest = cells_in(c.grid, -12, 12, 12);
+
+    SUBCASE("the written box is the footprint, from the first frame") {
+        clay_voxel_grab_tx* tx = clay_voxel_grab_begin(c.grid, kOrigin, &verb, 0);
+        REQUIRE(tx != nullptr);
+        std::int32_t lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};
+        REQUIRE(clay_voxel_grab_written_box(tx, lo, hi) == CLAY_OK);
+        CHECK(lo[0] == -5);  // size 11: -((11-1)/2) .. 11/2
+        CHECK(hi[0] == 5);
+        const float far[3] = {0.0f, 2.0f, 0.0f};
+        REQUIRE(clay_voxel_grab_update(tx, far) == CLAY_OK);
+        std::int32_t lo2[3] = {0, 0, 0}, hi2[3] = {0, 0, 0};
+        REQUIRE(clay_voxel_grab_written_box(tx, lo2, hi2) == CLAY_OK);
+        CHECK(lo2[1] == lo[1]);  // a long drag does not widen it
+        CHECK(hi2[1] == hi[1]);
+        REQUIRE(clay_voxel_grab_commit(tx) == CLAY_OK);
+        clay_voxel_grab_destroy(tx);
+    }
+
+    SUBCASE("cancel puts the material back") {
+        clay_voxel_grab_tx* tx = clay_voxel_grab_begin(c.grid, kOrigin, &verb, 0);
+        REQUIRE(tx != nullptr);
+        const float pull[3] = {0.0f, 0.4f, 0.0f};
+        REQUIRE(clay_voxel_grab_update(tx, pull) == CLAY_OK);
+        REQUIRE(cells_in(c.grid, -12, 12, 12) != rest);
+        REQUIRE(clay_voxel_grab_cancel(tx) == CLAY_OK);
+        CHECK(cells_in(c.grid, -12, 12, 12) == rest);
+        // ...and it is spent afterwards.
+        CHECK(clay_voxel_grab_update(tx, pull) == CLAY_ERROR_INVALID_ARGUMENT);
+        clay_voxel_grab_destroy(tx);
+    }
+
+    SUBCASE("destroying an uncommitted drag cancels it") {
+        // A host that drops the handle on an error path must not find half a
+        // gesture baked into the grid.
+        clay_voxel_grab_tx* tx = clay_voxel_grab_begin(c.grid, kOrigin, &verb, 0);
+        REQUIRE(tx != nullptr);
+        const float pull[3] = {0.0f, 0.4f, 0.0f};
+        REQUIRE(clay_voxel_grab_update(tx, pull) == CLAY_OK);
+        clay_voxel_grab_destroy(tx);
+        CHECK(cells_in(c.grid, -12, 12, 12) == rest);
+    }
+
+    SUBCASE("malformed calls are refused") {
+        const clay_brush_params tiny =
+            brush(0, CLAY_BRUSH_SHAPE_SPHERE, CLAY_BRUSH_FALLOFF_SMOOTH, 1.0f, 0);
+        CHECK(clay_voxel_grab_begin(c.grid, kOrigin, &tiny, 0) == nullptr);
+        CHECK(clay_voxel_grab_begin(nullptr, kOrigin, &verb, 0) == nullptr);
+        CHECK(clay_voxel_grab_begin(c.grid, kOrigin, nullptr, 0) == nullptr);
+
+        clay_voxel_grab_tx* tx = clay_voxel_grab_begin(c.grid, kOrigin, &verb, 0);
+        REQUIRE(tx != nullptr);
+        CHECK(clay_voxel_grab_update(tx, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_voxel_grab_update(nullptr, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+        std::int32_t live = 0;
+        REQUIRE(clay_voxel_grab_live(tx, &live) == CLAY_OK);
+        CHECK(live == 1);
+        REQUIRE(clay_voxel_grab_commit(tx) == CLAY_OK);
+        REQUIRE(clay_voxel_grab_live(tx, &live) == CLAY_OK);
+        CHECK(live == 0);
+        REQUIRE(clay_voxel_grab_live(nullptr, &live) == CLAY_OK);
+        CHECK(live == 0);  // a null handle is not live, and is not an error
+        CHECK(clay_voxel_grab_live(tx, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+        // Spent: a second commit is a refusal rather than a silent success.
+        CHECK(clay_voxel_grab_commit(tx) == CLAY_ERROR_INVALID_ARGUMENT);
+        clay_voxel_grab_destroy(tx);
+        clay_voxel_grab_destroy(nullptr);  // and null is a no-op
+    }
+}

@@ -2487,6 +2487,85 @@ def test_voxel_grab_moves_material():
     assert g.get((-5, 0, 0)) == 0       # trailing face vacated
 
 
+def _voxel_ball(radius_cells=8, cell=0.04):
+    g = clay.VoxelGrid(voxel_size=cell)
+    i = g.palette_add("#3399ee")
+    for x in range(-radius_cells, radius_cells + 1):
+        for y in range(-radius_cells, radius_cells + 1):
+            for z in range(-radius_cells, radius_cells + 1):
+                if x*x + y*y + z*z <= radius_cells * radius_cells:
+                    g.set((x, y, z), i)
+    return g
+
+
+def _voxel_cells(g, lo=-14, hi=14, hi_y=24):
+    return {(x, y, z)
+            for x in range(lo, hi + 1)
+            for y in range(lo, hi_y + 1)
+            for z in range(lo, hi + 1)
+            if g.get((x, y, z))}
+
+
+@pytest.mark.parametrize("splits", [1, 2, 4, 8])
+def test_a_voxel_drag_lands_the_same_however_it_is_delivered(splits):
+    """Issue #393: a grab of N cells is not N grabs of one cell.
+
+    `sculpt_grab` reads the grid, resamples and writes back, so the next call
+    reads its own output — and the displacement is rounded to whole cells after
+    the falloff weights it, so a finely split drag evaporates. Measured, the
+    same 8-cell drag over a 32-cell footprint moved 205 cells in one emission
+    and 0 in eight. A gesture resamples from what it captured at the start.
+    """
+    cell = 0.04
+    g = _voxel_ball(cell=cell)
+    at_rest = _voxel_cells(g)
+    with g.grab((0, 0, 0), size=32, falloff="smooth", front_only=True) as drag:
+        for i in range(1, splits + 1):
+            drag.update((0.0, (8 * i // splits) * cell, 0.0))
+    moved = _voxel_cells(g)
+    assert moved - at_rest, "the drag has to actually move material"
+
+    once = _voxel_ball(cell=cell)
+    with once.grab((0, 0, 0), size=32, falloff="smooth", front_only=True) as drag:
+        drag.update((0.0, 8 * cell, 0.0))
+    assert moved == _voxel_cells(once)
+
+
+def test_a_voxel_drag_can_go_back_on_itself():
+    """What a live preview needs and composition cannot have."""
+    g = _voxel_ball()
+    before = _voxel_cells(g)
+    with g.grab((0, 0, 0), size=32, falloff="smooth", front_only=True) as drag:
+        for cells in (2, 5, 8, 3, 0):
+            drag.update((0.0, cells * 0.04, 0.0))
+    assert _voxel_cells(g) == before
+
+
+def test_a_voxel_drag_cancels_on_an_exception():
+    g = _voxel_ball()
+    before = _voxel_cells(g)
+    with pytest.raises(RuntimeError):
+        with g.grab((0, 0, 0), size=32, falloff="smooth", front_only=True) as drag:
+            drag.update((0.0, 0.32, 0.0))
+            raise RuntimeError("the host gave up mid-drag")
+    assert _voxel_cells(g) == before
+
+
+def test_a_voxel_drags_written_box_is_the_footprint():
+    g = _voxel_ball()
+    with g.grab((0, 0, 0), size=11) as drag:
+        lo, hi = drag.written_box
+        assert lo == (-5, -5, -5) and hi == (5, 5, 5)
+        drag.update((0.0, 2.0, 0.0))       # a long drag...
+        assert drag.written_box == (lo, hi)  # ...does not widen it
+
+
+def test_a_voxel_grab_refuses_a_brush_that_is_not_a_footprint():
+    g = _voxel_ball()
+    with pytest.raises(ValueError):
+        g.grab((0, 0, 0), size=0)
+
+
 def test_region_deformers_round_trip(tmp_path):
     doc = clay.Document()
     doc.add_sdf_layer("l").add(

@@ -310,6 +310,75 @@ def main():
     R.contact_sheet(tiles, "15_smudge.png", columns=3,
                     caption="untouched, smudged, grabbed — the same displacement")
 
+    # --- a drag is a gesture, not a run of grabs ------------------------------
+    # `sculpt_grab` does not compose. Each call reads the grid, resamples
+    # occupancy through the falloff and writes back, so the next call reads its
+    # own output — and the displacement is rounded to whole cells AFTER the
+    # falloff weights it, so at one cell only the very middle of the region
+    # rounds to a cell, which inside solid material changes no occupancy at all.
+    # Split a drag finely enough and it evaporates (issue #393).
+    def ball(radius=8, cell=0.04):
+        g = clay.VoxelGrid(voxel_size=cell)
+        i = g.palette_add("#7f8a94")
+        for x in range(-radius, radius + 1):
+            for y in range(-radius, radius + 1):
+                for z in range(-radius, radius + 1):
+                    if x * x + y * y + z * z <= radius * radius:
+                        g.set((x, y, z), i)
+        return g
+
+    def moved_cells(g, before):
+        span = range(-14, 25)
+        now = {(x, y, z) for x in range(-14, 15) for y in span for z in range(-14, 15)
+               if g.get((x, y, z))}
+        return len(now - before), len(now)
+
+    CELL, TOTAL = 0.04, 8
+    at_rest = ball()
+    start = {(x, y, z) for x in range(-14, 15) for y in range(-14, 25) for z in range(-14, 15)
+             if at_rest.get((x, y, z))}
+    print("\n  the same 8-cell drag, delivered in pieces:")
+    print(f"    {'':<10}{'composed grabs':>22}{'one gesture':>22}")
+    print(f"    {'split':<10}{'new / occupied':>22}{'new / occupied':>22}")
+    for splits in (1, 2, 4, 8):
+        step = TOTAL // splits
+        stacked = ball()
+        for _ in range(splits):
+            stacked.sculpt_grab((0, 0, 0), 32, displacement=(0.0, step * CELL, 0.0),
+                                falloff="smooth", front_only=True)
+        gestured = ball()
+        with gestured.grab((0, 0, 0), size=32, falloff="smooth", front_only=True) as drag:
+            for i in range(1, splits + 1):
+                drag.update((0.0, step * i * CELL, 0.0))
+        a_new, a_occ = moved_cells(stacked, start)
+        b_new, b_occ = moved_cells(gestured, start)
+        print(f"    {splits:>2} x {step:<5}{a_new:>10} / {a_occ:<9}{b_new:>12} / {b_occ:<9}")
+
+    # The gesture's answer must not depend on the split, and composed grabs must
+    # lose the drag — otherwise this section is measuring nothing.
+    def gesture_result(splits):
+        g = ball()
+        step = TOTAL // splits
+        with g.grab((0, 0, 0), size=32, falloff="smooth", front_only=True) as drag:
+            for i in range(1, splits + 1):
+                drag.update((0.0, step * i * CELL, 0.0))
+        return moved_cells(g, start)
+
+    whole = gesture_result(1)
+    if any(gesture_result(n) != whole for n in (2, 4, 8)):
+        raise SystemExit("a gesture's result changed with how the drag was delivered")
+    if whole[0] == 0:
+        raise SystemExit("the fixture proves nothing — the drag moved no material")
+    fine = ball()
+    for _ in range(8):
+        fine.sculpt_grab((0, 0, 0), 32, displacement=(0.0, CELL, 0.0),
+                         falloff="smooth", front_only=True)
+    if moved_cells(fine, start)[0] != 0:
+        raise SystemExit("the composed path stopped losing the drag; the note above is stale")
+    print("    Composed, the drag evaporates as the pieces get smaller. As a")
+    print("    gesture every update is the TOTAL from the anchor, resampled from")
+    print("    what was captured at the start, so the split cannot matter.")
+
     # --- carve with an alpha -------------------------------------------------
     # A recognisable stamp, so the carve is obviously the alpha's shape.
     n = 16

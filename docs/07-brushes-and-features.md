@@ -1105,13 +1105,44 @@ already changed.
 | `sculpt_magnify` | ...and one step away — the inverse, sharing pinch's walk so the two cannot drift apart |
 | `sculpt_scrape` | Flatten **and** smooth from one snapshot. Calling both in sequence is not the same thing |
 | `sculpt_smudge` | Drag **surface** material along a direction, leaving the interior. Grab moves a lump; smudge smears a skin |
-| `sculpt_grab` | Translate occupancy through the same inverse map the SDF `grab` deformer uses, so both representations mean the same thing. Resampling is nearest-cell and rounds **per axis**, so a displacement under half a cell on every axis moves nothing — a drag fed raw pointer deltas is dead until the host accumulates them past `voxel_size` |
+| `sculpt_grab` | Translate occupancy through the same inverse map the SDF `grab` deformer uses, so both representations mean the same thing. Resampling is nearest-cell and rounds **per axis**, so a displacement under half a cell on every axis moves nothing. **It also does not compose** — for a drag, use `VoxelGrid.grab` / `clay_voxel_grab_begin` (see below) |
 | `sculpt_fill_cavities` | Fill pockets: an empty cell with ≥4 of its 6 face neighbours occupied is inside a cavity. The rule is local, so it fills what is **narrow**, not what is enclosed — a through-hole wider than one cell does not qualify, a one-cell perforation does. Its everyday input is a **dithered soft stamp**, which leaves single-cell holes through its own deposit; closing them cut a test stroke's greedy mesh by 27%. `repair_fill_voids` is the one for sealed voids, and neither substitutes for the other |
 | `sculpt_carve_alpha` | A caller-supplied scalar stamp modulating per-cell strength. **The engine decodes no images** — a host with an alpha has already loaded a PNG |
 | `sculpt_crease` | **Does not exist, deliberately** — DamStandard on a lattice is a recipe rather than a verb. See below |
 | `repair_report` | What a pre-bake check wants to know, without performing the fix |
 | `repair_close_holes` | Seal perforations by the same pocket rule. Only ever adds cells |
 | `repair_fill_voids` | Fill every empty cell the outside cannot reach — enclosure is *decided*, not guessed locally |
+
+**A voxel grab does not compose, and a drag is a gesture.** A grab of N cells is
+not N grabs of one cell. `sculpt_grab` reads the grid, resamples occupancy
+through the falloff and writes back, so the next call reads its own output — and
+the displacement is rounded to whole cells *after* the falloff weights it, so at
+one cell only the very middle of the region rounds to a cell, which inside solid
+material changes no occupancy at all. Measured on a solid ball 16 cells across,
+the same total drag of 8 cells in +y, counting cells that ended up somewhere
+new:
+
+| footprint | 1 × 8 | 2 × 4 | 4 × 2 | 8 × 1 |
+|---|---|---|---|---|
+| 24 cells | 59 | 61 | **0** | **0** |
+| 32 cells | 205 | 169 | 190 | **0** |
+| 40 cells | 357 | 376 | 293 | 126 |
+
+Occupancy is not conserved across the split either (2109 cells at rest became
+2235, 2298 and 2371), so composed grabs smear and duplicate rather than
+translate. Accumulating past the cell size host-side and emitting whole cells —
+the obvious reading of the rounding note — produces exactly the stream of
+one-cell grabs that moves nothing.
+
+`VoxelGrid.grab` and `clay_voxel_grab_begin` are the answer: the gesture
+captures the material as it is, and every `update` takes the **total**
+displacement from the anchor, resampled from that capture. A run of updates ends
+where a single one to the same total would, repeating one changes nothing, and a
+pointer that comes back to where it started puts the material back — the same
+shape `clay_sdf_move_begin` has on the field side. What it does *not* change is
+the half-cell dead zone: occupancy is binary and there is no sub-cell state to
+move. What changes is that the total is measured from the anchor, so a slow drag
+accumulates toward that half cell instead of rounding to zero every frame.
 
 Every verb takes `BrushParams`: `size`, shape (`Cube`/`Sphere`), falloff
 (`Constant`/`Linear`/`Smooth`/`Gaussian`), `strength`, `seed`, and an optional
@@ -1971,7 +2002,7 @@ difference:
 | **Inflate** | `Op::Relief` | `sculpt_inflate` | `MeshBrush::Inflate` | Relief displaces the accumulated surface along its own normal; the voxel verb dilates or erodes occupancy `\|amount\|` times; the mesh verb moves each vertex along **its own** normal — which is exactly what distinguishes it from `Draw`, whose direction is shared per stamp |
 | **Pinch** | `magnify` with negative strength, resolved against the surface by `clay_layer_magnify_surface` | `sculpt_pinch` | `MeshBrush::Pinch` | One signed strength on the SDF and mesh sides rather than two verbs. The voxel pair are separate entry points but share one walk so they cannot drift. Mesh pinch is **tangential** — it gathers within the surface rather than moving it along a normal |
 | **Magnify** | `magnify`, positive, resolved against the surface by `clay_layer_magnify_surface` | `sculpt_magnify` | — (use `Pinch` negative) | Maxon's own documentation calls pinch and magnify inverses, which is why they are one signed parameter here |
-| **Grab** | `Deformer::grab` | `sculpt_grab` | `MeshBrush::Grab` | The voxel verb uses **the same inverse map** as the SDF deformer, deliberately, so both mean the same thing. But voxel resampling is nearest-cell and rounds **per axis**: a drag under half a cell on every axis moves nothing, so raw pointer deltas are dead until a host accumulates them past `voxel_size`. The SDF deformer acts on **one item's own field**, not the assembled surface |
+| **Grab** | `Deformer::grab` | `sculpt_grab`, and `VoxelGrid.grab` for a drag | `MeshBrush::Grab` | The voxel verb uses **the same inverse map** as the SDF deformer, deliberately, so both mean the same thing. But voxel resampling is nearest-cell and rounds **per axis**: a drag under half a cell on every axis moves nothing. Accumulating past `voxel_size` and emitting is **not** the fix — see below. The SDF deformer acts on **one item's own field**, not the assembled surface |
 | **Move** | `brush::move_brush`; `field::move_topological` | — | `MeshBrush::Grab` | `move_brush` drags the **assembled** surface, which no other representation offers, and `move_topological` weights by distance *along the material* so a part close in space but far across the surface does not follow. There is no voxel or mesh Move Topological |
 | **Scrape** | — | `sculpt_scrape` | `MeshBrush::Scrape` | Both are flatten **and** smooth taken from *one* snapshot. Calling the two in sequence is a different result, which is why it is a verb rather than a recipe |
 | **Smudge / Nudge** | — | `sculpt_smudge` | `MeshBrush::Nudge` | `sculpt_smudge` drags **surface** material and leaves the interior — grab moves a lump, smudge smears a skin. `Nudge` slides the region along per-vertex tangent planes, where `Grab` carries it rigidly |
