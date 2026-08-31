@@ -119,6 +119,61 @@ def main():
     if delta.max() > 1e-5:
         raise SystemExit("the deformer's support is not finite")
 
+    # --- on a blended form, one item is not the surface ----------------------
+    # `magnify` is per ITEM and its centre is in that item's LOCAL frame,
+    # exactly as `grab` is. Put one on a picked item of a form that is several
+    # smooth-unioned pieces and it scales that piece and leaves the rest: the
+    # surface gathers on one side of the blend and not the other. Nothing
+    # errors. `Layer.magnify_surface` is the resolver for that, and until it
+    # existed Pinch could not be a surface brush on a field at all (issue #391).
+    def two_balls(per_item=None, surface=None):
+        doc = clay.Document()
+        layer = doc.add_sdf_layer("l")
+        for bx in (-0.45, 0.45):
+            ball = clay.Sphere(0.5).at((bx, 0, 0))
+            if per_item is not None and bx < 0:
+                ball.magnify(**per_item)
+            layer.add(ball, blend=clay.Smooth(0.25), color="#b0784a")
+        if surface is not None:
+            layer.magnify_surface(**surface)
+        return doc
+
+    def top(doc, at_x):
+        ys = np.arange(1.4, -1.4, -0.002, dtype=np.float32)
+        pts = np.stack([np.full_like(ys, at_x), ys, np.zeros_like(ys)], axis=1)
+        inside = np.nonzero(doc.eval(pts) <= 0.0)[0]
+        return float(ys[inside[0]]) if len(inside) else float("nan")
+
+    plain_form = two_balls()
+    picked = two_balls(per_item=dict(center=(0, 0, 0), radius=0.8, strength=0.4))
+    resolved = two_balls(surface=dict(centre=(0, 0, 0), strength=0.4, radius=0.8))
+    base_l, base_r = top(plain_form, -0.45), top(plain_form, 0.45)
+    print("\n  a magnify on one item of a blended form, and the same gesture resolved:")
+    print(f"    {'':<22}{'left':>9}{'right':>9}")
+    print(f"    {'on the left item':<22}{top(picked, -0.45) - base_l:>+9.4f}"
+          f"{top(picked, 0.45) - base_r:>+9.4f}")
+    print(f"    {'magnify_surface':<22}{top(resolved, -0.45) - base_l:>+9.4f}"
+          f"{top(resolved, 0.45) - base_r:>+9.4f}")
+    if abs(top(picked, 0.45) - base_r) > 0.005:
+        raise SystemExit("the fixture proves nothing — the per-item magnify reached both")
+    lifted = (top(resolved, -0.45) - base_l, top(resolved, 0.45) - base_r)
+    if not (lifted[0] > 0.0 and abs(lifted[0] - lifted[1]) < 0.005):
+        raise SystemExit("magnify_surface did not swell the form symmetrically")
+    print("    One item moves; the assembled surface moves as one. Same for Pinch,")
+    print("    which is this with a negative strength.")
+
+    # Head-on down +Z, because what there is to see is the LEFT/RIGHT
+    # asymmetry and the sheet's usual three-quarter camera foreshortens it into
+    # nothing.
+    FRONT, FRONT_TARGET = (0.0, 0.55, 3.1), (0.0, 0.0, 0.0)
+    R.contact_sheet(
+        [R.render_array(plain_form, eye=FRONT, target=FRONT_TARGET, width=250, height=215),
+         R.render_array(picked, eye=FRONT, target=FRONT_TARGET, width=250, height=215),
+         R.render_array(resolved, eye=FRONT, target=FRONT_TARGET, width=250, height=215)],
+        "23_magnify_surface.png", columns=3,
+        caption="the blended form; a magnify on ONE item; the same gesture through "
+                "magnify_surface")
+
     # --- what scaling space costs --------------------------------------------
     print("  scaling space is not distance preserving, and the marcher pays:")
     for strength in (0.0, 0.25, 0.5, 0.8):

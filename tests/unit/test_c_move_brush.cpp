@@ -452,3 +452,177 @@ TEST_CASE("c move: a preview refuses what the move refuses") {
     CHECK(clay_layer_move_surface_preview(doc.doc, layer, centre, displacement, &p, nullptr, 0,
                                           &count) == CLAY_ERROR_INVALID_ARGUMENT);
 }
+
+// -- magnify / pinch on the assembled surface (issue #391) --------------------
+//
+// CLAY_DEFORM_MAGNIFY is per item and local exactly as grab is, and until
+// clay_layer_magnify_surface there was no counterpart to clay_layer_move_surface
+// for it — so Pinch could not be a surface brush on a field from C at all. The
+// ABI note above ("magnify and noise are reachable from C at all") covered the
+// per-item deformer, which is the thing that gets the blend wrong.
+
+namespace {
+
+clay_magnify_params magnify_params(float radius) {
+    clay_magnify_params p;
+    std::memset(&p, 0, sizeof p);
+    p.struct_size = static_cast<uint32_t>(sizeof p);
+    p.radius = radius;
+    return p;
+}
+
+}  // namespace
+
+TEST_CASE("c magnify: a gesture swells the assembled surface, symmetrically") {
+    CDoc base;
+    (void)blended_form(base.doc);
+    const float before_left = top_at(base.doc, -0.45f);
+
+    CDoc c;
+    const clay_layer_id layer = blended_form(c.doc);
+    const float centre[3] = {0, 0, 0};
+    const clay_magnify_params p = magnify_params(0.8f);
+    size_t applied = 0;
+    REQUIRE(clay_layer_magnify_surface(c.doc, layer, centre, 0.4f, &p, &applied) == CLAY_OK);
+    CHECK(applied == 2);  // both items took a share, which is the whole point
+
+    const float left = top_at(c.doc, -0.45f) - before_left;
+    const float right = top_at(c.doc, 0.45f) - before_left;  // symmetric form
+    CHECK(left > 0.0f);
+    CHECK(left == doctest::Approx(right).epsilon(0.1));
+}
+
+TEST_CASE("c magnify: the sign is the difference between Magnify and Pinch") {
+    CDoc base;
+    (void)blended_form(base.doc);
+    const float before = top_at(base.doc, 0.0f);
+    const float centre[3] = {0, 0, 0};
+    const clay_magnify_params p = magnify_params(0.8f);
+
+    CDoc swelled;
+    const clay_layer_id a = blended_form(swelled.doc);
+    REQUIRE(clay_layer_magnify_surface(swelled.doc, a, centre, 0.4f, &p, nullptr) == CLAY_OK);
+    CHECK(top_at(swelled.doc, 0.0f) > before);
+
+    CDoc gathered;
+    const clay_layer_id b = blended_form(gathered.doc);
+    REQUIRE(clay_layer_magnify_surface(gathered.doc, b, centre, -0.4f, &p, nullptr) == CLAY_OK);
+    CHECK(top_at(gathered.doc, 0.0f) < before);
+}
+
+TEST_CASE("c magnify: the whole gesture is one undo step") {
+    CDoc c;
+    const clay_layer_id layer = blended_form(c.doc);
+    REQUIRE(clay_document_enable_undo(c.doc) == CLAY_OK);
+    const float before = top_at(c.doc, 0.0f);
+
+    const float centre[3] = {0, 0, 0};
+    const clay_magnify_params p = magnify_params(0.8f);
+    size_t applied = 0;
+    REQUIRE(clay_layer_magnify_surface(c.doc, layer, centre, 0.4f, &p, &applied) == CLAY_OK);
+    REQUIRE(applied == 2);
+    CHECK(top_at(c.doc, 0.0f) > before);
+
+    int32_t enabled = 0;
+    size_t depth = 0, redo = 0;
+    REQUIRE(clay_document_undo_state(c.doc, &enabled, &depth, &redo) == CLAY_OK);
+    CHECK(depth == 1);  // two items, one gesture, one step
+
+    int32_t undone = 0;
+    REQUIRE(clay_document_undo(c.doc, &undone) == CLAY_OK);
+    CHECK(undone == 1);
+    CHECK(top_at(c.doc, 0.0f) == doctest::Approx(before));
+}
+
+TEST_CASE("c magnify: a live gesture replaces its own last frame") {
+    // A host calls this every frame with a growing strength. Stacking one
+    // deformer per frame would grow the chain without bound and compound the
+    // declared Lipschitz with it.
+    CDoc live;
+    const clay_layer_id layer = blended_form(live.doc);
+    const float centre[3] = {0, 0, 0};
+    const clay_magnify_params p = magnify_params(0.8f);
+    for (float strength : {0.1f, 0.2f, 0.3f, 0.4f})
+        REQUIRE(clay_layer_magnify_surface(live.doc, layer, centre, strength, &p, nullptr) ==
+                CLAY_OK);
+
+    CDoc once;
+    const clay_layer_id other = blended_form(once.doc);
+    REQUIRE(clay_layer_magnify_surface(once.doc, other, centre, 0.4f, &p, nullptr) == CLAY_OK);
+
+    // The same document either way, sampled across the gesture.
+    for (float x = -1.2f; x <= 1.2f; x += 0.1f)
+        CHECK(top_at(live.doc, x) == doctest::Approx(top_at(once.doc, x)));
+}
+
+TEST_CASE("c magnify: a gesture that reaches nothing succeeds and changes nothing") {
+    CDoc c;
+    const clay_layer_id layer = blended_form(c.doc);
+    const float before = top_at(c.doc, 0.0f);
+    const float far[3] = {40.0f, 0, 0};
+    const clay_magnify_params p = magnify_params(0.8f);
+    size_t applied = 99;
+    CHECK(clay_layer_magnify_surface(c.doc, layer, far, 0.4f, &p, &applied) == CLAY_OK);
+    CHECK(applied == 0);
+    CHECK(top_at(c.doc, 0.0f) == doctest::Approx(before));
+}
+
+TEST_CASE("c magnify: bad arguments are refused") {
+    CDoc c;
+    const clay_layer_id layer = blended_form(c.doc);
+    const float centre[3] = {0, 0, 0};
+    const clay_magnify_params p = magnify_params(0.8f);
+
+    CHECK(clay_layer_magnify_surface(nullptr, layer, centre, 0.4f, &p, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_layer_magnify_surface(c.doc, layer, nullptr, 0.4f, &p, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_layer_magnify_surface(c.doc, layer, centre, 0.4f, nullptr, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_layer_magnify_surface(c.doc, 999, centre, 0.4f, &p, nullptr) ==
+          CLAY_ERROR_NOT_FOUND);
+
+    // A strength of zero scales by one: not a gesture, refused rather than
+    // accepted as a silent no-op.
+    CHECK(clay_layer_magnify_surface(c.doc, layer, centre, 0.0f, &p, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+
+    clay_magnify_params bad = magnify_params(0.0f);
+    CHECK(clay_layer_magnify_surface(c.doc, layer, centre, 0.4f, &bad, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+
+    clay_magnify_params stale = magnify_params(0.8f);
+    stale.struct_size = 0;
+    CHECK(clay_layer_magnify_surface(c.doc, layer, centre, 0.4f, &stale, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+}
+
+TEST_CASE("c magnify: previewing names the nodes and touches nothing") {
+    CDoc c;
+    const clay_layer_id layer = blended_form(c.doc);
+    const float before = top_at(c.doc, 0.0f);
+    const float centre[3] = {0, 0, 0};
+    const clay_magnify_params p = magnify_params(0.8f);
+
+    size_t count = 0;
+    REQUIRE(clay_layer_magnify_surface_preview(c.doc, layer, centre, 0.4f, &p, nullptr, 0,
+                                               &count) == CLAY_OK);
+    CHECK(count == 2);
+
+    std::vector<clay_node_id> nodes(count, 0);
+    REQUIRE(clay_layer_magnify_surface_preview(c.doc, layer, centre, 0.4f, &p, nodes.data(),
+                                               nodes.size(), &count) == CLAY_OK);
+    CHECK(count == 2);
+    CHECK(nodes[0] != nodes[1]);
+    CHECK(top_at(c.doc, 0.0f) == doctest::Approx(before));  // pure
+
+    // ...and it refuses what the apply refuses, so a host does not discover a
+    // bad gesture only on commit.
+    CHECK(clay_layer_magnify_surface_preview(c.doc, layer, centre, 0.0f, &p, nullptr, 0,
+                                             &count) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    // Then the apply names the same nodes.
+    size_t applied = 0;
+    REQUIRE(clay_layer_magnify_surface(c.doc, layer, centre, 0.4f, &p, &applied) == CLAY_OK);
+    CHECK(applied == count);
+}

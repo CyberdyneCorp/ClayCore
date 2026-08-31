@@ -305,6 +305,29 @@ Applying the result needs `SetDeformersCmd`, which is new too: the command
 vocabulary could not change a node's deformers at all, so a deformer could only
 be set when its node was created.
 
+**Magnify has the same resolver, and Pinch is it with a negative strength.**
+`magnify` is per item and local for exactly grab's reason, and until 0.68.0 it
+had no counterpart to `move_brush` — so Pinch could not be a surface brush on a
+field at all, and a host offering it had to either scale one picked item of a
+blended form (the failure this whole section exists to prevent) or rebuild the
+resolver itself. `brush::magnify_brush`, `Layer.magnify_surface` and
+`clay_layer_magnify_surface` close that, with `move_surface`'s contract: every
+item the region reaches, mapped into each frame, one undo step and one
+invalidation for the whole gesture, symmetry images handled, and a `_preview`
+counterpart.
+
+It resolves by *less* than a drag does. A drag's displacement is a vector, so
+each symmetry image has to reflect or rotate it; a magnify's strength is a
+dimensionless factor and a reflection of a radial scale is a radial scale of
+equal strength, so the strength crosses every image untouched. And the region a
+host must invalidate is the ball itself with no dilation — outside the radius
+the weight is zero and the point is returned unchanged, for either sign.
+
+`pose` is in this section's title and does **not** have a resolver. It does not
+fit the shape: radial pose carries an axis, a direction that would have to be
+mapped per image, and pose along a line has no finite support at all, so the
+reachability rule both resolvers are built on does not apply to it.
+
 `magnify`'s **centre is its fixed point** — a radial scale about a point on the
 surface bulges the neighbourhood *around* it and leaves the point itself exactly
 where it was. This surprises people (and caught the tests first); see
@@ -1810,8 +1833,8 @@ parity — the mechanism usually differs even where the result matches.
 | Gizmo Bend Arc | `bend_range` | Angle-limited bend, same shape |
 | Gizmo Bend Curve | `bend_curve` | A bend along an arbitrary guide. Implemented as the INVERSE of the swept primitive — the same nearest-point query and transported frames, read from the other end — so the two agree about what a guide is by construction |
 | Gizmo Lattice / FFD | `mesh::Lattice` on a mesh layer, `Deformer::lattice` on an SDF item, `brush::lattice_gizmo` over a whole LAYER | **Both forms, and they are not the same map.** On a mesh it runs FORWARD and is exact — which is what ZBrush and Blender do, because a mesh knows where its vertices are. On an SDF item forward FFD has no closed-form inverse, so the cage is authored AS the inverse: closed-form and portable, but not the exact inverse of the forward map. The two differ by a term proportional to how the basis varies along the displacement — measured at under 1.5% of the drag (`examples/50_sdf_lattice.py`), and SIGNED rather than always-less, so it does not inherit `grab`'s character. Divisions are capped at 4 per axis on the SDF side against 32 on the mesh side, because that one runs per SAMPLE rather than per vertex. A gizmo acts on the whole subtool, so `brush::lattice_gizmo` resolves one world-placed cage into a per-item lattice each carrying the transform into the cage's frame — exact for ROTATED items, which no axis-aligned per-item box could express, and reaching EVERY item because a lattice's displacement outside its box is clamped rather than zero |
-| Pinch | `magnify` (negative), `sculpt_pinch` | One signed strength, not two verbs |
-| Magnify | `magnify` (positive), `sculpt_magnify` | Maxon's own page calls them inverses |
+| Pinch | `magnify` (negative), `clay_layer_magnify_surface`, `sculpt_pinch` | One signed strength, not two verbs |
+| Magnify | `magnify` (positive), `clay_layer_magnify_surface`, `sculpt_magnify` | Maxon's own page calls them inverses |
 | Smooth | `field::relax`, `sculpt_smooth` | Bakes on the SDF side |
 | Flatten | `field::flatten` (two-sided), `sculpt_flatten` | Region required on the SDF side |
 | hPolish, Planar, Trim | `field::flatten` in **cut-only** mode | Planes down without filling, which is what keeps the facet crisp |
@@ -1926,8 +1949,8 @@ difference:
 | **Smooth** | `field::relax` | `VoxelGrid::sculpt_smooth` | `MeshBrush::Smooth` | SDF **bakes and steepens**; voxel is a majority filter over the 26-neighbourhood; mesh is a one-ring Laplacian weighted by falloff. Only the SDF version has a cost that accumulates across passes |
 | **Flatten** | `field::flatten` — `TwoSided` / `CutOnly` / `FillOnly` | `sculpt_flatten` — two-sided only | `MeshBrush::Flatten` — the same three modes | Cut-only *is* hPolish, and the voxel side does not have it. The SDF version **requires a region**; the brush versions take the plane from the stamp |
 | **Inflate** | `Op::Relief` | `sculpt_inflate` | `MeshBrush::Inflate` | Relief displaces the accumulated surface along its own normal; the voxel verb dilates or erodes occupancy `\|amount\|` times; the mesh verb moves each vertex along **its own** normal — which is exactly what distinguishes it from `Draw`, whose direction is shared per stamp |
-| **Pinch** | `magnify` with negative strength | `sculpt_pinch` | `MeshBrush::Pinch` | One signed strength on the SDF and mesh sides rather than two verbs. The voxel pair are separate entry points but share one walk so they cannot drift. Mesh pinch is **tangential** — it gathers within the surface rather than moving it along a normal |
-| **Magnify** | `magnify`, positive | `sculpt_magnify` | — (use `Pinch` negative) | Maxon's own documentation calls pinch and magnify inverses, which is why they are one signed parameter here |
+| **Pinch** | `magnify` with negative strength, resolved against the surface by `clay_layer_magnify_surface` | `sculpt_pinch` | `MeshBrush::Pinch` | One signed strength on the SDF and mesh sides rather than two verbs. The voxel pair are separate entry points but share one walk so they cannot drift. Mesh pinch is **tangential** — it gathers within the surface rather than moving it along a normal |
+| **Magnify** | `magnify`, positive, resolved against the surface by `clay_layer_magnify_surface` | `sculpt_magnify` | — (use `Pinch` negative) | Maxon's own documentation calls pinch and magnify inverses, which is why they are one signed parameter here |
 | **Grab** | `Deformer::grab` | `sculpt_grab` | `MeshBrush::Grab` | The voxel verb uses **the same inverse map** as the SDF deformer, deliberately, so both mean the same thing. But voxel resampling is nearest-cell and rounds **per axis**: a drag under half a cell on every axis moves nothing, so raw pointer deltas are dead until a host accumulates them past `voxel_size`. The SDF deformer acts on **one item's own field**, not the assembled surface |
 | **Move** | `brush::move_brush`; `field::move_topological` | — | `MeshBrush::Grab` | `move_brush` drags the **assembled** surface, which no other representation offers, and `move_topological` weights by distance *along the material* so a part close in space but far across the surface does not follow. There is no voxel or mesh Move Topological |
 | **Scrape** | — | `sculpt_scrape` | `MeshBrush::Scrape` | Both are flatten **and** smooth taken from *one* snapshot. Calling the two in sequence is a different result, which is why it is a verb rather than a recipe |

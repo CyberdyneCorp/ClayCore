@@ -206,46 +206,53 @@ void collect(const scene::SdfContent& content, const scene::Layer& layer,
 
 // -- ordering -------------------------------------------------------------------
 
-// A STRICT TOTAL ORDER over a grab's values — centre, then displacement —
-// descending. Never by which image produced the grab: the +x drag's "self"
-// image is the -x drag's "reflection", and once the item is not itself
-// plane-symmetric the two orders are two different fields (325 samples apart
-// on an off-centre straddler). The displacement is in the key because a drag
-// centred ON the plane gives both images one centre and opposite pulls, and a
-// centre-only key left that order gesture-dependent (1,365 samples apart).
-// Bitwise-equal values compare equal and keep their insertion order, +0/-0
-// included: the kernel cannot see the sign of a zero, so two such grabs are
-// one deformation whichever comes first.
-auto grab_key(const scene::Deformer& d) {
-    return std::make_tuple(d.k, d.a, d.b, d.ext[0], d.ext[1], d.ext[2]);
-}
-
-void order_by_value(std::vector<scene::Deformer>* grabs) {
-    // One grab needs no order, and stable_sort on a non-trivially-copyable
-    // element takes a temporary buffer whatever the count: on the live frame
-    // that was one allocation per item for nothing (measured 28 ns an item).
-    if (grabs->size() < 2) return;
-    std::stable_sort(grabs->begin(), grabs->end(),
-                     [](const scene::Deformer& x, const scene::Deformer& y) {
-                         return grab_key(x) > grab_key(y);
-                     });
-}
-
-// Is this chain entry a grab of the gesture `warp` continues — the same centre
-// and radius as one of the gesture's images on this item, one frame earlier?
-// Matched against every image the item can see, not only the ones reaching it
-// this frame (see MoveWarp::gesture); `deformers` is a subset of `gesture`
-// when the resolver built the warp, and the whole identity when a caller did.
-bool continues_drag(const scene::Deformer& lead, const MoveWarp& warp) {
-    if (lead.type != kernel::cdeform_grab) return false;
+// Is this chain entry a deformer of the gesture `warp` continues — the same
+// KIND, centre and radius as one of the gesture's images on this item, one
+// frame earlier? Matched against every image the item can see, not only the
+// ones reaching it this frame (see MoveWarp::gesture); `deformers` is a subset
+// of `gesture` when the resolver built the warp, and the whole identity when a
+// caller did.
+//
+// The KIND is part of the match rather than fixed at grab, because a magnify
+// gesture (brush/magnify.h) continues itself by the same rule and a pinch must
+// not replace a drag's leading grab that happens to share its ball.
+bool continues_gesture(const scene::Deformer& lead, const MoveWarp& warp) {
     const auto same_identity = [&](const scene::Deformer& f) {
-        return lead.k == f.k && lead.a == f.a && lead.b == f.b && lead.c == f.c;
+        return lead.type == f.type && lead.k == f.k && lead.a == f.a && lead.b == f.b &&
+               lead.c == f.c;
     };
     return std::any_of(warp.gesture.begin(), warp.gesture.end(), same_identity) ||
            std::any_of(warp.deformers.begin(), warp.deformers.end(), same_identity);
 }
 
 }  // namespace
+
+// A STRICT TOTAL ORDER over a gesture's deformers on one item — centre, then
+// payload — descending. Never by which image produced them: the +x drag's
+// "self" image is the -x drag's "reflection", and once the item is not itself
+// plane-symmetric the two orders are two different fields (325 samples apart on
+// an off-centre straddler). The payload is in the key because a drag centred ON
+// the plane gives both images one centre and opposite pulls, and a centre-only
+// key left that order gesture-dependent (1,365 samples apart). Bitwise-equal
+// values compare equal and keep their insertion order, +0/-0 included: the
+// kernel cannot see the sign of a zero, so two such deformers are one
+// deformation whichever comes first.
+//
+// Shared with the magnify resolver, which needs the same determinism for the
+// same reason and whose payload sits in the same `ext` slots.
+void order_by_value(std::vector<scene::Deformer>* deformers) {
+    // One deformer needs no order, and stable_sort on a non-trivially-copyable
+    // element takes a temporary buffer whatever the count: on the live frame
+    // that was one allocation per item for nothing (measured 28 ns an item).
+    if (deformers->size() < 2) return;
+    const auto key = [](const scene::Deformer& d) {
+        return std::make_tuple(d.k, d.a, d.b, d.ext[0], d.ext[1], d.ext[2]);
+    };
+    std::stable_sort(deformers->begin(), deformers->end(),
+                     [&key](const scene::Deformer& x, const scene::Deformer& y) {
+                         return key(x) > key(y);
+                     });
+}
 
 std::vector<DragImage> drag_images(const scene::Layer& layer, cfloat3 world_centre,
                                    cfloat3 world_displacement) {
@@ -351,7 +358,7 @@ std::vector<scene::Deformer> moved_chain(const std::vector<scene::Deformer>& exi
     // Stopping at the first entry that does not match is what keeps a
     // different gesture's grab, and any other deformer, in place.
     std::size_t skip = 0;
-    while (skip < existing.size() && continues_drag(existing[skip], warp)) ++skip;
+    while (skip < existing.size() && continues_gesture(existing[skip], warp)) ++skip;
     chain.insert(chain.end(), existing.begin() + static_cast<std::ptrdiff_t>(skip),
                  existing.end());
     return chain;

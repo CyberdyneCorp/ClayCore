@@ -21,6 +21,7 @@
 #include "clay/brush/gate_bake.h"
 #include "clay/brush/lattice_gizmo.h"
 #include "clay/brush/mask_extrude.h"
+#include "clay/brush/magnify.h"
 #include "clay/brush/move.h"
 #include "clay/brush/procedural_mask.h"
 #include "clay/brush/preset.h"
@@ -484,6 +485,8 @@ constexpr std::size_t kGizmoCageOriginal =
     offsetof(clay_gizmo_cage, nz) + sizeof(std::int32_t);
 constexpr std::size_t kMoveParamsOriginal =
     offsetof(clay_move_params, front_only) + sizeof(std::int32_t);
+constexpr std::size_t kMagnifyParamsOriginal =
+    offsetof(clay_magnify_params, ease) + sizeof(std::int32_t);
 constexpr std::size_t kImportBudgetOriginal =
     offsetof(clay_import_budget, max_triangles) + sizeof(std::uint64_t);
 constexpr std::size_t kMeshLayerDescOriginal =
@@ -6127,6 +6130,90 @@ void clay_sdf_move_cancel(clay_sdf_move_tx* tx) {
 
 void clay_sdf_move_destroy(clay_sdf_move_tx* tx) { delete tx; }
 
+namespace {
+
+// The half of a SURFACE GESTURE that is the same whether it drags, swells or
+// gathers: what it invalidates beyond its own reach, what it can state about
+// the frontier, and the one undo group and one invalidation that make it a
+// gesture rather than a run of edits.
+//
+// `reach` arrives holding the gesture's own boxes -- one per image the layer's
+// symmetry makes of it -- because only the caller knows how far its own
+// deformation carries. A drag dilates by its displacement; a magnify does not,
+// its weight being zero outside the radius for either sign of the strength.
+// Everything after that is common, and it is a hundred lines of it, so a second
+// gesture that copied it would be a second place to fix #360 and #363.
+clay_result apply_surface_gesture(clay_document* doc, clay_layer_id layer,
+                                  const scene::Layer& l,
+                                  const std::vector<brush::MoveWarp>& warps,
+                                  std::vector<math::Aabb> reach, size_t* out_applied) {
+    const scene::Layer* lp = &l;
+    // ... IN ONE PLACEMENT. The ball above is stated in the dragged layer's
+    // frame, and an instanced edit list is placed by every layer that shares
+    // it: the same nodes move under every one of those transforms, so the
+    // field changes in regions the ball does not contain and nothing else
+    // here would dirty them. Left out, the seeds there were advanced to the
+    // new revision while still clean and handed back as the whole answer --
+    // measured 0.4 world units stale, the whole displacement, in a second
+    // placement four units away.
+    //
+    // Widened by each sharer's WHOLE influence bound rather than by the ball
+    // mapped through its transform: mirror and radial place one ball in
+    // several spots and layer_influence_bound already accounts for all of
+    // them. Conservative, and only a shared edit list pays it -- the common
+    // layer shares with nobody and the loop finds nothing. This is the same
+    // union node_command_bound takes for the per-command path, which is why
+    // every other edit route was already right.
+    for (const scene::Layer& other : doc->doc.document.layers) {
+        if (&other == lp || other.sdf != lp->sdf) continue;
+        reach.push_back(scene::layer_influence_bound(other));
+    }
+
+    // What the drag can state about HISTORY, beside what the ball states about
+    // space (#360): every command it issues is a SetDeformersCmd -- a parameter
+    // edit -- so when the gates hold and every warp node resolves to a root
+    // ordinal, the gesture may state the earliest of those ordinals as its
+    // frontier and the seeds it dirties keep their prefix half. Stated here
+    // rather than derived per command because the gesture-grained invalidation
+    // below sees no commands; left unstated, the legacy drop would destroy the
+    // prefix seeds every frame and the frontier path would never resume.
+    DragFrontier frontier;
+    drag_frontier(doc, *lp, warps, &frontier);
+    const bool states_frontier = frontier.usable && frontier.all_resolved;
+
+    // The pre-drag seeds (#360), recorded before the applies dirty anything:
+    // once a seed is dirty its stored value no longer describes the document,
+    // and a prefix can only be sliced out of a value that does. Skipped when
+    // the gesture cannot state its frontier -- the drop below would only
+    // destroy what this pass recorded.
+    if (states_frontier) prepare_frontier_seeds(doc, frontier);
+
+    // One group for the whole drag: it is one gesture, and undoing it item by
+    // item would be the implementation showing through. One invalidation too,
+    // for the same reason and at the same grain (#358).
+    GestureRegion region{doc, std::move(reach),
+                         states_frontier ? frontier.min_ordinal
+                                         : clay_document::kFrontierDrop};
+    if (doc->undo) doc->undo->begin_group();
+    std::size_t applied = 0;
+    for (const brush::MoveWarp& w : warps) {
+        const scene::Node* n = lp->sdf->find(w.node);
+        if (!n) continue;
+        scene::SetDeformersCmd cmd{layer, w.node, brush::moved_chain(*n, w)};
+        const clay_result r = apply_edit_in_gesture(doc, scene::Command{cmd}, "node not found");
+        if (r != CLAY_OK) {
+            if (doc->undo) doc->undo->end_group();
+            return r;
+        }
+        ++applied;
+    }
+    if (doc->undo) doc->undo->end_group();
+    if (out_applied) *out_applied = applied;
+    return CLAY_OK;
+}
+
+}  // namespace
+
 clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
                                     const float centre[3], const float displacement[3],
                                     const clay_move_params* params, size_t* out_applied) {
@@ -6175,68 +6262,96 @@ clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
                             kernel::cf3(displacement[0], displacement[1], displacement[2])))
         reach.push_back(math::Aabb{image.centre, image.centre}.dilated(radius + pull));
 
-    // ... IN ONE PLACEMENT. The ball above is stated in the dragged layer's
-    // frame, and an instanced edit list is placed by every layer that shares
-    // it: the same nodes move under every one of those transforms, so the
-    // field changes in regions the ball does not contain and nothing else
-    // here would dirty them. Left out, the seeds there were advanced to the
-    // new revision while still clean and handed back as the whole answer --
-    // measured 0.4 world units stale, the whole displacement, in a second
-    // placement four units away.
-    //
-    // Widened by each sharer's WHOLE influence bound rather than by the ball
-    // mapped through its transform: mirror and radial place one ball in
-    // several spots and layer_influence_bound already accounts for all of
-    // them. Conservative, and only a shared edit list pays it -- the common
-    // layer shares with nobody and the loop finds nothing. This is the same
-    // union node_command_bound takes for the per-command path, which is why
-    // every other edit route was already right.
-    for (const scene::Layer& other : doc->doc.document.layers) {
-        if (&other == l || other.sdf != l->sdf) continue;
-        reach.push_back(scene::layer_influence_bound(other));
-    }
+    return apply_surface_gesture(doc, layer, *l, warps, std::move(reach), out_applied);
+}
 
-    // What the drag can state about HISTORY, beside what the ball states about
-    // space (#360): every command it issues is a SetDeformersCmd -- a parameter
-    // edit -- so when the gates hold and every warp node resolves to a root
-    // ordinal, the gesture may state the earliest of those ordinals as its
-    // frontier and the seeds it dirties keep their prefix half. Stated here
-    // rather than derived per command because the gesture-grained invalidation
-    // below sees no commands; left unstated, the legacy drop would destroy the
-    // prefix seeds every frame and the frontier path would never resume.
-    DragFrontier frontier;
-    drag_frontier(doc, *l, warps, &frontier);
-    const bool states_frontier = frontier.usable && frontier.all_resolved;
+namespace {
 
-    // The pre-drag seeds (#360), recorded before the applies dirty anything:
-    // once a seed is dirty its stored value no longer describes the document,
-    // and a prefix can only be sliced out of a value that does. Skipped when
-    // the gesture cannot state its frontier -- the drop below would only
-    // destroy what this pass recorded.
-    if (states_frontier) prepare_frontier_seeds(doc, frontier);
+clay_result resolve_magnify(const clay_document* doc, clay_layer_id layer, const float centre[3],
+                            float strength, const clay_magnify_params* params,
+                            const scene::Layer** out_layer,
+                            std::vector<brush::MoveWarp>* out_warps,
+                            float* out_radius = nullptr) {
+    if (!doc || !centre) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or centre");
+    if (!params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null magnify parameters");
+    clay_magnify_params p;
+    clay_result r = read_desc(params, kMagnifyParamsOriginal, &p);
+    if (r != CLAY_OK) return r;
+    if (!(p.radius > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "radius must be > 0");
+    // Refused rather than accepted as a no-op, for the reason a drag of zero
+    // is: a strength of zero scales by one, so it is not a gesture, and a host
+    // that reached here by accident should hear about it at the boundary.
+    if (!(strength != 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "strength must be non-zero; positive swells, negative gathers");
+    if ((r = check_ease(p.ease)) != CLAY_OK) return r;
 
-    // One group for the whole drag: it is one gesture, and undoing it item by
-    // item would be the implementation showing through. One invalidation too,
-    // for the same reason and at the same grain (#358).
-    GestureRegion region{doc, std::move(reach),
-                         states_frontier ? frontier.min_ordinal
-                                         : clay_document::kFrontierDrop};
-    if (doc->undo) doc->undo->begin_group();
-    std::size_t applied = 0;
-    for (const brush::MoveWarp& w : warps) {
-        const scene::Node* n = l->sdf->find(w.node);
-        if (!n) continue;
-        scene::SetDeformersCmd cmd{layer, w.node, brush::moved_chain(*n, w)};
-        r = apply_edit_in_gesture(doc, scene::Command{cmd}, "node not found");
-        if (r != CLAY_OK) {
-            if (doc->undo) doc->undo->end_group();
-            return r;
-        }
-        ++applied;
-    }
-    if (doc->undo) doc->undo->end_group();
-    if (out_applied) *out_applied = applied;
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "no layer with id " + std::to_string(layer));
+    if (l->kind != scene::LayerKind::Sdf || !l->sdf)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "this layer holds no SDF content to magnify");
+
+    brush::MagnifySettings settings;
+    settings.radius = p.radius;
+    settings.ease = static_cast<std::uint8_t>(p.ease);
+
+    *out_layer = l;
+    if (out_radius) *out_radius = p.radius;
+    *out_warps = brush::magnify_brush(*l, kernel::cf3(centre[0], centre[1], centre[2]), strength,
+                                      settings);
     return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_layer_magnify_surface_preview(const clay_document* doc, clay_layer_id layer,
+                                               const float centre[3], float strength,
+                                               const clay_magnify_params* params,
+                                               clay_node_id* out_nodes, size_t capacity,
+                                               size_t* out_count) {
+    if (!out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_count");
+    const scene::Layer* l = nullptr;
+    std::vector<brush::MoveWarp> warps;
+    clay_result r = resolve_magnify(doc, layer, centre, strength, params, &l, &warps);
+    if (r != CLAY_OK) return r;
+    *out_count = warps.size();
+    if (!out_nodes) return CLAY_OK;  // size query
+    for (std::size_t i = 0; i < warps.size() && i < capacity; ++i)
+        out_nodes[i] = warps[i].node;
+    return CLAY_OK;
+}
+
+clay_result clay_layer_magnify_surface(clay_document* doc, clay_layer_id layer,
+                                       const float centre[3], float strength,
+                                       const clay_magnify_params* params, size_t* out_applied) {
+    const scene::Layer* l = nullptr;
+    std::vector<brush::MoveWarp> warps;
+    float radius = 0.0f;
+    clay_result r = resolve_magnify(doc, layer, centre, strength, params, &l, &warps, &radius);
+    if (r != CLAY_OK) return r;
+
+    // WHAT THIS REACHES, and it is the ball with NO dilation — where a drag has
+    // to add its displacement as margin.
+    //
+    // Outside `radius` the region weight is zero and cmagnify_point returns the
+    // point unchanged, so a sample there evaluates the same nodes at the same
+    // place and the field cannot have moved. A PINCH samples from outside the
+    // ball, its scale factor exceeding one, but only ever at points inside it,
+    // and it is where the deformation is EVALUATED that bounds what changed.
+    //
+    // ... once per image the layer's symmetry makes of it (#363), for the
+    // reason clay_layer_move_surface states at length: the copies a mirror or
+    // radial layer emits gather where the reflected ball is, this gesture's
+    // warps are aimed there too, and a host invalidating one ball serves the
+    // reflected side stale. The displacement handed to drag_images is zero
+    // because this gesture has none — only the image CENTRES are read here.
+    std::vector<math::Aabb> reach;
+    for (const brush::DragImage& image :
+         brush::drag_images(*l, kernel::cf3(centre[0], centre[1], centre[2]),
+                            kernel::cf3(0.0f, 0.0f, 0.0f)))
+        reach.push_back(math::Aabb{image.centre, image.centre}.dilated(radius));
+
+    return apply_surface_gesture(doc, layer, *l, warps, std::move(reach), out_applied);
 }
 
 namespace {

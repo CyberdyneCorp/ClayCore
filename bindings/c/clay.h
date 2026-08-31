@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 67
+#define CLAY_ABI_MINOR 68
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -4584,6 +4584,83 @@ clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
                                     const float centre[3],
                             const float displacement[3], const clay_move_params* params,
                             size_t* out_applied);
+
+/* -- magnify / pinch on the assembled surface ------------------------------- */
+
+typedef struct clay_magnify_params {
+    uint32_t struct_size; /* = sizeof(clay_magnify_params); required */
+    float radius;         /* the region's radius in WORLD units; must be > 0 */
+    int32_t ease;         /* falloff curve across the region */
+    /* No front_only. A radial scale has no direction to gate a half-space on;
+     * a drag has one because a pull heads somewhere. */
+} clay_magnify_params;
+
+/* Magnify or PINCH a layer's assembled SURFACE, the radial-scale counterpart to
+ * clay_layer_move_surface — and it exists for the same reason that one does.
+ *
+ * CLAY_DEFORM_MAGNIFY is per ITEM and its centre is in that item's LOCAL frame,
+ * exactly as CLAY_DEFORM_GRAB is. Put one on a picked item of a form that is
+ * several smooth-unioned pieces and it scales that piece's own field and leaves
+ * the others where they were: the surface gathers on one side of the blend and
+ * not the other. Nothing errors — it just comes out wrong. Grab had a resolver
+ * for that and magnify did not, so Pinch could not be a surface brush on a
+ * field at all (issue #391).
+ *
+ * `strength` is SIGNED and one parameter covers both verbs: POSITIVE swells the
+ * surface away from the centre (Magnify), NEGATIVE gathers it toward (Pinch).
+ * They are one deformation, and Maxon's own documentation says as much.
+ *
+ * TOTAL, from the start of the gesture, never an increment on the last frame —
+ * as clay_layer_move_surface takes a total displacement, and for the same
+ * reason: a chain of increments composes scales that were each authored against
+ * a different intermediate surface, and the product is not the pinch the artist
+ * made. A live gesture calls this every frame with a growing strength and the
+ * engine replaces its own last frame rather than stacking a deformer per frame.
+ *
+ * *out_applied receives how many items took a warp, so a host can tell "the
+ * gesture reached nothing" from "the gesture did nothing visible". One that
+ * reaches nothing succeeds and changes nothing. A strength of zero scales by
+ * one and is refused for the same reason a drag of zero is: it is not a
+ * gesture, and a chain of no-op deformers is worse than none.
+ *
+ * WHAT IT INVALIDATES is the region's own ball, and one per image the layer's
+ * symmetry makes of it — with NO dilation, unlike a drag's. Outside the radius
+ * the weight is zero and the point is returned unchanged, so the field cannot
+ * differ there. A pinch SAMPLES from outside the ball, its scale factor
+ * exceeding one, but it is only evaluated inside it. As with a drag, an
+ * INSTANCED edit list (clay_document_instance_layer) widens that by each
+ * sharer's whole influence bound, because the same nodes are placed by every
+ * layer sharing them.
+ *
+ * UNDER A LAYER MIRROR OR RADIAL SYMMETRY the region is reflected and rotated
+ * into every image the layer emits, and an item is selected by what the ball OR
+ * one of its images touches, on the item's own bound — so an item whose mirror
+ * copy sits under the cursor is reached through that copy. The STRENGTH crosses
+ * every image untouched: a reflection or a rotation of a radial scale is a
+ * radial scale of the same strength, where a drag's displacement has to be
+ * mapped per image. With an identity layer transform a gesture and its mirror
+ * image produce the same field bit for bit.
+ *
+ * The whole gesture is ONE undo step however many items it touched.
+ *
+ * NOT OFFERED FOR POSE. CLAY_DEFORM_POSE sits in the same sentence as grab and
+ * magnify in the deformer docs and has the same per-item gap, but it does not
+ * fit this shape: radial pose carries an AXIS, a direction that would have to be
+ * mapped per image, and pose along a line has no finite support at all, so the
+ * reachability rule this is built on does not apply to it. */
+/* Which nodes a magnify WOULD warp, without touching the document. Size-query
+ * pattern, exactly as clay_layer_move_surface_preview: call with
+ * out_nodes == NULL to receive the count in *out_count, then again with a
+ * buffer of that size. */
+clay_result clay_layer_magnify_surface_preview(const clay_document* doc, clay_layer_id layer,
+                                               const float centre[3], float strength,
+                                               const clay_magnify_params* params,
+                                               clay_node_id* out_nodes, size_t capacity,
+                                               size_t* out_count);
+
+clay_result clay_layer_magnify_surface(clay_document* doc, clay_layer_id layer,
+                                       const float centre[3], float strength,
+                                       const clay_magnify_params* params, size_t* out_applied);
 
 /* -- transient SDF sculpt transactions ------------------------------------- */
 

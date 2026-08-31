@@ -251,9 +251,26 @@ std::vector<MoveWarp> move_brush(const scene::Layer& layer, kernel::cfloat3 worl
                                  kernel::cfloat3 world_displacement,
                                  const MoveSettings& settings = {});
 
-// The chain `node` should end up with: the move's grabs first, then whatever
-// was there minus the leading grabs of this same gesture, one frame earlier.
-// One place for the ordering rule, so a caller cannot get it subtly wrong.
+// Order a gesture's deformers on ONE item by their values — centre, then
+// payload — descending, never by which of the layer's symmetry images produced
+// them. Once the item is not itself plane-symmetric the two orders are two
+// different fields, so a drag made from the +x side has to come out the mirror
+// image of the same drag made from -x, bit for bit.
+//
+// Exposed because the magnify resolver (brush/magnify.h) needs the same
+// determinism for the same reason, and one ordering rule in one place is what
+// keeps the two gestures from drifting apart.
+void order_by_value(std::vector<scene::Deformer>* deformers);
+
+// The chain `node` should end up with: the gesture's deformers first, then
+// whatever was there minus the leading deformers of this same gesture, one
+// frame earlier. One place for the ordering rule, so a caller cannot get it
+// subtly wrong.
+//
+// Serves a MAGNIFY gesture too (brush/magnify.h) without a second rule: an
+// entry continues the gesture when it matches one of the gesture's images by
+// KIND, centre and radius, so a pinch replaces its own last frame and leaves a
+// drag's grab over the same ball alone.
 std::vector<scene::Deformer> moved_chain(const scene::Node& node, const MoveWarp& warp);
 
 // The same rule against a CHAIN rather than a node, for a caller holding the

@@ -18,6 +18,7 @@
 #include "clay/brush/gate_bake.h"
 #include "clay/brush/mask_extrude.h"
 #include "clay/brush/lattice_gizmo.h"
+#include "clay/brush/magnify.h"
 #include "clay/brush/move.h"
 #include "clay/brush/preset.h"
 #include "clay/mesh/dynamic_sculpt.h"
@@ -5122,6 +5123,70 @@ NB_MODULE(pyclay, m) {
              "0.31. That is `grab`'s deliberate behaviour — the true preimage\n"
              "costs an iteration per sample and buys nothing a sculptor can feel\n"
              "— and the pull is monotonic, so a UI can calibrate against it.")
+        .def("magnify_surface_preview",
+             [](PyLayer& l, nb::handle centre, float strength, float radius, int ease) {
+                 if (!(radius > 0.0f)) throw std::invalid_argument("radius must be > 0");
+                 brush::MagnifySettings settings;
+                 settings.radius = radius;
+                 settings.ease = static_cast<std::uint8_t>(ease);
+                 std::vector<scene::NodeId> nodes;
+                 for (const brush::MoveWarp& w : brush::magnify_brush(
+                          l.layer(), to_f3(centre, "centre"), strength, settings))
+                     nodes.push_back(w.node);
+                 return nodes;
+             },
+             "centre"_a, "strength"_a, "radius"_a = 0.3f, "ease"_a = 0,
+             "Which nodes a magnify WOULD warp, without touching the document —\n"
+             "so a host can preview the gesture, or show what it is about to\n"
+             "affect, before committing it. Resolving is pure; applying is what\n"
+             "changes things.")
+        .def("magnify_surface",
+             [](PyLayer& l, nb::handle centre, float strength, float radius, int ease) {
+                 if (!(radius > 0.0f)) throw std::invalid_argument("radius must be > 0");
+                 if (strength == 0.0f)
+                     throw std::invalid_argument(
+                         "strength must be non-zero; positive swells, negative gathers");
+                 brush::MagnifySettings settings;
+                 settings.radius = radius;
+                 settings.ease = static_cast<std::uint8_t>(ease);
+
+                 const std::vector<brush::MoveWarp> warps =
+                     brush::magnify_brush(l.layer(), to_f3(centre, "centre"), strength, settings);
+
+                 // One undo group for the whole gesture, as a drag takes.
+                 UndoRef undo = l.undo ? *l.undo : UndoRef();
+                 if (undo) undo->begin_group();
+                 std::vector<scene::NodeId> touched;
+                 for (const brush::MoveWarp& w : warps) {
+                     const scene::Node* n = l.layer().sdf->find(w.node);
+                     if (!n) continue;
+                     apply_or_throw(l.doc->document,
+                                    scene::Command{scene::SetDeformersCmd{
+                                        l.id, w.node, brush::moved_chain(*n, w)}},
+                                    "magnify_surface", l.undo.get());
+                     touched.push_back(w.node);
+                 }
+                 if (undo) undo->end_group();
+                 return touched;
+             },
+             "centre"_a, "strength"_a, "radius"_a = 0.3f, "ease"_a = 0,
+             "Magnify or PINCH this layer's assembled SURFACE — the radial-scale\n"
+             "counterpart to `move_surface`. Returns the nodes that took a warp.\n\n"
+             "NOT the same as `prim.magnify(...)`, and the difference is the\n"
+             "reason this exists. A deformer is per ITEM and its centre is in\n"
+             "that item's LOCAL frame, so a magnify scales one item's own field:\n"
+             "on a form blended from several, it gathers that item's share and\n"
+             "leaves the rest behind. Nothing errors — it just looks wrong. This\n"
+             "resolves the gesture against every item the region reaches, maps it\n"
+             "into each one's frame, and puts it at the FRONT of each chain.\n\n"
+             "`strength` is SIGNED and one parameter covers both verbs: POSITIVE\n"
+             "swells the surface away from the centre (Magnify), NEGATIVE gathers\n"
+             "it toward (Pinch). They are one deformation.\n\n"
+             "TOTAL, from the start of the gesture, never an increment on the\n"
+             "last frame — a live gesture calls this every frame with a growing\n"
+             "strength and the engine replaces its own last frame rather than\n"
+             "stacking a deformer per frame.\n\n"
+             "The whole gesture is ONE undo step however many items it touched.")
         .def("set_transform",
              [](PyLayer& l, scene::NodeId node, nb::handle position,
                 nb::handle rotation_axis_angle, nb::handle scale) {
