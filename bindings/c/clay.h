@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 72
+#define CLAY_ABI_MINOR 73
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -1990,6 +1990,61 @@ clay_result clay_layer_consolidate(clay_document* doc, clay_layer_id layer,
                                    const clay_consolidation_params* params,
                                    const float region_min[3], const float region_max[3],
                                    clay_consolidation_cost* out_cost);
+
+/* -- merging a bake into a REGION of a layer (ABI 0.73.0, issue #390) ------- */
+
+/* What a region merge would absorb, and over what box. */
+typedef struct clay_region_merge {
+    uint32_t struct_size; /* = sizeof(clay_region_merge); required */
+    float box_min[3];     /* the closure: what gets sampled */
+    float box_max[3];
+    uint64_t absorbed;    /* how many roots it takes */
+    int32_t whole_layer;  /* the closure reached every visible root */
+} clay_region_merge;
+
+/* Bake a REGION of a layer into one volume and put it back where the items it
+ * absorbed were, leaving everything outside parametric.
+ *
+ * clay_layer_consolidate collapses the whole layer. That is the right scope for
+ * a chain that has genuinely degraded and the wrong one for what a sculptor
+ * does, which is work a PATCH. A host applying a region bake per gesture could
+ * only append a volume each time — so every later bake sampled all the earlier
+ * ones — or collapse the entire subtool and lose the parameters of items
+ * nowhere near the stroke. Measured on a real form, twelve gestures on one
+ * patch: 22 ms and 2 items at the first, 244 ms and 13 at the twelfth.
+ *
+ * `region_min`/`region_max` say where you worked. What gets SAMPLED is the
+ * INFLUENCE CLOSURE of that: the region grown until every item that can reach
+ * inside it is wholly inside it. That is not the same as "the items overlapping
+ * the region", and the difference is not cosmetic — absorb only those and a
+ * Subtract straddling the edge stays behind, the material it had carved comes
+ * back, and the volume cannot take it away again. At the closure no remaining
+ * item contributes inside the box at all, which is what makes the bake the
+ * whole answer there and leaves the field outside it untouched.
+ *
+ * The closure may swallow the layer — one item reaching everywhere pulls in all
+ * the rest — and then this IS clay_layer_consolidate. That is the honest
+ * fallback, not a failure; `whole_layer` in the report says when it happened.
+ *
+ * WHAT IT BUYS: the second gesture on a patch has the first gesture's volume
+ * inside its closure, so it is absorbed rather than stacked on. A patch stays
+ * at ONE baked item however many times it is worked — O(1) in gestures where
+ * appending was O(n).
+ *
+ * `params.region` is ignored; the closure replaces it. `out_merge` may be NULL.
+ * Refused, with the document unchanged, on a missing, non-SDF, protected or
+ * empty layer, and when the region reaches nothing at all. */
+clay_result clay_layer_consolidate_region(clay_document* doc, clay_layer_id layer,
+                                          const float region_min[3], const float region_max[3],
+                                          const clay_consolidation_params* params,
+                                          clay_consolidation_cost* out_cost,
+                                          clay_region_merge* out_merge);
+
+/* What that call WOULD absorb, without baking anything — so a host can show the
+ * region whose parameters are about to be lost before the artist commits. */
+clay_result clay_layer_plan_region_merge(const clay_document* doc, clay_layer_id layer,
+                                         const float region_min[3], const float region_max[3],
+                                         clay_region_merge* out_merge);
 
 /* The same, cancellable (add-operation-cancellation, ABI 0.45.0).
  *

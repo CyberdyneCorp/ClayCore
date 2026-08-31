@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "clay/field/redistance.h"
+#include "clay/scene/bounds.h"
 #include "clay/kernel/exactness.h"
 #include "clay/scene/tape.h"
 
@@ -498,6 +499,106 @@ bool replace_layer_with_volume(Document& doc, LayerId layer_id, field::FieldVolu
     // transaction commit its stroke and consolidate it as one undo.
     if (undo) undo->begin_group();
     const bool added = install_bake(doc, layer_id, absorb, std::move(volume), run);
+    if (undo) undo->end_group();
+    return added;
+}
+
+RegionMerge plan_region_merge(const Layer& layer, const math::Aabb& region) {
+    RegionMerge out;
+    if (layer.kind != LayerKind::Sdf || !layer.sdf) return out;
+    if (region.empty()) return out;
+
+    // The candidates and their reach, computed once. An influence bound is not
+    // free — a non-local op reports an infinite one, a mirrored item spans the
+    // plane — and the fixed point below would otherwise ask for each of them
+    // once per round.
+    std::vector<NodeId> ids;
+    std::vector<math::Aabb> reach;
+    for (NodeId id : layer.sdf->roots) {
+        const Node* n = layer.sdf->find(id);
+        if (!n || !n->visible) continue;  // hidden roots are left alone, as ever
+        ids.push_back(id);
+        reach.push_back(node_influence_bound(*layer.sdf, id, layer));
+    }
+    if (ids.empty()) return out;
+
+    // The closure. Each round takes everything the box now meets; the box then
+    // grows to cover their reach. It terminates because `taken` only ever gains
+    // members and there are finitely many, so the loop runs at most once per
+    // item — and in practice twice, since the second round usually adds
+    // nothing.
+    math::Aabb box = region;
+    std::vector<bool> taken(ids.size(), false);
+    bool grew = true;
+    while (grew) {
+        grew = false;
+        for (std::size_t i = 0; i < ids.size(); ++i) {
+            if (taken[i]) continue;
+            // An INFINITE reach meets every box and is contained by none, so an
+            // item carrying one pulls the closure out to the whole layer. That
+            // is the correct answer rather than a special case: an item that
+            // can change the field anywhere can change it inside the box, so
+            // leaving it behind would break the property this exists for.
+            if (reach[i].empty()) continue;  // reaches nothing, so it meets nothing
+            if (!reach[i].is_infinite() && !box.intersects(reach[i])) continue;
+            taken[i] = true;
+            grew = true;
+            if (reach[i].is_infinite()) {
+                // "Everywhere" has no box, so it resolves to the union of every
+                // FINITE reach in the layer — which is where the field can
+                // actually differ, and is what a whole-layer bake samples.
+                for (const math::Aabb& r : reach)
+                    if (!r.empty() && !r.is_infinite()) box.expand(r);
+            } else {
+                box.expand(reach[i]);
+            }
+        }
+    }
+
+    for (std::size_t i = 0; i < ids.size(); ++i)
+        if (taken[i]) out.absorb.push_back(ids[i]);
+    if (out.absorb.empty()) return out;  // the region reached nothing
+    out.box = box;
+    out.whole_layer = out.absorb.size() == ids.size();
+    return out;
+}
+
+bool consolidate_region(Document& doc, LayerId layer_id, const math::Aabb& region,
+                        const ConsolidationParams& params, UndoStack* undo,
+                        ConsolidationCost* out_cost, const BakePointEval& point_eval,
+                        parallel::CancelToken* token, bool* out_cancelled,
+                        RegionMerge* out_plan) {
+    if (out_cancelled) *out_cancelled = false;
+    // The same gate `absorbable_roots` applies, and for the same reason: a
+    // protected layer should not cost a resampling to say no.
+    std::vector<NodeId> all;
+    if (!absorbable_roots(doc, layer_id, &all)) return false;
+    const Layer* layer = doc.find_layer(layer_id);
+
+    const RegionMerge plan = plan_region_merge(*layer, region);
+    if (out_plan) *out_plan = plan;
+    if (plan.absorb.empty()) return false;
+
+    // The closure, not the caller's region. Sampling the region alone would
+    // leave the absorbed items' contribution outside it in nothing at all.
+    ConsolidationParams over_closure = params;
+    over_closure.region = plan.box;
+    std::optional<field::FieldVolume> volume =
+        bake_layer(*layer, over_closure, out_cost, point_eval, token);
+    if (!volume && parallel::cancelled(token)) {
+        if (out_cancelled) *out_cancelled = true;
+        return false;  // untouched: the bake had not been installed
+    }
+    if (!volume) return false;
+
+    auto run = [&doc, undo](const Command& cmd) {
+        if (undo) return undo->perform(doc, cmd);
+        return scene::apply(doc, cmd).has_value();
+    };
+    // One group, exactly as the whole-layer form takes: a single undo puts back
+    // every absorbed item and the sharing the sever broke.
+    if (undo) undo->begin_group();
+    const bool added = install_bake(doc, layer_id, plan.absorb, std::move(*volume), run);
     if (undo) undo->end_group();
     return added;
 }

@@ -1164,3 +1164,205 @@ TEST_CASE("consolidate: bake_tape refuses what bake_layer refuses") {
     token.cancel();
     CHECK_FALSE(scene::bake_tape(tape, params_at(0.04f, 0.12f), false, nullptr, {}, &token));
 }
+
+// -- merging a bake into a REGION of a layer (issue #390) --------------------
+//
+// Consolidation collapses a whole layer, and a sculptor works a PATCH. A host
+// applying a region bake per gesture could only append a volume each time — so
+// every later bake sampled all the earlier ones, 22 ms and 2 items at the first
+// gesture against 244 ms and 13 at the twelfth — or collapse the entire subtool
+// and lose the parameters of items nowhere near the stroke.
+//
+// The scope is an INFLUENCE CLOSURE rather than plain containment, and the
+// difference is not cosmetic: absorb only the items overlapping the region and
+// a Subtract straddling its edge stays behind, its carved material comes back,
+// and the volume cannot take it away again.
+
+namespace {
+
+// A row of balls along X, far enough apart that each one's influence is its
+// own: a region over one of them closes over that one alone.
+scene::Document ball_row(int count, float spacing = 3.0f, float radius = 0.5f) {
+    scene::Document doc;
+    scene::Layer& layer = doc.add_sdf_layer("l");
+    for (int i = 0; i < count; ++i) {
+        scene::Node n;
+        n.prim = scene::Prim::sphere(radius);
+        n.xform.position = cf3(static_cast<float>(i) * spacing, 0, 0);
+        layer.sdf->insert(n);
+    }
+    return doc;
+}
+
+math::Aabb around(kernel::cfloat3 c, float r) {
+    return math::Aabb{cf3(c.x - r, c.y - r, c.z - r), cf3(c.x + r, c.y + r, c.z + r)};
+}
+
+std::size_t root_count(const scene::Document& doc) {
+    return doc.layers.front().sdf->roots.size();
+}
+
+}  // namespace
+
+TEST_CASE("region merge: the closure takes what the region reaches, and no more") {
+    const scene::Document doc = ball_row(4);
+    const scene::RegionMerge plan =
+        scene::plan_region_merge(doc.layers.front(), around(cf3(0, 0, 0), 0.6f));
+    CHECK(plan.absorb.size() == 1);
+    CHECK_FALSE(plan.whole_layer);
+    // ...and the box it will sample covers that ball, which is what makes the
+    // bake the whole answer inside it.
+    CHECK(plan.box.min.x <= -0.5f);
+    CHECK(plan.box.max.x >= 0.5f);
+    CHECK(plan.box.max.x < 2.0f);  // it did NOT reach the ball at x = 3
+}
+
+TEST_CASE("region merge: the closure grows until it is self-contained") {
+    // A ROUND is not enough, and the order is what shows it. Ball A sits at
+    // x = 0 and is inserted FIRST; ball B overlaps it at x = 0.8 and is
+    // inserted second. The region sits over B alone.
+    //
+    // One forward pass visits A while the box is still the region — which A
+    // does not reach — and skips it; only then does B come in and widen the box
+    // over A, too late to go back. A fixed point catches it on the next round.
+    // Left out, A is a parametric item overlapping a baked volume that already
+    // contains its material, which is the state this whole design exists to
+    // avoid.
+    scene::Document doc;
+    scene::Layer& layer = doc.add_sdf_layer("l");
+    for (float x : {0.0f, 0.8f}) {
+        scene::Node n;
+        n.prim = scene::Prim::sphere(0.5f);
+        n.xform.position = cf3(x, 0, 0);
+        layer.sdf->insert(n);
+    }
+    // Over B's far side only: it meets B's reach [0.3, 1.3] and not A's
+    // [-0.5, 0.5].
+    const scene::RegionMerge plan =
+        scene::plan_region_merge(doc.layers.front(), around(cf3(1.1f, 0, 0), 0.15f));
+    CHECK(plan.absorb.size() == 2);
+    CHECK(plan.whole_layer);
+    // ...and the box really did grow past what one pass would have taken.
+    CHECK(plan.box.min.x <= -0.5f);
+}
+
+TEST_CASE("region merge: a chain of overlaps is taken whole") {
+    // The same property along a run: four balls each overlapping the next, a
+    // region over one of them takes all four.
+    const scene::Document doc = ball_row(4, 0.6f);
+    const scene::RegionMerge plan =
+        scene::plan_region_merge(doc.layers.front(), around(cf3(0, 0, 0), 0.1f));
+    CHECK(plan.absorb.size() == 4);
+    CHECK(plan.whole_layer);
+}
+
+TEST_CASE("region merge: a region that reaches nothing merges nothing") {
+    const scene::Document doc = ball_row(3);
+    const scene::RegionMerge plan =
+        scene::plan_region_merge(doc.layers.front(), around(cf3(50, 0, 0), 0.5f));
+    CHECK(plan.absorb.empty());
+    CHECK(plan.box.empty());
+}
+
+TEST_CASE("region merge: the field is unchanged outside the merged region") {
+    // The claim the whole design rests on. Sampled densely along the row, so a
+    // ball that lost its parameters and did not come back as samples shows up.
+    scene::Document doc = ball_row(4);
+    const scene::Tape before = scene::compile_document(doc);
+
+    scene::ConsolidationCost cost;
+    scene::RegionMerge plan;
+    REQUIRE(scene::consolidate_region(doc, doc.layers.front().id, around(cf3(0, 0, 0), 0.6f),
+                                      params_at(0.02f, 0.08f), nullptr, &cost, {}, nullptr,
+                                      nullptr, &plan));
+    CHECK(plan.absorb.size() == 1);
+    // One absorbed, one volume put back, the other three left parametric.
+    CHECK(root_count(doc) == 4);
+
+    const scene::Tape after = scene::compile_document(doc);
+    int outside_moved = 0, inside_checked = 0;
+    for (float x = -1.5f; x <= 10.5f; x += 0.03f)
+        for (float y = -0.9f; y <= 0.9f; y += 0.09f) {
+            const kernel::cfloat3 p = cf3(x, y, 0.0f);
+            const bool inside = plan.box.contains(p);
+            if (inside) {
+                ++inside_checked;
+                continue;  // the bake is a resampling here, so it may differ
+            }
+            // Outside the closure the SURFACE must not have moved: a bake makes
+            // the value a bound rather than a distance, so the sign is the
+            // claim, not the number.
+            if ((before.eval(p).d < 0.0f) != (after.eval(p).d < 0.0f)) ++outside_moved;
+        }
+    CHECK(inside_checked > 0);  // the fixture really did straddle the box
+    CHECK(outside_moved == 0);
+}
+
+TEST_CASE("region merge: the merged region still holds its own surface") {
+    // The other half: "nothing outside moved" is satisfied by a merge that
+    // deleted the ball, so say what has to remain.
+    scene::Document doc = ball_row(3);
+    REQUIRE(scene::consolidate_region(doc, doc.layers.front().id, around(cf3(0, 0, 0), 0.6f),
+                                      params_at(0.02f, 0.08f)));
+    const scene::Tape after = scene::compile_document(doc);
+    CHECK(after.eval(cf3(0, 0, 0)).d < 0.0f);        // still solid at the centre
+    CHECK(after.eval(cf3(0.49f, 0, 0)).d < 0.0f);    // ...out to its radius
+    CHECK(after.eval(cf3(0.75f, 0, 0)).d > 0.0f);    // and empty past it
+}
+
+TEST_CASE("region merge: working one patch again does not stack a second volume") {
+    // The measurement issue #390 filed. The second gesture's closure contains
+    // the first gesture's volume, so it is absorbed rather than appended: a
+    // patch that gets worked stays at ONE baked item however many times it is
+    // worked, where appending was one per gesture.
+    scene::Document doc = ball_row(4);
+    const scene::LayerId id = doc.layers.front().id;
+    const math::Aabb patch = around(cf3(0, 0, 0), 0.6f);
+
+    for (int gesture = 1; gesture <= 6; ++gesture) {
+        CAPTURE(gesture);
+        REQUIRE(scene::consolidate_region(doc, id, patch, params_at(0.02f, 0.08f)));
+        // One volume for the patch, plus the three balls left parametric —
+        // whatever the gesture count.
+        CHECK(root_count(doc) == 4);
+    }
+    // ...and the far balls are still items with parameters, not samples.
+    const scene::SdfContent& content = *doc.layers.front().sdf;
+    int volumes = 0;
+    for (scene::NodeId n : content.roots)
+        if (content.find(n)->volume) ++volumes;
+    CHECK(volumes == 1);
+}
+
+TEST_CASE("region merge: a whole-layer closure is consolidation, and says so") {
+    scene::Document doc = sphere_document(0.6f);
+    scene::RegionMerge plan;
+    REQUIRE(scene::consolidate_region(doc, doc.layers.front().id, around(cf3(0, 0, 0), 0.1f),
+                                      params_at(0.02f, 0.08f), nullptr, nullptr, {}, nullptr,
+                                      nullptr, &plan));
+    CHECK(plan.whole_layer);
+    CHECK(root_count(doc) == 1);
+    CHECK(scene::consolidation_state(doc.layers.front()));
+}
+
+TEST_CASE("region merge: it undoes to the parametric form, in one step") {
+    scene::Document doc = ball_row(4);
+    const scene::Tape before = scene::compile_document(doc);
+    scene::UndoStack undo;
+    REQUIRE(scene::consolidate_region(doc, doc.layers.front().id, around(cf3(0, 0, 0), 0.6f),
+                                      params_at(0.02f, 0.08f), &undo));
+    CHECK(undo.undo_depth() == 1);
+    REQUIRE(undo.undo(doc));
+    CHECK(root_count(doc) == 4);
+    const scene::Tape restored = scene::compile_document(doc);
+    for (float x = -1.0f; x <= 10.0f; x += 0.05f)
+        CHECK(restored.eval(cf3(x, 0, 0)).d == before.eval(cf3(x, 0, 0)).d);
+}
+
+TEST_CASE("region merge: a protected layer is refused before it is sampled") {
+    scene::Document doc = ball_row(3);
+    doc.layers.front().locked = true;
+    CHECK_FALSE(scene::consolidate_region(doc, doc.layers.front().id, around(cf3(0, 0, 0), 0.6f),
+                                          params_at(0.02f, 0.08f)));
+    CHECK(root_count(doc) == 3);
+}
