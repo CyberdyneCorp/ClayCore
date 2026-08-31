@@ -5602,11 +5602,22 @@ void drag_frontier(const clay_document* doc, const scene::Layer& layer,
     }
     df.usable = true;
     df.all_resolved = !warps.empty();
+    df.spans.reserve(warps.size());
     // Per warp: the root ordinal it will dirty from, and its PRE-apply
     // influence. The post-apply territory a growing displacement reaches next
     // frame is dirtied by the apply itself and refilled once by the full path,
     // after which the prepare pass seeds it -- so a brick the drag grows into
     // is slow for one frame and resumed after.
+    // ONE command, its node rewritten per warp, rather than one built per warp.
+    // `scene::Command` is a variant over twenty alternatives and the widest of
+    // them carries a whole Layer by value, so constructing and destroying it
+    // inside this loop costs more than the bound it is asking for -- 138 times
+    // on a thousand-item drag, 1,392 on a ten-thousand-item one. What the bound
+    // reads is the (layer, node) pair; the deformer list is empty here and stays
+    // empty, because `command_influence_bound` routes every (layer, node)
+    // parameter edit to the same node_command_bound and never looks at it.
+    scene::Command probe_cmd{scene::SetDeformersCmd{layer.id, scene::kNoNode, {}}};
+    auto& probe = std::get<scene::SetDeformersCmd>(probe_cmd);
     for (const brush::MoveWarp& w : warps) {
         std::uint32_t ordinal = 0;
         if (!root_ordinal_of(*layer.sdf, w.node, &ordinal)) {
@@ -5614,8 +5625,8 @@ void drag_frontier(const clay_document* doc, const scene::Layer& layer,
             continue;
         }
         df.min_ordinal = std::min(df.min_ordinal, ordinal);
-        const math::Aabb bound = scene::command_influence_bound(
-            d, scene::Command{scene::SetDeformersCmd{layer.id, w.node, {}}});
+        probe.node = w.node;
+        const math::Aabb bound = scene::command_influence_bound(d, probe_cmd);
         if (bound.empty()) continue;
         df.spans.emplace_back(ordinal, bound);
     }
