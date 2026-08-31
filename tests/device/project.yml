@@ -87,7 +87,7 @@ targets:
         BUNDLE_LOADER: "$(TEST_HOST)"
         OTHER_LDFLAGS: -lc++
 
-  # The latency cases, alone in a process and FIRST in the run.
+  # The latency cases, alone in a process and SECOND in the run.
   #
   # ALONE, because a process keeps its high-water mark. testEveryVerbOnDevice
   # passed by itself and was killed by jetsam whenever anything ran ahead of
@@ -96,7 +96,7 @@ targets:
   # eventually these latency cases set one high enough to kill the verb suite
   # that used to share this bundle. It now has its own, below.
   #
-  # FIRST, because splitting the run into bundles serialises it and the tail is
+  # EARLY, because splitting the run into bundles serialises it and the tail is
   # measured on a hotter device. Measured rather than assumed: moving the
   # parity bundle from third to first took sdf_stamp_cpu from 14.988 ms back to
   # 5.618, and sdf_stamp_bricks from 6.506 to 3.065, against 5.829 and 3.099
@@ -156,14 +156,28 @@ targets:
   # because a process boundary is the only thing that actually returns the
   # high-water mark.
   #
-  # SECOND, deliberately, and this is the part not to "tidy" later. Within the
-  # old single process XCTest ran LatencyTests before VerbLatencyTests
-  # (alphabetical), so every one of the 62 committed baselines was recorded
-  # with the latency cases ahead of it. Keeping this bundle second preserves
-  # that thermal position and changes exactly one thing — the heap. Promoting
-  # it to first would hand it a colder window than its baseline was taken in
-  # and make the gate quietly lenient; this file's own 2.7x measurement is
-  # what that costs.
+  # FIRST, and that position was measured rather than assumed, because moving
+  # it is exactly the kind of change this file records a 2.7x swing for.
+  #
+  # Splitting alone was NOT enough: with the latency bundle still ahead of it
+  # the case died again, at the heavy tail (mask_extrude, sdf_consolidate,
+  # sdf_relax, sdf_move and the four authoring verbs), 21 of its 31 cases in.
+  # A separate process returns this bundle's own high-water mark and does
+  # nothing about the pressure the run before it leaves behind. Run alone it
+  # completes every case on a warm device, valid, nominal at both ends.
+  #
+  # Promoting it costs less than the ordering rule predicts. Its 31 cases were
+  # baselined in SECOND position; measured in first, against those baselines:
+  # median 1.003x over 62 shape-matched points, worst 1.14x (armature_edit),
+  # and NOTHING over the 1.4x regression tolerance. So the window this bundle
+  # sees is not meaningfully colder — the latency bundle ahead of it was 39 s,
+  # where the 2.7x that file measured was a three-bundle reordering. The
+  # baselines stand as recorded; none of them is re-taken here.
+  #
+  # LatencyTests inherits second place. It is the shorter suite, its cases are
+  # brick-cache latencies rather than volume bakes, and it does not sit near
+  # the jetsam limit — which is the whole reason the verb suite gets the
+  # cold, clean end of the window rather than it.
   ClayCoreDeviceVerbTests:
     type: bundle.unit-test
     platform: iOS
@@ -215,11 +229,13 @@ schemes:
         ClayCoreDeviceGalleryTests: [test]
     test:
       targets:
-        # The measurement bundle runs FIRST and in its own process, so the
-        # numbers the gate reads are taken on a clean heap. The others follow
-        # in whatever order; each is its own process, so none inherits another's
-        # high-water mark.
-        - ClayCoreDeviceMeasureTests
+        # The verb bundle runs FIRST and in its own process: it carries 31 of
+        # the 69 gated cases, it holds the heaviest ones, and it is the one
+        # that sits near the jetsam limit. The latency cases follow, then the
+        # gallery and the parity checks. Each is its own process, so none
+        # inherits another's high-water mark — which is necessary and, as the
+        # verb bundle found out, not sufficient.
         - ClayCoreDeviceVerbTests
+        - ClayCoreDeviceMeasureTests
         - ClayCoreDeviceGalleryTests
         - ClayCoreDeviceTests
