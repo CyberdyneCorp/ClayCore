@@ -33,6 +33,8 @@
 #include "clay/mesh/voxel_remesh.h"
 #include "clay/mesh/topology_ops.h"
 
+#include "clay.h"
+
 using namespace clay;
 using namespace clay::kernel;
 using mesh::Mesh;
@@ -451,4 +453,78 @@ TEST_CASE("allocation gate: the refused-remesh counter is discriminating") {
     CAPTURE(refused);
     CAPTURE(accepted);
     CHECK(accepted > refused * 20);
+}
+
+// A SURFACE DRAG ALLOCATES A BOUNDED AMOUNT PER ITEM IT REACHES.
+//
+// This is the gate #375 needed and did not have. `clay_layer_move_surface`
+// warps every item a drag reaches, and what it allocates per item is the thing
+// that regressed: #372 gave a `MoveWarp` a vector of grabs for mirror
+// correctness and took the cost from 4.07 to 6.16 allocations per warped item,
+// worth 1.09x on the host and part of a 1.56x on the reference iPad.
+//
+// NO TIMING GATE IN THIS REPOSITORY COULD SEE THAT, and both of the ones that
+// should have say so themselves. `check_bench.py`'s ceilings sit ~7x above the
+// measurement, deliberately, because a threshold tight enough to fail on 1.25x
+// would flake on a shared runner. The device gate holds the tighter line in
+// general and cannot here: `sdf_move` is small enough that its growth stays
+// under the 0.05 ms noise floor, so it reports and cannot fail.
+//
+// An allocation count has neither problem. It is exact, it is the same on
+// every machine, and it is what actually moved. Same argument the Metal
+// `repacks` counter makes in check_bench.py, where a 1.02x wall clock could
+// not gate what a 0 against 300 count could.
+//
+// The ceiling is per WARPED ITEM rather than absolute, so the gate does not
+// have to be re-derived when a fixture changes size, and it is set at 6 —
+// above the 5.10 this measures and below the 6.16 the regression cost — so it
+// fails on a return to per-warp vectors and tolerates ordinary churn.
+TEST_CASE("allocation gate: a surface drag's cost per warped item is bounded") {
+    clay_document* doc = clay_document_create();
+    REQUIRE(doc != nullptr);
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "form", &layer) == CLAY_OK);
+
+    // A shell of dabs over a unit sphere: a drag on its surface reaches many
+    // of them, which is what makes a per-item cost visible at all.
+    const int kNodes = 400;
+    for (int i = 0; i < kNodes; ++i) {
+        const double z = 1.0 - 2.0 * (i + 0.5) / kNodes;
+        const double r = std::sqrt(std::max(0.0, 1.0 - z * z));
+        const double th = 2.399963 * i;
+        clay_item_desc d{};
+        d.struct_size = static_cast<std::uint32_t>(sizeof d);
+        d.prim = CLAY_PRIM_SPHERE;
+        d.params[0] = 0.08f;
+        d.op = CLAY_OP_ADD;
+        d.position[0] = static_cast<float>(r * std::cos(th));
+        d.position[1] = static_cast<float>(r * std::sin(th));
+        d.position[2] = static_cast<float>(z);
+        clay_node_id node = 0;
+        REQUIRE(clay_add_item(doc, layer, &d, &node) == CLAY_OK);
+    }
+
+    clay_move_params p{};
+    p.struct_size = static_cast<std::uint32_t>(sizeof p);
+    p.radius = 0.4f;
+    const float centre[3] = {1.0f, 0.0f, 0.0f};
+    const float displacement[3] = {0.05f, 0.0f, 0.0f};
+
+    std::size_t applied = 0;
+    std::size_t allocations = 0;
+    {
+        CountingScope scope;
+        REQUIRE(clay_layer_move_surface(doc, layer, centre, displacement, &p, &applied) ==
+                CLAY_OK);
+        allocations = scope.count();
+    }
+    clay_document_destroy(doc);
+
+    // A drag that reached nothing would pass any ceiling by doing nothing.
+    REQUIRE(applied > 20);
+    const double per_item = static_cast<double>(allocations) / static_cast<double>(applied);
+    CAPTURE(applied);
+    CAPTURE(allocations);
+    CAPTURE(per_item);
+    CHECK(per_item < 6.0);
 }

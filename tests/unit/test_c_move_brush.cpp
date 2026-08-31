@@ -626,3 +626,64 @@ TEST_CASE("c magnify: previewing names the nodes and touches nothing") {
     REQUIRE(clay_layer_magnify_surface(c.doc, layer, centre, 0.4f, &p, &applied) == CLAY_OK);
     CHECK(applied == count);
 }
+
+// THE WARP BUFFER IS REUSED ACROSS ITEMS, and this pins that it is reset.
+//
+// `apply_surface_gesture` resolves one warp at a time into a single MoveWarp
+// rather than materialising a vector of them, which is what took the drag's
+// per-item allocations from 6.16 to 5.10 (#375). The buffer is only safe
+// because both resolvers write `node` and clear `deformers` and `gesture`
+// before filling them — so an item reached by ONE image cannot inherit a
+// second grab from the previous item, and no item can be applied under a
+// stale node id.
+//
+// A drag over many items at different distances is what makes that visible:
+// the items nearest the centre take the strongest pull and the ones at the rim
+// the weakest, so a leaked grab or a stale node shows up as an item moving by
+// the wrong neighbour's share. Asserted against the SAME drag applied to a
+// document holding each item alone, which cannot reuse anything.
+TEST_CASE("c move: a many-item drag resolves each item from its own share") {
+    // A row of separate balls, far enough apart not to blend, spanning the
+    // drag's radius so their shares of the pull genuinely differ.
+    const float xs[] = {-0.6f, -0.3f, 0.0f, 0.3f, 0.6f};
+    auto build = [](clay_document* doc, std::initializer_list<float> at) {
+        clay_layer_id layer = 0;
+        REQUIRE(clay_add_sdf_layer(doc, "row", &layer) == CLAY_OK);
+        for (float x : at) {
+            clay_item_desc d;
+            std::memset(&d, 0, sizeof d);
+            d.struct_size = static_cast<uint32_t>(sizeof d);
+            d.prim = CLAY_PRIM_SPHERE;
+            d.params[0] = 0.12f;
+            d.op = CLAY_OP_ADD;
+            d.position[0] = x;
+            clay_node_id node = 0;
+            REQUIRE(clay_add_item(doc, layer, &d, &node) == CLAY_OK);
+        }
+        return layer;
+    };
+
+    const float centre[3] = {0, 0, 0};
+    const float displacement[3] = {0, 0.25f, 0};
+    const clay_move_params p = move_params(0.9f);
+
+    // All five in one document: five items resolved through one reused buffer.
+    CDoc together;
+    const clay_layer_id all = build(together.doc, {-0.6f, -0.3f, 0.0f, 0.3f, 0.6f});
+    size_t applied = 0;
+    REQUIRE(clay_layer_move_surface(together.doc, all, centre, displacement, &p, &applied) ==
+            CLAY_OK);
+    CHECK(applied == 5);
+
+    // Each one alone: one item, so nothing is reused and nothing can leak.
+    for (float x : xs) {
+        CDoc alone;
+        const clay_layer_id one = build(alone.doc, {x});
+        size_t applied_one = 0;
+        REQUIRE(clay_layer_move_surface(alone.doc, one, centre, displacement, &p,
+                                        &applied_one) == CLAY_OK);
+        REQUIRE(applied_one == 1);
+        // The surface over this item must agree, whichever document it was in.
+        CHECK(top_at(together.doc, x) == doctest::Approx(top_at(alone.doc, x)).epsilon(1e-4));
+    }
+}
