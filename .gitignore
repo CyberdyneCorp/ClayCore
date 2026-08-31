@@ -28,3 +28,7 @@ tests/device/*.xcodeproj
 # it, because `git add -A` otherwise sweeps one in.
 examples/output/*_source.obj
 examples/output/*_source.mtl
+
+# Example 68 writes an OBJ for inspection, as 66 does; only the picture is
+# committed.
+examples/output/68_multires_level3.*

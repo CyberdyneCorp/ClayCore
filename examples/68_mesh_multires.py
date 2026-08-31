@@ -42,7 +42,7 @@ import pyclay as clay
 
 import _render as R
 
-EYE, TARGET = (1.3, 1.0, 2.6), (0.0, 0.05, 0.15)
+EYE, TARGET = (1.7, 1.3, 3.3), (0.0, 0.05, 0.12)
 
 
 def cage(n=6, radius=1.0):
@@ -71,10 +71,17 @@ def cage(n=6, radius=1.0):
             for u in range(n):
                 a = base + v * stride + u
                 b, c2, d = a + 1, a + stride, a + stride + 1
+                # OUTWARD (#407). A closed cage wound inward has a winding
+                # number of -1 in its interior, so `is_inside` is false
+                # everywhere and `Volume.from_mesh` samples a field that is
+                # positive at the centre of the model — no zero crossing, and
+                # the preview below renders as speckle. Copied inverted from
+                # 66_dynamic_topology, where it had been wrong for a long time
+                # without anything failing.
                 if signs[f] > 0.0:
-                    indices += [a, c2, b, b, c2, d]
-                else:
                     indices += [a, b, c2, b, d, c2]
+                else:
+                    indices += [a, c2, b, b, c2, d]
     return clay.Mesh.from_triangles(np.array(positions, dtype=np.float32),
                                     np.array(indices, dtype=np.uint32))
 
