@@ -102,12 +102,15 @@
 - [x] 3.4 Removing a layer re-evaluates its coverage only; it does not replay
       strokes and does not touch other layers
       — `remove` notes the removed layer's coverage and nothing else; tested
-- [ ] 3.5 Under symmetry, every mirrored write enters the SAME active layer and
+- [x] 3.5 Under symmetry, every mirrored write enters the SAME active layer and
       one undo step, with the coverage as the union
-      — falls out of the transaction: the target layer is pinned at `begin`, so
-      every mirrored stamp of one gesture enters that layer and one delta whose
-      coverage is the union. Not yet asserted — the mirrored-stroke case belongs
-      to `test_mesh_sculpt_layer_stroke.cpp` in the test stage
+      — falls out of the transaction, and `test_mesh_sculpt_layer_stroke.cpp`
+      asserts both halves: a gesture whose stamps alternate between a place and
+      its mirror image produces ONE delta naming ONE layer, both sides carry
+      coefficients, and reverting that one delta clears both. The companion case
+      is the one that found the bug — pinning at `begin` was a single write, so
+      a host that changed the active layer mid-gesture split it across two
+      channels; the transaction now re-asserts its target before every dab
 
 ## 4. Writing into a layer
 
@@ -115,10 +118,16 @@
       begin, stamp, commit, cancel — following the shape the SDF sculpt
       transaction already established
       — `mesh::LayeredMultiresSculptor` in `include/clay/mesh/layered_sculpt.h`
-- [ ] 4.2 Cancel restores the layer exactly; commit produces ONE undo delta
+- [x] 4.2 Cancel restores the layer exactly; commit produces ONE undo delta
       — `cancel` reverts the recorded `before` values rather than recomputing;
       `commit` hands over one `SculptLayerDelta` (or one `MultiresDelta` for a
-      base-domain stroke). Exactness not yet asserted — test stage
+      base-domain stroke). Asserted on CHECKSUMS rather than positions, in both
+      domains: a cancelled gesture leaves the layer checksum, the base checksum
+      and every evaluated position bit-identical, and one delta reverses a
+      six-stamp gesture. This is the case that found the checksum bug — an
+      undone stroke leaves the block allocated, and `sculpt_layer_checksum` was
+      folding the vertex count a lazily-sized field had been sized to, so an
+      exact restore hashed differently from never having written
 - [x] 4.3 A hundred stamps over one vertex coalesce to one entry
       — `SculptLayerDelta::note_detail` keeps the FIRST `before` per (level,
       vertex) and `sync_after` rewrites the LAST `after`
@@ -176,7 +185,31 @@
       and dense coverage
       — `BM_SculptLayerCompose*`, `BM_SculptLayerStrengthChange*` and
       `BM_SculptLayerStampOnStack*` over 1/4/16/64/128 with local, overlapping
-      and dense coverage; the counters are the reading, not the clock
+      and dense coverage; the counters are the reading, not the clock.
+      MEASURED (linuxdev, 21 repetitions each, P50 / P95 / max; load average
+      4.19 before and 1.93 after, so the ratios below are the reading rather
+      than the absolutes):
+
+        stamp on a LOCAL stack, 1 -> 128 layers
+          347.1 / 378.2 / 383.3 us   ->   365.0 / 415.7 / 417.1 us     1.05x
+          layer_blocks_visited 2898 at both ends — task 5.5's gate: a 128x
+          deeper stack is 1.05x the dab, because the layers that do not reach a
+          block are an O(1) miss and are never summed
+        stamp on an OVERLAPPING stack, 1 -> 128
+          349.7 / 371.8 / 407.4 us   ->   515.9 / 558.3 / 565.2 us     1.48x
+          layer_blocks_visited 2898 -> 14109 (4.9x), so the cost follows the
+          layers that actually cover what the stamp touched
+        strength change, LOCAL, 1 -> 128
+          728.3 / 767.0 / 780.8 us   ->  1165.4 / 1232.9 / 1252.2 us   1.60x
+          blocks_recomposed 200 at BOTH ends — task 5.4's gate; the pair count
+          rises 200 -> 25600 because in this shape every layer covers the same
+          footprint, which is the worst case by construction
+        cold whole-level compose, LOCAL, 1 -> 128
+          15.26 / 16.02 / 16.75 ms   ->   15.88 / 16.35 / 16.57 ms     1.04x
+        dense coverage, every layer over the whole level, 1 -> 16
+          compose 16.80 -> 18.02 ms; strength 5.80 -> 7.03 ms; stamp 1.66 ->
+          2.16 ms — reported rather than optimised, because a host should be
+          told this shape is expensive
 - [x] 5.7 Memory never silently stops recording. Report the budget and let a
       host merge, bake, delete or compact — a cap that silently stopped
       recording would leave the pass on the surface and un-dialable, which is a
@@ -218,11 +251,18 @@
       — `Step::Kind::MultiresLayer` and `MultiresLayerProperty`, applied through
       `MultiresSurface::apply_sculpt_layer_{delta,property}` and the existing
       `set_multires_resolver`; no fifth resolver
-- [ ] 7.4 Journal encode, decode, replay; older journals still replay; a
+- [x] 7.4 Journal encode, decode, replay; older journals still replay; a
       malformed delta is refused
-      — both journal kinds APPENDED so an older journal keeps its numbering;
-      encode, decode and replay wired. The fuzzed-payload cases belong to
-      `test_mesh_sculpt_layer_history.cpp` in the test stage
+      — `test_mesh_sculpt_layer_history.cpp`: a whole layered session (add,
+      stroke, dial) journalled and replayed onto a fresh hierarchy reproduces
+      the ids, the slider, the layer checksum and every position bit for bit; a
+      journal written before either kind existed still replays; a corrupted
+      payload stops the replay; and the delta, the property record and the stack
+      snapshot each refuse a foreign magic, an unknown version, an unknown op
+      code, a truncated stream and an absurd declared count — the last refused
+      by arithmetic BEFORE the array is reserved. A record naming a layer the
+      stack does not hold, or a vertex past the level, changes NOTHING rather
+      than half of something
 - [x] 7.5 Versioned serialization of the stack — id, name, kind, visible,
       locked, strength, per-level blocks, masks — inside the multires format
       rather than in the mesh stream
@@ -277,9 +317,20 @@
       `tools/check_swift_package.py` is green in textual mode. NOT type-checked:
       there is no Swift toolchain on this box, so the macOS and simulator runs
       are still owed
-- [ ] 8.6 THE MILESTONE, as a numbered example that renders and asserts: a
+- [x] 8.6 THE MILESTONE, as a numbered example that renders and asserts: a
       wrinkle pass dialled 0 → 50% → 100% over a form that never changes, plus
       one layer removed with the others untouched
+      — `examples/69_mesh_sculpt_layers.py`, registered in `run_all.py`'s
+      `EXAMPLES` and as `mesh-sculpt-layers`' capability example. Five tiles:
+      the form alone, three passes at 0% (byte-identical to it), at 50%, at
+      100%, and 'pores' removed. Every claim raises `SystemExit`: at 0 the
+      surface is byte-identical to the form, at 0.5 the mean offset is 0.5000 of
+      full over 310 moved vertices, dialling back to 1.0 reproduces the surface
+      exactly with the stack checksum unmoved, 40 stamps over one place record
+      the same 55 entries as one, a slider on 'scar' recomposes exactly the 11
+      blocks that layer has allocated of the 21 at the level, removing a layer
+      leaves the other two byte-identical and the base checksum unmoved, a
+      raising stroke leaves nothing behind, and the stack survives a save
 - [ ] 8.7 Version lines together; four presets green plus `release_check`;
       `tsan` under `setarch -R`; `check_layering.py` green
 - [ ] 8.8 Docs: `docs/07-brushes-and-features.md` gains the stack and the

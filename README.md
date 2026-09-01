@@ -291,10 +291,15 @@ protecting.
 - Pre-bake repair: report, close holes, fill voids
 - A stack of resolution levels — block out coarse, `add_level` to refine where
   the detail goes, without paying for a fine grid everywhere
-- **Sculpt layers** — ZBrush's headline feature, on a grid: bracket a run of
-  strokes and the grid records what they *changed*, so their strength stays
-  adjustable long after they are finished. Not undo, which is a stack you pop;
-  a layer is addressable
+- **Sculpt layers** — ZBrush's headline feature, on **two** representations:
+  bracket a run of strokes and the grid records what they *changed*, so their
+  strength stays adjustable long after they are finished; a subdivision
+  hierarchy has the same stack over its *detail*, where a pass is a named,
+  reorderable, dialable channel that survives a save, a load and a reorder
+  (§8b). Not undo, which is a stack you pop; a layer is addressable.
+  The two differ in one thing worth knowing: voxel layers replay cell writes and
+  are **order-dependent**, while additive displacement **commutes**, so
+  reordering a mesh pass changes organisation and not geometry
 
 | | |
 |---|---|

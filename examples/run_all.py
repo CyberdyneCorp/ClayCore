@@ -100,6 +100,7 @@ EXAMPLES = [
     "66_dynamic_topology",
     "67_voxel_remesh",
     "68_mesh_multires",
+    "69_mesh_sculpt_layers",
 ]
 
 
@@ -140,6 +141,10 @@ CAPABILITY_EXAMPLES = {
     # still active, which is what the asymmetry in check_capability_coverage
     # is for — a capability lands with its example in the same commit.
     "mesh-multires": "68_mesh_multires",
+    # The artist's channel stack over that hierarchy: its own capability, its
+    # own example. Listed here while the change is still active, for the reason
+    # the entry above gives.
+    "mesh-sculpt-layers": "69_mesh_sculpt_layers",
     "examples": None,             # this file
 }
 

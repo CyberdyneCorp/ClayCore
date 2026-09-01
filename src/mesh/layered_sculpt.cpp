@@ -140,6 +140,15 @@ void LayeredMultiresSculptor::cancel() {
 std::size_t LayeredMultiresSculptor::stamp(MeshBrush verb, const MeshBrushSettings& settings,
                                            const field::MaskGate& gate) {
     if (!open_) return 0;
+    // RE-PINNED PER DAB, because pinning once at `begin` is not a pin. The
+    // underlying sculptor routes a stamp by reading the stack's ACTIVE layer,
+    // and set-active is deliberately allowed while the composition is held (it
+    // moves no vertex, so refusing it would make a hold mean "hide from the
+    // UI"). A host that changes channel between two dabs would therefore split
+    // one gesture across two of them, and neither half would undo as the artist
+    // made it — which is exactly the failure this transaction exists to
+    // prevent. Metadata, so re-asserting it costs a comparison and no geometry.
+    if (surface_.sculpt_layers().active() != target_) surface_.set_active_sculpt_layer(target_);
     ++stamps_;
     return sculptor_.stamp(verb, settings, gate, &base_delta_, &layer_delta_);
 }

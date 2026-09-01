@@ -129,6 +129,13 @@ class LayeredMultiresSculptor {
     // Open a gesture. Fixes the target channel, holds the composition, and
     // clears the record.
     //
+    // FIXES means fixes: the target is re-asserted on the stack before every
+    // dab, not written once here. Set-active is allowed while the composition
+    // is held — it moves no vertex — so a host that changes channel between two
+    // dabs would otherwise split one gesture across two of them. For the length
+    // of the gesture the stack's active layer belongs to this transaction, and
+    // `commit` and `cancel` both put back what `begin` found.
+    //
     // Refuses — changing nothing — on an invalid surface, on a stroke that is
     // already open, on a LOCKED target layer, and on `Detail` with no active
     // layer.

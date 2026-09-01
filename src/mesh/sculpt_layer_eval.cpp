@@ -267,8 +267,21 @@ std::uint64_t MultiresSurface::sculpt_layer_checksum() const {
     for (std::size_t i = 0; i < state_->stack.size(); ++i) {
         const SculptLayer* layer = state_->stack.at(i);
         fold(layer->id);
-        for (const DetailField& f : layer->detail) fold(f.checksum());
-        for (const SparseWeightField& m : layer->mask) fold(m.checksum());
+        // AN EMPTY FIELD FOLDS AS ABSENT, and that is the whole difference
+        // between a content hash and an allocation hash. A layer's per-level
+        // fields are sized LAZILY, so `checksum()` — which folds the vertex
+        // count it was sized to — answers 0 for a field nothing ever wrote and
+        // something else for a field that was written and then emptied again.
+        // Undo does exactly that: it restores the recorded `before` values,
+        // which for a fresh layer are zeros, and leaves the block allocated
+        // until `compact_sculpt_layers` releases it.
+        //
+        // Hashing that difference would make the change's own gate — "undo
+        // restores sparse detail EXACTLY" — unprovable, and would have a host
+        // comparing checksums to decide whether to re-upload re-uploading
+        // forever after any stroke that undid itself.
+        for (const DetailField& f : layer->detail) fold(f.empty() ? 0ull : f.checksum());
+        for (const SparseWeightField& m : layer->mask) fold(m.empty() ? 0ull : m.checksum());
     }
     return h;
 }
