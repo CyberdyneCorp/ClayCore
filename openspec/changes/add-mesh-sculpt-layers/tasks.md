@@ -303,13 +303,35 @@
       `surface.sculpt_layer_stroke()` returns: `__enter__` begins, a clean exit
       commits and a RAISING BLOCK CANCELS. Height and vector maps are numpy
       arrays borrowed for the call, `(H, W)` and `(3, H, W)` — planar, because a
-      plane is the buffer the alpha sampler already reads
+      plane is the buffer the alpha sampler already reads.
+      ONE BUG FOUND AND FIXED at this boundary, which is the reason the stage
+      re-reads its own work: `__enter__` returned the transaction BY VALUE, so
+      nanobind built a second wrapper and `with surface.sculpt_layer_stroke()
+      as stroke:` bound a different object from the one `__exit__` closed.
+      Visible as `stroke is not handle`; the part that matters is invisible.
+      `sculpt_layer_stroke()` attaches a `keep_alive` to the surface because
+      `LayeredMultiresSculptor` holds a bare `MultiresSurface&` — the
+      `shared_ptr` keeps the SCULPTOR alive, not the surface under it — and the
+      copy carried none of it, so a handle that outlived the statement stamped
+      into a collected surface without raising. Now `[](nb::object self)`
+      returning `self`, which is the shape `PyVoxelGrab.__enter__` already had.
+      Regressed by `test_entering_the_stroke_hands_back_the_object_that_holds_
+      the_surface`, proven by reverting the fix: the revert compiles and the
+      test fails on it
 - [x] 8.4 `tools/check_binding_parity.py` green
       — 622 capabilities against the IMPORTED module (`--pyclay`), 29 exempt,
       no new exemption: every sculpt-layer capability pyclay exposes resolves
       onto a C entry point. The three string-valued axes (write domain, smooth
       mode, stamp mode) are registered in `STRING_CHOICES`, so a fourth
-      smoothing mode invented in Python has to exist in `clay.h` too
+      smoothing mode invented in Python has to exist in `clay.h` too.
+      Re-run in BOTH modes, which is the reading the gate's own docstring asks
+      for: parsed and imported agree at 622 / 29 exempt, so the nanobind DSL
+      parser is not drifting from the module it stands in for. The four
+      entry points the gate reports C-only are each reached from Python by a
+      different name and none is a gap — `_stroke_begin` is `__enter__`,
+      `_stroke_destroy` is the refcount, `_set_write_domain` is
+      `sculpt_layer_stroke(write_domain=...)`, and `set_active_sculpt_layer`
+      is the `active_sculpt_layer` property's setter
 - [ ] 8.5 Swift smoke on macOS and in the simulator
       NOT DONE — NEEDS macOS. There is no `swift` or `swiftc` on this Linux box,
       so the file below has never been type-checked, let alone run, and neither

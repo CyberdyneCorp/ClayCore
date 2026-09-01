@@ -195,6 +195,36 @@ def test_a_clean_block_commits_and_a_raising_block_cancels():
     s.set_sculpt_layer_strength(layer, 0.5)
 
 
+
+def test_entering_the_stroke_hands_back_the_object_that_holds_the_surface():
+    """REGRESSION: `__enter__` returned a COPY, so `as` bound a second wrapper.
+
+    Two failures in one, and only the first is visible from Python. `stroke is
+    handle` was False, so state read off the name the `with` gave you came from
+    a different object than the one `__exit__` closed.
+
+    The second is the reason this is a test and not a style note.
+    surface.sculpt_layer_stroke() attaches a keep_alive to the surface, because
+    LayeredMultiresSculptor holds a bare `MultiresSurface&` and the shared_ptr
+    keeps the SCULPTOR alive, not the surface under it. A copy carries none of
+    that, so a handle that outlived the statement pointed into a collected
+    surface — and stamping through it wrote into freed memory without raising.
+    Returning self is what puts the two back on one object.
+    """
+    s = surface()
+    layer = s.add_sculpt_layer("pass")
+    s.active_sculpt_layer = layer
+
+    handle = s.sculpt_layer_stroke()
+    with handle as stroke:
+        assert stroke is handle
+        stroke.stamp("draw", center=(0.0, 0.0, 0.0), radius=0.35, strength=0.4)
+        # One object, so one view of the gesture. Read off the copy these
+        # agreed by luck, because the shared_ptr underneath was shared.
+        assert stroke.stamps == handle.stamps == 1
+        assert stroke.target_layer == handle.target_layer == layer
+
+
 def test_the_write_domain_is_the_callers_choice():
     s = surface()
     layer = s.add_sculpt_layer("pass")
