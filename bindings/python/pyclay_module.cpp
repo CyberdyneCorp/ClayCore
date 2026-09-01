@@ -7652,7 +7652,7 @@ NB_MODULE(pyclay, m) {
                     verb, center, radius, strength, falloff, direction, nb::none(),
                     nb::cast(geodesic), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
                     smooth_iterations, 0.0f, alpha, alpha_direction, alpha_tangent, alpha_extent,
-                    nb::none(), &chosen);
+                    nb::none(), nb::none(), 0.0f, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
                 nb::gil_scoped_release release;
                 return s.sculptor->stamp(chosen, settings, gate);
@@ -7719,7 +7719,8 @@ NB_MODULE(pyclay, m) {
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     "draw", center, radius, strength, falloff, direction, nb::none(),
                     nb::cast(true), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
-                    0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), &chosen);
+                    0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), nb::none(),
+                    0.0f, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
                 nb::gil_scoped_release release;
                 return s.sculptor->stamp_detail(stamp, settings, gate);
@@ -7764,7 +7765,7 @@ NB_MODULE(pyclay, m) {
                     "smooth", center, radius, strength, falloff, nb::none(), nb::none(),
                     nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
                     smooth_iterations, 0.0f, nb::none(), nb::none(), nb::none(), 0.0f,
-                    nb::none(), &chosen);
+                    nb::none(), nb::none(), 0.0f, &chosen);
                 const mesh::MultiresSmoothMode chosen_mode = parse_smooth_mode(mode);
                 field::MaskGate gate = mask_gate_of(mask);
                 nb::gil_scoped_release release;
@@ -7792,7 +7793,8 @@ NB_MODULE(pyclay, m) {
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     "draw", center, radius, strength, falloff, nb::none(), nb::none(),
                     nb::cast(true), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
-                    0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), &chosen);
+                    0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), nb::none(),
+                    0.0f, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
                 nb::gil_scoped_release release;
                 return s.sculptor->erase(settings, gate);
@@ -7810,7 +7812,8 @@ NB_MODULE(pyclay, m) {
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     "draw", center, radius, strength, falloff, nb::none(), nb::none(),
                     nb::cast(true), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
-                    0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), &chosen);
+                    0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), nb::none(),
+                    0.0f, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
                 nb::gil_scoped_release release;
                 return s.sculptor->restore(settings, gate);
