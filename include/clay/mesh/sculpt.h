@@ -44,6 +44,7 @@
 #include "clay/field/flatten.h"  // FlattenMode
 #include "clay/field/relax.h"    // MaskGate
 #include "clay/mesh/adjacency.h"
+#include "clay/mesh/brush_arena.h"
 #include "clay/mesh/deform.h"
 #include "clay/mesh/bvh.h"
 #include "clay/mesh/lattice.h"
@@ -241,7 +242,14 @@ class MeshSculptor {
     // the read halo either, which is the ring Smooth, Relax and Polish average
     // over without touching. A host uploading the halo would re-send geometry
     // that did not change.
-    const std::vector<std::uint32_t>& write_region() const { return region_.write_region; }
+    // WIDENED TO `WorkItemId` (add-shared-brush-runtime): the write region is
+    // the workset's own array, and the workset stopped being addressed in weld
+    // classes when the adaptive and multiresolution sculptors started filling
+    // one. Carrying a second, narrower array holding the same information would
+    // have been a second answer to "what did this stamp write" — the exact
+    // failure `sculpt_workset.h` exists to prevent. Call `as_weld_class()` on
+    // an entry to get the number this used to hand back.
+    const std::vector<WorkItemId>& write_region() const { return region_.write_region; }
     const math::Aabb& write_bounds() const { return region_.write_bounds; }
     // The whole workset, including the entries that did not move. For a caller
     // that wants to know what the brush REACHED rather than what it changed.
@@ -322,8 +330,23 @@ class MeshSculptor {
     // an undo or a redo.
     void refit_bvh();
 
+    // What the per-stamp scratch arena owns and how far it has had to grow.
+    //
+    // ONE PER SCULPTOR AND NEVER A PROCESS-GLOBAL: a `MultiresSculptor` owns a
+    // `MeshSculptor`, and a document can hold several mesh layers, so a shared
+    // arena would make two stamps alias each other's scratch and would be a
+    // data race the first time a host stamped two layers on two threads.
+    const BrushScratchArena& arena() const { return arena_; }
+
    private:
+    // The walk: everything the brush REACHES, into `candidates_` and
+    // `distance_`. Declared here rather than in `sculpt_workset.h` because it
+    // names an `Adjacency` and a `Bvh`, and a neutral header holding three
+    // representation-specific signatures is neutral in the directory listing
+    // only.
+    void build_fixed_mesh_workset(const MeshBrushSettings& settings);
     void gather(const MeshBrushSettings& settings, const field::MaskGate& gate);
+    static kernel::cfloat3 normal_of_item(const void* context, WorkItemId item);
     std::size_t write(VertexDeltas* record);
     void gather_stroke_origin(const VertexDeltas& record);
     // The colour counterpart of `write`: applies `color_target_` where it
@@ -364,7 +387,14 @@ class MeshSculptor {
     Adjacency adjacency_;
     BrushRegion region_;
     WalkScratch walk_;
+    // The walk's own output, in weld classes, before the composition turns it
+    // into `WorkItemId`s. A member for the reason everything else here is one:
+    // a stroke of similar stamps allocates on its first stamp and never again.
+    std::vector<std::uint32_t> candidates_;
     std::vector<float> distance_;
+    // The transients one stamp needs deep inside the call — the automask's
+    // frontiers and its flood. See `brush_arena.h`.
+    BrushScratchArena arena_;
     std::vector<kernel::cfloat3> displacement_;
     // Where each class's colour should END UP, seeded from what it holds now,
     // so a verb that leaves an entry alone writes nothing rather than

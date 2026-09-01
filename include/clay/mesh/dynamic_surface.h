@@ -46,18 +46,9 @@
 namespace clay {
 namespace mesh {
 
-// The four element kinds, each its own type so one cannot be passed where
-// another belongs. Half the interesting bugs in a half-edge implementation are
-// exactly that mistake.
-struct VertexTag {};
-struct HalfEdgeTag {};
-struct EdgeTag {};
-struct FaceTag {};
-
-using VertexId = SlotId<VertexTag>;
-using HalfEdgeId = SlotId<HalfEdgeTag>;
-using EdgeId = SlotId<EdgeTag>;
-using FaceId = SlotId<FaceTag>;
+// `VertexId`, `HalfEdgeId`, `EdgeId` and `FaceId` are in `slot_pool.h`, with
+// the storage they address — a handle is not the surface, and `WorkItemId` is
+// built out of a `VertexId` without wanting anything else in this file.
 
 // What an operator may not do to an edge. Flags ON THE EDGE rather than policy
 // in the remesher: an operator refuses on its own rather than depending on a

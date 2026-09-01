@@ -176,9 +176,9 @@ std::size_t MultiresSculptor::stamp(MeshBrush verb, const MeshBrushSettings& set
     // every id would be off by one. The hierarchy stores detail per VERTEX, so
     // an off-by-one here writes a wrinkle onto its neighbour.
     const Adjacency& adjacency = sculptor_->adjacency();
-    for (std::uint32_t cls : sculptor_->write_region()) {
+    for (WorkItemId item : sculptor_->write_region()) {
         std::size_t member_count = 0;
-        const std::uint32_t* members = adjacency.members(cls, &member_count);
+        const std::uint32_t* members = adjacency.members(item.as_weld_class(), &member_count);
         for (std::size_t i = 0; i < member_count; ++i) touched_.push_back(members[i]);
     }
 

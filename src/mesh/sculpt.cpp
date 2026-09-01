@@ -342,9 +342,22 @@ kernel::cfloat3 MeshSculptor::automask_reference(const MeshBrushSettings& settin
     return near != kNoClass ? class_normal(mesh_, adjacency_, near) : kernel::cf3(0, 1, 0);
 }
 
-void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGate& gate) {
+// The fixed mesh's answers to the two questions `compose_workset` cannot
+// answer for itself. Free functions with a `this` context rather than lambdas,
+// because `WorkItemReader` holds function pointers — see the note there on why
+// it is not a `std::function`.
+kernel::cfloat3 MeshSculptor::normal_of_item(const void* context, WorkItemId item) {
+    const MeshSculptor* self = static_cast<const MeshSculptor*>(context);
+    return class_normal(self->mesh_, self->adjacency_, item.as_weld_class());
+}
+
+// THE WALK: everything the brush REACHES, with the distance each was reached
+// at. It fills `candidates_` and `distance_` and nothing else, because what
+// happens next — the weights, the drops, the automask, the frame — is the same
+// on all three representations and lives in `compose_workset`.
+void MeshSculptor::build_fixed_mesh_workset(const MeshBrushSettings& settings) {
     BrushRegion& r = region_;
-    // Retire the LAST stamp's slots before `r.classes` is overwritten, so the
+    // Retire the LAST stamp's slots before `r.items` is overwritten, so the
     // reset costs what that stamp touched. `adjacency.h` states the rule this
     // follows and the reason: "allocating a per-class array per stamp is the
     // entire cost of the stroke". `slot` has to stay a full per-class array
@@ -352,10 +365,12 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
     // that it is sized ONCE and never cleared wholesale again.
     if (r.slot.size() != adjacency_.class_count()) {
         r.slot.assign(adjacency_.class_count(), kNoClass);
-        r.classes.clear();
+        r.items.clear();
     } else {
-        for (std::uint32_t c : r.classes)
+        for (WorkItemId item : r.items) {
+            const std::uint32_t c = item.as_weld_class();
             if (c < r.slot.size()) r.slot[c] = kNoClass;
+        }
     }
     if (settings.geodesic) {
         // Seeded from the index when there is one. `geodesic_region` scans
@@ -372,7 +387,7 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
         if (seed >= adjacency_.class_count() && surface_index() != nullptr)
             seed = nearest_class(settings.center);
         automask_seed_ = seed < adjacency_.class_count() ? seed : kNoClass;
-        geodesic_region(mesh_, adjacency_, settings.center, settings.radius, walk_, &r.classes,
+        geodesic_region(mesh_, adjacency_, settings.center, settings.radius, walk_, &candidates_,
                         &distance_, seed);
     } else {
         // The euclidean region IS a ball query, and used to be written as a
@@ -388,26 +403,42 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
                                  ? settings.seed_class
                                  : nearest_class(settings.center);
         }
-        if (classes_in_ball(settings.center, settings.radius, &r.classes)) {
+        if (classes_in_ball(settings.center, settings.radius, &candidates_)) {
             // SORTED, so the region is the same list whether it came from the
             // tree or from the scan below — and so it does not depend on the
             // tree's shape, which a rebuild changes. The verbs accumulate a
             // weighted normal and a plane over this list, and float addition is
             // not associative, so an order that varied would make a brush's
             // result depend on whether the host happened to have picked.
-            std::sort(r.classes.begin(), r.classes.end());
-            distance_.resize(r.classes.size());
-            for (std::size_t i = 0; i < r.classes.size(); ++i)
-                distance_[i] = kernel::clength(class_position(r.classes[i]) - settings.center);
+            std::sort(candidates_.begin(), candidates_.end());
+            distance_.resize(candidates_.size());
+            for (std::size_t i = 0; i < candidates_.size(); ++i)
+                distance_[i] = kernel::clength(class_position(candidates_[i]) - settings.center);
         } else {
-            euclidean_region(mesh_, adjacency_, settings.center, settings.radius, &r.classes,
+            euclidean_region(mesh_, adjacency_, settings.center, settings.radius, &candidates_,
                              &distance_);
         }
     }
 
-    r.weights.resize(r.classes.size());
-    r.positions.resize(r.classes.size());
-    r.normals.resize(r.classes.size());
+    // The walk speaks weld classes; the workset speaks `WorkItemId`. The
+    // positions are lifted here rather than inside the weight loop because the
+    // neutral composition takes a candidate's position as given — it is the one
+    // thing every representation can hand over without being asked a question.
+    r.items.resize(candidates_.size());
+    r.positions.resize(candidates_.size());
+    for (std::size_t i = 0; i < candidates_.size(); ++i) {
+        const std::uint32_t c = candidates_[i];
+        std::size_t mc = 0;
+        r.items[i] = WorkItemId::weld_class(c);
+        r.positions[i] = mesh_.positions[adjacency_.members(c, &mc)[0]];
+    }
+}
+
+void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGate& gate) {
+    // Every transient this stamp asks the arena for is dead when the stamp
+    // ends, so the arena starts each one at zero and keeps its storage.
+    arena_.reset();
+    build_fixed_mesh_workset(settings);
 
     // The alpha's frame, once for the whole stamp rather than per vertex. Its
     // direction defaults to the brush's own averaged normal — which is not yet
@@ -427,131 +458,28 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
         alpha_frame = alpha_frame_for(settings, fallback);
     }
 
-    // Weigh, snapshot, and drop what the falloff or the mask reduced to
-    // nothing — compacting in place so the region is exactly what moves.
-    std::size_t kept = 0;
-    for (std::size_t i = 0; i < r.classes.size(); ++i) {
-        const std::uint32_t c = r.classes[i];
-        std::size_t mc = 0;
-        const kernel::cfloat3 p = mesh_.positions[adjacency_.members(c, &mc)[0]];
-        // THE WALK DECIDES WHAT IS REACHED; THE STRAIGHT LINE DECIDES HOW MUCH.
-        //
-        // Weighing by the walk's own distance was tried first and looks wrong:
-        // an edge path overestimates geodesic distance by a direction-dependent
-        // amount, so on an irregular triangulation the falloff picks up a
-        // visible herringbone banding that a render shows and the numbers do
-        // not. The straight-line distance carries no such bias, and it is
-        // bounded by the walk's — a class the walk reached within the radius is
-        // within the radius in space too — so weighing by it costs nothing.
-        //
-        // What survives is exactly the property the walk exists for: the chin
-        // is not REACHED from the upper lip, so it is not in the region at all
-        // and its weight never comes up. The price is a step at the region's
-        // rim on a strongly folded surface, where the two distances diverge; on
-        // ordinary curvature they agree to a few percent and the falloff there
-        // is already near zero.
-        //
-        // THE FACTORS ARE COMPOSED IN ONE FIXED ORDER, in `compose_weight`,
-        // and the order is the contract rather than an implementation detail:
-        // these are separate multiplications, float multiplication is not
-        // associative, and re-associating them moves the last bit of every
-        // displacement that reads the weight.
-        WeightFactors f;
-        f.falloff = falloff_weight(settings.falloff,
-                                   kernel::clength(p - settings.center) / settings.radius);
-        // ...and fade out over the last stretch of the walk's path budget, so
-        // the rim is smooth even where the two bounds disagree. See
-        // kPathTaperStart. A euclidean region has no walk, so it passes 1 and
-        // the multiplication is the identity.
-        if (settings.geodesic)
-            f.path_taper = path_taper(distance_[i] / settings.radius, kPathTaperStart,
-                                      kDefaultPathBudget);
-        if (gate) f.gate = gate(p);
-        // The alpha multiplies the WEIGHT, which is why it needs no per-verb
-        // code: every verb already scales by this, and every falloff already
-        // shaped it.
-        f.alpha = alpha_at(settings, alpha_frame, p);
-        const float w = compose_weight(f);
-        if (w <= 0.0f) continue;
-        r.classes[kept] = c;
-        r.weights[kept] = w;
-        r.positions[kept] = p;
-        r.normals[kept] = class_normal(mesh_, adjacency_, c);
-        ++kept;
-    }
-    r.classes.resize(kept);
-    r.weights.resize(kept);
-    r.positions.resize(kept);
-    r.normals.resize(kept);
+    const MeshWorkItemTopology topology(mesh_, adjacency_, region_);
+    const WorkItemId seed_item = WorkItemId::weld_class(automask_seed_);
 
-    // Already cleared at the top of this call, for exactly the entries the last
-    // stamp set; only the new region's entries are written here.
-    for (std::size_t i = 0; i < r.classes.size(); ++i)
-        r.slot[r.classes[i]] = static_cast<std::uint32_t>(i);
+    WorkComposeInputs in;
+    in.settings = &settings;
+    in.gate = &gate;
+    in.alpha = &alpha_frame;
+    in.path_distance = distance_.data();
+    in.geodesic = settings.geodesic;
+    in.taper_start = kPathTaperStart;
+    in.path_budget = kDefaultPathBudget;
+    in.topology = &topology;
+    in.automask_inputs = &automask_inputs_;
+    // Resolved ONLY when a factor wants it: the reference costs a nearest-class
+    // query on a brush that named no deposit direction, and a stamp with no
+    // automask must not pay for one.
+    if (settings.automask.any()) in.automask_reference = automask_reference(settings);
+    if (automask_seed_ != kNoClass) in.automask_seed = &seed_item;
+    in.reader.normal_at = &MeshSculptor::normal_of_item;
+    in.reader.context = this;
 
-    // THE AUTOMASK IS A SECOND PASS, and it has to be: two of its five factors
-    // — the boundary fade and the connectivity walk — spread over the workset's
-    // own neighbourhood, so they cannot be answered one vertex at a time while
-    // the workset is still being built. It multiplies into the weight LAST,
-    // which is what keeps a stamp with no automask on exactly the bits it had
-    // before automasking existed.
-    r.automask.clear();
-    if (settings.automask.any()) {
-        r.automask.resize(kept);
-        compute_automask(mesh_, adjacency_, r, settings.automask, automask_inputs_,
-                         automask_reference(settings), automask_seed_, r.automask.data());
-        std::size_t survived = 0;
-        for (std::size_t i = 0; i < kept; ++i) {
-            const float w = r.weights[i] * r.automask[i];
-            if (w <= 0.0f) {
-                // A fully automasked vertex leaves the workset entirely, which
-                // is what makes it BIT-IDENTICAL to its input rather than
-                // merely close: nothing writes it at all.
-                r.slot[r.classes[i]] = kNoClass;
-                continue;
-            }
-            r.classes[survived] = r.classes[i];
-            r.weights[survived] = w;
-            r.positions[survived] = r.positions[i];
-            r.normals[survived] = r.normals[i];
-            r.automask[survived] = r.automask[i];
-            ++survived;
-        }
-        if (survived != kept) {
-            r.classes.resize(survived);
-            r.weights.resize(survived);
-            r.positions.resize(survived);
-            r.normals.resize(survived);
-            r.automask.resize(survived);
-            for (std::size_t i = 0; i < survived; ++i)
-                r.slot[r.classes[i]] = static_cast<std::uint32_t>(i);
-            kept = survived;
-        }
-    }
-
-    // The plane and the shared direction, taken from the snapshot and never
-    // from what the stamp is about to deposit.
-    kernel::cfloat3 nsum = kernel::cf3(0, 0, 0), psum = kernel::cf3(0, 0, 0);
-    float wsum = 0.0f;
-    for (std::size_t i = 0; i < kept; ++i) {
-        nsum = nsum + r.normals[i] * r.weights[i];
-        psum = psum + r.positions[i] * r.weights[i];
-        wsum += r.weights[i];
-    }
-    r.average_normal = safe_normalize(nsum, kernel::cf3(0, 1, 0));
-    r.centroid = wsum > 0.0f ? psum / wsum : settings.center;
-    if (settings.use_given_plane) {
-        r.plane_point = settings.plane_point;
-        r.plane_normal = safe_normalize(settings.plane_normal, r.average_normal);
-    } else {
-        // The weighted centroid with the weighted average normal: the plane
-        // ZBrush and Blender both flatten onto, and the one an artist means by
-        // "flatten what is under the brush". A least-squares fit would be a
-        // better plane for a flat noisy patch and a worse one for a curved
-        // patch, which is the case that matters.
-        r.plane_point = r.centroid;
-        r.plane_normal = r.average_normal;
-    }
+    compose_workset(in, arena_, &region_);
 }
 
 // THE PLAN IS COMPILED ONCE PER STROKE, not per stamp.
@@ -664,7 +592,8 @@ std::size_t MeshSculptor::stamp_color(MeshBrush verb, const MeshBrushSettings& s
     color_target_.resize(region_.size());
     for (std::size_t i = 0; i < region_.size(); ++i) {
         std::size_t mc = 0;
-        const std::uint32_t v = adjacency_.members(region_.classes[i], &mc)[0];
+        const std::uint32_t v =
+            adjacency_.members(region_.items[i].as_weld_class(), &mc)[0];
         color_target_[i] = mesh_.colors[v];
     }
     // A copy, because both kernels read every entry's PRE-STAMP colour while
@@ -731,7 +660,7 @@ void MeshSculptor::build_neighbors(bool want_normals, bool want_colors) {
     const bool colors = want_colors && has_colors();
     for (std::size_t i = 0; i < r.size(); ++i) {
         std::size_t n = 0;
-        const std::uint32_t* ring = adjacency_.ring(r.classes[i], &n);
+        const std::uint32_t* ring = adjacency_.ring(r.items[i].as_weld_class(), &n);
         for (std::size_t k = 0; k < n; ++k) {
             const std::uint32_t nc = ring[k];
             nb_slots_.push_back(nc < r.slot.size() ? r.slot[nc] : kOutsideRegion);
@@ -748,7 +677,8 @@ void MeshSculptor::gather_stroke_origin(const VertexDeltas& record) {
     origin_.resize(region_.size());
     for (std::size_t i = 0; i < region_.size(); ++i) {
         std::size_t members = 0;
-        const std::uint32_t v = adjacency_.members(region_.classes[i], &members)[0];
+        const std::uint32_t v =
+            adjacency_.members(region_.items[i].as_weld_class(), &members)[0];
         const std::optional<kernel::cfloat3> seen = record.origin_of(v);
         // Not yet touched by this stroke: it starts here.
         origin_[i] = seen ? *seen : region_.positions[i];
@@ -773,14 +703,14 @@ std::size_t MeshSculptor::write_colors(VertexDeltas* record) {
     region_.write_bounds = math::Aabb{};
     std::size_t painted = 0;
     for (std::size_t i = 0; i < region_.size(); ++i) {
-        const std::uint32_t c = region_.classes[i];
+        const std::uint32_t c = region_.items[i].as_weld_class();
         std::size_t mc = 0;
         const std::uint32_t* members = adjacency_.members(c, &mc);
         // Unchanged means unwritten, so a zero-weight rim costs nothing and a
         // record does not grow entries whose before and after are equal.
         if (is_zero(color_target_[i] - mesh_.colors[members[0]])) continue;
         ++painted;
-        region_.write_region.push_back(c);
+        region_.write_region.push_back(region_.items[i]);
         region_.write_bounds.expand(region_.positions[i]);
         for (std::size_t k = 0; k < mc; ++k) {
             if (record) record->note(members[k], mesh_);
@@ -813,10 +743,10 @@ std::size_t MeshSculptor::write(VertexDeltas* record) {
     for (std::size_t i = 0; i < region_.size(); ++i) {
         if (is_zero(displacement_[i])) continue;
         ++moved;
-        const std::uint32_t c = region_.classes[i];
+        const std::uint32_t c = region_.items[i].as_weld_class();
         mark_bvh_dirty(c);  // for the next refit_bvh, which drains the whole set
         const kernel::cfloat3 target = region_.positions[i] + displacement_[i];
-        region_.write_region.push_back(c);
+        region_.write_region.push_back(region_.items[i]);
         region_.write_bounds.expand(region_.positions[i]);
         region_.write_bounds.expand(target);
         std::size_t mc = 0;

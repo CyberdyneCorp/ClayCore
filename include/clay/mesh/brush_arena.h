@@ -88,6 +88,10 @@ class ScratchVector {
         return true;
     }
 
+    // Undefined on an empty view, exactly as `std::vector::pop_back` is. The
+    // two callers are depth-first floods that just read the top.
+    void pop_back_unchecked() { --size_; }
+
     void clear() { size_ = 0; }
     bool empty() const { return size_ == 0; }
     std::size_t size() const { return size_; }

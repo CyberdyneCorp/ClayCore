@@ -1665,13 +1665,14 @@ TEST_CASE("mesh sculpt: the write region excludes the read halo") {
     const std::size_t moved = sculptor.stamp(MeshBrush::Smooth, s);
     REQUIRE(moved > 0);
 
-    const std::vector<std::uint32_t>& written = sculptor.write_region();
+    const std::vector<mesh::WorkItemId>& written = sculptor.write_region();
     const mesh::SculptWorkset& ws = sculptor.workset();
     CHECK(written.size() == moved);
 
     // Everything named actually moved. A report naming a vertex that did not
     // move costs a host an upload for nothing.
-    for (std::uint32_t c : written) {
+    for (mesh::WorkItemId item : written) {
+        const std::uint32_t c = item.as_weld_class();
         std::size_t n = 0;
         const std::uint32_t v = sculptor.adjacency().members(c, &n)[0];
         CAPTURE(c);
@@ -1685,9 +1686,9 @@ TEST_CASE("mesh sculpt: the write region excludes the read halo") {
     // the workset. Those are the vertices a report must not name, and they are
     // also the vertices the stamp must not have moved.
     std::size_t halo = 0;
-    for (std::uint32_t c : written) {
+    for (mesh::WorkItemId item : written) {
         std::size_t rc = 0;
-        const std::uint32_t* ring = sculptor.adjacency().ring(c, &rc);
+        const std::uint32_t* ring = sculptor.adjacency().ring(item.as_weld_class(), &rc);
         for (std::size_t k = 0; k < rc; ++k) {
             if (ws.slot[ring[k]] != mesh::kNoClass) continue;  // inside the workset
             ++halo;
@@ -1704,9 +1705,9 @@ TEST_CASE("mesh sculpt: the write region excludes the read halo") {
     CHECK(halo > 0);
 
     // Every moved vertex is inside the brush's ball.
-    for (std::uint32_t c : written) {
+    for (mesh::WorkItemId item : written) {
         std::size_t n = 0;
-        const std::uint32_t v = sculptor.adjacency().members(c, &n)[0];
+        const std::uint32_t v = sculptor.adjacency().members(item.as_weld_class(), &n)[0];
         CHECK(kernel::clength(before[v] - s.center) <= s.radius);
     }
 

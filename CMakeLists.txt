@@ -79,6 +79,7 @@ add_library(claycore
   src/mesh/sculpt.cpp
   src/mesh/sculpt_kernels.cpp
   src/mesh/brush_arena.cpp
+  src/mesh/sculpt_workset.cpp
   src/mesh/stamp_frame.cpp
   src/mesh/brush_model.cpp
   src/mesh/automask.cpp
