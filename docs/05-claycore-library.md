@@ -398,6 +398,71 @@ one by contract. So it is a plain batched walk, priced like a stroke's first dab
 rather than its tenth, which is the right price for something taken once a
 gesture. `clay_document_resume_stats` does not move for it.
 
+### Scaling a subtool per axis
+
+A ZBrush-style gizmo scales per axis — the three boxes on the arms — and users
+expect it on a placed object *and* on a whole subtool. `scale-an-item-per-axis`
+(#320) gave every NODE placement three factors in 0.54.0 and deferred the layer
+deliberately, because `layer.xform * node.xform` is consumed as a rigid frame by
+`brush::move` and `brush::lattice_gizmo`. A host therefore had to hide the axis
+boxes in scale mode for a subtool (#373).
+
+`Layer::scale_axes` closes it, composed innermost in the layer's own frame
+exactly as a node's is in its own:
+
+```
+world_from_local = layer.xform · diag(layer.scale_axes)
+                 · node.xform  · diag(node.scale_axes)
+```
+
+`xform.scale` stays the similarity factor at each level and the axes modulate
+it, so a triple of ones is the identity and **three equal factors compile to
+byte-identical tape** — the case a test pins, because it is what makes every
+document written before the field unaffected by it.
+
+**What a non-uniform scale costs, and what it does not.** The inverse goes into
+the tape's matrix and the distance is multiplied back by the product of the
+smallest component of each per-axis scale in the composition. That is
+conservative rather than exact, and provably so: the composed linear part is
+`L · D_l · R · D_n` with `L` and `R` rotations, and the smallest singular value
+of a product is at least the product of the smallest singular values, which for
+a rotation is 1. So the value never overestimates the true distance. The field
+stays **1-Lipschitz** — dividing by `s` and multiplying back by `min(s)` can
+only shorten — so `safe_step_scale` does not move and no marcher slows down.
+What goes is `is_exact`. A world **radius** mapped inward is divided by the
+**largest** component instead, the dual: `brush::move` takes the layer's factor
+into that rule, so a drag never reaches outside what the artist circled.
+
+Bounds, influence bounds, picking and a mesh layer's placed geometry all read
+the three factors; a mesh layer's **normals** go through the inverse transpose,
+as `clay_mesh_transform_nonuniform` already documents, because rotating a normal
+is right for a similarity and tilts every one of them off the surface under a
+squash.
+
+`kSceneMinor` and `kClaySpaceMinor` move to 16. An older stream loads with
+(1, 1, 1), which is what those files always meant; a stream written at an older
+minor does not carry the field, so that minor's reader does not desynchronise.
+The placement and the squash are **one command**, so one undo restores a frame
+that actually existed rather than the rotation from one step and the squash from
+another.
+
+**One verb refuses rather than approximating.** `brush::lattice_gizmo` returns
+no warps for a per-axis-scaled layer. A cage records its item-to-cage placement
+as a `math::Transform`, and on a squashed layer the map it needs is
+
+```
+cage.placement⁻¹ · layer.xform · diag(L) · node.xform · diag(N)
+```
+
+a general affine map — the layer's diagonal sits *between* the two placements,
+so it is not a similarity and not `Transform ∘ diag` either, which is the shape
+`drag-a-squashed-item` predicted when it deferred the widening here. Placing a
+cage through the narrower record would warp every item in a space it does not
+occupy, silently and with no error. Refusing is not a fix for that widening and
+does not pretend to be — the same record still drops a *node's* per-axis scale,
+which predates this change — but it stops the layer scale from adding a second
+silent case to it. `scale-a-layer-per-axis` task 5.1 carries the widening.
+
 ### Duplicating a subtool costs a layer record
 
 An **instance layer** is a second layer over the same edit list. It is what a

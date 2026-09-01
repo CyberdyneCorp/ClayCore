@@ -231,6 +231,18 @@ struct Layer {
     std::string name;
     LayerKind kind = LayerKind::Sdf;
     math::Transform xform;
+    // The whole layer's PER-AXIS scale, innermost in the layer's own frame —
+    // before `xform` places it, exactly as a node's sits before its own
+    // placement (#373). The full map is
+    // `layer.xform * diag(scale_axes) * node.xform * diag(node.scale_axes)`,
+    // and the two scales at each level multiply: `xform.scale` stays the
+    // uniform similarity factor and this modulates it.
+    //
+    // A separate field rather than a widening of math::Transform: a Transform
+    // is a similarity, and the algebra it is closed under is only the
+    // similarities. A per-axis scale composed into it would make every
+    // `a * b` in the tree quietly wrong instead of failing to compile.
+    kernel::cfloat3 scale_axes = kernel::cf3(1.0f, 1.0f, 1.0f);
     bool visible = true;
     // Protection, both off by default so a document that never sets them
     // behaves exactly as it did before they existed. Ghost is "show me this
@@ -257,6 +269,78 @@ struct Layer {
     // clay::scene, which is what makes "this content does not change what the
     // document evaluates to" structural rather than a rule to maintain.
 };
+
+// -- an item's PLACED frame, both per-axis scales composed --------------------
+//
+// One place each, so tape_build, bounds, pick and the two brushes cannot drift
+// on the order the scales compose in or on which component a distance is
+// corrected by. The node-level halves live in scene/types.h; these are the
+// whole composition:
+//
+//   world_from_local = layer.xform · diag(layer.scale_axes)
+//                    · node.xform  · diag(node.scale_axes)
+//
+// The uniform `xform.scale` at each level stays the similarity factor and the
+// axes modulate it, so a triple of ones is the identity at either level and an
+// unsquashed document takes the fast paths below unchanged.
+
+inline bool layer_is_squashed(const Layer& l) {
+    return !scale_axes_uniform(l.scale_axes) || l.scale_axes.x != 1.0f;
+}
+
+// The layer's own map, per-axis scale innermost.
+inline math::cfloat4x4 layer_matrix(const Layer& l) {
+    if (!layer_is_squashed(l)) return l.xform.matrix();
+    return math::mul(l.xform.matrix(), math::scale_matrix(l.scale_axes));
+}
+
+inline math::cfloat4x4 layer_inverse_matrix(const Layer& l) {
+    if (!layer_is_squashed(l)) return l.xform.inverse_matrix();
+    return math::mul(math::inverse_scale_matrix(l.scale_axes), l.xform.inverse_matrix());
+}
+
+// The layer's own distance factor, for a length authored in the LAYER's local
+// units — a group's rounding radius, which no single item owns.
+inline float layer_distance_scale(const Layer& l) {
+    return l.xform.scale * scale_axes_factor(l.scale_axes);
+}
+
+// The whole thing: the layer's map, then the item's own.
+inline math::cfloat4x4 placed_matrix(const Layer& l, const Node& n) {
+    return math::mul(layer_matrix(l), item_matrix(n));
+}
+
+inline math::cfloat4x4 placed_inverse_matrix(const Layer& l, const Node& n) {
+    return math::mul(item_inverse_matrix(n), layer_inverse_matrix(l));
+}
+
+// The factor a LOCAL distance is multiplied back by. The product of the two
+// similarity scales and of the smallest component of each per-axis scale.
+//
+// CONSERVATIVE RATHER THAN EXACT, and provably so: the composed linear part is
+// `L · D_l · R · D_n` with L and R rotations, and the smallest singular value
+// of a product is at least the product of the smallest singular values, which
+// for a rotation is 1. So this never exceeds the true minimum stretch, and a
+// distance multiplied by it never overestimates. That is `cscale_nu_dist`'s
+// instinct applied twice.
+inline float placed_distance_scale(const Layer& l, const Node& n) {
+    return l.xform.scale * scale_axes_factor(l.scale_axes) * n.xform.scale *
+           scale_axes_factor(n.scale_axes);
+}
+
+// The dual, for a WORLD radius being mapped inward: the largest component, so
+// every world reach is at most the region the caller circled. Under-reach is
+// recoverable by asking again; over-reach is not.
+inline float placed_reach_scale(const Layer& l, const Node& n) {
+    return l.xform.scale * scale_axes_reach(l.scale_axes) * n.xform.scale *
+           scale_axes_reach(n.scale_axes);
+}
+
+// Whether the composition is still a similarity — the case that keeps the field
+// EXACT and compiles to bit-identical tape.
+inline bool placed_is_similarity(const Layer& l, const Node& n) {
+    return scale_axes_uniform(l.scale_axes) && scale_axes_uniform(n.scale_axes);
+}
 
 class Document {
   public:

@@ -2750,7 +2750,7 @@ math::Aabb layer_world_bounds(const clay_document* doc, const scene::Layer& laye
         for (const kernel::cfloat3& p : it->second.positions) local.expand(p);
     }
     if (local.empty()) return local;  // transforming an empty box invents one
-    return local.transformed(layer.xform.matrix());
+    return local.transformed(scene::layer_matrix(layer));
 }
 
 // A cell reaches the caller as three int32 values, which is exactly the
@@ -4819,8 +4819,83 @@ clay_result clay_document_set_layer_transform(clay_document* doc, clay_layer_id 
     math::Transform xform;
     clay_result r = read_transform(position, rotation_axis, rotation_angle, scale, &xform);
     if (r != CLAY_OK) return r;
-    return apply_edit(doc, scene::Command{scene::SetLayerTransformCmd{layer, xform}},
+    // The identity triple, so this call REPLACES a squash rather than leaving
+    // one behind: the placement is one value in this ABI, and a caller setting
+    // it means the whole of it.
+    return apply_edit(
+        doc,
+        scene::Command{scene::SetLayerTransformCmd{layer, xform, kernel::cf3(1.0f, 1.0f, 1.0f)}},
+        "layer not found");
+}
+
+clay_result clay_document_set_layer_transform_nonuniform(clay_document* doc, clay_layer_id layer,
+                                                         const float position[3],
+                                                         const float rotation_axis[3],
+                                                         float rotation_angle,
+                                                         const float scale[3]) {
+    kernel::cfloat3 axes;
+    clay_result r = read_scale_axes(scale, &axes);
+    if (r != CLAY_OK) return r;
+    // The rotation and position come through the same reader every other
+    // transform in this ABI uses; the scale is the part that is not a
+    // similarity, so it rides beside the Transform rather than inside it —
+    // exactly as clay_layer_set_transform_nonuniform does one level down.
+    math::Transform xform;
+    r = read_transform(position, rotation_axis, rotation_angle, 1.0f, &xform);
+    if (r != CLAY_OK) return r;
+    return apply_edit(doc, scene::Command{scene::SetLayerTransformCmd{layer, xform, axes}},
                       "layer not found");
+}
+
+clay_result clay_document_layer_transform(const clay_document* doc, clay_layer_id layer,
+                                          float out_position[3], float out_rotation_axis[3],
+                                          float* out_rotation_angle, float* out_scale) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    // One float cannot express three, and every way of pretending otherwise is
+    // a lie a host would act on — the uniform factor alone describes a
+    // differently-shaped subtool, and a read-change-write through the uniform
+    // setter would round the artist's squash away. The same refusal
+    // clay_layer_node_transform makes one level down, for the same reason.
+    if (!scene::scale_axes_uniform(l->scale_axes))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "this layer carries a per-axis scale: use "
+                    "clay_document_layer_transform_nonuniform");
+    if (out_position) {
+        out_position[0] = l->xform.position.x;
+        out_position[1] = l->xform.position.y;
+        out_position[2] = l->xform.position.z;
+    }
+    axis_angle_of(l->xform, out_rotation_axis, out_rotation_angle);
+    if (out_scale) *out_scale = l->xform.scale * l->scale_axes.x;
+    return CLAY_OK;
+}
+
+clay_result clay_document_layer_transform_nonuniform(const clay_document* doc, clay_layer_id layer,
+                                                     float out_position[3],
+                                                     float out_rotation_axis[3],
+                                                     float* out_rotation_angle,
+                                                     float out_scale[3]) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    if (out_position) {
+        out_position[0] = l->xform.position.x;
+        out_position[1] = l->xform.position.y;
+        out_position[2] = l->xform.position.z;
+    }
+    axis_angle_of(l->xform, out_rotation_axis, out_rotation_angle);
+    // The two scales multiply and this call reports the product, so a layer
+    // placed through the UNIFORM setter answers (s, s, s) here rather than
+    // (1, 1, 1) with the factor hidden somewhere the caller cannot see. That is
+    // what lets ONE manipulator read this call and never branch.
+    if (out_scale) {
+        out_scale[0] = l->xform.scale * l->scale_axes.x;
+        out_scale[1] = l->xform.scale * l->scale_axes.y;
+        out_scale[2] = l->xform.scale * l->scale_axes.z;
+    }
+    return CLAY_OK;
 }
 
 clay_result clay_set_layer_mirror(clay_document* doc, clay_layer_id layer_id, int32_t axis_x,
@@ -8620,8 +8695,26 @@ clay_result clay_document_mesh_combined(const clay_document* doc,
         if (it == doc->doc.mesh_layers.end()) continue;
 
         mesh::Mesh m = it->second;
-        for (kernel::cfloat3& v : m.positions) v = layer.xform.apply(v);
-        for (kernel::cfloat3& n : m.normals) n = layer.xform.rotation.rotate(n);
+        const kernel::cfloat3 axes = layer.scale_axes;
+        for (kernel::cfloat3& v : m.positions)
+            v = layer.xform.apply(kernel::cf3(v.x * axes.x, v.y * axes.y, v.z * axes.z));
+        // Normals through the INVERSE TRANSPOSE of the linear part, which for
+        // rotation-times-diagonal is the rotation times the reciprocal scale —
+        // the same rule and the same code shape clay_mesh_transform_nonuniform
+        // states. Rotating a normal is right for a similarity and wrong for a
+        // squash: it tilts every normal off the surface and takes the shading
+        // with it.
+        const bool squashed = scene::layer_is_squashed(layer);
+        for (kernel::cfloat3& n : m.normals) {
+            if (!squashed) {
+                n = layer.xform.rotation.rotate(n);
+                continue;
+            }
+            kernel::cfloat3 t = layer.xform.rotation.rotate(
+                kernel::cf3(n.x / axes.x, n.y / axes.y, n.z / axes.z));
+            const float len2 = kernel::cdot2(t);
+            n = len2 > 0.0f ? t / kernel::csqrt(len2) : n;
+        }
         placed.push_back(std::move(m));
     }
 

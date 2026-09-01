@@ -164,7 +164,7 @@ inline constexpr std::uint16_t kClaySpaceMajor = 1;
 // reopening it here does not restore the link. That is the recoverable
 // direction: duplicated geometry is visible and re-instanceable, whereas a
 // silently dropped layer would not be.
-inline constexpr std::uint16_t kClaySpaceMinor = 15;
+inline constexpr std::uint16_t kClaySpaceMinor = 16;
 
 // The document bundle a .clayspace file holds. Voxel layer content is keyed
 // by layer id (the scene module stays voxel-agnostic by layering rule).
