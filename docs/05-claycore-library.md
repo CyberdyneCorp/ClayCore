@@ -906,6 +906,34 @@ serialized, so there is no moment at which you could hold a handle, have a step
 open, and ask. It is reported anyway so the total stays the sum of the fields if
 an entry point spanning a step is ever added. Do not build a response around it.
 
+**A sculptor's scratch is not in this report, and it is not an omission.**
+`clay_document_memory` measures the document; a mesh sculptor is a handle held
+BESIDE one, on the same footing as `MultiresSurface::memory()`, and a document
+does not know how many are open on it. Since 0.75.0 each sculptor owns one bump
+arena for the buffers a stamp needs and cannot hold as members — the automask's
+frontiers, the adaptive region's sort permutation — reset rather than freed
+between stamps, so a warm dab on a stable surface allocates nothing. Ask the
+sculptor:
+
+```c
+clay_brush_arena_stats a = { .struct_size = sizeof a };
+clay_mesh_sculptor_arena_stats(sculptor, &a);   /* also _dynamic_ and _multires_ */
+```
+
+Read it as **`growths`, then `high_water_bytes`, then `capacity_bytes`** — the
+order is deliberate. There is no current-usage field because a current usage
+reads zero between stamps whatever the arena is doing, and `growths` is the only
+one of the three that distinguishes an arena that has converged from scratch
+that is never released: the second allocates nothing after warm-up and consumes
+memory without bound, which no allocation count can see. The table above asks
+"may you release it?" and the answer here is **yes, by destroying the
+sculptor** — the arena is rebuildable state, in the brick cache's category
+rather than the user's work, and it costs a warm-up rather than a stall. There
+is deliberately nothing to tune: no reserve, no cap, no growth factor, because
+each would be a number a host sets from one device and is wrong about after the
+brush radius changes, and the arena already sizes itself from the largest
+footprint it has been given.
+
 Runnable: [`examples/62_what_this_document_costs.py`](../examples/62_what_this_document_costs.py),
 which builds a document the way an artist would and attributes it. On that
 fixture a 60-item SDF blockout is 29 KiB and the layer rasterized from it is
