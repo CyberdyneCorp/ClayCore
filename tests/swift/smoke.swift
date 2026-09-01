@@ -1317,7 +1317,7 @@ do {
     // A lock refuses a COEFFICIENT WRITE and permits every property change.
     check(clay_multires_set_sculpt_layer_locked(surface, layerIds[0], 1, &layerError) == CLAY_OK,
           "locked a finished pass")
-    var coefficients: [Float] = [0.1, 0, 0]
+    let coefficients: [Float] = [0.1, 0, 0]
     layerError = -1
     coefficients.withUnsafeBufferPointer { c in
         check(clay_multires_set_sculpt_layer_detail(surface, layerIds[0], 1, 0, c.baseAddress,

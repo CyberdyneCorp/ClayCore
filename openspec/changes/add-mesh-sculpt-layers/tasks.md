@@ -320,9 +320,21 @@
       save and a load), and `tools/check_swift_package.py` is green — but that
       gate reads the package manifest and the sources TEXTUALLY, so it proves
       the file is declared and referenced and proves nothing about whether it
-      compiles. To finish: run the smoke on a macOS host and in an iOS
-      simulator. CI covers macOS, so the first half should come back from the
-      PR's own matrix; the simulator run needs a machine with Xcode
+      compiles.
+      PARTLY CLOSED BY CI, and the record should say which part. PR #417's
+      `build+test (macos, +metal, parity)` job ran
+      `tools/check_swift_smoke.sh typecheck` and reported "typecheck OK
+      (smoke.swift compiles against bindings/c/clay.h)", so the new section
+      DOES type-check against the header on a real Swift toolchain — and it
+      found something this box could not: one `var coefficients` that is never
+      mutated, now a `let`. That closes the failure the type-check exists to
+      catch (a merge that makes the source stop compiling) and closes nothing
+      else. `check_swift_smoke.sh` deliberately keeps `macos` and `sim` —
+      building against the real xcframework slices and RUNNING the binary, the
+      simulator one under `simctl spawn` — at release time, so what this task
+      asks for has still not happened. To finish: `./tools/check_swift_smoke.sh
+      macos` and `./tools/check_swift_smoke.sh sim` on a machine with Xcode and
+      a booted simulator, which is the release workflow's job and not a PR's
 - [x] 8.6 THE MILESTONE, as a numbered example that renders and asserts: a
       wrinkle pass dialled 0 → 50% → 100% over a form that never changes, plus
       one layer removed with the others untouched
