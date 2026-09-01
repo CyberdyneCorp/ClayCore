@@ -587,6 +587,12 @@ class MultiresSurface {
     // 20k cage is a request for more memory than a machine holds.
     static constexpr std::uint32_t kMaxLevels = 12;
     static constexpr std::uint64_t kMaxLevelVertices = 1ull << 30;
+    // The layer stack inside this stream applies the same two, and has to
+    // spell them itself because it is compiled without this header. Held equal
+    // here, where both names are visible, so a change to either is a build
+    // failure rather than a stack chunk a document could smuggle past.
+    static_assert(SculptLayerStack::kMaxLevels == kMaxLevels);
+    static_assert(SculptLayerStack::kMaxLevelVertices == kMaxLevelVertices);
 
     // The implementation's own state. Declared here — rather than hidden
     // behind the pointer alone — because the three translation units that

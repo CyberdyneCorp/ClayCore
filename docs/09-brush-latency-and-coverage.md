@@ -565,6 +565,37 @@ which shape is expensive: 1 -> 16 layers each covering the WHOLE level costs
 compose 16.80 -> 18.02 ms, a strength change 5.80 -> 7.03 ms and a stamp 1.66 ->
 2.16 ms. Sixteen full-surface passes is not a detail workflow; it is a warning.
 
+**Re-measured at the end of the branch**, 31 repetitions per row on the same box
+under a different load (average 4.56 before, 2.61 after), with P99 added because
+a slider is an interactive gesture and its tail is what a host feels:
+
+| case | 1 layer, P50 / P95 / P99 / max | 128 layers, P50 / P95 / P99 / max | | counter |
+|---|---:|---:|---:|---|
+| `BM_SculptLayerStampOnStackLocal` | 363.3 / 369.2 / 388.2 / 388.2 us | 376.3 / 432.0 / 594.5 / 594.5 us | **1.04x** | `layer_blocks_visited` **2898 at both ends** |
+| `BM_SculptLayerStampOnStackOverlapping` | 439.1 / 550.2 / 683.1 / 683.1 us | 536.8 / 539.2 / 604.9 / 604.9 us | 1.22x | 2898 -> 14109 |
+| `BM_SculptLayerStrengthChangeLocal` | 752.3 / 754.7 / 811.5 / 811.5 us | 1204.2 / 1212.9 / 1264.2 / 1264.2 us | 1.60x | `blocks_recomposed` **200 at both ends** |
+| `BM_SculptLayerComposeLocal` | 15.65 / 15.89 / 16.73 ms | 16.17 / 17.00 / 17.77 ms | 1.03x | cold, the whole level |
+
+Both counters land on the same integers they did the first time, which is the
+point: they are exact and the clocks are not. The overlapping stamp's ratio moved
+1.48x -> 1.22x between two runs of unchanged code on a box whose load moved by a
+factor of two, which is the whole reason [the sculpt-layer rows are deliberately
+outside `check_bench.py`](#sculpt-layers-measured-add-mesh-sculpt-layers) — the
+claim they carry is an integer asserted in a unit test, not a ratio between two
+clocks on a shared runner.
+
+**What a hostile document costs is a latency question too**, and it is the one
+this branch's last stage found unanswered. A layer stack chunk rides inside the
+multires stream, and the surface's cross-check of a decoded stack against the
+hierarchy it rebuilt happens *after* the layer decoder has returned — so every
+number the chunk declares is one the decoder has already reserved from. Two of
+them were unbounded and a third was reserved eagerly: an 84-byte chunk naming
+twelve levels of a billion vertices reserved **3.2 GB** of per-block
+invalidation index before anything could object. It now costs **720 bytes**,
+asserted in `test_sculpt_allocation.cpp` — in bytes rather than allocations,
+because reserving three gigabytes is one allocation and a count would have
+called it cheaper than the vector of level sizes beside it.
+
 **Tiering.** A stamp on a stack is **Tier 1** at every depth measured — 0.37 ms
 at 128 local layers is 9% of the 4.17 ms share, and its growth is what the first
 row says it is. A strength change is Tier 1 at this size too, and it is the row

@@ -222,7 +222,8 @@ std::vector<std::uint8_t> encode_layer(const SculptLayer& layer) {
     return out;
 }
 
-bool decode_layer(Reader* r, SculptLayer* out) {
+bool decode_layer(Reader* r, const std::vector<std::uint32_t>& level_vertices,
+                  std::uint32_t block_size, SculptLayer* out) {
     std::uint32_t kind = 0, flags = 0, name_size = 0, levels = 0;
     if (!r->u64(&out->id) || out->id == kNoSculptLayer) return false;
     if (!r->u32(&kind)) return false;
@@ -242,9 +243,13 @@ bool decode_layer(Reader* r, SculptLayer* out) {
     out->name.assign(reinterpret_cast<const char*>(r->data + r->at), name_size);
     if (!r->skip(name_size)) return false;
 
-    // Each level costs at least two four-byte lengths, so the ceiling is the
-    // buffer itself rather than a preference.
+    // A LAYER CARRIES EXACTLY THIS STACK'S LEVELS. `encode_layer` writes one
+    // pair of fields per level of the stack it came out of, so anything else is
+    // a stream this library did not write — and pinning it here rather than
+    // pricing the count against the buffer is what bounds the loop below to a
+    // dozen fields instead of to however many a hostile buffer can name.
     if (!r->count(8u, &levels)) return false;
+    if (levels != level_vertices.size()) return false;
     out->detail.assign(levels, DetailField{});
     out->mask.assign(levels, SparseWeightField{});
     for (std::uint32_t l = 0; l < levels; ++l) {
@@ -253,24 +258,36 @@ bool decode_layer(Reader* r, SculptLayer* out) {
         if (!DetailField::decode(blob.data(), blob.size(), &out->detail[l])) return false;
         if (!r->blob(&blob)) return false;
         if (!SparseWeightField::decode(blob.data(), blob.size(), &out->mask[l])) return false;
-    }
-    return true;
-}
-
-// A layer's per-level fields must describe THIS stack's levels. A stream
-// pairing one level's coefficients with a different vertex count would silently
-// attach every wrinkle somewhere else — so an empty field passes (a layer that
-// never reached that level stores nothing) and a populated one must match
-// exactly. Lifted out of the decode loop because it was the only part of it
-// nested three deep, and the nesting was reading as if it were a special case.
-bool layer_levels_match(const SculptLayer& layer,
-                        const std::vector<std::uint32_t>& level_vertices) {
-    for (std::size_t l = 0; l < level_vertices.size(); ++l) {
-        const std::uint32_t vertices = level_vertices[l];
-        const std::uint32_t d = layer.detail[l].vertex_count();
-        const std::uint32_t m = layer.mask[l].vertex_count();
-        if (d != 0 && d != vertices) return false;
-        if (m != 0 && m != vertices) return false;
+        // A LAYER'S FIELDS MUST DESCRIBE THIS STACK'S LEVELS. A stream pairing
+        // one level's coefficients with a different vertex count would silently
+        // attach every wrinkle somewhere else — so an empty field passes (a
+        // layer that never reached that level stores nothing) and a populated
+        // one must match exactly.
+        //
+        // CHECKED HERE rather than over the finished layer, so a stream whose
+        // second level is nonsense is refused before its third is decoded. Both
+        // orders refuse the same streams; only this one refuses them without
+        // first reserving the index every remaining level declares.
+        const std::uint32_t d = out->detail[l].vertex_count();
+        const std::uint32_t m = out->mask[l].vertex_count();
+        if (d != 0 && d != level_vertices[l]) return false;
+        if (m != 0 && m != level_vertices[l]) return false;
+        // AND THEY MUST SHARE THE STACK'S BLOCKING, which the file header calls
+        // the thing every sparse container in this change agrees on. Block `b`
+        // naming the same vertices in a layer's coefficients, in its mask and
+        // in the level's composed field is the whole of tasks 5.4 and 5.5:
+        // `note_layer_coverage` hands a FIELD's block numbers straight to the
+        // STACK's dirty index without translating them.
+        //
+        // The failure a stream pairing two blockings produces is not a crash,
+        // which is why this is checked rather than trusted. A coefficient at
+        // vertex 5000 is block 4 under the stack's 1024 and block 1250 under a
+        // field's 4; marking 1250 falls off the end of a dirty index that has
+        // five entries, `note_block` drops it, and the strength slider then
+        // invalidates nothing and leaves the surface showing a composition
+        // nobody asked for.
+        if (out->detail[l].block_size() != block_size) return false;
+        if (out->mask[l].block_size() != block_size) return false;
     }
     return true;
 }
@@ -308,30 +325,36 @@ bool SculptLayerStack::decode(const std::uint8_t* data, std::size_t size, Sculpt
     if (!r.u64(&stack.active_) || !r.u64(&stack.next_id_)) return false;
     if (!r.u32(&block_size) || !valid_block_size(block_size)) return false;
     stack.block_size_ = block_size;
-    if (!r.count(4u, &levels)) return false;
+    // THE TWO CEILINGS THE STREAM AROUND THIS ONE APPLIES TO THE SAME TWO
+    // NUMBERS. `MultiresSurface::decode` bounds its level count and its
+    // per-level vertex count before it builds anything, and then checks a
+    // decoded stack against the hierarchy it built — but that check runs after
+    // this function has returned, and both numbers are RESERVED FROM here. A
+    // forty-eight-byte stack chunk declaring three levels of four billion
+    // vertices used to be accepted, and reserved three gigabytes on the way.
+    if (!r.count(4u, &levels) || levels > SculptLayerStack::kMaxLevels) return false;
     stack.level_vertices_.resize(levels);
-    for (std::uint32_t l = 0; l < levels; ++l)
-        if (!r.u32(&stack.level_vertices_[l])) return false;
-
-    stack.dirty_.assign(levels, LevelDirty{});
     for (std::uint32_t l = 0; l < levels; ++l) {
-        stack.dirty_[l].mark.assign(stack.level_block_count(l), 0);
-        stack.dirty_[l].all = true;
+        if (!r.u32(&stack.level_vertices_[l])) return false;
+        if (stack.level_vertices_[l] > SculptLayerStack::kMaxLevelVertices) return false;
     }
+
+    // `all` is the resting state of a freshly decoded stack, and while it holds
+    // the per-block mark array says nothing and is read by nothing — so it is
+    // sized when `clear_dirty` drops `all`, which is the moment it starts being
+    // consulted. See `SculptLayerStack::clear_dirty`.
+    stack.dirty_.assign(levels, LevelDirty{});
 
     for (std::uint32_t i = 0; i < count; ++i) {
         std::vector<std::uint8_t> payload;
         if (!r.blob(&payload)) return false;
         Reader lr{payload.data(), payload.size(), 0};
         SculptLayer layer;
-        if (!decode_layer(&lr, &layer)) return false;
+        if (!decode_layer(&lr, stack.level_vertices_, stack.block_size_, &layer)) return false;
         // Two layers answering to one id would make every lookup ambiguous and
         // every undo record apply to whichever came first.
         if (stack.index_of(layer.id) != kNoSculptLayerIndex) return false;
         if (layer.id >= stack.next_id_) return false;
-        layer.detail.resize(levels);
-        layer.mask.resize(levels);
-        if (!layer_levels_match(layer, stack.level_vertices_)) return false;
         stack.layers_.push_back(std::move(layer));
     }
     if (stack.active_ != kNoSculptLayer && stack.index_of(stack.active_) == kNoSculptLayerIndex)

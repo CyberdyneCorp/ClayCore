@@ -458,6 +458,21 @@ class SculptLayerStack {
     static constexpr std::uint32_t kMaxLayers = 1u << 16;
     static constexpr std::uint32_t kMaxNameBytes = 1u << 16;
 
+    // THE SAME TWO CEILINGS THE STREAM AROUND THIS ONE ALREADY APPLIES, and
+    // they are here because the stack chunk is read BEFORE the hierarchy it
+    // belongs to can be consulted. `MultiresSurface::decode` does check that a
+    // decoded stack's levels are this hierarchy's — but only after this
+    // function has returned, which is far too late to matter: a level count and
+    // a per-level vertex count are numbers this decoder RESERVES FROM, so a
+    // stack chunk declaring three levels of four billion vertices reserved
+    // three gigabytes of block index before anyone could say it was nonsense.
+    //
+    // Duplicated rather than included, because `multires.h` includes THIS
+    // header and not the other way round; a `static_assert` there holds the two
+    // pairs equal, so the copy cannot drift without failing the build.
+    static constexpr std::uint32_t kMaxLevels = 12;
+    static constexpr std::uint32_t kMaxLevelVertices = DetailField::kMaxVertices;
+
    private:
     // One level of `merge_down`, and the union of the two layers' coverages it
     // walks. Both are indices rather than ids: `merge_down` has already

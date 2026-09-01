@@ -457,3 +457,56 @@ def test_memory_reports_the_stack_apart_from_the_form_and_never_caps_it():
         s.set_sculpt_layer_detail(layer, 2, v, 0.0, 0.0, 0.0)
     s.compact_sculpt_layers()
     assert s.memory()["sculpt_layers"] < memory["sculpt_layers"]
+
+
+def _stack_chunk(block_size, level_vertices, layers=0, active=0, next_id=1):
+    """A layer stack chunk, as `SculptLayerStack::encode` writes one.
+
+    Hand-written because the point is to say something the engine would never
+    write. `_splice_stack_chunk` below asserts that a chunk built from the
+    hierarchy's own numbers still loads, which is what keeps a refusal here
+    attributable to the field that was changed.
+    """
+    import struct
+    body = struct.pack("<IIIQQII", 0x534C4D43, 1, layers, active, next_id,
+                       block_size, len(level_vertices))
+    body += b"".join(struct.pack("<I", v) for v in level_vertices)
+    return struct.pack("<I", len(body)) + body
+
+
+def _splice_stack_chunk(document, chunk):
+    """Replace a serialized surface's trailing layer chunk with `chunk`.
+
+    The stack is the last thing in the stream and announces itself with its own
+    magic, so a document can be rewritten without knowing anything about the
+    bytes in front of it — which is exactly the position a hostile file is in.
+    """
+    at = document.rindex(b"CMLS")
+    return document[:at - 4] + chunk
+
+
+def test_a_document_whose_stack_chunk_names_an_impossible_hierarchy_is_refused():
+    # THE SURFACE'S SECOND OPINION, at the boundary a script actually calls.
+    # `deserialize` rebuilds the cage from the stream and then requires the
+    # decoded stack's level count and every one of its level sizes to be that
+    # hierarchy's, rather than taking the chunk's word for them — otherwise a
+    # document could pair one sculpt's passes with another's levels and attach
+    # every wrinkle somewhere else. The ceilings the layer decoder applies on
+    # its own, and what a refused document costs on the way, are gated in the
+    # C++ suite, which can see both.
+    s = surface()
+    s.add_sculpt_layer("pass")
+    document = s.serialize()
+    vertices = [len(s.positions_at(level)) for level in range(3)]
+
+    # The control first: the same surgery with the hierarchy's own numbers.
+    legal = _splice_stack_chunk(document, _stack_chunk(1024, vertices))
+    assert clay.MultiresSurface.deserialize(legal).sculpt_layer_ids == []
+
+    for name, chunk in [
+        ("four billion vertices a level", _stack_chunk(4, [0xFFFFFFF0] * 3)),
+        ("more levels than a hierarchy has", _stack_chunk(1024, [4] * 13)),
+        ("a blocking that is not a power of two", _stack_chunk(1000, vertices)),
+    ]:
+        with pytest.raises(ValueError):
+            clay.MultiresSurface.deserialize(_splice_stack_chunk(document, chunk))

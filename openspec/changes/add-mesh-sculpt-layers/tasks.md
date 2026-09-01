@@ -30,6 +30,10 @@
       — design.md D3: `SculptLayerKind : uint16_t`, `Sampled = 0` shipping,
       `Procedural = 1` reserved and REFUSED by the decoder, each layer payload
       length-prefixed so a later format can choose to skip deliberately
+      — AND NOW TESTED, which it was not: the whole enforcement of this decision
+      was one comparison in `decode_layer` that nothing exercised.
+      `test_mesh_sculpt_layer_io.cpp` builds a stream carrying kind 1 and a kind
+      no version of this format has named, and refuses both
 - [x] 1.4 DECIDE whether a colour layer stack is in scope. Recommendation: not
       here — mesh paint and smear write vertex colours and a paint stack is the
       same idea under different arithmetic
@@ -49,6 +53,13 @@
       what a host, a serialized document and the C ABI hold
       — ids are minted from a serialized counter, `index_of` is a lookup, and
       `move_to`/`remove` never renumber anything a host holds
+      — the decoder's side of the same claim is now gated: two layers answering
+      to one id, the reserved id nothing may hold, and an id at or above the
+      serialized counter are each refused, and a stack that came off a stream
+      still mints above everything it carries. The counter check is the one that
+      matters from the other direction — a stream whose counter has been rewound
+      below an id it carries would mint that id again on the next `add`, and the
+      document would hold two layers with one handle without a malformed byte
 - [x] 2.3 Stack operations: add, remove, move, merge down, rename, set
       strength, set visible, set lock, set active
       — all nine on `SculptLayerStack`, each forwarded through `MultiresSurface`
@@ -74,6 +85,13 @@
       contributes
       — `mesh::SparseWeightField`, identity 1.0, same blocking and same block
       index as `DetailField`; the brush gate stays `field::MaskGate`
+      — the mask's own byte form is now gated on its own terms rather than only
+      through a layer: a round trip that asserts the identity survives outside
+      every stored block AND on the tail of one, plus its six refusals (foreign
+      magic, unwritten version, a blocking this reader cannot address, a block
+      index past the level, blocks that are not ascending, and more blocks than
+      the buffer could hold). THE SHARED BLOCKING IS NOW ENFORCED rather than
+      assumed — see 7.5
 - [x] 2.8 Byte accounting per layer and per stack, and coverage per layer, so a
       strength change can dirty coverage rather than the model
       — `MultiresMemory::sculpt_layers` (authoritative) and `::composed`
@@ -167,6 +185,12 @@
       SHALL NOT invalidate geometry
       — per-level dirty block sets on the stack; `rename` and `set_active` bump
       only `metadata_revision` and mark nothing. Tested
+      — the C++ case asserting it COULD NOT FAIL until this stage: it compared
+      `sculpt_layer_composition_revision()` to a second read of itself. It now
+      reads all three revisions before the rename and asserts metadata rose
+      while composition and content did not — proven by making `rename` bump the
+      composition revision, which compiles and fails the case at 3 == 2. The
+      pyclay case beside it was always correct, which is why nothing noticed
 - [x] 5.3 Separate revisions for metadata, composition and content, so the
       three kinds of change invalidate what they actually affect
       — `metadata_revision`, `composition_revision`, `content_revision`, with
@@ -176,11 +200,26 @@
       large surface costs its coverage, not the surface
       — tested: a layer inside one block of a five-block level recomposes exactly
       one block on a strength change
+      — RE-MEASURED at 31 repetitions (P50 / P95 / P99 / max, load average 4.56
+      before and 2.61 after, so the ratio is the reading):
+        strength change, LOCAL, 1 -> 128 layers
+          752.3 / 754.7 / 811.5 / 811.5 us  ->  1204.2 / 1212.9 / 1264.2 /
+          1264.2 us   ratio 1.60x, and `blocks_recomposed` is 200 at BOTH ends,
+          which is the gate. The clock rises because `layer_blocks_visited` goes
+          200 -> 25600 in a shape where every layer covers the same footprint
 - [x] 5.5 THE GATE: a stamp on the top of a deep stack does not sum every layer
       beneath it over unrelated geometry. Prefix checkpoints if the measurement
       requires them; the cache keys SHALL be designed so they are possible
       — tested: sixteen layers over two disjoint blocks, a write into one visits
       the eight layers that reach it and none of the others
+      — RE-MEASURED at 31 repetitions (P50 / P95 / P99 / max):
+        stamp on a LOCAL stack, 1 -> 128 layers
+          363.3 / 369.2 / 388.2 / 388.2 us  ->  376.3 / 432.0 / 594.5 /
+          594.5 us   ratio 1.04x, `layer_blocks_visited` 2898 at both ends
+        stamp on an OVERLAPPING stack, 1 -> 128
+          439.1 / 550.2 / 683.1 us  ->  536.8 / 539.2 / 604.9 us   ratio 1.22x,
+          `layer_blocks_visited` 2898 -> 14109, so the cost follows the layers
+          that actually cover what the stamp touched and nothing else
 - [x] 5.6 Benchmarks over 1, 4, 16, 64 and 128 layers with local, overlapping
       and dense coverage
       — `BM_SculptLayerCompose*`, `BM_SculptLayerStrengthChange*` and
@@ -263,13 +302,79 @@
       by arithmetic BEFORE the array is reserved. A record naming a layer the
       stack does not hold, or a vertex past the level, changes NOTHING rather
       than half of something
+      — ONE CLASS OF RECORD WAS NOT COVERED AND IS THE ONE THAT MATTERS MOST.
+      A STRUCTURAL record (add, remove, move, merge, bake) carries a whole stack
+      on each side, and `apply_structural_property` decodes those bytes and
+      INSTALLS what comes back. The document path has a second opinion available
+      — `MultiresSurface::decode` checks a decoded stack against the hierarchy in
+      the same stream — and this path has none, because a journal record is not
+      required to name a surface it was taken against. So the stack decoder's own
+      ceilings are the only refusal there is, and there were none: see 7.5.
+      `a structural record's stack snapshot is the last thing that can check it`
+      now pokes the snapshot's level table on both sides and checks the stack is
+      untouched afterwards, with the untouched record replayed both ways as the
+      control. PROVEN: removing the ceilings compiles, and the record then
+      applies — `s.sculpt_layers().size() == layers_before` fails, so the hostile
+      snapshot really did mutate the stack rather than merely being accepted
 - [x] 7.5 Versioned serialization of the stack — id, name, kind, visible,
       locked, strength, per-level blocks, masks — inside the multires format
       rather than in the mesh stream
       — `kSurfaceVersion = 2`, the stack chunk inside the multires stream, and
       version 1 still accepted as a hierarchy with no layers
+      — THREE REAL BUGS IN THIS DECODER, found by writing the refusal tests the
+      task did not have and fixed here, each with its own regression test proven
+      against a COMPILING revert. `tests/unit/test_mesh_sculpt_layer_io.cpp` is
+      the new file; it builds hostile streams from parts rather than poking
+      bytes, and asserts a well-formed one is byte-identical to
+      `SculptLayerStack::encode`'s output so a format change fails loudly rather
+      than poking a neighbouring field.
+
+        1. THE CHUNK APPLIED NEITHER CEILING the stream around it applies to the
+           same two numbers. `MultiresSurface::decode` bounds its level count at
+           `kMaxLevels` and each level at `kMaxLevelVertices` before it builds
+           anything; the stack chunk inside it bounded neither, and both are
+           numbers it reserves from. Fixed by spelling the two constants on
+           `SculptLayerStack` with a `static_assert` in `multires.h` holding them
+           equal to `MultiresSurface`'s, so the copy cannot drift.
+        2. THE PER-LEVEL DIRTY INDEX WAS RESERVED FROM A DECLARED LEVEL SIZE.
+           With (1) that made a FORTY-EIGHT-BYTE chunk reserve three gigabytes;
+           with (1) fixed, the largest LEGAL chunk still reserved three. The mark
+           array is read only while `all` is false, and `all` is the resting
+           state of a decoded stack, so it is now sized in `clear_dirty` where it
+           starts being consulted. MEASURED in `test_sculpt_allocation.cpp`, the
+           one translation unit in this tree that can see an allocation: an
+           84-byte chunk naming twelve levels of a billion vertices at the finest
+           blocking allocates 720 bytes. Reverting the fix compiles and the same
+           gate reports 3,221,226,192. Measured in BYTES and not allocations
+           deliberately — reserving three gigabytes is ONE allocation.
+        3. A LAYER'S FIELDS DID NOT HAVE TO SHARE THE STACK'S BLOCKING, which the
+           serializer's own file header claims is the thing every sparse
+           container in this change agrees on. This one is not a memory bug, it
+           is a silent correctness bug: `note_layer_coverage` hands a FIELD's
+           block numbers straight to the STACK's dirty index without translating
+           them, so a coefficient at vertex 5000 is block 4 under the stack's
+           1024 and block 1250 under a field's 4 — marking 1250 falls off the end
+           of a five-entry index, `note_block` drops it, and the strength slider
+           then invalidates nothing and leaves the surface composed from a stack
+           nobody dialled. Refused now, on both the coefficients and the mask.
+
+      Also gated here and previously untested: the kind (1.3), a strength outside
+      [0,1] or NaN, the id invariants (2.2), an active id the stream does not
+      carry, a declared name past `kMaxNameBytes` with the name at the ceiling so
+      the buffer really carries the bytes, a layer declaring a different level
+      count, and a field sized to another level. Every hostile case has a
+      POSITIVE CONTROL beside it — which is how this file found that clearing the
+      layers out of a stream leaves the active id dangling
 - [x] 7.6 A layer id survives a save, a load and a reorder
       — tested: save, load and a reorder before the save; ids and names survive
+      — and composition is now asserted to be ROUTE-INDEPENDENT, which is the
+      property a block cache loses without anyone noticing: the same ten
+      operations run WARM (evaluated after each one, so every one had to
+      invalidate a populated cache) and COLD (evaluated once at the end) must
+      agree bit for bit at every level, and a save-and-load is a third route to
+      the same bits. The reloaded surface is then dialled, because a decoded
+      stack whose dirty index was never sized is exactly the shape that would
+      compose once and go deaf
 
 ## 8. Bindings and gates
 

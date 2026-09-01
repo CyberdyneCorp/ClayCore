@@ -1907,6 +1907,27 @@ an artist's work with no signal at all. Version 1 still loads here, as what it
 was — a hierarchy with no layers. A layer's **kind** is written and an unknown
 one is **refused** rather than skipped, for the same reason one level down.
 
+**What the chunk may declare is bounded by the stream around it, and has to be.**
+The surface reader rebuilds the cage first, then requires a decoded stack's level
+count and every level size to be that hierarchy's — but that comparison happens
+*after* the layer decoder has returned, and both of those are numbers the layer
+decoder reserves from. So the chunk applies the same two ceilings itself
+(`kMaxLevels`, `kMaxLevelVertices`, held equal to the surface's by a
+`static_assert`), and a stack's per-block invalidation index is sized when it is
+first consulted rather than when a stream names a level. There is one path with
+no second opinion at all — a **structural undo record** carries a whole stack
+snapshot and is not required to name the surface it was taken against — and on
+that path the decoder's own refusals are the only ones there are.
+
+A layer's coefficients and mask must also share the **stack's blocking**, not
+merely declare a legal one. Block `b` naming the same 1024 vertices in a layer's
+field, in its mask and in the level's composed field is what makes a slider cost
+the layer's coverage; the invalidation path hands a field's block numbers to the
+stack's index without translating them, so a document pairing a 1024-blocked
+stack with a 4-blocked field would mark blocks the level does not have, drop
+them, and leave a surface composed from a stack nobody dialled. That is refused
+at the door.
+
 Runnable: [`examples/69_mesh_sculpt_layers.py`](../examples/69_mesh_sculpt_layers.py)
 — a wrinkle pass dialled 0 -> 50% -> 100% over a form that never changes, one
 layer removed with the others byte-identical, what a slider costs measured

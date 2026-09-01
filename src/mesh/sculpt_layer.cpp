@@ -250,11 +250,10 @@ void SculptLayerStack::set_level_sizes(const std::vector<std::uint32_t>& vertice
     level_vertices_ = vertices_per_level;
     for (SculptLayer& layer : layers_) size_layer(&layer);
 
+    // `LevelDirty` starts with `all` set, which is the answer every reader
+    // wants after a resize; the per-block mark array is sized where it is first
+    // consulted, in `clear_dirty`.
     dirty_.assign(level_vertices_.size(), LevelDirty{});
-    for (std::size_t l = 0; l < dirty_.size(); ++l) {
-        dirty_[l].mark.assign(level_block_count(static_cast<std::uint32_t>(l)), 0);
-        dirty_[l].all = true;
-    }
 }
 
 std::uint32_t SculptLayerStack::level_vertex_count(std::uint32_t level) const {
@@ -336,6 +335,14 @@ void SculptLayerStack::clear_dirty(std::uint32_t level) {
     for (std::uint32_t b : d.blocks)
         if (b < d.mark.size()) d.mark[b] = 0;
     d.blocks.clear();
+    // WHERE THE MARK ARRAY IS SIZED, and the only place it can be. It exists so
+    // a second `note_block` on one block does not list it twice, and
+    // `note_block` reads it only when `all` is false — which starts being true
+    // one line below and nowhere else. Sizing it when a LEVEL is declared
+    // instead let a forty-eight-byte stack chunk reserve three gigabytes of
+    // index for a hierarchy carrying no layers at all.
+    const std::size_t blocks = level_block_count(level);
+    if (d.mark.size() != blocks) d.mark.assign(blocks, 0);
     d.all = false;
 }
 

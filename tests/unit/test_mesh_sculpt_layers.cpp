@@ -130,11 +130,20 @@ TEST_CASE("strength dials a recorded pass without replaying it") {
     SUBCASE("a rename invalidates no geometry") {
         surface.positions_at(2);
         surface.reset_sculpt_layer_stats();
+        // Task 5.3's three revisions, each read BEFORE the rename. Comparing
+        // the composition revision to a second read of itself — which is what
+        // this case did until the test suite was audited — is a check that
+        // cannot fail, and the whole claim of 5.2 lives in it: a name is
+        // metadata, and metadata must not invalidate geometry.
+        const std::uint64_t metadata = surface.sculpt_layer_metadata_revision();
+        const std::uint64_t composition = surface.sculpt_layer_composition_revision();
+        const std::uint64_t content = surface.sculpt_layer_content_revision();
         REQUIRE(surface.rename_sculpt_layer(id, "pores"));
         surface.positions_at(2);
         CHECK(surface.sculpt_layer_stats().blocks_recomposed == 0);
-        CHECK(surface.sculpt_layer_composition_revision() ==
-              surface.sculpt_layer_composition_revision());
+        CHECK(surface.sculpt_layer_metadata_revision() > metadata);
+        CHECK(surface.sculpt_layer_composition_revision() == composition);
+        CHECK(surface.sculpt_layer_content_revision() == content);
     }
 }
 

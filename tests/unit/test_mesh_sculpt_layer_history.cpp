@@ -435,6 +435,79 @@ TEST_CASE("a malformed property record is refused, and an absurd stack size befo
     }
 }
 
+TEST_CASE("a structural record's stack snapshot is the last thing that can check it") {
+    // WHERE THE STACK DECODER'S CEILINGS ARE LOAD-BEARING AND NOTHING ELSE IS.
+    // A structural undo step — add, remove, move, merge, bake — carries a whole
+    // stack on each side, and replaying one hands those bytes to
+    // `SculptLayerStack::decode` and installs whatever comes back. The document
+    // path has a second opinion available (`MultiresSurface::decode` checks a
+    // decoded stack against the hierarchy in the same stream), and this path has
+    // none: a journal record is not required to name a surface it was taken
+    // against, so `apply_structural_property` decodes, installs, and only THEN
+    // re-imposes the levels.
+    //
+    // So a snapshot naming twelve levels of four billion vertices has to be
+    // refused here or not at all, and "not at all" means the number a hostile
+    // journal wrote is the number this build reserves a block index from.
+    MultiresSurface s = build(2);
+    SculptLayerProperty added;
+    const SculptLayerId id = s.add_sculpt_layer("pass", &added);
+    REQUIRE(added.op == SculptLayerProperty::Op::Structural);
+    REQUIRE(!added.stack_after.empty());
+
+    // The snapshot's level table sits after the magic, the version, the layer
+    // count, the active id, the id counter and the block size — and the CHECK
+    // below is what says so, so a format change fails here rather than poking
+    // a neighbouring field and passing for the wrong reason.
+    const std::size_t levels_at = 4 + 4 + 4 + 8 + 8 + 4;
+    const auto read_u32 = [](const std::vector<std::uint8_t>& b, std::size_t at) {
+        return static_cast<std::uint32_t>(b[at]) | (static_cast<std::uint32_t>(b[at + 1]) << 8) |
+               (static_cast<std::uint32_t>(b[at + 2]) << 16) |
+               (static_cast<std::uint32_t>(b[at + 3]) << 24);
+    };
+    const auto write_u32 = [](std::vector<std::uint8_t>* b, std::size_t at, std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) (*b)[at + i] = static_cast<std::uint8_t>((v >> (8 * i)) & 0xffu);
+    };
+    REQUIRE(read_u32(added.stack_after, levels_at) == s.level_count());
+
+    SUBCASE("a level larger than any level can be") {
+        SculptLayerProperty hostile = added;
+        write_u32(&hostile.stack_after, levels_at + 4, SculptLayerStack::kMaxLevelVertices + 1u);
+        const std::uint64_t before = s.sculpt_layer_checksum();
+        const std::size_t layers_before = s.sculpt_layers().size();
+        CHECK_FALSE(s.apply_sculpt_layer_property(hostile, true));
+        CHECK(s.sculpt_layers().size() == layers_before);
+        CHECK(s.sculpt_layer_checksum() == before);
+    }
+    SUBCASE("more levels than this build reconstructs") {
+        // Poked into the record's OTHER side — the empty stack this add started
+        // from — so the snapshot carries no layer payload. A layer's own level
+        // count has to match the stack's, and on the populated side that check
+        // would fire first and this one would never be reached.
+        SculptLayerProperty hostile = added;
+        std::vector<std::uint8_t>& b = hostile.stack_before;
+        const std::uint32_t was = read_u32(b, levels_at);
+        REQUIRE(was == s.level_count());
+        // Widened in place, so the declared count and the bytes behind it agree
+        // and the refusal is the ceiling rather than the truncation.
+        write_u32(&b, levels_at, SculptLayerStack::kMaxLevels + 1u);
+        b.insert(b.begin() + static_cast<std::ptrdiff_t>(levels_at + 4 + 4 * was),
+                 4 * (SculptLayerStack::kMaxLevels + 1u - was), 0);
+        const std::size_t layers_before = s.sculpt_layers().size();
+        CHECK_FALSE(s.apply_sculpt_layer_property(hostile, false));
+        CHECK(s.sculpt_layers().size() == layers_before);
+    }
+    SUBCASE("and the untouched record still replays, both ways") {
+        // The control. Every case above rewrites this record, so a refusal
+        // means nothing until the record itself is known to work.
+        REQUIRE(s.apply_sculpt_layer_property(added, false));
+        CHECK(s.sculpt_layers().size() == 0);
+        REQUIRE(s.apply_sculpt_layer_property(added, true));
+        CHECK(s.sculpt_layers().size() == 1);
+        CHECK(s.sculpt_layers().id_at(0) == id);
+    }
+}
+
 TEST_CASE("the two kinds are counted apart, which is the only reason there are two") {
     // THE MEASUREMENT THE SPLIT EXISTS FOR. A byte accounting can only separate
     // what the kind separates, and "which of these is filling my undo budget"
