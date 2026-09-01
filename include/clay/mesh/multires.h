@@ -62,6 +62,7 @@
 #include "clay/mesh/mesh_data.h"
 #include "clay/mesh/project.h"
 #include "clay/mesh/subdivide.h"
+#include "clay/mesh/surface_chunks.h"
 #include "clay/mesh/surface_frame.h"
 #include "clay/parallel/cancel.h"
 
@@ -149,6 +150,11 @@ struct MultiresMemory {
     // -- rebuildable, in the order a host should reach for it -----------------
     std::size_t evaluated = 0;      // subdivided positions, frames, positions, normals
     std::size_t runtime_index = 0;  // connectivity, level meshes, adjacency
+    // The per-level chunk tables and their face maps. Its own line rather than
+    // part of `runtime_index`, because a host answering a memory warning acts
+    // on the categories separately and the chunk index is the one that follows
+    // the FACE COUNT rather than the vertex count.
+    std::size_t chunk_index = 0;
     std::size_t rebuildable = 0;
 
     std::size_t total = 0;
@@ -372,6 +378,28 @@ class MultiresSurface {
     // host boundary.
     const std::vector<std::uint32_t>& dirty_patches() const;
     void clear_dirty();
+
+    // The level's CHUNKS: the same events as `dirty_patches`, in the vocabulary
+    // the other two representations report in, with four revisions instead of
+    // three and a per-chunk acknowledgement instead of an all-or-nothing clear.
+    //
+    // A chunk here is a run of consecutive faces in patch-major order — the
+    // (base patch, quadrant at depth d) identity — because a base patch is not
+    // a fixed-size unit: subdivision quadruples its faces per level, so one
+    // base quad owns 1024 faces at level 5. `src/mesh/multires_chunks.cpp` says
+    // why that is the same granularity keyed by the only identity subdivision
+    // preserves, rather than a second one.
+    //
+    // NOT const: the chunk bounds are read from P(n), so asking for them
+    // evaluates the level exactly as `positions_at` does. Built once per cache
+    // lifetime and released with the cache, because a partition of a level's
+    // own faces is reconstructed bit-identically from authoritative topology.
+    const ChunkTable& chunks_at(std::uint32_t level);
+    // Retire one chunk from a level's dirty set, and only if it has not changed
+    // since the caller read it. What lets a host drain across frames without
+    // either re-uploading everything or losing a change.
+    bool acknowledge_chunk(std::uint32_t level, std::uint32_t chunk, const ChunkRevisions& seen);
+    void clear_dirty_chunks(std::uint32_t level);
 
     const MultiresEvalStats& eval_stats() const;
     void reset_eval_stats();

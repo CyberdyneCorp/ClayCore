@@ -19,6 +19,7 @@
 #include "clay/mesh/detail_field.h"
 #include "clay/mesh/multires.h"
 #include "clay/mesh/subdivide.h"
+#include "clay/mesh/surface_chunks.h"
 #include "clay/mesh/surface_frame.h"
 
 namespace clay {
@@ -42,6 +43,18 @@ struct LevelCache {
     std::unique_ptr<Adjacency> adjacency;
     bool evaluated = false;
 
+    // The level's chunks, and the face -> chunk map that marks them.
+    //
+    // IN THE CACHE, so every `drop_*_caches` releases them and a rebuild
+    // reproduces them exactly: the partition is a function of the level's own
+    // face order and patch ids, both of which are authoritative. The cost of
+    // that placement is stated rather than hidden — dropping a level's cache
+    // drops its dirty set too, so a host that dropped a level it was still
+    // uploading has to re-read it whole. That is the same level it just told
+    // the engine it was not looking at.
+    ChunkTable chunks;
+    std::vector<std::uint32_t> face_chunk;
+
     // Split by what a memory report separates: the arrays that ARE the
     // evaluated surface, and the index structures built to work on it.
     //
@@ -53,7 +66,8 @@ struct LevelCache {
     struct Bytes {
         std::size_t evaluated = 0;
         std::size_t runtime = 0;
-        std::size_t total() const { return evaluated + runtime; }
+        std::size_t chunk_index = 0;
+        std::size_t total() const { return evaluated + runtime + chunk_index; }
     };
     Bytes byte_split() const;
     std::size_t bytes() const { return byte_split().total(); }
@@ -167,6 +181,11 @@ void evaluate_up_to(MultiresSurface::State& s, std::uint32_t level);
 // Note that these level vertices changed, for the host's changed-block drain.
 void mark_patches(MultiresSurface::State& s, std::uint32_t level,
                   const std::vector<std::uint32_t>& vertices);
+
+// Partition a level's faces into chunks, once per cache lifetime. Requires the
+// level to be evaluated: the chunk bounds are read from P(n). A no-op when the
+// level's table is already built. Defined in `multires_chunks.cpp`.
+void ensure_level_chunks(MultiresSurface::State& s, std::uint32_t level);
 
 // Build the cage's attributes at `level`, if it has any. Returns false when
 // there is nothing to build, which is not a failure.

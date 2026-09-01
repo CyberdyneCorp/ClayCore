@@ -56,6 +56,7 @@ LevelCache::Bytes LevelCache::byte_split() const {
                 mesh.quads.capacity() * sizeof(std::uint32_t) +
                 mesh.colors.capacity() * sizeof(kernel::cfloat3) +
                 mesh.uvs.capacity() * sizeof(kernel::cfloat2);
+    b.chunk_index = chunks.bytes() + face_chunk.capacity() * sizeof(std::uint32_t);
     if (adjacency) {
         // The adjacency's own arrays are not exposed; its three CSR pairs are
         // close enough to ten words a vertex that pricing it any more precisely
@@ -453,6 +454,9 @@ void mark_patches(MultiresSurface::State& s, std::uint32_t level,
     const LevelConnectivity& conn = connectivity_of(s, level);
     if (s.patch_dirty.size() != s.levels[0].topology.face_count)
         s.patch_dirty.assign(s.levels[0].topology.face_count, 0);
+    LevelCache* cache = s.levels[level].cache.get();
+    ChunkTable* level_chunks =
+        cache != nullptr && !cache->face_chunk.empty() ? &cache->chunks : nullptr;
     for (std::uint32_t v : vertices) {
         if (v >= topology.vertex_count) continue;
         std::size_t count = 0;
@@ -463,6 +467,16 @@ void mark_patches(MultiresSurface::State& s, std::uint32_t level,
                 s.patch_dirty[patch] = 1;
                 s.dirty_patches.push_back(patch);
             }
+            // The SAME event in the shared vocabulary, and only when the level
+            // has been partitioned — nothing here builds a chunk table on a
+            // sculpting path. The base patch stays the hierarchy's own dirty
+            // unit because a patch is what dirty propagation is defined over;
+            // the chunk is what a host uploads. They are the same granularity
+            // keyed two ways, which is why one walk marks both rather than two
+            // walks disagreeing.
+            if (level_chunks != nullptr && faces[i] < s.levels[level].cache->face_chunk.size())
+                level_chunks->mark(s.levels[level].cache->face_chunk[faces[i]],
+                                   ChunkDirty::Geometry);
         }
     }
 }
@@ -496,10 +510,11 @@ MultiresMemory MultiresSurface::memory() const {
         const LevelCache::Bytes split = l.cache->byte_split();
         m.evaluated += split.evaluated;
         m.runtime_index += split.runtime;
+        m.chunk_index += split.chunk_index;
     }
     for (const AttrLevel& a : state_->attr) m.runtime_index += a.bytes();
     m.authoritative = m.base + m.topology + m.detail;
-    m.rebuildable = m.evaluated + m.runtime_index;
+    m.rebuildable = m.evaluated + m.runtime_index + m.chunk_index;
     m.total = m.authoritative + m.rebuildable;
     return m;
 }

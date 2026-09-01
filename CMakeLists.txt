@@ -89,6 +89,7 @@ add_library(claycore
   src/mesh/topology_ops.cpp
   src/mesh/dynamic_bvh.cpp
   src/mesh/surface_chunks.cpp
+  src/mesh/surface_view.cpp
   src/mesh/remesh_local.cpp
   src/mesh/dynamic_sculpt.cpp
   src/mesh/subdivide.cpp
@@ -96,6 +97,7 @@ add_library(claycore
   src/mesh/detail_field.cpp
   src/mesh/multires.cpp
   src/mesh/multires_eval.cpp
+  src/mesh/multires_chunks.cpp
   src/mesh/multires_sculpt.cpp
   src/mesh/project.cpp
   src/mesh/multires_serialize.cpp
