@@ -258,7 +258,20 @@ before: correct, silent, and exactly as fast as it always was. Vulkan implements
 them with a **compute shader**, not `vkCmdCopyBuffer`, because nothing obliges a
 caller to have created its buffer with `VK_BUFFER_USAGE_TRANSFER_SRC/DST` —
 the storage binding the evaluation path already needs is the one usage that can
-be assumed. Metal has no seeded path yet and falls back (#350).
+be assumed. Metal implements them with an **`MTLBlitCommandEncoder`** (#350),
+which the Vulkan restriction does not reach: an `MTLBuffer` carries no transfer
+usage flag to be missing, so every buffer is a legal blit source and
+destination, `MTLStorageModePrivate` included. Staging is one of *our* shared
+buffers rather than the caller's pointer, for the same reason — a private
+buffer has no `contents()` to memcpy through, and assuming otherwise works on
+every unified-memory Mac and faults on the first host that allocated private.
+
+Both are served **only by an adopted backend**. `device_copy` names a buffer the
+caller lent us, and one from the device the registered backend made for itself
+is not that; the registered `"metal"` and `"vulkan"` entries report false and
+refuse. CUDA and OpenCL have no adoption path at all — `eval::make_backend`
+serves Metal and Vulkan, and OpenCL is not in `eval::DeviceApi` — so a caller
+cannot obtain a `clay_device` for them and the question does not arise.
 
 The seed is kept only where this path can say what it means: with **more than
 one visible SDF layer** a seed is two values — the active layer's and the hard
