@@ -1985,7 +1985,8 @@ clay_result clay_layer_consolidation_cost(const clay_document* doc, clay_layer_i
  * would spend their parameters on nothing.
  *
  * `out_cost` may be NULL. Undo grouping is the document's own, so this lands
- * as a single step when undo is enabled and as a plain edit when it is not. */
+ * as a single step when undo is enabled and as a plain edit when it is not.
+ */
 clay_result clay_layer_consolidate(clay_document* doc, clay_layer_id layer,
                                    const clay_consolidation_params* params,
                                    const float region_min[3], const float region_max[3],
@@ -5640,7 +5641,33 @@ clay_result clay_brush_preset_by_name(const char* name, clay_brush_preset* out_p
  * The mesh must outlive the sculptor. A sculptor over a mesh LAYER's triangles
  * refuses every call once that layer is gone, rather than reading freed
  * storage, and refuses one over a LOCKED or GHOSTED layer, because both flags
- * mean "never edited" and a vertex displacement is an edit. */
+ * mean "never edited" and a vertex displacement is an edit.
+ *
+ * THREADING. Building a sculptor is a READ of the mesh, on exactly the footing
+ * clay_brick_cache_eval_requests documents: clay_mesh_sculptor_create,
+ * clay_mesh_sculptor_refresh and clay_mesh_sculptor_refit may run on any number
+ * of threads against one const document, and are NOT safe concurrently with a
+ * mutating clay_document_* / clay_layer_* call. None of the three writes the
+ * document — the adjacency and the tree are read from `positions` and `indices`
+ * into the sculptor's own storage — and clay_last_error is per-thread, so a
+ * worker reads its own. Calls on ONE sculptor handle must still be serialized
+ * by the host, const readers included, exactly as a cache handle's are; two
+ * sculptors share nothing.
+ *
+ * SO ARM A SCULPTOR OFF THE INTERFACE THREAD. On a large mesh this is the
+ * difference between a click and a freeze: the adjacency is ~116 ms at 296k
+ * triangles and the tree another ~89 ms, and both are owed before the first
+ * pick can be answered. Note that the tree is built LAZILY, on first use — so a
+ * host that calls only clay_mesh_sculptor_create on the worker still pays the
+ * tree on whichever thread reaches clay_mesh_sculptor_raycast first. Call
+ * clay_mesh_sculptor_refresh on the worker too, and hand over a sculptor that
+ * is warm for the pick.
+ *
+ * The host owes the serialization against its OWN edits, and gets no help
+ * detecting a missed one: a mesh mutated while a build reads it produces an
+ * adjacency over positions that have since moved, which is a wrong
+ * neighbourhood rather than a refused call. What IS detected is a layer
+ * REBUILT under a finished sculptor — see clay_mesh_sculptor_create. */
 typedef struct clay_mesh_sculptor clay_mesh_sculptor;
 
 /* A sparse, coalesced record of what a gesture moved: the undo a mesh stroke

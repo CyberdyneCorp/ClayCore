@@ -91,6 +91,20 @@ and queues" principle in §2 does not say and should: one process-wide pool,
 dispatches a batch. Making it host-configurable (worker count, QoS class) is
 `add-mobile-thread-scheduling` and is not done.
 
+**What a host may call from its own worker.** Three contracts, all stated in
+`clay.h` where the calls are, and all of the same shape — free-threaded against
+a *const* document, never concurrent with a mutating `clay_document_*` /
+`clay_layer_*` call, with `clay_last_error` per-thread so a worker reads its
+own:
+
+- `clay_brick_cache_eval_requests`, which takes no cache and is the original of
+  the form. A cache *handle*'s calls are still the host's to serialize.
+- `clay_mesh_sculptor_create` / `_refresh` / `_refit` (issue #368). Arming a
+  mesh subtool costs the weld plus the ray tree — around 116 ms and 89 ms at
+  296k triangles — and the tree is built lazily, so a host that moves only
+  `create` to a worker still pays the tree on whichever thread picks first.
+  Call `_refresh` there too.
+
 ## 4. Operation inventory (the complete SDF vocabulary)
 
 Everything below ships in `clay::kernel` with CPU reference + per-backend parity tests. Items marked *(bound)* propagate non-exactness through the tree per principle 3.
