@@ -222,6 +222,40 @@ std::vector<std::uint8_t> encode_layer(const SculptLayer& layer) {
     return out;
 }
 
+// One level's pair of fields, decoded and then held to the level they claim to
+// belong to. Two things are checked and each has a silent failure behind it.
+//
+// THE VERTEX COUNT. A stream pairing one level's coefficients with a different
+// count would attach every wrinkle somewhere else — so an empty field passes (a
+// layer that never reached that level stores nothing) and a populated one must
+// match exactly.
+//
+// THE BLOCKING, which the file header calls the thing every sparse container in
+// this change agrees on. Block `b` naming the same vertices in a layer's
+// coefficients, in its mask and in the level's composed field is the whole of
+// tasks 5.4 and 5.5: `note_layer_coverage` hands a FIELD's block numbers
+// straight to the STACK's dirty index without translating them. A coefficient
+// at vertex 5000 is block 4 under the stack's 1024 and block 1250 under a
+// field's 4; marking 1250 falls off the end of a dirty index with five entries,
+// `note_block` drops it, and the strength slider then invalidates nothing and
+// leaves the surface showing a composition nobody asked for.
+//
+// PER LEVEL rather than over the finished layer, so a stream whose second level
+// is nonsense is refused before its third is decoded. Both orders refuse the
+// same streams; only this one refuses them without first reserving the index
+// every remaining level declares.
+bool decode_layer_level(Reader* r, std::uint32_t vertices, std::uint32_t block_size,
+                        DetailField* detail, SparseWeightField* mask) {
+    std::vector<std::uint8_t> blob;
+    if (!r->blob(&blob)) return false;
+    if (!DetailField::decode(blob.data(), blob.size(), detail)) return false;
+    if (!r->blob(&blob)) return false;
+    if (!SparseWeightField::decode(blob.data(), blob.size(), mask)) return false;
+    if (detail->vertex_count() != 0 && detail->vertex_count() != vertices) return false;
+    if (mask->vertex_count() != 0 && mask->vertex_count() != vertices) return false;
+    return detail->block_size() == block_size && mask->block_size() == block_size;
+}
+
 bool decode_layer(Reader* r, const std::vector<std::uint32_t>& level_vertices,
                   std::uint32_t block_size, SculptLayer* out) {
     std::uint32_t kind = 0, flags = 0, name_size = 0, levels = 0;
@@ -252,43 +286,9 @@ bool decode_layer(Reader* r, const std::vector<std::uint32_t>& level_vertices,
     if (levels != level_vertices.size()) return false;
     out->detail.assign(levels, DetailField{});
     out->mask.assign(levels, SparseWeightField{});
-    for (std::uint32_t l = 0; l < levels; ++l) {
-        std::vector<std::uint8_t> blob;
-        if (!r->blob(&blob)) return false;
-        if (!DetailField::decode(blob.data(), blob.size(), &out->detail[l])) return false;
-        if (!r->blob(&blob)) return false;
-        if (!SparseWeightField::decode(blob.data(), blob.size(), &out->mask[l])) return false;
-        // A LAYER'S FIELDS MUST DESCRIBE THIS STACK'S LEVELS. A stream pairing
-        // one level's coefficients with a different vertex count would silently
-        // attach every wrinkle somewhere else — so an empty field passes (a
-        // layer that never reached that level stores nothing) and a populated
-        // one must match exactly.
-        //
-        // CHECKED HERE rather than over the finished layer, so a stream whose
-        // second level is nonsense is refused before its third is decoded. Both
-        // orders refuse the same streams; only this one refuses them without
-        // first reserving the index every remaining level declares.
-        const std::uint32_t d = out->detail[l].vertex_count();
-        const std::uint32_t m = out->mask[l].vertex_count();
-        if (d != 0 && d != level_vertices[l]) return false;
-        if (m != 0 && m != level_vertices[l]) return false;
-        // AND THEY MUST SHARE THE STACK'S BLOCKING, which the file header calls
-        // the thing every sparse container in this change agrees on. Block `b`
-        // naming the same vertices in a layer's coefficients, in its mask and
-        // in the level's composed field is the whole of tasks 5.4 and 5.5:
-        // `note_layer_coverage` hands a FIELD's block numbers straight to the
-        // STACK's dirty index without translating them.
-        //
-        // The failure a stream pairing two blockings produces is not a crash,
-        // which is why this is checked rather than trusted. A coefficient at
-        // vertex 5000 is block 4 under the stack's 1024 and block 1250 under a
-        // field's 4; marking 1250 falls off the end of a dirty index that has
-        // five entries, `note_block` drops it, and the strength slider then
-        // invalidates nothing and leaves the surface showing a composition
-        // nobody asked for.
-        if (out->detail[l].block_size() != block_size) return false;
-        if (out->mask[l].block_size() != block_size) return false;
-    }
+    for (std::uint32_t l = 0; l < levels; ++l)
+        if (!decode_layer_level(r, level_vertices[l], block_size, &out->detail[l], &out->mask[l]))
+            return false;
     return true;
 }
 
