@@ -29,6 +29,8 @@
 #include "clay/mesh/dynamic_sculpt.h"
 #include "clay/brush/stroke.h"
 #include "clay/mesh/multires_sculpt.h"
+#include "clay/mesh/preflight.h"
+#include "clay/mesh/surface_view.h"
 #include "clay/mesh/project.h"
 #include "clay/mesh/dynamic_validate.h"
 #include "clay/brush/stroke.h"
@@ -47,6 +49,8 @@
 #include "clay/io/mesh_io.h"
 #include "clay/io/parity_fixture.h"
 #include "clay/kernel/field.h"
+#include "clay/memory/budget.h"
+#include "clay/memory/capacity.h"
 #include "clay/mesh/decimate.h"
 #include "clay/mesh/deform.h"
 #include "clay/mesh/dual_contouring.h"
@@ -519,6 +523,16 @@ constexpr std::size_t kHistoryBytesOriginal =
     offsetof(clay_history_bytes, dropped_steps) + sizeof(std::uint64_t);
 constexpr std::size_t kMemoryReportOriginal =
     offsetof(clay_memory_report, mask_count) + sizeof(std::uint64_t);
+// THIRTEEN, WRITTEN OUT, and not CLAY_MEMORY_CATEGORY_COUNT. The baseline is
+// the layout ABI 0.77.0 shipped; a build that adds a fourteenth category grows
+// the array and MUST NOT drag the minimum a older caller may declare along with
+// it, or every host compiled against 0.77.0 is refused for declaring the size
+// it was given.
+constexpr std::size_t kLedgerCategories0770 = 13;
+constexpr std::size_t kMemoryLedgerOriginal =
+    offsetof(clay_memory_ledger, bytes) + sizeof(std::uint64_t) * kLedgerCategories0770;
+constexpr std::size_t kTrimReportOriginal =
+    offsetof(clay_trim_report, released) + sizeof(std::uint64_t) * kLedgerCategories0770;
 
 // One conversion, so the document-wide and per-layer paths cannot fill the
 // struct differently — which is the kind of divergence a total-only test would
@@ -539,6 +553,18 @@ inline clay_memory_report to_c_report(const io::MemoryReport& r) {
     out.voxel_layers = r.voxel_layers;
     out.mesh_layer_count = r.mesh_layer_count;
     out.mask_count = r.mask_count;
+    // The surface tier and the three roll-ups (ABI 0.77.0). Zero for every
+    // caller that does not hand in a ledger, which is what a document with no
+    // host-held surface honestly costs.
+    out.surface_content = r.surface_content;
+    out.multires_detail = r.multires_detail;
+    out.sculpt_layers = r.sculpt_layers;
+    out.surface_caches = r.surface_caches;
+    out.surface_scratch = r.surface_scratch;
+    out.surface_undo = r.surface_undo;
+    out.essential = r.essential();
+    out.rebuildable = r.rebuildable();
+    out.undoable = r.undoable();
     return out;
 }
 constexpr std::size_t kMeasureParamsOriginal =
@@ -3960,6 +3986,34 @@ clay_result clay_document_memory(const clay_document* doc, clay_memory_report* o
     if (r != CLAY_OK) return r;
     const std::uint32_t declared = out_report->struct_size;
     write_desc(out_report, declared, to_c_report(io::document_memory(doc->doc, doc->undo.get())));
+    return CLAY_OK;
+}
+
+clay_result clay_document_memory_with_surfaces(const clay_document* doc,
+                                               const clay_memory_ledger* surfaces,
+                                               clay_memory_report* out_report) {
+    if (!doc || !out_report) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    clay_memory_report probe;
+    clay_result r = read_desc(out_report, kMemoryReportOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_report->struct_size;
+
+    memory::MemoryLedger ledger;
+    if (surfaces) {
+        clay_memory_ledger given;
+        r = read_desc(surfaces, kMemoryLedgerOriginal, &given);
+        if (r != CLAY_OK) return r;
+        // Reading every slot rather than `given.category_count` of them: a
+        // caller from an older header declared a shorter struct, and read_desc
+        // has already zeroed the tail it did not supply. Trusting the field
+        // instead would let a caller that forgot to set it report nothing.
+        for (std::size_t i = 0; i < CLAY_MEMORY_CATEGORY_COUNT; ++i)
+            ledger.add(static_cast<memory::MemoryCategory>(i),
+                       static_cast<std::size_t>(given.bytes[i]));
+    }
+    write_desc(out_report, declared,
+               to_c_report(io::document_memory(doc->doc, doc->undo.get(),
+                                               surfaces ? &ledger : nullptr)));
     return CLAY_OK;
 }
 
@@ -15386,6 +15440,682 @@ clay_result clay_mesh_deltas_clear(clay_mesh_deltas* deltas) {
     if (!deltas) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null delta record");
     deltas->deltas.clear();
     return CLAY_OK;
+}
+
+}  // extern "C" — the surface transport below takes and returns C++ types, and
+   // a function with C linkage cannot: that is what broke the macOS and Windows
+   // builds in #235, and GCC does not warn about it.
+
+// -- one transport for all three surfaces (c-abi spec, add-extreme-poly-runtime)
+//
+// The engine already has the seam: `mesh::SurfaceView` is the one place that
+// knows all three representations, so this file's job here is MARSHALLING and
+// not knowing what a multires level is. What it adds on top is the handle,
+// because a C caller cannot hold a `SurfaceView` — which is a call-site
+// convenience by construction, valid only while the surface it names is
+// unchanged.
+//
+// SO THE HANDLE STORES THE SOURCE, NOT THE VIEW. Every entry point rebuilds the
+// `SurfaceView` from the surface it was created over. That is not a cost worth
+// avoiding — it is three pointer loads for the adaptive and fixed cases — and
+// it is what makes a handle a host keeps across a stroke describe the surface
+// as it is now rather than as it was when the handle was made. Caching the view
+// would hand back spans into a table a stamp has since moved.
+
+struct clay_surface_view {
+    mesh::SurfaceKind kind = mesh::SurfaceKind::Fixed;
+    // Fixed: the mesh handle, re-resolved per call so a borrow whose layer left
+    // the document refuses rather than reading freed storage, and the partition
+    // this view OWNS — the fixed sculptor has none of its own yet.
+    const clay_mesh* mesh_handle = nullptr;
+    mesh::ChunkTable table;
+    // Adaptive and multires: the handle whose table is the live one.
+    clay_dynamic_sculptor* dynamic_handle = nullptr;
+    clay_multires* multires_handle = nullptr;
+    std::uint32_t level = 0;
+};
+
+// The gate a serializer or a readback holds, behind a handle so C can bracket
+// the region the way C++ brackets it with a scope.
+struct clay_memory_pin {
+    clay::memory::TrimGate gate;
+    // ONE LIVE `MemoryPin` PER ACQUIRE, rather than a counter of this file's
+    // own. The gate's count is private to `memory::MemoryPin` on purpose — RAII
+    // is the mechanism, not a convenience over it — and a second counter here
+    // could disagree with the one every trim path actually consults. A stack of
+    // scopes is the honest way to give a C caller the balance it brackets by
+    // hand.
+    std::vector<std::unique_ptr<clay::memory::MemoryPin>> held;
+};
+
+namespace {
+
+// Original layouts (ABI 0.77.0), named by their last field so appending one
+// does not silently move the baseline.
+constexpr std::size_t kChunkOptionsOriginal =
+    offsetof(clay_chunk_options, max_faces) + sizeof(std::uint32_t);
+constexpr std::size_t kChunkReadbackOriginal =
+    offsetof(clay_chunk_readback, ok) + sizeof(std::int32_t);
+constexpr std::size_t kSculptProfileOriginal =
+    offsetof(clay_sculpt_memory_profile, preview_chunks_per_frame) + sizeof(std::uint32_t);
+constexpr std::size_t kSurfacePreflightOriginal =
+    offsetof(clay_surface_preflight, error) + sizeof(std::int32_t);
+static_assert(static_cast<std::size_t>(CLAY_MEMORY_CATEGORY_COUNT) ==
+                  clay::memory::kMemoryCategoryCount,
+              "the C category list and memory::MemoryCategory must name the same set: a "
+              "category the ABI cannot spell is one a host cannot act on");
+
+bool pressure_is_known(std::int32_t value) {
+    return value >= 0 && value <= static_cast<std::int32_t>(clay::memory::Pressure::Critical);
+}
+
+// A value outside the declared list is a REFUSAL and not a clamp, on the same
+// footing as the mesher and brush enums: mapping it onto the default hides the
+// mistake behind a plausible result, and the plausible result here is "we
+// released nothing".
+clay_result read_pressure(std::int32_t value, clay::memory::Pressure* out) {
+    if (!pressure_is_known(value))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "pressure " + std::to_string(value) + " is not a clay_pressure");
+    *out = static_cast<clay::memory::Pressure>(value);
+    return CLAY_OK;
+}
+
+const clay::memory::TrimGate* gate_of(const clay_memory_pin* pin) {
+    return pin == nullptr ? nullptr : &pin->gate;
+}
+
+clay_memory_ledger to_c_ledger(const clay::memory::MemoryLedger& ledger) {
+    clay_memory_ledger out{};
+    out.category_count = CLAY_MEMORY_CATEGORY_COUNT;
+    out.essential = ledger.essential();
+    out.rebuildable = ledger.rebuildable();
+    out.undoable = ledger.undoable();
+    out.total = ledger.total();
+    for (std::size_t i = 0; i < CLAY_MEMORY_CATEGORY_COUNT; ++i) out.bytes[i] = ledger.bytes[i];
+    return out;
+}
+
+clay_trim_report to_c_trim(const clay::memory::TrimReport& report) {
+    clay_trim_report out{};
+    out.pressure = static_cast<std::int32_t>(report.pressure);
+    out.total_released = report.total_released;
+    out.pinned = report.pinned ? 1 : 0;
+    out.category_count = CLAY_MEMORY_CATEGORY_COUNT;
+    for (std::size_t i = 0; i < CLAY_MEMORY_CATEGORY_COUNT; ++i)
+        out.released[i] = report.released[i];
+    return out;
+}
+
+clay_surface_preflight to_c_preflight(const mesh::SurfacePreflight& p) {
+    clay_surface_preflight out{};
+    out.allowed = p.allowed ? 1 : 0;
+    out.authoritative_bytes = p.authoritative_bytes;
+    out.runtime_bytes = p.runtime_bytes;
+    out.persistent_bytes = p.persistent_bytes;
+    out.peak_bytes = p.peak_bytes;
+    out.error = static_cast<std::int32_t>(p.error);
+    return out;
+}
+
+// The one place a preflight entry point ends, so the five cannot fill the
+// descriptor differently — the divergence a per-call test would not see.
+clay_result write_preflight(clay_surface_preflight* out, const mesh::SurfacePreflight& value) {
+    if (!out) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_preflight");
+    clay_surface_preflight probe;
+    clay_result r = read_desc(out, kSurfacePreflightOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    write_desc(out, out->struct_size, to_c_preflight(value));
+    return CLAY_OK;
+}
+
+// The engine's read seam, rebuilt from whatever this handle was made over.
+clay_result resolve_view(clay_surface_view* view, mesh::SurfaceView* out) {
+    if (!view) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null surface view");
+    switch (view->kind) {
+        case mesh::SurfaceKind::Fixed: {
+            const mesh::Mesh* m = mesh_data(view->mesh_handle);
+            if (!m)
+                return fail(CLAY_ERROR_NOT_FOUND,
+                            "the mesh this view was built over is no longer in its document");
+            *out = mesh::SurfaceView::over_mesh(*m, view->table);
+            return CLAY_OK;
+        }
+        case mesh::SurfaceKind::Adaptive: {
+            if (!view->dynamic_handle || !view->dynamic_handle->sculptor)
+                return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+            mesh::DynamicSculptor& s = *view->dynamic_handle->sculptor;
+            *out = mesh::SurfaceView::over_dynamic(s.surface(), s.bvh().chunks());
+            return CLAY_OK;
+        }
+        case mesh::SurfaceKind::Multires: {
+            if (!view->multires_handle || !view->multires_handle->surface.valid())
+                return fail(CLAY_ERROR_INVALID_ARGUMENT, "empty hierarchy");
+            if (view->level >= view->multires_handle->surface.level_count())
+                return fail(CLAY_ERROR_NOT_FOUND,
+                            "level " + std::to_string(view->level) + " is gone from this "
+                            "hierarchy; take a new view");
+            *out = mesh::SurfaceView::over_level(view->multires_handle->surface, view->level);
+            return CLAY_OK;
+        }
+    }
+    return fail(CLAY_ERROR_INVALID_ARGUMENT, "corrupt surface view");
+}
+
+// One chunk, as the C struct. `view` is already resolved; `record` may be null,
+// which is a dirty id naming a chunk that has since been released.
+clay_chunk_info to_c_chunk(const mesh::SurfaceView& view, std::uint32_t chunk) {
+    clay_chunk_info out{};
+    out.chunk = chunk;
+    const mesh::SurfaceChunk* record = view.chunks().chunk(chunk);
+    if (record == nullptr) return out;
+    out.live = 1;
+    out.revision = record->revision;
+    out.revisions.topology = record->revisions.topology;
+    out.revisions.geometry = record->revisions.geometry;
+    out.revisions.normals = record->revisions.normals;
+    out.revisions.attributes = record->revisions.attributes;
+    out.geometry_dirty = record->geometry_dirty ? 1 : 0;
+    out.topology_dirty = record->topology_dirty ? 1 : 0;
+    // THE CAPACITY QUERY IS WHAT ANSWERS THE COUNTS, rather than arithmetic
+    // repeated here: welded and unwelded chunks count differently, and a second
+    // copy of that rule beside the one in surface_view.cpp is how the two come
+    // to disagree about how much a host should allocate.
+    const mesh::ChunkReadback r =
+        view.copy_chunk(chunk, nullptr, nullptr, 0, nullptr, 0, nullptr, 0);
+    out.vertex_count = r.vertex_count;
+    out.index_count = r.index_count;
+    if (!record->bounds.empty()) {
+        write_f3(out.bounds_min, record->bounds.min);
+        write_f3(out.bounds_max, record->bounds.max);
+    }
+    return out;
+}
+
+clay::memory::SculptMemoryProfile to_profile(const clay_sculpt_memory_profile& d) {
+    clay::memory::SculptMemoryProfile p;
+    p.memory_class = static_cast<clay::memory::MemoryClass>(d.memory_class);
+    p.cache_budget = d.cache_budget;
+    p.undo_budget = d.undo_budget;
+    p.scratch_budget = d.scratch_budget;
+    p.preview_budget = d.preview_budget;
+    p.max_resident_levels = d.max_resident_levels;
+    p.defer_normals_in_stroke = d.defer_normals_in_stroke != 0;
+    p.allow_index_rebuild = d.allow_index_rebuild != 0;
+    p.preview_chunks_per_frame = d.preview_chunks_per_frame;
+    return p;
+}
+
+clay_sculpt_memory_profile from_profile(const clay::memory::SculptMemoryProfile& p) {
+    clay_sculpt_memory_profile d{};
+    d.memory_class = static_cast<std::int32_t>(p.memory_class);
+    d.cache_budget = p.cache_budget;
+    d.undo_budget = p.undo_budget;
+    d.scratch_budget = p.scratch_budget;
+    d.preview_budget = p.preview_budget;
+    d.max_resident_levels = p.max_resident_levels;
+    d.defer_normals_in_stroke = p.defer_normals_in_stroke ? 1 : 0;
+    d.allow_index_rebuild = p.allow_index_rebuild ? 1 : 0;
+    d.preview_chunks_per_frame = p.preview_chunks_per_frame;
+    return d;
+}
+
+}  // namespace
+
+extern "C" {
+
+const char* clay_memory_class_text(int32_t memory_class) {
+    return clay::memory::memory_class_name(static_cast<clay::memory::MemoryClass>(memory_class));
+}
+
+const char* clay_pressure_text(int32_t pressure) {
+    return clay::memory::pressure_name(static_cast<clay::memory::Pressure>(pressure));
+}
+
+const char* clay_memory_category_text(int32_t category) {
+    return clay::memory::memory_category_name(
+        static_cast<clay::memory::MemoryCategory>(category));
+}
+
+const char* clay_budget_error_text(int32_t error) {
+    return clay::memory::budget_error_text(static_cast<clay::memory::BudgetError>(error));
+}
+
+clay_result clay_sculpt_memory_profile_defaults(clay_sculpt_memory_profile* out_profile) {
+    if (!out_profile) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_profile");
+    clay_sculpt_memory_profile probe;
+    clay_result r = read_desc(out_profile, kSculptProfileOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    write_desc(out_profile, out_profile->struct_size,
+               from_profile(clay::memory::SculptMemoryProfile{}));
+    return CLAY_OK;
+}
+
+clay_result clay_chunk_options_defaults(clay_chunk_options* out_options) {
+    if (!out_options) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_options");
+    clay_chunk_options probe;
+    clay_result r = read_desc(out_options, kChunkOptionsOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const mesh::ChunkOptions defaults;
+    clay_chunk_options out{};
+    out.target_faces = static_cast<std::uint32_t>(defaults.target_faces);
+    out.min_faces = static_cast<std::uint32_t>(defaults.min_faces);
+    out.max_faces = static_cast<std::uint32_t>(defaults.max_faces);
+    write_desc(out_options, out_options->struct_size, out);
+    return CLAY_OK;
+}
+
+/* -- the pin -------------------------------------------------------------- */
+
+clay_result clay_memory_pin_create(clay_memory_pin** out_pin) {
+    if (!out_pin) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_pin");
+    *out_pin = new clay_memory_pin();
+    return CLAY_OK;
+}
+
+void clay_memory_pin_destroy(clay_memory_pin* pin) { delete pin; }
+
+clay_result clay_memory_pin_acquire(clay_memory_pin* pin) {
+    if (!pin) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null pin");
+    pin->held.push_back(std::make_unique<clay::memory::MemoryPin>(pin->gate));
+    return CLAY_OK;
+}
+
+clay_result clay_memory_pin_release(clay_memory_pin* pin) {
+    if (!pin) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null pin");
+    if (!pin->held.empty()) pin->held.pop_back();
+    return CLAY_OK;
+}
+
+int32_t clay_memory_pin_held(const clay_memory_pin* pin) {
+    return pin != nullptr && pin->gate.pinned() ? 1 : 0;
+}
+
+/* -- the view ------------------------------------------------------------- */
+
+clay_result clay_surface_view_from_mesh(const clay_mesh* mesh_handle,
+                                        const clay_chunk_options* options,
+                                        clay_surface_view** out_view) {
+    if (!out_view) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_view");
+    const mesh::Mesh* m = nullptr;
+    clay_result r = resolve_mesh(mesh_handle, &m);
+    if (r != CLAY_OK) return r;
+
+    mesh::ChunkOptions chunking;
+    if (options) {
+        clay_chunk_options d;
+        r = read_desc(options, kChunkOptionsOriginal, &d);
+        if (r != CLAY_OK) return r;
+        if (d.target_faces == 0 || d.min_faces == 0 || d.max_faces < d.target_faces)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "chunk options must be 0 < min <= target <= max");
+        chunking.target_faces = d.target_faces;
+        chunking.min_faces = d.min_faces;
+        chunking.max_faces = d.max_faces;
+    }
+
+    auto view = std::make_unique<clay_surface_view>();
+    view->kind = mesh::SurfaceKind::Fixed;
+    view->mesh_handle = mesh_handle;
+    mesh::partition_mesh_chunks(*m, chunking, &view->table);
+    *out_view = view.release();
+    return CLAY_OK;
+}
+
+clay_result clay_surface_view_from_dynamic(clay_dynamic_sculptor* sculptor,
+                                           clay_surface_view** out_view) {
+    if (!out_view) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_view");
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    auto view = std::make_unique<clay_surface_view>();
+    view->kind = mesh::SurfaceKind::Adaptive;
+    view->dynamic_handle = sculptor;
+    *out_view = view.release();
+    return CLAY_OK;
+}
+
+clay_result clay_surface_view_from_multires(clay_multires* surface, uint32_t level,
+                                            clay_surface_view** out_view) {
+    if (!out_view) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_view");
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (level >= s->level_count())
+        return fail(CLAY_ERROR_NOT_FOUND, "level " + std::to_string(level) + " does not exist");
+    auto view = std::make_unique<clay_surface_view>();
+    view->kind = mesh::SurfaceKind::Multires;
+    view->multires_handle = surface;
+    view->level = level;
+    *out_view = view.release();
+    return CLAY_OK;
+}
+
+void clay_surface_view_destroy(clay_surface_view* view) { delete view; }
+
+int32_t clay_surface_view_kind(const clay_surface_view* view) {
+    return view == nullptr ? -1 : static_cast<std::int32_t>(view->kind);
+}
+
+size_t clay_surface_view_chunk_count(clay_surface_view* view) {
+    mesh::SurfaceView v;
+    if (resolve_view(view, &v) != CLAY_OK) return 0;
+    return v.chunk_count();
+}
+
+clay_result clay_surface_view_chunk_infos(clay_surface_view* view, const uint32_t* chunks,
+                                          size_t count, clay_chunk_info* out_infos) {
+    mesh::SurfaceView v;
+    clay_result r = resolve_view(view, &v);
+    if (r != CLAY_OK) return r;
+    if (count == 0) return CLAY_OK;
+    if (!out_infos) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_infos");
+    const std::size_t slots = v.chunk_count();
+    if (!chunks && count > slots)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "asked for the first " + std::to_string(count) +
+                        " chunks in order and the surface has " + std::to_string(slots));
+    for (std::size_t i = 0; i < count; ++i)
+        out_infos[i] = to_c_chunk(v, chunks ? chunks[i] : static_cast<std::uint32_t>(i));
+    return CLAY_OK;
+}
+
+clay_result clay_surface_view_dirty_chunks(clay_surface_view* view, uint32_t* out_chunks,
+                                           size_t* count) {
+    mesh::SurfaceView v;
+    clay_result r = resolve_view(view, &v);
+    if (r != CLAY_OK) return r;
+    if (!count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null count");
+    const std::vector<std::uint32_t>& dirty = v.dirty_chunks();
+    // The size-query pattern by hand: `write_sized` copies BYTES and these are
+    // indices, so a byte-wise fill would write a quarter of each one.
+    if (!out_chunks) {
+        *count = dirty.size();
+        return CLAY_OK;
+    }
+    if (*count < dirty.size()) {
+        *count = dirty.size();
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "capacity below the " + std::to_string(dirty.size()) + " dirty chunks");
+    }
+    for (std::size_t i = 0; i < dirty.size(); ++i) out_chunks[i] = dirty[i];
+    *count = dirty.size();
+    return CLAY_OK;
+}
+
+clay_result clay_surface_view_copy_chunk(clay_surface_view* view, uint32_t chunk,
+                                         const clay_chunk_revisions* expected,
+                                         float* out_positions, size_t position_capacity,
+                                         float* out_normals, size_t normal_capacity,
+                                         uint32_t* out_indices, size_t index_capacity,
+                                         clay_chunk_readback* out_readback) {
+    mesh::SurfaceView v;
+    clay_result r = resolve_view(view, &v);
+    if (r != CLAY_OK) return r;
+    if (out_readback) {
+        clay_chunk_readback probe;
+        r = read_desc(out_readback, kChunkReadbackOriginal, &probe);
+        if (r != CLAY_OK) return r;
+    }
+
+    mesh::ChunkRevisions want;
+    if (expected) {
+        want.topology = expected->topology;
+        want.geometry = expected->geometry;
+        want.normals = expected->normals;
+        want.attributes = expected->attributes;
+    }
+    const mesh::ChunkReadback got =
+        v.copy_chunk(chunk, expected ? &want : nullptr, out_positions, position_capacity,
+                     out_normals, normal_capacity, out_indices, index_capacity);
+    if (!got.ok) return fail(CLAY_ERROR_NOT_FOUND, "chunk " + std::to_string(chunk));
+    // TRUNCATION IS AN ERROR HERE AND A FLAG THERE, deliberately. The engine
+    // reports it as a flag because a batch drain wants to carry on; a C caller
+    // that passed a buffer and got nothing written has a bug, and returning
+    // CLAY_OK for it is how a host ends up drawing an empty chunk. The counts
+    // are still filled, so the refusal says what to allocate.
+    if (out_readback) {
+        clay_chunk_readback out{};
+        out.chunk = got.chunk;
+        out.vertex_count = got.vertex_count;
+        out.index_count = got.index_count;
+        out.requested.topology = got.requested.topology;
+        out.requested.geometry = got.requested.geometry;
+        out.requested.normals = got.requested.normals;
+        out.requested.attributes = got.requested.attributes;
+        out.current.topology = got.current.topology;
+        out.current.geometry = got.current.geometry;
+        out.current.normals = got.current.normals;
+        out.current.attributes = got.current.attributes;
+        out.stale = got.stale ? 1 : 0;
+        out.truncated = got.truncated ? 1 : 0;
+        out.ok = 1;
+        write_desc(out_readback, out_readback->struct_size, out);
+    }
+    if (got.truncated)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "capacity below the " + std::to_string(got.vertex_count) +
+                        " vertices and " + std::to_string(got.index_count) +
+                        " indices this chunk needs; nothing was written");
+    return CLAY_OK;
+}
+
+clay_result clay_surface_view_acknowledge(clay_surface_view* view, const uint32_t* chunks,
+                                          const clay_chunk_revisions* seen, size_t count,
+                                          size_t* out_clean) {
+    if (!view) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null surface view");
+    if (count != 0 && (!chunks || !seen))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null chunks or revisions");
+    // The acknowledgement is a WRITE, so it goes to the table rather than
+    // through the read seam — which is exactly why `SurfaceView` does not carry
+    // one.
+    mesh::ChunkTable* table = nullptr;
+    switch (view->kind) {
+        case mesh::SurfaceKind::Fixed:
+            table = &view->table;
+            break;
+        case mesh::SurfaceKind::Adaptive:
+            if (!view->dynamic_handle || !view->dynamic_handle->sculptor)
+                return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+            table = &view->dynamic_handle->sculptor->bvh().chunks_mutable();
+            break;
+        case mesh::SurfaceKind::Multires:
+            break;
+    }
+
+    std::size_t clean = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+        mesh::ChunkRevisions r;
+        r.topology = seen[i].topology;
+        r.geometry = seen[i].geometry;
+        r.normals = seen[i].normals;
+        r.attributes = seen[i].attributes;
+        if (table != nullptr) {
+            if (table->acknowledge(chunks[i], r)) ++clean;
+            continue;
+        }
+        mesh::MultiresSurface* s = nullptr;
+        clay_result mr = resolve_multires(view->multires_handle, &s);
+        if (mr != CLAY_OK) return mr;
+        if (s->acknowledge_chunk(view->level, chunks[i], r)) ++clean;
+    }
+    if (out_clean) *out_clean = clean;
+    return CLAY_OK;
+}
+
+clay_result clay_surface_view_clear_dirty(clay_surface_view* view) {
+    if (!view) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null surface view");
+    switch (view->kind) {
+        case mesh::SurfaceKind::Fixed:
+            view->table.clear_dirty();
+            return CLAY_OK;
+        case mesh::SurfaceKind::Adaptive:
+            if (!view->dynamic_handle || !view->dynamic_handle->sculptor)
+                return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+            view->dynamic_handle->sculptor->bvh().chunks_mutable().clear_dirty();
+            return CLAY_OK;
+        case mesh::SurfaceKind::Multires: {
+            mesh::MultiresSurface* s = nullptr;
+            clay_result r = resolve_multires(view->multires_handle, &s);
+            if (r != CLAY_OK) return r;
+            s->clear_dirty_chunks(view->level);
+            return CLAY_OK;
+        }
+    }
+    return fail(CLAY_ERROR_INVALID_ARGUMENT, "corrupt surface view");
+}
+
+/* -- the profile, the ledger and the trim --------------------------------- */
+
+clay_result clay_multires_set_memory_profile(clay_multires* surface,
+                                             const clay_sculpt_memory_profile* profile) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!profile) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null profile");
+    clay_sculpt_memory_profile d;
+    r = read_desc(profile, kSculptProfileOriginal, &d);
+    if (r != CLAY_OK) return r;
+    if (d.memory_class < 0 ||
+        d.memory_class > static_cast<std::int32_t>(clay::memory::MemoryClass::Minimal))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "memory_class " + std::to_string(d.memory_class) +
+                        " is not a clay_memory_class");
+    s->set_memory_profile(to_profile(d));
+    return CLAY_OK;
+}
+
+clay_result clay_multires_memory_profile(const clay_multires* surface,
+                                         clay_sculpt_memory_profile* out_profile) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_profile) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_profile");
+    clay_sculpt_memory_profile probe;
+    r = read_desc(out_profile, kSculptProfileOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    write_desc(out_profile, out_profile->struct_size, from_profile(s->memory_profile()));
+    return CLAY_OK;
+}
+
+clay_result clay_multires_memory_ledger(const clay_multires* surface,
+                                        clay_memory_ledger* out_ledger) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_ledger) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_ledger");
+    clay_memory_ledger probe;
+    r = read_desc(out_ledger, kMemoryLedgerOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    clay::memory::MemoryLedger ledger;
+    mesh::report_surface_memory(*s, &ledger);
+    write_desc(out_ledger, out_ledger->struct_size, to_c_ledger(ledger));
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_sculptor_memory_ledger(const clay_dynamic_sculptor* sculptor,
+                                                clay_memory_ledger* out_ledger) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    if (!out_ledger) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_ledger");
+    clay_memory_ledger probe;
+    clay_result r = read_desc(out_ledger, kMemoryLedgerOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    clay::memory::MemoryLedger ledger;
+    mesh::report_surface_memory(*sculptor->sculptor, &ledger);
+    write_desc(out_ledger, out_ledger->struct_size, to_c_ledger(ledger));
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_memory_ledger(clay_mesh_sculptor* sculptor,
+                                             clay_memory_ledger* out_ledger) {
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/false);
+    if (r != CLAY_OK) return r;
+    if (!out_ledger) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_ledger");
+    clay_memory_ledger probe;
+    r = read_desc(out_ledger, kMemoryLedgerOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    clay::memory::MemoryLedger ledger;
+    mesh::report_surface_memory(*sculptor->sculptor, &ledger);
+    write_desc(out_ledger, out_ledger->struct_size, to_c_ledger(ledger));
+    return CLAY_OK;
+}
+
+clay_result clay_multires_trim(clay_multires* surface, int32_t pressure,
+                               const clay_memory_pin* pin, clay_trim_report* out_report) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires(surface, &s);
+    if (r != CLAY_OK) return r;
+    clay::memory::Pressure level = clay::memory::Pressure::None;
+    r = read_pressure(pressure, &level);
+    if (r != CLAY_OK) return r;
+    if (out_report) {
+        clay_trim_report probe;
+        r = read_desc(out_report, kTrimReportOriginal, &probe);
+        if (r != CLAY_OK) return r;
+    }
+    const clay::memory::TrimReport report = mesh::trim_surface(*s, level, gate_of(pin));
+    if (out_report) write_desc(out_report, out_report->struct_size, to_c_trim(report));
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_sculptor_trim(clay_dynamic_sculptor* sculptor, int32_t pressure,
+                                       const clay_memory_pin* pin, clay_trim_report* out_report) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    clay::memory::Pressure level = clay::memory::Pressure::None;
+    clay_result r = read_pressure(pressure, &level);
+    if (r != CLAY_OK) return r;
+    if (out_report) {
+        clay_trim_report probe;
+        r = read_desc(out_report, kTrimReportOriginal, &probe);
+        if (r != CLAY_OK) return r;
+    }
+    const clay::memory::TrimReport report =
+        mesh::trim_surface(*sculptor->sculptor, level, gate_of(pin));
+    if (out_report) write_desc(out_report, out_report->struct_size, to_c_trim(report));
+    return CLAY_OK;
+}
+
+/* -- preflight ------------------------------------------------------------- */
+
+clay_result clay_mesh_preflight_to_dynamic(const clay_mesh* mesh_handle, uint64_t budget,
+                                           clay_surface_preflight* out_preflight) {
+    const mesh::Mesh* m = nullptr;
+    clay_result r = resolve_mesh(mesh_handle, &m);
+    if (r != CLAY_OK) return r;
+    return write_preflight(out_preflight, mesh::preflight_to_dynamic(*m, budget));
+}
+
+clay_result clay_mesh_preflight_global_remesh(const clay_mesh* mesh_handle,
+                                              uint64_t target_triangles, uint64_t budget,
+                                              clay_surface_preflight* out_preflight) {
+    const mesh::Mesh* m = nullptr;
+    clay_result r = resolve_mesh(mesh_handle, &m);
+    if (r != CLAY_OK) return r;
+    return write_preflight(out_preflight,
+                           mesh::preflight_global_remesh(*m, target_triangles, budget));
+}
+
+clay_result clay_dynamic_surface_preflight_to_mesh(const clay_dynamic_surface* surface,
+                                                   uint64_t budget,
+                                                   clay_surface_preflight* out_preflight) {
+    if (!surface) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic surface");
+    return write_preflight(out_preflight, mesh::preflight_to_mesh(surface->surface, budget));
+}
+
+clay_result clay_dynamic_surface_preflight_encode(const clay_dynamic_surface* surface,
+                                                  uint64_t budget,
+                                                  clay_surface_preflight* out_preflight) {
+    if (!surface) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic surface");
+    return write_preflight(out_preflight, mesh::preflight_encode(surface->surface, budget));
+}
+
+clay_result clay_multires_preflight_encode(const clay_multires* surface, uint64_t budget,
+                                           clay_surface_preflight* out_preflight) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    return write_preflight(out_preflight, mesh::preflight_encode(*s, budget));
 }
 
 }  // extern "C"

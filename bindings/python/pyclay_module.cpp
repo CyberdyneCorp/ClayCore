@@ -43,6 +43,8 @@
 #include "clay/io/memory.h"
 #include "clay/io/mesh_io.h"
 #include "clay/mesh/bvh.h"
+#include "clay/mesh/preflight.h"
+#include "clay/mesh/surface_view.h"
 #include "clay/mesh/decimate.h"
 #include "clay/mesh/dual_contouring.h"
 #include "clay/mesh/lattice.h"
@@ -92,6 +94,20 @@ nb::dict memory_dict(const io::MemoryReport& r) {
     out["voxel_layers"] = r.voxel_layers;
     out["mesh_layer_count"] = r.mesh_layer_count;
     out["mask_count"] = r.mask_count;
+    // The surface tier: zero unless the caller handed in the ledgers of the
+    // surfaces it holds BESIDE the document, because a hierarchy and an
+    // adaptive surface are owned by the host and a document cannot walk them.
+    out["surface_content"] = r.surface_content;
+    out["multires_detail"] = r.multires_detail;
+    out["sculpt_layers"] = r.sculpt_layers;
+    out["surface_caches"] = r.surface_caches;
+    out["surface_scratch"] = r.surface_scratch;
+    out["surface_undo"] = r.surface_undo;
+    // What a memory warning actually asks: not how big the document is, but
+    // WHICH PART — that is what decides what a host may release.
+    out["essential"] = r.essential();
+    out["rebuildable"] = r.rebuildable();
+    out["undoable"] = r.undoable();
     return out;
 }
 
@@ -634,6 +650,172 @@ struct PyMeshSculptor {
                 "the mesh layer was rebuilt under this sculptor; build a new one");
         return *sculptor;
     }
+};
+
+
+// -- the surface tier: budgets, ledgers and the chunk transport ---------------
+//
+// (add-extreme-poly-runtime.) A dab costs approximately what it TOUCHES, and a
+// host at twenty million vertices needs three things across this boundary to
+// keep it that way: what changed, those bytes and nothing else, and what the
+// whole thing costs.
+
+nb::dict ledger_dict(const memory::MemoryLedger& ledger) {
+    nb::dict out;
+    // KEYED BY THE CATEGORY'S OWN NAME rather than by an integer, so a script
+    // reading this does not have to hold the enumeration's order — and so a
+    // category added later appears in the dict instead of shifting an index
+    // somebody wrote down.
+    for (std::size_t i = 0; i < memory::kMemoryCategoryCount; ++i)
+        out[memory::memory_category_name(static_cast<memory::MemoryCategory>(i))] =
+            ledger.bytes[i];
+    out["essential"] = ledger.essential();
+    out["rebuildable"] = ledger.rebuildable();
+    out["undoable"] = ledger.undoable();
+    out["total"] = ledger.total();
+    return out;
+}
+
+nb::dict trim_dict(const memory::TrimReport& report) {
+    nb::dict out;
+    for (std::size_t i = 0; i < memory::kMemoryCategoryCount; ++i)
+        out[memory::memory_category_name(static_cast<memory::MemoryCategory>(i))] =
+            report.released[i];
+    out["pressure"] = memory::pressure_name(report.pressure);
+    out["total_released"] = report.total_released;
+    // Nothing was released and the figures above are what the call WOULD have
+    // released: a memory warning arriving mid-save gets an honest answer rather
+    // than a document mutating under the writer.
+    out["pinned"] = report.pinned;
+    return out;
+}
+
+nb::dict preflight_dict(const mesh::SurfacePreflight& p) {
+    nb::dict out;
+    out["authoritative_bytes"] = p.authoritative_bytes;
+    out["runtime_bytes"] = p.runtime_bytes;
+    out["persistent_bytes"] = p.persistent_bytes;
+    // The high-water mark DURING the call, and the number that matters: the
+    // peak is what kills an application on a memory-constrained device, and a
+    // steady-state figure that "fits" is what makes it happen half way through.
+    out["peak_bytes"] = p.peak_bytes;
+    out["allowed"] = p.allowed;
+    out["error"] = memory::budget_error_text(p.error);
+    return out;
+}
+
+// A ledger dict, back into the ledger it came out of. Keyed by the category's
+// own NAME, which is what `ledger_dict` emitted — the roll-ups it also carries
+// are derived and are ignored here rather than double-counted.
+void merge_ledger_dict(nb::handle h, memory::MemoryLedger* out) {
+    nb::dict d;
+    if (!nb::try_cast(h, d))
+        throw std::invalid_argument(
+            "a surface ledger must be a dict as memory_ledger() returns, or a list of them");
+    for (std::size_t i = 0; i < memory::kMemoryCategoryCount; ++i) {
+        const char* key = memory::memory_category_name(static_cast<memory::MemoryCategory>(i));
+        if (d.contains(key))
+            out->add(static_cast<memory::MemoryCategory>(i),
+                     nb::cast<std::size_t>(d[key]));
+    }
+}
+
+nb::dict revisions_dict(const mesh::ChunkRevisions& r) {
+    nb::dict out;
+    out["topology"] = r.topology;
+    out["geometry"] = r.geometry;
+    out["normals"] = r.normals;
+    out["attributes"] = r.attributes;
+    return out;
+}
+
+// The four counters a host echoes back when it acknowledges a chunk. A dict
+// rather than a class, because it is what `copy_chunk` handed the caller a
+// moment ago and a round trip through a bound type would buy nothing.
+mesh::ChunkRevisions to_revisions(nb::handle h, const char* what) {
+    mesh::ChunkRevisions r;
+    if (h.is_none()) return r;
+    nb::dict d;
+    if (!nb::try_cast(h, d))
+        throw std::invalid_argument(std::string(what) +
+                                    " must be a dict of topology/geometry/normals/attributes, "
+                                    "as copy_chunk returns");
+    const auto field = [&](const char* key, std::uint64_t* out) {
+        if (d.contains(key)) *out = nb::cast<std::uint64_t>(d[key]);
+    };
+    field("topology", &r.topology);
+    field("geometry", &r.geometry);
+    field("normals", &r.normals);
+    field("attributes", &r.attributes);
+    return r;
+}
+
+// The read seam, as a Python object.
+//
+// IT STORES THE SOURCE AND REBUILDS THE VIEW PER CALL. `mesh::SurfaceView` is a
+// call-site convenience by construction — valid only while the surface it names
+// is unchanged — and a Python object outlives a stamp by definition. Caching
+// the view would hand back spans into a table the next stamp has moved.
+struct PySurfaceView {
+    nb::object owner;  // the Python surface this names, kept alive for our life
+    mesh::SurfaceKind kind = mesh::SurfaceKind::Fixed;
+    PyMesh* mesh_handle = nullptr;
+    // Fixed only, and OURS: the fixed sculptor tracks dirty weld classes and
+    // has no chunk table of its own yet, so this view partitions the mesh and
+    // reports a static partition with an empty dirty set.
+    mesh::ChunkTable table;
+    mesh::DynamicSculptor* dynamic_sculptor = nullptr;
+    mesh::MultiresSurface* multires = nullptr;
+    std::uint32_t level = 0;
+
+    mesh::SurfaceView view() {
+        switch (kind) {
+            case mesh::SurfaceKind::Fixed:
+                return mesh::SurfaceView::over_mesh(mesh_handle->data(), table);
+            case mesh::SurfaceKind::Adaptive:
+                return mesh::SurfaceView::over_dynamic(dynamic_sculptor->surface(),
+                                                       dynamic_sculptor->bvh().chunks());
+            case mesh::SurfaceKind::Multires:
+                if (level >= multires->level_count())
+                    throw std::runtime_error(
+                        "that level is gone from this hierarchy; take a new view");
+                return mesh::SurfaceView::over_level(*multires, level);
+        }
+        throw std::runtime_error("corrupt surface view");
+    }
+
+    // The acknowledgement is a WRITE, which is why the read seam does not carry
+    // one. Null for a hierarchy, whose dirty set is retired through the surface.
+    mesh::ChunkTable* writable_table() {
+        switch (kind) {
+            case mesh::SurfaceKind::Fixed: return &table;
+            case mesh::SurfaceKind::Adaptive: return &dynamic_sculptor->bvh().chunks_mutable();
+            case mesh::SurfaceKind::Multires: return nullptr;
+        }
+        return nullptr;
+    }
+};
+
+// The gate a serializer or a readback holds. A CONTEXT MANAGER, and that is the
+// point of binding it rather than exposing a counter: a `with` block is the only
+// form that cannot leave a document pinned when the body raises, and a document
+// pinned forever is one no trim can ever help.
+struct PyMemoryPin {
+    PyMemoryPin() = default;
+    // NOT COPYABLE, said out loud rather than left to the member below. A
+    // vector of unique_ptr is copy-constructible as a DECLARATION and fails
+    // only when the copy is instantiated, so a binding generator that probes
+    // `is_copy_constructible` gets True and then a hard error inside the
+    // standard library. Copying a pin is also meaningless: the balance belongs
+    // to the scope that took it.
+    PyMemoryPin(const PyMemoryPin&) = delete;
+    PyMemoryPin& operator=(const PyMemoryPin&) = delete;
+
+    memory::TrimGate gate;
+    // One live scope per acquire. The count is private to memory::MemoryPin on
+    // purpose — RAII is the mechanism rather than a convenience over it — so a
+    // balance kept by hand is a stack of scopes and never a second counter.
+    std::vector<std::unique_ptr<memory::MemoryPin>> held;
 };
 
 struct PyVertexDeltas {
@@ -4212,7 +4394,31 @@ NB_MODULE(pyclay, m) {
             "ONE stated difference from `save`: an in-memory OBJ carries no\n"
             "`mtllib` line. The path form writes a companion .mtl beside the\n"
             "object file and names it; a buffer has no companion, and naming a\n"
-            "file that was never written is worse than naming none.");
+            "file that was never written is worse than naming none.")
+        .def(
+            "preflight_to_dynamic",
+            [](const PyMesh& pm, std::uint64_t budget) {
+                return preflight_dict(mesh::preflight_to_dynamic(pm.data(), budget));
+            },
+            "budget"_a = 0,
+            "What converting this mesh into an adaptive surface WOULD cost,\n"
+            "asked before any of it is paid. Allocates nothing and has no side\n"
+            "effects.\n\n"
+            "Read `peak_bytes`, not `persistent_bytes`: the conversion holds the\n"
+            "source mesh, the half-edge structure and the weld map at once, and\n"
+            "the peak is what kills an application on a constrained device.\n"
+            "A budget of 0 means no budget and always allows — except on an\n"
+            "arithmetic overflow, which refuses at any budget, because an\n"
+            "estimate nobody can compute is not one anybody may rely on.")
+        .def(
+            "preflight_global_remesh",
+            [](const PyMesh& pm, std::uint64_t target_triangles, std::uint64_t budget) {
+                return preflight_dict(
+                    mesh::preflight_global_remesh(pm.data(), target_triangles, budget));
+            },
+            "target_triangles"_a, "budget"_a = 0,
+            "The same question for a global remesh, where source and target are\n"
+            "live at the same time — which is the whole reason it is asked.");
 
     // -- fixed-topology mesh brushes -------------------------------------------------
     nb::class_<parallel::CancelToken>(
@@ -4738,7 +4944,21 @@ NB_MODULE(pyclay, m) {
             "by the root box so it is comparable across meshes.\n\n"
             "A rise means queries are getting slower. It does NOT mean rebuild:\n"
             "measured over five deformations, a rebuild produced a better tree in\n"
-            "exactly one of them, and was dramatically worse in two.");
+            "exactly one of them, and was dramatically worse in two.")
+        .def(
+            "memory_ledger",
+            [](const PyMeshSculptor& s) {
+                memory::MemoryLedger ledger;
+                mesh::report_surface_memory(s.live(false), &ledger);
+                return ledger_dict(ledger);
+            },
+            "What this sculptor's surface costs, by category, in the same\n"
+            "vocabulary the hierarchy and the adaptive surface answer in — so a\n"
+            "host holding one of each gets one set of three roll-ups rather than\n"
+            "three reports it has to reconcile.\n\n"
+            "THE MESH AND NOTHING ELSE. The ray tree is built lazily, so asking\n"
+            "a const report for its size would mean building one — 1.3 s on a 2M\n"
+            "vertex mesh — which is a report nobody would call twice.");
 
     // -- layer -----------------------------------------------------------------------
     nb::class_<PyLayer>(m, "Layer", "SDF layer: an ordered edit list inside a Document")
@@ -6380,6 +6600,35 @@ NB_MODULE(pyclay, m) {
             "same chunk cost the same. Expect it to move independently of\n"
             "occupied_count.")
         .def(
+            "memory_with_surfaces",
+            [](const PyDocument& d, nb::handle surfaces) {
+                // THE SURFACE SEAM, and the reason `memory` did not simply gain
+                // an argument: a hierarchy and an adaptive surface are owned by
+                // the HOST and held BESIDE a document rather than inside one, so
+                // a document cannot walk them and a guess would be worse than
+                // the honest zero `memory` reports. A caller that holds them
+                // passes their ledgers — one, or a list of them — here.
+                memory::MemoryLedger held;
+                if (!surfaces.is_none()) {
+                    nb::list items;
+                    if (nb::try_cast(surfaces, items)) {
+                        for (nb::handle h : items) merge_ledger_dict(h, &held);
+                    } else {
+                        merge_ledger_dict(surfaces, &held);
+                    }
+                }
+                return memory_dict(io::document_memory(
+                    *d.doc, d.undo ? d.undo->get() : nullptr,
+                    surfaces.is_none() ? nullptr : &held));
+            },
+            "surfaces"_a.none(),
+            "The same report, with the surfaces the host holds beside this\n"
+            "document folded into the surface-tier lines.\n\n"
+            "`surfaces` is a ledger `memory_ledger()` returned, or a list of\n"
+            "them — only the caller knows which surfaces belong to this\n"
+            "document. Passing None is exactly `memory`, which is why that one\n"
+            "stays rather than gaining an argument.")
+        .def(
             "layer_memory",
             [](const PyDocument& d, const std::string& name) {
                 // BY NAME, because every other layer lookup in this module is
@@ -6652,7 +6901,26 @@ NB_MODULE(pyclay, m) {
                                 "truncated, or written by a newer schema version");
                         return out;
                     },
-                    "data"_a);
+                    "data"_a)
+        .def(
+            "preflight_to_mesh",
+            [](const mesh::DynamicSurface& s, std::uint64_t budget) {
+                return preflight_dict(mesh::preflight_to_mesh(s, budget));
+            },
+            "budget"_a = 0,
+            "What exporting this surface as a flat mesh WOULD cost. The export\n"
+            "SPLITS a geometric vertex into as many export vertices as it has\n"
+            "distinct corner attributes, so the result is bounded by CORNERS\n"
+            "rather than by vertices — the term that makes this bigger than it\n"
+            "looks on a seam-heavy model.")
+        .def(
+            "preflight_encode",
+            [](const mesh::DynamicSurface& s, std::uint64_t budget) {
+                return preflight_dict(mesh::preflight_encode(s, budget));
+            },
+            "budget"_a = 0,
+            "The same for serialization, where the blob is a second copy of\n"
+            "everything and exists while the surface still does.");
 
     nb::class_<mesh::DynamicSculptor>(
         m, "DynamicSculptor",
@@ -6722,7 +6990,35 @@ NB_MODULE(pyclay, m) {
                          return std::vector<std::uint32_t>(d.begin(), d.end());
                      },
                      "The chunks the stamps since the last clear touched.")
-        .def("clear_dirty", [](mesh::DynamicSculptor& s) { s.bvh().clear_dirty(); });
+        .def("clear_dirty", [](mesh::DynamicSculptor& s) { s.bvh().clear_dirty(); })
+        .def(
+            "memory_ledger",
+            [](const mesh::DynamicSculptor& s) {
+                memory::MemoryLedger ledger;
+                mesh::report_surface_memory(s, &ledger);
+                return ledger_dict(ledger);
+            },
+            "What this surface costs, by category, with the three roll-ups a\n"
+            "host under pressure can act on.")
+        .def(
+            "trim",
+            [](mesh::DynamicSculptor& s, memory::Pressure pressure, PyMemoryPin* pin) {
+                return trim_dict(
+                    mesh::trim_surface(s, pressure, pin ? &pin->gate : nullptr));
+            },
+            "pressure"_a, "pin"_a.none() = nb::none(),
+            "Release rebuildable caches at a stated pressure and report what\n"
+            "went.\n\n"
+            "NEVER THE SURFACE ITSELF, and never the tree: an adaptive surface's\n"
+            "index is its only means of asking a local question, and releasing\n"
+            "it would not save a host memory so much as make the next dab a scan\n"
+            "over every face. What goes is the chunk arena's SLACK. Nor is the\n"
+            "slot pool's slack released: rebuilding it renumbers slots, so the\n"
+            "surface would come back identical as a surface and different as a\n"
+            "partition — and what a host had already uploaded would be addressed\n"
+            "by ids that no longer mean the same chunks.\n\n"
+            "A held pin makes this a no-op that reports what it WOULD have\n"
+            "released.");
 
     // -- multiresolution surfaces (add-mesh-multires) -------------------------
     nb::class_<mesh::MultiresSurface>(
@@ -6993,7 +7289,55 @@ NB_MODULE(pyclay, m) {
                                 "not a multiresolution surface, or from a newer writer");
                         return out;
                     },
-                    "data"_a);
+                    "data"_a)
+        .def_prop_rw(
+            "memory_profile",
+            [](const mesh::MultiresSurface& s) { return s.memory_profile(); },
+            [](mesh::MultiresSurface& s, const memory::SculptMemoryProfile& p) {
+                s.set_memory_profile(p);
+            },
+            "What the HOST is willing to spend. Filled by the host and never\n"
+            "detected: the portable core makes no platform call and branches on\n"
+            "no device model, so constrained behaviour is exercised by a desktop\n"
+            "test in three lines.\n\n"
+            "Setting it takes effect immediately and then at every residency\n"
+            "change the host itself causes, which is the only moment this class\n"
+            "releases anything on its own. On a constrained profile the sculpt\n"
+            "and display levels stay resident and every other level keeps its\n"
+            "authoritative detail alone.")
+        .def(
+            "memory_ledger",
+            [](const mesh::MultiresSurface& s) {
+                memory::MemoryLedger ledger;
+                mesh::report_surface_memory(s, &ledger);
+                return ledger_dict(ledger);
+            },
+            "The same figures `memory()` reports, in the vocabulary the other\n"
+            "two representations answer in, with the three roll-ups a host under\n"
+            "pressure can act on.")
+        .def(
+            "trim",
+            [](mesh::MultiresSurface& s, memory::Pressure pressure, PyMemoryPin* pin) {
+                return trim_dict(
+                    mesh::trim_surface(s, pressure, pin ? &pin->gate : nullptr));
+            },
+            "pressure"_a, "pin"_a.none() = nb::none(),
+            "Release rebuildable caches at a stated pressure, in a fixed order,\n"
+            "and report what went.\n\n"
+            "NEVER AUTHORITATIVE CONTENT: not the cage, not a level's topology,\n"
+            "not the detail. `detail_checksum` is unchanged across any trim, and\n"
+            "that is how a host proves it rather than taking this sentence on\n"
+            "trust. A held pin makes this a no-op that reports what it WOULD\n"
+            "have released.")
+        .def(
+            "preflight_encode",
+            [](const mesh::MultiresSurface& s, std::uint64_t budget) {
+                return preflight_dict(mesh::preflight_encode(s, budget));
+            },
+            "budget"_a = 0,
+            "What serializing this hierarchy WOULD cost. The blob is a second\n"
+            "copy of everything and it exists while the hierarchy still does, so\n"
+            "read `peak_bytes`.");
 
     nb::class_<mesh::MultiresSculptor>(
         m, "MultiresSculptor",
@@ -7071,6 +7415,369 @@ NB_MODULE(pyclay, m) {
                          return std::vector<std::uint32_t>(v.begin(), v.end());
                      },
                      "The level vertices the last stamp actually moved.");
+
+    // -- the surface tier: budgets, the pin and one transport -----------------
+    //
+    // (add-extreme-poly-runtime.) The principle the whole thing serves is that
+    // a dab costs approximately what it TOUCHES rather than what the model
+    // HOLDS, and these are the three things a host needs across this boundary
+    // to keep it that way at twenty million vertices.
+
+    nb::enum_<memory::MemoryClass>(
+        m, "MemoryClass",
+        "How much room the host is working in. A LABEL RATHER THAN A DEVICE:\n"
+        "nothing here detects anything, so a desktop test sets `constrained`\n"
+        "and observes constrained behaviour where the tests actually run.")
+        .value("full", memory::MemoryClass::Full,
+               "No budget. Every byte field is advisory and the runtime keeps\n"
+               "what it builds — what a desktop host and most tests want.")
+        .value("constrained", memory::MemoryClass::Constrained,
+               "Budgets are real, inactive levels hold compact detail only, and\n"
+               "maintenance runs between interactions.")
+        .value("minimal", memory::MemoryClass::Minimal,
+               "What a host sets when the operating system has already warned\n"
+               "it once: everything rebuildable is a candidate the moment it is\n"
+               "not being read.");
+
+    nb::enum_<memory::Pressure>(
+        m, "Pressure",
+        "How hard a host is asking for memory back. Passed to `trim`, and\n"
+        "never inferred by the engine — the host owns the moment, the engine\n"
+        "owns the order.")
+        .value("none", memory::Pressure::None,
+               "Give back what is free anyway: scratch above its steady\n"
+               "capacity, and preview staging already drained.")
+        .value("warning", memory::Pressure::Warning)
+        .value("urgent", memory::Pressure::Urgent)
+        .value("critical", memory::Pressure::Critical,
+               "The last stop before the operating system kills the process.\n"
+               "Everything rebuildable goes and the next edit pays to rebuild\n"
+               "what it needs.");
+
+    nb::enum_<mesh::SurfaceKind>(
+        m, "SurfaceKind",
+        "Which representation a SurfaceView is over. It changes exactly one\n"
+        "thing a caller can see, and copy_chunk says which.")
+        .value("fixed", mesh::SurfaceKind::Fixed)
+        .value("adaptive", mesh::SurfaceKind::Adaptive)
+        .value("multires", mesh::SurfaceKind::Multires);
+
+    nb::class_<memory::SculptMemoryProfile>(
+        m, "SculptMemoryProfile",
+        "What a host is willing to spend, filled by the HOST.\n\n"
+        "NO DEVICE DETECTION ANYWHERE. Not one platform call, not one\n"
+        "model-name comparison. A host knows what its operating system is\n"
+        "telling it; an engine guessing from a model string is both wrong and,\n"
+        "worse, untestable — because the tests run on a desktop.\n\n"
+        "EVERY FIELD IS A HINT, AND THE TYPE IS WHAT SAYS SO. Each one names\n"
+        "something that can be recomputed EXACTLY from what was committed:\n"
+        "normals during a drag, index quality, cache residency, the rate a\n"
+        "preview drains. There is deliberately no field for anything that IS\n"
+        "the committed result — the deformation, split and collapse\n"
+        "thresholds, remesh targets, detail coefficients, layer content,\n"
+        "masks, brush strength and falloff. A deferred split would make the\n"
+        "committed mesh a function of machine speed, and this library spends\n"
+        "real effort on determinism that would throw away. So 'a memory-saving\n"
+        "mode changed my sculpt' is unrepresentable here rather than merely\n"
+        "forbidden.\n\n"
+        "A byte field of 0 means no budget for that thing, which is what\n"
+        "`full` means field by field.")
+        .def(nb::init<>())
+        .def_rw("memory_class", &memory::SculptMemoryProfile::memory_class)
+        .def_rw("cache_budget", &memory::SculptMemoryProfile::cache_budget,
+                "Rebuildable caches: chunk indices, per-level runtime caches,\n"
+                "evaluated layer caches, derived positions. What a trim reaches\n"
+                "for first.")
+        .def_rw("undo_budget", &memory::SculptMemoryProfile::undo_budget,
+                "The engine never trims this on its own; the figure exists so a\n"
+                "host can set its own history budget from the same struct.")
+        .def_rw("scratch_budget", &memory::SculptMemoryProfile::scratch_budget,
+                "The per-stamp working set, and a HARD bound: a footprint\n"
+                "larger than it is processed in blocks rather than allocated,\n"
+                "which is what stops a 500k-vertex footprint on a constrained\n"
+                "profile from becoming the peak that kills the app.")
+        .def_rw("preview_budget", &memory::SculptMemoryProfile::preview_budget)
+        .def_rw("max_resident_levels", &memory::SculptMemoryProfile::max_resident_levels,
+                "How many multires levels keep their rebuildable caches; 0 is\n"
+                "no limit.")
+        .def_rw("defer_normals_in_stroke",
+                &memory::SculptMemoryProfile::defer_normals_in_stroke,
+                "Recompute exact normals at stroke end rather than per stamp.\n"
+                "The final state is exact either way — that is the gate — and\n"
+                "this only decides when the work happens.")
+        .def_rw("allow_index_rebuild", &memory::SculptMemoryProfile::allow_index_rebuild,
+                "Whether a spatial index may be REBUILT, never whether it may\n"
+                "be refitted: a refit is correctness. Defaults to True and\n"
+                "stays advisory, because a rebuild helped one of five measured\n"
+                "deformations and hurt two.")
+        .def_rw("preview_chunks_per_frame",
+                &memory::SculptMemoryProfile::preview_chunks_per_frame,
+                "How many dirty chunks a host expects to drain per frame; 0\n"
+                "means 'as many as there are'. Lossless at any value, because\n"
+                "the transport acknowledges per chunk.");
+
+    nb::class_<PyMemoryPin>(
+        m, "MemoryPin",
+        "Hold this across a save or a readback and a trim becomes a no-op that\n"
+        "reports what it WOULD have released.\n\n"
+        "A CONTEXT MANAGER, and that is the point of it:\n\n"
+        "    with MemoryPin() as pin:\n"
+        "        surface.trim(Pressure.critical, pin)   # releases nothing\n"
+        "        blob = surface.serialize()\n\n"
+        "`with` is the only form that cannot leave a document pinned when the\n"
+        "body raises, and a document pinned forever is one no trim can ever\n"
+        "help. REENTRANT, because a readback inside a save must not un-pin the\n"
+        "save when it returns.")
+        .def(nb::init<>())
+        .def("acquire",
+             [](PyMemoryPin& p) {
+                 p.held.push_back(std::make_unique<memory::MemoryPin>(p.gate));
+             },
+             "Hold it by hand. Prefer the `with` block, which cannot be\n"
+             "unbalanced by an exception.")
+        .def("release",
+             [](PyMemoryPin& p) {
+                 if (!p.held.empty()) p.held.pop_back();
+             },
+             "Releasing one nobody acquired does nothing: an unbalanced release\n"
+             "is a caller's bug, and leaving the count at zero is the harmless\n"
+             "reading of it. Underflowing to 'pinned forever' is not.")
+        .def_prop_ro("held", [](const PyMemoryPin& p) { return p.gate.pinned(); },
+                     "Whether a trim would do nothing right now.")
+        .def("__enter__",
+             [](nb::object self) {
+                 PyMemoryPin& p = nb::cast<PyMemoryPin&>(self);
+                 p.held.push_back(std::make_unique<memory::MemoryPin>(p.gate));
+                 return self;
+             })
+        .def("__exit__",
+             // Variadic: the three arguments are None on a clean exit, and a
+             // typed signature would refuse them.
+             [](PyMemoryPin& p, nb::args) {
+                 // Releases whether the block finished or threw, which is the
+                 // whole reason to bind this as a context manager.
+                 if (!p.held.empty()) p.held.pop_back();
+                 return false;  // an exception in the body propagates
+             });
+
+    nb::class_<PySurfaceView>(
+        m, "SurfaceView",
+        "What changed, and those bytes and no others — for whichever of the\n"
+        "three representations you are holding.\n\n"
+        "A host at twenty million vertices asks the same three questions\n"
+        "whatever the surface is, and answering them per representation is\n"
+        "three code paths whose dirty sets mean different things: a weld class,\n"
+        "a face chunk and a base patch are not interchangeable, and a host that\n"
+        "treated them as such would upload the wrong thing. So there is ONE\n"
+        "chunk unit underneath and this is the seam over it.\n\n"
+        "FOUR REVISIONS, NOT ONE — topology, geometry, normals, attributes — so\n"
+        "an index buffer is re-uploaded only when connectivity actually\n"
+        "changed, and a deferred normal flush is distinguishable from a move.\n\n"
+        "AN ACKNOWLEDGEMENT RATHER THAN A CLEAR. `clear_dirty` is\n"
+        "all-or-nothing: a host that drains half a set and drops a frame must\n"
+        "either re-upload everything or lose a change. `acknowledge` retires a\n"
+        "chunk only if it has not changed since you copied it, so draining\n"
+        "across frames is lossless at any rate.\n\n"
+        "A CALL-SITE CONVENIENCE, NOT A HANDLE TO STORE. It names a surface it\n"
+        "does not own; the surface must outlive it, and everything it reports\n"
+        "is read at the moment it is asked rather than cached.")
+        .def_static(
+            "over_mesh",
+            [](nb::object mesh_obj, std::size_t target_faces) {
+                PyMesh& handle = nb::cast<PyMesh&>(mesh_obj);
+                PySurfaceView v;
+                v.owner = mesh_obj;
+                v.kind = mesh::SurfaceKind::Fixed;
+                v.mesh_handle = &handle;
+                mesh::ChunkOptions options;
+                if (target_faces > 0) {
+                    options.target_faces = target_faces;
+                    options.min_faces = target_faces / 4 ? target_faces / 4 : 1;
+                    options.max_faces = target_faces * 2;
+                }
+                mesh::partition_mesh_chunks(handle.data(), options, &v.table);
+                return v;
+            },
+            "mesh"_a, "target_faces"_a = 0,
+            "A flat mesh, partitioned on the spot. The partition is this\n"
+            "view's, because the fixed sculptor tracks dirty WELD CLASSES and\n"
+            "whether that list is retired in favour of a chunk dirty set\n"
+            "depends on a measurement this change has not made yet — so this\n"
+            "view reports one partition of a static mesh and an empty dirty\n"
+            "set. The other two carry live dirty sets.\n\n"
+            "`target_faces` of 0 takes the library's defaults, which are\n"
+            "explicitly the UNMEASURED null hypothesis and not yet an answer.")
+        .def_static(
+            "over_dynamic",
+            [](nb::object sculptor_obj) {
+                mesh::DynamicSculptor& s = nb::cast<mesh::DynamicSculptor&>(sculptor_obj);
+                PySurfaceView v;
+                v.owner = sculptor_obj;
+                v.kind = mesh::SurfaceKind::Adaptive;
+                v.dynamic_sculptor = &s;
+                return v;
+            },
+            "sculptor"_a, "The adaptive surface, whose table is its chunked index.")
+        .def_static(
+            "over_level",
+            [](nb::object surface_obj, std::uint32_t level) {
+                mesh::MultiresSurface& s = nb::cast<mesh::MultiresSurface&>(surface_obj);
+                if (level >= s.level_count())
+                    throw std::invalid_argument("no such level in this hierarchy");
+                PySurfaceView v;
+                v.owner = surface_obj;
+                v.kind = mesh::SurfaceKind::Multires;
+                v.multires = &s;
+                v.level = level;
+                return v;
+            },
+            "surface"_a, "level"_a,
+            "One level of a hierarchy. Asking for its chunks EVALUATES the\n"
+            "level, exactly as reading its positions does.")
+        .def_prop_ro("kind", [](PySurfaceView& v) { return v.kind; })
+        .def_prop_ro("chunk_count", [](PySurfaceView& v) { return v.view().chunk_count(); },
+                     "Chunk ids run from 0 to this, and a slot in that range may\n"
+                     "be dead — read `live` from chunk_info.")
+        .def_prop_ro(
+            "dirty_chunks",
+            [](PySurfaceView& v) {
+                // The view is a temporary and the dirty set is a reference INTO
+                // it, so the view has to outlive the copy.
+                mesh::SurfaceView s = v.view();
+                const std::vector<std::uint32_t>& d = s.dirty_chunks();
+                return std::vector<std::uint32_t>(d.begin(), d.end());
+            },
+            "The chunks the stamps since the last drain touched, in the order\n"
+            "they were first marked.\n\n"
+            "MAY NAME A CHUNK THAT HAS SINCE BEEN RELEASED, whose chunk_info\n"
+            "reports live=False. Retiring a merged chunk from this list would\n"
+            "be an erase on a path that runs during a stroke, to save a check\n"
+            "that does not — so skip it rather than treating it as an error.")
+        .def(
+            "chunk_info",
+            [](PySurfaceView& v, std::uint32_t chunk) {
+                mesh::SurfaceView s = v.view();
+                nb::dict out;
+                const mesh::SurfaceChunk* record = s.chunks().chunk(chunk);
+                out["chunk"] = chunk;
+                out["live"] = record != nullptr;
+                if (record == nullptr) return out;
+                // The capacity query answers the counts rather than arithmetic
+                // repeated here: welded and unwelded chunks count differently,
+                // and a second copy of that rule is how the two come to
+                // disagree about how much a caller should allocate.
+                const mesh::ChunkReadback r =
+                    s.copy_chunk(chunk, nullptr, nullptr, 0, nullptr, 0, nullptr, 0);
+                out["vertex_count"] = r.vertex_count;
+                out["index_count"] = r.index_count;
+                out["revision"] = record->revision;
+                out["revisions"] = revisions_dict(record->revisions);
+                out["geometry_dirty"] = record->geometry_dirty;
+                out["topology_dirty"] = record->topology_dirty;
+                if (!record->bounds.empty()) {
+                    out["bounds_min"] = nb::make_tuple(record->bounds.min.x,
+                                                       record->bounds.min.y,
+                                                       record->bounds.min.z);
+                    out["bounds_max"] = nb::make_tuple(record->bounds.max.x,
+                                                       record->bounds.max.y,
+                                                       record->bounds.max.z);
+                }
+                return out;
+            },
+            "chunk"_a,
+            "What one chunk holds and what it costs to copy, without copying\n"
+            "it.")
+        .def(
+            "copy_chunk",
+            [](PySurfaceView& v, std::uint32_t chunk, nb::handle expected, bool normals) {
+                mesh::SurfaceView s = v.view();
+                const bool has_expected = !expected.is_none();
+                const mesh::ChunkRevisions want = to_revisions(expected, "expected");
+                const mesh::ChunkRevisions* want_p = has_expected ? &want : nullptr;
+
+                const mesh::ChunkReadback need =
+                    s.copy_chunk(chunk, want_p, nullptr, 0, nullptr, 0, nullptr, 0);
+                if (!need.ok) throw std::invalid_argument("no live chunk with that id");
+                const std::size_t nv = need.vertex_count, ni = need.index_count;
+
+                auto own_f = [](void* q) noexcept { delete[] static_cast<float*>(q); };
+                auto own_u = [](void* q) noexcept {
+                    delete[] static_cast<std::uint32_t*>(q);
+                };
+                // Each buffer is handed to its capsule the moment it exists, so
+                // a throw between here and the return frees it rather than
+                // leaking it into the interpreter.
+                float* pos = new float[nv ? nv * 3 : 1];
+                nb::capsule pos_owner(pos, own_f);
+                std::uint32_t* idx = new std::uint32_t[ni ? ni : 1];
+                nb::capsule idx_owner(idx, own_u);
+
+                nb::dict out;
+                float* nor = nullptr;
+                if (normals) {
+                    nor = new float[nv ? nv * 3 : 1];
+                    nb::capsule nor_owner(nor, own_f);
+                    out["normals"] =
+                        nb::ndarray<nb::numpy, float>(nor, {nv, std::size_t(3)}, nor_owner);
+                }
+
+                const mesh::ChunkReadback got =
+                    s.copy_chunk(chunk, want_p, pos, nv * 3, nor, nor ? nv * 3 : 0, idx, ni);
+                if (got.truncated)
+                    throw std::runtime_error(
+                        "the chunk changed size between the query and the copy; ask again");
+
+                out["positions"] = nb::ndarray<nb::numpy, float>(pos, {nv, std::size_t(3)},
+                                                                 pos_owner);
+                out["indices"] = nb::ndarray<nb::numpy, std::uint32_t>(idx, {ni}, idx_owner);
+                out["revisions"] = revisions_dict(got.current);
+                out["requested"] = revisions_dict(got.requested);
+                // The engine moved on after you took your snapshot. The data is
+                // CURRENT — this is not a failure — but a caller applying an
+                // older frame's plan can tell that its plan is out of date.
+                out["stale"] = got.stale;
+                return out;
+            },
+            "chunk"_a, "expected"_a.none() = nb::none(), "normals"_a = true,
+            "One chunk's geometry as numpy arrays: positions (N, 3), normals\n"
+            "(N, 3) and triangle indices (M,) LOCAL to the chunk, so it draws\n"
+            "as a standalone mesh.\n\n"
+            "`expected` is a revisions dict a previous copy returned; pass it\n"
+            "to learn whether what you get back has already been superseded.\n\n"
+            "WELDED WHERE THE REPRESENTATION ALLOWS IT. A fixed mesh and a\n"
+            "multires level have a stable per-chunk vertex list, so a chunk\n"
+            "copies as its own vertices. An adaptive surface's topology changes\n"
+            "under the stamp being uploaded, so its chunks copy as UNWELDED\n"
+            "triangles — read the array shapes rather than assuming either.")
+        .def(
+            "acknowledge",
+            [](PySurfaceView& v, std::uint32_t chunk, nb::handle seen) {
+                const mesh::ChunkRevisions r = to_revisions(seen, "seen");
+                mesh::ChunkTable* table = v.writable_table();
+                if (table != nullptr) return table->acknowledge(chunk, r);
+                return v.multires->acknowledge_chunk(v.level, chunk, r);
+            },
+            "chunk"_a, "seen"_a,
+            "Retire one chunk from the dirty set, and ONLY if it has not\n"
+            "changed since you copied it. `seen` is the revisions dict that\n"
+            "copy returned.\n\n"
+            "Returns whether the chunk is clean afterwards: True when it was\n"
+            "retired and True when it was never dirty, False only when it moved\n"
+            "on after you read it — in which case it is still waiting and you\n"
+            "have lost nothing.")
+        .def(
+            "clear_dirty",
+            [](PySurfaceView& v) {
+                mesh::ChunkTable* table = v.writable_table();
+                if (table != nullptr) {
+                    table->clear_dirty();
+                    return;
+                }
+                v.multires->clear_dirty_chunks(v.level);
+            },
+            "Drop the whole dirty set. The all-or-nothing form, for a caller\n"
+            "that uploads everything it was told about in one pass; prefer\n"
+            "`acknowledge` if you drain incrementally.");
 
     // -- the brush model, and brushes as data ---------------------------------
     nb::class_<mesh::AutomaskSettings>(

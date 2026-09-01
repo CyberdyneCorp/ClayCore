@@ -58,6 +58,11 @@ CLASS_PREFIX = {
     "DynamicSurface": ("clay_dynamic_surface_",),
     "DynamicSculptor": ("clay_dynamic_sculptor_", "clay_dynamic_surface_"),
     "TopologySettings": ("clay_dynamic_topology_",),
+    # The surface tier (add-extreme-poly-runtime): one transport over all three
+    # representations, and the budget a host fills for them.
+    "SurfaceView": ("clay_surface_view_",),
+    "MemoryPin": ("clay_memory_pin_",),
+    "SculptMemoryProfile": ("clay_sculpt_memory_profile_",),
     # Multiresolution (add-mesh-multires).
     "MultiresSurface": ("clay_multires_",),
     "MultiresSculptor": ("clay_multires_sculptor_", "clay_multires_"),
@@ -90,6 +95,10 @@ CLASS_PREFIX = {
 # would be inventing surface that neither binding wants. A field still has to
 # exist, which is what the gate is for.
 CLASS_STRUCT = {
+    # The memory profile a host fills. Its fields cross as members of
+    # clay_sculpt_memory_profile — a C caller sets profile.scratch_budget
+    # directly — which is the same reading StrokePreset's scalars already get.
+    "SculptMemoryProfile": "clay_sculpt_memory_profile",
     "StrokePreset": "clay_stroke_preset",
     "BrushPreset": "clay_brush_preset",
     "BrushModel": "clay_brush_model",
@@ -113,6 +122,11 @@ CLASS_ENUM_PREFIX = {
     "BrushWriteTarget": "CLAY_BRUSH_TARGET_",
     "BrushPostPolicy": "CLAY_BRUSH_POST_",
     "AutomaskFactor": "CLAY_AUTOMASK_",
+    # The surface tier's three vocabularies (add-extreme-poly-runtime). Each is
+    # an enumerator in C, spelled the same way the Python member is.
+    "MemoryClass": "CLAY_MEMORY_CLASS_",
+    "Pressure": "CLAY_PRESSURE_",
+    "SurfaceKind": "CLAY_SURFACE_",
 }
 
 # The names that do not derive. Kept explicit so the difference is reviewable.
@@ -223,6 +237,14 @@ ALIASES = {
     "MultiresSculptor.apply_stroke": "clay_multires_sculptor_apply_stroke",
     "MultiresSculptor.bound_level": "clay_multires_sculpt_level",
     "MultiresSculptor.last_write_vertices": "clay_multires_dirty_blocks",
+    # The surface transport (add-extreme-poly-runtime). The C names differ where
+    # they say more: "from_" is how every other handle in this ABI is built, and
+    # "_infos" marks the BULK fill, which is the whole point of the call — a
+    # host reads thousands of them in one go rather than one struct per call.
+    "SurfaceView.over_mesh": "clay_surface_view_from_mesh",
+    "SurfaceView.over_dynamic": "clay_surface_view_from_dynamic",
+    "SurfaceView.over_level": "clay_surface_view_from_multires",
+    "SurfaceView.chunk_info": "clay_surface_view_chunk_infos",
     "DynamicSculptor.rebuild_index": "clay_dynamic_sculptor_rebuild_index",
     "DynamicSculptor.chunk_count": "clay_dynamic_surface_chunk_count",
     "DynamicSculptor.dirty_chunks": "clay_dynamic_surface_dirty_chunks",
@@ -335,6 +357,14 @@ CLASS_CTOR = {
     "DynamicSculptor": "clay_dynamic_sculptor_create",
     "TopologySettings": "clay_dynamic_topology_defaults",
     "MultiresSurface": "clay_multires_from_mesh",
+    # The surface tier (add-extreme-poly-runtime).
+    "SurfaceView": "clay_surface_view_from_mesh",
+    "MemoryPin": "clay_memory_pin_create",
+    "SculptMemoryProfile": "clay_sculpt_memory_profile_defaults",
+    # Plain enumerators: nothing "builds" one, in C or in Python.
+    "MemoryClass": None,
+    "Pressure": None,
+    "SurfaceKind": None,
     "MultiresSculptor": "clay_multires_sculptor_create",
     "DetailMode": None,
     "BrushModel": "clay_brush_model_of",

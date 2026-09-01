@@ -599,6 +599,121 @@ field with `clay_item_volume_from_mesh` (`clay.Volume.from_mesh` in Python); see
 [05 §7](05-claycore-library.md#7-meshing--mesh-processing-claymesh). That path
 discards the topology, which is exactly the difference between the two.
 
+## Reading back only what changed
+
+Everything above copies a whole mesh, and at twenty million vertices a host that
+does that per dab has already lost. A dab touches a few thousand vertices; the
+readback should cost what it TOUCHED and not what the model HOLDS.
+
+`clay_surface_view` is the seam for that, and it is one seam for all three
+representations — a fixed mesh, an adaptive surface and a level of a
+multiresolution hierarchy. They are partitioned into CHUNKS, a stamp marks the
+chunks it reached, and a host drains that set into buffers it owns.
+
+```c
+clay_surface_view* view = NULL;
+clay_surface_view_from_dynamic(sculptor, &view);   /* or _from_mesh / _from_multires */
+
+size_t n = 0;
+clay_surface_view_dirty_chunks(view, NULL, &n);    /* size query */
+uint32_t* dirty = malloc(n * sizeof(uint32_t));
+clay_surface_view_dirty_chunks(view, dirty, &n);
+
+for (size_t i = 0; i < n; ++i) {
+    clay_chunk_readback need = { .struct_size = sizeof(need) };
+    clay_surface_view_copy_chunk(view, dirty[i], NULL, NULL, 0, NULL, 0, NULL, 0, &need);
+
+    float* positions = malloc(need.vertex_count * 3 * sizeof(float));
+    uint32_t* indices = malloc(need.index_count * sizeof(uint32_t));
+    clay_chunk_readback got = { .struct_size = sizeof(got) };
+    clay_surface_view_copy_chunk(view, dirty[i], NULL,
+                                 positions, need.vertex_count * 3, NULL, 0,
+                                 indices, need.index_count, &got);
+    upload(dirty[i], positions, indices);          /* your renderer */
+
+    /* Retire it — against what you actually copied. */
+    size_t clean = 0;
+    clay_surface_view_acknowledge(view, &dirty[i], &got.current, 1, &clean);
+}
+clay_surface_view_destroy(view);
+```
+
+Four things about that loop are the whole point.
+
+- **The buffers are yours, and the capacity query comes first.** Nothing here
+  allocates a heap object per chunk per frame, and nothing hands back a pointer
+  into the engine: a mutation can move or free anything, and at this scale it
+  does so mid-drag. A buffer that is too small has NOTHING written into it —
+  not a partial fill you might draw — and the counts say what it needed.
+- **Four revisions, not one.** `clay_chunk_info.revisions` separates topology,
+  geometry, normals and attributes, so you re-upload an index buffer only when
+  connectivity actually changed and can tell a deferred normal flush from a
+  move. The single `revision` beside them is the maximum of the four.
+- **Acknowledge, do not clear.** `clay_surface_view_acknowledge` retires a chunk
+  only if its revision still matches the one you copied. Drop a frame half way
+  through the set and the rest stays dirty; if a chunk changed again between the
+  copy and the acknowledgement it stays dirty too, so draining across frames at
+  any rate loses nothing. `clay_surface_view_clear_dirty` is the
+  all-or-nothing form, for a host that uploads everything in one pass.
+- **A stale readback is identifiable.** Pass the revisions you last saw as
+  `expected` and the result carries them back beside what the engine is at now,
+  with `stale` set when they differ. Without that a host drawing a superseded
+  chunk draws something the engine does not think it made, and nothing in the
+  pixels says so.
+
+A chunk of a fixed mesh or a multires level is WELDED — its own vertices, with
+indices local to it, so it uploads as a standalone draw. An adaptive surface's
+chunks are UNWELDED triangles, because its topology changes under the very stamp
+being uploaded and a per-chunk vertex map would have to be rebuilt per chunk per
+frame. Read `vertex_count` rather than assuming either.
+
+In Python the same loop is numpy-native:
+
+```python
+view = clay.SurfaceView.over_dynamic(sculptor)
+for chunk in view.dirty_chunks:
+    got = view.copy_chunk(chunk)          # positions (N,3), normals (N,3), indices (M,)
+    upload(chunk, got["positions"], got["indices"])
+    view.acknowledge(chunk, got["revisions"])
+```
+
+### Telling the engine what you can afford
+
+A host on a memory-constrained device fills a profile and asks for memory back
+when the operating system asks it for memory back. Nothing in the library
+detects a device, and nothing evicts on its own high-water mark:
+
+```python
+profile = clay.SculptMemoryProfile()
+profile.memory_class = clay.MemoryClass.constrained
+profile.max_resident_levels = 2
+hierarchy.memory_profile = profile
+
+led = hierarchy.memory_ledger()           # bytes by category, plus three roll-ups
+print(led["essential"], led["rebuildable"], led["undoable"])
+
+report = hierarchy.trim(clay.Pressure.critical)
+```
+
+A trim never touches unsaved authoritative content — the eviction order and what
+it excludes are in [05](05-claycore-library.md#memory-under-pressure-who-decides-what-and-in-what-order),
+verbatim. If a save or a readback is in flight, hold a pin and the trim becomes a
+no-op that reports what it WOULD have released:
+
+```python
+with clay.MemoryPin() as pin:
+    report = hierarchy.trim(clay.Pressure.critical, pin)
+    assert report["pinned"]               # nothing went; this is the estimate
+    blob = hierarchy.serialize()
+```
+
+And any operation whose transient PEAK exceeds its result can be priced before
+it is paid — `Mesh.preflight_to_dynamic`, `Mesh.preflight_global_remesh`,
+`DynamicSurface.preflight_to_mesh`, `DynamicSurface.preflight_encode`,
+`MultiresSurface.preflight_encode`, and `clay_multires_preflight_add_level`
+which came first. Read `peak_bytes`: an operation priced by what it leaves
+behind is the one that terminates the process half way through.
+
 ## Handing a sculpt to the retopology engine
 
 `clay_mesh_save_handoff` writes the **sculpt handoff** that CyberRemesherAndUV's

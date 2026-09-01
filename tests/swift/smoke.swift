@@ -1248,6 +1248,96 @@ do {
     check(clay_mesh_vertex_count(level) > 0, "the exported level has vertices")
     clay_mesh_destroy(level)
 
+    // -- the surface tier (add-extreme-poly-runtime) -------------------------
+    //
+    // One transport over all three representations, and the budget a host
+    // fills for them. The Swift-specific hazards are the two this repository
+    // has been bitten by before: a C enumerator crosses as a struct with a
+    // UInt32 rawValue rather than as an Int32, and `size_t` crosses as `Int`,
+    // so a count declared UInt32 would not compile against these signatures.
+
+    var view: OpaquePointer? = nil
+    check(clay_surface_view_from_multires(surface, 2, &view) == CLAY_OK,
+          "took a surface view over a level")
+    check(clay_surface_view_kind(view) == Int32(CLAY_SURFACE_MULTIRES.rawValue),
+          "the view names the representation underneath it")
+    let viewChunks = clay_surface_view_chunk_count(view)
+    check(viewChunks > 0, "the level is partitioned into chunks")
+
+    var chunkInfos = [clay_chunk_info](repeating: clay_chunk_info(), count: viewChunks)
+    chunkInfos.withUnsafeMutableBufferPointer { c in
+        check(clay_surface_view_chunk_infos(view, nil, viewChunks, c.baseAddress) == CLAY_OK,
+              "filled every chunk's record in ONE call, which is why it carries no struct_size")
+    }
+    check(chunkInfos[0].live == 1 && chunkInfos[0].index_count % 3 == 0,
+          "a chunk is whole triangles")
+
+    var readback = clay_chunk_readback()
+    readback.struct_size = UInt32(MemoryLayout<clay_chunk_readback>.size)
+    check(clay_surface_view_copy_chunk(view, chunkInfos[0].chunk, nil, nil, 0, nil, 0, nil, 0,
+                                       &readback) == CLAY_OK,
+          "asked what one chunk needs without copying it")
+    check(readback.vertex_count > 0, "the capacity query reports what to allocate")
+    check(readback.stale == 0, "a readback nobody asked a revision of is never stale")
+
+    var chunkPositions = [Float](repeating: 0, count: Int(readback.vertex_count) * 3)
+    var chunkIndices = [UInt32](repeating: 0, count: Int(readback.index_count))
+    var copied = clay_chunk_readback()
+    copied.struct_size = UInt32(MemoryLayout<clay_chunk_readback>.size)
+    chunkPositions.withUnsafeMutableBufferPointer { p in
+        chunkIndices.withUnsafeMutableBufferPointer { i in
+            check(clay_surface_view_copy_chunk(view, chunkInfos[0].chunk, nil, p.baseAddress,
+                                               p.count, nil, 0, i.baseAddress, i.count,
+                                               &copied) == CLAY_OK,
+                  "copied a chunk into memory Swift owns")
+        }
+    }
+    check(copied.truncated == 0 && copied.vertex_count == readback.vertex_count,
+          "the copy filled what the query promised")
+
+    var clean = 0
+    var seen = copied.current
+    check(clay_surface_view_acknowledge(view, [chunkInfos[0].chunk], &seen, 1, &clean) == CLAY_OK,
+          "acknowledged one chunk against the revision actually copied")
+    clay_surface_view_destroy(view)
+
+    var profile = clay_sculpt_memory_profile()
+    profile.struct_size = UInt32(MemoryLayout<clay_sculpt_memory_profile>.size)
+    check(clay_sculpt_memory_profile_defaults(&profile) == CLAY_OK,
+          "took the memory profile defaults")
+    check(profile.memory_class == Int32(CLAY_MEMORY_CLASS_FULL.rawValue),
+          "the default profile is the library as it behaved before one existed")
+    profile.memory_class = Int32(CLAY_MEMORY_CLASS_CONSTRAINED.rawValue)
+    profile.max_resident_levels = 2
+    check(clay_multires_set_memory_profile(surface, &profile) == CLAY_OK,
+          "a host declares its budget; nothing here detects a device")
+
+    var ledger = clay_memory_ledger()
+    ledger.struct_size = UInt32(MemoryLayout<clay_memory_ledger>.size)
+    check(clay_multires_memory_ledger(surface, &ledger) == CLAY_OK, "read the memory ledger")
+    check(ledger.total == ledger.essential + ledger.rebuildable + ledger.undoable,
+          "the three roll-ups partition the total")
+
+    var checksumBefore: UInt64 = 0
+    var checksumAfter: UInt64 = 0
+    check(clay_multires_detail_checksum(surface, &checksumBefore) == CLAY_OK,
+          "hashed the authoritative detail before a trim")
+    var trimmed = clay_trim_report()
+    trimmed.struct_size = UInt32(MemoryLayout<clay_trim_report>.size)
+    check(clay_multires_trim(surface, Int32(CLAY_PRESSURE_CRITICAL.rawValue), nil,
+                             &trimmed) == CLAY_OK,
+          "released the rebuildable caches at critical pressure")
+    check(clay_multires_detail_checksum(surface, &checksumAfter) == CLAY_OK,
+          "hashed it again")
+    check(checksumBefore == checksumAfter, "a trim never touches the user's work")
+
+    var encodeCost = clay_surface_preflight()
+    encodeCost.struct_size = UInt32(MemoryLayout<clay_surface_preflight>.size)
+    check(clay_multires_preflight_encode(surface, 0, &encodeCost) == CLAY_OK,
+          "priced the serialization before paying for it")
+    check(encodeCost.allowed == 1 && encodeCost.peak_bytes >= encodeCost.persistent_bytes,
+          "the peak is never below what remains")
+
     clay_multires_sculptor_destroy(sculptor)
     clay_multires_destroy(surface)
     clay_mesh_destroy(mesh)

@@ -130,17 +130,38 @@
 
 ## 6. Transport
 
-- [ ] 6.1 Revisioned dirty-chunk C ABI: count, info, positions, normals,
+- [x] 6.1 Revisioned dirty-chunk C ABI: count, info, positions, normals,
       indices, and an acknowledgement so a host can drain incrementally
-- [ ] 6.2 Caller-owned buffers with a capacity query; no heap object per chunk
+      DONE as `clay_surface_view`, ONE seam over all three representations
+      rather than a third set of entry points beside the shipped
+      `clay_dynamic_surface_chunk_*` and `clay_multires_copy_block`, which stay
+      byte-compatible. `clay_chunk_info` is a bulk fill and is registered in
+      `check_c_abi.py`'s ARRAY_ELEMENT_STRUCTS with its reason
+- [x] 6.2 Caller-owned buffers with a capacity query; no heap object per chunk
       per frame
-- [ ] 6.3 Topology revision distinct from geometry revision, so an index buffer
+      DONE: every buffer null IS the capacity query, and a buffer too small
+      writes NOTHING rather than a partial fill a host might draw
+- [x] 6.3 Topology revision distinct from geometry revision, so an index buffer
       is re-uploaded only when connectivity changed
-- [ ] 6.4 A stale-revision result is discardable by the host: the revision it
+      DONE: `clay_chunk_revisions` carries all four, and the single `revision`
+      a shipped host reads stays beside them as the maximum
+- [x] 6.4 A stale-revision result is discardable by the host: the revision it
       requested is echoed with what the engine is at now
 - [ ] 6.5 The whole-surface path stays for correctness, and the test compares
       the reconstruction from the dirty stream against it
-- [ ] 6.6 pyclay reaches the same transport, and parity is green
+      NOT DONE, and deliberately left to the test stage: the whole-surface
+      paths are untouched and `tests/unit/test_c_surface_chunks.cpp` asserts
+      that the chunks COVER the surface exactly once (triangle count against
+      the source mesh, and against `clay_multires_level_counts`), but a full
+      reconstruction compared against the whole-surface path is
+      `test_chunk_transport.cpp`, which is not written
+- [x] 6.6 pyclay reaches the same transport, and parity is green
+      DONE: `clay.SurfaceView` with numpy-native `copy_chunk`, plus the ledger,
+      the trim, the profile, the preflights and a `clay.MemoryPin` context
+      manager — `with` is the only form that cannot leave a document pinned
+      when a stroke loop raises. `check_binding_parity.py` OK against the BUILT
+      module (633 capabilities), and `bindings/python/tests/test_surface_transport.py`
+      covers the same six cases the C test does
 
 ## 7. The gates
 
