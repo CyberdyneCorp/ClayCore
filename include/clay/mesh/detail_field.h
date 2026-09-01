@@ -144,6 +144,23 @@ class DetailField {
 
     std::size_t bytes() const;
 
+    // -- block presence, for a composer reading several fields at once --------
+    //
+    // Exposed for `sculpt_layer.h`'s composer and for nothing else: a layer's
+    // field, a layer's mask and a level's composed field share this blocking,
+    // so block `b` names the same `block_size()` vertices in all of them. That
+    // shared index is what turns "a strength change costs the layer's coverage
+    // rather than the surface" from an optimisation into a property of the data
+    // structure — the composer walks the blocks a layer HAS, and a layer that
+    // does not reach a block is an O(1) miss rather than a scan.
+    //
+    // No storage changes here. `stored_block_at` walks `slot_block_`, which
+    // already existed so that a walk over stored blocks costs the stored ones.
+    std::uint32_t block_count() const;
+    bool block_stored(std::uint32_t block) const;
+    std::uint32_t stored_block_count() const;
+    std::uint32_t stored_block_at(std::uint32_t index) const;
+
     // A representation-INDEPENDENT hash of the content: the same value for a
     // sparse field and the dense field holding the same coefficients, and the
     // same value before and after a `compact`. That is what lets a test assert
@@ -167,7 +184,6 @@ class DetailField {
     static constexpr std::uint32_t kMaxVertices = 1u << 30;
 
    private:
-    std::uint32_t block_count() const;
     // Ensure the block holding `vertex` exists, and return the storage index of
     // that vertex.
     std::size_t reserve_slot(std::uint32_t vertex);
