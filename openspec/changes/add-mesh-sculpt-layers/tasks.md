@@ -715,6 +715,41 @@
         this stage changed four Markdown files and nothing a sanitizer can see.
         Re-running them would have cost two hours of a box already at load 100
         to re-prove an unchanged binary
+      AND ONCE MORE ON THE MERGE, because `main` moved twice while this branch
+      was being read: PR #417 landed the change itself, and
+      `add-shared-brush-runtime` (#419) landed after it and touched the same
+      file this branch's newest allocation gate lives in. `main` was merged in
+      rather than left to conflict — a conflicted PR never starts CI here. ONE
+      conflict, in `tests/unit/test_sculpt_allocation.cpp`, where both branches
+      appended a case to the end of the file; both are kept unchanged, since
+      they gate different things and share no fixture. Everything below was
+      re-run on the MERGED tree, not carried over:
+        build       270 translation units, exit 0. Three `-Warray-bounds`
+                    warnings from `/usr/include/c++/13/bits/stl_algobase.h`,
+                    inlined into `field::relax`, `field::flatten` and
+                    `field::move_topological` — a GCC 13 false positive in
+                    files this branch does not touch at all (`git diff
+                    origin/main...HEAD -- src/field/` is empty), which is why
+                    the earlier incremental builds reported none: those
+                    translation units were never rebuilt
+        cpu-only    4/4 passed, 0 failed, 138.3 s at load 4.5. 2179 doctest
+                    cases now register (2078 before the merge); the layer,
+                    stack, multires and allocation-gate family is 255 of them
+                    with 425,546 assertions and no failures
+        pyclay      617 passed, 20 skipped, 0 failed (596 before the merge),
+                    against a pyclay rebuilt on the merged tree
+        example     `examples/69_mesh_sculpt_layers.py` exit 0 again, tracked
+                    outputs byte-identical
+        gates       layering, c-abi (both modes), binding parity (both modes,
+                    now 631 capabilities and 32 exempt — the merge brought
+                    #419's), gallery, swift-package and `openspec validate
+                    --strict` all OK
+        release     10 PASS / 5 FAIL, the same five for the same two reasons.
+                    `version` PASSES at cmake=0.77.0 abi=0.77.0 wheel=0.77.0 —
+                    this branch's own 0.76.0 went in with #417 and #419 took 77,
+                    so the merge carries no version edit of its own, which is
+                    right: what is left on this branch adds no ABI
+
 - [x] 8.8 Docs: `docs/07-brushes-and-features.md` gains the stack and the
       distinction from `MeshBrush::Layer`; the README's sculpt-layer claim is
       widened from voxels to the representations that actually have them
