@@ -37,17 +37,29 @@ enum Fixture {
     /// against a path no host takes — measuring the engine with its history
     /// recording switched off.
     ///
-    /// Enabled BEFORE the priming stamps rather than after, deliberately: a
-    /// host has it on from document open, so the verb should run against a
-    /// document already carrying a journal, with the allocator in the state
-    /// that puts it in. The memory that costs was checked against this suite's
-    /// jetsam margin before making it the default — a 1,000-stamp fixture
-    /// journals about 2.4 MB and holds about 5.3 MB of history in total,
-    /// against bundle peaks measured in the tens of megabytes.
+    /// Enabled AFTER the priming stamps, and that position was measured rather
+    /// than assumed — the first attempt put it before them, on the argument
+    /// that a host has it on from document open, and this suite could not
+    /// afford it.
+    ///
+    /// Priming walks fresh ground, so at 1,000 stamps it journals about 2.4 MB
+    /// and leaves about 5.3 MB of history standing for the whole timed run,
+    /// per fixture. Two full four-session gates with it enabled before priming
+    /// were killed by jetsam in a LATER session — the latency bundle in one,
+    /// the heavy verb bundle in the other, NEITHER of which builds these
+    /// fixtures — where the run before the change passed all four sessions.
+    /// A process boundary does not return system-level pressure, which is the
+    /// same lesson `tools/run_device_bench.sh` records for the session split.
+    ///
+    /// Enabled after priming, the timed verb still journals every cell it
+    /// changes, which is what #242 asks about; what it does not do is make
+    /// every fixture carry the priming's history for the length of the run.
+    /// The cost of a full session's accumulated history is a real question and
+    /// a different one — `add-history-budget` is where it belongs, and the
+    /// per-dab figures in `test_document_memory.cpp` are its input.
     static func voxelGrid(stamps: Int, voxelSize: Float = 0.02, undo: Bool = true)
         -> (doc: OpaquePointer, grid: OpaquePointer)? {
         guard let doc = clay_document_create() else { return nil }
-        if undo { _ = clay_document_enable_undo(doc) }
         var layer: clay_layer_id = 0
         var grid: OpaquePointer?
         guard clay_document_add_voxel_layer(doc, "bench", voxelSize, &layer, &grid) == CLAY_OK,
@@ -59,6 +71,7 @@ enum Fixture {
             var c = cell(i)
             _ = clay_voxel_set_brush(grid, &c, &b, 1)
         }
+        if undo { _ = clay_document_enable_undo(doc) }
         return (doc, grid)
     }
 
@@ -92,7 +105,6 @@ enum Fixture {
     static func perforatedBlock(holes: Int, voxelSize: Float = 0.02, undo: Bool = true)
         -> (doc: OpaquePointer, grid: OpaquePointer)? {
         guard let doc = clay_document_create() else { return nil }
-        if undo { _ = clay_document_enable_undo(doc) }
         var layer: clay_layer_id = 0
         var grid: OpaquePointer?
         guard clay_document_add_voxel_layer(doc, "bench", voxelSize, &layer, &grid) == CLAY_OK,
@@ -105,6 +117,7 @@ enum Fixture {
             clay_document_destroy(doc); return nil
         }
         punch(grid, holes: holes)
+        if undo { _ = clay_document_enable_undo(doc) }
         return (doc, grid)
     }
 
