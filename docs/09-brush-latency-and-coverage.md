@@ -521,6 +521,67 @@ several. `BM_MultiresSubdivide` is **Tier 4**: adding a level is an explicit
 action an artist takes and waits on, which is also why it is priced by
 `preflight_add_level` before it is paid.
 
+### Sculpt layers, measured (add-mesh-sculpt-layers)
+
+The hierarchy above stores one detail field per level. A sculpt layer adds
+another one per layer, composed into it — `E = B + SUM s_i * m_i * L_i` — so
+everything a stack can cost reduces to two questions: what does moving a
+**slider** cost, and what does a **dab on top of a deep stack** cost. Both have
+a wrong answer that produces exactly the right surface, which is why the reading
+below is a **counter** and not the clock.
+
+Same box and same caveat as the table above: 24-thread Linux desktop, Release,
+21 repetitions per row, P50 / P95 / max, load average 4.19 before the run and
+1.93 after — so the ratios are the reading and the absolutes are not. Three
+coverage shapes, because a stack's cost is a property of its **overlap** and not
+of its depth: `local` puts every layer over the same small footprint,
+`overlapping` slides them across each other, `dense` puts every one over the
+whole level.
+
+| case | 1 layer | 128 layers | | the counter that is the actual claim |
+|---|---:|---:|---:|---|
+| `BM_SculptLayerStampOnStackLocal` | 347.1 us | 365.0 us | **1.05x** | `layer_blocks_visited` **2898 at both ends** |
+| `BM_SculptLayerStampOnStackOverlapping` | 349.7 us | 515.9 us | 1.48x | 2898 -> 14109 |
+| `BM_SculptLayerStrengthChangeLocal` | 728.3 us | 1165.4 us | 1.60x | `blocks_recomposed` **200 at both ends** |
+| `BM_SculptLayerComposeLocal` | 15.26 ms | 15.88 ms | 1.04x | cold, the whole level |
+
+**A 128x deeper stack is 1.05x the dab**, and that is the shape of the whole
+feature: a layer that does not reach the block a stamp touched is an O(1) miss
+against the block index the layer shares with the base field, and is never
+summed. The overlapping row is the honest counterweight — where the layers
+genuinely do cover what the pen touched, the cost follows them: 4.9x the
+(block, layer) pairs for 1.48x the wall clock.
+
+The strength row is the one to read carefully, because **the clock rises while
+the gate holds**. `blocks_recomposed` is 200 at one layer and 200 at 128 — a
+slider costs that layer's coverage and never the level, which is the claim — and
+what rises 200 -> 25 600 is the (block, layer) pairs, because `local` by
+construction stacks all 128 layers on the *same* footprint. That is the worst
+case the shape can express rather than a typical one, and it is what a host
+should size against.
+
+Dense coverage is reported rather than optimised, because a host should be told
+which shape is expensive: 1 -> 16 layers each covering the WHOLE level costs
+compose 16.80 -> 18.02 ms, a strength change 5.80 -> 7.03 ms and a stamp 1.66 ->
+2.16 ms. Sixteen full-surface passes is not a detail workflow; it is a warning.
+
+**Tiering.** A stamp on a stack is **Tier 1** at every depth measured — 0.37 ms
+at 128 local layers is 9% of the 4.17 ms share, and its growth is what the first
+row says it is. A strength change is Tier 1 at this size too, and it is the row
+to re-measure on the reference device first, because it is the only one an
+artist *drags* rather than clicks. A cold whole-level compose is **Tier 4**, and
+shares `BM_MultiresEvalCold`'s tier for the same reason: it is what a load pays
+once.
+
+**Deliberately not gated in `check_bench.py`.** The multires rows above are
+gated as ratios between two rows of one run, because on a shared runner that is
+the only claim the load cannot move. A layer stack's claims are not ratios
+between clocks at all — they are exact integers, 2898 against 2898 and 200
+against 200 — and they are asserted as integers in
+`tests/unit/test_mesh_sculpt_layers.cpp`, where a quadratic composer fails
+deterministically instead of on a quiet afternoon. Gating the wall clock as well
+would add a flake without adding a claim.
+
 ### The tier a per-dab number cannot tell you about
 
 `sdf_relax` sits at 0.73 ms and `sdf_move` in Tier 3, and read as a table both
@@ -1142,6 +1203,7 @@ Everything below is a **missing latency case**, not a missing test or render.
 | large-radius verbs | **measured at v0.30.0** — `voxel_smooth_r32` |
 | the level stack | **measured at v0.30.0** — `voxel_add_level`, `voxel_smooth_l2` |
 | `voxel_add_level_region` | **unmeasured, named on the record** — it does strictly LESS work than the measured `voxel_add_level` (it seeds the region's chunks rather than every occupied cell), so the measured figure bounds it. Worth its own case once a device fixture exercises a region |
+| the multires and sculpt-layer verbs | **unmeasured, named on the record** — `VERB_PATTERNS` matches no `clay_multires_*` name at all, so neither `add-mesh-multires` nor `add-mesh-sculpt-layers` is visible to the device gate, and neither is exempt: they are simply not in the set. Extending the patterns is the right fix and it fails the gate until the cases exist, which is the intended order — the blocker is the same one the row above names, a device fixture that imports a mesh, builds its adjacency and aims from a pick. The desktop figures are in [Sculpt layers, measured](#sculpt-layers-measured-add-mesh-sculpt-layers) |
 | the 11 fixed-topology mesh brushes | **unmeasured, named on the record** — `mesh_sculptor_stamp` and `mesh_sculptor_apply_stroke` are exempt in `Coverage.swift` with "no mesh-layer fixture", not with a reason they should never be measured. The first real gap since v0.30.0 |
 
 **Every brush in the inventory has a case or a recorded exemption.** That
@@ -1184,7 +1246,12 @@ What is left:
    one to do first: it is what a drag drives, and it amortises the adjacency
    build the stamp path pays for on its own. Until then the fixed-topology
    verbs have a hard correctness gate and no latency number, which is the
-   opposite of the voxel path's position at 0.29.0.
+   opposite of the voxel path's position at 0.29.0. **The same fixture
+   unblocks the multires and sculpt-layer verbs**, which are two changes'
+   worth of surface that the gate cannot currently even name — and a
+   layered dab is the case with the most reason to differ on a device,
+   since what it costs is a walk over blocks rather than arithmetic over
+   vertices.
 2. **Give a voxel sculpt a display that is not cubes.** `mesh_greedy` emits
    axis-aligned quads, so every voxel render in the gallery is blocky while the
    SDF renders look like clay. This is now the largest visible gap between what

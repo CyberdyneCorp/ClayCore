@@ -311,12 +311,18 @@
       mode, stamp mode) are registered in `STRING_CHOICES`, so a fourth
       smoothing mode invented in Python has to exist in `clay.h` too
 - [ ] 8.5 Swift smoke on macOS and in the simulator
-      — `tests/swift/smoke.swift` gained the section (identity across a reorder,
-      the name into a caller buffer, the typed refusals, the gesture holding the
-      composition, a height stamp, and the stack through a save and a load) and
-      `tools/check_swift_package.py` is green in textual mode. NOT type-checked:
-      there is no Swift toolchain on this box, so the macOS and simulator runs
-      are still owed
+      NOT DONE — NEEDS macOS. There is no `swift` or `swiftc` on this Linux box,
+      so the file below has never been type-checked, let alone run, and neither
+      the macOS nor the simulator run has happened. Left unticked deliberately.
+      — what IS written: `tests/swift/smoke.swift` gained the section (identity
+      across a reorder, the name into a caller buffer, the typed refusals, the
+      gesture holding the composition, a height stamp, and the stack through a
+      save and a load), and `tools/check_swift_package.py` is green — but that
+      gate reads the package manifest and the sources TEXTUALLY, so it proves
+      the file is declared and referenced and proves nothing about whether it
+      compiles. To finish: run the smoke on a macOS host and in an iOS
+      simulator. CI covers macOS, so the first half should come back from the
+      PR's own matrix; the simulator run needs a machine with Xcode
 - [x] 8.6 THE MILESTONE, as a numbered example that renders and asserts: a
       wrinkle pass dialled 0 → 50% → 100% over a form that never changes, plus
       one layer removed with the others untouched
@@ -355,7 +361,18 @@
           and a back-to-back run of main's own `clay_bench` on the same box
           failed on `BM_SdfHistoryPrefixPiled5000`. Load average moved 4.33 ->
           7.40 during the branch run and 7.40 -> 14.38 during main's. No failing
-          row touches `mesh/`, and the change's own benchmarks are in 5.6
+          row touches `mesh/`, and the change's own benchmarks are in 5.6.
+      RE-RUN at the end of the branch, after the documentation pass, and the
+      diagnosis above held: `release_check.py` is now **14 PASS / 1 FAIL** —
+      `benchmarks` came back `bench-gate: OK` on a box whose load average went
+      11.00 -> 19.51 across the run, without a line of benchmark code changing
+      between the two results, which is what "not reproducible on this box"
+      means. `device` is the only remaining failure and it is the environment's:
+      "engine changed since the gate ran at 39c244209". `cpu-only` re-ran 4/4
+      (clay_unit_tests 286.97 s under that load), and `check_layering`,
+      `check_c_abi`, `check_binding_parity` (622 capabilities, 29 exempt,
+      against the IMPORTED module), `check_gallery` (251 tracked outputs) and
+      `check_swift_package` (textual) are all OK
 - [x] 8.8 Docs: `docs/07-brushes-and-features.md` gains the stack and the
       distinction from `MeshBrush::Layer`; the README's sculpt-layer claim is
       widened from voxels to the representations that actually have them
@@ -367,4 +384,31 @@
       reason there is no cap. The README's claim now reads "on TWO
       representations" and states the difference that matters — voxel layers
       replay cell writes and are order-dependent, additive displacement
-      commutes
+      commutes.
+      Four more documents this change made stale, found by reading rather than
+      by a gate, since none of them has one:
+        * `docs/09-brush-latency-and-coverage.md` — "Sculpt layers, measured",
+          the 5.6 table with the counters called out as the actual claim, the
+          tiering, and why these rows are deliberately NOT in `check_bench.py`
+          (the claim is an exact integer asserted in a unit test, not a ratio
+          between two clocks on a shared runner). Plus a "Named gaps" row: the
+          device gate's `VERB_PATTERNS` matches no `clay_multires_*` name at
+          all, so two changes' worth of ABI is invisible to it — not exempt,
+          absent — and the same missing mesh fixture is the blocker
+        * `docs/05-claycore-library.md` — the "what is genuinely not undoable"
+          list said sculpt-layer property changes are not steps, which is now
+          true of the VOXEL stack only; and the document memory section gained
+          the note that a `MultiresSurface` is a standalone handle no document
+          can walk to, with `clay_multires_memory`'s own authoritative /
+          rebuildable split and the four levers it has instead of a cap
+        * `docs/sculpt_comparison.md` — the ZBrush/Blender/3DCoat rows said
+          sculpt layers were voxel-only in four places, including the Tier 1
+          entry, which now also records where the mesh stack matches ZBrush's
+          arithmetic literally and the two places it deliberately differs
+        * `openspec/ROADMAP.md` — Phase 5 row 4 marked **Landed** with what
+          shipped and the three decisions worth carrying, in the shape row 3
+          used; the review's P0 "Sculpt layers" row widened to two
+          representations; `unify-the-undo-history`'s "still open" narrowed to
+          the voxel half; the morph-target gap re-rated, since a base
+          deformation layer at level 0 is its storage; and `add-field-stamps`
+          told that the tangent-space stamp vocabulary now exists to be read

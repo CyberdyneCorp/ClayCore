@@ -39,9 +39,9 @@ per-node exactness and Lipschitz tracking that makes raymarching provably
 correct, and portability across four backends from one kernel source with gated
 parity. As a **sculpting product**, it is at *"core brush vocabulary complete,
 workflow tier absent."* The brushes landed, sculpt layers landed on voxel
-layers, alphas landed on SDF layers, and masking now protects against any
-operation rather than only against brushes; sculpt layers on SDF layers and the
-asset-finishing pipeline have not.
+layers and then on a mesh subdivision hierarchy's detail, alphas landed on SDF
+layers, and masking now protects against any operation rather than only against
+brushes; sculpt layers on SDF layers and the asset-finishing pipeline have not.
 SDF layers and the asset-finishing pipeline have not.
 
 ---
@@ -57,7 +57,7 @@ SDF layers and the asset-finishing pipeline have not.
 | **Booleans** | **Watertight by construction**, 2-manifold meshing | Live Boolean, then remesh | Voxel booleans, robust | BMesh booleans, fragile on bad input |
 | **Brush vocabulary** | Core set complete on fields and voxels, plus 16 fixed-topology verbs (14 that move vertices, 2 that write colour) and a lattice cage on a mesh layer (see below) | The reference: ~36 surface brushes plus the core | Broad, voxel + surface modes | Solid core set |
 | **Masking** | **Protects the surface from any op**, on either representation — a gated item does not act where the mask protects | First class, protects the surface from *any* op | First class | First class |
-| **Sculpt layers** | **On voxel layers.** A pass is bracketed and its changed cells recorded, so its strength stays adjustable long after the strokes are finished; SDF layers do not have them yet | Headline feature | Present | Present |
+| **Sculpt layers** | **On voxel layers and on a multiresolution mesh.** A pass is bracketed and what it changed is recorded, so its strength stays adjustable long after the strokes are finished. The mesh stack is the closer match to what the other three mean by the words — additive displacement in a transported tangent frame, so a fractional strength is an exact fraction rather than a dither, reordering changes nothing, and dialling a pass is itself undoable. SDF layers do not have them yet | Headline feature | Present | Present |
 | **Alphas / stamps** | **Both representations**, scalar stamps only — no vector displacement maps | Deep, VDM support | Deep | Present |
 | **Surface colour** | **Polypaint on all three representations**: per-item colour and freehand `Paint` strokes on SDF layers, per-sample colour in sampled volumes, a 256-entry voxel palette, and — since `add-mesh-colour-brushes` — `paint` and `smear` on a mesh layer's own vertices. No PBR channels — a declared non-goal for painting | Polypaint | **PBR texture painting — its moat** | Vertex paint + texture paint |
 | **Scale** | ≥256³ per voxel layer, no streaming; SDF edit lists degrade step scale as they grow | Tens of millions of polys | Very large voxel scenes | Large, memory-bound |
@@ -93,8 +93,8 @@ in [`07-brushes-and-features.md`](07-brushes-and-features.md).
 | Deformation palette (Taper, Twist, Bend, Flatten, Inflate, Noise) | 21 `Deformer`s on an SDF item; **`taper` and `twist` also on a mesh layer** (`MeshSculptor::deform`), plus a lattice cage on both | ✅ on SDF and mesh, ⬜ on voxels. The SDF forms are inverse point maps, so they compose and stay non-destructive; the mesh forms are the FORWARD maps, applied once per vertex — the easier direction and the exact one, so a tapered mesh and a tapered field are the same shape. **`bend` is SDF-only, by measurement**: it takes its angle from a coordinate it then moves, so it has no closed-form forward map, and past a gentle angle it has none at all — the deformation folds distinct points onto the same place. A VOXEL layer still takes neither |
 | Blob | `blob` | ✅ noise under a brush region |
 | Pulling a lobe out | `brush::snakehook` | ✅ the verb for growing form; Move is the verb for nudging it |
-| Morph | — | ⬜ needs a stored morph target; unblocked on voxels now that layers exist, still absent on SDF |
-| Layers | `VoxelGrid::begin_sculpt_layer` | 🟡 voxel layers only — an SDF pass is a weighted group, which waits on `expose-scene-groups` |
+| Morph | — | 🟡 no named morph target, but a **base deformation layer** at level 0 of a multires surface is stored, dialable offsets against a rest pose, which is the substrate. Unblocked on voxels too now that layers exist; still absent on SDF |
+| Layers | `VoxelGrid::begin_sculpt_layer`, `MultiresSurface::add_sculpt_layer` | 🟡 voxel and multires-mesh, not SDF — an SDF pass is a weighted group, and that is now the only representation without a stack |
 | Alphas | `sculpt_carve_alpha` (voxel), `Deformer::alpha` (SDF) | ✅ both, scalar stamps |
 | Masking | mask fields, `Node::gate` | ✅ gates any operation on either representation — a boolean included; the gate is a measured DISTANCE, so its cost follows a width you set |
 | **PolyGroups / Face Sets** | `voxel::GroupField`, `Document.groups()` | ✅ on **every** representation from one mechanism. Named regions on a world-space lattice rather than per-face ids, so a group survives rasterize/mesh/convert **by construction** — the ids were never in the SDF, the voxels or the mesh, so nothing can lose them, and a voxel grid's 256³ memory guarantee is untouched. Isolate hides the complement, hiding is not deleting (the field is untouched and the produced mesh is filtered, so showing restores the same triangles exactly), and both the ids and what was hidden survive a save. **What it costs:** the boundary is quantised to the lattice, not to the representation, so a mesh that could have carried an exact per-face border does not. **Where it differs from ZBrush:** grow is VOLUMETRIC, not geodesic — a fold closer than `steps` cells is crossed rather than followed |
@@ -189,7 +189,7 @@ and that is the shape of the gap.
 | Gap | Today | Why it blocks parity |
 |---|---|---|
 | **Masking as a field concept** | **Landed.** An item carries a gate — the signed distance to a painted mask's region — and does not act where it protects | ZBrush masking protects the **surface** from *any* operation, and this now does too: the gate rides the combine record rather than being a mode, so it gates a boolean, a smooth union or an add alike. Both ends are exact — fully protected is the accumulated field bit for bit. What it costs is honest and visible: mixing two fields by a spatially varying weight is not a distance, so a narrow gate costs an order of magnitude of step scale and a wide one much less (`examples/54_masked_operations.py` measures it). The cost follows the falloff width you choose rather than how hard the brush edge that painted the mask was, which is why the gate carries a distance rather than paint. |
-| **Sculpt layers / morph targets** | **On voxel layers**; not on SDF layers | A layer that records a pass and replays it at an intensity is a *document* concept, not a brush. The voxel side has it: `begin_sculpt_layer`/`end_sculpt_layer` bracket a pass, and strength, visibility, reordering and merge-down follow (`examples/52_sculpt_layers.py`). What a **fraction** means differs from ZBrush by representation — ZBrush interpolates vertex offsets, and binary occupancy has nothing to interpolate, so a fractional strength is a reproducible fraction of the *cells*, dithered against the same cell-coordinate hash the falloff brushes use. On an SDF layer the equivalent is a weighted group rather than a diff, which waits on `expose-scene-groups`. Morph stays "not planned" for the SDF side only. |
+| **Sculpt layers / morph targets** | **On voxel layers and on a multiresolution mesh**; not on SDF layers | A layer that records a pass and replays it at an intensity is a *document* concept, not a brush. The voxel side has it: `begin_sculpt_layer`/`end_sculpt_layer` bracket a pass, and strength, visibility, reordering and merge-down follow (`examples/52_sculpt_layers.py`). What a **fraction** means differs from ZBrush by representation — ZBrush interpolates vertex offsets, and binary occupancy has nothing to interpolate, so a fractional strength is a reproducible fraction of the *cells*, dithered against the same cell-coordinate hash the falloff brushes use. **The mesh stack is where the ZBrush arithmetic applies literally**: a `MultiresSurface` stores detail as offsets in a transported tangent frame, so `add-mesh-sculpt-layers` interpolates exactly what ZBrush interpolates — 0.5 is half the offset, not half the cells — and it goes further in two places, a mask per layer distinct from the brush gate, and layer property changes inside the undo history rather than outside it (`examples/69_mesh_sculpt_layers.py`). Two differences from ZBrush remain and are deliberate: reordering an additive stack is organisation and not geometry, because the sum commutes; and merge-down is defined by visual parity of the evaluated surface rather than by concatenating coefficients, which would divide by the lower layer's strength and be undefined at zero. On an SDF layer the equivalent is a weighted group rather than a diff, which waits on `expose-scene-groups`. A morph target is not named as such anywhere, but a base deformation layer at level 0 is its storage; it stays "not planned" for the SDF side only. |
 | **Alphas on SDF layers** | **Landed.** `Deformer::alpha` / `Prim.alpha(...)` / `clay_item_add_alpha` | Detail work in all three tools is alpha-driven, and it now works on the non-destructive representation rather than only the baked one. An alpha is a deformer — a distance offset under finite support — because it modulates an existing surface rather than adding material in the stamp's shape. The engine decodes no images; a host passes the samples. |
 
 ### Tier 1b — Move is not a mesh Move, and a stroke compounds
@@ -320,8 +320,10 @@ Recorded so they read as decisions rather than oversights. In full in
   evaluation parameter for an SDF layer, so the Res+/Resample apparatus has
   nothing to attach to there — which is exactly why the sentence never applied
   to a mesh layer, whose resolution is fixed by its import and is neither
-  evaluated nor stacked. A mesh subdivision hierarchy is scoped as
-  `add-mesh-multires` in Phase 5. Voxel layers now DO carry a level stack — level 0 coarsest,
+  evaluated nor stacked. **A mesh subdivision hierarchy has since landed** as
+  `add-mesh-multires`, beside the fixed-topology layer rather than inside it —
+  `MultiresSurface` is its own handle — and `add-mesh-sculpt-layers` put a
+  dialable stack over its detail. Voxel layers now DO carry a level stack — level 0 coarsest,
   half the cell size per level, detail held as offsets so a coarse stroke does
   not flatten fine work — because a voxel layer's resolution is real storage
   rather than a sampling choice. Discrete levels rather than an octree, so the
