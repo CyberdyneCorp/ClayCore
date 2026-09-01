@@ -90,6 +90,8 @@ add_library(claycore
   src/mesh/dynamic_bvh.cpp
   src/mesh/surface_chunks.cpp
   src/mesh/surface_view.cpp
+  src/mesh/preflight.cpp
+  src/mesh/maintenance.cpp
   src/mesh/remesh_local.cpp
   src/mesh/dynamic_sculpt.cpp
   src/mesh/subdivide.cpp

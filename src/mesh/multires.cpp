@@ -1,7 +1,9 @@
-#include "multires_internal.h"
-
 #include <algorithm>
 #include <cstring>
+
+#include "clay/memory/capacity.h"
+
+#include "multires_internal.h"
 
 namespace clay {
 namespace mesh {
@@ -95,6 +97,8 @@ const char* multires_error_text(MultiresError error) {
             return "the hierarchy carries detail; project onto a new cage instead of replacing it";
         case MultiresError::DepthLimit:
             return "the declared hierarchy is deeper than this build will reconstruct";
+        case MultiresError::CapacityOverflow:
+            return "the capacity estimate overflowed; the operation is refused rather than sized";
         case MultiresError::Decode:
             return "the buffer is truncated, corrupt, or from a newer writer";
     }
@@ -254,6 +258,14 @@ MultiresPreflight MultiresSurface::preflight_add_level() const {
 
     // Arithmetic, not a build: a child's counts follow from the parent's, which
     // is why `MultiresLevel::edge_count` is kept.
+    //
+    // CHECKED arithmetic, through the one estimator every priced operation in
+    // this library now shares. A level's vertex count is quadratic in the
+    // depth, so `vertices * bytes_per_vertex` is exactly the multiply that
+    // wraps on a hostile or merely ambitious hierarchy — and the failure mode
+    // of a wrapped estimate is that the level is ALLOWED, which is the one
+    // outcome this call exists to prevent. An overflow is reported as a
+    // refusal.
     p.vertices = static_cast<std::uint64_t>(parent.topology.vertex_count) + parent.edge_count +
                  parent.topology.face_count;
     p.faces = parent.topology.corners.size();
@@ -261,37 +273,55 @@ MultiresPreflight MultiresSurface::preflight_add_level() const {
     const auto with_slack = [](std::uint64_t exact) {
         return static_cast<std::uint64_t>(static_cast<double>(exact) * kCapacitySlack);
     };
+    memory::CapacityBuilder topology_cost;
     // The face list is ONE exactly-sized allocation, so it needs no slack.
-    p.topology_bytes = p.faces * kTopologyBytesPerFace;
+    topology_cost.authoritative(p.faces, kTopologyBytesPerFace);
+    p.topology_bytes = topology_cost.finish().persistent_bytes;
     // FULLY detailed means DENSE, and a promoted field's payload is one exact
     // allocation — so the coefficients are exact and only the block table it
     // leaves behind is grown. Two `uint32` vectors over the blocks, at the
     // doubling ceiling.
     {
+        memory::CapacityBuilder detail_cost;
         const std::uint64_t blocks =
             (p.vertices + DetailField::kDefaultBlockSize - 1) / DetailField::kDefaultBlockSize;
-        p.detail_bytes = p.vertices * kDetailBytesPerVertex + blocks * 4u * 2u * 2u;
+        detail_cost.authoritative(p.vertices, kDetailBytesPerVertex);
+        detail_cost.authoritative(blocks, 4u * 2u * 2u);
+        p.detail_bytes = detail_cost.finish().persistent_bytes;
     }
-    p.evaluated_bytes = with_slack(p.vertices * kEvaluatedBytesPerVertex);
-    p.runtime_bytes = with_slack(p.faces * (kConnBytesPerFace + kRuntimeBytesPerFace) +
-                                 p.vertices * (kConnBytesPerVertex + kRuntimeBytesPerVertex));
 
-    // What SURVIVES the call is the face list; the detail field starts empty
-    // and grows only where the artist works. What the call itself needs on top
-    // of that is the parent's connectivity, which is transient and is the
-    // reason peak and persistent are reported apart.
-    p.persistent_bytes = p.topology_bytes;
-    const std::uint64_t parent_conn =
-        static_cast<std::uint64_t>(parent.topology.face_count) * kConnBytesPerFace +
-        static_cast<std::uint64_t>(parent.topology.vertex_count) * kConnBytesPerVertex;
-    p.peak_bytes = p.persistent_bytes + parent_conn;
+    memory::CapacityBuilder cost;
+    // Persistent: the face list. What the call NEEDS on top of it is the
+    // parent's connectivity, which is transient and is the reason peak and
+    // persistent are reported apart.
+    cost.authoritative(p.faces, kTopologyBytesPerFace);
+    cost.transient(parent.topology.face_count, kConnBytesPerFace);
+    cost.transient(parent.topology.vertex_count, kConnBytesPerVertex);
+    const memory::CapacityEstimate estimate =
+        cost.finish(state_->options.memory_budget);
+
+    memory::CapacityBuilder evaluated_cost;
+    evaluated_cost.authoritative(p.vertices, kEvaluatedBytesPerVertex);
+    p.evaluated_bytes = with_slack(evaluated_cost.finish().persistent_bytes);
+    memory::CapacityBuilder runtime_cost;
+    runtime_cost.authoritative(p.faces, kConnBytesPerFace + kRuntimeBytesPerFace);
+    runtime_cost.authoritative(p.vertices, kConnBytesPerVertex + kRuntimeBytesPerVertex);
+    p.runtime_bytes = with_slack(runtime_cost.finish().persistent_bytes);
+
+    p.persistent_bytes = estimate.persistent_bytes;
+    p.peak_bytes = estimate.peak_bytes;
+    if (estimate.error == memory::BudgetError::Overflow) {
+        p.allowed = false;
+        p.error = MultiresError::CapacityOverflow;
+        return p;
+    }
 
     if (p.vertices > kMaxLevelVertices) {
         p.allowed = false;
         p.error = MultiresError::OverBudget;
         return p;
     }
-    if (state_->options.memory_budget != 0 && p.peak_bytes > state_->options.memory_budget) {
+    if (!estimate.allowed) {
         p.allowed = false;
         p.error = MultiresError::OverBudget;
     }

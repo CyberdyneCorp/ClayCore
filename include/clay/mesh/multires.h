@@ -97,6 +97,11 @@ enum class MultiresError : std::uint32_t {
     // A stream declaring a hierarchy this build will not reconstruct.
     DepthLimit = 10,
     Decode = 11,
+    // The capacity estimate itself overflowed 64 bits. Reported as a refusal
+    // rather than as a number, because the number would be wrong in the one
+    // direction that matters: a wrapped estimate is a SMALL one, and a small
+    // one is allowed.
+    CapacityOverflow = 12,
 };
 
 // The name of the refusal, for a message. Never null.

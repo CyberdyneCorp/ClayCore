@@ -6107,7 +6107,8 @@ typedef enum clay_multires_error {
     CLAY_MULTIRES_CANCELLED = 8,
     CLAY_MULTIRES_DETAIL_PRESENT = 9,
     CLAY_MULTIRES_DEPTH_LIMIT = 10,
-    CLAY_MULTIRES_DECODE = 11
+    CLAY_MULTIRES_DECODE = 11,
+    CLAY_MULTIRES_CAPACITY_OVERFLOW = 12
 } clay_multires_error;
 
 /* Never NULL, for any value. */
