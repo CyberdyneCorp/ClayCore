@@ -327,9 +327,13 @@ void DynamicBvh::insert(const DynamicSurface& surface, FaceId face) {
     face_leaf_[face.slot] = leaf_index;
     mark_dirty(leaf_index, /*topology=*/true);
     const SurfaceLeaf* leaf = table_.chunk(leaf_index);
+    const std::size_t faces_after = leaf->faces.size();
     if (leaf->node != 0xffffffffu) refit_ancestors(leaf->node);
-
-    if (leaf->faces.size() > options_.max_leaf_faces) split_leaf(surface, leaf_index);
+    // Read what is needed BEFORE the split: creating a chunk may move the
+    // table's records, so a pointer held across it is a pointer into the old
+    // storage. Cheaper to take the two words than to re-look-up, and it says so
+    // rather than depending on argument-evaluation order to be safe.
+    if (faces_after > options_.max_leaf_faces) split_leaf(surface, leaf_index);
     // THE TREE IS NOT REBUILT HERE. `insert` runs once per face per topology
     // operation, and a stamp on a big surface runs thousands of them; rebuilding
     // the tree over the leaves inside it made the stamp O(operations x leaves)
@@ -610,7 +614,7 @@ std::size_t DynamicBvh::bytes() const {
     n += nodes_.capacity() * sizeof(Node);
     n += table_.bytes();
     n += face_leaf_.capacity() * sizeof(std::uint32_t);
-    n += (touched_.capacity() + moved_faces_.capacity() * 2) * sizeof(std::uint32_t);
+    n += touched_.capacity() * sizeof(std::uint32_t) + moved_faces_.capacity() * sizeof(FaceId);
     return n;
 }
 
