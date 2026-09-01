@@ -29,6 +29,7 @@
 #include "clay/mesh/remesh_local.h"
 #include "clay/mesh/sculpt_common.h"
 #include "clay/mesh/sculpt_kernels.h"
+#include "clay/mesh/sculpt_workset.h"
 #include "clay/mesh/topology_delta.h"
 
 namespace clay {
@@ -95,11 +96,60 @@ class DynamicSculptor {
     void rebuild_index();
 
     // The workset the last stamp gathered, for a caller inspecting reach.
-    const std::vector<VertexId>& last_region() const { return region_vertices_; }
+    //
+    // PROJECTED OUT OF THE WORKSET rather than stored beside it: a caller
+    // asking the adaptive sculptor what it reached wants the adaptive surface's
+    // own handles, and the workset now addresses work by the neutral
+    // `WorkItemId` that all three representations share.
+    const std::vector<VertexId>& last_region() const { return last_region_; }
+    // The whole workset, including entries the falloff kept and the verb did
+    // not move.
+    const SculptWorkset& workset() const { return region_; }
+
+    // THE AUTOMASK INPUTS `mesh` MAY NOT COMPUTE FOR ITSELF — the cavity
+    // estimator and the surface-group field, both of which live in modules that
+    // depend on this one. Set once for a STROKE: they hold `std::function`s,
+    // and copying those per stamp would allocate on every dab.
+    //
+    // THE SAME SIGNATURE `MeshSculptor` HAS, deliberately. Before
+    // add-shared-brush-runtime this class had no such call and
+    // `DynamicSculptor::gather` never read `brush.automask` at all — so an
+    // automask an artist enabled was silently absent on the adaptive
+    // representation, although `clay_dynamic_sculptor_stamp` takes the same
+    // descriptor the fixed path takes and its four automask fields were being
+    // filled and dropped. That is the divergence this class was changed to
+    // close, and a host that was already setting factors will now see them take
+    // effect.
+    void set_automask_inputs(AutomaskInputs inputs) { automask_inputs_ = std::move(inputs); }
+    const AutomaskInputs& automask_inputs() const { return automask_inputs_; }
+
+    // What the per-stamp scratch arena owns and how far it has had to grow.
+    // One per sculptor and never a process-global — see `brush_arena.h`.
+    const BrushScratchArena& arena() const { return arena_; }
 
    private:
+    // THE WALK, and only the walk: everything the brush reaches, into
+    // `candidates_` and `region_distance_`. Declared here rather than in
+    // `sculpt_workset.h` because it names a `DynamicSurface`, and a neutral
+    // header holding three representation-specific signatures is neutral in the
+    // directory listing only.
+    void build_dynamic_surface_workset(const MeshBrushSettings& brush, bool geodesic);
+    // The determinism sort both region walks end in, over arena scratch.
+    void sort_candidates_by_slot();
     // Everything under the brush, by stable id, with the weights composed.
     bool gather(const MeshBrushSettings& brush, const field::MaskGate& gate, bool geodesic);
+    // The brush's own facing for the normal-angle automask, fixed for the
+    // stamp and never taken from the region — the region's average normal is
+    // weighted by the very weights the automask is shaping.
+    kernel::cfloat3 automask_reference(const MeshBrushSettings& brush);
+    // The corner of the closest face nearest `p` — the adaptive counterpart of
+    // `MeshSculptor::nearest_class`, shared by the walk's seed, the
+    // connectivity automask's anchor and the fallback facing.
+    VertexId nearest_vertex(kernel::cfloat3 p) const;
+    // The two answers `compose_workset` cannot work out for itself. Function
+    // pointers with a `this` context, for the reason `WorkItemReader` gives.
+    static kernel::cfloat3 normal_of_item(const void* context, WorkItemId item);
+    static float mask_of_item(const void* context, WorkItemId item);
     void build_neighbors(bool want_normals, bool want_colors);
     SculptSnapshot snapshot_of() const;
     SculptNeighbors neighbors_of() const;
@@ -115,21 +165,28 @@ class DynamicSculptor {
     DynamicSculptOptions options_;
     DynamicBvh bvh_;
 
-    // The workset, parallel arrays by stable id — the same shape the fixed
-    // sculptor's `SculptWorkset` has, so the kernels see one thing.
-    std::vector<VertexId> region_vertices_;
-    std::vector<float> region_weights_;
-    std::vector<kernel::cfloat3> region_positions_;
-    std::vector<kernel::cfloat3> region_normals_;
+    // THE SHARED WORKSET, not five parallel arrays of its own. It used to be
+    // five — vertices, weights, positions, normals, distances — plus a private
+    // slot map, which is the same shape `SculptWorkset` has and was the reason
+    // the automask could not reach here: a workset typed in the adaptive
+    // surface's own handles is a workset only this class can read. Its `slot`
+    // array is keyed by vertex slot, which is what `WorkItemId::key()` returns
+    // for a surface vertex.
+    SculptWorkset region_;
+    // The walk's own output, before the composition turns it into items. A
+    // member so a stroke of similar stamps allocates on its first stamp only.
+    std::vector<VertexId> candidates_;
     std::vector<float> region_distance_;
-    kernel::cfloat3 average_normal_ = kernel::cf3(0, 1, 0);
-    kernel::cfloat3 centroid_ = kernel::cf3(0, 0, 0);
-    kernel::cfloat3 plane_point_ = kernel::cf3(0, 0, 0);
-    kernel::cfloat3 plane_normal_ = kernel::cf3(0, 1, 0);
-
-    // vertex slot -> index in the workset, kNoClass outside. Reset through the
-    // workset rather than cleared, so a stamp costs what it reached.
-    std::vector<std::uint32_t> slot_;
+    // `last_region()`'s answer, projected out of the workset once per stamp.
+    std::vector<VertexId> last_region_;
+    // The transients one stamp needs deep inside the call: the region sort's
+    // permutation and its two sorted copies, and the automask's frontiers.
+    BrushScratchArena arena_;
+    AutomaskInputs automask_inputs_;
+    // The vertex the last gather anchored on, shared by the connectivity
+    // automask and the normal-angle reference so the two cannot disagree about
+    // where the brush landed.
+    VertexId automask_seed_;
 
     std::vector<std::uint32_t> nb_offsets_, nb_slots_;
     std::vector<kernel::cfloat3> nb_positions_, nb_normals_, nb_colors_;
@@ -143,8 +200,15 @@ class DynamicSculptor {
     std::vector<std::uint32_t> walk_dirty_;
     std::vector<std::pair<float, std::uint32_t>> walk_frontier_;
     std::vector<FaceId> touched_faces_;
+    // The ball query's own answer. A member for the same reason: it used to be
+    // a local in `euclidean_region` and allocated on every dab of every
+    // flatten and scrape.
+    std::vector<FaceId> ball_faces_;
     std::vector<VertexId> ring_scratch_;
     std::vector<HalfEdgeId> fan_scratch_;
+    // The buffers `DynamicSurface::refresh_normals` would otherwise build for
+    // itself, once per stamp plus one half-edge fan per vertex it touched.
+    DynamicSurface::NormalRefreshScratch normal_scratch_;
 };
 
 }  // namespace mesh
