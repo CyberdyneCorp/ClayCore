@@ -1143,6 +1143,279 @@ def brick_cache_exercise(lib) -> list[str]:
     return errors
 
 
+# Entry points that say "layer" and mean the DOCUMENT's layer — the scene
+# graph's, which clay_layer_id names. They are the reason the rule below is a
+# whitelist rather than a blanket ban: this vocabulary shipped first and is not
+# going anywhere.
+#
+# Prefixes rather than a list of the ninety names, so adding a document-layer
+# call does not mean editing this gate; the rule only has to be sharp enough to
+# catch a NEW artist-channel entry point spelled `layer`.
+DOCUMENT_LAYER_PREFIXES = ("clay_document_", "clay_layer_")
+DOCUMENT_LAYER_CALLS = {
+    "clay_add_sdf_layer",
+    "clay_set_layer_mirror",
+    "clay_set_layer_radial",
+    "clay_voxel_to_layer",
+    "clay_brick_cache_mark_dirty_layer",
+}
+
+
+def sculpt_layer_naming() -> list[str]:
+    """`layer` means three things in this library, so the ABI never says it bare.
+
+    D1 of add-mesh-sculpt-layers. CLAY_MESH_BRUSH_LAYER is a brush ALGORITHM
+    (deposit to a ceiling above the stroke-start surface), clay_layer_id is a
+    DOCUMENT layer, and a sculpt layer is an artist's CHANNEL. Renaming the
+    brush enumerator was the obvious way out and was rejected: it ships in
+    clay.h, in the Swift enum and in every host's serialized preset, so
+    renaming it would break all three to fix a documentation problem.
+
+    Which leaves the new vocabulary carrying the whole burden — and a rule
+    nobody checks is a rule that lasts one contributor. So: an entry point
+    whose name contains `layer` must say `sculpt_layer` (an artist channel, on
+    either the voxel or the multires stack), `mesh_layer` (a document layer
+    holding a mesh), or be one of the document-layer calls above.
+
+    The cost of documentation alone is the support burden the proposal names: a
+    host author reading "layer strength" has no way to know which of three
+    things it dials.
+    """
+    errors = []
+    for name in declared_functions():
+        if "layer" not in name:
+            continue
+        if "sculpt_layer" in name or "mesh_layer" in name:
+            continue
+        if name in DOCUMENT_LAYER_CALLS:
+            continue
+        if any(name.startswith(prefix) for prefix in DOCUMENT_LAYER_PREFIXES):
+            continue
+        errors.append(f"{name} says 'layer' without saying which one. An artist's channel is "
+                      f"spelled sculpt_layer, a document layer holding a mesh is mesh_layer, "
+                      f"and a document-layer call belongs in DOCUMENT_LAYER_CALLS in "
+                      f"tools/check_c_abi.py with a reason")
+    return errors
+
+
+class MultiresDesc(ctypes.Structure):
+    """clay_multires_desc as a bindings generator would emit it."""
+
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32),
+        ("rule", ctypes.c_int32),
+        ("weld_epsilon", ctypes.c_float),
+        ("memory_budget", ctypes.c_uint64),
+    ]
+
+
+class SculptLayerInfo(ctypes.Structure):
+    """clay_sculpt_layer_info, ABI 0.76.0."""
+
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32),
+        ("id", ctypes.c_uint64),
+        ("index", ctypes.c_uint32),
+        ("kind", ctypes.c_int32),
+        ("strength", ctypes.c_float),
+        ("visible", ctypes.c_int32),
+        ("locked", ctypes.c_int32),
+        ("name_bytes", ctypes.c_uint32),
+        ("bytes", ctypes.c_uint64),
+        ("coverage_vertices", ctypes.c_uint64),
+    ]
+
+
+# The refusals clay_multires_error names for a sculpt layer, so the assertions
+# below read as sentences rather than as three integers.
+NO_SUCH_SCULPT_LAYER = 12
+SCULPT_LAYER_LOCKED = 13
+SCULPT_LAYER_STROKE_OPEN = 14
+
+
+def sculpt_layer_argtypes(lib) -> None:
+    """Pointer-width argument types, which ctypes gets wrong by default.
+
+    An unset argtypes truncates every pointer to int on 64-bit, so a handle
+    reaches the library as garbage. Declared here rather than inline so the
+    exercise below reads as the flow it is testing.
+    """
+    p = ctypes.c_void_p
+    u64p = ctypes.POINTER(ctypes.c_uint64)
+    i32p = ctypes.POINTER(ctypes.c_int32)
+    lib.clay_mesh_from_triangles.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t,
+                                             ctypes.POINTER(ctypes.c_uint32), ctypes.c_size_t,
+                                             ctypes.POINTER(p)]
+    lib.clay_multires_defaults.argtypes = [ctypes.POINTER(MultiresDesc)]
+    lib.clay_multires_from_mesh.argtypes = [p, ctypes.POINTER(MultiresDesc), ctypes.POINTER(p),
+                                            i32p]
+    lib.clay_multires_add_level.argtypes = [p, p, i32p]
+    lib.clay_multires_destroy.argtypes = [p]
+    lib.clay_multires_add_sculpt_layer.argtypes = [p, ctypes.c_char_p, u64p, i32p]
+    lib.clay_multires_sculpt_layer_count.argtypes = [p, ctypes.POINTER(ctypes.c_size_t)]
+    lib.clay_multires_sculpt_layer_id_at.argtypes = [p, ctypes.c_size_t, u64p]
+    lib.clay_multires_sculpt_layer_info.argtypes = [p, ctypes.c_uint64,
+                                                    ctypes.POINTER(SculptLayerInfo)]
+    lib.clay_multires_sculpt_layer_name.argtypes = [p, ctypes.c_uint64, ctypes.c_char_p,
+                                                    ctypes.POINTER(ctypes.c_size_t)]
+    lib.clay_multires_move_sculpt_layer.argtypes = [p, ctypes.c_uint64, ctypes.c_size_t, i32p]
+    lib.clay_multires_set_sculpt_layer_strength.argtypes = [p, ctypes.c_uint64, ctypes.c_float,
+                                                            i32p]
+    lib.clay_multires_set_sculpt_layer_locked.argtypes = [p, ctypes.c_uint64, ctypes.c_int32,
+                                                          i32p]
+    lib.clay_multires_set_sculpt_layer_detail.argtypes = [p, ctypes.c_uint64, ctypes.c_uint32,
+                                                          ctypes.c_uint32,
+                                                          ctypes.POINTER(ctypes.c_float), i32p]
+    lib.clay_multires_rename_sculpt_layer.argtypes = [p, ctypes.c_uint64, ctypes.c_char_p, i32p]
+    lib.clay_multires_active_sculpt_layer.argtypes = [p, u64p]
+    lib.clay_multires_sculpt_layer_stroke_create.argtypes = [p, ctypes.POINTER(p)]
+    lib.clay_multires_sculpt_layer_stroke_begin.argtypes = [p, i32p]
+    lib.clay_multires_sculpt_layer_stroke_target_layer.argtypes = [p, u64p]
+    lib.clay_multires_sculpt_layer_stroke_commit.argtypes = [p, ctypes.POINTER(ctypes.c_size_t)]
+    lib.clay_multires_sculpt_layer_stroke_destroy.argtypes = [p]
+
+
+def sculpt_layer_exercise(lib) -> list[str]:
+    """The sculpt layer stack driven as a bindings generator's consumer would.
+
+    Two properties the spec delta names and nothing else in the repository
+    checks across the boundary: a layer stays the SAME layer through a reorder,
+    because a host holds an id and not an index; and a name arrives in a buffer
+    the CALLER owns, because a pointer into an engine-owned string is freed by
+    the next rename.
+    """
+    sculpt_layer_argtypes(lib)
+    errors = []
+    positions = (ctypes.c_float * 24)(-1, -1, -1,  1, -1, -1,  1, 1, -1,  -1, 1, -1,
+                                      -1, -1,  1,  1, -1,  1,  1, 1,  1,  -1, 1,  1)
+    indices = (ctypes.c_uint32 * 36)(0, 2, 1, 0, 3, 2,  4, 5, 6, 4, 6, 7,
+                                     0, 1, 5, 0, 5, 4,  2, 3, 7, 2, 7, 6,
+                                     1, 2, 6, 1, 6, 5,  0, 4, 7, 0, 7, 3)
+    mesh = ctypes.c_void_p(0)
+    if lib.clay_mesh_from_triangles(positions, 8, indices, 36, ctypes.byref(mesh)) != 0:
+        return ["clay_mesh_from_triangles failed on a box"]
+
+    desc = MultiresDesc()
+    desc.struct_size = ctypes.sizeof(MultiresDesc)
+    lib.clay_multires_defaults(ctypes.byref(desc))
+    surface = ctypes.c_void_p(0)
+    build_error = ctypes.c_int32(-1)
+    if lib.clay_multires_from_mesh(mesh, ctypes.byref(desc), ctypes.byref(surface),
+                                   ctypes.byref(build_error)) != 0:
+        lib.clay_mesh_destroy(mesh)
+        return ["clay_multires_from_mesh failed on a box"]
+    lib.clay_mesh_destroy(mesh)
+    add_error = ctypes.c_int32(-1)
+    lib.clay_multires_add_level(surface, None, ctypes.byref(add_error))
+
+    error = ctypes.c_int32(-1)
+    ids = []
+    for name in (b"form", b"wrinkles", b"pores"):
+        layer = ctypes.c_uint64(0)
+        if lib.clay_multires_add_sculpt_layer(surface, name, ctypes.byref(layer),
+                                              ctypes.byref(error)) != 0:
+            errors.append(f"clay_multires_add_sculpt_layer refused {name!r}")
+        ids.append(layer.value)
+    if len(set(ids)) != 3 or 0 in ids:
+        errors.append(f"three added layers report ids {ids}, which are not three distinct "
+                      f"non-zero identities")
+
+    count = ctypes.c_size_t(0)
+    if lib.clay_multires_sculpt_layer_count(surface, ctypes.byref(count)) != 0 or \
+            count.value != 3:
+        errors.append(f"the stack reports {count.value} layers, not 3")
+
+    # The name crosses into the CALLER's buffer, with the size query first.
+    size = ctypes.c_size_t(0)
+    if lib.clay_multires_sculpt_layer_name(surface, ids[1], None, ctypes.byref(size)) != 0:
+        errors.append("the sculpt layer name size query failed")
+    if size.value != len(b"wrinkles") + 1:
+        errors.append(f"the name query asks for {size.value} bytes, not {len(b'wrinkles') + 1}")
+    short = ctypes.c_size_t(2)
+    if lib.clay_multires_sculpt_layer_name(surface, ids[1], ctypes.create_string_buffer(2),
+                                           ctypes.byref(short)) != 3:  # BUFFER_TOO_SMALL
+        errors.append("a two-byte buffer took a nine-byte name")
+    buf = ctypes.create_string_buffer(size.value)
+    if lib.clay_multires_sculpt_layer_name(surface, ids[1], buf, ctypes.byref(size)) != 0 or \
+            buf.value != b"wrinkles":
+        errors.append(f"the name came back as {buf.value!r}, not b'wrinkles'")
+
+    # THE SCENARIO: a host stores an identity, reorders, and dials THAT layer.
+    info = SculptLayerInfo()
+    info.struct_size = ctypes.sizeof(SculptLayerInfo)
+    if lib.clay_multires_sculpt_layer_info(surface, ids[1], ctypes.byref(info)) != 0 or \
+            info.index != 1:
+        errors.append(f"'wrinkles' starts at index {info.index}, not 1")
+    if lib.clay_multires_move_sculpt_layer(surface, ids[2], 0, ctypes.byref(error)) != 0:
+        errors.append("clay_multires_move_sculpt_layer refused a valid position")
+    if lib.clay_multires_set_sculpt_layer_strength(surface, ids[1], 0.25,
+                                                   ctypes.byref(error)) != 0:
+        errors.append("clay_multires_set_sculpt_layer_strength refused after a reorder")
+    info = SculptLayerInfo()
+    info.struct_size = ctypes.sizeof(SculptLayerInfo)
+    lib.clay_multires_sculpt_layer_info(surface, ids[1], ctypes.byref(info))
+    if info.index != 2 or abs(info.strength - 0.25) > 1e-6 or info.name_bytes != size.value:
+        errors.append(f"after the reorder the stored id names index {info.index} at strength "
+                      f"{info.strength}; the identity did not survive the move")
+
+    # An unknown id is NOT_FOUND with the typed reason beside it, never a
+    # zeroed descriptor: a zeroed one is indistinguishable from a real layer
+    # sitting at strength 0.
+    error.value = -1
+    if lib.clay_multires_set_sculpt_layer_strength(surface, 999999, 0.5,
+                                                   ctypes.byref(error)) != 2 or \
+            error.value != NO_SUCH_SCULPT_LAYER:
+        errors.append("an unknown sculpt layer id is not reported as NOT_FOUND / no such layer")
+
+    # A lock refuses a COEFFICIENT WRITE and permits every property change.
+    lib.clay_multires_set_sculpt_layer_locked(surface, ids[0], 1, ctypes.byref(error))
+    tbn = (ctypes.c_float * 3)(0.1, 0.0, 0.0)
+    error.value = -1
+    if lib.clay_multires_set_sculpt_layer_detail(surface, ids[0], 1, 0, tbn,
+                                                 ctypes.byref(error)) == 0 or \
+            error.value != SCULPT_LAYER_LOCKED:
+        errors.append("a locked sculpt layer accepted a coefficient write")
+    if lib.clay_multires_rename_sculpt_layer(surface, ids[0], b"base pass",
+                                             ctypes.byref(error)) != 0:
+        errors.append("a locked sculpt layer refused a rename, which a lock must permit")
+    lib.clay_multires_set_sculpt_layer_locked(surface, ids[0], 0, ctypes.byref(error))
+
+    # An open gesture HOLDS the composition, so a slider refuses rather than
+    # authoring one stroke against two different surfaces.
+    sculptor = ctypes.c_void_p(0)
+    if lib.clay_multires_sculpt_layer_stroke_create(surface, ctypes.byref(sculptor)) != 0:
+        errors.append("clay_multires_sculpt_layer_stroke_create failed")
+    else:
+        error.value = -1
+        if lib.clay_multires_sculpt_layer_stroke_begin(sculptor, ctypes.byref(error)) != 0:
+            errors.append("clay_multires_sculpt_layer_stroke_begin refused a valid surface")
+        target = ctypes.c_uint64(0)
+        active = ctypes.c_uint64(0)
+        lib.clay_multires_sculpt_layer_stroke_target_layer(sculptor, ctypes.byref(target))
+        lib.clay_multires_active_sculpt_layer(surface, ctypes.byref(active))
+        if target.value != active.value:
+            errors.append(f"the stroke targets layer {target.value} and the stack's active "
+                          f"layer is {active.value}")
+        error.value = -1
+        if lib.clay_multires_set_sculpt_layer_strength(surface, ids[1], 0.9,
+                                                       ctypes.byref(error)) == 0 or \
+                error.value != SCULPT_LAYER_STROKE_OPEN:
+            errors.append("a strength change was accepted while a stroke held the composition")
+        entries = ctypes.c_size_t(999)
+        if lib.clay_multires_sculpt_layer_stroke_commit(sculptor, ctypes.byref(entries)) != 0 or \
+                entries.value != 0:
+            errors.append(f"a gesture with no stamps committed {entries.value} entries, not 0")
+        if lib.clay_multires_set_sculpt_layer_strength(surface, ids[1], 0.9,
+                                                       ctypes.byref(error)) != 0:
+            errors.append("the composition was still held after the gesture committed")
+        lib.clay_multires_sculpt_layer_stroke_destroy(sculptor)
+        lib.clay_multires_sculpt_layer_stroke_destroy(None)  # releasing a null handle is a no-op
+
+    lib.clay_multires_destroy(surface)
+    lib.clay_multires_destroy(None)
+    return errors
+
+
 def ffi_exercise(lib_path: str) -> list[str]:
     lib = ctypes.CDLL(lib_path)
     errors = exports_exercise(lib)
@@ -1229,6 +1502,7 @@ def ffi_exercise(lib_path: str) -> list[str]:
             errors += brick_cache_exercise(lib)
             errors += tape_export_exercise(lib)
             errors += parity_fixture_exercise(lib)
+            errors += sculpt_layer_exercise(lib)
         lib.clay_document_destroy(doc)
         lib.clay_document_destroy(None)  # releasing a null handle is a no-op
     return errors
@@ -1236,6 +1510,7 @@ def ffi_exercise(lib_path: str) -> list[str]:
 
 def main() -> int:
     errors = hygiene()
+    errors += sculpt_layer_naming()
     errors += output_descriptor_fills()
     if len(sys.argv) > 1:
         errors += ffi_exercise(sys.argv[1])

@@ -218,8 +218,23 @@ TEST_CASE("a child of a blended group covers the seam without covering the group
 TEST_CASE("an unbounded node reports unbounded, not a box") {
     Doc doc;
     add_sphere(doc, 0.5f, 0.0f, 0.0f, 0.0f);
-    clay_item_desc cut = sphere_desc(0.3f, 0.2f, 0.0f, 0.0f);
-    cut.op = CLAY_OP_INTERSECT;
+    // An UNBOUNDED PRIMITIVE: one of the things whose influence is still
+    // genuinely infinite. This was an intersect until #319 gave that one the
+    // layer's extent, and an intersect here would exercise the finite path
+    // under an infinite name. A plane rather than a spatial morph only because
+    // clay_item_desc cannot express a transition's span — the two are the same
+    // Nonlocality::Unbounded either way.
+    clay_item_desc cut;
+    std::memset(&cut, 0, sizeof cut);
+    cut.struct_size = sizeof cut;
+    cut.prim = CLAY_PRIM_PLANE;
+    cut.params[0] = 0.0f;
+    cut.params[1] = 1.0f;
+    cut.params[2] = 0.0f;
+    cut.params[3] = 0.0f;
+    cut.rotation[3] = 1.0f;
+    cut.scale = 1.0f;
+    cut.op = CLAY_OP_ADD;
     clay_node_id id = 0;
     REQUIRE(clay_add_item(doc.d, doc.layer, &cut, &id) == CLAY_OK);
 
@@ -233,6 +248,27 @@ TEST_CASE("an unbounded node reports unbounded, not a box") {
     // queries do — the host's response is mark_dirty with both regions NULL.
     CHECK(b.lo[0] == 1234.5f);
     CHECK(b.hi[0] == 1234.5f);
+}
+
+TEST_CASE("undoing an INTERSECT reports the layer's box, not unbounded") {
+    // The other half of the split (#319). Undo takes the same influence bound
+    // every other consumer does, so the finite answer has to reach it too —
+    // and a host that dirties the whole cache on every intersect undo is the
+    // cost this removes.
+    Doc doc;
+    add_sphere(doc, 0.5f, 0.0f, 0.0f, 0.0f);
+    clay_item_desc cut = sphere_desc(0.3f, 0.2f, 0.0f, 0.0f);
+    cut.op = CLAY_OP_INTERSECT;
+    clay_node_id id = 0;
+    REQUIRE(clay_add_item(doc.d, doc.layer, &cut, &id) == CLAY_OK);
+
+    Bound b;
+    REQUIRE(clay_document_undo_bound(doc.d, &b.undone, b.lo, b.hi, &b.has, &b.infinite) == CLAY_OK);
+    CHECK(b.undone == 1);
+    CHECK(b.has == 1);
+    CHECK(b.infinite == 0);
+    CHECK(b.lo[0] <= -0.5f);  // the layer's extent, which holds the 0.5 sphere
+    CHECK(b.hi[0] >= 0.5f);
 }
 
 TEST_CASE("an edit that cannot change the field dirties nothing") {

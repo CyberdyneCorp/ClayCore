@@ -90,7 +90,7 @@ bug they can report; they have found that the tool is untrustworthy."*
   and `test_multires_shared_brush_parity`, asserting both what MUST agree and
   what legitimately differs, because a gate that only checks agreement is a
   gate that will be satisfied by making the two representations equally wrong.
-- **`examples/69_shared_brush_runtime.py`** — the same `reference_presets()`
+- **`examples/70_shared_brush_runtime.py`** — the same `reference_presets()`
   gesture over fixed, adaptive and multires surfaces, rendered, with every
   claim asserted.
 

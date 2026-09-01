@@ -72,6 +72,9 @@ class MetalBackend final : public Backend {
     // Registration needs the two core pipelines; the rest is reported here.
     BackendCaps caps() const override {
         BackendCaps c{false, true, 0};
+        // Only on an ADOPTED device: `device_copy` names a buffer the CALLER
+        // lent us, and one from the device we made for ourselves is not that.
+        c.device_copy = !owns_device_;
         c.eval_points = pso_points_ != nullptr;
         c.eval_grid = pso_grid_ != nullptr;
         c.raycast = pso_rays_ != nullptr;
@@ -222,6 +225,56 @@ class MetalBackend final : public Backend {
         // dispatch waits until completed, so the work has landed here and
         // nothing is left in flight on the caller's queue.
         return ok ? Status::Ok : Status::DeviceError;
+    }
+
+    // What the resumed device refill needs on top of the evaluation above: a
+    // brick answered from its SEED is computed on the host and has to be
+    // written into the caller's slot, and a brick that had to be walked in full
+    // has to come back out so it becomes the next dab's seed. Both are a few
+    // kilobytes a brick, against a full walk of the surviving edit list per
+    // sample — 15.23 ms falling to 0.08 ms at 5,000 items on the Vulkan
+    // measurement this follows (#345, #350).
+    //
+    // A BLIT, where the Vulkan side had to route the same two transfers through
+    // a compute shader. That was not a stylistic choice there: a caller's
+    // VkBuffer may lack TRANSFER_SRC/DST usage, which is a per-buffer property
+    // fixed at creation and invisible to us, so a vkCmdCopyBuffer onto it is
+    // undefined. Metal buffers carry no transfer usage flag to be missing —
+    // every MTLBuffer is a legal blit source and destination, private storage
+    // included — so the direct route is available and is what these use.
+    //
+    // Staging is one of our own shared buffers rather than the caller's
+    // pointer: the caller's may be MTLStorageModePrivate, which has no
+    // `contents()` to memcpy through, and assuming otherwise would work on
+    // every unified-memory Mac and fault on the first host that allocated
+    // private.
+    Status write_device_buffer(const DeviceBuffer& dst, const void* src,
+                               std::uint64_t bytes) override {
+        if (owns_device_) return Status::Unsupported;
+        if (dst.empty() || !src) return Status::InvalidInput;
+        if (bytes == 0) return Status::Ok;
+        if (!copyable(bytes, dst)) return Status::InvalidInput;
+        std::lock_guard<std::mutex> lock(mutex_);
+        MTL::Buffer* staging = copy_in(kSlotCopy, src, static_cast<std::size_t>(bytes));
+        return blit(staging, 0, static_cast<MTL::Buffer*>(dst.handle), dst.offset, bytes)
+                   ? Status::Ok
+                   : Status::DeviceError;
+    }
+
+    Status read_device_buffer(void* dst, const DeviceBuffer& src,
+                              std::uint64_t bytes) override {
+        if (owns_device_) return Status::Unsupported;
+        if (src.empty() || !dst) return Status::InvalidInput;
+        if (bytes == 0) return Status::Ok;
+        if (!copyable(bytes, src)) return Status::InvalidInput;
+        std::lock_guard<std::mutex> lock(mutex_);
+        MTL::Buffer* staging = scratch(kSlotCopy, static_cast<std::size_t>(bytes));
+        if (!blit(static_cast<MTL::Buffer*>(src.handle), src.offset, staging, 0, bytes))
+            return Status::DeviceError;
+        // The blit has completed — `blit` waits — so the staging contents are
+        // the caller's bytes and nothing is left in flight on their queue.
+        std::memcpy(dst, staging->contents(), static_cast<std::size_t>(bytes));
+        return Status::Ok;
     }
 
     // Results land in the caller's own MTLBuffer, so a host that was going to
@@ -472,6 +525,7 @@ class MetalBackend final : public Backend {
         kSlotTapeInstrs,  // single tape without an identity (compile_id 0)
         kSlotTapeParams,
         kSlotTapeBlob,
+        kSlotCopy,  // staging for write_device_buffer / read_device_buffer
         kSlotCount,
     };
 
@@ -776,25 +830,28 @@ class MetalBackend final : public Backend {
         enc->dispatchThreads(grid, MTL::Size(tg, 1, 1));
         enc->endEncoding();
         cmd->commit();
-        // A dab-sized dispatch finishes in tens of microseconds, but parking
-        // this thread on waitUntilCompleted's semaphore notices that hundreds
-        // of microseconds later — the wakeup is most of what an interactive
-        // 1-brick call pays (measured ~150 us polled vs ~520 us parked on an
-        // M2 Max). So on macOS, for small dispatches, poll the status for up
-        // to ~2 ms of wall time before parking. Large dispatches run for
-        // milliseconds and park immediately: spinning there burns a core for
-        // no latency anyone can see.
-        //
-        // macOS ONLY. An iPad's CPU and GPU share one power budget, so the
-        // spinning core starves the kernel it is waiting on: the same small
-        // dispatch that polls in 150 us on an M2 Max ran 3.1x SLOWER on an
-        // iPad Air M3 (sdf_stamp_metal 1.77 -> 5.54 ms p95), caught by the
-        // device gate. On iOS the thread parks immediately, as it always
-        // did. The call is synchronous either way; only how completion is
-        // noticed changes.
-#if TARGET_OS_OSX
         constexpr std::size_t kSpinThreads = 64 * 512;  // ~a refill chunk's worth
-        if (thread_count <= kSpinThreads) {
+        return wait_for(cmd, thread_count <= kSpinThreads);
+    }
+
+    // A dab-sized dispatch finishes in tens of microseconds, but parking this
+    // thread on waitUntilCompleted's semaphore notices that hundreds of
+    // microseconds later — the wakeup is most of what an interactive 1-brick
+    // call pays (measured ~150 us polled vs ~520 us parked on an M2 Max). So on
+    // macOS, when the caller says the work is small, poll the status for up to
+    // ~2 ms of wall time before parking. Large dispatches run for milliseconds
+    // and park immediately: spinning there burns a core for no latency anyone
+    // can see.
+    //
+    // macOS ONLY. An iPad's CPU and GPU share one power budget, so the spinning
+    // core starves the kernel it is waiting on: the same small dispatch that
+    // polls in 150 us on an M2 Max ran 3.1x SLOWER on an iPad Air M3
+    // (sdf_stamp_metal 1.77 -> 5.54 ms p95), caught by the device gate. On iOS
+    // the thread parks immediately, as it always did. The call is synchronous
+    // either way; only how completion is noticed changes.
+    static bool wait_for(MTL::CommandBuffer* cmd, bool allow_spin) {
+#if TARGET_OS_OSX
+        if (allow_spin) {
             const auto deadline =
                 std::chrono::steady_clock::now() + std::chrono::milliseconds(2);
             do {
@@ -805,9 +862,42 @@ class MetalBackend final : public Backend {
                 }
             } while (std::chrono::steady_clock::now() < deadline);
         }
+#else
+        (void)allow_spin;
 #endif
         cmd->waitUntilCompleted();
         return cmd->status() == MTL::CommandBufferStatusCompleted;
+    }
+
+    // The same terms the Vulkan side states, for the same reason: whole floats
+    // only, and never past what the caller said the slice holds. A blit's
+    // offsets must be 4-byte aligned on macOS, which whole floats at a brick's
+    // stride already are — checked rather than assumed, because a misaligned
+    // copy is undefined rather than refused.
+    static bool copyable(std::uint64_t bytes, const DeviceBuffer& slice) {
+        return bytes % sizeof(float) == 0 && slice.offset % sizeof(float) == 0 &&
+               slice.size >= bytes;
+    }
+
+    // One blit, committed and waited on, so the transfer has COMPLETED when
+    // this returns — the rule every other device entry point here follows.
+    // Waits the same way a dispatch does, and for the same measured reason.
+    bool blit(MTL::Buffer* from, std::uint64_t from_offset, MTL::Buffer* to,
+              std::uint64_t to_offset, std::uint64_t bytes) {
+        if (!from || !to) return false;
+        MTL::CommandBuffer* cmd = queue_->commandBuffer();
+        if (!cmd) return false;
+        MTL::BlitCommandEncoder* enc = cmd->blitCommandEncoder();
+        if (!enc) return false;
+        enc->copyFromBuffer(from, static_cast<NS::UInteger>(from_offset), to,
+                            static_cast<NS::UInteger>(to_offset),
+                            static_cast<NS::UInteger>(bytes));
+        enc->endEncoding();
+        cmd->commit();
+        // A brick's worth of bytes is over in microseconds, so this is always
+        // the small case: spin briefly before parking, exactly as a small
+        // dispatch does, and on macOS only for the same power-budget reason.
+        return wait_for(cmd, /*allow_spin=*/true);
     }
 
     // Gradients on the host from 4 extra device evaluations would need a

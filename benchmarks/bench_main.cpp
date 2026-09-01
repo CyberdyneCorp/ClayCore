@@ -4678,6 +4678,211 @@ void BM_MultiresExportLevel(benchmark::State& state) {
 }
 BENCHMARK(BM_MultiresExportLevel)->Unit(benchmark::kMillisecond)->Iterations(20);
 
+// -- sculpt layers (add-mesh-sculpt-layers) -----------------------------------
+//
+// THE STACK DEPTH IS THE VARIABLE, and the three shapes of coverage are what
+// decide whether it matters. 1, 4, 16, 64 and 128 layers over the same
+// hierarchy, each with:
+//
+//   local        every layer over the same small footprint. The deep-stack
+//                worst case for one block, and the case a detail pass on one
+//                cheek actually is.
+//   overlapping  layers over footprints that slide across each other, so a
+//                block holds some of the stack and not all of it.
+//   dense        every layer over the whole level. What a host should be told
+//                is expensive, because it is.
+//
+// WHAT THE NUMBERS ARE FOR. `BM_SculptLayerStrengthChange` is task 5.4's
+// measurement: the cost of moving one slider must follow that layer's COVERAGE
+// and not the level, so its time must be flat in the level's size for a local
+// layer and must not grow with the layers that do not overlap it. The
+// `blocks_recomposed` and `layer_blocks_visited` counters are the reading here
+// rather than the clock — a correct implementation and a quadratic one produce
+// the same surface, and only the counters tell them apart.
+//
+// `BM_SculptLayerStampOnStack` is task 5.5's: a stamp on top of a deep stack
+// must not sum every layer beneath it over unrelated geometry, so its
+// `layer_blocks_visited` must be bounded by the layers covering what the stamp
+// touched. If these ever say prefix checkpoints are needed, the cache keys
+// already admit one — a checkpoint is a synthetic layer over a contiguous
+// prefix with its own composition revision.
+namespace {
+
+enum class LayerCoverage { Local, Overlapping, Dense };
+
+// Fill `count` layers over one level in the named shape, and return the
+// hierarchy holding them.
+mesh::MultiresSurface layered_fixture(int n, std::uint32_t levels, std::uint32_t count,
+                                      LayerCoverage coverage, std::uint32_t* out_level) {
+    mesh::MultiresSurface s = multires_fixture(n, levels);
+    const std::uint32_t level = levels;
+    const std::uint32_t vertices = s.topology_at(level).vertex_count;
+    *out_level = level;
+    const std::uint32_t footprint = vertices / 64 + 1;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const mesh::SculptLayerId id = s.add_sculpt_layer();
+        std::uint32_t begin = 0, end = 0;
+        switch (coverage) {
+            case LayerCoverage::Local:
+                begin = vertices / 3;
+                end = begin + footprint;
+                break;
+            case LayerCoverage::Overlapping:
+                begin = (vertices / 3) + (i * footprint) / 4;
+                end = begin + footprint;
+                break;
+            case LayerCoverage::Dense:
+                begin = 0;
+                end = vertices;
+                break;
+        }
+        for (std::uint32_t v = begin; v < end && v < vertices; ++v)
+            s.set_sculpt_layer_detail(id, level, v, mesh::LocalDetail{0.0f, 0.0f, 0.001f});
+    }
+    s.positions_at(level);
+    return s;
+}
+
+void report_composition(benchmark::State& state, const mesh::MultiresSurface& s,
+                        std::uint32_t layers) {
+    state.counters["layers"] = static_cast<double>(layers);
+    state.counters["blocks_recomposed"] =
+        static_cast<double>(s.sculpt_layer_stats().blocks_recomposed);
+    state.counters["layer_blocks_visited"] =
+        static_cast<double>(s.sculpt_layer_stats().layer_blocks_visited);
+    state.counters["layer_MiB"] =
+        static_cast<double>(s.memory().sculpt_layers) / (1024.0 * 1024.0);
+    state.counters["composed_MiB"] = static_cast<double>(s.memory().composed) / (1024.0 * 1024.0);
+}
+
+void sculpt_layer_compose(benchmark::State& state, LayerCoverage coverage) {
+    const std::uint32_t layers = static_cast<std::uint32_t>(state.range(0));
+    std::uint32_t level = 0;
+    mesh::MultiresSurface s = layered_fixture(24, 3, layers, coverage, &level);
+    for (auto _ : state) {
+        // A COLD composition: the composed field is released with the rest of
+        // the caches and rebuilt whole, which is the ceiling the incremental
+        // paths below are measured against.
+        s.drop_all_caches();
+        std::size_t count = s.positions_at(level).size();
+        benchmark::DoNotOptimize(count);
+    }
+    report_composition(state, s, layers);
+}
+
+void sculpt_layer_strength(benchmark::State& state, LayerCoverage coverage) {
+    const std::uint32_t layers = static_cast<std::uint32_t>(state.range(0));
+    std::uint32_t level = 0;
+    mesh::MultiresSurface s = layered_fixture(24, 3, layers, coverage, &level);
+    const mesh::SculptLayerId top = s.sculpt_layers().id_at(layers - 1);
+    s.reset_sculpt_layer_stats();
+    int i = 0;
+    for (auto _ : state) {
+        s.set_sculpt_layer_strength(top, (i % 2) ? 0.25f : 0.75f);
+        std::size_t count = s.positions_at(level).size();
+        benchmark::DoNotOptimize(count);
+        ++i;
+    }
+    report_composition(state, s, layers);
+}
+
+void sculpt_layer_stamp(benchmark::State& state, LayerCoverage coverage) {
+    const std::uint32_t layers = static_cast<std::uint32_t>(state.range(0));
+    std::uint32_t level = 0;
+    mesh::MultiresSurface s = layered_fixture(24, 3, layers, coverage, &level);
+    s.set_sculpt_level(level);
+    s.set_active_sculpt_layer(s.sculpt_layers().id_at(layers - 1));
+    mesh::MultiresSculptor sculptor(s);
+    mesh::MeshBrushSettings brush;
+    brush.radius = 0.08f;
+    brush.strength = 0.2f;
+    s.reset_sculpt_layer_stats();
+    int i = 0;
+    for (auto _ : state) {
+        brush.center = kernel::cf3(0.02f * static_cast<float>(i % 5), 0.0f, 0.0f);
+        brush.strength = (i % 2) ? 0.2f : -0.2f;
+        sculptor.stamp(mesh::MeshBrush::Draw, brush);
+        std::size_t count = s.positions_at(level).size();
+        benchmark::DoNotOptimize(count);
+        ++i;
+    }
+    report_composition(state, s, layers);
+}
+
+}  // namespace
+
+void BM_SculptLayerComposeLocal(benchmark::State& state) {
+    sculpt_layer_compose(state, LayerCoverage::Local);
+}
+BENCHMARK(BM_SculptLayerComposeLocal)
+    ->Arg(1)->Arg(4)->Arg(16)->Arg(64)->Arg(128)
+    ->Unit(benchmark::kMillisecond)
+    ->Iterations(20);
+
+void BM_SculptLayerComposeOverlapping(benchmark::State& state) {
+    sculpt_layer_compose(state, LayerCoverage::Overlapping);
+}
+BENCHMARK(BM_SculptLayerComposeOverlapping)
+    ->Arg(1)->Arg(4)->Arg(16)->Arg(64)->Arg(128)
+    ->Unit(benchmark::kMillisecond)
+    ->Iterations(20);
+
+void BM_SculptLayerComposeDense(benchmark::State& state) {
+    sculpt_layer_compose(state, LayerCoverage::Dense);
+}
+BENCHMARK(BM_SculptLayerComposeDense)
+    ->Arg(1)->Arg(4)->Arg(16)
+    ->Unit(benchmark::kMillisecond)
+    ->Iterations(10);
+
+void BM_SculptLayerStrengthChangeLocal(benchmark::State& state) {
+    sculpt_layer_strength(state, LayerCoverage::Local);
+}
+BENCHMARK(BM_SculptLayerStrengthChangeLocal)
+    ->Arg(1)->Arg(4)->Arg(16)->Arg(64)->Arg(128)
+    ->Unit(benchmark::kMicrosecond)
+    ->Iterations(200);
+
+void BM_SculptLayerStrengthChangeOverlapping(benchmark::State& state) {
+    sculpt_layer_strength(state, LayerCoverage::Overlapping);
+}
+BENCHMARK(BM_SculptLayerStrengthChangeOverlapping)
+    ->Arg(1)->Arg(4)->Arg(16)->Arg(64)->Arg(128)
+    ->Unit(benchmark::kMicrosecond)
+    ->Iterations(200);
+
+void BM_SculptLayerStrengthChangeDense(benchmark::State& state) {
+    sculpt_layer_strength(state, LayerCoverage::Dense);
+}
+BENCHMARK(BM_SculptLayerStrengthChangeDense)
+    ->Arg(1)->Arg(4)->Arg(16)
+    ->Unit(benchmark::kMillisecond)
+    ->Iterations(20);
+
+void BM_SculptLayerStampOnStackLocal(benchmark::State& state) {
+    sculpt_layer_stamp(state, LayerCoverage::Local);
+}
+BENCHMARK(BM_SculptLayerStampOnStackLocal)
+    ->Arg(1)->Arg(4)->Arg(16)->Arg(64)->Arg(128)
+    ->Unit(benchmark::kMicrosecond)
+    ->Iterations(200);
+
+void BM_SculptLayerStampOnStackOverlapping(benchmark::State& state) {
+    sculpt_layer_stamp(state, LayerCoverage::Overlapping);
+}
+BENCHMARK(BM_SculptLayerStampOnStackOverlapping)
+    ->Arg(1)->Arg(4)->Arg(16)->Arg(64)->Arg(128)
+    ->Unit(benchmark::kMicrosecond)
+    ->Iterations(200);
+
+void BM_SculptLayerStampOnStackDense(benchmark::State& state) {
+    sculpt_layer_stamp(state, LayerCoverage::Dense);
+}
+BENCHMARK(BM_SculptLayerStampOnStackDense)
+    ->Arg(1)->Arg(4)->Arg(16)
+    ->Unit(benchmark::kMillisecond)
+    ->Iterations(20);
+
 // Resident uploaded tapes (accel/metal-persistent): the Metal backend keeps
 // the uploaded form of recent tapes resident, keyed on the process-unique
 // Tape::compile_id the compiler stamps, so re-evaluating an unchanged

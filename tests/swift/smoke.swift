@@ -1282,6 +1282,236 @@ do {
     check(clay_mesh_vertex_count(level) > 0, "the exported level has vertices")
     clay_mesh_destroy(level)
 
+
+    // -- sculpt layers -------------------------------------------------------
+    //
+    // A named, dialable CHANNEL over the hierarchy. What is checked here is the
+    // SHAPE a host touches, as above: 64-bit identities that survive a reorder,
+    // names copied into a buffer the caller owns, typed refusals, and a gesture
+    // that holds the composition until it closes. The arithmetic is covered in
+    // C++.
+
+    var layerError: Int32 = -1
+    var layerIds: [UInt64] = []
+    for name in ["form", "wrinkles", "pores"] {
+        var id: UInt64 = 0
+        check(clay_multires_add_sculpt_layer(surface, name, &id, &layerError) == CLAY_OK,
+              "added the sculpt layer '\(name)'")
+        layerIds.append(id)
+    }
+    check(Set(layerIds).count == 3 && !layerIds.contains(0),
+          "three layers carry three distinct non-zero identities")
+
+    var layerCount = 0
+    check(clay_multires_sculpt_layer_count(surface, &layerCount) == CLAY_OK && layerCount == 3,
+          "the stack reports its three layers")
+
+    // The NAME crosses into the caller's own buffer. A pointer into an
+    // engine-owned string would be freed by the next rename.
+    var nameSize = 0
+    check(clay_multires_sculpt_layer_name(surface, layerIds[1], nil, &nameSize) == CLAY_OK,
+          "asked how long the layer's name is")
+    check(nameSize == "wrinkles".utf8.count + 1, "the query includes the terminator")
+    var nameBuffer = [CChar](repeating: 0, count: nameSize)
+    nameBuffer.withUnsafeMutableBufferPointer { b in
+        check(clay_multires_sculpt_layer_name(surface, layerIds[1], b.baseAddress,
+                                              &nameSize) == CLAY_OK,
+              "copied the name into the caller's buffer")
+    }
+    check(String(cString: nameBuffer) == "wrinkles", "the name came back intact")
+
+    // IDS, NEVER INDICES: a host stores an identity, reorders the stack, and
+    // the identity still names the pass it named before the drag.
+    var layerInfo = clay_sculpt_layer_info()
+    layerInfo.struct_size = UInt32(MemoryLayout<clay_sculpt_layer_info>.size)
+    check(clay_multires_sculpt_layer_info(surface, layerIds[1], &layerInfo) == CLAY_OK,
+          "read a layer's row")
+    check(layerInfo.index == 1 && layerInfo.visible == 1 && layerInfo.strength == 1.0,
+          "a new layer is visible at full strength, second from the bottom")
+    check(clay_multires_move_sculpt_layer(surface, layerIds[2], 0, &layerError) == CLAY_OK,
+          "moved the top layer to the bottom")
+    check(clay_multires_set_sculpt_layer_strength(surface, layerIds[1], 0.25,
+                                                  &layerError) == CLAY_OK,
+          "dialled the stored identity after the reorder")
+    layerInfo.struct_size = UInt32(MemoryLayout<clay_sculpt_layer_info>.size)
+    check(clay_multires_sculpt_layer_info(surface, layerIds[1], &layerInfo) == CLAY_OK,
+          "read the row again")
+    check(layerInfo.index == 2 && layerInfo.strength == 0.25,
+          "the identity survived the move and dialled the layer the host meant")
+
+    // An unknown id is NOT_FOUND with the typed reason beside it, never a
+    // zeroed descriptor — a zeroed one reads as a real layer at strength 0.
+    layerError = -1
+    check(clay_multires_set_sculpt_layer_strength(surface, 999_999, 0.5,
+                                                  &layerError) == CLAY_ERROR_NOT_FOUND,
+          "an unknown sculpt layer id is refused")
+    check(layerError == Int32(CLAY_MULTIRES_NO_SUCH_SCULPT_LAYER.rawValue),
+          "and says which refusal it was")
+
+    // A lock refuses a COEFFICIENT WRITE and permits every property change.
+    check(clay_multires_set_sculpt_layer_locked(surface, layerIds[0], 1, &layerError) == CLAY_OK,
+          "locked a finished pass")
+    let coefficients: [Float] = [0.1, 0, 0]
+    layerError = -1
+    coefficients.withUnsafeBufferPointer { c in
+        check(clay_multires_set_sculpt_layer_detail(surface, layerIds[0], 1, 0, c.baseAddress,
+                                                    &layerError) != CLAY_OK,
+              "a locked layer refuses a coefficient write")
+    }
+    check(layerError == Int32(CLAY_MULTIRES_SCULPT_LAYER_LOCKED.rawValue),
+          "and says it was the lock")
+    check(clay_multires_rename_sculpt_layer(surface, layerIds[0], "base pass",
+                                            &layerError) == CLAY_OK,
+          "a locked layer still accepts a rename, which is what a lock does NOT freeze")
+    check(clay_multires_set_sculpt_layer_locked(surface, layerIds[0], 0, &layerError) == CLAY_OK,
+          "unlocked it again")
+
+    // The gesture. Its whole reason for existing is that a stamp reads the
+    // evaluated surface, so the composition is held until it closes.
+    var stroke: OpaquePointer? = nil
+    check(clay_multires_sculpt_layer_stroke_create(surface, &stroke) == CLAY_OK,
+          "made a layered stroke")
+    check(clay_multires_sculpt_layer_stroke_set_write_domain(
+              stroke, Int32(CLAY_MULTIRES_WRITE_DETAIL.rawValue)) == CLAY_OK,
+          "asked for the active layer rather than the form under it")
+    check(clay_multires_set_active_sculpt_layer(surface, layerIds[1], &layerError) == CLAY_OK,
+          "made 'wrinkles' the active channel")
+    check(clay_multires_sculpt_layer_stroke_begin(stroke, &layerError) == CLAY_OK,
+          "opened the gesture")
+
+    var target: UInt64 = 0
+    check(clay_multires_sculpt_layer_stroke_target_layer(stroke, &target) == CLAY_OK &&
+              target == layerIds[1],
+          "the gesture pinned the channel at pointer-down")
+    layerError = -1
+    check(clay_multires_set_sculpt_layer_visible(surface, layerIds[1], 0,
+                                                 &layerError) != CLAY_OK,
+          "a composition change refuses while the stroke is open")
+    check(layerError == Int32(CLAY_MULTIRES_SCULPT_LAYER_STROKE_OPEN.rawValue),
+          "and says the stroke is why")
+
+    var layerReport = clay_multires_stamp_report()
+    layerReport.struct_size = UInt32(MemoryLayout<clay_multires_stamp_report>.size)
+    var contentBefore: UInt64 = 0
+    check(clay_multires_sculpt_layer_revision(surface, nil, nil, &contentBefore) == CLAY_OK,
+          "read the layer content revision before the gesture")
+    for _ in 0..<4 {
+        check(clay_multires_sculpt_layer_stroke_stamp(stroke, &brush, nil,
+                                                      &layerReport) == CLAY_OK,
+              "stamped into the layer")
+    }
+    check(layerReport.moved_vertices > 0, "the layered stamp moved something")
+
+    // A height stamp, planar and borrowed for the length of the call.
+    var height = [Float](repeating: 0, count: 16 * 16)
+    for y in 4..<12 { for x in 4..<12 { height[y * 16 + x] = 1.0 } }
+    var stampDesc = clay_detail_stamp_desc()
+    stampDesc.struct_size = UInt32(MemoryLayout<clay_detail_stamp_desc>.size)
+    stampDesc.mode = Int32(CLAY_DETAIL_STAMP_HEIGHT.rawValue)
+    stampDesc.width = 16
+    stampDesc.height = 16
+    stampDesc.amplitude = 0.05
+    stampDesc.center = (0, 0, 1)
+    stampDesc.extent = 1.2
+    var stampReport = clay_detail_stamp_report()
+    stampReport.struct_size = UInt32(MemoryLayout<clay_detail_stamp_report>.size)
+    height.withUnsafeBufferPointer { h in
+        stampDesc.image = h.baseAddress
+        check(clay_multires_sculpt_layer_stroke_stamp_detail(stroke, &stampDesc, &brush, nil,
+                                                             &stampReport,
+                                                             &layerReport) == CLAY_OK,
+              "deposited a height map into the layer")
+        stampDesc.image = nil
+    }
+    check(stampReport.oversampling > 0, "the stamp says whether the level can carry the map")
+    check(clay_multires_sculpt_layer_stroke_smooth(
+              stroke, Int32(CLAY_MULTIRES_SMOOTH_PRESERVE_DETAIL.rawValue), &brush, nil,
+              &layerReport) == CLAY_OK,
+          "smoothed the form under the detail")
+
+    var stampCount = 0
+    var recordSize = 0
+    check(clay_multires_sculpt_layer_stroke_stamps(stroke, &stampCount) == CLAY_OK,
+          "asked how many stamps the gesture took")
+    check(clay_multires_sculpt_layer_stroke_record_size(stroke, &recordSize) == CLAY_OK,
+          "asked how many entries the record holds")
+    // Two different quantities, deliberately: the record's size follows the
+    // VERTICES the gesture reached, and the stamp count follows the dabs it
+    // took. Four dabs over one place are one entry per vertex, not four.
+    check(stampCount >= 4, "every dab the gesture took is counted")
+    check(recordSize > 0, "the gesture recorded what it changed")
+
+    var committed = 0
+    check(clay_multires_sculpt_layer_stroke_commit(stroke, &committed) == CLAY_OK,
+          "committed the gesture")
+    check(committed == recordSize, "the commit reports the record it closed")
+    check(clay_multires_set_sculpt_layer_visible(surface, layerIds[1], 1, &layerError) == CLAY_OK,
+          "the composition is released once the gesture closes")
+    clay_multires_sculpt_layer_stroke_destroy(stroke)
+    clay_multires_sculpt_layer_stroke_destroy(nil)  // releasing a null handle is a no-op
+
+    var contentAfter: UInt64 = 0
+    check(clay_multires_sculpt_layer_revision(surface, nil, nil, &contentAfter) == CLAY_OK,
+          "read the layer content revision")
+    check(contentAfter > contentBefore, "writing coefficients moved the content revision")
+
+    var layerChecksum: UInt64 = 0
+    check(clay_multires_sculpt_layer_checksum(surface, &layerChecksum) == CLAY_OK,
+          "hashed the stack apart from the base detail")
+    check(layerChecksum != 0, "the stack carries an artist's work")
+
+    var layerStats = clay_sculpt_layer_stats()
+    layerStats.struct_size = UInt32(MemoryLayout<clay_sculpt_layer_stats>.size)
+    check(clay_multires_sculpt_layer_stats(surface, &layerStats) == CLAY_OK,
+          "read what composition actually did")
+    check(layerStats.blocks_recomposed > 0, "composing the stack recomposed blocks")
+
+    check(clay_multires_memory_get(surface, &memory) == CLAY_OK, "read the memory rows again")
+    check(memory.sculpt_layers > 0 && memory.total == memory.authoritative + memory.rebuildable,
+          "the layers are counted, and counted as authoritative")
+
+    // A rename is METADATA: it must not recompose one block of the model.
+    check(clay_multires_reset_sculpt_layer_stats(surface) == CLAY_OK, "cleared the counters")
+    check(clay_multires_rename_sculpt_layer(surface, layerIds[1], "wrinkle pass",
+                                            &layerError) == CLAY_OK,
+          "renamed a layer")
+    layerStats.struct_size = UInt32(MemoryLayout<clay_sculpt_layer_stats>.size)
+    check(clay_multires_sculpt_layer_stats(surface, &layerStats) == CLAY_OK, "read the counters")
+    check(layerStats.blocks_recomposed == 0, "a rename recomposes nothing")
+
+    // The stack rides the same stream, at version 2. A hierarchy written
+    // before layers existed still loads, as a hierarchy with none.
+    var withLayersSize = 0
+    check(clay_multires_serialize(surface, nil, &withLayersSize) == CLAY_OK,
+          "asked for the encoded size with layers")
+    var withLayers = [UInt8](repeating: 0, count: withLayersSize)
+    withLayers.withUnsafeMutableBufferPointer { b in
+        check(clay_multires_serialize(surface, b.baseAddress, &withLayersSize) == CLAY_OK,
+              "encoded the hierarchy and its stack")
+    }
+    var restored: OpaquePointer? = nil
+    withLayers.withUnsafeBufferPointer { b in
+        check(clay_multires_deserialize(b.baseAddress, b.count, &restored) == CLAY_OK,
+              "decoded it back")
+    }
+    var restoredCount = 0
+    check(clay_multires_sculpt_layer_count(restored, &restoredCount) == CLAY_OK &&
+              restoredCount == 3,
+          "the three layers survived the round trip")
+    var restoredChecksum: UInt64 = 0
+    check(clay_multires_sculpt_layer_checksum(restored, &restoredChecksum) == CLAY_OK &&
+              restoredChecksum == layerChecksum,
+          "and so did every coefficient in them")
+    var restoredName = [CChar](repeating: 0, count: 64)
+    var restoredNameSize = 64
+    restoredName.withUnsafeMutableBufferPointer { b in
+        check(clay_multires_sculpt_layer_name(restored, layerIds[1], b.baseAddress,
+                                              &restoredNameSize) == CLAY_OK,
+              "the id still names a layer after a save and a load")
+    }
+    check(String(cString: restoredName) == "wrinkle pass", "with the name the artist gave it")
+    clay_multires_destroy(restored)
+
     clay_multires_sculptor_destroy(sculptor)
     clay_multires_destroy(surface)
     clay_mesh_destroy(mesh)

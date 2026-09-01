@@ -117,6 +117,33 @@ struct Step {
         // reconstructs. `VertexDeltas` would record all of them; this records
         // what was EDITED, so the step follows the brush rather than the depth.
         Multires,
+        // ONE GESTURE ON A SCULPT LAYER: the coefficients and mask weights it
+        // changed, in one channel of one hierarchy's stack.
+        //
+        // Its own kind rather than an overload of `Multires`, and the argument
+        // is the one that kind already makes about `Mesh`: the payloads are
+        // different things reversed against different owners. A `Multires` step
+        // restores the level's BASE detail and the cage; this restores a
+        // LAYER's, reached through the surface its id lives on. Folding them
+        // would make every apply branch on which half of the payload is
+        // populated.
+        MultiresLayer,
+        // ONE PROPERTY OPERATION on a stack: a rename, a strength, a
+        // visibility, a lock, a reorder, an add, a remove, a merge or a bake.
+        //
+        // A SECOND KIND rather than a tag inside the one above, and the reason
+        // is `step_bytes`: the scene-model delta asks for undo memory to be
+        // measurable per kind, and a byte accounting can only separate what the
+        // kind separates. A strength change is twenty bytes and a stroke is a
+        // megabyte; one kind holding both makes the only interesting question
+        // about a history's size unanswerable.
+        //
+        // Property changes being in the history AT ALL is the thing this change
+        // does better than the voxel stack, whose renames and strengths are
+        // still outside it: an artist who dials a pass from 100% to 40% and
+        // then presses undo means the dial, and a history that skipped past it
+        // to the stroke before is a history that lied about what it holds.
+        MultiresLayerProperty,
         Barrier  // an operation nothing records; not reversible, not silent
     };
 
@@ -127,6 +154,8 @@ struct Step {
     mesh::VertexDeltas deltas;                // Mesh
     mesh::TopologyDelta topology_delta;        // DynamicMesh
     mesh::MultiresDelta multires_delta;        // Multires
+    mesh::SculptLayerDelta sculpt_layer_delta;        // MultiresLayer
+    mesh::SculptLayerProperty sculpt_layer_property;  // MultiresLayerProperty
     // SurfaceGroup: the whole field, serialised, on each side of the edit.
     //
     // A WHOLE SNAPSHOT where every other kind stores a DIFF, and deliberately.
@@ -256,6 +285,14 @@ class History {
     // Empty records are dropped, for the reason every other recorder drops a
     // no-op.
     void record_multires_step(scene::LayerId layer, mesh::MultiresDelta delta);
+    // One gesture on a SCULPT LAYER — every stamp of it — as ONE step. Empty
+    // records are dropped, for the reason every other recorder drops a no-op.
+    void record_multires_layer_step(scene::LayerId layer, mesh::SculptLayerDelta delta);
+    // One property operation on a stack. Recorded even though it moves no
+    // vertex in the rename case, because an artist who renamed a pass and
+    // pressed undo means the rename — and a history that skipped past it to the
+    // stroke before would take back work the user did not ask to lose.
+    void record_multires_layer_property(scene::LayerId layer, mesh::SculptLayerProperty property);
     // One layer's mesh REPLACED wholesale — a global voxel remesh. Both sides
     // are taken by value because both are kept: undo needs the before and redo
     // needs the after, and the layer holds only one of them at a time.
@@ -339,7 +376,9 @@ class History {
             // every file already on disk.
             DynamicMesh,
             MeshReplace,  // appended, for the reason above
-            Multires      // appended, for the reason above
+            Multires,     // appended, for the reason above
+            MultiresLayer,         // appended, for the reason above
+            MultiresLayerProperty  // appended, for the reason above
         };
         Kind kind = Kind::Command;
         scene::Command command;                   // Kind::Command
@@ -349,6 +388,8 @@ class History {
         mesh::VertexDeltas deltas;                // Mesh
         mesh::TopologyDelta topology_delta;        // DynamicMesh
         mesh::MultiresDelta multires_delta;        // Multires
+        mesh::SculptLayerDelta sculpt_layer_delta;        // MultiresLayer
+        mesh::SculptLayerProperty sculpt_layer_property;  // MultiresLayerProperty
         // SurfaceGroup: the field AFTER the edit. Only the after side, unlike
         // the step — a journal replays forward onto the snapshot it was taken
         // against and never runs backwards, so the before side would be bytes

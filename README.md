@@ -291,10 +291,15 @@ protecting.
 - Pre-bake repair: report, close holes, fill voids
 - A stack of resolution levels — block out coarse, `add_level` to refine where
   the detail goes, without paying for a fine grid everywhere
-- **Sculpt layers** — ZBrush's headline feature, on a grid: bracket a run of
-  strokes and the grid records what they *changed*, so their strength stays
-  adjustable long after they are finished. Not undo, which is a stack you pop;
-  a layer is addressable
+- **Sculpt layers** — ZBrush's headline feature, on **two** representations:
+  bracket a run of strokes and the grid records what they *changed*, so their
+  strength stays adjustable long after they are finished; a subdivision
+  hierarchy has the same stack over its *detail*, where a pass is a named,
+  reorderable, dialable channel that survives a save, a load and a reorder
+  (§8b). Not undo, which is a stack you pop; a layer is addressable.
+  The two differ in one thing worth knowing: voxel layers replay cell writes and
+  are **order-dependent**, while additive displacement **commutes**, so
+  reordering a mesh pass changes organisation and not geometry
 
 | | |
 |---|---|
@@ -571,7 +576,7 @@ Recorded as decisions rather than gaps, with the reasoning in
   a chisel is a preset over. They are not three sculptors that happen to agree:
   the same brush descriptor through each writes byte-identical positions for a
   normal-free verb and masks the same vertices, asserted in
-  `examples/69_shared_brush_runtime.py` rather than claimed here.
+  `examples/70_shared_brush_runtime.py` rather than claimed here.
 - ~~**No global topology reset**~~ — **`mesh::voxel_remesh` shipped.** A whole
   surface rebuilt through a signed narrow-band field at an explicit world voxel
   size: overlaps fuse, open surfaces close under an explicit policy, the result

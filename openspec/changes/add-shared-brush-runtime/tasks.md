@@ -398,7 +398,7 @@
 
 ## 8. The demonstration
 
-- [x] 8.1 `examples/69_shared_brush_runtime.py` — ONE
+- [x] 8.1 `examples/70_shared_brush_runtime.py` — ONE
       `brush.reference_preset(...)` gesture, resolved once, replayed over a
       fixed mesh, an adaptive surface and a multires hierarchy built from the
       same source model.
@@ -596,7 +596,7 @@
       (3) the preset fix undone in full (version back to 1, the `put_f32` and
       the gated read removed): 2 cases fail, both new.
       (4) `in.topology = &topology` set to null in `DynamicSculptor::gather`,
-      pyclay rebuilt against it, and `examples/69_shared_brush_runtime.py` run:
+      pyclay rebuilt against it, and `examples/70_shared_brush_runtime.py` run:
       it raises `SystemExit` reading `(529, 613, 529)` where it needs
       `(529, 529, 529)`. That is the change's headline claim failing through the
       shipped wheel, which is the only place the example could have caught it
@@ -639,7 +639,7 @@
       stamp reports `arena_growths = 0` and `arena_high_water = 0` — its
       automask-free path never touches the arena at all — where every other row
       reports 1 growth and 1856 bytes
-- [x] 10.9 THE EXAMPLE, RUN. `examples/69_shared_brush_runtime.py` exits 0 and
+- [x] 10.9 THE EXAMPLE, RUN. `examples/70_shared_brush_runtime.py` exits 0 and
       reproduces its committed render and .obj BYTE-IDENTICALLY (`git status`
       over `examples/` is empty after the run), which is a determinism claim the
       gallery gate cannot make on its own. Its numbers are the ones 8.2 and 8.3
@@ -726,7 +726,7 @@
       `benchmarks` PASSES — `check_bench.py` OK against a fresh
       `clay_bench --benchmark_format=json` run.
       AND THE EXAMPLE, RE-RUN AT THE DOCS TIP:
-      `examples/69_shared_brush_runtime.py` exits 0 and leaves
+      `examples/70_shared_brush_runtime.py` exits 0 and leaves
       `git status examples/` empty, so it reproduces its committed PNG and
       `.obj` byte for byte
 - [x] 11.6 THE PR, opened against `main` — #419.
@@ -768,11 +768,11 @@
 | `tests/unit/test_stamp_frame.cpp` | orthonormality, `stamp_uv` inversion, and azimuth-zero byte equality |
 | `tests/unit/test_dynamic_shared_brush_parity.cpp` | P1–P4 against the adaptive surface |
 | `tests/unit/test_multires_shared_brush_parity.cpp` | P1–P4 against the hierarchy at level 0 |
-| `examples/69_shared_brush_runtime.py` | one preset gesture over three representations, asserted and rendered |
+| `examples/70_shared_brush_runtime.py` | one preset gesture over three representations, asserted and rendered |
 | `tests/unit/test_shared_brush_determinism.cpp` | history-independence of the arena, and the automask drop said where it is visible |
 | `tests/unit/test_c_shared_brush_runtime.cpp` | the automask divergence and the arena statistics at the ABI, where the contract is written down |
 | `bindings/python/tests/test_shared_brush_runtime.py` | the same claims from the wheel, including the two estimators the C ABI cannot carry |
-| `examples/output/69_shared_brush_runtime.png`, `..._adaptive.obj`, `..._adaptive.mtl` | the committed render and mesh the gallery gate compares against |
+| `examples/output/70_shared_brush_runtime.png`, `..._adaptive.obj`, `..._adaptive.mtl` | the committed render and mesh the gallery gate compares against |
 
 **Changed**
 

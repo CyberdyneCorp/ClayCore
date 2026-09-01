@@ -342,10 +342,10 @@ def main():
     print("            the hierarchy's cage is byte-identical, because at level 0 it")
     print("            IS the fixed sculptor rather than a second implementation of it.")
 
-    R.contact_sheet(tiles, "69_shared_brush_runtime.png", columns=3,
+    R.contact_sheet(tiles, "70_shared_brush_runtime.png", columns=3,
                     caption=" | ".join(labels))
 
-    obj = R.output_path("69_shared_brush_adaptive.obj")
+    obj = R.output_path("70_shared_brush_adaptive.obj")
     surface.to_mesh().save(obj)
     print(f"\n  wrote {os.path.basename(obj)} for inspection.")
     print("  one brush model, one weight, one factor order — and the three")
