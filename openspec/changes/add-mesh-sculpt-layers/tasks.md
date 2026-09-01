@@ -331,8 +331,40 @@
       blocks that layer has allocated of the 21 at the level, removing a layer
       leaves the other two byte-identical and the base checksum unmoved, a
       raising stroke leaves nothing behind, and the stack survives a save
-- [ ] 8.7 Version lines together; four presets green plus `release_check`;
+- [x] 8.7 Version lines together; four presets green plus `release_check`;
       `tsan` under `setarch -R`; `check_layering.py` green
-- [ ] 8.8 Docs: `docs/07-brushes-and-features.md` gains the stack and the
+      — the four version lines move as one at 0.76.0 (`CMakeLists.txt` VERSION,
+      `CLAY_ABI_MINOR 76`, `pyproject.toml`, and `release_check`'s `version`
+      row, which compares exactly those and PASSES). Every preset this box can
+      build is green, each the whole `ctest` suite and not a filter:
+      `cpu-only` 4/4 in 154.6 s, `asan-ubsan` 4/4 in 3284.1 s with no sanitizer
+      report, and `tsan` under `setarch -R` 4/4 in 1229.9 s, likewise clean —
+      2,032 unit cases and 14.9 M assertions each. `metal` is Darwin-only and
+      `cuda`/`opencl`/`vulkan` want hardware this box does not have.
+      `check_layering.py`, `check_c_abi.py`, `check_binding_parity.py`,
+      `check_gallery.py` and `check_swift_package.py` are all OK.
+      `release_check.py` is 13 PASS / 2 FAIL, and NEITHER failure is this
+      change's:
+        * `device` needs the hardware gate — "engine changed since the gate ran
+          at 39c244209", which is the pre-existing state of this environment;
+        * `benchmarks` is not reproducible on this shared box, and MAIN FAILS IT
+          TOO. Three runs of the same gate on this branch failed on three
+          different rows (`BM_MeshBricksGradDenseDoc` at 17.17x once, six
+          unrelated SDF/voxel/brick rows the next, one SDF row the third), a
+          fourth run of the SAME pair measured 9.01x against the 14.0 ceiling,
+          and a back-to-back run of main's own `clay_bench` on the same box
+          failed on `BM_SdfHistoryPrefixPiled5000`. Load average moved 4.33 ->
+          7.40 during the branch run and 7.40 -> 14.38 during main's. No failing
+          row touches `mesh/`, and the change's own benchmarks are in 5.6
+- [x] 8.8 Docs: `docs/07-brushes-and-features.md` gains the stack and the
       distinction from `MeshBrush::Layer`; the README's sculpt-layer claim is
       widened from voxels to the representations that actually have them
+      — §8b gains "Sculpt layers over the hierarchy": the one-line model, a
+      table of the THREE things `Layer` means and why the brush enumerator was
+      not renamed, strength-as-composition with the divide-by-zero trap named,
+      the three revisions and what each invalidates, the transaction's three
+      reasons, the detail-aware verbs as a table, and the memory rows with the
+      reason there is no cap. The README's claim now reads "on TWO
+      representations" and states the difference that matters — voxel layers
+      replay cell writes and are order-dependent, additive displacement
+      commutes
