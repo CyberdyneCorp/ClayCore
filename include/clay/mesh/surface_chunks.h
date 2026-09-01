@@ -297,6 +297,15 @@ class ChunkTable {
     // times a stamp touches it, and the clear is an increment.
     void mark(std::uint32_t chunk, ChunkDirty what);
 
+    // The chunks marked since the last `clear_dirty`, in the order they were
+    // first marked.
+    //
+    // MAY NAME A CHUNK THAT HAS SINCE BEEN RELEASED. A partitioner that merges
+    // or retires a chunk does not walk this list to remove it — the whole point
+    // of the epoch mark is that nothing walks the list — so `chunk()` returns
+    // null for it and a drain SKIPS it rather than assuming every id here is
+    // live. The alternative is an O(dirty) erase on the release path, which
+    // runs during a stroke to save a null check that does not.
     const std::vector<std::uint32_t>& dirty() const { return dirty_; }
     void clear_dirty();
 
