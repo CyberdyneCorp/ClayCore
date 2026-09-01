@@ -91,6 +91,44 @@ struct Doc {
     operator clay_document*() const { return d; }
 };
 
+
+// A hierarchy with one sculpt layer on it, for the descriptors that
+// add-mesh-sculpt-layers introduced — and for clay_multires_memory, which that
+// change GREW by two rows. A descriptor that has just grown is the case this
+// file exists for: every host compiled against the older clay.h allocated the
+// shorter struct, and the two new rows land past the end of it unless the fill
+// is bounded.
+struct Hierarchy {
+    clay_mesh* mesh = nullptr;
+    clay_multires* surface = nullptr;
+    uint64_t layer = 0;
+
+    Hierarchy() {
+        const float positions[24] = {-1, -1, -1, 1, -1, -1, 1, 1, -1, -1, 1, -1,
+                                     -1, -1, 1,  1, -1, 1,  1, 1, 1,  -1, 1, 1};
+        const std::uint32_t indices[36] = {0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7,
+                                           0, 1, 5, 0, 5, 4, 2, 3, 7, 2, 7, 6,
+                                           1, 2, 6, 1, 6, 5, 0, 4, 7, 0, 7, 3};
+        REQUIRE(clay_mesh_from_triangles(positions, 8, indices, 36, &mesh) == CLAY_OK);
+        clay_multires_desc desc{};
+        desc.struct_size = sizeof(desc);
+        REQUIRE(clay_multires_defaults(&desc) == CLAY_OK);
+        std::int32_t error = 0;
+        REQUIRE(clay_multires_from_mesh(mesh, &desc, &surface, &error) == CLAY_OK);
+        REQUIRE(clay_multires_add_level(surface, nullptr, &error) == CLAY_OK);
+        REQUIRE(clay_multires_add_sculpt_layer(surface, "wrinkles", &layer, &error) == CLAY_OK);
+        const float tbn[3] = {0.0f, 0.0f, 0.05f};
+        REQUIRE(clay_multires_set_sculpt_layer_detail(surface, layer, 1, 0, tbn, &error) ==
+                CLAY_OK);
+    }
+    ~Hierarchy() {
+        clay_multires_destroy(surface);
+        clay_mesh_destroy(mesh);
+    }
+    Hierarchy(const Hierarchy&) = delete;
+    Hierarchy& operator=(const Hierarchy&) = delete;
+};
+
 }  // namespace
 
 TEST_CASE("c abi: an output descriptor is never filled past the size the caller declared") {
@@ -173,6 +211,73 @@ TEST_CASE("c abi: an output descriptor is never filled past the size the caller 
         CHECK(stats.reported_size() == stats.declared);
 
         clay_brick_cache_destroy(cache);
+    }
+
+    SUBCASE("clay_multires_memory, which grew two rows in ABI 0.76.0") {
+        Hierarchy h;
+        // `total` was the last field before the sculpt-layer rows were
+        // appended, so this is exactly the buffer a 0.75.0 host allocated.
+        OldHostBuffer<clay_multires_memory> buf(ORIGINAL_OF(clay_multires_memory, total));
+        REQUIRE(clay_multires_memory_get(h.surface, buf.ptr()) == CLAY_OK);
+        CHECK(buf.overrun() == 0);
+        CHECK(buf.reported_size() == buf.declared);
+        CHECK(buf.was_filled());
+    }
+
+    SUBCASE("clay_sculpt_layer_info") {
+        Hierarchy h;
+        OldHostBuffer<clay_sculpt_layer_info> buf(
+            ORIGINAL_OF(clay_sculpt_layer_info, coverage_vertices));
+        REQUIRE(clay_multires_sculpt_layer_info(h.surface, h.layer, buf.ptr()) == CLAY_OK);
+        CHECK(buf.overrun() == 0);
+        CHECK(buf.reported_size() == buf.declared);
+        CHECK(buf.was_filled());
+    }
+
+    SUBCASE("clay_sculpt_layer_stats") {
+        Hierarchy h;
+        OldHostBuffer<clay_sculpt_layer_stats> buf(
+            ORIGINAL_OF(clay_sculpt_layer_stats, compositions));
+        REQUIRE(clay_multires_sculpt_layer_stats(h.surface, buf.ptr()) == CLAY_OK);
+        CHECK(buf.overrun() == 0);
+        CHECK(buf.reported_size() == buf.declared);
+    }
+
+    SUBCASE("clay_detail_stamp_report") {
+        Hierarchy h;
+        clay_multires_sculpt_layer_stroke* stroke = nullptr;
+        REQUIRE(clay_multires_sculpt_layer_stroke_create(h.surface, &stroke) == CLAY_OK);
+        std::int32_t error = 0;
+        REQUIRE(clay_multires_sculpt_layer_stroke_begin(stroke, &error) == CLAY_OK);
+
+        clay_mesh_brush_desc brush{};
+        brush.struct_size = sizeof(brush);
+        REQUIRE(clay_mesh_brush_defaults(&brush) == CLAY_OK);
+        brush.center[2] = 1.0f;
+        brush.radius = 0.8f;
+        brush.strength = 0.4f;
+
+        std::vector<float> image(16 * 16, 0.5f);
+        clay_detail_stamp_desc stamp{};
+        stamp.struct_size = sizeof(stamp);
+        stamp.mode = CLAY_DETAIL_STAMP_HEIGHT;
+        stamp.image = image.data();
+        stamp.width = 16;
+        stamp.height = 16;
+        stamp.amplitude = 0.05f;
+        stamp.center[2] = 1.0f;
+        stamp.extent = 1.2f;
+
+        OldHostBuffer<clay_detail_stamp_report> buf(
+            ORIGINAL_OF(clay_detail_stamp_report, under_resolved));
+        REQUIRE(clay_multires_sculpt_layer_stroke_stamp_detail(stroke, &stamp, &brush, nullptr,
+                                                               buf.ptr(), nullptr) == CLAY_OK);
+        CHECK(buf.overrun() == 0);
+        CHECK(buf.reported_size() == buf.declared);
+        CHECK(buf.was_filled());
+
+        REQUIRE(clay_multires_sculpt_layer_stroke_commit(stroke, nullptr) == CLAY_OK);
+        clay_multires_sculpt_layer_stroke_destroy(stroke);
     }
 }
 

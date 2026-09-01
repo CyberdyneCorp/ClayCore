@@ -28,6 +28,7 @@
 #include "clay/brush/preset.h"
 #include "clay/mesh/dynamic_sculpt.h"
 #include "clay/brush/stroke.h"
+#include "clay/mesh/layered_sculpt.h"
 #include "clay/mesh/multires_sculpt.h"
 #include "clay/mesh/project.h"
 #include "clay/mesh/dynamic_validate.h"
@@ -14922,6 +14923,8 @@ clay_result clay_multires_memory_get(const clay_multires* surface,
     out.runtime_index = m.runtime_index;
     out.rebuildable = m.rebuildable;
     out.total = m.total;
+    out.sculpt_layers = m.sculpt_layers;
+    out.composed = m.composed;
     write_desc(out_memory, declared, out);
     return CLAY_OK;
 }
@@ -15261,6 +15264,677 @@ clay_result clay_multires_copy_block(clay_multires* surface, uint32_t patch, uin
     if (out_indices)
         for (std::size_t i = 0; i < block.indices.size(); ++i) out_indices[i] = block.indices[i];
     if (out_written) write_block_info(out_written, declared, block);
+    return CLAY_OK;
+}
+
+// -- sculpt layers (mesh-sculpt-layers spec, add-mesh-sculpt-layers) ----------
+//
+// The stack is OWNED by the surface, so every entry point here reaches it
+// through the surface handle rather than through a second one. There is
+// deliberately no clay_sculpt_layer handle: a layer is not an object with a
+// lifetime of its own, it is a row of a stack that a remove or a merge can
+// take away, and a handle would be a pointer a host could hold across exactly
+// that.
+
+namespace {
+
+constexpr std::size_t kSculptLayerInfoOriginal =
+    offsetof(clay_sculpt_layer_info, coverage_vertices) + sizeof(std::uint64_t);
+constexpr std::size_t kSculptLayerStatsOriginal =
+    offsetof(clay_sculpt_layer_stats, compositions) + sizeof(std::uint64_t);
+constexpr std::size_t kDetailStampDescOriginal =
+    offsetof(clay_detail_stamp_desc, extent) + sizeof(float);
+constexpr std::size_t kDetailStampReportOriginal =
+    offsetof(clay_detail_stamp_report, under_resolved) + sizeof(std::int32_t);
+
+// WHICH refusal, worked out from the stack rather than returned by it.
+//
+// The C++ API answers `false`, which is all a caller with the stack in front of
+// it needs. A host needs more: "no such layer", "this layer is locked" and
+// "finish the stroke first" are three different sentences in a UI, and one
+// false makes them indistinguishable. `composition` says whether the operation
+// changes what reaches the surface (which an open stroke refuses) and `writes`
+// whether it touches coefficients (which a lock refuses) — a rename is neither,
+// which is exactly why it still works in both states.
+std::int32_t sculpt_layer_refusal(const mesh::MultiresSurface& surface, std::uint64_t id,
+                                  bool composition, bool writes) {
+    const mesh::SculptLayerStack& stack = surface.sculpt_layers();
+    const mesh::SculptLayer* layer = stack.find(id);
+    if (!layer) return CLAY_MULTIRES_NO_SUCH_SCULPT_LAYER;
+    if (composition && stack.composition_held()) return CLAY_MULTIRES_SCULPT_LAYER_STROKE_OPEN;
+    if (writes && layer->locked) return CLAY_MULTIRES_SCULPT_LAYER_LOCKED;
+    // Everything else a stack operation refuses for is an index or a vertex
+    // that does not name anything: merging the bottom layer down, moving past
+    // the end, a level the hierarchy does not have.
+    return CLAY_MULTIRES_INDEX_OUT_OF_RANGE;
+}
+
+// Report a refusal through BOTH channels, because they answer different
+// questions: `out_error` is the typed reason a host branches on, and the
+// clay_result plus its message is what a log reads. An unknown id is
+// CLAY_ERROR_NOT_FOUND rather than a bare invalid argument, which is the
+// reading every other id in this ABI already gets.
+clay_result refuse_sculpt_layer(std::int32_t* out_error, std::int32_t reason) {
+    if (out_error) *out_error = reason;
+    const char* text = mesh::multires_error_text(static_cast<mesh::MultiresError>(reason));
+    return fail(reason == CLAY_MULTIRES_NO_SUCH_SCULPT_LAYER ? CLAY_ERROR_NOT_FOUND
+                                                             : CLAY_ERROR_INVALID_ARGUMENT,
+                text);
+}
+
+// Resolve a surface for a stack mutation and clear the caller's error slot in
+// one step: every mutator below opens with exactly these three lines, and the
+// one that forgot to clear `out_error` would leave a stale reason behind a
+// success.
+clay_result begin_sculpt_layer_edit(clay_multires* surface, std::int32_t* out_error,
+                                    mesh::MultiresSurface** out) {
+    if (out_error) *out_error = CLAY_MULTIRES_OK;
+    return resolve_multires(surface, out);
+}
+
+const mesh::SculptLayer* find_sculpt_layer(const mesh::MultiresSurface& surface,
+                                           std::uint64_t id) {
+    return surface.sculpt_layers().find(id);
+}
+
+}  // namespace
+
+struct clay_multires_sculpt_layer_stroke {
+    // The surface, kept beside the transaction so a report can read its
+    // revisions after the stamp — the same shape clay_multires_sculptor has.
+    clay_multires* owner = nullptr;
+    std::unique_ptr<mesh::LayeredMultiresSculptor> sculptor;
+};
+
+clay_result clay_multires_sculpt_layer_count(const clay_multires* surface, size_t* out_count) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_count");
+    *out_count = s->sculpt_layers().size();
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculpt_layer_id_at(const clay_multires* surface, size_t index,
+                                             uint64_t* out_id) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_id) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_id");
+    if (index >= s->sculpt_layers().size())
+        return fail(CLAY_ERROR_NOT_FOUND, "no sculpt layer at index " + std::to_string(index));
+    *out_id = s->sculpt_layers().id_at(index);
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculpt_layer_info(const clay_multires* surface, uint64_t id,
+                                            clay_sculpt_layer_info* out_info) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_info) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_info");
+    const std::uint32_t declared = out_info->struct_size;
+    clay_sculpt_layer_info probe;
+    r = read_desc(out_info, kSculptLayerInfoOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const mesh::SculptLayer* layer = find_sculpt_layer(*s, id);
+    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "no sculpt layer " + std::to_string(id));
+
+    clay_sculpt_layer_info out{};
+    out.struct_size = static_cast<std::uint32_t>(sizeof(out));
+    out.id = layer->id;
+    out.index = static_cast<std::uint32_t>(s->sculpt_layers().index_of(id));
+    out.kind = static_cast<std::int32_t>(layer->kind);
+    out.strength = layer->strength;
+    out.visible = layer->visible ? 1 : 0;
+    out.locked = layer->locked ? 1 : 0;
+    out.name_bytes = static_cast<std::uint32_t>(layer->name.size() + 1);
+    out.bytes = layer->bytes();
+    out.coverage_vertices = layer->coverage_vertices();
+    write_desc(out_info, declared, out);
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculpt_layer_name(const clay_multires* surface, uint64_t id,
+                                            char* buffer, size_t* size) {
+    if (!size) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null size");
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    const mesh::SculptLayer* layer = find_sculpt_layer(*s, id);
+    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "no sculpt layer " + std::to_string(id));
+    const std::size_t needed = layer->name.size() + 1;
+    if (!buffer) {
+        *size = needed;
+        return CLAY_OK;
+    }
+    if (*size < needed) {
+        *size = needed;
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                    "the name needs " + std::to_string(needed) + " bytes");
+    }
+    std::memcpy(buffer, layer->name.c_str(), needed);
+    *size = needed;
+    return CLAY_OK;
+}
+
+clay_result clay_multires_active_sculpt_layer(const clay_multires* surface, uint64_t* out_id) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_id) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_id");
+    *out_id = s->sculpt_layers().active();
+    return CLAY_OK;
+}
+
+clay_result clay_multires_add_sculpt_layer(clay_multires* surface, const char* name,
+                                           uint64_t* out_id, int32_t* out_error) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = begin_sculpt_layer_edit(surface, out_error, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_id) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_id");
+    const mesh::SculptLayerId id = s->add_sculpt_layer(name ? std::string(name) : std::string());
+    // The only reason `add` refuses: a stroke is holding the composition, and
+    // adding a layer under an open gesture would change what the next stamp
+    // reads.
+    if (id == mesh::kNoSculptLayer)
+        return refuse_sculpt_layer(out_error, CLAY_MULTIRES_SCULPT_LAYER_STROKE_OPEN);
+    *out_id = id;
+    return CLAY_OK;
+}
+
+clay_result clay_multires_remove_sculpt_layer(clay_multires* surface, uint64_t id,
+                                              int32_t* out_error) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = begin_sculpt_layer_edit(surface, out_error, &s);
+    if (r != CLAY_OK) return r;
+    if (!s->remove_sculpt_layer(id))
+        return refuse_sculpt_layer(out_error, sculpt_layer_refusal(*s, id, true, false));
+    return CLAY_OK;
+}
+
+clay_result clay_multires_move_sculpt_layer(clay_multires* surface, uint64_t id, size_t index,
+                                            int32_t* out_error) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = begin_sculpt_layer_edit(surface, out_error, &s);
+    if (r != CLAY_OK) return r;
+    if (!s->move_sculpt_layer(id, index))
+        return refuse_sculpt_layer(out_error, sculpt_layer_refusal(*s, id, true, false));
+    return CLAY_OK;
+}
+
+clay_result clay_multires_merge_sculpt_layer_down(clay_multires* surface, uint64_t id,
+                                                  int32_t* out_error) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = begin_sculpt_layer_edit(surface, out_error, &s);
+    if (r != CLAY_OK) return r;
+    if (!s->merge_sculpt_layer_down(id))
+        return refuse_sculpt_layer(out_error, sculpt_layer_refusal(*s, id, true, true));
+    return CLAY_OK;
+}
+
+clay_result clay_multires_bake_sculpt_layer_to_base(clay_multires* surface, uint64_t id,
+                                                    int32_t* out_error) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = begin_sculpt_layer_edit(surface, out_error, &s);
+    if (r != CLAY_OK) return r;
+    if (!s->bake_sculpt_layer_to_base(id))
+        return refuse_sculpt_layer(out_error, sculpt_layer_refusal(*s, id, true, true));
+    return CLAY_OK;
+}
+
+clay_result clay_multires_rename_sculpt_layer(clay_multires* surface, uint64_t id,
+                                              const char* name, int32_t* out_error) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = begin_sculpt_layer_edit(surface, out_error, &s);
+    if (r != CLAY_OK) return r;
+    // A rename is metadata: neither a lock nor an open stroke refuses it, so
+    // the only reason left is an id this stack does not hold.
+    if (!s->rename_sculpt_layer(id, name ? std::string(name) : std::string()))
+        return refuse_sculpt_layer(out_error, sculpt_layer_refusal(*s, id, false, false));
+    return CLAY_OK;
+}
+
+clay_result clay_multires_set_sculpt_layer_strength(clay_multires* surface, uint64_t id,
+                                                    float strength, int32_t* out_error) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = begin_sculpt_layer_edit(surface, out_error, &s);
+    if (r != CLAY_OK) return r;
+    if (!s->set_sculpt_layer_strength(id, strength))
+        return refuse_sculpt_layer(out_error, sculpt_layer_refusal(*s, id, true, false));
+    return CLAY_OK;
+}
+
+clay_result clay_multires_set_sculpt_layer_visible(clay_multires* surface, uint64_t id,
+                                                   int32_t visible, int32_t* out_error) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = begin_sculpt_layer_edit(surface, out_error, &s);
+    if (r != CLAY_OK) return r;
+    if (!s->set_sculpt_layer_visible(id, visible != 0))
+        return refuse_sculpt_layer(out_error, sculpt_layer_refusal(*s, id, true, false));
+    return CLAY_OK;
+}
+
+clay_result clay_multires_set_sculpt_layer_locked(clay_multires* surface, uint64_t id,
+                                                  int32_t locked, int32_t* out_error) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = begin_sculpt_layer_edit(surface, out_error, &s);
+    if (r != CLAY_OK) return r;
+    // Locking is a permission rather than a contribution, so a locked layer can
+    // be unlocked and an open stroke does not refuse it.
+    if (!s->set_sculpt_layer_locked(id, locked != 0))
+        return refuse_sculpt_layer(out_error, sculpt_layer_refusal(*s, id, false, false));
+    return CLAY_OK;
+}
+
+clay_result clay_multires_set_active_sculpt_layer(clay_multires* surface, uint64_t id,
+                                                  int32_t* out_error) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = begin_sculpt_layer_edit(surface, out_error, &s);
+    if (r != CLAY_OK) return r;
+    if (!s->set_active_sculpt_layer(id))
+        return refuse_sculpt_layer(out_error, sculpt_layer_refusal(*s, id, false, false));
+    return CLAY_OK;
+}
+
+clay_result clay_multires_set_sculpt_layer_detail(clay_multires* surface, uint64_t id,
+                                                  uint32_t level, uint32_t vertex,
+                                                  const float* tbn, int32_t* out_error) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = begin_sculpt_layer_edit(surface, out_error, &s);
+    if (r != CLAY_OK) return r;
+    if (!tbn) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null coefficients");
+    const mesh::LocalDetail value{tbn[0], tbn[1], tbn[2]};
+    if (!s->set_sculpt_layer_detail(id, level, vertex, value))
+        return refuse_sculpt_layer(out_error, sculpt_layer_refusal(*s, id, false, true));
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculpt_layer_detail(const clay_multires* surface, uint64_t id,
+                                              uint32_t level, uint32_t vertex, float* out_tbn) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_tbn) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_tbn");
+    if (!find_sculpt_layer(*s, id))
+        return fail(CLAY_ERROR_NOT_FOUND, "no sculpt layer " + std::to_string(id));
+    // Zero outside anything stored, which is what a coefficient field means
+    // where the artist has not been — so a level or a vertex past the end reads
+    // as "nothing here" rather than refusing.
+    const mesh::LocalDetail d = s->sculpt_layer_detail(id, level, vertex);
+    out_tbn[0] = d.tangent;
+    out_tbn[1] = d.bitangent;
+    out_tbn[2] = d.normal;
+    return CLAY_OK;
+}
+
+clay_result clay_multires_set_sculpt_layer_mask(clay_multires* surface, uint64_t id,
+                                                uint32_t level, uint32_t vertex, float weight,
+                                                int32_t* out_error) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = begin_sculpt_layer_edit(surface, out_error, &s);
+    if (r != CLAY_OK) return r;
+    if (!s->set_sculpt_layer_mask(id, level, vertex, weight))
+        return refuse_sculpt_layer(out_error, sculpt_layer_refusal(*s, id, true, false));
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculpt_layer_mask(const clay_multires* surface, uint64_t id,
+                                            uint32_t level, uint32_t vertex, float* out_weight) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_weight) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_weight");
+    if (!find_sculpt_layer(*s, id))
+        return fail(CLAY_ERROR_NOT_FOUND, "no sculpt layer " + std::to_string(id));
+    // The identity is ONE, not zero: a mask the artist has never touched must
+    // not erase the layer it belongs to.
+    const mesh::SparseWeightField* mask = s->sculpt_layers().mask_at(id, level);
+    *out_weight = mask ? mask->get(vertex) : 1.0f;
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculpt_layer_checksum(const clay_multires* surface,
+                                                uint64_t* out_checksum) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_checksum) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_checksum");
+    *out_checksum = s->sculpt_layer_checksum();
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculpt_layer_revision(const clay_multires* surface,
+                                                uint64_t* out_metadata, uint64_t* out_composition,
+                                                uint64_t* out_content) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (out_metadata) *out_metadata = s->sculpt_layer_metadata_revision();
+    if (out_composition) *out_composition = s->sculpt_layer_composition_revision();
+    if (out_content) *out_content = s->sculpt_layer_content_revision();
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculpt_layer_stats(const clay_multires* surface,
+                                             clay_sculpt_layer_stats* out_stats) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_stats) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_stats");
+    const std::uint32_t declared = out_stats->struct_size;
+    clay_sculpt_layer_stats probe;
+    r = read_desc(out_stats, kSculptLayerStatsOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const mesh::SculptLayerStats st = s->sculpt_layer_stats();
+    clay_sculpt_layer_stats out{};
+    out.struct_size = static_cast<std::uint32_t>(sizeof(out));
+    out.blocks_recomposed = st.blocks_recomposed;
+    out.layer_blocks_visited = st.layer_blocks_visited;
+    out.compositions = st.compositions;
+    write_desc(out_stats, declared, out);
+    return CLAY_OK;
+}
+
+clay_result clay_multires_reset_sculpt_layer_stats(clay_multires* surface) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires(surface, &s);
+    if (r != CLAY_OK) return r;
+    s->reset_sculpt_layer_stats();
+    return CLAY_OK;
+}
+
+clay_result clay_multires_compact_sculpt_layers(clay_multires* surface) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires(surface, &s);
+    if (r != CLAY_OK) return r;
+    s->compact_sculpt_layers();
+    return CLAY_OK;
+}
+
+clay_result clay_multires_hold_sculpt_layer_composition(clay_multires* surface, int32_t held) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires(surface, &s);
+    if (r != CLAY_OK) return r;
+    s->hold_sculpt_layer_composition(held != 0);
+    return CLAY_OK;
+}
+
+// -- the sculpt layer stroke transaction -------------------------------------
+
+namespace {
+
+clay_result resolve_layer_stroke(clay_multires_sculpt_layer_stroke* stroke,
+                                 mesh::LayeredMultiresSculptor** out) {
+    if (!stroke || !stroke->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null sculpt layer stroke");
+    *out = stroke->sculptor.get();
+    return CLAY_OK;
+}
+
+// A verb, its mask gate and an OPEN transaction, which is what all five stroke
+// entry points need before they can do anything. Gathered here rather than
+// repeated five times, where the fifth copy is the one that forgets to check
+// that a stroke is open.
+clay_result read_layer_stroke_stamp(clay_multires_sculpt_layer_stroke* stroke,
+                                    const clay_mesh_brush_desc* brush, const clay_mask* mask,
+                                    mesh::LayeredMultiresSculptor** out_sculptor,
+                                    mesh::MeshBrush* out_verb,
+                                    mesh::MeshBrushSettings* out_settings,
+                                    field::MaskGate* out_gate) {
+    clay_result r = resolve_layer_stroke(stroke, out_sculptor);
+    if (r != CLAY_OK) return r;
+    if (!(*out_sculptor)->open())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "no stroke is open; call clay_multires_sculpt_layer_stroke_begin first");
+    r = read_mesh_brush(brush, out_verb, out_settings);
+    if (r != CLAY_OK) return r;
+    if (mask) {
+        voxel::MaskField* field_mask = nullptr;
+        r = resolve_mask(mask, &field_mask);
+        if (r != CLAY_OK) return r;
+        *out_gate = [field_mask](kernel::cfloat3 p) { return field_mask->sample(p); };
+    }
+    return CLAY_OK;
+}
+
+clay_result write_layer_stroke_report(const mesh::MultiresSurface& s, std::size_t moved,
+                                      clay_multires_stamp_report* out_report) {
+    if (!out_report) return CLAY_OK;
+    const std::uint32_t declared = out_report->struct_size;
+    clay_multires_stamp_report probe;
+    clay_result r = read_desc(out_report, kMultiresStampReportOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    clay_multires_stamp_report out{};
+    out.struct_size = static_cast<std::uint32_t>(sizeof(out));
+    out.level = s.sculpt_level();
+    out.moved_vertices = moved;
+    out.base_revision = s.base_revision();
+    out.detail_revision = s.detail_revision();
+    out.evaluated_revision = s.evaluated_revision();
+    write_desc(out_report, declared, out);
+    return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_multires_sculpt_layer_stroke_create(
+    clay_multires* surface, clay_multires_sculpt_layer_stroke** out_stroke) {
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_stroke) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_stroke");
+    auto* handle = new clay_multires_sculpt_layer_stroke{};
+    handle->owner = surface;
+    handle->sculptor = std::make_unique<mesh::LayeredMultiresSculptor>(*s);
+    *out_stroke = handle;
+    return CLAY_OK;
+}
+
+void clay_multires_sculpt_layer_stroke_destroy(clay_multires_sculpt_layer_stroke* stroke) {
+    delete stroke;
+}
+
+clay_result clay_multires_sculpt_layer_stroke_set_write_domain(
+    clay_multires_sculpt_layer_stroke* stroke, int32_t domain) {
+    mesh::LayeredMultiresSculptor* self = nullptr;
+    clay_result r = resolve_layer_stroke(stroke, &self);
+    if (r != CLAY_OK) return r;
+    if (domain < CLAY_MULTIRES_WRITE_AUTOMATIC || domain > CLAY_MULTIRES_WRITE_DETAIL)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "unknown write domain: " + std::to_string(domain));
+    self->set_write_domain(static_cast<mesh::MultiresWriteDomain>(domain));
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculpt_layer_stroke_begin(clay_multires_sculpt_layer_stroke* stroke,
+                                                    int32_t* out_error) {
+    if (out_error) *out_error = CLAY_MULTIRES_OK;
+    mesh::LayeredMultiresSculptor* self = nullptr;
+    clay_result r = resolve_layer_stroke(stroke, &self);
+    if (r != CLAY_OK) return r;
+    const bool was_open = self->open();
+    if (self->begin()) return CLAY_OK;
+    // Three refusals, told apart the same way the stack's are, because a host
+    // shows three different things: a gesture already running, a channel the
+    // caller asked for that does not exist, and a finished pass that is locked.
+    if (was_open) return refuse_sculpt_layer(out_error, CLAY_MULTIRES_SCULPT_LAYER_STROKE_OPEN);
+    const mesh::SculptLayerStack& stack = stroke->owner->surface.sculpt_layers();
+    const mesh::SculptLayer* active = stack.find(stack.active());
+    if (self->write_domain() == mesh::MultiresWriteDomain::Detail && !active)
+        return refuse_sculpt_layer(out_error, CLAY_MULTIRES_NO_SUCH_SCULPT_LAYER);
+    if (active && active->locked)
+        return refuse_sculpt_layer(out_error, CLAY_MULTIRES_SCULPT_LAYER_LOCKED);
+    if (out_error) *out_error = CLAY_MULTIRES_EMPTY_BASE;
+    return fail(CLAY_ERROR_INVALID_ARGUMENT, "the hierarchy has no level to sculpt");
+}
+
+clay_result clay_multires_sculpt_layer_stroke_target_layer(
+    const clay_multires_sculpt_layer_stroke* stroke, uint64_t* out_id) {
+    if (!stroke || !stroke->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null sculpt layer stroke");
+    if (!out_id) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_id");
+    *out_id = stroke->sculptor->target_layer();
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculpt_layer_stroke_stamp(clay_multires_sculpt_layer_stroke* stroke,
+                                                    const clay_mesh_brush_desc* brush,
+                                                    const clay_mask* mask,
+                                                    clay_multires_stamp_report* out_report) {
+    mesh::LayeredMultiresSculptor* self = nullptr;
+    mesh::MeshBrush verb = mesh::MeshBrush::Draw;
+    mesh::MeshBrushSettings settings;
+    field::MaskGate gate;
+    clay_result r =
+        read_layer_stroke_stamp(stroke, brush, mask, &self, &verb, &settings, &gate);
+    if (r != CLAY_OK) return r;
+    const std::size_t moved = self->stamp(verb, settings, gate);
+    return write_layer_stroke_report(stroke->owner->surface, moved, out_report);
+}
+
+clay_result clay_multires_sculpt_layer_stroke_stamp_detail(
+    clay_multires_sculpt_layer_stroke* stroke, const clay_detail_stamp_desc* stamp,
+    const clay_mesh_brush_desc* brush, const clay_mask* mask,
+    clay_detail_stamp_report* out_stamp_report, clay_multires_stamp_report* out_report) {
+    mesh::LayeredMultiresSculptor* self = nullptr;
+    mesh::MeshBrush verb = mesh::MeshBrush::Draw;
+    mesh::MeshBrushSettings settings;
+    field::MaskGate gate;
+    clay_result r =
+        read_layer_stroke_stamp(stroke, brush, mask, &self, &verb, &settings, &gate);
+    if (r != CLAY_OK) return r;
+    if (!stamp) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null detail stamp descriptor");
+    clay_detail_stamp_desc d;
+    r = read_desc(stamp, kDetailStampDescOriginal, &d);
+    if (r != CLAY_OK) return r;
+    if (d.mode != CLAY_DETAIL_STAMP_HEIGHT && d.mode != CLAY_DETAIL_STAMP_VECTOR)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "a detail stamp is a height or a vector displacement; a scalar alpha is "
+                    "clay_mesh_brush_desc's own alpha");
+    if (!d.image) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null stamp image");
+    if (d.width < 2 || d.height < 2)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "a stamp image is at least 2x2 samples");
+    if (!(d.extent > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "stamp extent has no size");
+
+    mesh::DetailStampSettings s{};
+    s.mode = static_cast<mesh::DetailStampMode>(d.mode);
+    s.image = d.image;  // BORROWED for the length of the call, never copied
+    s.width = d.width;
+    s.height = d.height;
+    s.amplitude = d.amplitude;
+    s.bias = d.bias;
+    s.center = kernel::cf3(d.center[0], d.center[1], d.center[2]);
+    s.direction = kernel::cf3(d.direction[0], d.direction[1], d.direction[2]);
+    s.tangent = kernel::cf3(d.tangent[0], d.tangent[1], d.tangent[2]);
+    s.extent = d.extent;
+
+    const std::size_t moved = self->stamp_detail(s, settings, gate);
+    if (out_stamp_report) {
+        const std::uint32_t declared = out_stamp_report->struct_size;
+        clay_detail_stamp_report probe;
+        r = read_desc(out_stamp_report, kDetailStampReportOriginal, &probe);
+        if (r != CLAY_OK) return r;
+        const mesh::DetailStampReport& rep = self->last_stamp_report();
+        clay_detail_stamp_report out{};
+        out.struct_size = static_cast<std::uint32_t>(sizeof(out));
+        out.sample_size = rep.sample_size;
+        out.vertex_spacing = rep.vertex_spacing;
+        out.oversampling = rep.oversampling;
+        out.under_resolved = rep.under_resolved ? 1 : 0;
+        write_desc(out_stamp_report, declared, out);
+    }
+    return write_layer_stroke_report(stroke->owner->surface, moved, out_report);
+}
+
+clay_result clay_multires_sculpt_layer_stroke_smooth(clay_multires_sculpt_layer_stroke* stroke,
+                                                     int32_t mode,
+                                                     const clay_mesh_brush_desc* brush,
+                                                     const clay_mask* mask,
+                                                     clay_multires_stamp_report* out_report) {
+    mesh::LayeredMultiresSculptor* self = nullptr;
+    mesh::MeshBrush verb = mesh::MeshBrush::Draw;
+    mesh::MeshBrushSettings settings;
+    field::MaskGate gate;
+    clay_result r =
+        read_layer_stroke_stamp(stroke, brush, mask, &self, &verb, &settings, &gate);
+    if (r != CLAY_OK) return r;
+    if (mode < CLAY_MULTIRES_SMOOTH_GEOMETRY || mode > CLAY_MULTIRES_SMOOTH_PRESERVE_DETAIL)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown smooth mode: " + std::to_string(mode));
+    const std::size_t moved =
+        self->smooth(static_cast<mesh::MultiresSmoothMode>(mode), settings, gate);
+    return write_layer_stroke_report(stroke->owner->surface, moved, out_report);
+}
+
+clay_result clay_multires_sculpt_layer_stroke_erase(clay_multires_sculpt_layer_stroke* stroke,
+                                                    const clay_mesh_brush_desc* brush,
+                                                    const clay_mask* mask,
+                                                    clay_multires_stamp_report* out_report) {
+    mesh::LayeredMultiresSculptor* self = nullptr;
+    mesh::MeshBrush verb = mesh::MeshBrush::Draw;
+    mesh::MeshBrushSettings settings;
+    field::MaskGate gate;
+    clay_result r =
+        read_layer_stroke_stamp(stroke, brush, mask, &self, &verb, &settings, &gate);
+    if (r != CLAY_OK) return r;
+    const std::size_t moved = self->erase(settings, gate);
+    return write_layer_stroke_report(stroke->owner->surface, moved, out_report);
+}
+
+clay_result clay_multires_sculpt_layer_stroke_restore(clay_multires_sculpt_layer_stroke* stroke,
+                                                      const clay_mesh_brush_desc* brush,
+                                                      const clay_mask* mask,
+                                                      clay_multires_stamp_report* out_report) {
+    mesh::LayeredMultiresSculptor* self = nullptr;
+    mesh::MeshBrush verb = mesh::MeshBrush::Draw;
+    mesh::MeshBrushSettings settings;
+    field::MaskGate gate;
+    clay_result r =
+        read_layer_stroke_stamp(stroke, brush, mask, &self, &verb, &settings, &gate);
+    if (r != CLAY_OK) return r;
+    const std::size_t moved = self->restore(settings, gate);
+    return write_layer_stroke_report(stroke->owner->surface, moved, out_report);
+}
+
+clay_result clay_multires_sculpt_layer_stroke_stamps(
+    const clay_multires_sculpt_layer_stroke* stroke, size_t* out_stamps) {
+    if (!stroke || !stroke->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null sculpt layer stroke");
+    if (!out_stamps) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_stamps");
+    *out_stamps = stroke->sculptor->stamps();
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculpt_layer_stroke_record_size(
+    const clay_multires_sculpt_layer_stroke* stroke, size_t* out_entries) {
+    if (!stroke || !stroke->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null sculpt layer stroke");
+    if (!out_entries) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_entries");
+    *out_entries = stroke->sculptor->record_size();
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculpt_layer_stroke_commit(clay_multires_sculpt_layer_stroke* stroke,
+                                                     size_t* out_entries) {
+    mesh::LayeredMultiresSculptor* self = nullptr;
+    clay_result r = resolve_layer_stroke(stroke, &self);
+    if (r != CLAY_OK) return r;
+    if (!self->open()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "no stroke is open");
+    // Read BEFORE the commit, which clears the transaction. The records go
+    // nowhere: this ABI does not carry an undo step yet, which the header says
+    // rather than leaving to be discovered — but a host still wants to see that
+    // a hundred stamps coalesced into far fewer entries.
+    const std::size_t entries = self->record_size();
+    if (!self->commit()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "no stroke is open");
+    if (out_entries) *out_entries = entries;
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculpt_layer_stroke_cancel(clay_multires_sculpt_layer_stroke* stroke) {
+    mesh::LayeredMultiresSculptor* self = nullptr;
+    clay_result r = resolve_layer_stroke(stroke, &self);
+    if (r != CLAY_OK) return r;
+    self->cancel();
     return CLAY_OK;
 }
 
