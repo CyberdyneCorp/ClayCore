@@ -185,7 +185,12 @@ bool LayeredMultiresSculptor::gather(const MeshBrushSettings& settings,
     for (std::size_t i = 0; i < workset.size(); ++i) {
         if (workset.weights[i] <= 0.0f) continue;
         std::size_t members = 0;
-        const std::uint32_t* member = adjacency.members(workset.classes[i], &members);
+        // `as_weld_class()` rather than `key()`: this sculptor is bound to a
+        // level's own mesh, so its work items ARE weld classes, and naming that
+        // is what keeps the call honest if the workset ever carries another
+        // identity here.
+        const std::uint32_t* member =
+            adjacency.members(workset.items[i].as_weld_class(), &members);
         // Through the class's members rather than by assuming class == vertex.
         // They usually agree, and two level vertices that coincide bit for bit
         // weld into one class — from which every id would be off by one, and
