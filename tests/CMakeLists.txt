@@ -62,6 +62,11 @@ add_executable(clay_unit_tests
   unit/test_multires_io.cpp
   unit/test_c_multires.cpp
   unit/test_sculpt_allocation.cpp
+  unit/test_brush_arena.cpp
+  unit/test_stamp_frame.cpp
+  unit/test_dynamic_shared_brush_parity.cpp
+  unit/test_multires_shared_brush_parity.cpp
+  unit/test_c_shared_brush_runtime.cpp
   unit/test_brush_preset.cpp
   unit/test_c_brush_preset.cpp
   unit/test_mesh_deform.cpp

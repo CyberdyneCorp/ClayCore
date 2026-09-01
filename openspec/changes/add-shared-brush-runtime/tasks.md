@@ -106,15 +106,31 @@
 - [x] 4.4 `DynamicSculptor::gather` reads `brush.automask` and applies it as
       the LAST factor, dropping a fully masked entry from the workset entirely
       so it is bit-identical to its input rather than merely close
-- [ ] 4.5 REGRESSION TEST for the divergence this change exists to close: a
+- [x] 4.5 REGRESSION TEST for the divergence this change exists to close: a
       stamp on an adaptive surface with `AutomaskFactor::NormalAngle` set must
       move fewer vertices than the same stamp without it, and the difference
-      must be on the side facing away from the brush. It fails on main
-- [ ] 4.6 REGRESSION TEST at the C ABI, where the contract is written down:
+      must be on the side facing away from the brush. It fails on main.
+      DONE — `tests/unit/test_dynamic_shared_brush_parity.cpp`, two cases. On a
+      cube-sphere under a 1.6 brush the stamp moves 365 unmasked and 149 with
+      the factor, and every survivor faces within `cos(2 * 0.5) = 0.5403` of the
+      brush where the unmasked stamp reached -0.272. ONE TRAP RECORDED IN THE
+      TEST: at the 60-degree DEFAULT angle nothing on that sphere turns far
+      enough away to reach zero, so the first version read 365 against 365 for a
+      reason that had nothing to do with the defect — the angle is tightened to
+      0.5 rad so the gate actually closes. PROVEN by reverting
+      `in.topology = &topology` to null in `DynamicSculptor::gather` (which
+      reinstates exactly the pre-change behaviour and COMPILES): 5 test cases
+      and 129 assertions fail, and pass again on restore
+- [x] 4.6 REGRESSION TEST at the C ABI, where the contract is written down:
       `clay_dynamic_sculptor_stamp` with `automask_factors` set must produce a
       different report from the same call with 0, because
       `clay_dynamic_sculptor_stamp`'s own header says the descriptor is "the
-      same descriptor the fixed path takes". It fails on main
+      same descriptor the fixed path takes". It fails on main.
+      DONE — `tests/unit/test_c_shared_brush_runtime.cpp`, plus the positive
+      half: one descriptor through `clay_mesh_sculptor_stamp` and
+      `clay_dynamic_sculptor_stamp` gives the same 365 / 149 on both. Also
+      covered from Python in `bindings/python/tests/test_shared_brush_runtime.py`,
+      which is where the claim about the SHIPPED WHEEL lives
 - [x] 4.7 `brush::apply_to_mesh`'s adaptive counterpart wires the cavity and
       group callbacks the same way `src/brush/stroke.cpp:543` does for the
       fixed path, or the change states in the delta why an adaptive stroke does
@@ -131,11 +147,21 @@
 - [x] 5.1 `include/clay/mesh/stamp_frame.h` + `src/mesh/stamp_frame.cpp` —
       `StampFrame`, `make_stamp_frame(origin, normal, azimuth,
       explicit_rotation)`, `stamp_uv(frame, p, extent)`
-- [ ] 5.2 The zero-azimuth branch, with the `-0.0f` reasoning in the comment —
+- [x] 5.2 The zero-azimuth branch, with the `-0.0f` reasoning in the comment —
       D5. A test asserts the unrotated basis is byte-identical to the basis
       built with `azimuth = 0`.
-      HALF DONE: the branch and its reasoning are in `src/mesh/stamp_frame.cpp`.
-      The assertion is 6.6's and is not written yet, so this stays open
+      DONE in `tests/unit/test_stamp_frame.cpp`, as a PAIR, because the obvious
+      single assertion is a tautology: one case says a zero azimuth returns
+      `kernel::calpha_frame`'s output untouched, and the other says the
+      `cos 0` / `sin 0` form is NOT that — on `direction = (-1,-1,0)`,
+      `hint = (-1,0,0)` the branch keeps `bitangent.x == -0.0f` where the
+      multiplication clears the sign bit. Found by sweeping the exactly
+      representable directions and hints: 1876 of 16464 combinations disagree.
+      PROVEN by deleting the branch (compiles): 3 cases, 4 assertions fail.
+      AND ONE HONEST FINDING RECORDED IN THE FILE: with the branch deleted
+      every golden in `mesh_sculpt_goldens_*.inc` still PASSES, so this file is
+      the only gate on D5 — no golden fixture happens to pair such a direction
+      with an alpha sample near a texel boundary
 - [x] 5.3 `alpha_frame_for` reimplemented over `make_stamp_frame`, reaching
       `kernel::calpha_frame` with the same two arguments exactly once.
       `AlphaFrame` and `alpha_at` unchanged
@@ -148,33 +174,112 @@
 
 ## 6. The gates
 
-- [ ] 6.1 `tests/unit/test_brush_arena.cpp` — bump order, alignment, `reset`
+- [x] 6.1 `tests/unit/test_brush_arena.cpp` — bump order, alignment, `reset`
       keeps capacity, `high_water_bytes` is a maximum and not a current, and
-      `growths` stops growing over a stroke of similar stamps
-- [ ] 6.2 `tests/unit/test_sculpt_allocation.cpp` EXTENDED: every verb with
+      `growths` stops growing over a stroke of similar stamps.
+      DONE, 16 cases. `growths` is asserted as a CONTRAST rather than against a
+      magnitude — twelve stamps at the same size take 1 growth, twelve that
+      climb to it take 4 — because a bare number would be a test of the doubling
+      constant. Two behaviours were measured and written down rather than
+      asserted away: `high_water_bytes` OVERSTATES a stamp that overflowed (an
+      overflow block leaves its predecessor's tail unusable until the reset,
+      which is the conservative direction for a budget), and
+      `ScratchVector::overflowed()` is STICKY across `clear()`, because it
+      reports a wrong bound rather than a condition. `WorkItemId`'s encoding is
+      gated here too — the low half is the dense index in all three identities,
+      which is the rule `slot[item.key()]` rests on
+- [x] 6.2 `tests/unit/test_sculpt_allocation.cpp` EXTENDED: every verb with
       `Boundary | TopologyConnected | NormalAngle` set, which is the coverage
-      hole that let `compute_automask`'s five vectors through. It fails on main
-- [ ] 6.3 `tests/unit/test_sculpt_allocation.cpp` EXTENDED to
+      hole that let `compute_automask`'s five vectors through. It fails on main.
+      DONE, all 13 verbs. ONE TRAP: at radius 0.9 on a patch of half-extent 1.0
+      the brush does not REACH the border, the boundary fade spreads from an
+      empty frontier and the gate passes on code that never ran — the radius is
+      1.2 and a companion case asserts the automask actually removed vertices
+      from the same fixture, so the zero is one the automask earned
+- [x] 6.3 `tests/unit/test_sculpt_allocation.cpp` EXTENDED to
       `DynamicSculptor` (topology disabled, so the surface is stable) and to
       `MultiresSculptor`. A warm stamp allocates nothing on all three
-      representations, which is the requirement's actual wording
-- [ ] 6.4 `tests/unit/test_dynamic_shared_brush_parity.cpp` — P1, P2, P3 and
+      representations, which is the requirement's actual wording.
+      DONE — three new cases: 9 verbs on the adaptive surface, an automasked
+      adaptive stamp, and an automasked multiresolution stamp. PROVEN by
+      reverting `apply_boundary`'s four arena blocks to the local
+      `std::vector`s they were (compiles): 3 cases, 15 assertions fail
+- [x] 6.4 `tests/unit/test_dynamic_shared_brush_parity.cpp` — P1, P2, P3 and
       P4 for the adaptive surface, on a plane grid converted with
-      `DynamicSurface::from_mesh` and topology disabled
-- [ ] 6.5 `tests/unit/test_multires_shared_brush_parity.cpp` — the same, at
-      level 0 where an identical vertex set exists; P1 and P2 above it
-- [ ] 6.6 `tests/unit/test_stamp_frame.cpp` — the basis is orthonormal and
+      `DynamicSurface::from_mesh` and topology disabled.
+      DONE, 13 cases. P1/P2 are asserted in the strongest form available — not a
+      synthetic snapshot fed to both, but the two representations' OWN worksets
+      after the same stamp, compared entry for entry: items, positions, normals,
+      weights, the resolved frame and the write region all agree BIT FOR BIT on
+      the plane grid, and every neighbour-free kernel run over both writes
+      identical displacements. P4 needs CURVATURE — on the plane the two normal
+      estimators produce byte-identical normals, so Draw agrees there and the
+      row would be vacuous; it is asserted on a cube-sphere, where Draw,
+      Inflate and Clay differ at 9, 7 and 9 of 21 moved vertices by at most
+      1.2e-9, 6.0e-8 and 1.4e-9. Nudge is separated from Grab deliberately:
+      `kernel_nudge` projects its direction against the vertex normal, so it is
+      a P3 verb on the plane and a P4 verb on the sphere, and the file says
+      which is which. Also gated: two sculptors stamping CONCURRENTLY on two
+      threads produce the single-threaded answer, which is the per-sculptor
+      arena claim in the form only TSan can check
+- [x] 6.5 `tests/unit/test_multires_shared_brush_parity.cpp` — the same, at
+      level 0 where an identical vertex set exists; P1 and P2 above it.
+      DONE, 9 cases, INCLUDING a three-way P3: one source model becomes a fixed
+      mesh, an adaptive surface and a cage, and a Grab writes byte-identical
+      positions on all three. TWO CLAIMS THIS FILE DELIBERATELY DOES NOT MAKE,
+      both measured first. Above the cage the level-2 reconstruction is
+      BIT-EXACT to the fixed sculptor for Grab, Clay, Draw, Inflate, Nudge and
+      Crease on a planar cage — the transported frame is axis-aligned there and
+      the encode/decode pair is exact — so P4 is stated as the difference that
+      IS real (a fine stamp writes a coefficient and leaves the cage untouched
+      where the fixed sculptor writes a position) rather than as a tolerance
+      nothing measured. And the boundary automask leaves 49 of 81 cage vertices
+      moving at EVERY `boundary_rings` setting, because the fade ramps and only
+      the border ring reaches a hard zero — the ring count is visible in the
+      WEIGHTS, which a separate case reads, and asserting 25 here was the first
+      version measuring the wrong quantity
+- [x] 6.6 `tests/unit/test_stamp_frame.cpp` — the basis is orthonormal and
       right-handed, `stamp_uv` inverts it, the azimuth rotates in-plane, and
-      an explicit rotation replaces the azimuth rather than composing
-- [ ] 6.7 THE ACCEPTANCE GATE, run after every commit in this branch:
+      an explicit rotation replaces the azimuth rather than composing.
+      DONE, 10 cases, including the D5 pair described at 5.2 and the claim that
+      `alpha_frame_for` IS `make_stamp_frame` plus an extent — byte-compared,
+      because a re-derived basis there would drift at the last bit and nothing
+      else in the suite would notice. The rotation's SENSE is asserted as well
+      as its magnitude: `cos` is even, so an angle check alone passes on a
+      rotation the wrong way round
+- [x] 6.7 THE ACCEPTANCE GATE, run after every commit in this branch:
       `mesh_sculpt_goldens_linux_x64.inc`, `..._macos_arm64.inc` and
       `..._msvc_x64.inc` are UNCHANGED in the diff. A moved golden is a failed
-      refactor and never a new baseline
-- [ ] 6.8 A benchmark case for the neutral automask's virtual — a
+      refactor and never a new baseline.
+      HELD. `git diff a44b1f5 -- tests/unit/mesh_sculpt_goldens_*.inc` is empty
+      and was re-checked after every build this stage. See 5.2 for what that
+      does NOT prove: the goldens also stay green with D5's branch deleted, so
+      they are not the gate on it
+- [x] 6.8 A benchmark case for the neutral automask's virtual — a
       boundary-automasked stamp, before and after, on the same fixture. The
       measured number goes in the commit message; a ceiling goes in
       `tools/check_bench.py` only if it can be set from the runner rather than
-      from a development machine
+      from a development machine.
+      DONE — four cases in `benchmarks/bench_main.cpp`, the fixed and adaptive
+      stamps with the factor off and on, and the same four built against
+      a44b1f5 to compare. Nine repetitions of 200 iterations, P50 in us, load
+      average 7-12 before and after both runs. THE VIRTUAL IS NOT WHAT IT
+      LOOKED LIKE: on the fixed path — the only one where the automask ran on
+      main at all — the neutral rewrite is 2.0x and 1.6x FASTER than the direct
+      `Mesh`/`Adjacency` implementation (350.28 -> 170.39 at n=224,
+      2527.86 -> 1615.53 at n=707), because five per-stamp `std::vector`s
+      became arena blocks and an indirect call per entry is cheaper than a
+      malloc per stamp. THE ADAPTIVE ROWS ARE THE DEFECT, NOT A REGRESSION:
+      main's automasked adaptive stamp costs the same as its unmasked one
+      (144.65 against 153.23) because the factor never ran, so the 3.80x and
+      8.08x here are what an automask costs on a representation that has
+      started honouring it. NO CEILING was added to `check_bench.py`, on that
+      file's own rule that a ceiling must be read off the runner. ONE THING
+      FOUND AND VERIFIED AGAINST MAIN RATHER THAN ASSUMED: the plain fixed
+      stamp is proportional to the MODEL at an identical 114-entry workset —
+      10x the surface costs 7.96x on main and 8.22x here — so it is older than
+      this change and is not this change's to fix, but it is recorded in the
+      benchmark's comment where it will show up next
 
 ## 7. The ABI and the bindings
 
@@ -230,11 +335,18 @@
 
 ## 8. The demonstration
 
-- [ ] 8.1 `examples/69_shared_brush_runtime.py` — ONE
+- [x] 8.1 `examples/69_shared_brush_runtime.py` — ONE
       `brush.reference_preset(...)` gesture, resolved once, replayed over a
       fixed mesh, an adaptive surface and a multires hierarchy built from the
-      same source model
-- [ ] 8.2 It ASSERTS what must match: the normal-free verb writes identical
+      same source model.
+      DONE. The 'Move' preset's stroke resolves to 41 stamps of 'grab' at
+      spacing 0.050, replayed identically on all three. The fixture is a
+      quad-gridded DOME rather than a cube-sphere: it has no duplicated
+      vertices, so the three numberings coincide and a byte comparison is a byte
+      comparison — and it is curved, so the P4 row below has something to
+      report. `DynamicSurface.to_mesh()` emits in POOL order, so the example
+      builds the pairing once from the untouched surface and says why
+- [x] 8.2 It ASSERTS what must match: the normal-free verb writes identical
       positions on all three (P3); the topological automask reaches the same
       vertex set; the arena's `growths` stops climbing over the stroke.
       MEASURED FROM PYTHON DURING 7.3, so the example does not have to
@@ -251,35 +363,86 @@
       nothing. The adaptive sculptor's arena is exercised by every stamp
       (25960 B capacity unmasked, 103840 B with the three factors), and the
       hierarchy's reads zero until a level is bound and 105648 B after — which
-      is the documented behaviour, not a gap
-- [ ] 8.3 It ASSERTS what legitimately differs, and by how much: Draw diverges
+      is the documented behaviour, not a gap.
+      DONE, and THE TRAP WAS TAKEN SERIOUSLY: the example's arena section drives
+      `Boundary` on every representation precisely so the fixed and hierarchy
+      columns are not asserting a trivially-true zero, and it refuses to run if
+      the adaptive arena spent nothing. Its own measured numbers, on the dome:
+      the gesture moves 935 vertices on all three and writes byte-identical
+      positions; the automask leaves 613 open and 529 masked, the same pair on
+      each; over 48 dabs the three arenas settle at 3, 4 and 3 growths and take
+      nothing more
+- [x] 8.3 It ASSERTS what legitimately differs, and by how much: Draw diverges
       between fixed and adaptive because the normal estimators differ (D8/P4),
-      and the example says so in prose rather than hiding it
-- [ ] 8.4 `raise SystemExit` when a claim stops holding, which is this
-      repository's example convention
-- [ ] 8.5 Registered: `EXAMPLES` in `examples/run_all.py`, the render committed
+      and the example says so in prose rather than hiding it.
+      DONE — measured at 2.660e-10 against a displacement of 2.000e-01, and
+      asserted in BOTH directions: it raises if Draw ever becomes byte-identical
+      between the two (an estimator silently unified) and if the divergence
+      exceeds a thousandth of the displacement (one representation drifting).
+      The hierarchy's cage is asserted byte-identical to the fixed mesh, because
+      at level 0 it IS the fixed sculptor rather than a second implementation
+- [x] 8.4 `raise SystemExit` when a claim stops holding, which is this
+      repository's example convention.
+      DONE — eleven `raise SystemExit` sites, every one of them on a claim the
+      prose makes
+- [x] 8.5 Registered: `EXAMPLES` in `examples/run_all.py`, the render committed
       under `examples/output/`, and a line in
       `docs/07-brushes-and-features.md`. No new `CAPABILITY_EXAMPLES` key —
       this change adds requirements to `meshing` and `brush-engine`, which
-      already have examples
-- [ ] 8.6 `python3 tools/check_gallery.py`
+      already have examples.
+      DONE. The docs line is a new subsection, "The runtime the three mesh
+      representations share", under §8a's automasking — the neutral workset, the
+      automask reaching all three, the arena, the stamp azimuth, and the three
+      things in `mesh` called a frame
+- [x] 8.6 `python3 tools/check_gallery.py` — OK, 251 tracked outputs (three
+      new: the contact sheet, the exported .obj and its .mtl)
 
 ## 9. Ship
 
-- [ ] 9.1 `cmake --build --preset cpu-only -j 8` clean;
-      `ctest --preset cpu-only --output-on-failure` green
-- [ ] 9.2 `asan-ubsan` green; `setarch -R ctest --preset tsan` green — the
+- [x] 9.1 `cmake --build --preset cpu-only -j 8` clean;
+      `ctest --preset cpu-only --output-on-failure` green.
+      At af531ff: build clean with `CLAY_WERROR=ON`, zero warnings from any file
+      this change touches. ctest 4/4; `clay_unit_tests` is 2084 cases and
+      14,857,096 assertions, up from 2022 cases — 62 new
+- [x] 9.2 `asan-ubsan` green; `setarch -R ctest --preset tsan` green — the
       arena is per-sculptor and the claim that two sculptors never alias it is
-      a threading claim
-- [ ] 9.3 `check_layering.py`, `check_binding_parity.py`, `check_c_abi.py`,
+      a threading claim.
+      ASAN-UBSAN: the full `ctest --preset asan-ubsan` is 4/4 green,
+      `clay_unit_tests` in 3305.73 s, zero sanitizer reports. The new cases were
+      re-run on their own against a build at af531ff with
+      `ASAN_OPTIONS=detect_leaks=1` — 69 cases, 5370 assertions, clean.
+      TSAN: `setarch -R` over the new cases plus every pre-existing `C ABI*`
+      case — 207 cases, 108,074 assertions, zero race reports.
+      AND THE THREADING CLAIM IS NOW A THREADING TEST rather than a sequential
+      one: `two sculptors stamp concurrently without aliasing` runs two
+      `DynamicSculptor`s on two `std::thread`s and asserts both produce the
+      single-threaded answer byte for byte. Sequentially that assertion is weak
+      — a racing bump allocator corrupts scratch rather than reliably changing
+      an answer — so the test says in its own comment that TSan is the gate and
+      it is only what gives TSan something to watch
+- [x] 9.3 `check_layering.py`, `check_binding_parity.py`, `check_c_abi.py`,
       `check_gallery.py`, `release_check.py`. The four known-failing
       `release_check` rows in this environment (`bindings`, `abi`, `tests`
       from the anaconda GLIBCXX_3.4.31 mismatch, `device` from the hardware
       gate) are pre-existing; anything else is verified against main before it
-      is called that
-- [ ] 9.4 Every new `src/**.cpp` in `CMakeLists.txt`, every new
+      is called that.
+      ALL GREEN. `check_layering.py` OK. `check_binding_parity.py` OK (590
+      pyclay capabilities, 32 exempt) — re-run after the binding fix, no table
+      edit needed because the fix changed error handling and added no symbol.
+      `check_c_abi.py` OK against the built `libclay_shared.so`, run under
+      `/usr/bin/python3` to sidestep the anaconda loader.
+      `check_gallery.py` OK, 251 tracked outputs.
+      `release_check.py` reports FIVE failures, not four, and the fifth is the
+      same cause: `wheel` fails because the venv is built from `sys.executable`
+      (anaconda), so the wheel builds and installs and only `import pyclay`
+      inside it hits GLIBCXX_3.4.31. `tests` was traced to its root rather than
+      assumed — the only failing ctest entry in `build/release` is
+      `pyclay_pytest`, failing at IMPORT, and it PASSES under
+      `LD_PRELOAD=/lib/x86_64-linux-gnu/libstdc++.so.6` (53.65 s). Under that
+      preload the whole pyclay suite is 607 passed, 1 skipped
+- [x] 9.4 Every new `src/**.cpp` in `CMakeLists.txt`, every new
       `tests/unit/test_*.cpp` in `tests/CMakeLists.txt`
-- [ ] 9.5 `openspec validate add-shared-brush-runtime --strict`
+- [x] 9.5 `openspec validate add-shared-brush-runtime --strict`
 
 ## Files
 

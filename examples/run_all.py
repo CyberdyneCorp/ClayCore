@@ -100,6 +100,7 @@ EXAMPLES = [
     "66_dynamic_topology",
     "67_voxel_remesh",
     "68_mesh_multires",
+    "69_shared_brush_runtime",
 ]
 
 

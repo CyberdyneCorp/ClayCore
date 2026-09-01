@@ -811,7 +811,21 @@ mesh::MeshBrushSettings mesh_brush_settings(
     // block on clay_mesh_brush_desc, one member on MeshBrushSettings. Spreading
     // it into keywords here would be a third spelling of the same four fields
     // and a third place to forget one when a factor is added.
-    if (!automask.is_none()) settings.automask = nb::cast<mesh::AutomaskSettings>(automask);
+    //
+    // TYPE-CHECKED BEFORE THE CAST, and that is a fix rather than a formality.
+    // A bare `nb::cast<T>` on a handle of the wrong type throws `nb::cast_error`
+    // — a `std::bad_cast` — which nanobind surfaces as
+    // `RuntimeError: std::bad_cast`, naming neither the argument nor what it
+    // should have been. `automask=3` is a plausible mistake (the factors ARE an
+    // integer, one level down) and it deserves the same answer `to_f3` gives a
+    // malformed vector.
+    if (!automask.is_none()) {
+        if (!nb::isinstance<mesh::AutomaskSettings>(automask))
+            throw std::invalid_argument(
+                "automask must be an AutomaskSettings or None; to set the factors, build one "
+                "and assign to its `factors` field");
+        settings.automask = nb::cast<mesh::AutomaskSettings>(automask);
+    }
     // Passed through as given, INCLUDING zero. Zero is not "unset": it is the
     // value that means unrotated, and the engine branches on exactly it rather
     // than turning the basis by cos 0 and sin 0, which would leave a -0.0f
@@ -1004,11 +1018,31 @@ field::MaskGate mask_gate_of(nb::handle mask) {
 // caller's own cell_size rather than something this hides.
 mesh::AutomaskInputs automask_inputs_of(nb::handle cavity, nb::handle groups,
                                         std::uint32_t active_group) {
+    // BOTH ARGUMENTS ARE TYPE-CHECKED HERE RATHER THAN CAST AND HOPED FOR, and
+    // the wrong type is the mistake this call invites: the C++ type holds two
+    // `std::function`s, so "pass a function" is the obvious guess, and it is
+    // the one thing that cannot be offered — a stamp releases the GIL and
+    // evaluates these from a worker thread, where calling back into the
+    // interpreter crashes. A caller who guesses must be told what to pass
+    // instead, and `RuntimeError: std::bad_cast` from a bare `nb::cast` tells
+    // them nothing at all.
     mesh::AutomaskInputs out;
-    if (const voxel::MaskField* m = borrow_mask(cavity))
-        out.cavity = [m](kernel::cfloat3 p) { return m->sample(p); };
-    if (!groups.is_none()) {
-        voxel::GroupField* g = &nb::cast<PyGroupField*>(groups)->field();
+    if (cavity.is_valid() && !cavity.is_none()) {
+        if (!nb::isinstance<PyMaskField>(cavity))
+            throw std::invalid_argument(
+                "cavity must be a MaskField or None — build one with "
+                "document.mask_from_surface('cavity', ...). A Python callable cannot be used: a "
+                "stamp evaluates it from a worker thread with the GIL released");
+        out.cavity = [m = &nb::cast<PyMaskField&>(cavity).field()](kernel::cfloat3 p) {
+            return m->sample(p);
+        };
+    }
+    if (groups.is_valid() && !groups.is_none()) {
+        if (!nb::isinstance<PyGroupField>(groups))
+            throw std::invalid_argument(
+                "groups must be the document's GroupField or None. A Python callable cannot be "
+                "used: a stamp evaluates it from a worker thread with the GIL released");
+        voxel::GroupField* g = &nb::cast<PyGroupField&>(groups).field();
         out.group = [g](kernel::cfloat3 p) { return static_cast<std::uint32_t>(g->at(p)); };
     }
     out.active_group = active_group;
