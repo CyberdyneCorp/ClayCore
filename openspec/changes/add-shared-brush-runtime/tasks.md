@@ -327,7 +327,7 @@
       are EXEMPT with the reason D9 already gives — the two estimators are
       `std::function`s, which is what the C ABI cannot carry, while the three
       input-free factors do cross on `clay_mesh_brush_desc`
-- [ ] 7.6 `tests/swift/smoke.swift` — the appended field and the arena
+- [x] 7.6 `tests/swift/smoke.swift` — the appended field and the arena
       statistics through the SwiftPM surface, which is where a descriptor's
       layout is checked by a compiler that is not the one that built the
       library. ADDED IN RECONCILIATION: the work was done and no task named it.
@@ -358,6 +358,16 @@
       `stamp_azimuth == 0` from the defaults, a turned stamp being the same
       descriptor, and a high water no larger than the capacity — are gated on
       the tag's workflow and by nothing on the PR
+      CLOSED BY CI, at the tip this stage pushed. Run 33549441714, job
+      `build+test (macos, +metal, parity)` at `2f34778`, step "Swift smoke
+      type-check": **success**, and the log line is the whole claim —
+      `swift smoke: typecheck OK (smoke.swift compiles against
+      bindings/c/clay.h)`. So the task's own gate is met: a Swift compiler that
+      is not the one that built the library accepted the file, the appended
+      field and the three `*_arena_stats` signatures included. This is ticked
+      for the COMPILE and for nothing more — the three runtime claims still run
+      only under `check_swift_smoke.sh all` on the tag, and 13.4 says so rather
+      than letting this tick be read as covering them.
 
 - [x] 7.5 The version lines, in lockstep, at 0.77.0 / 77 (written at 0.75.0 / 75
       and moved by the merge — 11.7 has the why). THREE literals, not
@@ -688,11 +698,11 @@
       `bench_main.cpp`, `check_binding_parity.py`, `smoke.swift` and the five
       documentation files. The version row was wrong in the other direction and
       now agrees with 7.5: THREE literals, not four
-- [ ] 11.4 `tests/swift/smoke.swift` COMPILED — see 7.6, which this stage
-      UNTICKED after walking it.
-      needs macOS. There is no Swift toolchain on this box and
-      `tools/check_swift_package.py` is textual only. CI's macOS job is the
-      only thing that can close it
+- [x] 11.4 `tests/swift/smoke.swift` COMPILED — see 7.6. Left open by two
+      stages because there is no Swift toolchain on this box and CI's macOS job
+      was the only thing that could close it. It has: run 33549441714 at
+      `2f34778`, step "Swift smoke type-check", success. Ticked on CI's result
+      rather than on this box's, and 13.4 records the distinction
 - [x] 11.5 THE FINAL GATES, re-run from this worktree at the docs tip and
       recorded as output rather than as a tick.
       `cmake --build --preset cpu-only -j 8`: exit 0, zero warnings.
@@ -944,7 +954,7 @@ the code at the merged tip. What neither did is re-read the PROSE at the merged
 tip, and the merge moved three things the prose names: the version, the example
 number, and the count of things that consume this runtime.
 
-- [ ] 13.1 THE DOCS RE-READ AT THE MERGED TIP, and three statements the merge
+- [x] 13.1 THE DOCS RE-READ AT THE MERGED TIP, and three statements the merge
       made false, each fixed where the false sentence is rather than by
       appending a correction.
       `docs/05-claycore-library.md` said the arena arrived "since 0.75.0",
@@ -967,7 +977,7 @@ number, and the count of things that consume this runtime.
       `docs/09-brush-latency-and-coverage.md` had the new section running
       straight into the next `###` with no blank line between them, which is a
       heading this file's own renderer would have swallowed.
-- [ ] 13.2 THE OPENSPEC ARTIFACTS RECONCILED WITH THE NUMBER THEY SHIP UNDER.
+- [x] 13.2 THE OPENSPEC ARTIFACTS RECONCILED WITH THE NUMBER THEY SHIP UNDER.
       `proposal.md`'s Impact paragraph still promised 0.75.0 / minor 75, "a
       host compiled against 74", and "`examples` gains 69" — every one of which
       is what was planned and none of which is what merged. Corrected, with a
@@ -977,12 +987,89 @@ number, and the count of things that consume this runtime.
       way and now carry 77 with the same pointer. Task 0.1's "assigned 0.75.0"
       is LEFT STANDING — it is the assignment as it was given, and rewriting it
       would erase the fact 11.7 exists to record.
-- [ ] 13.3 THE FINAL GATES, from this worktree at the documentation tip, as
+- [x] 13.3 THE FINAL GATES, from this worktree at the documentation tip, as
       output rather than as a tick.
-- [ ] 13.4 THE SWIFT GATE, CLOSED BY CI RATHER THAN BY THIS BOX — which is
-      where 7.6 and 11.4 always said it would close, and it has.
-- [ ] 13.5 THE PR, updated rather than opened. #419 already existed from 11.6
-      and was CONFLICTING then; the merge at 9bb7181 resolved that.
+      `cmake --build --preset cpu-only -j 8`: exit 0, and `grep -ci warning`
+      over the log is 0 with `CLAY_WERROR=ON`.
+      `ctest --preset cpu-only`: **4/4, 0 failed, 139.44 s**
+      (`clay_unit_tests` 139.01 s). `clay_unit_tests` on its own:
+      **2159 cases, 15,649,881 assertions, 0 failed** — the same counts 12.1
+      recorded, which is what a documentation commit should leave.
+      `check_layering.py` OK. `check_binding_parity.py` OK (631 pyclay
+      capabilities, 32 exempt, imported from the built wheel).
+      `check_c_abi.py` OK (hygiene + ctypes FFI) against
+      `build/cpu-only/libclay_shared.so` — run WITH the library argument,
+      because with no argument it prints "no shared library given, hygiene
+      checks only" and still exits 0, which is a weaker gate reported the same
+      way. `check_gallery.py` OK, 254 tracked outputs.
+      `openspec validate add-shared-brush-runtime --strict`: valid.
+      pyclay: **632 passed, 1 skipped in 75.85 s** under
+      `LD_PRELOAD=/lib/x86_64-linux-gnu/libstdc++.so.6`.
+      `examples/70_shared_brush_runtime.py`: exit 0, and `git status examples/`
+      is EMPTY afterwards, so it reproduced its three committed outputs byte
+      for byte. Its numbers are unchanged: 3 / 4 / 3 arena growths, none over
+      40 further dabs, and Draw diverging 2.660e-10 against a 2.000e-01
+      displacement.
+      THE ACCEPTANCE GATE, re-measured against `origin/main` rather than
+      against the base the branch was cut from:
+      `git diff origin/main HEAD -- 'tests/unit/mesh_sculpt_goldens_*.inc'` is
+      EMPTY, and `tools/check_layering.py` is byte-unchanged from main, which
+      is D1's visible form. `origin/main` is 428f7362 and IS the merge base, so
+      the branch is `MERGEABLE`.
+      `release_check.py` under `/usr/bin/python3`: `version` PASSES at
+      cmake=0.77.0 abi=0.77.0 wheel=0.77.0, and the SAME FOUR rows fail as at
+      12.9 — `tests`, `device`, `benchmarks`, `wheel`. `tests` reproduced on
+      its own: the only failing entry in `build/release` is `pyclay_pytest`,
+      and `PYTHONPATH=build/release/bindings/python python -c "import pyclay"`
+      gives `ImportError: .../anaconda3/lib/libstdc++.so.6: version
+      GLIBCXX_3.4.31 not found`. `device` and `wheel` are 12.9's, unchanged.
+      `benchmarks` FAILED A THIRD DIFFERENT ROW — three whole-suite runs, three
+      different failures, which is the reading rather than any one of them:
+      this one is `BM_VoxelRemeshLargeBall: 15.95x BM_VoxelRemeshSmallBall
+      above the 6.0x ceiling`, a RATIO gate between two voxel-remesh cases,
+      measured while the load average was 30. Two things say it is the box:
+      the change touches no voxel or remesh file (`git diff --name-only
+      origin/main...HEAD` matches neither word), and the two cases measured
+      ALONE at load 13 read 274.28 us and 1123.86 us — **4.10x against a 6.0x
+      ceiling**. CI's own `benchmarks + regression gate` job passes on this
+      branch. The gate needs a quiet runner, which is the rule that kept a
+      ceiling out of `check_bench.py` at 6.8 and 12.7.
+- [x] 13.4 THE SWIFT GATE, CLOSED BY CI RATHER THAN BY THIS BOX — which is
+      where 7.6 and 11.4 always said it would close, and it has. Run
+      33549441714 on `2f34778`, job `build+test (macos, +metal, parity)`, step
+      "Swift smoke type-check": success, printing `swift smoke: typecheck OK
+      (smoke.swift compiles against bindings/c/clay.h)`. Both tasks are now
+      ticked on that and on nothing else.
+      WHAT IS STILL NOT RUN, and the tick must not be read as covering it: the
+      typecheck target compiles and links NOTHING. The three claims
+      `smoke.swift` asserts at runtime — `clay_mesh_brush_defaults` reporting
+      `stamp_azimuth == 0`, a turned stamp being the SAME descriptor rather
+      than a second entry point, and the two `*_arena_stats` reading back a
+      high water no larger than the capacity — execute only under
+      `check_swift_smoke.sh all`, which builds against the real xcframework
+      slices and runs the binary on macOS and inside a booted iOS Simulator.
+      That is `.github/workflows/release.yml`, on the tag. **Needs macOS and
+      the Simulator; it is not gated on this PR and this box cannot gate it.**
+- [x] 13.5 THE PR, updated rather than opened. #419 already existed from 11.6
+      and was CONFLICTING then; the merge at 9bb7181 resolved that, and GitHub
+      now reports it MERGEABLE with CI running on the branch for the first
+      time. The body it carried was written before the merge and was stale in
+      every place the merge moved something — 0.75.0, `examples/69`, "CI has
+      not run and will not", and a whole "READ BEFORE MERGING" section asking
+      for a rebase that has since happened. Rewritten against the merged tip,
+      with the fourth consumer, the compile fix, the re-measured gates and the
+      four `release_check` rows traced rather than attributed.
+- [ ] 13.6 `tests/swift/smoke.swift` RUN, not merely compiled — the three
+      claims it asserts against real slices. Split out of 7.6 rather than
+      folded into its tick, because "the file compiles" and "the assertions
+      hold" are two gates and only one of them has run.
+      needs macOS and the iOS Simulator. `check_swift_smoke.sh all` builds
+      against `dist/claycore.xcframework`'s macos-arm64 and
+      ios-arm64-simulator slices and executes the binary, the second through
+      `xcrun simctl spawn`. It lives in `.github/workflows/release.yml` and
+      fires on the TAG, so no pull request gates it — this one included. There
+      is no Swift toolchain and no Simulator on this box, and there is no
+      arrangement under which this branch can close it.
 
 
 ## Files
