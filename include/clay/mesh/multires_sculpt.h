@@ -145,6 +145,23 @@ class MultiresSculptor {
     std::uint32_t bound_level() const { return bound_level_; }
     MeshSculptor* level_sculptor();
 
+    // The seed token for the level this sculptor is bound to RIGHT NOW, for a
+    // host that picked a `seed_class` off the level mesh and wants the stamp to
+    // be able to tell whether that class still means what it meant.
+    //
+    // This is the call the token exists for. A hierarchy rebinds — and so
+    // renumbers — whenever the sculpt level or the cache generation moves, and
+    // both happen behind a host: the first when it changes level, the second
+    // when a trim releases the caches under memory pressure. A seed picked
+    // before either is in bounds and wrong, and spends the dab on an empty
+    // region rather than reporting anything.
+    //
+    // BINDS, because the answer is a property of the bound level and a caller
+    // asking before the first stamp would otherwise get the token of whatever
+    // was bound last. Returns `kNoSeedRevision` for a surface that cannot bind,
+    // which is the value that claims nothing.
+    std::uint64_t seed_revision();
+
     // Normals follow the vertices, and a host draining a stroke can defer the
     // recompute to the end of it. Forwarded to whichever level sculptor is
     // bound, because deferring is a property of the STROKE rather than of the

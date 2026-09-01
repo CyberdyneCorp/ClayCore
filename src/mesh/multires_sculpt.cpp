@@ -133,6 +133,12 @@ MeshSculptor* MultiresSculptor::level_sculptor() {
     return sculptor_.get();
 }
 
+std::uint64_t MultiresSculptor::seed_revision() {
+    if (!surface_.valid()) return kNoSeedRevision;
+    bind();
+    return sculptor_ ? sculptor_->seed_revision() : kNoSeedRevision;
+}
+
 void MultiresSculptor::bind() {
     const std::uint32_t level = surface_.sculpt_level();
     const std::uint64_t generation = surface_.cache_generation();

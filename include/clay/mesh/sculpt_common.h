@@ -94,6 +94,13 @@ bool writes_color(MeshBrush verb);
 
 inline constexpr std::uint32_t kNoClass = 0xffffffffu;
 
+// The seed token a sculptor hands out and a stamp checks a caller's seed
+// against. Zero means "I did not check", which is what every caller that has
+// never heard of a revision sends, and is why the default preserves the
+// bounds-check-only behaviour this field was added beside rather than
+// replacing it.
+inline constexpr std::uint64_t kNoSeedRevision = 0;
+
 // The most smoothing passes one stamp will run. A bound rather than a
 // preference: each pass walks the whole region again, so a count arriving from
 // a host's slider typo is otherwise an unbounded amount of work.
@@ -132,6 +139,28 @@ struct MeshBrushSettings {
     // over the classes, which is fine for a test and wrong for a stroke on a
     // million-vertex mesh.
     std::uint32_t seed_class = kNoClass;
+
+    // WHICH CLASS SPACE `seed_class` WAS PICKED IN. A seed is an index, and an
+    // index outlives the numbering it was taken from: a hierarchy rebinds its
+    // level sculptor whenever the sculpt level or the cache generation moves
+    // (`MultiresSculptor::bind`), and every rebind is a new set of classes. A
+    // seed picked at level 3 and spent at level 4 is still comfortably IN
+    // BOUNDS, so the bounds check above cannot see it, and what it buys is not
+    // a slightly wrong region — `geodesic_region` returns EMPTY when the seed
+    // is farther than the radius from the centre, so the dab silently does
+    // nothing and the host has no way to tell that from a masked stroke.
+    //
+    // Carrying the token the picker was handed makes that case a rejected seed
+    // and a scan rather than a lost stamp. Zero (`kNoSeedRevision`) means the
+    // caller is not claiming anything, and is what keeps every shipped caller
+    // — the C ABI, pyclay's `pick`, every test — behaving exactly as before.
+    //
+    // The rejected alternative was validating the seed GEOMETRICALLY, by
+    // checking that the class it names sits within the radius. That accepts a
+    // stale seed whenever the two levels happen to overlap there, which is the
+    // common case for a hierarchy of the same model, so it would have passed
+    // the obvious test and failed in the field.
+    std::uint64_t seed_revision = kNoSeedRevision;
 
     // Flatten and Scrape. CutOnly is the hard-surface family — Trim Dynamic,
     // hPolish, the Planar brushes — where cutting WITHOUT filling is the whole
