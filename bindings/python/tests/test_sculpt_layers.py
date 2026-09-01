@@ -374,6 +374,45 @@ def test_merge_and_bake_are_defined_by_the_surface_they_leave():
         assert s.memory()["composed"] == 0
 
 
+
+def test_a_layered_write_marks_the_same_patches_a_base_write_does():
+    """The reason there is no second changed-block transport, asserted.
+
+    A host repaints from `dirty_patches` and `clay_multires_copy_block`, and
+    this change deliberately added neither a layered twin nor a per-layer
+    variant of them: a stamp into a layer moves the EVALUATED surface, which is
+    the only surface a renderer has, so it marks the patches a base stamp would
+    have marked and a host repaints without learning a new word. A second
+    transport would have been a second answer to one question, and the two
+    would drift.
+
+    Nothing else in the suite asserts it — the note in the change says it, and a
+    note is not a test.
+    """
+    s = surface()
+    layer = s.add_sculpt_layer("pores")
+    s.active_sculpt_layer = layer
+
+    # The base's own answer first, as the thing to match.
+    s.clear_dirty()
+    with s.sculpt_layer_stroke(write_domain="geometry") as stroke:
+        stroke.stamp("draw", center=(0.0, 0.0, 0.0), radius=0.35, strength=0.5)
+    base_patches = sorted(s.dirty_patches)
+    assert base_patches, "a base stamp marks the patches it moved"
+
+    s.clear_dirty()
+    assert s.dirty_patches == []
+    with s.sculpt_layer_stroke(write_domain="detail") as stroke:
+        assert stroke.target_layer == layer
+        stroke.stamp("draw", center=(0.0, 0.0, 0.0), radius=0.35, strength=0.5)
+    assert sorted(s.dirty_patches) == base_patches
+
+    # And the write really did land in the CHANNEL, not the form — otherwise
+    # the patches above would match for the uninteresting reason.
+    assert s.sculpt_layer_checksum != 0
+    assert s.sculpt_layer_info(layer)["coverage_vertices"] > 0
+
+
 def test_the_stack_round_trips_through_serialize():
     s = surface()
     first = s.add_sculpt_layer("first")

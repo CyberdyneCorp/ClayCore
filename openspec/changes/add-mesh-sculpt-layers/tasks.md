@@ -293,7 +293,17 @@
       three, and `clay_multires_memory` grown by `sculpt_layers` and `composed`.
       Changed blocks read back through the EXISTING `clay_multires_dirty_blocks`
       and `clay_multires_copy_block`: a layered write marks the same base
-      patches, so a second transport would have been a second answer
+      patches, so a second transport would have been a second answer.
+      THAT SENTENCE IS NOW A TEST rather than a note. It was the one claim in
+      this task nothing asserted, and it is the claim the whole decision rests
+      on — if a layered stamp marked different patches than a base one, a host
+      repainting from `dirty_patches` would show stale geometry and the missing
+      second transport would be the reason.
+      `test_a_layered_write_marks_the_same_patches_a_base_write_does` stamps
+      the same dab twice, once with `write_domain='geometry'` and once with
+      `'detail'`, and compares the sorted patch lists; the layer's coverage is
+      checked afterwards so the two cannot agree for the uninteresting reason
+      that the detail stamp went to the base
 - [x] 8.3 pyclay, with a context manager for a stroke transaction — the voxel
       sculpt layer's `with grid.sculpt_layer(name):` is the precedent, and it
       is the only form that cannot leave a surface recording when a stroke loop
