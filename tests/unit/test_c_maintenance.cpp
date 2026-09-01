@@ -491,7 +491,15 @@ TEST_CASE("C deferred normals: a deferred stroke's undo is still exact") {
     REQUIRE(deltas != nullptr);
 
     const size_t n = clay_mesh_vertex_count(mesh);
-    const std::vector<float> before(clay_mesh_normals(mesh), clay_mesh_normals(mesh) + n * 3);
+    // CHECKED, because `clay_mesh_normals` returns NULL for a mesh that carries
+    // no normals and that is its documented answer, not a failure. Building a
+    // vector from (nullptr, nullptr + n * 3) memmoves n * 12 bytes from address
+    // zero: this test SIGSEGV'd twice on a shared machine at 13068 bytes -- the
+    // 1089-vertex sphere -- and took the desktop with it, while reading as a
+    // mysterious crash in the sculptor rather than as a missing check here.
+    const float* base = clay_mesh_normals(mesh);
+    REQUIRE(base != nullptr);
+    const std::vector<float> before(base, base + n * 3);
 
     REQUIRE(clay_mesh_sculptor_set_defer_normals(sculptor, 1) == CLAY_OK);
     const clay_mesh_brush_desc dab = draw_brush(0.0f, 0.5f, 0.25f, 0.5f);
@@ -502,6 +510,7 @@ TEST_CASE("C deferred normals: a deferred stroke's undo is still exact") {
 
     REQUIRE(clay_mesh_deltas_revert(deltas, sculptor) == CLAY_OK);
     const float* after = clay_mesh_normals(mesh);
+    REQUIRE(after != nullptr);
     for (size_t i = 0; i < n * 3; ++i) CHECK(after[i] == doctest::Approx(before[i]).epsilon(1e-6));
 
     clay_mesh_deltas_destroy(deltas);

@@ -124,6 +124,22 @@ void append_stored_vertices(const MultiresLevel& lev, std::uint32_t bs,
 }  // namespace
 
 bool composition_pending(const MultiresSurface::State& s) {
+    // A COMPOSED FIELD THE STACK NO LONGER REACHES IS PENDING WORK, and it is
+    // pending even when the stack is EMPTY -- removing or baking the LAST layer
+    // is precisely the case that leaves one behind. So this is asked before the
+    // empty short circuit below rather than after it.
+    //
+    // It matters for more than the bytes. `composed_or_detail` prefers the
+    // composed field wherever one exists, so a level still holding one after its
+    // last layer went reads the composed coefficients -- the baked layer would
+    // go on contributing to the surface it was just baked into, counted twice.
+    //
+    // It only became reachable when `below_is_current` stopped treating the
+    // target's own pending normals as a reason to walk: before that, a bake
+    // left normals pending and the full walk released the field on the way
+    // past. The short circuit is right and this was the assumption it broke.
+    for (std::uint32_t l = 0; l < static_cast<std::uint32_t>(s.levels.size()); ++l)
+        if (s.levels[l].composed && !s.stack.reaches_level(l)) return true;
     if (s.stack.empty()) return false;
     if (s.stack.any_dirty()) return true;
     // A level that reaches the stack and has no composed field yet is work

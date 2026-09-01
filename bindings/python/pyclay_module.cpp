@@ -8290,7 +8290,7 @@ NB_MODULE(pyclay, m) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, center, radius, strength, falloff, direction, nb::none(),
-                    nb::cast(geodesic), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
+                    nb::cast(geodesic), nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
                     smooth_iterations, 0.0f, alpha, alpha_direction, alpha_tangent, alpha_extent,
                     nb::none(), nb::none(), 0.0f, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
@@ -8358,7 +8358,7 @@ NB_MODULE(pyclay, m) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     "draw", center, radius, strength, falloff, direction, nb::none(),
-                    nb::cast(true), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
+                    nb::cast(true), nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
                     0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), nb::none(),
                     0.0f, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
@@ -8403,7 +8403,7 @@ NB_MODULE(pyclay, m) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     "smooth", center, radius, strength, falloff, nb::none(), nb::none(),
-                    nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
+                    nb::none(), nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
                     smooth_iterations, 0.0f, nb::none(), nb::none(), nb::none(), 0.0f,
                     nb::none(), nb::none(), 0.0f, &chosen);
                 const mesh::MultiresSmoothMode chosen_mode = parse_smooth_mode(mode);
@@ -8432,7 +8432,7 @@ NB_MODULE(pyclay, m) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     "draw", center, radius, strength, falloff, nb::none(), nb::none(),
-                    nb::cast(true), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
+                    nb::cast(true), nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
                     0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), nb::none(),
                     0.0f, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
@@ -8451,7 +8451,7 @@ NB_MODULE(pyclay, m) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     "draw", center, radius, strength, falloff, nb::none(), nb::none(),
-                    nb::cast(true), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
+                    nb::cast(true), nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
                     0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), nb::none(),
                     0.0f, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
