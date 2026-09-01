@@ -421,3 +421,74 @@ TEST_CASE("a write on top of a deep stack sums only the layers that reach the bl
     CHECK(surface.sculpt_layer_stats().blocks_recomposed == 1);
     CHECK(surface.sculpt_layer_stats().layer_blocks_visited == 8);
 }
+
+TEST_CASE("merge folds the per-layer mask in, once, and leaves the identity behind") {
+    // THE HALF OF THE PARITY GATE THE MASK WAS MISSING FROM. Task 2.7's
+    // per-layer mask is a SECOND multiplier in `E = B + Σ sᵢ·mᵢ(v)·Lᵢ`, and a
+    // merge that is defined by the surface it leaves has to fold it into the
+    // coefficients it writes AND clear it — a mask left standing would apply
+    // itself a second time to a coefficient that already carries it, and one
+    // dropped would lose the shape the artist masked. Every merge and bake case
+    // in this suite ran with the identity mask, so the arithmetic that handles a
+    // real one was written and never asked a question.
+    for (float lower_strength : {1.0f, 0.37f, 0.0f}) {
+        CAPTURE(lower_strength);
+        MultiresSurface surface = build(2);
+        const SculptLayerId lower = surface.add_sculpt_layer("lower");
+        const SculptLayerId upper = surface.add_sculpt_layer("upper");
+        for (std::uint32_t v = 30; v < 50; ++v) {
+            surface.set_sculpt_layer_detail(lower, 2, v, lift(0.04f));
+            surface.set_sculpt_layer_detail(upper, 2, v, lift(0.02f));
+            // Two masks that DISAGREE and that vary along the run, so a merge
+            // dropping either one, or applying one of them twice, lands
+            // somewhere a constant mask would have hidden.
+            const float t = static_cast<float>(v - 30);
+            REQUIRE(surface.set_sculpt_layer_mask(lower, 2, v, 0.25f + 0.03f * t));
+            REQUIRE(surface.set_sculpt_layer_mask(upper, 2, v, 0.95f - 0.04f * t));
+        }
+        REQUIRE(surface.set_sculpt_layer_strength(lower, lower_strength));
+        REQUIRE(surface.set_sculpt_layer_strength(upper, 0.6f));
+        const std::vector<cfloat3> before = surface.positions_at(2);
+
+        REQUIRE(surface.merge_sculpt_layer_down(upper));
+        REQUIRE(surface.sculpt_layers().size() == 1);
+        const std::vector<cfloat3> after = surface.positions_at(2);
+        for (std::size_t i = 0; i < before.size(); ++i) {
+            CAPTURE(i);
+            CHECK(after[i].y == doctest::Approx(before[i].y).epsilon(1e-6));
+        }
+        // The identity the target needs is the mask's as well as the slider's:
+        // the weight is in the coefficients now, so the mask has to be gone
+        // rather than combined.
+        const mesh::SparseWeightField* mask = surface.sculpt_layers().mask_at(lower, 2);
+        REQUIRE(mask != nullptr);
+        for (std::uint32_t v = 30; v < 50; ++v) CHECK(mask->get(v) == 1.0f);
+    }
+}
+
+TEST_CASE("bake carries the mask into the base, and the surface stays where it was") {
+    MultiresSurface surface = build(2);
+    for (std::uint32_t v = 30; v < 50; ++v) surface.set_detail(2, v, lift(0.011f));
+    const SculptLayerId id = surface.add_sculpt_layer("pass");
+    for (std::uint32_t v = 30; v < 50; ++v) {
+        surface.set_sculpt_layer_detail(id, 2, v, lift(0.03f));
+        REQUIRE(surface.set_sculpt_layer_mask(id, 2, v, 0.2f + 0.04f * static_cast<float>(v - 30)));
+    }
+    REQUIRE(surface.set_sculpt_layer_strength(id, 0.55f));
+    const std::vector<cfloat3> before = surface.positions_at(2);
+
+    REQUIRE(surface.bake_sculpt_layer_to_base(id));
+    CHECK(surface.sculpt_layers().empty());
+    const std::vector<cfloat3> after = surface.positions_at(2);
+    for (std::size_t i = 0; i < before.size(); ++i) {
+        CAPTURE(i);
+        CHECK(after[i].y == doctest::Approx(before[i].y).epsilon(1e-6));
+    }
+    // The base has neither a strength nor a mask to carry, so what landed there
+    // must be the MASKED, SCALED coefficient and not the raw one — a bake that
+    // ignored the mask would write 0.011 + 0.55·0.03 at every masked vertex.
+    const float w = 0.2f + 0.04f * 10.0f;
+    CHECK(surface.detail_at(2).get(40).normal ==
+          doctest::Approx(0.011f + 0.55f * w * 0.03f).epsilon(1e-5));
+    CHECK(surface.memory().composed == 0);
+}

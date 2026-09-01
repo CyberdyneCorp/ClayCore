@@ -150,6 +150,22 @@
       — `SculptLayerStack::merge_down` sets the target to the identity it needs;
       `bake_sculpt_layer_to_base` is the same statement with the base as target.
       Parity tested at strengths 1.0, 0.37 and 0.0
+      — AND NOW WITH A MASK ON, which no parity case had. The per-layer mask
+      (2.7) is a SECOND multiplier in `E = B + Σ sᵢ·mᵢ(v)·Lᵢ`, so the identity a
+      merge has to construct is the mask's as well as the slider's: the weight
+      must be folded into the coefficients written and the mask CLEARED, because
+      one left standing applies itself twice to a coefficient that already
+      carries it. Every merge and bake case ran with the identity mask, so that
+      arithmetic was written and never asked a question. Both hold — this is a
+      missing gate rather than a bug — and are now gated by `merge folds the
+      per-layer mask in, once, and leaves the identity behind` (two masks that
+      disagree and vary along the run, at the same three strengths, plus the
+      target's mask asserted back at 1.0) and `bake carries the mask into the
+      base, and the surface stays where it was` (the base has no mask to carry,
+      so what lands there must be the MASKED, SCALED coefficient). PROVEN
+      separately, one revert per property: dropping the mask from `merge_level`
+      compiles and fails 60 assertions; dropping it from `bake_layer_level`
+      compiles and fails 21
 - [x] 3.4 Removing a layer re-evaluates its coverage only; it does not replay
       strokes and does not touch other layers
       — `remove` notes the removed layer's coverage and nothing else; tested
