@@ -560,6 +560,42 @@
       `cuda`/`opencl`/`vulkan` want hardware this box does not have.
       `check_layering.py`, `check_c_abi.py`, `check_binding_parity.py`,
       `check_gallery.py` and `check_swift_package.py` are all OK.
+      — RE-RUN END TO END after this stage's fix and three new cases, on a box
+      three worktrees and unrelated jobs were sharing, so the load average is
+      recorded either side of every run rather than the wall clock being taken
+      at face value:
+        cpu-only    4/4 in 268.7 s (load 14.8 before, 18.1 after). The same
+                    suite ran 142.5 s earlier in the stage at load 3.7/4.9, so
+                    the 1.9x is the box and not the change. 2078 doctest cases,
+                    14.87 M assertions, 0 failed. Every new translation unit was
+                    force-recompiled: 0 warnings under `-Werror`
+        asan-ubsan  4/4 in 3353.5 s, ZERO AddressSanitizer, LeakSanitizer or
+                    UBSan reports (load 4.3 before, 9.6 after). That binary
+                    predates the last three cases, so asan was rebuilt and the
+                    165-case sculpt-layer, C-ABI and allocation-gate family
+                    re-run on it — 191,170 assertions, 0 reports
+        tsan        4/4 in 1169.1 s under `setarch -R`, ZERO ThreadSanitizer
+                    warnings (load 9.7 before, 15.3 after); the same 165-case
+                    family re-run on a rebuilt tsan binary, 0 warnings.
+                    Composition holds no thread of its own — the gate is that
+                    the surrounding evaluation still does not race with it
+        pyclay      596 passed, 20 skipped, 0 failed under
+                    `LD_PRELOAD=/lib/x86_64-linux-gnu/libstdc++.so.6`;
+                    `examples/69_mesh_sculpt_layers.py` runs to completion with
+                    every `SystemExit` claim holding and its tracked outputs
+                    byte-identical, so `check_gallery` stays green
+        gates       layering OK; c-abi OK in BOTH modes (hygiene-only, and the
+                    ctypes FFI against `build/cpu-only/libclay_shared.so`);
+                    binding parity OK in BOTH modes at 622 capabilities / 29
+                    exempt, parsed and `--pyclay --require-import`; gallery OK
+                    (251 tracked outputs); swift-package OK (textual)
+        release     10 PASS / 5 FAIL, the same five and for the same two
+                    reasons: `tests`, `bindings`, `abi` and `wheel` are one root
+                    cause, the anaconda GLIBCXX_3.4.31 mismatch — `tests` fails
+                    ONLY on ctest job 3, `pyclay_pytest`, and that suite passes
+                    596/0 under `LD_PRELOAD` — and `device` is the environment's
+                    hardware gate. `version` PASSES at cmake=0.76.0 abi=0.76.0
+                    wheel=0.76.0
       `release_check.py` is 13 PASS / 2 FAIL, and NEITHER failure is this
       change's:
         * `device` needs the hardware gate — "engine changed since the gate ran
