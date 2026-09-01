@@ -8215,11 +8215,11 @@ NB_MODULE(pyclay, m) {
                      },
                      "The level vertices the last stamp actually moved.")
         .def_prop_ro("arena_stats",
-                     [](const mesh::MultiresSculptor& s) { return arena_stats_of(s.arena()); },
+                     [](const PyMultiresSculptor& s) { return arena_stats_of(s.arena()); },
                      kArenaStatsDoc)
         .def(
             "set_automask_inputs",
-            [](mesh::MultiresSculptor& s, nb::handle cavity, nb::handle groups,
+            [](PyMultiresSculptor& s, nb::handle cavity, nb::handle groups,
                std::uint32_t active_group) {
                 s.set_automask_inputs(automask_inputs_of(cavity, groups, active_group));
             },
