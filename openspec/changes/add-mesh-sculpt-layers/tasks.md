@@ -40,105 +40,196 @@
 
 ## 2. The stack
 
-- [ ] 2.1 `include/clay/mesh/sculpt_layer.h` — stable 64-bit ids, name,
+- [x] 2.1 `include/clay/mesh/sculpt_layer.h` — stable 64-bit ids, name,
       strength, visible, locked, kind, per-level detail, byte accounting
-- [ ] 2.2 IDs are never vector indices. Reordering changes indices; an id is
+      — `SculptLayerId`, `SculptLayerKind`, `SparseWeightField`, `SculptLayer`,
+      `SculptLayerStack`, `SculptLayerDelta` and `SculptLayerProperty`; per-layer
+      `bytes()` and `coverage_vertices()`, stack `memory()`
+- [x] 2.2 IDs are never vector indices. Reordering changes indices; an id is
       what a host, a serialized document and the C ABI hold
-- [ ] 2.3 Stack operations: add, remove, move, merge down, rename, set
+      — ids are minted from a serialized counter, `index_of` is a lookup, and
+      `move_to`/`remove` never renumber anything a host holds
+- [x] 2.3 Stack operations: add, remove, move, merge down, rename, set
       strength, set visible, set lock, set active
-- [ ] 2.4 A locked layer refuses a sculpt write; property changes may still be
+      — all nine on `SculptLayerStack`, each forwarded through `MultiresSurface`
+      so the per-level sizes and the surface revisions stay in step and an undo
+      record can be captured on the way
+- [x] 2.4 A locked layer refuses a sculpt write; property changes may still be
       allowed and the rule is stated rather than discovered
-- [ ] 2.5 Evaluation: `base detail + Σ visible layer detail × strength × layer
+      — `MultiresSculptor::stamp` refuses before the brush moves anything and
+      `absorb_level_edit` puts the level's mesh back for a direct caller;
+      `rename`, `set_locked` and `set_active` are still allowed and say so
+- [x] 2.5 Evaluation: `base detail + Σ visible layer detail × strength × layer
       mask`, per level
-- [ ] 2.6 Base deformation layers at level zero, so a non-destructive
+      — `recompose_block` in `src/mesh/sculpt_layer_eval.cpp`; a layer at zero
+      effective strength is SKIPPED rather than multiplied by zero, so an
+      invisible stack composes to the base field bit for bit
+- [x] 2.6 Base deformation layers at level zero, so a non-destructive
       proportion pass is possible and not only a non-destructive detail one
-- [ ] 2.7 Per-layer mask, sparse, DISTINCT from the temporary brush gate — the
+      — `State::BaseRestFrames` — the cage's rest frames, built lazily and only
+      when a level-0 layer exists; `absorb_base_edit` subtracts the layer's
+      contribution so sculpting the form under a proportion pass does not bake it
+- [x] 2.7 Per-layer mask, sparse, DISTINCT from the temporary brush gate — the
       gate says where a brush writes, the mask says where a stored layer
       contributes
-- [ ] 2.8 Byte accounting per layer and per stack, and coverage per layer, so a
+      — `mesh::SparseWeightField`, identity 1.0, same blocking and same block
+      index as `DetailField`; the brush gate stays `field::MaskGate`
+- [x] 2.8 Byte accounting per layer and per stack, and coverage per layer, so a
       strength change can dirty coverage rather than the model
+      — `MultiresMemory::sculpt_layers` (authoritative) and `::composed`
+      (rebuildable), plus `SculptLayer::coverage_vertices`
 
 ## 3. Semantics that must be written down, not discovered
 
-- [ ] 3.1 Additive layers COMMUTE. Reordering changes organisation and not
+- [x] 3.1 Additive layers COMMUTE. Reordering changes organisation and not
       geometry, and the requirement says so rather than implying an order
       dependence. This differs from voxel sculpt layers, whose replay of cell
       writes IS order-dependent and whose spec pins which order wins
-- [ ] 3.2 A stroke on a layer at strength 0.5 records its FULL contribution.
+      — composition visits a block's layers once and adds; `move_to` invalidates
+      no block. `test_mesh_sculpt_layers` swaps two overlapping layers and
+      compares the evaluated positions BIT for bit
+- [x] 3.2 A stroke on a layer at strength 0.5 records its FULL contribution.
       Strength is composition, not a scale on the pen
-- [ ] 3.3 Merge-down and bake-to-base are defined by VISUAL PARITY — evaluated
+      — `absorb_layered_detail` stores `ΔE = frame⁻¹(P_written) − E_before`;
+      nothing in the change divides by a strength. Tested at 0.5 → 1.0
+- [x] 3.3 Merge-down and bake-to-base are defined by VISUAL PARITY — evaluated
       surface before equals evaluated surface after — not by concatenating
       coefficients. The naive arithmetic divides by the lower layer's strength
       and fails exactly when it is zero
-- [ ] 3.4 Removing a layer re-evaluates its coverage only; it does not replay
+      — `SculptLayerStack::merge_down` sets the target to the identity it needs;
+      `bake_sculpt_layer_to_base` is the same statement with the base as target.
+      Parity tested at strengths 1.0, 0.37 and 0.0
+- [x] 3.4 Removing a layer re-evaluates its coverage only; it does not replay
       strokes and does not touch other layers
+      — `remove` notes the removed layer's coverage and nothing else; tested
 - [ ] 3.5 Under symmetry, every mirrored write enters the SAME active layer and
       one undo step, with the coverage as the union
+      — falls out of the transaction: the target layer is pinned at `begin`, so
+      every mirrored stamp of one gesture enters that layer and one delta whose
+      coverage is the union. Not yet asserted — the mirrored-stroke case belongs
+      to `test_mesh_sculpt_layer_stroke.cpp` in the test stage
 
 ## 4. Writing into a layer
 
-- [ ] 4.1 `mesh::LayeredMultiresSculptor` with a stroke transaction —
+- [x] 4.1 `mesh::LayeredMultiresSculptor` with a stroke transaction —
       begin, stamp, commit, cancel — following the shape the SDF sculpt
       transaction already established
+      — `mesh::LayeredMultiresSculptor` in `include/clay/mesh/layered_sculpt.h`
 - [ ] 4.2 Cancel restores the layer exactly; commit produces ONE undo delta
-- [ ] 4.3 A hundred stamps over one vertex coalesce to one entry
-- [ ] 4.4 The active layer's blocks are writable; the evaluated lower stack is
+      — `cancel` reverts the recorded `before` values rather than recomputing;
+      `commit` hands over one `SculptLayerDelta` (or one `MultiresDelta` for a
+      base-domain stroke). Exactness not yet asserted — test stage
+- [x] 4.3 A hundred stamps over one vertex coalesce to one entry
+      — `SculptLayerDelta::note_detail` keeps the FIRST `before` per (level,
+      vertex) and `sync_after` rewrites the LAST `after`
+- [x] 4.4 The active layer's blocks are writable; the evaluated lower stack is
       read-only and cached during the stroke
-- [ ] 4.5 Write domain: geometry at the active level, or detail relative to the
+      — the composed field IS the cached lower stack, and
+      `hold_sculpt_layer_composition` refuses a composition change while a
+      stroke is open — which answers the design's open question
+- [x] 4.5 Write domain: geometry at the active level, or detail relative to the
       subdivided parent, chosen explicitly by the caller. An automatic choice
       may be offered and SHALL NOT be the only one
-- [ ] 4.6 An erase mode moves the active layer's detail toward zero and touches
+      — `MultiresWriteDomain::{Automatic, Geometry, Detail}`, resolved once at
+      `begin`; `Detail` with no active layer refuses rather than falling back
+- [x] 4.6 An erase mode moves the active layer's detail toward zero and touches
       neither the base nor any other layer
-- [ ] 4.7 Height stamps and tangent-space vector displacement, sampled through
+      — `LayeredMultiresSculptor::erase` fades the ACTIVE layer toward zero and
+      refuses when there is no target, so it can never reach the base
+- [x] 4.7 Height stamps and tangent-space vector displacement, sampled through
       the SAME alpha sampler and orientation rules the existing mesh alpha
       uses, with image data borrowed and never copied into a preset
-- [ ] 4.8 Vector displacement is interpreted in the tangent frame, never in
+      — `include/clay/mesh/detail_stamp.h`; the placement is
+      `kernel::calpha_frame` and the read is `kernel::calpha_sample`, the same
+      two the scalar alpha uses. Images are planar and borrowed
+- [x] 4.8 Vector displacement is interpreted in the tangent frame, never in
       world space — a world-space stamp is orientation-dependent and unusable
       over a curved surface
+      — `DetailStampMode::Vector` returns three components in the vertex's
+      transported frame; nothing is read or written in world space
 
 ## 5. Caching and scale
 
-- [ ] 5.1 Blocked detail storage, with the block size chosen by measurement
-- [ ] 5.2 An evaluated-detail block cache keyed on a stack revision; a rename
+- [x] 5.1 Blocked detail storage, with the block size chosen by measurement
+      — the stack shares `DetailField`'s blocking and its measured 1024-vertex
+      default rather than choosing a second one — the shared block index is what
+      makes 5.4 and 5.5 arithmetic
+- [x] 5.2 An evaluated-detail block cache keyed on a stack revision; a rename
       SHALL NOT invalidate geometry
-- [ ] 5.3 Separate revisions for metadata, composition and content, so the
+      — per-level dirty block sets on the stack; `rename` and `set_active` bump
+      only `metadata_revision` and mark nothing. Tested
+- [x] 5.3 Separate revisions for metadata, composition and content, so the
       three kinds of change invalidate what they actually affect
-- [ ] 5.4 THE GATE: a strength change on a layer touching a small fraction of a
+      — `metadata_revision`, `composition_revision`, `content_revision`, with
+      `geometry_bumps` folded into the surface's own two so a pre-existing host
+      keeps working
+- [x] 5.4 THE GATE: a strength change on a layer touching a small fraction of a
       large surface costs its coverage, not the surface
-- [ ] 5.5 THE GATE: a stamp on the top of a deep stack does not sum every layer
+      — tested: a layer inside one block of a five-block level recomposes exactly
+      one block on a strength change
+- [x] 5.5 THE GATE: a stamp on the top of a deep stack does not sum every layer
       beneath it over unrelated geometry. Prefix checkpoints if the measurement
       requires them; the cache keys SHALL be designed so they are possible
-- [ ] 5.6 Benchmarks over 1, 4, 16, 64 and 128 layers with local, overlapping
+      — tested: sixteen layers over two disjoint blocks, a write into one visits
+      the eight layers that reach it and none of the others
+- [x] 5.6 Benchmarks over 1, 4, 16, 64 and 128 layers with local, overlapping
       and dense coverage
-- [ ] 5.7 Memory never silently stops recording. Report the budget and let a
+      — `BM_SculptLayerCompose*`, `BM_SculptLayerStrengthChange*` and
+      `BM_SculptLayerStampOnStack*` over 1/4/16/64/128 with local, overlapping
+      and dense coverage; the counters are the reading, not the clock
+- [x] 5.7 Memory never silently stops recording. Report the budget and let a
       host merge, bake, delete or compact — a cap that silently stopped
       recording would leave the pass on the surface and un-dialable, which is a
       correctness bug wearing a memory limit's clothes
+      — nothing is capped anywhere; `MultiresMemory` reports layer content apart
+      from the composed cache and the comment says why a cap would be a
+      correctness bug
 
 ## 6. Detail-aware verbs
 
-- [ ] 6.1 Smooth gains modes: geometry as today, detail-only, and
+- [x] 6.1 Smooth gains modes: geometry as today, detail-only, and
       preserve-detail. A plain Laplacian over pores removes the pores, which is
       rarely what was asked
-- [ ] 6.2 A restore/morph mode — toward zero on the active layer, or toward the
+      — `MultiresSmoothMode::{Geometry, DetailOnly, PreserveDetail}` on the
+      layered sculptor; `PreserveDetail` smooths the form and folds the change
+      into the level's own detail, leaving every layer's contribution intact
+- [x] 6.2 A restore/morph mode — toward zero on the active layer, or toward the
       base — distinct from undo and documented as such
+      — `erase` (the active channel toward zero) and `restore` (the level's own
+      detail toward the pure subdivision); both are brushes and both are
+      recorded as gestures that undo, which is what makes them not-undo
 
 ## 7. Undo, history, serialization
 
-- [ ] 7.1 `mesh::SculptLayerDelta` — layer id, level, changed entries or
+- [x] 7.1 `mesh::SculptLayerDelta` — layer id, level, changed entries or
       blocks, optional mask changes, with existence flags on each side
-- [ ] 7.2 Layer PROPERTY operations are undoable — rename, strength,
+      — `mesh::SculptLayerDelta` — layer id, level, coefficient entries and mask
+      entries, coalesced, with its own byte form
+- [x] 7.2 Layer PROPERTY operations are undoable — rename, strength,
       visibility, reorder, lock, add, remove, merge, bake. Voxel sculpt-layer
       property changes are still outside the history; this is the change that
       does better rather than repeating it
-- [ ] 7.3 `session::History` gains the kind and a resolver, through the same
+      — `mesh::SculptLayerProperty`: scalar sides for rename/strength/visible/
+      lock/active, and a whole-stack snapshot on each side for add, remove,
+      move, merge and bake — plus the base detail and cage positions a bake
+      wrote outside the stack
+- [x] 7.3 `session::History` gains the kind and a resolver, through the same
       inversion the other kinds use
+      — `Step::Kind::MultiresLayer` and `MultiresLayerProperty`, applied through
+      `MultiresSurface::apply_sculpt_layer_{delta,property}` and the existing
+      `set_multires_resolver`; no fifth resolver
 - [ ] 7.4 Journal encode, decode, replay; older journals still replay; a
       malformed delta is refused
-- [ ] 7.5 Versioned serialization of the stack — id, name, kind, visible,
+      — both journal kinds APPENDED so an older journal keeps its numbering;
+      encode, decode and replay wired. The fuzzed-payload cases belong to
+      `test_mesh_sculpt_layer_history.cpp` in the test stage
+- [x] 7.5 Versioned serialization of the stack — id, name, kind, visible,
       locked, strength, per-level blocks, masks — inside the multires format
       rather than in the mesh stream
-- [ ] 7.6 A layer id survives a save, a load and a reorder
+      — `kSurfaceVersion = 2`, the stack chunk inside the multires stream, and
+      version 1 still accepted as a hierarchy with no layers
+- [x] 7.6 A layer id survives a save, a load and a reorder
+      — tested: save, load and a reorder before the save; ids and names survive
 
 ## 8. Bindings and gates
 
