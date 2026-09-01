@@ -340,6 +340,62 @@ The document tree the app and specs already define, owned here so every consumer
 
 `clay::brick`: sparse virtual grid of 8³/16³ bricks, fp16 narrow band (±3 voxels), dirty-set tracking, async-friendly (evaluation requests are plain data; the app owns threading/queues via the backend), LOD mip bricks for far view.
 
+### An intersect is bounded by its layer
+
+`item_influence_bound` reported `Everything` for any op that is not local, and
+"not local" covered two things that behave differently. One of them has a finite
+answer, and the difference is 1.8x on a drag: the reporter of #319 measured the
+same object, the same drag, the same scene, differing only in the operation —
+**19.39 ms subtracting, 35.52 ms intersecting**, none of it the intersect being
+harder to evaluate.
+
+- **An INTERSECT is bounded by its LAYER.** `max(acc, item)` can only take
+  material away, and what it takes away is inside what the layer already
+  occupies — it cannot put material where the layer has none.
+- **A SPATIAL MORPH is not.** Its weight *saturates*:
+  `ctransition_radial_weight` is `clamp((length(p.xz) − r0)/(r1 − r0), 0, 1)`
+  about the **world Y axis**, so past `r1` the weight is exactly 1 and the result
+  *is* the item's own field, arbitrarily far from anything the layer occupies.
+  These keep `Everything`, and #319's report — which lumps "intersect, the
+  spatial morphs" together — would have been unsound taken literally. That claim
+  is *mechanical*: it is a statement about the kernel's weight, not about a
+  fixture, and morph behaviour is unchanged here in any case. A probe of the
+  radial morph leaks 4 points in 200,000 on arm64 and none on x86_64, which is
+  reported and not asserted — the leaking points sit a rounding error either
+  side of the band edge.
+
+**What made this shippable was a sample count, not a fixture.** #326 held it
+back on a real objection: nothing in the suite could tell a correct bound from a
+wrong one, because the item's *own* geometry box is ~3x tighter than the layer's
+and measured drift 0 as well. Four candidate fixture designs were proposed to
+break the tie and **none was needed**. Moving the intersect of #319's own
+sphere+box document leaves 34 drifting points in 400,000 — about 1 in 11,700 —
+so the property test's 4,000 samples miss it roughly seven times in ten. At
+200,000 it shows every run:
+
+| candidate bound | worst band-clamped drift |
+|---|---:|
+| the item's own geometry | **0.100** (146 points) |
+| the layer's extent | **0** |
+
+against a 0.15 band, by exact equality, boxes dilated by `band + cull_pad`. So
+#319 asked for the tightest bound that holds, not one 3.4x too loose. The
+sample count is a property of how *rare* a violation is rather than of how hard
+the document is — a local item's bound is its own geometry and a violation there
+is dense, which is what the gnarly corpus finds at 4,000.
+
+**The cull gate does not change.** `item_influence_is_local` still refuses every
+non-local op, so an intersect still appears in every brick's tape. "May this be
+omitted from a brick's tape" and "which bricks does moving it dirty" were always
+different questions and only the second has the finite answer; keeping them
+separate is what makes this safe. `item_own_influence_bound` also keeps the
+infinite answer — it asks how far the item's own body reaches, which is what a
+brush that has already reflected itself tests a drag against.
+
+Measured on the reporter's case, bricks dirtied per drag frame over 20 frames,
+1,000 tracked: subtract **64 → 64**, intersect **1,000 → 216**. 216 is exactly
+the figure the triage on #319 predicted.
+
 ### Drawing a preview beside the rest of the document
 
 A live sculpt transaction previews **one layer** — that is what

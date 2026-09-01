@@ -200,16 +200,28 @@ TEST_CASE("nested groups each contribute their support") {
     CHECK(b.max.x == doctest::Approx(a.max.x + support).epsilon(0.001));
 }
 
-TEST_CASE("a non-local subtree is still unbounded") {
-    // An intersect ANYWHERE above reads the running accumulator and can move
-    // the result arbitrarily far. Checked at both levels, because the walk
-    // tests op_is_local at every step and a check that only ran on the first
-    // would pass the depth-1 case and be wrong for the depth-2 one.
+TEST_CASE("an intersecting subtree reaches the LAYER, and a morph reaches further") {
+    // An intersect ANYWHERE above reads the running accumulator, so an edit
+    // inside it can move the result anywhere the LAYER has material — and no
+    // further (#319). A spatial morph above can move it further than that and
+    // still answers infinite.
+    //
+    // Checked at both levels, because the walk tests the op at every step and
+    // a check that only ran on the first would pass the depth-1 case and be
+    // wrong for the depth-2 one.
     for (int depth : {1, 2}) {
         CAPTURE(depth);
-        Nested n = nested(depth, /*k=*/0.0f, /*sibling=*/false, scene::Op::Intersect);
-        const math::Aabb reach = scene::node_reach_bound(n.content(), n.child, n.layer());
-        CHECK(reach.is_infinite());
+        {
+            Nested n = nested(depth, /*k=*/0.0f, /*sibling=*/false, scene::Op::Intersect);
+            const math::Aabb reach = scene::node_reach_bound(n.content(), n.child, n.layer());
+            CHECK(!reach.is_infinite());
+            CHECK(!reach.empty());
+        }
+        {
+            Nested n = nested(depth, /*k=*/0.0f, /*sibling=*/false, scene::Op::TransitionRadial);
+            const math::Aabb reach = scene::node_reach_bound(n.content(), n.child, n.layer());
+            CHECK(reach.is_infinite());
+        }
     }
 }
 
