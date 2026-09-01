@@ -584,6 +584,34 @@ outside `check_bench.py`](#sculpt-layers-measured-add-mesh-sculpt-layers) — th
 claim they carry is an integer asserted in a unit test, not a ratio between two
 clocks on a shared runner.
 
+**Re-measured a third time, and this time the change was priced against
+itself.** Composition now sums a block's contributors in **layer-id** order
+rather than in list order ([07 §8b](07-brushes-and-features.md#reordering-is-organisation-which-is-why-the-sum-is-taken-in-id-order)),
+which puts a sort on the per-block path — and a sort on a hot path should be
+paid for rather than assumed. 31 repetitions, same box, load average 3.76 before
+and 2.86 after; the same binary was then rebuilt with the sort removed and run
+back to back (load 3.8 before, 3.4 after), so the two sides are comparable:
+
+| case | 1 layer, P50 / P95 / P99 / max | 128 layers, P50 / P95 / P99 / max | | counter |
+|---|---:|---:|---:|---|
+| `BM_SculptLayerStampOnStackLocal` | 362.9 / 369.4 / 417.4 / 437.6 us | 375.9 / 381.5 / 381.8 / 381.9 us | **1.04x** | `layer_blocks_visited` **2898 at both ends** |
+| `BM_SculptLayerStampOnStackOverlapping` | 364.8 / 374.0 / 404.4 / 415.8 us | 538.8 / 612.3 / 651.5 / 661.4 us | 1.48x | 2898 -> 14109 |
+| `BM_SculptLayerStrengthChangeLocal` | 751.6 / 794.3 / 810.2 / 814.5 us | 1204.9 / 1216.4 / 1222.9 / 1225.3 us | 1.60x | `blocks_recomposed` **200 at both ends** |
+| `BM_SculptLayerComposeLocal` | 15.67 / 16.04 / 16.48 / 16.57 ms | 16.15 / 16.56 / 17.13 / 17.37 ms | 1.03x | cold, the whole level |
+
+Dense coverage, 1 -> 16 layers each over the whole level: compose 19.30 -> 18.65
+ms, strength 5.96 -> 7.30 ms, stamp 1.76 -> 2.32 ms.
+
+**What the sort costs**, P50 with it against P50 without on the same box in the
+same session: **0.97x to 1.01x** on every compose and stamp row, and **0.87x to
+0.90x** on the deep local strength change at 16, 64 and 128 layers — the shape
+with the most contributors per block. Free within the noise everywhere and
+measurably faster there; the cause is not attributed, only measured. The
+gathered list is already in id order whenever nothing has been moved, so the
+sort costs a scan over the layers that reach **one** block. Both counters land
+on the same integers for the third time, across three runs whose clocks moved by
+up to a factor of two — which is the argument for reading the counter.
+
 **What a hostile document costs is a latency question too**, and it is the one
 this branch's last stage found unanswered. A layer stack chunk rides inside the
 multires stream, and the surface's cross-check of a decoded stack against the

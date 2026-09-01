@@ -1798,6 +1798,15 @@ strength and is undefined at exactly the value one slider reaches.
 Strength 0 and invisible contribute **nothing, to the bit**: a layer at zero
 effective strength is skipped rather than multiplied by zero.
 
+Parity is the **mask's** as well as the slider's, and that is the half of it
+easiest to write and never ask about. `m_i` is a second multiplier, so a merge
+has to fold the weight it is removing into the coefficients it writes *and*
+clear the mask it folded — one left standing applies itself a second time to a
+coefficient that already carries it — and a bake writes the **masked, scaled**
+coefficient into a base that has no mask to carry. Both hold, and both are now
+gated with two disagreeing masks at strengths 1.0, 0.37 and 0.0, because every
+parity case before ran with the identity mask.
+
 #### Reordering is organisation, which is why the sum is taken in id order
 
 Additive displacement commutes, so dragging a pass up or down the list changes
@@ -1915,6 +1924,14 @@ leave the pass on the surface and un-dialable, which is a correctness bug wearin
 a memory limit's clothes. A host under pressure has four levers instead:
 `compact_sculpt_layers()` (the cheapest — it releases every all-zero block a
 gesture that undid itself left behind), merge, bake and delete.
+
+`compact_sculpt_layers()` is a memory lever and **not** a change to the picture,
+which is a stronger claim than its byte count falling: a lever that ate the pass
+would report the same saving. A mask is authoritative rather than rebuildable,
+so what compaction may release is all-zero coefficient blocks and nothing else.
+It is asserted on the evaluated surface bit for bit twice — straight after the
+compaction, and again after every slider has been dialled away and back so that
+every covered block has recomposed out of what survived.
 
 The stack is serialized **inside the multires stream**, at surface version 2. The
 bump is deliberate rather than incidental: `decode` ignores trailing bytes, so
