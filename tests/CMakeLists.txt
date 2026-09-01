@@ -86,6 +86,7 @@ add_executable(clay_unit_tests
   unit/test_c_transform_args.cpp
   unit/test_scale_axes.cpp
   unit/test_c_scale_axes.cpp
+  unit/test_c_layer_scale_axes.cpp
   unit/test_c_layer_rename.cpp
   unit/test_c_layer_mirror.cpp
   unit/test_c_layer_radial.cpp

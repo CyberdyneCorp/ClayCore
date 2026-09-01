@@ -235,11 +235,10 @@ struct Compiler {
     // header offset and the instance's world-to-local transform appended, so
     // the kernel can weigh the crossfade by the inset into the sampled box.
     void emit_replace_feather(const Node& item, const Layer& layer) {
-        math::Transform world = layer.xform * item.xform;
-        // The item's per-axis scale composes here exactly as it does for the
-        // item's own record: a squashed item's sampled box is squashed with it,
-        // or the crossfade would weigh an inset the geometry no longer has.
-        cfloat4x4 inv = item_scaled_inverse(item, world.inverse_matrix());
+        // Both per-axis scales compose here exactly as they do for the item's
+        // own record: a squashed item's sampled box is squashed with it, or the
+        // crossfade would weigh an inset the geometry no longer has.
+        cfloat4x4 inv = placed_inverse_matrix(layer, item);
         CTapeInstr instr;
         instr.op = kernel::ctape_combine;
         instr.param_offset = static_cast<unsigned int>(tape.params.size());
@@ -253,7 +252,7 @@ struct Compiler {
         const float xf[12] = {inv.c0.x, inv.c0.y, inv.c0.z, inv.c1.x, inv.c1.y, inv.c1.z,
                               inv.c2.x, inv.c2.y, inv.c2.z, inv.c3.x, inv.c3.y, inv.c3.z};
         tape.params.insert(tape.params.end(), xf, xf + 12);
-        tape.params.push_back(world.scale * scale_axes_factor(item.scale_axes));
+        tape.params.push_back(placed_distance_scale(layer, item));
     }
 
     // rb: second radius of the two-parameter extended modes (groove/tongue
@@ -678,7 +677,6 @@ struct Compiler {
     // Item plus its mirror copies, pre-combined with the layer's Mirror
     // Blend, left on the stack as one value.
     void emit_item(const Node& item, const Layer& layer) {
-        math::Transform world = layer.xform * item.xform;
         // The item's PER-AXIS scale is innermost — in its own local frame,
         // inside the placement — so it goes into the INVERSE matrix outermost
         // and the distance factor takes its smallest component. That is
@@ -688,16 +686,21 @@ struct Compiler {
         //
         // No new opcode and no wider record, which is why this is plumbing
         // rather than a kernel change (#320).
-        const kernel::cfloat3 axes = item.scale_axes;
-        const float axis_factor = scale_axes_factor(axes);
-        const float scale_world = world.scale * axis_factor;
-        emit_item_instance(item, item_scaled_inverse(item, world.inverse_matrix()), scale_world);
-        // A non-uniform scale stops the result being a true distance. It stays
-        // 1-Lipschitz — dividing by s and multiplying back by min(s) can only
-        // shorten — so the safe step scale does not move and no marcher slows
-        // down. What goes is `is_exact`, which is what cfi_scale_nonuniform
-        // says and all it says.
-        if (!scale_axes_uniform(axes)) tape.info = kernel::cfi_scale_nonuniform(tape.info);
+        // The LAYER's per-axis scale composes the same way one level out
+        // (#373): `layer.xform * diag(L) * node.xform * diag(N)`, so the
+        // inverse carries both and the distance factor takes both minima.
+        // Their product is conservative rather than exact — the smallest
+        // singular value of a product is at least the product of the smallest,
+        // and a rotation's is 1 — so the value still never overestimates.
+        const float scale_world = placed_distance_scale(layer, item);
+        emit_item_instance(item, placed_inverse_matrix(layer, item), scale_world);
+        // A non-uniform scale at EITHER level stops the result being a true
+        // distance. It stays 1-Lipschitz — dividing by s and multiplying back
+        // by min(s) can only shorten — so the safe step scale does not move and
+        // no marcher slows down. What goes is `is_exact`, which is what
+        // cfi_scale_nonuniform says and all it says.
+        if (!placed_is_similarity(layer, item))
+            tape.info = kernel::cfi_scale_nonuniform(tape.info);
         // A feathered replace does not participate in the layer mirror: its
         // combine crossfades by the inset into ONE sampled box, and a mirror
         // copy pre-combined into the same operand would sit outside that box
@@ -716,10 +719,17 @@ struct Compiler {
                                layer.mirror_k};
             for (int axis = 0; axis < 3; ++axis) {
                 if (!(layer.mirror_axes & (1u << axis))) continue;
-                // inv of (layer * R * item) = item^-1 * R * layer^-1
+                // inv of (layer * diag(L) * R * item) = item^-1 * R * diag(1/L) * layer^-1.
+                // The reflection acts in the layer's LOCAL space, so the
+                // layer's per-axis scale is OUTSIDE it — and for a reflection
+                // the order does not actually matter, since negating one
+                // coordinate commutes with scaling each independently. It is
+                // written this way so the radial case beside it, where the
+                // order DOES matter, reads as the same rule rather than as a
+                // second one.
                 cfloat4x4 inv = math::mul(
                     item.xform.inverse_matrix(),
-                    math::mul(math::reflection_matrix(axis), layer.xform.inverse_matrix()));
+                    math::mul(math::reflection_matrix(axis), layer_inverse_matrix(layer)));
                 emit_item_instance(item, item_scaled_inverse(item, inv), scale_world);
                 emit_combine(Op::Add, mirror_blend, 0.0f);
             }
@@ -746,11 +756,21 @@ struct Compiler {
             for (int k = 1; k < count; ++k) {
                 const float angle = 6.2831853071795864769f * static_cast<float>(k) /
                                     static_cast<float>(count);
-                // inv of (layer * R * item) = item^-1 * R^-1 * layer^-1, and a
-                // rotation's inverse is the negative angle.
+                // inv of (layer * diag(L) * R * item) = item^-1 * R^-1 * diag(1/L)
+                // * layer^-1, and a rotation's inverse is the negative angle.
+                //
+                // The layer's per-axis scale is OUTSIDE the rotation, and here
+                // that is a real choice rather than a formality: a rotation
+                // about Y mixes X and Z and does NOT commute with a diagonal
+                // scale unless those two factors are equal. Outside is what
+                // "scale the whole subtool" means — the array is built in the
+                // layer's own space and the result is squashed as one object,
+                // which is what a gizmo on a subtool does. Inside would squash
+                // each copy along its own rotated axes and leave the array
+                // itself round.
                 cfloat4x4 inv = math::mul(
                     item.xform.inverse_matrix(),
-                    math::mul(math::rotation_matrix(axis, -angle), layer.xform.inverse_matrix()));
+                    math::mul(math::rotation_matrix(axis, -angle), layer_inverse_matrix(layer)));
                 emit_item_instance(item, item_scaled_inverse(item, inv), scale_world);
                 emit_combine(Op::Add, radial_blend, 0.0f);
             }
@@ -841,12 +861,12 @@ struct Compiler {
                         emit_replace_feather(*n, layer);
                     else
                         emit_combine(n->op, n->blend,
-                                     n->rounding * layer.xform.scale * n->xform.scale,
+                                     n->rounding * placed_distance_scale(layer, *n),
                                      &n->transition, n);
                 }
                 gate_reach_ = geometry;
                 fold_info(*n, (have_acc || seeded) ? n->op : Op::Add, smooth && have_acc,
-                          n->rounding * layer.xform.scale * n->xform.scale);
+                          n->rounding * placed_distance_scale(layer, *n));
                 have_acc = true;
             }
         }
@@ -902,7 +922,7 @@ struct Compiler {
                 f.emits = have_acc;
                 f.op = group.op;
                 f.blend = group.blend;
-                f.rounding = group.rounding * layer.xform.scale;
+                f.rounding = group.rounding * layer_distance_scale(layer);
                 checkpoint.frames.push_back(f);
                 tail_checkpoint_taken_ = true;
             }
@@ -930,11 +950,11 @@ struct Compiler {
             f.emits = have_acc || seeded;
             f.op = group.op;
             f.blend = group.blend;
-            f.rounding = group.rounding * layer.xform.scale;
+            f.rounding = group.rounding * layer_distance_scale(layer);
             checkpoint.frames.push_back(f);
         }
         if (have_acc || seeded) {
-            emit_combine(group.op, group.blend, group.rounding * layer.xform.scale);
+            emit_combine(group.op, group.blend, group.rounding * layer_distance_scale(layer));
             bool smooth = group.blend.profile != BlendProfile::Hard && group.blend.k > 0.0f;
             if (op_is_extended(group.op))
                 tape.info = kernel::cfi_extended_blend(tape.info, tape.info,

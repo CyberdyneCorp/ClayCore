@@ -215,6 +215,9 @@ inline void mix_layer_head(std::uint64_t& h, const scene::Layer& layer) {
     mix(h, layer.name.size());
     mix_bytes(h, layer.name.data(), layer.name.size());
     mix_xform(h, layer.xform);
+    mix(h, layer.scale_axes.x);  // the per-axis scale is part of the placement
+    mix(h, layer.scale_axes.y);
+    mix(h, layer.scale_axes.z);
     mix(h, layer.visible);
     mix(h, layer.ghost);
     mix(h, layer.locked);

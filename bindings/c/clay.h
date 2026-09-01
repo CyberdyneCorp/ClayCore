@@ -998,11 +998,82 @@ clay_result clay_document_set_layer_protection(clay_document* doc, clay_layer_id
 clay_result clay_document_layer_protection(const clay_document* doc, clay_layer_id layer,
                                            int32_t* out_ghost, int32_t* out_locked);
 /* Place the whole layer. Same terms as clay_layer_set_transform: `position`
- * and `rotation_axis` are required, the axis must be non-zero, `scale` > 0. */
+ * and `rotation_axis` are required, the axis must be non-zero, `scale` > 0.
+ *
+ * SETS THE WHOLE PLACEMENT, so it clears any per-axis scale the layer carried:
+ * a placement is one value in this ABI, and a caller setting it means the whole
+ * of it rather than "the parts this call can name". */
 clay_result clay_document_set_layer_transform(clay_document* doc, clay_layer_id layer,
                                               const float position[3],
                                               const float rotation_axis[3],
                                               float rotation_angle, float scale);
+
+/* -- a layer's PER-AXIS scale (ABI 0.74.0, issue #373) ----------------------
+ *
+ * The whole-layer half of clay_layer_set_transform_nonuniform, which has placed
+ * a NODE per axis since 0.54.0. A ZBrush-style gizmo scales per axis — the
+ * three boxes on the arms — on a placed object AND on a whole subtool, and a
+ * layer that took one factor is why a host had to hide the boxes in scale mode
+ * for the subtool case.
+ *
+ * COMPOSED INNERMOST in the layer's own frame, before its rotation and
+ * translation, exactly as a node's is in its own:
+ *
+ *     world = layer.xform * diag(layer_scale) * node.xform * diag(node_scale)
+ *
+ * so a triple of (1, 1, 1) is the identity and a document that never calls this
+ * compiles byte-identical tape.
+ *
+ * WHAT A NON-UNIFORM SCALE COSTS, and what it does not. The evaluated distance
+ * is multiplied back by the product of the SMALLEST component of each per-axis
+ * scale in the composition, which never overestimates the true distance — so
+ * the field stays a conservative bound and stays 1-Lipschitz, and
+ * clay_safe_step_scale does not move. What goes is exactness:
+ * clay_tape_info's out_is_exact drops, as it does for any non-uniform scale.
+ *
+ * A world RADIUS mapped inward is divided by the LARGEST component instead —
+ * the dual, so a gesture never reaches outside the region it named.
+ * clay_layer_move_surface takes the layer's factor into that rule.
+ *
+ * clay_layer_bounds, the influence bounds, clay_document_raycast_attributed and
+ * the placed mesh of a mesh layer all read the three factors. A mesh layer's
+ * NORMALS go through the inverse transpose, as clay_mesh_transform_nonuniform
+ * documents: rotating a normal is right for a similarity and tilts every one of
+ * them off the surface under a squash.
+ *
+ * ONE THING IS REFUSED RATHER THAN APPROXIMATED. clay_layer_lattice_gizmo
+ * returns no warps for a layer carrying a per-axis scale. A cage records its
+ * item-to-cage placement as a rigid transform, and on a squashed layer the map
+ * it needs is a general affine one — the layer's diagonal sits BETWEEN the two
+ * placements. Placing a cage through the narrower record would warp every item
+ * in a space it does not occupy, silently. A host that gets nothing back should
+ * offer the uniform gizmo. */
+clay_result clay_document_set_layer_transform_nonuniform(clay_document* doc, clay_layer_id layer,
+                                                         const float position[3],
+                                                         const float rotation_axis[3],
+                                                         float rotation_angle,
+                                                         const float scale[3]);
+
+/* Reading it back. Every out pointer is optional.
+ *
+ * The per-axis reader answers the PRODUCT of the layer's two scales, so a layer
+ * placed through the uniform setter answers (s, s, s) rather than (1, 1, 1)
+ * with the factor hidden somewhere the caller cannot see — which is what lets
+ * one manipulator read this call and never branch.
+ *
+ * The single-factor reader REFUSES a layer carrying three different factors
+ * with CLAY_ERROR_INVALID_ARGUMENT, exactly as clay_layer_node_transform
+ * refuses a squashed node: one float cannot express three, the uniform factor
+ * alone describes a differently-shaped subtool, and a read-change-write through
+ * the uniform setter would round the artist's squash away. */
+clay_result clay_document_layer_transform(const clay_document* doc, clay_layer_id layer,
+                                          float out_position[3], float out_rotation_axis[3],
+                                          float* out_rotation_angle, float* out_scale);
+clay_result clay_document_layer_transform_nonuniform(const clay_document* doc, clay_layer_id layer,
+                                                     float out_position[3],
+                                                     float out_rotation_axis[3],
+                                                     float* out_rotation_angle,
+                                                     float out_scale[3]);
 /* Symmetry. Each enabled axis reflects the layer's items through the plane
  * where that LOCAL coordinate is 0 (the layer transform moves the plane with
  * the layer), and every item participates: place a lump on one side and both
