@@ -1985,7 +1985,27 @@ clay_result clay_layer_consolidation_cost(const clay_document* doc, clay_layer_i
  * would spend their parameters on nothing.
  *
  * `out_cost` may be NULL. Undo grouping is the document's own, so this lands
- * as a single step when undo is enabled and as a plain edit when it is not. */
+ * as a single step when undo is enabled and as a plain edit when it is not.
+ *
+ * THE SAMPLING IS ON THE CPU, AND TAKES NO BACKEND. Every call in this header
+ * that bakes a field to a lattice — this one and its _cancellable form,
+ * clay_layer_consolidation_cost, clay_layer_consolidate_region,
+ * clay_sdf_smooth_begin and clay_sdf_move_begin —
+ * evaluates through the CPU backend's reference arithmetic, spread across its
+ * thread pool. There is no parameter to route it elsewhere and no registered
+ * backend it will pick up: a bake lives in a layer this library keeps below
+ * the one that names backends, so it is handed an evaluator rather than
+ * choosing one, and the evaluator it is handed is the CPU's.
+ *
+ * That is a DESIGN STATEMENT, not an omission to work around. A baked volume
+ * is content the document then carries, so it must not depend on which GPU the
+ * machine has, and byte-identity with the serial walk is the contract the pool
+ * is held to. What a device backend does or does not agree with cannot reach
+ * this result, in either direction: a bake taken on a Metal machine and the
+ * same bake taken on a Linux box produce the same samples from the same
+ * document. Evaluating that volume AFTERWARDS is where a backend enters, and
+ * clay_eval_points, the parity suite and clay_backend_supports are how that
+ * half is asked about. */
 clay_result clay_layer_consolidate(clay_document* doc, clay_layer_id layer,
                                    const clay_consolidation_params* params,
                                    const float region_min[3], const float region_max[3],
@@ -4968,6 +4988,12 @@ typedef struct clay_sculpt_budget {
  * pointer-down cost, and it is the trade this design makes deliberately: the
  * whole finite layer once, so that every dab afterwards costs what it touches.
  *
+ * The pooled evaluator is the CPU's, and nothing in this transaction reaches a
+ * device backend — not this sampling, not clay_sdf_smooth_update's dabs, not
+ * the commit. See clay_layer_consolidate for the statement and why it is one.
+ * A host comparing a committed Smooth across platforms is comparing what it
+ * DRAWS the result with, not what produced it.
+ *
  * `token` may be NULL. It cancels only the sampling. */
 clay_sdf_smooth_tx* clay_sdf_smooth_begin(clay_document* doc, clay_layer_id layer,
                                           const clay_sculpt_policy* policy,
@@ -5640,7 +5666,33 @@ clay_result clay_brush_preset_by_name(const char* name, clay_brush_preset* out_p
  * The mesh must outlive the sculptor. A sculptor over a mesh LAYER's triangles
  * refuses every call once that layer is gone, rather than reading freed
  * storage, and refuses one over a LOCKED or GHOSTED layer, because both flags
- * mean "never edited" and a vertex displacement is an edit. */
+ * mean "never edited" and a vertex displacement is an edit.
+ *
+ * THREADING. Building a sculptor is a READ of the mesh, on exactly the footing
+ * clay_brick_cache_eval_requests documents: clay_mesh_sculptor_create,
+ * clay_mesh_sculptor_refresh and clay_mesh_sculptor_refit may run on any number
+ * of threads against one const document, and are NOT safe concurrently with a
+ * mutating clay_document_* / clay_layer_* call. None of the three writes the
+ * document — the adjacency and the tree are read from `positions` and `indices`
+ * into the sculptor's own storage — and clay_last_error is per-thread, so a
+ * worker reads its own. Calls on ONE sculptor handle must still be serialized
+ * by the host, const readers included, exactly as a cache handle's are; two
+ * sculptors share nothing.
+ *
+ * SO ARM A SCULPTOR OFF THE INTERFACE THREAD. On a large mesh this is the
+ * difference between a click and a freeze: the adjacency is ~116 ms at 296k
+ * triangles and the tree another ~89 ms, and both are owed before the first
+ * pick can be answered. Note that the tree is built LAZILY, on first use — so a
+ * host that calls only clay_mesh_sculptor_create on the worker still pays the
+ * tree on whichever thread reaches clay_mesh_sculptor_raycast first. Call
+ * clay_mesh_sculptor_refresh on the worker too, and hand over a sculptor that
+ * is warm for the pick.
+ *
+ * The host owes the serialization against its OWN edits, and gets no help
+ * detecting a missed one: a mesh mutated while a build reads it produces an
+ * adjacency over positions that have since moved, which is a wrong
+ * neighbourhood rather than a refused call. What IS detected is a layer
+ * REBUILT under a finished sculptor — see clay_mesh_sculptor_create. */
 typedef struct clay_mesh_sculptor clay_mesh_sculptor;
 
 /* A sparse, coalesced record of what a gesture moved: the undo a mesh stroke

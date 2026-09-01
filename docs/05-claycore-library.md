@@ -91,6 +91,32 @@ and queues" principle in §2 does not say and should: one process-wide pool,
 dispatches a batch. Making it host-configurable (worker count, QoS class) is
 `add-mobile-thread-scheduling` and is not done.
 
+**What a host may call from its own worker.** Three contracts, all stated in
+`clay.h` where the calls are, and all of the same shape — free-threaded against
+a *const* document, never concurrent with a mutating `clay_document_*` /
+`clay_layer_*` call, with `clay_last_error` per-thread so a worker reads its
+own:
+
+- `clay_brick_cache_eval_requests`, which takes no cache and is the original of
+  the form. A cache *handle*'s calls are still the host's to serialize.
+- `clay_mesh_sculptor_create` / `_refresh` / `_refit` (issue #368). Arming a
+  mesh subtool costs the weld plus the ray tree — around 116 ms and 89 ms at
+  296k triangles — and the tree is built lazily, so a host that moves only
+  `create` to a worker still pays the tree on whichever thread picks first.
+  Call `_refresh` there too.
+
+**And what never reaches a device at all.** Every bake in the ABI —
+`clay_layer_consolidate` and its `_cost` / `_cancellable` / `_region` forms,
+`clay_sdf_smooth_begin`, `clay_sdf_move_begin` — evaluates through the CPU
+backend's reference arithmetic on that pool, and takes no backend argument
+(issue #379). It is an *injected* evaluator rather than a chosen one, because a
+bake lives in `clay::scene` and the layering runs `eval -> scene`: a bake
+cannot name a backend. That is deliberate and worth keeping — a baked volume is
+content the document then carries, so it must not depend on which GPU wrote it,
+and byte-identity with the serial walk is the contract the pool is held to.
+Which backend a host *draws* the result with is the separate question, and the
+one `clay_eval_points` and the parity suite answer.
+
 ## 4. Operation inventory (the complete SDF vocabulary)
 
 Everything below ships in `clay::kernel` with CPU reference + per-backend parity tests. Items marked *(bound)* propagate non-exactness through the tree per principle 3.

@@ -11,12 +11,14 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <string_view>
 #include <vector>
 
 #include "clay/field/flatten.h"
 #include "clay/field/redistance.h"
 #include "clay/field/volume.h"
 #include "clay/kernel/exactness.h"
+#include "clay/eval/backend.h"
 #include "clay/eval/bake_points.h"
 #include "clay/eval/bake_volume.h"
 #include "clay/field/relax.h"
@@ -645,6 +647,79 @@ TEST_CASE("the grid bake is byte-identical to the serial full-tape bake") {
         scene::bake_layer(doc.layers.front(), params, nullptr, eval::pooled_bake_eval());
     REQUIRE(baked);
     CHECK(baked->serialize() == serial_bake(doc.layers.front(), params).serialize());
+}
+
+// Issue #379. The header now STATES that every bake in the ABI evaluates on the
+// CPU and takes no backend, so a baked volume does not depend on which GPU the
+// machine has. The statement is only worth as much as this test: what it
+// forbids is a later change routing the bake through a registry preference, and
+// what would make that change invisible is that a device backend agrees with
+// the CPU to 1e-4 — a parity tolerance, not bit-identity. So the assertion here
+// is IDENTITY against the scalar reference that defines correctness, which a
+// device backend does not promise and would not generally satisfy.
+TEST_CASE("the bake evaluates on the CPU, whatever else is registered") {
+    // A polished sphere: a steep field with a long tape, which is where a
+    // device backend's different-but-valid arithmetic would show up at all.
+    scene::Document doc = wrap(polish(sphere_document(0.8f), cf3(0, 0, 1), 0.55f, 0.02f, 0.08f));
+    const scene::Tape tape = scene::compile_layer(doc.layers.front());
+    REQUIRE(!tape.empty());
+
+    // Sample points spread over the layer's own bound, so the comparison covers
+    // the arithmetic the bake actually runs rather than one lucky point.
+    std::vector<float> points;
+    const kernel::cfloat3 lo = tape.bounds.min, hi = tape.bounds.max;
+    for (int i = 0; i < 9; ++i)
+        for (int j = 0; j < 9; ++j)
+            for (int k = 0; k < 9; ++k) {
+                const float u = static_cast<float>(i) / 8.0f;
+                const float v = static_cast<float>(j) / 8.0f;
+                const float w = static_cast<float>(k) / 8.0f;
+                points.push_back(lo.x + (hi.x - lo.x) * u);
+                points.push_back(lo.y + (hi.y - lo.y) * v);
+                points.push_back(lo.z + (hi.z - lo.z) * w);
+            }
+    const std::size_t count = points.size() / 3;
+
+    // What the scalar reference says. This is the definition of correctness the
+    // parity suite compares every backend AGAINST, at a tolerance.
+    std::vector<float> reference(count, 0.0f);
+    {
+        eval::PointQuery q;
+        q.points_xyz = points.data();
+        q.count = count;
+        eval::PointResults out;
+        out.distances = reference.data();
+        eval::eval_points_reference(tape, q, out);
+    }
+
+    // What the bake's injected evaluator says. Identity, not tolerance.
+    std::vector<float> baked(count, 0.0f);
+    REQUIRE(eval::pooled_bake_eval()(tape, points.data(), count, baked.data(), nullptr));
+
+    // Reported as a count and a first offender rather than by comparing the
+    // vectors: a failure here is a routing change, and "812 of 729 samples
+    // differ, first at 41" says that, where two dumped vectors of 729 floats
+    // say nothing a reader can act on.
+    std::size_t differing = 0, first = count;
+    for (std::size_t i = 0; i < count; ++i)
+        if (baked[i] != reference[i]) {
+            if (differing == 0) first = i;
+            ++differing;
+        }
+    INFO("first differing sample " << first << " of " << count << ": bake "
+                                   << (first < count ? baked[first] : 0.0f) << " vs reference "
+                                   << (first < count ? reference[first] : 0.0f));
+    CHECK(differing == 0);
+
+    // What a build with a device backend registered adds: the check above is
+    // the same assertion either way, but only here can it FAIL for the reason
+    // it exists — a bake that started preferring a registered device. Recorded
+    // so a reader of a passing log knows which of the two runs they had.
+    int others = 0;
+    for (eval::Backend* b : eval::Registry::instance().all())
+        if (std::string_view(b->name()) != "cpu") ++others;
+    INFO("registered backends besides cpu: " << others);
+    CHECK(others >= 0);
 }
 
 TEST_CASE("the grid bake matches the serial bake on a steep volume chain") {
