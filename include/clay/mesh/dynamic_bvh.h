@@ -49,15 +49,22 @@ namespace clay {
 namespace mesh {
 
 struct DynamicBvhOptions {
-    // Faces per leaf. A few hundred is the band where the leaf is big enough to
-    // be worth uploading as a unit and small enough that a brush touching one
-    // does not drag in a neighbourhood it does not need.
-    std::size_t target_leaf_faces = 256;
+    // Faces per leaf. MEASURED, and the same number `ChunkOptions` carries —
+    // one size for the library, not one per representation, because a
+    // per-representation size is the second granularity the shared table exists
+    // to prevent, arriving by the back door. `surface_chunks.h` holds the
+    // matrix and `benchmarks/bench_surface_chunks.cpp` produces it; the short
+    // version is that 128 minimises the query-plus-normals-plus-index P95 at
+    // the 20k footprint and sits at the minimum of the split-and-merge cost,
+    // and that 256 — what this field said before anybody measured it here — is
+    // beaten by 5 to 6% on the first and by 1.51x against 1.64x on false
+    // positives.
+    std::size_t target_leaf_faces = 128;
     // Above this a leaf splits; below it, two siblings merge. The gap is
     // hysteresis: a leaf hovering at the threshold must not split and merge on
     // alternate stamps.
-    std::size_t max_leaf_faces = 512;
-    std::size_t min_leaf_faces = 64;
+    std::size_t max_leaf_faces = 256;
+    std::size_t min_leaf_faces = 32;
 };
 
 // `SurfaceLeaf` — the chunk record, its four revisions and its face span — is

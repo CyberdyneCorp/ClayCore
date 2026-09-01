@@ -187,6 +187,69 @@ repository is the same thing as not having it.
 implementation with its rule pinned. Ticking a DECIDE task on an unrun benchmark
 is the failure mode the task was written against.
 
+### D2a — THE MEASUREMENT, AND THE ANSWER: 128 target / 32 min / 256 max
+
+The benchmark has now been run and this section records what it said, because
+D2 reserved the right to re-decide here rather than to paper a finding over with
+three constants.
+
+**The run.** `benchmarks/bench_surface_chunks.cpp` over a 2,076,481-vertex
+fixed-spacing plane (1440 quads a side at 0.01), 40 repetitions per cell, four
+stamp centres so a chunk boundary that happens to fall on the origin does not
+decide the number. Load average 3.7–8.0 and stable within every run; three
+repeats of the decision row and three of the mutation row. At the 20k footprint:
+
+| target | P95(query + normals + index), 3 runs | false positives | upload | mutation P95, 3 runs | index bytes |
+|---|---|---|---|---|---|
+| 64   | 345, 348, 359 us | 1.45x | 2.20x | 9.53, 9.54, 10.55 ms | 91.6 MB |
+| 128  | 337, 337, 354 us | 1.51x | 2.08x | 8.76, 8.79, 8.82 ms | 88.3 MB |
+| 256  | 358, 359, 373 us | 1.64x | 2.06x | 8.41, 8.92, 9.25 ms | 77.7 MB |
+| 512  | 367, 376, 407 us | 1.64x | 1.95x | 8.96, 9.04, 9.59 ms | 78.0 MB |
+| 1024 | 893 us           | 1.64x | 1.84x | 9.50, 9.64, 10.47 ms | 73.3 MB |
+
+Both constraints hold at every size, so the rule reduces to minimising the P95.
+
+**Two things the harness got wrong first, and they are worth recording because
+each reversed the ordering.** The query was a linear scan over every chunk
+testing its bounds, which is O(chunks) and reported the query getting four times
+FASTER every time the chunk size doubled — a measurement of the harness. It is
+now a median-split tree over the chunk bounds, which is what a real query
+descends. And the admitted-vertex count summed each chunk's vertex list, which
+double-counts a vertex on a chunk boundary once per chunk it belongs to; a small
+chunk has more boundary per face, so the double counting grew as the chunk
+shrank and reported the 64-face partition admitting MORE vertices than the
+1024-face one, which is backwards.
+
+**The decision, and where it departs from the letter of the rule.** 64 and 128
+tie on the term the rule minimises — their three-run ranges overlap — and the
+rule says a tie breaks toward the smaller chunk. Its stated ground for that is
+"mutation cost grows superlinearly in chunk size". **The measurement falsifies
+that ground.** Mutation is a shallow U with its minimum at 128, not a monotone
+climb: a 64-face chunk is twice the tree to refit and twice the split-and-merge
+bookkeeping, and it comes out 8–20% worse than 128 and five times noisier. With
+its premise gone the tie-break does not apply, so the tie breaks the other way,
+to the size that is at the minimum of the term the rule got wrong.
+
+**Against the null hypothesis.** 256 is beaten on the decision term by 5–6%,
+outside the spread of either, and on false positives by 1.51x against 1.64x. It
+wins on index memory by 14% (77.7 MB against 88.3 MB over 4.1M triangles), which
+the rule does not weigh and which is worth naming as the cost of the change. The
+move from 256 to 128 is real and it is modest; presenting a 5% P95 as a
+discovery would be worse than not having measured.
+
+**One size for the library.** `ChunkOptions` and `DynamicBvhOptions` both carry
+it. The optima did not differ by more than one sweep step between the fixed
+partition's terms and the adaptive surface's mutation term, so the condition
+under which D2 said to report three constants did not arise.
+
+**What the sweep did NOT settle.** The multires chunk depth. The achieved
+distribution is exactly on target at every level of the fixture measured
+(level 1 through 4, all 256 faces per chunk at a 256 target, one chunk of 64 at
+level 0 where the whole cage is smaller than a chunk), so the depth derivation
+lands where it says it does — but a cage whose base patch count is not a power
+of four has not been swept, and the risk section's wording about a level
+producing chunks far under target stands unmeasured for that case.
+
 ### D3 — The memory profile is a new `memory` leaf module
 
 **The question.** Task 1.2: a new module with a layering entry, or `io` beside

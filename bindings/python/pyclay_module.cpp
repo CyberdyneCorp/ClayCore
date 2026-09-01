@@ -7605,8 +7605,10 @@ NB_MODULE(pyclay, m) {
             "depends on a measurement this change has not made yet — so this\n"
             "view reports one partition of a static mesh and an empty dirty\n"
             "set. The other two carry live dirty sets.\n\n"
-            "`target_faces` of 0 takes the library's defaults, which are\n"
-            "explicitly the UNMEASURED null hypothesis and not yet an answer.")
+            "`target_faces` of 0 takes the library's default of 128, which is\n"
+            "MEASURED: benchmarks/bench_surface_chunks.cpp sweeps 64 to 1024\n"
+            "over a 2.08M-vertex plane against query cost, false positives,\n"
+            "normal recompute, upload bytes, locality and split/merge cost.")
         .def_static(
             "over_dynamic",
             [](nb::object sculptor_obj) {

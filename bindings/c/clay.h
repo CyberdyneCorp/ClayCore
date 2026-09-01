@@ -6699,7 +6699,12 @@ typedef struct clay_chunk_info {
 
 /* What a chunk aims to hold, for a view over a flat mesh — the one case where
  * the caller chooses, because a fixed mesh has no partitioner of its own yet.
- * NULL takes the library's defaults. */
+ * NULL takes the library's defaults, which are 128 / 32 / 256 and are MEASURED:
+ * benchmarks/bench_surface_chunks.cpp sweeps 64 to 1024 over a 2.08M-vertex
+ * plane at five footprints against chunk-query time, false-positive touched
+ * vertices, normal recompute, upload bytes, a locality proxy and split/merge
+ * cost. A host with a different draw-call budget may want a different number;
+ * a host with no opinion should pass NULL. */
 typedef struct clay_chunk_options {
     uint32_t struct_size; /* = sizeof(clay_chunk_options); required */
     uint32_t target_faces;

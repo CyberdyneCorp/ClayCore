@@ -452,4 +452,20 @@ if(CLAY_BUILD_BENCHMARKS)
   add_executable(tape_stack_probe benchmarks/tape_stack_probe.cpp)
   target_link_libraries(tape_stack_probe PRIVATE claycore)
   clay_apply_warnings(tape_stack_probe)
+
+  # The chunk-size measurement (add-extreme-poly-runtime task 1.1). Its own
+  # target rather than a case of clay_bench, because the decision rule reads
+  # percentiles of a sum across four stages and google-benchmark reports one
+  # aggregate per case. Exits non-zero if the partition it measures stops
+  # being a partition.
+  add_executable(bench_surface_chunks benchmarks/bench_surface_chunks.cpp)
+  target_link_libraries(bench_surface_chunks PRIVATE claycore)
+  clay_apply_warnings(bench_surface_chunks)
+
+  # The 7.1 scaling matrix with 7.2's per-stage timers. Driven by
+  # tools/bench_extreme_poly.py, which records the load average either side of
+  # every row and reports ratios rather than bare milliseconds.
+  add_executable(bench_extreme_poly benchmarks/bench_extreme_poly.cpp)
+  target_link_libraries(bench_extreme_poly PRIVATE claycore)
+  clay_apply_warnings(bench_extreme_poly)
 endif()

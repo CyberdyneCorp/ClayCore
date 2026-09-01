@@ -74,21 +74,45 @@ using FaceId = SlotId<FaceTag>;
 
 // What a chunk aims to hold.
 //
-// THESE NUMBERS ARE THE NULL HYPOTHESIS AND NOT YET THE ANSWER. They are
-// `DynamicBvhOptions`'s current defaults, which are prior art in the strict
-// sense — they are in this tree and they were never measured here.
-// `benchmarks/bench_surface_chunks.cpp` sweeps 64/128/256/512/1024 against
-// query cost, false-positive touched vertices, normal recompute, upload bytes,
-// a locality proxy and split/merge cost, and the decision rule is written in
-// the change's design.md before the data exists. Until that has been RUN, this
-// header does not claim a measured size.
+// 128 IS MEASURED, and `benchmarks/bench_surface_chunks.cpp` is the artefact.
+// The sweep is 64/128/256/512/1024 over a 2.08M-vertex fixed-spacing plane, at
+// footprints of 1k to 500k, against the six quantities the requirement names:
+// chunk-query time through a tree over the chunk bounds, false-positive touched
+// vertices, normal recompute, upload bytes, a locality proxy, and split/merge
+// cost on the adaptive surface. The decision rule was written into the change's
+// design.md before the data existed. At the 20k footprint, three runs at a
+// stable load average:
+//
+//     target   P95(query+normals+index)   false positives   mutation P95
+//        64        345 - 359 us                1.45x        9.5 - 10.6 ms
+//       128        337 - 354 us                1.51x        8.76 - 8.82 ms
+//       256        358 - 373 us                1.64x        8.4 - 9.2 ms
+//       512        367 - 407 us                1.64x        9.0 - 9.6 ms
+//      1024              893 us                1.64x        9.5 - 10.5 ms
+//
+// 128 and 64 tie on the term the rule minimises, and the rule breaks a tie
+// toward the smaller chunk — on the stated ground that mutation cost grows
+// superlinearly in chunk size. THE MEASUREMENT FALSIFIES THAT GROUND. Mutation
+// is a shallow U with its minimum at 128, not a monotone climb: a 64-face chunk
+// means twice the tree to refit and twice the split and merge bookkeeping, and
+// it comes out 8 to 20% worse and five times noisier than 128. So the tie
+// breaks to 128, and design.md records the re-decision rather than this header
+// asserting it.
+//
+// 256 — `DynamicBvhOptions`'s previous default, and the null hypothesis — is
+// beaten on the decision term by 5 to 6%, outside the spread of either, and on
+// the false-positive term by 1.51x against 1.64x. It wins on index memory
+// (77.7 MB against 88.3 MB over 4.1M triangles), which the rule does not weigh.
+// The change from 256 to 128 is real and it is modest, and it is worth saying
+// so rather than presenting a measured number as a discovery.
 struct ChunkOptions {
-    std::size_t target_faces = 256;
+    std::size_t target_faces = 128;
     // Above this a chunk splits; below it two siblings merge. The gap is
     // hysteresis: a chunk hovering at the threshold must not split and merge on
-    // alternate stamps.
-    std::size_t max_faces = 512;
-    std::size_t min_faces = 64;
+    // alternate stamps. Target/4 and target*2, which is the ratio the sweep
+    // held constant so that only the target moved.
+    std::size_t max_faces = 256;
+    std::size_t min_faces = 32;
 };
 
 // The parallel grain for chunk-level work. `parallel_for` runs a single task
