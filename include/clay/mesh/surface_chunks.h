@@ -231,8 +231,9 @@ class ChunkTable {
     ChunkTable() = default;
     // Copyable, because the spans are pointers INTO the copy's own arena and
     // therefore have to be re-pointed rather than memcpy'd. A defaulted copy
-    // would hand the copy spans into the original's storage, which outlives
-    // nothing in particular.
+    // would leave the copy reading the ORIGINAL's storage — a dangling read the
+    // moment either is destroyed, and one that would have worked in every test
+    // that copied a table and kept the original alive.
     ChunkTable(const ChunkTable& other);
     ChunkTable& operator=(const ChunkTable& other);
     ChunkTable(ChunkTable&&) noexcept;
