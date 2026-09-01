@@ -23,6 +23,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -600,4 +601,116 @@ TEST_CASE("c preflight: an operation is priced before it is paid, and refuses wh
 
     clay_dynamic_surface_destroy(surface);
     clay_mesh_destroy(mesh);
+}
+
+// -- 6.5: the dirty stream against the whole-surface path --------------------------
+//
+// The whole-surface path stays in the library for correctness and the
+// incremental path is what a host at twenty million vertices uses. That
+// arrangement is only worth having if the two agree, and nothing in the pixels
+// says when they stop: a host drawing from the dirty stream draws something the
+// engine does not think it made, and it looks like geometry.
+//
+// COMPARED AS TRIANGLES, NOT AS INDEX BUFFERS, because the two paths number
+// their vertices differently on purpose — the whole-surface path emits the
+// level's own global ids and a chunk emits ids local to itself, which is what
+// lets a host upload a chunk as a standalone draw. Canonicalised by ROTATING
+// each triangle so its smallest corner is first: a rotation and not a sort,
+// which would lose the winding and call an inside-out surface equal.
+
+namespace {
+
+struct CanonicalTri {
+    uint32_t bits[9] = {};
+    bool operator<(const CanonicalTri& o) const {
+        return std::memcmp(bits, o.bits, sizeof(bits)) < 0;
+    }
+    bool operator==(const CanonicalTri& o) const {
+        return std::memcmp(bits, o.bits, sizeof(bits)) == 0;
+    }
+};
+
+CanonicalTri canonical(const float* a, const float* b, const float* c) {
+    const float* corner[3] = {a, b, c};
+    uint32_t key[3][3];
+    for (int i = 0; i < 3; ++i)
+        for (int k = 0; k < 3; ++k) std::memcpy(&key[i][k], corner[i] + k, sizeof(uint32_t));
+    int first = 0;
+    for (int i = 1; i < 3; ++i)
+        if (std::memcmp(key[i], key[first], sizeof(key[0])) < 0) first = i;
+    CanonicalTri t;
+    for (int k = 0; k < 3; ++k)
+        std::memcpy(t.bits + k * 3, key[(first + k) % 3], sizeof(key[0]));
+    return t;
+}
+
+// Every triangle of a mesh, through the C ABI's own readback.
+std::vector<CanonicalTri> triangles_of(const clay_mesh* mesh) {
+    const size_t vertices = clay_mesh_vertex_count(mesh);
+    const size_t index_count = clay_mesh_index_count(mesh);
+    std::vector<uint32_t> indices(index_count);
+    REQUIRE(clay_mesh_copy_indices(mesh, indices.data(), indices.size()) == CLAY_OK);
+    const float* positions = clay_mesh_positions(mesh);
+    REQUIRE(positions != nullptr);
+    std::vector<CanonicalTri> out;
+    out.reserve(index_count / 3);
+    for (size_t i = 0; i + 2 < index_count; i += 3) {
+        REQUIRE(indices[i] < vertices);
+        out.push_back(canonical(positions + indices[i + 0] * 3, positions + indices[i + 1] * 3,
+                                positions + indices[i + 2] * 3));
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("c surface view: the chunk stream reassembles into the whole-surface path") {
+    std::vector<float> positions;
+    std::vector<uint32_t> indices;
+    plane(6, 1.0f, &positions, &indices);
+    clay_mesh* cage = mesh_from(positions, indices);
+    clay_multires* surface = nullptr;
+    REQUIRE(clay_multires_from_mesh(cage, nullptr, &surface, nullptr) == CLAY_OK);
+    clay_mesh_destroy(cage);
+    REQUIRE(clay_multires_add_level(surface, nullptr, nullptr) == CLAY_OK);
+    REQUIRE(clay_multires_add_level(surface, nullptr, nullptr) == CLAY_OK);
+
+    uint32_t level = 0;
+    REQUIRE(clay_multires_sculpt_level(surface, &level) == CLAY_OK);
+
+    clay_surface_view* view = nullptr;
+    REQUIRE(clay_surface_view_from_multires(surface, level, &view) == CLAY_OK);
+    const size_t chunks = clay_surface_view_chunk_count(view);
+    REQUIRE(chunks > 1);
+
+    // A HOST'S OWN COPY, assembled chunk by chunk, each with local indices and
+    // none of them knowing about the others.
+    std::vector<CanonicalTri> streamed;
+    for (uint32_t i = 0; i < static_cast<uint32_t>(chunks); ++i) {
+        std::vector<float> chunk_positions;
+        std::vector<uint32_t> chunk_indices;
+        const clay_chunk_readback got = drain(view, i, nullptr, &chunk_positions, &chunk_indices);
+        REQUIRE(got.ok);
+        for (size_t k = 0; k + 2 < chunk_indices.size(); k += 3) {
+            REQUIRE(chunk_indices[k] < got.vertex_count);
+            streamed.push_back(canonical(chunk_positions.data() + chunk_indices[k + 0] * 3,
+                                         chunk_positions.data() + chunk_indices[k + 1] * 3,
+                                         chunk_positions.data() + chunk_indices[k + 2] * 3));
+        }
+    }
+    std::sort(streamed.begin(), streamed.end());
+
+    // THE WHOLE-SURFACE PATH, which the library still ships and which this
+    // exists to stay equal to.
+    clay_mesh* whole = nullptr;
+    REQUIRE(clay_multires_copy_level_mesh(surface, level, &whole) == CLAY_OK);
+    const std::vector<CanonicalTri> reference = triangles_of(whole);
+    clay_mesh_destroy(whole);
+
+    REQUIRE(streamed.size() == reference.size());
+    CHECK(streamed == reference);
+
+    clay_surface_view_destroy(view);
+    clay_multires_destroy(surface);
 }

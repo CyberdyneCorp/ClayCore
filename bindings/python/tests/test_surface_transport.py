@@ -274,3 +274,153 @@ def test_an_operation_is_priced_before_it_is_paid_and_refuses_whole():
     assert surface.preflight_to_mesh()["allowed"] is True
     blob = surface.preflight_encode()
     assert blob["peak_bytes"] > blob["persistent_bytes"]
+
+
+def _plane(n, spacing=0.02):
+    """A patch at FIXED SPACING whose extent grows with `n`, measured outward
+    from the centre.
+
+    THE FIXTURE IS THE EXPERIMENT for the two scaling cases below: a bigger
+    model here is more of the same geometry at the same detail, never a more
+    finely subdivided version of it — that would put more vertices under a brush
+    of the same radius and the comparison would be measuring the fixture.
+    Centred rather than cornered because `-half + spacing * x` rounds
+    differently at two sizes, so the same world point comes out a few ulps apart
+    and the ball admits a different set of vertices for a reason that has
+    nothing to do with the runtime.
+    """
+    centre = n // 2
+    xs = (np.arange(n + 1) - centre) * spacing
+    gx, gz = np.meshgrid(xs, xs, indexing="xy")
+    y = np.where((np.add.outer(np.arange(n + 1), np.arange(n + 1)) % 2) == 0, 0.0, spacing * 0.5)
+    positions = np.stack([gx, y, gz], axis=-1).reshape(-1, 3).astype(np.float32)
+    stride = n + 1
+    a = (np.arange(n)[:, None] * stride + np.arange(n)[None, :]).reshape(-1)
+    b, c, d = a + 1, a + stride, a + stride + 1
+    faces = np.stack([np.stack([a, c, b], axis=1), np.stack([b, c, d], axis=1)],
+                     axis=1).reshape(-1, 3).astype(np.uint32)
+    return clay.Mesh.from_triangles(positions, faces)
+
+
+def _canonical(positions, indices):
+    """Triangles as the nine floats a host uploads, rotated so the smallest
+    corner is first — a rotation and not a sort, which would lose the winding
+    and call an inside-out surface equal to one that is not."""
+    tris = np.asarray(positions, dtype=np.float32)[
+        np.asarray(indices, dtype=np.int64).reshape(-1, 3)]
+    keys = tris.view(np.uint32).reshape(len(tris), 3, 3)
+    order = np.lexsort((keys[:, :, 2], keys[:, :, 1], keys[:, :, 0]), axis=1)[:, 0]
+    rolled = np.stack([tris[np.arange(len(tris)), (order + k) % 3] for k in range(3)], axis=1)
+    flat = rolled.reshape(len(tris), 9)
+    return flat[np.lexsort(flat.T[::-1])]
+
+
+def test_the_stream_reassembles_into_the_whole_surface_path():
+    # The whole-surface path stays in the library for correctness and the
+    # incremental one is what a host at twenty million vertices uses. Nothing in
+    # the pixels says when they stop agreeing: a host drawing from the stream
+    # draws something the engine does not think it made, and it looks like
+    # geometry.
+    mesh = _plane(24)
+    view = clay.SurfaceView.over_mesh(mesh, target_faces=64)
+
+    streamed = []
+    for i in range(view.chunk_count):
+        if not view.chunk_info(i)["live"]:
+            continue
+        got = view.copy_chunk(i, normals=False)
+        # Local indices, so a chunk uploads as its own standalone draw and can
+        # never index past its own array.
+        assert got["indices"].max() < got["positions"].shape[0]
+        streamed.append(_canonical(got["positions"], got["indices"]))
+    streamed = np.concatenate(streamed, axis=0)
+    streamed = streamed[np.lexsort(streamed.T[::-1])]
+
+    whole = _canonical(np.asarray(mesh.positions), np.asarray(mesh.indices))
+    assert streamed.shape == whole.shape
+    assert np.array_equal(streamed, whole)
+
+
+def test_a_dab_hands_the_host_the_same_bytes_at_sixteen_times_the_model():
+    # THE PREVIEW GATE. Bytes handed to a host per stamp follow the dirty
+    # chunks, not the model size.
+    radius, centre = 0.20, np.zeros(3)
+
+    def dab(n):
+        mesh = _plane(n)
+        view = clay.SurfaceView.over_mesh(mesh, target_faces=128)
+        lo, hi = centre - radius, centre + radius
+        reached = [i for i in range(view.chunk_count)
+                   if view.chunk_info(i)["live"]
+                   and np.all(np.array(view.chunk_info(i)["bounds_max"]) >= lo)
+                   and np.all(np.array(view.chunk_info(i)["bounds_min"]) <= hi)]
+        upload = sum(view.chunk_info(i)["vertex_count"] * 3 * 4 for i in reached)
+        sculptor = clay.MeshSculptor(mesh)
+        moved = sculptor.stamp("draw", center=tuple(centre), radius=radius, strength=0.4)
+        whole = len(np.asarray(mesh.positions)) * 3 * 4
+        return moved, len(reached), upload, whole
+
+    small_moved, small_chunks, small_bytes, small_whole = dab(48)
+    large_moved, large_chunks, large_bytes, large_whole = dab(192)
+
+    assert small_moved > 0
+    # The footprint is held constant BY CONSTRUCTION, and this is the assertion
+    # that says the fixture did its job. Without it every line below could pass
+    # on a model that simply had less surface under the brush.
+    assert large_moved == small_moved
+    assert large_whole > 14 * small_whole
+
+    # A chunk is a fixed face count and the partition is a median split over the
+    # whole mesh, so the same ball straddles a chunk boundary differently at the
+    # two sizes — by one or two chunks, never by the model ratio.
+    assert large_chunks <= 2 * small_chunks
+    assert 0 < large_bytes <= 2 * small_bytes
+    # And the point of it: the dab is cheaper than the surface by the model.
+    assert large_bytes * 20 < large_whole
+
+
+def test_a_constrained_profile_cannot_change_what_is_committed():
+    # THE 1.3 GATE, and the reason every field of the profile is a HINT. Each
+    # one names something recomputable exactly from what was committed; there is
+    # deliberately no field that reaches the result, because a deferred SPLIT
+    # would make the mesh a function of machine speed. This is the assertion
+    # that would fail if such a field were ever added.
+    positions, faces = grid(6)
+
+    def stroke_under(profile):
+        hierarchy = clay.MultiresSurface.from_mesh(clay.Mesh.from_triangles(positions, faces))
+        for _ in range(3):
+            hierarchy.add_level()
+        if profile is not None:
+            hierarchy.memory_profile = profile
+        hierarchy.sculpt_level = hierarchy.max_level
+        hierarchy.display_level = hierarchy.max_level
+        sculptor = clay.MultiresSculptor(hierarchy)
+        sculptor.begin_stroke()
+        for i in range(10):
+            sculptor.stamp("draw", (-0.3 + 0.06 * i, 0.0, 0.1 * (i % 3)), 0.3, 0.3)
+        return (hierarchy.detail_checksum,
+                np.array(hierarchy.positions_at(hierarchy.max_level), copy=True))
+
+    constrained = clay.SculptMemoryProfile()
+    constrained.memory_class = clay.MemoryClass.constrained
+    constrained.max_resident_levels = 1
+    constrained.cache_budget = 64 * 1024
+    constrained.scratch_budget = 32 * 1024
+    constrained.preview_chunks_per_frame = 2
+    constrained.defer_normals_in_stroke = True
+    constrained.allow_index_rebuild = False
+
+    minimal = clay.SculptMemoryProfile()
+    minimal.memory_class = clay.MemoryClass.minimal
+    minimal.max_resident_levels = 1
+
+    full_sum, full_positions = stroke_under(None)
+    for profile in (constrained, minimal):
+        checksum, got = stroke_under(profile)
+        # The coefficients, which are what the document holds...
+        assert checksum == full_sum
+        # ...and the surface they reconstruct, bit for bit. The constrained run
+        # defers its normals, so this is also the assertion that a deferred
+        # flush ends exactly where a per-stamp one does.
+        assert np.array_equal(got, full_positions)
