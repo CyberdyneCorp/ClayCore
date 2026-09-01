@@ -15,10 +15,15 @@
 //
 // WHAT IS ASSERTED, AND WHY IN THIS ORDER.
 //
-//   1. THE COUNTS, which are deterministic and are the real gate. The workset,
-//      the write region, the chunks a dab dirties and the bytes a host is
-//      handed are identical at both sizes — not close, identical. A path that
-//      had gone O(model) shows here first and shows unambiguously.
+//   1. THE COUNTS, which are deterministic and are the real gate. The workset
+//      and the write region are IDENTICAL at both sizes — not close, identical
+//      — because the footprint is the same surface and the brush is the same
+//      brush. The chunks a dab reaches and the bytes a host is handed are a
+//      BAND of 2x instead, and the reason is stated where it is asserted: a
+//      chunk is a fixed face count and the partition is a median split over the
+//      whole mesh, so the same ball straddles a boundary differently at the two
+//      sizes. By one or two, never by the model ratio. A path that had gone
+//      O(model) shows here first and shows unambiguously.
 //   2. THE PEAK, which is 7.7 and catches what the counts cannot: a buffer
 //      sized to the SURFACE during warm-up costs nothing per stamp and is
 //      still O(model). The high-water marks have to match too.
