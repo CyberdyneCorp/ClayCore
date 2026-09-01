@@ -489,6 +489,139 @@
       `tests/unit/test_*.cpp` in `tests/CMakeLists.txt`
 - [x] 9.5 `openspec validate add-shared-brush-runtime --strict`
 
+## 10. Proving the gates, and the hole they left
+
+- [x] 10.1 RE-RUN, not re-read. Everything section 9 claims was measured again
+      from this worktree rather than trusted. `cmake --build build/cpu-only -j 8`
+      clean with zero warnings; `ctest` 4/4; `clay_unit_tests` 2089 cases and
+      14,860,258 assertions, up from the 2084 section 9.1 recorded — the five
+      new ones are 10.2 and 10.3. `check_layering.py`, `check_binding_parity.py`
+      (590 pyclay capabilities, 32 exempt), `check_c_abi.py`, `check_gallery.py`
+      (251 tracked outputs) all OK. `release_check.py` fails the same five rows
+      and no others — `tests` (only `pyclay_pytest`, at import),
+      `bindings`, `abi` and `wheel` from the anaconda GLIBCXX_3.4.31 mismatch,
+      and `device` from the hardware gate. Under
+      `LD_PRELOAD=/lib/x86_64-linux-gnu/libstdc++.so.6` the pyclay suite is 620
+      passed, 1 skipped. The acceptance gate holds:
+      `git diff a44b1f5 -- 'tests/unit/mesh_sculpt_goldens_*.inc'` is empty
+- [x] 10.2 `tests/unit/test_shared_brush_determinism.cpp` — THE DEFECT CLASS
+      THE ARENA REFACTOR COULD HAVE INTRODUCED EVERYWHERE AT ONCE, and which
+      nothing in the suite was watching for. A `std::vector<int> depth(n, -1)`
+      is value-initialized and an arena block is not: `reset()` is a pointer
+      store, so a stamp is handed whatever the previous stamp left behind. Every
+      other fixture in the tree runs on a COLD arena — build a sculptor, stamp
+      once or twice at one size, read the answer — so a path that read scratch
+      before writing it would be correct in the whole suite and wrong for an
+      artist whose stroke changed size.
+      Three cases. Two of them stamp the same stroke on identical geometry with
+      a cold arena and with one grown and dirtied by a much larger stamp first
+      (fixed, through `VertexDeltas::revert`; adaptive, through a snapshot of
+      the slots) and compare positions, normals, moved counts and write regions
+      BYTE FOR BYTE. Each asserts the warmed arena is genuinely larger before it
+      compares anything, so a refactor that stopped the arena growing fails here
+      rather than quietly turning the two runs into one run twice
+- [x] 10.3 THE UNGATED CLAIM 10.2's third case closes, measured rather than
+      assumed. Task 4.4 says a fully masked entry leaves the workset ENTIRELY
+      "so it is bit-identical to its input rather than merely close". Replacing
+      that drop with a keep-and-multiply-by-zero COMPILES, and against the whole
+      2089-case suite exactly ONE case noticed — `multires parity: the boundary
+      ring count is visible in the weights`, which noticed incidentally, by
+      reading a weight it was checking for another reason.
+      The first version of the new case did not notice either, and the reason is
+      worth keeping: a kept entry at weight 0.0f produces a displacement of
+      exactly zero, so it never enters the WRITE REGION and never reaches the
+      undo record — the two places the obvious test looks. What a kept entry
+      does do is sit in `items` with a zero weight and hold a live slot in the
+      map its neighbours are looked up through, so that is where the assertion
+      went. With it, the revert fails 233 assertions
+- [x] 10.4 A BUG FOUND AND FIXED: `BrushPreset` did not carry
+      `settings.stamp_azimuth`. Task 5.4 added the field to `MeshBrushSettings`
+      and the preset schema — which serializes the identity subset of exactly
+      that struct, field by field — was never revisited, so a saved brush came
+      back unturned and looked like it had worked. It is identity and not
+      placement, which is the whole reason it belongs there and `direction` does
+      not: `direction` says where the finger went, the azimuth says how the
+      brush's own pattern is turned, and a rotated chisel is not something the
+      stroke engine derives — nothing in `brush` resolves an azimuth from the
+      direction of travel yet, so a preset library is the ONLY place an artist
+      can put one.
+      FIXED at `kBrushPresetVersion = 2`, appended, with the read gated on the
+      version so a version-1 record still loads and takes the default. Nothing
+      else moves: the C ABI's `clay_brush_preset_version`, pyclay's
+      `BrushPreset.version` and both "a newer version is refused" tests all
+      DERIVE the number
+- [x] 10.5 THE REGRESSION TESTS FOR 10.4, and why the existing round-trip case
+      could not have caught it: it walks `reference_presets()`, and every
+      preset in the library has an azimuth of zero, so a default round-trips to
+      the default whether the schema knows the field or not. Three C++ cases in
+      `tests/unit/test_brush_preset.cpp` — a NON-default azimuth survives, the
+      default comes back as an exact `+0.0f` (which is the value
+      `make_stamp_frame` branches on, D5), and a version-1 record loads at the
+      default while a version-1 record that is also truncated is still refused.
+      Three pyclay cases in `bindings/python/tests/test_shared_brush_runtime.py`,
+      because that is the surface a host saves a library through and NO Python
+      test had touched `BrushPreset` at all — the whole format was reachable
+      from the wheel and ungated in it
+- [x] 10.6 THE REVERT PROOFS, one per property, each confirmed to COMPILE.
+      (1) `depth.assign_all(-1)` deleted from `apply_boundary`: 7 cases fail
+      including 10.2's fixed-mesh one — recorded honestly, since this is the one
+      probe where the new file is a gate rather than THE gate.
+      (2) the automask's zero-drop replaced by a keep: 1 case, 233 assertions —
+      see 10.3.
+      (3) the preset fix undone in full (version back to 1, the `put_f32` and
+      the gated read removed): 2 cases fail, both new.
+      (4) `in.topology = &topology` set to null in `DynamicSculptor::gather`,
+      pyclay rebuilt against it, and `examples/69_shared_brush_runtime.py` run:
+      it raises `SystemExit` reading `(529, 613, 529)` where it needs
+      `(529, 529, 529)`. That is the change's headline claim failing through the
+      shipped wheel, which is the only place the example could have caught it
+- [x] 10.7 SANITIZERS, over the new cases and the change's own.
+      ASAN-UBSAN with `ASAN_OPTIONS=detect_leaks=1`: 59 cases, 10,015
+      assertions, zero sanitizer reports.
+      TSAN under `setarch -R`: 204 cases, 112,934 assertions, zero race
+      reports — including `adaptive parity: two sculptors stamp concurrently
+      without aliasing`, which is the per-sculptor arena claim in the only form
+      TSan can check. Neither is the full suite; both are the new cases plus
+      every `C ABI`, arena, stamp-frame and parity case, and that is what is
+      claimed
+- [x] 10.8 THE BENCHMARK, RE-MEASURED AS A DISTRIBUTION rather than as the
+      single P50 6.8 recorded. Forty repetitions of 200 iterations,
+      `--benchmark_report_aggregates_only=false`, percentiles taken over the
+      forty repetition means (so they are percentiles of means, not of
+      individual stamps — the case fixes `Iterations(200)`). Load average 2.06
+      before and 1.60 after, both read on the box; the RATIOS are the reading.
+      All times in microseconds:
+
+      | case | P50 | P95 | P99 | max |
+      |---|---|---|---|---|
+      | fixed, no automask, n=224 | 66.89 | 76.85 | 83.18 | 86.99 |
+      | fixed, boundary automask, n=224 | 161.36 | 169.28 | 172.43 | 173.25 |
+      | fixed, no automask, n=707 | 552.17 | 602.63 | 659.90 | 666.04 |
+      | fixed, boundary automask, n=707 | 1456.72 | 1523.41 | 1551.08 | 1557.71 |
+      | adaptive, no automask, n=224 | 131.06 | 137.41 | 151.48 | 159.14 |
+      | adaptive, boundary automask, n=224 | 350.57 | 360.87 | 361.98 | 362.59 |
+      | adaptive, no automask, n=707 | 127.59 | 131.72 | 134.96 | 136.25 |
+      | adaptive, boundary automask, n=707 | 1021.87 | 1105.52 | 1723.21 | 1789.59 |
+
+      The automask's P50 cost is 2.41x and 2.64x on the fixed path and 2.67x and
+      8.01x on the adaptive one, which agrees with 6.8's reading of what those
+      two columns mean. TWO THINGS ONLY THE TAIL SHOWS. Seven of the eight rows
+      have a P99 within 15% of their P50; the adaptive automasked stamp at n=707
+      is 1.69x, and its max is 1.75x — so the one case whose cost is dominated
+      by a breadth-first walk over an adaptive surface is also the one with a
+      tail, which a mean would have hidden entirely. And the arena counters the
+      cases carry confirm 8.2's trap rather than restating it: the plain FIXED
+      stamp reports `arena_growths = 0` and `arena_high_water = 0` — its
+      automask-free path never touches the arena at all — where every other row
+      reports 1 growth and 1856 bytes
+- [x] 10.9 THE EXAMPLE, RUN. `examples/69_shared_brush_runtime.py` exits 0 and
+      reproduces its committed render and .obj BYTE-IDENTICALLY (`git status`
+      over `examples/` is empty after the run), which is a determinism claim the
+      gallery gate cannot make on its own. Its numbers are the ones 8.2 and 8.3
+      record: 935 moved on all three with byte-identical positions, 613 open
+      against 529 automasked on each, arenas settling at 3, 4 and 3 growths, and
+      Draw diverging by 2.660e-10 against a 2.000e-01 displacement
+
 ## Files
 
 **Added**
@@ -505,6 +638,7 @@
 | `tests/unit/test_dynamic_shared_brush_parity.cpp` | P1–P4 against the adaptive surface |
 | `tests/unit/test_multires_shared_brush_parity.cpp` | P1–P4 against the hierarchy at level 0 |
 | `examples/69_shared_brush_runtime.py` | one preset gesture over three representations, asserted and rendered |
+| `tests/unit/test_shared_brush_determinism.cpp` | history-independence of the arena, and the automask drop said where it is visible |
 
 **Changed**
 
@@ -518,6 +652,9 @@
 | `include/clay/mesh/dynamic_surface.h`, `src/mesh/dynamic_surface.cpp` | `refresh_normals` takes its touched-vertex buffer from the caller |
 | `include/clay/mesh/sculpt_kernels.h`, `src/mesh/sculpt_kernels.cpp` | `alpha_frame_for` reimplemented over `make_stamp_frame`; `AlphaFrame` unchanged |
 | `include/clay/mesh/sculpt_common.h` | `stamp_azimuth` |
+| `include/clay/brush/preset.h`, `src/brush/preset.cpp` | preset version 2: the azimuth crosses the format — 10.4 |
+| `tests/unit/test_brush_preset.cpp` | the three regression cases for 10.4 |
+| `bindings/python/tests/test_shared_brush_runtime.py` | the same three through the wheel, on a format no Python test had touched |
 | `include/clay/mesh/brush_model.h`, `include/clay/mesh/surface_frame.h` | each names the other two frames — D4 |
 | `bindings/c/clay.h`, `bindings/c/clay_c.cpp` | minor 75, `stamp_azimuth`, the arena statistics |
 | `bindings/python/pyclay_module.cpp` | `automask` on the adaptive stamp, `set_automask_inputs`, `arena_stats` |
