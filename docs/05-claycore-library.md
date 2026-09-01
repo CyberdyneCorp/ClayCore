@@ -357,7 +357,12 @@ harder to evaluate.
   about the **world Y axis**, so past `r1` the weight is exactly 1 and the result
   *is* the item's own field, arbitrarily far from anything the layer occupies.
   These keep `Everything`, and #319's report — which lumps "intersect, the
-  spatial morphs" together — would have been unsound taken literally.
+  spatial morphs" together — would have been unsound taken literally. That claim
+  is *mechanical*: it is a statement about the kernel's weight, not about a
+  fixture, and morph behaviour is unchanged here in any case. A probe of the
+  radial morph leaks 4 points in 200,000 on arm64 and none on x86_64, which is
+  reported and not asserted — the leaking points sit a rounding error either
+  side of the band edge.
 
 **What made this shippable was a sample count, not a fixture.** #326 held it
 back on a real objection: nothing in the suite could tell a correct bound from a

@@ -21,8 +21,9 @@
 
 - [x] 2.1 The measurement #326 asked for: rank the item's own box against the
       layer's extent on #319's own fixture, and require the tighter one to leak.
-- [x] 2.2 The morph half: require the layer's extent to leak for the radial
-      morph, and hold both morphs to the infinite answer.
+- [x] 2.2 The morph half: hold both morphs to the infinite answer, and REPORT
+      rather than assert the leak — it is 4 points in 200,000 on arm64 and 0 on
+      x86_64, so asserting it would gate a mechanical claim on float rounding.
 - [x] 2.3 Raise the property test's non-local cases to a sample count that finds
       a one-in-ten-thousand violation every run, and say why the local corpus
       does not need it.

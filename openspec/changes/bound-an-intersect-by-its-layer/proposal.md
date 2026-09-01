@@ -50,10 +50,18 @@ tighter-looking alternative leaks.
 - **A SPATIAL MORPH is not.** Its weight SATURATES:
   `ctransition_radial_weight` is `clamp((length(p.xz) - r0) / (r1 - r0), 0, 1)`
   about the WORLD Y axis, so past `r1` the weight is exactly 1 and the result IS
-  the item's own field, arbitrarily far from anything the layer occupies.
-  Measured: 0.0178 of drift outside the layer's extent over 4 points in 200,000.
-  These keep `Everything`, and #319's report — which lumps "intersect, the
-  spatial morphs" together — would have been unsound if taken literally.
+  the item's own field, arbitrarily far from anything the layer occupies. These
+  keep `Everything`, and #319's report — which lumps "intersect, the spatial
+  morphs" together — would have been unsound if taken literally.
+
+  THE MORPH CLAIM IS MECHANICAL, NOT MEASURED, and the change does not rest on
+  it either way: morph behaviour is untouched here, so the conservative answer
+  they already had needs no new justification. A probe found the radial morph
+  leaking 4 points at 0.0178 outside the layer's extent on macOS/arm64 and none
+  on x86_64 — the leaking points sit a rounding error either side of the band
+  edge, so which platform sees them is decided by the last bits of a tape
+  evaluation. That is reported and deliberately not asserted; the burden of
+  proof is on the bound being TIGHTENED, and that one is measured on both.
 
 Also unbounded, as before and for their own reasons: an infinite grid repeat and
 a primitive with no finite extent. An intersect that ALSO repeats infinitely is
