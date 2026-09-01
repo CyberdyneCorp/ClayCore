@@ -528,3 +528,113 @@ TEST_CASE("allocation gate: a surface drag's cost per warped item is bounded") {
     CAPTURE(per_item);
     CHECK(per_item < 6.0);
 }
+
+// -- THE ALLOCATION GATE AT TWO MODEL SIZES (add-extreme-poly-runtime 7.4) ---------
+//
+// The two assertions above — count and bytes — are made at one model size, and
+// both of them can be satisfied by a runtime whose cost follows the model. A
+// buffer sized to the SURFACE and allocated once during warm-up performs no
+// allocation on a warm stamp and costs no bytes on one; it passes the counter,
+// it passes the byte counter, and it is O(model) storage whose touch cost
+// scales. So the gate is repeated at sixteen times the model with the SAME
+// world footprint, and the third thing asserted is that nothing about the dab
+// moved: not the count, not the bytes, not the workset, not the write region.
+//
+// THE FIXTURE IS FIXED-SPACING WITH A GROWING EXTENT, measured outward from the
+// centre. `-half + step * x` rounds differently at two sizes, so the same world
+// point comes out a few ulps apart on a 48-quad grid and a 192-quad one and the
+// brush admits a different set of vertices — a difference with nothing to do
+// with the runtime, which would make the comparison below meaningless.
+//
+// The high-water half of the same argument is asserted on `memory::ScratchArena`
+// in `tests/unit/test_scratch_arena.cpp`, because that is where the mechanism
+// is: `MeshSculptor`'s own gather does not consume the arena yet, and asserting
+// it here would be asserting something nothing implements.
+
+namespace {
+
+Mesh centred_plane(int n, float spacing) {
+    Mesh m;
+    const int centre = n / 2;
+    for (int z = 0; z <= n; ++z)
+        for (int x = 0; x <= n; ++x) {
+            m.positions.push_back(cf3(spacing * static_cast<float>(x - centre),
+                                      ((x + z) & 1) ? spacing * 0.5f : 0.0f,
+                                      spacing * static_cast<float>(z - centre)));
+            m.normals.push_back(cf3(0, 1, 0));
+        }
+    const std::uint32_t stride = static_cast<std::uint32_t>(n + 1);
+    for (int z = 0; z < n; ++z)
+        for (int x = 0; x < n; ++x) {
+            const std::uint32_t a =
+                static_cast<std::uint32_t>(z) * stride + static_cast<std::uint32_t>(x);
+            const std::uint32_t b = a + 1, c = a + stride, d = c + 1;
+            m.indices.insert(m.indices.end(), {a, c, b, b, c, d});
+        }
+    return m;
+}
+
+struct WarmStamp {
+    std::size_t count = 0;
+    std::size_t bytes = 0;
+    std::size_t workset = 0;
+    std::size_t write_region = 0;
+    std::size_t vertices = 0;
+};
+
+WarmStamp warm_stamp_on(int n, MeshBrush verb) {
+    Mesh m = centred_plane(n, 0.02f);
+    MeshSculptor sculptor(m);
+    // A host that places a brush has picked, and picking builds the tree. The
+    // sculptor never builds one on its own behalf, so this is what a host does.
+    (void)sculptor.bvh();
+
+    MeshBrushSettings s;
+    s.center = cf3(0, 0, 0);
+    s.radius = 0.20f;
+    s.strength = 0.2f;
+    s.smooth_iterations = 2;
+    s.direction = cf3(0.01f, 0.005f, 0.0f);
+    s.geodesic = mesh::default_geodesic(verb);
+    for (int i = 0; i < 12; ++i) sculptor.stamp(verb, s);
+
+    WarmStamp out;
+    {
+        CountingScope scope;
+        sculptor.stamp(verb, s);
+        out.count = scope.count();
+        out.bytes = scope.bytes();
+    }
+    out.workset = sculptor.workset().size();
+    out.write_region = sculptor.write_region().size();
+    out.vertices = m.positions.size();
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("allocation gate: a warm stamp's cost does not follow the model") {
+    const MeshBrush verbs[2] = {MeshBrush::Draw, MeshBrush::Flatten};
+    for (MeshBrush verb : verbs) {
+        CAPTURE(static_cast<int>(verb));
+        const WarmStamp small = warm_stamp_on(48, verb);
+        const WarmStamp large = warm_stamp_on(192, verb);
+
+        CAPTURE(small.vertices);
+        CAPTURE(large.vertices);
+        REQUIRE(large.vertices > 14 * small.vertices);
+        REQUIRE(small.workset > 0);
+
+        // 1 and 2: the two assertions this file already makes, at both sizes.
+        CHECK(small.count == 0u);
+        CHECK(small.bytes == 0u);
+        CHECK(large.count == 0u);
+        CHECK(large.bytes == 0u);
+
+        // 3: and the dab is the SAME dab. Identical, not close — the footprint
+        // is the same surface at both sizes because the fixture holds the
+        // spacing and the brush holds its radius.
+        CHECK(large.workset == small.workset);
+        CHECK(large.write_region == small.write_region);
+    }
+}

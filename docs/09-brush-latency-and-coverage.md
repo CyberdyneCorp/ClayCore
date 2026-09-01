@@ -521,6 +521,101 @@ several. `BM_MultiresSubdivide` is **Tier 4**: adding a level is an explicit
 action an artist takes and waits on, which is also why it is priced by
 `preflight_add_level` before it is paid.
 
+### The extreme-poly runtime, measured (add-extreme-poly-runtime)
+
+Everything above prices a dab at ONE model size. The question this section
+answers is the other one — what happens to that price when the model grows and
+the dab does not — because it is the question an artist actually asks, in the
+form "why does the brush get slower as I add detail".
+
+**The fixture is fixed-spacing with a growing extent**, and that is the whole
+experiment rather than a detail of it. A bigger model here is more of the same
+geometry at the same detail; a more finely subdivided model would put more
+vertices under a brush of the same radius, and then a dab costing more on the
+bigger model would prove nothing at all. Linux desktop, Release,
+`benchmarks/bench_extreme_poly.cpp` driven by `tools/bench_extreme_poly.py`,
+which records the one-minute load average either side of every row and flags a
+row whose load moved.
+
+**RATIOS, because a millisecond on that box is a fact about that box.** 20M
+vertices against 1M at the same 20k-vertex footprint, per stage:
+
+| Stage | 20M / 1M, P50 | 20M / 1M, P95 |
+|---|---|---|
+| seed (nearest class through the index) | 1.33x | 1.22x |
+| chunk query | 1.88x | 1.65x |
+| stamp (gather, geodesic, weights, kernel, normals) | **1.01x** | **1.03x** |
+| index update (mark + refit) | 1.25x | 1.32x |
+| readback (the dirty chunks, sized and copied) | 1.72x | 1.66x |
+| **total** | **1.05x** | **1.11x** |
+
+**Twenty times the vertices, at the same footprint, is 1.05x the dab.** The two
+stages above 1.5x are the two that are supposed to grow: a tree query is
+logarithmic in the chunk count and both are microseconds against a stamp of
+milliseconds. Seven repeats of the total read 0.83, 1.04, 1.05, 1.20 and 1.41
+under a stable load and 2.68 and 3.34 under a moving one — so on that box the
+honest statement is "under 3x for 20x the model", and even the worst reading is
+six times under what an O(model) path would give.
+
+Absolutes, for scale, at 1M vertices and a 20k footprint: seed 35 us, chunk
+query 10 us, stamp 4.7 ms, index update 1.8 ms, readback 8 us. The stamp
+dominates, which is the shape a runtime should have — the work is the
+deformation and not the bookkeeping around it.
+
+**What a host is handed per dab.** The transport is per chunk and the four
+revisions are what make it cheap: a stamp with stable topology advances the
+GEOMETRY revision and leaves the TOPOLOGY revision alone, so a host re-uploads
+a vertex buffer and keeps the index buffer it already has.
+`examples/69_extreme_poly.py` measures it on two models sixteen times apart:
+9.2 KiB on both, against a whole surface of 28 KiB and 437 KiB — 1.00x for a 16x
+model, and 48x cheaper than handing over the surface.
+
+**The chunk size is 128 faces and it is measured, not adopted.**
+`benchmarks/bench_surface_chunks.cpp` sweeps 64/128/256/512/1024 over a 2.08M
+vertex plane against chunk-query time, false-positive touched vertices, normal
+recompute, upload bytes, a locality proxy and split/merge cost. At the 20k
+footprint 128 minimises P95(query + normals + index update) at 337-354 us and
+sits at the minimum of the split-and-merge term at 8.8 ms; 256 — the previous
+default — reads 358-373 us and 1.64x false positives against 1.51x. The change
+is real and it is modest, and 256 wins 14% on index memory, which the decision
+rule does not weigh.
+
+**These are Tier 1 at every size measured.** A dab at 20M vertices fits a frame
+with the same room to spare it has at 1M, which is the entire point of the
+change.
+
+**Across the other two representations**, at 100k against 1M vertices with the
+same footprints (load average 2.27 to 2.40, stable):
+
+| Representation | What is constant | What is not |
+|---|---|---|
+| adaptive surface | dirty chunks (26 → 25 at 1k, 85 → 84 at 20k), upload (104 → 95 KB, 162 → 176 KB), topology ops (identical) | stamp+remesh P50 1.27x at 1k and 1.55x at 20k for a 10x model |
+| hierarchy | dirty chunks (14 → 15, 146 → 146), upload (67 → 72 KB, 700 → 700 KB), **detail write 180 → 188 us and 2912 → 2927 us** | stamp P50 **3.2x** at the 1k footprint |
+
+The detail-write column is the one worth reading twice: the propagation a
+coarse edit causes costs 1.01x at ten times the model, which is what "the levels
+above re-evaluate the descendants of what moved and nothing else" is worth as a
+number rather than as a design note.
+
+**And the hierarchy's stamp column is a MEASURED GAP, not noise.** 0.49 ms to
+1.58 ms at the 1k footprint is +1.09 ms for +888k vertices — about 1.2 ns a
+vertex, which is the shape of a linear scan and not of a tree. The cause is
+known and is in the fixed sculptor's own header: `MeshSculptor::surface_index`
+never BUILDS a ray tree on its own behalf (measured at 689 ms against 1.24 ms
+saved per stamp), so a host that picks gets one for free and a caller that does
+not is left with `geodesic_region` scanning every class for a seed.
+`MultiresSculptor` binds a `MeshSculptor` to the level mesh and is exactly that
+caller: nothing picks against a hierarchy level, so nothing ever builds its
+index. The fixed and adaptive paths do not have this term, which is why their
+rows are flat.
+
+It is a fixed cost per stamp rather than a growing one — 1.1 to 1.6 ms at a
+million level vertices — so it is invisible at a large footprint and dominant at
+a small one, which is the wrong way round: a detail pass is small footprints.
+The fix is task 3.2's caller-supplied seed rather than building a tree per
+level, and it is not done. Recorded here so that the number exists before the
+work does.
+
 ### The tier a per-dab number cannot tell you about
 
 `sdf_relax` sits at 0.73 ms and `sdf_move` in Tier 3, and read as a table both

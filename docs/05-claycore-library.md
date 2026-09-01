@@ -130,6 +130,19 @@ A `memory::MemoryPin` held by a serializer or a readback turns a trim into a
 no-op that reports what it WOULD have released, so a memory warning arriving
 mid-save gets an honest answer instead of a document mutating under the writer.
 
+Every sentence above is a test rather than an intention.
+`tests/unit/test_memory_trim.cpp` asserts the checksum across a critical trim,
+that every dropped cache reconstructs BIT for bit, that the partition comes back
+naming the same faces under the same chunk ids, that the four pressures form a
+monotone chain with `None` releasing nothing, and that a pinned trim reports and
+releases nothing. `tests/unit/test_scratch_arena.cpp` asserts the arena's own
+half — including that a release actually releases, which it did not: `trim` was
+written with `std::vector::shrink_to_fit`, which libstdc++ implements through
+`__shrink_to_fit_aux` and which does NOTHING when exceptions are off, and this
+library compiles its core with `-fno-exceptions`. A critical trim of a 160 KB
+arena returned 0 and kept every byte, and it is invisible to anything derived
+from the vector's SIZE. Four other files in this tree still call it.
+
 The profile a host fills carries fields for DERIVABLE work only — exact normals
 during a drag, index quality, display level, cache residency, preview drain
 rate. There is deliberately no field that reaches a topology decision, a detail
