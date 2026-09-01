@@ -326,7 +326,7 @@
       are EXEMPT with the reason D9 already gives — the two estimators are
       `std::function`s, which is what the C ABI cannot carry, while the three
       input-free factors do cross on `clay_mesh_brush_desc`
-- [x] 7.6 `tests/swift/smoke.swift` — the appended field and the arena
+- [ ] 7.6 `tests/swift/smoke.swift` — the appended field and the arena
       statistics through the SwiftPM surface, which is where a descriptor's
       layout is checked by a compiler that is not the one that built the
       library. ADDED IN RECONCILIATION: the work was done and no task named it.
@@ -338,7 +338,14 @@
       NOT RUN ON THIS BOX — there is no Swift toolchain here (`which swift`
       and `which swiftc` both fail), so the file is written and compiled by
       CI's macOS job and by nothing I ran. That is the one gate in this change
-      whose result I am taking on trust
+      whose result I am taking on trust.
+      LEFT OPEN IN RECONCILIATION — needs macOS. The file is written and
+      committed; the gate this task exists for is "a descriptor's layout
+      checked by a compiler that is not the one that built the library", and
+      no such compiler ran. `which swift` and `which swiftc` both fail on this
+      box and `tools/check_swift_package.py` is textual only. It closes when
+      CI's macOS job compiles it, and not before; a tick here would have
+      claimed a compiler ran
 
 - [x] 7.5 The version lines, in lockstep, at 0.75.0 / 75. THREE literals, not
       four: `CMakeLists.txt`, `bindings/c/clay.h` and `pyproject.toml` carry the
@@ -446,16 +453,23 @@
 
 - [x] 9.1 `cmake --build --preset cpu-only -j 8` clean;
       `ctest --preset cpu-only --output-on-failure` green.
-      At af531ff: build clean with `CLAY_WERROR=ON`, zero warnings from any file
-      this change touches. ctest 4/4; `clay_unit_tests` is 2084 cases and
-      14,857,096 assertions, up from 2022 cases — 62 new
+      Build clean with `CLAY_WERROR=ON`, zero warnings from any file this change
+      touches. ctest 4/4; `clay_unit_tests` is 2084 cases and 14,857,096
+      assertions, up from 2022 cases — 62 new.
+      CITATION CORRECTED IN RECONCILIATION: this line and 9.2 originally read
+      "at af531ff", which is an object that exists in the repository and is
+      reachable from no branch — an amended commit. The work it names is
+      e85b2d8 ("test(mesh): gate the shared brush runtime on all three
+      representations"), and the figures were superseded by 10.1's re-run at
+      the branch tip either way
 - [x] 9.2 `asan-ubsan` green; `setarch -R ctest --preset tsan` green — the
       arena is per-sculptor and the claim that two sculptors never alias it is
       a threading claim.
       ASAN-UBSAN: the full `ctest --preset asan-ubsan` is 4/4 green,
       `clay_unit_tests` in 3305.73 s, zero sanitizer reports. The new cases were
-      re-run on their own against a build at af531ff with
-      `ASAN_OPTIONS=detect_leaks=1` — 69 cases, 5370 assertions, clean.
+      re-run on their own against a build at e85b2d8 (see 9.1 on the corrected
+      citation) with `ASAN_OPTIONS=detect_leaks=1` — 69 cases, 5370 assertions,
+      clean.
       TSAN: `setarch -R` over the new cases plus every pre-existing `C ABI*`
       case — 207 cases, 108,074 assertions, zero race reports.
       AND THE THREADING CLAIM IS NOW A THREADING TEST rather than a sequential
@@ -622,6 +636,95 @@
       against 529 automasked on each, arenas settling at 3, 4 and 3 growths, and
       Draw diverging by 2.660e-10 against a 2.000e-01 displacement
 
+## 11. Documentation, reconciliation and the PR
+
+- [x] 11.1 THE DOCS THIS CHANGE MAKES STALE, each edited where the untrue
+      sentence actually is rather than by appending a section somewhere.
+      `docs/07-brushes-and-features.md`: a new subsection, "The runtime the
+      three mesh representations share" — the neutral workset, the automask
+      that used to reach two representations out of three, the arena and why
+      `growths` is the counter to watch, the stamp's grain, and the three
+      things in `mesh` that are called a frame. Preset version 2 recorded
+      there and in the brush-engine delta spec.
+      `docs/05-claycore-library.md`: why a sculptor's arena is ABSENT from
+      `clay_document_memory` and is not an omission — a sculptor is a handle
+      held beside a document, on `MultiresSurface::memory()`'s footing — with
+      the three `*_arena_stats` calls and the "may you release it?" answer the
+      table around it asks of every row.
+      `docs/09-brush-latency-and-coverage.md`: the main-vs-branch P50 table,
+      the 40-repetition distribution beside it, and TWO new rows in the
+      missing-device-coverage list — the mesh automask on any representation,
+      and the adaptive and multiresolution stamps.
+      `README.md`: the Sculpt row, and the mesh-representation bullet.
+      `openspec/ROADMAP.md`: row 1b for this change, the automasking row closed,
+      and the stroke-stabilization row closed IN TWO HALVES — its "one line
+      wide" gap (`apply_to_mesh` never reads `Stamp::rotation`) was already
+      closed by `add-shared-brush-kernels` and the row had not been updated,
+      which was verified against main rather than assumed before the row moved
+- [x] 11.2 THE PHANTOM COMMIT, corrected rather than left standing. 9.1 and 9.2
+      cited results "at af531ff", an object that exists in this repository and
+      is reachable from no branch — an amended commit from an earlier stage.
+      Both citations now name e85b2d8, which is the reachable commit that did
+      that work, and say why they were changed. The figures themselves were
+      superseded by 10.1's re-run at the branch tip
+- [x] 11.3 THE `Files` TABLES RECONCILED WITH THE DIFF. Nine paths the change
+      touches had no row: `test_c_shared_brush_runtime.cpp`, the pyclay suite,
+      the three committed example outputs, `dynamic_bvh` and `slot_pool`,
+      `test_sculpt_allocation.cpp` (which is THE GATE and was missing from the
+      table listing it), `test_mesh_sculpt.cpp` / `test_dynamic_sculpt.cpp`,
+      `bench_main.cpp`, `check_binding_parity.py`, `smoke.swift` and the five
+      documentation files. The version row was wrong in the other direction and
+      now agrees with 7.5: THREE literals, not four
+- [ ] 11.4 `tests/swift/smoke.swift` COMPILED — see 7.6, which this stage
+      UNTICKED after walking it.
+      needs macOS. There is no Swift toolchain on this box and
+      `tools/check_swift_package.py` is textual only. CI's macOS job is the
+      only thing that can close it
+- [x] 11.5 THE FINAL GATES, re-run from this worktree at the docs tip and
+      recorded as output rather than as a tick.
+      `cmake --build --preset cpu-only -j 8`: exit 0, zero warnings.
+      `ctest --preset cpu-only`: 4/4, 149.54 s. `clay_unit_tests` on its own:
+      2089 cases, 14,860,258 assertions, 0 failed.
+      `check_layering.py` OK. `check_binding_parity.py` OK (590 pyclay
+      capabilities, 32 exempt). `check_c_abi.py` OK (hygiene + ctypes FFI).
+      `check_gallery.py` OK (251 tracked outputs).
+      THE ACCEPTANCE GATE: `git diff a44b1f5 -- 'tests/unit/mesh_sculpt_goldens_*.inc'`
+      empty; `tools/check_layering.py` byte-unchanged from main, which is D1's
+      visible form.
+      `release_check.py`, run under `/usr/bin/python3` rather than the
+      anaconda python on PATH, fails THREE rows and no others — not the five
+      the previous stage recorded, and the difference is the INTERPRETER
+      rather than the tree: release_check's own subprocesses inherit the
+      python it was started with, so `bindings` and `abi` PASS here and fail
+      under anaconda. `version` passes: cmake=0.75.0 abi=0.75.0 wheel=0.75.0.
+      Each of the three traced rather than assumed:
+      `tests` — the only failing ctest entry in `build/release` is
+      `pyclay_pytest`, and it fails at IMPORT on GLIBCXX_3.4.31. Under
+      `LD_PRELOAD=/lib/x86_64-linux-gnu/libstdc++.so.6` that suite is
+      620 passed, 1 skipped in 57.31 s.
+      `device` — the gate's snapshot is 39c244209, which IS AN ANCESTOR OF
+      MAIN, and main already differs from it in `CMakeLists.txt`,
+      `bindings/c/clay.h` and 45 more engine files. The row therefore fails on
+      main as well; it re-runs on the reference iPad and nowhere else.
+      `wheel` — NOT the GLIBCXX mismatch the previous stage attributed it to,
+      which was worth checking because that explanation stopped applying the
+      moment the venv came from `/usr/bin/python3`. Reproduced on its own
+      outside release_check: `python3 -m venv` cannot bootstrap pip on this
+      box because `ensurepip` is missing (`python3.12-venv` is not
+      installed), so the gate never reaches a wheel to build.
+      `benchmarks` PASSES — `check_bench.py` OK against a fresh
+      `clay_bench --benchmark_format=json` run.
+      AND THE EXAMPLE, RE-RUN AT THE DOCS TIP:
+      `examples/69_shared_brush_runtime.py` exits 0 and leaves
+      `git status examples/` empty, so it reproduces its committed PNG and
+      `.obj` byte for byte
+- [x] 11.6 THE PR, opened against `main`. The branch is the BOTTOM of a
+      three-branch stack cut from a44b1f5 — 0.75.0 here, 0.76.0 on
+      `feat/mesh-sculpt-layers`, 0.77.0 on `feat/extreme-poly-runtime` — so it
+      rebases onto `main` directly and the other two rebase onto it, in that
+      order. Merging out of order means re-assigning ABI minors, which is the
+      one conflict in this repository that is expensive to resolve
+
 ## Files
 
 **Added**
@@ -639,6 +742,9 @@
 | `tests/unit/test_multires_shared_brush_parity.cpp` | P1–P4 against the hierarchy at level 0 |
 | `examples/69_shared_brush_runtime.py` | one preset gesture over three representations, asserted and rendered |
 | `tests/unit/test_shared_brush_determinism.cpp` | history-independence of the arena, and the automask drop said where it is visible |
+| `tests/unit/test_c_shared_brush_runtime.cpp` | the automask divergence and the arena statistics at the ABI, where the contract is written down |
+| `bindings/python/tests/test_shared_brush_runtime.py` | the same claims from the wheel, including the two estimators the C ABI cannot carry |
+| `examples/output/69_shared_brush_runtime.png`, `..._adaptive.obj`, `..._adaptive.mtl` | the committed render and mesh the gallery gate compares against |
 
 **Changed**
 
@@ -658,8 +764,16 @@
 | `include/clay/mesh/brush_model.h`, `include/clay/mesh/surface_frame.h` | each names the other two frames — D4 |
 | `bindings/c/clay.h`, `bindings/c/clay_c.cpp` | minor 75, `stamp_azimuth`, the arena statistics |
 | `bindings/python/pyclay_module.cpp` | `automask` on the adaptive stamp, `set_automask_inputs`, `arena_stats` |
-| `CMakeLists.txt`, `tests/CMakeLists.txt`, `pyproject.toml`, `tools/release_check.py` | the new sources and tests, and the four version lines at 0.75.0 / 75 |
+| `CMakeLists.txt`, `tests/CMakeLists.txt` | the new sources and tests |
+| `CMakeLists.txt`, `bindings/c/clay.h`, `pyproject.toml` | the version, at 0.75.0 / 75. THREE literals — `tools/release_check.py` derives it and has no row to edit (7.5) |
+| `include/clay/mesh/dynamic_bvh.h`, `src/mesh/dynamic_bvh.cpp`, `include/clay/mesh/slot_pool.h` | the buffers the adaptive walk used to own become arena blocks the caller passes in |
+| `tests/unit/test_sculpt_allocation.cpp` | THE GATE — extended to every verb with automask factors on, and to the other two representations |
+| `tests/unit/test_mesh_sculpt.cpp`, `tests/unit/test_dynamic_sculpt.cpp` | the workset's new identity, and the adaptive automask's regression case |
+| `benchmarks/bench_main.cpp` | the four automask-on/off cases 6.8 and 10.8 measure, carrying the arena counters |
+| `tools/check_binding_parity.py` | the three `set_automask_inputs` exemptions, with the `std::function` reason |
+| `tests/swift/smoke.swift` | the appended field and the arena statistics through SwiftPM — written, NOT compiled here (7.6) |
 | `examples/run_all.py`, `docs/07-brushes-and-features.md` | example 69 |
+| `README.md`, `docs/05-claycore-library.md`, `docs/09-brush-latency-and-coverage.md`, `openspec/ROADMAP.md` | section 11 — what this change makes untrue elsewhere |
 
 **Must not change**
 
