@@ -12921,6 +12921,10 @@ constexpr std::size_t kMeshBrushDescOriginal =
 constexpr std::size_t kMeshFrameOriginal = offsetof(clay_mesh_frame, scale) + sizeof(float);
 constexpr std::size_t kMeshHitOriginal =
     offsetof(clay_mesh_hit, seed_class) + sizeof(std::uint32_t);
+// Original layout (ABI 0.75.0), named by its last field so appending one does
+// not silently move the baseline.
+constexpr std::size_t kBrushArenaStatsOriginal =
+    offsetof(clay_brush_arena_stats, growths) + sizeof(std::uint64_t);
 
 mesh::Mesh* mesh_data_mut(clay_mesh* mesh) {
     if (!mesh) return nullptr;
@@ -13057,6 +13061,13 @@ clay_result read_mesh_brush(const clay_mesh_brush_desc* src, mesh::MeshBrush* ou
     if (d.automask_boundary_rings > 0) out->automask.boundary_rings = d.automask_boundary_rings;
     if (d.automask_cavity_strength > 0.0f)
         out->automask.cavity_strength = d.automask_cavity_strength;
+    // The stamp's grain, appended. Zero is passed STRAIGHT THROUGH rather than
+    // read as a default, because zero is the value that means "unrotated" and
+    // the engine branches on exactly that — see make_stamp_frame. Every other
+    // appended scalar here reads zero as "the caller declared an older layout,
+    // give them the engine default"; this one has the same answer either way,
+    // which is what makes the field safe to append at all.
+    out->stamp_azimuth = d.stamp_azimuth;
     return CLAY_OK;
 }
 
@@ -13110,6 +13121,7 @@ clay_result clay_mesh_brush_defaults(clay_mesh_brush_desc* out_desc) {
     out.automask_normal_angle = d.automask.normal_angle;
     out.automask_boundary_rings = d.automask.boundary_rings;
     out.automask_cavity_strength = d.automask.cavity_strength;
+    out.stamp_azimuth = d.stamp_azimuth;
     // The alpha stays null in the defaults: a stamp without one is the common
     // case, and a default pointing at nothing a caller owns would be a trap.
     write_desc(out_desc, declared, out);
@@ -13179,6 +13191,7 @@ clay_mesh_brush_desc to_c_brush(const mesh::MeshBrushSettings& s, mesh::MeshBrus
     out.automask_normal_angle = s.automask.normal_angle;
     out.automask_boundary_rings = s.automask.boundary_rings;
     out.automask_cavity_strength = s.automask.cavity_strength;
+    out.stamp_azimuth = s.stamp_azimuth;
     return out;
 }
 
@@ -15284,6 +15297,62 @@ clay_result clay_mesh_sculptor_quality(clay_mesh_sculptor* sculptor, float* out_
     // No tree means no queries to cost, which reads as zero.
     *out_quality = sculptor->sculptor->has_bvh() ? sculptor->sculptor->bvh().quality() : 0.0f;
     return CLAY_OK;
+}
+
+// -- what a stroke's scratch costs --------------------------------------------
+//
+// One filler for three sculptors, because the descriptor says the same three
+// numbers about the same kind of object whichever one asked. A NULL arena is
+// not an error: the multiresolution sculptor has none until a level is bound,
+// and zeroes are the truth about an arena that has never been asked for a byte
+// rather than a placeholder standing in for an answer.
+// `static` because this sits inside the extern "C" block: without it the
+// helper would take C linkage and be exported from the shared library under a
+// name that is no part of the ABI.
+static clay_result write_arena_stats(const mesh::BrushScratchArena* arena,
+                                     clay_brush_arena_stats* out_stats) {
+    if (!out_stats) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_stats");
+    const std::uint32_t declared = out_stats->struct_size;
+    clay_brush_arena_stats probe;
+    clay_result r = read_desc(out_stats, kBrushArenaStatsOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    clay_brush_arena_stats out{};
+    out.struct_size = static_cast<std::uint32_t>(sizeof(out));
+    if (arena) {
+        out.capacity_bytes = static_cast<std::uint64_t>(arena->capacity_bytes());
+        out.high_water_bytes = static_cast<std::uint64_t>(arena->high_water_bytes());
+        out.growths = static_cast<std::uint64_t>(arena->growths());
+    }
+    write_desc(out_stats, declared, out);
+    return CLAY_OK;
+}
+
+// NOT behind resolve_sculptor, on the same footing as has_colors. What an arena
+// owns is a fact about the SCULPTOR, not about the mesh it is bound to, so a
+// sculptor whose layer was rebuilt under it still spent the memory and a host
+// winding down still has to account for it. Refusing the reading there would
+// hide the number exactly when a host wants it.
+clay_result clay_mesh_sculptor_arena_stats(const clay_mesh_sculptor* sculptor,
+                                           clay_brush_arena_stats* out_stats) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh sculptor");
+    return write_arena_stats(&sculptor->sculptor->arena(), out_stats);
+}
+
+clay_result clay_dynamic_sculptor_arena_stats(const clay_dynamic_sculptor* sculptor,
+                                              clay_brush_arena_stats* out_stats) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    return write_arena_stats(&sculptor->sculptor->arena(), out_stats);
+}
+
+clay_result clay_multires_sculptor_arena_stats(const clay_multires_sculptor* sculptor,
+                                               clay_brush_arena_stats* out_stats) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
+    // Forwards to the bound level sculptor's arena, and is null before the
+    // first stamp binds one. See the header.
+    return write_arena_stats(sculptor->sculptor->arena(), out_stats);
 }
 
 clay_result clay_mesh_sculptor_refresh(clay_mesh_sculptor* sculptor) {

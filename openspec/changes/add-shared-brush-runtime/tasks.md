@@ -178,19 +178,55 @@
 
 ## 7. The ABI and the bindings
 
-- [ ] 7.1 `bindings/c/clay.h`: `CLAY_ABI_MINOR 75`; `stamp_azimuth` appended to
+- [x] 7.1 `bindings/c/clay.h`: `CLAY_ABI_MINOR 75`; `stamp_azimuth` appended to
       `clay_mesh_brush_desc` under the `struct_size` rule;
-      `clay_brush_arena_stats` and the three `*_arena_stats` calls — D9
-- [ ] 7.2 `bindings/c/clay_c.cpp`: `read_mesh_brush` carries the azimuth,
-      `write_mesh_brush` reports it, the three stat calls are implemented
-- [ ] 7.3 `bindings/python/pyclay_module.cpp`: `DynamicSculptor.stamp` gains an
-      `automask` argument (it has none today, so the divergence is unreachable
-      from Python even after 4.4); `set_automask_inputs` on `DynamicSculptor`;
-      `arena_stats` on all three sculptors
-- [ ] 7.4 `python3 tools/check_binding_parity.py` — every new pyclay member has
-      a C counterpart or an exemption with a reason. `arena_stats` maps to
-      `clay_*_sculptor_arena_stats` under the existing `CLASS_PREFIX` rule
-- [ ] 7.5 The four version lines, in lockstep, at 0.75.0 / 75
+      `clay_brush_arena_stats` and the three `*_arena_stats` calls — D9.
+      The stats descriptor's byte counts are `uint64_t` rather than `size_t`:
+      it is a versioned descriptor with a fixed layout, and `size_t` would make
+      that layout depend on the host's word size
+- [x] 7.2 `bindings/c/clay_c.cpp`: `read_mesh_brush` carries the azimuth,
+      `clay_mesh_brush_defaults` and `to_c_brush` report it, the three stat
+      calls are implemented over one `write_arena_stats` filler.
+      TWO THINGS WORTH RECORDING. The azimuth is passed STRAIGHT THROUGH,
+      including zero — every other appended scalar here reads zero as "an older
+      host declared the shorter layout, give it the engine default", and this
+      one must not, because zero is the value that means unrotated and the
+      engine branches on exactly it (D5). And the three queries do NOT go
+      through `resolve_sculptor`, on the same footing as
+      `clay_mesh_sculptor_has_colors`: what an arena owns is a fact about the
+      SCULPTOR rather than about the mesh it is bound to, so a sculptor whose
+      layer was rebuilt under it still spent the memory and a host winding down
+      still has to account for it
+- [x] 7.3 `bindings/python/pyclay_module.cpp`. WIDER THAN THE TASK ASKED, and
+      deliberately: the brush-engine delta says the estimators SHALL be settable
+      on EVERY sculptor that offers the automask with the same signature, and
+      `MeshSculptor.stamp` turned out to have no `automask` argument either —
+      so the factor was unreachable from Python on the fixed path too, not only
+      the adaptive one. All three `stamp` calls (and both `apply_stroke` forms)
+      now take `automask` and `stamp_azimuth`, threaded through the one
+      `mesh_brush_settings` helper so they cannot drift; `set_automask_inputs`
+      and `arena_stats` are on all three sculptors.
+      `set_automask_inputs` TAKES OBJECTS, NOT CALLABLES — `cavity` is a
+      MaskField (`document.mask_from_surface('cavity', ...)`, which bakes the
+      same estimator the engine measures with) and `groups` is the document's
+      own lattice. A Python callable is not an option rather than a nicety: a
+      stamp releases the GIL and evaluates these per workset entry from a
+      worker thread, where calling back into the interpreter crashes
+- [x] 7.4 `python3 tools/check_binding_parity.py` — OK, 590 pyclay
+      capabilities, 32 exempt. `arena_stats` maps to
+      `clay_*_sculptor_arena_stats` under the existing `CLASS_PREFIX` rule with
+      no table edit, as predicted. Two entries were added:
+      `MeshBrushSettings.stamp_azimuth` aliases `clay_mesh_brush_defaults`
+      exactly as its twelve siblings do, and the three `set_automask_inputs`
+      are EXEMPT with the reason D9 already gives — the two estimators are
+      `std::function`s, which is what the C ABI cannot carry, while the three
+      input-free factors do cross on `clay_mesh_brush_desc`
+- [x] 7.5 The version lines, in lockstep, at 0.75.0 / 75. THREE literals, not
+      four: `CMakeLists.txt`, `bindings/c/clay.h` and `pyproject.toml` carry the
+      number, and `tools/release_check.py` DERIVES it from all three and checks
+      they agree (`check_versions`) rather than carrying a row of its own. The
+      task said four because the other stacked changes' notes do; the file has
+      no literal to edit
 
 ## 8. The demonstration
 
@@ -200,7 +236,22 @@
       same source model
 - [ ] 8.2 It ASSERTS what must match: the normal-free verb writes identical
       positions on all three (P3); the topological automask reaches the same
-      vertex set; the arena's `growths` stops climbing over the stroke
+      vertex set; the arena's `growths` stops climbing over the stroke.
+      MEASURED FROM PYTHON DURING 7.3, so the example does not have to
+      rediscover it: on a 20-per-face cube-sphere at radius 0.9, Draw at
+      (0,0,0.9) with radius 1.2, the fixed and adaptive sculptors move 1081
+      vertices unmasked and 849 with
+      `NormalAngle|TopologyConnected|Boundary` — the same two numbers on both,
+      which is the P3 automask row. AND A TRAP FOR THE ARENA CLAIM: the FIXED
+      sculptor's arena reads all zeroes for a stamp whose automask needs no
+      flood. NormalAngle reads the workset's own normals and TopologyConnected
+      returns early on a region that is already one component, so only
+      Boundary's frontiers reach the arena there; a `growths` assertion on the
+      fixed path with those two factors alone is trivially true and proves
+      nothing. The adaptive sculptor's arena is exercised by every stamp
+      (25960 B capacity unmasked, 103840 B with the three factors), and the
+      hierarchy's reads zero until a level is bound and 105648 B after — which
+      is the documented behaviour, not a gap
 - [ ] 8.3 It ASSERTS what legitimately differs, and by how much: Draw diverges
       between fixed and adaptive because the normal estimators differ (D8/P4),
       and the example says so in prose rather than hiding it
