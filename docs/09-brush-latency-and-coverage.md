@@ -698,6 +698,50 @@ on all three, `topology_ops` and `dirty_chunks` on the adaptive surface, and
 the scratch arena yet — the same gap 3.1 and 3.7 name. Reporting the zero it
 measured is the honest answer; a number nothing filled would not be.
 
+### What a memory warning costs the dab after it
+
+A trim is called from an operating-system callback, which means it lands where
+the host did not schedule it — including between two dabs of a drag. The
+memory-pressure gate says that is CORRECT: the checksum survives it and every
+dropped cache reconstructs. It says nothing about what the next dab pays, and
+that is the number a host needs in order to choose between answering the warning
+now and holding a `memory::MemoryPin` until the stroke ends.
+
+`benchmarks/bench_trim_recovery` times each dab of a 200-dab stroke on a
+hierarchy at three cage sizes, with no trim, with `Pressure::Warning` after every
+dab, and with `Pressure::Critical` after every dab. Two runs, loads 2.5 → 5.3
+and 6.6 → 8.3, reported as the p50 and p95 ratio against the undisturbed stroke
+because the absolutes belong to this machine:
+
+| cage | after Warning (p50 / p95) | after Critical (p50 / p95) |
+|---|---|---|
+| 6^2, 3 levels  | 0.62-0.98x / 0.97-1.01x | 13.5-15.5x / 11.4-14.6x |
+| 12^2, 3 levels | 1.00x / 0.95-1.00x      | 38.5-59.2x / 44.3-67.3x |
+| 24^2, 3 levels | 0.98-1.78x / 1.00-2.04x | 124-182x / 129-200x |
+
+The two columns are a decision, not a spread. `Warning` drops the levels nobody
+is looking at and leaves the sculpt level resident, so the next dab pays nothing
+and a host may answer it mid-drag freely. `Critical` drops everything, so the
+next dab pays a full re-evaluation of every level under the one being sculpted —
+and that cost GROWS with the model while the dab's own cost does not, which is
+precisely the shape this whole change exists to keep out of the stroke. A host
+that must answer a critical warning mid-drag should expect to drop the frame;
+one that can wait should hold a pin and answer it at the stroke boundary.
+
+**The recovery used to be free, and that was the defect.**
+`MultiresSculptor::bind` decides whether the `Mesh&` its `MeshSculptor` holds is
+still live by comparing `MultiresSurface::cache_generation()`, and that counter
+was bumped when a level's cache was BUILT and not when it was released. Between
+a `drop_*_caches` and the next build the number had not moved, so the sculptor
+was kept — bound to a freed `LevelCache`. It did not crash: the stamp wrote its
+displacement into released storage, `absorb_level_edit` rebuilt the level from
+the authoritative detail before reading the displacement back out of it, and the
+dab was simply not there, with `stamp` still returning the weld-class count it
+believed it had moved. With a trim after every dab the symptom was every SECOND
+dab vanishing. Releasing a cache now moves the generation too; the table above
+is what correctness costs, and the `Warning` row is the answer for a host that
+cannot afford it.
+
 ### What it costs to dispatch a dab across threads
 
 The stamp path is SERIAL, and this is the measurement that says it should stay

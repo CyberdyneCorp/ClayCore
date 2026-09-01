@@ -475,4 +475,10 @@ if(CLAY_BUILD_BENCHMARKS)
   add_executable(bench_extreme_poly benchmarks/bench_extreme_poly.cpp)
   target_link_libraries(bench_extreme_poly PRIVATE claycore)
   clay_apply_warnings(bench_extreme_poly)
+
+  # What a memory warning costs the dab after it, which the correctness gates
+  # deliberately do not measure. See the file's own header.
+  add_executable(bench_trim_recovery benchmarks/bench_trim_recovery.cpp)
+  target_link_libraries(bench_trim_recovery PRIVATE claycore)
+  clay_apply_warnings(bench_trim_recovery)
 endif()

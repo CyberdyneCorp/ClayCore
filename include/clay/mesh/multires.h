@@ -411,10 +411,15 @@ class MultiresSurface {
 
     // -- residency ------------------------------------------------------------
 
-    // Bumped whenever a level's rebuildable cache is created. A sculptor bound
-    // to a level's mesh compares it and rebinds rather than holding a reference
-    // into storage a `drop_*_caches` released underneath it — which is a
-    // use-after-free that a host under memory pressure would find first.
+    // Bumped whenever a level's rebuildable cache is created OR RELEASED. A
+    // sculptor bound to a level's mesh compares it and rebinds rather than
+    // holding a reference into storage a `drop_*_caches` released underneath it
+    // — which is a use-after-free that a host under memory pressure would find
+    // first.
+    //
+    // BOTH HALVES, and the release half is the one that was missing: bumping
+    // only on create leaves the window between a drop and the next build, which
+    // is exactly where a stamp taken right after a memory warning lands.
     std::uint64_t cache_generation() const;
 
     // WHAT THE HOST WILL SPEND. Filled by the host, never detected: the

@@ -714,3 +714,133 @@ TEST_CASE("c surface view: the chunk stream reassembles into the whole-surface p
     clay_surface_view_destroy(view);
     clay_multires_destroy(surface);
 }
+
+TEST_CASE("c regression: a trim between two stamps does not eat the next dab") {
+    // THE HOST-FACING HALF of the defect in `test_extreme_poly_exactness.cpp`,
+    // and the path it would actually have shipped on: a host answering an
+    // operating-system memory warning calls clay_multires_trim, and the next
+    // clay_multires_sculptor_stamp returns CLAY_OK with a plausible
+    // moved_vertices while writing nothing at all.
+    //
+    // `moved_vertices` is exactly what a host would have checked, and it was
+    // never wrong — the sculptor did move the classes, into storage the trim had
+    // already released. So the assertion here is the AUTHORITATIVE CHECKSUM,
+    // which is what "the dab landed" means for a hierarchy, taken after every
+    // dab rather than once at the end: with the defect present the checksum
+    // stands still on every second dab.
+    std::vector<float> positions;
+    std::vector<uint32_t> indices;
+    plane(6, 1.0f, &positions, &indices);
+    clay_mesh* mesh = mesh_from(positions, indices);
+    clay_multires* surface = nullptr;
+    REQUIRE(clay_multires_from_mesh(mesh, nullptr, &surface, nullptr) == CLAY_OK);
+    clay_mesh_destroy(mesh);
+    REQUIRE(clay_multires_add_level(surface, nullptr, nullptr) == CLAY_OK);
+    REQUIRE(clay_multires_add_level(surface, nullptr, nullptr) == CLAY_OK);
+
+    clay_multires_sculptor* sculptor = nullptr;
+    REQUIRE(clay_multires_sculptor_create(surface, &sculptor) == CLAY_OK);
+
+    uint64_t previous = 0;
+    REQUIRE(clay_multires_detail_checksum(surface, &previous) == CLAY_OK);
+    for (int i = 0; i < 4; ++i) {
+        CAPTURE(i);
+        const clay_mesh_brush_desc brush =
+            draw_brush(-0.3f + 0.2f * static_cast<float>(i), 0.0f, 0.0f, 0.35f, 0.5f);
+        clay_multires_stamp_report report{};
+        report.struct_size = sizeof(report);
+        REQUIRE(clay_multires_sculptor_stamp(sculptor, &brush, nullptr, &report) == CLAY_OK);
+        REQUIRE(report.moved_vertices > 0);
+
+        uint64_t now = 0;
+        REQUIRE(clay_multires_detail_checksum(surface, &now) == CLAY_OK);
+        CHECK(now != previous);
+        previous = now;
+
+        clay_trim_report trimmed{};
+        trimmed.struct_size = sizeof(trimmed);
+        REQUIRE(clay_multires_trim(surface, CLAY_PRESSURE_CRITICAL, nullptr, &trimmed) ==
+                CLAY_OK);
+        // And the release itself changed nothing, which is the older claim this
+        // one sits beside rather than replaces.
+        uint64_t after_trim = 0;
+        REQUIRE(clay_multires_detail_checksum(surface, &after_trim) == CLAY_OK);
+        CHECK(after_trim == previous);
+    }
+
+    clay_multires_sculptor_destroy(sculptor);
+    clay_multires_destroy(surface);
+}
+
+TEST_CASE("c surface view: an absurd declared size is refused as a size, not read as a layout") {
+    // The descriptor rule, on the descriptors this change ADDED. A struct_size
+    // is the one field a caller can get wrong in a way the library cannot
+    // detect from the bytes: 0 is what a caller who never set it passes, a
+    // small number is a struct from before the convention whose first word is a
+    // float or an enum, and a huge one is a wild pointer's contents. All three
+    // have to come back as a refusal rather than as a read of whatever is
+    // there, and NOTHING may be written to the caller's buffer on the way out.
+    std::vector<float> positions;
+    std::vector<uint32_t> indices;
+    plane(4, 1.0f, &positions, &indices);
+    clay_mesh* mesh = mesh_from(positions, indices);
+    clay_surface_view* view = nullptr;
+    REQUIRE(clay_surface_view_from_mesh(mesh, nullptr, &view) == CLAY_OK);
+
+    const uint32_t absurd[] = {0u, 4u, 0xffffffffu};
+    for (uint32_t declared : absurd) {
+        CAPTURE(declared);
+
+        clay_chunk_options options{};
+        options.struct_size = declared;
+        options.target_faces = 0xdeadbeefu;
+        CHECK(clay_chunk_options_defaults(&options) != CLAY_OK);
+        CHECK(options.target_faces == 0xdeadbeefu);
+
+        clay_sculpt_memory_profile profile{};
+        profile.struct_size = declared;
+        profile.cache_budget = 12345u;
+        CHECK(clay_sculpt_memory_profile_defaults(&profile) != CLAY_OK);
+        CHECK(profile.cache_budget == 12345u);
+
+        // An INPUT descriptor with the same broken size, which is the more
+        // dangerous direction: it is read rather than written.
+        clay_chunk_options as_input{};
+        as_input.struct_size = declared;
+        as_input.target_faces = 128;
+        as_input.min_faces = 32;
+        as_input.max_faces = 256;
+        clay_surface_view* refused = nullptr;
+        CHECK(clay_surface_view_from_mesh(mesh, &as_input, &refused) != CLAY_OK);
+        CHECK(refused == nullptr);
+
+        clay_chunk_readback readback{};
+        readback.struct_size = declared;
+        readback.vertex_count = 999u;
+        CHECK(clay_surface_view_copy_chunk(view, 0, nullptr, nullptr, 0, nullptr, 0, nullptr, 0,
+                                           &readback) != CLAY_OK);
+        CHECK(readback.vertex_count == 999u);
+    }
+
+    // A CHUNK ID THAT NAMES NOTHING is answered rather than read. A host keeps
+    // ids across frames and a partitioner retires chunks, so a stale id in a
+    // list is ordinary rather than exceptional — `live` is the answer, and the
+    // bulk fill must not walk off its table looking for one.
+    const uint32_t ids[] = {0u, 0xfffffffeu};
+    clay_chunk_info infos[2]{};
+    infos[1].live = 1;
+    REQUIRE(clay_surface_view_chunk_infos(view, ids, 2, infos) == CLAY_OK);
+    CHECK(infos[0].live == 1);
+    CHECK(infos[1].live == 0);
+    CHECK(infos[1].chunk == 0xfffffffeu);
+    CHECK(infos[1].vertex_count == 0);
+
+    // And the ordered form refuses to be asked for more chunks than exist,
+    // rather than filling the tail with zeroed records a host would draw.
+    const size_t chunks = clay_surface_view_chunk_count(view);
+    std::vector<clay_chunk_info> too_many(chunks + 4);
+    CHECK(clay_surface_view_chunk_infos(view, nullptr, chunks + 4, too_many.data()) != CLAY_OK);
+
+    clay_surface_view_destroy(view);
+    clay_mesh_destroy(mesh);
+}

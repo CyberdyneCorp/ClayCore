@@ -424,3 +424,79 @@ def test_a_constrained_profile_cannot_change_what_is_committed():
         # defers its normals, so this is also the assertion that a deferred
         # flush ends exactly where a per-stamp one does.
         assert np.array_equal(got, full_positions)
+
+
+def test_a_trim_between_two_dabs_does_not_eat_the_next_dab():
+    """A memory warning arriving mid-stroke used to cost the next dab.
+
+    THE DEFECT, and the reason it is worth a Python case of its own: a script
+    that reacts to a memory warning by calling `trim` between two dabs of a
+    stroke is the ordinary way to use this API from Python, and the failure was
+    silent from up here. `stamp` returned the number of weld classes it had
+    moved and the surface did not change, because the sculptor was still bound
+    to a level mesh the trim had released — so the displacement went into freed
+    storage and the next evaluation rebuilt the level from the authoritative
+    detail, which had never been written.
+
+    The assertion is therefore `detail_checksum` after EVERY dab, which is what
+    "the dab landed" means for a hierarchy. Checking the return of `stamp` was
+    how the defect stayed hidden, and checking the surface once at the end
+    would have passed: with the defect present the odd dabs land and the even
+    ones do not.
+    """
+    positions, faces = grid(6)
+    hierarchy = clay.MultiresSurface.from_mesh(clay.Mesh.from_triangles(positions, faces))
+    hierarchy.add_level()
+    hierarchy.add_level()
+
+    sculptor = clay.MultiresSculptor(hierarchy)
+    sculptor.begin_stroke()
+    previous = hierarchy.detail_checksum
+    for i in range(4):
+        moved = sculptor.stamp("draw", (-0.3 + 0.2 * i, 0.0, 0.0), 0.35, 0.5)
+        assert moved > 0, f"dab {i} reached nothing"
+        now = hierarchy.detail_checksum
+        assert now != previous, f"dab {i} reported {moved} moved and changed nothing"
+        previous = now
+
+        report = hierarchy.trim(clay.Pressure.critical)
+        assert report["pinned"] is False
+        # ...and the release itself still changes nothing, which is the older
+        # claim this one sits beside rather than replaces.
+        assert hierarchy.detail_checksum == previous
+
+
+def test_a_stroke_taken_under_memory_pressure_commits_the_same_surface():
+    """Determinism, which is the form the same defect takes for a reproduction.
+
+    Two machines running the same session must not diverge because one of them
+    was low on memory. Compared as the authoritative checksum and then position
+    by position, because a stroke that landed a DIFFERENT surface under
+    pressure is a bug report nobody can reproduce.
+    """
+    def stroke(trim_between):
+        positions, faces = grid(6)
+        hierarchy = clay.MultiresSurface.from_mesh(
+            clay.Mesh.from_triangles(positions, faces))
+        hierarchy.add_level()
+        hierarchy.add_level()
+        sculptor = clay.MultiresSculptor(hierarchy)
+        sculptor.begin_stroke()
+        moved = []
+        for i in range(4):
+            moved.append(sculptor.stamp("draw", (-0.3 + 0.2 * i, 0.0, 0.0), 0.35, 0.5))
+            if trim_between:
+                hierarchy.trim(clay.Pressure.critical)
+        return hierarchy, moved
+
+    calm, calm_moved = stroke(False)
+    pressed, pressed_moved = stroke(True)
+
+    assert pressed_moved == calm_moved
+    assert pressed.detail_checksum == calm.detail_checksum
+    # Bit equality rather than a tolerance: "the same surface" is the claim, and
+    # a tolerance would pass a stroke that had quietly landed somewhere else.
+    for level in range(3):
+        want = calm.mesh_at_level(level).positions
+        got = pressed.mesh_at_level(level).positions
+        assert np.array_equal(got, want), f"level {level} diverged under pressure"

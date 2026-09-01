@@ -161,6 +161,13 @@
       `ScratchArena::trim` for the scratch, in the order the spec fixes, with
       `memory::MemoryPin` making a trim honest during a save. History is left to
       the host's own policy and is never touched here
+      AND SAFE MID-STROKE, which is a separate claim from safe mid-save and was
+      not true: see 7.6. The spec delta now states it and the cost is measured
+      rather than assumed — `benchmarks/bench_trim_recovery` prices the dab
+      after a warning at 0.62-2.04x for `Warning` (the sculpt level stays
+      resident) and 13-182x for `Critical`, growing with the model, which is
+      what makes "prefer Warning mid-drag, or hold a pin until the stroke ends"
+      advice a host can act on rather than a preference
 - [x] 4.5 A trim report saying what was released and how much
 - [x] 4.6 THE GATE: after a critical trim, the authoritative checksum is
       unchanged and every dropped cache reconstructs to an identical surface
@@ -304,6 +311,29 @@
       `test_c_surface_chunks.cpp` and `test_surface_transport.py`. Proven to
       catch its regression: with `trim_blocked` returning false the pin cases
       fail
+      EXTENDED, and writing the extension found the defect the gate as first
+      written could not see. Every case above trims a document nobody is
+      touching, which is the half a host can schedule. A trim arrives from an
+      operating-system callback and lands BETWEEN TWO DABS OF A DRAG, and there
+      the gate was false: `MultiresSculptor::bind` decides whether the `Mesh&`
+      its `MeshSculptor` holds is still live by comparing
+      `cache_generation()`, which was bumped when a level cache was BUILT and
+      not when it was released — so between a `drop_*_caches` and the next
+      build the number had not moved and the stale sculptor was kept, bound to
+      a freed `LevelCache`. It did not crash: the stamp wrote into released
+      storage, `absorb_level_edit` rebuilt the level from the authoritative
+      detail before reading the displacement back, and the dab was not there,
+      with `stamp` still returning the weld-class count it believed it had
+      moved. With a trim after every dab, every SECOND dab vanished.
+      Fixed by moving the generation on release too, in the three `drop_*`
+      functions. Four cases hold it — `test_extreme_poly_exactness.cpp` (the
+      named regression and the determinism form of it), `test_c_surface_chunks.cpp`
+      and `test_surface_transport.py` — and it is PROVEN to catch its
+      regression twice over: with the release bump removed the branch still
+      COMPILES, the C++ cases fail on the checksum standing still, and the same
+      case under `asan-ubsan` reports `heap-use-after-free` in
+      `MeshSculptor::valid()` reading storage freed by
+      `MultiresSurface::drop_all_caches`
 - [x] 7.7 Peak telemetry — scratch, workset, dirty chunks, topology operations
       — reported as high-water marks for profile tuning
       DONE. The type and its high-water semantics were already here; what this
@@ -348,4 +378,9 @@
       per-dab upload, the chunk-size decision, the adaptive and hierarchy rows,
       and the measured gap 3.1 names. docs/05 already carried the eviction order
       verbatim from the engine stage and now carries the tests that prove each
-      sentence of it — including the one that was not true
+      sentence of it — including the one that was not true.
+      EXTENDED: docs/09 gains "What a memory warning costs the dab after it" —
+      the two-run ratio table from `bench_trim_recovery` and the defect it was
+      written to price — and docs/05 gains the paragraph a host needs beside the
+      eviction order: a trim mid-drag is correct at every pressure and is free
+      only at `Warning`

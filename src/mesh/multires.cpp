@@ -590,9 +590,34 @@ bool MultiresSurface::level_resident(std::uint32_t level) const {
     return state_ && state_->level_ok(level) && state_->levels[level].cache != nullptr;
 }
 
+namespace {
+
+// RELEASING storage moves the generation for the same reason CREATING it does.
+//
+// `cache_generation` is what a `MeshSculptor` bound to a level's `Mesh`
+// compares to decide whether the reference it is holding still points into live
+// storage, and `ensure_cache` bumped it on the way in. Nothing bumped it on the
+// way out, which left a window one call wide — drop, then stamp — where the
+// number had not moved and `MultiresSculptor::bind` therefore kept a sculptor
+// whose `Mesh&` pointed into a freed `LevelCache`.
+//
+// WHAT THAT LOOKED LIKE was not a crash, which is why it survived: the stamp
+// wrote its displacement into released storage, `absorb_level_edit` rebuilt the
+// level from the authoritative detail before reading it back, and the dab
+// simply was not there — with the sculptor still returning the number of weld
+// classes it believed it had moved. Under a memory warning arriving mid-stroke
+// that is a brush that stops working for one dab and says nothing.
+void release_generation(MultiresSurface::State& s, bool released) {
+    if (released) ++s.cache_generation;
+}
+
+}  // namespace
+
 void MultiresSurface::drop_all_caches() {
     if (!state_) return;
+    bool released = false;
     for (MultiresLevel& l : state_->levels) {
+        released = released || l.cache != nullptr;
         l.cache.reset();
         l.pending.clear();
         l.pending_all = true;
@@ -600,6 +625,7 @@ void MultiresSurface::drop_all_caches() {
     state_->attr.clear();
     state_->base_frames_all = true;
     state_->base_frames_dirty.clear();
+    release_generation(*state_, released);
 }
 
 void MultiresSurface::drop_intermediate_caches() {
@@ -610,11 +636,14 @@ void MultiresSurface::drop_intermediate_caches() {
     // changes have not reached the one above it yet, and dropping it would drop
     // the edit rather than the cache.
     evaluate_up_to(*state_, std::max(keep_a, keep_b));
+    bool released = false;
     for (std::uint32_t l = 0; l < state_->levels.size(); ++l) {
         if (l == keep_a || l == keep_b) continue;
+        released = released || state_->levels[l].cache != nullptr;
         state_->levels[l].cache.reset();
     }
     state_->attr.clear();
+    release_generation(*state_, released);
 }
 
 void MultiresSurface::drop_inactive_caches() {
@@ -623,12 +652,15 @@ void MultiresSurface::drop_inactive_caches() {
     // ones in use have to stay. What goes is everything above them, which on a
     // deep hierarchy is most of it.
     const std::uint32_t keep = std::max(state_->sculpt_level, state_->display_level);
+    bool released = false;
     for (std::uint32_t l = keep + 1; l < state_->levels.size(); ++l) {
+        released = released || state_->levels[l].cache != nullptr;
         state_->levels[l].cache.reset();
         state_->levels[l].pending.clear();
         state_->levels[l].pending_all = true;
     }
     state_->attr.resize(std::min<std::size_t>(state_->attr.size(), keep + 1u));
+    release_generation(*state_, released);
 }
 
 }  // namespace mesh

@@ -130,6 +130,18 @@ A `memory::MemoryPin` held by a serializer or a readback turns a trim into a
 no-op that reports what it WOULD have released, so a memory warning arriving
 mid-save gets an honest answer instead of a document mutating under the writer.
 
+**A stroke is the other thing worth pinning, and for a different reason.** A trim
+mid-drag is CORRECT — the stroke commits the same surface bit for bit whether or
+not one arrives, which `tests/unit/test_extreme_poly_exactness.cpp` asserts by
+taking the same stroke twice and comparing every level — but at
+`Pressure::Critical` it is not free: the next dab pays a full re-evaluation of
+every level under the one being sculpted, measured at 13x to 182x an ordinary dab
+and growing with the model (docs/09, "What a memory warning costs the dab after
+it"). `Pressure::Warning` leaves the sculpt level resident and costs the next dab
+nothing. So a host answering a warning mid-drag should prefer `Warning`, or hold
+a pin and answer at the stroke boundary; the choice is a latency one and not a
+correctness one.
+
 Every sentence above is a test rather than an intention.
 `tests/unit/test_memory_trim.cpp` asserts the checksum across a critical trim,
 that every dropped cache reconstructs BIT for bit, that the partition comes back

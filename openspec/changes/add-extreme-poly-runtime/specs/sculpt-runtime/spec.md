@@ -74,6 +74,12 @@ A trim SHALL report what it released and how much.
 
 After a trim at any pressure level, the authoritative content SHALL be unchanged — verified by checksum, not by inspection — and every released cache SHALL reconstruct to an identical evaluated surface.
 
+A trim SHALL be safe BETWEEN THE DABS OF A STROKE, not only between strokes: a trim is called from an operating-system callback and lands where the host did not schedule it. A stroke interrupted by any number of trims SHALL commit exactly the surface the same stroke commits uninterrupted, and every dab SHALL land — a sculptor holding a reference into released storage is the failure this states, and it reports the classes it moved while changing nothing.
+
+#### Scenario: A trim between two dabs of a stroke costs no dab
+- **WHEN** the same stroke is taken twice, once undisturbed and once with a critical trim after every dab
+- **THEN** the authoritative checksum advances after every dab of both, and the two surfaces are identical level by level
+
 #### Scenario: A critical trim costs no work
 - **WHEN** a critical trim runs on a document with every cache built
 - **THEN** the authoritative checksums are unchanged and the reconstructed surface after rebuilding the caches is identical

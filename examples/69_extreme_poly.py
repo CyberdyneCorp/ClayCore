@@ -301,6 +301,60 @@ def priced_before_it_is_paid(large):
     print(f"    and an absurd target refuses rather than wrapping: \"{absurd['error']}\".")
 
 
+def a_warning_mid_stroke():
+    """A memory warning does not arrive between strokes. It arrives inside one.
+
+    Everything above trims a document nobody is touching, which is the easy
+    half: a host that finishes the stroke and then answers the warning gets a
+    correct answer. The real case is the one it cannot schedule — the warning
+    lands between two dabs of a drag, and the question is whether the stroke
+    the artist is halfway through is still the stroke they get.
+
+    The trap is that the failure has no symptom from up here. `stamp` returns
+    the number of weld classes it moved, and it is telling the truth: it did
+    move them. Whether they landed in the surface is a different question, and
+    the only thing that answers it is the authoritative checksum, taken after
+    EVERY dab rather than once at the end.
+    """
+    def stroke(trim_between):
+        hierarchy = clay.MultiresSurface.from_mesh(plane(24, spacing=0.08))
+        hierarchy.add_level()
+        hierarchy.add_level()
+        sculptor = clay.MultiresSculptor(hierarchy)
+        sculptor.begin_stroke()
+        marks, moved = [], []
+        for i in range(4):
+            moved.append(sculptor.stamp("draw", (-0.24 + 0.16 * i, 0.0, 0.0), 0.20, 0.5))
+            marks.append(hierarchy.detail_checksum)
+            if trim_between:
+                hierarchy.trim(clay.Pressure.critical)
+        return hierarchy, marks, moved
+
+    calm, calm_marks, calm_moved = stroke(False)
+    pressed, pressed_marks, pressed_moved = stroke(True)
+
+    print("\n  A MEMORY WARNING BETWEEN TWO DABS OF ONE STROKE:")
+    for i, (moved, calm_mark, mark) in enumerate(
+            zip(pressed_moved, calm_marks, pressed_marks)):
+        landed = "lands" if i == 0 or mark != pressed_marks[i - 1] else "STANDS STILL"
+        same = "same as the undisturbed stroke" if mark == calm_mark else "DIFFERENT"
+        print(f"    dab {i}: {moved:5d} classes moved, checksum {landed}  ({same})")
+
+    if any(a == b for a, b in zip(pressed_marks, pressed_marks[1:])):
+        raise SystemExit(
+            "a dab under memory pressure reported classes moved and changed nothing: "
+            "the stroke was writing into storage the trim had already released")
+    if pressed_moved != calm_moved or pressed_marks != calm_marks:
+        raise SystemExit(
+            "the same stroke committed a different surface under memory pressure, which is "
+            "a divergence nobody can reproduce")
+    for level in range(3):
+        if not np.array_equal(np.asarray(pressed.mesh_at_level(level).positions),
+                              np.asarray(calm.mesh_at_level(level).positions)):
+            raise SystemExit(f"level {level} diverged under memory pressure")
+    print("    and the surface is bit-identical to the stroke nobody interrupted.")
+
+
 def pictures(centre, rows):
     """One tile per model, the touched region lit by the same ball the query
     used — so the picture is of what the runtime reached rather than of a drawn
@@ -340,6 +394,7 @@ def main():
     the_stream_is_the_surface(large, large_view)
     what_it_costs()
     priced_before_it_is_paid(large)
+    a_warning_mid_stroke()
     pictures((0.0, 0.0, 0.0), (("small", small, small_hit), ("large", large, large_hit)))
     one_chunk_on_disk(large_view, large_hit[0])
 
