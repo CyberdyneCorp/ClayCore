@@ -440,6 +440,97 @@ TEST_CASE("c sculpt layers: the stack survives a save and a load, ids and all") 
     }
 }
 
+TEST_CASE("c sculpt layers: a document whose stack chunk names an impossible hierarchy") {
+    // THE SURFACE'S SECOND OPINION, at the boundary a host actually calls.
+    // `MultiresSurface::decode` does not take the stack chunk's word for the
+    // hierarchy it belongs to: it rebuilds the cage from the stream, then
+    // requires the decoded stack's level count and every one of its level sizes
+    // to be that hierarchy's. Without that, a document could pair one sculpt's
+    // passes with another's levels and attach every wrinkle somewhere else.
+    //
+    // This is a DIFFERENT claim from the ceilings in
+    // `test_mesh_sculpt_layer_io.cpp`, and the split is worth stating: the
+    // ceilings are what the layer decoder refuses on its own, and they matter
+    // where nothing downstream can check — the journal's stack snapshots, gated
+    // in `test_mesh_sculpt_layer_history.cpp`. What a document costs on the way
+    // to being refused is gated in `test_sculpt_allocation.cpp`. This case is
+    // only the cross-check, which is the one of the three a host sees.
+    //
+    // The chunk is the last thing in the stream and announces itself with its
+    // own magic, so a document can be rewritten to carry a different one
+    // without knowing anything about the bytes in front of it.
+    Fixture f;
+    f.add("pass");
+    size_t size = 0;
+    REQUIRE(clay_multires_serialize(f.surface, nullptr, &size) == CLAY_OK);
+    std::vector<uint8_t> bytes(size);
+    REQUIRE(clay_multires_serialize(f.surface, bytes.data(), &size) == CLAY_OK);
+
+    const uint8_t magic[4] = {0x43, 0x4d, 0x4c, 0x53};  // 'CMLS', little-endian
+    size_t at = bytes.size();
+    while (at >= 4 && std::memcmp(bytes.data() + at - 4, magic, 4) != 0) --at;
+    REQUIRE(at >= 8);  // found, with room for the length prefix in front of it
+    const size_t chunk_at = at - 4;
+
+    std::vector<uint8_t> document(bytes.begin(), bytes.begin() + chunk_at - 4);
+    const auto u32 = [&document](uint32_t v) {
+        for (int i = 0; i < 4; ++i)
+            document.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xffu));
+    };
+    u32(48u);          // the chunk's length
+    u32(0x534c4d43u);  // 'CMLS'
+    u32(1u);           // version
+    u32(0u);           // no layers
+    u32(0u);           // active, low
+    u32(0u);           // active, high
+    u32(1u);           // the id counter, low
+    u32(0u);           // the id counter, high
+    u32(4u);           // the finest blocking the format allows
+    u32(3u);           // three levels
+    for (int i = 0; i < 3; ++i) u32(0xfffffff0u);  // of four billion vertices each
+
+    clay_multires* out = nullptr;
+    CHECK(clay_multires_deserialize(document.data(), document.size(), &out) != CLAY_OK);
+    CHECK(out == nullptr);
+
+    SUBCASE("and the same surgery with a legal chunk still loads") {
+        // The control: this rewrite splices a stack chunk in by hand, so a
+        // refusal proves nothing until the same splice with a well-formed
+        // chunk is accepted. Same three levels, at the sizes the hierarchy
+        // actually has.
+        uint32_t vertices[3] = {0, 0, 0};
+        for (uint32_t l = 0; l < 3; ++l) {
+            clay_mesh* level_mesh = nullptr;
+            REQUIRE(clay_multires_copy_level_mesh(f.surface, l, &level_mesh) == CLAY_OK);
+            vertices[l] = static_cast<uint32_t>(clay_mesh_vertex_count(level_mesh));
+            clay_mesh_destroy(level_mesh);
+        }
+        std::vector<uint8_t> legal(bytes.begin(), bytes.begin() + chunk_at - 4);
+        const auto put = [&legal](uint32_t v) {
+            for (int i = 0; i < 4; ++i)
+                legal.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xffu));
+        };
+        put(48u);
+        put(0x534c4d43u);
+        put(1u);
+        put(0u);
+        put(0u);
+        put(0u);
+        put(1u);
+        put(0u);
+        put(1024u);  // the blocking the engine's own fields use
+        put(3u);
+        for (uint32_t l = 0; l < 3; ++l) put(vertices[l]);
+
+        clay_multires* loaded = nullptr;
+        REQUIRE(clay_multires_deserialize(legal.data(), legal.size(), &loaded) == CLAY_OK);
+        size_t count = 1;
+        REQUIRE(clay_multires_sculpt_layer_count(loaded, &count) == CLAY_OK);
+        CHECK(count == 0);
+        clay_multires_destroy(loaded);
+    }
+}
+
 TEST_CASE("c sculpt layers: a stroke transaction begins, stamps, commits and cancels") {
     Fixture f;
     const uint64_t id = f.add("pass");

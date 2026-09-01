@@ -42,6 +42,17 @@ constexpr std::uint32_t kPropertyVersion = 1u;
 // stream's own.
 constexpr std::uint32_t kMaxArray = 1u << 28;
 
+// The blocking a stream may declare. Every sparse container in this change
+// shares one block index — that is what makes a strength change cost a layer's
+// coverage rather than the surface — so a stream that declared a block size the
+// containers could not agree on would silently unshare it. Named once because
+// both the mask and the stack read it, and two copies of a three-way test are
+// two chances to relax one of them.
+bool valid_block_size(std::uint32_t block_size) {
+    if (block_size < 4u || block_size > (1u << 20)) return false;
+    return (block_size & (block_size - 1u)) == 0u;  // a power of two
+}
+
 void put_u32(std::vector<std::uint8_t>* out, std::uint32_t v) {
     out->push_back(static_cast<std::uint8_t>(v & 0xffu));
     out->push_back(static_cast<std::uint8_t>((v >> 8) & 0xffu));
@@ -162,9 +173,7 @@ bool SparseWeightField::decode(const std::uint8_t* data, std::size_t size,
     if (!r.u32(&magic) || magic != kMaskMagic) return false;
     if (!r.u32(&version) || version != kMaskVersion) return false;
     if (!r.u32(&vertex_count) || vertex_count > kMaxVertices) return false;
-    if (!r.u32(&block_size)) return false;
-    if (block_size < 4u || block_size > (1u << 20) || (block_size & (block_size - 1u)) != 0u)
-        return false;
+    if (!r.u32(&block_size) || !valid_block_size(block_size)) return false;
     if (!r.u32(&block_total)) return false;
 
     const std::uint32_t blocks = (vertex_count + block_size - 1) / block_size;
@@ -213,7 +222,42 @@ std::vector<std::uint8_t> encode_layer(const SculptLayer& layer) {
     return out;
 }
 
-bool decode_layer(Reader* r, SculptLayer* out) {
+// One level's pair of fields, decoded and then held to the level they claim to
+// belong to. Two things are checked and each has a silent failure behind it.
+//
+// THE VERTEX COUNT. A stream pairing one level's coefficients with a different
+// count would attach every wrinkle somewhere else — so an empty field passes (a
+// layer that never reached that level stores nothing) and a populated one must
+// match exactly.
+//
+// THE BLOCKING, which the file header calls the thing every sparse container in
+// this change agrees on. Block `b` naming the same vertices in a layer's
+// coefficients, in its mask and in the level's composed field is the whole of
+// tasks 5.4 and 5.5: `note_layer_coverage` hands a FIELD's block numbers
+// straight to the STACK's dirty index without translating them. A coefficient
+// at vertex 5000 is block 4 under the stack's 1024 and block 1250 under a
+// field's 4; marking 1250 falls off the end of a dirty index with five entries,
+// `note_block` drops it, and the strength slider then invalidates nothing and
+// leaves the surface showing a composition nobody asked for.
+//
+// PER LEVEL rather than over the finished layer, so a stream whose second level
+// is nonsense is refused before its third is decoded. Both orders refuse the
+// same streams; only this one refuses them without first reserving the index
+// every remaining level declares.
+bool decode_layer_level(Reader* r, std::uint32_t vertices, std::uint32_t block_size,
+                        DetailField* detail, SparseWeightField* mask) {
+    std::vector<std::uint8_t> blob;
+    if (!r->blob(&blob)) return false;
+    if (!DetailField::decode(blob.data(), blob.size(), detail)) return false;
+    if (!r->blob(&blob)) return false;
+    if (!SparseWeightField::decode(blob.data(), blob.size(), mask)) return false;
+    if (detail->vertex_count() != 0 && detail->vertex_count() != vertices) return false;
+    if (mask->vertex_count() != 0 && mask->vertex_count() != vertices) return false;
+    return detail->block_size() == block_size && mask->block_size() == block_size;
+}
+
+bool decode_layer(Reader* r, const std::vector<std::uint32_t>& level_vertices,
+                  std::uint32_t block_size, SculptLayer* out) {
     std::uint32_t kind = 0, flags = 0, name_size = 0, levels = 0;
     if (!r->u64(&out->id) || out->id == kNoSculptLayer) return false;
     if (!r->u32(&kind)) return false;
@@ -233,18 +277,18 @@ bool decode_layer(Reader* r, SculptLayer* out) {
     out->name.assign(reinterpret_cast<const char*>(r->data + r->at), name_size);
     if (!r->skip(name_size)) return false;
 
-    // Each level costs at least two four-byte lengths, so the ceiling is the
-    // buffer itself rather than a preference.
+    // A LAYER CARRIES EXACTLY THIS STACK'S LEVELS. `encode_layer` writes one
+    // pair of fields per level of the stack it came out of, so anything else is
+    // a stream this library did not write — and pinning it here rather than
+    // pricing the count against the buffer is what bounds the loop below to a
+    // dozen fields instead of to however many a hostile buffer can name.
     if (!r->count(8u, &levels)) return false;
+    if (levels != level_vertices.size()) return false;
     out->detail.assign(levels, DetailField{});
     out->mask.assign(levels, SparseWeightField{});
-    for (std::uint32_t l = 0; l < levels; ++l) {
-        std::vector<std::uint8_t> blob;
-        if (!r->blob(&blob)) return false;
-        if (!DetailField::decode(blob.data(), blob.size(), &out->detail[l])) return false;
-        if (!r->blob(&blob)) return false;
-        if (!SparseWeightField::decode(blob.data(), blob.size(), &out->mask[l])) return false;
-    }
+    for (std::uint32_t l = 0; l < levels; ++l)
+        if (!decode_layer_level(r, level_vertices[l], block_size, &out->detail[l], &out->mask[l]))
+            return false;
     return true;
 }
 
@@ -279,44 +323,38 @@ bool SculptLayerStack::decode(const std::uint8_t* data, std::size_t size, Sculpt
 
     SculptLayerStack stack;
     if (!r.u64(&stack.active_) || !r.u64(&stack.next_id_)) return false;
-    if (!r.u32(&block_size)) return false;
-    if (block_size < 4u || block_size > (1u << 20) || (block_size & (block_size - 1u)) != 0u)
-        return false;
+    if (!r.u32(&block_size) || !valid_block_size(block_size)) return false;
     stack.block_size_ = block_size;
-    if (!r.count(4u, &levels)) return false;
+    // THE TWO CEILINGS THE STREAM AROUND THIS ONE APPLIES TO THE SAME TWO
+    // NUMBERS. `MultiresSurface::decode` bounds its level count and its
+    // per-level vertex count before it builds anything, and then checks a
+    // decoded stack against the hierarchy it built — but that check runs after
+    // this function has returned, and both numbers are RESERVED FROM here. A
+    // forty-eight-byte stack chunk declaring three levels of four billion
+    // vertices used to be accepted, and reserved three gigabytes on the way.
+    if (!r.count(4u, &levels) || levels > SculptLayerStack::kMaxLevels) return false;
     stack.level_vertices_.resize(levels);
-    for (std::uint32_t l = 0; l < levels; ++l)
-        if (!r.u32(&stack.level_vertices_[l])) return false;
-
-    stack.dirty_.assign(levels, LevelDirty{});
     for (std::uint32_t l = 0; l < levels; ++l) {
-        stack.dirty_[l].mark.assign(stack.level_block_count(l), 0);
-        stack.dirty_[l].all = true;
+        if (!r.u32(&stack.level_vertices_[l])) return false;
+        if (stack.level_vertices_[l] > SculptLayerStack::kMaxLevelVertices) return false;
     }
+
+    // `all` is the resting state of a freshly decoded stack, and while it holds
+    // the per-block mark array says nothing and is read by nothing — so it is
+    // sized when `clear_dirty` drops `all`, which is the moment it starts being
+    // consulted. See `SculptLayerStack::clear_dirty`.
+    stack.dirty_.assign(levels, LevelDirty{});
 
     for (std::uint32_t i = 0; i < count; ++i) {
         std::vector<std::uint8_t> payload;
         if (!r.blob(&payload)) return false;
         Reader lr{payload.data(), payload.size(), 0};
         SculptLayer layer;
-        if (!decode_layer(&lr, &layer)) return false;
+        if (!decode_layer(&lr, stack.level_vertices_, stack.block_size_, &layer)) return false;
         // Two layers answering to one id would make every lookup ambiguous and
         // every undo record apply to whichever came first.
         if (stack.index_of(layer.id) != kNoSculptLayerIndex) return false;
         if (layer.id >= stack.next_id_) return false;
-        // A layer's per-level fields must describe THIS stack's levels. A
-        // stream pairing one level's coefficients with a different vertex count
-        // would silently attach every wrinkle somewhere else.
-        layer.detail.resize(levels);
-        layer.mask.resize(levels);
-        for (std::uint32_t l = 0; l < levels; ++l) {
-            const std::uint32_t vertices = stack.level_vertices_[l];
-            if (layer.detail[l].vertex_count() != 0 &&
-                layer.detail[l].vertex_count() != vertices)
-                return false;
-            if (layer.mask[l].vertex_count() != 0 && layer.mask[l].vertex_count() != vertices)
-                return false;
-        }
         stack.layers_.push_back(std::move(layer));
     }
     if (stack.active_ != kNoSculptLayer && stack.index_of(stack.active_) == kNoSculptLayerIndex)
@@ -423,44 +461,68 @@ std::vector<std::uint8_t> SculptLayerProperty::encode() const {
     return out;
 }
 
+namespace {
+
+// The two sides of a scalar property change, plus the whole-stack snapshots a
+// structural one carries. Everything here is fixed-width but for the two names
+// and the two blobs, so it reads top to bottom in stream order.
+bool decode_property_sides(Reader* r, SculptLayerProperty* p) {
+    std::uint32_t flags = 0, n = 0;
+    if (!r->u64(&p->layer)) return false;
+    for (std::string* name : {&p->name_before, &p->name_after}) {
+        if (!r->count(1u, &n) || n > SculptLayerStack::kMaxNameBytes) return false;
+        name->assign(reinterpret_cast<const char*>(r->data + r->at), n);
+        if (!r->skip(n)) return false;
+    }
+    if (!r->f32(&p->strength_before) || !r->f32(&p->strength_after)) return false;
+    if (!r->u32(&flags)) return false;
+    p->flag_before = (flags & 1u) != 0u;
+    p->flag_after = (flags & 2u) != 0u;
+    if (!r->u64(&p->active_before) || !r->u64(&p->active_after)) return false;
+    return r->blob(&p->stack_before) && r->blob(&p->stack_after);
+}
+
+// What a BAKE wrote outside the stack: the level's own detail and the cage
+// positions it moved. Only a bake fills these, and they are read unconditionally
+// because their counts are zero for every other op — a record that decoded
+// differently per op would be a second format keyed on a field.
+bool decode_property_base_edits(Reader* r, SculptLayerProperty* p) {
+    std::uint32_t n = 0;
+    if (!r->count(32u, &n)) return false;
+    p->base_detail.resize(n);
+    for (SculptLayerProperty::DetailEntry& e : p->base_detail) {
+        if (!r->u32(&e.level) || !r->u32(&e.vertex)) return false;
+        if (!r->detail(&e.before) || !r->detail(&e.after)) return false;
+    }
+    if (!r->count(28u, &n)) return false;
+    p->base_vertices.resize(n);
+    p->base_before.resize(n);
+    p->base_after.resize(n);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        if (!r->u32(&p->base_vertices[i])) return false;
+        if (!r->vec3(&p->base_before[i]) || !r->vec3(&p->base_after[i])) return false;
+    }
+    return true;
+}
+
+}  // namespace
+
 bool SculptLayerProperty::decode(const std::uint8_t* data, std::size_t size,
                                  SculptLayerProperty* out) {
     if (!data || !out) return false;
     Reader r{data, size, 0};
-    std::uint32_t magic = 0, version = 0, op_value = 0, flags = 0, n = 0;
+    std::uint32_t magic = 0, version = 0, op_value = 0;
     if (!r.u32(&magic) || magic != kPropertyMagic) return false;
     if (!r.u32(&version) || version != kPropertyVersion) return false;
+    // AN UNKNOWN OP IS REFUSED. Replaying a record whose verb this build does
+    // not have would apply the sides it does understand and skip the rest,
+    // which leaves a stack half-changed by a step that reports success.
     if (!r.u32(&op_value) || op_value > static_cast<std::uint32_t>(Op::Structural)) return false;
 
     SculptLayerProperty p;
     p.op = static_cast<Op>(op_value);
-    if (!r.u64(&p.layer)) return false;
-    for (std::string* name : {&p.name_before, &p.name_after}) {
-        if (!r.count(1u, &n) || n > SculptLayerStack::kMaxNameBytes) return false;
-        name->assign(reinterpret_cast<const char*>(r.data + r.at), n);
-        if (!r.skip(n)) return false;
-    }
-    if (!r.f32(&p.strength_before) || !r.f32(&p.strength_after)) return false;
-    if (!r.u32(&flags)) return false;
-    p.flag_before = (flags & 1u) != 0u;
-    p.flag_after = (flags & 2u) != 0u;
-    if (!r.u64(&p.active_before) || !r.u64(&p.active_after)) return false;
-    if (!r.blob(&p.stack_before) || !r.blob(&p.stack_after)) return false;
-
-    if (!r.count(32u, &n)) return false;
-    p.base_detail.resize(n);
-    for (DetailEntry& e : p.base_detail) {
-        if (!r.u32(&e.level) || !r.u32(&e.vertex)) return false;
-        if (!r.detail(&e.before) || !r.detail(&e.after)) return false;
-    }
-    if (!r.count(28u, &n)) return false;
-    p.base_vertices.resize(n);
-    p.base_before.resize(n);
-    p.base_after.resize(n);
-    for (std::uint32_t i = 0; i < n; ++i) {
-        if (!r.u32(&p.base_vertices[i])) return false;
-        if (!r.vec3(&p.base_before[i]) || !r.vec3(&p.base_after[i])) return false;
-    }
+    if (!decode_property_sides(&r, &p)) return false;
+    if (!decode_property_base_edits(&r, &p)) return false;
     *out = std::move(p);
     return true;
 }

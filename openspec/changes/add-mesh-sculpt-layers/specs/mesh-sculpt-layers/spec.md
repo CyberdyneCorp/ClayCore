@@ -37,9 +37,15 @@ This SHALL be stated rather than hidden. Voxel sculpt layers replay cell writes 
 
 Reordering SHALL remain available: hosts present a stack, later blend modes may not commute, and a procedural layer may read the stack beneath it.
 
+Composition SHALL sum a block's contributors in an order that a reorder does not change. Addition commutes, but float addition does not ASSOCIATE, so an implementation accumulating in list order would land on different bits the moment a stack is three deep or sits on a non-zero base detail — and because a reorder invalidates no block, the blocks a later stroke happened to recompose would then carry one order while the blocks still cached carried the other, leaving the surface composed two ways at once.
+
 #### Scenario: Reordering two overlapping layers changes nothing
 - **WHEN** two layers whose coverage overlaps are swapped
 - **THEN** the evaluated surface is bit-identical
+
+#### Scenario: A reorder changes nothing once the blocks it covers compose again
+- **WHEN** a stack three layers deep over a non-zero base detail is reordered and the blocks its layers cover are driven through composition a second time
+- **THEN** the evaluated surface is bit-identical to the surface before the reorder
 
 ### Requirement: A stroke records its full contribution regardless of strength
 A stroke on a layer whose strength is less than one SHALL record the contribution it would have made at full strength. Strength SHALL affect evaluation only.

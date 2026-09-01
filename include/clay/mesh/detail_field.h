@@ -190,6 +190,21 @@ class DetailField {
     void promote_to_dense();
 
     std::uint32_t vertex_count_ = 0;
+    // THE POSTCONDITION `compact()` EXISTS FOR. `bytes()` reports CAPACITY,
+    // not size, because capacity is what the allocator is actually holding —
+    // so a compaction that packs the content but leaves capacity where it was
+    // releases nothing a host can observe, and `memory().sculpt_layers` does
+    // not move.
+    //
+    // The demotion path rebuilds through `set()`, which grows these vectors by
+    // the standard library's OWN growth factor: libstdc++ doubles, MSVC grows
+    // by 1.5. The same compaction therefore lands on a different capacity per
+    // toolchain — and on MSVC it landed ABOVE the dense form it replaced, so
+    // the stack's bytes went UP after compacting. Shrinking here is what makes
+    // the claim true everywhere rather than true on the toolchain it was
+    // written on.
+    void shrink_to_content();
+
     bool dense_ = false;
     // block -> slot in `storage_`, kNoBlock when the block has never been
     // written. Empty when dense.

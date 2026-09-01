@@ -150,6 +150,13 @@ void SparseWeightField::compact() {
     }
     storage_ = std::move(packed);
     slot_block_ = std::move(new_slot_block);
+    shrink_to_content();
+}
+
+void SparseWeightField::shrink_to_content() {
+    storage_.shrink_to_fit();
+    slot_block_.shrink_to_fit();
+    block_slot_.shrink_to_fit();
 }
 
 bool SparseWeightField::block_stored(std::uint32_t block) const {
@@ -250,11 +257,10 @@ void SculptLayerStack::set_level_sizes(const std::vector<std::uint32_t>& vertice
     level_vertices_ = vertices_per_level;
     for (SculptLayer& layer : layers_) size_layer(&layer);
 
+    // `LevelDirty` starts with `all` set, which is the answer every reader
+    // wants after a resize; the per-block mark array is sized where it is first
+    // consulted, in `clear_dirty`.
     dirty_.assign(level_vertices_.size(), LevelDirty{});
-    for (std::size_t l = 0; l < dirty_.size(); ++l) {
-        dirty_[l].mark.assign(level_block_count(static_cast<std::uint32_t>(l)), 0);
-        dirty_[l].all = true;
-    }
 }
 
 std::uint32_t SculptLayerStack::level_vertex_count(std::uint32_t level) const {
@@ -336,6 +342,14 @@ void SculptLayerStack::clear_dirty(std::uint32_t level) {
     for (std::uint32_t b : d.blocks)
         if (b < d.mark.size()) d.mark[b] = 0;
     d.blocks.clear();
+    // WHERE THE MARK ARRAY IS SIZED, and the only place it can be. It exists so
+    // a second `note_block` on one block does not list it twice, and
+    // `note_block` reads it only when `all` is false — which starts being true
+    // one line below and nowhere else. Sizing it when a LEVEL is declared
+    // instead let a forty-eight-byte stack chunk reserve three gigabytes of
+    // index for a hierarchy carrying no layers at all.
+    const std::size_t blocks = level_block_count(level);
+    if (d.mark.size() != blocks) d.mark.assign(blocks, 0);
     d.all = false;
 }
 
@@ -427,6 +441,12 @@ bool SculptLayerStack::move_to(SculptLayerId id, std::size_t index) {
     // so a reorder cannot move a vertex; what it changes is the order a host
     // draws the list in. The revision still moves, because a host watching the
     // stack has to redraw.
+    //
+    // That is only true because composition sums in ID order rather than in
+    // stack order — see `gather_contributors`. Summing in stack order would
+    // make this line a bug rather than an optimisation: float addition does not
+    // associate, so the blocks a later stroke happened to recompose would carry
+    // one order and the blocks still cached would carry the other.
     ++composition_revision_;
     ++composition_bumps_;
     return true;
@@ -565,6 +585,68 @@ bool SculptLayerStack::set_mask(SculptLayerId id, std::uint32_t level, std::uint
     return true;
 }
 
+// The union of the two layers' coverages, and nothing outside it: everywhere
+// else both terms are zero and the answer is the zero already there. Gathered
+// rather than walked, because a level's blocks are numbered and the two layers
+// each store an ascending list of the ones they reach.
+void SculptLayerStack::merge_blocks(std::size_t ui, std::size_t li, std::uint32_t level,
+                                    std::vector<std::uint32_t>* blocks) const {
+    const DetailField& du = layers_[ui].detail[level];
+    const DetailField& dl = layers_[li].detail[level];
+    blocks->clear();
+    for (std::uint32_t i = 0; i < du.stored_block_count(); ++i)
+        blocks->push_back(du.stored_block_at(i));
+    for (std::uint32_t i = 0; i < dl.stored_block_count(); ++i)
+        blocks->push_back(dl.stored_block_at(i));
+    std::sort(blocks->begin(), blocks->end());
+    blocks->erase(std::unique(blocks->begin(), blocks->end()), blocks->end());
+}
+
+// One level of a merge: `L_l' = s_u·m_u·L_u + s_l·m_l·L_l`, stored DIRECTLY.
+// The naive concatenation would solve for a coefficient carrying the ratio of
+// the two strengths and be undefined at `s_l = 0` — a state one slider reaches.
+// The target's composition is set to the identity by the caller, which is what
+// makes the evaluated surface unchanged by construction rather than by luck.
+void SculptLayerStack::merge_level(std::size_t ui, std::size_t li, std::uint32_t level, float fu,
+                                   float fl) {
+    const std::uint32_t vertices = level_vertex_count(level);
+    if (vertices == 0) return;
+    if (layers_[ui].detail[level].stored_block_count() == 0 &&
+        layers_[li].detail[level].stored_block_count() == 0)
+        return;
+
+    std::vector<std::uint32_t> blocks;
+    merge_blocks(ui, li, level, &blocks);
+
+    const DetailField& du = layers_[ui].detail[level];
+    const DetailField& dl = layers_[li].detail[level];
+    const SparseWeightField& mu = layers_[ui].mask[level];
+    const SparseWeightField& ml = layers_[li].mask[level];
+    std::vector<LocalDetail> merged;
+    std::vector<std::uint32_t> vertex_ids;
+    for (std::uint32_t b : blocks) {
+        const std::uint32_t begin = b * block_size_;
+        const std::uint32_t end = std::min(begin + block_size_, vertices);
+        for (std::uint32_t v = begin; v < end; ++v) {
+            const LocalDetail a = du.get(v), c = dl.get(v);
+            const float wu = fu * mu.get(v), wl = fl * ml.get(v);
+            LocalDetail out;
+            out.tangent = wu * a.tangent + wl * c.tangent;
+            out.bitangent = wu * a.bitangent + wl * c.bitangent;
+            out.normal = wu * a.normal + wl * c.normal;
+            merged.push_back(out);
+            vertex_ids.push_back(v);
+        }
+    }
+
+    DetailField* target = sized_field(layers_[li].detail, level, vertices, block_size_);
+    if (!target) return;
+    for (std::size_t i = 0; i < merged.size(); ++i) target->set(vertex_ids[i], merged[i]);
+    // The mask is CLEARED rather than combined. It has already been folded into
+    // the coefficients above, and leaving it would apply it twice.
+    layers_[li].mask[level] = SparseWeightField{};
+}
+
 bool SculptLayerStack::merge_down(SculptLayerId upper) {
     if (composition_held_) return false;
     const std::size_t ui = index_of(upper);
@@ -580,48 +662,8 @@ bool SculptLayerStack::merge_down(SculptLayerId upper) {
     note_layer_coverage(layers_[ui]);
     note_layer_coverage(layers_[li]);
 
-    for (std::uint32_t l = 0; l < static_cast<std::uint32_t>(level_vertices_.size()); ++l) {
-        const std::uint32_t vertices = level_vertex_count(l);
-        if (vertices == 0) continue;
-        const DetailField& du = layers_[ui].detail[l];
-        const DetailField& dl = layers_[li].detail[l];
-        if (du.stored_block_count() == 0 && dl.stored_block_count() == 0) continue;
-
-        // The union of the two coverages, and nothing outside it. Everywhere
-        // else both terms are zero and the answer is the zero already there.
-        std::vector<std::uint32_t> blocks;
-        for (std::uint32_t i = 0; i < du.stored_block_count(); ++i)
-            blocks.push_back(du.stored_block_at(i));
-        for (std::uint32_t i = 0; i < dl.stored_block_count(); ++i)
-            blocks.push_back(dl.stored_block_at(i));
-        std::sort(blocks.begin(), blocks.end());
-        blocks.erase(std::unique(blocks.begin(), blocks.end()), blocks.end());
-
-        const SparseWeightField& mu = layers_[ui].mask[l];
-        const SparseWeightField& ml = layers_[li].mask[l];
-        std::vector<LocalDetail> merged;
-        std::vector<std::uint32_t> vertex_ids;
-        for (std::uint32_t b : blocks) {
-            const std::uint32_t begin = b * block_size_;
-            const std::uint32_t end = std::min(begin + block_size_, vertices);
-            for (std::uint32_t v = begin; v < end; ++v) {
-                const LocalDetail a = du.get(v), c = dl.get(v);
-                const float wu = fu * mu.get(v), wl = fl * ml.get(v);
-                LocalDetail out;
-                out.tangent = wu * a.tangent + wl * c.tangent;
-                out.bitangent = wu * a.bitangent + wl * c.bitangent;
-                out.normal = wu * a.normal + wl * c.normal;
-                merged.push_back(out);
-                vertex_ids.push_back(v);
-            }
-        }
-        DetailField* target = sized_field(layers_[li].detail, l, vertices, block_size_);
-        if (!target) continue;
-        for (std::size_t i = 0; i < merged.size(); ++i) target->set(vertex_ids[i], merged[i]);
-        // The mask is CLEARED rather than combined. It has already been folded
-        // into the coefficients above, and leaving it would apply it twice.
-        layers_[li].mask[l] = SparseWeightField{};
-    }
+    for (std::uint32_t l = 0; l < static_cast<std::uint32_t>(level_vertices_.size()); ++l)
+        merge_level(ui, li, l, fu, fl);
 
     // The identity the target now needs for the evaluated surface to be
     // unchanged. Visible as well as full strength: merging into a hidden layer

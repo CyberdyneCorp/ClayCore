@@ -961,6 +961,65 @@ which shape is expensive: 1 -> 16 layers each covering the WHOLE level costs
 compose 16.80 -> 18.02 ms, a strength change 5.80 -> 7.03 ms and a stamp 1.66 ->
 2.16 ms. Sixteen full-surface passes is not a detail workflow; it is a warning.
 
+**Re-measured at the end of the branch**, 31 repetitions per row on the same box
+under a different load (average 4.56 before, 2.61 after), with P99 added because
+a slider is an interactive gesture and its tail is what a host feels:
+
+| case | 1 layer, P50 / P95 / P99 / max | 128 layers, P50 / P95 / P99 / max | | counter |
+|---|---:|---:|---:|---|
+| `BM_SculptLayerStampOnStackLocal` | 363.3 / 369.2 / 388.2 / 388.2 us | 376.3 / 432.0 / 594.5 / 594.5 us | **1.04x** | `layer_blocks_visited` **2898 at both ends** |
+| `BM_SculptLayerStampOnStackOverlapping` | 439.1 / 550.2 / 683.1 / 683.1 us | 536.8 / 539.2 / 604.9 / 604.9 us | 1.22x | 2898 -> 14109 |
+| `BM_SculptLayerStrengthChangeLocal` | 752.3 / 754.7 / 811.5 / 811.5 us | 1204.2 / 1212.9 / 1264.2 / 1264.2 us | 1.60x | `blocks_recomposed` **200 at both ends** |
+| `BM_SculptLayerComposeLocal` | 15.65 / 15.89 / 16.73 ms | 16.17 / 17.00 / 17.77 ms | 1.03x | cold, the whole level |
+
+Both counters land on the same integers they did the first time, which is the
+point: they are exact and the clocks are not. The overlapping stamp's ratio moved
+1.48x -> 1.22x between two runs of unchanged code on a box whose load moved by a
+factor of two, which is the whole reason [the sculpt-layer rows are deliberately
+outside `check_bench.py`](#sculpt-layers-measured-add-mesh-sculpt-layers) — the
+claim they carry is an integer asserted in a unit test, not a ratio between two
+clocks on a shared runner.
+
+**Re-measured a third time, and this time the change was priced against
+itself.** Composition now sums a block's contributors in **layer-id** order
+rather than in list order ([07 §8b](07-brushes-and-features.md#reordering-is-organisation-which-is-why-the-sum-is-taken-in-id-order)),
+which puts a sort on the per-block path — and a sort on a hot path should be
+paid for rather than assumed. 31 repetitions, same box, load average 3.76 before
+and 2.86 after; the same binary was then rebuilt with the sort removed and run
+back to back (load 3.8 before, 3.4 after), so the two sides are comparable:
+
+| case | 1 layer, P50 / P95 / P99 / max | 128 layers, P50 / P95 / P99 / max | | counter |
+|---|---:|---:|---:|---|
+| `BM_SculptLayerStampOnStackLocal` | 362.9 / 369.4 / 417.4 / 437.6 us | 375.9 / 381.5 / 381.8 / 381.9 us | **1.04x** | `layer_blocks_visited` **2898 at both ends** |
+| `BM_SculptLayerStampOnStackOverlapping` | 364.8 / 374.0 / 404.4 / 415.8 us | 538.8 / 612.3 / 651.5 / 661.4 us | 1.48x | 2898 -> 14109 |
+| `BM_SculptLayerStrengthChangeLocal` | 751.6 / 794.3 / 810.2 / 814.5 us | 1204.9 / 1216.4 / 1222.9 / 1225.3 us | 1.60x | `blocks_recomposed` **200 at both ends** |
+| `BM_SculptLayerComposeLocal` | 15.67 / 16.04 / 16.48 / 16.57 ms | 16.15 / 16.56 / 17.13 / 17.37 ms | 1.03x | cold, the whole level |
+
+Dense coverage, 1 -> 16 layers each over the whole level: compose 19.30 -> 18.65
+ms, strength 5.96 -> 7.30 ms, stamp 1.76 -> 2.32 ms.
+
+**What the sort costs**, P50 with it against P50 without on the same box in the
+same session: **0.97x to 1.01x** on every compose and stamp row, and **0.87x to
+0.90x** on the deep local strength change at 16, 64 and 128 layers — the shape
+with the most contributors per block. Free within the noise everywhere and
+measurably faster there; the cause is not attributed, only measured. The
+gathered list is already in id order whenever nothing has been moved, so the
+sort costs a scan over the layers that reach **one** block. Both counters land
+on the same integers for the third time, across three runs whose clocks moved by
+up to a factor of two — which is the argument for reading the counter.
+
+**What a hostile document costs is a latency question too**, and it is the one
+this branch's last stage found unanswered. A layer stack chunk rides inside the
+multires stream, and the surface's cross-check of a decoded stack against the
+hierarchy it rebuilt happens *after* the layer decoder has returned — so every
+number the chunk declares is one the decoder has already reserved from. Two of
+them were unbounded and a third was reserved eagerly: an 84-byte chunk naming
+twelve levels of a billion vertices reserved **3.2 GB** of per-block
+invalidation index before anything could object. It now costs **720 bytes**,
+asserted in `test_sculpt_allocation.cpp` — in bytes rather than allocations,
+because reserving three gigabytes is one allocation and a count would have
+called it cheaper than the vector of level sizes beside it.
+
 **Tiering.** A stamp on a stack is **Tier 1** at every depth measured — 0.37 ms
 at 128 local layers is 9% of the 4.17 ms share, and its growth is what the first
 row says it is. A strength change is Tier 1 at this size too, and it is the row

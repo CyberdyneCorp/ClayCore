@@ -74,6 +74,7 @@ add_executable(clay_unit_tests
   unit/test_mesh_sculpt_layers.cpp
   unit/test_mesh_sculpt_layer_stroke.cpp
   unit/test_mesh_sculpt_layer_history.cpp
+  unit/test_mesh_sculpt_layer_io.cpp
   unit/test_c_sculpt_layers.cpp
   unit/test_sculpt_allocation.cpp
   unit/test_brush_arena.cpp

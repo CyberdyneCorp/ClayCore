@@ -1,12 +1,17 @@
 #include <doctest/doctest.h>
 
+#include <cmath>
 #include <cstdio>
+#include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
 #include "clay/eval/backend.h"
+#include "clay/eval/bake_points.h"
 #include "clay/scene/bounds.h"
+#include "clay/scene/consolidate.h"
 #include "kernel_utils.h"
 #include "scene_utils.h"
 
@@ -228,6 +233,71 @@ std::vector<ParityScene> parity_scenes() {
             sphere, math::Aabb{cf3(-1.2f, -1.2f, -1.2f), cf3(1.2f, 1.2f, 1.2f)}, 0.12f, 0.3f));
         l.sdf->insert(n);
         scenes.push_back({"sampled_volume_sphere", std::move(doc), 3.0f});
+    }
+    {   // A volume BAKED FROM A DOCUMENT, which is not the same structure as
+        // the two below it (#243, ship-metal-in-the-xcframework task 1.10).
+        //
+        // Those sample a lambda; this one goes through scene::bake_layer, which
+        // is what clay_item_volume_from_document runs — local frame, the pooled
+        // evaluator, REDISTANCE, COMPACT, and a measured Lipschitz. Redistance
+        // rewrites the samples and compact drops the bricks it shows are past
+        // the band, so the sparse index a backend walks has a different shape
+        // from a lambda sample's, and the values in it are not the ones the
+        // source field produced. A report of a Simulator deviation on a baked
+        // field (0.166 against 0.033 on the CPU) had no scene in this corpus
+        // that could confirm or refute it; this is that scene.
+        //
+        // The bake itself is CPU-only and takes no backend, so every platform
+        // produces the SAME volume — what varies between backends is only the
+        // walk of it, which is exactly what this compares.
+        Document source;
+        Layer& sl = source.add_sdf_layer("src");
+        sl.sdf->insert(item(Prim::sphere(0.62f), cf3(0, 0, 0)));
+        // Enough blended dabs that the baked result is a worked surface rather
+        // than a resampled sphere, and a subtract so the field has a concavity
+        // the redistance has to carry.
+        for (int i = 0; i < 9; ++i) {
+            const float a = 0.7f * static_cast<float>(i);
+            Node d = item(Prim::sphere(0.2f),
+                          cf3(0.55f * std::cos(a), 0.42f * std::sin(a), 0.2f * std::sin(a * 1.7f)),
+                          i % 4 == 3 ? Op::Subtract : Op::Add);
+            d.blend = Blend{BlendProfile::Quadratic, 0.09f};
+            sl.sdf->insert(d);
+        }
+        scene::ConsolidationParams params;
+        params.cell_size = 0.045f;
+        params.band = 0.14f;
+        std::optional<field::FieldVolume> baked =
+            scene::bake_layer(source.layers.front(), params, nullptr, eval::pooled_bake_eval());
+        REQUIRE(baked.has_value());
+        // TEETH. A backend comparison over a volume that redistanced to nothing
+        // agrees perfectly and proves nothing, so the fixture is required to be
+        // a real sparse structure before it is allowed to pass: many bricks,
+        // and a surface the probe points actually straddle.
+        REQUIRE(baked->brick_count() > 40);
+
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        Node n = item(Prim::volume(), cf3(0, 0, 0));
+        n.volume = std::make_shared<field::FieldVolume>(std::move(*baked));
+        l.sdf->insert(n);
+        {   // The probe points this corpus uses are uniform over +-extent; check
+            // that a good share of them land INSIDE, so the comparison covers
+            // the band and the interior rather than only far-field constants.
+            const scene::Tape probe = scene::compile_document(doc);
+            clay_test::Lcg rng(511);
+            int inside = 0, banded = 0;
+            for (int i = 0; i < 4096; ++i) {
+                const cfloat3 p = cf3(rng.range(-1.6f, 1.6f), rng.range(-1.6f, 1.6f),
+                                      rng.range(-1.6f, 1.6f));
+                const float dv = probe.eval(p).d;
+                if (dv < 0.0f) ++inside;
+                if (dv > -0.14f && dv < 0.14f) ++banded;
+            }
+            REQUIRE(inside > 100);
+            REQUIRE(banded > 100);
+        }
+        scenes.push_back({"document_baked_volume", std::move(doc), 1.6f});
     }
     {   // The same structure carrying COLOUR per sample. The comparison this
         // scene exists for is the colour one: the distance path is already
