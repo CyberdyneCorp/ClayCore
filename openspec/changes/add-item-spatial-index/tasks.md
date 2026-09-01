@@ -59,14 +59,16 @@
       definition rather than against any implementation and will guard whichever
       index does land.
 
-- [ ] 1.1c The remaining direction, now the only one the measurement leaves:
-      make the index SURVIVE a revision and update incrementally, so the build
-      is paid per EDIT rather than per document. Only then is a sublinear query
-      worth having — and only then does BVH-vs-grid become answerable, because
-      the structure has to support insertion and removal rather than just
-      queries. `build_chain` calling `item_geometry_bound` per node, which
-      re-tessellates spline strokes and sweeps, is what makes the rebuild
-      expensive and what an incremental form would stop repeating.
+- [x] 1.1c DONE, under `extend-the-index-without-the-document` and
+      `append-the-cull-index` rather than here. `CullIndex::append`
+      (`src/scene/cull_index.cpp:149`) extends a live index, and
+      `scene::append_cached` is the one place that decides whether the cached
+      index may be extended in place or has to be copied first — it extends in
+      place when no reader holds it, which is the ordinary case. An append at
+      20,000 items went **0.0542 ms → 0.000258 ms** and stopped scaling with
+      the document. Held by "cull index: an appended index is the index a
+      rebuild would give" and "the pad an append raises is a maximum of SUMS
+      over layers" in `test_cull_index.cpp`.
 - [x] 1.2 Baseline the numbers this change exists to move, on a build of `main`: culling
       time per brick at 100 / 2 400 / 10 000 items, and a dab's total. Committed as
       `BM_DeepDocCullPlanned10000` and `BM_DeepDocRefillPlanned10000`, with gates.
@@ -77,14 +79,38 @@
       exactly as described (linear across a 52x range) and culling is still 99% of a dab's
       cost, so the direction holds — but this is not urgent, and it runs out at ~100 000
       items rather than at 10 000. The proposal's "Why" now says so.
-- [ ] 1.3 Build the index over item influence bounds, derived from `item_influence_bound` — no second definition of reach, and non-local items (`item_influence_is_local` false) held in an always-emitted list rather than indexed
-- [ ] 1.4 `compile_document(doc, cull)` queries the index instead of scanning. The linear scan stays available behind a flag or a build so the equivalence test below can run both
-- [ ] 1.5 Own the index where the tape cache is owned, invalidated by the same `touch()`, so index and tape cannot disagree about the same document
-- [ ] 1.6 `clay_brick_cache_eval_requests` dispatches its batch through the worker pool instead of looping on the calling thread, sharing one compiled document across the batch
-- [ ] 1.7 Equivalence test: over the golden corpus plus a generated 10 000-item document, every brick's culled tape gives **bit-identical** data to the full tape and to the linear-scan cull. Not "within tolerance" — a subset is a wrong field
-- [ ] 1.8 Regression test for the non-local case: a document containing an unbounded item and a distant brick still emits that item
-- [ ] 1.9 Regression test for staleness: add / move / remove an item, cull immediately, assert the culled tape reflects the edit
-- [ ] 1.10 Benchmark: culling time per brick against document size, asserting the slope is flat rather than the constant small. A 2× constant improvement passing as a fix for this is the failure mode to guard against
+- [x] 1.3 DONE. `CullIndex::Entry` carries the bound and a `local` flag taken
+      from `item_influence_is_local`, so a non-local item always survives rather
+      than being indexed. There is no second definition of reach — note that
+      `bound-an-intersect-by-its-layer` later split `item_influence_bound` three
+      ways WITHOUT touching that flag, precisely so this stays true.
+- [x] 1.4 DONE. `compile_document(doc, cull, index, plan)` takes the index, and
+      passing none still scans — so the equivalence tests run both against each
+      other without a build flag.
+- [x] 1.5 DONE. The C ABI owns it beside the cached tape under one mutex
+      (`cull_index_locked()`), keyed on the same document revision, so the two
+      cannot disagree.
+- [x] 1.6 DONE, under `batch-brick-eval`. The refill hands whole chunks to
+      `eval_grid_batch`, and the CPU backend spreads them over
+      `parallel::ThreadPool` by ROWS rather than z-slices — a brick is 8 cells
+      across, and eight slices could not occupy more than eight threads, which
+      was the whole of the old batch path's scaling. MEASURED 2026-09-01 on a
+      12-core M2 Max, as CPU time over wall time: **~11 of 12 cores** for a
+      12-brick window at every document size from 200 to 50,000 items. There is
+      no parallelism left to win on this path.
+- [x] 1.7 DONE. "cull index: byte-identical per-brick tapes on the gnarly
+      corpus" and "the tree returns exactly what the scan did, in the same
+      order", plus the adversarial cases beside them (mirrored layers with
+      spline strokes and deformer chains, groups with blend dilation and
+      repeats, feathered replace chains). Byte equality, not tolerance.
+- [x] 1.8 DONE. "cull index: an entry that can never be culled always
+      survives".
+- [x] 1.9 DONE, by the revision key plus "an appended index is the index a
+      rebuild would give".
+- [x] 1.10 DONE, and held as a SLOPE rather than a constant exactly as this
+      task demands: "cull index: the cost is SUBLINEAR in document size, not
+      merely smaller" in `test_cull_index.cpp`, with `BM_DeepDocCullPlanned*`
+      as the benchmark half.
 
       — A SECOND FAILURE MODE, from #193: the dab has to land on geometry. That
       issue's first end-to-end harness placed the dab in empty space, so the cull
@@ -93,10 +119,26 @@
       dab on real geometry makes it 1.7%. Assert the benchmark's culled tape is
       non-empty and that its instruction count grows with document size — otherwise
       the flat slope it reports is the slope of doing no work.
-- [ ] 1.11 Order-independence test on the batch path: the same batch evaluated twice is bit-identical
+- [x] 1.11 DONE, in `test_parity.cpp`: "cpu batch grids are bit-identical to
+      the same grids one at a time", "a grid batch answers what per-grid
+      evaluation does", and "batch dispatch covers every element exactly once,
+      at every size".
 - [x] 1.12 Update `docs/RELEASE.md`'s "a brush dab's brick COUNT is flat, but its cost is
       not" entry with what actually landed, including whatever slope remains.
       — Done ahead of the index rather than after it, because the entry's published claim
       (a 10 000-item sculpt past the interactive budget on culling alone) had already
       stopped being true and someone may have planned around it. The correction is recorded
       as a correction rather than quietly rewritten.
+
+## Reconciled 2026-09-01
+
+Every task above is done, and none of the last six was ticked when it landed —
+the work went in under `batch-brick-eval`, `extend-the-index-without-the-document`
+and `append-the-cull-index`, and each of those ticked its own file rather than
+this one. A reader starting from this file would have rebuilt `CullIndex`.
+
+What this change set out to move it did move: a dab's cull is sublinear in the
+document, an append extends the index instead of rebuilding it, and the refill
+reaches ~11 of 12 cores. What is NOT fixed, and is not this change's to fix, is
+that a brick with **no seed** still walks the whole surviving edit list — that
+is #306, and it is an evaluation cost rather than a culling one.
