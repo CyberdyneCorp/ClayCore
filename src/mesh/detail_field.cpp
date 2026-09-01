@@ -213,6 +213,22 @@ void DetailField::compact() {
     slot_block_ = std::move(new_slot_block);
 }
 
+bool DetailField::block_stored(std::uint32_t block) const {
+    if (dense_) return block < block_count();
+    return block < block_slot_.size() && block_slot_[block] != kNoBlock;
+}
+
+std::uint32_t DetailField::stored_block_count() const {
+    // A DENSE field stores every block, which is exactly what promotion means:
+    // the block table is gone because there is nothing left for it to say.
+    return dense_ ? block_count() : static_cast<std::uint32_t>(slot_block_.size());
+}
+
+std::uint32_t DetailField::stored_block_at(std::uint32_t index) const {
+    if (dense_) return index < block_count() ? index : kNoBlock;
+    return index < slot_block_.size() ? slot_block_[index] : kNoBlock;
+}
+
 std::size_t DetailField::bytes() const {
     return storage_.capacity() * sizeof(LocalDetail) +
            block_slot_.capacity() * sizeof(std::uint32_t) +

@@ -22,6 +22,7 @@
 #include "clay/brush/move.h"
 #include "clay/brush/preset.h"
 #include "clay/mesh/dynamic_sculpt.h"
+#include "clay/mesh/layered_sculpt.h"
 #include "clay/mesh/multires_sculpt.h"
 #include "clay/mesh/project.h"
 #include "clay/mesh/dynamic_validate.h"
@@ -248,6 +249,69 @@ field::FlattenMode parse_flatten_mode(const std::string& mode) {
     if (mode == "fill") return field::FlattenMode::FillOnly;
     throw std::invalid_argument("mode must be 'two_sided', 'cut' or 'fill', got '" + mode + "'");
 }
+
+// -- sculpt layer vocabulary (add-mesh-sculpt-layers) --------------------------
+//
+// Strings rather than enum classes, matching every other axis a pyclay caller
+// names — a verb, a falloff, a flatten mode. Each choice lands on a C
+// enumerator and tools/check_binding_parity.py checks that it does, so a fourth
+// smoothing mode invented here has to exist in clay.h too.
+
+mesh::MultiresWriteDomain parse_write_domain(const std::string& domain) {
+    if (domain == "automatic") return mesh::MultiresWriteDomain::Automatic;
+    if (domain == "geometry") return mesh::MultiresWriteDomain::Geometry;
+    if (domain == "detail") return mesh::MultiresWriteDomain::Detail;
+    throw std::invalid_argument("write domain must be 'automatic', 'geometry' or 'detail', got '" +
+                                domain + "'");
+}
+
+mesh::MultiresSmoothMode parse_smooth_mode(const std::string& mode) {
+    if (mode == "geometry") return mesh::MultiresSmoothMode::Geometry;
+    if (mode == "detail_only") return mesh::MultiresSmoothMode::DetailOnly;
+    if (mode == "preserve_detail") return mesh::MultiresSmoothMode::PreserveDetail;
+    throw std::invalid_argument(
+        "smooth mode must be 'geometry', 'detail_only' or 'preserve_detail', got '" + mode + "'");
+}
+
+mesh::DetailStampMode parse_detail_stamp_mode(const std::string& mode) {
+    if (mode == "weight") return mesh::DetailStampMode::Weight;
+    if (mode == "height") return mesh::DetailStampMode::Height;
+    if (mode == "vector") return mesh::DetailStampMode::Vector;
+    throw std::invalid_argument("stamp mode must be 'weight', 'height' or 'vector', got '" + mode +
+                                "'");
+}
+
+// Which of the three refusals a stack operation hit, worked out from the stack
+// rather than returned by it. The C++ API answers `false`, which is all a
+// caller with the stack in front of it needs; a script needs the sentence —
+// "no such layer", "this layer is locked" and "finish the stroke first" are
+// three different bugs and one `False` makes them indistinguishable. The C ABI
+// splits them the same way, through its `out_error`.
+std::invalid_argument sculpt_layer_error(const mesh::MultiresSurface& surface,
+                                         mesh::SculptLayerId id) {
+    const mesh::SculptLayerStack& stack = surface.sculpt_layers();
+    const mesh::SculptLayer* layer = stack.find(id);
+    if (!layer) return std::invalid_argument("no sculpt layer " + std::to_string(id));
+    if (stack.composition_held())
+        return std::invalid_argument(
+            "a stroke is open; finish or cancel it before changing the stack");
+    if (layer->locked)
+        return std::invalid_argument("sculpt layer " + std::to_string(id) + " is locked");
+    return std::invalid_argument("that sculpt layer operation names nothing to act on");
+}
+
+// `with surface.sculpt_layer_stroke() as stroke:` — the shape a Python caller
+// reaches for, and the ONLY one that cannot leave a surface holding its
+// composition when the stroke loop raises. A bare begin/commit pair looks fine
+// until the exception, at which point every slider on the model refuses and
+// nothing in the traceback says why.
+//
+// Holds the sculptor by shared_ptr so a copied handle drives the same gesture
+// rather than a second one over the same surface; the factory keeps the
+// surface alive for as long as the object.
+struct PySculptLayerStroke {
+    std::shared_ptr<mesh::LayeredMultiresSculptor> sculptor;
+};
 
 voxel::BrushFalloff parse_falloff(const std::string& falloff) {
     if (falloff == "constant") return voxel::BrushFalloff::Constant;
@@ -6945,8 +7009,17 @@ NB_MODULE(pyclay, m) {
                 out["base"] = mem.base;
                 out["topology"] = mem.topology;
                 out["detail"] = mem.detail;
+                // Reported APART from `detail`, though it is counted in
+                // `authoritative` with it: the two are the same quantity under
+                // different owners, and a host deciding what to merge, bake or
+                // delete needs to see which of them is costing it.
+                out["sculpt_layers"] = mem.sculpt_layers;
                 out["authoritative"] = mem.authoritative;
                 out["evaluated"] = mem.evaluated;
+                // Derived from the two above and droppable, which is why it is
+                // on the rebuildable side even though it is the array the
+                // evaluation actually reads.
+                out["composed"] = mem.composed;
                 out["runtime_index"] = mem.runtime_index;
                 out["rebuildable"] = mem.rebuildable;
                 out["total"] = mem.total;
@@ -7002,6 +7075,256 @@ NB_MODULE(pyclay, m) {
             "strength"_a = 1.0f,
             "Fit every level to a sculpt made somewhere else, coarse first —\n"
             "the supported route by which a hierarchy accepts a new cage.")
+        // -- the sculpt layer stack (add-mesh-sculpt-layers) ------------------
+        //
+        // A layer is addressed by its ID everywhere here, never by its index.
+        // Reordering changes every index at or below the layer it moves, so an
+        // index a script held across a `move_sculpt_layer` would name a
+        // different pass; an id survives a reorder, a save and a load.
+        .def_prop_ro("sculpt_layer_count",
+                     [](const mesh::MultiresSurface& s) { return s.sculpt_layers().size(); })
+        .def_prop_ro(
+            "sculpt_layer_ids",
+            [](const mesh::MultiresSurface& s) {
+                const mesh::SculptLayerStack& stack = s.sculpt_layers();
+                std::vector<mesh::SculptLayerId> out;
+                out.reserve(stack.size());
+                for (std::size_t i = 0; i < stack.size(); ++i) out.push_back(stack.id_at(i));
+                return out;
+            },
+            "Every layer's id, BOTTOM-FIRST — the order a host draws the list\n"
+            "in. Additive layers commute, so that order says everything about\n"
+            "organisation and nothing about geometry.")
+        .def(
+            "add_sculpt_layer",
+            [](mesh::MultiresSurface& s, const std::string& name) {
+                const mesh::SculptLayerId id = s.add_sculpt_layer(name);
+                if (id == mesh::kNoSculptLayer)
+                    throw std::invalid_argument(
+                        "a stroke is open; finish or cancel it before changing the stack");
+                return id;
+            },
+            "name"_a = "",
+            "A new empty layer on top, full strength, visible, made active.\n"
+            "Returns its id.")
+        .def(
+            "remove_sculpt_layer",
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id) {
+                if (!s.remove_sculpt_layer(id)) throw sculpt_layer_error(s, id);
+            },
+            "id"_a,
+            "Discard a layer. Re-evaluates its COVERAGE and nothing else: no\n"
+            "stroke is replayed, and no other layer's coefficients, strength or\n"
+            "relative order change.")
+        .def(
+            "move_sculpt_layer",
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id, std::size_t index) {
+                if (!s.move_sculpt_layer(id, index)) throw sculpt_layer_error(s, id);
+            },
+            "id"_a, "index"_a,
+            "Slide a layer through the stack. Organisation only — additive\n"
+            "layers commute, so this cannot move a vertex.")
+        .def(
+            "merge_sculpt_layer_down",
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id) {
+                if (!s.merge_sculpt_layer_down(id)) throw sculpt_layer_error(s, id);
+            },
+            "id"_a,
+            "Fold a layer into the one below it. Defined by VISUAL PARITY —\n"
+            "the evaluated surface before equals the evaluated surface after,\n"
+            "at any strength including zero — rather than by concatenating\n"
+            "coefficients, an arithmetic that divides by the lower layer's\n"
+            "strength and is undefined exactly where a slider can be.\n\n"
+            "What is lost is real: the merged layer's slider no longer scales\n"
+            "what the upper layer contributed on its own. That is what merging\n"
+            "MEANS, and it is why it undoes.")
+        .def(
+            "bake_sculpt_layer_to_base",
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id) {
+                if (!s.bake_sculpt_layer_to_base(id)) throw sculpt_layer_error(s, id);
+            },
+            "id"_a,
+            "The same parity statement with the BASE as the target: the level's\n"
+            "own detail, and the cage itself for a level-0 layer.")
+        .def(
+            "rename_sculpt_layer",
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id, const std::string& name) {
+                if (!s.rename_sculpt_layer(id, name)) throw sculpt_layer_error(s, id);
+            },
+            "id"_a, "name"_a,
+            "Metadata: invalidates nothing geometric, and recomposes no block.")
+        .def(
+            "set_sculpt_layer_strength",
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id, float strength) {
+                if (!s.set_sculpt_layer_strength(id, strength)) throw sculpt_layer_error(s, id);
+            },
+            "id"_a, "strength"_a,
+            "How much of what is stored reaches the surface. 1 contributes\n"
+            "fully, 0 contributes nothing, and NEITHER REPLAYS A STROKE.\n\n"
+            "Strength is composition, not a scale on the pen: a stroke made\n"
+            "into a layer at 0.5 recorded its full contribution and moved the\n"
+            "surface half as far, so raising this to 1 afterwards doubles what\n"
+            "is already on screen.")
+        .def(
+            "set_sculpt_layer_visible",
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id, bool visible) {
+                if (!s.set_sculpt_layer_visible(id, visible)) throw sculpt_layer_error(s, id);
+            },
+            "id"_a, "visible"_a,
+            "Invisible is exactly zero rather than nearly zero, so hiding a\n"
+            "layer removes its contribution bit for bit.")
+        .def(
+            "set_sculpt_layer_locked",
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id, bool locked) {
+                if (!s.set_sculpt_layer_locked(id, locked)) throw sculpt_layer_error(s, id);
+            },
+            "id"_a, "locked"_a,
+            "A lock refuses a COEFFICIENT WRITE and permits every property\n"
+            "change — the rule stated rather than discovered. Locking exists so\n"
+            "an artist can keep working over a finished pass; a lock that also\n"
+            "froze the name and the slider would make 'lock' mean 'hide'.")
+        .def_prop_rw(
+            "active_sculpt_layer",
+            [](const mesh::MultiresSurface& s) { return s.sculpt_layers().active(); },
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id) {
+                if (!s.set_active_sculpt_layer(id)) throw sculpt_layer_error(s, id);
+            },
+            "Which layer the next sculpt write lands in. 0 is the BASE detail,\n"
+            "which is what every stroke did before layers existed.")
+        .def(
+            "sculpt_layer_info",
+            [](const mesh::MultiresSurface& s, mesh::SculptLayerId id) {
+                const mesh::SculptLayerStack& stack = s.sculpt_layers();
+                const mesh::SculptLayer* layer = stack.find(id);
+                if (!layer) throw sculpt_layer_error(s, id);
+                nb::dict out;
+                out["id"] = layer->id;
+                out["index"] = stack.index_of(id);
+                out["name"] = layer->name;
+                out["kind"] =
+                    layer->kind == mesh::SculptLayerKind::Sampled ? "sampled" : "procedural";
+                out["strength"] = layer->strength;
+                out["visible"] = layer->visible;
+                out["locked"] = layer->locked;
+                out["bytes"] = layer->bytes();
+                out["coverage_vertices"] = layer->coverage_vertices();
+                return out;
+            },
+            "id"_a,
+            "One layer's row: its name, kind, sliders, and what it costs. A\n"
+            "layer costs its COVERAGE and not the model, which is what makes a\n"
+            "hundred passes over one cheek affordable.")
+        .def(
+            "sculpt_layer_name",
+            [](const mesh::MultiresSurface& s, mesh::SculptLayerId id) {
+                const mesh::SculptLayer* layer = s.sculpt_layers().find(id);
+                if (!layer) throw sculpt_layer_error(s, id);
+                return layer->name;
+            },
+            "id"_a)
+        .def(
+            "set_sculpt_layer_detail",
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id, std::uint32_t level,
+               std::uint32_t vertex, float tangent, float bitangent, float normal) {
+                if (!s.set_sculpt_layer_detail(id, level, vertex,
+                                               mesh::LocalDetail{tangent, bitangent, normal}))
+                    throw sculpt_layer_error(s, id);
+            },
+            "id"_a, "level"_a, "vertex"_a, "tangent"_a, "bitangent"_a, "normal"_a,
+            "One vertex's coefficients on a layer, in the vertex's transported\n"
+            "frame — the same three the base detail stores, because they are\n"
+            "the same quantity under a different owner.")
+        .def(
+            "sculpt_layer_detail",
+            [](const mesh::MultiresSurface& s, mesh::SculptLayerId id, std::uint32_t level,
+               std::uint32_t vertex) {
+                if (!s.sculpt_layers().find(id)) throw sculpt_layer_error(s, id);
+                const mesh::LocalDetail d = s.sculpt_layer_detail(id, level, vertex);
+                return nb::make_tuple(d.tangent, d.bitangent, d.normal);
+            },
+            "id"_a, "level"_a, "vertex"_a)
+        .def(
+            "set_sculpt_layer_mask",
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id, std::uint32_t level,
+               std::uint32_t vertex, float weight) {
+                if (!s.set_sculpt_layer_mask(id, level, vertex, weight))
+                    throw sculpt_layer_error(s, id);
+            },
+            "id"_a, "level"_a, "vertex"_a, "weight"_a,
+            "The per-layer MASK, a different question from the brush gate: the\n"
+            "gate says where a brush writes and is gone when the pointer comes\n"
+            "up, this says where a STORED LAYER CONTRIBUTES and is serialized\n"
+            "with it. Its identity is 1, so writing exactly 1 releases the\n"
+            "storage again and an untouched mask hides nothing.")
+        .def(
+            "sculpt_layer_mask",
+            [](const mesh::MultiresSurface& s, mesh::SculptLayerId id, std::uint32_t level,
+               std::uint32_t vertex) {
+                if (!s.sculpt_layers().find(id)) throw sculpt_layer_error(s, id);
+                const mesh::SparseWeightField* mask = s.sculpt_layers().mask_at(id, level);
+                return mask ? mask->get(vertex) : 1.0f;
+            },
+            "id"_a, "level"_a, "vertex"_a)
+        .def_prop_ro("sculpt_layer_checksum", &mesh::MultiresSurface::sculpt_layer_checksum,
+                     "Every layer's coefficients and mask, and nothing derived\n"
+                     "from them. Apart from `detail_checksum`, which still hashes\n"
+                     "the BASE detail only — so a test can ask 'did the form\n"
+                     "change' and 'did a pass change' separately.")
+        .def_prop_ro("sculpt_layer_metadata_revision",
+                     &mesh::MultiresSurface::sculpt_layer_metadata_revision,
+                     "A rename or a change of active layer. Invalidates nothing.")
+        .def_prop_ro("sculpt_layer_composition_revision",
+                     &mesh::MultiresSurface::sculpt_layer_composition_revision,
+                     "Strength, visibility, mask, order, add, remove.")
+        .def_prop_ro("sculpt_layer_content_revision",
+                     &mesh::MultiresSurface::sculpt_layer_content_revision,
+                     "Coefficients written.")
+        .def(
+            "sculpt_layer_stats",
+            [](const mesh::MultiresSurface& s) {
+                const mesh::SculptLayerStats st = s.sculpt_layer_stats();
+                nb::dict out;
+                out["blocks_recomposed"] = st.blocks_recomposed;
+                out["layer_blocks_visited"] = st.layer_blocks_visited;
+                out["compositions"] = st.compositions;
+                return out;
+            },
+            "What composition actually did, so the two scale claims are\n"
+            "MEASUREMENTS rather than assertions — there is no other way to see\n"
+            "either from outside, because a correct implementation and a\n"
+            "quadratic one produce the same surface.")
+        .def("reset_sculpt_layer_stats", &mesh::MultiresSurface::reset_sculpt_layer_stats)
+        .def("compact_sculpt_layers", &mesh::MultiresSurface::compact_sculpt_layers,
+             "Release every all-zero coefficient block and every all-identity\n"
+             "mask block — the storage a stroke that undid itself left behind.\n"
+             "NEVER CALL THIS INSIDE A POINTER EVENT: it walks every layer's\n"
+             "stored blocks, which is proportional to the stack, not the dab.")
+        .def(
+            "hold_sculpt_layer_composition",
+            [](mesh::MultiresSurface& s, bool held) { s.hold_sculpt_layer_composition(held); },
+            "held"_a,
+            "Hold the composition for a gesture driven stamp by stamp. The\n"
+            "stroke transaction below takes and releases this for you, which is\n"
+            "why it is the form to reach for.")
+        .def(
+            "sculpt_layer_stroke",
+            [](nb::object self, const std::string& write_domain) {
+                mesh::MultiresSurface& s = nb::cast<mesh::MultiresSurface&>(self);
+                PySculptLayerStroke stroke;
+                stroke.sculptor = std::make_shared<mesh::LayeredMultiresSculptor>(s);
+                stroke.sculptor->set_write_domain(parse_write_domain(write_domain));
+                return stroke;
+            },
+            "write_domain"_a = "automatic", nb::keep_alive<0, 1>(),
+            "A layered gesture as a CONTEXT MANAGER:\n\n"
+            "    with surface.sculpt_layer_stroke() as stroke:\n"
+            "        for p in path:\n"
+            "            stroke.stamp('draw', center=p, radius=0.2)\n\n"
+            "Entering begins the gesture, a clean exit commits it and an\n"
+            "exception cancels it — which is the whole reason this is the form\n"
+            "to reach for. A stroke loop that raises halfway would otherwise\n"
+            "leave the surface holding its composition, with every slider\n"
+            "refusing and no way for the script to know why.")
         .def("serialize",
              [](const mesh::MultiresSurface& s) {
                  const std::vector<std::uint8_t> bytes = s.encode();
@@ -7098,6 +7421,259 @@ NB_MODULE(pyclay, m) {
                          return std::vector<std::uint32_t>(v.begin(), v.end());
                      },
                      "The level vertices the last stamp actually moved.");
+
+    nb::class_<PySculptLayerStroke>(
+        m, "SculptLayerStroke",
+        "A layered gesture, which surface.sculpt_layer_stroke() returns.\n\n"
+        "WHY A TRANSACTION AND NOT A LOOP OF STAMPS. Three reasons, and none of\n"
+        "them exists until a layer stack does:\n\n"
+        "  1. A stroke has to enter ONE channel, fixed at pointer-down rather\n"
+        "     than read again per dab — otherwise changing the active layer\n"
+        "     mid-stroke splits one gesture across two channels.\n"
+        "  2. A stamp READS the evaluated surface, which includes every visible\n"
+        "     layer, so the composition is HELD for the length of the stroke and\n"
+        "     the sliders refuse while it is open.\n"
+        "  3. Cancel has to be exact. A layered write is `L += dE`, so the only\n"
+        "     exact restore is the recorded `before` values — which means the\n"
+        "     record exists from the first stamp rather than being reconstructed\n"
+        "     at the end.\n\n"
+        "Under symmetry every mirrored stamp is another stamp in the same\n"
+        "transaction, so a mirrored stroke is one layer, one record, and the\n"
+        "union of the two sides' coverage.")
+        .def("__enter__",
+             [](PySculptLayerStroke& s) {
+                 if (!s.sculptor->begin())
+                     throw std::invalid_argument(
+                         "cannot begin a layered stroke: one is already open, the target layer "
+                         "is locked, or write_domain='detail' was asked for with no active "
+                         "layer");
+                 return s;
+             })
+        .def("__exit__",
+             // Variadic: the three arguments are None on a clean exit, and a
+             // typed signature would refuse them.
+             [](PySculptLayerStroke& s, nb::args args) {
+                 // A RAISING BLOCK CANCELS. This is the whole reason the context
+                 // manager exists rather than being sugar: a half-finished
+                 // gesture committed on the way out of an exception is an undo
+                 // step for work the artist never asked for, and a gesture left
+                 // open holds the composition forever.
+                 const bool raised = args.size() > 0 && !args[0].is_none();
+                 if (raised)
+                     s.sculptor->cancel();
+                 else
+                     s.sculptor->commit();
+                 return false;  // never swallow the exception
+             })
+        .def_prop_ro("target_layer", [](const PySculptLayerStroke& s) {
+                         return s.sculptor->target_layer();
+                     },
+                     "The channel this stroke is writing; 0 means the base.")
+        .def_prop_ro("stamps",
+                     [](const PySculptLayerStroke& s) { return s.sculptor->stamps(); })
+        .def_prop_ro("record_size",
+                     [](const PySculptLayerStroke& s) { return s.sculptor->record_size(); },
+                     "How many entries the undo record holds. A hundred stamps\n"
+                     "over one vertex is ONE entry — the record follows the\n"
+                     "vertices the stroke reached, not the stamps it took — and\n"
+                     "comparing this with `stamps` is how you see that.")
+        .def(
+            "stamp",
+            [](PySculptLayerStroke& s, const std::string& verb, nb::handle center, float radius,
+               float strength, const std::string& falloff, nb::handle direction, nb::handle mask,
+               bool geodesic, int smooth_iterations, nb::handle alpha,
+               nb::handle alpha_direction, nb::handle alpha_tangent, float alpha_extent) {
+                mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
+                mesh::MeshBrushSettings settings = mesh_brush_settings(
+                    verb, center, radius, strength, falloff, direction, nb::none(),
+                    nb::cast(geodesic), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
+                    smooth_iterations, 0.0f, alpha, alpha_direction, alpha_tangent, alpha_extent,
+                    nb::none(), &chosen);
+                field::MaskGate gate = mask_gate_of(mask);
+                nb::gil_scoped_release release;
+                return s.sculptor->stamp(chosen, settings, gate);
+            },
+            "verb"_a, "center"_a, "radius"_a, "strength"_a = 0.5f, "falloff"_a = "smooth",
+            "direction"_a = nb::none(), "mask"_a = nb::none(), "geodesic"_a = true,
+            "smooth_iterations"_a = 1, "alpha"_a = nb::none(),
+            "alpha_direction"_a = nb::none(), "alpha_tangent"_a = nb::none(),
+            "alpha_extent"_a = 0.0f,
+            "One stamp at the surface's sculpt level, into this stroke's\n"
+            "channel: the same sixteen verbs, the same falloffs, the same mask\n"
+            "and the same automasking, because it is the same code.")
+        .def(
+            "stamp_detail",
+            [](PySculptLayerStroke& s, nb::handle image, const std::string& mode,
+               nb::handle center, float radius, float extent, float amplitude, float bias,
+               float strength, const std::string& falloff, nb::handle direction,
+               nb::handle tangent, nb::handle mask) {
+                mesh::DetailStampSettings stamp;
+                stamp.mode = parse_detail_stamp_mode(mode);
+                if (stamp.mode == mesh::DetailStampMode::Weight)
+                    throw std::invalid_argument(
+                        "a scalar alpha is the `alpha` argument of stamp(); routing it through "
+                        "a second entry point would be two ways to say one thing");
+                // PLANAR, and borrowed for the call. A (3, H, W) array IS three
+                // consecutive H*W planes, which is exactly the buffer the alpha
+                // sampler already reads — an interleaved (H, W, 3) one would
+                // need a second lookup with its own stride rules, which is the
+                // drift this avoids.
+                nb::module_ np = nb::module_::import_("numpy");
+                nb::object arr = np.attr("ascontiguousarray")(image, "dtype"_a = "float32");
+                nb::ndarray<const float, nb::c_contig, nb::device::cpu> view;
+                try {
+                    view = nb::cast<decltype(view)>(arr);
+                } catch (const std::exception&) {
+                    throw std::invalid_argument("image must be a float array");
+                }
+                if (stamp.mode == mesh::DetailStampMode::Vector) {
+                    if (view.ndim() != 3 || view.shape(0) != 3)
+                        throw std::invalid_argument(
+                            "a vector displacement map is (3, height, width) — three PLANES of "
+                            "tangent, bitangent and normal, not interleaved triples");
+                    stamp.height = static_cast<int>(view.shape(1));
+                    stamp.width = static_cast<int>(view.shape(2));
+                } else {
+                    if (view.ndim() != 2)
+                        throw std::invalid_argument("a height map is (height, width)");
+                    stamp.height = static_cast<int>(view.shape(0));
+                    stamp.width = static_cast<int>(view.shape(1));
+                }
+                if (stamp.width < 2 || stamp.height < 2)
+                    throw std::invalid_argument(
+                        "a stamp needs at least 2x2 samples; there is nothing to interpolate "
+                        "below that");
+                stamp.image = view.data();
+                stamp.amplitude = amplitude;
+                stamp.bias = bias;
+                stamp.extent = extent > 0.0f ? extent : radius * 2.0f;
+                if (!center.is_none()) stamp.center = to_f3(center, "center");
+                if (!direction.is_none()) stamp.direction = to_f3(direction, "direction");
+                if (!tangent.is_none()) stamp.tangent = to_f3(tangent, "tangent");
+
+                mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
+                mesh::MeshBrushSettings settings = mesh_brush_settings(
+                    "draw", center, radius, strength, falloff, direction, nb::none(),
+                    nb::cast(true), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
+                    0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), &chosen);
+                field::MaskGate gate = mask_gate_of(mask);
+                nb::gil_scoped_release release;
+                return s.sculptor->stamp_detail(stamp, settings, gate);
+            },
+            "image"_a, "mode"_a = "height", "center"_a = nb::none(), "radius"_a = 1.0f,
+            "extent"_a = 0.0f, "amplitude"_a = 1.0f, "bias"_a = 0.0f, "strength"_a = 1.0f,
+            "falloff"_a = "smooth", "direction"_a = nb::none(), "tangent"_a = nb::none(),
+            "mask"_a = nb::none(),
+            "A HEIGHT MAP or a TANGENT-SPACE VECTOR DISPLACEMENT, deposited\n"
+            "through the brush's own weight — so the falloff, the mask, the\n"
+            "automasking and the alpha compose with it exactly as they do with\n"
+            "a verb.\n\n"
+            "A vector map's three components are read IN THE VERTEX'S FRAME and\n"
+            "never in world space: a world-space stamp is orientation-dependent,\n"
+            "so the same map on the left and right of a face makes two different\n"
+            "shapes and across a curve it shears.\n\n"
+            "`last_stamp_report` afterwards says whether the level could carry\n"
+            "what the map holds, reported rather than silently blurred.")
+        .def_prop_ro(
+            "last_stamp_report",
+            [](const PySculptLayerStroke& s) {
+                const mesh::DetailStampReport& r = s.sculptor->last_stamp_report();
+                nb::dict out;
+                out["sample_size"] = r.sample_size;
+                out["vertex_spacing"] = r.vertex_spacing;
+                out["oversampling"] = r.oversampling;
+                out["under_resolved"] = r.under_resolved;
+                return out;
+            },
+            "Whether the level can carry what the last detail stamp held. A\n"
+            "2048-sample map across a 5 mm square carries features finer than a\n"
+            "level whose mean edge is 1 mm can represent, and applying it anyway\n"
+            "looks like the map through a blur — which reads as a bug in the\n"
+            "map, or the brush, or the file, and is none of those.")
+        .def(
+            "smooth",
+            [](PySculptLayerStroke& s, const std::string& mode, nb::handle center, float radius,
+               float strength, const std::string& falloff, int smooth_iterations,
+               nb::handle mask) {
+                mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
+                mesh::MeshBrushSettings settings = mesh_brush_settings(
+                    "smooth", center, radius, strength, falloff, nb::none(), nb::none(),
+                    nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
+                    smooth_iterations, 0.0f, nb::none(), nb::none(), nb::none(), 0.0f,
+                    nb::none(), &chosen);
+                const mesh::MultiresSmoothMode chosen_mode = parse_smooth_mode(mode);
+                field::MaskGate gate = mask_gate_of(mask);
+                nb::gil_scoped_release release;
+                return s.sculptor->smooth(chosen_mode, settings, gate);
+            },
+            "mode"_a, "center"_a, "radius"_a, "strength"_a = 0.5f, "falloff"_a = "smooth",
+            "smooth_iterations"_a = 1, "mask"_a = nb::none(),
+            "WHICH FREQUENCY to smooth, as three operations rather than one\n"
+            "filter with a cutoff — the split is representational, because the\n"
+            "hierarchy already stores the form and the detail apart:\n\n"
+            "  'geometry'        positions, exactly the Smooth brush.\n"
+            "  'detail_only'     coefficients in this channel; the form under\n"
+            "                    them does not move and no other layer is read.\n"
+            "  'preserve_detail' the FORM, with the detail re-applied unchanged.\n"
+            "                    The mode an artist correcting anatomy under\n"
+            "                    pores is asking for, and the one that is\n"
+            "                    impossible on a flat mesh.\n\n"
+            "A plain Laplacian over pores removes the pores, which is rarely\n"
+            "what was asked.")
+        .def(
+            "erase",
+            [](PySculptLayerStroke& s, nb::handle center, float radius, float strength,
+               const std::string& falloff, nb::handle mask) {
+                mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
+                mesh::MeshBrushSettings settings = mesh_brush_settings(
+                    "draw", center, radius, strength, falloff, nb::none(), nb::none(),
+                    nb::cast(true), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
+                    0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), &chosen);
+                field::MaskGate gate = mask_gate_of(mask);
+                nb::gil_scoped_release release;
+                return s.sculptor->erase(settings, gate);
+            },
+            "center"_a, "radius"_a, "strength"_a = 0.5f, "falloff"_a = "smooth",
+            "mask"_a = nb::none(),
+            "This channel toward zero. Touches neither the base nor any other\n"
+            "layer, which is what makes it an eraser for THIS pass rather than\n"
+            "a flattening brush.")
+        .def(
+            "restore",
+            [](PySculptLayerStroke& s, nb::handle center, float radius, float strength,
+               const std::string& falloff, nb::handle mask) {
+                mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
+                mesh::MeshBrushSettings settings = mesh_brush_settings(
+                    "draw", center, radius, strength, falloff, nb::none(), nb::none(),
+                    nb::cast(true), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
+                    0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), &chosen);
+                field::MaskGate gate = mask_gate_of(mask);
+                nb::gil_scoped_release release;
+                return s.sculptor->restore(settings, gate);
+            },
+            "center"_a, "radius"_a, "strength"_a = 0.5f, "falloff"_a = "smooth",
+            "mask"_a = nb::none(),
+            "The LEVEL'S OWN detail toward zero: the form back toward the pure\n"
+            "subdivision, with every layer left alone.\n\n"
+            "Neither this nor `erase` is undo, and it is worth stating because\n"
+            "the temptation is to wire one to the other: undo walks a step list\n"
+            "backwards and restores what a gesture changed, wherever it was;\n"
+            "these move the surface toward a named target under the cursor, and\n"
+            "are themselves gestures that undo.")
+        .def(
+            "commit",
+            [](PySculptLayerStroke& s) {
+                const std::size_t entries = s.sculptor->record_size();
+                if (!s.sculptor->commit()) throw std::invalid_argument("no stroke is open");
+                return entries;
+            },
+            "Close the gesture and return how many entries its record held.\n"
+            "A gesture that changed nothing produces an EMPTY record rather than\n"
+            "a step: pointer-down and pointer-up with nothing between must not\n"
+            "add an undo that does nothing.")
+        .def("cancel", [](PySculptLayerStroke& s) { s.sculptor->cancel(); },
+             "Discard. Restores this channel EXACTLY — the recorded `before`\n"
+             "values, not a recomputation.");
 
     // -- the brush model, and brushes as data ---------------------------------
     nb::class_<mesh::AutomaskSettings>(

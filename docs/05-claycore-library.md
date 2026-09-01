@@ -569,12 +569,20 @@ The obvious guesses are wrong, so they are worth naming:
 
 What genuinely is not:
 
-- **Sculpt-layer property changes** — strength, visibility, order, merge-down.
-  Their effect on cells replays, but the property value does not, so an undo
-  would restore the pixels and not the setting. A partial undo is worse than
-  none, so they are not steps yet.
+- **VOXEL sculpt-layer property changes** — strength, visibility, order,
+  merge-down. Their effect on cells replays, but the property value does not, so
+  an undo would restore the pixels and not the setting. A partial undo is worse
+  than none, so they are not steps yet. Since 0.76.0 the **mesh** stack over a
+  multiresolution hierarchy does record them — rename, strength, visibility,
+  reorder, lock, add, remove, merge and bake are all `MultiresLayerProperty`
+  steps — because an additive displacement can restore its own coefficients
+  exactly and a dialled-back pass is a thing an artist means to undo. That is
+  the shape the voxel side would have to reach, not an inconsistency to
+  preserve.
 - **Operations that destroy history itself** — dropping a resolution level,
-  removing a sculpt layer.
+  removing a VOXEL sculpt layer. Removing a *mesh* sculpt layer is a step: the
+  property record carries a whole-stack snapshot on each side, so it comes back
+  with its id, its name and its coefficients.
 - **Creating a mask.** Mask *edits* record; the mask's existence does not. It is
   the same shape of gap that layer creation had until #341 closed it.
 - Anything a **host** does that the engine never sees.
@@ -1033,6 +1041,33 @@ allowed to touch.
 `clay_layer_memory` gives the same breakdown for one layer, so a large document
 can be attributed to the abandoned blockout that is 200 MB of it rather than
 merely called large.
+
+**A `MultiresSurface` is not in this report, and that is a consequence of what
+it is rather than an omission.** It is a standalone handle like `DynamicSurface`
+— no `scene::Layer` owns one — so the document cannot walk to it. Its accounting
+is per surface, through `clay_multires_memory`, and it makes the same
+authoritative/rebuildable split this table does:
+
+| | may you release it? | what it costs you |
+|---|---|---|
+| `base`, `topology`, `detail` | **no** | it is the user's work |
+| `sculpt_layers` | **no** | it is the user's work — every layer's coefficients and masks |
+| `evaluated`, `composed`, `runtime_index` | **yes** | a rebuild, and nothing else |
+
+`sculpt_layers` is reported apart from `detail` even though the two hold the
+same quantity in the same field type, because they hold it under different
+owners: a host deciding what to merge, bake or delete needs to see which of the
+two is costing it, and a combined figure would hide the only number an artist
+can act on. `composed` is the materialized `B + SUM(s*m*L)` — derived from the
+two rows above it and droppable, even though it is the array evaluation reads.
+
+There is deliberately **no cap on a layer stack**, unlike the history's budget.
+A cap that silently stopped recording would leave the pass on the surface and
+un-dialable, which is a correctness bug wearing a memory limit's clothes. The
+levers are `compact_sculpt_layers()` — the cheapest, and the one to reach for
+first, because it releases every all-zero block a gesture that undid itself left
+behind — then merge, bake and delete. See
+[07 §8b](07-brushes-and-features.md#memory-is-reported-and-never-capped).
 
 **Instance layers are counted once**, document-wide, and in full per layer — ten
 instances of one blockout are one allocation, and saying otherwise would invite
