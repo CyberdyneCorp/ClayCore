@@ -3,7 +3,10 @@
 #include <Foundation/Foundation.hpp>
 #include <Metal/Metal.hpp>
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -79,6 +82,55 @@ scene::Document scene_doc() {
     l.sdf->insert(item(scene::Prim::box(kernel::cf3(0.3f, 0.25f, 0.2f)),
                        kernel::cf3(0.3f, 0.1f, 0.0f)));
     return doc;
+}
+
+float rel_err(float a, float b) {
+    const float scale = std::max(std::max(std::fabs(a), std::fabs(b)), 1.0f);
+    return std::fabs(a - b) / scale;
+}
+
+// A dab, kept so the oracle document can be rebuilt item for item.
+struct Dab {
+    float radius;
+    float pos[3];
+};
+
+clay_document* build(const std::vector<Dab>& dabs, clay_layer_id* out_layer) {
+    clay_document* doc = clay_document_create();
+    REQUIRE(doc != nullptr);
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "body", &layer) == CLAY_OK);
+    for (const Dab& d : dabs) {
+        clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &d.radius, 1);
+        REQUIRE(it != nullptr);
+        REQUIRE(clay_item_set_position(it, d.pos) == CLAY_OK);
+        REQUIRE(clay_layer_add_item(doc, layer, it, nullptr) == CLAY_OK);
+        clay_item_destroy(it);
+    }
+    if (out_layer) *out_layer = layer;
+    return doc;
+}
+
+// A window of bricks over the sphere's equator, where every brick either
+// straddles the surface or lies inside it. A window that runs off the shape
+// holds bricks whose culled prefix produced nothing at all, which are
+// correctly walked in full for ever — a legitimate refusal that would sit in
+// the counter below pretending to be the defect it is gating.
+std::vector<clay_brick_request> equator_window(int n) {
+    std::vector<clay_brick_request> reqs(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        std::memset(&reqs[static_cast<std::size_t>(i)], 0, sizeof(clay_brick_request));
+        clay_brick_request& r = reqs[static_cast<std::size_t>(i)];
+        r.key[0] = i - 1;
+        r.key[1] = 0;
+        r.key[2] = 0;
+        for (int a = 0; a < 3; ++a)
+            r.origin[a] = static_cast<float>(r.key[a]) * 8 * 0.05f;
+        r.spacing = 0.05f;
+        r.dims[0] = r.dims[1] = r.dims[2] = 8;
+        r.band = 0.15f;
+    }
+    return reqs;
 }
 
 }  // namespace
@@ -277,4 +329,203 @@ TEST_CASE("metal interop: the C ABI device refill agrees with the host-memory re
     clay_brick_cache_destroy(cache);
     clay_document_destroy(doc);
     clay_device_release(cdev);
+}
+
+// Issue #350. The resumed device refill landed on Vulkan (#345) and fell back to
+// the full walk on Metal, because `caps().device_copy` was false there: the two
+// transfers the resume needs — a host-computed brick INTO the caller's slot,
+// and a fully walked brick back OUT so it seeds the next dab — had no Metal
+// implementation. Everything else about the resume is in the C ABI and is
+// backend agnostic, so this case is the Vulkan one written for the platform the
+// zero-copy path exists for.
+//
+// Written the same way deliberately: the two paths are value-identical by
+// contract, so nothing about the VALUES can witness that the fast route fired.
+// clay_document_resume_stats is the witness, and without it these checks pass
+// just as happily on the fallback they did before this change.
+TEST_CASE("metal interop: a stroke resumes into the caller's buffer and matches a full walk") {
+    HostDevice host;
+    if (!host.ok) {
+        MESSAGE("no Metal device; skipping");
+        return;
+    }
+    clay_device_desc desc;
+    std::memset(&desc, 0, sizeof desc);
+    desc.struct_size = sizeof desc;
+    desc.api = CLAY_DEVICE_API_METAL;
+    desc.handles[0] = host.device;
+    desc.handles[1] = host.queue;
+    clay_device* dev = clay_device_adopt(&desc);
+    REQUIRE(dev != nullptr);
+
+    // A sculpt with enough history that a full walk and a suffix are visibly
+    // different amounts of work, then a stroke of dabs on top of it.
+    std::vector<Dab> dabs;
+    dabs.push_back(Dab{1.0f, {0.0f, 0.0f, 0.0f}});
+    for (int i = 0; i < 200; ++i) {
+        const float t = static_cast<float>(i) * 0.031f;
+        dabs.push_back(Dab{0.08f, {std::cos(t), std::sin(t) * 0.4f, std::sin(t * 1.7f) * 0.4f}});
+    }
+
+    clay_layer_id layer = 0;
+    clay_document* doc = build(dabs, &layer);
+    const std::vector<clay_brick_request> reqs = equator_window(6);
+    const std::size_t count = reqs.size();
+    const std::size_t per = 8 * 8 * 8;
+    const std::size_t total = count * per;
+
+    MTL::Buffer* values = host.alloc(total * sizeof(float));
+    MTL::Buffer* colors = host.alloc(total * 3 * sizeof(float));
+    REQUIRE(values != nullptr);
+    REQUIRE(colors != nullptr);
+    clay_device_buffer dst;
+    std::memset(&dst, 0, sizeof dst);
+    dst.struct_size = sizeof dst;
+    dst.handle = values;
+    dst.size = total * sizeof(float);
+    clay_device_buffer dst_colors = dst;
+    dst_colors.handle = colors;
+    dst_colors.size = total * 3 * sizeof(float);
+
+    // Primed in the MIDDLE, and through the host-memory entry point, so the
+    // first device call has to hold three cases apart at once: a run of
+    // resumable bricks that does NOT start at brick 0, and un-resumable bricks
+    // on both sides of it. Every destination here is a fixed slot, so a run
+    // that lands at the run's own offset and a run that lands at the buffer's
+    // start differ only when the run does not start at 0 — which is the shape a
+    // moving dirty window is in every dab but the first. The seed store is the
+    // DOCUMENT's, not either entry point's, so priming through the host path is
+    // also the check that one refill's seeds serve the other's.
+    std::vector<float> prime(4 * per), prime_rgb(4 * per * 3);
+    REQUIRE(clay_brick_cache_eval_requests(doc, "cpu", reqs.data() + 1, 4, prime.data(),
+                                           prime.size(), prime_rgb.data(),
+                                           prime_rgb.size()) == CLAY_OK);
+
+    std::vector<float> oracle(total), oracle_rgb(total * 3);
+    float worst = 0.0f, worst_rgb = 0.0f;
+    for (int step = 0; step < 6; ++step) {
+        // One dab, appended — which is the case a suffix exists for.
+        const float t = static_cast<float>(step) * 0.05f;
+        dabs.push_back(Dab{0.07f, {0.95f, t, -0.1f}});
+        clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &dabs.back().radius, 1);
+        REQUIRE(it != nullptr);
+        REQUIRE(clay_item_set_position(it, dabs.back().pos) == CLAY_OK);
+        REQUIRE(clay_layer_add_item(doc, layer, it, nullptr) == CLAY_OK);
+        clay_item_destroy(it);
+
+        REQUIRE(clay_brick_cache_eval_requests_device(doc, dev, reqs.data(), count, &dst,
+                                                      &dst_colors) == CLAY_OK);
+
+        // The oracle: the same items in a document that has never been
+        // refilled, so its CPU refill walks the whole edit list.
+        clay_document* fresh = build(dabs, nullptr);
+        REQUIRE(clay_brick_cache_eval_requests(fresh, "cpu", reqs.data(), count, oracle.data(),
+                                               total, oracle_rgb.data(), total * 3) == CLAY_OK);
+        clay_document_destroy(fresh);
+
+        const float* got = static_cast<const float*>(values->contents());
+        const float* got_rgb = static_cast<const float*>(colors->contents());
+        for (std::size_t i = 0; i < total; ++i) worst = std::max(worst, rel_err(got[i], oracle[i]));
+        for (std::size_t i = 0; i < total * 3; ++i)
+            worst_rgb = std::max(worst_rgb, rel_err(got_rgb[i], oracle_rgb[i]));
+    }
+    // The parity suite's standard for a GPU backend against the CPU scalar
+    // reference (test_parity.cpp): 1e-4 relative. Not bit-identity, because the
+    // half of each answer that was NOT resumed came off the GPU and the oracle
+    // is the CPU; identity is the wrong bar for that pair, and it is the bar the
+    // device path already had to meet before it resumed anything.
+    CHECK(worst <= 1e-4f);
+    CHECK(worst_rgb <= 1e-4f);
+
+    // And it fired. Before this change `caps().device_copy` was false on Metal
+    // and this counter stayed at zero while every check above still passed.
+    clay_resume_stats rs;
+    std::memset(&rs, 0, sizeof rs);
+    rs.struct_size = sizeof rs;
+    REQUIRE(clay_document_resume_stats(doc, &rs) == CLAY_OK);
+    CHECK(rs.resumed_bricks > 0);
+    // The bricks outside the primed middle were walked in full on the first
+    // device call, which is what left them a seed — and a seed can only have
+    // been left by read_device_buffer, the other half of this change.
+    CHECK(rs.refilled_bricks >= 2);
+    // and carried the stroke rather than firing once. Not "every brick after
+    // the first call": the cull pad GROWS as a stroke reaches outward, and a
+    // seed taken under a smaller one is correctly refused and refilled, which is
+    // a legitimate refusal the host path makes too.
+    CHECK(rs.resumed_bricks > rs.refilled_bricks);
+    CHECK(rs.entries >= count);
+
+    values->release();
+    colors->release();
+    clay_document_destroy(doc);
+    clay_device_release(dev);
+}
+
+// The capability itself, and its one restriction: device_copy names a buffer
+// the CALLER lent us, so a backend that made its own device must not claim it —
+// an MTLBuffer belongs to the device that allocated it, and the registered
+// "metal" backend's device is not the caller's.
+TEST_CASE("metal interop: only an adopted backend serves a device copy") {
+    HostDevice host;
+    if (!host.ok) {
+        MESSAGE("no Metal device; skipping");
+        return;
+    }
+    std::unique_ptr<eval::Backend> adopted = eval::make_backend("metal", host.handles());
+    REQUIRE(adopted != nullptr);
+    CHECK(adopted->caps().device_copy);
+
+    eval::Backend* registered = eval::Registry::instance().find("metal");
+    REQUIRE(registered != nullptr);
+    CHECK(registered->caps().device_copy == false);
+
+    // A round trip through the caller's own buffer, at a non-zero offset, so
+    // the slice arithmetic is exercised rather than only the whole-buffer case
+    // — a refill writes every run at the run's own offset.
+    constexpr std::size_t kFloats = 512;      // one 8^3 brick
+    constexpr std::size_t kSkip = 64;         // the run does not start at 0
+    MTL::Buffer* buf = host.alloc((kFloats + kSkip) * sizeof(float));
+    REQUIRE(buf != nullptr);
+    std::memset(buf->contents(), 0, (kFloats + kSkip) * sizeof(float));
+
+    std::vector<float> sent(kFloats);
+    for (std::size_t i = 0; i < kFloats; ++i) sent[i] = static_cast<float>(i) * 0.25f - 3.0f;
+
+    eval::DeviceBuffer slice;
+    slice.handle = buf;
+    slice.offset = kSkip * sizeof(float);
+    slice.size = kFloats * sizeof(float);
+    REQUIRE(adopted->write_device_buffer(slice, sent.data(), kFloats * sizeof(float)) ==
+            eval::Status::Ok);
+
+    std::vector<float> got(kFloats, 0.0f);
+    REQUIRE(adopted->read_device_buffer(got.data(), slice, kFloats * sizeof(float)) ==
+            eval::Status::Ok);
+    CHECK(got == sent);
+
+    // Bytes BEFORE the slice were not touched: a copy that ignored the offset
+    // would land at 0 and still pass the round trip above.
+    const float* raw = static_cast<const float*>(buf->contents());
+    std::size_t before_touched = 0;
+    for (std::size_t i = 0; i < kSkip; ++i) before_touched += raw[i] != 0.0f;
+    CHECK(before_touched == 0);
+
+    // Refused rather than truncated: past what the slice says it holds, and a
+    // partial float. Both would otherwise be silent corruption.
+    CHECK(adopted->write_device_buffer(slice, sent.data(), (kFloats + 1) * sizeof(float)) ==
+          eval::Status::InvalidInput);
+    CHECK(adopted->read_device_buffer(got.data(), slice, kFloats * sizeof(float) - 1) ==
+          eval::Status::InvalidInput);
+    // Zero bytes is a no-op, not an error.
+    CHECK(adopted->write_device_buffer(slice, sent.data(), 0) == eval::Status::Ok);
+
+    // The registered backend refuses a foreign buffer outright, on the same
+    // terms its eval_grid_device does.
+    float one = 0.0f;
+    CHECK(registered->write_device_buffer(slice, &one, sizeof(float)) ==
+          eval::Status::Unsupported);
+    CHECK(registered->read_device_buffer(&one, slice, sizeof(float)) ==
+          eval::Status::Unsupported);
+
+    buf->release();
 }

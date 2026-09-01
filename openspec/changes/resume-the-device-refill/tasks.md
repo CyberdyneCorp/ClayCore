@@ -27,4 +27,7 @@
 - [x] Prove each test fails with its fix reverted, and that the revert compiles.
 - [x] Document the device resume, the copy primitive and the declined shape in
       `docs/05-claycore-library.md`.
-- [ ] Metal: no seeded path, falls back. Filed device-gated as #350.
+- [x] Metal: `write_device_buffer` / `read_device_buffer` as one
+      `MTLBlitCommandEncoder` copy each, `caps().device_copy` true on an
+      adopted device only, and the Vulkan resume case written for Metal in
+      `tests/unit/test_metal_interop.cpp`. Closed #350.
