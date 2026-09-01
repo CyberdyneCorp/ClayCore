@@ -207,10 +207,15 @@ namespace {
 // pointless, because the next stamp brings them all back. A detail pass at a
 // fine level reads that level's own subdivided positions and frames and nothing
 // else, so when nothing below has moved there is nothing to walk.
-bool already_current(const MultiresSurface::State& s, std::uint32_t target) {
+//
+// THE TARGET'S OWN PENDING NORMALS ARE NOT A REASON TO WALK. They are a
+// recompute over the region the target was itself edited in, and the walk from
+// the cage that would reach the same drain rebuilds every level under it — the
+// exact cost the short circuit exists to avoid. `evaluate_up_to` drains them
+// directly instead, which is why they are not tested here.
+bool below_is_current(const MultiresSurface::State& s, std::uint32_t target) {
     if (!s.levels[target].cache || !s.levels[target].cache->evaluated) return false;
     if (s.base_frames_all || !s.base_frames_dirty.empty()) return false;
-    if (!s.levels[target].normals_pending.empty()) return false;
     for (std::uint32_t l = 0; l < target; ++l) {
         const MultiresLevel& lev = s.levels[l];
         if (lev.pending_all || !lev.pending.empty() || !lev.normals_pending.empty()) return false;
@@ -223,7 +228,13 @@ bool already_current(const MultiresSurface::State& s, std::uint32_t target) {
 void evaluate_up_to(MultiresSurface::State& s, std::uint32_t level) {
     if (s.levels.empty()) return;
     const std::uint32_t target = std::min(level, static_cast<std::uint32_t>(s.levels.size() - 1));
-    if (already_current(s, target)) return;
+    if (below_is_current(s, target)) {
+        // Nothing below moved, so the only work outstanding is whatever display
+        // normals this level owes over its own last edit. That costs the
+        // footprint; reaching it through the walk would cost the hierarchy.
+        drain_normals_pending(s, target);
+        return;
+    }
     evaluate_level0(s);
     for (std::uint32_t l = 1; l <= target; ++l) {
         ensure_cache(s, l);
@@ -563,6 +574,27 @@ void MultiresSurface::absorb_level_edit(std::uint32_t level,
             c.mesh.positions[v] =
                 c.subdivided[v] + frame_to_world(c.frames[v], d.tangent, d.bitangent, d.normal);
         }
+        // AND THE DISPLAY NORMALS THIS LEVEL OWNS, over the region and its
+        // ring, which is what `drain_normals_pending` does with this list.
+        //
+        // WHY THE CALLER'S NORMALS ARE NOT ENOUGH, even when the caller is
+        // `MeshSculptor` and has just recomputed them. Two things write
+        // `c.mesh.normals` and they do not agree: the sculptor derives them
+        // from the level mesh's TRIANGLES, and everything in this file derives
+        // them from the level's own faces by Newell — which on a subdivision
+        // quad is a different vector, measured at about a degree over a
+        // sculpted region. So a hierarchy that had been sculpted shaded one way
+        // while its cache was warm and another way after a `drop_all_caches`
+        // rebuilt it, which is a visible change under memory pressure with no
+        // edit behind it and nothing in the surface to explain it. The
+        // hierarchy is authoritative about its own normals; the level mesh's
+        // are an input to the deformation, not the answer.
+        //
+        // The second reason is smaller and would have been enough on its own:
+        // the loop above REWROTE the positions these normals were computed
+        // from, reading the coefficients back through the frame, so even one
+        // definition would have left them a round trip behind.
+        lev.normals_pending.insert(lev.normals_pending.end(), vertices.begin(), vertices.end());
         ++state_->detail_revision;
     }
     lev.pending.insert(lev.pending.end(), vertices.begin(), vertices.end());

@@ -58,6 +58,12 @@ add_executable(clay_unit_tests
   unit/test_multires_sculpt.cpp
   unit/test_multires_dirty.cpp
   unit/test_surface_chunks.cpp
+  unit/test_chunk_transport.cpp
+  unit/test_memory_trim.cpp
+  unit/test_preflight_budget.cpp
+  unit/test_scratch_arena.cpp
+  unit/test_memory_profile.cpp
+  unit/test_extreme_poly_scaling.cpp
   unit/test_mesh_project.cpp
   unit/test_multires_history.cpp
   unit/test_multires_io.cpp

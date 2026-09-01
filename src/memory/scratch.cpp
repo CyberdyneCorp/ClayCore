@@ -1,15 +1,40 @@
 #include "clay/memory/scratch.h"
 
 #include <algorithm>
+#include <cstdint>
+#include <vector>
 
 namespace clay {
 namespace memory {
 namespace {
 
-std::size_t align_up(std::size_t value, std::size_t align) {
+std::uintptr_t align_up(std::uintptr_t value, std::size_t align) {
     if (align <= 1) return value;
-    const std::size_t rem = value % align;
+    const std::uintptr_t rem = value % align;
     return rem == 0 ? value : value + (align - rem);
+}
+
+// KEEP `n` BYTES AND GIVE THE REST BACK, WITHOUT `shrink_to_fit`.
+//
+// This library compiles its core with `-fno-exceptions` (the top-level
+// CMakeLists), and libstdc++ implements `vector::shrink_to_fit` through
+// `__shrink_to_fit_aux`, whose no-exceptions form returns false without doing
+// anything. It is a documented no-op in this build. So `resize(n)` followed by
+// a shrink — the obvious way to write all three callers below — keeps the
+// buffer and reports having released it. Measured before this was written: a
+// critical trim of a 160 KB arena returned 0 and kept every byte, which is the
+// worst possible answer for a call a host makes because the operating system
+// has already warned it once.
+//
+// The portable release is a swap with a vector built at the size wanted, which
+// is what the standard call does on the platforms where it does anything.
+void shrink_to(std::vector<std::uint8_t>* storage, std::size_t n) {
+    if (storage->capacity() <= n) return;
+    std::vector<std::uint8_t> replacement;
+    if (n != 0)
+        replacement.assign(storage->begin(),
+                           storage->begin() + static_cast<std::ptrdiff_t>(n));
+    replacement.swap(*storage);
 }
 
 }  // namespace
@@ -21,10 +46,7 @@ void ScratchArena::configure(const SculptMemoryProfile& profile) {
     // schedule and the arena's is the stroke.
     if (used_ == 0) {
         const std::size_t hard = hard_bound();
-        if (hard != 0 && storage_.size() > hard) {
-            storage_.resize(hard);
-            storage_.shrink_to_fit();
-        }
+        if (hard != 0 && storage_.size() > hard) shrink_to(&storage_, hard);
     }
 }
 
@@ -52,7 +74,16 @@ bool ScratchArena::prepare(std::size_t bytes) {
 }
 
 void* ScratchArena::allocate(std::size_t bytes, std::size_t align) {
-    const std::size_t begin = align_up(used_, align);
+    if (storage_.empty()) return nullptr;
+    // ALIGNED AGAINST THE BASE POINTER, not against the offset. The storage is
+    // a `std::vector<std::uint8_t>`, so its data is aligned for
+    // `max_align_t` and no further — an offset-only alignment therefore
+    // honours every request up to that and silently under-aligns anything
+    // over-aligned, which is the one kind of request that asks because it
+    // cannot cope without. For every alignment the base already satisfies this
+    // computes the same offset it did before, so no existing caller moves.
+    const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(storage_.data());
+    const std::size_t begin = static_cast<std::size_t>(align_up(base + used_, align) - base);
     if (bytes > storage_.size() || begin > storage_.size() - bytes) return nullptr;
     used_ = begin + bytes;
     return storage_.data() + begin;
@@ -82,8 +113,7 @@ void ScratchArena::end_stamp() {
 void ScratchArena::end_stroke() {
     const std::size_t soft = soft_bound();
     if (storage_.size() <= soft) return;
-    storage_.resize(soft);
-    storage_.shrink_to_fit();
+    shrink_to(&storage_, soft);
 }
 
 std::size_t ScratchArena::trim(Pressure pressure) {
@@ -93,8 +123,7 @@ std::size_t ScratchArena::trim(Pressure pressure) {
     if (used_ != 0) return 0;
     const std::size_t before = storage_.capacity();
     if (pressure == Pressure::Critical) {
-        storage_.clear();
-        storage_.shrink_to_fit();
+        shrink_to(&storage_, 0);
         // The recent window goes too: it is a prediction of the next stamp, and
         // under critical pressure the host would rather pay for the first stamp
         // after the trim than keep holding the prediction.

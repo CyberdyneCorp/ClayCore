@@ -271,8 +271,15 @@ void ChunkTable::compact() {
         // maintenance item and not something a stamp does.
         c.faces.capacity_ = c.faces.count_;
     }
+    // `packed` was RESERVED at the live face count above, so the swap IS the
+    // release: the old arena goes with `packed`'s destructor. The
+    // `shrink_to_fit` that used to follow was doing nothing at all — libstdc++
+    // implements it through `__shrink_to_fit_aux`, whose no-exceptions form
+    // returns false without acting, and this library compiles its core with
+    // `-fno-exceptions`. Harmless here and not harmless in
+    // `memory/scratch.cpp`, where it was the whole of a release path; see the
+    // note there.
     face_arena_.swap(packed);
-    face_arena_.shrink_to_fit();
     free_blocks_.clear();
     repoint_spans();
 }
