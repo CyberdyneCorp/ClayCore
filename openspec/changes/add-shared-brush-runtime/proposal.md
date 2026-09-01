@@ -135,9 +135,15 @@ than multiplying by `cos 0` and `sin 0`.
 cross-representation parity requirement. `brush-engine` gains the stamp frame
 and the requirement that an automask reaches every representation that offers
 the verb. `c-abi` and `python-bindings` gain the arena's statistics and the
-stamp azimuth; the ABI moves to **0.75.0 / `CLAY_ABI_MINOR 75`**, appending to
-`clay_mesh_brush_desc` rather than changing it, so a host compiled against 74
-builds and behaves identically. `examples` gains 69.
+stamp azimuth; the ABI moves to **0.77.0 / `CLAY_ABI_MINOR 77`**, appending to
+`clay_mesh_brush_desc` rather than changing it, so a host compiled against 76
+builds and behaves identically. `examples` gains 70.
+
+The two numbers in that sentence were 0.75.0 and 69 when this was written, and
+both moved for the same reason rather than by revision: this branch was cut as
+the BOTTOM of a stack of three and both branches above it merged first, so 0.75
+and 0.76 were spent and 69 was taken by `add-mesh-sculpt-layers`. Task 11.7
+records the merge that settled them.
 
 No fixed-mesh behaviour changes. The adaptive path's behaviour changes in
 exactly one direction — it starts honouring an automask it was given and

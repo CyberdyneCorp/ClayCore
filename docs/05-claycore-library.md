@@ -1162,7 +1162,7 @@ an entry point spanning a step is ever added. Do not build a response around it.
 **A sculptor's scratch is not in this report, and it is not an omission.**
 `clay_document_memory` measures the document; a mesh sculptor is a handle held
 BESIDE one, on the same footing as `MultiresSurface::memory()`, and a document
-does not know how many are open on it. Since 0.75.0 each sculptor owns one bump
+does not know how many are open on it. Since 0.77.0 each sculptor owns one bump
 arena for the buffers a stamp needs and cannot hold as members — the automask's
 frontiers, the adaptive region's sort permutation — reset rather than freed
 between stamps, so a warm dab on a stable surface allocates nothing. Ask the

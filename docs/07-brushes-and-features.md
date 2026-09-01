@@ -2236,6 +2236,20 @@ map for each. Each representation still walks its own region — a weld-class ri
 a half-edge ring, or a delegation to the bound level — and all three END in that
 one composition, which is where the factor order lives.
 
+**Three representations, four consumers.** `LayeredMultiresSculptor` is the
+fourth, and it reaches the runtime by a route none of the other three take: its
+`gather()` builds no region of its own, it takes a zero-strength `Draw` through
+the bound level's `MeshSculptor` and reads the workset back. That is deliberate —
+a layered stroke must weight a vertex by exactly what an unlayered stamp would,
+so the falloff, the mask gate, the alpha and the composed automask have to be
+ONE answer rather than two that agree today. It is also where the divergence this
+runtime exists to remove would come back, and asymmetrically: `stamp` routes
+through `MultiresSculptor` and keeps its automask, so a mask that stopped
+reaching `gather()` would appear to work for the sixteen ordinary verbs and
+silently stop for `erase`, `restore`, `smooth` and `stamp_detail` — the four
+that exist only on the layered path. `test_multires_shared_brush_parity.cpp`
+pins that route on its own for that reason.
+
 **The automask reaches all three.** It used to reach two. `clay_mesh_brush_desc`
 carried the factors to `clay_dynamic_sculptor_stamp`, which decoded them and
 never read them, so an automask an artist enabled was silently absent on the

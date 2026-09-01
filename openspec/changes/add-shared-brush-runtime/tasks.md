@@ -283,7 +283,8 @@
 
 ## 7. The ABI and the bindings
 
-- [x] 7.1 `bindings/c/clay.h`: `CLAY_ABI_MINOR 75`; `stamp_azimuth` appended to
+- [x] 7.1 `bindings/c/clay.h`: `CLAY_ABI_MINOR 77` (written as 75, moved by the
+      merge at 11.7); `stamp_azimuth` appended to
       `clay_mesh_brush_desc` under the `struct_size` rule;
       `clay_brush_arena_stats` and the three `*_arena_stats` calls — D9.
       The stats descriptor's byte counts are `uint64_t` rather than `size_t`:
@@ -358,7 +359,8 @@
       descriptor, and a high water no larger than the capacity — are gated on
       the tag's workflow and by nothing on the PR
 
-- [x] 7.5 The version lines, in lockstep, at 0.75.0 / 75. THREE literals, not
+- [x] 7.5 The version lines, in lockstep, at 0.77.0 / 77 (written at 0.75.0 / 75
+      and moved by the merge — 11.7 has the why). THREE literals, not
       four: `CMakeLists.txt`, `bindings/c/clay.h` and `pyproject.toml` carry the
       number, and `tools/release_check.py` DERIVES it from all three and checks
       they agree (`check_versions`) rather than carrying a row of its own. The
@@ -935,6 +937,54 @@ merged tree — and two things it found that the merge could not.
       which is the same rule that kept a ceiling out of `check_bench.py` at
       6.8.
 
+## 13. The documentation pass, and what CI closed that this box could not
+
+Section 11 wrote the documentation against `a44b1f5` and section 12 re-measured
+the code at the merged tip. What neither did is re-read the PROSE at the merged
+tip, and the merge moved three things the prose names: the version, the example
+number, and the count of things that consume this runtime.
+
+- [ ] 13.1 THE DOCS RE-READ AT THE MERGED TIP, and three statements the merge
+      made false, each fixed where the false sentence is rather than by
+      appending a correction.
+      `docs/05-claycore-library.md` said the arena arrived "since 0.75.0",
+      which is the number this branch was ASSIGNED and not the one it ships
+      under — 0.77.0, for the reason 11.7 records. A reader checking the claim
+      against `clay.h` would have found 77 and concluded the arena predates it.
+      `docs/07-brushes-and-features.md` said the runtime is read by three
+      sculptors, full stop. It is three REPRESENTATIONS and FOUR consumers:
+      `LayeredMultiresSculptor` reaches it through a route none of the other
+      three take, and 12.2's regression case pins that route without any
+      document saying the route exists. A new paragraph says what the route is,
+      why it is shaped that way (a layered stroke must weight a vertex by
+      exactly what an unlayered stamp would), and what breaks asymmetrically if
+      it drifts — masking keeps working for the sixteen ordinary verbs and
+      stops for `erase`, `restore`, `smooth` and `stamp_detail`, the four that
+      exist only on that path. THE FOUR WAS COUNTED rather than copied: those
+      are the four public verbs whose implementations call `gather()`
+      (`stamp_detail`, `smooth` through both modes, and `erase` / `restore`
+      through `fade_toward_zero`); 12.2's note says five and is one out.
+      `docs/09-brush-latency-and-coverage.md` had the new section running
+      straight into the next `###` with no blank line between them, which is a
+      heading this file's own renderer would have swallowed.
+- [ ] 13.2 THE OPENSPEC ARTIFACTS RECONCILED WITH THE NUMBER THEY SHIP UNDER.
+      `proposal.md`'s Impact paragraph still promised 0.75.0 / minor 75, "a
+      host compiled against 74", and "`examples` gains 69" — every one of which
+      is what was planned and none of which is what merged. Corrected, with a
+      sentence saying the two numbers moved because the stack merged out of
+      order rather than because anyone revised the design; 11.7 keeps the
+      detail. `tasks.md` 7.1, 7.5 and two `Files` rows carried 75 in the same
+      way and now carry 77 with the same pointer. Task 0.1's "assigned 0.75.0"
+      is LEFT STANDING — it is the assignment as it was given, and rewriting it
+      would erase the fact 11.7 exists to record.
+- [ ] 13.3 THE FINAL GATES, from this worktree at the documentation tip, as
+      output rather than as a tick.
+- [ ] 13.4 THE SWIFT GATE, CLOSED BY CI RATHER THAN BY THIS BOX — which is
+      where 7.6 and 11.4 always said it would close, and it has.
+- [ ] 13.5 THE PR, updated rather than opened. #419 already existed from 11.6
+      and was CONFLICTING then; the merge at 9bb7181 resolved that.
+
+
 ## Files
 
 **Added**
@@ -972,10 +1022,10 @@ merged tree — and two things it found that the merge could not.
 | `tests/unit/test_brush_preset.cpp` | the three regression cases for 10.4 |
 | `bindings/python/tests/test_shared_brush_runtime.py` | the same three through the wheel, on a format no Python test had touched |
 | `include/clay/mesh/brush_model.h`, `include/clay/mesh/surface_frame.h` | each names the other two frames — D4 |
-| `bindings/c/clay.h`, `bindings/c/clay_c.cpp` | minor 75, `stamp_azimuth`, the arena statistics |
+| `bindings/c/clay.h`, `bindings/c/clay_c.cpp` | minor 77, `stamp_azimuth`, the arena statistics |
 | `bindings/python/pyclay_module.cpp` | `automask` on the adaptive stamp, `set_automask_inputs`, `arena_stats` |
 | `CMakeLists.txt`, `tests/CMakeLists.txt` | the new sources and tests |
-| `CMakeLists.txt`, `bindings/c/clay.h`, `pyproject.toml` | the version, at 0.75.0 / 75. THREE literals — `tools/release_check.py` derives it and has no row to edit (7.5) |
+| `CMakeLists.txt`, `bindings/c/clay.h`, `pyproject.toml` | the version, at 0.77.0 / 77 (11.7). THREE literals — `tools/release_check.py` derives it and has no row to edit (7.5) |
 | `include/clay/mesh/dynamic_bvh.h`, `src/mesh/dynamic_bvh.cpp`, `include/clay/mesh/slot_pool.h` | the buffers the adaptive walk used to own become arena blocks the caller passes in |
 | `tests/unit/test_sculpt_allocation.cpp` | THE GATE — extended to every verb with automask factors on, and to the other two representations |
 | `tests/unit/test_mesh_sculpt.cpp`, `tests/unit/test_dynamic_sculpt.cpp` | the workset's new identity, and the adaptive automask's regression case |

@@ -621,6 +621,7 @@ model rather than to the footprint — which is the claim `make-the-brush-cost-l
 made for the field verbs and nobody has made for the mesh ones. It is older than
 the shared runtime, it was not touched by it, and it is the next thing to chase
 on this path.
+
 ### Sculpt layers, measured (add-mesh-sculpt-layers)
 
 The hierarchy above stores one detail field per level. A sculpt layer adds
