@@ -342,10 +342,21 @@
       LEFT OPEN IN RECONCILIATION — needs macOS. The file is written and
       committed; the gate this task exists for is "a descriptor's layout
       checked by a compiler that is not the one that built the library", and
-      no such compiler ran. `which swift` and `which swiftc` both fail on this
-      box and `tools/check_swift_package.py` is textual only. It closes when
-      CI's macOS job compiles it, and not before; a tick here would have
-      claimed a compiler ran
+      no such compiler ran here. `which swift` and `which swiftc` both fail on
+      this box and `tools/check_swift_package.py` is textual only —
+      `check_swift_smoke.sh` prints "skipped (no swiftc on PATH)" and exits 0,
+      which is a skip and not a pass.
+      WHERE IT ACTUALLY CLOSES, read out of `.github/workflows/ci.yml` rather
+      than assumed: the macOS job on THIS PR runs
+      `./tools/check_swift_smoke.sh typecheck`, which type-checks the file
+      against `clay.h` alone — so the appended field and the three
+      `*_arena_stats` signatures are checked by a Swift compiler on every push.
+      What stays release-time is `check_swift_smoke.sh all`: building against
+      the real xcframework slices and RUNNING the binary, macOS and inside a
+      booted iOS Simulator. So the three claims the file asserts at runtime —
+      `stamp_azimuth == 0` from the defaults, a turned stamp being the same
+      descriptor, and a high water no larger than the capacity — are gated on
+      the tag's workflow and by nothing on the PR
 
 - [x] 7.5 The version lines, in lockstep, at 0.75.0 / 75. THREE literals, not
       four: `CMakeLists.txt`, `bindings/c/clay.h` and `pyproject.toml` carry the
