@@ -376,6 +376,27 @@ void report_multires_distribution(std::size_t target) {
     }
 }
 
+// The rule, read off the rows. Written before the data existed and printed
+// here beside the numbers, so that a reader sees the criterion and the
+// measurement together rather than having to trust that they matched.
+void report_decision(const std::vector<Row>& rows) {
+    std::printf("\n# THE DECISION RULE, read at the %zu footprint\n", kDecisionFootprint);
+    std::printf("# minimise P95(query + normals + index update), subject to admitted/exact <= 2\n"
+                "# and upload/moved <= 3; ties break toward the SMALLER chunk.\n");
+    for (const Row& row : rows) {
+        if (row.footprint != kDecisionFootprint) continue;
+        const double fp = row.exact_vertices == 0 ? 0.0
+                                                  : static_cast<double>(row.admitted_vertices) /
+                                                        static_cast<double>(row.exact_vertices);
+        const double up = row.moved_bytes == 0 ? 0.0
+                                               : static_cast<double>(row.upload_bytes) /
+                                                     static_cast<double>(row.moved_bytes);
+        std::printf("  target %4zu  P95 %9.1f us  false-positive %.2fx %s  upload %.2fx %s\n",
+                    row.target, row.decision_p95, fp, fp <= 2.0 ? "ok " : "OVER",
+                    up, up <= 3.0 ? "ok " : "OVER");
+    }
+}
+
 bool partition_is_a_partition(const Mesh& mesh, const ChunkTable& table) {
     std::vector<int> seen(mesh.indices.size() / 3, 0);
     for (std::uint32_t i = 0; i < table.slot_count(); ++i) {
@@ -478,20 +499,6 @@ int main(int argc, char** argv) {
                 "promise\n");
     report_multires_distribution(256);
 
-    std::printf("\n# THE DECISION RULE, read at the %zu footprint\n", kDecisionFootprint);
-    std::printf("# minimise P95(query + normals + index update), subject to admitted/exact <= 2\n"
-                "# and upload/moved <= 3; ties break toward the SMALLER chunk.\n");
-    for (const Row& row : rows) {
-        if (row.footprint != kDecisionFootprint) continue;
-        const double fp = row.exact_vertices == 0 ? 0.0
-                                                  : static_cast<double>(row.admitted_vertices) /
-                                                        static_cast<double>(row.exact_vertices);
-        const double up = row.moved_bytes == 0 ? 0.0
-                                               : static_cast<double>(row.upload_bytes) /
-                                                     static_cast<double>(row.moved_bytes);
-        std::printf("  target %4zu  P95 %9.1f us  false-positive %.2fx %s  upload %.2fx %s\n",
-                    row.target, row.decision_p95, fp, fp <= 2.0 ? "ok " : "OVER",
-                    up, up <= 3.0 ? "ok " : "OVER");
-    }
+    report_decision(rows);
     return 0;
 }

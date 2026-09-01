@@ -152,9 +152,8 @@ def reconstruct(view):
     return stacked[np.lexsort(stacked.T[::-1])]
 
 
-def main():
-    print(__doc__)
-
+def the_same_dab_on_both():
+    """Two models sixteen times apart at the same detail, and the same dab."""
     small, large = plane(SMALL), plane(LARGE)
     small_view = clay.SurfaceView.over_mesh(small, target_faces=TARGET_FACES)
     large_view = clay.SurfaceView.over_mesh(large, target_faces=TARGET_FACES)
@@ -213,11 +212,16 @@ def main():
     if saving < 10.0:
         raise SystemExit("the per-chunk transport is not saving anything worth having")
 
-    # --- 2. the stream IS the surface ------------------------------------------
-    whole = canonical_triangles(np.asarray(large.positions), np.asarray(large.indices))
-    streamed = reconstruct(large_view)
+    return small, large, small_view, large_view, small_hit, large_hit
+
+
+def the_stream_is_the_surface(mesh, view):
+    """Reassemble the whole surface from the chunks and compare it against the
+    whole-surface path the library still ships."""
+    whole = canonical_triangles(np.asarray(mesh.positions), np.asarray(mesh.indices))
+    streamed = reconstruct(view)
     print("\n  THE STREAM IS THE SURFACE:")
-    print(f"    {large_view.chunk_count} chunks reassembled into {len(streamed):,d} triangles,")
+    print(f"    {view.chunk_count} chunks reassembled into {len(streamed):,d} triangles,")
     print(f"    against {len(whole):,d} from the whole-surface path.")
     if streamed.shape != whole.shape or not np.array_equal(streamed, whole):
         raise SystemExit(
@@ -226,7 +230,10 @@ def main():
             "drawing something the engine does not think it made")
     print("    every triangle agrees, by the bits of its nine floats.")
 
-    # --- 3. what it costs, and what a host may take back ------------------------
+
+def what_it_costs():
+    """The three figures a memory warning asks for, and a trim that keeps the
+    work — under a pin first, then for real."""
     hierarchy = clay.MultiresSurface.from_mesh(plane(24, spacing=0.08))
     hierarchy.add_level()
     hierarchy.add_level()
@@ -267,7 +274,10 @@ def main():
     print("    and the authoritative checksum is unchanged, which is what says it")
     print("    released caches and not work. Every one of them reconstructs.")
 
-    # --- 4. priced before it is paid --------------------------------------------
+
+def priced_before_it_is_paid(large):
+    """The PEAK rather than the steady state, and a refusal that arrives before
+    anything is allocated."""
     priced = large.preflight_to_dynamic()
     refused = large.preflight_to_dynamic(budget=priced["persistent_bytes"])
     print("\n  PRICED BEFORE IT IS PAID:")
@@ -290,10 +300,13 @@ def main():
                          "wrapped multiply produces, because a wrapped estimate is a small one")
     print(f"    and an absurd target refuses rather than wrapping: \"{absurd['error']}\".")
 
-    # --- the pictures -------------------------------------------------------------
+
+def pictures(centre, rows):
+    """One tile per model, the touched region lit by the same ball the query
+    used — so the picture is of what the runtime reached rather than of a drawn
+    circle."""
     tiles, labels = [], []
-    for name, mesh, view, hit in (("small", small, small_view, small_hit),
-                                  ("large", large, large_view, large_hit)):
+    for name, mesh, hit in rows:
         eye, target = R.orbit_camera(
             (np.asarray(mesh.positions).min(axis=0), np.asarray(mesh.positions).max(axis=0)),
             elevation=52.0)
@@ -310,13 +323,25 @@ def main():
     R.contact_sheet(tiles, "69_extreme_poly.png", columns=2,
                     caption=" | ".join(labels))
 
+
+def one_chunk_on_disk(view, chunk):
     path = R.output_path("69_extreme_poly_chunk.obj")
-    got = large_view.copy_chunk(large_hit[0], normals=False)
+    got = view.copy_chunk(chunk, normals=False)
     clay.Mesh.from_triangles(got["positions"],
                              got["indices"].reshape(-1, 3)).save(path)
     print(f"\n  wrote {os.path.basename(path)}: ONE chunk, as its own standalone draw with")
     print("  indices local to itself. That file is what a host uploads per dab; the")
     print("  model it came from is on disk beside it and is not.")
+
+
+def main():
+    print(__doc__)
+    small, large, small_view, large_view, small_hit, large_hit = the_same_dab_on_both()
+    the_stream_is_the_surface(large, large_view)
+    what_it_costs()
+    priced_before_it_is_paid(large)
+    pictures((0.0, 0.0, 0.0), (("small", small, small_hit), ("large", large, large_hit)))
+    one_chunk_on_disk(large_view, large_hit[0])
 
 
 if __name__ == "__main__":

@@ -449,37 +449,51 @@ void run_multires(std::size_t vertices, const std::vector<std::size_t>& footprin
                 "     measured against a layer stack of this benchmark's own invention.)\n");
 }
 
-}  // namespace
-
-int main(int argc, char** argv) {
+// What the driver asked for. A struct rather than five out-parameters, so
+// `main` reads as the matrix it runs rather than as the parsing that got there.
+struct Options {
     std::vector<std::size_t> sizes = {100000, 1000000, 5000000};
     std::vector<std::size_t> footprints = {1000, 5000, 20000, 100000, 500000};
     int reps = 40;
     int levels = 3;
     std::string which = "all";
+};
 
+void parse_list(const std::string& text, std::vector<std::size_t>* out) {
+    out->clear();
+    std::size_t at = 0;
+    while (at <= text.size()) {
+        const std::size_t comma = text.find(',', at);
+        const std::string item = text.substr(at, comma - at);
+        if (!item.empty())
+            out->push_back(static_cast<std::size_t>(std::strtoull(item.c_str(), nullptr, 10)));
+        if (comma == std::string::npos) break;
+        at = comma + 1;
+    }
+}
+
+Options parse_options(int argc, char** argv) {
+    Options o;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-        const auto list = [&](const char* prefix, std::vector<std::size_t>* out) {
-            if (arg.rfind(prefix, 0) != 0) return false;
-            out->clear();
-            std::string rest = arg.substr(std::strlen(prefix));
-            std::size_t at = 0;
-            while (at < rest.size()) {
-                const std::size_t comma = rest.find(',', at);
-                out->push_back(static_cast<std::size_t>(
-                    std::strtoull(rest.substr(at, comma - at).c_str(), nullptr, 10)));
-                if (comma == std::string::npos) break;
-                at = comma + 1;
-            }
-            return true;
-        };
-        if (list("--sizes=", &sizes)) continue;
-        if (list("--footprints=", &footprints)) continue;
-        if (arg.rfind("--reps=", 0) == 0) reps = std::atoi(arg.c_str() + 7);
-        else if (arg.rfind("--levels=", 0) == 0) levels = std::atoi(arg.c_str() + 9);
-        else if (arg.rfind("--which=", 0) == 0) which = arg.substr(8);
+        if (arg.rfind("--sizes=", 0) == 0) parse_list(arg.substr(8), &o.sizes);
+        else if (arg.rfind("--footprints=", 0) == 0) parse_list(arg.substr(13), &o.footprints);
+        else if (arg.rfind("--reps=", 0) == 0) o.reps = std::atoi(arg.c_str() + 7);
+        else if (arg.rfind("--levels=", 0) == 0) o.levels = std::atoi(arg.c_str() + 9);
+        else if (arg.rfind("--which=", 0) == 0) o.which = arg.substr(8);
     }
+    return o;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    const Options options = parse_options(argc, argv);
+    const std::vector<std::size_t>& sizes = options.sizes;
+    const std::vector<std::size_t>& footprints = options.footprints;
+    const int reps = options.reps;
+    const int levels = options.levels;
+    const std::string& which = options.which;
 
     std::printf("# bench_extreme_poly: the 7.1 matrix with 7.2's separable stages\n");
     std::printf("# spacing %.4f, %d repetitions per cell after 4 warm-up stamps\n",

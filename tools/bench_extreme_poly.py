@@ -104,7 +104,7 @@ def parse(text: str) -> dict:
     return out
 
 
-def main() -> int:
+def arguments():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build", default="build/cpu-only")
     ap.add_argument("--sizes", default="100000,1000000,5000000,10000000,20000000")
@@ -116,8 +116,65 @@ def main() -> int:
                     help="how far the one-minute load may move across a row before it is "
                          "flagged as not comparable")
     ap.add_argument("--out", default=None, help="write the raw benchmark output here too")
-    args = ap.parse_args()
+    return ap.parse_args()
 
+
+def measure_rows(binary, sizes, args):
+    """One row per size, each with the load either side of it recorded.
+
+    Returns (rows, raw output, notes). A row is never silently dropped: a
+    reader deciding whether to trust a number needs to see that it was taken
+    and why it is suspect, which is what `notes` carries.
+    """
+    rows, raw, notes = {}, [], []
+    for size in sizes:
+        need, have = predicted_mb(size), free_mb()
+        if need > have:
+            print(f"== {size} vertices: SKIPPED, predicts ~{need} MB and {have} MB is available")
+            notes.append(f"{size}: skipped, not enough memory ({need} MB predicted, "
+                         f"{have} MB available)")
+            continue
+        print(f"== {size} vertices: predicts ~{need} MB, {have} MB available", flush=True)
+        text, code, before, after = run_size(binary, size, args.footprints, args.reps,
+                                             args.which, args.levels)
+        raw.append(text)
+        moved = abs(after - before)
+        flag = "" if moved <= args.load_tolerance else "  ** LOAD MOVED **"
+        print(f"   load {before:.2f} -> {after:.2f}{flag}", flush=True)
+        if code != 0:
+            notes.append(f"{size}: benchmark exited {code}")
+            continue
+        if moved > args.load_tolerance:
+            notes.append(f"{size}: load moved {before:.2f} -> {after:.2f}; "
+                         f"re-run before quoting this row")
+        rows[size] = parse(text)
+    return rows, raw, notes
+
+
+def report_ratios(rows, measured):
+    """Every stage of every footprint against the smallest size measured."""
+    base = measured[0]
+    print(f"\n# RATIOS against the {base}-vertex row, same footprint, same stage.")
+    print("# A stage that is O(model) reads as the model ratio; one that costs what it")
+    print("# touches reads as about 1.")
+    keys = sorted({k for row in rows.values() for k in row})
+    for key in keys:
+        if key not in rows[base]:
+            continue
+        b50, b95 = rows[base][key][0:2]
+        cells = [_ratio_cell(rows[size].get(key), size, b50, b95) for size in measured[1:]]
+        representation, footprint, stage = key
+        print(f"  {representation:18s} fp {footprint:7d}  {stage:14s} | " + " | ".join(cells))
+
+
+def _ratio_cell(cell, size, b50, b95):
+    if cell is None:
+        return f"{size / 1e6:.0f}M    -   "
+    return f"{size / 1e6:.0f}M p50 {cell[0] / b50:5.2f}x p95 {cell[1] / b95:5.2f}x"
+
+
+def main() -> int:
+    args = arguments()
     binary = REPO / args.build / "bench_extreme_poly"
     if not binary.exists():
         print(f"no benchmark at {binary}; configure with -DCLAY_BUILD_BENCHMARKS=ON",
@@ -125,29 +182,7 @@ def main() -> int:
         return 2
 
     sizes = [int(s) for s in args.sizes.split(",")]
-    rows, raw, flagged = {}, [], []
-    for size in sizes:
-        need, have = predicted_mb(size), free_mb()
-        if need > have:
-            print(f"== {size} vertices: SKIPPED, predicts ~{need} MB and {have} MB is available")
-            flagged.append(f"{size}: skipped, not enough memory ({need} MB predicted, "
-                           f"{have} MB available)")
-            continue
-        print(f"== {size} vertices: predicts ~{need} MB, {have} MB available", flush=True)
-        text, code, before, after = run_size(binary, size, args.footprints, args.reps,
-                                             args.which, args.levels)
-        raw.append(text)
-        moved = abs(after - before)
-        note = "" if moved <= args.load_tolerance else "  ** LOAD MOVED **"
-        print(f"   load {before:.2f} -> {after:.2f}{note}", flush=True)
-        if code != 0:
-            flagged.append(f"{size}: benchmark exited {code}")
-            continue
-        if moved > args.load_tolerance:
-            flagged.append(f"{size}: load moved {before:.2f} -> {after:.2f}; "
-                           f"re-run before quoting this row")
-        rows[size] = parse(text)
-
+    rows, raw, notes = measure_rows(binary, sizes, args)
     if args.out:
         pathlib.Path(args.out).write_text("\n".join(raw))
 
@@ -155,28 +190,11 @@ def main() -> int:
     if len(measured) < 2:
         print("\nfewer than two rows measured; there is nothing to form a ratio from")
         return 0
+    report_ratios(rows, measured)
 
-    base = measured[0]
-    print(f"\n# RATIOS against the {base}-vertex row, same footprint, same stage.")
-    print("# A stage that is O(model) reads as the model ratio; one that costs what it")
-    print("# touches reads as about 1.")
-    keys = sorted({k for row in rows.values() for k in row})
-    for representation, footprint, stage in keys:
-        if (representation, footprint, stage) not in rows[base]:
-            continue
-        b50, b95 = rows[base][(representation, footprint, stage)][0:2]
-        cells = []
-        for size in measured[1:]:
-            cell = rows[size].get((representation, footprint, stage))
-            if cell is None:
-                cells.append(f"{size / 1e6:.0f}M    -   ")
-                continue
-            cells.append(f"{size / 1e6:.0f}M p50 {cell[0] / b50:5.2f}x p95 {cell[1] / b95:5.2f}x")
-        print(f"  {representation:18s} fp {footprint:7d}  {stage:14s} | " + " | ".join(cells))
-
-    if flagged:
+    if notes:
         print("\n# NOT COMPARABLE, and said so rather than dropped:")
-        for note in flagged:
+        for note in notes:
             print(f"  - {note}")
     return 0
 
