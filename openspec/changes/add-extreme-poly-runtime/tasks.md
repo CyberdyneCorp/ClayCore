@@ -97,8 +97,9 @@
       `MultiresSculptor` seed itself from the previous stamp of the same
       stroke, which is a change to the bind path in
       `src/mesh/multires_sculpt.cpp` and `src/mesh/sculpt.cpp` and is DEFERRED
-      TO THE REBASE onto feat/shared-brush-runtime, whose per-stroke runtime
-      plan is where a carried-forward seed belongs. The gap is measured, not
+      TO THE REBASE onto main — which now carries feat/shared-brush-runtime
+      (#419) — whose per-stroke runtime plan is where a carried-forward seed
+      belongs. The gap is measured, not
       estimated: 3.22x at ten times the model at the 1k footprint, in docs/09
 - [x] 3.2 An optional caller-supplied seed from the pick subsystem, validated
       against a revision, so a stroke does not re-search a centre the host
@@ -418,13 +419,15 @@
       touch a file two concurrent branches are also editing. Named in the
       output rather than folded silently into a total. The stage split was
       already actionable: it is what located the hierarchy's seed scan in 3.1
-      OPEN: the remaining eight stages are DEFERRED TO THE REBASE onto
-      feat/shared-brush-runtime and feat/mesh-sculpt-layers. They all live
-      inside `MeshSculptor::stamp` in `src/mesh/sculpt.cpp`, which both sibling
-      branches are editing concurrently; instrumenting it here would turn a
-      mechanical rebase into a hand-merged one, and the shared brush runtime
-      lands a per-stroke plan that is the natural owner of the timers anyway.
-      Not attempted for that reason and no other
+      OPEN: the remaining eight stages are DEFERRED TO THE REBASE. They all
+      live inside `MeshSculptor::stamp` in `src/mesh/sculpt.cpp`, which both
+      sibling branches were editing concurrently while this one was written —
+      and which both have now merged to main (#419 shared-brush-runtime, #417
+      mesh-sculpt-layers), so `src/mesh/sculpt.cpp` is one of the 17 files this
+      branch must merge before CI can run it. Instrumenting it here would have
+      turned that merge into a harder one, and the shared brush runtime lands a
+      per-stroke plan that is the natural owner of the timers anyway. Not
+      attempted for that reason and no other
 - [x] 7.3 THE LOCALITY GATE: for one footprint, stamp time stays in one band
       from 1M to 20M vertices
       DONE twice. As a ctest gate at sizes CI can afford,
