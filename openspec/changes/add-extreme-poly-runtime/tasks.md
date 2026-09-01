@@ -30,74 +30,99 @@
 
 ## 2. The shared chunk
 
-- [ ] 2.1 `include/clay/mesh/surface_chunks.h` — bounds, triangles, unique
+- [x] 2.1 `include/clay/mesh/surface_chunks.h` — bounds, triangles, unique
       vertices, and separate revisions for topology, geometry, normals and
       attributes
-- [ ] 2.2 ONE unit serving the spatial index leaf, the brush candidate set, the
+- [x] 2.2 ONE unit serving the spatial index leaf, the brush candidate set, the
       parallel work unit, the normal recompute unit, the dirty set and the host
       upload unit. A subsystem that invents a second granularity SHALL say why
-- [ ] 2.3 An epoch-marked dirty set rather than a hash set per stamp
-- [ ] 2.4 Chunk-local vertex indexing for derived buffers, with the mapping to
+      DONE: `ChunkTable` is the one unit; `SurfaceLeaf` is now a name for
+      `SurfaceChunk`. The multires partitioner states in its own file why a
+      (base patch, quadrant at depth d) chunk is the same granularity and not a
+      second one
+- [x] 2.3 An epoch-marked dirty set rather than a hash set per stamp
+- [x] 2.4 Chunk-local vertex indexing for derived buffers, with the mapping to
       global identity kept; authoritative topology stays 32-bit
-- [ ] 2.5 Integrate with the adaptive surface and with each multires level
+- [x] 2.5 Integrate with the adaptive surface and with each multires level
+      DONE for the adaptive surface (`DynamicBvh` publishes into the table)
+      and for each multires level (`ensure_level_chunks`, in the level CACHE so a
+      trim releases it). The FIXED sculptor gets `partition_mesh_chunks` and does
+      not yet mark chunks beside its weld classes — that is design.md's open
+      question, blocked on the 1.1 measurement
 
 ## 3. Local update path
-
 - [ ] 3.1 The query path is: brush volume → top-level tree → candidate chunks →
       candidate vertices → exact footprint. Never a scan over every vertex
 - [ ] 3.2 An optional caller-supplied seed from the pick subsystem, validated
       against a revision, so a stroke does not re-search a centre the host
       already picked
-- [ ] 3.3 Local normals over the write region and its ring, with an optional
+- [x] 3.3 Local normals over the write region and its ring, with an optional
       deferral to stroke end whose FINAL state is exact
-- [ ] 3.4 Spatial index quality tracked; a rebuild is marked and deferred, and
+      ALREADY TRUE in `MeshSculptor` (`defer_normals` / `flush_normals` over
+      the write region and its ring); what this stage added is the profile field
+      that expresses the deferral and the `NormalFlush` maintenance item, which is
+      marked non-optional because the committed state has to be exact
+- [x] 3.4 Spatial index quality tracked; a rebuild is marked and deferred, and
       it runs between strokes rather than mid-drag
-- [ ] 3.5 A deferred-maintenance queue — index quality rebuild, cache
+- [x] 3.5 A deferred-maintenance queue — index quality rebuild, cache
       compaction, sparse-to-dense conversion, slot-pool compaction — that a
       host services with a time budget between interactions and that never runs
       in a pointer event
-- [ ] 3.6 Parallel granularity chosen per operation, one level only: the pool
+- [x] 3.6 Parallel granularity chosen per operation, one level only: the pool
       runs a nested `parallel_for` inline by design, so parallel-chunks inside
       parallel-vertices is a mistake the code must not make
+      DONE as a RULE the code keeps: `kChunkParallelGrain` and
+      `kVertexParallelGrain` are one level each, documented against the pool's
+      inline-nesting behaviour. No new nested dispatch was introduced
 - [ ] 3.7 A serial threshold below which a small footprint does not dispatch at
       all, measured rather than guessed
 
 ## 4. Memory
 
-- [ ] 4.1 `SculptMemoryProfile` with a memory class and byte budgets, filled by
+- [x] 4.1 `SculptMemoryProfile` with a memory class and byte budgets, filled by
       the HOST. NO device detection, no platform API, no `if iPad` in the
       portable core — the policy has to be testable on a desktop
-- [ ] 4.2 Extend the memory report with the new categories: adaptive surface
+- [x] 4.2 Extend the memory report with the new categories: adaptive surface
       content, multires authoritative detail, sculpt layers, sculpt undo; and
       separately the rebuildable ones — chunk indices, per-level runtime
       caches, evaluated layer caches, scratch, preview staging
-- [ ] 4.3 Roll up three totals a host can act on: essential, rebuildable,
+- [x] 4.3 Roll up three totals a host can act on: essential, rebuildable,
       undoable
-- [ ] 4.4 `trim(pressure)` with the eviction order written into the spec:
+- [x] 4.4 `trim(pressure)` with the eviction order written into the spec:
       transient scratch, preview buffers, evaluated caches, inactive spatial
       indices, inactive derived positions, other rebuildable caches, history to
       the host's policy — and NEVER unsaved authoritative content
-- [ ] 4.5 A trim report saying what was released and how much
+      DONE: `mesh::trim_surface` for the hierarchy and the adaptive surface,
+      `ScratchArena::trim` for the scratch, in the order the spec fixes, with
+      `memory::MemoryPin` making a trim honest during a save. History is left to
+      the host's own policy and is never touched here
+- [x] 4.5 A trim report saying what was released and how much
 - [ ] 4.6 THE GATE: after a critical trim, the authoritative checksum is
       unchanged and every dropped cache reconstructs to an identical surface
 - [ ] 4.7 Residency: sculpt level and display level resident by default on a
       constrained profile, other levels compact detail only
-- [ ] 4.8 Scratch capacity tracks the largest recent footprint with a soft and
+- [x] 4.8 Scratch capacity tracks the largest recent footprint with a soft and
       a hard bound; past the hard bound the work is processed in blocks rather
       than allocated
 
 ## 5. Preflight
 
-- [ ] 5.1 A capacity estimate — authoritative, runtime and PEAK bytes — for
+- [x] 5.1 A capacity estimate — authoritative, runtime and PEAK bytes — for
       any operation whose peak exceeds its result: adding a level, converting
       between representations, flattening a stack, global remesh, serialization
-- [ ] 5.2 Refuse with a typed budget error BEFORE allocating, never after
+- [x] 5.2 Refuse with a typed budget error BEFORE allocating, never after
       allocating half. The peak, not the steady state, is what kills an app on
       the target device
-- [ ] 5.3 Checked arithmetic on every estimate; an overflow reports a refusal
+      DONE for `add_level`, which is the one operation that already carries a
+      budget; the other four report a typed refusal to a caller that passes one
+      to their preflight, and allocate nothing to do it
+- [x] 5.3 Checked arithmetic on every estimate; an overflow reports a refusal
       rather than a small number
-- [ ] 5.4 Build-then-publish on every such operation, and cancellation through
+- [x] 5.4 Build-then-publish on every such operation, and cancellation through
       the existing token
+      ALREADY TRUE for the five named operations (`from_mesh`, `to_mesh`,
+      `add_level`, `project_from`, `encode` are all build-then-publish and take
+      the existing cancel token); verified rather than re-implemented
 
 ## 6. Transport
 

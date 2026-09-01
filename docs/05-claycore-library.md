@@ -48,6 +48,10 @@ claycore/
 │   │   ├── ease.h       #   easing-curve library (fogleman-style)
 │   │   └── field.h      #   normals (tetrahedron), AO, soft-shadow, raycast steppers (01 §3)
 │   ├── parallel/        # the one data-parallel primitive: a batch thread pool, below everything
+│   ├── memory/          # what a host will spend and may take back: the budget
+│   │                    #   profile, the category ledger and its three roll-ups,
+│   │                    #   the trim vocabulary and pin, the checked capacity
+│   │                    #   estimator, the bounded per-stamp scratch arena
 │   ├── math/            # host-side geometry: AABB, transforms, quats, ray, frustum
 │   ├── scene/           # document model: layers, groups, edit items, tape compiler, undo commands
 │   ├── eval/            # backend-agnostic evaluation API + backend registry
@@ -74,7 +78,7 @@ claycore/
 └── tools/               # clay-cli: eval/mesh/convert/validate from the command line
 ```
 
-Dependency rule: `kernel` and `parallel` depend on nothing; `scene`/`brick`/`mesh` depend on `kernel`+`math`; backends depend on `eval`; `io` and bindings sit on top. **No module depends on a backend**, and `tools/check_layering.py` gates it.
+Dependency rule: `kernel`, `parallel` and `memory` depend on nothing; `scene`/`brick`/`mesh` depend on `kernel`+`math`; backends depend on `eval`; `io` and bindings sit on top. **No module depends on a backend**, and `tools/check_layering.py` gates it.
 
 That last rule is why `parallel` is its own module rather than living where it
 started. The thread pool was a private header of the CPU backend, so the rule
@@ -84,6 +88,54 @@ were single-threaded not because they resist parallelism but because they could
 not legally reach it. It sits below everything now — depending on nothing but
 the standard library — so a core module can use it and the gate can see that it
 does.
+
+`memory` is a leaf for the same reason, arrived at from the other direction.
+`mesh` has to consult a budget on every stamp — the scratch hard bound, what may
+be deferred, which levels are resident, what an operation is allowed to peak at
+— and `io` is the top of the table, so a budget living beside `io::MemoryReport`
+would have meant either a `mesh -> io` edge that makes the table cyclic or a
+byte count threaded through every call signature from the host down, which puts
+residency policy in the host. `scene` was the other candidate and is worse in a
+subtler way: `scene` is what gets serialized, so a device budget landing there
+would drift into the file format and travel with a document to another machine.
+
+### Memory under pressure: who decides what, and in what order
+
+The engine owns the MECHANISM, the ORDER and the reconstruction guarantee. The
+host owns the MOMENT. Nothing in the library evicts on its own high-water mark:
+an engine that did would mutate a document behind a host that may be mid-save or
+holding a readback, and `MultiresSurface::cache_generation` exists precisely
+because a released cache is a use-after-free waiting for pressure to find it.
+Eviction happens at exactly three moments — an explicit `trim(pressure)`, a
+residency change the host itself caused, and the scratch arena settling back to
+its soft bound at a STROKE BOUNDARY, never inside a pointer event.
+
+`trim` releases in this order, and a host implementer should read it as prose
+rather than infer it from a header:
+
+1. transient scratch beyond its steady capacity;
+2. preview staging;
+3. evaluated caches (subdivided positions, frames, normals);
+4. spatial indices for inactive levels;
+5. derived positions for inactive levels;
+6. other rebuildable caches — chunk tables, per-level runtime caches;
+7. history, and only to the host's own policy.
+
+It NEVER releases unsaved authoritative content: base geometry, topology,
+multires detail, sculpt layers or their masks. After a trim at any pressure the
+authoritative checksum is unchanged and every released cache reconstructs to an
+identical surface — asserted by `detail_checksum`, not by inspection.
+
+A `memory::MemoryPin` held by a serializer or a readback turns a trim into a
+no-op that reports what it WOULD have released, so a memory warning arriving
+mid-save gets an honest answer instead of a document mutating under the writer.
+
+The profile a host fills carries fields for DERIVABLE work only — exact normals
+during a drag, index quality, display level, cache residency, preview drain
+rate. There is deliberately no field that reaches a topology decision, a detail
+coefficient or a brush setting: a deferred split would make the committed mesh a
+function of machine speed, and "a memory-saving mode changed my sculpt" is
+unrepresentable rather than merely forbidden.
 
 **The library therefore spawns threads**, which the "the caller owns threading
 and queues" principle in §2 does not say and should: one process-wide pool,

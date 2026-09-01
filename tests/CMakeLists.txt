@@ -57,6 +57,7 @@ add_executable(clay_unit_tests
   unit/test_multires.cpp
   unit/test_multires_sculpt.cpp
   unit/test_multires_dirty.cpp
+  unit/test_surface_chunks.cpp
   unit/test_mesh_project.cpp
   unit/test_multires_history.cpp
   unit/test_multires_io.cpp
