@@ -233,17 +233,50 @@
 
 ## 8. Bindings and gates
 
-- [ ] 8.1 C ABI: layer ids as `uint64`, stack and property operations, layer
+- [x] 8.1 C ABI: layer ids as `uint64`, stack and property operations, layer
       info with `struct_size`, name retrieval into caller buffers rather than
       pointers into engine strings
-- [ ] 8.2 C ABI: high-detail stamp descriptors, borrowed image data, changed
+      — `clay_sculpt_layer_id`, `clay_sculpt_layer_info` and
+      `clay_sculpt_layer_stats` with the `struct_size` prefix and bounded fills;
+      add/remove/move/merge/bake/rename/set-active and the three sliders, each
+      with an `int32_t* out_error` carrying a `clay_multires_error` so a host can
+      tell "no such layer" from "locked" from "finish the stroke first".
+      `clay_multires_sculpt_layer_name` is the size-query pattern into the
+      caller's buffer. D1's naming rule is now gated by
+      `tools/check_c_abi.py::sculpt_layer_naming` — which caught this change's
+      own first spelling, `clay_multires_layered_sculptor_*`, and is why the
+      transaction is `clay_multires_sculpt_layer_stroke_*`
+- [x] 8.2 C ABI: high-detail stamp descriptors, borrowed image data, changed
       block readback, revisions
-- [ ] 8.3 pyclay, with a context manager for a stroke transaction — the voxel
+      — `clay_detail_stamp_desc` (planar, borrowed `const float*`) and
+      `clay_detail_stamp_report`; `clay_multires_sculpt_layer_revision` for the
+      three, and `clay_multires_memory` grown by `sculpt_layers` and `composed`.
+      Changed blocks read back through the EXISTING `clay_multires_dirty_blocks`
+      and `clay_multires_copy_block`: a layered write marks the same base
+      patches, so a second transport would have been a second answer
+- [x] 8.3 pyclay, with a context manager for a stroke transaction — the voxel
       sculpt layer's `with grid.sculpt_layer(name):` is the precedent, and it
       is the only form that cannot leave a surface recording when a stroke loop
       raises
-- [ ] 8.4 `tools/check_binding_parity.py` green
+      — the stack on `MultiresSurface` (ids, sliders, info, mask, coefficients,
+      the three revisions, stats, compact) plus `SculptLayerStroke`, which
+      `surface.sculpt_layer_stroke()` returns: `__enter__` begins, a clean exit
+      commits and a RAISING BLOCK CANCELS. Height and vector maps are numpy
+      arrays borrowed for the call, `(H, W)` and `(3, H, W)` — planar, because a
+      plane is the buffer the alpha sampler already reads
+- [x] 8.4 `tools/check_binding_parity.py` green
+      — 622 capabilities against the IMPORTED module (`--pyclay`), 29 exempt,
+      no new exemption: every sculpt-layer capability pyclay exposes resolves
+      onto a C entry point. The three string-valued axes (write domain, smooth
+      mode, stamp mode) are registered in `STRING_CHOICES`, so a fourth
+      smoothing mode invented in Python has to exist in `clay.h` too
 - [ ] 8.5 Swift smoke on macOS and in the simulator
+      — `tests/swift/smoke.swift` gained the section (identity across a reorder,
+      the name into a caller buffer, the typed refusals, the gesture holding the
+      composition, a height stamp, and the stack through a save and a load) and
+      `tools/check_swift_package.py` is green in textual mode. NOT type-checked:
+      there is no Swift toolchain on this box, so the macOS and simulator runs
+      are still owed
 - [ ] 8.6 THE MILESTONE, as a numbered example that renders and asserts: a
       wrinkle pass dialled 0 → 50% → 100% over a form that never changes, plus
       one layer removed with the others untouched
