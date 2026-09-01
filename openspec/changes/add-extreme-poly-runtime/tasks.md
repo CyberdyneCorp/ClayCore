@@ -69,7 +69,14 @@
       a scan. `MeshSculptor::surface_index` never builds a tree on its own
       behalf and `MultiresSculptor` is a caller that never picks, so nothing
       ever builds one for a level. Recorded in docs/09 with the numbers; the
-      fix is 3.2 rather than a tree per level
+      fix is 3.2 rather than a tree per level.
+      STILL NOT TICKED, but the fix is now available rather than pending: 3.2
+      landed, so a host that picks against a level can pass `seed_class` with
+      `MultiresSculptor::seed_revision()` and the walk starts there instead of
+      scanning. What keeps this open is that nothing supplies the seed
+      AUTOMATICALLY — a caller that passes none still scans, so the requirement
+      as written ("never a scan over every vertex") is not yet true of the
+      hierarchy path on its own
 - [x] 3.2 An optional caller-supplied seed from the pick subsystem, validated
       against a revision, so a stroke does not re-search a centre the host
       already picked
