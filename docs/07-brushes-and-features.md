@@ -1941,6 +1941,187 @@ wall that fusion removes.
 
 ---
 
+## 8e. The surface tier — what a dab costs when the model is enormous
+
+Sections 8, 8b, 8c and 8d are four ways to change a surface. This section is
+about the one property all four have to keep once a model gets to millions of
+vertices, and it is one sentence:
+
+> **A dab costs approximately what it TOUCHES, not what the model HOLDS.**
+
+That is not a performance nicety. A sculptor working at 20M vertices has a model
+too large to redraw, so a stamp whose cost follows the surface is unusable
+however correct its deformation is — and the same is true of the bookkeeping
+around the stamp, which is where the cost usually leaks: a dirty set that is
+rebuilt per stroke, a preview upload sized by the surface, an index that is
+refit whole, a scratch buffer sized to the model. Each of those is individually
+defensible and collectively fatal.
+
+### One chunk, and a subsystem that wants a second one has to say why
+
+The tree already had three granularities, each right where it stood:
+`SurfaceLeaf` for the adaptive surface's spatial index, dirty **weld classes**
+in `MeshSculptor` because a weld class is the identity its adjacency walk
+produces, and dirty **base patches** in `MultiresSurface` because a base patch
+is the only identity that survives subdivision. Three notions of "the part that
+changed" means three chances for one of them to be a size the others are not,
+and a preview that follows the smallest of them.
+
+`mesh::ChunkTable` is now the one unit, and it serves all six roles the
+requirement names: the spatial-index leaf, the brush candidate set, the parallel
+work unit, the normal-recompute unit, the dirty set and the host's upload unit.
+**What is shared is the table, the identity space and the revisions — not the
+partition rule**, because the three representations genuinely do not agree on
+what a stable face is. Each supplies only a partitioner.
+
+One of those six roles is a declaration rather than a description today, and it
+is worth saying which: **the stamp path is serial and dispatches nothing.**
+`kChunkParallelGrain` and `kVertexParallelGrain` fix one level of parallelism
+each — the pool runs a nested `parallel_for` inline, so parallel-chunks inside
+parallel-vertices is a mistake the code must not make — and they were measured
+rather than guessed (`benchmarks/bench_parallel_grain.cpp`: 32,768 vertices and
+576 chunks, because the dispatch itself costs 17-20 us at any size, which at the
+old threshold of 1024 made the parallel form ten times slower than the serial
+loop). They are the numbers a future parallel pass starts from, not a
+description of what the library does now.
+
+The multires partitioner is where the claim would have failed quietly, so it is
+worth stating: a base patch is not a fixed-size unit — Catmull-Clark quadruples
+faces per level, so one base quad owns 1024 faces at level 5 and 4096 at level
+6. The multires chunk id is therefore `(base patch, quadrant at depth d)` with
+`d` chosen per level to land on the target size. The identity is still stable
+under an edit, because a patch's subtree never moves between base faces. That is
+the same granularity keyed by the only identity subdivision preserves, not a
+second one.
+
+**The size is 128 faces and it was measured here, not adopted from prior art.**
+`benchmarks/bench_surface_chunks.cpp` sweeps 64/128/256/512/1024 over a 2.08M
+vertex plane against query time, false-positive touched vertices, normal
+recompute, upload bytes, locality and split/merge cost; the table and the one
+place the decision departs from the rule that chose it are in
+[`design.md`](../openspec/changes/add-extreme-poly-runtime/design.md) D2a and
+the numbers are in
+[`docs/09`](09-brush-latency-and-coverage.md#the-extreme-poly-runtime-measured-add-extreme-poly-runtime).
+
+### Four revisions, because one cannot say what did not change
+
+A chunk carries separate revisions for **topology, geometry, normals and
+attributes**. A single counter can only say "something here moved", and a host
+that cannot tell geometry from connectivity re-uploads an index buffer on every
+dab of a stroke that never changed one. An ordinary stable-topology stamp
+advances the geometry revision and leaves the topology revision alone, and that
+is the difference between re-uploading positions and re-uploading a mesh. The
+shipped single `revision` stays beside them as the maximum of the four, because
+it is ABI a host already reads.
+
+The dirty set is **epoch-marked** rather than a hash set built per stamp: a
+chunk records the epoch it was last dirtied in, so marking is a store and
+draining is a walk, and a chunk marked twice in one epoch is entered once.
+
+### What a host is handed, and how it drains it
+
+`clay_surface_view` is ONE transport over all three representations rather than
+a third set of entry points beside the two that shipped. Every buffer being null
+IS the capacity query; a buffer too small writes **nothing** rather than a
+partial fill a host might draw, and reports `CLAY_ERROR_BUFFER_TOO_SMALL` —
+which is a retryable refusal and deliberately not `CLAY_ERROR_INVALID_ARGUMENT`,
+because those two codes tell a host opposite things: grow and ask again, versus
+the call was malformed and retrying it is a spin. The acknowledgement is what
+makes a drain incremental: a host that got through four chunks of nine before
+the frame budget ran out acknowledges four and the other five are still dirty.
+
+Full detail, with the retry loop a host actually writes, is in
+[`docs/08-mesh-readback.md`](08-mesh-readback.md#reading-back-only-what-changed).
+**The whole-surface path stays** — it is the correctness reference, and the
+tests reconstruct a surface from the dirty stream and compare it against the
+full copy rather than against themselves.
+
+### Memory is the host's budget, and the engine never evicts behind it
+
+A `SculptMemoryProfile` is filled by the HOST. There is no device detection, no
+platform API and no `if iPad` anywhere in the portable core — the policy has to
+be testable on a desktop, and a policy that reads the hardware is a policy that
+cannot be tested at all. The memory report separates what is **essential**
+(base mesh, authoritative detail, sculpt layers, undo) from what is
+**rebuildable** (chunk indices, per-level caches, evaluated caches, scratch,
+preview staging), because those are the two numbers a host answering an
+operating-system memory warning has to tell apart.
+
+`trim(pressure)` releases in a fixed order — transient scratch, preview buffers,
+evaluated caches, inactive spatial indices, inactive derived positions, other
+rebuildable caches, history to the host's own policy — and **never** unsaved
+authoritative content. The order is written out verbatim in
+[`docs/05-claycore-library.md`](05-claycore-library.md#memory-under-pressure-who-decides-what-and-in-what-order),
+which is where a host implementer needs it, together with what a trim costs the
+dab after it: 0.62-2.04x on the next dab at `Warning`, where the sculpt level
+stays resident, and 13-182x at `Critical`, growing with the model. Prefer
+`Warning` mid-drag, or hold a `memory::MemoryPin` until the stroke ends.
+
+**A trim is safe mid-drag, and it was not.** A memory warning arrives from the
+operating system and lands between two dabs, not between two strokes, and
+writing the gate for that case found a real defect: `MultiresSculptor::bind`
+decided its cached `MeshSculptor` was still live by comparing a cache generation
+that moved when a level cache was BUILT and not when one was RELEASED, so a
+trim between two dabs left a stale sculptor bound to freed storage. It did not
+crash — the stamp wrote into released memory, the level was rebuilt from the
+authoritative detail before the displacement was read back, and the dab simply
+was not there, with `stamp` still reporting the classes it believed it had
+moved. Every second dab of a drag vanished. Fixed, and held by four regression
+cases across C++, C and pyclay.
+
+### The peak is what kills an app, not the steady state
+
+Adding a level, converting between representations, flattening a stack, a global
+remesh and serialization all have a peak larger than their result.
+The `mesh::preflight_*` family estimates authoritative, runtime and **peak**
+bytes through one `memory::CapacityBuilder` underneath all five, and refuses with a typed budget error **before** allocating, rather than after
+allocating half — and every estimate is checked arithmetic, so an overflow
+reports a refusal instead of a small number and an accepted request.
+
+### Work a host schedules, rather than work that happens mid-gesture
+
+`mesh::MaintenanceQueue` is a queue the HOST owns and services with a time
+budget between interactions: index-quality rebuild, cache compaction,
+sparse-to-dense conversion, slot-pool compaction, and the normal flush. Nothing
+in it runs inside a pointer event. The drain is a take/complete pair rather than
+a callback — this header has never taken a function pointer, the budget loop is
+four lines in the caller's own language, and host code queuing another item from
+inside a callback would mutate the vector the queue is walking.
+
+The one item in it that is **not** optional is the normal flush. That is task
+1.3's decision, per item rather than globally: deferring exact normals during a
+drag is safe, because the committed state is still exact once the stroke ends
+and only the in-flight shading is approximate. Deferring a **topology** decision
+is not, because it changes the committed result. So the budget is a hint for the
+first kind and a contract for the second, and the queue marks which is which.
+
+### The gates, because this section is a claim about cost
+
+Four of them run in CI as ordinary tests rather than as benchmarks, which is
+what makes them a gate rather than a report:
+
+| Gate | What it asserts |
+|---|---|
+| **Locality** | Stamp time stays in one band from 1M to 20M vertices at one footprint, and the workset and write region are *identical* at both |
+| **Allocation** | After warm-up an ordinary stable-topology stamp performs no heap allocation — asserted in **bytes** as well as in call counts, at two model sizes |
+| **Preview** | The bytes handed to a host per stamp follow the dirty chunks and not the model size, with the full upload asserted to have grown so that "the dirty bytes did not" is a claim |
+| **Memory pressure** | After a critical trim the authoritative checksum is unchanged and every dropped cache reconstructs to a bit-identical surface |
+
+**Bytes and not only counts, and that is not pedantry.** A gate that counts
+allocations cannot see an O(surface) read: a single `std::vector` sized to the
+class count inside a stamp reads as ONE allocation at every model size —
+identical, unremarkable, and exactly what a correctly sized warm-up buffer also
+reads — while its bytes grow with the model. The allocation gate was
+deliberately regressed that way to check it: the count read 1 against 1 and the
+bytes read 9,604 against 148,996, a 15.5x ratio against a 15.5x model.
+
+Runnable: [`examples/69_extreme_poly.py`](../examples/69_extreme_poly.py) — the
+same dab on two models sixteen times apart, with the per-dab upload, the dirty
+chunk count and the reconstruction from the dirty stream all measured and
+asserted from the host's side rather than the engine's.
+
+---
+
 ## 8a. The brush model — how this vocabulary is organised
 
 Read this before the ZBrush map below, because it is the answer to the question
@@ -2135,6 +2316,16 @@ Names differ between bindings, so this lists them rather than ticking boxes.
 | Picking a mesh layer | `pick::raycast_mesh`, `mesh::Bvh::raycast` | `MeshSculptor.raycast(...)` | `clay_mesh_sculptor_raycast` |
 | Serializing without a path | `io::save_clayspace`, `save_obj/ply/fbx/glb` | `Document.to_bytes()`, `Mesh.to_bytes(fmt)`, `clay.load_bytes`, `clay.load_mesh_bytes` | `clay_document_save_memory`, `clay_mesh_save_memory`, `clay_*_load_memory`, `clay_blob_*` |
 | What a mesh's quality actually is | `mesh::validate`, `signed_volume`, `surface_area` | `Mesh.validation_report(...)`, `.signed_volume`, `.surface_area` | `clay_mesh_validation_report`, `clay_mesh_measure` |
+| Reading back only the dirty chunks | `mesh::ChunkTable`, `mesh::SurfaceView` | `clay.SurfaceView` — numpy-native `copy_chunk` | `clay_surface_view_from_mesh/_from_dynamic/_from_multires`, `clay_surface_view_dirty_chunks`, `_chunk_infos`, `_copy_chunk`, `_acknowledge` |
+| What the sculpt runtime is holding | `mesh::report_surface_memory` into a `memory::MemoryLedger`, `io::document_memory` | `MeshSculptor.memory_ledger()`, `Document.memory_with_surfaces()` | `clay_mesh_sculptor_memory_ledger`, `clay_multires_memory_ledger`, `clay_dynamic_sculptor_memory_ledger`, `clay_document_memory_with_surfaces` |
+| The budget a host declares | `mesh::SculptMemoryProfile` | `clay.SculptMemoryProfile` | `clay_sculpt_memory_profile_defaults`, `clay_multires_set_memory_profile`, `clay_memory_class_text` |
+| Answering a memory warning | `mesh::trim_surface`, `memory::MemoryPin` | `MultiresSurface.trim(...)`, `with clay.MemoryPin(...):` | `clay_multires_trim`, `clay_dynamic_sculptor_trim`, `clay_memory_pin_*`, `clay_pressure_text` |
+| Pricing an operation before it allocates | `mesh::preflight_to_dynamic/_to_mesh/_global_remesh/_encode` | `Mesh.preflight_to_dynamic/_global_remesh`, `DynamicSurface.preflight_to_mesh/_encode`, `MultiresSurface.preflight_encode` | `clay_mesh_preflight_to_dynamic`, `clay_mesh_preflight_global_remesh`, `clay_dynamic_surface_preflight_to_mesh/_encode`, `clay_multires_preflight_encode`, `clay_budget_error_text` |
+| Work a host schedules between gestures | `mesh::MaintenanceQueue` | `clay.MaintenanceQueue`, `with queue.stroke():` | `clay_maintenance_queue_*`, `clay_maintenance_kind_text` |
+| Is the spatial index still worth its shape | `mesh::DynamicBvh::quality()` | `DynamicSculptor.index_quality`, `.request_index_rebuild(...)` | `clay_dynamic_sculptor_index_quality`, `clay_dynamic_sculptor_request_index_rebuild` |
+| Deferring normals across a drag | `MeshSculptor::defer_normals` / `flush_normals` | `sculptor.defer_normals`, `.flush_normals(deltas=None)` | `clay_mesh_sculptor_set_defer_normals`, `_defer_normals`, `_flush_normals`, and the `clay_multires_sculptor_*` three |
+| Starting a stamp from what the host picked | `MeshBrushSettings::seed_class` / `seed_revision` | `seed_revision=` on `stamp` / `apply_stroke`, `.stale_seeds_rejected` | `clay_mesh_hit.seed_revision`, `clay_mesh_brush_desc.seed_revision`, `clay_mesh_sculptor_seed_revision`, `clay_multires_sculptor_seed_revision` |
+| The high-water marks a profile is tuned against | `mesh::PeakTelemetry` | `MeshSculptor.peak_telemetry()`, `.reset_peak_telemetry()` | `clay_mesh_sculptor_peak_telemetry`, `clay_multires_sculptor_peak_telemetry`, `clay_dynamic_sculptor_peak_telemetry`, and the three `_reset_` |
 
 Snakehook has no dedicated C entry point on purpose: it is a **resolver** that
 produces an ordinary stroke item, and the C ABI already builds those. A separate

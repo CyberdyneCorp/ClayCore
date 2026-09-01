@@ -5,6 +5,12 @@
       missing one — the reverted `add-item-spatial-index` is what that costs
       when it is done in the other order. FIRST to be pulled forward if an iPad
       build stalls on memory rather than on latency
+      OPEN BY KIND, NOT BY OMISSION, and left unticked deliberately. This is a
+      statement about where this change sits among the five Phase 5 rows, not
+      work to perform: there is nothing here to do and therefore nothing to
+      tick. The sequencing it asserts DID hold — the change was implemented
+      last, on a branch cut from main, and the two rows it is stacked behind
+      are still in flight. The ROADMAP row is where that now lives
 
 ## 1. Decide first
 
@@ -54,8 +60,16 @@
       DONE for the adaptive surface (`DynamicBvh` publishes into the table)
       and for each multires level (`ensure_level_chunks`, in the level CACHE so a
       trim releases it). The FIXED sculptor gets `partition_mesh_chunks` and does
-      not yet mark chunks beside its weld classes — that is design.md's open
-      question, blocked on the 1.1 measurement
+      not yet mark chunks beside its weld classes. That reason is now STALE as
+      first written — it said "blocked on the 1.1 measurement", and 1.1 is
+      answered. What is actually true is that the task's letter is met (the
+      adaptive surface and every multires level) and that the fixed sculptor's
+      own dirty set is still weld classes: a caller partitions with
+      `partition_mesh_chunks` and marks, which is what
+      `test_extreme_poly_scaling.cpp` and `test_chunk_transport.cpp` do, and
+      what the preview gate measures. Making the sculptor mark for itself is a
+      change to `src/mesh/sculpt.cpp`, which two concurrent branches are also
+      editing, so it is deferred to the rebase rather than done here
 
 ## 3. Local update path
 - [ ] 3.1 The query path is: brush volume → top-level tree → candidate chunks →
@@ -77,6 +91,15 @@
       AUTOMATICALLY — a caller that passes none still scans, so the requirement
       as written ("never a scan over every vertex") is not yet true of the
       hierarchy path on its own
+      OPEN, and the reason in one line: NOT ATTEMPTED beyond 3.2. Closing it
+      means either building a ray tree per multires level — measured at 689 ms
+      against 1.24 ms saved per stamp, which is the wrong trade — or having
+      `MultiresSculptor` seed itself from the previous stamp of the same
+      stroke, which is a change to the bind path in
+      `src/mesh/multires_sculpt.cpp` and `src/mesh/sculpt.cpp` and is DEFERRED
+      TO THE REBASE onto feat/shared-brush-runtime, whose per-stroke runtime
+      plan is where a carried-forward seed belongs. The gap is measured, not
+      estimated: 3.22x at ten times the model at the 1k footprint, in docs/09
 - [x] 3.2 An optional caller-supplied seed from the pick subsystem, validated
       against a revision, so a stroke does not re-search a centre the host
       already picked
@@ -395,6 +418,13 @@
       touch a file two concurrent branches are also editing. Named in the
       output rather than folded silently into a total. The stage split was
       already actionable: it is what located the hierarchy's seed scan in 3.1
+      OPEN: the remaining eight stages are DEFERRED TO THE REBASE onto
+      feat/shared-brush-runtime and feat/mesh-sculpt-layers. They all live
+      inside `MeshSculptor::stamp` in `src/mesh/sculpt.cpp`, which both sibling
+      branches are editing concurrently; instrumenting it here would turn a
+      mechanical rebase into a hand-merged one, and the shared brush runtime
+      lands a per-stroke plan that is the natural owner of the timers anyway.
+      Not attempted for that reason and no other
 - [x] 7.3 THE LOCALITY GATE: for one footprint, stamp time stays in one band
       from 1M to 20M vertices
       DONE twice. As a ctest gate at sizes CI can afford,
@@ -515,6 +545,13 @@
       NOT DONE and NOT DOABLE HERE: there is no reference iPad on this box, and
       `release_check.py`'s `device` row refuses for the same reason. The desktop
       half is done and is in docs/09
+      OPEN: NEEDS THE REFERENCE IPAD, and needs macOS to build for it. Not
+      attempted. What would have to be true to close it: a device on the gate
+      running the existing device harness over `examples/69_extreme_poly.py`'s
+      two model sizes plus a sustained multi-minute drag for thermals, reporting
+      median and p95 stamp latency, footprint and peak memory. The change
+      deliberately extends that gate rather than inventing a second one, so the
+      work is running it, not writing it
 - [ ] 7.9 Four presets green plus `release_check`; `tsan` under `setarch -R`;
       `check_layering.py` green including whatever 1.2 decided
       PARTIAL, and the report says exactly which. `cpu-only` green (2079 cases).
@@ -542,6 +579,15 @@
       capabilities, 30 exempt, IMPORTED module), check_gallery (251 tracked
       outputs) and `openspec validate --strict` all green. metal, cuda, opencl
       and vulkan still need toolkits this box does not have, so 7.9 stays open
+      OPEN: NEEDS MACOS/METAL AND THE CUDA, OPENCL AND VULKAN TOOLKITS, none of
+      which are on this box; CI covers macOS and Windows and will run them on
+      the pull request. `release_check.py` additionally keeps five environment
+      failures here — `tests`, `bindings`, `abi` and `wheel` from the anaconda
+      GLIBCXX_3.4.31 mismatch (the same pyclay suite passes 625/1-skipped under
+      LD_PRELOAD=/lib/x86_64-linux-gnu/libstdc++.so.6), and `device` from the
+      hardware gate 7.8 also waits on. Everything this box CAN run is green and
+      is recorded above; the task stays unticked because "four presets green"
+      is not something this box is able to observe
 - [x] 7.10 Docs: `docs/09-brush-latency-and-coverage.md` gains the new
       representations' measured costs; the memory documentation gains the
       eviction order verbatim, because a host implementer needs it in prose
@@ -556,3 +602,18 @@
       written to price — and docs/05 gains the paragraph a host needs beside the
       eviction order: a trim mid-drag is correct at every pressure and is free
       only at `Warning`
+      EXTENDED AGAIN IN THE DOCUMENTATION STAGE, past this task's letter and
+      because of the repository rule that a change updates whatever it makes
+      stale. docs/07 gains section 8e, "The surface tier" — the one-chunk
+      argument including where the multires partitioner would have failed
+      quietly, the four revisions, the transport and its typed refusal, the
+      memory profile and the eviction order, the preflight, the maintenance
+      queue and 1.3's per-item hint-or-contract answer, and the four gates with
+      the bytes-not-counts argument stated in numbers — plus eleven rows in
+      section 10's reachability table for the capabilities this change added.
+      README's "Multires and subdivision are still not implemented" was STALE ON
+      MAIN (add-mesh-multires landed) and this change made it more so, so it is
+      corrected, and a surface-tier bullet and a "Sculpt big" capability row are
+      added beside it. `openspec/ROADMAP.md`'s Phase 5 row 5 now records what
+      shipped, the measured chunk size, the two defects found, and what is not
+      done

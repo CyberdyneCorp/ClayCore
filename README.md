@@ -532,6 +532,7 @@ short version:
 |---|---|
 | **Author** | 28 primitives and 7 lifted 2D profiles, 17 combine ops under 5 blend profiles, 21 deformers, armatures (ZSpheres), control-point curves, the cut tool, grid/radial repetition and mirrors — all as an ordered, re-editable edit list with per-node exactness and Lipschitz tracking |
 | **Sculpt** | One stroke engine feeding four consumers: SDF edit items, voxel cells, mask fields and a mesh layer's own vertices. 10 voxel verbs with sculpt layers, 16 fixed-topology mesh verbs including colour, taper and twist on meshes, baked field relax/flatten/move-topological, and masking that gates *any* operation |
+| **Sculpt big** | Four mesh modes — fixed topology, adaptive topology, a Catmull-Clark multires hierarchy and a global voxel remesh. Under the three that persist, ONE chunk unit with four revisions, a dirty-chunk readback, a host-declared memory budget with an ordered pressure trim, and preflighted peaks. A dab costs what it touches: 200x the vertices at the same footprint is the same dab, gated in CI |
 | **Evaluate** | CPU, Metal, CUDA, OpenCL and Vulkan from one kernel source, tolerance-gated against the CPU reference; a sparse fp16 brick cache with LOD mips, a memory budget and eviction, so a host can answer a platform memory warning without destroying it |
 | **Get it out** | Watertight marching tetrahedra, surface nets, dual contouring and quad-only meshing; scene and brick picking; `.clayspace` documents; OBJ, PLY, FBX and glTF GLB **in both directions** |
 | **Embed** | A stable C ABI with versioned descriptors, a SwiftPM xcframework, `pyclay` (nanobind, numpy-native) and a `clay` CLI — with C-ABI/pyclay parity gated in CI |
@@ -561,8 +562,11 @@ Recorded as decisions rather than gaps, with the reasoning in
   hand back `indices` and `quads` byte for byte, and a caller converts into an
   adaptive surface deliberately rather than a brush slipping into one. A quad
   workflow does not pass through it: a dynamic surface is triangles and the
-  export says so. **Multires and subdivision are still not implemented** —
-  `openspec/ROADMAP.md` Phase 5 row 3.
+  export says so. ~~**Multires and subdivision are still not implemented**~~ —
+  **`mesh::MultiresSurface` shipped** as the fourth mesh mode: a deterministic
+  Catmull-Clark hierarchy with detail stored in a transported local frame, so a
+  change to the form beneath a wrinkle does not destroy the wrinkle. Sculpt
+  level and display level are independent — `examples/68_mesh_multires.py`.
 - ~~**No global topology reset**~~ — **`mesh::voxel_remesh` shipped.** A whole
   surface rebuilt through a signed narrow-band field at an explicit world voxel
   size: overlaps fuse, open surfaces close under an explicit policy, the result
@@ -576,6 +580,23 @@ Recorded as decisions rather than gaps, with the reasoning in
   artist did while waiting — and so a live sculptor over that layer is refused
   rather than left stamping into an index describing triangles that no longer
   exist.
+- **No device detection, and no memory policy the engine owns.** The surface
+  tier that makes a 20M-vertex model workable — one chunk unit under the fixed
+  mesh, the adaptive surface and every multires level, four revisions so a
+  stable-topology dab re-uploads positions and not an index buffer, a
+  dirty-chunk readback, a pressure trim in a published eviction order, and
+  preflighted peaks — takes its budget from a `SculptMemoryProfile` the HOST
+  fills in. There is no platform API and no `if iPad` anywhere in the portable
+  core: a policy that reads the hardware is a policy that cannot be tested on a
+  desktop. The engine also never evicts on its own high-water mark, because a
+  document that shrinks behind a host mid-save is a second invalidation source
+  the host cannot see. **What the engine does own is the property all of it
+  exists for — a dab costs what it TOUCHES, not what the model HOLDS** — and
+  that is a CI gate rather than an aspiration: 200x the vertices at the same
+  touched region is the same dab to within the measurement, with an identical
+  gathered workset from 100k to 20M. `examples/69_extreme_poly.py`, and the
+  matrix in
+  [`docs/09-brush-latency-and-coverage.md`](docs/09-brush-latency-and-coverage.md).
 - **No PBR channels.** Polypaint works on all three representations; roughness
   and metallic want a UV parameterisation and a texture set, which live
   upstream of this library.
