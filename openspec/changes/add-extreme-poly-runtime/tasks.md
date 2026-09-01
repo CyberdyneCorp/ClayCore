@@ -362,6 +362,27 @@
       recorded as awaiting the rebase: this branch is cut from main and does
       not carry add-mesh-sculpt-layers, and a layer stack of the benchmark's
       own invention would be a measurement of the benchmark
+      COMPLETED IN THE TEST STAGE, and completing it found that two of the five
+      footprints the requirement names had never been REPORTED. The binary
+      measured 100k and 500k every run; `tools/bench_extreme_poly.py` took its
+      baseline from the smallest size in the run, a footprint that does not fit
+      inside a model is SKIPPED, so neither key existed in the baseline row and
+      `report_ratios` dropped every key its baseline lacked. Both were in the
+      raw output every time and absent from the only table anybody reads. The
+      baseline is now per footprint — the smallest size that measured it — and
+      every row names the size it is against. The full 5x5 matrix then ran on a
+      quiet box (load 5.80 -> 2.39, spread 3.41, no row flagged, no note
+      emitted) and reads 1.00x / 0.96x / 0.92x / 0.99x / 0.98x on TOTAL P50 at
+      the five footprints, against model ratios of 200x, 200x, 200x, 20x and 4x.
+      docs/09 carries the table and the counts that do not depend on the box.
+      The other two arms were re-measured on the same quiet box (load 1.28 ->
+      1.31, the steadiest reading of the session): the adaptive surface at 100k
+      against 1M reads 1.19-1.55x on stamp+remesh and 1.03-1.28x on readback,
+      and the hierarchy reads 1.02-1.03x on the detail write with dirty chunks
+      of 14/15, 45/47 and 136/135 and uploads within 2% at ten times the model.
+      The hierarchy's stamp at the 1k footprint is 3.22x, which reproduces the
+      gap 3.1 names rather than contradicting it. The LAYERED rows still await
+      the rebase, unchanged
 - [ ] 7.2 Per-stage timing — seed, chunk query, gather, geodesic, snapshot,
       weight, alpha, automask, kernel, remesh, detail write, normals, index
       update, readback — because a total without stages is not actionable
@@ -387,6 +408,15 @@
       labour design.md describes. And as the benchmark at the sizes the
       requirement names: 20M against 1M at the same 20k footprint is 1.05x the
       total dab, 1.01x for the stamp itself
+      RE-PROVEN IN THE TEST STAGE, independently. With `surface_index()`
+      returning null after the refit the branch COMPILES and the gate fails on
+      both query shapes — median time ratio 5.40x and 4.38x against a band of
+      4.0 — and the two things that do NOT move are the reason the time
+      assertion has to be there at all: the worksets read 36 and 36, and 101 and
+      101, at both model sizes. A count-only gate sees nothing here. The
+      allocation and preview gates stayed green throughout, which is the
+      division of labour holding. And the timing claim now stands at every
+      footprint rather than one; see 7.1
 - [x] 7.4 THE ALLOCATION GATE: after warm-up an ordinary stable-topology stamp
       performs no heap allocation; adaptive stamps allocate only from
       preallocated pools
@@ -399,6 +429,16 @@
       where the mechanism is: the sculptor's gather does not consume the arena
       yet (3.1, 3.7), and asserting it there would assert something nothing
       implements
+      PROVEN IN THE TEST STAGE to catch its regression, and the proof is the
+      argument for asserting BYTES rather than only counts, in numbers. With one
+      piece of per-stamp bookkeeping written as a sweep over the model — a
+      `std::vector` sized to the class count, allocated inside `gather` — the
+      revert COMPILES and the gate fails eight assertions. The COUNT reads 1 at
+      BOTH model sizes: identical, unremarkable, and exactly what a
+      warm-up-sized buffer would also read. The BYTES read 9,604 and 148,996, a
+      15.5x ratio against a 15.5x model, which names the defect outright. The
+      blind spot this repo was warned about, reproduced deliberately: a gate
+      that counts touches cannot see an O(surface) read
 - [x] 7.5 THE PREVIEW GATE: bytes handed to a host per stamp follow the dirty
       chunks and not the model size
       DONE in `test_chunk_transport.cpp` (a hierarchy at 10 against 40 base
@@ -406,6 +446,15 @@
       asserted to have grown so that "the dirty bytes did not" is a claim),
       in `test_extreme_poly_scaling.cpp` on the fixed mesh, and in pyclay. The
       example measures it too: 9.2 KiB on both of two models 16x apart
+      PROVEN IN THE TEST STAGE to catch its regression, twice. With
+      `ChunkTable::mark` entering every live chunk into the dirty set — a
+      transport that reports the surface, which is what one written as a sweep
+      does and which is CORRECT, only expensive — the revert COMPILES and the
+      gate reads byte_ratio 15.89x against a model ratio of 16.00x: the
+      transport following the model to three significant figures. And the
+      example catches the same thing from the host's side, with the large
+      model's dab uploading its whole surface: SystemExit, exit 1, "a dab hands
+      the host 602112 bytes on the large model against 9408 on the small one"
 - [x] 7.6 THE MEMORY-PRESSURE GATE: 4.6, as a test rather than a claim
       DONE: `tests/unit/test_memory_trim.cpp`, and the C and pyclay halves in
       `test_c_surface_chunks.cpp` and `test_surface_transport.py`. Proven to
@@ -434,6 +483,12 @@
       case under `asan-ubsan` reports `heap-use-after-free` in
       `MeshSculptor::valid()` reading storage freed by
       `MultiresSurface::drop_all_caches`
+      RE-RUN INDEPENDENTLY IN THE TEST STAGE. With `release_generation` made a
+      no-op the branch COMPILES and three cases fail nine assertions, and the
+      failure prints the defect rather than merely reporting one: the checksum
+      is EQUAL to the previous dab's at i = 1 and again at i = 3, which is every
+      second dab of the drag vanishing, with `stamp` still returning the classes
+      it believed it had moved
 - [x] 7.7 Peak telemetry — scratch, workset, dirty chunks, topology operations
       — reported as high-water marks for profile tuning
       DONE. The type and its high-water semantics were already here; what this
@@ -472,6 +527,21 @@
       this environment has (bindings, abi, tests and wheel from the anaconda
       GLIBCXX_3.4.31 mismatch, device from the hardware gate). The metal, cuda,
       opencl and vulkan presets need toolkits this box does not have
+      RE-RUN IN THE TEST STAGE, and this is what that stage itself ran rather
+      than what it inherited. `cpu-only`: 2107 cases, 2107 passed, 14,990,399
+      assertions, 0 failed (2106 on arrival; the one new case is the typed
+      refusal above). pyclay: 625 passed, 1 skipped, under
+      LD_PRELOAD=/lib/x86_64-linux-gnu/libstdc++.so.6 for the anaconda
+      GLIBCXX_3.4.31 mismatch. `asan-ubsan` over the change's cases: see the
+      stage report. `tsan` under `setarch -R` over the same set: 71 cases, 71
+      passed, 30,679 assertions, ZERO ThreadSanitizer warnings — run alone,
+      because a first attempt sharing the box with an `asan-ubsan` run and a
+      sibling worktree at load 160 was killed with exit 137, which on this box
+      is OOM and not a finding. check_layering, check_c_abi (hygiene + ctypes
+      FFI against the built libclay_shared.so), check_binding_parity (668
+      capabilities, 30 exempt, IMPORTED module), check_gallery (251 tracked
+      outputs) and `openspec validate --strict` all green. metal, cuda, opencl
+      and vulkan still need toolkits this box does not have, so 7.9 stays open
 - [x] 7.10 Docs: `docs/09-brush-latency-and-coverage.md` gains the new
       representations' measured costs; the memory documentation gains the
       eviction order verbatim, because a host implementer needs it in prose

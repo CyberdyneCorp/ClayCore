@@ -562,6 +562,49 @@ query 10 us, stamp 4.7 ms, index update 1.8 ms, readback 8 us. The stamp
 dominates, which is the shape a runtime should have — the work is the
 deformation and not the bookkeeping around it.
 
+**And now at ALL FIVE footprints, which the report used to drop.** The table
+above is one footprint because for a long time one footprint was all the driver
+would print: it took its baseline from the smallest size in the run, and a
+footprint that does not fit inside a model is skipped, so the 100k footprint
+first exists at 1M vertices and the 500k one at 5M. Neither was in the baseline
+row, so neither appeared — measured by the binary every time, printed in the raw
+output every time, and absent from the only table anybody reads. The baseline is
+now taken per footprint from the smallest size that measured it, and every row
+names the size it is against. TOTAL, P50 and P95, on a quiet box (load 5.80 ->
+2.39 across the whole matrix, no row flagged):
+
+| Footprint | Against | P50 | P95 | Model ratio |
+|---|---|---|---|---|
+| 1k | 20M vs 100k | **1.00x** | 1.02x | 200x |
+| 5k | 20M vs 100k | **0.96x** | 1.01x | 200x |
+| 20k | 20M vs 100k | **0.92x** | 0.90x | 200x |
+| 100k | 20M vs 1M | **0.99x** | 0.99x | 20x |
+| 500k | 20M vs 5M | **0.98x** | 1.02x | 4x |
+
+Two hundred times the vertices, at the same touched region, is the same dab to
+within the measurement. The only stage anywhere above 1.5x is the chunk query at
+the 100k footprint (1.52-1.57x), which is the logarithmic term and is 25 us
+against a stamp of 27 ms. Absolutes at the 20k footprint, 1M against 20M: P50
+6279 -> 6216 us, P95 7980 -> 7995, P99 8243 -> 8353, max 8664 -> 8715.
+
+**The counts are the part that does not depend on the box at all**, and they
+are the strongest form of the claim because no amount of load moves them. At
+each footprint the gathered workset is IDENTICAL from 100k to 20M vertices —
+885, 3415, 11178, 56339 and 252935 vertices — and the per-dab upload holds a
+band of a few per cent (69-87 KB at 1k, 1125-1163 KB at 20k, 26.5-26.7 MB at
+500k) while the model behind it grows two hundredfold. A timing ratio can be
+argued with on a shared machine; an identical workset cannot.
+
+**A word on measuring this here, because it cost two full matrices to learn.**
+The driver records the one-minute load either side of every row and flags a row
+whose load MOVED. That check is necessary and it is not sufficient: a row taken
+under a load that held steady at 11.6 for its whole duration passes it, and the
+ratio between that row and one taken under 7 is still noise. The first full
+matrix read 2.6x-8.5x at 5M and 1.3x-2.7x at 20M — the model getting cheaper as
+it grows, which is arithmetic nothing about the engine can produce — and nothing
+in the output said why. The driver now also compares the load LEVEL across rows
+and refuses to let a spread pass silently.
+
 **What a host is handed per dab.** The transport is per chunk and the four
 revisions are what make it cheap: a stamp with stable topology advances the
 GEOMETRY revision and leaves the TOPOLOGY revision alone, so a host re-uploads

@@ -122,11 +122,11 @@ def arguments():
 def measure_rows(binary, sizes, args):
     """One row per size, each with the load either side of it recorded.
 
-    Returns (rows, raw output, notes). A row is never silently dropped: a
+    Returns (rows, load, raw output, notes). A row is never silently dropped: a
     reader deciding whether to trust a number needs to see that it was taken
     and why it is suspect, which is what `notes` carries.
     """
-    rows, raw, notes = {}, [], []
+    rows, load, raw, notes = {}, {}, [], []
     for size in sizes:
         need, have = predicted_mb(size), free_mb()
         if need > have:
@@ -148,23 +148,62 @@ def measure_rows(binary, sizes, args):
             notes.append(f"{size}: load moved {before:.2f} -> {after:.2f}; "
                          f"re-run before quoting this row")
         rows[size] = parse(text)
-    return rows, raw, notes
+        load[size] = (before + after) / 2.0
+    return rows, load, raw, notes
+
+
+def load_notes(load, tolerance):
+    """The check the within-row one cannot make.
+
+    A row taken under a load that held steady at 11.6 for its whole duration
+    passes the movement check, and a ratio between it and a row taken under 7 is
+    still noise presented as a finding. It was not hypothetical: the 5M row of
+    the first full matrix read 2.6x-8.5x against 100k while the 10M and 20M rows
+    read 1.3x-2.7x, which is the model getting CHEAPER as it grows — arithmetic
+    nothing about the engine can produce. The load level was the difference, and
+    nothing in the output said so.
+    """
+    if len(load) < 2:
+        return []
+    lo, hi = min(load.values()), max(load.values())
+    if hi - lo <= tolerance:
+        return []
+    trail = ", ".join(f"{size}: {value:.2f}" for size, value in sorted(load.items()))
+    return [f"the load LEVEL differs by {hi - lo:.2f} across rows ({trail}); rows taken "
+            f"under different loads are not comparable to each other however steady each "
+            f"one was, and the ratios below span them"]
 
 
 def report_ratios(rows, measured):
-    """Every stage of every footprint against the smallest size measured."""
-    base = measured[0]
-    print(f"\n# RATIOS against the {base}-vertex row, same footprint, same stage.")
-    print("# A stage that is O(model) reads as the model ratio; one that costs what it")
-    print("# touches reads as about 1.")
+    """Every stage of every footprint against the smallest size that HAS it.
+
+    THE BASELINE IS PER KEY, and the reason is 7.1's own matrix rather than a
+    refinement. A footprint that does not fit inside a model is skipped, so the
+    500k footprint first exists at 5M vertices and the 100k one at 1M. A single
+    baseline taken from the smallest size measured therefore has neither key,
+    and a report that skips what its baseline lacks drops the two LARGEST
+    footprints the requirement names — measured by the binary, printed in the
+    raw output, and absent from the only table anybody reads. Each row now says
+    which size it is against, because a ratio whose baseline is not stated is
+    not a number.
+    """
+    print("\n# RATIOS against the smallest size that measured that footprint (named per row),")
+    print("# same footprint, same stage. A stage that is O(model) reads as the model ratio;")
+    print("# one that costs what it touches reads as about 1.")
     keys = sorted({k for row in rows.values() for k in row})
     for key in keys:
-        if key not in rows[base]:
+        present = [size for size in measured if key in rows[size]]
+        if len(present) < 2:
+            representation, footprint, stage = key
+            print(f"  {representation:18s} fp {footprint:7d}  {stage:14s} | "
+                  f"only {present[0] / 1e6:.1f}M measured it; no ratio")
             continue
+        base = present[0]
         b50, b95 = rows[base][key][0:2]
-        cells = [_ratio_cell(rows[size].get(key), size, b50, b95) for size in measured[1:]]
+        cells = [_ratio_cell(rows[size].get(key), size, b50, b95) for size in present[1:]]
         representation, footprint, stage = key
-        print(f"  {representation:18s} fp {footprint:7d}  {stage:14s} | " + " | ".join(cells))
+        print(f"  {representation:18s} fp {footprint:7d}  {stage:14s} | "
+              f"vs {base / 1e6:5.1f}M | " + " | ".join(cells))
 
 
 def _ratio_cell(cell, size, b50, b95):
@@ -182,7 +221,8 @@ def main() -> int:
         return 2
 
     sizes = [int(s) for s in args.sizes.split(",")]
-    rows, raw, notes = measure_rows(binary, sizes, args)
+    rows, load, raw, notes = measure_rows(binary, sizes, args)
+    notes += load_notes(load, args.load_tolerance)
     if args.out:
         pathlib.Path(args.out).write_text("\n".join(raw))
 
