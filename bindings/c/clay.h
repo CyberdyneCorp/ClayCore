@@ -2123,7 +2123,14 @@ clay_result clay_layer_consolidation_cost(const clay_document* doc, clay_layer_i
  * same bake taken on a Linux box produce the same samples from the same
  * document. Evaluating that volume AFTERWARDS is where a backend enters, and
  * clay_eval_points, the parity suite and clay_backend_supports are how that
- * half is asked about. */
+ * half is asked about.
+ *
+ * IT DOES CHANGE THE MARCH, THOUGH, ON EVERY PLATFORM EQUALLY. A lattice is
+ * only a BOUND on the distance to its own surface, so a sampled volume declares
+ * sqrt(3) times its samples' Lipschitz and this layer's safe step scale falls
+ * from 1.0 to at most 0.577 — roughly three times the sphere-trace steps for
+ * the same shape. See clay_sdf_smooth_commit for the measured numbers and for
+ * what it means to a host with a fixed step budget. */
 clay_result clay_layer_consolidate(clay_document* doc, clay_layer_id layer,
                                    const clay_consolidation_params* params,
                                    const float region_min[3], const float region_max[3],
@@ -5151,6 +5158,26 @@ clay_result clay_sdf_smooth_preview_item(const clay_sdf_smooth_tx* tx, clay_item
  *
  * NEVER re-samples the layer: the volume being installed is the one the dabs
  * were applied to, which is the entire point of the transaction.
+ *
+ * IT COSTS THE MARCHER, AND A HOST HAS TO KNOW BEFORE IT DRAWS. The layer that
+ * comes back is one SAMPLED VOLUME where it was a list of parametric items, and
+ * a sampled volume declares a Lipschitz of sqrt(3) times its samples' — so
+ * clay_safe_step_scale for that layer falls from 1.0 to at most 0.577, and the
+ * sphere trace takes correspondingly more steps. Measured on a roughened ball:
+ * 7.1 steps a ray parametric, 22.9 once consolidated AT THE SAME SHAPE, and
+ * 33.8 after a Smooth stroke was committed over it — so most of the rise is
+ * the lattice and the rest is the relax, which flattens the field and shortens
+ * every step (tests/unit/test_parity.cpp, "consolidating a layer really does
+ * change the march").
+ *
+ * That is inherent to baking a field, not a defect: a lattice is only a bound
+ * on the distance to its own surface, and the marcher may not overstep a bound.
+ * What it means for a caller is that a renderer with a FIXED step budget draws
+ * a committed Smooth worse than it drew the parametric layer — dropped or
+ * ragged pixels where rays run out of iterations — and that two renderers with
+ * different budgets disagree about the same document (issue #379). The budget
+ * is the host's, so raising it is the host's; `out_budget`'s `safe_step_scale`
+ * and clay_layer_safe_step_scale are what say by how much.
  *
  * CLAY_ERROR_INVALID_ARGUMENT, changing nothing, when the layer was edited,
  * removed or protected since begin. `out_budget` may be NULL. The transaction

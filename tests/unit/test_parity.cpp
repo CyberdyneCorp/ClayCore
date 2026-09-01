@@ -10,8 +10,11 @@
 
 #include "clay/eval/backend.h"
 #include "clay/eval/bake_points.h"
+#include "clay/field/relax.h"
+#include "clay/kernel/field.h"
 #include "clay/scene/bounds.h"
 #include "clay/scene/consolidate.h"
+#include "clay/session/sdf_sculpt.h"
 #include "kernel_utils.h"
 #include "scene_utils.h"
 
@@ -675,20 +678,119 @@ TEST_CASE("parity: a grid batch answers what per-grid evaluation does") {
     }
 }
 
-TEST_CASE("parity: raycast hits agree with reference sphere tracing") {
+namespace {
+
+// The scenes the raycast comparison runs over.
+//
+// It used to run over one: a sphere and a box, both EXACT, so the tape's
+// Lipschitz was 1 and the march took ~9 steps a ray. That is not the march a
+// host draws a worked model with, and it is not the march #379 reports a
+// divergence in. A layer that has been CONSOLIDATED — by clay_layer_consolidate
+// or by clay_sdf_smooth_commit — is one sampled volume, and a sampled volume
+// declares sqrt(3) * L (kernel::cfi_volume), so the same shape marches at a
+// step scale of 0.577 and costs three to five times the steps. Nothing was
+// comparing backends over THAT, here or in the device suite — which has no
+// raycast at all.
+struct RayScene {
+    std::string name;
+    scene::Document doc;
+};
+
+// A roughened ball: a base sphere with blended stamps over it, some
+// subtracted, so a consolidation of it is a worked surface rather than a
+// resampled sphere.
+scene::Document roughened_ball() {
     scene::Document doc;
     scene::Layer& l = doc.add_sdf_layer("l");
-    l.sdf->insert(item(scene::Prim::sphere(1.0f), cf3(0, 0, 0)));
-    l.sdf->insert(item(scene::Prim::box(cf3(0.4f, 0.4f, 0.4f)), cf3(1.2f, 0, 0), scene::Op::Add,
-                       scene::Blend{scene::BlendProfile::Quadratic, 0.1f}));
-    scene::Tape tape = scene::compile_document(doc);
+    l.sdf->insert(item(scene::Prim::sphere(0.8f), cf3(0, 0, 0)));
+    clay_test::Lcg rng(4271);
+    for (int i = 0; i < 24; ++i) {
+        cfloat3 d = cf3(rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1));
+        const float len = clength(d);
+        if (len < 1e-3f) continue;
+        d = d * (1.0f / len);
+        l.sdf->insert(item(scene::Prim::sphere(0.11f + 0.04f * rng.range(-1, 1)), d * 0.8f,
+                           i % 3 == 0 ? scene::Op::Subtract : scene::Op::Add,
+                           scene::Blend{scene::BlendProfile::Quadratic, 0.05f}));
+    }
+    return doc;
+}
 
+// One Smooth stroke over `doc`'s only layer, committed — so the layer becomes
+// the single sampled volume a consolidation leaves behind.
+bool smooth_and_commit(scene::Document& doc) {
+    session::SdfSculptPolicy policy;
+    policy.cell_size = 0.03f;
+    policy.band = 0.12f;
+    policy.padding = 0.12f;
+    // The stroke's own consolidation would install a SECOND volume over the
+    // first; one is what a host draws and one is what this is about.
+    policy.complexity.allow_consolidation = false;
+    std::optional<session::SdfSmoothTransaction> tx = session::SdfSmoothTransaction::begin(
+        doc, doc.layers.front().id, policy, eval::pooled_bake_eval());
+    if (!tx) return false;
+    field::RelaxSettings relax;
+    relax.strength = 0.6f;
+    relax.radius_cells = 1;
+    relax.iterations = 2;
+    relax.centre = cf3(0, 0, 0.8f);
+    relax.region_radius = 0.35f;
+    relax.falloff = 0.1f;
+    tx->update(relax);
+    return tx->commit(nullptr);
+}
+
+std::vector<RayScene> ray_scenes() {
+    std::vector<RayScene> scenes;
+    {
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("l");
+        l.sdf->insert(item(scene::Prim::sphere(1.0f), cf3(0, 0, 0)));
+        l.sdf->insert(item(scene::Prim::box(cf3(0.4f, 0.4f, 0.4f)), cf3(1.2f, 0, 0), scene::Op::Add,
+                           scene::Blend{scene::BlendProfile::Quadratic, 0.1f}));
+        scenes.push_back({"exact_sphere_box", std::move(doc)});
+    }
+    {   // A roughened ball after a Smooth stroke was COMMITTED — the path
+        // #379 is about. Built through the real transaction rather than by
+        // baking a lambda, because what the commit installs is not a bake:
+        // the dabs relax the samples, the commit redistances the relaxed
+        // field and compacts it, and the stored Lipschitz is measured off the
+        // result.
+        //
+        // The bake and the relax are CPU-only and take no backend (see
+        // clay_layer_consolidate), so every platform installs the SAME volume.
+        // What a backend can still differ about is the march through it, and
+        // that is what this compares.
+        scene::Document doc = roughened_ball();
+        REQUIRE(smooth_and_commit(doc));
+        scenes.push_back({"smooth_committed_volume", std::move(doc)});
+    }
+    return scenes;
+}
+
+// One scene's worth of the comparison: the CPU's own march is the reference,
+// and every other registered backend has to land on the same surface.
+void compare_raycast(const RayScene& rs) {
+    CAPTURE(rs.name);
+    const scene::Tape tape = scene::compile_document(rs.doc);
+    REQUIRE(!tape.bounds.empty());
+
+    // Aimed at the scene rather than at fixed coordinates, so a fixture may
+    // be re-shaped without silently firing past it and comparing 128 misses.
+    // Pulled in towards the centre, because a ray box that exactly matches the
+    // bound spends most of its rays on the corners the model does not fill.
+    const math::Aabb bound = tape.bounds;
+    const cfloat3 centre = (bound.min + bound.max) * 0.5f;
+    const math::Aabb box{centre + (bound.min - centre) * 0.7f,
+                         centre + (bound.max - centre) * 0.7f};
     const std::size_t n = 128;
     clay_test::Lcg rng(513);
     std::vector<float> rays(n * 6);
     for (std::size_t i = 0; i < n; ++i) {
-        cfloat3 ro = cf3(rng.range(-1, 2), rng.range(-1, 1), -4.0f);
-        cfloat3 rd = cnormalize(cf3(rng.range(-0.2f, 0.2f), rng.range(-0.2f, 0.2f), 1.0f));
+        const cfloat3 ro = cf3(rng.range(box.min.x, box.max.x), rng.range(box.min.y, box.max.y),
+                               box.min.z - 3.0f);
+        const cfloat3 rd =
+            cnormalize(cf3(rng.range(-0.05f, 0.05f), rng.range(-0.05f, 0.05f), 1.0f));
         rays[i * 6] = ro.x;
         rays[i * 6 + 1] = ro.y;
         rays[i * 6 + 2] = ro.z;
@@ -711,7 +813,7 @@ TEST_CASE("parity: raycast hits agree with reference sphere tracing") {
         if (backend == cpu) continue;
         CAPTURE(backend->name());
         std::vector<eval::RayHit> got(n);
-        eval::Status s = backend->raycast(tape, q, got.data());
+        const eval::Status s = backend->raycast(tape, q, got.data());
         if (s == eval::Status::Unsupported) continue;
         REQUIRE(s == eval::Status::Ok);
         for (std::size_t i = 0; i < n; ++i) {
@@ -721,6 +823,93 @@ TEST_CASE("parity: raycast hits agree with reference sphere tracing") {
                 CHECK(cabs(got[i].t - ref[i].t) < 5e-3f);
         }
     }
+}
+
+}  // namespace
+
+TEST_CASE("parity: raycast hits agree with reference sphere tracing") {
+    for (const RayScene& rs : ray_scenes()) compare_raycast(rs);
+}
+
+// TEETH for the scene above, and the number the scene exists because of.
+//
+// A consolidated fixture that redistanced away — or one that quietly stopped
+// being a volume — would march like the parametric one, and the comparison
+// would then be running the easy path twice under two names. So what makes the
+// second scene worth its runtime is asserted rather than assumed: the step
+// scale a sampled volume declares, and the extra steps that go with it.
+//
+// The property that separates the two forms is the LIPSCHITZ, not exactness: a
+// smooth union is already inexact, and costs the marcher nothing for it.
+//
+// Measured BEFORE AND AFTER ON ONE SHAPE, not one shape against another —
+// otherwise the comparison is about which fixture is knobblier.
+TEST_CASE("parity: consolidating a layer really does change the march") {
+    // Steps per ray, over rays fired at the model from every direction.
+    auto mean_steps = [](const scene::Tape& tape) {
+        auto f = [&](cfloat3 p) { return tape.eval(p).d; };
+        const float ss = tape.safe_step_scale();
+        clay_test::Lcg rng(88);
+        double total = 0;
+        int rays = 0;
+        for (int i = 0; i < 256; ++i) {
+            cfloat3 dir = cf3(rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1));
+            const float len = clength(dir);
+            if (len < 1e-3f) continue;
+            dir = dir * (1.0f / len);
+            const kernel::CRayHit h =
+                kernel::craycast(f, dir * 3.0f, dir * -1.0f, 0.0f, 6.0f, 1e-4f, ss, 1.4f, 256);
+            total += h.steps;
+            ++rays;
+        }
+        return total / (double)rays;
+    };
+
+    scene::Document doc = roughened_ball();
+    const scene::Tape before = scene::compile_document(doc);
+    const double before_steps = mean_steps(before);
+    // Spheres and smooth unions are all 1-Lipschitz, so the parametric form
+    // steps by the full distance.
+    CHECK(before.safe_step_scale() == doctest::Approx(1.0f));
+
+    // The SAME SHAPE, only consolidated: no stroke, nothing moved, just the
+    // layer's field baked onto a lattice. The control, so the rise can be
+    // split between what the REPRESENTATION costs and what the stroke adds on
+    // top of it — they are not the same size and it would be easy to bill the
+    // whole of it to either one.
+    scene::Document baked = roughened_ball();
+    scene::ConsolidationParams params;
+    params.cell_size = 0.03f;
+    params.band = 0.12f;
+    params.padding = 0.12f;
+    REQUIRE(scene::consolidate_layer(baked, baked.layers.front().id, params, nullptr, nullptr,
+                                     eval::pooled_bake_eval()));
+    const scene::Tape baked_tape = scene::compile_document(baked);
+    const double baked_steps = mean_steps(baked_tape);
+
+    scene::Document smoothed = roughened_ball();
+    REQUIRE(smooth_and_commit(smoothed));
+    const scene::Tape after = scene::compile_document(smoothed);
+    const double after_steps = mean_steps(after);
+
+    // cfi_volume declares sqrt(3) * max(sample_lipschitz, 1), so the scale is
+    // at most 1/sqrt(3) = 0.577 however clean the samples measure — for both
+    // baked forms, because it is the storage that says so and not the values.
+    CAPTURE(baked_tape.safe_step_scale());
+    CAPTURE(after.safe_step_scale());
+    CHECK(baked_tape.safe_step_scale() <= 0.578f);
+    CHECK(after.safe_step_scale() <= 0.578f);
+
+    // Measured on this fixture: 7.1 steps a ray parametric, 22.9 baked
+    // (3.2x — the lattice alone, at the same shape), 33.8 smoothed and
+    // committed (4.8x). So most of it is the representation, and the rest is
+    // the relax: a smoothed field is flatter, so each step is shorter. The
+    // gates are loose because the numbers are the point, not their values.
+    CAPTURE(before_steps);
+    CAPTURE(baked_steps);
+    CAPTURE(after_steps);
+    CHECK(baked_steps > before_steps * 2.0);
+    CHECK(after_steps > before_steps * 2.0);
 }
 
 TEST_CASE("batch dispatch covers every element exactly once, at every size") {

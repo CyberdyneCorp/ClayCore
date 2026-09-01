@@ -117,6 +117,26 @@ and byte-identity with the serial walk is the contract the pool is held to.
 Which backend a host *draws* the result with is the separate question, and the
 one `clay_eval_points` and the parity suite answer.
 
+**What a bake does change is the march.** A consolidated layer is one *sampled
+volume* where it was a list of parametric items, and a sampled volume declares a
+Lipschitz of `sqrt(3)` times its samples' (`kernel::cfi_volume`) — because a
+lattice is only a *bound* on the distance to its own surface, and the sphere
+trace may not overstep a bound. So `clay_safe_step_scale` for that layer falls
+from 1.0 to at most 0.577 and the trace takes correspondingly more steps.
+Measured on a roughened ball: 7.1 steps a ray parametric, 22.9 once
+consolidated *at the same shape*, and 33.8 after a Smooth stroke was committed
+over it — so most of the rise is the lattice, and the rest is the relax, which
+flattens the field and shortens every step. A renderer with a *fixed*
+step budget therefore draws a consolidated layer worse than it drew the
+parametric one, and two renderers with different budgets disagree about the same
+document — which is a rendering-budget difference, not an evaluation one (issue
+#379). `clay_sculpt_budget.safe_step_scale` and `clay_layer_safe_step_scale` are
+what say by how much. It also puts a floor under
+`clay_sculpt_policy.min_safe_step_scale`: that threshold is what *triggers* a
+consolidation, so setting it above `1/sqrt(3)` marks every already-consolidated
+layer permanently over budget — the collapse is refused (there is nothing left
+to collapse) but the report never comes back under.
+
 ## 4. Operation inventory (the complete SDF vocabulary)
 
 Everything below ships in `clay::kernel` with CPU reference + per-backend parity tests. Items marked *(bound)* propagate non-exactness through the tree per principle 3.

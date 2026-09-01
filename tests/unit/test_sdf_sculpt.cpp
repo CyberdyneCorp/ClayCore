@@ -1016,6 +1016,48 @@ TEST_CASE("sculpt: an authorised policy keeps firing, not just once") {
           policy.complexity.max_deformer_chain + 1);
 }
 
+// What a commit costs the marcher, and the ceiling that puts under the policy.
+//
+// The layer that comes back from a commit is one SAMPLED VOLUME, and
+// kernel::cfi_volume declares sqrt(3) * max(sample_lipschitz, 1) for one — so
+// 1/sqrt(3) = 0.577 is the BEST a consolidated layer can ever report, however
+// clean its samples measure. That is worth a number rather than a shrug,
+// because it decides two things a host gets wrong otherwise: a fixed step
+// budget draws the committed layer worse than the parametric one it replaced
+// (issue #379), and a min_safe_step_scale above 0.577 is unsatisfiable, so the
+// layer stays over budget for ever while the collapse is correctly refused.
+//
+// The case below uses 1.5 for "nothing can satisfy this". This one pins where
+// "nothing" actually starts.
+TEST_CASE("sculpt: a commit lands at the ceiling a sampled volume declares") {
+    Document doc = two_balls();
+    const LayerId id = doc.layers.front().id;
+    const float before = compile_document(doc).safe_step_scale();
+    CHECK(before == doctest::Approx(1.0f));  // spheres and a smooth union
+
+    SdfSculptPolicy policy = smooth_policy();
+    // Just above the ceiling, not far above it: the point is that 0.6 is
+    // already out of reach, not that 1.5 is.
+    policy.complexity.min_safe_step_scale = 0.6f;
+    policy.complexity.allow_consolidation = true;
+
+    auto tx = SdfSmoothTransaction::begin(doc, id, policy);
+    REQUIRE(tx);
+    tx->update(dab(cf3(0, 0.42f, 0)));
+    REQUIRE(tx->commit(nullptr));
+
+    const float after = compile_document(doc).safe_step_scale();
+    CAPTURE(after);
+    CHECK(after == doctest::Approx(1.0f / std::sqrt(3.0f)).epsilon(1e-4));
+    CHECK(tx->budget().report.safe_step_scale == doctest::Approx(after));
+
+    // Over budget, and nothing to do about it: re-baking a layer that is
+    // already one volume would only make it steeper.
+    CHECK(tx->budget().over_budget);
+    CHECK_FALSE(tx->budget().consolidated);
+    REQUIRE(doc.layers.front().sdf->roots.size() == 1);
+}
+
 TEST_CASE("sculpt: a bare consolidated layer is still not re-baked") {
     // The other half of the pair above: relaxing the check must not turn it
     // off. A single volume item with an EMPTY chain is what a bake produces,

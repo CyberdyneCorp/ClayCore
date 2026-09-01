@@ -9,6 +9,7 @@
 #include "clay.h"
 #include "clay/eval/backend.h"
 #include "clay/io/parity_fixture.h"
+#include "clay/kernel/field.h"
 #include "clay/kernel/ops.h"
 #include "clay/kernel/prim3d.h"
 
@@ -220,6 +221,34 @@ TEST_CASE("parity fixture: expectations hold on every registered backend") {
                 CAPTURE(i);
                 CHECK(within(got[i], c.distances[i], tol));
             }
+
+            // ...and the MARCH, on the backend's own raycast. A backend that
+            // evaluates the field correctly can still trace it differently —
+            // this is where that shows.
+            if (c.rays.empty()) continue;
+            std::vector<float> rays;
+            rays.reserve(c.rays.size() * 6);
+            for (const io::FixtureRay& r : c.rays) {
+                rays.push_back(r.origin.x);
+                rays.push_back(r.origin.y);
+                rays.push_back(r.origin.z);
+                rays.push_back(r.direction.x);
+                rays.push_back(r.direction.y);
+                rays.push_back(r.direction.z);
+            }
+            const io::FixtureMarch m = io::kernel_parity_march();
+            eval::RayQuery rq{rays.data(), c.rays.size(), m.tmin, m.tmax, m.eps, m.max_steps};
+            std::vector<eval::RayHit> hits(c.rays.size());
+            const eval::Status s = backend->raycast(c.tape, rq, hits.data());
+            if (s == eval::Status::Unsupported) continue;
+            REQUIRE(s == eval::Status::Ok);
+            for (std::size_t i = 0; i < hits.size(); ++i) {
+                CAPTURE(i);
+                CHECK(hits[i].hit != 0);
+                if (!hits[i].hit) continue;
+                CHECK(hits[i].t - c.rays[i].t <= tol.hit_t_late_abs);
+                CHECK(c.rays[i].t - hits[i].t <= tol.hit_t_early_abs);
+            }
         }
     }
 }
@@ -249,7 +278,105 @@ TEST_CASE("parity fixture: export is deterministic and parseable as JSON") {
          at = a.find("\"name\":", at + 1))
         ++names;
     CHECK(names == io::kernel_parity_cases().size());
-    CHECK(a.find("\"schema\": 1") != std::string::npos);
+    CHECK(a.find("\"schema\": 2") != std::string::npos);
+    CHECK(a.find("\"march\": {") != std::string::npos);
+    CHECK(a.find("\"rays\":[") != std::string::npos);
+}
+
+// The march half exists because the point half cannot reach it: a preview that
+// evaluates the field perfectly can still TRACE it wrongly, and until this the
+// fixture had no case that noticed. docs/06 has said "step by safe_step_scale,
+// never by 1" since the loft and sweep cases landed; nothing enforced it.
+TEST_CASE("parity fixture: the march half is there, and reaches the bound cases") {
+    std::vector<io::FixtureCase> cases = io::kernel_parity_cases();
+    std::size_t rays = 0, bound_with_rays = 0;
+    for (const io::FixtureCase& c : cases) {
+        rays += c.rays.size();
+        if (c.tape.safe_step_scale() < 1.0f && !c.rays.empty()) ++bound_with_rays;
+        for (const io::FixtureRay& r : c.rays) {
+            CAPTURE(c.name);
+            CHECK(std::fabs(kernel::clength(r.direction) - 1.0f) < 1e-5f);
+            CHECK(r.t > 0.0f);
+        }
+    }
+    CHECK(rays > 500);
+    // A march that only ever traced 1-Lipschitz fields would say nothing about
+    // the rule it exists to enforce.
+    CHECK(bound_with_rays >= 8);
+}
+
+// An expectation a correct consumer cannot meet is worse than none: it teaches
+// hosts to widen the tolerance until the gate stops working. So every exported
+// ray is re-marched here by marchers that are all RIGHT and all different, and
+// each has to land inside the published allowance.
+TEST_CASE("parity fixture: every exported ray survives a differently-written marcher") {
+    const io::FixtureTolerance tol;
+    const io::FixtureMarch m = io::kernel_parity_march();
+    for (const io::FixtureCase& c : io::kernel_parity_cases()) {
+        CAPTURE(c.name);
+        auto field = [&c](cfloat3 p) { return c.tape.eval(p).d; };
+        const float scale = c.tape.safe_step_scale();
+        for (std::size_t i = 0; i < c.rays.size(); ++i) {
+            const io::FixtureRay& r = c.rays[i];
+            CAPTURE(i);
+            const kernel::CRayHit variants[] = {
+                // over-relaxation off — the plain Hart trace
+                kernel::craycast(field, r.origin, r.direction, m.tmin, m.tmax, m.eps, scale, 1.0f,
+                                 m.max_steps),
+                // a finer and a coarser pixel footprint
+                kernel::craycast(field, r.origin, r.direction, m.tmin, m.tmax, m.eps * 0.2f, scale,
+                                 1.4f, m.max_steps),
+                kernel::craycast(field, r.origin, r.direction, m.tmin, m.tmax, m.eps * 5.0f, scale,
+                                 1.4f, m.max_steps),
+                // half the budget, and four times more conservative than asked
+                kernel::craycast(field, r.origin, r.direction, m.tmin, m.tmax, m.eps, scale, 1.4f,
+                                 m.max_steps / 2),
+                kernel::craycast(field, r.origin, r.direction, m.tmin, m.tmax, m.eps, scale * 0.25f,
+                                 1.4f, m.max_steps * 4),
+            };
+            for (const kernel::CRayHit& h : variants) {
+                REQUIRE(h.hit);
+                CHECK(h.t - r.t <= tol.hit_t_late_abs);
+                CHECK(r.t - h.t <= tol.hit_t_early_abs);
+            }
+        }
+    }
+}
+
+// ...and the other side of that: a gate a wrong consumer passes is not a gate.
+// The wrong consumer here is the one docs/06 warns about — a preview that steps
+// by the reported distance instead of scaling it by safe_step_scale. It
+// oversteps, so it lands LATE or misses, which is the direction the tolerance
+// is tight in.
+//
+// WHERE IT BITES, MEASURED, because the obvious guess is wrong. Steep DEFORMER
+// fields catch it: deformer_chain (step scale 0.23) fails 3 of its 4 rays,
+// relief_build_up (0.56) 13 of 96, deformer_noise (0.39) 4 of 86. A SAMPLED
+// VOLUME does not, at any cell size tried: sqrt(3) is what cfi_volume declares
+// for a lattice, but a redistanced volume's realised gradient sits near 1 and a
+// ray does not ride the cell diagonal, so stepping by the full distance happens
+// to work. That is worth writing down — it is the reasoning that made #379 look
+// explained when it was not.
+TEST_CASE("parity fixture: a marcher that ignores safe_step_scale is rejected") {
+    const io::FixtureTolerance tol;
+    const io::FixtureMarch m = io::kernel_parity_march();
+    std::size_t discriminating = 0, bound = 0;
+    for (const io::FixtureCase& c : io::kernel_parity_cases()) {
+        if (c.tape.safe_step_scale() >= 1.0f || c.rays.empty()) continue;
+        ++bound;
+        CAPTURE(c.name);
+        auto field = [&c](cfloat3 p) { return c.tape.eval(p).d; };
+        std::size_t rejected = 0;
+        for (const io::FixtureRay& r : c.rays) {
+            // step_scale 1: the drift, everything else identical
+            const kernel::CRayHit h = kernel::craycast(field, r.origin, r.direction, m.tmin,
+                                                       m.tmax, m.eps, 1.0f, 1.4f, m.max_steps);
+            if (!h.hit || h.t - r.t > tol.hit_t_late_abs) ++rejected;
+        }
+        if (rejected) ++discriminating;
+    }
+    CHECK(bound >= 8);
+    CHECK(discriminating >= 2);
 }
 
 // Regression for the drift this fixture exists to catch (issue #3): the app's

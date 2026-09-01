@@ -129,13 +129,15 @@ Byte-identical to the CLI's output and deterministic, so two runs diff clean and
 a change in the fixture is a change you made. It builds the whole table per
 call — a test-time cost for a test-time entry point.
 
-It is JSON, schema 1:
+It is JSON, schema 2:
 
 ```json
 {
-  "schema": 1,
+  "schema": 2,
   "generator": "claycore 0.19.0",
-  "tolerance": {"distance_abs": 1e-05, "distance_rel": 0.0001, "color_abs": 0.0001},
+  "tolerance": {"distance_abs": 1e-05, "distance_rel": 0.0001, "color_abs": 0.0001,
+                "hit_t_late_abs": 0.001, "hit_t_early_abs": 0.01},
+  "march": {"tmin": 0.0, "tmax": 6.0, "eps": 0.0001, "max_steps": 512, "relax": 1.4},
   "cases": [
     {
       "name": "blend_union_quadratic",
@@ -144,11 +146,16 @@ It is JSON, schema 1:
                "is_exact": true, "safe_step_scale": 1.0},
       "points": [[x, y, z], ...],
       "distance": [...],
-      "color": [[r, g, b], ...]
+      "color": [[r, g, b], ...],
+      "rays": [[ox, oy, oz, dx, dy, dz, t], ...]
     }
   ]
 }
 ```
+
+Schema 2 adds `march` and per-case `rays`; everything schema 1 carried is
+unchanged and in the same place, so a consumer that ignores the two new keys
+reads a schema-2 file exactly as it read a schema-1 one.
 
 For each case, upload `instrs` / `params` / `blob` as the three tape buffers,
 evaluate at every point in `points`, and assert
@@ -206,6 +213,40 @@ distance field; the tape says so, and the fixture exports it. The loft case
 comes out at 0.117 and the sweep at 0.015 — a host raymarching either as if
 `|∇f| = 1` steps straight through the surface. The suite asserts the fixture
 contains such a case, so this cannot quietly become untestable.
+
+**And the `rays` are how that stops being advice.** Until schema 2 the fixture
+only asked what a host *evaluates*, so a preview that got every distance right
+and then traced it wrongly passed. Each case now also carries rays that hit,
+with the `t` at which the CPU reference lands; march them with the `march`
+block's parameters and assert
+
+```
+t_host - t_ref <= hit_t_late_abs        (0.001)
+t_ref - t_host <= hit_t_early_abs       (0.01)
+```
+
+**The two allowances differ by 10x on purpose.** The acceptance test in a sphere
+trace is `|f| * step_scale < eps * t`, so the step scale is in the *stopping*
+rule as well as the step length: a host that marches more conservatively than
+the tape asks accepts further out and lands **early**, which is safe and must
+pass. A host that oversteps lands **late**, or misses. Late is the only
+direction that means a defect, and it is the only one held tight.
+
+Every listed ray is one a differently-written marcher also passes — the export
+drops any ray that over-relaxation, a finer or coarser epsilon, half the budget
+or a four-times-more-conservative step scale disagree about. That is why a case
+may carry few rays or none: at the sweep's 0.015 no stable expectation exists,
+so none is shipped. It is also why widening the tolerance is never the right
+response to a failure here.
+
+**Where this bites, measured.** Steep *deformer* fields catch a step-by-1
+preview: `deformer_chain` fails 3 of its 4 rays, `relief_build_up` 13 of 96,
+`deformer_noise` 4 of 86. A **sampled volume does not**, at any cell size tried
+— `sqrt(3)` is what `cfi_volume` *declares* for a lattice, but a redistanced
+volume's realised gradient sits near 1 and a ray does not ride the cell
+diagonal, so stepping by the full distance happens to work. Worth knowing before
+reasoning from the declared bound to a visual consequence, which is a step that
+does not hold (issue #379).
 
 The blend cases probe a ring straddling the seam of two overlapping spheres,
 which is exactly where a wrong support width shows up. `tests/unit/test_parity_fixture.cpp`
