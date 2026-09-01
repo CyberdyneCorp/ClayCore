@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 76
+#define CLAY_ABI_MINOR 77
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -5642,6 +5642,23 @@ typedef struct clay_mesh_brush_desc {
     int32_t automask_boundary_rings;
     /* CAVITY: how much of the measured cavity to apply, in [0,1]. */
     float automask_cavity_strength;
+    /* THE STAMP'S GRAIN: how far the stamp's in-plane axes are turned about its
+     * own facing, in radians. This is what makes a rake, a chisel, clay strips,
+     * a directional scratch and a rotated alpha presets over one frame rather
+     * than five code paths — a stroke resolver that knows the direction of
+     * travel sets this, and no verb has to know that it did.
+     *
+     * ZERO IS NO ROTATION AT ALL, not a rotation by zero, and the difference is
+     * observable: turning the basis by cos 0 and sin 0 leaves a -0.0f where an
+     * unrotated axis has +0.0f, and the fixed mesh's bit-parity goldens move.
+     * The engine branches on it — see make_stamp_frame in
+     * include/clay/mesh/stamp_frame.h.
+     *
+     * Appended, so a host compiled against ABI minor 74 sends the shorter
+     * descriptor, this reads as zero, and its stamps are what they were.
+     * Observable only through an alpha or a directional kernel: a round brush
+     * has nothing to orient. */
+    float stamp_azimuth;
 } clay_mesh_brush_desc;
 
 /* The automask factors. A bit set, so a host sends one integer. */
@@ -7037,6 +7054,52 @@ clay_result clay_mesh_sculptor_refresh(clay_mesh_sculptor* sculptor);
  * number of triangle tests a random ray must make. Lower is better; compare it
  * against what the same tree scored when it was built. */
 clay_result clay_mesh_sculptor_quality(clay_mesh_sculptor* sculptor, float* out_quality);
+
+/* -- WHAT A STROKE'S SCRATCH COSTS -------------------------------------------
+ *
+ * Every sculptor keeps ONE bump arena for the buffers a stamp needs and cannot
+ * hold as members — the affected-vertex list, the temporary normals, the
+ * surface traversal, the alpha samples, the automask's frontiers and floods,
+ * the topology candidates. It grows to the largest footprint it has actually
+ * been given and is reset, not freed, between stamps, so a warm stamp on a
+ * stable surface allocates nothing at all.
+ *
+ * THIS CROSSES BECAUSE A HOST HAS TO BUDGET FOR IT. The device this library
+ * targets kills an application for memory rather than warning it twice — the
+ * same reason the multiresolution preflight crosses — and a per-stroke scratch
+ * high-water mark is a number such a host budgets against. A host that cannot
+ * see it is guessing.
+ *
+ * THERE IS DELIBERATELY NOTHING TO TUNE. No reserve, no cap, no growth factor.
+ * Each would be a number a host tunes against one device and is then wrong
+ * about after the brush radius changes, and the arena already sizes itself from
+ * the largest footprint it has seen, which is the measurement such a knob would
+ * be guessing at.
+ *
+ * `growths` is the one to watch, and it is why a current usage is not reported:
+ * a usage reads zero between stamps whatever the arena is doing. A count that
+ * has stopped rising over stamps of similar footprint is the arena having
+ * converged; one that rises every stamp is scratch that is never released,
+ * which allocates nothing after warm-up and consumes memory without bound. */
+
+typedef struct clay_brush_arena_stats {
+    uint32_t struct_size; /* = sizeof(clay_brush_arena_stats); required */
+    uint64_t capacity_bytes;   /* what the arena currently OWNS */
+    uint64_t high_water_bytes; /* the largest a single stamp has ever used */
+    uint64_t growths;          /* how many times it has had to take more */
+} clay_brush_arena_stats;
+
+clay_result clay_mesh_sculptor_arena_stats(const clay_mesh_sculptor* sculptor,
+                                           clay_brush_arena_stats* out_stats);
+clay_result clay_dynamic_sculptor_arena_stats(const clay_dynamic_sculptor* sculptor,
+                                              clay_brush_arena_stats* out_stats);
+/* The multiresolution sculptor's arena is the BOUND LEVEL SCULPTOR's: a stamp
+ * runs the fixed sculptor over the active level's own mesh, so that is the
+ * arena that grows, and reporting a second empty one here would tell a host its
+ * scratch cost nothing. Before the first stamp there is no bound level and
+ * every field reads zero, which is the truth rather than a placeholder. */
+clay_result clay_multires_sculptor_arena_stats(const clay_multires_sculptor* sculptor,
+                                               clay_brush_arena_stats* out_stats);
 
 typedef struct clay_mesh_hit {
     uint32_t struct_size; /* = sizeof(clay_mesh_hit); required, as every descriptor's is */

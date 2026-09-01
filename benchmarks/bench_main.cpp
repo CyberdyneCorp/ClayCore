@@ -4266,6 +4266,198 @@ BENCHMARK(BM_DynamicStampNoTopology)
     ->Unit(benchmark::kMillisecond)
     ->Iterations(20);
 
+// -- what the neutral automask's virtual costs (add-shared-brush-runtime 6.8) --
+//
+// THE ONE PLACE THIS CHANGE ADDED AN INDIRECT CALL. `compute_automask`'s core
+// is now written against `WorkItemTopology`, an abstract base with two methods,
+// so the boundary fade and the connectivity flood reach a representation
+// through a virtual rather than through a `Mesh` and an `Adjacency` directly.
+// That is what lets one automask serve three representations instead of three
+// copies of it serving one each, and it is not free.
+//
+// WHY IT WAS JUDGED ACCEPTABLE, and what these cases exist to check that
+// judgement against. `sculpt_kernels.h` explicitly REFUSED a virtual for the
+// neighbour lookup, and the reason does not carry here: that would have been a
+// call in the INNERMOST loop of a smoothing pass, per neighbour, per pass, on a
+// million-vertex surface. This is one call per WORKSET entry, on two of five
+// factors, in a pass that already calls `acos` per entry. The alternative was a
+// template on the topology, which reinstates the three instantiations the
+// neutral work item exists to avoid.
+//
+// SO THE PAIR IS THE MEASUREMENT: the same stamp on the same fixture with the
+// factor off and on. The difference is the automask ENTIRELY — its arithmetic,
+// its arena scope and its virtual — which is the honest bound on the virtual
+// rather than a number that flatters it. A regression that made the indirect
+// call expensive (a topology object rebuilt per entry, say) shows up as the
+// ratio moving, and the ratio is what to read: this box is shared, so an
+// absolute time here says as much about the neighbours as about the code.
+//
+// NO CEILING IS ADDED TO check_bench.py. The gate's own note says a ceiling has
+// to be set from the RUNNER rather than from a development machine, and these
+// numbers were taken on a 24-core desktop under other load. Reporting is the
+// honest width until someone reads them off CI.
+//
+// WHAT IT MEASURED, against a44b1f5 built from the same source with the same
+// four cases. Nine repetitions of 200 iterations each, P50 in microseconds,
+// load average 7-12 before and after both runs, so the RATIOS are the reading
+// and the absolutes are not:
+//
+//                                          main      this branch
+//   fixed, no automask       n=224        158.00       71.02   (0.45x)
+//   fixed, no automask       n=707       1258.12      583.97   (0.46x)
+//   fixed, boundary automask n=224        350.28      170.39   (0.49x)
+//   fixed, boundary automask n=707       2527.86     1615.53   (0.64x)
+//   adaptive, no automask    n=224        153.23      145.46   (0.95x)
+//   adaptive, no automask    n=707        141.59      168.28   (1.19x)
+//   adaptive, boundary       n=224        144.65      550.11   (3.80x)
+//   adaptive, boundary       n=707        141.40     1143.02   (8.08x)
+//
+// THREE THINGS TO READ OUT OF THAT, and the third is the point of the file.
+//
+// The VIRTUAL DID NOT COST WHAT IT LOOKED LIKE IT WOULD. On the fixed path —
+// the only one where the automask ran on main at all — the neutral rewrite is
+// 2.0x and 1.6x FASTER than the direct `Mesh`/`Adjacency` implementation it
+// replaced, indirect call and all, because the five per-stamp `std::vector`s it
+// used to build became arena blocks. An indirect call per workset entry is
+// cheaper than a malloc per stamp by a wide margin.
+//
+// THE ADAPTIVE ROWS ARE NOT A REGRESSION, THEY ARE THE DEFECT. On main the
+// automasked adaptive stamp costs the same as the unmasked one — 144.65 against
+// 153.23 — because `DynamicSculptor::gather` read none of `brush.automask` and
+// the factor never ran. Paying nothing for work not done is not a baseline. The
+// 3.80x and 8.08x are what an automask costs on a representation that has
+// started honouring it, and the fixed column is the fair comparison for that
+// number.
+//
+// THE PLAIN STAMP'S SCALING WITH THE SURFACE IS PRE-EXISTING AND WAS VERIFIED,
+// not assumed: at an identical 114-entry workset, 10x the surface costs 7.96x
+// on main and 8.22x here. Something in the fixed path is proportional to the
+// model rather than to the footprint, it is older than this change, and it is
+// not this change's to fix — but it is worth someone's afternoon, and these
+// two cases are where it will show up next.
+
+void mesh_stamp_automask(benchmark::State& state, std::uint32_t factors) {
+    using namespace clay;
+    using namespace clay::kernel;
+    const int n = static_cast<int>(state.range(0));
+    mesh::Mesh patch = bench_surface_patch(n, 0.02f);
+    mesh::MeshSculptor sculptor(patch, 0.0f);
+
+    mesh::MeshBrushSettings brush;
+    brush.radius = 0.12f;  // a FIXED footprint, whatever the patch's size
+    brush.strength = 0.05f;
+    brush.geodesic = false;
+    brush.direction = cf3(0.001f, 0.002f, 0.0f);
+    brush.automask.factors = factors;
+    brush.automask.boundary_rings = 2;
+
+    // WARM. The arena takes its storage on the first stamp of a footprint and
+    // keeps it, so charging that to the measurement would measure the warm-up.
+    for (int i = 0; i < 8; ++i) {
+        brush.center = cf3(0.02f * static_cast<float>(i % 5) - 0.04f, 0.0f, 0.0f);
+        sculptor.stamp(mesh::MeshBrush::Grab, brush);
+    }
+
+    int i = 0;
+    std::size_t moved = 0;
+    for (auto _ : state) {
+        brush.center = cf3(0.02f * static_cast<float>(i % 5) - 0.04f, 0.0f, 0.0f);
+        moved = sculptor.stamp(mesh::MeshBrush::Grab, brush);
+        ++i;
+    }
+    // A stamp that reached nothing would time a no-op, and the pair would
+    // compare two no-ops and look wonderfully flat.
+    state.counters["moved"] = static_cast<double>(moved);
+    state.counters["workset"] = static_cast<double>(sculptor.workset().size());
+    state.counters["arena_growths"] = static_cast<double>(sculptor.arena().growths());
+    state.counters["arena_high_water"] =
+        static_cast<double>(sculptor.arena().high_water_bytes());
+}
+
+void BM_MeshStampNoAutomask(benchmark::State& state) { mesh_stamp_automask(state, 0); }
+BENCHMARK(BM_MeshStampNoAutomask)
+    ->Arg(224)   // ~100k triangles
+    ->Arg(707)   // ~1M
+    ->Unit(benchmark::kMicrosecond)
+    ->Iterations(200);
+
+// BOUNDARY, and boundary alone, because it is the only one of the three
+// input-free factors that makes the virtual do work on every entry: it asks
+// `on_open_border` once per workset slot to seed the spread. NormalAngle reads
+// the workset's own normals and never touches the topology at all, so a case
+// built on it would report the arithmetic and none of the indirection.
+void BM_MeshStampBoundaryAutomask(benchmark::State& state) {
+    mesh_stamp_automask(state, static_cast<std::uint32_t>(clay::mesh::AutomaskFactor::Boundary));
+}
+BENCHMARK(BM_MeshStampBoundaryAutomask)
+    ->Arg(224)
+    ->Arg(707)
+    ->Unit(benchmark::kMicrosecond)
+    ->Iterations(200);
+
+// The same pair on the ADAPTIVE surface, where the topology object is a
+// different implementation of the same two methods — `one_ring` through the
+// workset's slot map, and `DynamicSurface::is_boundary_edge`. If the virtual
+// were the cost, the two representations would pay it alike; if one of them
+// pays much more, the cost is in that implementation rather than in the
+// indirection, which is a different fix.
+void dynamic_stamp_automask(benchmark::State& state, std::uint32_t factors) {
+    using namespace clay;
+    using namespace clay::kernel;
+    const int n = static_cast<int>(state.range(0));
+    auto surface = mesh::DynamicSurface::from_mesh(bench_surface_patch(n, 0.02f));
+    if (!surface) {
+        state.SkipWithError("could not build the surface");
+        return;
+    }
+    mesh::DynamicSculptor sculptor(*surface);
+
+    mesh::MeshBrushSettings brush;
+    brush.radius = 0.12f;
+    brush.strength = 0.05f;
+    brush.geodesic = false;
+    brush.direction = cf3(0.001f, 0.002f, 0.0f);
+    brush.automask.factors = factors;
+    brush.automask.boundary_rings = 2;
+    mesh::DynamicTopologySettings topo;
+    topo.enabled = false;
+
+    for (int i = 0; i < 8; ++i) {
+        brush.center = cf3(0.02f * static_cast<float>(i % 5) - 0.04f, 0.0f, 0.0f);
+        sculptor.stamp(mesh::MeshBrush::Grab, brush, topo);
+    }
+
+    int i = 0;
+    std::size_t moved = 0;
+    for (auto _ : state) {
+        brush.center = cf3(0.02f * static_cast<float>(i % 5) - 0.04f, 0.0f, 0.0f);
+        moved = sculptor.stamp(mesh::MeshBrush::Grab, brush, topo).moved_vertices;
+        ++i;
+    }
+    state.counters["moved"] = static_cast<double>(moved);
+    state.counters["workset"] = static_cast<double>(sculptor.workset().size());
+    state.counters["arena_growths"] = static_cast<double>(sculptor.arena().growths());
+    state.counters["arena_high_water"] =
+        static_cast<double>(sculptor.arena().high_water_bytes());
+}
+
+void BM_DynamicStampNoAutomask(benchmark::State& state) { dynamic_stamp_automask(state, 0); }
+BENCHMARK(BM_DynamicStampNoAutomask)
+    ->Arg(224)
+    ->Arg(707)
+    ->Unit(benchmark::kMicrosecond)
+    ->Iterations(200);
+
+void BM_DynamicStampBoundaryAutomask(benchmark::State& state) {
+    dynamic_stamp_automask(state,
+                           static_cast<std::uint32_t>(clay::mesh::AutomaskFactor::Boundary));
+}
+BENCHMARK(BM_DynamicStampBoundaryAutomask)
+    ->Arg(224)
+    ->Arg(707)
+    ->Unit(benchmark::kMicrosecond)
+    ->Iterations(200);
+
 
 // The two numbers `DetailField` is configured by, measured rather than asserted
 // (add-mesh-multires, task 1.2).

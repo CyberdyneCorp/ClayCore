@@ -812,7 +812,8 @@ mesh::MeshBrushSettings mesh_brush_settings(
     nb::handle geodesic, nb::handle seed_class, const std::string& flatten_mode,
     nb::handle plane_point, nb::handle plane_normal, float polish_angle, int smooth_iterations,
     float layer_height, nb::handle alpha, nb::handle alpha_direction, nb::handle alpha_tangent,
-    float alpha_extent, nb::handle color, mesh::MeshBrush* out_verb) {
+    float alpha_extent, nb::handle color, nb::handle automask, float stamp_azimuth,
+    mesh::MeshBrush* out_verb) {
     *out_verb = parse_mesh_brush(verb);
     if (!(radius > 0.0f)) throw std::invalid_argument("radius must be > 0");
     if (smooth_iterations < 1 || smooth_iterations > mesh::kMaxSmoothIterations)
@@ -869,6 +870,31 @@ mesh::MeshBrushSettings mesh_brush_settings(
             settings.alpha_tangent = to_f3(alpha_tangent, "alpha_tangent");
         settings.alpha_extent = alpha_extent;
     }
+    // The automask arrives as the settings object rather than as four loose
+    // scalars, because that is what it is on both other bindings: one appended
+    // block on clay_mesh_brush_desc, one member on MeshBrushSettings. Spreading
+    // it into keywords here would be a third spelling of the same four fields
+    // and a third place to forget one when a factor is added.
+    //
+    // TYPE-CHECKED BEFORE THE CAST, and that is a fix rather than a formality.
+    // A bare `nb::cast<T>` on a handle of the wrong type throws `nb::cast_error`
+    // — a `std::bad_cast` — which nanobind surfaces as
+    // `RuntimeError: std::bad_cast`, naming neither the argument nor what it
+    // should have been. `automask=3` is a plausible mistake (the factors ARE an
+    // integer, one level down) and it deserves the same answer `to_f3` gives a
+    // malformed vector.
+    if (!automask.is_none()) {
+        if (!nb::isinstance<mesh::AutomaskSettings>(automask))
+            throw std::invalid_argument(
+                "automask must be an AutomaskSettings or None; to set the factors, build one "
+                "and assign to its `factors` field");
+        settings.automask = nb::cast<mesh::AutomaskSettings>(automask);
+    }
+    // Passed through as given, INCLUDING zero. Zero is not "unset": it is the
+    // value that means unrotated, and the engine branches on exactly it rather
+    // than turning the basis by cos 0 and sin 0, which would leave a -0.0f
+    // where an unrotated axis has +0.0f and move the fixed mesh's goldens.
+    settings.stamp_azimuth = stamp_azimuth;
     return settings;
 }
 
@@ -1032,6 +1058,102 @@ field::MaskGate mask_gate_of(nb::handle mask) {
     if (!m) return {};
     return [m](kernel::cfloat3 p) { return m->sample(p); };
 }
+
+// The two automask factors a mesh module structurally cannot compute for
+// itself: the cavity measure, which is a field's curvature, and the surface
+// group, which is a world lattice. Wired here because this binding is the one
+// place that can see the mesh sculptor, a mask field and a document's group
+// lattice at once — the same reason brush::apply_to_mesh is where the C++ path
+// wires them.
+//
+// NOT A PYTHON CALLABLE, and that shape is the whole point. Every stamp
+// releases the GIL and evaluates these once per workset entry from a thread
+// that no longer holds it; a Python function called from there is a crash
+// rather than a slowdown. So the cavity arrives as a MaskField and the groups
+// as the document's own lattice, both of which answer a world point with no
+// interpreter involved.
+//
+// WHAT THE CAVITY MASK IS, precisely, because "the same estimator" is a claim
+// worth being exact about: `document.mask_from_surface("cavity", ...)` bakes
+// brush::measure_at onto a lattice, so this is that estimator SAMPLED where the
+// C++ path evaluates it directly. A painted cavity mask and a cavity automask
+// therefore agree about the surface by construction, which is the claim
+// automask.h makes; what differs is the lattice's resolution, and that is the
+// caller's own cell_size rather than something this hides.
+mesh::AutomaskInputs automask_inputs_of(nb::handle cavity, nb::handle groups,
+                                        std::uint32_t active_group) {
+    // BOTH ARGUMENTS ARE TYPE-CHECKED HERE RATHER THAN CAST AND HOPED FOR, and
+    // the wrong type is the mistake this call invites: the C++ type holds two
+    // `std::function`s, so "pass a function" is the obvious guess, and it is
+    // the one thing that cannot be offered — a stamp releases the GIL and
+    // evaluates these from a worker thread, where calling back into the
+    // interpreter crashes. A caller who guesses must be told what to pass
+    // instead, and `RuntimeError: std::bad_cast` from a bare `nb::cast` tells
+    // them nothing at all.
+    mesh::AutomaskInputs out;
+    if (cavity.is_valid() && !cavity.is_none()) {
+        if (!nb::isinstance<PyMaskField>(cavity))
+            throw std::invalid_argument(
+                "cavity must be a MaskField or None — build one with "
+                "document.mask_from_surface('cavity', ...). A Python callable cannot be used: a "
+                "stamp evaluates it from a worker thread with the GIL released");
+        out.cavity = [m = &nb::cast<PyMaskField&>(cavity).field()](kernel::cfloat3 p) {
+            return m->sample(p);
+        };
+    }
+    if (groups.is_valid() && !groups.is_none()) {
+        if (!nb::isinstance<PyGroupField>(groups))
+            throw std::invalid_argument(
+                "groups must be the document's GroupField or None. A Python callable cannot be "
+                "used: a stamp evaluates it from a worker thread with the GIL released");
+        voxel::GroupField* g = &nb::cast<PyGroupField&>(groups).field();
+        out.group = [g](kernel::cfloat3 p) { return static_cast<std::uint32_t>(g->at(p)); };
+    }
+    out.active_group = active_group;
+    return out;
+}
+
+// One reading for three sculptors, since the numbers mean the same thing
+// whichever asked. A null arena — the multiresolution sculptor has none until a
+// level is bound — reads as zeroes, which is the truth about an arena that has
+// never been asked for a byte rather than a placeholder.
+nb::dict arena_stats_of(const mesh::BrushScratchArena* arena) {
+    nb::dict out;
+    out["capacity_bytes"] = arena ? arena->capacity_bytes() : std::size_t{0};
+    out["high_water_bytes"] = arena ? arena->high_water_bytes() : std::size_t{0};
+    out["growths"] = arena ? arena->growths() : std::size_t{0};
+    return out;
+}
+
+// The docstring the three sculptors share, so their contract cannot drift by
+// being written out three times.
+constexpr const char* kArenaStatsDoc =
+    "What this sculptor's per-stamp scratch arena owns, the largest a single\n"
+    "stamp has ever used, and how many times it has had to take more.\n\n"
+    "`growths` is the one to watch. A warm stamp on a stable surface allocates\n"
+    "nothing — the arena is reset, not freed, between stamps — so a count that\n"
+    "has stopped rising over stamps of similar footprint is the arena having\n"
+    "converged. One that rises every stamp is scratch that is never released:\n"
+    "it allocates nothing after warm-up and consumes memory without bound, and\n"
+    "a current usage would not show it, because that reads zero between stamps\n"
+    "whatever the arena is doing.\n\n"
+    "There is deliberately nothing to tune here. Any reserve or cap would be a\n"
+    "number you tune against one device and are then wrong about after the\n"
+    "brush radius changes; the arena already sizes itself from the largest\n"
+    "footprint it has actually been given.";
+
+constexpr const char* kAutomaskInputsDoc =
+    "The two automask factors a mesh cannot compute for itself: `cavity` is a\n"
+    "MaskField — build it with `document.mask_from_surface('cavity', ...)`,\n"
+    "which bakes the same estimator the engine measures with, so a painted\n"
+    "cavity mask and a cavity automask agree about this surface — and `groups`\n"
+    "is the document's own group lattice, with `active_group` the group the\n"
+    "stroke started in.\n\n"
+    "SET ONCE PER STROKE, never per stamp. These become callable objects, and\n"
+    "copying them per dab is an allocation per dab.\n\n"
+    "Neither is a Python callable, and that is not an oversight: a stamp\n"
+    "releases the GIL and evaluates these from a worker thread, where calling\n"
+    "back into the interpreter would crash rather than merely be slow.";
 
 const voxel::MaskField* borrow_mask(nb::handle mask) {
     if (!mask.is_valid() || mask.is_none()) return nullptr;
@@ -4479,13 +4601,14 @@ NB_MODULE(pyclay, m) {
                const std::string& flatten_mode, nb::handle plane_point, nb::handle plane_normal,
                float polish_angle, int smooth_iterations, float layer_height, nb::handle alpha,
                nb::handle alpha_direction, nb::handle alpha_tangent, float alpha_extent,
-               nb::handle color, nb::handle mask, nb::handle deltas) {
+               nb::handle color, nb::handle automask, float stamp_azimuth, nb::handle mask,
+               nb::handle deltas) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, center, radius, strength, falloff, direction, deposit_normal, geodesic,
                     seed_class, flatten_mode, plane_point, plane_normal, polish_angle,
                     smooth_iterations, layer_height, alpha, alpha_direction, alpha_tangent,
-                    alpha_extent, color, &chosen);
+                    alpha_extent, color, automask, stamp_azimuth, &chosen);
                 mesh::VertexDeltas* record =
                     deltas.is_none() ? nullptr : nb::cast<PyVertexDeltas*>(deltas)->deltas.get();
                 field::MaskGate gate = mask_gate_of(mask);
@@ -4499,8 +4622,8 @@ NB_MODULE(pyclay, m) {
             "plane_point"_a = nb::none(), "plane_normal"_a = nb::none(), "polish_angle"_a = 0.20f,
             "smooth_iterations"_a = 1, "layer_height"_a = 0.05f, "alpha"_a = nb::none(),
             "alpha_direction"_a = nb::none(), "alpha_tangent"_a = nb::none(),
-            "alpha_extent"_a = 0.0f, "color"_a = nb::none(), "mask"_a = nb::none(),
-            "deltas"_a = nb::none(),
+            "alpha_extent"_a = 0.0f, "color"_a = nb::none(), "automask"_a = nb::none(),
+            "stamp_azimuth"_a = 0.0f, "mask"_a = nb::none(), "deltas"_a = nb::none(),
             "One stamp; returns how many welded classes moved.\n\n"
             "`verb` is one of:\n"
             "  'grab'      drag the region by `direction`\n"
@@ -4672,7 +4795,8 @@ NB_MODULE(pyclay, m) {
                nb::handle geodesic, nb::handle seed_class, const std::string& flatten_mode,
                nb::handle plane_point, nb::handle plane_normal, float polish_angle,
                int smooth_iterations, float layer_height, float strength, nb::handle color,
-               nb::handle mask, nb::handle deltas, bool defer_normals) {
+               nb::handle automask, float stamp_azimuth, nb::handle mask, nb::handle deltas,
+               bool defer_normals) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 // The radius is the STAMP's, so a placeholder goes in here.
                 // No alpha on the stroke path: a stamp-oriented alpha along a
@@ -4682,7 +4806,7 @@ NB_MODULE(pyclay, m) {
                     verb, nb::none(), 1.0f, strength, falloff, nb::none(), deposit_normal, geodesic,
                     seed_class, flatten_mode, plane_point, plane_normal, polish_angle,
                     smooth_iterations, layer_height, nb::none(), nb::none(), nb::none(), 0.0f,
-                    color, &chosen);
+                    color, automask, stamp_azimuth, &chosen);
                 std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
                 mesh::VertexDeltas* record =
                     deltas.is_none() ? nullptr : nb::cast<PyVertexDeltas*>(deltas)->deltas.get();
@@ -4699,7 +4823,8 @@ NB_MODULE(pyclay, m) {
             "flatten_mode"_a = "two_sided", "plane_point"_a = nb::none(),
             "plane_normal"_a = nb::none(), "polish_angle"_a = 0.20f, "smooth_iterations"_a = 1,
             "layer_height"_a = 0.05f, "strength"_a = 1.0f, "color"_a = nb::none(),
-            "mask"_a = nb::none(), "deltas"_a = nb::none(), "defer_normals"_a = false,
+            "automask"_a = nb::none(), "stamp_azimuth"_a = 0.0f, "mask"_a = nb::none(),
+            "deltas"_a = nb::none(), "defer_normals"_a = false,
             "Resolve a stroke and apply it — the stroke engine's FOURTH consumer,\n"
             "after the voxel grid, the mask and the edit list. Spacing, pressure\n"
             "response, deterministic jitter, taper, steady stroke and\n"
@@ -4711,6 +4836,18 @@ NB_MODULE(pyclay, m) {
             "'grab' anchors on the first stamp and drags by the motion between\n"
             "stamps; 'snakehook' re-anchors on every stamp, so its region walks\n"
             "with the pull. Returns how many stamps moved a vertex.")
+        .def_prop_ro("arena_stats",
+                     [](const PyMeshSculptor& s) { return arena_stats_of(&s.live(false).arena()); },
+                     kArenaStatsDoc)
+        .def(
+            "set_automask_inputs",
+            [](PyMeshSculptor& s, nb::handle cavity, nb::handle groups,
+               std::uint32_t active_group) {
+                s.live(false).set_automask_inputs(
+                    automask_inputs_of(cavity, groups, active_group));
+            },
+            "cavity"_a = nb::none(), "groups"_a = nb::none(), "active_group"_a = 0,
+            nb::keep_alive<1, 2>(), nb::keep_alive<1, 3>(), kAutomaskInputsDoc)
         .def(
             "raycast",
             [](PyMeshSculptor& s, nb::handle origin, nb::handle direction, nb::handle position,
@@ -6762,13 +6899,14 @@ NB_MODULE(pyclay, m) {
             [](mesh::DynamicSculptor& self, const std::string& verb, nb::handle center,
                float radius, float strength, const std::string& falloff,
                const mesh::DynamicTopologySettings& topology, nb::handle direction,
-               nb::handle mask, bool geodesic, int smooth_iterations) {
+               nb::handle mask, bool geodesic, int smooth_iterations, nb::handle automask,
+               float stamp_azimuth) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, center, radius, strength, falloff, direction, nb::none(),
                     nb::cast(geodesic), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
                     smooth_iterations, 0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(),
-                    &chosen);
+                    automask, stamp_azimuth, &chosen);
                 if (!mesh::dynamic_offers(chosen))
                     throw std::invalid_argument(
                         "an adaptive surface does not offer '" + verb +
@@ -6798,6 +6936,7 @@ NB_MODULE(pyclay, m) {
             "verb"_a, "center"_a, "radius"_a, "strength"_a = 0.5f, "falloff"_a = "smooth",
             "topology"_a = mesh::DynamicTopologySettings{}, "direction"_a = nb::none(),
             "mask"_a = nb::none(), "geodesic"_a = true, "smooth_iterations"_a = 1,
+            "automask"_a = nb::none(), "stamp_azimuth"_a = 0.0f,
             "One stamp: remesh where the verb's timing says, deform through the\n"
             "shared kernels, recompute the normals of what moved, and keep the\n"
             "chunked index in step.")
@@ -6813,7 +6952,18 @@ NB_MODULE(pyclay, m) {
                          return std::vector<std::uint32_t>(d.begin(), d.end());
                      },
                      "The chunks the stamps since the last clear touched.")
-        .def("clear_dirty", [](mesh::DynamicSculptor& s) { s.bvh().clear_dirty(); });
+        .def("clear_dirty", [](mesh::DynamicSculptor& s) { s.bvh().clear_dirty(); })
+        .def_prop_ro("arena_stats",
+                     [](const mesh::DynamicSculptor& s) { return arena_stats_of(&s.arena()); },
+                     kArenaStatsDoc)
+        .def(
+            "set_automask_inputs",
+            [](mesh::DynamicSculptor& s, nb::handle cavity, nb::handle groups,
+               std::uint32_t active_group) {
+                s.set_automask_inputs(automask_inputs_of(cavity, groups, active_group));
+            },
+            "cavity"_a = nb::none(), "groups"_a = nb::none(), "active_group"_a = 0,
+            nb::keep_alive<1, 2>(), nb::keep_alive<1, 3>(), kAutomaskInputsDoc);
 
     // -- multiresolution surfaces (add-mesh-multires) -------------------------
     nb::class_<mesh::MultiresSurface>(
@@ -7365,13 +7515,14 @@ NB_MODULE(pyclay, m) {
             [](mesh::MultiresSculptor& self, const std::string& verb, nb::handle center,
                float radius, float strength, const std::string& falloff, nb::handle direction,
                nb::handle mask, bool geodesic, int smooth_iterations, nb::handle alpha,
-               nb::handle alpha_direction, nb::handle alpha_tangent, float alpha_extent) {
+               nb::handle alpha_direction, nb::handle alpha_tangent, float alpha_extent,
+               nb::handle automask, float stamp_azimuth) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, center, radius, strength, falloff, direction, nb::none(),
                     nb::cast(geodesic), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
                     smooth_iterations, 0.0f, alpha, alpha_direction, alpha_tangent, alpha_extent,
-                    nb::none(), &chosen);
+                    nb::none(), automask, stamp_azimuth, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
                 nb::gil_scoped_release release;
                 return self.stamp(chosen, settings, gate, nullptr);
@@ -7380,7 +7531,7 @@ NB_MODULE(pyclay, m) {
             "direction"_a = nb::none(), "mask"_a = nb::none(), "geodesic"_a = true,
             "smooth_iterations"_a = 1, "alpha"_a = nb::none(),
             "alpha_direction"_a = nb::none(), "alpha_tangent"_a = nb::none(),
-            "alpha_extent"_a = 0.0f,
+            "alpha_extent"_a = 0.0f, "automask"_a = nb::none(), "stamp_azimuth"_a = 0.0f,
             "One stamp at the surface's current sculpt level. Returns how many\n"
             "weld classes moved.")
         .def("begin_stroke", &mesh::MultiresSculptor::begin_stroke,
@@ -7391,14 +7542,15 @@ NB_MODULE(pyclay, m) {
             [](mesh::MultiresSculptor& self, nb::handle samples, const brush::StrokePreset& preset,
                const std::string& verb, const std::string& falloff, float strength,
                nb::handle geodesic, int smooth_iterations, float layer_height, nb::handle mask,
-               bool defer_normals) {
+               bool defer_normals, nb::handle automask, float stamp_azimuth) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 // The radius is the STAMP's, so a placeholder goes in here —
                 // the same reading the fixed sculptor's stroke path takes.
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, nb::none(), 1.0f, strength, falloff, nb::none(), nb::none(), geodesic,
                     nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, smooth_iterations,
-                    layer_height, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), &chosen);
+                    layer_height, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), automask,
+                    stamp_azimuth, &chosen);
                 const std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
                 const voxel::MaskField* field_mask = borrow_mask(mask);
                 brush::MeshStrokeOptions options;
@@ -7409,7 +7561,8 @@ NB_MODULE(pyclay, m) {
             },
             "samples"_a, "preset"_a, "verb"_a, "falloff"_a = "smooth", "strength"_a = 1.0f,
             "geodesic"_a = nb::none(), "smooth_iterations"_a = 1, "layer_height"_a = 0.05f,
-            "mask"_a = nb::none(), "defer_normals"_a = false,
+            "mask"_a = nb::none(), "defer_normals"_a = false, "automask"_a = nb::none(),
+            "stamp_azimuth"_a = 0.0f,
             "A whole stroke at the active sculpt level, resolved into spaced\n"
             "stamps by the same engine that drives a mesh layer — so a stamp\n"
             "lands in the same place with the same radius and the same\n"
@@ -7420,7 +7573,18 @@ NB_MODULE(pyclay, m) {
                          const std::vector<std::uint32_t>& v = s.last_write_vertices();
                          return std::vector<std::uint32_t>(v.begin(), v.end());
                      },
-                     "The level vertices the last stamp actually moved.");
+                     "The level vertices the last stamp actually moved.")
+        .def_prop_ro("arena_stats",
+                     [](const mesh::MultiresSculptor& s) { return arena_stats_of(s.arena()); },
+                     kArenaStatsDoc)
+        .def(
+            "set_automask_inputs",
+            [](mesh::MultiresSculptor& s, nb::handle cavity, nb::handle groups,
+               std::uint32_t active_group) {
+                s.set_automask_inputs(automask_inputs_of(cavity, groups, active_group));
+            },
+            "cavity"_a = nb::none(), "groups"_a = nb::none(), "active_group"_a = 0,
+            nb::keep_alive<1, 2>(), nb::keep_alive<1, 3>(), kAutomaskInputsDoc);
 
     nb::class_<PySculptLayerStroke>(
         m, "SculptLayerStroke",
@@ -7488,7 +7652,7 @@ NB_MODULE(pyclay, m) {
                     verb, center, radius, strength, falloff, direction, nb::none(),
                     nb::cast(geodesic), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
                     smooth_iterations, 0.0f, alpha, alpha_direction, alpha_tangent, alpha_extent,
-                    nb::none(), &chosen);
+                    nb::none(), nb::none(), 0.0f, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
                 nb::gil_scoped_release release;
                 return s.sculptor->stamp(chosen, settings, gate);
@@ -7555,7 +7719,8 @@ NB_MODULE(pyclay, m) {
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     "draw", center, radius, strength, falloff, direction, nb::none(),
                     nb::cast(true), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
-                    0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), &chosen);
+                    0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), nb::none(),
+                    0.0f, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
                 nb::gil_scoped_release release;
                 return s.sculptor->stamp_detail(stamp, settings, gate);
@@ -7600,7 +7765,7 @@ NB_MODULE(pyclay, m) {
                     "smooth", center, radius, strength, falloff, nb::none(), nb::none(),
                     nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
                     smooth_iterations, 0.0f, nb::none(), nb::none(), nb::none(), 0.0f,
-                    nb::none(), &chosen);
+                    nb::none(), nb::none(), 0.0f, &chosen);
                 const mesh::MultiresSmoothMode chosen_mode = parse_smooth_mode(mode);
                 field::MaskGate gate = mask_gate_of(mask);
                 nb::gil_scoped_release release;
@@ -7628,7 +7793,8 @@ NB_MODULE(pyclay, m) {
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     "draw", center, radius, strength, falloff, nb::none(), nb::none(),
                     nb::cast(true), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
-                    0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), &chosen);
+                    0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), nb::none(),
+                    0.0f, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
                 nb::gil_scoped_release release;
                 return s.sculptor->erase(settings, gate);
@@ -7646,7 +7812,8 @@ NB_MODULE(pyclay, m) {
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     "draw", center, radius, strength, falloff, nb::none(), nb::none(),
                     nb::cast(true), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
-                    0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), &chosen);
+                    0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), nb::none(),
+                    0.0f, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
                 nb::gil_scoped_release release;
                 return s.sculptor->restore(settings, gate);
@@ -7705,7 +7872,15 @@ NB_MODULE(pyclay, m) {
         .def_rw("polish_angle", &mesh::MeshBrushSettings::polish_angle)
         .def_rw("smooth_iterations", &mesh::MeshBrushSettings::smooth_iterations)
         .def_rw("layer_height", &mesh::MeshBrushSettings::layer_height)
-        .def_rw("automask", &mesh::MeshBrushSettings::automask);
+        .def_rw("automask", &mesh::MeshBrushSettings::automask)
+        .def_rw("stamp_azimuth", &mesh::MeshBrushSettings::stamp_azimuth,
+                "radians; how far the stamp's in-plane axes are turned about its\n"
+                "own facing. This is what makes rake, chisel, clay strips and a\n"
+                "rotated alpha presets over one frame rather than four code\n"
+                "paths. Zero is no rotation AT ALL rather than a rotation by\n"
+                "zero — the engine branches on it, because turning the basis by\n"
+                "cos 0 and sin 0 leaves a -0.0f where an unrotated axis has\n"
+                "+0.0f, and the fixed mesh's bit-parity goldens move.");
 
     nb::enum_<mesh::BrushFootprint>(m, "BrushFootprint",
                                     "How the region under the brush is REACHED.")

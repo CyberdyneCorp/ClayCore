@@ -521,6 +521,107 @@ several. `BM_MultiresSubdivide` is **Tier 4**: adding a level is an explicit
 action an artist takes and waits on, which is also why it is priced by
 `preflight_add_level` before it is paid.
 
+### What the shared brush runtime costs (add-shared-brush-runtime)
+
+Three mesh representations now run ONE brush runtime — one workset, one factor
+order, one automask, one scratch arena. Two things about that are latency facts
+rather than architecture, and both are Linux desktop numbers on a shared box, so
+**the ratios are the reading and the absolutes are not**. Nine repetitions of
+200 iterations, P50 in microseconds, load average 7–12 before and after both
+runs, measured against a44b1f5 built from the same source with the same cases
+(`BM_MeshStamp*Automask`, `BM_DynamicStamp*Automask`):
+
+| case | main | now | ratio |
+|---|---|---|---|
+| fixed, no automask, n=224 | 158.00 | **71.02** | 0.45× |
+| fixed, no automask, n=707 | 1258.12 | **583.97** | 0.46× |
+| fixed, boundary automask, n=224 | 350.28 | **170.39** | 0.49× |
+| fixed, boundary automask, n=707 | 2527.86 | **1615.53** | 0.64× |
+| adaptive, no automask, n=224 | 153.23 | 145.46 | 0.95× |
+| adaptive, no automask, n=707 | 141.59 | 168.28 | 1.19× |
+| adaptive, boundary automask, n=224 | 144.65 | 550.11 | 3.80× |
+| adaptive, boundary automask, n=707 | 141.40 | 1143.02 | 8.08× |
+
+**The virtual did not cost what it looked like it would.** The automask is now
+written against an abstract `WorkItemTopology` with two methods, which is one
+indirect call per workset entry on two of five factors — and the fixed path,
+the only one where the automask ran at all before, got **2.0× and 1.6× faster**
+anyway, because five per-stamp `std::vector`s became arena blocks. An indirect
+call per entry is cheaper than a malloc per stamp by a wide margin. That is the
+opposite of the judgement `sculpt_kernels.h` records for the neighbour lookup,
+and the two are consistent: that one would have been a call in the innermost
+loop of a smoothing pass, per neighbour, per pass.
+
+**The adaptive rows are the defect, not a regression, and a table read without
+this paragraph will be filed as a bug.** On main the automasked adaptive stamp
+cost the same as the unmasked one — 144.65 against 153.23 — because
+`DynamicSculptor::gather` read none of `brush.automask` and the factor never
+ran. Paying nothing for work not done is not a baseline. The 3.80× and 8.08× are
+what an automask costs on a representation that has started honouring it, and
+the fixed column is the fair comparison for that number.
+
+**The table above is a P50, and one of those eight rows has a tail the P50 does
+not show.** Re-measured as a distribution — forty repetitions of 200 iterations
+with `--benchmark_report_aggregates_only=false`, percentiles taken over the
+forty repetition MEANS rather than over individual stamps, since the cases fix
+`Iterations(200)` — seven rows sit within 15% of their P50 at P99. The eighth
+does not:
+
+| case | P50 | P95 | P99 | max |
+|---|---|---|---|---|
+| fixed, no automask, n=224 | 66.89 | 76.85 | 83.18 | 86.99 |
+| fixed, boundary automask, n=224 | 161.36 | 169.28 | 172.43 | 173.25 |
+| fixed, no automask, n=707 | 552.17 | 602.63 | 659.90 | 666.04 |
+| fixed, boundary automask, n=707 | 1456.72 | 1523.41 | 1551.08 | 1557.71 |
+| adaptive, no automask, n=224 | 131.06 | 137.41 | 151.48 | 159.14 |
+| adaptive, boundary automask, n=224 | 350.57 | 360.87 | 361.98 | 362.59 |
+| adaptive, no automask, n=707 | 127.59 | 131.72 | 134.96 | 136.25 |
+| **adaptive, boundary automask, n=707** | **1021.87** | 1105.52 | **1723.21** | **1789.59** |
+
+That run is a quieter box than the comparison above — load average 2.06 before
+and 1.60 after, against 7–12 — which is why its absolutes are lower and why the
+two tables are not rows of one table. The reading is the SHAPE: the one case
+whose cost is dominated by a breadth-first walk over an adaptive surface is the
+one with a P99 at 1.69× its P50 and a max at 1.75×, and a mean would have hidden
+it. This is the row a frame budget has to be set against, and it is the row an
+artist reaches by leaving the automask on and sculpting a dense area.
+
+**The arena converges, and that is the number to watch rather than an
+allocation count.** `clay_mesh_sculptor_arena_stats` and its two siblings report
+`capacity_bytes`, `high_water_bytes` and `growths`; a warm stamp on a stable
+surface allocates nothing on all three representations, gated in
+`test_sculpt_allocation.cpp`. `growths` is the one that matters because scratch
+that grows a little every stamp also allocates nothing after warm-up and
+consumes memory without bound — an allocation count cannot see it, and a
+current-usage figure reads zero between stamps. Over example 70's 48-dab stroke
+the three arenas settle at 3, 4 and 3 growths and take nothing more.
+
+**Re-measured after the merge, and the tail is the box rather than the row.**
+Both tables above were taken before this branch merged `main`; the whole set was
+run again from the merged tree, forty repetitions as before, at load average
+3.45 rising to 5.59. The MEDIANS reproduce to within a few percent — the
+automask costs 2.42× and 2.65× on the fixed path against 2.41× and 2.64× above,
+and 2.60× and 8.16× on the adaptive one against 2.67× and 8.01× — so the P50
+table is a property of the code. The TAIL of the eighth row is not. It reads
+4.35× at that load, and re-run on its own while the box climbed from 10.3 to
+15.3 it reads P50 1183.21, P99 17616.63 and max 24406.12, a 14.89× tail. The
+P50 moved by 10% across a 3× change in load and the tail moved by 3×, which
+means the 1.69× above is what a quiet machine reads and not a ceiling anyone
+should budget against. The honest statement is the one the shape supports: that
+row is the only one whose tail responds to contention at all, because it is the
+only one dominated by a breadth-first walk, and its tail on a loaded machine has
+to be measured on the machine the frame budget is for. That is also why no
+ceiling for it went into `tools/check_bench.py`, which requires a number read
+off the runner.
+
+**One pre-existing cost this measurement surfaced, verified against main rather
+than assumed:** at an IDENTICAL 114-entry workset, ten times the surface costs
+7.96× on main and 8.22× now. Something in the fixed stamp is proportional to the
+model rather than to the footprint — which is the claim `make-the-brush-cost-local`
+made for the field verbs and nobody has made for the mesh ones. It is older than
+the shared runtime, it was not touched by it, and it is the next thing to chase
+on this path.
+
 ### Sculpt layers, measured (add-mesh-sculpt-layers)
 
 The hierarchy above stores one detail field per level. A sculpt layer adds
@@ -1205,6 +1306,8 @@ Everything below is a **missing latency case**, not a missing test or render.
 | `voxel_add_level_region` | **unmeasured, named on the record** — it does strictly LESS work than the measured `voxel_add_level` (it seeds the region's chunks rather than every occupied cell), so the measured figure bounds it. Worth its own case once a device fixture exercises a region |
 | the multires and sculpt-layer verbs | **unmeasured, named on the record** — `VERB_PATTERNS` matches no `clay_multires_*` name at all, so neither `add-mesh-multires` nor `add-mesh-sculpt-layers` is visible to the device gate, and neither is exempt: they are simply not in the set. Extending the patterns is the right fix and it fails the gate until the cases exist, which is the intended order — the blocker is the same one the row above names, a device fixture that imports a mesh, builds its adjacency and aims from a pick. The desktop figures are in [Sculpt layers, measured](#sculpt-layers-measured-add-mesh-sculpt-layers) |
 | the 11 fixed-topology mesh brushes | **unmeasured, named on the record** — `mesh_sculptor_stamp` and `mesh_sculptor_apply_stroke` are exempt in `Coverage.swift` with "no mesh-layer fixture", not with a reason they should never be measured. The first real gap since v0.30.0 |
+| the mesh brushes' automask, on any representation | **unmeasured on device, named on the record** — the gap above got wider rather than older. The automask is a per-stamp cost on all three mesh representations since `add-shared-brush-runtime`, it is the factor with a topology walk in it, and it is now the one an artist is most likely to leave switched on. Desktop ratios are in the section above; there is no device figure for any of them, and the same missing mesh fixture is why |
+| the adaptive and multiresolution stamps | **unmeasured on device, named on the record** — `clay_dynamic_sculptor_stamp` and `clay_multires_sculptor_stamp` have desktop numbers (above, and the multires table) and no device case, for the same reason: the harness drives fields and grids |
 
 **Every brush in the inventory has a case or a recorded exemption.** That
 was not true at 0.29.0: `VERB_PATTERNS` in `tools/check_device_coverage.py` is
@@ -1246,12 +1349,17 @@ What is left:
    one to do first: it is what a drag drives, and it amortises the adjacency
    build the stamp path pays for on its own. Until then the fixed-topology
    verbs have a hard correctness gate and no latency number, which is the
-   opposite of the voxel path's position at 0.29.0. **The same fixture
-   unblocks the multires and sculpt-layer verbs**, which are two changes'
-   worth of surface that the gate cannot currently even name — and a
-   layered dab is the case with the most reason to differ on a device,
-   since what it costs is a walk over blocks rather than arithmetic over
-   vertices.
+   opposite of the voxel path's position at 0.29.0. **The family is three
+   representations wide now, not one**, and one fixture serves all of it: the
+   fixed mesh, the adaptive surface and the hierarchy take the same brush
+   descriptor and end in the same composition, so the case that aims a stamp at
+   an imported mesh aims it at the other two for the cost of two more handles.
+   That same fixture is what **unblocks the multires and sculpt-layer verbs**,
+   which the gate cannot currently even name. Do it with the automask ON — it is
+   the factor with a topology walk in it and the only one whose desktop cost is
+   measured in multiples rather than percent — and include a layered dab, which
+   is the case with the most reason to differ on a device, since what it costs
+   is a walk over blocks rather than arithmetic over vertices.
 2. **Give a voxel sculpt a display that is not cubes.** `mesh_greedy` emits
    axis-aligned quads, so every voxel render in the gallery is blocky while the
    SDF renders look like clay. This is now the largest visible gap between what

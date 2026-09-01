@@ -101,6 +101,7 @@ EXAMPLES = [
     "67_voxel_remesh",
     "68_mesh_multires",
     "69_mesh_sculpt_layers",
+    "70_shared_brush_runtime",
 ]
 
 

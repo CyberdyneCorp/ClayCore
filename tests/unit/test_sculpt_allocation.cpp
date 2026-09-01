@@ -29,6 +29,8 @@
 
 #include <cmath>
 
+#include "clay/mesh/dynamic_sculpt.h"
+#include "clay/mesh/multires_sculpt.h"
 #include "clay/mesh/sculpt.h"
 #include "clay/mesh/voxel_remesh.h"
 #include "clay/mesh/topology_ops.h"
@@ -527,4 +529,257 @@ TEST_CASE("allocation gate: a surface drag's cost per warped item is bounded") {
     CAPTURE(allocations);
     CAPTURE(per_item);
     CHECK(per_item < 6.0);
+}
+
+// -- THE AUTOMASK MUST COST THE WORKSET AND NOT A HEAP ALLOCATION -------------
+//
+// THE COVERAGE HOLE THAT LET FIVE VECTORS THROUGH (add-shared-brush-runtime
+// 6.2). Everything above this line stamps with `MeshBrushSettings::automask`
+// left at its default, which is no factors at all — so `compute_automask` was
+// never called, and the five `std::vector`s it built per dab (`depth`,
+// `frontier`, `next`, `reached`, `stack`) were invisible to the one gate in
+// this repository that exists to see exactly that.
+//
+// They are on the arena now. This is the assertion that says so, and it is the
+// assertion that fails on `main`.
+//
+// WHY ALL THREE TOPOLOGICAL FACTORS AT ONCE rather than one case per factor:
+// they allocate through different paths — the boundary fade runs a
+// breadth-first spread over two frontiers, the connectivity flood runs a
+// depth-first walk over a stack and a mark array, and the normal-angle gate
+// runs over the workset's own normals and allocates nothing — so the union is
+// what covers the code and the individual cases would mostly be measuring the
+// factor that was already free.
+
+namespace {
+
+std::size_t allocations_for_warm_automasked_stamp(MeshBrush verb) {
+    // A patch small enough that the brush REACHES ITS OPEN BORDER. A boundary
+    // fade on a region nowhere near a border spreads from an empty frontier and
+    // allocates nothing, which would make this gate pass on the very code it
+    // exists to catch.
+    Mesh m = plane_grid(24, 1.0f);
+    MeshSculptor sculptor(m);
+
+    MeshBrushSettings s;
+    // PAST THE PATCH'S HALF-EXTENT OF 1.0, so the brush genuinely reaches the
+    // open border. At 0.9 it does not, the boundary fade spreads from an empty
+    // frontier, and the whole gate passes on code that never ran — which is
+    // what the first version of this measured.
+    s.radius = 1.2f;
+    s.strength = 0.15f;
+    s.smooth_iterations = 2;
+    s.direction = cf3(0.02f, 0.01f, 0.0f);
+    s.geodesic = mesh::default_geodesic(verb);
+    s.automask.factors = mesh::AutomaskFactor::NormalAngle |
+                         mesh::AutomaskFactor::TopologyConnected |
+                         static_cast<std::uint32_t>(mesh::AutomaskFactor::Boundary);
+    s.automask.boundary_rings = 2;
+
+    for (int i = 0; i < 6; ++i) {
+        s.center = cf3(-0.05f + 0.02f * static_cast<float>(i), 0.0f, 0.0f);
+        sculptor.stamp(verb, s, {}, nullptr);
+    }
+    s.center = cf3(0.0f, 0.0f, 0.0f);
+    for (int i = 0; i < 8; ++i) sculptor.stamp(verb, s, {}, nullptr);
+
+    CountingScope scope;
+    sculptor.stamp(verb, s, {}, nullptr);
+    return scope.count();
+}
+
+}  // namespace
+
+TEST_CASE("allocation gate: a warm AUTOMASKED stamp allocates nothing") {
+    const MeshBrush verbs[] = {MeshBrush::Grab,      MeshBrush::Draw,      MeshBrush::Inflate,
+                               MeshBrush::Smooth,    MeshBrush::Pinch,     MeshBrush::Flatten,
+                               MeshBrush::Clay,      MeshBrush::Crease,    MeshBrush::Scrape,
+                               MeshBrush::Polish,    MeshBrush::Snakehook, MeshBrush::Relax,
+                               MeshBrush::Nudge};
+    for (MeshBrush v : verbs) {
+        CAPTURE(static_cast<int>(v));
+        CHECK(allocations_for_warm_automasked_stamp(v) == 0);
+    }
+}
+
+TEST_CASE("allocation gate: the automask fixture really engages the automask") {
+    // THE SELF-CHECK THE CASE ABOVE NEEDS. A brush that reached no border and a
+    // region that was already one component would give an automask with nothing
+    // to do, and "allocates nothing" would be true of a function that never
+    // ran. This asserts the factors actually removed vertices from the stamp on
+    // the same fixture, so the zero above is a zero the automask earned.
+    Mesh open_mesh = plane_grid(24, 1.0f);
+    Mesh masked_mesh = plane_grid(24, 1.0f);
+    MeshSculptor open(open_mesh);
+    MeshSculptor masked(masked_mesh);
+
+    MeshBrushSettings s;
+    s.center = cf3(0.0f, 0.0f, 0.0f);
+    s.radius = 1.2f;
+    s.strength = 0.15f;
+    s.geodesic = false;
+    s.direction = cf3(0.02f, 0.01f, 0.0f);
+
+    const std::size_t moved_open = open.stamp(MeshBrush::Grab, s, {}, nullptr);
+
+    s.automask.factors = mesh::AutomaskFactor::NormalAngle |
+                         mesh::AutomaskFactor::TopologyConnected |
+                         static_cast<std::uint32_t>(mesh::AutomaskFactor::Boundary);
+    s.automask.boundary_rings = 2;
+    const std::size_t moved_masked = masked.stamp(MeshBrush::Grab, s, {}, nullptr);
+
+    CAPTURE(moved_open);
+    CAPTURE(moved_masked);
+    CHECK(moved_open > 0);
+    CHECK(moved_masked < moved_open);
+}
+
+// -- THE SAME RULE ON THE OTHER TWO REPRESENTATIONS ---------------------------
+//
+// "A stamp costs what it touches" was only ever gated on the fixed mesh
+// (add-shared-brush-runtime 6.3), and the requirement's actual wording is about
+// a stamp rather than about a sculptor. The adaptive path sorted its region into
+// two fresh vectors per stamp and built an incident-face vector PER MOVED
+// VERTEX — an allocation per vertex, not per stamp — and nothing here could see
+// either.
+
+TEST_CASE("allocation gate: a warm adaptive stamp allocates nothing") {
+    // TOPOLOGY DISABLED, so the surface is stable and the measurement is about
+    // the brush rather than about a remesh. A remesh legitimately allocates:
+    // it creates vertices, and the pools grow. That is content, not churn, and
+    // conflating the two is the mistake this file's own header records about
+    // the undo record.
+    auto surface = mesh::DynamicSurface::from_mesh(plane_grid(24, 1.0f));
+    REQUIRE(surface.has_value());
+    mesh::DynamicSculptor sculptor(*surface);
+
+    mesh::DynamicTopologySettings topology;
+    topology.enabled = false;
+
+    MeshBrushSettings s;
+    s.radius = 0.3f;
+    s.strength = 0.05f;
+    s.smooth_iterations = 2;
+    s.geodesic = false;
+    s.direction = cf3(0.02f, 0.01f, 0.0f);
+
+    const MeshBrush verbs[] = {MeshBrush::Grab,   MeshBrush::Draw,   MeshBrush::Inflate,
+                               MeshBrush::Smooth, MeshBrush::Pinch,  MeshBrush::Flatten,
+                               MeshBrush::Clay,   MeshBrush::Crease, MeshBrush::Nudge};
+    for (MeshBrush v : verbs) {
+        CAPTURE(static_cast<int>(v));
+        // Warm the arena and the sculptor's members on this footprint, then
+        // measure one more stamp of exactly the same shape.
+        for (int i = 0; i < 8; ++i) {
+            s.center = cf3(-0.05f + 0.02f * static_cast<float>(i % 4), 0.0f, 0.0f);
+            sculptor.stamp(v, s, topology);
+        }
+        s.center = cf3(0.0f, 0.0f, 0.0f);
+        for (int i = 0; i < 6; ++i) sculptor.stamp(v, s, topology);
+
+        std::size_t count = 0;
+        {
+            CountingScope scope;
+            sculptor.stamp(v, s, topology);
+            count = scope.count();
+        }
+        CHECK(count == 0);
+    }
+}
+
+TEST_CASE("allocation gate: a warm AUTOMASKED adaptive stamp allocates nothing") {
+    // The adaptive path's automask is new in this change — before it,
+    // `DynamicSculptor::gather` read none of `brush.automask` — so it has never
+    // been under this gate at all.
+    auto surface = mesh::DynamicSurface::from_mesh(plane_grid(24, 1.0f));
+    REQUIRE(surface.has_value());
+    mesh::DynamicSculptor sculptor(*surface);
+
+    mesh::DynamicTopologySettings topology;
+    topology.enabled = false;
+
+    MeshBrushSettings s;
+    s.radius = 1.2f;  // past the half-extent of 1.0, so it reaches the open border
+    s.strength = 0.05f;
+    s.geodesic = false;
+    s.direction = cf3(0.02f, 0.01f, 0.0f);
+    s.automask.factors = mesh::AutomaskFactor::NormalAngle |
+                         mesh::AutomaskFactor::TopologyConnected |
+                         static_cast<std::uint32_t>(mesh::AutomaskFactor::Boundary);
+    s.automask.boundary_rings = 2;
+
+    for (int i = 0; i < 10; ++i) {
+        s.center = cf3(-0.05f + 0.02f * static_cast<float>(i % 4), 0.0f, 0.0f);
+        sculptor.stamp(MeshBrush::Grab, s, topology);
+    }
+    s.center = cf3(0.0f, 0.0f, 0.0f);
+    for (int i = 0; i < 6; ++i) sculptor.stamp(MeshBrush::Grab, s, topology);
+
+    std::size_t count = 0;
+    {
+        CountingScope scope;
+        sculptor.stamp(MeshBrush::Grab, s, topology);
+        count = scope.count();
+    }
+    CHECK(count == 0);
+}
+
+TEST_CASE("allocation gate: a warm multiresolution stamp allocates nothing") {
+    // A multiresolution stamp IS the fixed sculptor's stamp on the bound
+    // level's mesh, plus the step that turns the moved positions back into what
+    // the hierarchy stores. That second half is this representation's own, and
+    // it is what this covers.
+    Mesh cage;
+    {
+        const int n = 8;
+        const float step = 4.0f / static_cast<float>(n);
+        for (int z = 0; z <= n; ++z)
+            for (int x = 0; x <= n; ++x)
+                cage.positions.push_back(cf3(-2.0f + step * static_cast<float>(x), 0.0f,
+                                             -2.0f + step * static_cast<float>(z)));
+        const std::uint32_t stride = static_cast<std::uint32_t>(n + 1);
+        for (int z = 0; z < n; ++z)
+            for (int x = 0; x < n; ++x) {
+                const std::uint32_t a =
+                    static_cast<std::uint32_t>(z) * stride + static_cast<std::uint32_t>(x);
+                cage.quads.insert(cage.quads.end(), {a, a + 1, a + stride + 1, a + stride});
+                cage.indices.insert(cage.indices.end(),
+                                    {a, a + 1, a + stride + 1, a, a + stride + 1, a + stride});
+            }
+    }
+
+    mesh::MultiresError err = mesh::MultiresError::None;
+    auto surface = mesh::MultiresSurface::from_mesh(cage, {}, &err);
+    REQUIRE_MESSAGE(surface.has_value(), mesh::multires_error_text(err));
+    REQUIRE(surface->add_level(&err));
+    REQUIRE(surface->add_level(&err));
+    REQUIRE(surface->set_sculpt_level(2));
+
+    mesh::MultiresSculptor sculptor(*surface);
+
+    MeshBrushSettings s;
+    s.radius = 0.4f;
+    s.strength = 0.05f;
+    s.geodesic = false;
+    s.direction = cf3(0.02f, 0.01f, 0.0f);
+    s.automask.factors = static_cast<std::uint32_t>(mesh::AutomaskFactor::Boundary);
+    s.automask.boundary_rings = 2;
+
+    // Warm: the level bind, the detail vector, the touched list and the arena
+    // all grow on the first stamps at a given footprint, which the requirement
+    // permits.
+    for (int i = 0; i < 10; ++i) {
+        s.center = cf3(-0.05f + 0.02f * static_cast<float>(i % 4), 0.0f, 0.0f);
+        sculptor.stamp(MeshBrush::Grab, s);
+    }
+    s.center = cf3(0.0f, 0.0f, 0.0f);
+    for (int i = 0; i < 6; ++i) sculptor.stamp(MeshBrush::Grab, s);
+
+    std::size_t count = 0;
+    {
+        CountingScope scope;
+        sculptor.stamp(MeshBrush::Grab, s);
+        count = scope.count();
+    }
+    CHECK(count == 0);
 }

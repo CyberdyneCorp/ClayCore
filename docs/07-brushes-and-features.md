@@ -2182,6 +2182,14 @@ reading a prefix of it, and **carries no image bytes**: an alpha stays
 caller-owned and borrowed for the call, so a preset is a couple of hundred
 bytes and a host owns its own resource cache.
 
+**v2 appends the stamp azimuth.** The azimuth is what turns Rake, Chisel and a
+rotated alpha, and nothing in the stroke engine derives it from the direction of
+travel yet — so a preset is the only place an artist can put one, and v1 wrote
+every other identity field and stopped one short of this one. A v1 record still
+loads and takes the unrotated default, which is what it was in fact saved with;
+a v2 record read by a v1 build is refused rather than reinterpreted, which is
+the whole reason the number is there.
+
 ### Automasking
 
 The gates a brush applies to itself — normal angle, topology connectivity,
@@ -2212,6 +2220,79 @@ structurally cannot write a second estimator to disagree with.
 Runnable: [`examples/65_brush_presets.py`](../examples/65_brush_presets.py) —
 one gesture through five presets, with every claim above asserted rather than
 illustrated.
+
+### The runtime the three mesh representations share
+
+Everything above — the five weight factors, the automask, the alpha, the stamp's
+frame — is one implementation read by three sculptors, and the parts that are
+NOT shared are named rather than left to be discovered.
+
+**One workset, one identity.** `SculptWorkset` addresses work by a 64-bit
+`WorkItemId` rather than by weld class, because a weld class is the fixed mesh's
+identity and nothing else's: the adaptive surface's is a generational
+`VertexId`, the hierarchy's is (level, vertex). The low 32 bits are the dense
+index in all three, which is what lets one `compose_workset` publish the slot
+map for each. Each representation still walks its own region — a weld-class ring,
+a half-edge ring, or a delegation to the bound level — and all three END in that
+one composition, which is where the factor order lives.
+
+**Three representations, four consumers.** `LayeredMultiresSculptor` is the
+fourth, and it reaches the runtime by a route none of the other three take: its
+`gather()` builds no region of its own, it takes a zero-strength `Draw` through
+the bound level's `MeshSculptor` and reads the workset back. That is deliberate —
+a layered stroke must weight a vertex by exactly what an unlayered stamp would,
+so the falloff, the mask gate, the alpha and the composed automask have to be
+ONE answer rather than two that agree today. It is also where the divergence this
+runtime exists to remove would come back, and asymmetrically: `stamp` routes
+through `MultiresSculptor` and keeps its automask, so a mask that stopped
+reaching `gather()` would appear to work for the sixteen ordinary verbs and
+silently stop for `erase`, `restore`, `smooth` and `stamp_detail` — the four
+that exist only on the layered path. `test_multires_shared_brush_parity.cpp`
+pins that route on its own for that reason.
+
+**The automask reaches all three.** It used to reach two. `clay_mesh_brush_desc`
+carried the factors to `clay_dynamic_sculptor_stamp`, which decoded them and
+never read them, so an automask an artist enabled was silently absent on the
+adaptive representation while the header promised "the same descriptor the fixed
+path takes". The neutral core asks a `WorkItemTopology` two questions — the
+in-workset ring of a slot, and whether a slot is on an open border — and three
+of the five factors need no topology at all.
+
+**A per-stamp scratch arena.** "A stamp costs what it touches" is kept by the
+sculptors owning a buffer for every array a stamp needs, which stops working the
+moment a buffer is wanted DEEP inside the call: the automask's breadth-first
+frontier, the adaptive region's sort permutation. `BrushScratchArena` is a bump
+pointer that is reset rather than freed between stamps, so a warm dab on a
+stable surface allocates nothing on any of the three. It reports
+`capacity_bytes`, `high_water_bytes` and `growths` — the last is the one to
+watch, because scratch that grows a little every stamp allocates nothing after
+warm-up and consumes memory without bound, which no allocation count can see.
+One arena per sculptor, never a process-global: two layers stamped on two
+threads must not alias each other's scratch.
+
+**A stamp frame, and its grain.** `MeshBrushSettings::stamp_azimuth` turns the
+stamp's in-plane axes about its own facing, which is what makes a rake, a
+chisel, clay strips, a directional scratch and a rotated alpha presets over one
+frame rather than five code paths. A zero azimuth takes **no rotation at all**
+rather than a rotation by zero, and that is a correctness rule: `x + 0.0f` is
+not the identity when `x` is `-0.0f`, and one flipped sign bit moves an alpha
+sample across a texel boundary.
+
+**Three things in `mesh` are called a frame**, and they are different:
+`BrushFrame` is an enum naming the direction a kernel displaces along,
+`StampFrame` is the orthonormal basis a stamp is oriented in, and `SurfaceFrame`
+is the transported frame a multiresolution detail coefficient is measured in.
+The first keeps its name because it is serialized at preset version 1 and
+mirrored in the C ABI.
+
+Runnable: [`examples/70_shared_brush_runtime.py`](../examples/70_shared_brush_runtime.py)
+— one preset gesture replayed over a fixed mesh, an adaptive surface and a
+multiresolution cage built from the same model. The three write byte-identical
+positions for a normal-free verb, the automask masks the same vertices on each,
+the arena stops growing over the stroke, and Draw's divergence between the
+representations is asserted **as a difference** with its measured bound, because
+a gate that only checked agreement would be satisfied by three representations
+that had become equally wrong.
 
 ---
 

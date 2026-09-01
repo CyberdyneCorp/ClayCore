@@ -104,6 +104,32 @@ class MultiresDelta {
     std::unordered_map<std::uint32_t, std::uint32_t> base_slot_;
 };
 
+// THE HIERARCHY'S OWN VIEW OF WHAT A STAMP REACHED: the bound level sculptor's
+// workset with every item re-tagged from a level weld class to
+// `WorkItemId::level_vertex(level, vertex)`.
+//
+// THIN, AND STILL WORTH HAVING. It walks nothing and weighs nothing — a
+// multiresolution stamp IS `MeshSculptor::stamp` on the bound level, which is
+// the whole point of this representation — but without it a multiresolution
+// write region is reportable only at the LEVEL MESH's addressing, and a host
+// that asked the hierarchy what moved would be answered in a number that means
+// something different at every level.
+//
+// ONE ENTRY PER LEVEL WELD CLASS, tagged with the class's first member. That is
+// the vertex whose position the workset already carries: `MeshSculptor` gathers
+// a class's geometry from `members(c)[0]` and writes every member the same
+// value, so a class is one point and one displacement whatever its member count.
+// The vertices sharing it are not lost — `MultiresSculptor::last_write_vertices`
+// expands them, and that expansion is what `absorb_level_edit` consumes — they
+// are simply not separate work items, because nothing can move them separately.
+//
+// Declared here rather than in `sculpt_workset.h` for the reason the other two
+// builders are declared beside their representations: it names a
+// `MeshSculptor`, and a neutral header holding three representation-specific
+// signatures is neutral in the directory listing only.
+void build_multires_workset(const MeshSculptor& level_sculptor, std::uint32_t level,
+                            SculptWorkset* out);
+
 // Whether a hierarchy offers this verb.
 //
 // ALL SIXTEEN, including Layer — which the adaptive surface declines. The
@@ -179,6 +205,17 @@ class MultiresSculptor {
     // rim of a falloff and a fully masked vertex are gathered and never move.
     const std::vector<std::uint32_t>& last_write_vertices() const { return touched_; }
 
+    // The last stamp's workset, at the HIERARCHY's addressing — see
+    // `build_multires_workset`. Empty before the first stamp.
+    const SculptWorkset& workset() const { return workset_; }
+
+    // The per-stamp scratch arena, which is the BOUND LEVEL SCULPTOR's: a
+    // multiresolution stamp is that sculptor's stamp, so it is that sculptor's
+    // arena that grows, and reporting a second empty one here would tell a host
+    // budgeting memory that a hierarchy costs nothing. Null when no level is
+    // bound yet.
+    const BrushScratchArena* arena() const;
+
    private:
     void bind();
 
@@ -194,6 +231,9 @@ class MultiresSculptor {
     // a stroke at level 0 so the FIRST before survives.
     VertexDeltas level_deltas_;
     std::vector<std::uint32_t> touched_;
+    // Kept as a member rather than built on demand, for the reason every other
+    // per-stamp buffer here is one: a stroke allocates on its first stamp only.
+    SculptWorkset workset_;
 };
 
 }  // namespace mesh

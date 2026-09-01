@@ -1101,6 +1101,31 @@ do {
     }
     check(written.vertex_count == info.vertex_count, "the copy filled what the query promised")
 
+    // ABI 0.75.0's appended field. Zero is what the defaults give and what an
+    // older host sends by declaring the shorter descriptor, and it means NO
+    // rotation rather than a rotation by zero — so a host that never touches
+    // this gets exactly the stamps it got at minor 74.
+    var defaulted = clay_mesh_brush_desc()
+    defaulted.struct_size = UInt32(MemoryLayout<clay_mesh_brush_desc>.size)
+    check(clay_mesh_brush_defaults(&defaulted) == CLAY_OK, "took the brush defaults again")
+    check(defaulted.stamp_azimuth == 0, "the stamp's grain defaults to unrotated")
+
+    var raked = brush
+    raked.stamp_azimuth = 0.7
+    check(clay_dynamic_sculptor_stamp(sculptor, &raked, &topo, nil, nil) == CLAY_OK,
+          "a turned stamp is the same descriptor, not a second entry point")
+
+    // What the stroke's scratch cost. Read rather than tuned: the ABI offers no
+    // reserve and no cap, on purpose.
+    var arena = clay_brush_arena_stats()
+    arena.struct_size = UInt32(MemoryLayout<clay_brush_arena_stats>.size)
+    check(clay_dynamic_sculptor_arena_stats(sculptor, &arena) == CLAY_OK,
+          "read what the adaptive sculptor's scratch arena costs")
+    check(arena.capacity_bytes > 0 && arena.high_water_bytes > 0,
+          "stamps have been made, so the arena owns bytes and has used some")
+    check(arena.high_water_bytes <= arena.capacity_bytes,
+          "the high-water mark cannot exceed what the arena holds")
+
     var exported: OpaquePointer? = nil
     check(clay_dynamic_surface_to_mesh(surface, &exported) == CLAY_OK,
           "exported the adaptive surface back to a mesh")
@@ -1188,6 +1213,15 @@ do {
     check(report.level == 2, "the report names the level it wrote")
     check(report.moved_vertices > 0, "the stamp moved something")
     check(report.detail_revision > 1, "a fine stamp is detail, not cage geometry")
+
+    // The hierarchy's arena is the BOUND LEVEL SCULPTOR's — a stamp runs the
+    // fixed sculptor over the active level's own mesh — so it has bytes only
+    // because the stamp above bound one.
+    var arena = clay_brush_arena_stats()
+    arena.struct_size = UInt32(MemoryLayout<clay_brush_arena_stats>.size)
+    check(clay_multires_sculptor_arena_stats(sculptor, &arena) == CLAY_OK,
+          "read what the hierarchy's scratch arena costs")
+    check(arena.capacity_bytes > 0, "the bound level sculptor's arena is the one reported")
 
     // The changed-block transport: a host copies the blocks the dab reached
     // rather than the display level.

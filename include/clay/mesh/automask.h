@@ -33,6 +33,8 @@
 #include <functional>
 
 #include "clay/kernel/shim.h"
+#include "clay/mesh/brush_arena.h"
+#include "clay/mesh/work_item.h"
 
 namespace clay {
 namespace mesh {
@@ -68,6 +70,22 @@ inline std::uint32_t operator|(AutomaskFactor a, AutomaskFactor b) {
 inline bool has_factor(std::uint32_t factors, AutomaskFactor f) {
     return (factors & static_cast<std::uint32_t>(f)) != 0;
 }
+
+// Where the connectivity flood starts, IN WORKSET SLOTS rather than in a
+// representation's own identity — resolving an identity to a slot is the
+// adapter's job, because `SculptWorkset::slot` is the adapter's array.
+//
+// THREE STATES RATHER THAN TWO, and the third is not a technicality.
+// `resolved == false` means no seed could be found at all, and the factor does
+// not run: a flood with nowhere to start must not mask a stamp the caller never
+// asked to have masked. `resolved` with `slot == kNoClass` means a seed WAS
+// found and did not survive the falloff into the workset, and that masks
+// everything — a flood from a seed that is not there reaches nothing, and
+// saying so is the honest answer where quietly passing everything would not be.
+struct ConnectivitySeed {
+    bool resolved = false;
+    std::uint32_t slot = 0xffffffffu;  // kNoClass; see sculpt_common.h
+};
 
 struct AutomaskSettings {
     std::uint32_t factors = 0;
@@ -116,9 +134,57 @@ struct AutomaskInputs {
 // `reference_normal` is the brush's own facing, fixed for the whole stamp. It
 // is NOT recomputed from the region, which would be circular — the automask is
 // shaping the very weights the region's average normal is weighted by.
+//
+// THE NEUTRAL CORE. It names no representation: three of the five factors need
+// none at all (NormalAngle reads `workset.normals`; Cavity and SurfaceGroup
+// call the caller's own functions on `workset.positions`), and the two that do
+// — the boundary fade and the connectivity flood — ask `WorkItemTopology` the
+// two questions in `work_item.h` and get their answers in workset slots.
+//
+// That split is the whole of why an automask an artist enables now reaches the
+// adaptive surface: before it, `compute_automask` took a `Mesh` and an
+// `Adjacency`, so the one representation that has neither could not call it,
+// and `DynamicSculptor::gather` silently dropped the four automask fields the
+// descriptor had already carried to it.
+//
+// The arena carries the five per-stamp arrays this used to build as
+// `std::vector`s. Each has an exact and knowable bound: a slot enters a
+// breadth-first frontier at most once, and a ring cannot hold more distinct
+// in-workset neighbours than the workset has entries.
+void compute_automask(const WorkItemTopology& topology, const SculptWorkset& workset,
+                      const AutomaskSettings& settings, const AutomaskInputs& inputs,
+                      kernel::cfloat3 reference_normal, ConnectivitySeed seed,
+                      BrushScratchArena& arena, float* out);
+
+// THE FIXED MESH'S ADAPTER, kept under the signature it always had so a caller
+// holding a mesh and an adjacency does not have to build a topology to ask.
+// `seed_class` is a weld class and is resolved to a workset slot here.
 void compute_automask(const Mesh& mesh, const Adjacency& adjacency, const SculptWorkset& workset,
                       const AutomaskSettings& settings, const AutomaskInputs& inputs,
-                      kernel::cfloat3 reference_normal, std::uint32_t seed_class, float* out);
+                      kernel::cfloat3 reference_normal, std::uint32_t seed_class,
+                      BrushScratchArena& arena, float* out);
+
+// The fixed mesh's `WorkItemTopology`: a ring is the adjacency's ring, and an
+// open border is a ring neighbour sharing exactly one triangle.
+//
+// Declared here rather than hidden in the implementation because the fixed
+// sculptor's own gather passes one to `compose_workset` directly — the automask
+// is one step of a composition rather than a call the sculptor makes on its
+// own.
+class MeshWorkItemTopology final : public WorkItemTopology {
+   public:
+    MeshWorkItemTopology(const Mesh& mesh, const Adjacency& adjacency,
+                         const SculptWorkset& workset)
+        : mesh_(mesh), adjacency_(adjacency), workset_(workset) {}
+
+    void ring_slots(std::uint32_t slot, ScratchVector<std::uint32_t>* out) const override;
+    bool on_open_border(std::uint32_t slot) const override;
+
+   private:
+    const Mesh& mesh_;
+    const Adjacency& adjacency_;
+    const SculptWorkset& workset_;
+};
 
 // Whether a class sits on an open border: it has a ring neighbour with which it
 // shares exactly one triangle. Exposed because the boundary gate is not the

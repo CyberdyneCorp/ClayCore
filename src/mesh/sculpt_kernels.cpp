@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "clay/kernel/deform.h"  // calpha_sample, calpha_frame
+#include "clay/mesh/stamp_frame.h"
 
 namespace clay {
 namespace mesh {
@@ -47,6 +48,14 @@ float compose_weight(const WeightFactors& f) {
     return w;
 }
 
+// THE ALPHA'S FRAME IS ONE READING OF THE STAMP'S FRAME, and since
+// add-shared-brush-runtime it is literally that: `make_stamp_frame` reaches
+// `kernel::calpha_frame` exactly once with the same two arguments this used to
+// pass it, so an unrotated alpha lands on the bits it landed on before the
+// stamp frame existed — by construction rather than by measurement.
+//
+// `AlphaFrame` itself stays. It is the CACHED record `alpha_at` reads, and it
+// carries `extent`, which is a property of the stamp rather than of the basis.
 AlphaFrame alpha_frame_for(const MeshBrushSettings& settings, kernel::cfloat3 fallback_direction) {
     AlphaFrame frame;
     if (!settings.has_alpha()) return frame;
@@ -54,10 +63,10 @@ AlphaFrame alpha_frame_for(const MeshBrushSettings& settings, kernel::cfloat3 fa
     frame.extent = settings.alpha_extent > 0.0f ? settings.alpha_extent : 2.0f * settings.radius;
     kernel::cfloat3 dir = settings.alpha_direction;
     if (kernel::clength(dir) < 1e-9f) dir = fallback_direction;
-    kernel::cfloat3 n, t, b;
-    kernel::calpha_frame(dir, settings.alpha_tangent, &n, &t, &b);
-    frame.tangent = t;
-    frame.binormal = b;
+    const StampFrame stamp =
+        make_stamp_frame(settings.center, dir, settings.alpha_tangent, settings.stamp_azimuth);
+    frame.tangent = stamp.tangent;
+    frame.binormal = stamp.bitangent;
     return frame;
 }
 

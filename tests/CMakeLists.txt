@@ -66,6 +66,12 @@ add_executable(clay_unit_tests
   unit/test_mesh_sculpt_layer_history.cpp
   unit/test_c_sculpt_layers.cpp
   unit/test_sculpt_allocation.cpp
+  unit/test_brush_arena.cpp
+  unit/test_stamp_frame.cpp
+  unit/test_dynamic_shared_brush_parity.cpp
+  unit/test_multires_shared_brush_parity.cpp
+  unit/test_c_shared_brush_runtime.cpp
+  unit/test_shared_brush_determinism.cpp
   unit/test_brush_preset.cpp
   unit/test_c_brush_preset.cpp
   unit/test_mesh_deform.cpp
