@@ -14,6 +14,13 @@
 // representation needs to turn a chunk into vertices. The C ABI's job becomes
 // marshalling rather than knowing what a multires level is.
 //
+// THE READ HALF ONLY, deliberately. Draining a dirty set is a WRITE, and it
+// already has one shape for all three: `ChunkTable::acknowledge`, reached
+// through `DynamicBvh::chunks_mutable`, `MultiresSurface::acknowledge_chunk`,
+// or the table a caller owns for a fixed mesh. Duplicating it here would mean
+// this type holding a mutable handle to a surface it exists to read, which is
+// the seam a const readback path could not then use.
+//
 // CALLER-OWNED BUFFERS, AND NO BORROWED POINTERS. `copy_chunk` writes into
 // storage the caller sized from a capacity query and returns nothing that
 // points into the engine. The shipped dynamic-surface transport already states
