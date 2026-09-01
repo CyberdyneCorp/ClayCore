@@ -9,16 +9,23 @@
 - [x] 1.7 Correct the script comment that told consumers to enable the backend during Xcode integration, which a prebuilt static library makes impossible
 - [x] 1.8 Run `tools/build_xcframework.sh` on an Apple machine and confirm all three slices carry a metallib for their own SDK — **done on an Apple machine by `add-device-perf-gates`.** All three build and each is verified by platform, not merely by presence: `metal-readobj --file-headers` reports `METALLIB_PLATFORM_MACOS` / `_IOS` / `_IOS_SIMULATOR` respectively, and that check is now part of the script so the wrong AIR cannot ship silently
 - [x] 1.9 Confirm on a real iPad that `clay_list_backends` reports `metal`, and re-measure — **done on iPad15,5 (iPad Air 13-inch M3), iOS 26.5.2:** `backends = cpu, metal`. Re-measured far past the bake numbers: `add-device-perf-gates` carries a per-verb latency suite on that device, which also found that Metal is SLOWER than the CPU below roughly a thousand stamps (1.85 ms vs 0.21 ms p95 at ten), so shipping Metal is a win at scale and a loss early
-- [ ] 1.10 Reproduce the reported Simulator parity deviation (baked field 0.166 vs 0.033 on CPU) under the parity suite rather than through an app fixture, now that a Metal-enabled framework makes it reachable — **still open, and narrowed.** `add-device-perf-gates` added a parity corpus that runs ON the iPad through the C ABI: every primitive, every combine op, every deformer, every blend profile, and scenes the brushes authored, all at 0.0 worst-case relative error against the CPU. That does NOT close this: no scene bakes through `clay_item_volume_from_document` and compares backends, which is what the report describes. The gap is a scene, not a mechanism
-- [x] 1.11 Decide whether the Metal compile needs an explicit deployment-target flag — **decided yes, and implemented.** `-mios-version-min` / `-mios-simulator-version-min` / `-mmacosx-version-min` are passed from `CMAKE_OSX_DEPLOYMENT_TARGET`, and the metallib records it: `metal-readobj` reports `PlatformMajor: 16` for the iOS slices. Without it the AIR takes the SDK's own version, which is exactly the silent non-registration this change is about
+- [x] 1.10 Reproduce the reported Simulator parity deviation (baked field 0.166
+      vs 0.033 on CPU) under the parity suite rather than through an app
+      fixture — **the scene exists in both corpora now.**
+      `tests/device/Tests/DeviceParityTests.swift` has `authored_baked_volume`,
+      a document collapsed by `clay_item_volume_from_document` then placed and
+      evaluated, added for this task and named in its comment; the text above
+      this line said no such scene existed and had gone stale.
+      `tests/unit/test_parity.cpp` now carries the same shape as
+      `document_baked_volume`, which puts it in the corpus every registered
+      backend is compared over on EVERY pull request rather than only in the
+      device gate's release-time run. Measured on macOS + Metal: worst relative
+      error **0**, against a fixture required to hold >40 bricks and to put
+      >100 of its 4,096 probes inside the surface and >100 in the band, so a
+      volume that redistanced to nothing cannot pass it.
 
-## Not done
-
-- **No CPU-only variant.** The issue offers it as an option if a CPU artifact
-  is still wanted. Nothing in this repository needs one, and two artifacts that
-  differ only in a way invisible at the API is a way to deploy the wrong one.
-  Trivial to add if a consumer asks.
-- **Nothing verified on Apple hardware.** Every change here is build-time and
-  none of it could be executed on the machine it was written on. The scripts
-  parse, CMake configures, and the gates are written to fail loudly — but the
-  first real evidence will come from the release workflow and from a device.
+      WHAT IS STILL UNVERIFIED is the SIMULATOR itself, which is where the
+      report came from. Native macOS Metal and the iPad both agree; the
+      Simulator's Metal is a different device and no suite has been run on it.
+      That is a run, not a scene, and it belongs to whoever next has a
+      Simulator in front of them.
