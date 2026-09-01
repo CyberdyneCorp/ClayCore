@@ -1348,36 +1348,42 @@ headroom than they were set with. **Re-record on the reference device before
 treating an `sdf_stamp_*` budget as a real line.** Until then it is a ceiling
 that will not catch what it was drawn to catch.
 
-### The fixtures record history, because a host does
+### What the undo journal costs the voxel verbs, and why it is not on by default
 
-`Fixture.voxelGrid` and `Fixture.perforatedBlock` call
-`clay_document_enable_undo`, so the voxel verbs are measured against a document
-that journals — which is the state a shipping host is in and the state the
-budgets are read as though they were.
+A shipping host always has undo enabled, and every voxel verb funnels through
+`VoxelGrid::set`, which appends a 16-byte record per cell it CHANGES once it is.
+Through v0.73.0 no device fixture called `clay_document_enable_undo`, so the
+voxel budgets were set against a path no host takes (#242).
 
-**After the priming stamps, not before, and that placement was measured.**
-Priming walks fresh ground, so at 1,000 stamps it journals about 2.4 MB and
-leaves about 5.3 MB of history standing per fixture for the whole run. Enabled
-before priming, two consecutive four-session gates were killed by jetsam in a
-LATER session — the latency bundle in one, the heavy verb bundle in the other,
-neither of which builds these fixtures — where the gate immediately before the
-change passed all four. System-level pressure is not returned by a process
-boundary, which is the same reason the sessions are split at all. Enabled after
-priming, the timed verb still journals every cell it changes, which is the
-question; the fixture just stops carrying the priming's history.
+**Measured with it on, on the reference iPad, from a valid run: 19 voxel cases,
+median 1.017x, worst 1.10x (`voxel_flatten`), every one inside its budget.** The
+gap the budgets carry is small, and it is a number now rather than an unknown.
 
-**They did not, through v0.73.0** (#242). Every voxel verb funnels through
-`VoxelGrid::set`, which appends a 16-byte record per cell it CHANGES once undo
-is on, and no device fixture enabled it — so eleven budgets were set against a
-path no host takes. Measured with it on, the answer is that it fits: **19 voxel
-cases, median 1.017x, worst 1.10x (`voxel_flatten`), every one inside budget.**
+**It is not the default, for a reason about this harness rather than the
+engine.** A case takes up to 200 timed passes and most voxel cases batch 128
+applications into each, so one axis point applies the verb up to **25,600 times
+to a single document with no reset**. Undo is uncapped by design, so at the
+measured 5,300 bytes a changed dab that is up to **136 MB of history for one
+axis point**. The batching exists to lift a 0.002 ms verb above the gate's
+0.125 ms noise floor; a host applies one dab per frame and never accumulates
+25,600 between resets. The memory is the measurement device showing through,
+not a host state being reproduced.
 
-**A dab that lands on covered ground journals NOTHING**, because nothing
-changes, and that is worth knowing before reading the figure above as the whole
-story. The verb cases walk with `walkWindow` wrapping over ground the priming
-already stamped, so at the top of the growth axis most dabs record no events at
-all. The journal's real per-dab cost is measured where it is actually paid — a
-stroke on fresh ground — in `test_document_memory.cpp`:
+Measured consequence: with undo on, two consecutive four-session gates died of
+jetsam in a bundle that does not build these fixtures at all — the latency
+bundle once, the heavy verb bundle twice — where the gate immediately before
+passed all four sessions. Moving the call after the priming stamps was tried and
+did not help, because the accumulation is in the timed loop.
+
+`Fixture.voxelGrid(stamps:voxelSize:undo:)` takes the flag, so the measurement
+reproduces on demand.
+
+**A dab that lands on covered ground journals nothing**, because nothing
+changes, and that bounds how much the figure above can be read as the whole
+story: the verb cases walk with `walkWindow` wrapping over primed ground, so at
+the top of the axis many dabs record no event. The journal's real per-dab cost
+is measured where it is actually paid — a stroke on fresh ground — in
+`test_document_memory.cpp`:
 
     journal    2,386 bytes per dab   (16 per changed cell)
     undo       2,930 bytes per dab
@@ -1385,11 +1391,6 @@ stroke on fresh ground — in `test_document_memory.cpp`:
 
 Flat across 32, 128 and 512 dabs to within 1%: nothing amortises, which is what
 "no cap" means, and it is the input `add-history-budget` needs.
-
-**The gallery bundle still builds its documents without undo**, deliberately
-left alone: it constructs them directly rather than through `Fixture`, and it is
-the bundle that sits closest to jetsam. Extending the change there wants its own
-measurement.
 
 ### Running it
 

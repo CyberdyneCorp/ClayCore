@@ -27,37 +27,42 @@ enum Fixture {
         return [Int32(x * scale), Int32(y * scale), Int32(z * scale)]
     }
 
-    /// UNDO IS ON, because that is the state a shipping host is in and the
-    /// budgets are read as though it were (#242).
+    /// `undo` defaults to OFF, and that is a measured decision rather than the
+    /// oversight #242 found. Read this before changing it.
     ///
-    /// Every voxel verb funnels through `VoxelGrid::set`, which appends a
-    /// 16-byte journal record per cell it actually CHANGES once undo is
-    /// enabled. Through v0.73.0 no device fixture called
-    /// `clay_document_enable_undo`, so the eleven voxel budgets were set
-    /// against a path no host takes — measuring the engine with its history
-    /// recording switched off.
+    /// #242 is right that a shipping host always has undo enabled, that every
+    /// voxel verb funnels through `VoxelGrid::set`, and that through v0.73.0 no
+    /// device fixture called `clay_document_enable_undo` — so the voxel budgets
+    /// were set against a path no host takes. **The question it asks has been
+    /// answered on the reference iPad, with undo on: 19 voxel cases, median
+    /// 1.017x, worst 1.10x (`voxel_flatten`), every one inside its budget.**
+    /// The gap is small, and it is now a number instead of an unknown.
     ///
-    /// Enabled AFTER the priming stamps, and that position was measured rather
-    /// than assumed — the first attempt put it before them, on the argument
-    /// that a host has it on from document open, and this suite could not
-    /// afford it.
+    /// WHAT IT CANNOT BE IS THE PERMANENT CONFIGURATION, because of how this
+    /// harness measures rather than because of what the engine costs. A case
+    /// takes up to `maxSamples` (200) timed passes and most voxel cases batch
+    /// 128 applications into each, so ONE axis point applies the verb up to
+    /// 25,600 times to a single document with no reset. Undo is uncapped by
+    /// design (`clay_document_set_history_budget` is the host's lever, and it
+    /// deliberately does not evict the journal), so at the measured 5,300 bytes
+    /// a changed dab that is up to 136 MB of history for one axis point.
     ///
-    /// Priming walks fresh ground, so at 1,000 stamps it journals about 2.4 MB
-    /// and leaves about 5.3 MB of history standing for the whole timed run,
-    /// per fixture. Two full four-session gates with it enabled before priming
-    /// were killed by jetsam in a LATER session — the latency bundle in one,
-    /// the heavy verb bundle in the other, NEITHER of which builds these
-    /// fixtures — where the run before the change passed all four sessions.
-    /// A process boundary does not return system-level pressure, which is the
-    /// same lesson `tools/run_device_bench.sh` records for the session split.
+    /// That is an artifact of BATCHING, which exists to lift a 0.002 ms verb
+    /// above the gate's 0.125 ms noise floor. A host applies one dab per frame
+    /// and never accumulates 25,600 of them between resets, so the memory is
+    /// not a host state being reproduced — it is the measurement device
+    /// showing through.
     ///
-    /// Enabled after priming, the timed verb still journals every cell it
-    /// changes, which is what #242 asks about; what it does not do is make
-    /// every fixture carry the priming's history for the length of the run.
-    /// The cost of a full session's accumulated history is a real question and
-    /// a different one — `add-history-budget` is where it belongs, and the
-    /// per-dab figures in `test_document_memory.cpp` are its input.
-    static func voxelGrid(stamps: Int, voxelSize: Float = 0.02, undo: Bool = true)
+    /// Measured consequence: with undo enabled, two consecutive four-session
+    /// gates died of jetsam in a bundle that does not even build these
+    /// fixtures — the latency bundle once, the heavy verb bundle twice —
+    /// where the gate immediately before the change passed all four sessions.
+    /// Moving the call after the priming stamps was tried and did not fix it,
+    /// because the accumulation is in the timed loop rather than the priming.
+    ///
+    /// So the parameter stays, the answer is recorded, and the default keeps
+    /// the gate able to run. Pass `undo: true` to reproduce the measurement.
+    static func voxelGrid(stamps: Int, voxelSize: Float = 0.02, undo: Bool = false)
         -> (doc: OpaquePointer, grid: OpaquePointer)? {
         guard let doc = clay_document_create() else { return nil }
         var layer: clay_layer_id = 0
@@ -84,8 +89,8 @@ enum Fixture {
         return [Int32(x * 18), Int32(y * 18), Int32(z * 18)]
     }
 
-    /// A solid block with `holes` single-cell perforations. Undo on, for the
-    /// reason `voxelGrid` states.
+    /// A solid block with `holes` single-cell perforations. `undo` defaults off
+    /// for the reason `voxelGrid` states at length.
     ///
     /// The only shape `fill_cavities` acts on. The verb fills what is NARROW:
     /// a cell with five of its six face neighbours occupied, which is the
@@ -102,7 +107,7 @@ enum Fixture {
     ///
     /// `holes` is the axis: the block is a fixed 33^3 either way, so a bigger
     /// number is more pockets to find rather than more material to walk.
-    static func perforatedBlock(holes: Int, voxelSize: Float = 0.02, undo: Bool = true)
+    static func perforatedBlock(holes: Int, voxelSize: Float = 0.02, undo: Bool = false)
         -> (doc: OpaquePointer, grid: OpaquePointer)? {
         guard let doc = clay_document_create() else { return nil }
         var layer: clay_layer_id = 0
