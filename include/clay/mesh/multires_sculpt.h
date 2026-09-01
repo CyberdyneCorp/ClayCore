@@ -127,8 +127,24 @@ class MultiresSculptor {
     //
     // `gate` is the freeze, taken exactly as every other representation takes
     // one. `record`, when given, accumulates into the caller's gesture.
+    //
+    // A WRITE MAY BE DESTINED FOR A SCULPT LAYER. When the surface's stack has
+    // an active layer, the displacement this stamp made is recorded into that
+    // layer rather than into the level's base detail — see
+    // `MultiresSurface::absorb_level_edit`, which is still the one write path
+    // and still where the arithmetic lives. Two consequences are visible here:
+    //
+    //   * a LOCKED active layer refuses the stamp, and refuses it BEFORE the
+    //     brush moves anything, so the level's mesh is never left holding a
+    //     displacement the hierarchy declined to store. Returns 0, exactly as a
+    //     stamp that reached nothing does;
+    //   * `layer_record`, when given, accumulates the LAYER's coefficients
+    //     before and after, which is what an undo of a layered gesture needs.
+    //     `record` accumulates the base's, as it always has. A gesture writes
+    //     one or the other, never both, because the active layer is one thing.
     std::size_t stamp(MeshBrush verb, const MeshBrushSettings& settings,
-                      const field::MaskGate& gate = {}, MultiresDelta* record = nullptr);
+                      const field::MaskGate& gate = {}, MultiresDelta* record = nullptr,
+                      SculptLayerDelta* layer_record = nullptr);
 
     const MultiresSurface& surface() const { return surface_; }
     MultiresSurface& surface() { return surface_; }

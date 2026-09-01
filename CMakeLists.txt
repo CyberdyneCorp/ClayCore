@@ -96,6 +96,7 @@ add_library(claycore
   src/mesh/project.cpp
   src/mesh/multires_serialize.cpp
   src/mesh/sculpt_layer.cpp
+  src/mesh/sculpt_layer_eval.cpp
   src/mesh/sculpt_layer_serialize.cpp
   src/mesh/deform.cpp
   src/mesh/transfer.cpp

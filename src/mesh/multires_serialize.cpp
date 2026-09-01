@@ -31,7 +31,22 @@ namespace mesh {
 namespace {
 
 constexpr std::uint32_t kSurfaceMagic = 0x53524d43u;  // 'CMRS'
-constexpr std::uint32_t kSurfaceVersion = 1u;
+// VERSION 2 SINCE add-mesh-sculpt-layers, and the bump is the point rather than
+// a formality.
+//
+// `decode` ignores TRAILING BYTES, so the cheap route was available and is
+// wrong: append the layer chunk, leave the version at 1, and a predating binary
+// opens a layered document, reads the base detail, and presents a surface
+// missing every one of the artist's passes — with no signal at all, because
+// nothing it read was malformed. A reader that cannot present the whole surface
+// must say so. So the version moves, an older build refuses by the strict
+// equality check it already has, and the refusal is the "reports that it cannot
+// present the surface" branch the file-io delta asks for.
+//
+// This build accepts BOTH. A version-1 stream is a hierarchy with no layers,
+// which is exactly what it was.
+constexpr std::uint32_t kSurfaceVersion = 2u;
+constexpr std::uint32_t kSurfaceVersionUnlayered = 1u;
 constexpr std::uint32_t kDeltaMagic = 0x44524d43u;  // 'CMRD'
 constexpr std::uint32_t kDeltaVersion = 1u;
 
@@ -170,6 +185,16 @@ std::vector<std::uint8_t> MultiresSurface::encode() const {
         put_u32(&out, static_cast<std::uint32_t>(blob.size()));
         out.insert(out.end(), blob.begin(), blob.end());
     }
+    // THE LAYER STACK, inside this stream rather than beside it. Not in
+    // `mesh::Mesh`'s flat form for the reason the file-io delta gives — its
+    // readers expect interchange arrays — and not in a sidecar, because a
+    // hierarchy and the passes over it are one document's worth of work and a
+    // reader holding half of either is holding a surface it cannot present.
+    {
+        const std::vector<std::uint8_t> blob = state_->stack.encode();
+        put_u32(&out, static_cast<std::uint32_t>(blob.size()));
+        out.insert(out.end(), blob.begin(), blob.end());
+    }
     return out;
 }
 
@@ -205,12 +230,19 @@ struct SurfaceHeader {
     std::uint32_t display = 0;
     float weld = kDefaultWeldEpsilon;
     SubdivisionRule rule = SubdivisionRule::CatmullClark;
+    // A version-1 stream carries no layer chunk. Recorded rather than
+    // re-derived from what is left in the buffer, because `decode` deliberately
+    // ignores trailing bytes and "there are some bytes left" is not the same
+    // question as "this writer wrote a stack".
+    bool has_layers = false;
 };
 
 bool read_header(Reader* r, SurfaceHeader* out) {
     std::uint32_t magic = 0, version = 0, rule = 0;
     if (!r->u32(&magic) || magic != kSurfaceMagic) return false;
-    if (!r->u32(&version) || version != kSurfaceVersion) return false;
+    if (!r->u32(&version)) return false;
+    if (version != kSurfaceVersion && version != kSurfaceVersionUnlayered) return false;
+    out->has_layers = version == kSurfaceVersion;
     if (!r->u32(&rule)) return false;
     // THE RULE IS READ RATHER THAN ASSUMED. A hierarchy reconstructed with a
     // different rule than it was authored with is a different surface, and
@@ -269,6 +301,22 @@ bool MultiresSurface::decode(const std::uint8_t* data, std::size_t size, Multire
         // attach every wrinkle somewhere else.
         if (field.vertex_count() != surface->topology_at(l).vertex_count) return false;
         surface->state_->levels[l].detail = std::move(field);
+    }
+
+    if (header.has_layers) {
+        std::uint32_t blob_size = 0;
+        if (!r.count(1u, &blob_size)) return false;
+        SculptLayerStack stack;
+        if (!SculptLayerStack::decode(data + r.at, blob_size, &stack)) return false;
+        r.at += blob_size;
+        // The stack's own levels must be THIS hierarchy's. A stream pairing one
+        // hierarchy's passes with another's levels would attach every wrinkle
+        // somewhere else, and the layer decoder cannot see the cage to check.
+        if (stack.level_count() != header.levels) return false;
+        for (std::uint32_t l = 0; l < header.levels; ++l)
+            if (stack.level_vertex_count(l) != surface->topology_at(l).vertex_count) return false;
+        surface->state_->stack = std::move(stack);
+        sync_stack_levels(*surface->state_);
     }
 
     surface->state_->sculpt_level = header.sculpt;

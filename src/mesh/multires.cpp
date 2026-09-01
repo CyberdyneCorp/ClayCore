@@ -96,6 +96,12 @@ const char* multires_error_text(MultiresError error) {
             return "the declared hierarchy is deeper than this build will reconstruct";
         case MultiresError::Decode:
             return "the buffer is truncated, corrupt, or from a newer writer";
+        case MultiresError::NoSuchSculptLayer:
+            return "no sculpt layer with that id on this hierarchy";
+        case MultiresError::SculptLayerLocked:
+            return "the sculpt layer is locked; unlock it or write to another channel";
+        case MultiresError::SculptLayerStrokeOpen:
+            return "a stroke is open; a composition change would author it against two surfaces";
     }
     return "unknown error";
 }
@@ -228,6 +234,7 @@ std::optional<MultiresSurface> MultiresSurface::from_mesh(const Mesh& mesh,
     s->levels.push_back(std::move(level0));
     s->patch_dirty.assign(s->levels[0].topology.face_count, 0);
     s->base_frames_all = true;
+    sync_stack_levels(*s);
 
     MultiresSurface surface;
     surface.state_ = std::move(s);
@@ -332,6 +339,9 @@ bool MultiresSurface::add_level(MultiresError* out_error, const parallel::Cancel
     level.pending_all = true;
 
     state_->levels.push_back(std::move(level));
+    // Every layer gains a slot for the new level, sized lazily on first write.
+    // A layer over a twelve-level hierarchy costs the levels it REACHED.
+    sync_stack_levels(*state_);
     const std::uint32_t added = static_cast<std::uint32_t>(state_->levels.size() - 1);
     state_->sculpt_level = added;
     state_->display_level = added;
@@ -346,6 +356,12 @@ bool MultiresSurface::remove_highest_level(MultiresError* out_error, DetailField
     }
     if (out_detail) *out_detail = std::move(state_->levels.back().detail);
     state_->levels.pop_back();
+    // Every layer's field at the level that just went is discarded with it: a
+    // coefficient stored against a level that no longer exists names nothing.
+    // Destructive, and the owner above this is what makes it reversible — the
+    // same statement this call already makes about the base detail it hands
+    // back.
+    sync_stack_levels(*state_);
     state_->attr.resize(std::min<std::size_t>(state_->attr.size(), state_->levels.size()));
     const std::uint32_t top = max_level();
     state_->sculpt_level = std::min(state_->sculpt_level, top);
@@ -363,6 +379,15 @@ bool MultiresSurface::set_base_mesh(const Mesh& mesh, MultiresError* out_error) 
     }
     for (std::size_t l = 1; l < state_->levels.size(); ++l)
         if (!state_->levels[l].detail.empty()) {
+            if (out_error) *out_error = MultiresError::DetailPresent;
+            return false;
+        }
+    // A SCULPT LAYER IS DETAIL, under a different owner. The stencils above the
+    // cage are defined by the connectivity being replaced, so a layer's
+    // coefficients would become as meaningless as the base's — and refusing for
+    // one while accepting the other would be a rule nobody could predict.
+    for (std::size_t i = 0; i < state_->stack.size(); ++i)
+        if (state_->stack.at(i)->has_content()) {
             if (out_error) *out_error = MultiresError::DetailPresent;
             return false;
         }
@@ -426,10 +451,15 @@ std::uint64_t MultiresSurface::detail_checksum() const {
 
 std::uint64_t MultiresSurface::base_revision() const { return state_ ? state_->base_revision : 0; }
 std::uint64_t MultiresSurface::detail_revision() const {
-    return state_ ? state_->detail_revision : 0;
+    // The stack's composition and content bumps are FOLDED IN rather than kept
+    // apart, so a host written against this ABI before sculpt layers existed
+    // sees a strength change exactly as it sees a coefficient write. A host
+    // that needs to know which of the three kinds of layer change happened
+    // reads the three counters the stack keeps.
+    return state_ ? state_->detail_revision + state_->stack.geometry_bumps() : 0;
 }
 std::uint64_t MultiresSurface::evaluated_revision() const {
-    return state_ ? state_->evaluated_revision : 0;
+    return state_ ? state_->evaluated_revision + state_->stack.geometry_bumps() : 0;
 }
 
 const std::vector<std::uint32_t>& MultiresSurface::dirty_patches() const {
@@ -491,6 +521,7 @@ MultiresMemory MultiresSurface::memory() const {
     for (const MultiresLevel& l : state_->levels) {
         m.topology += l.topology.bytes();
         m.detail += l.detail.bytes();
+        if (l.composed) m.composed += l.composed->bytes();
         if (!l.cache) continue;
         ++m.resident_levels;
         const LevelCache::Bytes split = l.cache->byte_split();
@@ -498,8 +529,18 @@ MultiresMemory MultiresSurface::memory() const {
         m.runtime_index += split.runtime;
     }
     for (const AttrLevel& a : state_->attr) m.runtime_index += a.bytes();
-    m.authoritative = m.base + m.topology + m.detail;
-    m.rebuildable = m.evaluated + m.runtime_index;
+    // MEMORY MULTIPLIES TWICE with a layer stack, and the report says so rather
+    // than hiding it: a layer costs its coverage per level, a hundred layers
+    // over one cheek cost a hundred copies of that coverage, and the composed
+    // field costs the union of them once more. Nothing here caps anything — a
+    // cap that silently stopped recording would leave the pass on the surface
+    // and un-dialable, which is a correctness bug wearing a memory limit's
+    // clothes. The levers are merge, bake and delete, and a host reaches for
+    // them by reading this.
+    const SculptLayerMemory layers = state_->stack.memory();
+    m.sculpt_layers = layers.content + layers.masks;
+    m.authoritative = m.base + m.topology + m.detail + m.sculpt_layers;
+    m.rebuildable = m.evaluated + m.composed + m.runtime_index;
     m.total = m.authoritative + m.rebuildable;
     return m;
 }
@@ -512,9 +553,13 @@ void MultiresSurface::drop_all_caches() {
     if (!state_) return;
     for (MultiresLevel& l : state_->levels) {
         l.cache.reset();
+        // The composed detail goes with the rest: it is `B + Σ s·m·L` and
+        // every input to it is still here, so it rebuilds bit-identically.
+        l.composed.reset();
         l.pending.clear();
         l.pending_all = true;
     }
+    state_->base_rest.reset();
     state_->attr.clear();
     state_->base_frames_all = true;
     state_->base_frames_dirty.clear();
@@ -531,6 +576,7 @@ void MultiresSurface::drop_intermediate_caches() {
     for (std::uint32_t l = 0; l < state_->levels.size(); ++l) {
         if (l == keep_a || l == keep_b) continue;
         state_->levels[l].cache.reset();
+        state_->levels[l].composed.reset();
     }
     state_->attr.clear();
 }
@@ -543,6 +589,7 @@ void MultiresSurface::drop_inactive_caches() {
     const std::uint32_t keep = std::max(state_->sculpt_level, state_->display_level);
     for (std::uint32_t l = keep + 1; l < state_->levels.size(); ++l) {
         state_->levels[l].cache.reset();
+        state_->levels[l].composed.reset();
         state_->levels[l].pending.clear();
         state_->levels[l].pending_all = true;
     }
