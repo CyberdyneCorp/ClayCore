@@ -134,7 +134,7 @@ def adaptive_permutation(positions, indices):
 
 
 def main():
-    R.banner("69 shared brush runtime — one brush, three representations")
+    R.banner("70 shared brush runtime — one brush, three representations")
 
     positions, indices = dome()
     inverse = adaptive_permutation(positions, indices)

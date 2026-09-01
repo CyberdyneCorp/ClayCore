@@ -1,5 +1,5 @@
 # claycore OBJ export (vertex-color extension: v x y z r g b)
-mtllib 69_shared_brush_adaptive.mtl
+mtllib 70_shared_brush_adaptive.mtl
 usemtl clay_default
 o claycore
 v -1 0 -1
