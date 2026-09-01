@@ -98,12 +98,19 @@ math::Aabb DynamicBvh::face_bounds(const DynamicSurface& s, FaceId f) const {
 
 void DynamicBvh::build(const DynamicSurface& surface, const DynamicBvhOptions& options) {
     options_ = options;
-    leaves_.clear();
     nodes_.clear();
-    dirty_.clear();
-    dirty_epoch_.clear();
+    ChunkOptions chunking;
+    chunking.target_faces = options_.target_leaf_faces;
+    chunking.max_faces = options_.max_leaf_faces;
+    chunking.min_faces = options_.min_leaf_faces;
+    // Sized from the surface rather than grown: the partition is a function of
+    // the surface, so its arena is one allocation and not one per chunk.
+    const std::size_t faces = surface.faces().size();
+    const std::size_t expected_chunks =
+        faces / std::max<std::size_t>(chunking.target_faces, 1) + 1;
+    table_.reset(expected_chunks, faces + expected_chunks * 16);
+    table_.set_options(chunking);
     face_leaf_.assign(surface.faces().capacity_slots(), kNoLeaf);
-    epoch_ = 1;
 
     // Faces in SLOT ORDER, then partitioned spatially. The slot order is what
     // makes the partition a function of the surface rather than of the order
@@ -127,18 +134,18 @@ void DynamicBvh::build(const DynamicSurface& surface, const DynamicBvhOptions& o
         void run(std::size_t begin, std::size_t end) {
             const std::size_t count = end - begin;
             if (count <= self.options_.target_leaf_faces) {
-                SurfaceLeaf leaf;
-                leaf.live = true;
-                leaf.faces.assign(faces.begin() + static_cast<std::ptrdiff_t>(begin),
-                                  faces.begin() + static_cast<std::ptrdiff_t>(end));
-                for (FaceId f : leaf.faces) leaf.bounds.expand(self.face_bounds(s, f));
-                const std::uint32_t index = static_cast<std::uint32_t>(self.leaves_.size());
-                for (FaceId f : leaf.faces) {
+                const std::uint32_t index = self.table_.create();
+                self.table_.assign_faces(index, faces.data() + begin, count);
+                math::Aabb bounds;
+                for (std::size_t i = begin; i < end; ++i)
+                    bounds.expand(self.face_bounds(s, faces[i]));
+                self.table_.set_bounds(index, bounds);
+                for (std::size_t i = begin; i < end; ++i) {
+                    const FaceId f = faces[i];
                     if (f.slot >= self.face_leaf_.size())
                         self.face_leaf_.resize(f.slot + 1, kNoLeaf);
                     self.face_leaf_[f.slot] = index;
                 }
-                self.leaves_.push_back(std::move(leaf));
                 return;
             }
             // Split on the widest axis of the centroid spread, at the median.
@@ -173,7 +180,9 @@ void DynamicBvh::build(const DynamicSurface& surface, const DynamicBvhOptions& o
     for (std::size_t i = 0; i < all.size(); ++i) centroids[i] = centroid_of(surface, all[i]);
     Chunker{surface, *this, all, centroids}.run(0, all.size());
 
-    dirty_epoch_.assign(leaves_.size(), 0);
+    // A fresh partition is not a change a host has to redraw: it is the state
+    // the host is about to read for the first time.
+    table_.clear_dirty();
     rebuild_tree();
 }
 
@@ -185,14 +194,16 @@ std::uint32_t DynamicBvh::build_node(std::vector<std::uint32_t>& order, std::siz
 
     if (end - begin == 1) {
         const std::uint32_t leaf_index = order[begin];
+        SurfaceLeaf* leaf = table_.chunk_mutable(leaf_index);
         nodes_[index].leaf = leaf_index;
-        nodes_[index].bounds = leaves_[leaf_index].bounds;
-        leaves_[leaf_index].node = index;
+        nodes_[index].bounds = leaf->bounds;
+        leaf->node = index;
         return index;
     }
 
     math::Aabb spread;
-    for (std::size_t i = begin; i < end; ++i) spread.expand(leaves_[order[i]].bounds.center());
+    for (std::size_t i = begin; i < end; ++i)
+        spread.expand(table_.chunk(order[i])->bounds.center());
     const kernel::cfloat3 ext = spread.extent();
     const int axis = ext.x >= ext.y && ext.x >= ext.z ? 0 : (ext.y >= ext.z ? 1 : 2);
     const std::size_t mid = begin + (end - begin) / 2;
@@ -200,8 +211,8 @@ std::uint32_t DynamicBvh::build_node(std::vector<std::uint32_t>& order, std::siz
                      order.begin() + static_cast<std::ptrdiff_t>(mid),
                      order.begin() + static_cast<std::ptrdiff_t>(end),
                      [&](std::uint32_t a, std::uint32_t b) {
-                         const kernel::cfloat3 ca = leaves_[a].bounds.center();
-                         const kernel::cfloat3 cb = leaves_[b].bounds.center();
+                         const kernel::cfloat3 ca = table_.chunk(a)->bounds.center();
+                         const kernel::cfloat3 cb = table_.chunk(b)->bounds.center();
                          const float va = axis == 0 ? ca.x : (axis == 1 ? ca.y : ca.z);
                          const float vb = axis == 0 ? cb.x : (axis == 1 ? cb.y : cb.z);
                          if (va != vb) return va < vb;
@@ -228,8 +239,8 @@ void DynamicBvh::ensure_tree() const {
 void DynamicBvh::rebuild_tree() {
     nodes_.clear();
     std::vector<std::uint32_t> order;
-    for (std::uint32_t i = 0; i < leaves_.size(); ++i)
-        if (leaves_[i].live) order.push_back(i);
+    for (std::uint32_t i = 0; i < table_.slot_count(); ++i)
+        if (table_.chunk(i) != nullptr) order.push_back(i);
     if (order.empty()) {
         root_ = 0xffffffffu;
         tree_stale_ = false;
@@ -247,7 +258,7 @@ void DynamicBvh::refit_ancestors(std::uint32_t node) {
     while (node != 0xffffffffu) {
         Node& n = nodes_[node];
         if (n.leaf != kNoLeaf) {
-            n.bounds = leaves_[n.leaf].bounds;
+            n.bounds = table_.chunk(n.leaf)->bounds;
         } else {
             n.bounds = math::Aabb{};
             if (n.left != 0xffffffffu) n.bounds.expand(nodes_[n.left].bounds);
@@ -258,40 +269,22 @@ void DynamicBvh::refit_ancestors(std::uint32_t node) {
 }
 
 void DynamicBvh::refit_leaf(const DynamicSurface& surface, std::uint32_t leaf_index) {
-    if (leaf_index >= leaves_.size() || !leaves_[leaf_index].live) return;
-    SurfaceLeaf& leaf = leaves_[leaf_index];
-    leaf.bounds = math::Aabb{};
-    for (FaceId f : leaf.faces)
-        if (surface.live(f)) leaf.bounds.expand(face_bounds(surface, f));
-    if (leaf.node != 0xffffffffu) refit_ancestors(leaf.node);
+    SurfaceLeaf* leaf = table_.chunk_mutable(leaf_index);
+    if (leaf == nullptr) return;
+    leaf->bounds = math::Aabb{};
+    for (FaceId f : leaf->faces)
+        if (surface.live(f)) leaf->bounds.expand(face_bounds(surface, f));
+    if (leaf->node != 0xffffffffu) refit_ancestors(leaf->node);
 }
 
 void DynamicBvh::mark_dirty(std::uint32_t leaf_index, bool topology) {
-    if (leaf_index >= leaves_.size()) return;
-    if (dirty_epoch_.size() != leaves_.size()) dirty_epoch_.resize(leaves_.size(), 0);
-    SurfaceLeaf& leaf = leaves_[leaf_index];
-    leaf.revision = ++revision_;
-    if (topology)
-        leaf.topology_dirty = true;
-    else
-        leaf.geometry_dirty = true;
-    // THE EPOCH MARK. A leaf already marked this epoch is already in the list,
-    // so the list holds one entry per leaf however many times a stamp touches
-    // it — and clearing is an increment rather than a walk.
-    if (dirty_epoch_[leaf_index] == epoch_) return;
-    dirty_epoch_[leaf_index] = epoch_;
-    dirty_.push_back(leaf_index);
+    // THE EPOCH MARK lives in the table now, with the four revisions and the
+    // per-chunk acknowledgement. What is decided here is only WHICH of the four
+    // a tree operation advanced: membership, or the same faces in new places.
+    table_.mark(leaf_index, topology ? ChunkDirty::Topology : ChunkDirty::Geometry);
 }
 
-void DynamicBvh::clear_dirty() {
-    for (std::uint32_t i : dirty_)
-        if (i < leaves_.size()) {
-            leaves_[i].geometry_dirty = false;
-            leaves_[i].topology_dirty = false;
-        }
-    dirty_.clear();
-    ++epoch_;
-}
+void DynamicBvh::clear_dirty() { table_.clear_dirty(); }
 
 std::uint32_t DynamicBvh::choose_leaf(kernel::cfloat3 centroid) const {
     if (root_ == 0xffffffffu) return kNoLeaf;
@@ -326,21 +319,17 @@ void DynamicBvh::insert(const DynamicSurface& surface, FaceId face) {
     std::uint32_t leaf_index = choose_leaf(centroid_of(surface, face));
     if (leaf_index == kNoLeaf) {
         // The first face of an empty index.
-        SurfaceLeaf leaf;
-        leaf.live = true;
-        leaves_.push_back(leaf);
-        dirty_epoch_.push_back(0);
-        leaf_index = static_cast<std::uint32_t>(leaves_.size() - 1);
+        leaf_index = table_.create();
         tree_stale_ = true;
     }
-    leaves_[leaf_index].faces.push_back(face);
-    leaves_[leaf_index].bounds.expand(face_bounds(surface, face));
+    table_.add_face(leaf_index, face);
+    table_.expand_bounds(leaf_index, face_bounds(surface, face));
     face_leaf_[face.slot] = leaf_index;
     mark_dirty(leaf_index, /*topology=*/true);
-    if (leaves_[leaf_index].node != 0xffffffffu) refit_ancestors(leaves_[leaf_index].node);
+    const SurfaceLeaf* leaf = table_.chunk(leaf_index);
+    if (leaf->node != 0xffffffffu) refit_ancestors(leaf->node);
 
-    if (leaves_[leaf_index].faces.size() > options_.max_leaf_faces)
-        split_leaf(surface, leaf_index);
+    if (leaf->faces.size() > options_.max_leaf_faces) split_leaf(surface, leaf_index);
     // THE TREE IS NOT REBUILT HERE. `insert` runs once per face per topology
     // operation, and a stamp on a big surface runs thousands of them; rebuilding
     // the tree over the leaves inside it made the stamp O(operations x leaves)
@@ -349,17 +338,22 @@ void DynamicBvh::insert(const DynamicSurface& surface, FaceId face) {
 }
 
 void DynamicBvh::split_leaf(const DynamicSurface& surface, std::uint32_t leaf_index) {
-    SurfaceLeaf& leaf = leaves_[leaf_index];
-    if (leaf.faces.size() < 2) return;
+    const std::size_t count = table_.chunk(leaf_index)->faces.size();
+    if (count < 2) return;
 
     // Median split on the widest axis, same rule as the build, with the same
     // slot tie-break so a leaf split during a stroke partitions the way a
     // rebuild would have.
+    //
+    // SORTED IN PLACE IN THE ARENA. The block is the chunk's own and nothing
+    // else reads it while this runs, so the split costs no allocation at all —
+    // which is what the adaptive half of the allocation gate asks for.
     math::Aabb spread;
-    for (FaceId f : leaf.faces) spread.expand(centroid_of(surface, f));
+    for (FaceId f : table_.chunk(leaf_index)->faces) spread.expand(centroid_of(surface, f));
     const kernel::cfloat3 ext = spread.extent();
     const int axis = ext.x >= ext.y && ext.x >= ext.z ? 0 : (ext.y >= ext.z ? 1 : 2);
-    std::sort(leaf.faces.begin(), leaf.faces.end(), [&](FaceId a, FaceId b) {
+    FaceId* faces = table_.faces_mutable(leaf_index);
+    std::sort(faces, faces + count, [&](FaceId a, FaceId b) {
         const kernel::cfloat3 ca = centroid_of(surface, a), cb = centroid_of(surface, b);
         const float va = axis == 0 ? ca.x : (axis == 1 ? ca.y : ca.z);
         const float vb = axis == 0 ? cb.x : (axis == 1 ? cb.y : cb.z);
@@ -367,23 +361,26 @@ void DynamicBvh::split_leaf(const DynamicSurface& surface, std::uint32_t leaf_in
         return a.slot < b.slot;
     });
 
-    SurfaceLeaf other;
-    other.live = true;
-    const std::size_t mid = leaf.faces.size() / 2;
-    other.faces.assign(leaf.faces.begin() + static_cast<std::ptrdiff_t>(mid), leaf.faces.end());
-    leaf.faces.resize(mid);
+    // The second half is copied out before the new chunk is created, because
+    // creating one may move the arena under the pointer the sort just used.
+    const std::size_t mid = count / 2;
+    moved_faces_.assign(faces + mid, faces + count);
+    table_.truncate_faces(leaf_index, mid);
 
-    const std::uint32_t other_index = static_cast<std::uint32_t>(leaves_.size());
-    for (FaceId f : other.faces) {
+    const std::uint32_t other_index = table_.create();
+    table_.assign_faces(other_index, moved_faces_.data(), moved_faces_.size());
+    math::Aabb other_bounds;
+    for (FaceId f : moved_faces_) {
         if (f.slot < face_leaf_.size()) face_leaf_[f.slot] = other_index;
-        other.bounds.expand(face_bounds(surface, f));
+        other_bounds.expand(face_bounds(surface, f));
     }
-    leaves_[leaf_index].bounds = math::Aabb{};
-    for (FaceId f : leaves_[leaf_index].faces)
-        leaves_[leaf_index].bounds.expand(face_bounds(surface, f));
+    table_.set_bounds(other_index, other_bounds);
 
-    leaves_.push_back(std::move(other));
-    dirty_epoch_.push_back(0);
+    math::Aabb kept;
+    for (FaceId f : table_.chunk(leaf_index)->faces) kept.expand(face_bounds(surface, f));
+    table_.set_bounds(leaf_index, kept);
+
+    mark_dirty(leaf_index, /*topology=*/true);
     mark_dirty(other_index, /*topology=*/true);
     // The leaf SET changed, so the tree over the leaves has to be rebuilt. That
     // is O(leaves), not O(faces), and it happens once per few hundred inserted
@@ -394,14 +391,8 @@ void DynamicBvh::split_leaf(const DynamicSurface& surface, std::uint32_t leaf_in
 void DynamicBvh::erase(FaceId face) {
     if (face.slot >= face_leaf_.size()) return;
     const std::uint32_t leaf_index = face_leaf_[face.slot];
-    if (leaf_index == kNoLeaf || leaf_index >= leaves_.size()) return;
-    SurfaceLeaf& leaf = leaves_[leaf_index];
-    for (std::size_t i = 0; i < leaf.faces.size(); ++i)
-        if (leaf.faces[i].slot == face.slot) {
-            leaf.faces[i] = leaf.faces.back();
-            leaf.faces.pop_back();
-            break;
-        }
+    if (leaf_index == kNoLeaf || table_.chunk(leaf_index) == nullptr) return;
+    table_.remove_face(leaf_index, face.slot);
     face_leaf_[face.slot] = kNoLeaf;
     mark_dirty(leaf_index, /*topology=*/true);
     // The bounds are left as they are: they still CONTAIN everything in the
@@ -413,29 +404,34 @@ void DynamicBvh::erase(FaceId face) {
 void DynamicBvh::update(const DynamicSurface& surface, FaceId face) {
     if (face.slot >= face_leaf_.size()) return;
     const std::uint32_t leaf_index = face_leaf_[face.slot];
-    if (leaf_index == kNoLeaf || leaf_index >= leaves_.size()) return;
-    leaves_[leaf_index].bounds.expand(face_bounds(surface, face));
+    const SurfaceLeaf* leaf = leaf_index == kNoLeaf ? nullptr : table_.chunk(leaf_index);
+    if (leaf == nullptr) return;
+    table_.expand_bounds(leaf_index, face_bounds(surface, face));
     mark_dirty(leaf_index, /*topology=*/false);
-    if (leaves_[leaf_index].node != 0xffffffffu) refit_ancestors(leaves_[leaf_index].node);
+    if (leaf->node != 0xffffffffu) refit_ancestors(leaf->node);
 }
 
 void DynamicBvh::update_many(const DynamicSurface& surface, const std::vector<FaceId>& faces) {
     // One refit pass per LEAF rather than per face: a stamp usually touches a
     // few hundred faces in one or two leaves, and refitting the ancestors once
     // per face would multiply the logarithmic cost by the footprint.
-    std::vector<std::uint32_t> touched;
+    // The touched set is a member rather than a local: a stroke drains this
+    // once per stamp and an allocation here would be one per dab.
+    touched_.clear();
     for (FaceId f : faces) {
         if (f.slot >= face_leaf_.size()) continue;
         const std::uint32_t leaf_index = face_leaf_[f.slot];
-        if (leaf_index == kNoLeaf || leaf_index >= leaves_.size()) continue;
-        if (surface.live(f)) leaves_[leaf_index].bounds.expand(face_bounds(surface, f));
+        if (leaf_index == kNoLeaf || table_.chunk(leaf_index) == nullptr) continue;
+        if (surface.live(f)) table_.expand_bounds(leaf_index, face_bounds(surface, f));
         mark_dirty(leaf_index, /*topology=*/false);
-        touched.push_back(leaf_index);
+        touched_.push_back(leaf_index);
     }
-    std::sort(touched.begin(), touched.end());
-    touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
-    for (std::uint32_t i : touched)
-        if (leaves_[i].node != 0xffffffffu) refit_ancestors(leaves_[i].node);
+    std::sort(touched_.begin(), touched_.end());
+    touched_.erase(std::unique(touched_.begin(), touched_.end()), touched_.end());
+    for (std::uint32_t i : touched_) {
+        const SurfaceLeaf* leaf = table_.chunk(i);
+        if (leaf->node != 0xffffffffu) refit_ancestors(leaf->node);
+    }
 }
 
 // -- queries ------------------------------------------------------------------
@@ -459,7 +455,7 @@ void DynamicBvh::faces_in_ball(const DynamicSurface& surface, kernel::cfloat3 ce
         }
         // OVER-ADMITTED at the leaf, EXACT at the face: a leaf whose bounds
         // reach the ball may hold faces that do not.
-        for (FaceId f : leaves_[n.leaf].faces) {
+        for (FaceId f : table_.chunk(n.leaf)->faces) {
             if (!surface.live(f)) continue;
             VertexId v[3];
             if (!surface.face_vertices(f, v)) continue;
@@ -492,7 +488,7 @@ DynamicBvh::ClosestPoint DynamicBvh::closest(const DynamicSurface& surface,
             if (n.right != 0xffffffffu) stack.push_back(n.right);
             continue;
         }
-        for (FaceId f : leaves_[n.leaf].faces) {
+        for (FaceId f : table_.chunk(n.leaf)->faces) {
             if (!surface.live(f)) continue;
             VertexId v[3];
             if (!surface.face_vertices(f, v)) continue;
@@ -538,7 +534,7 @@ DynamicBvh::RayHit DynamicBvh::raycast(const DynamicSurface& surface, kernel::cf
             if (n.right != 0xffffffffu) stack.push_back(n.right);
             continue;
         }
-        for (FaceId f : leaves_[n.leaf].faces) {
+        for (FaceId f : table_.chunk(n.leaf)->faces) {
             if (!surface.live(f)) continue;
             VertexId v[3];
             if (!surface.face_vertices(f, v)) continue;
@@ -561,16 +557,14 @@ DynamicBvh::RayHit DynamicBvh::raycast(const DynamicSurface& surface, kernel::cf
 // -- introspection ------------------------------------------------------------
 
 std::size_t DynamicBvh::leaf_count() const {
-    std::size_t n = 0;
-    for (const SurfaceLeaf& l : leaves_)
-        if (l.live) ++n;
-    return n;
+    // The SLOT count, which is the live count too: this partitioner never
+    // releases a chunk, so the identity space stays dense and a caller
+    // iterating 0..leaf_count() sees every leaf. A partitioner that did release
+    // one would have to say so here rather than let the two quietly diverge.
+    return table_.slot_count();
 }
 
-const SurfaceLeaf* DynamicBvh::leaf(std::uint32_t index) const {
-    if (index >= leaves_.size() || !leaves_[index].live) return nullptr;
-    return &leaves_[index];
-}
+const SurfaceLeaf* DynamicBvh::leaf(std::uint32_t index) const { return table_.chunk(index); }
 
 std::uint32_t DynamicBvh::leaf_of(FaceId face) const {
     if (face.slot >= face_leaf_.size()) return kNoLeaf;
@@ -586,15 +580,16 @@ float DynamicBvh::quality() const {
     // The mean leaf volume against the volume of their union. One means a
     // perfect partition; larger means the leaves overlap, which is what local
     // edits do to a tree over time.
-    if (leaves_.empty()) return 1.0f;
+    if (table_.slot_count() == 0) return 1.0f;
     const math::Aabb whole = bounds();
     const kernel::cfloat3 we = whole.extent();
     const float total = std::max(we.x * we.y * we.z, 1e-20f);
     float sum = 0.0f;
     std::size_t n = 0;
-    for (const SurfaceLeaf& l : leaves_) {
-        if (!l.live || l.faces.empty()) continue;
-        const kernel::cfloat3 e = l.bounds.extent();
+    for (std::uint32_t i = 0; i < table_.slot_count(); ++i) {
+        const SurfaceLeaf* l = table_.chunk(i);
+        if (l == nullptr || l->faces.empty()) continue;
+        const kernel::cfloat3 e = l->bounds.extent();
         sum += std::max(e.x * e.y * e.z, 0.0f);
         ++n;
     }
@@ -613,10 +608,9 @@ bool DynamicBvh::wants_rebuild() const {
 std::size_t DynamicBvh::bytes() const {
     std::size_t n = sizeof(DynamicBvh);
     n += nodes_.capacity() * sizeof(Node);
-    n += leaves_.capacity() * sizeof(SurfaceLeaf);
-    for (const SurfaceLeaf& l : leaves_) n += l.faces.capacity() * sizeof(FaceId);
+    n += table_.bytes();
     n += face_leaf_.capacity() * sizeof(std::uint32_t);
-    n += (dirty_.capacity() + dirty_epoch_.capacity()) * sizeof(std::uint32_t);
+    n += (touched_.capacity() + moved_faces_.capacity() * 2) * sizeof(std::uint32_t);
     return n;
 }
 

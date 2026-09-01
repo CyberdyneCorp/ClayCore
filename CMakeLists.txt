@@ -88,6 +88,7 @@ add_library(claycore
   src/mesh/topology_delta.cpp
   src/mesh/topology_ops.cpp
   src/mesh/dynamic_bvh.cpp
+  src/mesh/surface_chunks.cpp
   src/mesh/remesh_local.cpp
   src/mesh/dynamic_sculpt.cpp
   src/mesh/subdivide.cpp

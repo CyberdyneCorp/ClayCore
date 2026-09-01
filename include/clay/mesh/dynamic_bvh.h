@@ -23,6 +23,15 @@
 // demonstrates the shape: a sparse set of fixed units with revisions, refilled
 // and uploaded independently.
 //
+// THE CHUNK ITSELF IS NO LONGER THIS FILE'S (add-extreme-poly-runtime). It is
+// `mesh::ChunkTable`, which the fixed sculptor and the hierarchy share: the
+// six roles above are claimed for all three representations rather than for
+// this one, and what stays here is the PARTITIONER — which faces go in which
+// chunk, and the tree over the chunks. `SurfaceLeaf` is now a name for
+// `SurfaceChunk`, so every existing reader of a leaf's faces, bounds, revision
+// and dirty flags is unchanged; what it gained is three more revisions, an
+// arena instead of a vector per leaf, and an acknowledgement.
+//
 // WHAT "LOCAL" MEANS HERE, precisely, because it is the requirement: moving a
 // vertex refits its leaf and the leaf's ANCESTORS, which is logarithmic in the
 // number of leaves — not the whole tree, and not the whole surface. A split or
@@ -34,6 +43,7 @@
 
 #include "clay/math/geom.h"
 #include "clay/mesh/dynamic_surface.h"
+#include "clay/mesh/surface_chunks.h"
 
 namespace clay {
 namespace mesh {
@@ -50,21 +60,9 @@ struct DynamicBvhOptions {
     std::size_t min_leaf_faces = 64;
 };
 
-// One chunk. `revision` advances whenever anything in it changes, so a host can
-// ask "what do I need to re-upload" without diffing geometry.
-struct SurfaceLeaf {
-    math::Aabb bounds;
-    std::vector<FaceId> faces;
-    std::uint64_t revision = 0;
-    // Set when the faces moved but the membership did not, and when the
-    // membership itself changed. A host re-uploads an index buffer only for the
-    // second.
-    bool geometry_dirty = false;
-    bool topology_dirty = false;
-    // The tree node that owns this leaf.
-    std::uint32_t node = 0xffffffffu;
-    bool live = false;
-};
+// `SurfaceLeaf` — the chunk record, its four revisions and its face span — is
+// in `surface_chunks.h`. It is not redefined here, because two definitions of
+// "one chunk" is the exact failure the shared table exists to remove.
 
 class DynamicBvh {
    public:
@@ -122,8 +120,15 @@ class DynamicBvh {
     // BY EPOCH MARK, not by a hash set per dab. A leaf carries the epoch it was
     // last marked in; the "clear" is an increment of the current epoch, which
     // costs nothing and cannot grow.
-    const std::vector<std::uint32_t>& dirty_leaves() const { return dirty_; }
+    const std::vector<std::uint32_t>& dirty_leaves() const { return table_.dirty(); }
     void clear_dirty();
+
+    // The table itself, for the transport and the ledger. A caller that wants
+    // the four revisions, the chunk-local vertex map or the per-chunk
+    // acknowledgement asks it directly; `dirty_leaves` and `leaf` stay as the
+    // shipped shorthand over the same records.
+    const ChunkTable& chunks() const { return table_; }
+    ChunkTable& chunks_mutable() { return table_; }
 
     // -- introspection --------------------------------------------------------
     std::size_t leaf_count() const;
@@ -168,16 +173,21 @@ class DynamicBvh {
     math::Aabb face_bounds(const DynamicSurface& surface, FaceId f) const;
 
     DynamicBvhOptions options_;
-    std::vector<SurfaceLeaf> leaves_;
+    // The chunks, their faces and their dirty set. Shared with the other two
+    // representations; what is private to this file is the tree below and the
+    // face-to-chunk map beside it.
+    ChunkTable table_;
     std::vector<Node> nodes_;
     std::uint32_t root_ = 0xffffffffu;
     // face slot -> leaf index. A vector rather than a map: the slot space is
     // dense enough that the vector is smaller and the lookup is a load.
     std::vector<std::uint32_t> face_leaf_;
-    std::vector<std::uint32_t> dirty_;
-    std::vector<std::uint32_t> dirty_epoch_;
-    std::uint32_t epoch_ = 1;
-    std::uint64_t revision_ = 1;
+    // Scratch for the two operations that run per stamp: the leaves a refit
+    // touched, and the half of a chunk a split moves. Members rather than
+    // locals, for the reason every other per-stamp buffer in this library is
+    // one — a stroke must allocate on its first stamp and never again.
+    std::vector<std::uint32_t> touched_;
+    std::vector<FaceId> moved_faces_;
     mutable bool tree_stale_ = false;
 };
 
