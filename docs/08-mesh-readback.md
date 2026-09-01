@@ -714,6 +714,113 @@ it is paid — `Mesh.preflight_to_dynamic`, `Mesh.preflight_global_remesh`,
 which came first. Read `peak_bytes`: an operation priced by what it leaves
 behind is the one that terminates the process half way through.
 
+### Work that is not required for correctness
+
+A sculpt runtime accumulates jobs that make the **next** interaction cheaper and
+this one slower: an index whose partition has decayed under local edits, a chunk
+arena with slack a split left behind, a detail field that is now dense enough to
+be worth promoting, normals a drag deferred. Every one of them is a stall if it
+happens while a finger is on the glass, and none of them is the engine's
+decision — the engine does not own the moment between two interactions.
+
+So they are **queued and not done**, and a host drains the queue with a budget of
+its own:
+
+```python
+queue = clay.MaintenanceQueue()
+
+with queue.stroke():                       # the gate: nothing runs in here
+    for point in drag:
+        adaptive.stamp("draw", center=point, radius=r, strength=s)
+    adaptive.request_index_rebuild(queue)  # discovered mid-stroke, run later
+
+deadline = time.monotonic() + 0.004        # your frame, your clock
+while time.monotonic() < deadline:
+    item = queue.take_next()               # None while a stroke is open
+    if item is None:
+        break
+    if item["kind"] == clay.MaintenanceKind.index_rebuild:
+        adaptive.rebuild_index()
+    elif item["kind"] == clay.MaintenanceKind.normal_flush:
+        fixed.flush_normals()
+    queue.complete(item["kind"], item["target"])
+```
+
+`adaptive` is a `DynamicSculptor` and `fixed` a `MeshSculptor`: one queue serves
+every surface a document holds, which is why an item carries a `target` the
+queue never interprets — it is what makes two requests the same request.
+
+`clay_maintenance_queue_*` is the same surface in C, with the same take/complete
+pair — the budget loop is the caller's because the caller holds the clock, and a
+callback across the boundary could be re-entered by host code that queued another
+item mid-drain.
+
+**The stroke gate is a mechanism rather than a convention.** "We only call this
+between strokes" is a rule that survives until the second caller, so `take_next`
+and `complete` do nothing while a stroke is open. A **request** is not gated, and
+that asymmetry is the whole design: a stamp is exactly where an item is
+discovered, and refusing to record one mid-stroke would lose the request rather
+than defer the work.
+
+**Nothing in the queue performs anything.** An item names a kind and a target;
+what services it is an ordinary call you already have. An item you decline, defer
+forever or perform differently leaves the surface correct either way, because
+none of it was correctness.
+
+`MaintenanceKind.normal_flush` is the one exception and is marked so: the
+committed state has to be exact. It is in the queue so you can spend your budget
+on it first, not so you can decide whether to do it.
+
+### Deferring normals across a drag
+
+Normals follow the vertices, so a moved vertex with a stale normal shades wrong
+immediately — which is why they are recomputed per stamp by default and the
+deferral is opt-in. What it buys is the recompute of a stroke's overlapping dabs
+done once instead of once per dab.
+
+```python
+sculptor.defer_normals = True
+for point in drag:
+    sculptor.stamp("draw", center=point, radius=r, strength=s, deltas=step)
+sculptor.flush_normals(step)      # pass the same record the stamps used
+```
+
+**The final state is exact either way.** That is the whole contract: deferring
+changes *when* the work happens and nothing about the result, which is what makes
+it a hint `SculptMemoryProfile.defer_normals_in_stroke` may carry rather than a
+decision that would make a committed sculpt a function of machine speed.
+
+**A host that defers must flush**, because nothing flushes on its own — the
+sculptor does not know where a stroke ends, and a guess at it would flush
+mid-drag, which is the cost the deferral exists to avoid. `apply_stroke`'s own
+`defer_normals` argument is a different thing and still flushes at the end of the
+stroke it drove; there the library does know where the stroke ended.
+
+Pass the same delta record the stamps were recorded into. A deferred stroke's
+undo is exact only if the flush records the normals it changed; omit it and undo
+restores positions and leaves shading from a stroke that no longer exists.
+
+### Asking what the index is worth
+
+`DynamicSculptor.index_quality` reports `leaf_count`, `quality` and
+`wants_rebuild` — the measurement behind the one maintenance item you are most
+likely to decline, so declining it is declining something you can see rather than
+a name.
+
+`quality` is the mean leaf volume against the volume of their union: 1 is a
+perfect partition and larger means the leaves overlap, which is what local edits
+do to a tree over time. Compare it against what **this** tree scored when it was
+built, never against another model's. A surface with **no volume reports 0** — a
+flat ground plane's leaves and their union are both zero-volume boxes — so on a
+plane the number says nothing and `wants_rebuild` is never true.
+
+`wants_rebuild` is the engine's opinion of its own partition and not an
+instruction. `request_index_rebuild` checks it **and**
+`SculptMemoryProfile.allow_index_rebuild`, and the two are deliberately apart:
+the engine measures, the host decides whether it has the room. A rebuild is not
+automatically an improvement — over five measured deformations one produced a
+better tree in exactly one case and a dramatically worse one in two.
+
 ## Handing a sculpt to the retopology engine
 
 `clay_mesh_save_handoff` writes the **sculpt handoff** that CyberRemesherAndUV's

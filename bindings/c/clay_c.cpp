@@ -27,6 +27,7 @@
 #include "clay/brush/procedural_mask.h"
 #include "clay/brush/preset.h"
 #include "clay/mesh/dynamic_sculpt.h"
+#include "clay/mesh/maintenance.h"
 #include "clay/brush/stroke.h"
 #include "clay/mesh/multires_sculpt.h"
 #include "clay/mesh/preflight.h"
@@ -15805,6 +15806,53 @@ clay_sculpt_memory_profile from_profile(const clay::memory::SculptMemoryProfile&
 
 }  // namespace
 
+// -- the queue a host drains between interactions (add-extreme-poly-runtime 3.5)
+//
+// A HANDLE OVER `mesh::MaintenanceQueue` AND NOTHING ELSE. The queue refers to
+// no surface and owns nothing but its entries, so one of these may collect the
+// items of every surface a document holds — which is what a host with a
+// hierarchy, an adaptive surface and a fixed mesh open at once actually has.
+//
+// THE STROKE GATE IS NOT REIMPLEMENTED HERE. Both drain entry points below go
+// through `service`, whose first line is the gate, rather than reading
+// `in_stroke()` and deciding for themselves. A second copy of a rule is a
+// second thing that can stay true while the first changes, and this rule is the
+// one the file it lives in calls a mechanism rather than a convention.
+struct clay_maintenance_queue {
+    clay::mesh::MaintenanceQueue queue;
+};
+
+namespace {
+
+constexpr std::size_t kMaintenanceItemOriginal =
+    offsetof(clay_maintenance_item, estimated_micros) + sizeof(std::uint64_t);
+constexpr std::size_t kIndexQualityOriginal =
+    offsetof(clay_index_quality, wants_rebuild) + sizeof(std::int32_t);
+
+// A kind outside the declared list is a REFUSAL rather than a clamp, on the
+// same footing as the pressure and mesher enums: mapping it onto the default
+// would queue an INDEX REBUILD for a caller that asked for something else, and
+// the host would service it without ever learning it had been misheard.
+clay_result read_maintenance_kind(std::int32_t value, mesh::MaintenanceKind* out) {
+    if (value < 0 || value > static_cast<std::int32_t>(mesh::MaintenanceKind::NormalFlush))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "maintenance kind " + std::to_string(value) +
+                        " is not a clay_maintenance_kind");
+    *out = static_cast<mesh::MaintenanceKind>(value);
+    return CLAY_OK;
+}
+
+clay_maintenance_item to_c_item(const mesh::MaintenanceItem& item) {
+    clay_maintenance_item out{};
+    out.kind = static_cast<std::int32_t>(item.kind);
+    out.target = item.target;
+    out.requests = item.requests;
+    out.estimated_micros = item.estimated_micros;
+    return out;
+}
+
+}  // namespace
+
 extern "C" {
 
 const char* clay_memory_class_text(int32_t memory_class) {
@@ -16259,6 +16307,248 @@ clay_result clay_multires_preflight_encode(const clay_multires* surface, uint64_
     clay_result r = resolve_multires_ro(surface, &s);
     if (r != CLAY_OK) return r;
     return write_preflight(out_preflight, mesh::preflight_encode(*s, budget));
+}
+
+/* -- maintenance ---------------------------------------------------------- */
+
+const char* clay_maintenance_kind_text(int32_t kind) {
+    if (kind < 0 || kind > static_cast<std::int32_t>(mesh::MaintenanceKind::NormalFlush))
+        return "unknown";
+    return mesh::maintenance_kind_name(static_cast<mesh::MaintenanceKind>(kind));
+}
+
+clay_result clay_maintenance_queue_create(clay_maintenance_queue** out_queue) {
+    if (!out_queue) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_queue");
+    *out_queue = new clay_maintenance_queue();
+    return CLAY_OK;
+}
+
+void clay_maintenance_queue_destroy(clay_maintenance_queue* queue) { delete queue; }
+
+clay_result clay_maintenance_queue_request(clay_maintenance_queue* queue, int32_t kind,
+                                           uint32_t target, uint64_t estimated_micros) {
+    if (!queue) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null maintenance queue");
+    mesh::MaintenanceKind k = mesh::MaintenanceKind::IndexRebuild;
+    clay_result r = read_maintenance_kind(kind, &k);
+    if (r != CLAY_OK) return r;
+    // NOT GATED, and that is the asymmetry the gate is made of: a stamp is
+    // exactly where an item is DISCOVERED, and refusing to record it mid-stroke
+    // would lose the request rather than defer the work. What the gate stops is
+    // running it.
+    queue->queue.request(k, target, estimated_micros);
+    return CLAY_OK;
+}
+
+clay_result clay_maintenance_queue_count(const clay_maintenance_queue* queue, size_t* out_count) {
+    if (!queue) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null maintenance queue");
+    if (!out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_count");
+    *out_count = queue->queue.size();
+    return CLAY_OK;
+}
+
+clay_result clay_maintenance_queue_item(const clay_maintenance_queue* queue, size_t index,
+                                        clay_maintenance_item* out_item) {
+    if (!queue) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null maintenance queue");
+    if (!out_item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_item");
+    clay_maintenance_item probe;
+    clay_result r = read_desc(out_item, kMaintenanceItemOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::vector<mesh::MaintenanceItem>& items = queue->queue.items();
+    if (index >= items.size())
+        return fail(CLAY_ERROR_NOT_FOUND,
+                    "maintenance item " + std::to_string(index) + " of " +
+                        std::to_string(items.size()));
+    write_desc(out_item, out_item->struct_size, to_c_item(items[index]));
+    return CLAY_OK;
+}
+
+clay_result clay_maintenance_queue_has(const clay_maintenance_queue* queue, int32_t kind,
+                                       uint32_t target, int32_t* out_has) {
+    if (!queue) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null maintenance queue");
+    if (!out_has) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_has");
+    mesh::MaintenanceKind k = mesh::MaintenanceKind::IndexRebuild;
+    clay_result r = read_maintenance_kind(kind, &k);
+    if (r != CLAY_OK) return r;
+    *out_has = queue->queue.has(k, target) ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_maintenance_queue_begin_stroke(clay_maintenance_queue* queue) {
+    if (!queue) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null maintenance queue");
+    queue->queue.begin_stroke();
+    return CLAY_OK;
+}
+
+clay_result clay_maintenance_queue_end_stroke(clay_maintenance_queue* queue) {
+    if (!queue) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null maintenance queue");
+    queue->queue.end_stroke();
+    return CLAY_OK;
+}
+
+clay_result clay_maintenance_queue_in_stroke(const clay_maintenance_queue* queue,
+                                             int32_t* out_in_stroke) {
+    if (!queue) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null maintenance queue");
+    if (!out_in_stroke) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_in_stroke");
+    *out_in_stroke = queue->queue.in_stroke() ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_maintenance_queue_take_next(clay_maintenance_queue* queue,
+                                             clay_maintenance_item* out_item, int32_t* out_have) {
+    if (!queue) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null maintenance queue");
+    if (!out_item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_item");
+    if (!out_have) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_have");
+    clay_maintenance_item probe;
+    clay_result r = read_desc(out_item, kMaintenanceItemOriginal, &probe);
+    if (r != CLAY_OK) return r;
+
+    // A PEEK THROUGH THE DRAIN, so the stroke gate has one implementation and
+    // it is the engine's. `run` declines every item, which leaves the queue
+    // exactly as it was and walks it under the same check `service` applies to
+    // a real drain — a gate that changed there could not stay true here by
+    // accident. Walking past the first entry costs nothing worth avoiding: the
+    // queue holds a handful, five kinds and a target apiece.
+    mesh::MaintenanceItem found;
+    bool have = false;
+    queue->queue.service(0, [&](const mesh::MaintenanceItem& item) {
+        if (!have) {
+            found = item;
+            have = true;
+        }
+        return false;
+    });
+    *out_have = have ? 1 : 0;
+    // Left untouched when there is nothing to take, the way a missed raycast
+    // leaves clay_mesh_hit alone: a caller that checked the flag reads nothing,
+    // and one that did not reads what it passed in rather than a plausible item.
+    if (have) write_desc(out_item, out_item->struct_size, to_c_item(found));
+    return CLAY_OK;
+}
+
+clay_result clay_maintenance_queue_complete(clay_maintenance_queue* queue, int32_t kind,
+                                            uint32_t target, int32_t* out_completed) {
+    if (!queue) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null maintenance queue");
+    mesh::MaintenanceKind k = mesh::MaintenanceKind::IndexRebuild;
+    clay_result r = read_maintenance_kind(kind, &k);
+    if (r != CLAY_OK) return r;
+    // Through `service` for the same reason: the item that matches is
+    // "completed" and every other one is declined, so a budget of zero removes
+    // exactly the one named and the gate is the one the engine keeps.
+    const std::size_t done = queue->queue.service(0, [&](const mesh::MaintenanceItem& item) {
+        return item.kind == k && item.target == target;
+    });
+    if (out_completed) *out_completed = done != 0 ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_maintenance_queue_clear(clay_maintenance_queue* queue) {
+    if (!queue) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null maintenance queue");
+    queue->queue.clear();
+    return CLAY_OK;
+}
+
+clay_result clay_maintenance_queue_bytes(const clay_maintenance_queue* queue, size_t* out_bytes) {
+    if (!queue) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null maintenance queue");
+    if (!out_bytes) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_bytes");
+    *out_bytes = queue->queue.bytes();
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_sculptor_index_quality(const clay_dynamic_sculptor* sculptor,
+                                                clay_index_quality* out_quality) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    if (!out_quality) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_quality");
+    clay_index_quality probe;
+    clay_result r = read_desc(out_quality, kIndexQualityOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const mesh::DynamicBvh& index = sculptor->sculptor->bvh();
+    clay_index_quality out{};
+    out.leaf_count = index.leaf_count();
+    out.quality = index.quality();
+    out.wants_rebuild = index.wants_rebuild() ? 1 : 0;
+    write_desc(out_quality, out_quality->struct_size, out);
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_sculptor_request_index_rebuild(const clay_dynamic_sculptor* sculptor,
+                                                        const clay_sculpt_memory_profile* profile,
+                                                        uint32_t target,
+                                                        clay_maintenance_queue* queue,
+                                                        int32_t* out_queued) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    if (!queue) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null maintenance queue");
+    clay::memory::SculptMemoryProfile p;
+    if (profile) {
+        clay_sculpt_memory_profile d;
+        clay_result r = read_desc(profile, kSculptProfileOriginal, &d);
+        if (r != CLAY_OK) return r;
+        if (d.memory_class < 0 ||
+            d.memory_class > static_cast<std::int32_t>(clay::memory::MemoryClass::Minimal))
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "memory_class " + std::to_string(d.memory_class) +
+                            " is not a clay_memory_class");
+        p = to_profile(d);
+    }
+    const bool queued =
+        mesh::request_index_rebuild(sculptor->sculptor->bvh(), p, target, &queue->queue);
+    if (out_queued) *out_queued = queued ? 1 : 0;
+    return CLAY_OK;
+}
+
+/* -- normals a drag deferred ---------------------------------------------- */
+
+clay_result clay_mesh_sculptor_set_defer_normals(clay_mesh_sculptor* sculptor, int32_t defer) {
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/true);
+    if (r != CLAY_OK) return r;
+    sculptor->sculptor->set_defer_normals(defer != 0);
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_defer_normals(const clay_mesh_sculptor* sculptor,
+                                             int32_t* out_defer) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh sculptor");
+    if (!out_defer) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_defer");
+    *out_defer = sculptor->sculptor->defer_normals() ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_flush_normals(clay_mesh_sculptor* sculptor,
+                                             clay_mesh_deltas* deltas) {
+    // FOR EDIT, because it writes the mesh's normals: a flush against a
+    // sculptor whose layer has been replaced underneath it has to refuse for
+    // exactly the reasons a stamp does, and the one check that catches that is
+    // the one every mutating entry point already shares.
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/true);
+    if (r != CLAY_OK) return r;
+    sculptor->sculptor->flush_normals(deltas ? &deltas->deltas : nullptr);
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculptor_set_defer_normals(clay_multires_sculptor* sculptor,
+                                                     int32_t defer) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
+    sculptor->sculptor->set_defer_normals(defer != 0);
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculptor_defer_normals(const clay_multires_sculptor* sculptor,
+                                                 int32_t* out_defer) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
+    if (!out_defer) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_defer");
+    *out_defer = sculptor->sculptor->defer_normals() ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculptor_flush_normals(clay_multires_sculptor* sculptor) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
+    sculptor->sculptor->flush_normals();
+    return CLAY_OK;
 }
 
 }  // extern "C"

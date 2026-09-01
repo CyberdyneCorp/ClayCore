@@ -114,12 +114,79 @@
       the write region and its ring); what this stage added is the profile field
       that expresses the deferral and the `NormalFlush` maintenance item, which is
       marked non-optional because the committed state has to be exact
+      NOW REACHABLE FROM EVERY HOST, which it was not: the deferral existed in
+      C++ only, so an application driving a drag stamp by stamp — which is every
+      interactive host — could not use it at all. `clay_mesh_sculptor_set_defer_normals`
+      / `_defer_normals` / `_flush_normals` (taking the `clay_mesh_deltas` the
+      stamps were recorded into, because a deferred stroke's undo is exact only
+      if the flush records the normals it changed), the same three on
+      `clay_multires_sculptor_*`, and pyclay's `defer_normals` property and
+      `flush_normals(deltas=None)` on both sculptors. The gate is asserted as
+      BYTES in all three languages — two identical stroke sequences, one
+      deferred and flushed and one not, compared normal by normal, with the
+      pre-flush difference asserted first so the post-flush equality is a claim
+      about the flush rather than about two runs that were never apart:
+      `test_c_maintenance.cpp` and `bindings/python/tests/test_maintenance.py`.
+      Writing them found the fixture trap worth recording: a mesh from
+      `clay_mesh_from_triangles` carries NO normals and a sculptor never
+      manufactures them, so a deferral is unobservable on a triangle soup — the
+      cases mesh a sphere through the document, which is what a host sculpts.
+      PROVEN TO CATCH ITS REGRESSION: with `clay_mesh_sculptor_flush_normals`
+      passing `nullptr` where the caller's `clay_mesh_deltas` belongs — a flush
+      that runs and records nothing, which is the mistake, not a flush that
+      fails to run — the branch still compiles and the undo case reports 282
+      failed assertions against 26,120
 - [x] 3.4 Spatial index quality tracked; a rebuild is marked and deferred, and
       it runs between strokes rather than mid-drag
+      REACHABLE NOW, which is what makes the deferral a host's decision rather
+      than a comment: `clay_dynamic_sculptor_index_quality` fills a
+      `clay_index_quality` (leaf count, quality, wants_rebuild) and
+      `clay_dynamic_sculptor_request_index_rebuild` queues the job if the tree
+      wants one AND the profile allows it, with pyclay's `index_quality` dict
+      and `request_index_rebuild(queue, profile, target)` beside them. The two
+      conditions are asserted SEPARATELY — a profile that forbids rebuilds
+      queues nothing whatever the tree thinks — because a case that only
+      exercised them together would pass on a freshly built tree that does not
+      want one either.
+      AND A PROPERTY OF THE MEASURE IS NOW WRITTEN DOWN rather than left to be
+      discovered: `quality` is a VOLUME ratio, so a surface with no volume — a
+      ground plane — reports 0 and never wants a rebuild however far its
+      partition drifts. Asserted in both binding tests, on the plane and then on
+      the same plane after a stamp has given it thickness, and stated in
+      clay.h, the pyclay docstring and docs/08
 - [x] 3.5 A deferred-maintenance queue — index quality rebuild, cache
       compaction, sparse-to-dense conversion, slot-pool compaction — that a
       host services with a time budget between interactions and that never runs
       in a pointer event
+      AND NOW SHIPPED, which it was not: `mesh::MaintenanceQueue` is a queue a
+      HOST owns by construction, and no host outside C++ could reach it. The C
+      ABI gains `clay_maintenance_kind` (five enumerators plus `_kind_text`),
+      the `clay_maintenance_item` descriptor and
+      `clay_maintenance_queue_create/destroy/request/count/item/has/
+      begin_stroke/end_stroke/in_stroke/take_next/complete/clear/bytes`; pyclay
+      gains `MaintenanceKind`, `MaintenanceQueue` and the `with queue.stroke():`
+      block that is the only form which cannot leave the gate shut when a stroke
+      loop raises — a gate shut forever is a queue that silently never runs
+      again, and the case raises inside the block on purpose.
+      TWO DECISIONS WORTH THE WORDS. The drain is a TAKE/COMPLETE pair and not a
+      callback: this header has never taken a function pointer, the budget loop
+      is four lines in the caller's own language and the caller holds the clock,
+      and host code that queued another item from inside a callback would mutate
+      the vector `service` is walking. And both halves go THROUGH `service`
+      rather than reading `in_stroke` and deciding for themselves, so the stroke
+      gate has exactly one implementation and it is the engine's — a second copy
+      of a rule is a second thing that can stay true while the first changes.
+      Nine C cases in `test_c_maintenance.cpp` and nine pyclay cases in
+      `test_maintenance.py`, including the refusal that matters: a kind outside
+      the declared list is REFUSED rather than clamped, because clamping would
+      queue an index rebuild for a caller that asked for something else and the
+      host would service it without ever learning it had been misheard.
+      PROVEN TO CATCH ITS REGRESSION: with `take_next` reading
+      `queue.items().front()` directly instead of going through `service` —
+      which is precisely what a second implementation of the gate would look
+      like — the branch still compiles and the mid-stroke case fails on both of
+      its assertions, the drain handing out an item while a stroke is open and
+      overwriting the buffer it was told to leave alone
 - [x] 3.6 Parallel granularity chosen per operation, one level only: the pool
       runs a nested `parallel_for` inline by design, so parallel-chunks inside
       parallel-vertices is a mistake the code must not make
@@ -241,6 +308,16 @@
       their vertices differently on purpose, and canonicalised by ROTATION
       rather than by a sort, which would call an inside-out surface equal
 - [x] 6.6 pyclay reaches the same transport, and parity is green
+      AND EVERY OTHER PART OF THIS CHANGE DOES TOO, which is what the binding
+      stage was for: the three that were still C++-only — the maintenance queue
+      (3.5), the index measurement behind it (3.4) and the per-stamp normal
+      deferral (3.3) — now cross both bindings, so nothing this change added
+      lives in C++ alone. `check_binding_parity.py` OK against the BUILT module
+      at 668 capabilities, with `MaintenanceQueue`, `MaintenanceKind` and
+      `MaintenanceStroke` registered in the gate's own tables and exactly one
+      new exemption, `MaintenanceQueue.stroke`, on the same footing as
+      `VoxelGrid.grab`: `with` is a Python statement and there is nothing in C
+      for it to map to.
       DONE: `clay.SurfaceView` with numpy-native `copy_chunk`, plus the ledger,
       the trim, the profile, the preflights and a `clay.MemoryPin` context
       manager — `with` is the only form that cannot leave a document pinned
@@ -366,7 +443,9 @@
       `asan-ubsan` green over the new cases. `tsan` under `setarch -R` run over
       the new cases. `check_layering.py`, `check_c_abi.py`,
       `check_binding_parity.py`, `check_gallery.py` and `check_swift_package.py`
-      all green. `release_check.py` still reports the four pre-existing failures
+      all green — and the binding stage re-ran every one of them, plus the
+      full pyclay suite (625 passed, 1 skipped) and the new cases under
+      `asan-ubsan`, clean. `release_check.py` still reports the four pre-existing failures
       this environment has (bindings, abi, tests and wheel from the anaconda
       GLIBCXX_3.4.31 mismatch, device from the hardware gate). The metal, cuda,
       opencl and vulkan presets need toolkits this box does not have

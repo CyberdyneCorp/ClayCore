@@ -63,6 +63,13 @@ CLASS_PREFIX = {
     "SurfaceView": ("clay_surface_view_",),
     "MemoryPin": ("clay_memory_pin_",),
     "SculptMemoryProfile": ("clay_sculpt_memory_profile_",),
+    # The jobs a host services between interactions. Both bindings drain the
+    # queue the same way — take one, do it, complete it — so every member but
+    # the `with` wrapper crosses by prefix.
+    "MaintenanceQueue": ("clay_maintenance_queue_",),
+    # A `with` wrapper over begin_stroke/end_stroke and nothing else. Its only
+    # members are dunders, which this gate does not walk.
+    "MaintenanceStroke": (),
     # Multiresolution (add-mesh-multires).
     "MultiresSurface": ("clay_multires_",),
     "MultiresSculptor": ("clay_multires_sculptor_", "clay_multires_"),
@@ -127,6 +134,7 @@ CLASS_ENUM_PREFIX = {
     "MemoryClass": "CLAY_MEMORY_CLASS_",
     "Pressure": "CLAY_PRESSURE_",
     "SurfaceKind": "CLAY_SURFACE_",
+    "MaintenanceKind": "CLAY_MAINTENANCE_",
 }
 
 # The names that do not derive. Kept explicit so the difference is reviewable.
@@ -190,6 +198,10 @@ ALIASES = {
     "BrushPreset.serialize": "clay_brush_preset_serialize",
     "BrushPreset.deserialize": "clay_brush_preset_deserialize",
     "MeshSculptor.apply_preset": "clay_mesh_sculptor_apply_preset",
+    # The queue holds a handful of entries, so C reads them one at a time by
+    # index where Python returns the list; it is the same capability spelled
+    # for the language, the way DynamicSurface's stats already are.
+    "MaintenanceQueue.items": "clay_maintenance_queue_item",
     # The surface's counts and revisions all cross through the two report
     # descriptors rather than as one call each — the same reading StrokePreset's
     # scalar fields already get.
@@ -361,10 +373,15 @@ CLASS_CTOR = {
     "SurfaceView": "clay_surface_view_from_mesh",
     "MemoryPin": "clay_memory_pin_create",
     "SculptMemoryProfile": "clay_sculpt_memory_profile_defaults",
+    "MaintenanceQueue": "clay_maintenance_queue_create",
+    # Nothing constructs it: `MaintenanceQueue.stroke()` hands it out, and a C
+    # caller brackets the region itself with begin_stroke and end_stroke.
+    "MaintenanceStroke": None,
     # Plain enumerators: nothing "builds" one, in C or in Python.
     "MemoryClass": None,
     "Pressure": None,
     "SurfaceKind": None,
+    "MaintenanceKind": None,
     "MultiresSculptor": "clay_multires_sculptor_create",
     "DetailMode": None,
     "BrushModel": "clay_brush_model_of",
@@ -448,6 +465,15 @@ EXEMPT = {
                       "context manager, and `with` is a Python statement with "
                       "nothing in C to map to — a C caller brackets the gesture "
                       "itself with clay_voxel_grab_commit or _cancel",
+
+    "MaintenanceQueue.stroke": "a Python-idiom wrapper over "
+                               "clay_maintenance_queue_begin_stroke and "
+                               "_end_stroke, both of which C reaches directly. "
+                               "It differs only in returning a context manager, "
+                               "and `with` is a Python statement with nothing in "
+                               "C to map to — a C caller brackets the drag "
+                               "itself. The gate it opens and shuts is the "
+                               "engine's either way",
 
     "MeshQuery.distance": "an inspection surface, not a capability: C imports a "
                           "mesh with clay_item_volume_from_mesh and evaluates "

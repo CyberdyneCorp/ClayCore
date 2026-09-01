@@ -7037,6 +7037,236 @@ clay_result clay_dynamic_sculptor_peak_telemetry(const clay_dynamic_sculptor* sc
                                                  clay_peak_telemetry* out_telemetry);
 clay_result clay_dynamic_sculptor_reset_peak_telemetry(clay_dynamic_sculptor* sculptor);
 
+/* -- work that is not required for correctness --------------------------------
+ *
+ * (sculpt-runtime spec, add-extreme-poly-runtime, tasks 3.3, 3.4 and 3.5.)
+ *
+ * A sculpt runtime accumulates jobs that make the NEXT interaction cheaper and
+ * THIS one slower: rebuilding a spatial index whose partition has decayed,
+ * compacting a chunk arena that splits have left holes in, promoting a detail
+ * field that is now dense, compacting a slot pool full of dead slots, recomputing
+ * normals a drag deferred. Every one of them is a stall if it happens while a
+ * finger is on the glass, and none of them is the engine's decision, because
+ * the engine does not own the moment between two interactions. The host does.
+ *
+ * SO THEY ARE QUEUED AND NOT DONE. The queue is a host's own object here, not a
+ * hidden member of a sculptor, for the same reason the memory profile is filled
+ * by the host: one application may service maintenance on a background thread
+ * between strokes, another only when a document is idle, and a third never. A
+ * queue nobody services costs a handful of structs and changes no result.
+ *
+ * THE STROKE GATE IS A MECHANISM RATHER THAN A CONVENTION. "we only call this
+ * between strokes" is a rule that survives until the second caller, so the
+ * queue refuses to hand anything out between clay_maintenance_queue_begin_stroke
+ * and _end_stroke — a host that wired the drain to the wrong callback finds out
+ * by nothing happening rather than by a stutter it will blame on the brush.
+ *
+ * WHY A TAKE/COMPLETE PAIR RATHER THAN A CALLBACK. The C++ form of this is
+ * `MaintenanceQueue::service(budget, run)`, and a function pointer with a void*
+ * would have crossed here unchanged. Two reasons it does not. The first is that
+ * this header has never taken a callback and gains nothing by starting: the
+ * budget loop is four lines in the caller's own language, and the caller is the
+ * one holding the clock the budget is measured on. The second is reentrancy —
+ * `run` is host code, host code that queues another item while the queue is
+ * mid-drain would mutate the vector being walked, and a boundary that cannot
+ * prevent that should not offer it. Take one, do it, say it is done.
+ *
+ * NOTHING HERE PERFORMS THE WORK. An item is a REQUEST naming a kind and a
+ * target; what services it is an ordinary entry point the host already has —
+ * clay_dynamic_sculptor_rebuild_index for an index, clay_mesh_sculptor_flush_-
+ * normals for deferred normals. That is deliberate: an item a host declines,
+ * defers forever or performs differently must leave the surface correct either
+ * way, and it does, because none of it was correctness in the first place. */
+
+typedef enum clay_maintenance_kind {
+    /* The spatial index's partition has decayed under local edits. Advisory,
+     * and the most likely one for a host to decline: measured over five
+     * deformations, a rebuild produced a better tree in exactly one and a
+     * dramatically worse one in two. */
+    CLAY_MAINTENANCE_INDEX_REBUILD = 0,
+    /* The chunk table's face arena has slack a split left behind. */
+    CLAY_MAINTENANCE_CHUNK_COMPACTION = 1,
+    /* A sparse detail field whose coverage has passed the promotion threshold.
+     * Speed rather than memory: the block table is smaller than the dense form
+     * until coverage passes 99.9%, and what argues for promotion is the
+     * indirection on every read. */
+    CLAY_MAINTENANCE_DETAIL_PROMOTION = 2,
+    /* Dead slots an adaptive surface's edits left in its pools. */
+    CLAY_MAINTENANCE_SLOT_POOL_COMPACTION = 3,
+    /* Normals a drag deferred. THE ONE ITEM THAT IS NOT OPTIONAL: the committed
+     * state has to be exact, so a host that never services the queue must still
+     * flush these at stroke end with clay_mesh_sculptor_flush_normals. It is
+     * here so a host can spend its budget on them FIRST, not so it can decide
+     * whether to do them at all. */
+    CLAY_MAINTENANCE_NORMAL_FLUSH = 4
+} clay_maintenance_kind;
+
+/* Never NULL, for any value, including one this build does not know. */
+const char* clay_maintenance_kind_text(int32_t kind);
+
+typedef struct clay_maintenance_item {
+    uint32_t struct_size; /* = sizeof(clay_maintenance_item); required */
+    int32_t kind;         /* clay_maintenance_kind */
+    /* What the item is about: a multires level, a chunk, a surface id. The
+     * queue never interprets it — it is what makes two requests the SAME
+     * request rather than two entries for the same job. */
+    uint32_t target;
+    /* How many times this item has been re-requested since it was last
+     * serviced. An entry whose count keeps climbing is one the host is
+     * starving, and that is worth being able to see. */
+    uint32_t requests;
+    /* The requester's own estimate. Zero means "unknown", which is what most
+     * callers honestly have — clay_dynamic_sculptor_request_index_rebuild fills
+     * it with a LEAF COUNT rather than a time, because a rebuild is O(leaves)
+     * and this library carries no machine model to turn that into microseconds.
+     * A host that has measured its own device replaces it by requesting the
+     * same item again with a figure of its own. */
+    uint64_t estimated_micros;
+} clay_maintenance_item;
+
+/* A host's queue. Owns nothing but its own entries and refers to no surface, so
+ * one queue may collect items from every surface a document holds. */
+typedef struct clay_maintenance_queue clay_maintenance_queue;
+
+clay_result clay_maintenance_queue_create(clay_maintenance_queue** out_queue);
+void clay_maintenance_queue_destroy(clay_maintenance_queue* queue);
+
+/* Queue an item, or FOLD it into the identical one already queued — same kind,
+ * same target — bumping that entry's `requests` and taking the latest non-zero
+ * estimate. Never allocates once the queue has reached its working size, which
+ * is what makes it safe to call from a stamp: a stroke requests the same
+ * rebuild on every dab. */
+clay_result clay_maintenance_queue_request(clay_maintenance_queue* queue, int32_t kind,
+                                           uint32_t target, uint64_t estimated_micros);
+
+clay_result clay_maintenance_queue_count(const clay_maintenance_queue* queue, size_t* out_count);
+/* The item at `index`, in queue order, without removing it. Indexed rather than
+ * filled in bulk because the queue holds a HANDFUL of entries by construction —
+ * five kinds and a target apiece — so a bulk fill would trade a struct_size
+ * every descriptor here has for a copy nobody is making per frame. */
+clay_result clay_maintenance_queue_item(const clay_maintenance_queue* queue, size_t index,
+                                        clay_maintenance_item* out_item);
+clay_result clay_maintenance_queue_has(const clay_maintenance_queue* queue, int32_t kind,
+                                       uint32_t target, int32_t* out_has);
+
+/* The gate. A pointer event is not a maintenance window. */
+clay_result clay_maintenance_queue_begin_stroke(clay_maintenance_queue* queue);
+clay_result clay_maintenance_queue_end_stroke(clay_maintenance_queue* queue);
+clay_result clay_maintenance_queue_in_stroke(const clay_maintenance_queue* queue,
+                                             int32_t* out_in_stroke);
+
+/* The drain, in two halves.
+ *
+ *     while (budget_left()) {
+ *         int32_t have = 0;
+ *         clay_maintenance_queue_take_next(q, &item, &have);
+ *         if (!have) break;
+ *         ... do the work ...
+ *         clay_maintenance_queue_complete(q, item.kind, item.target, NULL);
+ *     }
+ *
+ * take_next PEEKS: the item stays queued until _complete says it was done, so a
+ * host that took one and then decided it could not afford it has declined
+ * rather than dropped it. It reports *out_have as 0 while a stroke is open and
+ * while the queue is empty — the same answer to "is there work I may do now",
+ * which is the question a drain is actually asking.
+ *
+ * complete removes the item naming that kind and target and reports whether one
+ * was there. Also gated: an item completed mid-stroke would have been performed
+ * mid-stroke. `out_completed` may be NULL. */
+clay_result clay_maintenance_queue_take_next(clay_maintenance_queue* queue,
+                                             clay_maintenance_item* out_item, int32_t* out_have);
+clay_result clay_maintenance_queue_complete(clay_maintenance_queue* queue, int32_t kind,
+                                            uint32_t target, int32_t* out_completed);
+
+clay_result clay_maintenance_queue_clear(clay_maintenance_queue* queue);
+clay_result clay_maintenance_queue_bytes(const clay_maintenance_queue* queue, size_t* out_bytes);
+
+/* -- what the index is worth right now ---------------------------------------
+ *
+ * The measurement behind CLAY_MAINTENANCE_INDEX_REBUILD, so a host declining
+ * the item is declining something it can see rather than a name.
+ *
+ * `quality` is the mean leaf VOLUME against the volume of their union: 1 is a
+ * perfect partition and larger means the leaves overlap, which is what local
+ * edits do to a tree over time. LOWER IS BETTER, and it is only meaningful
+ * against this same tree's own history — never against another model's.
+ *
+ * A SURFACE WITH NO VOLUME REPORTS 0, and that follows from the measure rather
+ * than from a bug: a flat plane's leaves and their union are both zero-volume
+ * boxes, so the ratio is 0, `wants_rebuild` is never true, and the number says
+ * nothing about how far the partition has drifted. Any model with thickness —
+ * which is every model anybody sculpts — reports a real figure. Stated because
+ * a host testing this on a ground plane would otherwise conclude the field is
+ * broken.
+ *
+ * `wants_rebuild` is the engine's opinion of its own partition and NOT an
+ * instruction. It is one of the two conditions
+ * clay_dynamic_sculptor_request_index_rebuild checks; the other is the host's
+ * clay_sculpt_memory_profile.allow_index_rebuild, and keeping them apart is the
+ * point: the engine measures, the host decides whether it has the room. */
+typedef struct clay_index_quality {
+    uint32_t struct_size; /* = sizeof(clay_index_quality); required */
+    uint64_t leaf_count;
+    float quality;
+    int32_t wants_rebuild;
+} clay_index_quality;
+
+clay_result clay_dynamic_sculptor_index_quality(const clay_dynamic_sculptor* sculptor,
+                                                clay_index_quality* out_quality);
+
+/* Queue an index rebuild if the tree wants one AND the profile allows it, and
+ * report whether anything was queued. `profile` may be NULL, which is the
+ * default profile and therefore allows it.
+ *
+ * A convenience over the two calls above and deliberately still a REQUEST: it
+ * puts the job where a host can see it and rebuilds nothing.
+ * clay_dynamic_sculptor_rebuild_index is what performs it, between strokes. */
+clay_result clay_dynamic_sculptor_request_index_rebuild(
+    const clay_dynamic_sculptor* sculptor, const clay_sculpt_memory_profile* profile,
+    uint32_t target, clay_maintenance_queue* queue, int32_t* out_queued);
+
+/* -- normals a drag deferred --------------------------------------------------
+ *
+ * Normals follow the vertices, so a moved vertex with a stale normal shades
+ * wrong immediately — which is why they are recomputed per stamp by DEFAULT and
+ * this is opt-in. What it buys is the recompute of a stroke's overlapping dabs
+ * done once instead of once per dab; what it costs is that the shading lags the
+ * geometry until the flush.
+ *
+ * THE FINAL STATE IS EXACT EITHER WAY. That is the whole contract: deferring
+ * changes WHEN the work happens and nothing about the result, which is what
+ * makes it a hint a memory profile may set (clay_sculpt_memory_profile.defer_-
+ * normals_in_stroke) rather than a decision that would make a committed sculpt
+ * a function of machine speed.
+ *
+ * A HOST THAT DEFERS MUST FLUSH. Nothing flushes on its own: the sculptor does
+ * not know where a stroke ends, and guessing at it — a timer, a stamp with no
+ * predecessor — would flush mid-drag, which is the cost this exists to avoid.
+ * clay_mesh_sculptor_apply_stroke's own `defer_normals` argument is unaffected
+ * and still flushes at the end of the stroke it drove, because there the
+ * library does know where the stroke ended.
+ *
+ * The deltas argument matters and is easy to miss: a deferred stroke's undo is
+ * only exact if the flush records the normals it changed, so pass the same
+ * clay_mesh_deltas the stamps were recorded into, or NULL if none was. */
+clay_result clay_mesh_sculptor_set_defer_normals(clay_mesh_sculptor* sculptor, int32_t defer);
+clay_result clay_mesh_sculptor_defer_normals(const clay_mesh_sculptor* sculptor,
+                                             int32_t* out_defer);
+clay_result clay_mesh_sculptor_flush_normals(clay_mesh_sculptor* sculptor,
+                                             clay_mesh_deltas* deltas);
+
+/* The hierarchy's half. Forwarded to whichever level is bound, INCLUDING one
+ * bound later, for the same reason the peak telemetry is: a rebind builds a new
+ * level sculptor, and a deferral that stopped applying the moment the host
+ * changed level would leave a drag half deferred and half not. Flushing binds
+ * nothing — there is nothing to flush on a level nobody has stamped. */
+clay_result clay_multires_sculptor_set_defer_normals(clay_multires_sculptor* sculptor,
+                                                     int32_t defer);
+clay_result clay_multires_sculptor_defer_normals(const clay_multires_sculptor* sculptor,
+                                                 int32_t* out_defer);
+clay_result clay_multires_sculptor_flush_normals(clay_multires_sculptor* sculptor);
+
 /* Update the ray-query tree for vertices that have moved.
  *
  * REFIT is the per-stamp call. A mesh layer's topology is fixed, so a stamp

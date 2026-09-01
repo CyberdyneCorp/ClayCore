@@ -42,6 +42,7 @@
 #include "clay/io/handoff.h"
 #include "clay/io/memory.h"
 #include "clay/io/mesh_io.h"
+#include "clay/mesh/maintenance.h"
 #include "clay/mesh/bvh.h"
 #include "clay/mesh/preflight.h"
 #include "clay/mesh/surface_view.h"
@@ -729,6 +730,52 @@ nb::dict peak_dict(const memory::PeakTelemetry& peak) {
     out["workset_vertices"] = peak.workset_vertices;
     out["dirty_chunks"] = peak.dirty_chunks;
     out["topology_ops"] = peak.topology_ops;
+    return out;
+}
+
+// One queued maintenance job, as a dict.
+//
+// `kind` comes back as the bound `MaintenanceKind` rather than an integer, so
+// the value a drain reads out of an item is the value `complete` and `has` take
+// — a script never has to know the enumeration's order to hand an item back.
+nb::dict item_dict(const mesh::MaintenanceItem& item) {
+    nb::dict out;
+    out["kind"] = item.kind;
+    out["target"] = item.target;
+    out["requests"] = item.requests;
+    out["estimated_micros"] = item.estimated_micros;
+    return out;
+}
+
+// The `with` form of a maintenance queue's stroke gate.
+//
+// IT HOLDS THE QUEUE OBJECT AND NOT ONLY A POINTER INTO IT. `with
+// clay.MaintenanceQueue().stroke():` builds a queue that nothing else refers
+// to, and a scope carrying a bare pointer would outlive it by exactly the
+// length of the block it exists to guard.
+struct PyMaintenanceStroke {
+    mesh::MaintenanceQueue* queue = nullptr;
+    nb::object owner;
+};
+
+// What the spatial index is worth right now, behind the maintenance item that
+// asks about it. A dict rather than three properties for the same reason
+// `peak_dict` is one: the three numbers only mean anything together, and a
+// script that read `quality` without `wants_rebuild` has read the half it
+// cannot act on.
+nb::dict index_quality_dict(const mesh::DynamicBvh& index) {
+    nb::dict out;
+    out["leaf_count"] = index.leaf_count();
+    // The mean leaf VOLUME against the volume of their union: 1 is a perfect
+    // partition, larger means the leaves overlap, which is what local edits do
+    // to a tree over time. LOWER IS BETTER, and it is only meaningful against
+    // this same tree's own history — never against another model's.
+    //
+    // A SURFACE WITH NO VOLUME REPORTS 0, which follows from the measure rather
+    // than from a bug: a flat plane's leaves and their union are both
+    // zero-volume boxes. Every model with thickness reports a real figure.
+    out["quality"] = index.quality();
+    out["wants_rebuild"] = index.wants_rebuild();
     return out;
 }
 
@@ -5012,6 +5059,40 @@ NB_MODULE(pyclay, m) {
             "reset_peak_telemetry", [](PyMeshSculptor& s) { s.peak.reset(); },
             "Start the high-water marks again, which is what a script does\n"
             "between the case it is measuring and the one before it.")
+        .def_prop_rw(
+            "defer_normals",
+            [](PyMeshSculptor& s) { return s.live(false).defer_normals(); },
+            [](PyMeshSculptor& s, bool defer) { s.live(true).set_defer_normals(defer); },
+            "Recompute normals once at the end of a drag instead of once per\n"
+            "stamp. False by default, because a moved vertex with a stale\n"
+            "normal shades wrong immediately.\n\n"
+            "THE FINAL STATE IS EXACT EITHER WAY. That is the whole contract:\n"
+            "this changes WHEN the work happens and nothing about the result,\n"
+            "which is what makes it a hint a `SculptMemoryProfile` may carry\n"
+            "rather than a decision that would make a committed sculpt a\n"
+            "function of machine speed.\n\n"
+            "A SCRIPT THAT DEFERS MUST FLUSH. Nothing flushes on its own: the\n"
+            "sculptor does not know where a stroke ends, and a guess at it\n"
+            "would flush mid-drag, which is the cost this exists to avoid.\n"
+            "`apply_stroke`'s own `defer_normals` argument is a different\n"
+            "thing and still flushes at the end of the stroke it drove:\n"
+            "there the library does know where the stroke ended.")
+        .def(
+            "flush_normals",
+            [](PyMeshSculptor& s, nb::handle deltas) {
+                mesh::VertexDeltas* record =
+                    deltas.is_none() ? nullptr : nb::cast<PyVertexDeltas*>(deltas)->deltas.get();
+                s.live(true).flush_normals(record);
+            },
+            "deltas"_a = nb::none(),
+            "Recompute the normals a deferred drag left pending, over the write\n"
+            "region and its ring, and clear it. A no-op when nothing is\n"
+            "pending, so calling it at the end of every stroke is right whether\n"
+            "or not that stroke deferred.\n\n"
+            "PASS THE SAME `deltas` THE STAMPS WERE RECORDED INTO. A deferred\n"
+            "stroke's undo is exact only if the flush records the normals it\n"
+            "changed; omitting it leaves an undo that restores positions and\n"
+            "not shading.")
         .def_prop_ro(
             "has_colors", [](PyMeshSculptor& s) { return s.live(false).has_colors(); },
             "Whether the mesh carries a vertex colour attribute, which 'paint'\n"
@@ -7098,6 +7179,44 @@ NB_MODULE(pyclay, m) {
              "Rebuild the chunked index. BETWEEN strokes, never mid-drag: a refit\n"
              "stays correct and does not stay fast, and a rebuild is not\n"
              "automatically an improvement.")
+        .def_prop_ro(
+            "index_quality", [](const PyDynamicSculptor& s) { return index_quality_dict(s.bvh()); },
+            "What the chunked index is worth right now: `leaf_count`,\n"
+            "`quality` and `wants_rebuild`.\n\n"
+            "The measurement behind a `MaintenanceKind.index_rebuild` item, so\n"
+            "a host declining that item declines something it can see rather\n"
+            "than a name.\n\n"
+            "`quality` is the mean leaf volume against the volume of their\n"
+            "union: 1 is a perfect partition and larger means the leaves\n"
+            "overlap. A SURFACE WITH NO VOLUME REPORTS 0 — a flat plane's\n"
+            "leaves and their union are both zero-volume boxes — so a script\n"
+            "testing this on a ground plane sees 0 and a `wants_rebuild` that\n"
+            "is never true. Every model with thickness reports a real figure.\n\n"
+            "`wants_rebuild` is the ENGINE's opinion of its own\n"
+            "partition and NOT an instruction: it is one of the two conditions\n"
+            "`request_index_rebuild` checks, and the other is the host's\n"
+            "`SculptMemoryProfile.allow_index_rebuild`. Keeping them apart is\n"
+            "the point — the engine measures, the host decides whether it has\n"
+            "the room.")
+        .def(
+            "request_index_rebuild",
+            [](const PyDynamicSculptor& s, mesh::MaintenanceQueue& queue, nb::handle profile,
+               std::uint32_t target) {
+                // None IS the default profile, rather than a second spelling of
+                // one: `SculptMemoryProfile` is registered after this class, so
+                // a default-constructed instance in the signature would be cast
+                // at module-init time against a type that does not exist yet —
+                // which is a std::bad_cast on `import clay`, not a bad default.
+                memory::SculptMemoryProfile p;
+                if (!profile.is_none()) p = nb::cast<memory::SculptMemoryProfile>(profile);
+                return mesh::request_index_rebuild(s.bvh(), p, target, &queue);
+            },
+            "queue"_a, "profile"_a = nb::none(), "target"_a = 0u,
+            "Queue an index rebuild if the tree wants one AND the profile\n"
+            "allows it, and report whether anything was queued.\n\n"
+            "Still a REQUEST: it puts the job where a host can see it and\n"
+            "rebuilds nothing. `rebuild_index` is what performs it, between\n"
+            "strokes.")
         .def_prop_ro("chunk_count",
                      [](const PyDynamicSculptor& s) { return s.bvh().leaf_count(); })
         .def_prop_ro("dirty_chunks",
@@ -7572,6 +7691,20 @@ NB_MODULE(pyclay, m) {
         .def(
             "reset_peak_telemetry", [](PyMultiresSculptor& s) { s.peak.reset(); },
             "Start the high-water marks again.")
+        .def_prop_rw(
+            "defer_normals", [](const PyMultiresSculptor& s) { return s.defer_normals(); },
+            [](PyMultiresSculptor& s, bool defer) { s.set_defer_normals(defer); },
+            "The hierarchy's half of the deferral, forwarded to whichever level\n"
+            "is bound INCLUDING one bound later — a rebind builds a new level\n"
+            "sculptor, and a deferral that stopped applying the moment the host\n"
+            "changed level would leave a drag half deferred and half not.\n\n"
+            "The final state is exact either way, and a script that sets this\n"
+            "must call `flush_normals` at the end of the drag.")
+        .def(
+            "flush_normals", [](PyMultiresSculptor& s) { s.flush_normals(); },
+            "Recompute what a deferred drag left pending on the bound level.\n"
+            "Binds nothing: there is nothing to flush on a level nobody has\n"
+            "stamped, so this is safe to call at every stroke end.")
         .def_prop_ro("last_write_vertices",
                      [](const PyMultiresSculptor& s) {
                          const std::vector<std::uint32_t>& v = s.last_write_vertices();
@@ -7722,6 +7855,192 @@ NB_MODULE(pyclay, m) {
                  if (!p.held.empty()) p.held.pop_back();
                  return false;  // an exception in the body propagates
              });
+
+    // -- work that is not required for correctness (task 3.5) -----------------
+
+    nb::enum_<mesh::MaintenanceKind>(
+        m, "MaintenanceKind",
+        "A job that makes the NEXT interaction cheaper and this one slower.\n"
+        "Queued and not done: every one of them is a stall if it happens while\n"
+        "a finger is on the glass, and none of them changes what is committed.")
+        .value("index_rebuild", mesh::MaintenanceKind::IndexRebuild,
+               "The spatial index's partition has decayed under local edits.\n"
+               "Advisory, and the most likely one to decline: over five\n"
+               "measured deformations a rebuild produced a better tree in\n"
+               "exactly one and a dramatically worse one in two.")
+        .value("chunk_compaction", mesh::MaintenanceKind::ChunkCompaction,
+               "The chunk table's face arena has slack a split left behind.")
+        .value("detail_promotion", mesh::MaintenanceKind::DetailPromotion,
+               "A sparse detail field whose coverage has passed the promotion\n"
+               "threshold. Speed rather than memory: the block table stays\n"
+               "smaller than the dense form until coverage passes 99.9%, and\n"
+               "what argues for promotion is the indirection on every read.")
+        .value("slot_pool_compaction", mesh::MaintenanceKind::SlotPoolCompaction,
+               "Dead slots an adaptive surface's edits left in its pools.")
+        .value("normal_flush", mesh::MaintenanceKind::NormalFlush,
+               "Normals a drag deferred. THE ONE ITEM THAT IS NOT OPTIONAL:\n"
+               "the committed state has to be exact, so a script that never\n"
+               "services the queue must still call `flush_normals` at stroke\n"
+               "end. It is here so a host can spend its budget on these FIRST,\n"
+               "not so it can decide whether to do them.");
+
+    nb::class_<PyMaintenanceStroke>(
+        m, "MaintenanceStroke",
+        "The `with` form of a MaintenanceQueue's stroke gate. Returned by\n"
+        "`MaintenanceQueue.stroke()`; there is nothing to construct.")
+        .def("__enter__",
+             [](nb::object self) {
+                 nb::cast<PyMaintenanceStroke&>(self).queue->begin_stroke();
+                 return self;
+             })
+        .def("__exit__",
+             // Variadic: the three arguments are None on a clean exit, and a
+             // typed signature would refuse them.
+             [](PyMaintenanceStroke& s, nb::args) {
+                 // Closes whether the body finished or threw, which is the
+                 // whole reason to bind this as a context manager: a stroke
+                 // loop that raises would otherwise leave the gate shut and
+                 // every later drain silently doing nothing.
+                 s.queue->end_stroke();
+                 return false;  // an exception in the body propagates
+             });
+
+    nb::class_<mesh::MaintenanceQueue>(
+        m, "MaintenanceQueue",
+        "Jobs a host services BETWEEN interactions, with a budget it owns.\n\n"
+        "A sculpt runtime accumulates work that is not required for\n"
+        "correctness — an index whose partition has decayed, a chunk arena\n"
+        "with slack, a detail field that is now dense, normals a drag\n"
+        "deferred. This is where those requests go, and nothing here performs\n"
+        "one: an item names a kind and a target, and what services it is an\n"
+        "ordinary call the script already has.\n\n"
+        "    with queue.stroke():\n"
+        "        for p in drag:\n"
+        "            sculptor.stamp(...)     # requests pile up; none of them run\n"
+        "    while budget_left():\n"
+        "        item = queue.take_next()\n"
+        "        if item is None:\n"
+        "            break\n"
+        "        do_the_work(item)\n"
+        "        queue.complete(item['kind'], item['target'])\n\n"
+        "THE STROKE GATE IS A MECHANISM RATHER THAN A CONVENTION. 'we only\n"
+        "call this between strokes' is a rule that survives until the second\n"
+        "caller, so `take_next` and `complete` do nothing while a stroke is\n"
+        "open — a script that wired the drain to the wrong callback finds out\n"
+        "by nothing happening rather than by a stutter it will blame on the\n"
+        "brush.\n\n"
+        "NO CALLBACK, DELIBERATELY. The C++ form takes a `run` function and a\n"
+        "budget; this takes neither, because the caller holds the clock the\n"
+        "budget is measured on and because host code that queued another item\n"
+        "from inside the drain would mutate the list being walked. Take one,\n"
+        "do it, say it is done.\n\n"
+        "REFERS TO NO SURFACE, so one queue may collect the items of every\n"
+        "surface a document holds — which is what a script with a hierarchy, an\n"
+        "adaptive surface and a fixed mesh open at once actually has.")
+        .def(nb::init<>())
+        .def(
+            "request",
+            [](mesh::MaintenanceQueue& q, mesh::MaintenanceKind kind, std::uint32_t target,
+               std::uint64_t estimated_micros) { q.request(kind, target, estimated_micros); },
+            "kind"_a, "target"_a = 0u, "estimated_micros"_a = 0u,
+            "Queue an item, or FOLD it into the identical one already queued —\n"
+            "same kind, same target — bumping that entry's `requests` and\n"
+            "taking the latest non-zero estimate.\n\n"
+            "NOT GATED, and that asymmetry is what the gate is made of: a stamp\n"
+            "is exactly where an item is DISCOVERED, and refusing to record one\n"
+            "mid-stroke would lose the request rather than defer the work.\n\n"
+            "`target` is what the item is about — a multires level, a chunk, a\n"
+            "surface id. The queue never interprets it; it is what makes two\n"
+            "requests the same request.")
+        .def("__len__", [](const mesh::MaintenanceQueue& q) { return q.size(); })
+        .def_prop_ro("count", [](const mesh::MaintenanceQueue& q) { return q.size(); },
+                     "How many distinct items are queued.")
+        .def_prop_ro(
+            "items",
+            [](const mesh::MaintenanceQueue& q) {
+                nb::list out;
+                for (const mesh::MaintenanceItem& item : q.items()) out.append(item_dict(item));
+                return out;
+            },
+            "Every queued item in queue order, as dicts: `kind`, `target`,\n"
+            "`requests`, `estimated_micros`.\n\n"
+            "`requests` is the one worth watching. An entry whose count keeps\n"
+            "climbing is one the host is starving, and a queue that only ever\n"
+            "reported its length could not say so.")
+        .def(
+            "has",
+            [](const mesh::MaintenanceQueue& q, mesh::MaintenanceKind kind,
+               std::uint32_t target) { return q.has(kind, target); },
+            "kind"_a, "target"_a = 0u, "Whether that exact item is queued.")
+        .def("begin_stroke", [](mesh::MaintenanceQueue& q) { q.begin_stroke(); },
+             "Shut the gate by hand. Prefer `stroke()`, which cannot be left\n"
+             "shut by an exception.")
+        .def("end_stroke", [](mesh::MaintenanceQueue& q) { q.end_stroke(); },
+             "Open it again. Prefer `stroke()`.")
+        .def_prop_ro("in_stroke", [](const mesh::MaintenanceQueue& q) { return q.in_stroke(); },
+                     "Whether the gate is shut, which is why a drain is\n"
+                     "reporting nothing to do.")
+        .def(
+            "stroke",
+            [](nb::object self) {
+                PyMaintenanceStroke scope;
+                scope.queue = &nb::cast<mesh::MaintenanceQueue&>(self);
+                scope.owner = self;
+                return scope;
+            },
+            "The gate as a `with` block:\n\n"
+            "    with queue.stroke():\n"
+            "        ...the drag...\n\n"
+            "`with` is the only form that cannot leave the gate shut when a\n"
+            "stroke loop raises, and a gate shut forever is a queue that\n"
+            "silently never runs again.")
+        .def(
+            "take_next",
+            [](mesh::MaintenanceQueue& q) -> nb::object {
+                // A PEEK THROUGH THE DRAIN, so the stroke gate has exactly one
+                // implementation and it is the engine's. `run` declines every
+                // item, which leaves the queue as it was and walks it under the
+                // same check a real drain gets — a gate that changed there
+                // could not stay true here by accident.
+                mesh::MaintenanceItem found;
+                bool have = false;
+                q.service(0, [&](const mesh::MaintenanceItem& item) {
+                    if (!have) {
+                        found = item;
+                        have = true;
+                    }
+                    return false;
+                });
+                if (!have) return nb::none();
+                return item_dict(found);
+            },
+            "The next item a host may do right now, or None.\n\n"
+            "PEEKS: the item stays queued until `complete` says it was done, so\n"
+            "a script that took one and then found it could not afford it has\n"
+            "declined rather than dropped it. None while a stroke is open and\n"
+            "None when the queue is empty — the same answer to 'is there work I\n"
+            "may do now', which is the question a drain is actually asking.")
+        .def(
+            "complete",
+            [](mesh::MaintenanceQueue& q, mesh::MaintenanceKind kind, std::uint32_t target) {
+                // Through `service` for the same reason `take_next` is: the
+                // matching item is "completed" and every other one declined, so
+                // a budget of zero removes exactly the one named under the gate
+                // the engine keeps.
+                return q.service(0, [&](const mesh::MaintenanceItem& item) {
+                           return item.kind == kind && item.target == target;
+                       }) != 0;
+            },
+            "kind"_a, "target"_a = 0u,
+            "Retire the item naming that kind and target, and report whether\n"
+            "one was there. Gated like `take_next`: an item completed\n"
+            "mid-stroke would have been performed mid-stroke.")
+        .def("clear", [](mesh::MaintenanceQueue& q) { q.clear(); },
+             "Drop every queued item. Correct at any moment, because none of\n"
+             "them was correctness.")
+        .def_prop_ro("bytes", [](const mesh::MaintenanceQueue& q) { return q.bytes(); },
+                     "What the queue itself costs. A handful of structs: five\n"
+                     "kinds and a target apiece is the working size.");
 
     nb::class_<PySurfaceView>(
         m, "SurfaceView",

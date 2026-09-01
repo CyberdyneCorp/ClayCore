@@ -1362,6 +1362,58 @@ do {
     check(encodeCost.allowed == 1 && encodeCost.peak_bytes >= encodeCost.persistent_bytes,
           "the peak is never below what remains")
 
+    // -- work a host services between interactions (task 3.5) ----------------
+    //
+    // The Swift-specific hazards are the two this repository has been bitten by
+    // before, and both are here: a C enumerator crosses as a struct with a
+    // UInt32 rawValue rather than as an Int32, so every kind has to be widened
+    // explicitly; and `size_t` crosses as `Int`, so a count declared UInt32
+    // would not compile against these signatures.
+
+    var queue: OpaquePointer? = nil
+    check(clay_maintenance_queue_create(&queue) == CLAY_OK, "made a maintenance queue")
+
+    check(clay_maintenance_queue_request(
+              queue, Int32(CLAY_MAINTENANCE_INDEX_REBUILD.rawValue), 0, 0) == CLAY_OK,
+          "queued an index rebuild")
+    check(clay_maintenance_queue_request(
+              queue, Int32(CLAY_MAINTENANCE_INDEX_REBUILD.rawValue), 0, 900) == CLAY_OK,
+          "asked for the same job again")
+
+    var queued: Int = 0
+    check(clay_maintenance_queue_count(queue, &queued) == CLAY_OK, "read the queue depth")
+    check(queued == 1, "an identical request FOLDS rather than queueing twice")
+
+    var queuedItem = clay_maintenance_item()
+    queuedItem.struct_size = UInt32(MemoryLayout<clay_maintenance_item>.size)
+    check(clay_maintenance_queue_item(queue, 0, &queuedItem) == CLAY_OK, "read the item")
+    check(queuedItem.requests == 2 && queuedItem.estimated_micros == 900,
+          "the fold bumped the count and took the newer estimate")
+
+    // THE GATE. A pointer event is not a maintenance window, and a host that
+    // wired the drain to the wrong callback gets nothing done rather than a
+    // stutter it will blame on the brush.
+    check(clay_maintenance_queue_begin_stroke(queue) == CLAY_OK, "opened a stroke")
+    var have: Int32 = 1
+    check(clay_maintenance_queue_take_next(queue, &queuedItem, &have) == CLAY_OK,
+          "asked for work mid-stroke")
+    check(have == 0, "the gate hands out nothing while a stroke is open")
+    check(clay_maintenance_queue_end_stroke(queue) == CLAY_OK, "closed the stroke")
+    check(clay_maintenance_queue_take_next(queue, &queuedItem, &have) == CLAY_OK,
+          "asked again between strokes")
+    check(have == 1, "and now there is work")
+
+    // TAKE PEEKS, COMPLETE REMOVES: a host that took an item and then found it
+    // could not afford it has declined rather than dropped it.
+    check(clay_maintenance_queue_count(queue, &queued) == CLAY_OK, "read the depth again")
+    check(queued == 1, "taking an item does not retire it")
+    var completed: Int32 = 0
+    check(clay_maintenance_queue_complete(queue, queuedItem.kind, queuedItem.target,
+                                          &completed) == CLAY_OK,
+          "said the job was done")
+    check(completed == 1, "and it was there to retire")
+    clay_maintenance_queue_destroy(queue)
+
     clay_multires_sculptor_destroy(sculptor)
     clay_multires_destroy(surface)
     clay_mesh_destroy(mesh)
