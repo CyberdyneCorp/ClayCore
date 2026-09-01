@@ -24,6 +24,14 @@
 // takes the parent's normal onto the child's. Nothing is re-derived, so nothing
 // can disagree with what it was a frame ago.
 //
+// ONE OF THREE THINGS CALLED A FRAME IN `mesh`, and the distinction is the
+// contract rather than the shape. `mesh::BrushFrame` (`brush_model.h`) is an
+// ENUM naming the direction a kernel displaces along. `mesh::StampFrame`
+// (`stamp_frame.h`) has the same three axes this one has and the OPPOSITE rule:
+// it is rebuilt from scratch for every stamp, which is exactly what a detail
+// frame may never be. Sharing one struct between the two would put two opposite
+// rules on one type.
+//
 // THE FRAME IS BUILT FROM THE PURE SUBDIVISION SURFACE, never from the surface
 // with detail already applied. That is what makes a coefficient invariant: if
 // the frame moved when the detail did, writing a detail would change the

@@ -2751,7 +2751,7 @@ math::Aabb layer_world_bounds(const clay_document* doc, const scene::Layer& laye
         for (const kernel::cfloat3& p : it->second.positions) local.expand(p);
     }
     if (local.empty()) return local;  // transforming an empty box invents one
-    return local.transformed(layer.xform.matrix());
+    return local.transformed(scene::layer_matrix(layer));
 }
 
 // A cell reaches the caller as three int32 values, which is exactly the
@@ -2796,6 +2796,23 @@ clay_result compile_one_layer(const clay_document* doc, clay_layer_id layer_id,
     const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
     if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
     *out = scene::compile_layer(*layer);
+    return CLAY_OK;
+}
+
+// The document WITHOUT one layer (#378). The compile itself refuses nothing —
+// a layer it cannot find contributes nothing to the union either way — so the
+// refusal is here, where the caller's INTENT is known: a host excluding a
+// layer means "do not draw this, I am drawing it myself", and answering a
+// stale id with the whole document would draw that layer twice, once from
+// here and once from the preview. That is the exact defect this call exists to
+// prevent, so it is a refusal rather than a no-op.
+clay_result compile_document_without(const clay_document* doc, clay_layer_id excluded,
+                                     scene::Tape* out) {
+    if (!doc->doc.document.find_layer(excluded))
+        return fail(CLAY_ERROR_NOT_FOUND,
+                    "no layer " + std::to_string(excluded) + " to exclude: excluding a layer the "
+                    "document does not hold would evaluate the whole document");
+    *out = scene::compile_document_except(doc->doc.document, excluded);
     return CLAY_OK;
 }
 
@@ -3672,7 +3689,10 @@ math::Aabb request_brick_box(const clay_brick_request& req) {
 // only thing the two entry points do differently.
 // Which of a document a batch compiles: the whole thing, or one side of the
 // split a resumable multi-layer refill holds as two values.
-enum class ChunkHalf { Whole, Below, Active };
+// `Except` is the other pairing, for a host previewing ONE layer that needs the
+// rest of the document beside it (#378): every visible SDF layer but `active`.
+// It takes no checkpoint and stores no seed — see the entry point.
+enum class ChunkHalf { Whole, Below, Active, Except };
 
 // `post`, when given, is called once per chunk AFTER `run` has filled it, with
 // the chunk's per-brick tapes and the checkpoint each passed through. That is
@@ -3733,6 +3753,9 @@ clay_result eval_requests_in_chunks(const clay_document* doc, const clay_brick_r
             else if (cp && half == ChunkHalf::Active)
                 tapes.push_back(scene::compile_document_part_resumable(
                     doc->doc.document, active, /*below=*/false, &cull, index.get(), cp));
+            else if (half == ChunkHalf::Except)
+                tapes.push_back(scene::compile_document_except(doc->doc.document, active, &cull,
+                                                               index.get()));
             else
                 tapes.push_back(scene::compile_document_part(doc->doc.document, active,
                                                              half == ChunkHalf::Below, &cull,
@@ -4797,8 +4820,83 @@ clay_result clay_document_set_layer_transform(clay_document* doc, clay_layer_id 
     math::Transform xform;
     clay_result r = read_transform(position, rotation_axis, rotation_angle, scale, &xform);
     if (r != CLAY_OK) return r;
-    return apply_edit(doc, scene::Command{scene::SetLayerTransformCmd{layer, xform}},
+    // The identity triple, so this call REPLACES a squash rather than leaving
+    // one behind: the placement is one value in this ABI, and a caller setting
+    // it means the whole of it.
+    return apply_edit(
+        doc,
+        scene::Command{scene::SetLayerTransformCmd{layer, xform, kernel::cf3(1.0f, 1.0f, 1.0f)}},
+        "layer not found");
+}
+
+clay_result clay_document_set_layer_transform_nonuniform(clay_document* doc, clay_layer_id layer,
+                                                         const float position[3],
+                                                         const float rotation_axis[3],
+                                                         float rotation_angle,
+                                                         const float scale[3]) {
+    kernel::cfloat3 axes;
+    clay_result r = read_scale_axes(scale, &axes);
+    if (r != CLAY_OK) return r;
+    // The rotation and position come through the same reader every other
+    // transform in this ABI uses; the scale is the part that is not a
+    // similarity, so it rides beside the Transform rather than inside it —
+    // exactly as clay_layer_set_transform_nonuniform does one level down.
+    math::Transform xform;
+    r = read_transform(position, rotation_axis, rotation_angle, 1.0f, &xform);
+    if (r != CLAY_OK) return r;
+    return apply_edit(doc, scene::Command{scene::SetLayerTransformCmd{layer, xform, axes}},
                       "layer not found");
+}
+
+clay_result clay_document_layer_transform(const clay_document* doc, clay_layer_id layer,
+                                          float out_position[3], float out_rotation_axis[3],
+                                          float* out_rotation_angle, float* out_scale) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    // One float cannot express three, and every way of pretending otherwise is
+    // a lie a host would act on — the uniform factor alone describes a
+    // differently-shaped subtool, and a read-change-write through the uniform
+    // setter would round the artist's squash away. The same refusal
+    // clay_layer_node_transform makes one level down, for the same reason.
+    if (!scene::scale_axes_uniform(l->scale_axes))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "this layer carries a per-axis scale: use "
+                    "clay_document_layer_transform_nonuniform");
+    if (out_position) {
+        out_position[0] = l->xform.position.x;
+        out_position[1] = l->xform.position.y;
+        out_position[2] = l->xform.position.z;
+    }
+    axis_angle_of(l->xform, out_rotation_axis, out_rotation_angle);
+    if (out_scale) *out_scale = l->xform.scale * l->scale_axes.x;
+    return CLAY_OK;
+}
+
+clay_result clay_document_layer_transform_nonuniform(const clay_document* doc, clay_layer_id layer,
+                                                     float out_position[3],
+                                                     float out_rotation_axis[3],
+                                                     float* out_rotation_angle,
+                                                     float out_scale[3]) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    if (out_position) {
+        out_position[0] = l->xform.position.x;
+        out_position[1] = l->xform.position.y;
+        out_position[2] = l->xform.position.z;
+    }
+    axis_angle_of(l->xform, out_rotation_axis, out_rotation_angle);
+    // The two scales multiply and this call reports the product, so a layer
+    // placed through the UNIFORM setter answers (s, s, s) here rather than
+    // (1, 1, 1) with the factor hidden somewhere the caller cannot see. That is
+    // what lets ONE manipulator read this call and never branch.
+    if (out_scale) {
+        out_scale[0] = l->xform.scale * l->scale_axes.x;
+        out_scale[1] = l->xform.scale * l->scale_axes.y;
+        out_scale[2] = l->xform.scale * l->scale_axes.z;
+    }
+    return CLAY_OK;
 }
 
 clay_result clay_set_layer_mirror(clay_document* doc, clay_layer_id layer_id, int32_t axis_x,
@@ -6871,6 +6969,29 @@ clay_result clay_layer_eval_gradients(const clay_document* doc, clay_layer_id la
     return gradients_into(tape, backend, points_xyz, count, out_gradients_xyz);
 }
 
+clay_result clay_eval_points_excluding(const clay_document* doc, clay_layer_id excluded,
+                                       const char* backend, const float* points_xyz, size_t count,
+                                       float* out_distances, float* out_colors_rgb) {
+    if (!doc || !points_xyz || !out_distances)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null buffer");
+    scene::Tape tape;
+    clay_result r = compile_document_without(doc, excluded, &tape);
+    if (r != CLAY_OK) return r;
+    return eval_into(tape, backend, points_xyz, count,
+                     eval::PointResults{out_distances, nullptr, out_colors_rgb});
+}
+
+clay_result clay_eval_gradients_excluding(const clay_document* doc, clay_layer_id excluded,
+                                          const char* backend, const float* points_xyz,
+                                          size_t count, float* out_gradients_xyz) {
+    if (!doc || !points_xyz || !out_gradients_xyz)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null buffer");
+    scene::Tape tape;
+    clay_result r = compile_document_without(doc, excluded, &tape);
+    if (r != CLAY_OK) return r;
+    return gradients_into(tape, backend, points_xyz, count, out_gradients_xyz);
+}
+
 clay_result clay_safe_step_scale(const clay_document* doc, float* out_scale) {
     if (!doc || !out_scale)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out pointer");
@@ -8575,8 +8696,26 @@ clay_result clay_document_mesh_combined(const clay_document* doc,
         if (it == doc->doc.mesh_layers.end()) continue;
 
         mesh::Mesh m = it->second;
-        for (kernel::cfloat3& v : m.positions) v = layer.xform.apply(v);
-        for (kernel::cfloat3& n : m.normals) n = layer.xform.rotation.rotate(n);
+        const kernel::cfloat3 axes = layer.scale_axes;
+        for (kernel::cfloat3& v : m.positions)
+            v = layer.xform.apply(kernel::cf3(v.x * axes.x, v.y * axes.y, v.z * axes.z));
+        // Normals through the INVERSE TRANSPOSE of the linear part, which for
+        // rotation-times-diagonal is the rotation times the reciprocal scale —
+        // the same rule and the same code shape clay_mesh_transform_nonuniform
+        // states. Rotating a normal is right for a similarity and wrong for a
+        // squash: it tilts every normal off the surface and takes the shading
+        // with it.
+        const bool squashed = scene::layer_is_squashed(layer);
+        for (kernel::cfloat3& n : m.normals) {
+            if (!squashed) {
+                n = layer.xform.rotation.rotate(n);
+                continue;
+            }
+            kernel::cfloat3 t = layer.xform.rotation.rotate(
+                kernel::cf3(n.x / axes.x, n.y / axes.y, n.z / axes.z));
+            const float len2 = kernel::cdot2(t);
+            n = len2 > 0.0f ? t / kernel::csqrt(len2) : n;
+        }
         placed.push_back(std::move(m));
     }
 
@@ -12299,6 +12438,69 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
 }
 }  // namespace
 
+// The brick refill WITHOUT one layer (#378), for a host drawing a transaction's
+// preview beside the rest of the document.
+//
+// TAKES NO SEED AND LEAVES NONE, which is the whole reason this is its own
+// function rather than a flag on the one below. A seed is a brick's value for
+// THIS document, and the resume arithmetic continues it with the items the
+// document has gained since. A value computed without one of the document's
+// layers is not that, and storing it would hand the next whole-document refill
+// a seed that is missing a layer — silently, because a seeded answer is
+// bit-identical to a walked one by contract and there is nothing in the values
+// to notice it by. So this path is a plain batched walk: correct, and priced
+// like the first dab of a stroke rather than the tenth.
+//
+// That is affordable for what it is for. A host takes this ONCE per gesture —
+// the layers it excludes are static while the artist drags — and composes the
+// result with its own live preview per frame.
+clay_result clay_brick_cache_eval_requests_excluding(
+    const clay_document* doc, clay_layer_id excluded, const char* backend,
+    const clay_brick_request* requests, size_t count, float* out_values,
+    size_t values_capacity, float* out_colors_rgb, size_t colors_capacity) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (count > 0 && (!requests || !out_values))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null requests or values");
+    clay_result r = check_batch("brick requests", count);
+    if (r != CLAY_OK) return r;
+    // Checked even for an empty batch, so a stale layer id is reported at the
+    // call that carries it rather than at whichever later call happens to be
+    // the first with work in it.
+    if (!doc->doc.document.find_layer(excluded))
+        return fail(CLAY_ERROR_NOT_FOUND,
+                    "no layer " + std::to_string(excluded) + " to exclude: excluding a layer the "
+                    "document does not hold would evaluate the whole document");
+    if (count == 0) {
+        if (values_capacity != 0 || colors_capacity != 0)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "no requests, but a non-empty buffer");
+        return CLAY_OK;
+    }
+    eval::GridQuery first;
+    std::size_t per = 0;
+    r = read_grid(requests[0].origin, requests[0].spacing, requests[0].dims, &first, &per);
+    if (r != CLAY_OK) return r;
+    r = exact_capacity("brick values", count, per, values_capacity);
+    if (r != CLAY_OK) return r;
+    r = optional_capacity("brick colours", out_colors_rgb, count, per * 3, colors_capacity);
+    if (r != CLAY_OK) return r;
+    r = check_uniform_dims(requests, count);
+    if (r != CLAY_OK) return r;
+    const char* name = backend ? backend : "cpu";
+    eval::Backend* b = eval::Registry::instance().find(name);
+    if (!b) return fail(CLAY_ERROR_NOT_FOUND, std::string("backend not registered: ") + name);
+    return eval_requests_in_chunks(
+        doc, requests, count,
+        [&](const eval::GridBatchQuery& bq, std::size_t base) -> clay_result {
+            if (b->eval_grid_batch(
+                    bq, out_values + base * per,
+                    out_colors_rgb ? out_colors_rgb + base * per * 3 : nullptr) !=
+                eval::Status::Ok)
+                return fail(CLAY_ERROR_BACKEND, "eval_grid_batch failed");
+            return CLAY_OK;
+        },
+        ChunkHalf::Except, excluded);
+}
+
 clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char* backend,
                                            const clay_brick_request* requests, size_t count,
                                            float* out_values, size_t values_capacity,
@@ -12922,6 +13124,10 @@ constexpr std::size_t kMeshBrushDescOriginal =
 constexpr std::size_t kMeshFrameOriginal = offsetof(clay_mesh_frame, scale) + sizeof(float);
 constexpr std::size_t kMeshHitOriginal =
     offsetof(clay_mesh_hit, seed_class) + sizeof(std::uint32_t);
+// Original layout (ABI 0.75.0), named by its last field so appending one does
+// not silently move the baseline.
+constexpr std::size_t kBrushArenaStatsOriginal =
+    offsetof(clay_brush_arena_stats, growths) + sizeof(std::uint64_t);
 
 mesh::Mesh* mesh_data_mut(clay_mesh* mesh) {
     if (!mesh) return nullptr;
@@ -13058,6 +13264,13 @@ clay_result read_mesh_brush(const clay_mesh_brush_desc* src, mesh::MeshBrush* ou
     if (d.automask_boundary_rings > 0) out->automask.boundary_rings = d.automask_boundary_rings;
     if (d.automask_cavity_strength > 0.0f)
         out->automask.cavity_strength = d.automask_cavity_strength;
+    // The stamp's grain, appended. Zero is passed STRAIGHT THROUGH rather than
+    // read as a default, because zero is the value that means "unrotated" and
+    // the engine branches on exactly that — see make_stamp_frame. Every other
+    // appended scalar here reads zero as "the caller declared an older layout,
+    // give them the engine default"; this one has the same answer either way,
+    // which is what makes the field safe to append at all.
+    out->stamp_azimuth = d.stamp_azimuth;
     return CLAY_OK;
 }
 
@@ -13111,6 +13324,7 @@ clay_result clay_mesh_brush_defaults(clay_mesh_brush_desc* out_desc) {
     out.automask_normal_angle = d.automask.normal_angle;
     out.automask_boundary_rings = d.automask.boundary_rings;
     out.automask_cavity_strength = d.automask.cavity_strength;
+    out.stamp_azimuth = d.stamp_azimuth;
     // The alpha stays null in the defaults: a stamp without one is the common
     // case, and a default pointing at nothing a caller owns would be a trap.
     write_desc(out_desc, declared, out);
@@ -13180,6 +13394,7 @@ clay_mesh_brush_desc to_c_brush(const mesh::MeshBrushSettings& s, mesh::MeshBrus
     out.automask_normal_angle = s.automask.normal_angle;
     out.automask_boundary_rings = s.automask.boundary_rings;
     out.automask_cavity_strength = s.automask.cavity_strength;
+    out.stamp_azimuth = s.stamp_azimuth;
     return out;
 }
 
@@ -15958,6 +16173,62 @@ clay_result clay_mesh_sculptor_quality(clay_mesh_sculptor* sculptor, float* out_
     // No tree means no queries to cost, which reads as zero.
     *out_quality = sculptor->sculptor->has_bvh() ? sculptor->sculptor->bvh().quality() : 0.0f;
     return CLAY_OK;
+}
+
+// -- what a stroke's scratch costs --------------------------------------------
+//
+// One filler for three sculptors, because the descriptor says the same three
+// numbers about the same kind of object whichever one asked. A NULL arena is
+// not an error: the multiresolution sculptor has none until a level is bound,
+// and zeroes are the truth about an arena that has never been asked for a byte
+// rather than a placeholder standing in for an answer.
+// `static` because this sits inside the extern "C" block: without it the
+// helper would take C linkage and be exported from the shared library under a
+// name that is no part of the ABI.
+static clay_result write_arena_stats(const mesh::BrushScratchArena* arena,
+                                     clay_brush_arena_stats* out_stats) {
+    if (!out_stats) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_stats");
+    const std::uint32_t declared = out_stats->struct_size;
+    clay_brush_arena_stats probe;
+    clay_result r = read_desc(out_stats, kBrushArenaStatsOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    clay_brush_arena_stats out{};
+    out.struct_size = static_cast<std::uint32_t>(sizeof(out));
+    if (arena) {
+        out.capacity_bytes = static_cast<std::uint64_t>(arena->capacity_bytes());
+        out.high_water_bytes = static_cast<std::uint64_t>(arena->high_water_bytes());
+        out.growths = static_cast<std::uint64_t>(arena->growths());
+    }
+    write_desc(out_stats, declared, out);
+    return CLAY_OK;
+}
+
+// NOT behind resolve_sculptor, on the same footing as has_colors. What an arena
+// owns is a fact about the SCULPTOR, not about the mesh it is bound to, so a
+// sculptor whose layer was rebuilt under it still spent the memory and a host
+// winding down still has to account for it. Refusing the reading there would
+// hide the number exactly when a host wants it.
+clay_result clay_mesh_sculptor_arena_stats(const clay_mesh_sculptor* sculptor,
+                                           clay_brush_arena_stats* out_stats) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh sculptor");
+    return write_arena_stats(&sculptor->sculptor->arena(), out_stats);
+}
+
+clay_result clay_dynamic_sculptor_arena_stats(const clay_dynamic_sculptor* sculptor,
+                                              clay_brush_arena_stats* out_stats) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    return write_arena_stats(&sculptor->sculptor->arena(), out_stats);
+}
+
+clay_result clay_multires_sculptor_arena_stats(const clay_multires_sculptor* sculptor,
+                                               clay_brush_arena_stats* out_stats) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
+    // Forwards to the bound level sculptor's arena, and is null before the
+    // first stamp binds one. See the header.
+    return write_arena_stats(sculptor->sculptor->arena(), out_stats);
 }
 
 clay_result clay_mesh_sculptor_refresh(clay_mesh_sculptor* sculptor) {

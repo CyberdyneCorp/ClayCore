@@ -846,19 +846,21 @@ Aabb geometry_bound(const Node& item, const Layer& layer, bool with_copies) {
     Aabb local = item_local_bounds(item);
     if (local.empty()) return local;
 
-    math::Transform world = layer.xform * item.xform;
-    // The item's PER-AXIS scale is innermost, so it multiplies the local box
-    // before the placement does. A bound that missed it would be tight around
-    // the shape the item no longer is, and the cull would drop a squashed
-    // cylinder that is on screen.
+    // Each PER-AXIS scale is innermost at its own level, so the item's
+    // multiplies the local box before its placement does and the layer's
+    // multiplies the result before the layer's placement does. A bound that
+    // missed either would be tight around a shape the item no longer is, and
+    // the cull would drop a squashed cylinder that is on screen.
     const math::cfloat4x4 axes = math::scale_matrix(item.scale_axes);
-    const float axis_factor = scale_axes_factor(item.scale_axes);
-    Aabb bound = local.transformed(math::mul(world.matrix(), axes));
+    Aabb bound = local.transformed(placed_matrix(layer, item));
     if (with_copies && item.mirror && layer.mirror_axes != 0) {
         for (int axis = 0; axis < 3; ++axis) {
             if (!(layer.mirror_axes & (1u << axis))) continue;
+            // The copy's map, on the order emit_item uses: the reflection acts
+            // in the layer's LOCAL space, so the layer's per-axis scale is
+            // outside it.
             math::cfloat4x4 m = math::mul(
-                layer.xform.matrix(),
+                layer_matrix(layer),
                 math::mul(math::reflection_matrix(axis), math::mul(item.xform.matrix(), axes)));
             bound.expand(local.transformed(m));
         }
@@ -875,8 +877,8 @@ Aabb geometry_bound(const Node& item, const Layer& layer, bool with_copies) {
             const float angle =
                 6.2831853071795864769f * static_cast<float>(k) / static_cast<float>(count);
             math::cfloat4x4 m =
-                math::mul(layer.xform.matrix(), math::mul(math::rotation_matrix(axis, angle),
-                                                          math::mul(item.xform.matrix(), axes)));
+                math::mul(layer_matrix(layer), math::mul(math::rotation_matrix(axis, angle),
+                                                         math::mul(item.xform.matrix(), axes)));
             bound.expand(local.transformed(m));
         }
         bound = bound.dilated(kernel::csmin_quadratic_support(layer.radial_k));
@@ -890,7 +892,7 @@ Aabb geometry_bound(const Node& item, const Layer& layer, bool with_copies) {
     // Rounding is authored in item-local units and the tape converts it by the
     // same factor it multiplies the distance by, so the bound has to use that
     // factor too rather than the uniform scale alone.
-    float round_world = item.rounding * world.scale * axis_factor;
+    float round_world = item.rounding * placed_distance_scale(layer, item);
     float combine = op_is_extended(item.op)
                         ? kernel::ccombine_extended_support(static_cast<int>(item.op),
                                                             item.blend.k, round_world)
@@ -921,8 +923,7 @@ float feather_cull_pad(const SdfContent& content, const Layer& layer) {
         (void)id;
         if (n.is_group || !n.visible) continue;
         if (!item_is_feathered_replace(n)) continue;
-        pad = kernel::cmax(pad, n.volume->band() * layer.xform.scale * n.xform.scale *
-                                    scale_axes_factor(n.scale_axes));
+        pad = kernel::cmax(pad, n.volume->band() * placed_distance_scale(layer, n));
     }
     return pad;
 }
@@ -1177,8 +1178,7 @@ CullPadTerms cull_pad_terms(const Node& n, const Layer& layer) {
     if (!n.visible) return t;
     const bool feathered = !n.is_group && item_is_feathered_replace(n);
     if (feathered)
-        t.feather = n.volume->band() * layer.xform.scale * n.xform.scale *
-                    scale_axes_factor(n.scale_axes);
+        t.feather = n.volume->band() * placed_distance_scale(layer, n);
     raise_blend_term(n, &t);
     // The SEAM blends this node's symmetry copies enter the chain through.
     // Exactly the nodes emit_item copies: items participating in the mirror,
@@ -1222,12 +1222,74 @@ bool item_influence_is_local(const Node& item) {
     return true;
 }
 
-Aabb item_influence_bound(const Node& item, const Layer& layer) {
-    if (!item_influence_is_local(item)) return Aabb::infinite();
-    return item_geometry_bound(item, layer);
+Nonlocality item_nonlocality(const Node& item) {
+    // Order matters: an intersect that ALSO repeats infinitely is unbounded,
+    // and the weaker answer must not win.
+    if (item.repeat.is_infinite_grid()) return Nonlocality::Unbounded;
+    if (prim_is_unbounded(item.prim.type)) return Nonlocality::Unbounded;
+    // THE SPLIT THIS CHANGE IS ABOUT (#319, measured in #326).
+    //
+    // A SPATIAL MORPH is unbounded. Its weight saturates:
+    // `ctransition_radial_weight` is `clamp((length(p.xz) - r0) / (r1 - r0), 0, 1)`
+    // about the WORLD Y axis, so past `r1` the weight is exactly 1 and the
+    // result IS the item's own field -- arbitrarily far from anything the
+    // layer occupies. Measured: over 400,000 sample points a radial morph
+    // leaves 0.0157 of band-clamped drift outside the layer's extent dilated
+    // by the band, and a linear morph 0.000568. The layer is not a bound for
+    // these.
+    //
+    // An INTERSECT is bounded by its LAYER. `max(acc, item)` can only take
+    // material away, and what it takes away is inside what the layer already
+    // occupies -- it cannot put material where the layer has none. Measured
+    // over the same 400,000 points on two fixtures: drift exactly 0 outside
+    // the layer's extent, against 0.100 and 0.065 outside the item's OWN
+    // geometry, which is the bound that looks tighter and does not hold.
+    if (item.op == Op::Intersect) return Nonlocality::BoundedByLayer;
+    if (!op_is_local(item.op)) return Nonlocality::Unbounded;
+    return Nonlocality::None;
+}
+
+Aabb layer_influence_extent(const SdfContent& content, const Layer& layer) {
+    // Every visible item's geometry, and infinite the moment one of them has
+    // none: an intersect in a layer holding a plane is bounded by a plane.
+    Aabb out;
+    for (const auto& [id, n] : content.nodes()) {
+        (void)id;
+        if (n.is_group || !n.visible) continue;
+        if (!item_influence_is_local(n)) {
+            // A second non-local item bounds this one only if IT is bounded.
+            if (item_nonlocality(n) != Nonlocality::BoundedByLayer) return Aabb::infinite();
+        }
+        out.expand(item_geometry_bound(n, layer));
+    }
+    return out;
+}
+
+Aabb item_influence_bound(const Node& item, const Layer& layer, const Aabb* layer_extent) {
+    switch (item_nonlocality(item)) {
+        case Nonlocality::None:
+            return item_geometry_bound(item, layer);
+        case Nonlocality::BoundedByLayer: {
+            // Computed here when the caller did not already hold it. Only an
+            // intersect reaches this, so a layer without one pays nothing --
+            // which is why this is a lazy fallback rather than a parameter
+            // every caller has to thread.
+            if (layer_extent) return *layer_extent;
+            if (!layer.sdf) return Aabb::infinite();
+            return layer_influence_extent(*layer.sdf, layer);
+        }
+        case Nonlocality::Unbounded:
+            break;
+    }
+    return Aabb::infinite();
 }
 
 Aabb item_own_influence_bound(const Node& item, const Layer& layer) {
+    // NOT given the layer fallback, deliberately. This one answers "how far
+    // does this item's own body reach", which is what a brush that has already
+    // reflected itself tests a drag against -- and for a non-local item the
+    // honest answer there is still "everywhere", because the brush is asking
+    // whether to warp it at all rather than which bricks to redraw.
     if (!item_influence_is_local(item)) return Aabb::infinite();
     return geometry_bound(item, layer, /*with_copies=*/false);
 }
@@ -1247,7 +1309,7 @@ float group_blend_support(const Node& group, const Layer& layer) {
     // because it is the same number.
     return op_is_extended(group.op)
                ? kernel::ccombine_extended_support(static_cast<int>(group.op), group.blend.k,
-                                                   group.rounding * layer.xform.scale)
+                                                   group.rounding * layer_distance_scale(layer))
                : kernel::cmax(group.blend.support(), group.blend.k);
 }
 
@@ -1255,7 +1317,13 @@ Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& lay
     const Node* n = content.find(id);
     if (!n || !n->visible) return Aabb{};
     if (!n->is_group) return item_influence_bound(*n, layer);
-    if (!op_is_local(n->op)) return Aabb::infinite();
+    // A GROUP takes the same split its items take: an intersecting group reads
+    // the running accumulator and can move the result anywhere the LAYER has
+    // material, and no further.
+    if (!op_is_local(n->op)) {
+        if (n->op != Op::Intersect || !layer.sdf) return Aabb::infinite();
+        return layer_influence_extent(*layer.sdf, layer);
+    }
     Aabb b;
     for (NodeId c : n->children) {
         Aabb cb = node_influence_bound(content, c, layer);
@@ -1303,9 +1371,14 @@ Aabb node_reach_bound(const SdfContent& content, NodeId id, const Layer& layer) 
         if (!g->visible) return Aabb{};
         // The non-local check at EVERY level, not only the first. An
         // intersect anywhere above reads the running accumulator and can move
-        // the result arbitrarily far, which is what node_influence_bound
-        // already reports for the group itself.
-        if (!op_is_local(g->op)) return Aabb::infinite();
+        // the result as far as the LAYER reaches, which is what
+        // node_influence_bound already reports for the group itself; a spatial
+        // morph above can move it further than that and still reports
+        // infinite.
+        if (!op_is_local(g->op)) {
+            if (g->op != Op::Intersect || !layer.sdf) return Aabb::infinite();
+            return layer_influence_extent(*layer.sdf, layer);
+        }
         b = b.dilated(group_blend_support(*g, layer));
         cur = parent;
     }

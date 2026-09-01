@@ -82,6 +82,15 @@ struct LatticeWarp {
 //
 // Groups take no warp of their own: a group's transform does not reach its
 // children in this scene model, so the children are what carry it.
+//
+// EMPTY FOR A LAYER CARRYING A PER-AXIS SCALE (#373). `Deformer::cage_xform` is
+// a math::Transform, and the map a cage needs on such a layer is
+// `cage.placement^-1 * layer.xform * diag(L) * node.xform * diag(N)` — a
+// general affine map, because the layer's diagonal sits between the two
+// placements. A cage placed through the rigid record would warp every item in a
+// space it does not occupy, silently. A host that gets nothing back from a
+// squashed layer should offer the uniform gizmo; widening the record is
+// `scale-a-layer-per-axis` task 5.1.
 std::vector<LatticeWarp> lattice_gizmo(const scene::Layer& layer, const GizmoCage& cage);
 
 // The chain `node` should end up with: the cage first, then whatever was there.

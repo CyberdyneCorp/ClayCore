@@ -91,6 +91,32 @@ and queues" principle in §2 does not say and should: one process-wide pool,
 dispatches a batch. Making it host-configurable (worker count, QoS class) is
 `add-mobile-thread-scheduling` and is not done.
 
+**What a host may call from its own worker.** Three contracts, all stated in
+`clay.h` where the calls are, and all of the same shape — free-threaded against
+a *const* document, never concurrent with a mutating `clay_document_*` /
+`clay_layer_*` call, with `clay_last_error` per-thread so a worker reads its
+own:
+
+- `clay_brick_cache_eval_requests`, which takes no cache and is the original of
+  the form. A cache *handle*'s calls are still the host's to serialize.
+- `clay_mesh_sculptor_create` / `_refresh` / `_refit` (issue #368). Arming a
+  mesh subtool costs the weld plus the ray tree — around 116 ms and 89 ms at
+  296k triangles — and the tree is built lazily, so a host that moves only
+  `create` to a worker still pays the tree on whichever thread picks first.
+  Call `_refresh` there too.
+
+**And what never reaches a device at all.** Every bake in the ABI —
+`clay_layer_consolidate` and its `_cost` / `_cancellable` / `_region` forms,
+`clay_sdf_smooth_begin`, `clay_sdf_move_begin` — evaluates through the CPU
+backend's reference arithmetic on that pool, and takes no backend argument
+(issue #379). It is an *injected* evaluator rather than a chosen one, because a
+bake lives in `clay::scene` and the layering runs `eval -> scene`: a bake
+cannot name a backend. That is deliberate and worth keeping — a baked volume is
+content the document then carries, so it must not depend on which GPU wrote it,
+and byte-identity with the serial walk is the contract the pool is held to.
+Which backend a host *draws* the result with is the separate question, and the
+one `clay_eval_points` and the parity suite answer.
+
 ## 4. Operation inventory (the complete SDF vocabulary)
 
 Everything below ships in `clay::kernel` with CPU reference + per-backend parity tests. Items marked *(bound)* propagate non-exactness through the tree per principle 3.
@@ -232,7 +258,20 @@ before: correct, silent, and exactly as fast as it always was. Vulkan implements
 them with a **compute shader**, not `vkCmdCopyBuffer`, because nothing obliges a
 caller to have created its buffer with `VK_BUFFER_USAGE_TRANSFER_SRC/DST` —
 the storage binding the evaluation path already needs is the one usage that can
-be assumed. Metal has no seeded path yet and falls back (#350).
+be assumed. Metal implements them with an **`MTLBlitCommandEncoder`** (#350),
+which the Vulkan restriction does not reach: an `MTLBuffer` carries no transfer
+usage flag to be missing, so every buffer is a legal blit source and
+destination, `MTLStorageModePrivate` included. Staging is one of *our* shared
+buffers rather than the caller's pointer, for the same reason — a private
+buffer has no `contents()` to memcpy through, and assuming otherwise works on
+every unified-memory Mac and faults on the first host that allocated private.
+
+Both are served **only by an adopted backend**. `device_copy` names a buffer the
+caller lent us, and one from the device the registered backend made for itself
+is not that; the registered `"metal"` and `"vulkan"` entries report false and
+refuse. CUDA and OpenCL have no adoption path at all — `eval::make_backend`
+serves Metal and Vulkan, and OpenCL is not in `eval::DeviceApi` — so a caller
+cannot obtain a `clay_device` for them and the question does not arise.
 
 The seed is kept only where this path can say what it means: with **more than
 one visible SDF layer** a seed is two values — the active layer's and the hard
@@ -300,6 +339,230 @@ The document tree the app and specs already define, owned here so every consumer
 - **Undo command vocabulary**: every mutation is a serializable command with an inverse (add/remove/reorder item, set-param, voxel-span edit, layer ops). The in-memory undo stack and the document file share this one vocabulary — one serialization story, tiny undo steps, stroke-level coalescing.
 
 `clay::brick`: sparse virtual grid of 8³/16³ bricks, fp16 narrow band (±3 voxels), dirty-set tracking, async-friendly (evaluation requests are plain data; the app owns threading/queues via the backend), LOD mip bricks for far view.
+
+### Warming a cold brick window off the interaction thread
+
+The resumable refill made a dab flat in document size — but only for bricks that
+already carry a seed. **A brick with no seed still walks the whole surviving
+edit list**, and that cost follows the size of the sculpt. That is what is left
+of #306, and it is a *tail* problem rather than a median one. A moving stroke on
+a worked sphere, 24 dabs, dabs spread evenly:
+
+| items | resumed / refilled | median dab | **worst dab** |
+|---:|---|---:|---:|
+| 1,000 | 888 / 96 | 0.290 ms | 3.96 ms |
+| 5,000 | 888 / 96 | 0.170 ms | 12.02 ms |
+| 20,000 | 888 / 96 | 0.157 ms | 45.15 ms |
+| 50,000 | 888 / 96 | **0.155 ms** | **113.31 ms** |
+
+90% of bricks resume, the median is flat across 50x the document, and the worst
+dab scales linearly — because a moving brush keeps reaching ground it has not
+covered. Where a cold window's time goes, at 50,000 items: the cull index 2.9
+ms, compiling twelve culled tapes 18.7 ms, and **evaluating them 68.4 ms**,
+already spread over ~11 of 12 cores. There is no parallelism left to win and no
+constant to shave: a brick dilated by its band and the chain pad genuinely
+overlaps 8,126 of the 50,000 dabs, and an exact answer has to evaluate them.
+
+**So move it, rather than make it cheaper.** The seed store belongs to the
+*document*, not to a cache or a thread, and
+`clay_brick_cache_eval_requests` is free-threaded against a const document. So a
+worker can pay the cold walk and leave seeds the interaction thread resumes
+from. Measured on the same 50,000-item document and the same twelve bricks:
+
+| | interaction thread pays |
+|---|---:|
+| no warming | **107.99 ms** |
+| the window warmed on a worker first | **0.004 ms** |
+
+with the values **bit-identical** and `resumed_bricks` confirming the fast path
+fired. That last part is the half worth testing rather than assuming: a prefetch
+returning "close enough" values would put a silent correctness bug inside a
+performance feature.
+
+**What it costs is an edit.** The warming refill is only safe while the document
+is not being mutated, so it belongs at pointer-down, between strokes, or on a
+camera move — not between the dabs of a live stroke, where every dab is a
+mutating call. A host that warms the neighbourhood a brush is about to enter
+pays for it once, before the stroke that needs it.
+
+### An intersect is bounded by its layer
+
+`item_influence_bound` reported `Everything` for any op that is not local, and
+"not local" covered two things that behave differently. One of them has a finite
+answer, and the difference is 1.8x on a drag: the reporter of #319 measured the
+same object, the same drag, the same scene, differing only in the operation —
+**19.39 ms subtracting, 35.52 ms intersecting**, none of it the intersect being
+harder to evaluate.
+
+- **An INTERSECT is bounded by its LAYER.** `max(acc, item)` can only take
+  material away, and what it takes away is inside what the layer already
+  occupies — it cannot put material where the layer has none.
+- **A SPATIAL MORPH is not.** Its weight *saturates*:
+  `ctransition_radial_weight` is `clamp((length(p.xz) − r0)/(r1 − r0), 0, 1)`
+  about the **world Y axis**, so past `r1` the weight is exactly 1 and the result
+  *is* the item's own field, arbitrarily far from anything the layer occupies.
+  These keep `Everything`, and #319's report — which lumps "intersect, the
+  spatial morphs" together — would have been unsound taken literally. That claim
+  is *mechanical*: it is a statement about the kernel's weight, not about a
+  fixture, and morph behaviour is unchanged here in any case. A probe of the
+  radial morph leaks 4 points in 200,000 on arm64 and none on x86_64, which is
+  reported and not asserted — the leaking points sit a rounding error either
+  side of the band edge.
+
+**What made this shippable was a sample count, not a fixture.** #326 held it
+back on a real objection: nothing in the suite could tell a correct bound from a
+wrong one, because the item's *own* geometry box is ~3x tighter than the layer's
+and measured drift 0 as well. Four candidate fixture designs were proposed to
+break the tie and **none was needed**. Moving the intersect of #319's own
+sphere+box document leaves 34 drifting points in 400,000 — about 1 in 11,700 —
+so the property test's 4,000 samples miss it roughly seven times in ten. At
+200,000 it shows every run:
+
+| candidate bound | worst band-clamped drift |
+|---|---:|
+| the item's own geometry | **0.100** (146 points) |
+| the layer's extent | **0** |
+
+against a 0.15 band, by exact equality, boxes dilated by `band + cull_pad`. So
+#319 asked for the tightest bound that holds, not one 3.4x too loose. The
+sample count is a property of how *rare* a violation is rather than of how hard
+the document is — a local item's bound is its own geometry and a violation there
+is dense, which is what the gnarly corpus finds at 4,000.
+
+**The cull gate does not change.** `item_influence_is_local` still refuses every
+non-local op, so an intersect still appears in every brick's tape. "May this be
+omitted from a brick's tape" and "which bricks does moving it dirty" were always
+different questions and only the second has the finite answer; keeping them
+separate is what makes this safe. `item_own_influence_bound` also keeps the
+infinite answer — it asks how far the item's own body reaches, which is what a
+brush that has already reflected itself tests a drag against.
+
+Measured on the reporter's case, bricks dirtied per drag frame over 20 frames,
+1,000 tracked: subtract **64 → 64**, intersect **1,000 → 216**. 216 is exactly
+the figure the triage on #319 predicted.
+
+### Drawing a preview beside the rest of the document
+
+A live sculpt transaction previews **one layer** — that is what
+`clay_sdf_smooth_preview_delta_take` hands over, and it is why a dab costs what
+it touches rather than what the artist has already made. But
+`clay_brick_cache_eval_requests` evaluates the hard union of every visible SDF
+layer and attributes no brick to the layer it came from, so a host drawing only
+the preview was drawing that layer **alone**: every other visible field layer
+vanished for the length of the gesture. ClaySpaceDesktop's answer was to refuse
+— open a live gesture only when the sculpted layer is the only visible one —
+which took the feature away from exactly the documents subtools exist for
+(#378).
+
+The missing question was the third one. There was "the whole document"
+(`clay_eval_points`) and "one layer" (`clay_layer_eval_points`), and no way to
+ask for **every visible SDF layer except one**. `clay_eval_points_excluding`,
+`clay_eval_gradients_excluding` and `clay_brick_cache_eval_requests_excluding`
+are that question; `Document.eval_excluding` and `.gradients_excluding` are the
+pyclay half.
+
+**Composing is a minimum, and it is exact.** Visible SDF layers hard-union, and
+the union of two fields IS the smaller of the two distances, so
+`min(excluding(L), your own preview of L)` is the field the whole document would
+evaluate to — not an approximation of it. There is no blend parameter to match
+and no seam to hide. A host takes the excluded evaluation **once at
+pointer-down**, because the layers it excluded do not move while the artist
+drags, and composes it with the live preview per frame.
+
+**Neither call edits the document**, which is the other half of why they exist.
+The route a host would otherwise take — hide the layer, sample the rest, show it
+again — is three edits, and an edit taken between `clay_sdf_smooth_begin` and its
+commit is one the commit correctly refuses.
+
+The engine half is `scene::compile_document_except`, a third case in the
+predicate `compile_document_part` already had. That function's `below` **stops**
+at the named layer, so it is "before" rather than "except" and drops everything
+above it too; the new case skips the layer and keeps walking. Both cull under
+the **whole document's** pad, for the reason the split already documented: a
+part compiled under its own smaller pad drops items the whole compile keeps, and
+the parts then stop summing to the whole.
+
+Two deliberate refusals. An **unknown layer** is `CLAY_ERROR_NOT_FOUND` rather
+than "exclude nothing" — a host whose id went stale would otherwise be handed the
+whole document and would draw the excluded layer twice, once from here and once
+from its own preview, which looks like a shading artefact rather than a bug. A
+**hidden or empty** layer succeeds, because it contributes nothing to the union
+already and refusing would make a host branch on state it has no reason to
+track.
+
+And the excluded refill **takes no seed and leaves none**. A seed is a brick's
+value for *this* document, which a later refill continues with the items the
+document has gained since; a value computed without one of the layers is not
+that, and storing it would hand the next whole-document refill a seed with a
+layer missing — silently, because a seeded answer is bit-identical to a walked
+one by contract. So it is a plain batched walk, priced like a stroke's first dab
+rather than its tenth, which is the right price for something taken once a
+gesture. `clay_document_resume_stats` does not move for it.
+
+### Scaling a subtool per axis
+
+A ZBrush-style gizmo scales per axis — the three boxes on the arms — and users
+expect it on a placed object *and* on a whole subtool. `scale-an-item-per-axis`
+(#320) gave every NODE placement three factors in 0.54.0 and deferred the layer
+deliberately, because `layer.xform * node.xform` is consumed as a rigid frame by
+`brush::move` and `brush::lattice_gizmo`. A host therefore had to hide the axis
+boxes in scale mode for a subtool (#373).
+
+`Layer::scale_axes` closes it, composed innermost in the layer's own frame
+exactly as a node's is in its own:
+
+```
+world_from_local = layer.xform · diag(layer.scale_axes)
+                 · node.xform  · diag(node.scale_axes)
+```
+
+`xform.scale` stays the similarity factor at each level and the axes modulate
+it, so a triple of ones is the identity and **three equal factors compile to
+byte-identical tape** — the case a test pins, because it is what makes every
+document written before the field unaffected by it.
+
+**What a non-uniform scale costs, and what it does not.** The inverse goes into
+the tape's matrix and the distance is multiplied back by the product of the
+smallest component of each per-axis scale in the composition. That is
+conservative rather than exact, and provably so: the composed linear part is
+`L · D_l · R · D_n` with `L` and `R` rotations, and the smallest singular value
+of a product is at least the product of the smallest singular values, which for
+a rotation is 1. So the value never overestimates the true distance. The field
+stays **1-Lipschitz** — dividing by `s` and multiplying back by `min(s)` can
+only shorten — so `safe_step_scale` does not move and no marcher slows down.
+What goes is `is_exact`. A world **radius** mapped inward is divided by the
+**largest** component instead, the dual: `brush::move` takes the layer's factor
+into that rule, so a drag never reaches outside what the artist circled.
+
+Bounds, influence bounds, picking and a mesh layer's placed geometry all read
+the three factors; a mesh layer's **normals** go through the inverse transpose,
+as `clay_mesh_transform_nonuniform` already documents, because rotating a normal
+is right for a similarity and tilts every one of them off the surface under a
+squash.
+
+`kSceneMinor` and `kClaySpaceMinor` move to 16. An older stream loads with
+(1, 1, 1), which is what those files always meant; a stream written at an older
+minor does not carry the field, so that minor's reader does not desynchronise.
+The placement and the squash are **one command**, so one undo restores a frame
+that actually existed rather than the rotation from one step and the squash from
+another.
+
+**One verb refuses rather than approximating.** `brush::lattice_gizmo` returns
+no warps for a per-axis-scaled layer. A cage records its item-to-cage placement
+as a `math::Transform`, and on a squashed layer the map it needs is
+
+```
+cage.placement⁻¹ · layer.xform · diag(L) · node.xform · diag(N)
+```
+
+a general affine map — the layer's diagonal sits *between* the two placements,
+so it is not a similarity and not `Transform ∘ diag` either, which is the shape
+`drag-a-squashed-item` predicted when it deferred the widening here. Placing a
+cage through the narrower record would warp every item in a space it does not
+occupy, silently and with no error. Refusing is not a fix for that widening and
+does not pretend to be — the same record still drops a *node's* per-axis scale,
+which predates this change — but it stops the layer scale from adding a second
+silent case to it. `scale-a-layer-per-axis` task 5.1 carries the widening.
 
 ### Duplicating a subtool costs a layer record
 
@@ -944,6 +1207,34 @@ opens its step and closes it before returning, and calls on one document must be
 serialized, so there is no moment at which you could hold a handle, have a step
 open, and ask. It is reported anyway so the total stays the sum of the fields if
 an entry point spanning a step is ever added. Do not build a response around it.
+
+**A sculptor's scratch is not in this report, and it is not an omission.**
+`clay_document_memory` measures the document; a mesh sculptor is a handle held
+BESIDE one, on the same footing as `MultiresSurface::memory()`, and a document
+does not know how many are open on it. Since 0.77.0 each sculptor owns one bump
+arena for the buffers a stamp needs and cannot hold as members — the automask's
+frontiers, the adaptive region's sort permutation — reset rather than freed
+between stamps, so a warm dab on a stable surface allocates nothing. Ask the
+sculptor:
+
+```c
+clay_brush_arena_stats a = { .struct_size = sizeof a };
+clay_mesh_sculptor_arena_stats(sculptor, &a);   /* also _dynamic_ and _multires_ */
+```
+
+Read it as **`growths`, then `high_water_bytes`, then `capacity_bytes`** — the
+order is deliberate. There is no current-usage field because a current usage
+reads zero between stamps whatever the arena is doing, and `growths` is the only
+one of the three that distinguishes an arena that has converged from scratch
+that is never released: the second allocates nothing after warm-up and consumes
+memory without bound, which no allocation count can see. The table above asks
+"may you release it?" and the answer here is **yes, by destroying the
+sculptor** — the arena is rebuildable state, in the brick cache's category
+rather than the user's work, and it costs a warm-up rather than a stall. There
+is deliberately nothing to tune: no reserve, no cap, no growth factor, because
+each would be a number a host sets from one device and is wrong about after the
+brush radius changes, and the arena already sizes itself from the largest
+footprint it has been given.
 
 Runnable: [`examples/62_what_this_document_costs.py`](../examples/62_what_this_document_costs.py),
 which builds a document the way an artist would and attributes it. On that

@@ -192,3 +192,90 @@ TEST_CASE("setting a transform is one undo step that restores both scales") {
     CHECK(n->scale_axes.x == doctest::Approx(2.0f));
     CHECK(n->scale_axes.y == doctest::Approx(1.0f));
 }
+
+// -- the LAYER's per-axis scale (#373) ---------------------------------------
+
+TEST_CASE("a layer written at an older minor degrades to its uniform scale") {
+    // The same one-directional loss the item arm states above, one level out. A
+    // build that predates the field must read the bytes it always did and get
+    // back the unsquashed subtool rather than a broken one — recoverable and
+    // obvious, which is the direction this format takes everywhere.
+    scene::Document doc = one_sphere(kernel::cf3(1, 1, 1), 1.0f);
+    doc.layers[0].xform.scale = 1.5f;
+    doc.layers[0].scale_axes = kernel::cf3(3.0f, 0.5f, 2.0f);
+
+    const std::vector<std::uint8_t> old_bytes = scene::serialize_document(doc, 15);
+    // The bytes a build that predates the field would have written, exactly: an
+    // unsquashed layer at minor 15 serializes identically.
+    scene::Document plain = one_sphere(kernel::cf3(1, 1, 1), 1.0f);
+    plain.layers[0].xform.scale = 1.5f;
+    CHECK(old_bytes == scene::serialize_document(plain, 15));
+
+    std::optional<scene::Document> back =
+        scene::deserialize_document(old_bytes.data(), old_bytes.size(), 15);
+    REQUIRE(back.has_value());
+    CHECK(back->layers.at(0).scale_axes.x == doctest::Approx(1.0f));
+    CHECK(back->layers.at(0).scale_axes.y == doctest::Approx(1.0f));
+    CHECK(back->layers.at(0).scale_axes.z == doctest::Approx(1.0f));
+    CHECK(back->layers.at(0).xform.scale == doctest::Approx(1.5f));  // the uniform half survives
+}
+
+TEST_CASE("a layer's per-axis scale round-trips at the current minor") {
+    scene::Document doc = one_sphere(kernel::cf3(1, 1, 1), 1.0f);
+    doc.layers[0].scale_axes = kernel::cf3(3.0f, 0.5f, 2.0f);
+    const std::vector<std::uint8_t> bytes = scene::serialize_document(doc, scene::kSceneMinor);
+    std::optional<scene::Document> back =
+        scene::deserialize_document(bytes.data(), bytes.size(), scene::kSceneMinor);
+    REQUIRE(back.has_value());
+    CHECK(back->layers.at(0).scale_axes.x == doctest::Approx(3.0f));
+    CHECK(back->layers.at(0).scale_axes.y == doctest::Approx(0.5f));
+    CHECK(back->layers.at(0).scale_axes.z == doctest::Approx(2.0f));
+
+    // And the field it describes comes back with it, which is what a
+    // round-tripped placement is actually for.
+    const scene::Tape a = scene::compile_document(doc);
+    const scene::Tape b = scene::compile_document(*back);
+    CHECK(a.params == b.params);
+    CHECK(a.instrs.size() == b.instrs.size());
+}
+
+TEST_CASE("setting a layer transform is one undo step that restores both scales") {
+    scene::Document doc = one_sphere(kernel::cf3(1, 1, 1), 1.0f);
+    doc.layers[0].scale_axes = kernel::cf3(2.0f, 1.0f, 1.0f);
+    const scene::LayerId lid = doc.layers[0].id;
+
+    scene::SetLayerTransformCmd cmd{lid, math::Transform{}, kernel::cf3(1.0f, 4.0f, 1.0f)};
+    std::optional<scene::Command> inverse = scene::apply(doc, scene::Command{cmd});
+    REQUIRE(inverse.has_value());
+    CHECK(doc.layers[0].scale_axes.y == doctest::Approx(4.0f));
+
+    // The inverse captured what was there, per-axis scale included — without
+    // that, one undo of a subtool squash leaves it squashed the other way.
+    REQUIRE(scene::apply(doc, *inverse).has_value());
+    CHECK(doc.layers[0].scale_axes.x == doctest::Approx(2.0f));
+    CHECK(doc.layers[0].scale_axes.y == doctest::Approx(1.0f));
+}
+
+TEST_CASE("a layer scale and an item scale multiply, in that order") {
+    // The composition the whole change rests on:
+    //     layer.xform * diag(L) * node.xform * diag(N)
+    // A 2x layer on a 3x item is 6x, and the two are not interchangeable when
+    // there is a rotation between them — which is why the order is pinned here
+    // rather than left to the arithmetic.
+    scene::Document doc = one_sphere(kernel::cf3(3.0f, 1.0f, 1.0f), 1.0f);
+    doc.layers[0].scale_axes = kernel::cf3(2.0f, 1.0f, 1.0f);
+    const scene::Tape tape = scene::compile_document(doc);
+
+    // The surface of a unit sphere scaled 3x on X by the item and 2x again by
+    // the layer sits at x = 6.
+    CHECK(tape.eval(kernel::cf3(6.0f, 0, 0)).d == doctest::Approx(0.0f).epsilon(1e-4));
+    CHECK(tape.eval(kernel::cf3(0, 1.0f, 0)).d == doctest::Approx(0.0f).epsilon(1e-4));
+    CHECK(tape.eval(kernel::cf3(7.0f, 0, 0)).d > 0.0f);
+
+    // Conservative everywhere along the stretched axis: the reported distance
+    // never exceeds the true one.
+    for (float x = 0.2f; x < 8.0f; x += 0.21f) {
+        const float got = tape.eval(kernel::cf3(x, 0, 0)).d;
+        CHECK(std::fabs(got) <= std::fabs(x - 6.0f) + 1e-4f);
+    }
+}

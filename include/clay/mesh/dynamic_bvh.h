@@ -176,6 +176,9 @@ class DynamicBvh {
     std::vector<std::uint32_t> face_leaf_;
     std::vector<std::uint32_t> dirty_;
     std::vector<std::uint32_t> dirty_epoch_;
+    // `update_many`'s per-stamp leaf list, kept so a stroke of similar stamps
+    // allocates on its first one and never again.
+    std::vector<std::uint32_t> update_scratch_;
     std::uint32_t epoch_ = 1;
     std::uint64_t revision_ = 1;
     mutable bool tree_stale_ = false;

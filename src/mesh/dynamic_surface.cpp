@@ -192,16 +192,21 @@ bool DynamicSurface::outgoing_halfedges(VertexId v, std::vector<HalfEdgeId>* out
     return true;
 }
 
-bool DynamicSurface::one_ring(VertexId v, std::vector<VertexId>* out) const {
+bool DynamicSurface::one_ring(VertexId v, std::vector<VertexId>* out,
+                              std::vector<HalfEdgeId>* fan) const {
     out->clear();
-    std::vector<HalfEdgeId> ring;
-    if (!outgoing_halfedges(v, &ring)) return false;
-    out->reserve(ring.size());
-    for (HalfEdgeId h : ring) {
+    if (!outgoing_halfedges(v, fan)) return false;
+    out->reserve(fan->size());
+    for (HalfEdgeId h : *fan) {
         const VertexId t = target_of(h);
         if (t.valid()) out->push_back(t);
     }
     return true;
+}
+
+bool DynamicSurface::one_ring(VertexId v, std::vector<VertexId>* out) const {
+    std::vector<HalfEdgeId> fan;
+    return one_ring(v, out, &fan);
 }
 
 bool DynamicSurface::incident_faces(VertexId v, std::vector<FaceId>* out) const {
@@ -251,11 +256,16 @@ float DynamicSurface::face_area_x2(FaceId f) const {
 }
 
 kernel::cfloat3 DynamicSurface::compute_vertex_normal(VertexId v) const {
-    std::vector<HalfEdgeId> ring;
-    if (!outgoing_halfedges(v, &ring)) return kernel::cf3(0, 1, 0);
+    std::vector<HalfEdgeId> fan;
+    return compute_vertex_normal(v, &fan);
+}
+
+kernel::cfloat3 DynamicSurface::compute_vertex_normal(VertexId v,
+                                                      std::vector<HalfEdgeId>* fan) const {
+    if (!outgoing_halfedges(v, fan)) return kernel::cf3(0, 1, 0);
     const kernel::cfloat3 p = position_of(v);
     kernel::cfloat3 sum = kernel::cf3(0, 0, 0);
-    for (HalfEdgeId h : ring) {
+    for (HalfEdgeId h : *fan) {
         const FaceId f = face_of(h);
         if (!faces_.live(f)) continue;
         // The two other corners of this face, from this corner.
@@ -270,13 +280,20 @@ kernel::cfloat3 DynamicSurface::compute_vertex_normal(VertexId v) const {
 }
 
 void DynamicSurface::refresh_normals(const std::vector<FaceId>& faces) {
+    NormalRefreshScratch scratch;
+    refresh_normals(faces, &scratch);
+}
+
+void DynamicSurface::refresh_normals(const std::vector<FaceId>& faces,
+                                     NormalRefreshScratch* scratch) {
     // Faces first, then every vertex those faces touch: a vertex normal is an
     // average over its faces, so the faces have to be right before the vertices
     // read them.
     for (FaceId f : faces)
         if (DynamicFace* rec = faces_.get(f)) rec->normal = face_normal(f);
 
-    std::vector<VertexId> touched;
+    std::vector<VertexId>& touched = scratch->vertices;
+    touched.clear();
     for (FaceId f : faces) {
         VertexId v[3];
         if (!face_vertices(f, v)) continue;
@@ -288,7 +305,8 @@ void DynamicSurface::refresh_normals(const std::vector<FaceId>& faces) {
               [](VertexId a, VertexId b) { return a.slot < b.slot; });
     touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
     for (VertexId v : touched)
-        if (DynamicVertex* rec = vertices_.get(v)) rec->normal = compute_vertex_normal(v);
+        if (DynamicVertex* rec = vertices_.get(v))
+            rec->normal = compute_vertex_normal(v, &scratch->fan);
 }
 
 void DynamicSurface::refresh_all_normals() {

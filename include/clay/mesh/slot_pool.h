@@ -69,6 +69,24 @@ struct SlotId {
     friend bool operator<(const SlotId& a, const SlotId& b) { return a.slot < b.slot; }
 };
 
+// THE FOUR ELEMENT KINDS OF A DYNAMIC SURFACE, each its own type so one cannot
+// be passed where another belongs. Half the interesting bugs in a half-edge
+// implementation are exactly that mistake.
+//
+// They live HERE rather than beside the surface that stores them because a
+// handle is not the surface: `mesh::WorkItemId` is built out of a `VertexId`
+// and must not drag the half-edge world — the pools, the operators, the
+// validator — into every header that names a workset.
+struct VertexTag {};
+struct HalfEdgeTag {};
+struct EdgeTag {};
+struct FaceTag {};
+
+using VertexId = SlotId<VertexTag>;
+using HalfEdgeId = SlotId<HalfEdgeTag>;
+using EdgeId = SlotId<EdgeTag>;
+using FaceId = SlotId<FaceTag>;
+
 // Storage of `T` addressed by `Id`, with a free list and a generation per slot.
 template <typename T, typename Id>
 class SlotPool {
