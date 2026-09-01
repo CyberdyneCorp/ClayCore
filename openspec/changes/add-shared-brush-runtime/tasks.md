@@ -737,21 +737,203 @@
       merged FIRST, as #417. `main` is 1c230df4 at 0.76.0, so this branch's
       number is BEHIND main rather than ahead of it and GitHub reports the PR
       CONFLICTING. No CI has run and none will until that is resolved
-- [ ] 11.7 THE REBASE ONTO `main` AT 1c230df4 OR LATER.
-      not attempted, and deliberately not: it turns on an ABI minor that is not
-      this stage's to assign. `git merge-tree` names exactly five conflicting
-      files and nothing in the engine — the three version literals,
-      `examples/run_all.py` (main now has `examples/69_mesh_sculpt_layers.py`,
-      so this change's example, its two committed outputs, its docs/07 link and
-      the gallery manifest all renumber), and `docs/09`, where both branches
-      appended to one section and both paragraphs should be kept. 0.77.0 is
-      still assigned to `feat/extreme-poly-runtime`, which has not merged, so
-      taking it moves the collision rather than resolving it: the next free
-      number depends on which of the two lands first. The three golden `.inc`
-      files are untouched on both sides. Every gate in section 11.5 was measured
-      against a44b1f5 and has to be re-run afterwards — in particular the
-      example's byte-identical render, which is a determinism claim about a file
-      the rebase renames
+- [x] 11.7 THE REBASE ONTO `main`, WHICH LANDED AS A MERGE — 9bb7181, onto
+      `origin/main` at 428f7362. The number this change ships under is
+      **0.77.0 / `CLAY_ABI_MINOR 77`**, not the 0.75.0 it was assigned: both
+      branches below it merged first, so 0.75.0 and 0.76.0 were spent and the
+      next free literal was 0.77.0. The three literals agree
+      (`CMakeLists.txt`, `bindings/c/clay.h`, `pyproject.toml`), and
+      `release_check`'s `version` row derives from them.
+      THE EXAMPLE RENUMBERED to `examples/70_shared_brush_runtime.py`, because
+      `add-mesh-sculpt-layers` took 69. Two renumber residues were still in the
+      tree afterwards and are recorded at 12.3 and 12.4 rather than quietly
+      fixed. The three golden `.inc` files are byte-unchanged against the new
+      base, which is the acceptance gate re-measured rather than re-asserted.
+      THE MERGE ALSO NEEDED AN ENGINE FIX, fcb8d174: `main` added
+      `src/mesh/layered_sculpt.cpp`, whose region walk reads `workset.classes`,
+      which this branch had already replaced with the neutral `items` array.
+      The two sides never touched the same file, so git resolved it clean and
+      the result did not compile. What the merge could NOT catch is at 12.2
+      THE PRE-MERGE READING THIS SUPERSEDES, kept because it was right about
+      the cost: `git merge-tree` named five conflicting files and nothing in
+      the engine — the three version literals, `examples/run_all.py`, and
+      `docs/09`, where both branches appended to one section and both
+      paragraphs had to be kept. What it could not name is the file neither
+      side touched twice, which is fcb8d174 above. And its closing warning
+      stands and is section 12: every gate in 11.5 was measured against
+      a44b1f5 and none of those readings survive the merge.
+
+## 12. The proving run, at the merged tip
+
+Everything sections 9, 10 and 11 measured was measured against `a44b1f5`. The
+merge at 9bb7181 moved the base to 428f7362, took the version to 0.77.0,
+renumbered the example and needed an engine fix to compile. None of those
+readings survive that, so this section is the whole set taken again from the
+merged tree — and two things it found that the merge could not.
+
+- [x] 12.1 THE SUITE AND THE GATES, RE-RUN AT THE MERGED TIP.
+      `cmake --build build/cpu-only -j 8` exit 0, zero warning lines with
+      `CLAY_WERROR=ON`. `ctest --test-dir build/cpu-only` 4/4 in 143.77 s
+      (`clay_unit_tests` 143.36 s), and the header names THIS worktree.
+      `clay_unit_tests` on its own, BEFORE this section added anything:
+      **2158 cases, 15,649,159 assertions, 0 failed** — against the
+      2089 / 14,860,258 section 10.1 recorded, the difference being what the
+      merge brought in. After 12.2's case, re-run at the tip:
+      **2159 cases, 15,649,881 assertions, 0 failed**, `ctest` 4/4 in
+      146.21 s.
+      `check_layering.py` OK. `check_binding_parity.py` OK (631 pyclay
+      capabilities, 32 exempt, imported from the built wheel).
+      `check_c_abi.py` OK (hygiene + ctypes FFI) against
+      `build/cpu-only/libclay_shared.so`. `check_gallery.py` OK, 254 tracked
+      outputs. `check_swift_package.py` OK (textual — still no toolchain).
+      THE ACCEPTANCE GATE HOLDS AGAINST THE NEW BASE:
+      `git diff 428f7362 -- 'tests/unit/mesh_sculpt_goldens_*.inc'` is empty,
+      and `tools/check_layering.py` is byte-unchanged from main, which is D1's
+      visible form.
+      pyclay: 632 passed, 1 skipped in 65.47 s;
+      `test_shared_brush_runtime.py` alone 21 passed.
+- [x] 12.2 THE GAP THE MERGE OPENED, FOUND AND GATED. `main` brought a FOURTH
+      consumer of this runtime — `LayeredMultiresSculptor`, the layered stroke
+      transaction — and this change's headline claim is stated over three.
+      That sculptor reaches the runtime by a route none of the other three
+      take: `gather()` builds no region of its own, it takes a zero-strength
+      `Draw` through the level's `MeshSculptor` and reads `workset()` back,
+      precisely so the falloff, the mask gate, the alpha and the composed
+      automask are ONE answer. Nothing was watching that route — no test in
+      the tree mentioned `LayeredMultiresSculptor` and an automask together —
+      and it is exactly where the divergence this change exists to close would
+      come back: `stamp` routes through `MultiresSculptor` and keeps its
+      automask, so masking would appear to work for the sixteen ordinary verbs
+      and silently stop for `erase`, `restore`, `smooth` and `stamp_detail`,
+      the five verbs that exist only on this representation.
+      `REGRESSION: the automask reaches the layered sculptor's own region walk`
+      in `test_multires_shared_brush_parity.cpp` closes it. Measured on an 8x8
+      quad cage at level 1: an eraser at radius 4.0 reaches all **289**
+      vertices of the 17x17 level and leaves none unchanged; with
+      `AutomaskFactor::Boundary` it reaches **225** and leaves exactly **64**,
+      and those 64 are asserted to BE the geometric border rather than merely
+      to number the same — a wrong address would leave a scrambled 64 that
+      every count would still accept. The unmasked run is asserted first, as
+      the control that keeps "the border survived" from being a statement
+      about the brush's reach.
+      PROVEN NON-VACUOUS by `probe.automask.factors = 0` in
+      `LayeredMultiresSculptor::gather` — which compiles, and is the
+      "optimisation" a reader would actually reach for. Against the whole
+      2159-case suite exactly ONE case notices, and it is this one.
+- [x] 12.3 A BUG THE RENUMBER LEFT, FOUND BY RUNNING THE EXAMPLE.
+      `examples/output/70_shared_brush_adaptive.obj` was committed carrying
+      `mtllib 69_shared_brush_adaptive.mtl` — a material file that does not
+      exist in the tree, because the export was renamed after it was written.
+      Any viewer opening the committed export finds no material. Regenerated
+      and committed. THE GATE ALREADY EXISTED and is what caught it: 10.9's
+      rule that the example must leave `git status examples/` empty. It is
+      `check_gallery.py` that could NOT catch it — the manifest checks that a
+      tracked output exists, not that it refers to a file that does.
+- [x] 12.4 A SECOND RENUMBER RESIDUE, FIXED, AND THE GATE FOR IT DELIBERATELY
+      NOT ADDED. The example announced itself as `R.banner("69 shared brush
+      runtime ...")`, which is another example's number. Fixed.
+      A repository-wide check that an example's banner names its own number is
+      the obvious gate and was measured before being proposed: three examples
+      on `main` — `33_mask_extrude` (says 26), `37_groups` (says 36) and
+      `38_consolidation` (says 36) — fail it today. Adding the check here
+      would either fail on main or drag three unrelated examples into this
+      change's diff, so it is reported rather than taken.
+- [x] 12.5 THE EXAMPLE, RUN AND RE-RUN. `examples/70_shared_brush_runtime.py`
+      exits 0 against the wheel built from this tree, and reproduces all three
+      of its outputs BYTE-IDENTICALLY on a second run (md5 over the .png, the
+      .obj and the .mtl) — which is the determinism claim `check_gallery`
+      cannot make. Its numbers at the merged tip are unchanged from 8.2 and
+      8.3: 935 moved on all three with byte-identical positions, 613 open
+      against 529 automasked on each, arenas settling at 3 / 4 / 3 growths and
+      taking nothing more over 40 further dabs, and Draw diverging by
+      2.660e-10 against a 2.000e-01 displacement.
+      AND IT STILL CATCHES: with `in.topology = nullptr` in
+      `DynamicSculptor::gather` (compiles) and pyclay rebuilt against it, the
+      example exits 1 on `(529, 613, 529)` where it needs `(529, 529, 529)`.
+      The same probe fails FIVE C++ cases — the two C ABI automask cases, P3's
+      vertex-set case and both adaptive automask regressions — so the example
+      is the wheel's gate on a property the test binary also holds.
+- [x] 12.6 SANITIZERS, RE-RUN AT THE MERGED TIP over the change's own cases
+      plus `test_sculpt_allocation`, `test_brush_preset` and the fixed-mesh
+      golden parity case.
+      ASAN-UBSAN with `ASAN_OPTIONS=detect_leaks=1`: exit 0, **82 cases,
+      12,098 assertions, 0 failed**, and zero lines matching
+      AddressSanitizer / UndefinedBehaviorSanitizer / LeakSanitizer /
+      "runtime error".
+      TSAN under `setarch -R`: exit 0, the same 82 cases and 12,098
+      assertions, **zero `WARNING: ThreadSanitizer` lines**. That
+      `adaptive parity: two sculptors stamp concurrently without aliasing`
+      really ran under it was checked on its own rather than inferred from the
+      total — 586 assertions, passing. Neither run is the whole suite and
+      neither is claimed to be.
+- [x] 12.7 THE BENCHMARK, RE-MEASURED, AND WHAT THIS BOX COULD NOT MEASURE.
+      Forty repetitions of 200 iterations,
+      `--benchmark_report_aggregates_only=false`; percentiles are over the
+      forty repetition means. Load average 3.45 before and 5.59 after, both
+      read on the box. All times in microseconds:
+
+      | case | P50 | P95 | P99 | max | growths | high water |
+      |---|---|---|---|---|---|---|
+      | fixed, no automask, n=224 | 69.30 | 73.47 | 78.19 | 80.46 | 0 | 0 |
+      | fixed, boundary automask, n=224 | 167.66 | 169.84 | 171.06 | 171.72 | 1 | 1856 |
+      | fixed, no automask, n=707 | 570.74 | 575.70 | 615.38 | 640.29 | 0 | 0 |
+      | fixed, boundary automask, n=707 | 1511.38 | 1545.44 | 1569.96 | 1575.74 | 1 | 1856 |
+      | adaptive, no automask, n=224 | 135.15 | 147.45 | 157.62 | 158.63 | 1 | 1856 |
+      | adaptive, boundary automask, n=224 | 351.71 | 358.53 | 385.15 | 400.99 | 1 | 1856 |
+      | adaptive, no automask, n=707 | 131.73 | 150.58 | 153.20 | 153.96 | 1 | 1856 |
+      | adaptive, boundary automask, n=707 | 1075.31 | 1803.49 | 4681.49 | 6234.81 | 1 | 1856 |
+
+      THE MEDIAN RATIOS REPRODUCE 10.8 ALMOST EXACTLY, which is the reading:
+      the automask costs x2.42 and x2.65 on the fixed path (10.8 measured 2.41
+      and 2.64) and x2.60 and x8.16 on the adaptive one (2.67 and 8.01). The
+      arena counters reproduce 8.2's trap too — the plain fixed stamp is the
+      one row reporting `growths = 0`, because its automask-free path never
+      touches the arena.
+      THE TAIL ON ONE ROW IS NOT MEASURABLE ON THIS BOX TODAY, and is reported
+      as that rather than as a number. `adaptive, boundary automask, n=707`
+      shows P99/P50 = 4.35x here where 10.8 read 1.69x at load ~2. Re-run
+      alone at load 10.3 rising to 15.3 it reads P50 1183.21, P99 17616.63,
+      max 24406.12 — a 14.89x tail. The P50 moved 10% across a 3x load change
+      and the tail moved 3x, so the tail is the box and not the feature. Seven
+      of the eight rows are within 15% of their own P50 at both loads. NO
+      CEILING added to `tools/check_bench.py`, on that file's own rule.
+- [x] 12.8 A GOTCHA WORTH THE NEXT STAGE'S TIME, because it looked like a
+      failure and was not. `bindings/python/tests/test_c_abi_parity.py::
+      test_mesh_layer_written_by_pyclay_reads_back_through_c` failed with
+      `clay_document_load` returning 4 on a document pyclay had just written.
+      It is not a defect: that suite loads `build/release/libclay_shared.so`
+      through ctypes, and building `--target pyclay` alone leaves that library
+      STALE — a wheel at one format minor reading through a loader at another.
+      `cmake --build build/release` in full, then 632 passed, 1 skipped.
+      Building the pyclay target on its own is enough to run
+      `test_shared_brush_runtime.py` and is NOT enough to run the ctypes
+      parity suite.
+- [x] 12.9 `release_check.py` AT THE MERGED TIP, run under `/usr/bin/python3`
+      rather than the anaconda python on PATH, and every failing row traced
+      rather than attributed. FOUR fail — `tests`, `device`, `benchmarks`,
+      `wheel` — and `version` passes at cmake=0.77.0 abi=0.77.0 wheel=0.77.0.
+      `tests` — the only failing ctest entry in `build/release` is
+      `pyclay_pytest`, and the log names the cause: `ImportError:
+      .../anaconda3/lib/libstdc++.so.6: version GLIBCXX_3.4.31 not found`.
+      Under `LD_PRELOAD=/lib/x86_64-linux-gnu/libstdc++.so.6` the same suite is
+      632 passed, 1 skipped.
+      `device` — the gate's snapshot is 39c244209 and main already differs from
+      it in 72 engine files; it fails on main too and re-runs on the reference
+      iPad.
+      `wheel` — `python3 -m venv` cannot bootstrap pip here (`python3.12-venv`
+      is not installed), so the gate never reaches a wheel.
+      `benchmarks` — THE ONE THAT WAS NOT ON 11.5'S LIST, and it is the shared
+      box rather than the tree. It failed
+      `BM_MoveDrag1000: 0.7 ms above ceiling` on a run taken while another
+      worktree's TSan and ASan suites had the load average at 15. Measured on
+      its own at load 11.5: **0.086 ms median over 15 repetitions against a
+      0.6 ms ceiling**, seven times the headroom. A second whole-suite run
+      failed a DIFFERENT row (`BM_VolumeBakeCulledDoc not faster than
+      BM_VolumeBakeWholeTapeDoc`, a ratio gate), and a third started at load
+      3.93 and reports `bench-gate: OK`. Three runs, three different answers,
+      none of the rows touched by this change: the gate needs a quiet runner,
+      which is the same rule that kept a ceiling out of `check_bench.py` at
+      6.8.
 
 ## Files
 
@@ -797,10 +979,11 @@
 | `include/clay/mesh/dynamic_bvh.h`, `src/mesh/dynamic_bvh.cpp`, `include/clay/mesh/slot_pool.h` | the buffers the adaptive walk used to own become arena blocks the caller passes in |
 | `tests/unit/test_sculpt_allocation.cpp` | THE GATE — extended to every verb with automask factors on, and to the other two representations |
 | `tests/unit/test_mesh_sculpt.cpp`, `tests/unit/test_dynamic_sculpt.cpp` | the workset's new identity, and the adaptive automask's regression case |
+| `src/mesh/layered_sculpt.cpp` | the merge seam — the region walk addresses `items` rather than the `classes` array that no longer exists (fcb8d174, 11.7) |
 | `benchmarks/bench_main.cpp` | the four automask-on/off cases 6.8 and 10.8 measure, carrying the arena counters |
 | `tools/check_binding_parity.py` | the three `set_automask_inputs` exemptions, with the `std::function` reason |
 | `tests/swift/smoke.swift` | the appended field and the arena statistics through SwiftPM — written, NOT compiled here (7.6) |
-| `examples/run_all.py`, `docs/07-brushes-and-features.md` | example 69 |
+| `examples/run_all.py`, `docs/07-brushes-and-features.md` | example 70 — 69 was taken by `add-mesh-sculpt-layers`, which merged first (11.7) |
 | `README.md`, `docs/05-claycore-library.md`, `docs/09-brush-latency-and-coverage.md`, `openspec/ROADMAP.md` | section 11 — what this change makes untrue elsewhere |
 
 **Must not change**
@@ -822,7 +1005,8 @@
 | parity P3 (identical vertex set, normal-free verb, byte equality) | the runtime around the kernels agrees | the walk, the drop rule or the factor order diverged — the strongest single signal in the suite |
 | parity P4 (the named differences still differ) | the differences are understood, not accidental | either an estimator was silently unified, or one representation has drifted far past the stated bound |
 | the automask regression, C++ and C | the adaptive path honours the brush it was given | the divergence this change exists to close is back |
+| the layered sculptor's automask regression (12.2) | the FOURTH consumer, which `main` added mid-change, reaches the same runtime | `LayeredMultiresSculptor::gather` grew a region walk of its own, and masking works for the sixteen ordinary verbs while silently failing for `erase`, `restore`, `smooth` and `stamp_detail` |
 | `test_stamp_frame`'s azimuth-zero byte equality | D5's branch is present | somebody replaced it with `cos`/`sin`, and a `-0.0f` is waiting to move a golden |
 | `check_layering.py` | D1 held | something in `mesh` reached into `brush`, or the leaf module got added after all |
 | `check_binding_parity.py` | the ABI reaches what pyclay reaches | a Python member landed without a C counterpart |
-| `examples/69` raising `SystemExit` | the claims are true of the shipped wheel and not only of the test binary | a claim in the prose stopped holding |
+| `examples/70` raising `SystemExit` | the claims are true of the shipped wheel and not only of the test binary | a claim in the prose stopped holding |

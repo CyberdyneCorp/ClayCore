@@ -593,8 +593,26 @@ surface allocates nothing on all three representations, gated in
 `test_sculpt_allocation.cpp`. `growths` is the one that matters because scratch
 that grows a little every stamp also allocates nothing after warm-up and
 consumes memory without bound — an allocation count cannot see it, and a
-current-usage figure reads zero between stamps. Over example 69's 48-dab stroke
+current-usage figure reads zero between stamps. Over example 70's 48-dab stroke
 the three arenas settle at 3, 4 and 3 growths and take nothing more.
+
+**Re-measured after the merge, and the tail is the box rather than the row.**
+Both tables above were taken before this branch merged `main`; the whole set was
+run again from the merged tree, forty repetitions as before, at load average
+3.45 rising to 5.59. The MEDIANS reproduce to within a few percent — the
+automask costs 2.42× and 2.65× on the fixed path against 2.41× and 2.64× above,
+and 2.60× and 8.16× on the adaptive one against 2.67× and 8.01× — so the P50
+table is a property of the code. The TAIL of the eighth row is not. It reads
+4.35× at that load, and re-run on its own while the box climbed from 10.3 to
+15.3 it reads P50 1183.21, P99 17616.63 and max 24406.12, a 14.89× tail. The
+P50 moved by 10% across a 3× change in load and the tail moved by 3×, which
+means the 1.69× above is what a quiet machine reads and not a ceiling anyone
+should budget against. The honest statement is the one the shape supports: that
+row is the only one whose tail responds to contention at all, because it is the
+only one dominated by a breadth-first walk, and its tail on a loaded machine has
+to be measured on the machine the frame budget is for. That is also why no
+ceiling for it went into `tools/check_bench.py`, which requires a number read
+off the runner.
 
 **One pre-existing cost this measurement surfaced, verified against main rather
 than assumed:** at an IDENTICAL 114-entry workset, ten times the surface costs

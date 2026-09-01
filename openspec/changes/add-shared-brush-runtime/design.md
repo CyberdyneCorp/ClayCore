@@ -396,7 +396,7 @@ growths }`.
 **Why the statistics cross at all.** The library's stated target kills an app
 for memory rather than warning it twice — the reasoning `add-mesh-multires`
 gives for its preflight — and a per-stroke scratch high-water is a number such
-a host budgets against. It is also what lets `examples/69` assert the arena's
+a host budgets against. It is also what lets `examples/70` assert the arena's
 claim from Python without a C++ allocation counter, which matters because the
 allocation gate is a test-binary technique (it replaces `operator new`) and
 cannot be shipped to a host.
