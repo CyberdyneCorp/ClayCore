@@ -83,6 +83,38 @@ def test_the_stack_is_addressed_by_id_and_an_id_survives_a_reorder():
     assert s.sculpt_layer_info(lower)["strength"] == pytest.approx(1.0)
 
 
+def test_a_reorder_moves_no_vertex_even_after_the_blocks_recompose():
+    # THE HALF OF "additive layers commute" THAT A REORDER ALONE CANNOT SHOW.
+    # `move_sculpt_layer` invalidates no block by design, so reading the surface
+    # straight after it reads the composed cache back unchanged whatever
+    # composition does. The claim only becomes falsifiable once the blocks are
+    # driven through composition AGAIN, three layers deep, on a base detail that
+    # is already there — float addition commutes but does not associate, so a
+    # stack summed in list order would land on different bits from this point on.
+    s = surface()
+    for v in range(30, 50):
+        s.set_detail(2, v, 0.0, 0.0, 0.05)
+    a = s.add_sculpt_layer("a")
+    b = s.add_sculpt_layer("b")
+    c = s.add_sculpt_layer("c")
+    for v in range(30, 50):
+        for layer in (a, b, c):
+            s.set_sculpt_layer_detail(layer, 2, v, 0.0, 0.0, 0.03)
+    s.set_sculpt_layer_strength(a, 0.4)
+    s.set_sculpt_layer_strength(b, 0.4)
+    s.set_sculpt_layer_strength(c, 0.7)
+    before = positions(s)
+
+    s.move_sculpt_layer(c, 0)
+    # A slider away and back is the cheapest way to make every block this layer
+    # covers compose a second time; it ends where it started, so the reorder is
+    # the only thing that differs between the two readings.
+    s.set_sculpt_layer_strength(b, 0.55)
+    s.set_sculpt_layer_strength(b, 0.4)
+    assert np.array_equal(before, positions(s))
+    assert s.sculpt_layer_ids == [c, a, b]
+
+
 def test_strength_is_composition_and_replays_no_stroke():
     s = surface()
     flat = positions(s)

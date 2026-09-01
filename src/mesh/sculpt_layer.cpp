@@ -434,6 +434,12 @@ bool SculptLayerStack::move_to(SculptLayerId id, std::size_t index) {
     // so a reorder cannot move a vertex; what it changes is the order a host
     // draws the list in. The revision still moves, because a host watching the
     // stack has to redraw.
+    //
+    // That is only true because composition sums in ID order rather than in
+    // stack order — see `gather_contributors`. Summing in stack order would
+    // make this line a bug rather than an optimisation: float addition does not
+    // associate, so the blocks a later stroke happened to recompose would carry
+    // one order and the blocks still cached would carry the other.
     ++composition_revision_;
     ++composition_bumps_;
     return true;

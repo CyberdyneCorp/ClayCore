@@ -52,6 +52,7 @@ namespace {
 // composes to EXACTLY the base detail — bit for bit, which is what makes
 // "invisible contributes nothing" a bit-comparison rather than a tolerance.
 struct BlockContributor {
+    SculptLayerId id = kNoSculptLayer;
     const DetailField* detail = nullptr;
     const SparseWeightField* mask = nullptr;
     float factor = 0.0f;
@@ -68,11 +69,37 @@ void gather_contributors(const SculptLayerStack& stack, std::uint32_t level, std
         const DetailField& field = layer->detail[level];
         if (!field.block_stored(block)) continue;
         BlockContributor c;
+        c.id = layer->id;
         c.detail = &field;
         c.mask = &layer->mask[level];
         c.factor = factor;
         out->push_back(c);
     }
+    // SUMMED IN ID ORDER, NOT IN STACK ORDER, and that is the whole of task
+    // 3.1's bit-for-bit claim rather than a tidiness. Addition COMMUTES, which
+    // is what the requirement says; float addition does not ASSOCIATE, which is
+    // what an implementation that accumulated in stack order would run into the
+    // moment a stack is three layers deep or sits on a non-zero base detail:
+    // `B + a + b + c` and `B + c + a + b` differ in the last bit.
+    //
+    // It matters more than a last bit because `move_to` invalidates NOTHING, on
+    // purpose. Without a stable order the two orders would not even coexist
+    // quietly: after a drag in the layer list, the blocks some later stroke
+    // happened to recompose would carry the new order and the blocks still
+    // cached would carry the old, and the surface would be composed two ways at
+    // once with no operation able to tell you which. An id is minted once from
+    // the stack's counter and a reorder never renumbers, so ordering the sum on
+    // it makes composition invariant under exactly the operation the
+    // requirement promises is free.
+    //
+    // THE REJECTED ALTERNATIVE was to let `move_to` dirty the moved layer's
+    // coverage and accept a ULP-scale shift. That charges a drag in a list the
+    // union of two layers' blocks — the one operation the design promises costs
+    // nothing — and it still moves the surface, which is the thing 3.1 forbids.
+    // Sorting costs the layers that reach ONE block, against the 1024 vertices
+    // × contributors of multiply-adds the same block is about to run.
+    std::sort(out->begin(), out->end(),
+              [](const BlockContributor& a, const BlockContributor& b) { return a.id < b.id; });
 }
 
 void recompose_block(MultiresSurface::State& s, MultiresLevel& lev, std::uint32_t level,

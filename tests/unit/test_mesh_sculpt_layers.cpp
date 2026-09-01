@@ -166,6 +166,57 @@ TEST_CASE("additive layers commute") {
     CHECK(bit_equal(before, a.positions_at(2)));
 }
 
+TEST_CASE("a reorder still moves no vertex once the blocks it holds recompose") {
+    // THE SAME CLAIM, ASSERTED WHERE IT CAN ACTUALLY FAIL — and it did. The
+    // case above cannot see the interesting half of task 3.1 for two
+    // independent reasons, which is how the defect this pins survived:
+    //
+    //   * `move_to` invalidates NO block, on purpose, so reading the surface
+    //     straight after a reorder reads the composed cache back unchanged.
+    //     That comparison is the cache against itself whatever composition
+    //     does;
+    //   * two layers over a zero base sum as `(0 + x) + y` against `(0 + y) +
+    //     x`, and a single IEEE addition commutes exactly. Order can only bite
+    //     from the third term on, or from the second over a non-zero base,
+    //     because float addition does not ASSOCIATE.
+    //
+    // So: three deep, on a base detail that is already there, with the blocks
+    // driven through composition again AFTER the reorder. The numbers are
+    // chosen rather than pretty — 0.4·0.03 twice and 0.7·0.03 over a base of
+    // 0.05 is a sum whose value depends on the order it is taken in, at
+    // 0.0949999988 against 0.0950000063.
+    MultiresSurface surface = build(2);
+    for (std::uint32_t v = 30; v < 50; ++v) surface.set_detail(2, v, lift(0.05f));
+    const SculptLayerId a = surface.add_sculpt_layer("a");
+    const SculptLayerId b = surface.add_sculpt_layer("b");
+    const SculptLayerId c = surface.add_sculpt_layer("c");
+    for (std::uint32_t v = 30; v < 50; ++v) {
+        surface.set_sculpt_layer_detail(a, 2, v, lift(0.03f));
+        surface.set_sculpt_layer_detail(b, 2, v, lift(0.03f));
+        surface.set_sculpt_layer_detail(c, 2, v, lift(0.03f));
+    }
+    REQUIRE(surface.set_sculpt_layer_strength(a, 0.4f));
+    REQUIRE(surface.set_sculpt_layer_strength(b, 0.4f));
+    REQUIRE(surface.set_sculpt_layer_strength(c, 0.7f));
+    const std::vector<cfloat3> before = surface.positions_at(2);
+
+    REQUIRE(surface.move_sculpt_layer(c, 0));
+    // A slider away and back is the cheapest way to make every block this
+    // layer covers compose a second time. It ends on the value it started
+    // from, so the only thing that changed between the two readings is the
+    // order the stack is listed in.
+    REQUIRE(surface.set_sculpt_layer_strength(b, 0.55f));
+    REQUIRE(surface.set_sculpt_layer_strength(b, 0.4f));
+    CHECK(bit_equal(before, surface.positions_at(2)));
+
+    // And the other direction, so the case is not passing because the reorder
+    // happened to be undone: put the stack back and recompose again.
+    REQUIRE(surface.move_sculpt_layer(c, 2));
+    REQUIRE(surface.set_sculpt_layer_strength(b, 0.55f));
+    REQUIRE(surface.set_sculpt_layer_strength(b, 0.4f));
+    CHECK(bit_equal(before, surface.positions_at(2)));
+}
+
 TEST_CASE("merge down is defined by the surface it leaves, including at zero strength") {
     for (float lower_strength : {1.0f, 0.37f, 0.0f}) {
         MultiresSurface surface = build(2);

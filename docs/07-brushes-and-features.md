@@ -1798,6 +1798,23 @@ strength and is undefined at exactly the value one slider reaches.
 Strength 0 and invisible contribute **nothing, to the bit**: a layer at zero
 effective strength is skipped rather than multiplied by zero.
 
+#### Reordering is organisation, which is why the sum is taken in id order
+
+Additive displacement commutes, so dragging a pass up or down the list changes
+what the list looks like and not where a vertex is — and `move_sculpt_layer`
+therefore invalidates **no block**, which is what makes a drag free.
+
+That freedom is only sound because composition sums a block's contributors in
+**layer-id** order rather than in list order. Addition commutes; float addition
+does not *associate*, so `B + a + b + c` and `B + c + a + b` differ in the last
+bit as soon as a stack is three deep or sits on a base detail that is already
+there. With a reorder invalidating nothing, list-order accumulation would leave
+the blocks a later stroke happened to recompose carrying one order and the
+blocks still cached carrying the other — the surface composed two ways at once,
+with no operation able to say which. An id is minted once and a reorder never
+renumbers it, so ordering the sum on the id makes composition invariant under
+exactly the operation the stack promises is free.
+
 #### Three revisions, because one counter cannot say which of three things happened
 
 | | moved by | invalidates |

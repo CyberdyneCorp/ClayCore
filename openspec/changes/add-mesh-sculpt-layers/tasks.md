@@ -106,6 +106,39 @@
       — composition visits a block's layers once and adds; `move_to` invalidates
       no block. `test_mesh_sculpt_layers` swaps two overlapping layers and
       compares the evaluated positions BIT for bit
+      — A REAL BUG, FOUND HERE BY THE ONE THING THAT COULD FIND IT: asking what
+      the existing case would do if the claim stopped holding. It would do
+      nothing, for two independent reasons. `move_to` invalidates NO block, on
+      purpose, so reading the surface straight after a reorder reads the
+      composed cache back unchanged whatever composition does — the comparison
+      was the cache against itself. And two layers over a ZERO base sum as
+      `(0 + x) + y` against `(0 + y) + x`, which is one IEEE addition and
+      commutes exactly. Order can only bite from the third term on, or from the
+      second over a non-zero base, because float addition does not ASSOCIATE.
+      A randomised probe over 300 five-layer stacks (reorder, then dial a slider
+      away and back so the covered blocks compose again) found 158 of them moved
+      the surface, worst delta 1.49e-8. That is ULP-scale and still a bug: with
+      `move_to` invalidating nothing, the blocks a later stroke happened to
+      recompose carried the new order while the blocks still cached carried the
+      old, so ONE reorder left the surface composed two ways at once and no
+      operation could say which.
+      FIXED in `gather_contributors` by summing a block's contributors in
+      LAYER-ID order rather than in stack order — an id is minted once and a
+      reorder never renumbers, so composition is invariant under exactly the
+      operation the requirement promises is free. The rejected alternative was
+      to let `move_to` dirty the moved layer's coverage and accept the shift,
+      which charges a drag in a list the union of two layers' blocks and still
+      moves the surface. The same probe reports 0 of 300 after the fix.
+      REGRESSED by `a reorder still moves no vertex once the blocks it holds
+      recompose`: three layers of 0.03 at strengths 0.4, 0.4 and 0.7 over a base
+      of 0.05 — a sum that reads 0.0949999988 one way and 0.0950000063 the other
+      — reordered and then recomposed, with the move BACK as the control so the
+      case cannot pass by the reorder having been undone. PROVEN: deleting the
+      sort compiles, and the first CHECK then fails while the control still
+      passes. Mirrored through the binding by
+      `test_a_reorder_moves_no_vertex_even_after_the_blocks_recompose`, and the
+      spec delta gained the scenario and the sentence that constrains the
+      summation order
 - [x] 3.2 A stroke on a layer at strength 0.5 records its FULL contribution.
       Strength is composition, not a scale on the pen
       — `absorb_layered_detail` stores `ΔE = frame⁻¹(P_written) − E_before`;
