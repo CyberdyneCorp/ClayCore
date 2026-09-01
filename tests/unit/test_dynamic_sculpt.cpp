@@ -356,3 +356,68 @@ TEST_CASE("dynamic sculpt: layer is declined rather than silently partial") {
     CHECK(r.moved_vertices == 0);
     CHECK_FALSE(r.changed());
 }
+
+// THE SLOT MAP MUST NOT KEEP A CANDIDATE THE WEIGHT DROPPED
+// (add-shared-brush-runtime; regression for a defect found while unifying the
+// workset).
+//
+// The ball footprint's region walk marks a vertex's slot AS IT ADMITS IT,
+// because that mark is how it refuses to admit the same vertex twice through
+// two different faces. The composition then publishes a real workset index for
+// the entries the weight KEPT — and only for those. So a candidate the falloff,
+// the mask gate or the surface's own vertex mask dropped was left holding the
+// provisional mark, which is `0`, which names workset entry ZERO.
+//
+// NOTHING THAT READS A RESULT COULD SEE THIS, which is why it survived. The
+// stamp's own arithmetic never consults the map for a vertex it dropped. What
+// consults it is `build_neighbors`, which asks "is this ring neighbour under
+// the brush" for every neighbour of every entry — so Smooth, Relax, Polish,
+// Scrape and Smear averaged against workset entry 0 wherever a dropped
+// candidate happened to be a neighbour, and the marks accumulated for the life
+// of the sculptor because the next stamp retired only what had survived.
+//
+// The assertion is on the map rather than on a smoothed position on purpose: a
+// stale entry 0 is a plausible-looking position, so a tolerance on the geometry
+// would have to be tight enough to be flaky and would still not say what was
+// wrong. The invariant is exact and has one meaning — a slot outside the
+// workset reads `kNoClass`.
+TEST_CASE("dynamic sculpt: a dropped candidate leaves no mark in the slot map") {
+    auto surface = DynamicSurface::from_mesh(cube_sphere(12, 1.0f));
+    REQUIRE(surface.has_value());
+    DynamicSculptor sculptor(*surface);
+    const DynamicTopologySettings topology = topology_off();
+
+    MeshBrushSettings brush;
+    brush.center = cf3(0, 1.0f, 0);
+    brush.radius = 0.7f;
+    brush.strength = 0.2f;
+    // THE BALL FOOTPRINT, which is the walk that marks provisionally. A
+    // geodesic walk keeps its own distance array and marks nothing here.
+    brush.geodesic = false;
+
+    // A freeze over half the disc, so that a large and known share of the
+    // candidates are admitted by the walk and then dropped by the weight.
+    const field::MaskGate gate = [](cfloat3 p) { return p.x > 0.0f ? 1.0f : 0.0f; };
+    REQUIRE(sculptor.stamp(MeshBrush::Draw, brush, topology, gate).moved_vertices > 0);
+
+    const mesh::SculptWorkset& workset = sculptor.workset();
+    REQUIRE(workset.size() > 0);
+    std::vector<char> in_workset(workset.slot.size(), 0);
+    for (mesh::WorkItemId item : workset.items) {
+        REQUIRE(item.key() < in_workset.size());
+        in_workset[item.key()] = 1;
+    }
+
+    std::size_t stale = 0;
+    for (std::size_t i = 0; i < workset.slot.size(); ++i)
+        if (!in_workset[i] && workset.slot[i] != mesh::kNoClass) ++stale;
+    CAPTURE(workset.size());
+    CAPTURE(stale);
+    CHECK(stale == 0);
+
+    // ...and the freeze really did drop candidates, or the check above passes
+    // over a stamp that had nothing to leave behind. The walk admits the whole
+    // disc; the gate keeps the half with x <= 0.
+    for (mesh::WorkItemId item : workset.items)
+        CHECK(workset.positions[workset.slot[item.key()]].x <= 0.0f);
+}

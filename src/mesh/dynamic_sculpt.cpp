@@ -294,6 +294,26 @@ void DynamicSculptor::build_dynamic_surface_workset(const MeshBrushSettings& bru
         euclidean_region(brush.center, brush.radius);
     }
 
+    // RETIRE THE WALK'S PROVISIONAL MARKS. `euclidean_region` marks a
+    // candidate's slot as it admits it, because the mark is how it dedupes a
+    // vertex reached through two faces — and the composition then publishes a
+    // real index only for the entries the weight KEPT. Without this pass, a
+    // candidate the falloff, the gate or the vertex mask dropped is left
+    // reading 0, which names workset entry ZERO: `build_neighbors` reports an
+    // out-of-region ring neighbour as entry 0, so Smooth, Relax, Polish,
+    // Scrape and Smear average against a vertex that is not under the brush,
+    // and the marks accumulate for the life of the sculptor because the next
+    // stamp only retires what survived. Measured on a 24x24 patch under a
+    // half-freezing gate: 53 stale marks after one ball-footprint stamp, and
+    // that is the state the neighbour build then read.
+    //
+    // It is a pre-existing defect rather than one this change introduced — the
+    // private `slot_` array it replaced had exactly this shape — but the
+    // automask's ring walk would have inherited it, so it is fixed here rather
+    // than carried forward.
+    for (VertexId v : candidates_)
+        if (v.slot < r.slot.size()) r.slot[v.slot] = kNoClass;
+
     // The walk speaks `VertexId`; the workset speaks `WorkItemId`. The
     // positions are lifted here because the neutral composition takes a
     // candidate's position as given — it is the one thing every representation
