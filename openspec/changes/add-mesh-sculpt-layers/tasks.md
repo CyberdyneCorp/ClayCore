@@ -1,24 +1,42 @@
 # Tasks: add-mesh-sculpt-layers
 
-- [ ] 0.1 SEQUENCING (see ROADMAP, "Phase 5 — the surface tier"): after
+- [x] 0.1 SEQUENCING (see ROADMAP, "Phase 5 — the surface tier"): after
       `add-mesh-multires`, whose detail representation this extends. The two
       SHALL NOT be designed independently — a layer contribution and a base
       detail coefficient are the same quantity under two owners
+      — `add-mesh-multires` verified landed in the tree; design.md D5 composes
+      one `DetailField` per layer into the level's own rather than adding a
+      second displacement representation
 
 ## 1. Decide first
 
-- [ ] 1.1 DECIDE the naming so the collision cannot ship: `MeshBrush::Layer` is
+- [x] 1.1 DECIDE the naming so the collision cannot ship: `MeshBrush::Layer` is
       a brush ALGORITHM (deposit to a ceiling above the stroke-start surface)
       and a sculpt layer is a persistent artist CHANNEL. Neither name changes
       meaning; the API SHALL make the difference unmissable
-- [ ] 1.2 DECIDE whether layers exist on a fixed-topology mesh with no
+      — design.md D1: the channel is never spelled `Layer` unqualified
+      (`SculptLayer*`, `clay_multires_sculpt_layer_*`,
+      `surface.sculpt_layer(...)`), the brush enumerator is untouched, and
+      `tools/check_c_abi.py` gains the rule so the discipline is gated
+- [x] 1.2 DECIDE whether layers exist on a fixed-topology mesh with no
       hierarchy. A sparse per-vertex offset needs no levels; the question is
       whether that is a product or a second code path
-- [ ] 1.3 DECIDE the layer-kind enumeration now, even if only sampled layers
+      — design.md D2: yes as a product, no as a second path. A one-level
+      `MultiresSurface` IS a fixed-topology mesh, and base deformation layers
+      (2.6) are how it gets a stack; a bare mesh has no frame to measure an
+      offset from
+- [x] 1.3 DECIDE the layer-kind enumeration now, even if only sampled layers
       ship, so a procedural layer does not need a format break later
-- [ ] 1.4 DECIDE whether a colour layer stack is in scope. Recommendation: not
+      — design.md D3: `SculptLayerKind : uint16_t`, `Sampled = 0` shipping,
+      `Procedural = 1` reserved and REFUSED by the decoder, each layer payload
+      length-prefixed so a later format can choose to skip deliberately
+- [x] 1.4 DECIDE whether a colour layer stack is in scope. Recommendation: not
       here — mesh paint and smear write vertex colours and a paint stack is the
       same idea under different arithmetic
+      — design.md D4: out of scope. Colour BLENDS and blending does not
+      commute, so including it would make requirement 3.1 conditional on a
+      layer's kind; and a level's colours are a rebuildable subdivided
+      attribute cache, not per-level authoritative state
 
 ## 2. The stack
 
