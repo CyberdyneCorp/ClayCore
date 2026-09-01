@@ -750,6 +750,43 @@
                     so the merge carries no version edit of its own, which is
                     right: what is left on this branch adds no ABI
 
+      WHAT CI FOUND THAT THIS BOX COULD NOT. The Windows job
+      (`build+test (windows-latest, MSVC /WX)`) failed on PR #421 where every
+      Linux and macOS job passed, and the failure was REAL
+      rather than a toolchain quirk: `compacting is a memory lever, not a change
+      to the picture` reported 107,666 bytes after a compaction against 103,070
+      before — compaction made the stack measure MORE.
+      DIAGNOSED: `DetailField::bytes()` reports CAPACITY rather than size, which
+      is right, because capacity is what the allocator is holding. But
+      `compact()`'s dense-to-sparse demotion rebuilt the field through `reset()`
+      and a `set()` per vertex, and `reset()` only `clear()`s — so the dense
+      era's capacity survived into the sparse field and `set()` regrew it by the
+      standard library's own factor. libstdc++ doubles, MSVC grows by 1.5, so
+      one compaction lands on a different capacity per toolchain, and on MSVC it
+      landed above the dense array it replaced. Instrumented on Linux first: the
+      demotion there ran 50,752 -> 49,204 bytes for a saving of 1,548, three per
+      cent of one field, which is inside the slack an allocator can move.
+      FIXED by building each vector at its final size, as the sparse branch
+      already did. `shrink_to_fit` is the obvious repair and is not one — the
+      standard makes it a non-binding request, and libstdc++ declined it for
+      `slot_block_`. The rebuild copies BLOCKS rather than vertices now, so it
+      clamps the last block to `vertex_count_`: a dense field is `vertex_count_`
+      long and its final block is short whenever a level is not a whole number
+      of blocks, which the old per-vertex loop could not walk past and a block
+      copy can.
+      GATED by `detail field: compaction releases capacity, not only content`,
+      which asserts the PORTABLE claim — a compacted field costs exactly what a
+      field built sparse from the start costs, and compacting again does not
+      move it — rather than "fewer bytes than before", which is what held on the
+      toolchain it was written on. PROVEN: reverting the exact-size rebuild
+      compiles, and the case then fails on LINUX too, at 12,352 against 12,324:
+      28 bytes of slack in the two index vectors. A gate that only MSVC can fail
+      would have been half a gate.
+      WHAT THIS SAYS ABOUT THE OTHER TWO BYTE ASSERTIONS: the C-ABI and pyclay
+      compaction cases assert a strict decrease and passed Windows CI in #417,
+      because their fixtures release a WHOLE BLOCK and the drop is far above any
+      allocator's slack. The case that failed is the only one whose field was
+      dense, so the only one whose saving was a demotion's sliver.
 - [x] 8.8 Docs: `docs/07-brushes-and-features.md` gains the stack and the
       distinction from `MeshBrush::Layer`; the README's sculpt-layer claim is
       widened from voxels to the representations that actually have them
