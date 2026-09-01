@@ -19,6 +19,8 @@
 # asserts in C++, deliberately: if the binding ever started building a different
 # descriptor, the two suites would disagree and one of them would say so.
 
+import gc
+
 import numpy as np
 import pytest
 
@@ -98,6 +100,7 @@ def automask(factors, normal_angle=None, boundary_rings=None):
 NORMAL_ANGLE = int(clay.AutomaskFactor.NORMAL_ANGLE.value)
 TOPOLOGY_CONNECTED = int(clay.AutomaskFactor.TOPOLOGY_CONNECTED.value)
 BOUNDARY = int(clay.AutomaskFactor.BOUNDARY.value)
+SURFACE_GROUP = int(clay.AutomaskFactor.SURFACE_GROUP.value)
 
 
 # -- the automask reaches every representation through one argument -----------
@@ -340,6 +343,174 @@ def test_two_sculptors_do_not_share_an_arena():
 
     assert a.arena_stats["growths"] > 0
     assert b.arena_stats == {"capacity_bytes": 0, "high_water_bytes": 0, "growths": 0}
+
+
+# -- the two estimators the C ABI cannot carry --------------------------------
+#
+# `set_automask_inputs` is the ONE call this change adds that pyclay has and the
+# C ABI does not, and `tools/check_binding_parity.py` records all three of them
+# as exemptions. An exemption is a promise that the Python side does something
+# real; nothing in this suite kept that promise until these cases, which asserted
+# only that the method existed and that it refused a callable. A binding that
+# accepted the objects and dropped them on the floor would have passed every one
+# of them.
+
+
+def grouped_document(group=7):
+    """A lattice that names the half-space x >= 0, and nothing else.
+
+    A box fill rather than a painted mask because the boundary then falls on a
+    plane the fixture's own vertices straddle exactly, which is what makes the
+    two halves add back up to the whole below.
+    """
+    doc = clay.Document()
+    groups = doc.groups(0.05)
+    groups.fill(((0.0, -0.5, -1.5), (1.5, 0.5, 1.5)), group)
+    # The document owns the lattice; the handle only borrows it. Returned
+    # together so a caller cannot drop the document and keep the lattice.
+    return doc, groups
+
+
+def test_the_surface_group_estimator_reaches_every_representation():
+    """THE EXEMPTION'S OWN GATE, on the change's headline claim.
+
+    `SurfaceGroup` is the factor a mesh module structurally cannot compute for
+    itself — the answer lives on the document's world lattice — so it is the
+    factor that says the wiring is real rather than that the argument parsed.
+    The three representations must agree exactly, not approximately: the lattice
+    answers a world point, and all three ask it about the same points.
+    """
+    positions, indices = plane_grid()
+    doc, groups = grouped_document()
+    factor = automask(SURFACE_GROUP)
+
+    def fixed(wire):
+        sculptor = clay.MeshSculptor(mesh_of(positions, indices), 0.0)
+        if wire:
+            sculptor.set_automask_inputs(groups=groups, active_group=7)
+        return sculptor.stamp("draw", (0, 0, 0), 1.5, 0.3, automask=factor)
+
+    def adaptive(wire):
+        surface = clay.DynamicSurface.from_mesh(mesh_of(positions, indices))
+        sculptor = clay.DynamicSculptor(surface)
+        if wire:
+            sculptor.set_automask_inputs(groups=groups, active_group=7)
+        return sculptor.stamp("draw", (0, 0, 0), 1.5, 0.3, topology=topology_off(),
+                              automask=factor)["moved"]
+
+    def hierarchy(wire):
+        sculptor = clay.MultiresSculptor(
+            clay.MultiresSurface.from_mesh(mesh_of(positions, indices)))
+        if wire:
+            sculptor.set_automask_inputs(groups=groups, active_group=7)
+        return sculptor.stamp("draw", (0, 0, 0), 1.5, 0.3, automask=factor)
+
+    # An UNWIRED sculptor asked for the surface-group factor has no lattice to
+    # ask, and the documented answer is that the factor does nothing rather than
+    # that the stamp fails: a host that has not named any groups yet is not in
+    # error. That is what makes the pair below a measurement of the wiring and
+    # not of the flag.
+    for representation in (fixed, adaptive, hierarchy):
+        assert representation(False) == 289
+        assert representation(True) == 153
+
+    # AND THE TWO HALVES ADD UP. Isolating group 7 and isolating the ungrouped
+    # remainder partition the stamp's region exactly, which is the claim a bare
+    # "fewer vertices moved" cannot make — a wiring that returned a constant
+    # would also move fewer, and would move the same fewer whichever group was
+    # active.
+    ungrouped = clay.MeshSculptor(mesh_of(positions, indices), 0.0)
+    ungrouped.set_automask_inputs(groups=groups, active_group=0)
+    assert ungrouped.stamp("draw", (0, 0, 0), 1.5, 0.3, automask=factor) == 136
+    assert 153 + 136 == 289
+
+
+def test_clearing_the_estimators_reopens_the_stamp():
+    """A stroke ENDS by clearing these, and the sculptor is then what it was.
+
+    An estimator that outlived the stroke that set it would mask the next one
+    against a lattice the artist has moved on from, which is the failure mode
+    that looks like the brush having gone wrong rather than like state having
+    leaked.
+    """
+    positions, indices = plane_grid()
+    doc, groups = grouped_document()
+    factor = automask(SURFACE_GROUP)
+    sculptor = clay.MeshSculptor(mesh_of(positions, indices), 0.0)
+
+    sculptor.set_automask_inputs(groups=groups, active_group=7)
+    assert sculptor.stamp("draw", (0, 0, 0), 1.5, 0.3, automask=factor) == 153
+    sculptor.set_automask_inputs()
+    assert sculptor.stamp("draw", (0, 0, 0), 1.5, 0.3, automask=factor) == 289
+
+
+def test_the_sculptor_holds_the_estimator_objects_it_was_given():
+    """The binding stores a raw pointer into the lattice and keeps the Python
+    object alive with `nb::keep_alive`, because the alternative — copying the
+    lattice per stroke — is the allocation the docstring tells hosts to avoid.
+
+    WHAT THIS DOES AND DOES NOT PROVE, stated plainly: with the `keep_alive`
+    removed the handle's last reference dies at the `del` and the stamp below
+    reads freed memory, which a sanitizer catches and an ordinary run may not.
+    So this is the SHAPE the mechanism has to keep — a caller may drop the
+    handle and go on stamping — rather than the proof that it is kept. The
+    proof is the asan-ubsan run over the same file.
+    """
+    positions, indices = plane_grid()
+    doc, groups = grouped_document()
+    sculptor = clay.MeshSculptor(mesh_of(positions, indices), 0.0)
+    sculptor.set_automask_inputs(groups=groups, active_group=7)
+
+    del groups
+    gc.collect()
+
+    assert sculptor.stamp("draw", (0, 0, 0), 1.5, 0.3, automask=automask(SURFACE_GROUP)) == 153
+
+
+def test_the_cavity_estimator_reaches_a_stamp():
+    """The other exemption, and the one whose input is a baked field.
+
+    `mask_from_surface('cavity', ...)` bakes `brush::measure_at` onto a lattice,
+    so this is the estimator the C++ path evaluates directly, SAMPLED. The
+    fixture is two overlapping spheres — a genuine crease, and the same shape
+    `examples/64_measuring_the_surface.py` uses and says why a torus is wrong
+    for it.
+
+    Asserted as a SUBSET rather than as a count, because the count is a
+    marching-cubes vertex count and the subset is what a multiplicative mask
+    MEANS: a masked stamp may move fewer vertices, never a different set.
+    """
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("body")
+    layer.add(clay.Sphere(r=0.5, position=(0.32, 0, 0)))
+    layer.add(clay.Sphere(r=0.5, position=(-0.32, 0, 0)))
+    cavity = doc.mask_from_surface("cavity", ((-1.0, -0.7, -0.7), (1.0, 0.7, 0.7)),
+                                   cell_size=0.04, band=0.06, params={"scale": 0.25})
+    # Without this the whole case is satisfied by a mask that painted nothing
+    # and an automask that therefore had nothing to remove.
+    assert cavity.painted_count > 0
+
+    factor = clay.AutomaskSettings()
+    factor.factors = int(clay.AutomaskFactor.CAVITY.value)
+    factor.cavity_strength = 1.0
+    # The crease, found from the two radii rather than guessed at.
+    crease = (0.0, float(np.sqrt(0.5 ** 2 - 0.32 ** 2)), 0.0)
+
+    def moved_set(wire):
+        mesh = doc.mesh(resolution=32)
+        before = np.array(mesh.positions, np.float32).copy()
+        sculptor = clay.MeshSculptor(mesh, 1e-5)
+        if wire:
+            sculptor.set_automask_inputs(cavity=cavity)
+        sculptor.stamp("draw", crease, 0.4, strength=0.3, automask=factor)
+        after = np.array(mesh.positions, np.float32).copy()
+        return set(np.flatnonzero(np.abs(after - before).sum(axis=1) > 0).tolist())
+
+    open_set = moved_set(False)
+    masked_set = moved_set(True)
+
+    assert open_set
+    assert masked_set < open_set
 
 
 # -- the refusals --------------------------------------------------------------

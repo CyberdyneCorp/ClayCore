@@ -177,7 +177,7 @@
 - [x] 6.1 `tests/unit/test_brush_arena.cpp` — bump order, alignment, `reset`
       keeps capacity, `high_water_bytes` is a maximum and not a current, and
       `growths` stops growing over a stroke of similar stamps.
-      DONE, 16 cases. `growths` is asserted as a CONTRAST rather than against a
+      DONE, 17 cases. `growths` is asserted as a CONTRAST rather than against a
       magnitude — twelve stamps at the same size take 1 growth, twelve that
       climb to it take 4 — because a bare number would be a test of the doubling
       constant. Two behaviours were measured and written down rather than
@@ -326,12 +326,57 @@
       are EXEMPT with the reason D9 already gives — the two estimators are
       `std::function`s, which is what the C ABI cannot carry, while the three
       input-free factors do cross on `clay_mesh_brush_desc`
+- [x] 7.6 `tests/swift/smoke.swift` — the appended field and the arena
+      statistics through the SwiftPM surface, which is where a descriptor's
+      layout is checked by a compiler that is not the one that built the
+      library. ADDED IN RECONCILIATION: the work was done and no task named it.
+      Three claims: `clay_mesh_brush_defaults` reports `stamp_azimuth == 0`,
+      a turned stamp is the SAME descriptor rather than a second entry point,
+      and `clay_dynamic_sculptor_arena_stats` /
+      `clay_multires_sculptor_arena_stats` read back a high water no larger
+      than the capacity.
+      NOT RUN ON THIS BOX — there is no Swift toolchain here (`which swift`
+      and `which swiftc` both fail), so the file is written and compiled by
+      CI's macOS job and by nothing I ran. That is the one gate in this change
+      whose result I am taking on trust
+
 - [x] 7.5 The version lines, in lockstep, at 0.75.0 / 75. THREE literals, not
       four: `CMakeLists.txt`, `bindings/c/clay.h` and `pyproject.toml` carry the
       number, and `tools/release_check.py` DERIVES it from all three and checks
       they agree (`check_versions`) rather than carrying a row of its own. The
       task said four because the other stacked changes' notes do; the file has
       no literal to edit
+- [x] 7.7 GATE THE PARITY EXEMPTION. `set_automask_inputs` is the only call
+      this change adds that pyclay has and the C ABI does not, and 7.4 records
+      all three of them as EXEMPT — an exemption being a promise that the Python
+      side does something real. Nothing kept that promise: the suite asserted
+      that the method existed and that it refused a callable, so a binding that
+      accepted a MaskField and a GroupField and dropped both on the floor passed
+      every case in the file.
+      DONE — four cases in `bindings/python/tests/test_shared_brush_runtime.py`.
+      The surface-group estimator is the one that says the wiring is real rather
+      than that the argument parsed: the answer lives on the document's world
+      lattice, which a mesh module structurally cannot compute, and all three
+      representations read 289 open and 153 isolated to group 7 — the SAME two
+      numbers, which is the change's headline claim measured from the wheel.
+      Asserted as a PARTITION and not as "fewer moved": isolating group 7 and
+      isolating the ungrouped remainder give 153 and 136, and 153 + 136 = 289, a
+      claim a wiring returning a constant would fail while a bare inequality
+      would let through. The cavity estimator is gated on the two overlapping
+      spheres of `examples/64_measuring_the_surface.py` — with the mask's
+      `painted_count` asserted first, since the whole case is otherwise
+      satisfied by a mask that painted nothing — and as a SUBSET rather than a
+      count, because a subset is what a multiplicative mask MEANS and a count is
+      a marching-cubes vertex count. Clearing the inputs is gated too: an
+      estimator that outlived its stroke would mask the next one against a
+      lattice the artist has moved on from.
+      PROVEN NOT VACUOUS: with the two lambdas in `automask_inputs_of` deleted
+      (it compiles), all four fail and the fourteen cases that were already
+      there still pass — which is the coverage hole, exactly measured.
+      ONE CLAIM STATED RATHER THAN PROVEN, in the test's own docstring: the
+      `nb::keep_alive` case drops the caller's handle and stamps again, and
+      without the keep_alive that reads freed memory — which a sanitizer catches
+      and an ordinary pytest run may not. It gates the SHAPE, and says so
 
 ## 8. The demonstration
 
