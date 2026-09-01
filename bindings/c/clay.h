@@ -8026,7 +8026,31 @@ typedef struct clay_brick_stats {
  * Both counts are CUMULATIVE over the document's life and never reset, so read
  * them as differences across the interval you care about. A seed is a pure
  * performance cache: dropping every one of them changes no geometry, only the
- * time it takes to produce it. */
+ * time it takes to produce it.
+ *
+ * THE SEED STORE BELONGS TO THE DOCUMENT, not to a cache and not to a thread.
+ * Two caches over one document share it, and a refill on ONE thread leaves
+ * seeds that a refill on ANOTHER can resume from. That is what makes the
+ * expensive case schedulable.
+ *
+ * WARM A COLD WINDOW OFF THE INTERACTION THREAD. A brick with no seed pays the
+ * whole surviving edit list, and that cost follows the size of the sculpt: a
+ * 12-brick window over a 50,000-item document measures ~108 ms, against ~0.16
+ * ms for a dab whose bricks are all warm. It is the tail rather than the median
+ * that hurts — a stroke's median dab is flat in document size and its worst dab
+ * is not, because a moving brush keeps reaching ground it has not covered.
+ *
+ * Because clay_brick_cache_eval_requests is free-threaded against a const
+ * document and the seeds are the document's, a host can pay that on a worker
+ * and hand the frame a warm window. Measured on the same 50,000-item document:
+ * the interaction thread pays 107.99 ms with no warming and 0.004 ms after a
+ * worker refilled the same requests, bit-identically.
+ *
+ * WHAT THAT COSTS YOU IS AN EDIT. The warming refill is only safe while the
+ * document is not being mutated, so it belongs at pointer-DOWN, between
+ * strokes, or on a camera move — not between the dabs of a live stroke, where
+ * every dab is a mutating call. A host that warms the neighbourhood the brush
+ * is about to enter pays for it once, before the stroke that needs it. */
 typedef struct clay_resume_stats {
     uint32_t struct_size;      /* = sizeof(clay_resume_stats); required */
     uint64_t entries;          /* bricks currently holding a seed */
