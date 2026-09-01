@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "clay/mesh/dynamic_sculpt.h"
+#include "clay/mesh/layered_sculpt.h"
 #include "clay/mesh/multires_sculpt.h"
 #include "clay/mesh/sculpt.h"
 #include "clay/mesh/sculpt_kernels.h"
@@ -46,6 +47,8 @@ using mesh::DynamicSculptor;
 using mesh::DynamicSurface;
 using mesh::DynamicTopologySettings;
 using mesh::DynamicVertex;
+using mesh::LayeredMultiresSculptor;
+using mesh::LocalDetail;
 using mesh::Mesh;
 using mesh::MeshBrush;
 using mesh::MeshBrushSettings;
@@ -53,6 +56,7 @@ using mesh::MeshSculptor;
 using mesh::MultiresError;
 using mesh::MultiresSculptor;
 using mesh::MultiresSurface;
+using mesh::SculptLayerId;
 using mesh::SculptSnapshot;
 using mesh::SculptWorkset;
 using mesh::VertexId;
@@ -533,4 +537,107 @@ TEST_CASE("multires parity: an automasked stamp spends the arena, and then stops
     CAPTURE(hierarchy.arena()->growths());
     CHECK(hierarchy.arena()->growths() == warm);
     CHECK(hierarchy.arena()->capacity_bytes() == capacity);
+}
+
+// -- the fourth consumer, which the merge of `main` introduced ----------------
+
+// THE AUTOMASK REACHES `LayeredMultiresSculptor`, WHICH DID NOT EXIST WHEN THIS
+// CHANGE WAS PLANNED.
+//
+// The change's headline claim is stated over three representations, and while
+// it was being written `main` grew a FOURTH consumer of the runtime: the
+// layered stroke transaction. It reaches the shared runtime by a route none of
+// the other three take. `LayeredMultiresSculptor::gather` does not build a
+// region of its own — it takes a zero-strength `Draw` through the level's own
+// `MeshSculptor` and reads `workset()` back — precisely so the falloff, the
+// mask gate, the alpha and the composed automask are the ONE answer the rest of
+// the runtime gives rather than a second one drifting beside it.
+//
+// That route is load-bearing and nothing was watching it. The obvious
+// "optimisation" for a region that only needs weights is a second walk that
+// skips the automask composition entirely, and it would be invisible: `stamp`
+// routes through `MultiresSculptor` and keeps its automask, so an artist would
+// see masking work for the sixteen ordinary verbs and silently stop working for
+// `erase`, `restore`, `smooth` and `stamp_detail` — the five verbs that exist
+// only on this representation. The merge that brought the file in had to patch
+// this walk to compile against the neutral `WorkItemId` array, which is a
+// second reason to gate what it does rather than what it happens to build as.
+//
+// Asserted as a SET and not as a count. `erase` fades a coefficient by
+// `weight * strength`, so the entry the automask removed is the one whose
+// coefficient is EXACTLY what it was — which makes "what the eraser never
+// reached" readable directly, and makes a wrong answer a named list of vertices
+// rather than a number that is merely different. Note that this is the
+// UNCHANGED set and not the non-zero one: away from the centre the eraser fades
+// rather than clearing, so almost every vertex is still non-zero after a run
+// that touched all 289 of them.
+TEST_CASE("REGRESSION: the automask reaches the layered sculptor's own region walk") {
+    const Mesh source = plane_quads(8, 2.0f);
+    const LocalDetail pass{0.0f, 0.0f, 0.05f};
+
+    std::vector<cfloat3> level1;
+    auto run = [&](std::uint32_t factors, std::vector<std::uint32_t>* kept) {
+        MultiresSurface s = build(source, 1);
+        REQUIRE(s.set_sculpt_level(1));
+        const SculptLayerId layer = s.add_sculpt_layer("pass");
+        REQUIRE(layer != mesh::kNoSculptLayer);
+        REQUIRE(s.set_active_sculpt_layer(layer));
+
+        // A pass over EVERY level-1 vertex, so what the eraser leaves is what
+        // the region left out rather than what was never there.
+        const std::size_t n = s.positions_at(1).size();
+        for (std::uint32_t v = 0; v < n; ++v)
+            REQUIRE(s.set_sculpt_layer_detail(layer, 1, v, pass));
+
+        LayeredMultiresSculptor sculpt(s);
+        REQUIRE(sculpt.begin());
+        MeshBrushSettings b;
+        b.center = cf3(0, 0, 0);
+        b.radius = 4.0f;  // past the far corner at 2.83, so nothing is out of reach
+        b.strength = 1.0f;
+        b.geodesic = false;
+        b.automask.factors = factors;
+        b.automask.boundary_rings = 2;
+        const std::size_t moved = sculpt.erase(b);
+
+        level1 = s.positions_at(1);
+        kept->clear();
+        for (std::uint32_t v = 0; v < n; ++v)
+            if (s.sculpt_layer_detail(layer, 1, v) == pass) kept->push_back(v);
+        return moved;
+    };
+
+    std::vector<std::uint32_t> kept_open, kept_masked;
+    const std::size_t moved_open = run(0, &kept_open);
+    const std::size_t moved_masked =
+        run(static_cast<std::uint32_t>(AutomaskFactor::Boundary), &kept_masked);
+
+    CAPTURE(moved_open);
+    CAPTURE(moved_masked);
+    CAPTURE(kept_open.size());
+    CAPTURE(kept_masked.size());
+
+    // THE UNMASKED RUN IS THE CONTROL, and it is the assertion that keeps the
+    // masked one honest: a brush that reaches every vertex must leave nothing,
+    // or "the border survived" would be a statement about the brush's reach.
+    CHECK(kept_open.empty());
+    CHECK(moved_open == 289);  // the whole 17x17 level-1 grid
+
+    // AND THE MASKED ONE LEAVES EXACTLY THE OPEN BORDER. `boundary_rings = 2`
+    // FADES over two rings and only the border itself reaches a hard zero — the
+    // same reading `the boundary ring count is visible in the weights` records
+    // for the cage — so the surviving set is the 64-vertex border ring and not
+    // the 124 vertices two rings deep.
+    CHECK(kept_masked.size() == 64);
+    CHECK(moved_masked == 289 - 64);
+
+    // AND IT IS THE BORDER, not merely a set of the right size. A region walk
+    // that addressed the level by the wrong index would erase a scrambled 225
+    // and leave a scrambled 64, which every count above would still accept.
+    for (std::uint32_t v : kept_masked) {
+        CAPTURE(v);
+        REQUIRE(v < level1.size());
+        const cfloat3 q = level1[v];
+        CHECK((std::fabs(std::fabs(q.x) - 2.0f) < 1e-5f || std::fabs(std::fabs(q.z) - 2.0f) < 1e-5f));
+    }
 }
