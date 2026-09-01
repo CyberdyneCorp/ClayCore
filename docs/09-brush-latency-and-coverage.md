@@ -638,8 +638,53 @@ It is a fixed cost per stamp rather than a growing one — 1.1 to 1.6 ms at a
 million level vertices — so it is invisible at a large footprint and dominant at
 a small one, which is the wrong way round: a detail pass is small footprints.
 The fix is task 3.2's caller-supplied seed rather than building a tree per
-level, and it is not done. Recorded here so that the number exists before the
-work does.
+level. The seed half is now DONE and the term is avoidable: a host that picks
+against a level passes the class it hit as `MeshBrushSettings::seed_class`
+together with the token from `MultiresSculptor::seed_revision()`, and the walk
+starts there instead of scanning. What is still true is that nothing supplies it
+automatically — a caller that passes no seed pays the scan exactly as measured
+above, because nothing picks against a hierarchy level on the engine's own
+behalf.
+
+The token is not bureaucracy. A hierarchy renumbers its classes on every rebind
+— a sculpt-level change, or a cache generation moving under a trim — so a seed
+picked before one is still IN BOUNDS afterwards and names unrelated geometry.
+`geodesic_region` returns an empty region when the seed lies farther than the
+radius from the brush centre, so an unvalidated stale seed does not misplace the
+dab, it silently loses it. Passing the revision is what turns that into a scan
+and a correct stamp.
+
+### What it costs to dispatch a dab across threads
+
+The stamp path is SERIAL, and this is the measurement that says it should stay
+that way until a footprint is much larger than a dab.
+
+`benchmarks/bench_parallel_grain` runs one per-vertex sculpt pass — a falloff
+weight from a distance, applied along the vertex normal — serially and through
+`parallel::for_range`, at 64 to 131,072 vertices, 201 repetitions a cell, and
+prints the load average either side. Four sweeps at loads from 2.5 to 8.7:
+
+| vertices | serial P50 | parallel P50 | ratio |
+|---|---|---|---|
+| 1,024   | 1.9-2.3 us   | 18.9-20.0 us | 0.10-0.12x |
+| 8,192   | 11.0-11.9 us | 22.3-24.3 us | 0.47-0.49x |
+| 16,384  | 20.2-22.7 us | 24.1-25.6 us | 0.81-0.93x |
+| 32,768  | 39.2-42.7 us | 24.9-27.5 us | 1.45-1.58x |
+| 131,072 | 149-170 us   | 32.5-40.8 us | 4.17-4.66x |
+
+The dispatch costs 17-20 us at ANY size — that flat floor is the whole story.
+Break-even is 32,768 vertices, and it holds at every larger size in every run.
+A typical dab is 1k to 20k vertices, which is entirely below it: dispatching a
+stamp across threads would make it two to ten times SLOWER, and the serial
+stamp path is not a gap in the implementation but the faster arrangement at the
+footprints artists actually use.
+
+`kVertexParallelGrain` (32,768) and `kChunkParallelGrain` (576, the same
+crossover converted through a measured 58.0 vertices per chunk) record it.
+Nothing reads them yet; they are what a future chunk-parallel pass has to clear
+before it is worth writing. Their previous values, 1024 and 4, were guesses, and
+a pass built on them would have been a pessimisation at every footprint this
+document measures.
 
 ### The tier a per-dab number cannot tell you about
 
