@@ -189,13 +189,18 @@ class DynamicBvh {
     // face slot -> leaf index. A vector rather than a map: the slot space is
     // dense enough that the vector is smaller and the lookup is a load.
     std::vector<std::uint32_t> face_leaf_;
-    std::vector<std::uint32_t> dirty_;
-    std::vector<std::uint32_t> dirty_epoch_;
     // `update_many`'s per-stamp leaf list, kept so a stroke of similar stamps
     // allocates on its first one and never again.
     std::vector<std::uint32_t> update_scratch_;
-    std::uint32_t epoch_ = 1;
-    std::uint64_t revision_ = 1;
+    // NO `dirty_`, `dirty_epoch_`, `epoch_` OR `revision_` HERE. They were the
+    // epoch-marked dirty set this class kept for itself, and the chunk table
+    // owns that now: `dirty_leaves()` answers out of `table_.dirty()`, and one
+    // dirty set serving the spatial index, the brush candidate set, the normal
+    // recompute and the host upload is the whole point of the chunk unit.
+    //
+    // Worth a note rather than a silent deletion, because they survived the
+    // merge with main once -- unused, which GCC tolerates and Clang rejects
+    // under -Wunused-private-field, so it was the macOS job that caught it.
     // The half of a chunk a split moves. A member for the same reason
     // `update_scratch_` above is one -- this runs per stamp, and a local would
     // allocate and free on every dab.
