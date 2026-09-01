@@ -163,6 +163,12 @@ TEST_CASE("additive layers commute") {
     CHECK(a.sculpt_layers().id_at(0) == high);
     // Reordering changes ORGANISATION and not geometry, and the requirement
     // says so rather than implying an order dependence that does not exist.
+    //
+    // This is the CHEAP half of the claim and it is worth saying which half:
+    // `move_to` invalidates no block, so what this asserts is that a reorder
+    // does not disturb a composed cache that is already there. The half that
+    // can actually catch an order-dependent composition is the case below,
+    // which recomposes after the reorder.
     CHECK(bit_equal(before, a.positions_at(2)));
 }
 
