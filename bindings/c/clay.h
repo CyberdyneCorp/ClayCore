@@ -1798,6 +1798,53 @@ clay_result clay_layer_eval_gradients(const clay_document* doc, clay_layer_id la
                                       const char* backend, const float* points_xyz, size_t count,
                                       float* out_gradients_xyz);
 
+/* -- the document WITHOUT one layer (ABI 0.74.0, issue #378) ----------------
+ *
+ * The third question, beside "the whole document" and "one layer": every
+ * visible SDF layer EXCEPT the one named. They answer what the whole-document
+ * calls would answer for a document that layer had been removed from.
+ *
+ * WHAT THIS IS FOR. A live sculpt transaction previews ONE layer — that is
+ * what clay_sdf_smooth_preview_delta_take hands over, and it is the reason a
+ * dab costs what it touches instead of what the artist has already made. A
+ * host drawing only that is drawing the layer alone, and every other visible
+ * field layer vanishes for the length of the gesture. With these, a host
+ * evaluates the rest of the document ONCE at pointer-down — the layers it
+ * excluded do not move while the artist drags — and composes that with its
+ * live preview per frame.
+ *
+ * COMPOSING IS A MINIMUM, AND IT IS EXACT. Visible SDF layers hard-union, and
+ * the union of two fields IS the smaller of the two distances, so
+ *
+ *     min(excluding(L) , your preview of L)
+ *
+ * is the field the whole document would evaluate to, not an approximation of
+ * it. There is no blend parameter to match and no seam to hide.
+ *
+ * NEITHER CALL EDITS THE DOCUMENT, which is the other half of why they exist.
+ * The route a host would otherwise take — hide the layer, sample the rest,
+ * show it again — is three edits, and an edit taken between
+ * clay_sdf_smooth_begin and its commit is one the commit correctly refuses.
+ * These are safe to call at any point inside a transaction and record no undo
+ * entry.
+ *
+ * AN UNKNOWN LAYER IS REFUSED with CLAY_ERROR_NOT_FOUND rather than read as
+ * "exclude nothing". A host whose layer id went stale would otherwise be
+ * handed the whole document and would draw the excluded layer twice — once
+ * from here and once from its own preview — which is the exact defect these
+ * calls exist to prevent, and it would look like a shading artefact rather
+ * than a bug.
+ *
+ * A HIDDEN layer, or one carrying no SDF content, SUCCEEDS: it contributes
+ * nothing to the union already, so excluding it is a no-op, and refusing would
+ * make a host branch on state it has no reason to track. */
+clay_result clay_eval_points_excluding(const clay_document* doc, clay_layer_id excluded,
+                                       const char* backend, const float* points_xyz, size_t count,
+                                       float* out_distances, float* out_colors_rgb);
+clay_result clay_eval_gradients_excluding(const clay_document* doc, clay_layer_id excluded,
+                                          const char* backend, const float* points_xyz,
+                                          size_t count, float* out_gradients_xyz);
+
 /* Multiply a field distance by this before stepping along a ray: the tape's
  * Lipschitz safety factor, which a scaled or displaced edit lowers.
  *
@@ -7682,6 +7729,32 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
                                            const clay_brick_request* requests, size_t count,
                                            float* out_values, size_t values_capacity,
                                            float* out_colors_rgb, size_t colors_capacity);
+
+/* The same refill over every visible SDF layer EXCEPT one (issue #378) — the
+ * brick-cache half of clay_eval_points_excluding, and what a host actually
+ * fills a preview atlas from. Same arguments, same ceilings, same fixed
+ * per-brick slots at the same stride; brick i still occupies
+ * out_values[i * dim^3 ...].
+ *
+ * TAKES NO SEED AND LEAVES NONE, and that is deliberate rather than an
+ * omission. A seed is a brick's value for THIS document, which a later refill
+ * continues with the items the document has gained since; a value computed
+ * without one of the layers is not that, and storing it would hand the next
+ * whole-document refill a seed with a layer missing from it — silently, since a
+ * seeded answer is bit-identical to a walked one by contract and nothing in the
+ * values could show it. So this is a plain batched walk, priced like a stroke's
+ * first dab rather than its tenth.
+ *
+ * Which is the right price for what it is for: a host takes this ONCE at
+ * pointer-down, because the layers it excludes do not move while the artist
+ * drags, and composes the result with its live preview per frame.
+ *
+ * clay_document_resume_stats is untouched by this call — neither counter moves,
+ * because neither a resume nor a seedable full walk happened. */
+clay_result clay_brick_cache_eval_requests_excluding(
+    const clay_document* doc, clay_layer_id excluded, const char* backend,
+    const clay_brick_request* requests, size_t count, float* out_values, size_t values_capacity,
+    float* out_colors_rgb, size_t colors_capacity);
 
 /* clay_brick_cache_eval_requests with the destination on the device — the call
  * a host refilling a brick atlas actually wants. Brick i occupies

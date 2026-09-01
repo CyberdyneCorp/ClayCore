@@ -398,3 +398,129 @@ TEST_CASE("a culled prefix is cut under the document pad, not the layer's own") 
     const std::vector<float> flat_seed = eval_whole(flat_prefix, pts);
     CHECK(std::memcmp(seed.data(), flat_seed.data(), count * sizeof(float)) != 0);
 }
+
+// -- the document WITHOUT one layer (#378) -----------------------------------
+//
+// compile_document_part's `below` STOPS at the named layer, so it is "before"
+// rather than "except" and drops everything above it too. compile_document_except
+// skips the named layer and keeps walking. The claims are the same two the other
+// parts are held to: the parts SUM to the whole under the hard union layers
+// compose by, and a part culls under the DOCUMENT's pad rather than its own —
+// both silent when wrong, so both are checked by identity.
+
+namespace {
+
+// Three visible SDF layers, deliberately overlapping so that dropping one
+// CHANGES the field everywhere it reached rather than only where it was alone.
+scene::Document three_layers(scene::LayerId out_ids[3]) {
+    scene::Document doc;
+    for (int i = 0; i < 3; ++i) {
+        const LayerRef l = add_layer(doc, i == 0 ? "a" : (i == 1 ? "b" : "c"));
+        out_ids[i] = l.id;
+        l.sdf->insert(dab(-0.35f + 0.35f * static_cast<float>(i), 0.1f * static_cast<float>(i),
+                          0.0f, 0.55f));
+        l.sdf->insert(dab(0.2f * static_cast<float>(i), -0.3f, 0.25f, 0.3f, scene::Op::Add, 0.07f));
+    }
+    return doc;
+}
+
+std::vector<float> hard_union(const std::vector<float>& a, const std::vector<float>& b) {
+    std::vector<float> out(a.size());
+    for (std::size_t i = 0; i < a.size(); ++i) out[i] = a[i] < b[i] ? a[i] : b[i];
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("a document part can exclude one layer, wherever it sits") {
+    scene::LayerId id[3] = {0, 0, 0};
+    scene::Document doc = three_layers(id);
+    const std::vector<float> pts = lattice(11);
+
+    for (int which = 0; which < 3; ++which) {
+        CAPTURE(which);
+        const scene::Tape except = scene::compile_document_except(doc, id[which]);
+        const scene::Tape only =
+            scene::compile_document_part(doc, id[which], /*below=*/false);
+
+        // THE PARTS SUM TO THE WHOLE. Layers union hard, so the join is min and
+        // this is exact rather than a tolerance — which is the property the C
+        // ABI tells a host it may rely on when it composes its own preview.
+        const std::vector<float> whole = eval_whole(scene::compile_document(doc), pts);
+        const std::vector<float> got =
+            hard_union(eval_whole(except, pts), eval_whole(only, pts));
+        CHECK(std::memcmp(got.data(), whole.data(), got.size() * sizeof(float)) == 0);
+
+        // AND IT HAS TEETH: the excluded part must differ from the whole, or
+        // the identity above would hold for a compile that excluded nothing.
+        const std::vector<float> without = eval_whole(except, pts);
+        CHECK(std::memcmp(without.data(), whole.data(), without.size() * sizeof(float)) != 0);
+    }
+
+    // The MIDDLE layer is the case `below` cannot express: it stops there, so
+    // it drops the third layer too. These two are different tapes, and that
+    // difference is the whole change.
+    const std::vector<float> except_mid = eval_whole(scene::compile_document_except(doc, id[1]), pts);
+    const std::vector<float> before_mid =
+        eval_whole(scene::compile_document_part(doc, id[1], /*below=*/true), pts);
+    CHECK(std::memcmp(except_mid.data(), before_mid.data(),
+                      except_mid.size() * sizeof(float)) != 0);
+
+    // Excluding the LAST layer is the one case where the two agree, because
+    // there is nothing above it to keep. A regression that made `except`
+    // silently stop would still pass this one, which is why the middle case
+    // above is the one with teeth.
+    const std::vector<float> except_last =
+        eval_whole(scene::compile_document_except(doc, id[2]), pts);
+    const std::vector<float> before_last =
+        eval_whole(scene::compile_document_part(doc, id[2], /*below=*/true), pts);
+    CHECK(std::memcmp(except_last.data(), before_last.data(),
+                      except_last.size() * sizeof(float)) == 0);
+}
+
+TEST_CASE("an excluded part culls under the document pad, not its own") {
+    // The same claim `compile_layer_prefix` is held to, for the same reason: a
+    // part compiled under its own smaller pad drops items the whole-document
+    // compile keeps, and then the parts stop summing to the whole. Blends make
+    // the pad non-zero and make a dropped item change the answer INSIDE the
+    // region rather than only at its edge.
+    scene::LayerId id[3] = {0, 0, 0};
+    scene::Document doc = three_layers(id);
+    const std::vector<float> pts = lattice(9);
+
+    scene::CullRegion cull{math::Aabb{cf3(-0.5f, -0.5f, -0.5f), cf3(0.5f, 0.5f, 0.5f)}};
+    const scene::Tape whole = scene::compile_document(doc, &cull);
+    const scene::Tape except = scene::compile_document_except(doc, id[1], &cull);
+    const scene::Tape only = scene::compile_document_part(doc, id[1], /*below=*/false, &cull);
+
+    const std::vector<float> got =
+        hard_union(eval_whole(except, pts), eval_whole(only, pts));
+    const std::vector<float> want = eval_whole(whole, pts);
+    CHECK(std::memcmp(got.data(), want.data(), got.size() * sizeof(float)) == 0);
+}
+
+TEST_CASE("excluding the only visible layer is empty space, not a failure") {
+    scene::Document doc;
+    const LayerRef only = add_layer(doc, "one");
+    only.sdf->insert(dab(0.0f, 0.0f, 0.0f, 0.6f));
+    const std::vector<float> pts = lattice(7);
+
+    const scene::Tape except = scene::compile_document_except(doc, only.id);
+    const std::vector<float> got = eval_whole(except, pts);
+    // An empty tape evaluates as empty space everywhere. Checked as "nothing is
+    // inside" rather than against a constant, which is what "empty space" means
+    // for a field and does not pin an unspecified sentinel.
+    for (float d : got) CHECK(d > 0.0f);
+
+    // A hidden layer is already contributing nothing, so excluding it is the
+    // ordinary compile — no refusal at this level; the C ABI owns the caller's
+    // intent.
+    const LayerRef second = add_layer(doc, "two");
+    second.sdf->insert(dab(0.3f, 0.0f, 0.0f, 0.4f));
+    doc.find_layer(second.id)->visible = false;
+    const std::vector<float> without_hidden =
+        eval_whole(scene::compile_document_except(doc, second.id), pts);
+    const std::vector<float> plain = eval_whole(scene::compile_document(doc), pts);
+    CHECK(std::memcmp(without_hidden.data(), plain.data(),
+                      plain.size() * sizeof(float)) == 0);
+}

@@ -125,6 +125,7 @@ add_executable(clay_unit_tests
   unit/test_mask_extrude.cpp
   unit/test_c_mask_brush.cpp
   unit/test_c_pick_eval.cpp
+  unit/test_c_eval_excluding.cpp
   unit/test_c_tape_cache.cpp
   unit/test_c_frontier_resume.cpp
   unit/test_c_brick.cpp
