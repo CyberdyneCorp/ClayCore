@@ -61,6 +61,10 @@ CLASS_PREFIX = {
     # Multiresolution (add-mesh-multires).
     "MultiresSurface": ("clay_multires_",),
     "MultiresSculptor": ("clay_multires_sculptor_", "clay_multires_"),
+    # A layered gesture (add-mesh-sculpt-layers). Its verbs cross as
+    # clay_multires_sculpt_layer_stroke_stamp / _smooth / _erase / _restore /
+    # _commit / _cancel; only the `with` statement itself has no C counterpart.
+    "SculptLayerStroke": ("clay_multires_sculpt_layer_stroke_",),
     "BrushModel": ("clay_brush_model_",),
     "AutomaskSettings": ("clay_automask_",),
     "MeshBrushSettings": ("clay_mesh_brush_",),
@@ -223,6 +227,23 @@ ALIASES = {
     "MultiresSculptor.apply_stroke": "clay_multires_sculptor_apply_stroke",
     "MultiresSculptor.bound_level": "clay_multires_sculpt_level",
     "MultiresSculptor.last_write_vertices": "clay_multires_dirty_blocks",
+    # Sculpt layers (add-mesh-sculpt-layers). The three revisions are one C
+    # call with three out parameters, for the same reason the hierarchy's own
+    # three are — a host reads whichever it keyed on, and one call is cheaper
+    # than three across the boundary.
+    "MultiresSurface.sculpt_layer_metadata_revision": "clay_multires_sculpt_layer_revision",
+    "MultiresSurface.sculpt_layer_composition_revision": "clay_multires_sculpt_layer_revision",
+    "MultiresSurface.sculpt_layer_content_revision": "clay_multires_sculpt_layer_revision",
+    # Python hands back the whole list; C walks it, because a C caller owns the
+    # buffer an id list would land in and the walk is the loop it was going to
+    # write anyway.
+    "MultiresSurface.sculpt_layer_ids": "clay_multires_sculpt_layer_id_at",
+    # The context manager IS the transaction object, so the call that makes one
+    # is the call that builds the C handle.
+    "MultiresSurface.sculpt_layer_stroke": "clay_multires_sculpt_layer_stroke_create",
+    # The oversampling reading rides the stamp that produced it, filled into the
+    # caller's own descriptor rather than read back afterwards.
+    "SculptLayerStroke.last_stamp_report": "clay_multires_sculpt_layer_stroke_stamp_detail",
     "DynamicSculptor.rebuild_index": "clay_dynamic_sculptor_rebuild_index",
     "DynamicSculptor.chunk_count": "clay_dynamic_surface_chunk_count",
     "DynamicSculptor.dirty_chunks": "clay_dynamic_surface_dirty_chunks",
@@ -336,6 +357,7 @@ CLASS_CTOR = {
     "TopologySettings": "clay_dynamic_topology_defaults",
     "MultiresSurface": "clay_multires_from_mesh",
     "MultiresSculptor": "clay_multires_sculptor_create",
+    "SculptLayerStroke": "clay_multires_sculpt_layer_stroke_create",
     "DetailMode": None,
     "BrushModel": "clay_brush_model_of",
     # Value types carried INSIDE another descriptor rather than built on their
@@ -514,6 +536,11 @@ STRING_CHOICES = (
     ("parse_axis", "mirror axis", "CLAY_MIRROR_"),
     ("parse_extrude_side", "mask extrude side", "CLAY_EXTRUDE_"),
     ("mesh_document", "mesher", "CLAY_MESHER_"),
+    # Sculpt layers (add-mesh-sculpt-layers). Three axes a layered stroke
+    # names, each an enumerator on the C side.
+    ("parse_write_domain", "multires write domain", "CLAY_MULTIRES_WRITE_"),
+    ("parse_smooth_mode", "multires smooth mode", "CLAY_MULTIRES_SMOOTH_"),
+    ("parse_detail_stamp_mode", "detail stamp mode", "CLAY_DETAIL_STAMP_"),
 )
 
 
