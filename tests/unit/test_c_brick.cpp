@@ -82,6 +82,9 @@ clay_node_id add_sphere(Doc& doc, float r, float x, float y, float z,
     const float pos[3] = {x, y, z};
     REQUIRE(clay_item_set_position(it, pos) == CLAY_OK);
     REQUIRE(clay_item_set_op(it, op) == CLAY_OK);
+    // A morph carries its own span; the builder refuses one without it.
+    if (op == CLAY_OP_TRANSITION_RADIAL)
+        REQUIRE(clay_item_set_transition_radial(it, 0.2f, 1.8f, CLAY_EASE_LINEAR) == CLAY_OK);
     clay_node_id id = 0;
     REQUIRE(clay_layer_add_item(doc.d, doc.layer, it, &id) == CLAY_OK);
     clay_item_destroy(it);
@@ -274,12 +277,36 @@ TEST_CASE("influence bounds: three states through two flags") {
         }
     }
 
-    SUBCASE("a non-local op has no finite influence and says so") {
+    SUBCASE("an INTERSECT is bounded by its layer, and says so") {
+        // #319: an intersect can only take material away, and what it takes
+        // away is inside what the layer already occupies — so the honest
+        // answer is the layer's extent rather than everything. A spatial morph
+        // is the case below, and still has no finite answer.
         add_sphere(doc, 0.5f, 0.0f, 0.0f, 0.0f);
         clay_node_id cut = add_sphere(doc, 0.3f, 0.2f, 0.0f, 0.0f, CLAY_OP_INTERSECT);
-        lo[0] = hi[0] = 1234.5f;
         REQUIRE(clay_layer_node_influence_bound(doc.d, doc.layer, cut, lo, hi, &has, &infinite) ==
                 CLAY_OK);
+        CHECK(has == 1);
+        CHECK(infinite == 0);
+        // The LAYER's box, not the intersect's own: the 0.5 sphere at the
+        // origin is in it even though the cutter is a 0.3 sphere at x = 0.2.
+        CHECK(lo[0] <= -0.5f);
+        CHECK(hi[0] >= 0.5f);
+        // and the whole layer's union is finite too
+        REQUIRE(clay_layer_influence_bound(doc.d, doc.layer, lo, hi, &has, &infinite) == CLAY_OK);
+        CHECK(infinite == 0);
+    }
+
+    SUBCASE("a SPATIAL MORPH has no finite influence and says so") {
+        // The half of the old "non-local" case that is still unbounded. A
+        // morph's weight saturates, so past its span the result IS the item's
+        // own field, arbitrarily far from anything the layer occupies.
+        add_sphere(doc, 0.5f, 0.0f, 0.0f, 0.0f);
+        clay_node_id morph =
+            add_sphere(doc, 0.3f, 0.2f, 0.0f, 0.0f, CLAY_OP_TRANSITION_RADIAL);
+        lo[0] = hi[0] = 1234.5f;
+        REQUIRE(clay_layer_node_influence_bound(doc.d, doc.layer, morph, lo, hi, &has,
+                                                &infinite) == CLAY_OK);
         CHECK(infinite == 1);
         CHECK(has == 1);
         CHECK(lo[0] == 1234.5f);  // an unbounded answer writes no box
@@ -1033,8 +1060,13 @@ TEST_CASE("the incremental claim, as a COUNT: a small edit re-evaluates few bric
               CLAY_ERROR_INVALID_ARGUMENT);
     }
     SUBCASE("an infinite influence dirties everything tracked, and nothing more") {
+        // A SPATIAL MORPH, which is what still has no finite bound. This used
+        // to be an intersect; #319 gave that one the layer's extent, and the
+        // case needs an op whose influence is genuinely unbounded or it is
+        // measuring the finite path under an infinite name.
         clay_brick_stats s = stats_of(cache);
-        clay_node_id cut = add_sphere(doc, 0.5f, 0.0f, 0.0f, 0.0f, CLAY_OP_INTERSECT);
+        clay_node_id cut =
+            add_sphere(doc, 0.5f, 0.0f, 0.0f, 0.0f, CLAY_OP_TRANSITION_RADIAL);
         std::int32_t node_has = 0, node_infinite = 0;
         float nlo[3], nhi[3];
         REQUIRE(clay_layer_node_influence_bound(doc.d, doc.layer, cut, nlo, nhi, &node_has,

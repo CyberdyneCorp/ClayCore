@@ -910,7 +910,7 @@ int require_unchanged_outside(const Tape& before, const Tape& after, const math:
 // promise for each. `moved` counts the nodes actually exercised.
 void check_influence_promise(Document doc, std::uint64_t seed, float lo, float hi,
                              int* out_moved, int* out_points, int* out_infinite,
-                             float* out_worst) {
+                             float* out_worst, int samples = 4000) {
     const float band = 0.15f;
     const cfloat3 delta = cf3(0.11f, -0.07f, 0.05f);
     int moved = 0, points = 0, infinite = 0;
@@ -947,7 +947,7 @@ void check_influence_promise(Document doc, std::uint64_t seed, float lo, float h
                 // ONE blend can move, and a smooth-union chain drags further.
                 const float pad = band + cull_pad(*layer.sdf, layer);
                 points += require_unchanged_outside(before, after, dirty.dilated(pad), band,
-                                                    seed + id, lo, hi, out_worst);
+                                                    seed + id, lo, hi, out_worst, samples);
                 ++moved;
             }
             n->xform.position = was;  // leave the document as it was found
@@ -971,6 +971,26 @@ TEST_CASE("influence bound: an edit changes nothing outside the box, on the gnar
     CHECK(points > 500);
 }
 
+// WHY THESE TWO RUN AT 200,000 SAMPLES AND THE CORPUS RUNS AT 4,000 (#326).
+//
+// #326 was filed because nothing in the suite could tell a correct influence
+// bound from a wrong one for an intersect: the item's own geometry box is ~3x
+// tighter than the layer's and measured drift 0 too, so whichever bound shipped
+// would have been chosen on reasoning rather than evidence. Four candidate
+// fixture designs were proposed to break the tie.
+//
+// None of them was needed. THE FIXTURE WAS NEVER THE PROBLEM — the sample count
+// was. Moving the intersect of the plain sphere+box document leaves 34 drifting
+// points in 400,000, about 1 in 11,700, so 4,000 samples miss it roughly seven
+// times in ten. At 200,000 it shows every run, and the too-small bound reads
+// 0.100 of drift against a 0.15 band.
+//
+// So a non-local case is worth sampling densely and a local one is not: a local
+// item's bound is its own geometry and a violation there is dense, which is what
+// the gnarly corpus finds at 4,000. The number is a property of how RARE the
+// violation is, not of how hard the document is.
+constexpr int kNonLocalSamples = 200000;
+
 TEST_CASE("influence bound: an INTERSECT is bounded, and the box it names holds") {
     // The case #319 is about. An intersect reads the accumulated field far from
     // itself, so its bound is not its own geometry — but it is not Everything
@@ -987,10 +1007,11 @@ TEST_CASE("influence bound: an INTERSECT is bounded, and the box it names holds"
 
     int moved = 0, points = 0, infinite = 0;
     float worst = 0;
-    check_influence_promise(doc, 8802, -2.5f, 2.5f, &moved, &points, &infinite, &worst);
+    check_influence_promise(doc, 8802, -2.5f, 2.5f, &moved, &points, &infinite, &worst,
+                            kNonLocalSamples);
     MESSAGE("intersect: worst drift = ", worst);
     CHECK(moved > 0);
-    CHECK(points > 500);
+    CHECK(points > 100000);
 }
 
 TEST_CASE("influence bound: a layer of non-local ops still holds its promise") {
@@ -1002,10 +1023,177 @@ TEST_CASE("influence bound: a layer of non-local ops still holds its promise") {
                         Blend{BlendProfile::Quadratic, 0.05f}));
     int moved = 0, points = 0, infinite = 0;
     float worst = 0;
-    check_influence_promise(doc, 8803, -3.5f, 3.5f, &moved, &points, &infinite, &worst);
+    check_influence_promise(doc, 8803, -3.5f, 3.5f, &moved, &points, &infinite, &worst,
+                            kNonLocalSamples);
     MESSAGE("non-local: worst drift = ", worst);
     CHECK(moved > 0);
     CHECK(points > 500);
+}
+
+// The measurement #326 asked for: rank the candidate bounds on evidence.
+//
+// It wanted "a fixture where shrinking the intersect's bound produces a
+// non-zero drift", so the tightest bound that holds could be shipped instead of
+// the first one proposed. This is that measurement, and its answer is that the
+// bound #319 proposed IS the tightest that holds — the tighter-looking
+// alternative leaks.
+namespace {
+
+// Worst band-clamped drift outside `box` when `id` moves. The property test's
+// arithmetic, against a box the caller chooses rather than the one the engine
+// declares — which is what makes it a comparison of candidates.
+float drift_outside_box(Document doc, LayerId lid, NodeId id, math::Aabb box, float band,
+                        std::uint64_t seed, float lo, float hi, int* out_hits, int samples) {
+    Layer* layer = doc.find_layer(lid);
+    Node* n = layer->sdf->find_mut(id);
+    const cfloat3 delta = cf3(0.11f, -0.07f, 0.05f);
+    const Tape before = compile_document(doc);
+    const cfloat3 was = n->xform.position;
+    n->xform.position = was + delta;
+    const Tape after = compile_document(doc);
+    n->xform.position = was;
+
+    clay_test::Lcg rng(seed);
+    float worst = 0.0f;
+    int hits = 0;
+    for (int i = 0; i < samples; ++i) {
+        const cfloat3 p = rng.vec3(lo, hi);
+        if (box.contains(p)) continue;
+        const float a = cclamp(before.eval(p).d, -band, band);
+        const float b = cclamp(after.eval(p).d, -band, band);
+        const float dv = a > b ? a - b : b - a;
+        if (dv != 0.0f) ++hits;
+        if (dv > worst) worst = dv;
+    }
+    *out_hits = hits;
+    return worst;
+}
+
+// The union of a layer's visible item GEOMETRY, with no non-locality rule
+// applied — "the layer's own bounds" as #319 proposes them. Written here rather
+// than called from the engine because for a morph the engine correctly answers
+// INFINITE, and the question this test asks is what would happen if it did not.
+math::Aabb layer_geometry_union(const Layer& layer) {
+    math::Aabb b;
+    for (const auto& [id, n] : layer.sdf->nodes()) {
+        (void)id;
+        if (n.is_group || !n.visible) continue;
+        b.expand(item_geometry_bound(n, layer));
+    }
+    return b;
+}
+
+// Both sides of the move, as every consumer of an influence bound unions them.
+math::Aabb spanning(const Document& doc, LayerId lid, NodeId id, bool layer_extent) {
+    Document moved = doc;
+    const Layer* l0 = doc.find_layer(lid);
+    Layer* l1 = moved.find_layer(lid);
+    l1->sdf->find_mut(id)->xform.position =
+        l1->sdf->find(id)->xform.position + cf3(0.11f, -0.07f, 0.05f);
+    math::Aabb b;
+    if (layer_extent) {
+        b = layer_geometry_union(*l0);
+        b.expand(layer_geometry_union(*l1));
+    } else {
+        b = item_geometry_bound(*l0->sdf->find(id), *l0);
+        b.expand(item_geometry_bound(*l1->sdf->find(id), *l1));
+    }
+    return b;
+}
+
+Document sphere_and_intersect(NodeId* out_cutter) {
+    Document doc;
+    Layer& l = doc.add_sdf_layer("l");
+    l.sdf->insert(item(Prim::sphere(1.0f), cf3(0, 0, 0)));
+    *out_cutter =
+        l.sdf->insert(item(Prim::box(cf3(0.3f, 0.3f, 0.3f)), cf3(-0.4f, 0, 0), Op::Intersect));
+    return doc;
+}
+
+}  // namespace
+
+TEST_CASE("influence bound: the item's own box is TOO SMALL for an intersect") {
+    // The discriminating measurement. This is #319's own fixture — no new
+    // design was needed — and the drift it shows is what says the layer bound
+    // is necessary rather than merely harmless.
+    NodeId cutter = kNoNode;
+    Document doc = sphere_and_intersect(&cutter);
+    const LayerId lid = doc.layers.front().id;
+    const float band = 0.15f;
+    const float pad = band + cull_pad(*doc.layers.front().sdf, doc.layers.front());
+
+    int own_hits = 0, layer_hits = 0;
+    const float own = drift_outside_box(doc, lid, cutter,
+                                        spanning(doc, lid, cutter, false).dilated(pad), band,
+                                        4401, -3.0f, 3.0f, &own_hits, kNonLocalSamples);
+    const float ext = drift_outside_box(doc, lid, cutter,
+                                        spanning(doc, lid, cutter, true).dilated(pad), band,
+                                        4401, -3.0f, 3.0f, &layer_hits, kNonLocalSamples);
+    MESSAGE("intersect: own-box drift ", own, " (", own_hits, " pts), layer-extent drift ", ext);
+
+    // The item's own geometry LEAKS. Well clear of float noise against a 0.15
+    // band, and the reason a bound may not be chosen by which one looks tighter.
+    CHECK(own > 0.01f);
+    CHECK(own_hits > 0);
+    // The layer's extent holds, exactly.
+    CHECK(ext == 0.0f);
+    CHECK(layer_hits == 0);
+}
+
+TEST_CASE("influence bound: the layer's extent is TOO SMALL for a spatial morph") {
+    // The other half of the split, and why the morphs keep the infinite answer.
+    //
+    // A morph's weight SATURATES. `ctransition_radial_weight` is
+    // clamp((length(p.xz) - r0) / (r1 - r0), 0, 1) about the WORLD Y axis and
+    // the linear one is clamp(dot(p - a, ab) / dot(ab, ab), 0, 1) along a
+    // segment — so past the span the weight is exactly 1, the result IS the
+    // item's own field, and moving the item changes it arbitrarily far from
+    // anything the layer occupies. That is a different mechanism from an
+    // intersect's `max`, which is why the two get different answers.
+    //
+    // MEASURED ON THE RADIAL ONE. The linear morph leaks by the same mechanism
+    // but far more rarely on this fixture — about 1 sample in 400,000, where
+    // the radial leaks 4 in 200,000 — so asserting a leak for it would be a
+    // flaky test of a sound claim. What both are held to below is the engine's
+    // answer; the measurement is what says that answer is not merely cautious.
+    Document doc;
+    Layer& l = doc.add_sdf_layer("l");
+    l.sdf->insert(item(Prim::sphere(1.0f), cf3(0, 0, 0)));
+    const NodeId morph = l.sdf->insert(
+        item(Prim::box(cf3(0.5f, 0.5f, 0.5f)), cf3(0.3f, 0, 0), Op::TransitionRadial));
+    const float band = 0.15f;
+    const float pad = band + cull_pad(*doc.layers.front().sdf, doc.layers.front());
+
+    int hits = 0;
+    const float ext = drift_outside_box(doc, l.id, morph,
+                                        spanning(doc, l.id, morph, true).dilated(pad), band,
+                                        4402, -6.0f, 6.0f, &hits, kNonLocalSamples);
+    MESSAGE("radial morph: drift outside the LAYER's extent = ", ext, " over ", hits, " points");
+    CHECK(hits > 0);   // the layer does not bound it
+    CHECK(ext > 0.001f);
+}
+
+TEST_CASE("influence bound: both morphs report unbounded, and an intersect does not") {
+    // The engine's side of the same claim, for both morphs — the one the
+    // measurement above is only able to demonstrate for the radial.
+    for (Op op : {Op::TransitionLinear, Op::TransitionRadial}) {
+        CAPTURE(static_cast<int>(op));
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        l.sdf->insert(item(Prim::sphere(1.0f), cf3(0, 0, 0)));
+        const NodeId morph =
+            l.sdf->insert(item(Prim::box(cf3(0.5f, 0.5f, 0.5f)), cf3(0.3f, 0, 0), op));
+        CHECK(item_influence_bound(*l.sdf->find(morph), l).is_infinite());
+        CHECK(item_nonlocality(*l.sdf->find(morph)) == Nonlocality::Unbounded);
+        // and neither is ever culled, which is unchanged for all of them
+        CHECK(!item_influence_is_local(*l.sdf->find(morph)));
+    }
+    NodeId cutter = kNoNode;
+    Document doc = sphere_and_intersect(&cutter);
+    const Layer& l = doc.layers.front();
+    CHECK(!item_influence_bound(*l.sdf->find(cutter), l).is_infinite());
+    CHECK(item_nonlocality(*l.sdf->find(cutter)) == Nonlocality::BoundedByLayer);
+    CHECK(!item_influence_is_local(*l.sdf->find(cutter)));
 }
 
 TEST_CASE("influence bound: a MIRRORED item's box understates what moving it changes") {

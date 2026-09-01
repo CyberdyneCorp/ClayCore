@@ -1222,12 +1222,74 @@ bool item_influence_is_local(const Node& item) {
     return true;
 }
 
-Aabb item_influence_bound(const Node& item, const Layer& layer) {
-    if (!item_influence_is_local(item)) return Aabb::infinite();
-    return item_geometry_bound(item, layer);
+Nonlocality item_nonlocality(const Node& item) {
+    // Order matters: an intersect that ALSO repeats infinitely is unbounded,
+    // and the weaker answer must not win.
+    if (item.repeat.is_infinite_grid()) return Nonlocality::Unbounded;
+    if (prim_is_unbounded(item.prim.type)) return Nonlocality::Unbounded;
+    // THE SPLIT THIS CHANGE IS ABOUT (#319, measured in #326).
+    //
+    // A SPATIAL MORPH is unbounded. Its weight saturates:
+    // `ctransition_radial_weight` is `clamp((length(p.xz) - r0) / (r1 - r0), 0, 1)`
+    // about the WORLD Y axis, so past `r1` the weight is exactly 1 and the
+    // result IS the item's own field -- arbitrarily far from anything the
+    // layer occupies. Measured: over 400,000 sample points a radial morph
+    // leaves 0.0157 of band-clamped drift outside the layer's extent dilated
+    // by the band, and a linear morph 0.000568. The layer is not a bound for
+    // these.
+    //
+    // An INTERSECT is bounded by its LAYER. `max(acc, item)` can only take
+    // material away, and what it takes away is inside what the layer already
+    // occupies -- it cannot put material where the layer has none. Measured
+    // over the same 400,000 points on two fixtures: drift exactly 0 outside
+    // the layer's extent, against 0.100 and 0.065 outside the item's OWN
+    // geometry, which is the bound that looks tighter and does not hold.
+    if (item.op == Op::Intersect) return Nonlocality::BoundedByLayer;
+    if (!op_is_local(item.op)) return Nonlocality::Unbounded;
+    return Nonlocality::None;
+}
+
+Aabb layer_influence_extent(const SdfContent& content, const Layer& layer) {
+    // Every visible item's geometry, and infinite the moment one of them has
+    // none: an intersect in a layer holding a plane is bounded by a plane.
+    Aabb out;
+    for (const auto& [id, n] : content.nodes()) {
+        (void)id;
+        if (n.is_group || !n.visible) continue;
+        if (!item_influence_is_local(n)) {
+            // A second non-local item bounds this one only if IT is bounded.
+            if (item_nonlocality(n) != Nonlocality::BoundedByLayer) return Aabb::infinite();
+        }
+        out.expand(item_geometry_bound(n, layer));
+    }
+    return out;
+}
+
+Aabb item_influence_bound(const Node& item, const Layer& layer, const Aabb* layer_extent) {
+    switch (item_nonlocality(item)) {
+        case Nonlocality::None:
+            return item_geometry_bound(item, layer);
+        case Nonlocality::BoundedByLayer: {
+            // Computed here when the caller did not already hold it. Only an
+            // intersect reaches this, so a layer without one pays nothing --
+            // which is why this is a lazy fallback rather than a parameter
+            // every caller has to thread.
+            if (layer_extent) return *layer_extent;
+            if (!layer.sdf) return Aabb::infinite();
+            return layer_influence_extent(*layer.sdf, layer);
+        }
+        case Nonlocality::Unbounded:
+            break;
+    }
+    return Aabb::infinite();
 }
 
 Aabb item_own_influence_bound(const Node& item, const Layer& layer) {
+    // NOT given the layer fallback, deliberately. This one answers "how far
+    // does this item's own body reach", which is what a brush that has already
+    // reflected itself tests a drag against -- and for a non-local item the
+    // honest answer there is still "everywhere", because the brush is asking
+    // whether to warp it at all rather than which bricks to redraw.
     if (!item_influence_is_local(item)) return Aabb::infinite();
     return geometry_bound(item, layer, /*with_copies=*/false);
 }
@@ -1255,7 +1317,13 @@ Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& lay
     const Node* n = content.find(id);
     if (!n || !n->visible) return Aabb{};
     if (!n->is_group) return item_influence_bound(*n, layer);
-    if (!op_is_local(n->op)) return Aabb::infinite();
+    // A GROUP takes the same split its items take: an intersecting group reads
+    // the running accumulator and can move the result anywhere the LAYER has
+    // material, and no further.
+    if (!op_is_local(n->op)) {
+        if (n->op != Op::Intersect || !layer.sdf) return Aabb::infinite();
+        return layer_influence_extent(*layer.sdf, layer);
+    }
     Aabb b;
     for (NodeId c : n->children) {
         Aabb cb = node_influence_bound(content, c, layer);
@@ -1303,9 +1371,14 @@ Aabb node_reach_bound(const SdfContent& content, NodeId id, const Layer& layer) 
         if (!g->visible) return Aabb{};
         // The non-local check at EVERY level, not only the first. An
         // intersect anywhere above reads the running accumulator and can move
-        // the result arbitrarily far, which is what node_influence_bound
-        // already reports for the group itself.
-        if (!op_is_local(g->op)) return Aabb::infinite();
+        // the result as far as the LAYER reaches, which is what
+        // node_influence_bound already reports for the group itself; a spatial
+        // morph above can move it further than that and still reports
+        // infinite.
+        if (!op_is_local(g->op)) {
+            if (g->op != Op::Intersect || !layer.sdf) return Aabb::infinite();
+            return layer_influence_extent(*layer.sdf, layer);
+        }
         b = b.dilated(group_blend_support(*g, layer));
         cur = parent;
     }
