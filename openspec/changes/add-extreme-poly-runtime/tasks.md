@@ -106,12 +106,21 @@
       DONE as a RULE the code keeps: `kChunkParallelGrain` and
       `kVertexParallelGrain` are one level each, documented against the pool's
       inline-nesting behaviour. No new nested dispatch was introduced
-- [ ] 3.7 A serial threshold below which a small footprint does not dispatch at
+- [x] 3.7 A serial threshold below which a small footprint does not dispatch at
       all, measured rather than guessed
-      NOT DONE. `kChunkParallelGrain` and `kVertexParallelGrain` exist and are
-      one level each, and both are still guesses. This stage measured the chunk
-      SIZE and not the dispatch threshold; ticking it on the first would be the
-      same failure 1.1 was written against
+      MEASURED, by `benchmarks/bench_parallel_grain.cpp`, with the rule fixed
+      before the data in D2's shape and recorded in design.md D2b. The answer is
+      32,768 vertices (was 1024) and 576 chunks (was 4), stable across four
+      sweeps at loads from 2.5 to 8.7.
+      The finding is bigger than a tuned constant: the dispatch costs 17-20 us
+      at ANY size, so at the shipped 1024 the parallel form was TEN TIMES SLOWER
+      than the serial loop, and a chunk-parallel stamp at the old values would
+      have been a pessimisation at every footprint this change benchmarks.
+      Recorded honestly: NOTHING READS EITHER CONSTANT. The stamp path is serial
+      and dispatches nothing, so these are the numbers a future parallel pass
+      must start from rather than a description of what the library does — which
+      is exactly the distinction ticking this on the constants' plausibility
+      would have destroyed
 
 ## 4. Memory
 

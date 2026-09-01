@@ -40,10 +40,14 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <vector>
 
 #include "clay/kernel/shim.h"
+#include "clay/mesh/mesh_data.h"
+#include "clay/mesh/surface_chunks.h"
+#include "clay/mesh/surface_view.h"
 #include "clay/parallel/thread_pool.h"
 
 using namespace clay;
@@ -86,6 +90,27 @@ Stats summarise(std::vector<double> v) {
     return s;
 }
 
+// A plane at fixed spacing, only to give the partitioner a real mesh to chunk.
+mesh::Mesh plane(int n, float spacing) {
+    mesh::Mesh m;
+    const int centre = n / 2;
+    for (int z = 0; z <= n; ++z)
+        for (int x = 0; x <= n; ++x) {
+            m.positions.push_back(cf3(spacing * static_cast<float>(x - centre), 0.0f,
+                                      spacing * static_cast<float>(z - centre)));
+            m.normals.push_back(cf3(0, 1, 0));
+        }
+    const std::uint32_t stride = static_cast<std::uint32_t>(n + 1);
+    for (int z = 0; z < n; ++z)
+        for (int x = 0; x < n; ++x) {
+            const std::uint32_t a =
+                static_cast<std::uint32_t>(z) * stride + static_cast<std::uint32_t>(x);
+            const std::uint32_t b = a + 1, c = a + stride, d = c + 1;
+            m.indices.insert(m.indices.end(), {a, c, b, b, c, d});
+        }
+    return m;
+}
+
 // One per-vertex sculpt pass: a falloff weight from the distance to the brush
 // centre, applied along the vertex normal. The shape of the weight pass and the
 // write-back that `kVertexParallelGrain` actually gates.
@@ -110,7 +135,8 @@ int main(int argc, char** argv) {
     std::printf("# %d repetitions per cell; the rule is P50 at least 15%% faster,\n",
                 repetitions);
     std::printf("# holding at every larger footprint.\n");
-    std::printf("# shipped: kVertexParallelGrain = 1024, kChunkParallelGrain = 4\n");
+    std::printf("# shipped: kVertexParallelGrain = %zu, kChunkParallelGrain = %zu\n",
+                mesh::kVertexParallelGrain, mesh::kChunkParallelGrain);
     print_load("before");
 
     // Doubling from far below any plausible threshold to far above it.
@@ -177,7 +203,28 @@ int main(int argc, char** argv) {
         }
     }
 
+    // THE CHUNK GRAIN IS THE SAME CROSSOVER IN THE OTHER UNIT. The per-item
+    // body is identical — a chunk-level dispatch runs this same per-vertex pass
+    // over the chunk's vertices — so what decides the crossover is the TOTAL
+    // work behind one dispatch, not how it is addressed. Converting therefore
+    // needs one measured quantity and no second sweep: how many vertices a
+    // chunk actually holds at the shipped options.
+    mesh::ChunkTable table;
+    mesh::partition_mesh_chunks(plane(200, 0.01f), mesh::ChunkOptions{}, &table);
+    std::size_t vertex_total = 0;
+    for (std::uint32_t i = 0; i < table.slot_count(); ++i)
+        if (table.chunk(i) != nullptr) vertex_total += table.vertices(i).size();
+    const double per_chunk = table.live_count() == 0
+                                 ? 0.0
+                                 : static_cast<double>(vertex_total) /
+                                       static_cast<double>(table.live_count());
+
     print_load("after");
+    std::printf("\n# %zu chunks at the shipped options, %.1f vertices each\n",
+                table.live_count(), per_chunk);
+    if (crossover != 0 && per_chunk > 0.0)
+        std::printf("# chunk grain = %zu / %.1f = %.0f chunks\n", crossover, per_chunk,
+                    std::ceil(static_cast<double>(crossover) / per_chunk));
     std::printf("\n# crossover: ");
     if (crossover == 0)
         std::printf("none in range — the dispatch never pays here\n");

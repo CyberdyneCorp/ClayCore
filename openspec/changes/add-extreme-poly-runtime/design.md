@@ -250,6 +250,55 @@ lands where it says it does — but a cage whose base patch count is not a power
 of four has not been swept, and the risk section's wording about a level
 producing chunks far under target stands unmeasured for that case.
 
+### D2b — THE SERIAL THRESHOLD, MEASURED: 32,768 vertices / 576 chunks
+
+Task 3.7 asks for the dispatch threshold to be measured rather than guessed,
+and it shipped guessed: `kVertexParallelGrain = 1024` and
+`kChunkParallelGrain = 4`, under a comment asserting that "at a few hundred
+vertices the dispatch is the measurement". `benchmarks/bench_parallel_grain.cpp`
+sweeps a per-vertex sculpt pass — a falloff weight from a distance, applied
+along the vertex normal, which is the shape of the weight pass and the
+write-back the constant gates — serially and through `parallel::for_range`, at
+64 through 131,072 vertices, 201 repetitions a cell. The rule was fixed before
+the data, in D2's shape:
+
+> The grain is the SMALLEST footprint at which the parallel form's P50 is at
+> least 15% faster than the serial form's, and stays faster at every larger
+> footprint measured.
+
+**The run.** Four sweeps, load average 2.5 to 8.7 and unmoved within each run.
+
+| vertices | serial P50 | parallel P50 | ratio |
+|---|---|---|---|
+| 1,024   | 1.9-2.3 us | 18.9-20.0 us | 0.10-0.12x |
+| 8,192   | 11.0-11.9 us | 22.3-24.3 us | 0.47-0.49x |
+| 16,384  | 20.2-22.7 us | 24.1-25.6 us | 0.81-0.93x |
+| 32,768  | 39.2-42.7 us | 24.9-27.5 us | **1.45-1.58x** |
+| 131,072 | 149-170 us | 32.5-40.8 us | 4.17-4.66x |
+
+The crossover is 32,768 in every run and holds at every larger size. The
+dispatch costs about 17-20 us at ANY size, which is the whole finding: the
+shipped 1024 is not merely low, it is a point at which dispatching is TEN TIMES
+SLOWER than running the loop.
+
+**The chunk figure is a conversion, not a second sweep,** and the design records
+why that is legitimate: a chunk-level dispatch runs the same per-vertex body
+over the chunk's vertices, so the crossover is decided by the total work behind
+one dispatch rather than by how it is addressed. The benchmark measures the one
+quantity the conversion needs — 58.0 vertices per chunk at the D2a options —
+giving 565, rounded up to 576. Up rather than down because the rule's two errors
+are not symmetric: erring high costs a little parallelism on a medium dab,
+erring low costs a dispatch on every small dab of every stroke.
+
+**What this does NOT claim.** Nothing reads either constant. The stamp path is
+serial — `MeshSculptor::stamp` dispatches nothing — so these are the numbers a
+future chunk-parallel pass starts from, not a description of what the library
+does today. Recording that is the point: the measurement's real content is that
+a chunk-parallel stamp at the OLD values would have been a pessimisation at
+every footprint this change benchmarks (1k to 500k, of which only 500k clears
+the threshold), which is a conclusion that would have been invisible had 3.7
+been ticked on the constants' plausibility.
+
 ### D3 — The memory profile is a new `memory` leaf module
 
 **The question.** Task 1.2: a new module with a layering entry, or `io` beside

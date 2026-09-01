@@ -124,11 +124,37 @@ struct ChunkOptions {
 // parallel-over-chunks containing parallel-over-vertices is not a speedup, it
 // is the outer loop's chunking silently becoming the whole parallelism. A
 // caller picks the granularity that matches the work and does not nest.
-inline constexpr std::size_t kChunkParallelGrain = 4;
+//
+// MEASURED, NOT GUESSED (task 3.7, `benchmarks/bench_parallel_grain.cpp`).
+// These shipped as 4 and 1024 under a comment asserting that "at a few hundred
+// vertices the dispatch is the measurement". The sweep says the dispatch is
+// far more expensive than that: a per-vertex sculpt pass costs about 17-20 us
+// to dispatch at ANY size on this box, so the parallel form does not break even
+// until 32,768 vertices, and at the old 1024 it is TEN TIMES SLOWER than simply
+// running the loop. Three runs at a stable load put the crossover at 32,768
+// every time, with the ratio 0.81-0.86x at 16,384 and 1.45-1.58x at 32,768.
+//
+// The chunk figure is that same crossover in the other unit rather than a
+// second sweep, and it can be: a chunk-level dispatch runs the SAME per-vertex
+// body over the chunk's vertices, so what decides the crossover is the total
+// work behind one dispatch and not how it is addressed. The benchmark measures
+// the one quantity the conversion needs — 58.0 vertices per chunk at the
+// options above — giving 32768/58 = 565, rounded up to a multiple of 64.
+// Rounding UP on purpose: erring high costs a little parallelism on a medium
+// dab, erring low costs a dispatch on every small dab of every stroke, and the
+// small dab is the case that has to stay cheap.
+//
+// NOTHING READS THESE YET, and saying so is part of the measurement being
+// honest. The stamp path is serial today — `MeshSculptor::stamp` dispatches
+// nothing — so these are the numbers a future chunk-parallel pass must start
+// from, not a description of what the library currently does. What the sweep
+// establishes is that such a pass would have been a pessimisation at the old
+// values for every footprint this change's own benchmark measures (1k to 500k
+// vertices, of which only 500k clears the threshold).
+inline constexpr std::size_t kChunkParallelGrain = 576;
 // The same threshold for per-vertex work inside one chunk. Below it the gather,
-// the weight pass and the write-back stay on the calling thread: at a few
-// hundred vertices the dispatch is the measurement.
-inline constexpr std::size_t kVertexParallelGrain = 1024;
+// the weight pass and the write-back stay on the calling thread.
+inline constexpr std::size_t kVertexParallelGrain = 32768;
 
 // Which of the four revisions a change advances.
 enum class ChunkDirty : std::uint32_t {
