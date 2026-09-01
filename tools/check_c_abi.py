@@ -729,7 +729,10 @@ def parity_fixture_exercise(lib) -> list[str]:
     if lib.clay_parity_fixture_json(buf, ctypes.byref(cap)) != 0:
         errors.append("clay_parity_fixture_json rejected an adequate buffer")
     text = buf.value.decode()
-    for key in ('"cases"', '"instrs"', '"safe_step_scale"', '"tolerance"'):
+    # "march" and "rays" are schema 2: the half that says how a host must TRACE
+    # the field, not just evaluate it. A build that stopped exporting them would
+    # still pass every point comparison.
+    for key in ('"cases"', '"instrs"', '"safe_step_scale"', '"tolerance"', '"march"', '"rays"'):
         if key not in text:
             errors.append(f"the parity fixture is missing {key}")
     # a short buffer is refused AND reports what was needed, so the retry is

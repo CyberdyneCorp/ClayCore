@@ -340,3 +340,35 @@
       well, with teeth on the step scale and on the step count so the second
       scene cannot degrade into a second easy one. Verified against a real
       device backend locally (Vulkan/lavapipe), not only the CPU
+
+- [x] 17.6 THE MARCH, IN THE HOST PARITY FIXTURE (issue #379 follow-up). The
+      fixture asked only what a host EVALUATES, so a preview that got every
+      distance right and then traced it wrongly passed — while `docs/06` has
+      said "step by `safe_step_scale`, never by 1" since the loft and sweep
+      cases landed, with nothing enforcing it. Schema 2 adds a `march` block
+      and per-case `rays`: rays that hit, and where the CPU reference lands.
+      Purely additive, so a schema-1 consumer reads a schema-2 file unchanged.
+
+      The tolerances are LOPSIDED and that is the design: `hit_t_late_abs` 1e-3
+      against `hit_t_early_abs` 1e-2, because the step scale sits in the
+      acceptance test as well as the step length, so a host that marches more
+      conservatively than asked lands EARLY and is safe, while overstepping
+      lands LATE or misses. Every exported ray is filtered to one a
+      differently-written marcher also passes — over-relaxation off, a finer
+      and a coarser eps, half the budget, a quarter of the step scale — so a
+      case may carry few rays or none rather than shipping an expectation a
+      correct consumer cannot meet.
+
+      Gated three ways in `test_parity_fixture.cpp`: the rays exist and reach
+      the bound cases, every one survives those five variant marchers, and a
+      step-by-1 marcher is REJECTED by at least two cases. Also compared on
+      every registered backend's own `raycast`, beside the point comparison.
+
+      AND WHAT IT DOES NOT CATCH, measured and written down: a sampled VOLUME
+      does not discriminate a step-by-1 host at any cell size tried. `sqrt(3)`
+      is what `cfi_volume` declares for a lattice, but a redistanced volume's
+      realised gradient sits near 1 and a ray does not ride the cell diagonal.
+      Steep deformer fields are what catch it — deformer_chain 3 of 4 rays,
+      relief_build_up 13 of 96, deformer_noise 4 of 86. Recorded because
+      reasoning from the declared bound to a visual consequence is the step
+      that made #379 look explained when it was not.
