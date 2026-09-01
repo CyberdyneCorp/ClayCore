@@ -994,17 +994,31 @@ struct Compiler {
         return pad;
     }
 
-    // Compile only the visible SDF layers BEFORE `stop`, or only `stop` itself.
-    // Together the two are the whole document apart from the hard union
-    // between them, which is what lets a caller hold them as two values and
-    // fold one of them forward.
-    void run_part(const Document& doc, const CullRegion* cull_region, LayerId stop, bool below) {
+    // Which visible SDF layers a PART compiles. Before and Only are the two
+    // halves of the split a brick refill takes; Except is the other pairing —
+    // Except and Only also sum to the whole, and it is the one a host wants
+    // when it is previewing `stop` itself and needs everything else beside it
+    // (issue #378).
+    enum class Part : std::uint8_t { Before, Only, Except };
+
+    // Compile the visible SDF layers BEFORE `stop`, only `stop` itself, or
+    // every one EXCEPT `stop`. Whichever pairing, the parts are the whole
+    // document apart from the hard union between them, which is what lets a
+    // caller hold them as two values and fold one of them forward.
+    void run_part(const Document& doc, const CullRegion* cull_region, LayerId stop, Part part) {
         begin_cull(cull_region, document_pad(doc, cull_region));
         bool have_acc = false;
         for (const Layer& layer : doc.layers) {
             if (!layer.visible || layer.kind != LayerKind::Sdf || !layer.sdf) continue;
-            if (below ? layer.id == stop : layer.id != stop) {
-                if (below && layer.id == stop) break;  // everything after it too
+            // Before STOPS at the named layer, so everything above it goes too.
+            // Except only SKIPS it and keeps walking, which is the difference
+            // between the two and the whole of this change: a selection that
+            // stopped would be Before under another name.
+            if (part == Part::Before) {
+                if (layer.id == stop) break;
+            } else if (part == Part::Only) {
+                if (layer.id != stop) continue;
+            } else if (layer.id == stop) {
                 continue;
             }
             on_tail_path_ = true;
@@ -1322,9 +1336,24 @@ Tape compile_document_part_resumable(const Document& doc, LayerId active, bool b
     Compiler c;
     if (index && index->document() != &doc) index = nullptr;
     c.index = index;
-    c.run_part(doc, cull, active, below);
+    c.run_part(doc, cull, active, below ? Compiler::Part::Before : Compiler::Part::Only);
     c.tape.compile_id = next_compile_id();
     if (out_checkpoint) *out_checkpoint = c.checkpoint;
+    return std::move(c.tape);
+}
+
+// No resumable form and no checkpoint out-parameter, deliberately. A checkpoint
+// names the layer a suffix continues, and this compile has no active layer —
+// `excluded` is the one layer it does NOT hold. Handing back the checkpoint the
+// walk happens to leave would name whichever layer came last, and a caller that
+// resumed from it would append into a layer it did not choose.
+Tape compile_document_except(const Document& doc, LayerId excluded, const CullRegion* cull,
+                             const CullIndex* index) {
+    Compiler c;
+    if (index && index->document() != &doc) index = nullptr;
+    c.index = index;
+    c.run_part(doc, cull, excluded, Compiler::Part::Except);
+    c.tape.compile_id = next_compile_id();
     return std::move(c.tape);
 }
 

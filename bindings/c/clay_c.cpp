@@ -2798,6 +2798,23 @@ clay_result compile_one_layer(const clay_document* doc, clay_layer_id layer_id,
     return CLAY_OK;
 }
 
+// The document WITHOUT one layer (#378). The compile itself refuses nothing —
+// a layer it cannot find contributes nothing to the union either way — so the
+// refusal is here, where the caller's INTENT is known: a host excluding a
+// layer means "do not draw this, I am drawing it myself", and answering a
+// stale id with the whole document would draw that layer twice, once from
+// here and once from the preview. That is the exact defect this call exists to
+// prevent, so it is a refusal rather than a no-op.
+clay_result compile_document_without(const clay_document* doc, clay_layer_id excluded,
+                                     scene::Tape* out) {
+    if (!doc->doc.document.find_layer(excluded))
+        return fail(CLAY_ERROR_NOT_FOUND,
+                    "no layer " + std::to_string(excluded) + " to exclude: excluding a layer the "
+                    "document does not hold would evaluate the whole document");
+    *out = scene::compile_document_except(doc->doc.document, excluded);
+    return CLAY_OK;
+}
+
 // Mesher dispatch and the one gate the meshing spec puts on it: plain dual
 // contouring is not guaranteed manifold, so it is reachable only when the
 // caller opts in. The refusal happens here rather than in the engine, which
@@ -3671,7 +3688,10 @@ math::Aabb request_brick_box(const clay_brick_request& req) {
 // only thing the two entry points do differently.
 // Which of a document a batch compiles: the whole thing, or one side of the
 // split a resumable multi-layer refill holds as two values.
-enum class ChunkHalf { Whole, Below, Active };
+// `Except` is the other pairing, for a host previewing ONE layer that needs the
+// rest of the document beside it (#378): every visible SDF layer but `active`.
+// It takes no checkpoint and stores no seed — see the entry point.
+enum class ChunkHalf { Whole, Below, Active, Except };
 
 // `post`, when given, is called once per chunk AFTER `run` has filled it, with
 // the chunk's per-brick tapes and the checkpoint each passed through. That is
@@ -3732,6 +3752,9 @@ clay_result eval_requests_in_chunks(const clay_document* doc, const clay_brick_r
             else if (cp && half == ChunkHalf::Active)
                 tapes.push_back(scene::compile_document_part_resumable(
                     doc->doc.document, active, /*below=*/false, &cull, index.get(), cp));
+            else if (half == ChunkHalf::Except)
+                tapes.push_back(scene::compile_document_except(doc->doc.document, active, &cull,
+                                                               index.get()));
             else
                 tapes.push_back(scene::compile_document_part(doc->doc.document, active,
                                                              half == ChunkHalf::Below, &cull,
@@ -6941,6 +6964,29 @@ clay_result clay_layer_eval_gradients(const clay_document* doc, clay_layer_id la
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null buffer");
     scene::Tape tape;
     clay_result r = compile_one_layer(doc, layer, &tape);
+    if (r != CLAY_OK) return r;
+    return gradients_into(tape, backend, points_xyz, count, out_gradients_xyz);
+}
+
+clay_result clay_eval_points_excluding(const clay_document* doc, clay_layer_id excluded,
+                                       const char* backend, const float* points_xyz, size_t count,
+                                       float* out_distances, float* out_colors_rgb) {
+    if (!doc || !points_xyz || !out_distances)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null buffer");
+    scene::Tape tape;
+    clay_result r = compile_document_without(doc, excluded, &tape);
+    if (r != CLAY_OK) return r;
+    return eval_into(tape, backend, points_xyz, count,
+                     eval::PointResults{out_distances, nullptr, out_colors_rgb});
+}
+
+clay_result clay_eval_gradients_excluding(const clay_document* doc, clay_layer_id excluded,
+                                          const char* backend, const float* points_xyz,
+                                          size_t count, float* out_gradients_xyz) {
+    if (!doc || !points_xyz || !out_gradients_xyz)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null buffer");
+    scene::Tape tape;
+    clay_result r = compile_document_without(doc, excluded, &tape);
     if (r != CLAY_OK) return r;
     return gradients_into(tape, backend, points_xyz, count, out_gradients_xyz);
 }
@@ -12390,6 +12436,69 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
     return resumed_count;
 }
 }  // namespace
+
+// The brick refill WITHOUT one layer (#378), for a host drawing a transaction's
+// preview beside the rest of the document.
+//
+// TAKES NO SEED AND LEAVES NONE, which is the whole reason this is its own
+// function rather than a flag on the one below. A seed is a brick's value for
+// THIS document, and the resume arithmetic continues it with the items the
+// document has gained since. A value computed without one of the document's
+// layers is not that, and storing it would hand the next whole-document refill
+// a seed that is missing a layer — silently, because a seeded answer is
+// bit-identical to a walked one by contract and there is nothing in the values
+// to notice it by. So this path is a plain batched walk: correct, and priced
+// like the first dab of a stroke rather than the tenth.
+//
+// That is affordable for what it is for. A host takes this ONCE per gesture —
+// the layers it excludes are static while the artist drags — and composes the
+// result with its own live preview per frame.
+clay_result clay_brick_cache_eval_requests_excluding(
+    const clay_document* doc, clay_layer_id excluded, const char* backend,
+    const clay_brick_request* requests, size_t count, float* out_values,
+    size_t values_capacity, float* out_colors_rgb, size_t colors_capacity) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (count > 0 && (!requests || !out_values))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null requests or values");
+    clay_result r = check_batch("brick requests", count);
+    if (r != CLAY_OK) return r;
+    // Checked even for an empty batch, so a stale layer id is reported at the
+    // call that carries it rather than at whichever later call happens to be
+    // the first with work in it.
+    if (!doc->doc.document.find_layer(excluded))
+        return fail(CLAY_ERROR_NOT_FOUND,
+                    "no layer " + std::to_string(excluded) + " to exclude: excluding a layer the "
+                    "document does not hold would evaluate the whole document");
+    if (count == 0) {
+        if (values_capacity != 0 || colors_capacity != 0)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "no requests, but a non-empty buffer");
+        return CLAY_OK;
+    }
+    eval::GridQuery first;
+    std::size_t per = 0;
+    r = read_grid(requests[0].origin, requests[0].spacing, requests[0].dims, &first, &per);
+    if (r != CLAY_OK) return r;
+    r = exact_capacity("brick values", count, per, values_capacity);
+    if (r != CLAY_OK) return r;
+    r = optional_capacity("brick colours", out_colors_rgb, count, per * 3, colors_capacity);
+    if (r != CLAY_OK) return r;
+    r = check_uniform_dims(requests, count);
+    if (r != CLAY_OK) return r;
+    const char* name = backend ? backend : "cpu";
+    eval::Backend* b = eval::Registry::instance().find(name);
+    if (!b) return fail(CLAY_ERROR_NOT_FOUND, std::string("backend not registered: ") + name);
+    return eval_requests_in_chunks(
+        doc, requests, count,
+        [&](const eval::GridBatchQuery& bq, std::size_t base) -> clay_result {
+            if (b->eval_grid_batch(
+                    bq, out_values + base * per,
+                    out_colors_rgb ? out_colors_rgb + base * per * 3 : nullptr) !=
+                eval::Status::Ok)
+                return fail(CLAY_ERROR_BACKEND, "eval_grid_batch failed");
+            return CLAY_OK;
+        },
+        ChunkHalf::Except, excluded);
+}
 
 clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char* backend,
                                            const clay_brick_request* requests, size_t count,

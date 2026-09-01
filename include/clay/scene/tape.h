@@ -336,6 +336,28 @@ Tape compile_document_part_resumable(const Document& doc, LayerId active, bool b
                                      const CullRegion* cull, const CullIndex* index,
                                      TapeCheckpoint* out_checkpoint);
 
+// The OTHER pairing: every visible SDF layer EXCEPT `excluded`, wherever it
+// sits in the stack. `compile_document_part`'s `below` STOPS at the named layer
+// and so drops everything above it too; this one skips it and keeps walking.
+// With `compile_document_part(doc, excluded, /*below=*/false)` it sums to the
+// whole document under the same hard union — which is what a host previewing
+// one layer needs in order to draw the rest of the document beside it (#378).
+//
+// Culls under the WHOLE DOCUMENT's pad, exactly as the other parts do and for
+// the same reason: a part compiled under its own smaller pad drops items the
+// whole-document compile keeps, and the parts then no longer sum to the whole.
+//
+// A layer that is hidden, is not an SDF layer, or is not in the document is
+// already contributing nothing, so excluding it is an ordinary compile of every
+// visible SDF layer rather than an error. Whether a CALLER meant that is the C
+// ABI's question, where the caller's intent is known.
+//
+// No checkpoint and no resumable form: a checkpoint names the layer a suffix
+// continues, and the one layer this compile does not hold is the one it was
+// given.
+Tape compile_document_except(const Document& doc, LayerId excluded,
+                             const CullRegion* cull = nullptr, const CullIndex* index = nullptr);
+
 bool compile_layer_suffix(const TapeCheckpoint& checkpoint, const Document& doc,
                           const std::vector<NodeId>& appended, Tape* out,
                           TapeCheckpoint* out_checkpoint, const CullRegion* cull = nullptr,
