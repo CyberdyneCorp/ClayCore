@@ -729,12 +729,29 @@
       `examples/69_shared_brush_runtime.py` exits 0 and leaves
       `git status examples/` empty, so it reproduces its committed PNG and
       `.obj` byte for byte
-- [x] 11.6 THE PR, opened against `main`. The branch is the BOTTOM of a
-      three-branch stack cut from a44b1f5 — 0.75.0 here, 0.76.0 on
-      `feat/mesh-sculpt-layers`, 0.77.0 on `feat/extreme-poly-runtime` — so it
-      rebases onto `main` directly and the other two rebase onto it, in that
-      order. Merging out of order means re-assigning ABI minors, which is the
-      one conflict in this repository that is expensive to resolve
+- [x] 11.6 THE PR, opened against `main` — #419.
+      THE STACK IS NOT IN THE ORDER IT WAS PLANNED IN, measured after opening
+      it rather than assumed from the plan. The branch was cut from a44b1f5 as
+      the BOTTOM of three — 0.75.0 here, 0.76.0 on `feat/mesh-sculpt-layers`,
+      0.77.0 on `feat/extreme-poly-runtime` — and `feat/mesh-sculpt-layers`
+      merged FIRST, as #417. `main` is 1c230df4 at 0.76.0, so this branch's
+      number is BEHIND main rather than ahead of it and GitHub reports the PR
+      CONFLICTING. No CI has run and none will until that is resolved
+- [ ] 11.7 THE REBASE ONTO `main` AT 1c230df4 OR LATER.
+      not attempted, and deliberately not: it turns on an ABI minor that is not
+      this stage's to assign. `git merge-tree` names exactly five conflicting
+      files and nothing in the engine — the three version literals,
+      `examples/run_all.py` (main now has `examples/69_mesh_sculpt_layers.py`,
+      so this change's example, its two committed outputs, its docs/07 link and
+      the gallery manifest all renumber), and `docs/09`, where both branches
+      appended to one section and both paragraphs should be kept. 0.77.0 is
+      still assigned to `feat/extreme-poly-runtime`, which has not merged, so
+      taking it moves the collision rather than resolving it: the next free
+      number depends on which of the two lands first. The three golden `.inc`
+      files are untouched on both sides. Every gate in section 11.5 was measured
+      against a44b1f5 and has to be re-run afterwards — in particular the
+      example's byte-identical render, which is a determinism claim about a file
+      the rebase renames
 
 ## Files
 
