@@ -78,6 +78,8 @@ add_library(claycore
   src/mesh/lattice.cpp
   src/mesh/sculpt.cpp
   src/mesh/sculpt_kernels.cpp
+  src/mesh/brush_arena.cpp
+  src/mesh/stamp_frame.cpp
   src/mesh/brush_model.cpp
   src/mesh/automask.cpp
   src/mesh/dynamic_surface.cpp
