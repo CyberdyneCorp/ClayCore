@@ -55,9 +55,19 @@ Rake, chisel, clay strips, a directional scratch and a rotated alpha SHALL be ex
 
 The stamp's azimuth SHALL be part of the brush's settings, so that a stroke resolver which knows the direction of travel can orient the stamp without any verb knowing that it did.
 
+The azimuth SHALL be carried by the brush preset format, at a schema version, as part of the brush's identity rather than of where a stamp landed. Nothing resolves an azimuth from a stroke's direction of travel yet, so a preset is the only place an artist can put one, and a library that dropped it would give a turned brush back unturned — the failure a version number exists to prevent. A record written by an earlier schema SHALL still load, taking the unrotated default it was in fact saved with.
+
 #### Scenario: A directional family needs no engine path
 - **WHEN** a directional preset is applied
 - **THEN** it resolves to an azimuth on the shared stamp frame over an existing kernel, and no kernel exists whose only caller is that family
+
+#### Scenario: A turned brush stays turned across the format
+- **WHEN** a preset carrying a non-default azimuth is serialized and read back
+- **THEN** it reports the same azimuth, and a preset carrying the default reports an exact positive zero
+
+#### Scenario: A record from the earlier schema still loads
+- **WHEN** a preset record written before the azimuth was carried is read
+- **THEN** it loads with the unrotated default rather than being refused, while a record that is also truncated is still refused
 
 ### Requirement: A host can budget the memory a stroke's scratch will ask for
 The library SHALL report, per sculptor, the capacity its scratch arena currently holds, the largest it has ever held, and how many times it has grown.

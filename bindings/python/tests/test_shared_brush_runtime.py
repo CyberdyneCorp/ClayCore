@@ -20,6 +20,7 @@
 # descriptor, the two suites would disagree and one of them would say so.
 
 import gc
+import math
 
 import numpy as np
 import pytest
@@ -606,3 +607,67 @@ def test_an_automasked_stamp_is_deterministic():
         return np.array(mesh.positions, np.float32).tobytes()
 
     assert run() == run()
+
+
+# -- the azimuth crosses the preset format ------------------------------------
+#
+# THE ONE PLACE AN ARTIST CAN PUT AN AZIMUTH AND KEEP IT. Nothing in `brush`
+# resolves the azimuth from a stroke's direction of travel yet, so a rotated
+# chisel is not something the stroke engine derives — it is something a person
+# sets on a brush and saves. `BrushPreset` is that file format, and until this
+# change it wrote every other identity field and stopped one short of this one.
+#
+# It is gated from Python as well as from C++ because this is the surface a host
+# actually saves a library through: `pyclay_module.cpp` binds `serialize` and
+# `deserialize` and, before these three cases, no Python test touched
+# `BrushPreset` at all — the whole format was reachable from the wheel and
+# ungated in it.
+
+
+def test_preset_carries_the_stamp_azimuth_across_bytes():
+    """A turned brush comes back turned.
+
+    Every preset in the reference library has an azimuth of zero, so a
+    round-trip over the library cannot see a field the format never writes. A
+    non-default value is the only value that distinguishes carrying it from
+    dropping it.
+    """
+    preset = clay.BrushPreset.by_name("Standard")
+    preset.settings.stamp_azimuth = 0.75
+
+    back = clay.BrushPreset.deserialize(preset.serialize())
+    assert back.settings.stamp_azimuth == 0.75
+    # And the rest of the record is unmoved: an appended field that had shifted
+    # the earlier ones would show up here rather than as a wrong azimuth.
+    assert back.name == preset.name
+    assert back.settings.strength == preset.settings.strength
+
+
+def test_preset_default_azimuth_survives_as_an_exact_zero():
+    """Zero is the value the engine branches on, so it has to come back exact.
+
+    `make_stamp_frame` returns the unrotated basis without evaluating the
+    rotation when the azimuth is zero, and that branch is a correctness rule
+    rather than an optimisation (design D5). A round trip that gave back -0.0 or
+    a denormal would take the rotation path on a brush nobody turned.
+    """
+    for preset in clay.BrushPreset.library():
+        back = clay.BrushPreset.deserialize(preset.serialize())
+        assert back.settings.stamp_azimuth == 0.0
+        # `math.copysign` rather than `== 0.0`, which -0.0 also satisfies.
+        assert math.copysign(1.0, back.settings.stamp_azimuth) == 1.0
+
+
+def test_preset_refuses_a_newer_schema_rather_than_reading_a_prefix():
+    """The version gate, from the side a host meets it.
+
+    A newer layout read as this one gives a brush that is not the brush somebody
+    saved, which is worse than an error because it looks like it worked. The
+    binding turns that refusal into an exception rather than a default-built
+    preset.
+    """
+    assert clay.BrushPreset.version >= 2  # the azimuth's own version
+    data = bytearray(clay.BrushPreset.by_name("Standard").serialize())
+    data[4] = clay.BrushPreset.version + 1
+    with pytest.raises(ValueError):
+        clay.BrushPreset.deserialize(bytes(data))

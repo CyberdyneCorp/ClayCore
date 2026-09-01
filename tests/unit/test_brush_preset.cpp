@@ -7,6 +7,7 @@
 
 #include <doctest/doctest.h>
 
+#include <cmath>
 #include <set>
 #include <string>
 #include <vector>
@@ -159,4 +160,78 @@ TEST_CASE("brush presets: no image bytes cross the format") {
     REQUIRE(back.has_value());
     CHECK(back->settings.alpha == nullptr);
     CHECK_FALSE(back->settings.has_alpha());
+}
+
+// -- the azimuth crosses the format (add-shared-brush-runtime) ----------------
+//
+// THE HOLE THIS CLOSES, stated as the hole rather than as the fix. Every
+// reference preset has `stamp_azimuth == 0`, so the round-trip case above
+// walks the whole library and cannot see a field that is never written: a
+// preset carrying the default round-trips to the default whether the schema
+// knows about it or not. That is how `stamp_azimuth` reached
+// `MeshBrushSettings`, reached the C ABI, reached Python, and did not reach the
+// one format an artist would save it in.
+//
+// The test therefore sets a NON-DEFAULT azimuth, which is the only value that
+// distinguishes a schema that carries it from one that silently drops it.
+TEST_CASE("brush presets: a turned brush stays turned across the format") {
+    BrushPreset p = *brush::reference_preset("Standard");
+    // Exactly representable, so the comparison below is `==` and not an
+    // approximation: a format that loses the field gives 0, and a format that
+    // rounds it is a different defect worth seeing separately.
+    p.settings.stamp_azimuth = 0.75f;
+
+    const std::vector<std::uint8_t> bytes = p.serialize();
+    const std::optional<BrushPreset> back = BrushPreset::deserialize(bytes.data(), bytes.size());
+    REQUIRE(back.has_value());
+    CHECK(back->settings.stamp_azimuth == 0.75f);
+
+    // And the default survives as the default rather than as a NaN or a
+    // reinterpreted neighbour — the azimuth is the one field the engine
+    // BRANCHES on at exactly zero (design D5), so a round trip that returned
+    // -0.0f or 1e-45f would take the rotation path on a brush nobody turned.
+    BrushPreset unturned = *brush::reference_preset("Standard");
+    const std::vector<std::uint8_t> plain = unturned.serialize();
+    const std::optional<BrushPreset> plain_back =
+        BrushPreset::deserialize(plain.data(), plain.size());
+    REQUIRE(plain_back.has_value());
+    CHECK(plain_back->settings.stamp_azimuth == 0.0f);
+    CHECK_FALSE(std::signbit(plain_back->settings.stamp_azimuth));
+}
+
+// The other half of a version bump, and the half that is easy to skip because
+// version 1 was the only version this format had ever had: the header promises
+// deserialize "accepts this version and any earlier one, taking defaults for
+// whatever the older schema did not carry", and until now nothing could check
+// it. A version-1 record is a version-2 record without its last four bytes.
+TEST_CASE("brush presets: a version-1 record still loads, at the default azimuth") {
+    BrushPreset p = *brush::reference_preset("Rake");
+    p.settings.stamp_azimuth = 1.25f;
+
+    std::vector<std::uint8_t> v1 = p.serialize();
+    REQUIRE(v1.size() > 6 + sizeof(float));
+    // Take the appended field away and say so in the version, which is exactly
+    // what a library saved by the previous build holds.
+    v1.resize(v1.size() - sizeof(float));
+    v1[4] = 1;
+    v1[5] = 0;
+
+    const std::optional<BrushPreset> back = BrushPreset::deserialize(v1.data(), v1.size());
+    REQUIRE(back.has_value());
+    // The default, not the 1.25f the newer record carried and not a refusal:
+    // an unrotated basis is what a version-1 preset was in fact saved with.
+    CHECK(back->settings.stamp_azimuth == 0.0f);
+    // Everything version 1 DID carry is unaffected — a truncation that shifted
+    // the earlier fields would show up here rather than as a missing azimuth.
+    CHECK(back->name == p.name);
+    CHECK(back->model.verb == p.model.verb);
+    CHECK(back->model.frame == p.model.frame);
+    CHECK(back->settings.strength == p.settings.strength);
+    CHECK(back->settings.automask.factors == p.settings.automask.factors);
+
+    // A version-1 record that is ALSO short of its own fields is still refused.
+    // The version gate must not become a way to smuggle a truncated buffer past
+    // the `r.ok` check.
+    for (std::size_t cut = 8; cut < v1.size(); cut += 5)
+        CHECK_FALSE(BrushPreset::deserialize(v1.data(), cut).has_value());
 }

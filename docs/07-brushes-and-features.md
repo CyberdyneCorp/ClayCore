@@ -2014,6 +2014,14 @@ reading a prefix of it, and **carries no image bytes**: an alpha stays
 caller-owned and borrowed for the call, so a preset is a couple of hundred
 bytes and a host owns its own resource cache.
 
+**v2 appends the stamp azimuth.** The azimuth is what turns Rake, Chisel and a
+rotated alpha, and nothing in the stroke engine derives it from the direction of
+travel yet — so a preset is the only place an artist can put one, and v1 wrote
+every other identity field and stopped one short of this one. A v1 record still
+loads and takes the unrotated default, which is what it was in fact saved with;
+a v2 record read by a v1 build is refused rather than reinterpreted, which is
+the whole reason the number is there.
+
 ### Automasking
 
 The gates a brush applies to itself — normal angle, topology connectivity,
