@@ -317,3 +317,26 @@
 - [ ] 17.4 LOCAL CHECKPOINTS for Smooth, so `begin()` stops being O(model).
       Deliberately after the benchmark, not before it — see `design.md` on why
       a local patch was not the P0. The benchmark that decides it now exists
+
+- [x] 17.5 WHAT A COMMIT COSTS THE MARCHER, said and gated (issue #379). The
+      layer that comes back is one sampled volume, and `kernel::cfi_volume`
+      declares `sqrt(3) * max(sample_lipschitz, 1)` for one — so a layer's
+      safe step scale falls from 1.0 to 0.577 and the sphere trace takes 7.1
+      steps a ray parametric, 22.9 consolidated at the SAME shape, and 33.8
+      after a committed Smooth — most of it the lattice, the rest the relax. Stated on `clay_sdf_smooth_commit` and in
+      `docs/05-claycore-library.md` beside the CPU-only bake statement, with the
+      consequence a host cares about: a renderer with a FIXED step budget draws
+      a committed Smooth worse than the parametric layer it replaced, and two
+      renderers with different budgets disagree about the same document. Pinned
+      by `tests/unit/test_sdf_sculpt.cpp` ("a commit lands at the ceiling a
+      sampled volume declares"), which also records that a
+      `min_safe_step_scale` above `1/sqrt(3)` is unsatisfiable.
+
+      AND THE COVERAGE GAP UNDER IT. The backend raycast comparison ran over one
+      scene — a sphere and a box, both 1-Lipschitz, ~9 steps a ray — so no
+      backend was ever compared on a march through a sampled volume, here or in
+      the Swift device suite, which has no raycast at all. `test_parity.cpp` now
+      raycasts a layer smoothed and COMMITTED through the real transaction as
+      well, with teeth on the step scale and on the step count so the second
+      scene cannot degrade into a second easy one. Verified against a real
+      device backend locally (Vulkan/lavapipe), not only the CPU
