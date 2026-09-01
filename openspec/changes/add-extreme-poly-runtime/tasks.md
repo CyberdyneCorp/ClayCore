@@ -11,15 +11,20 @@
 - [ ] 1.1 DECIDE the chunk size from a benchmark matrix over 64, 128, 256, 512
       and 1024 triangles per leaf, measuring query cost, false-positive touched
       vertices, normal recompute, upload size, locality and topology mutation
-      cost. Do not adopt a number from prior art without running it here
-- [ ] 1.2 DECIDE where the memory profile lives — a new `memory` module with a
+      cost. Do not adopt a number from prior art without running it here.
+      NOT ticked by the design stage: design.md D2 fixes the matrix, the six
+      measured quantities and the decision rule for reading them, and leaves
+      the NUMBER to the benchmark. Ticking this on an unrun benchmark is the
+      failure the task was written against. Null hypothesis to beat: 256/64/512,
+      `DynamicBvhOptions`'s current and unmeasured defaults
+- [x] 1.2 DECIDE where the memory profile lives — a new `memory` module with a
       layering entry, or `io` beside the existing report. `parallel` is the
       precedent for a new leaf module; `io::MemoryReport` is the precedent for
       the type
-- [ ] 1.3 DECIDE whether the interactive budget is a hint or a contract, per
+- [x] 1.3 DECIDE whether the interactive budget is a hint or a contract, per
       deferrable item. Deferring exact normals during a drag is safe; deferring
       a topology decision changes the committed result and is not
-- [ ] 1.4 DECIDE how much residency policy the engine owns. A host that must
+- [x] 1.4 DECIDE how much residency policy the engine owns. A host that must
       ask before every level switch is a bad API; an engine that evicts on its
       own is a document mutating behind a host that may be mid-save
 

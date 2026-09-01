@@ -62,6 +62,10 @@ and a GPU-authoritative surface trades all four for a frame.
 
 ## Open questions
 
+All four are settled in `design.md` (D2, D3, D5, D4 in that order),
+except the NUMBER in the first: the experiment and the rule for reading it are
+decided, the measurement is not yet run.
+
 - **Chunk size.** Somewhere between 64 and 1024 triangles by every prior art;
   the number comes from a benchmark matrix on this library's own workloads and
   not from a citation.
