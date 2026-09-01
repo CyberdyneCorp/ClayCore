@@ -340,6 +340,51 @@ The document tree the app and specs already define, owned here so every consumer
 
 `clay::brick`: sparse virtual grid of 8³/16³ bricks, fp16 narrow band (±3 voxels), dirty-set tracking, async-friendly (evaluation requests are plain data; the app owns threading/queues via the backend), LOD mip bricks for far view.
 
+### Warming a cold brick window off the interaction thread
+
+The resumable refill made a dab flat in document size — but only for bricks that
+already carry a seed. **A brick with no seed still walks the whole surviving
+edit list**, and that cost follows the size of the sculpt. That is what is left
+of #306, and it is a *tail* problem rather than a median one. A moving stroke on
+a worked sphere, 24 dabs, dabs spread evenly:
+
+| items | resumed / refilled | median dab | **worst dab** |
+|---:|---|---:|---:|
+| 1,000 | 888 / 96 | 0.290 ms | 3.96 ms |
+| 5,000 | 888 / 96 | 0.170 ms | 12.02 ms |
+| 20,000 | 888 / 96 | 0.157 ms | 45.15 ms |
+| 50,000 | 888 / 96 | **0.155 ms** | **113.31 ms** |
+
+90% of bricks resume, the median is flat across 50x the document, and the worst
+dab scales linearly — because a moving brush keeps reaching ground it has not
+covered. Where a cold window's time goes, at 50,000 items: the cull index 2.9
+ms, compiling twelve culled tapes 18.7 ms, and **evaluating them 68.4 ms**,
+already spread over ~11 of 12 cores. There is no parallelism left to win and no
+constant to shave: a brick dilated by its band and the chain pad genuinely
+overlaps 8,126 of the 50,000 dabs, and an exact answer has to evaluate them.
+
+**So move it, rather than make it cheaper.** The seed store belongs to the
+*document*, not to a cache or a thread, and
+`clay_brick_cache_eval_requests` is free-threaded against a const document. So a
+worker can pay the cold walk and leave seeds the interaction thread resumes
+from. Measured on the same 50,000-item document and the same twelve bricks:
+
+| | interaction thread pays |
+|---|---:|
+| no warming | **107.99 ms** |
+| the window warmed on a worker first | **0.004 ms** |
+
+with the values **bit-identical** and `resumed_bricks` confirming the fast path
+fired. That last part is the half worth testing rather than assuming: a prefetch
+returning "close enough" values would put a silent correctness bug inside a
+performance feature.
+
+**What it costs is an edit.** The warming refill is only safe while the document
+is not being mutated, so it belongs at pointer-down, between strokes, or on a
+camera move — not between the dabs of a live stroke, where every dab is a
+mutating call. A host that warms the neighbourhood a brush is about to enter
+pays for it once, before the stroke that needs it.
+
 ### An intersect is bounded by its layer
 
 `item_influence_bound` reported `Everything` for any op that is not local, and
