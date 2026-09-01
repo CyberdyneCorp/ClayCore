@@ -306,6 +306,31 @@ std::size_t LayeredMultiresSculptor::smooth_detail(const MeshBrushSettings& sett
     return moved;
 }
 
+void LayeredMultiresSculptor::form_shift(const Adjacency& adjacency,
+                                         const std::vector<kernel::cfloat3>& form,
+                                         float strength,
+                                         std::vector<kernel::cfloat3>* shift) const {
+    shift->assign(region_.size(), kernel::cf3(0, 0, 0));
+    for (std::size_t i = 0; i < region_.size(); ++i) {
+        const std::uint32_t v = region_[i].vertex;
+        if (v >= form.size()) continue;
+        std::size_t ring_count = 0;
+        const std::uint32_t* ring = adjacency.ring(adjacency.class_of(v), &ring_count);
+        kernel::cfloat3 sum = kernel::cf3(0, 0, 0);
+        std::size_t count = 0;
+        for (std::size_t k = 0; k < ring_count; ++k) {
+            std::size_t members = 0;
+            const std::uint32_t n = adjacency.members(ring[k], &members)[0];
+            if (n >= form.size()) continue;
+            sum = sum + form[n];
+            ++count;
+        }
+        if (count == 0) continue;
+        const float t = std::clamp(region_[i].weight * strength, 0.0f, 1.0f);
+        (*shift)[i] = (sum / static_cast<float>(count) - form[v]) * t;
+    }
+}
+
 std::size_t LayeredMultiresSculptor::smooth_form(const MeshBrushSettings& settings,
                                                  const field::MaskGate& gate) {
     const std::uint32_t level = surface_.sculpt_level();
@@ -324,30 +349,8 @@ std::size_t LayeredMultiresSculptor::smooth_form(const MeshBrushSettings& settin
     const std::vector<kernel::cfloat3>& form =
         level == 0 ? surface_.positions_at(level) : surface_.subdivided_at(level);
 
-    // EVERY SHIFT IS COMPUTED BEFORE ANY IS WRITTEN. At level 0 the array being
-    // read IS the array a write moves, so a fused loop would be a Gauss-Seidel
-    // sweep whose result depends on the order the region sits in — the same
-    // rule `SculptWorkset` states for positions, and the same reason.
-    std::vector<kernel::cfloat3> shift(region_.size(), kernel::cf3(0, 0, 0));
-    for (std::size_t i = 0; i < region_.size(); ++i) {
-        const std::uint32_t v = region_[i].vertex;
-        if (v >= form.size()) continue;
-        const std::uint32_t cls = adjacency.class_of(v);
-        std::size_t ring_count = 0;
-        const std::uint32_t* ring = adjacency.ring(cls, &ring_count);
-        kernel::cfloat3 sum = kernel::cf3(0, 0, 0);
-        std::size_t count = 0;
-        for (std::size_t k = 0; k < ring_count; ++k) {
-            std::size_t members = 0;
-            const std::uint32_t n = adjacency.members(ring[k], &members)[0];
-            if (n >= form.size()) continue;
-            sum = sum + form[n];
-            ++count;
-        }
-        if (count == 0) continue;
-        const float t = std::clamp(region_[i].weight * settings.strength, 0.0f, 1.0f);
-        shift[i] = (sum / static_cast<float>(count) - form[v]) * t;
-    }
+    std::vector<kernel::cfloat3> shift;
+    form_shift(adjacency, form, settings.strength, &shift);
 
     std::size_t moved = 0;
     for (std::size_t i = 0; i < region_.size(); ++i) {

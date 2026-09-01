@@ -459,6 +459,14 @@ class SculptLayerStack {
     static constexpr std::uint32_t kMaxNameBytes = 1u << 16;
 
    private:
+    // One level of `merge_down`, and the union of the two layers' coverages it
+    // walks. Both are indices rather than ids: `merge_down` has already
+    // resolved them and a second lookup could not fail differently.
+    void merge_level(std::size_t upper, std::size_t lower, std::uint32_t level, float upper_factor,
+                     float lower_factor);
+    void merge_blocks(std::size_t upper, std::size_t lower, std::uint32_t level,
+                      std::vector<std::uint32_t>* blocks) const;
+
     struct LevelDirty {
         std::vector<std::uint32_t> blocks;
         std::vector<char> mark;
