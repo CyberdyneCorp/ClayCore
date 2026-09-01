@@ -274,3 +274,90 @@ TEST_CASE("memory: the C ABI reports no transient memory, whatever you paint") {
     CHECK(r.transient == 0);
     CHECK(sum_of_parts(r) == r.total);
 }
+
+// -- what a stroke costs the history (#242) ---------------------------------
+//
+// `unify-the-undo-history` put a recording channel at `VoxelGrid::set`, the
+// choke point every voxel verb funnels through, and it appends per cell CHANGED
+// rather than per cell touched. #242 asked for the number a stroke costs,
+// because `add-history-budget` has to choose a default from a measurement
+// rather than a guess, and a session journals with no cap.
+//
+// Measured on an M-series Mac at brush size 8, dabs one diameter apart so every
+// one lands on ground the stroke has not covered:
+//
+//     journal    2,386 bytes per dab     (16 per changed cell)
+//     undo       2,930 bytes per dab
+//     TOTAL      5,300 bytes per dab  -> a 512-dab stroke is 2.7 MB
+//
+// Flat across 32, 128 and 512 dabs to within 1%: nothing amortises, which is
+// what "no cap" means in practice.
+//
+// THOSE FIGURES ARE PUBLISHED HERE AND NOT ASSERTED, for this file's own reason
+// — an absolute byte count is not portable, and "a stroke is 5,300 bytes" would
+// fail on another standard library for no defect. What IS assertable is the
+// SHAPE, and the shape is the whole of the budget question: the cost is linear
+// in the dabs, so it is bounded only by how long somebody sculpts.
+TEST_CASE("memory: a stroke's history cost is linear in the dabs it changes") {
+    auto stroke_bytes = [](int dabs) {
+        Doc doc;
+        clay_layer_id vox = 0;
+        clay_voxel_grid* g = doc.add_voxels("stroke", &vox);
+        REQUIRE(clay_document_enable_undo(doc.d) == CLAY_OK);
+
+        clay_brush_params b{};
+        b.struct_size = sizeof(b);
+        b.size = 8;
+        b.shape = CLAY_BRUSH_SHAPE_SPHERE;
+        b.falloff = CLAY_BRUSH_FALLOFF_SMOOTH;
+        b.strength = 1.0f;
+        b.seed = 1;
+        // One brush diameter apart, so each dab reaches cells the last did not
+        // and the journal records something. A stroke that walks back over its
+        // own ground changes no occupancy and journals nothing — which is a
+        // real property of the mechanism, and the reason the device harness's
+        // wrapping walk under-exercises this path.
+        for (int i = 0; i < dabs; ++i) {
+            std::int32_t c[3] = {static_cast<std::int32_t>((i % 40) * 9 - 180),
+                                 static_cast<std::int32_t>(((i / 40) % 40) * 9 - 180),
+                                 static_cast<std::int32_t>((i / 1600) * 9)};
+            REQUIRE(clay_voxel_set_brush(g, c, &b, 1) == CLAY_OK);
+        }
+        clay_history_bytes h{};
+        h.struct_size = sizeof(h);
+        REQUIRE(clay_document_history_bytes(doc.d, &h) == CLAY_OK);
+        return h;
+    };
+
+    const clay_history_bytes small = stroke_bytes(32);
+    const clay_history_bytes large = stroke_bytes(128);
+
+    // Every dab changed something, so every dab is an event: a stroke that
+    // journals fewer events than dabs is measuring covered ground, and the
+    // ratios below would then be comparing two nothings.
+    REQUIRE(small.journal_events == 32);
+    REQUIRE(large.journal_events == 128);
+    REQUIRE(small.journal > 0);
+
+    // FOUR times the dabs, about four times the bytes. The window is wide
+    // because a dab's changed-cell count depends on how much of its ball is
+    // already filled, which the walk above varies a little; it is far narrower
+    // than the difference between linear and bounded, which is what this
+    // exists to tell apart.
+    const double journal_ratio = static_cast<double>(large.journal) /
+                                 static_cast<double>(small.journal);
+    const double total_ratio = static_cast<double>(large.total) /
+                               static_cast<double>(small.total);
+    CAPTURE(journal_ratio);
+    CAPTURE(total_ratio);
+    CHECK(journal_ratio > 3.0);
+    CHECK(journal_ratio < 5.0);
+    CHECK(total_ratio > 3.0);
+    CHECK(total_ratio < 5.0);
+
+    // The journal is a SECOND copy beside the undo stack, which is why enabling
+    // crash recovery roughly doubles what a session holds — the header says so
+    // and nothing checked it.
+    CHECK(large.journal > large.total / 4);
+    CHECK(large.undo + large.journal == large.total);
+}
