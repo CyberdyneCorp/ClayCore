@@ -492,3 +492,46 @@ TEST_CASE("bake carries the mask into the base, and the surface stays where it w
           doctest::Approx(0.011f + 0.55f * w * 0.03f).epsilon(1e-5));
     CHECK(surface.memory().composed == 0);
 }
+
+TEST_CASE("compacting is a memory lever, not a change to the picture") {
+    // Task 5.7 leaves a host four levers instead of a cap, and `compact` is the
+    // one that costs nothing to reach for. The case beside it asserts that the
+    // bytes go down — which is also what a lever that ATE THE PASS would do.
+    // What has to hold is that the surface does not move: not immediately,
+    // where the composed cache would answer for it whatever compaction did, and
+    // not once every covered block has composed again out of what survived.
+    MultiresSurface surface = build(4);
+    const std::uint32_t level = 4;
+    const std::uint32_t vertices = surface.topology_at(level).vertex_count;
+    const SculptLayerId a = surface.add_sculpt_layer("a");
+    const SculptLayerId b = surface.add_sculpt_layer("b");
+    for (std::uint32_t v = 0; v < vertices; ++v) {
+        if (v % 3 == 0) surface.set_sculpt_layer_detail(a, level, v, lift(0.004f));
+        if (v >= 1000 && v < 1400) surface.set_sculpt_layer_detail(b, level, v, lift(-0.002f));
+        // A mask that is real over part of the layer and identity over the
+        // rest, so compaction has identity blocks to drop AND weighted ones it
+        // must not.
+        if (v % 7 == 0) REQUIRE(surface.set_sculpt_layer_mask(a, level, v, 0.6f));
+    }
+    REQUIRE(surface.set_sculpt_layer_strength(a, 0.8f));
+    REQUIRE(surface.set_sculpt_layer_strength(b, 0.45f));
+    // A whole block written back to zero, which is what actually gives
+    // compaction something to release.
+    for (std::uint32_t v = 1024; v < 2048 && v < vertices; ++v)
+        surface.set_sculpt_layer_detail(a, level, v, lift(0.0f));
+    const std::vector<cfloat3> before = surface.positions_at(level);
+    const std::size_t bytes_before = surface.memory().sculpt_layers;
+
+    surface.compact_sculpt_layers();
+    CHECK(surface.memory().sculpt_layers < bytes_before);
+    CHECK(bit_equal(before, surface.positions_at(level)));
+
+    // And the reading that matters: dial both sliders away and back so every
+    // block either layer covers is composed again from the storage compaction
+    // left behind.
+    REQUIRE(surface.set_sculpt_layer_strength(a, 0.5f));
+    REQUIRE(surface.set_sculpt_layer_strength(a, 0.8f));
+    REQUIRE(surface.set_sculpt_layer_strength(b, 0.5f));
+    REQUIRE(surface.set_sculpt_layer_strength(b, 0.45f));
+    CHECK(bit_equal(before, surface.positions_at(level)));
+}

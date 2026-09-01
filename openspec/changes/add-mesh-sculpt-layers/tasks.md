@@ -305,6 +305,19 @@
       — nothing is capped anywhere; `MultiresMemory` reports layer content apart
       from the composed cache and the comment says why a cap would be a
       correctness bug
+      — AND THE LEVER IS NOW GATED ON THE PICTURE, not only on the bytes. The
+      one case for `compact_sculpt_layers` asserted that the byte count goes
+      down, which is also what a lever that ATE THE PASS would do. `compacting
+      is a memory lever, not a change to the picture` builds two layers over a
+      five-block level with a mask that is real over part of it and identity
+      over the rest, writes a whole block back to zero so there is something to
+      release, and asserts the evaluated surface bit for bit TWICE: straight
+      after compaction, where the composed cache would answer for it whatever
+      compaction did, and again after both sliders are dialled away and back so
+      every covered block composes out of what survived. It holds — a missing
+      gate rather than a bug. PROVEN: making `compact` treat the mask as
+      rebuildable and drop it compiles, and the case then fails on the second
+      reading
 
 ## 6. Detail-aware verbs
 
