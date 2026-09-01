@@ -298,6 +298,38 @@
           compose 16.80 -> 18.02 ms; strength 5.80 -> 7.03 ms; stamp 1.66 ->
           2.16 ms — reported rather than optimised, because a host should be
           told this shape is expensive
+      — RE-MEASURED at 31 repetitions after the composition order changed, and
+      PRICED against the same binary with the sort removed, because a sort on
+      the per-block path is the kind of change that should be paid for rather
+      than assumed (load 3.8 before and 2.9 after with the sort, 3.8 and 3.4
+      without, so the two sides are comparable; P50 / P95 / P99 / max):
+
+        stamp on a LOCAL stack, 1 -> 128 layers
+          362.9 / 369.4 / 417.4 / 437.6 us  ->  375.9 / 381.5 / 381.8 /
+          381.9 us   ratio 1.04x, `layer_blocks_visited` 2898 at both ends —
+          task 5.5's gate, unmoved
+        stamp on an OVERLAPPING stack, 1 -> 128
+          364.8 / 374.0 / 404.4 / 415.8 us  ->  538.8 / 612.3 / 651.5 /
+          661.4 us   ratio 1.48x, `layer_blocks_visited` 2898 -> 14109
+        strength change, LOCAL, 1 -> 128
+          751.6 / 794.3 / 810.2 / 814.5 us  ->  1204.9 / 1216.4 / 1222.9 /
+          1225.3 us  ratio 1.60x, `blocks_recomposed` 200 at BOTH ends —
+          task 5.4's gate, unmoved
+        cold whole-level compose, LOCAL, 1 -> 128
+          15.67 / 16.04 / 16.48 / 16.57 ms  ->  16.15 / 16.56 / 17.13 /
+          17.37 ms   ratio 1.03x
+        dense, every layer over the whole level, 1 -> 16
+          compose 19.30 -> 18.65 ms; strength 5.96 -> 7.30 ms; stamp 1.76 ->
+          2.32 ms
+
+      WHAT THE SORT COSTS, P50 with it against P50 without, same box and same
+      session: 0.97x to 1.01x on every compose and stamp row, and 0.87x to
+      0.90x on the deep LOCAL strength change at 16, 64 and 128 layers — the
+      shape with the most contributors per block. Free within the noise
+      everywhere and measurably faster there; the cause is not attributed, only
+      measured. The gathered list is already in id order whenever nothing has
+      been moved, so the sort costs a scan over the layers that reach ONE
+      block.
 - [x] 5.7 Memory never silently stops recording. Report the budget and let a
       host merge, bake, delete or compact — a cap that silently stopped
       recording would leave the pass on the surface and un-dialable, which is a
