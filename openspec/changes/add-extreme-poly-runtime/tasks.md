@@ -70,13 +70,24 @@
       behalf and `MultiresSculptor` is a caller that never picks, so nothing
       ever builds one for a level. Recorded in docs/09 with the numbers; the
       fix is 3.2 rather than a tree per level
-- [ ] 3.2 An optional caller-supplied seed from the pick subsystem, validated
+- [x] 3.2 An optional caller-supplied seed from the pick subsystem, validated
       against a revision, so a stroke does not re-search a centre the host
       already picked
-      NOT DONE. `MeshBrushSettings::seed_class` is the caller-supplied half and
-      is shipped; nothing validates it against a revision, and nothing supplies
-      it on the hierarchy path — which 3.1's measurement now prices at 1.1 to
-      1.6 ms a stamp at a million level vertices
+      DONE. `MeshBrushSettings::seed_revision` carries the token
+      `MeshSculptor::seed_revision()` hands out, and a stamp falls back to the
+      scan when it does not match; `MultiresSculptor::seed_revision()` binds and
+      forwards, which is the hierarchy half. Zero means the caller claims
+      nothing, so every shipped caller keeps the bounds check it had and this
+      adds a way to be CORRECT rather than making anyone slower.
+      Writing it found the defect that made it worth more than a query: a seed
+      picked at one level and spent at another is IN BOUNDS, and
+      `geodesic_region` returns an EMPTY region when the seed is farther than
+      the radius from the centre — so a stale seed did not slightly misplace the
+      dab, it silently lost it, indistinguishable from a fully masked stroke.
+      Regression test in `test_multires_sculpt.cpp`, which spends the same stale
+      seed three ways; proven to catch its regression (with the revision
+      ignored, the stale case reports 0 moved). `stale_seeds_rejected()` is what
+      makes the rejection assertable rather than assumed
 - [x] 3.3 Local normals over the write region and its ring, with an optional
       deferral to stroke end whose FINAL state is exact
       ALREADY TRUE in `MeshSculptor` (`defer_normals` / `flush_normals` over
@@ -264,15 +275,25 @@
       `test_c_surface_chunks.cpp` and `test_surface_transport.py`. Proven to
       catch its regression: with `trim_blocked` returning false the pin cases
       fail
-- [ ] 7.7 Peak telemetry — scratch, workset, dirty chunks, topology operations
+- [x] 7.7 Peak telemetry — scratch, workset, dirty chunks, topology operations
       — reported as high-water marks for profile tuning
-      PARTIAL. `memory::PeakTelemetry` exists, observes all four as high-water
-      marks rather than averages, is asserted in `test_scratch_arena.cpp`, and
-      is what `test_extreme_poly_scaling.cpp` reads for the peak-workset half of
-      the locality gate. What is NOT done is the engine reporting into it: no
-      sculptor, no BVH and no chunk table observes anything, so a host cannot
-      read a peak it did not accumulate itself. The type and its gate are here;
-      the wiring is not
+      DONE. The type and its high-water semantics were already here; what this
+      stage added is the ENGINE reporting into it, which is what the task
+      actually asks for. Four quantities, four owners, each publishing through a
+      borrowed `PeakTelemetry*` the host sets and the engine only writes:
+      `ScratchArena::end_stamp` (before `used_` is cleared and there is nothing
+      left to report), `MeshSculptor::gather` (once the workset is FINAL, after
+      the falloff and automask drop what they drop), `ChunkTable::enter_dirty`
+      (the one place the set grows, so a chunk marked twice in an epoch counts
+      once) and `DynamicSculptor::stamp` (topology operations plus the adaptive
+      workset, from a thin wrapper so a body with several early returns has one
+      publish site). Null is the default and costs a null check.
+      `test_extreme_poly_scaling.cpp` now READS the peak the engine accumulated
+      instead of calling `observe_workset` itself, which is the difference the
+      task names, and the wiring has its own cases there and in
+      `test_dynamic_sculpt.cpp` — including that a fresh partition is entirely
+      dirty (the largest the set ever is, and what a staging buffer must hold)
+      and that a later smaller stamp does not pull a peak down
 - [ ] 7.8 Measured on the reference iPad as well as on a desktop: median and
       p95 stamp latency, footprint and peak memory, and a sustained multi-minute
       session for thermal behaviour. The device gate already exists and this

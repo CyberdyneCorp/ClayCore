@@ -465,6 +465,13 @@ if(CLAY_BUILD_BENCHMARKS)
   # The 7.1 scaling matrix with 7.2's per-stage timers. Driven by
   # tools/bench_extreme_poly.py, which records the load average either side of
   # every row and reports ratios rather than bare milliseconds.
+  # The 3.7 serial threshold: where dispatching a per-vertex pass starts to
+  # pay. Prints the load average either side of the run, because the crossover
+  # is unreadable on a box that picked up a job mid-sweep.
+  add_executable(bench_parallel_grain benchmarks/bench_parallel_grain.cpp)
+  target_link_libraries(bench_parallel_grain PRIVATE claycore)
+  clay_apply_warnings(bench_parallel_grain)
+
   add_executable(bench_extreme_poly benchmarks/bench_extreme_poly.cpp)
   target_link_libraries(bench_extreme_poly PRIVATE claycore)
   clay_apply_warnings(bench_extreme_poly)
