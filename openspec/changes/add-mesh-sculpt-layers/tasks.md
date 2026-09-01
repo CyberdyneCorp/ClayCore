@@ -138,7 +138,11 @@
       passes. Mirrored through the binding by
       `test_a_reorder_moves_no_vertex_even_after_the_blocks_recompose`, and the
       spec delta gained the scenario and the sentence that constrains the
-      summation order
+      summation order. THE PYCLAY MIRROR WAS NOT SEPARATELY REVERT-PROVEN, and
+      the record should not imply four proofs where there are three: it asserts
+      the same property as the C++ case that WAS proven, one binding layer up,
+      and proving it again would have cost a second pyclay rebuild for no new
+      information
 - [x] 3.2 A stroke on a layer at strength 0.5 records its FULL contribution.
       Strength is composition, not a scale on the pen
       — `absorb_layered_detail` stores `ΔE = frame⁻¹(P_written) − E_before`;
@@ -565,7 +569,12 @@
       simulator one under `simctl spawn` — at release time, so what this task
       asks for has still not happened. To finish: `./tools/check_swift_smoke.sh
       macos` and `./tools/check_swift_smoke.sh sim` on a machine with Xcode and
-      a booted simulator, which is the release workflow's job and not a PR's
+      a booted simulator, which is the release workflow's job and not a PR's.
+      RE-CONFIRMED at the end of the branch rather than carried forward on
+      trust: `which swift swiftc` finds neither, and
+      `./tools/check_swift_smoke.sh typecheck` reports "skipped (Apple platforms
+      only)" on this box. PR #417 has since merged, so the type-check result
+      above is on `main` and covers the section as it stands
 - [x] 8.6 THE MILESTONE, as a numbered example that renders and asserts: a
       wrinkle pass dialled 0 → 50% → 100% over a form that never changes, plus
       one layer removed with the others untouched
@@ -652,6 +661,60 @@
       `check_c_abi`, `check_binding_parity` (622 capabilities, 29 exempt,
       against the IMPORTED module), `check_gallery` (251 tracked outputs) and
       `check_swift_package` (textual) are all OK
+      RE-RUN ONE LAST TIME, on the committed tree, with the documentation pass
+      above in it. The box was carrying two sibling worktrees and unrelated
+      jobs, so the load average is recorded either side and the wall clocks
+      below are the box rather than the change:
+        cpu-only    4/4 passed, 0 failed, 2903.3 s, load 2.25 before and 99.8
+                    after — the same suite took 268.7 s earlier in the branch at
+                    load 15 and 142.5 s at load 4, so the 11x is the box.
+                    `cmake --build --preset cpu-only -j 8` exits 0 with a zero
+                    warning count under `-Werror`, and had nothing to rebuild —
+                    no source changed in this stage, so what it re-proves is the
+                    tree, not the compiler; the force-recompile of every new
+                    translation unit is the previous stage's record and is not
+                    re-claimed here. 2078 doctest cases registered;
+                    the layer / stack / multires / allocation-gate family is
+                    218 of them, 117,040 assertions, 0 failed
+        pyclay      596 passed, 20 skipped, 0 failed in 51.6 s under
+                    `LD_PRELOAD=/lib/x86_64-linux-gnu/libstdc++.so.6`
+        example     `examples/69_mesh_sculpt_layers.py` exit 0, every
+                    `SystemExit` claim held, and `git status` clean afterwards —
+                    the tracked PNG and OBJ are byte-identical, so the gallery
+                    gate needed no regeneration
+        gates       `check_layering` OK; `check_c_abi` OK in both modes
+                    (hygiene-only, and the ctypes FFI against
+                    `build/cpu-only/libclay_shared.so`, which needs the same
+                    `LD_PRELOAD` for the same reason as the wheel below);
+                    `check_binding_parity` OK in both modes at 622 capabilities
+                    and 29 exempt, parsed and against the imported module;
+                    `check_gallery` OK at 251 tracked outputs;
+                    `check_swift_package` OK (textual);
+                    `openspec validate add-mesh-sculpt-layers --strict` valid
+        release     `release_check.py` 10 PASS / 5 FAIL. `version` PASSES at
+                    cmake=0.76.0 abi=0.76.0 wheel=0.76.0, and `benchmarks` came
+                    back `bench-gate: OK` on this run — the row that failed
+                    three different ways earlier in the branch without a line of
+                    benchmark code changing, which is what "not reproducible on
+                    this box" means. The five failures are the environment's:
+                      - `tests`, `bindings`, `abi` and `wheel` are ONE root
+                        cause, and it is the interpreter rather than the branch.
+                        `/home/leonardo/anaconda3/lib/libstdc++.so.6` tops out
+                        at GLIBCXX_3.4.29 while the system GCC that builds
+                        `libclay_shared.so` emits GLIBCXX_3.4.31, which the
+                        system `/lib/x86_64-linux-gnu/libstdc++.so.6` has and
+                        anaconda's does not — checked directly rather than
+                        inferred from the message. `tests` fails on ctest job 3,
+                        `pyclay_pytest`, and nothing else (`LastTestsFailed.log`
+                        names exactly that), and that suite passes 596/0 under
+                        `LD_PRELOAD`
+                      - `device` is the hardware gate: "engine changed since the
+                        gate ran at 39c244209"
+        NOT re-run in this stage, and deliberately: `asan-ubsan` and `tsan`. The
+        previous stage ran both whole and clean on this exact source tree, and
+        this stage changed four Markdown files and nothing a sanitizer can see.
+        Re-running them would have cost two hours of a box already at load 100
+        to re-prove an unchanged binary
 - [x] 8.8 Docs: `docs/07-brushes-and-features.md` gains the stack and the
       distinction from `MeshBrush::Layer`; the README's sculpt-layer claim is
       widened from voxels to the representations that actually have them
@@ -691,3 +754,33 @@
           the voxel half; the morph-target gap re-rated, since a base
           deformation layer at level 0 is its storage; and `add-field-stamps`
           told that the tangent-space stamp vocabulary now exists to be read
+      RE-READ AFTER THE LAST THREE FIXES, because a fix that lands after the
+      documentation pass leaves the documentation describing the version that
+      was wrong. Four gaps, all of them introduced by this branch's own last
+      stage and none of them caught by a gate, since none of these documents
+      has one:
+        * `docs/09` carried the second 31-repetition table and stopped there,
+          so the sort the id-order composition put on the per-block path was
+          undocumented. It now carries the third run (P50 / P95 / P99 / max at
+          load 3.76 -> 2.86) and, more usefully, WHAT THE SORT COSTS measured
+          against the same binary with it removed: 0.97x-1.01x on every compose
+          and stamp row and 0.87x-0.90x on the deep local strength change. Both
+          counters land on their integers for the third time across runs whose
+          clocks moved by up to 2x, which is the argument for reading the
+          counter rather than the clock
+        * `docs/07` said merge and bake are defined by visual parity and left
+          the reader to assume that meant the SLIDER. It now says parity is the
+          MASK's too — the weight is folded into the coefficients and the mask
+          cleared, because one left standing applies itself twice — which is
+          the arithmetic 3.3's new cases gate
+        * `docs/07` and `docs/05` both described `compact_sculpt_layers()` by
+          what it releases, which is also how a lever that ate the pass would
+          be described. Both now say it cannot change the picture and that the
+          claim is asserted on the evaluated surface bit for bit; `docs/05`
+          separates it from merge, bake and delete on exactly that ground — a
+          host may run a compaction under pressure without asking the artist
+        * `openspec/ROADMAP.md` row 4 said reordering is organisation and not
+          geometry, which was the claim the branch found untrue in the last
+          bit. The row now says the property is ENFORCED and how: a reorder
+          invalidates no block, float addition does not associate, so the sum
+          is taken in layer-id order
