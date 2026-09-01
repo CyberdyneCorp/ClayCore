@@ -654,6 +654,50 @@ radius from the brush centre, so an unvalidated stale seed does not misplace the
 dab, it silently loses it. Passing the revision is what turns that into a scan
 and a correct stamp.
 
+BOTH BINDINGS REACH IT, which matters more here than for most of this document:
+the caller most exposed to the stale seed is a scripted one, because pyclay's
+`raycast` hands back a `seed_class` a script is meant to feed straight into the
+next `stamp`. From C the token rides on `clay_mesh_hit.seed_revision` and
+`clay_mesh_brush_desc.seed_revision`, with `clay_mesh_sculptor_seed_revision`,
+`clay_multires_sculptor_seed_revision` and
+`clay_mesh_sculptor_stale_seeds_rejected` beside them; from pyclay it is a
+`seed_revision` key in the dict `raycast` returns, a `seed_revision` keyword on
+`stamp` and `apply_stroke`, and the `seed_revision` / `stale_seeds_rejected`
+properties. Zero, and a Python `None`, mean "I claim no numbering" and leave
+every caller written before the token behaving exactly as it did.
+
+`clay_mesh_brush_desc` growing a field is also what surfaced a latent break in
+the descriptor rule, which is worth recording because it is not the kind a
+review catches: `clay_brush_preset` EMBEDS the brush descriptor, and its
+"original layout" was computed as `offsetof(brush) + sizeof(clay_mesh_brush_desc)`.
+That reads as a constant and is not one — appending to the brush moved the
+PRESET's original size with it, so the next growth of either would have refused
+every correctly-sized preset from the previous header. The constant is now
+frozen at the offset of the first field appended after the preset shipped, and
+`tests/unit/test_c_brush_preset.cpp` spends a preset declared at that size.
+
+### The peaks a host tunes a profile against, from a host
+
+Task 7.7's four high-water marks are readable from both bindings without owning
+anything: `clay_peak_telemetry` filled by `clay_mesh_sculptor_peak_telemetry`,
+`clay_multires_sculptor_peak_telemetry` and
+`clay_dynamic_sculptor_peak_telemetry` (each with a `_reset_` companion), and a
+`peak_telemetry` dict plus `reset_peak_telemetry()` on the same three pyclay
+classes.
+
+The C++ seam BORROWS a pointer the host sets, and neither binding exposes that
+borrow. A pointer that crossed the C boundary would be a lifetime a host can get
+wrong exactly once, mid-stroke, by freeing a block a stamp still writes into;
+the Python equivalent is a telemetry object the interpreter collects while a
+stroke is still running. So each handle owns its block, wires it once at
+creation, and hands out a COPY. Four stores per stamp is the whole cost.
+
+What they report today, stated rather than implied: `workset_vertices` is live
+on all three, `topology_ops` and `dirty_chunks` on the adaptive surface, and
+`scratch_bytes` is 0 from every handle because the stamp path does not consume
+the scratch arena yet — the same gap 3.1 and 3.7 name. Reporting the zero it
+measured is the honest answer; a number nothing filled would not be.
+
 ### What it costs to dispatch a dab across threads
 
 The stamp path is SERIAL, and this is the measurement that says it should stay

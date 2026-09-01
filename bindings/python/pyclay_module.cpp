@@ -630,6 +630,10 @@ struct PyMeshSculptor {
     // landing on the same vertex and index counts.
     std::uint64_t geometry_revision = 0;
     std::shared_ptr<mesh::MeshSculptor> sculptor;
+    // The peaks this session measured, OWNED HERE and pointed at once when the
+    // sculptor is built. See `peak_dict` for why a script reads a copy of this
+    // rather than being handed the block the engine writes into.
+    memory::PeakTelemetry peak;
 
     mesh::MeshSculptor& live(bool for_edit) const {
         if (!sculptor) throw std::runtime_error("this sculptor was never built");
@@ -652,6 +656,39 @@ struct PyMeshSculptor {
     }
 };
 
+// The adaptive sculptor and the hierarchy's, each owning the block its peaks
+// publish into.
+//
+// SUBCLASSED RATHER THAN WRAPPED because there is exactly one thing to add and
+// every existing member should keep meaning what it means. The engine's seam
+// borrows a pointer on purpose — a C++ host has somewhere to put the numbers
+// and may want one block for several surfaces — and the borrow is what a
+// scripting binding must not expose: a telemetry object the interpreter can
+// collect while a stroke is still writing into it is a use-after-free with a
+// stack trace nobody would connect to the object they dropped. Owning it for
+// the sculptor's whole life removes the question.
+struct PyDynamicSculptor : mesh::DynamicSculptor {
+    memory::PeakTelemetry peak;
+    explicit PyDynamicSculptor(mesh::DynamicSurface& surface) : mesh::DynamicSculptor(surface) {
+        set_telemetry(&peak);
+        // Two publishers, one block: the sculptor reports the topology
+        // operations and the workset, and its chunked index reports how deep
+        // the dirty set got. A host sizing a staging buffer needs both, and
+        // needs them measured over the same stamps.
+        bvh().chunks_mutable().set_telemetry(&peak);
+    }
+};
+
+struct PyMultiresSculptor : mesh::MultiresSculptor {
+    memory::PeakTelemetry peak;
+    explicit PyMultiresSculptor(mesh::MultiresSurface& surface)
+        : mesh::MultiresSculptor(surface) {
+        // Forwarded to whichever level is bound, including one bound later, so
+        // the peak belongs to the SESSION rather than to whichever level was
+        // bound first — a hierarchy rebinds on a level change and on a trim.
+        set_telemetry(&peak);
+    }
+};
 
 // -- the surface tier: budgets, ledgers and the chunk transport ---------------
 //
@@ -673,6 +710,25 @@ nb::dict ledger_dict(const memory::MemoryLedger& ledger) {
     out["rebuildable"] = ledger.rebuildable();
     out["undoable"] = ledger.undoable();
     out["total"] = ledger.total();
+    return out;
+}
+
+// The four high-water marks a host tunes a `SculptMemoryProfile` against.
+//
+// A SNAPSHOT rather than a live object, and that is the decision worth stating:
+// the engine's seam borrows a pointer the host owns, which is right for a C++
+// host that already has somewhere to put the numbers and wrong for a Python
+// one — a `PeakTelemetry` handed across `set_telemetry` would be a lifetime the
+// interpreter can end while a stroke is still writing into it. So the binding
+// owns the block for as long as the sculptor, and a script reads a copy. It is
+// the same shape the C ABI gives a host, which is the point: the two bindings
+// say the same thing about the same feature.
+nb::dict peak_dict(const memory::PeakTelemetry& peak) {
+    nb::dict out;
+    out["scratch_bytes"] = peak.scratch_bytes;
+    out["workset_vertices"] = peak.workset_vertices;
+    out["dirty_chunks"] = peak.dirty_chunks;
+    out["topology_ops"] = peak.topology_ops;
     return out;
 }
 
@@ -927,7 +983,8 @@ math::Aabb to_aabb(nb::handle obj);
 mesh::MeshBrushSettings mesh_brush_settings(
     const std::string& verb, nb::handle center, float radius, float strength,
     const std::string& falloff, nb::handle direction, nb::handle deposit_normal,
-    nb::handle geodesic, nb::handle seed_class, const std::string& flatten_mode,
+    nb::handle geodesic, nb::handle seed_class, nb::handle seed_revision,
+    const std::string& flatten_mode,
     nb::handle plane_point, nb::handle plane_normal, float polish_angle, int smooth_iterations,
     float layer_height, nb::handle alpha, nb::handle alpha_direction, nb::handle alpha_tangent,
     float alpha_extent, nb::handle color, mesh::MeshBrush* out_verb) {
@@ -955,6 +1012,15 @@ mesh::MeshBrushSettings mesh_brush_settings(
         geodesic.is_none() ? mesh::default_geodesic(*out_verb) : nb::cast<bool>(geodesic);
     settings.seed_class =
         seed_class.is_none() ? mesh::kNoClass : nb::cast<std::uint32_t>(seed_class);
+    // WHICH NUMBERING THAT SEED CAME FROM. None claims nothing and leaves the
+    // bounds check that was always here, which is what every caller that does
+    // not pick sends. It is worth passing whenever the class was: a seed picked
+    // in a numbering that has since been replaced is still IN BOUNDS, and the
+    // surface walk answers an empty region rather than a wrong one — so the dab
+    // is lost outright and looks exactly like a fully masked stroke.
+    settings.seed_revision = seed_revision.is_none()
+                                 ? mesh::kNoSeedRevision
+                                 : nb::cast<std::uint64_t>(seed_revision);
     settings.flatten_mode = parse_flatten_mode(flatten_mode);
     // A plane is given when EITHER half of it is, so a caller who names only the
     // normal gets the plane they meant rather than a silently ignored argument.
@@ -4600,6 +4666,10 @@ NB_MODULE(pyclay, m) {
                 self->geometry_revision =
                     pm->revisions ? revision_of(*pm->revisions, pm->layer) : 0;
                 self->sculptor = std::make_shared<mesh::MeshSculptor>(data, weld_epsilon);
+                // Pointed at the block this object owns and never re-pointed:
+                // the sculptor is built once here and `live()` refuses rather
+                // than rebuilding, so the peaks belong to the session.
+                self->sculptor->set_telemetry(&self->peak);
             },
             "mesh"_a, "weld_epsilon"_a = mesh::kDefaultWeldEpsilon,
             "`weld_epsilon` is relative to the bounding-box diagonal: vertices\n"
@@ -4618,16 +4688,17 @@ NB_MODULE(pyclay, m) {
             [](PyMeshSculptor& s, const std::string& verb, nb::handle center, float radius,
                float strength, const std::string& falloff, nb::handle direction,
                nb::handle deposit_normal, nb::handle geodesic, nb::handle seed_class,
-               const std::string& flatten_mode, nb::handle plane_point, nb::handle plane_normal,
+               nb::handle seed_revision, const std::string& flatten_mode, nb::handle plane_point,
+               nb::handle plane_normal,
                float polish_angle, int smooth_iterations, float layer_height, nb::handle alpha,
                nb::handle alpha_direction, nb::handle alpha_tangent, float alpha_extent,
                nb::handle color, nb::handle mask, nb::handle deltas) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, center, radius, strength, falloff, direction, deposit_normal, geodesic,
-                    seed_class, flatten_mode, plane_point, plane_normal, polish_angle,
-                    smooth_iterations, layer_height, alpha, alpha_direction, alpha_tangent,
-                    alpha_extent, color, &chosen);
+                    seed_class, seed_revision, flatten_mode, plane_point, plane_normal,
+                    polish_angle, smooth_iterations, layer_height, alpha, alpha_direction,
+                    alpha_tangent, alpha_extent, color, &chosen);
                 mesh::VertexDeltas* record =
                     deltas.is_none() ? nullptr : nb::cast<PyVertexDeltas*>(deltas)->deltas.get();
                 field::MaskGate gate = mask_gate_of(mask);
@@ -4637,7 +4708,8 @@ NB_MODULE(pyclay, m) {
             },
             "verb"_a, "center"_a, "radius"_a, "strength"_a = 0.5f, "falloff"_a = "smooth",
             "direction"_a = nb::none(), "deposit_normal"_a = nb::none(), "geodesic"_a = nb::none(),
-            "seed_class"_a = nb::none(), "flatten_mode"_a = "two_sided",
+            "seed_class"_a = nb::none(), "seed_revision"_a = nb::none(),
+            "flatten_mode"_a = "two_sided",
             "plane_point"_a = nb::none(), "plane_normal"_a = nb::none(), "polish_angle"_a = 0.20f,
             "smooth_iterations"_a = 1, "layer_height"_a = 0.05f, "alpha"_a = nb::none(),
             "alpha_direction"_a = nb::none(), "alpha_tangent"_a = nb::none(),
@@ -4811,7 +4883,8 @@ NB_MODULE(pyclay, m) {
             "apply_stroke",
             [](PyMeshSculptor& s, nb::handle samples, const brush::StrokePreset& preset,
                const std::string& verb, const std::string& falloff, nb::handle deposit_normal,
-               nb::handle geodesic, nb::handle seed_class, const std::string& flatten_mode,
+               nb::handle geodesic, nb::handle seed_class, nb::handle seed_revision,
+               const std::string& flatten_mode,
                nb::handle plane_point, nb::handle plane_normal, float polish_angle,
                int smooth_iterations, float layer_height, float strength, nb::handle color,
                nb::handle mask, nb::handle deltas, bool defer_normals) {
@@ -4822,9 +4895,9 @@ NB_MODULE(pyclay, m) {
                 // is its own decision — see the proposal's open question.
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, nb::none(), 1.0f, strength, falloff, nb::none(), deposit_normal, geodesic,
-                    seed_class, flatten_mode, plane_point, plane_normal, polish_angle,
-                    smooth_iterations, layer_height, nb::none(), nb::none(), nb::none(), 0.0f,
-                    color, &chosen);
+                    seed_class, seed_revision, flatten_mode, plane_point, plane_normal,
+                    polish_angle, smooth_iterations, layer_height, nb::none(), nb::none(),
+                    nb::none(), 0.0f, color, &chosen);
                 std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
                 mesh::VertexDeltas* record =
                     deltas.is_none() ? nullptr : nb::cast<PyVertexDeltas*>(deltas)->deltas.get();
@@ -4838,6 +4911,7 @@ NB_MODULE(pyclay, m) {
             },
             "samples"_a, "preset"_a, "verb"_a, "falloff"_a = "smooth",
             "deposit_normal"_a = nb::none(), "geodesic"_a = nb::none(), "seed_class"_a = nb::none(),
+            "seed_revision"_a = nb::none(),
             "flatten_mode"_a = "two_sided", "plane_point"_a = nb::none(),
             "plane_normal"_a = nb::none(), "polish_angle"_a = 0.20f, "smooth_iterations"_a = 1,
             "layer_height"_a = 0.05f, "strength"_a = 1.0f, "color"_a = nb::none(),
@@ -4883,6 +4957,7 @@ NB_MODULE(pyclay, m) {
                 out["u"] = hit.u;
                 out["v"] = hit.v;
                 out["seed_class"] = live.adjacency().class_of(mm.indices[hit.triangle * 3]);
+                out["seed_revision"] = live.seed_revision();
                 return nb::object(out);
             },
             "origin"_a, "direction"_a, "position"_a = nb::none(), "rotation_axis"_a = nb::none(),
@@ -4895,7 +4970,48 @@ NB_MODULE(pyclay, m) {
             "shell means it.\n\n"
             "The dict carries `seed_class`, which is what `stamp`'s `seed_class`\n"
             "wants: it starts the surface walk where the finger did, instead of\n"
-            "scanning the whole mesh for the nearest vertex.")
+            "scanning the whole mesh for the nearest vertex — and beside it\n"
+            "`seed_revision`, which is the numbering that class was picked in.\n"
+            "Pass both back or neither. They are handed out together because a\n"
+            "class kept without its token is exactly the half nothing can\n"
+            "check: a seed from a numbering that has been replaced is still in\n"
+            "bounds, and the stamp it seeds reports 0 moved rather than moving\n"
+            "the wrong thing.")
+        .def_prop_ro(
+            "seed_revision", [](PyMeshSculptor& s) { return s.live(false).seed_revision(); },
+            "The numbering this sculptor's weld classes are in — what `raycast`\n"
+            "hands back beside a `seed_class`, and what `stamp` wants in\n"
+            "`seed_revision`.\n\n"
+            "Constant for the life of the sculptor: the adjacency is built once\n"
+            "and nothing rebuilds it, so vertices moving under a stroke leave\n"
+            "the token alone and a seed stays valid across the stamps of a\n"
+            "gesture. What retires one is a NEW sculptor — and a hierarchy\n"
+            "makes one on every rebind, which is the case it exists for.")
+        .def_prop_ro(
+            "stale_seeds_rejected",
+            [](PyMeshSculptor& s) { return s.live(false).stale_seeds_rejected(); },
+            "How many stamps refused a `seed_class` because its\n"
+            "`seed_revision` did not match. The number that makes a rejection\n"
+            "OBSERVABLE: without it a script cannot tell a seed that was\n"
+            "refused from one that was taken and happened to be harmless.")
+        .def_prop_ro(
+            "peak_telemetry", [](PyMeshSculptor& s) { return peak_dict(s.peak); },
+            "The high-water marks this session has reached, for tuning a\n"
+            "`SculptMemoryProfile`: `scratch_bytes`, `workset_vertices`,\n"
+            "`dirty_chunks`, `topology_ops`.\n\n"
+            "PEAKS RATHER THAN AVERAGES, and that is what makes them worth\n"
+            "reading. A buffer sized to the vertex count, allocated once and\n"
+            "reused forever, allocates nothing on a warm stamp and costs no\n"
+            "bytes on one — it satisfies every count-based check — and it is\n"
+            "still O(model) storage. What catches it is a peak that does not\n"
+            "move between a small model and a large one at the same footprint.\n\n"
+            "`workset_vertices` is the live one here: the fixed stamp path does\n"
+            "not consume the scratch arena yet, so `scratch_bytes` reports the\n"
+            "0 it measured rather than a number nothing filled.")
+        .def(
+            "reset_peak_telemetry", [](PyMeshSculptor& s) { s.peak.reset(); },
+            "Start the high-water marks again, which is what a script does\n"
+            "between the case it is measuring and the one before it.")
         .def_prop_ro(
             "has_colors", [](PyMeshSculptor& s) { return s.live(false).has_colors(); },
             "Whether the mesh carries a vertex colour attribute, which 'paint'\n"
@@ -6922,7 +7038,7 @@ NB_MODULE(pyclay, m) {
             "The same for serialization, where the blob is a second copy of\n"
             "everything and exists while the surface still does.");
 
-    nb::class_<mesh::DynamicSculptor>(
+    nb::class_<PyDynamicSculptor>(
         m, "DynamicSculptor",
         "The brush engine over an adaptive surface: the same verbs, the same\n"
         "falloffs, the same mask, and the same deformation math — the shared\n"
@@ -6930,22 +7046,22 @@ NB_MODULE(pyclay, m) {
         "representations.\n\n"
         "The surface must outlive the sculptor.")
         .def("__init__",
-             [](mesh::DynamicSculptor* self, mesh::DynamicSurface& surface) {
-                 new (self) mesh::DynamicSculptor(surface);
+             [](PyDynamicSculptor* self, mesh::DynamicSurface& surface) {
+                 new (self) PyDynamicSculptor(surface);
              },
              "surface"_a, nb::keep_alive<1, 2>())
         .def(
             "stamp",
-            [](mesh::DynamicSculptor& self, const std::string& verb, nb::handle center,
+            [](PyDynamicSculptor& self, const std::string& verb, nb::handle center,
                float radius, float strength, const std::string& falloff,
                const mesh::DynamicTopologySettings& topology, nb::handle direction,
                nb::handle mask, bool geodesic, int smooth_iterations) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, center, radius, strength, falloff, direction, nb::none(),
-                    nb::cast(geodesic), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
-                    smooth_iterations, 0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(),
-                    &chosen);
+                    nb::cast(geodesic), nb::none(), nb::none(), "two_sided", nb::none(),
+                    nb::none(), 0.2f, smooth_iterations, 0.0f, nb::none(), nb::none(), nb::none(),
+                    0.0f, nb::none(), &chosen);
                 if (!mesh::dynamic_offers(chosen))
                     throw std::invalid_argument(
                         "an adaptive surface does not offer '" + verb +
@@ -6978,22 +7094,36 @@ NB_MODULE(pyclay, m) {
             "One stamp: remesh where the verb's timing says, deform through the\n"
             "shared kernels, recompute the normals of what moved, and keep the\n"
             "chunked index in step.")
-        .def("rebuild_index", &mesh::DynamicSculptor::rebuild_index,
+        .def("rebuild_index", [](PyDynamicSculptor& s) { s.rebuild_index(); },
              "Rebuild the chunked index. BETWEEN strokes, never mid-drag: a refit\n"
              "stays correct and does not stay fast, and a rebuild is not\n"
              "automatically an improvement.")
         .def_prop_ro("chunk_count",
-                     [](const mesh::DynamicSculptor& s) { return s.bvh().leaf_count(); })
+                     [](const PyDynamicSculptor& s) { return s.bvh().leaf_count(); })
         .def_prop_ro("dirty_chunks",
-                     [](const mesh::DynamicSculptor& s) {
+                     [](const PyDynamicSculptor& s) {
                          const std::vector<std::uint32_t>& d = s.bvh().dirty_leaves();
                          return std::vector<std::uint32_t>(d.begin(), d.end());
                      },
                      "The chunks the stamps since the last clear touched.")
-        .def("clear_dirty", [](mesh::DynamicSculptor& s) { s.bvh().clear_dirty(); })
+        .def("clear_dirty", [](PyDynamicSculptor& s) { s.bvh().clear_dirty(); })
+        .def_prop_ro(
+            "peak_telemetry", [](const PyDynamicSculptor& s) { return peak_dict(s.peak); },
+            "The high-water marks this sculptor has reached:\n"
+            "`scratch_bytes`, `workset_vertices`, `dirty_chunks`,\n"
+            "`topology_ops`.\n\n"
+            "The adaptive surface is the only representation that fills\n"
+            "`topology_ops`, and it is the number that decides how big the slot\n"
+            "pools have to be: a split allocates a slot, and the stamp that\n"
+            "split five hundred times is the one a pool must survive.\n"
+            "`dirty_chunks` comes from the same chunked index the transport\n"
+            "drains, so it is what a staging buffer has to hold.")
+        .def(
+            "reset_peak_telemetry", [](PyDynamicSculptor& s) { s.peak.reset(); },
+            "Start the high-water marks again.")
         .def(
             "memory_ledger",
-            [](const mesh::DynamicSculptor& s) {
+            [](const PyDynamicSculptor& s) {
                 memory::MemoryLedger ledger;
                 mesh::report_surface_memory(s, &ledger);
                 return ledger_dict(ledger);
@@ -7002,7 +7132,7 @@ NB_MODULE(pyclay, m) {
             "host under pressure can act on.")
         .def(
             "trim",
-            [](mesh::DynamicSculptor& s, memory::Pressure pressure, PyMemoryPin* pin) {
+            [](PyDynamicSculptor& s, memory::Pressure pressure, PyMemoryPin* pin) {
                 return trim_dict(
                     mesh::trim_surface(s, pressure, pin ? &pin->gate : nullptr));
             },
@@ -7339,7 +7469,7 @@ NB_MODULE(pyclay, m) {
             "copy of everything and it exists while the hierarchy still does, so\n"
             "read `peak_bytes`.");
 
-    nb::class_<mesh::MultiresSculptor>(
+    nb::class_<PyMultiresSculptor>(
         m, "MultiresSculptor",
         "The brush engine over a hierarchy: the same verbs, the same falloffs,\n"
         "the same mask and the same deformation math — the fixed sculptor run\n"
@@ -7350,22 +7480,23 @@ NB_MODULE(pyclay, m) {
         "coefficients in the transported frame above it.\n\n"
         "The surface must outlive the sculptor.")
         .def("__init__",
-             [](mesh::MultiresSculptor* self, mesh::MultiresSurface& surface) {
-                 new (self) mesh::MultiresSculptor(surface);
+             [](PyMultiresSculptor* self, mesh::MultiresSurface& surface) {
+                 new (self) PyMultiresSculptor(surface);
              },
              "surface"_a, nb::keep_alive<1, 2>())
         .def(
             "stamp",
-            [](mesh::MultiresSculptor& self, const std::string& verb, nb::handle center,
+            [](PyMultiresSculptor& self, const std::string& verb, nb::handle center,
                float radius, float strength, const std::string& falloff, nb::handle direction,
                nb::handle mask, bool geodesic, int smooth_iterations, nb::handle alpha,
-               nb::handle alpha_direction, nb::handle alpha_tangent, float alpha_extent) {
+               nb::handle alpha_direction, nb::handle alpha_tangent, float alpha_extent,
+               nb::handle seed_class, nb::handle seed_revision) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, center, radius, strength, falloff, direction, nb::none(),
-                    nb::cast(geodesic), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
-                    smooth_iterations, 0.0f, alpha, alpha_direction, alpha_tangent, alpha_extent,
-                    nb::none(), &chosen);
+                    nb::cast(geodesic), seed_class, seed_revision, "two_sided", nb::none(),
+                    nb::none(), 0.2f, smooth_iterations, 0.0f, alpha, alpha_direction,
+                    alpha_tangent, alpha_extent, nb::none(), &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
                 nb::gil_scoped_release release;
                 return self.stamp(chosen, settings, gate, nullptr);
@@ -7374,15 +7505,26 @@ NB_MODULE(pyclay, m) {
             "direction"_a = nb::none(), "mask"_a = nb::none(), "geodesic"_a = true,
             "smooth_iterations"_a = 1, "alpha"_a = nb::none(),
             "alpha_direction"_a = nb::none(), "alpha_tangent"_a = nb::none(),
-            "alpha_extent"_a = 0.0f,
+            "alpha_extent"_a = 0.0f, "seed_class"_a = nb::none(),
+            "seed_revision"_a = nb::none(),
             "One stamp at the surface's current sculpt level. Returns how many\n"
-            "weld classes moved.")
-        .def("begin_stroke", &mesh::MultiresSculptor::begin_stroke,
+            "weld classes moved.\n\n"
+            "`seed_class` starts the surface walk where the finger did instead\n"
+            "of scanning the level for the nearest vertex, and `seed_revision`\n"
+            "is `seed_revision` READ AT THE TIME OF THE PICK. Pass both or\n"
+            "neither. A hierarchy renumbers its classes on every rebind — a\n"
+            "level change, or a trim releasing the level caches — and a seed\n"
+            "from the old numbering is still IN BOUNDS, so nothing catches it:\n"
+            "the walk finds no class within the radius and the stamp reports 0\n"
+            "moved, which is indistinguishable from a fully masked stroke. With\n"
+            "the token the stale seed is rejected and the walk finds its own\n"
+            "way, which is slower for one stamp and correct.")
+        .def("begin_stroke", [](PyMultiresSculptor& s) { s.begin_stroke(); },
              "Start a gesture. Clears the record the Layer verb measures its\n"
              "ceiling against.")
         .def(
             "apply_stroke",
-            [](mesh::MultiresSculptor& self, nb::handle samples, const brush::StrokePreset& preset,
+            [](PyMultiresSculptor& self, nb::handle samples, const brush::StrokePreset& preset,
                const std::string& verb, const std::string& falloff, float strength,
                nb::handle geodesic, int smooth_iterations, float layer_height, nb::handle mask,
                bool defer_normals) {
@@ -7391,8 +7533,9 @@ NB_MODULE(pyclay, m) {
                 // the same reading the fixed sculptor's stroke path takes.
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, nb::none(), 1.0f, strength, falloff, nb::none(), nb::none(), geodesic,
-                    nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, smooth_iterations,
-                    layer_height, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), &chosen);
+                    nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
+                    smooth_iterations, layer_height, nb::none(), nb::none(), nb::none(), 0.0f,
+                    nb::none(), &chosen);
                 const std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
                 const voxel::MaskField* field_mask = borrow_mask(mask);
                 brush::MeshStrokeOptions options;
@@ -7408,9 +7551,29 @@ NB_MODULE(pyclay, m) {
             "stamps by the same engine that drives a mesh layer — so a stamp\n"
             "lands in the same place with the same radius and the same\n"
             "pressure-scaled strength on either representation.")
-        .def_prop_ro("bound_level", &mesh::MultiresSculptor::bound_level)
+        .def_prop_ro("bound_level", [](const PyMultiresSculptor& s) { return s.bound_level(); })
+        .def_prop_ro(
+            "seed_revision", [](PyMultiresSculptor& s) { return s.seed_revision(); },
+            "The numbering the CURRENTLY BOUND level's classes are in, to store\n"
+            "beside a `seed_class` picked off that level and pass back to\n"
+            "`stamp`.\n\n"
+            "Reading it BINDS, which is why it is not a free question: the\n"
+            "answer belongs to the level bound now, and asking before the first\n"
+            "stamp would otherwise report whichever level was bound last. A\n"
+            "hierarchy renumbers on every rebind — a level change, or a trim\n"
+            "releasing the level caches — and both happen behind a host.")
+        .def_prop_ro(
+            "peak_telemetry", [](const PyMultiresSculptor& s) { return peak_dict(s.peak); },
+            "The high-water marks this session has reached, across every level\n"
+            "it has been bound to. A rebind builds a new level sculptor and\n"
+            "this block keeps filling, so the peak belongs to the session\n"
+            "rather than to whichever level happened to be bound first — which\n"
+            "is what a host sizing one arena for a stroke needs.")
+        .def(
+            "reset_peak_telemetry", [](PyMultiresSculptor& s) { s.peak.reset(); },
+            "Start the high-water marks again.")
         .def_prop_ro("last_write_vertices",
-                     [](const mesh::MultiresSculptor& s) {
+                     [](const PyMultiresSculptor& s) {
                          const std::vector<std::uint32_t>& v = s.last_write_vertices();
                          return std::vector<std::uint32_t>(v.begin(), v.end());
                      },
@@ -7612,7 +7775,7 @@ NB_MODULE(pyclay, m) {
         .def_static(
             "over_dynamic",
             [](nb::object sculptor_obj) {
-                mesh::DynamicSculptor& s = nb::cast<mesh::DynamicSculptor&>(sculptor_obj);
+                PyDynamicSculptor& s = nb::cast<PyDynamicSculptor&>(sculptor_obj);
                 PySurfaceView v;
                 v.owner = sculptor_obj;
                 v.kind = mesh::SurfaceKind::Adaptive;

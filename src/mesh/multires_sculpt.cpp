@@ -122,6 +122,11 @@ void MultiresSculptor::set_defer_normals(bool defer) {
     if (sculptor_) sculptor_->set_defer_normals(defer);
 }
 
+void MultiresSculptor::set_telemetry(memory::PeakTelemetry* telemetry) {
+    telemetry_ = telemetry;
+    if (sculptor_) sculptor_->set_telemetry(telemetry_);
+}
+
 void MultiresSculptor::flush_normals() {
     // No binding is made just to flush: nothing has been deferred if nothing
     // has been stamped.
@@ -159,6 +164,7 @@ void MultiresSculptor::bind() {
     bound_generation_ = surface_.cache_generation();
     if (automask_set_) sculptor_->set_automask_inputs(automask_);
     sculptor_->set_defer_normals(defer_normals_);
+    sculptor_->set_telemetry(telemetry_);
 }
 
 std::size_t MultiresSculptor::stamp(MeshBrush verb, const MeshBrushSettings& settings,

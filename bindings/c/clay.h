@@ -5718,6 +5718,27 @@ typedef struct clay_mesh_brush_desc {
     int32_t automask_boundary_rings;
     /* CAVITY: how much of the measured cavity to apply, in [0,1]. */
     float automask_cavity_strength;
+    /* WHICH CLASS SPACE `seed_class` WAS PICKED IN — the token
+     * clay_mesh_hit.seed_revision handed back, or the one
+     * clay_mesh_sculptor_seed_revision reports. Zero, which is what a host
+     * compiled against the older layout sends and what a host that does not
+     * pick sends, claims nothing and leaves the bounds check that was always
+     * here; nothing gets slower and nothing behaves differently.
+     *
+     * WHY A TOKEN AND NOT A BOUNDS CHECK. A seed is an INDEX, and an index
+     * outlives the numbering it was taken from. A hierarchy renumbers its
+     * classes whenever the sculpt level moves or a trim releases the level
+     * caches — both of which happen behind the host — and a seed picked before
+     * either is still comfortably in bounds, so a bounds check sees nothing.
+     * What it costs is not a slightly misplaced dab: the surface walk returns
+     * an EMPTY region when the seed lies farther than the radius from the
+     * centre, so a stale seed loses the stamp whole, and "nothing moved" is
+     * indistinguishable from a fully masked stroke.
+     *
+     * Sending the token turns that into a rejected seed and a scan — one stamp
+     * slower, and correct. clay_mesh_sculptor_stale_seeds_rejected counts the
+     * rejections, so a host sees it happen rather than inferring it. */
+    uint64_t seed_revision;
 } clay_mesh_brush_desc;
 
 /* The automask factors. A bit set, so a host sends one integer. */
@@ -5902,6 +5923,22 @@ clay_result clay_mesh_sculptor_vertex_count(const clay_mesh_sculptor* sculptor, 
 /* Welded classes: fewer than the vertex count exactly where the mesh has
  * seams, which is how a host can tell it imported a split model. */
 clay_result clay_mesh_sculptor_class_count(const clay_mesh_sculptor* sculptor, size_t* out_count);
+
+/* The token this sculptor's weld classes are numbered in, to store beside a
+ * `seed_class` and send back in clay_mesh_brush_desc.seed_revision. Constant
+ * for the life of the handle: a sculptor's adjacency is built once and nothing
+ * rebuilds it, so vertices moving under a stroke leave the token alone and a
+ * seed stays valid across the stamps of a gesture — which is exactly when
+ * re-picking would be wasted work. What retires a token is a NEW sculptor, and
+ * a hierarchy makes one on every rebind. */
+clay_result clay_mesh_sculptor_seed_revision(const clay_mesh_sculptor* sculptor,
+                                             uint64_t* out_revision);
+/* How many stamps rejected a seed because its token did not match, over the
+ * life of this sculptor. The number that makes a rejection OBSERVABLE: without
+ * it a host cannot tell a seed that was refused from one that was accepted and
+ * happened to be harmless, and neither can a test. */
+clay_result clay_mesh_sculptor_stale_seeds_rejected(const clay_mesh_sculptor* sculptor,
+                                                    size_t* out_count);
 
 /* One stamp. `mask` and `deltas` may be NULL. *out_moved receives how many weld
  * classes moved — zero for a stamp that reached nothing, that was fully masked,
@@ -6537,6 +6574,23 @@ void clay_multires_sculptor_destroy(clay_multires_sculptor* sculptor);
  * against, so a second stroke over the same place deposits from the surface as
  * THAT stroke found it. */
 clay_result clay_multires_sculptor_begin_stroke(clay_multires_sculptor* sculptor);
+/* The token the CURRENTLY BOUND level's classes are numbered in, to store
+ * beside a `seed_class` picked off that level's mesh and send back in
+ * clay_mesh_brush_desc.seed_revision.
+ *
+ * THIS IS THE CALL THE TOKEN EXISTS FOR, and it is not const: it BINDS, because
+ * the answer is a property of the bound level and a host asking before the
+ * first stamp would otherwise be handed the token of whatever was bound last. A
+ * hierarchy renumbers on every rebind — a level change, or a trim releasing the
+ * level caches — and both happen behind the host, so a seed picked before
+ * either is in bounds, wrong, and silent: the walk finds nothing within the
+ * radius and the dab is lost rather than misplaced.
+ *
+ * Reports zero for a surface that cannot bind, which is the value that claims
+ * nothing. */
+clay_result clay_multires_sculptor_seed_revision(clay_multires_sculptor* sculptor,
+                                                 uint64_t* out_revision);
+
 /* ONE STAMP at the surface's current sculpt level. `mask` is the freeze, taken
  * exactly as every other representation takes one, and may be NULL. */
 clay_result clay_multires_sculptor_stamp(clay_multires_sculptor* sculptor,
@@ -6922,6 +6976,67 @@ clay_result clay_dynamic_surface_preflight_encode(const clay_dynamic_surface* su
 clay_result clay_multires_preflight_encode(const clay_multires* surface, uint64_t budget,
                                            clay_surface_preflight* out_preflight);
 
+/* -- peak telemetry ----------------------------------------------------------
+ *
+ * (add-extreme-poly-runtime, task 7.7.) The four high-water marks a host tunes
+ * a clay_sculpt_memory_profile against, measured by the engine while it works.
+ *
+ * HIGH-WATER MARKS, NOT AVERAGES, and that is the whole point rather than a
+ * detail. A buffer sized to the vertex count, allocated once during warm-up and
+ * reused forever, allocates nothing on a warm stamp and costs no bytes on one
+ * — it satisfies every count-based assertion — and it is still O(model)
+ * storage. The only thing that catches it is a PEAK that does not move between
+ * a one-million and a twenty-million-vertex model at the same footprint, which
+ * is what a host reads here to check the claim on its own content rather than
+ * on the library's fixtures.
+ *
+ * EVERY SCULPTING HANDLE MEASURES ITSELF, always, from the moment it is
+ * created. There is no attach step and no telemetry object to own, which is
+ * deliberate: the C++ seam takes a BORROWED pointer a host sets, and a borrowed
+ * pointer across this boundary is a lifetime a caller can get wrong exactly
+ * once, mid-stroke, by destroying a block a sculptor still writes into. Four
+ * counters cost a store each; a dangling one costs the process. So the handle
+ * owns the block, the host reads a COPY into a descriptor it owns, and there is
+ * nothing to keep alive.
+ *
+ * scratch_bytes is reported for completeness and is ZERO from these handles
+ * today: the stamp path does not consume the scratch arena yet (see the change's
+ * tasks 3.1 and 3.7), and reporting a number nothing measured would be worse
+ * than reporting the truth. The other three are live. */
+
+typedef struct clay_peak_telemetry {
+    uint32_t struct_size; /* = sizeof(clay_peak_telemetry); required */
+    uint64_t scratch_bytes;    /* the largest working set one stamp needed */
+    uint64_t workset_vertices; /* the largest footprint GATHERED, rim included */
+    uint64_t dirty_chunks;     /* the deepest the dirty set has been */
+    uint64_t topology_ops;     /* splits and collapses in one stamp */
+} clay_peak_telemetry;
+
+/* uint64_t rather than size_t in the struct on purpose: a peak is a measurement
+ * a host records, compares against a run on another device and puts in a
+ * report, and a field whose width follows the pointer size makes two of those
+ * runs incomparable at the byte level. size_t stays on the COUNT out-parameters
+ * elsewhere, where the value is an index into this process's own memory. */
+
+/* The workset peak of a fixed-topology session. */
+clay_result clay_mesh_sculptor_peak_telemetry(const clay_mesh_sculptor* sculptor,
+                                              clay_peak_telemetry* out_telemetry);
+clay_result clay_mesh_sculptor_reset_peak_telemetry(clay_mesh_sculptor* sculptor);
+/* The hierarchy's, which is the bound level's and follows the level: a rebind
+ * builds a new level sculptor and this one keeps filling, so the peak belongs
+ * to the SESSION rather than to whichever level happened to be bound first. */
+clay_result clay_multires_sculptor_peak_telemetry(const clay_multires_sculptor* sculptor,
+                                                  clay_peak_telemetry* out_telemetry);
+clay_result clay_multires_sculptor_reset_peak_telemetry(clay_multires_sculptor* sculptor);
+/* The adaptive surface's, and the only one of the three that fills all three
+ * live counters: topology_ops is a split-and-collapse count no other
+ * representation has, and it is the number that decides how big the slot pools
+ * have to be, while dirty_chunks comes from the same chunked index the transport
+ * drains. */
+clay_result clay_dynamic_sculptor_peak_telemetry(const clay_dynamic_sculptor* sculptor,
+                                                 clay_peak_telemetry* out_telemetry);
+clay_result clay_dynamic_sculptor_reset_peak_telemetry(clay_dynamic_sculptor* sculptor);
+
 /* Update the ray-query tree for vertices that have moved.
  *
  * REFIT is the per-stamp call. A mesh layer's topology is fixed, so a stamp
@@ -6963,6 +7078,14 @@ typedef struct clay_mesh_hit {
     /* A weld class of the triangle hit, ready to hand back as the descriptor's
      * seed_class so the surface walk starts where the finger did. */
     uint32_t seed_class;
+    /* The class space that seed_class was picked in, to send back in
+     * clay_mesh_brush_desc.seed_revision.
+     *
+     * Handed out HERE, beside the class, rather than through a call of its own,
+     * because the two are only meaningful together: a host that keeps the class
+     * and forgets the token has kept exactly the half that cannot be checked,
+     * and the stale-seed failure is silent. */
+    uint64_t seed_revision;
 } clay_mesh_hit;
 
 /* Turn a tap into a brush centre. `xform` is where the mesh sits, or NULL for

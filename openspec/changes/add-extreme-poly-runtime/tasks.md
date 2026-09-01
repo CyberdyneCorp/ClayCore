@@ -94,7 +94,20 @@
       Regression test in `test_multires_sculpt.cpp`, which spends the same stale
       seed three ways; proven to catch its regression (with the revision
       ignored, the stale case reports 0 moved). `stale_seeds_rejected()` is what
-      makes the rejection assertable rather than assumed
+      makes the rejection assertable rather than assumed.
+      NOW REACHABLE FROM EVERY HOST, which is what the defect deserved: the
+      token rides on `clay_mesh_hit.seed_revision` and
+      `clay_mesh_brush_desc.seed_revision`, with
+      `clay_mesh_sculptor_seed_revision`,
+      `clay_multires_sculptor_seed_revision` and
+      `clay_mesh_sculptor_stale_seeds_rejected` beside them, and on pyclay's
+      `raycast` dict, a `seed_revision` keyword on `stamp` / `apply_stroke`, and
+      the two read-back properties. Zero and `None` claim nothing, so every
+      caller written before the token is bit-identical. Cases in
+      `test_c_mesh_sculpt.cpp`, `test_c_multires.cpp` and
+      `bindings/python/tests/test_seed_and_peaks.py`, including the one that
+      matters: an unrevisioned stale seed still LOSES the dab (0 moved) and the
+      same seed WITH its token lands it
 - [x] 3.3 Local normals over the write region and its ring, with an optional
       deferral to stroke end whose FINAL state is exact
       ALREADY TRUE in `MeshSculptor` (`defer_normals` / `flush_normals` over

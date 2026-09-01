@@ -12946,6 +12946,12 @@ struct clay_mesh_sculptor {
     // no layer and cannot be replaced under anyone.
     std::uint64_t geometry_revision = 0;
     std::unique_ptr<mesh::MeshSculptor> sculptor;
+    // The peaks this session measured. OWNED BY THE HANDLE and wired once at
+    // create: the engine's seam borrows a pointer, and a borrowed pointer that
+    // crossed this boundary would be a lifetime a host can get wrong exactly
+    // once — mid-stroke, by freeing a block a stamp still writes into. The
+    // handle outlives every call that fills it, by construction.
+    memory::PeakTelemetry peak;
 };
 
 struct clay_mesh_deltas {
@@ -12962,6 +12968,11 @@ struct clay_dynamic_surface {
 struct clay_dynamic_sculptor {
     clay_dynamic_surface* owner = nullptr;
     std::unique_ptr<mesh::DynamicSculptor> sculptor;
+    // Two publishers, one block: the sculptor reports the topology operations
+    // and the adaptive workset, and its chunked index reports how deep the
+    // dirty set got. A host tuning a staging buffer needs both and should not
+    // have to add two numbers that were measured over different stamps.
+    memory::PeakTelemetry peak;
 };
 
 struct clay_mesh_lattice {
@@ -13071,6 +13082,7 @@ clay_result read_mesh_brush(const clay_mesh_brush_desc* src, mesh::MeshBrush* ou
         kernel::cf3(d.deposit_normal[0], d.deposit_normal[1], d.deposit_normal[2]);
     out->geodesic = d.geodesic != 0;
     out->seed_class = d.seed_class;
+    out->seed_revision = d.seed_revision;
     out->flatten_mode = static_cast<field::FlattenMode>(d.flatten_mode);
     out->use_given_plane = d.use_given_plane != 0;
     out->plane_point = kernel::cf3(d.plane_point[0], d.plane_point[1], d.plane_point[2]);
@@ -13152,6 +13164,9 @@ clay_result clay_mesh_brush_defaults(clay_mesh_brush_desc* out_desc) {
     write_f3(out.deposit_normal, d.deposit_normal);
     out.geodesic = d.geodesic ? 1 : 0;
     out.seed_class = CLAY_MESH_NO_CLASS;
+    // Zero, and the engine's own default: a descriptor nobody has filled in
+    // claims nothing about which numbering its (absent) seed came from.
+    out.seed_revision = d.seed_revision;
     out.flatten_mode = static_cast<std::int32_t>(d.flatten_mode);
     out.use_given_plane = 0;
     write_f3(out.plane_point, d.plane_point);
@@ -13181,8 +13196,24 @@ clay_result clay_mesh_brush_defaults(clay_mesh_brush_desc* out_desc) {
 namespace {
 
 constexpr std::size_t kBrushModelOriginal = offsetof(clay_brush_model, post) + sizeof(std::int32_t);
+// The preset's ORIGINAL layout, and the second term is frozen rather than
+// measured. It used to read `+ sizeof(clay_mesh_brush_desc)`, which looks like
+// the same thing and is not: clay_brush_preset EMBEDS the brush descriptor, so
+// appending a field to the brush moved the preset's "original" size up with it,
+// and every host that had compiled against the previous header would then have
+// its correctly-sized clay_brush_preset refused as TooShort — the exact break
+// struct_size exists to absorb, arriving through the one descriptor that
+// contains another. `seed_revision` was the append that would have done it.
+//
+// offsetof of the first field appended AFTER the preset shipped is what a size
+// frozen in place looks like without a magic number in it: it is the sizeof the
+// brush descriptor had at that moment, padding included, and it does not move
+// when the descriptor grows again.
+constexpr std::size_t kMeshBrushDescAtPresetV1 = offsetof(clay_mesh_brush_desc, seed_revision);
 constexpr std::size_t kBrushPresetOriginal =
-    offsetof(clay_brush_preset, brush) + sizeof(clay_mesh_brush_desc);
+    offsetof(clay_brush_preset, brush) + kMeshBrushDescAtPresetV1;
+static_assert(kBrushPresetOriginal <= sizeof(clay_brush_preset),
+              "the frozen original cannot exceed the layout this build declares");
 
 clay_brush_model to_c_model(const mesh::BrushModel& m) {
     clay_brush_model out{};
@@ -13864,6 +13895,34 @@ clay_result replace_mesh_layer_geometry(clay_document* doc, clay_layer_id layer,
     return CLAY_OK;
 }
 
+// Every peak reads out through here — one bounded fill for three handles, so
+// the day a fifth counter is appended there is one place that has to know the
+// caller may have declared a shorter struct.
+//
+// Defined OUT here rather than beside the entry points because it takes a C++
+// reference: an anonymous namespace does not reset language linkage, so the
+// same definition inside the extern "C" block below would carry C linkage on a
+// signature C cannot spell. That is the C4190 family this file has been bitten
+// by before.
+constexpr std::size_t kPeakTelemetryOriginal =
+    offsetof(clay_peak_telemetry, topology_ops) + sizeof(std::uint64_t);
+
+clay_result fill_peak_telemetry(const memory::PeakTelemetry& peak, clay_peak_telemetry* out) {
+    if (!out) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_telemetry");
+    clay_peak_telemetry probe;
+    clay_result r = read_desc(out, kPeakTelemetryOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out->struct_size;
+    clay_peak_telemetry filled{};
+    filled.struct_size = static_cast<std::uint32_t>(sizeof(filled));
+    filled.scratch_bytes = peak.scratch_bytes;
+    filled.workset_vertices = peak.workset_vertices;
+    filled.dirty_chunks = peak.dirty_chunks;
+    filled.topology_ops = peak.topology_ops;
+    write_desc(out, declared, filled);
+    return CLAY_OK;
+}
+
 }  // namespace
 
 extern "C" {
@@ -13954,6 +14013,7 @@ clay_result clay_mesh_sculptor_create(clay_mesh* mesh, float weld_epsilon,
     handle->geometry_revision = mesh->doc ? mesh_layer_revision_of(mesh->doc, mesh->layer) : 0;
     handle->sculptor = std::make_unique<mesh::MeshSculptor>(
         *data, weld_epsilon < 0.0f ? mesh::kDefaultWeldEpsilon : weld_epsilon);
+    handle->sculptor->set_telemetry(&handle->peak);
     *out_sculptor = handle.release();
     return CLAY_OK;
 }
@@ -13973,6 +14033,38 @@ clay_result clay_mesh_sculptor_class_count(const clay_mesh_sculptor* sculptor, s
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh sculptor");
     if (!out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_count");
     *out_count = sculptor->sculptor->adjacency().class_count();
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_seed_revision(const clay_mesh_sculptor* sculptor,
+                                             uint64_t* out_revision) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh sculptor");
+    if (!out_revision) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_revision");
+    *out_revision = sculptor->sculptor->seed_revision();
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_stale_seeds_rejected(const clay_mesh_sculptor* sculptor,
+                                                    size_t* out_count) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh sculptor");
+    if (!out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_count");
+    *out_count = sculptor->sculptor->stale_seeds_rejected();
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_peak_telemetry(const clay_mesh_sculptor* sculptor,
+                                              clay_peak_telemetry* out_telemetry) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh sculptor");
+    return fill_peak_telemetry(sculptor->peak, out_telemetry);
+}
+
+clay_result clay_mesh_sculptor_reset_peak_telemetry(clay_mesh_sculptor* sculptor) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh sculptor");
+    sculptor->peak.reset();
     return CLAY_OK;
 }
 
@@ -14450,11 +14542,27 @@ clay_result clay_dynamic_sculptor_create(clay_dynamic_surface* surface,
     clay_dynamic_sculptor* handle = new clay_dynamic_sculptor{};
     handle->owner = surface;
     handle->sculptor = std::make_unique<mesh::DynamicSculptor>(surface->surface);
+    handle->sculptor->set_telemetry(&handle->peak);
+    handle->sculptor->bvh().chunks_mutable().set_telemetry(&handle->peak);
     *out_sculptor = handle;
     return CLAY_OK;
 }
 
 void clay_dynamic_sculptor_destroy(clay_dynamic_sculptor* sculptor) { delete sculptor; }
+
+clay_result clay_dynamic_sculptor_peak_telemetry(const clay_dynamic_sculptor* sculptor,
+                                                 clay_peak_telemetry* out_telemetry) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    return fill_peak_telemetry(sculptor->peak, out_telemetry);
+}
+
+clay_result clay_dynamic_sculptor_reset_peak_telemetry(clay_dynamic_sculptor* sculptor) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    sculptor->peak.reset();
+    return CLAY_OK;
+}
 
 clay_result clay_dynamic_sculptor_stamp(clay_dynamic_sculptor* sculptor,
                                         const clay_mesh_brush_desc* brush,
@@ -14725,6 +14833,10 @@ struct clay_multires {
 struct clay_multires_sculptor {
     clay_multires* owner = nullptr;
     std::unique_ptr<mesh::MultiresSculptor> sculptor;
+    // Forwarded to whichever level sculptor is bound, including one bound after
+    // this handle was made, so the peak belongs to the session rather than to
+    // the level that happened to be bound first.
+    memory::PeakTelemetry peak;
 };
 
 namespace {
@@ -15095,6 +15207,7 @@ clay_result clay_multires_sculptor_create(clay_multires* surface,
     auto* handle = new clay_multires_sculptor{};
     handle->owner = surface;
     handle->sculptor = std::make_unique<mesh::MultiresSculptor>(*s);
+    handle->sculptor->set_telemetry(&handle->peak);
     *out_sculptor = handle;
     return CLAY_OK;
 }
@@ -15105,6 +15218,32 @@ clay_result clay_multires_sculptor_begin_stroke(clay_multires_sculptor* sculptor
     if (!sculptor || !sculptor->sculptor)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
     sculptor->sculptor->begin_stroke();
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculptor_seed_revision(clay_multires_sculptor* sculptor,
+                                                 uint64_t* out_revision) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
+    if (!out_revision) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_revision");
+    // BINDS, which is why this handle is not const here: the token belongs to
+    // the level that is bound now, and a host asking before its first stamp
+    // would otherwise be handed whatever was bound last.
+    *out_revision = sculptor->sculptor->seed_revision();
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculptor_peak_telemetry(const clay_multires_sculptor* sculptor,
+                                                  clay_peak_telemetry* out_telemetry) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
+    return fill_peak_telemetry(sculptor->peak, out_telemetry);
+}
+
+clay_result clay_multires_sculptor_reset_peak_telemetry(clay_multires_sculptor* sculptor) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
+    sculptor->peak.reset();
     return CLAY_OK;
 }
 
@@ -15400,6 +15539,10 @@ clay_result clay_mesh_sculptor_raycast(clay_mesh_sculptor* sculptor, const float
         out.u = hit.u;
         out.v = hit.v;
         out.seed_class = sculptor->sculptor->adjacency().class_of(m.indices[hit.triangle * 3]);
+        // The numbering that class was picked in, handed out with it. A miss
+        // leaves it zero beside CLAY_MESH_NO_CLASS: there is no seed to
+        // validate, and a token beside no class would only invite one.
+        out.seed_revision = sculptor->sculptor->seed_revision();
     } else {
         out.seed_class = CLAY_MESH_NO_CLASS;
     }

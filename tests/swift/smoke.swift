@@ -1180,6 +1180,16 @@ do {
     brush.radius = 0.8
     brush.strength = 0.4
 
+    // The seed token (add-extreme-poly-runtime 3.2). A hierarchy renumbers its
+    // classes on every rebind, so a `seed_class` a host picked at one level and
+    // spends at another is IN BOUNDS and means nothing — and the walk answers an
+    // empty region, so the dab is LOST rather than misplaced. Reading this binds,
+    // which is why the token belongs to the level that is bound now.
+    var seedRevision: UInt64 = 0
+    check(clay_multires_sculptor_seed_revision(sculptor, &seedRevision) == CLAY_OK,
+          "read the bound level's seed numbering")
+    check(seedRevision != 0, "a bound level always claims a numbering")
+
     check(clay_multires_clear_dirty(surface) == CLAY_OK, "drained what building reported")
     var report = clay_multires_stamp_report()
     report.struct_size = UInt32(MemoryLayout<clay_multires_stamp_report>.size)
@@ -1200,6 +1210,20 @@ do {
         check(clay_multires_dirty_blocks(surface, b.baseAddress, &blockCount) == CLAY_OK,
               "drained the changed blocks")
     }
+
+    // The peaks a host tunes a memory profile against (add-extreme-poly-runtime
+    // 7.7). Read into a descriptor the caller owns: the handle measures itself
+    // from the moment it is created and there is nothing to attach or free.
+    var peak = clay_peak_telemetry()
+    peak.struct_size = UInt32(MemoryLayout<clay_peak_telemetry>.size)
+    check(clay_multires_sculptor_peak_telemetry(sculptor, &peak) == CLAY_OK,
+          "read the session's peaks")
+    check(peak.workset_vertices > 0, "the stamp above gathered something")
+    check(clay_multires_sculptor_reset_peak_telemetry(sculptor) == CLAY_OK,
+          "restarted the high-water marks")
+    check(clay_multires_sculptor_peak_telemetry(sculptor, &peak) == CLAY_OK,
+          "read the peaks again")
+    check(peak.workset_vertices == 0, "a reset starts the marks over")
 
     var info = clay_multires_block_info()
     info.struct_size = UInt32(MemoryLayout<clay_multires_block_info>.size)
