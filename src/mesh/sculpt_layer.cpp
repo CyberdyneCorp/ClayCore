@@ -150,6 +150,13 @@ void SparseWeightField::compact() {
     }
     storage_ = std::move(packed);
     slot_block_ = std::move(new_slot_block);
+    shrink_to_content();
+}
+
+void SparseWeightField::shrink_to_content() {
+    storage_.shrink_to_fit();
+    slot_block_.shrink_to_fit();
+    block_slot_.shrink_to_fit();
 }
 
 bool SparseWeightField::block_stored(std::uint32_t block) const {
