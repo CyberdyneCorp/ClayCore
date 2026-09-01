@@ -22,6 +22,7 @@
 #include "clay/brush/move.h"
 #include "clay/brush/preset.h"
 #include "clay/mesh/dynamic_sculpt.h"
+#include "clay/mesh/layered_sculpt.h"
 #include "clay/mesh/multires_sculpt.h"
 #include "clay/mesh/project.h"
 #include "clay/mesh/dynamic_validate.h"
@@ -265,6 +266,69 @@ field::FlattenMode parse_flatten_mode(const std::string& mode) {
     if (mode == "fill") return field::FlattenMode::FillOnly;
     throw std::invalid_argument("mode must be 'two_sided', 'cut' or 'fill', got '" + mode + "'");
 }
+
+// -- sculpt layer vocabulary (add-mesh-sculpt-layers) --------------------------
+//
+// Strings rather than enum classes, matching every other axis a pyclay caller
+// names — a verb, a falloff, a flatten mode. Each choice lands on a C
+// enumerator and tools/check_binding_parity.py checks that it does, so a fourth
+// smoothing mode invented here has to exist in clay.h too.
+
+mesh::MultiresWriteDomain parse_write_domain(const std::string& domain) {
+    if (domain == "automatic") return mesh::MultiresWriteDomain::Automatic;
+    if (domain == "geometry") return mesh::MultiresWriteDomain::Geometry;
+    if (domain == "detail") return mesh::MultiresWriteDomain::Detail;
+    throw std::invalid_argument("write domain must be 'automatic', 'geometry' or 'detail', got '" +
+                                domain + "'");
+}
+
+mesh::MultiresSmoothMode parse_smooth_mode(const std::string& mode) {
+    if (mode == "geometry") return mesh::MultiresSmoothMode::Geometry;
+    if (mode == "detail_only") return mesh::MultiresSmoothMode::DetailOnly;
+    if (mode == "preserve_detail") return mesh::MultiresSmoothMode::PreserveDetail;
+    throw std::invalid_argument(
+        "smooth mode must be 'geometry', 'detail_only' or 'preserve_detail', got '" + mode + "'");
+}
+
+mesh::DetailStampMode parse_detail_stamp_mode(const std::string& mode) {
+    if (mode == "weight") return mesh::DetailStampMode::Weight;
+    if (mode == "height") return mesh::DetailStampMode::Height;
+    if (mode == "vector") return mesh::DetailStampMode::Vector;
+    throw std::invalid_argument("stamp mode must be 'weight', 'height' or 'vector', got '" + mode +
+                                "'");
+}
+
+// Which of the three refusals a stack operation hit, worked out from the stack
+// rather than returned by it. The C++ API answers `false`, which is all a
+// caller with the stack in front of it needs; a script needs the sentence —
+// "no such layer", "this layer is locked" and "finish the stroke first" are
+// three different bugs and one `False` makes them indistinguishable. The C ABI
+// splits them the same way, through its `out_error`.
+std::invalid_argument sculpt_layer_error(const mesh::MultiresSurface& surface,
+                                         mesh::SculptLayerId id) {
+    const mesh::SculptLayerStack& stack = surface.sculpt_layers();
+    const mesh::SculptLayer* layer = stack.find(id);
+    if (!layer) return std::invalid_argument("no sculpt layer " + std::to_string(id));
+    if (stack.composition_held())
+        return std::invalid_argument(
+            "a stroke is open; finish or cancel it before changing the stack");
+    if (layer->locked)
+        return std::invalid_argument("sculpt layer " + std::to_string(id) + " is locked");
+    return std::invalid_argument("that sculpt layer operation names nothing to act on");
+}
+
+// `with surface.sculpt_layer_stroke() as stroke:` — the shape a Python caller
+// reaches for, and the ONLY one that cannot leave a surface holding its
+// composition when the stroke loop raises. A bare begin/commit pair looks fine
+// until the exception, at which point every slider on the model refuses and
+// nothing in the traceback says why.
+//
+// Holds the sculptor by shared_ptr so a copied handle drives the same gesture
+// rather than a second one over the same surface; the factory keeps the
+// surface alive for as long as the object.
+struct PySculptLayerStroke {
+    std::shared_ptr<mesh::LayeredMultiresSculptor> sculptor;
+};
 
 voxel::BrushFalloff parse_falloff(const std::string& falloff) {
     if (falloff == "constant") return voxel::BrushFalloff::Constant;
@@ -1034,7 +1098,8 @@ mesh::MeshBrushSettings mesh_brush_settings(
     const std::string& flatten_mode,
     nb::handle plane_point, nb::handle plane_normal, float polish_angle, int smooth_iterations,
     float layer_height, nb::handle alpha, nb::handle alpha_direction, nb::handle alpha_tangent,
-    float alpha_extent, nb::handle color, mesh::MeshBrush* out_verb) {
+    float alpha_extent, nb::handle color, nb::handle automask, float stamp_azimuth,
+    mesh::MeshBrush* out_verb) {
     *out_verb = parse_mesh_brush(verb);
     if (!(radius > 0.0f)) throw std::invalid_argument("radius must be > 0");
     if (smooth_iterations < 1 || smooth_iterations > mesh::kMaxSmoothIterations)
@@ -1100,6 +1165,31 @@ mesh::MeshBrushSettings mesh_brush_settings(
             settings.alpha_tangent = to_f3(alpha_tangent, "alpha_tangent");
         settings.alpha_extent = alpha_extent;
     }
+    // The automask arrives as the settings object rather than as four loose
+    // scalars, because that is what it is on both other bindings: one appended
+    // block on clay_mesh_brush_desc, one member on MeshBrushSettings. Spreading
+    // it into keywords here would be a third spelling of the same four fields
+    // and a third place to forget one when a factor is added.
+    //
+    // TYPE-CHECKED BEFORE THE CAST, and that is a fix rather than a formality.
+    // A bare `nb::cast<T>` on a handle of the wrong type throws `nb::cast_error`
+    // — a `std::bad_cast` — which nanobind surfaces as
+    // `RuntimeError: std::bad_cast`, naming neither the argument nor what it
+    // should have been. `automask=3` is a plausible mistake (the factors ARE an
+    // integer, one level down) and it deserves the same answer `to_f3` gives a
+    // malformed vector.
+    if (!automask.is_none()) {
+        if (!nb::isinstance<mesh::AutomaskSettings>(automask))
+            throw std::invalid_argument(
+                "automask must be an AutomaskSettings or None; to set the factors, build one "
+                "and assign to its `factors` field");
+        settings.automask = nb::cast<mesh::AutomaskSettings>(automask);
+    }
+    // Passed through as given, INCLUDING zero. Zero is not "unset": it is the
+    // value that means unrotated, and the engine branches on exactly it rather
+    // than turning the basis by cos 0 and sin 0, which would leave a -0.0f
+    // where an unrotated axis has +0.0f and move the fixed mesh's goldens.
+    settings.stamp_azimuth = stamp_azimuth;
     return settings;
 }
 
@@ -1263,6 +1353,102 @@ field::MaskGate mask_gate_of(nb::handle mask) {
     if (!m) return {};
     return [m](kernel::cfloat3 p) { return m->sample(p); };
 }
+
+// The two automask factors a mesh module structurally cannot compute for
+// itself: the cavity measure, which is a field's curvature, and the surface
+// group, which is a world lattice. Wired here because this binding is the one
+// place that can see the mesh sculptor, a mask field and a document's group
+// lattice at once — the same reason brush::apply_to_mesh is where the C++ path
+// wires them.
+//
+// NOT A PYTHON CALLABLE, and that shape is the whole point. Every stamp
+// releases the GIL and evaluates these once per workset entry from a thread
+// that no longer holds it; a Python function called from there is a crash
+// rather than a slowdown. So the cavity arrives as a MaskField and the groups
+// as the document's own lattice, both of which answer a world point with no
+// interpreter involved.
+//
+// WHAT THE CAVITY MASK IS, precisely, because "the same estimator" is a claim
+// worth being exact about: `document.mask_from_surface("cavity", ...)` bakes
+// brush::measure_at onto a lattice, so this is that estimator SAMPLED where the
+// C++ path evaluates it directly. A painted cavity mask and a cavity automask
+// therefore agree about the surface by construction, which is the claim
+// automask.h makes; what differs is the lattice's resolution, and that is the
+// caller's own cell_size rather than something this hides.
+mesh::AutomaskInputs automask_inputs_of(nb::handle cavity, nb::handle groups,
+                                        std::uint32_t active_group) {
+    // BOTH ARGUMENTS ARE TYPE-CHECKED HERE RATHER THAN CAST AND HOPED FOR, and
+    // the wrong type is the mistake this call invites: the C++ type holds two
+    // `std::function`s, so "pass a function" is the obvious guess, and it is
+    // the one thing that cannot be offered — a stamp releases the GIL and
+    // evaluates these from a worker thread, where calling back into the
+    // interpreter crashes. A caller who guesses must be told what to pass
+    // instead, and `RuntimeError: std::bad_cast` from a bare `nb::cast` tells
+    // them nothing at all.
+    mesh::AutomaskInputs out;
+    if (cavity.is_valid() && !cavity.is_none()) {
+        if (!nb::isinstance<PyMaskField>(cavity))
+            throw std::invalid_argument(
+                "cavity must be a MaskField or None — build one with "
+                "document.mask_from_surface('cavity', ...). A Python callable cannot be used: a "
+                "stamp evaluates it from a worker thread with the GIL released");
+        out.cavity = [m = &nb::cast<PyMaskField&>(cavity).field()](kernel::cfloat3 p) {
+            return m->sample(p);
+        };
+    }
+    if (groups.is_valid() && !groups.is_none()) {
+        if (!nb::isinstance<PyGroupField>(groups))
+            throw std::invalid_argument(
+                "groups must be the document's GroupField or None. A Python callable cannot be "
+                "used: a stamp evaluates it from a worker thread with the GIL released");
+        voxel::GroupField* g = &nb::cast<PyGroupField&>(groups).field();
+        out.group = [g](kernel::cfloat3 p) { return static_cast<std::uint32_t>(g->at(p)); };
+    }
+    out.active_group = active_group;
+    return out;
+}
+
+// One reading for three sculptors, since the numbers mean the same thing
+// whichever asked. A null arena — the multiresolution sculptor has none until a
+// level is bound — reads as zeroes, which is the truth about an arena that has
+// never been asked for a byte rather than a placeholder.
+nb::dict arena_stats_of(const mesh::BrushScratchArena* arena) {
+    nb::dict out;
+    out["capacity_bytes"] = arena ? arena->capacity_bytes() : std::size_t{0};
+    out["high_water_bytes"] = arena ? arena->high_water_bytes() : std::size_t{0};
+    out["growths"] = arena ? arena->growths() : std::size_t{0};
+    return out;
+}
+
+// The docstring the three sculptors share, so their contract cannot drift by
+// being written out three times.
+constexpr const char* kArenaStatsDoc =
+    "What this sculptor's per-stamp scratch arena owns, the largest a single\n"
+    "stamp has ever used, and how many times it has had to take more.\n\n"
+    "`growths` is the one to watch. A warm stamp on a stable surface allocates\n"
+    "nothing — the arena is reset, not freed, between stamps — so a count that\n"
+    "has stopped rising over stamps of similar footprint is the arena having\n"
+    "converged. One that rises every stamp is scratch that is never released:\n"
+    "it allocates nothing after warm-up and consumes memory without bound, and\n"
+    "a current usage would not show it, because that reads zero between stamps\n"
+    "whatever the arena is doing.\n\n"
+    "There is deliberately nothing to tune here. Any reserve or cap would be a\n"
+    "number you tune against one device and are then wrong about after the\n"
+    "brush radius changes; the arena already sizes itself from the largest\n"
+    "footprint it has actually been given.";
+
+constexpr const char* kAutomaskInputsDoc =
+    "The two automask factors a mesh cannot compute for itself: `cavity` is a\n"
+    "MaskField — build it with `document.mask_from_surface('cavity', ...)`,\n"
+    "which bakes the same estimator the engine measures with, so a painted\n"
+    "cavity mask and a cavity automask agree about this surface — and `groups`\n"
+    "is the document's own group lattice, with `active_group` the group the\n"
+    "stroke started in.\n\n"
+    "SET ONCE PER STROKE, never per stamp. These become callable objects, and\n"
+    "copying them per dab is an allocation per dab.\n\n"
+    "Neither is a Python callable, and that is not an oversight: a stamp\n"
+    "releases the GIL and evaluates these from a worker thread, where calling\n"
+    "back into the interpreter would crash rather than merely be slow.";
 
 const voxel::MaskField* borrow_mask(nb::handle mask) {
     if (!mask.is_valid() || mask.is_none()) return nullptr;
@@ -4739,13 +4925,14 @@ NB_MODULE(pyclay, m) {
                nb::handle plane_normal,
                float polish_angle, int smooth_iterations, float layer_height, nb::handle alpha,
                nb::handle alpha_direction, nb::handle alpha_tangent, float alpha_extent,
-               nb::handle color, nb::handle mask, nb::handle deltas) {
+               nb::handle color, nb::handle automask, float stamp_azimuth, nb::handle mask,
+               nb::handle deltas) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, center, radius, strength, falloff, direction, deposit_normal, geodesic,
                     seed_class, seed_revision, flatten_mode, plane_point, plane_normal,
                     polish_angle, smooth_iterations, layer_height, alpha, alpha_direction,
-                    alpha_tangent, alpha_extent, color, &chosen);
+                    alpha_tangent, alpha_extent, color, automask, stamp_azimuth, &chosen);
                 mesh::VertexDeltas* record =
                     deltas.is_none() ? nullptr : nb::cast<PyVertexDeltas*>(deltas)->deltas.get();
                 field::MaskGate gate = mask_gate_of(mask);
@@ -4760,8 +4947,8 @@ NB_MODULE(pyclay, m) {
             "plane_point"_a = nb::none(), "plane_normal"_a = nb::none(), "polish_angle"_a = 0.20f,
             "smooth_iterations"_a = 1, "layer_height"_a = 0.05f, "alpha"_a = nb::none(),
             "alpha_direction"_a = nb::none(), "alpha_tangent"_a = nb::none(),
-            "alpha_extent"_a = 0.0f, "color"_a = nb::none(), "mask"_a = nb::none(),
-            "deltas"_a = nb::none(),
+            "alpha_extent"_a = 0.0f, "color"_a = nb::none(), "automask"_a = nb::none(),
+            "stamp_azimuth"_a = 0.0f, "mask"_a = nb::none(), "deltas"_a = nb::none(),
             "One stamp; returns how many welded classes moved.\n\n"
             "`verb` is one of:\n"
             "  'grab'      drag the region by `direction`\n"
@@ -4934,7 +5121,8 @@ NB_MODULE(pyclay, m) {
                const std::string& flatten_mode,
                nb::handle plane_point, nb::handle plane_normal, float polish_angle,
                int smooth_iterations, float layer_height, float strength, nb::handle color,
-               nb::handle mask, nb::handle deltas, bool defer_normals) {
+               nb::handle automask, float stamp_azimuth, nb::handle mask, nb::handle deltas,
+               bool defer_normals) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 // The radius is the STAMP's, so a placeholder goes in here.
                 // No alpha on the stroke path: a stamp-oriented alpha along a
@@ -4944,7 +5132,7 @@ NB_MODULE(pyclay, m) {
                     verb, nb::none(), 1.0f, strength, falloff, nb::none(), deposit_normal, geodesic,
                     seed_class, seed_revision, flatten_mode, plane_point, plane_normal,
                     polish_angle, smooth_iterations, layer_height, nb::none(), nb::none(),
-                    nb::none(), 0.0f, color, &chosen);
+                    nb::none(), 0.0f, color, automask, stamp_azimuth, &chosen);
                 std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
                 mesh::VertexDeltas* record =
                     deltas.is_none() ? nullptr : nb::cast<PyVertexDeltas*>(deltas)->deltas.get();
@@ -4962,7 +5150,8 @@ NB_MODULE(pyclay, m) {
             "flatten_mode"_a = "two_sided", "plane_point"_a = nb::none(),
             "plane_normal"_a = nb::none(), "polish_angle"_a = 0.20f, "smooth_iterations"_a = 1,
             "layer_height"_a = 0.05f, "strength"_a = 1.0f, "color"_a = nb::none(),
-            "mask"_a = nb::none(), "deltas"_a = nb::none(), "defer_normals"_a = false,
+            "automask"_a = nb::none(), "stamp_azimuth"_a = 0.0f, "mask"_a = nb::none(),
+            "deltas"_a = nb::none(), "defer_normals"_a = false,
             "Resolve a stroke and apply it — the stroke engine's FOURTH consumer,\n"
             "after the voxel grid, the mask and the edit list. Spacing, pressure\n"
             "response, deterministic jitter, taper, steady stroke and\n"
@@ -4974,6 +5163,18 @@ NB_MODULE(pyclay, m) {
             "'grab' anchors on the first stamp and drags by the motion between\n"
             "stamps; 'snakehook' re-anchors on every stamp, so its region walks\n"
             "with the pull. Returns how many stamps moved a vertex.")
+        .def_prop_ro("arena_stats",
+                     [](const PyMeshSculptor& s) { return arena_stats_of(&s.live(false).arena()); },
+                     kArenaStatsDoc)
+        .def(
+            "set_automask_inputs",
+            [](PyMeshSculptor& s, nb::handle cavity, nb::handle groups,
+               std::uint32_t active_group) {
+                s.live(false).set_automask_inputs(
+                    automask_inputs_of(cavity, groups, active_group));
+            },
+            "cavity"_a = nb::none(), "groups"_a = nb::none(), "active_group"_a = 0,
+            nb::keep_alive<1, 2>(), nb::keep_alive<1, 3>(), kAutomaskInputsDoc)
         .def(
             "raycast",
             [](PyMeshSculptor& s, nb::handle origin, nb::handle direction, nb::handle position,
@@ -6039,6 +6240,33 @@ NB_MODULE(pyclay, m) {
                                    Want::Colors);
              },
              "points"_a, "backend"_a = "cpu", "Field colors at (N, 3) points -> (N, 3)")
+        .def("eval_excluding",
+             [](const PyDocument& d, scene::LayerId excluded, nb::handle points,
+                const std::string& backend) {
+                 if (!d.doc->document.find_layer(excluded))
+                     throw std::invalid_argument(
+                         "no layer " + std::to_string(excluded) + " to exclude: excluding a "
+                         "layer the document does not hold would evaluate the whole document");
+                 return eval_field(scene::compile_document_except(d.doc->document, excluded),
+                                   points, backend, Want::Distances);
+             },
+             "excluded"_a, "points"_a, "backend"_a = "cpu",
+             "Signed distances of every visible SDF layer EXCEPT `excluded` -> (N,) float32.\n"
+             "Layers hard-union, so np.minimum(this, your own preview of that layer) is\n"
+             "exactly what the whole document evaluates to. A layer the document does not\n"
+             "hold raises rather than evaluating everything.")
+        .def("gradients_excluding",
+             [](const PyDocument& d, scene::LayerId excluded, nb::handle points,
+                const std::string& backend) {
+                 if (!d.doc->document.find_layer(excluded))
+                     throw std::invalid_argument(
+                         "no layer " + std::to_string(excluded) + " to exclude: excluding a "
+                         "layer the document does not hold would evaluate the whole document");
+                 return eval_field(scene::compile_document_except(d.doc->document, excluded),
+                                   points, backend, Want::Gradients);
+             },
+             "excluded"_a, "points"_a, "backend"_a = "cpu",
+             "Gradients of every visible SDF layer EXCEPT `excluded` -> (N, 3)")
         .def("safe_step_scale",
              [](const PyDocument& d) {
                  return scene::compile_document(d.doc->document).safe_step_scale();
@@ -7136,13 +7364,14 @@ NB_MODULE(pyclay, m) {
             [](PyDynamicSculptor& self, const std::string& verb, nb::handle center,
                float radius, float strength, const std::string& falloff,
                const mesh::DynamicTopologySettings& topology, nb::handle direction,
-               nb::handle mask, bool geodesic, int smooth_iterations) {
+               nb::handle mask, bool geodesic, int smooth_iterations, nb::handle automask,
+               float stamp_azimuth) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, center, radius, strength, falloff, direction, nb::none(),
                     nb::cast(geodesic), nb::none(), nb::none(), "two_sided", nb::none(),
                     nb::none(), 0.2f, smooth_iterations, 0.0f, nb::none(), nb::none(), nb::none(),
-                    0.0f, nb::none(), &chosen);
+                    0.0f, nb::none(), automask, stamp_azimuth, &chosen);
                 if (!mesh::dynamic_offers(chosen))
                     throw std::invalid_argument(
                         "an adaptive surface does not offer '" + verb +
@@ -7172,6 +7401,7 @@ NB_MODULE(pyclay, m) {
             "verb"_a, "center"_a, "radius"_a, "strength"_a = 0.5f, "falloff"_a = "smooth",
             "topology"_a = mesh::DynamicTopologySettings{}, "direction"_a = nb::none(),
             "mask"_a = nb::none(), "geodesic"_a = true, "smooth_iterations"_a = 1,
+            "automask"_a = nb::none(), "stamp_azimuth"_a = 0.0f,
             "One stamp: remesh where the verb's timing says, deform through the\n"
             "shared kernels, recompute the normals of what moved, and keep the\n"
             "chunked index in step.")
@@ -7267,7 +7497,18 @@ NB_MODULE(pyclay, m) {
             "partition — and what a host had already uploaded would be addressed\n"
             "by ids that no longer mean the same chunks.\n\n"
             "A held pin makes this a no-op that reports what it WOULD have\n"
-            "released.");
+            "released.")
+        .def_prop_ro("arena_stats",
+                     [](const PyDynamicSculptor& s) { return arena_stats_of(&s.arena()); },
+                     kArenaStatsDoc)
+        .def(
+            "set_automask_inputs",
+            [](PyDynamicSculptor& s, nb::handle cavity, nb::handle groups,
+               std::uint32_t active_group) {
+                s.set_automask_inputs(automask_inputs_of(cavity, groups, active_group));
+            },
+            "cavity"_a = nb::none(), "groups"_a = nb::none(), "active_group"_a = 0,
+            nb::keep_alive<1, 2>(), nb::keep_alive<1, 3>(), kAutomaskInputsDoc);
 
     // -- multiresolution surfaces (add-mesh-multires) -------------------------
     nb::class_<mesh::MultiresSurface>(
@@ -7463,8 +7704,17 @@ NB_MODULE(pyclay, m) {
                 out["base"] = mem.base;
                 out["topology"] = mem.topology;
                 out["detail"] = mem.detail;
+                // Reported APART from `detail`, though it is counted in
+                // `authoritative` with it: the two are the same quantity under
+                // different owners, and a host deciding what to merge, bake or
+                // delete needs to see which of them is costing it.
+                out["sculpt_layers"] = mem.sculpt_layers;
                 out["authoritative"] = mem.authoritative;
                 out["evaluated"] = mem.evaluated;
+                // Derived from the two above and droppable, which is why it is
+                // on the rebuildable side even though it is the array the
+                // evaluation actually reads.
+                out["composed"] = mem.composed;
                 out["runtime_index"] = mem.runtime_index;
                 out["rebuildable"] = mem.rebuildable;
                 out["total"] = mem.total;
@@ -7520,6 +7770,256 @@ NB_MODULE(pyclay, m) {
             "strength"_a = 1.0f,
             "Fit every level to a sculpt made somewhere else, coarse first —\n"
             "the supported route by which a hierarchy accepts a new cage.")
+        // -- the sculpt layer stack (add-mesh-sculpt-layers) ------------------
+        //
+        // A layer is addressed by its ID everywhere here, never by its index.
+        // Reordering changes every index at or below the layer it moves, so an
+        // index a script held across a `move_sculpt_layer` would name a
+        // different pass; an id survives a reorder, a save and a load.
+        .def_prop_ro("sculpt_layer_count",
+                     [](const mesh::MultiresSurface& s) { return s.sculpt_layers().size(); })
+        .def_prop_ro(
+            "sculpt_layer_ids",
+            [](const mesh::MultiresSurface& s) {
+                const mesh::SculptLayerStack& stack = s.sculpt_layers();
+                std::vector<mesh::SculptLayerId> out;
+                out.reserve(stack.size());
+                for (std::size_t i = 0; i < stack.size(); ++i) out.push_back(stack.id_at(i));
+                return out;
+            },
+            "Every layer's id, BOTTOM-FIRST — the order a host draws the list\n"
+            "in. Additive layers commute, so that order says everything about\n"
+            "organisation and nothing about geometry.")
+        .def(
+            "add_sculpt_layer",
+            [](mesh::MultiresSurface& s, const std::string& name) {
+                const mesh::SculptLayerId id = s.add_sculpt_layer(name);
+                if (id == mesh::kNoSculptLayer)
+                    throw std::invalid_argument(
+                        "a stroke is open; finish or cancel it before changing the stack");
+                return id;
+            },
+            "name"_a = "",
+            "A new empty layer on top, full strength, visible, made active.\n"
+            "Returns its id.")
+        .def(
+            "remove_sculpt_layer",
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id) {
+                if (!s.remove_sculpt_layer(id)) throw sculpt_layer_error(s, id);
+            },
+            "id"_a,
+            "Discard a layer. Re-evaluates its COVERAGE and nothing else: no\n"
+            "stroke is replayed, and no other layer's coefficients, strength or\n"
+            "relative order change.")
+        .def(
+            "move_sculpt_layer",
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id, std::size_t index) {
+                if (!s.move_sculpt_layer(id, index)) throw sculpt_layer_error(s, id);
+            },
+            "id"_a, "index"_a,
+            "Slide a layer through the stack. Organisation only — additive\n"
+            "layers commute, so this cannot move a vertex.")
+        .def(
+            "merge_sculpt_layer_down",
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id) {
+                if (!s.merge_sculpt_layer_down(id)) throw sculpt_layer_error(s, id);
+            },
+            "id"_a,
+            "Fold a layer into the one below it. Defined by VISUAL PARITY —\n"
+            "the evaluated surface before equals the evaluated surface after,\n"
+            "at any strength including zero — rather than by concatenating\n"
+            "coefficients, an arithmetic that divides by the lower layer's\n"
+            "strength and is undefined exactly where a slider can be.\n\n"
+            "What is lost is real: the merged layer's slider no longer scales\n"
+            "what the upper layer contributed on its own. That is what merging\n"
+            "MEANS, and it is why it undoes.")
+        .def(
+            "bake_sculpt_layer_to_base",
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id) {
+                if (!s.bake_sculpt_layer_to_base(id)) throw sculpt_layer_error(s, id);
+            },
+            "id"_a,
+            "The same parity statement with the BASE as the target: the level's\n"
+            "own detail, and the cage itself for a level-0 layer.")
+        .def(
+            "rename_sculpt_layer",
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id, const std::string& name) {
+                if (!s.rename_sculpt_layer(id, name)) throw sculpt_layer_error(s, id);
+            },
+            "id"_a, "name"_a,
+            "Metadata: invalidates nothing geometric, and recomposes no block.")
+        .def(
+            "set_sculpt_layer_strength",
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id, float strength) {
+                if (!s.set_sculpt_layer_strength(id, strength)) throw sculpt_layer_error(s, id);
+            },
+            "id"_a, "strength"_a,
+            "How much of what is stored reaches the surface. 1 contributes\n"
+            "fully, 0 contributes nothing, and NEITHER REPLAYS A STROKE.\n\n"
+            "Strength is composition, not a scale on the pen: a stroke made\n"
+            "into a layer at 0.5 recorded its full contribution and moved the\n"
+            "surface half as far, so raising this to 1 afterwards doubles what\n"
+            "is already on screen.")
+        .def(
+            "set_sculpt_layer_visible",
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id, bool visible) {
+                if (!s.set_sculpt_layer_visible(id, visible)) throw sculpt_layer_error(s, id);
+            },
+            "id"_a, "visible"_a,
+            "Invisible is exactly zero rather than nearly zero, so hiding a\n"
+            "layer removes its contribution bit for bit.")
+        .def(
+            "set_sculpt_layer_locked",
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id, bool locked) {
+                if (!s.set_sculpt_layer_locked(id, locked)) throw sculpt_layer_error(s, id);
+            },
+            "id"_a, "locked"_a,
+            "A lock refuses a COEFFICIENT WRITE and permits every property\n"
+            "change — the rule stated rather than discovered. Locking exists so\n"
+            "an artist can keep working over a finished pass; a lock that also\n"
+            "froze the name and the slider would make 'lock' mean 'hide'.")
+        .def_prop_rw(
+            "active_sculpt_layer",
+            [](const mesh::MultiresSurface& s) { return s.sculpt_layers().active(); },
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id) {
+                if (!s.set_active_sculpt_layer(id)) throw sculpt_layer_error(s, id);
+            },
+            "Which layer the next sculpt write lands in. 0 is the BASE detail,\n"
+            "which is what every stroke did before layers existed.")
+        .def(
+            "sculpt_layer_info",
+            [](const mesh::MultiresSurface& s, mesh::SculptLayerId id) {
+                const mesh::SculptLayerStack& stack = s.sculpt_layers();
+                const mesh::SculptLayer* layer = stack.find(id);
+                if (!layer) throw sculpt_layer_error(s, id);
+                nb::dict out;
+                out["id"] = layer->id;
+                out["index"] = stack.index_of(id);
+                out["name"] = layer->name;
+                out["kind"] =
+                    layer->kind == mesh::SculptLayerKind::Sampled ? "sampled" : "procedural";
+                out["strength"] = layer->strength;
+                out["visible"] = layer->visible;
+                out["locked"] = layer->locked;
+                out["bytes"] = layer->bytes();
+                out["coverage_vertices"] = layer->coverage_vertices();
+                return out;
+            },
+            "id"_a,
+            "One layer's row: its name, kind, sliders, and what it costs. A\n"
+            "layer costs its COVERAGE and not the model, which is what makes a\n"
+            "hundred passes over one cheek affordable.")
+        .def(
+            "sculpt_layer_name",
+            [](const mesh::MultiresSurface& s, mesh::SculptLayerId id) {
+                const mesh::SculptLayer* layer = s.sculpt_layers().find(id);
+                if (!layer) throw sculpt_layer_error(s, id);
+                return layer->name;
+            },
+            "id"_a)
+        .def(
+            "set_sculpt_layer_detail",
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id, std::uint32_t level,
+               std::uint32_t vertex, float tangent, float bitangent, float normal) {
+                if (!s.set_sculpt_layer_detail(id, level, vertex,
+                                               mesh::LocalDetail{tangent, bitangent, normal}))
+                    throw sculpt_layer_error(s, id);
+            },
+            "id"_a, "level"_a, "vertex"_a, "tangent"_a, "bitangent"_a, "normal"_a,
+            "One vertex's coefficients on a layer, in the vertex's transported\n"
+            "frame — the same three the base detail stores, because they are\n"
+            "the same quantity under a different owner.")
+        .def(
+            "sculpt_layer_detail",
+            [](const mesh::MultiresSurface& s, mesh::SculptLayerId id, std::uint32_t level,
+               std::uint32_t vertex) {
+                if (!s.sculpt_layers().find(id)) throw sculpt_layer_error(s, id);
+                const mesh::LocalDetail d = s.sculpt_layer_detail(id, level, vertex);
+                return nb::make_tuple(d.tangent, d.bitangent, d.normal);
+            },
+            "id"_a, "level"_a, "vertex"_a)
+        .def(
+            "set_sculpt_layer_mask",
+            [](mesh::MultiresSurface& s, mesh::SculptLayerId id, std::uint32_t level,
+               std::uint32_t vertex, float weight) {
+                if (!s.set_sculpt_layer_mask(id, level, vertex, weight))
+                    throw sculpt_layer_error(s, id);
+            },
+            "id"_a, "level"_a, "vertex"_a, "weight"_a,
+            "The per-layer MASK, a different question from the brush gate: the\n"
+            "gate says where a brush writes and is gone when the pointer comes\n"
+            "up, this says where a STORED LAYER CONTRIBUTES and is serialized\n"
+            "with it. Its identity is 1, so writing exactly 1 releases the\n"
+            "storage again and an untouched mask hides nothing.")
+        .def(
+            "sculpt_layer_mask",
+            [](const mesh::MultiresSurface& s, mesh::SculptLayerId id, std::uint32_t level,
+               std::uint32_t vertex) {
+                if (!s.sculpt_layers().find(id)) throw sculpt_layer_error(s, id);
+                const mesh::SparseWeightField* mask = s.sculpt_layers().mask_at(id, level);
+                return mask ? mask->get(vertex) : 1.0f;
+            },
+            "id"_a, "level"_a, "vertex"_a)
+        .def_prop_ro("sculpt_layer_checksum", &mesh::MultiresSurface::sculpt_layer_checksum,
+                     "Every layer's coefficients and mask, and nothing derived\n"
+                     "from them. Apart from `detail_checksum`, which still hashes\n"
+                     "the BASE detail only — so a test can ask 'did the form\n"
+                     "change' and 'did a pass change' separately.")
+        .def_prop_ro("sculpt_layer_metadata_revision",
+                     &mesh::MultiresSurface::sculpt_layer_metadata_revision,
+                     "A rename or a change of active layer. Invalidates nothing.")
+        .def_prop_ro("sculpt_layer_composition_revision",
+                     &mesh::MultiresSurface::sculpt_layer_composition_revision,
+                     "Strength, visibility, mask, order, add, remove.")
+        .def_prop_ro("sculpt_layer_content_revision",
+                     &mesh::MultiresSurface::sculpt_layer_content_revision,
+                     "Coefficients written.")
+        .def(
+            "sculpt_layer_stats",
+            [](const mesh::MultiresSurface& s) {
+                const mesh::SculptLayerStats st = s.sculpt_layer_stats();
+                nb::dict out;
+                out["blocks_recomposed"] = st.blocks_recomposed;
+                out["layer_blocks_visited"] = st.layer_blocks_visited;
+                out["compositions"] = st.compositions;
+                return out;
+            },
+            "What composition actually did, so the two scale claims are\n"
+            "MEASUREMENTS rather than assertions — there is no other way to see\n"
+            "either from outside, because a correct implementation and a\n"
+            "quadratic one produce the same surface.")
+        .def("reset_sculpt_layer_stats", &mesh::MultiresSurface::reset_sculpt_layer_stats)
+        .def("compact_sculpt_layers", &mesh::MultiresSurface::compact_sculpt_layers,
+             "Release every all-zero coefficient block and every all-identity\n"
+             "mask block — the storage a stroke that undid itself left behind.\n"
+             "NEVER CALL THIS INSIDE A POINTER EVENT: it walks every layer's\n"
+             "stored blocks, which is proportional to the stack, not the dab.")
+        .def(
+            "hold_sculpt_layer_composition",
+            [](mesh::MultiresSurface& s, bool held) { s.hold_sculpt_layer_composition(held); },
+            "held"_a,
+            "Hold the composition for a gesture driven stamp by stamp. The\n"
+            "stroke transaction below takes and releases this for you, which is\n"
+            "why it is the form to reach for.")
+        .def(
+            "sculpt_layer_stroke",
+            [](nb::object self, const std::string& write_domain) {
+                mesh::MultiresSurface& s = nb::cast<mesh::MultiresSurface&>(self);
+                PySculptLayerStroke stroke;
+                stroke.sculptor = std::make_shared<mesh::LayeredMultiresSculptor>(s);
+                stroke.sculptor->set_write_domain(parse_write_domain(write_domain));
+                return stroke;
+            },
+            "write_domain"_a = "automatic", nb::keep_alive<0, 1>(),
+            "A layered gesture as a CONTEXT MANAGER:\n\n"
+            "    with surface.sculpt_layer_stroke() as stroke:\n"
+            "        for p in path:\n"
+            "            stroke.stamp('draw', center=p, radius=0.2)\n\n"
+            "Entering begins the gesture, a clean exit commits it and an\n"
+            "exception cancels it — which is the whole reason this is the form\n"
+            "to reach for. A stroke loop that raises halfway would otherwise\n"
+            "leave the surface holding its composition, with every slider\n"
+            "refusing and no way for the script to know why.")
         .def("serialize",
              [](const mesh::MultiresSurface& s) {
                  const std::vector<std::uint8_t> bytes = s.encode();
@@ -7609,13 +8109,14 @@ NB_MODULE(pyclay, m) {
                float radius, float strength, const std::string& falloff, nb::handle direction,
                nb::handle mask, bool geodesic, int smooth_iterations, nb::handle alpha,
                nb::handle alpha_direction, nb::handle alpha_tangent, float alpha_extent,
-               nb::handle seed_class, nb::handle seed_revision) {
+               nb::handle seed_class, nb::handle seed_revision, nb::handle automask,
+               float stamp_azimuth) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, center, radius, strength, falloff, direction, nb::none(),
                     nb::cast(geodesic), seed_class, seed_revision, "two_sided", nb::none(),
                     nb::none(), 0.2f, smooth_iterations, 0.0f, alpha, alpha_direction,
-                    alpha_tangent, alpha_extent, nb::none(), &chosen);
+                    alpha_tangent, alpha_extent, nb::none(), automask, stamp_azimuth, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
                 nb::gil_scoped_release release;
                 return self.stamp(chosen, settings, gate, nullptr);
@@ -7625,7 +8126,8 @@ NB_MODULE(pyclay, m) {
             "smooth_iterations"_a = 1, "alpha"_a = nb::none(),
             "alpha_direction"_a = nb::none(), "alpha_tangent"_a = nb::none(),
             "alpha_extent"_a = 0.0f, "seed_class"_a = nb::none(),
-            "seed_revision"_a = nb::none(),
+            "seed_revision"_a = nb::none(), "automask"_a = nb::none(),
+            "stamp_azimuth"_a = 0.0f,
             "One stamp at the surface's current sculpt level. Returns how many\n"
             "weld classes moved.\n\n"
             "`seed_class` starts the surface walk where the finger did instead\n"
@@ -7646,7 +8148,7 @@ NB_MODULE(pyclay, m) {
             [](PyMultiresSculptor& self, nb::handle samples, const brush::StrokePreset& preset,
                const std::string& verb, const std::string& falloff, float strength,
                nb::handle geodesic, int smooth_iterations, float layer_height, nb::handle mask,
-               bool defer_normals) {
+               bool defer_normals, nb::handle automask, float stamp_azimuth) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 // The radius is the STAMP's, so a placeholder goes in here —
                 // the same reading the fixed sculptor's stroke path takes.
@@ -7654,7 +8156,7 @@ NB_MODULE(pyclay, m) {
                     verb, nb::none(), 1.0f, strength, falloff, nb::none(), nb::none(), geodesic,
                     nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
                     smooth_iterations, layer_height, nb::none(), nb::none(), nb::none(), 0.0f,
-                    nb::none(), &chosen);
+                    nb::none(), automask, stamp_azimuth, &chosen);
                 const std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
                 const voxel::MaskField* field_mask = borrow_mask(mask);
                 brush::MeshStrokeOptions options;
@@ -7665,7 +8167,8 @@ NB_MODULE(pyclay, m) {
             },
             "samples"_a, "preset"_a, "verb"_a, "falloff"_a = "smooth", "strength"_a = 1.0f,
             "geodesic"_a = nb::none(), "smooth_iterations"_a = 1, "layer_height"_a = 0.05f,
-            "mask"_a = nb::none(), "defer_normals"_a = false,
+            "mask"_a = nb::none(), "defer_normals"_a = false, "automask"_a = nb::none(),
+            "stamp_azimuth"_a = 0.0f,
             "A whole stroke at the active sculpt level, resolved into spaced\n"
             "stamps by the same engine that drives a mesh layer — so a stamp\n"
             "lands in the same place with the same radius and the same\n"
@@ -7710,7 +8213,274 @@ NB_MODULE(pyclay, m) {
                          const std::vector<std::uint32_t>& v = s.last_write_vertices();
                          return std::vector<std::uint32_t>(v.begin(), v.end());
                      },
-                     "The level vertices the last stamp actually moved.");
+                     "The level vertices the last stamp actually moved.")
+        .def_prop_ro("arena_stats",
+                     [](const mesh::MultiresSculptor& s) { return arena_stats_of(s.arena()); },
+                     kArenaStatsDoc)
+        .def(
+            "set_automask_inputs",
+            [](mesh::MultiresSculptor& s, nb::handle cavity, nb::handle groups,
+               std::uint32_t active_group) {
+                s.set_automask_inputs(automask_inputs_of(cavity, groups, active_group));
+            },
+            "cavity"_a = nb::none(), "groups"_a = nb::none(), "active_group"_a = 0,
+            nb::keep_alive<1, 2>(), nb::keep_alive<1, 3>(), kAutomaskInputsDoc);
+
+    nb::class_<PySculptLayerStroke>(
+        m, "SculptLayerStroke",
+        "A layered gesture, which surface.sculpt_layer_stroke() returns.\n\n"
+        "WHY A TRANSACTION AND NOT A LOOP OF STAMPS. Three reasons, and none of\n"
+        "them exists until a layer stack does:\n\n"
+        "  1. A stroke has to enter ONE channel, fixed at pointer-down rather\n"
+        "     than read again per dab — otherwise changing the active layer\n"
+        "     mid-stroke splits one gesture across two channels.\n"
+        "  2. A stamp READS the evaluated surface, which includes every visible\n"
+        "     layer, so the composition is HELD for the length of the stroke and\n"
+        "     the sliders refuse while it is open.\n"
+        "  3. Cancel has to be exact. A layered write is `L += dE`, so the only\n"
+        "     exact restore is the recorded `before` values — which means the\n"
+        "     record exists from the first stamp rather than being reconstructed\n"
+        "     at the end.\n\n"
+        "Under symmetry every mirrored stamp is another stamp in the same\n"
+        "transaction, so a mirrored stroke is one layer, one record, and the\n"
+        "union of the two sides' coverage.")
+        .def("__enter__",
+             [](PySculptLayerStroke& s) {
+                 if (!s.sculptor->begin())
+                     throw std::invalid_argument(
+                         "cannot begin a layered stroke: one is already open, the target layer "
+                         "is locked, or write_domain='detail' was asked for with no active "
+                         "layer");
+                 return s;
+             })
+        .def("__exit__",
+             // Variadic: the three arguments are None on a clean exit, and a
+             // typed signature would refuse them.
+             [](PySculptLayerStroke& s, nb::args args) {
+                 // A RAISING BLOCK CANCELS. This is the whole reason the context
+                 // manager exists rather than being sugar: a half-finished
+                 // gesture committed on the way out of an exception is an undo
+                 // step for work the artist never asked for, and a gesture left
+                 // open holds the composition forever.
+                 const bool raised = args.size() > 0 && !args[0].is_none();
+                 if (raised)
+                     s.sculptor->cancel();
+                 else
+                     s.sculptor->commit();
+                 return false;  // never swallow the exception
+             })
+        .def_prop_ro("target_layer", [](const PySculptLayerStroke& s) {
+                         return s.sculptor->target_layer();
+                     },
+                     "The channel this stroke is writing; 0 means the base.")
+        .def_prop_ro("stamps",
+                     [](const PySculptLayerStroke& s) { return s.sculptor->stamps(); })
+        .def_prop_ro("record_size",
+                     [](const PySculptLayerStroke& s) { return s.sculptor->record_size(); },
+                     "How many entries the undo record holds. A hundred stamps\n"
+                     "over one vertex is ONE entry — the record follows the\n"
+                     "vertices the stroke reached, not the stamps it took — and\n"
+                     "comparing this with `stamps` is how you see that.")
+        .def(
+            "stamp",
+            [](PySculptLayerStroke& s, const std::string& verb, nb::handle center, float radius,
+               float strength, const std::string& falloff, nb::handle direction, nb::handle mask,
+               bool geodesic, int smooth_iterations, nb::handle alpha,
+               nb::handle alpha_direction, nb::handle alpha_tangent, float alpha_extent) {
+                mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
+                mesh::MeshBrushSettings settings = mesh_brush_settings(
+                    verb, center, radius, strength, falloff, direction, nb::none(),
+                    nb::cast(geodesic), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
+                    smooth_iterations, 0.0f, alpha, alpha_direction, alpha_tangent, alpha_extent,
+                    nb::none(), nb::none(), 0.0f, &chosen);
+                field::MaskGate gate = mask_gate_of(mask);
+                nb::gil_scoped_release release;
+                return s.sculptor->stamp(chosen, settings, gate);
+            },
+            "verb"_a, "center"_a, "radius"_a, "strength"_a = 0.5f, "falloff"_a = "smooth",
+            "direction"_a = nb::none(), "mask"_a = nb::none(), "geodesic"_a = true,
+            "smooth_iterations"_a = 1, "alpha"_a = nb::none(),
+            "alpha_direction"_a = nb::none(), "alpha_tangent"_a = nb::none(),
+            "alpha_extent"_a = 0.0f,
+            "One stamp at the surface's sculpt level, into this stroke's\n"
+            "channel: the same sixteen verbs, the same falloffs, the same mask\n"
+            "and the same automasking, because it is the same code.")
+        .def(
+            "stamp_detail",
+            [](PySculptLayerStroke& s, nb::handle image, const std::string& mode,
+               nb::handle center, float radius, float extent, float amplitude, float bias,
+               float strength, const std::string& falloff, nb::handle direction,
+               nb::handle tangent, nb::handle mask) {
+                mesh::DetailStampSettings stamp;
+                stamp.mode = parse_detail_stamp_mode(mode);
+                if (stamp.mode == mesh::DetailStampMode::Weight)
+                    throw std::invalid_argument(
+                        "a scalar alpha is the `alpha` argument of stamp(); routing it through "
+                        "a second entry point would be two ways to say one thing");
+                // PLANAR, and borrowed for the call. A (3, H, W) array IS three
+                // consecutive H*W planes, which is exactly the buffer the alpha
+                // sampler already reads — an interleaved (H, W, 3) one would
+                // need a second lookup with its own stride rules, which is the
+                // drift this avoids.
+                nb::module_ np = nb::module_::import_("numpy");
+                nb::object arr = np.attr("ascontiguousarray")(image, "dtype"_a = "float32");
+                nb::ndarray<const float, nb::c_contig, nb::device::cpu> view;
+                try {
+                    view = nb::cast<decltype(view)>(arr);
+                } catch (const std::exception&) {
+                    throw std::invalid_argument("image must be a float array");
+                }
+                if (stamp.mode == mesh::DetailStampMode::Vector) {
+                    if (view.ndim() != 3 || view.shape(0) != 3)
+                        throw std::invalid_argument(
+                            "a vector displacement map is (3, height, width) — three PLANES of "
+                            "tangent, bitangent and normal, not interleaved triples");
+                    stamp.height = static_cast<int>(view.shape(1));
+                    stamp.width = static_cast<int>(view.shape(2));
+                } else {
+                    if (view.ndim() != 2)
+                        throw std::invalid_argument("a height map is (height, width)");
+                    stamp.height = static_cast<int>(view.shape(0));
+                    stamp.width = static_cast<int>(view.shape(1));
+                }
+                if (stamp.width < 2 || stamp.height < 2)
+                    throw std::invalid_argument(
+                        "a stamp needs at least 2x2 samples; there is nothing to interpolate "
+                        "below that");
+                stamp.image = view.data();
+                stamp.amplitude = amplitude;
+                stamp.bias = bias;
+                stamp.extent = extent > 0.0f ? extent : radius * 2.0f;
+                if (!center.is_none()) stamp.center = to_f3(center, "center");
+                if (!direction.is_none()) stamp.direction = to_f3(direction, "direction");
+                if (!tangent.is_none()) stamp.tangent = to_f3(tangent, "tangent");
+
+                mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
+                mesh::MeshBrushSettings settings = mesh_brush_settings(
+                    "draw", center, radius, strength, falloff, direction, nb::none(),
+                    nb::cast(true), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
+                    0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), nb::none(),
+                    0.0f, &chosen);
+                field::MaskGate gate = mask_gate_of(mask);
+                nb::gil_scoped_release release;
+                return s.sculptor->stamp_detail(stamp, settings, gate);
+            },
+            "image"_a, "mode"_a = "height", "center"_a = nb::none(), "radius"_a = 1.0f,
+            "extent"_a = 0.0f, "amplitude"_a = 1.0f, "bias"_a = 0.0f, "strength"_a = 1.0f,
+            "falloff"_a = "smooth", "direction"_a = nb::none(), "tangent"_a = nb::none(),
+            "mask"_a = nb::none(),
+            "A HEIGHT MAP or a TANGENT-SPACE VECTOR DISPLACEMENT, deposited\n"
+            "through the brush's own weight — so the falloff, the mask, the\n"
+            "automasking and the alpha compose with it exactly as they do with\n"
+            "a verb.\n\n"
+            "A vector map's three components are read IN THE VERTEX'S FRAME and\n"
+            "never in world space: a world-space stamp is orientation-dependent,\n"
+            "so the same map on the left and right of a face makes two different\n"
+            "shapes and across a curve it shears.\n\n"
+            "`last_stamp_report` afterwards says whether the level could carry\n"
+            "what the map holds, reported rather than silently blurred.")
+        .def_prop_ro(
+            "last_stamp_report",
+            [](const PySculptLayerStroke& s) {
+                const mesh::DetailStampReport& r = s.sculptor->last_stamp_report();
+                nb::dict out;
+                out["sample_size"] = r.sample_size;
+                out["vertex_spacing"] = r.vertex_spacing;
+                out["oversampling"] = r.oversampling;
+                out["under_resolved"] = r.under_resolved;
+                return out;
+            },
+            "Whether the level can carry what the last detail stamp held. A\n"
+            "2048-sample map across a 5 mm square carries features finer than a\n"
+            "level whose mean edge is 1 mm can represent, and applying it anyway\n"
+            "looks like the map through a blur — which reads as a bug in the\n"
+            "map, or the brush, or the file, and is none of those.")
+        .def(
+            "smooth",
+            [](PySculptLayerStroke& s, const std::string& mode, nb::handle center, float radius,
+               float strength, const std::string& falloff, int smooth_iterations,
+               nb::handle mask) {
+                mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
+                mesh::MeshBrushSettings settings = mesh_brush_settings(
+                    "smooth", center, radius, strength, falloff, nb::none(), nb::none(),
+                    nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
+                    smooth_iterations, 0.0f, nb::none(), nb::none(), nb::none(), 0.0f,
+                    nb::none(), nb::none(), 0.0f, &chosen);
+                const mesh::MultiresSmoothMode chosen_mode = parse_smooth_mode(mode);
+                field::MaskGate gate = mask_gate_of(mask);
+                nb::gil_scoped_release release;
+                return s.sculptor->smooth(chosen_mode, settings, gate);
+            },
+            "mode"_a, "center"_a, "radius"_a, "strength"_a = 0.5f, "falloff"_a = "smooth",
+            "smooth_iterations"_a = 1, "mask"_a = nb::none(),
+            "WHICH FREQUENCY to smooth, as three operations rather than one\n"
+            "filter with a cutoff — the split is representational, because the\n"
+            "hierarchy already stores the form and the detail apart:\n\n"
+            "  'geometry'        positions, exactly the Smooth brush.\n"
+            "  'detail_only'     coefficients in this channel; the form under\n"
+            "                    them does not move and no other layer is read.\n"
+            "  'preserve_detail' the FORM, with the detail re-applied unchanged.\n"
+            "                    The mode an artist correcting anatomy under\n"
+            "                    pores is asking for, and the one that is\n"
+            "                    impossible on a flat mesh.\n\n"
+            "A plain Laplacian over pores removes the pores, which is rarely\n"
+            "what was asked.")
+        .def(
+            "erase",
+            [](PySculptLayerStroke& s, nb::handle center, float radius, float strength,
+               const std::string& falloff, nb::handle mask) {
+                mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
+                mesh::MeshBrushSettings settings = mesh_brush_settings(
+                    "draw", center, radius, strength, falloff, nb::none(), nb::none(),
+                    nb::cast(true), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
+                    0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), nb::none(),
+                    0.0f, &chosen);
+                field::MaskGate gate = mask_gate_of(mask);
+                nb::gil_scoped_release release;
+                return s.sculptor->erase(settings, gate);
+            },
+            "center"_a, "radius"_a, "strength"_a = 0.5f, "falloff"_a = "smooth",
+            "mask"_a = nb::none(),
+            "This channel toward zero. Touches neither the base nor any other\n"
+            "layer, which is what makes it an eraser for THIS pass rather than\n"
+            "a flattening brush.")
+        .def(
+            "restore",
+            [](PySculptLayerStroke& s, nb::handle center, float radius, float strength,
+               const std::string& falloff, nb::handle mask) {
+                mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
+                mesh::MeshBrushSettings settings = mesh_brush_settings(
+                    "draw", center, radius, strength, falloff, nb::none(), nb::none(),
+                    nb::cast(true), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
+                    0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), nb::none(),
+                    0.0f, &chosen);
+                field::MaskGate gate = mask_gate_of(mask);
+                nb::gil_scoped_release release;
+                return s.sculptor->restore(settings, gate);
+            },
+            "center"_a, "radius"_a, "strength"_a = 0.5f, "falloff"_a = "smooth",
+            "mask"_a = nb::none(),
+            "The LEVEL'S OWN detail toward zero: the form back toward the pure\n"
+            "subdivision, with every layer left alone.\n\n"
+            "Neither this nor `erase` is undo, and it is worth stating because\n"
+            "the temptation is to wire one to the other: undo walks a step list\n"
+            "backwards and restores what a gesture changed, wherever it was;\n"
+            "these move the surface toward a named target under the cursor, and\n"
+            "are themselves gestures that undo.")
+        .def(
+            "commit",
+            [](PySculptLayerStroke& s) {
+                const std::size_t entries = s.sculptor->record_size();
+                if (!s.sculptor->commit()) throw std::invalid_argument("no stroke is open");
+                return entries;
+            },
+            "Close the gesture and return how many entries its record held.\n"
+            "A gesture that changed nothing produces an EMPTY record rather than\n"
+            "a step: pointer-down and pointer-up with nothing between must not\n"
+            "add an undo that does nothing.")
+        .def("cancel", [](PySculptLayerStroke& s) { s.sculptor->cancel(); },
+             "Discard. Restores this channel EXACTLY — the recorded `before`\n"
+             "values, not a recomputation.");
 
     // -- the surface tier: budgets, the pin and one transport -----------------
     //
@@ -8293,7 +9063,15 @@ NB_MODULE(pyclay, m) {
         .def_rw("polish_angle", &mesh::MeshBrushSettings::polish_angle)
         .def_rw("smooth_iterations", &mesh::MeshBrushSettings::smooth_iterations)
         .def_rw("layer_height", &mesh::MeshBrushSettings::layer_height)
-        .def_rw("automask", &mesh::MeshBrushSettings::automask);
+        .def_rw("automask", &mesh::MeshBrushSettings::automask)
+        .def_rw("stamp_azimuth", &mesh::MeshBrushSettings::stamp_azimuth,
+                "radians; how far the stamp's in-plane axes are turned about its\n"
+                "own facing. This is what makes rake, chisel, clay strips and a\n"
+                "rotated alpha presets over one frame rather than four code\n"
+                "paths. Zero is no rotation AT ALL rather than a rotation by\n"
+                "zero — the engine branches on it, because turning the basis by\n"
+                "cos 0 and sin 0 leaves a -0.0f where an unrotated axis has\n"
+                "+0.0f, and the fixed mesh's bit-parity goldens move.");
 
     nb::enum_<mesh::BrushFootprint>(m, "BrushFootprint",
                                     "How the region under the brush is REACHED.")

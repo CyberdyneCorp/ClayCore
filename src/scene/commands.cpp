@@ -215,8 +215,9 @@ std::optional<Command> apply_one(Document& doc, const SetLayerProtectionCmd& c) 
 std::optional<Command> apply_one(Document& doc, const SetLayerTransformCmd& c) {
     Layer* l = doc.find_layer(c.id);
     if (!l) return std::nullopt;
-    SetLayerTransformCmd inverse{c.id, l->xform};
+    SetLayerTransformCmd inverse{c.id, l->xform, l->scale_axes};
     l->xform = c.xform;
+    l->scale_axes = c.scale_axes;
     return Command{inverse};
 }
 
@@ -923,6 +924,10 @@ void write_layer(Writer& w, const Layer& l, LayerId content_source = 0) {
         w.pod(l.radial_axis);
         w.pod(l.radial_k);
     }
+    // From minor 16, and gated exactly as the radial fields above are. An
+    // older stream stops before it and keeps (1, 1, 1), which is the identity
+    // and what every file written before this field meant.
+    if (w.minor >= 16) w.pod(l.scale_axes);
     // From minor 15, and gated exactly as the radial fields above are. The id
     // goes out BEFORE the content flag so a reader knows, before it reaches
     // the flag, whether a content section follows it.
@@ -974,6 +979,9 @@ Layer read_layer(Reader& r, LayerId* out_content_source = nullptr) {
         l.radial_axis = r.pod<std::uint8_t>();
         l.radial_k = r.pod<float>();
     }
+    // Appended at minor 16, on the same terms: an older stream stops before it
+    // and keeps the identity triple.
+    if (r.minor >= 16) l.scale_axes = r.pod<kernel::cfloat3>();
     LayerId content_source = 0;
     if (r.minor >= 15) content_source = r.pod<LayerId>();
     if (out_content_source) *out_content_source = content_source;
@@ -1127,6 +1135,10 @@ struct SerializeVisitor {
         w.pod(Tag::SetLayerTransform);
         w.pod(c.id);
         w.pod(c.xform);
+        // From minor 16, gated as every appended field is: a stream written at
+        // an older minor must not carry what that minor's reader will not
+        // consume, or the two desynchronise for every record after this one.
+        if (w.minor >= 16) w.pod(c.scale_axes);
     }
     void operator()(const SetLayerMirrorCmd& c) {
         w.pod(Tag::SetLayerMirror);
@@ -1306,6 +1318,7 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
             SetLayerTransformCmd c;
             c.id = r.pod<LayerId>();
             c.xform = r.pod<math::Transform>();
+            if (r.minor >= 16) c.scale_axes = r.pod<kernel::cfloat3>();
             cmd = c;
             break;
         }

@@ -71,7 +71,17 @@ add_executable(clay_unit_tests
   unit/test_c_multires.cpp
   unit/test_c_surface_chunks.cpp
   unit/test_c_maintenance.cpp
+  unit/test_mesh_sculpt_layers.cpp
+  unit/test_mesh_sculpt_layer_stroke.cpp
+  unit/test_mesh_sculpt_layer_history.cpp
+  unit/test_c_sculpt_layers.cpp
   unit/test_sculpt_allocation.cpp
+  unit/test_brush_arena.cpp
+  unit/test_stamp_frame.cpp
+  unit/test_dynamic_shared_brush_parity.cpp
+  unit/test_multires_shared_brush_parity.cpp
+  unit/test_c_shared_brush_runtime.cpp
+  unit/test_shared_brush_determinism.cpp
   unit/test_brush_preset.cpp
   unit/test_c_brush_preset.cpp
   unit/test_mesh_deform.cpp
@@ -96,6 +106,7 @@ add_executable(clay_unit_tests
   unit/test_c_transform_args.cpp
   unit/test_scale_axes.cpp
   unit/test_c_scale_axes.cpp
+  unit/test_c_layer_scale_axes.cpp
   unit/test_c_layer_rename.cpp
   unit/test_c_layer_mirror.cpp
   unit/test_c_layer_radial.cpp
@@ -135,8 +146,10 @@ add_executable(clay_unit_tests
   unit/test_mask_extrude.cpp
   unit/test_c_mask_brush.cpp
   unit/test_c_pick_eval.cpp
+  unit/test_c_eval_excluding.cpp
   unit/test_c_tape_cache.cpp
   unit/test_c_frontier_resume.cpp
+  unit/test_c_prefetch_seed.cpp
   unit/test_c_brick.cpp
   unit/test_c_undo_bound.cpp
   unit/test_c_out_descriptors.cpp

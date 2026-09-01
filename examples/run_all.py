@@ -100,7 +100,9 @@ EXAMPLES = [
     "66_dynamic_topology",
     "67_voxel_remesh",
     "68_mesh_multires",
-    "69_extreme_poly",
+    "69_mesh_sculpt_layers",
+    "70_shared_brush_runtime",
+    "71_extreme_poly",
 ]
 
 
@@ -141,10 +143,14 @@ CAPABILITY_EXAMPLES = {
     # still active, which is what the asymmetry in check_capability_coverage
     # is for — a capability lands with its example in the same commit.
     "mesh-multires": "68_mesh_multires",
+    # The artist's channel stack over that hierarchy: its own capability, its
+    # own example. Listed here while the change is still active, for the reason
+    # the entry above gives.
+    "mesh-sculpt-layers": "69_mesh_sculpt_layers",
     # The surface tier: one chunk unit, one dirty-chunk transport, and a
     # memory tier a host can act on. Listed while add-extreme-poly-runtime is
     # still active, which is what the asymmetry above is for.
-    "sculpt-runtime": "69_extreme_poly",
+    "sculpt-runtime": "71_extreme_poly",
     "examples": None,             # this file
 }
 

@@ -550,7 +550,7 @@
       half is done and is in docs/09
       OPEN: NEEDS THE REFERENCE IPAD, and needs macOS to build for it. Not
       attempted. What would have to be true to close it: a device on the gate
-      running the existing device harness over `examples/69_extreme_poly.py`'s
+      running the existing device harness over `examples/71_extreme_poly.py`'s
       two model sizes plus a sustained multi-minute drag for thermals, reporting
       median and p95 stamp latency, footprint and peak memory. The change
       deliberately extends that gate rather than inventing a second one, so the

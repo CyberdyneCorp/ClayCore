@@ -419,20 +419,23 @@ void DynamicBvh::update_many(const DynamicSurface& surface, const std::vector<Fa
     // One refit pass per LEAF rather than per face: a stamp usually touches a
     // few hundred faces in one or two leaves, and refitting the ancestors once
     // per face would multiply the logarithmic cost by the footprint.
-    // The touched set is a member rather than a local: a stroke drains this
-    // once per stamp and an allocation here would be one per dab.
-    touched_.clear();
+    //
+    // A MEMBER rather than a local, for the reason every other scratch buffer
+    // on a per-stamp path is one: this runs once per stamp, and a local here
+    // allocated and freed on every dab.
+    std::vector<std::uint32_t>& touched = update_scratch_;
+    touched.clear();
     for (FaceId f : faces) {
         if (f.slot >= face_leaf_.size()) continue;
         const std::uint32_t leaf_index = face_leaf_[f.slot];
         if (leaf_index == kNoLeaf || table_.chunk(leaf_index) == nullptr) continue;
         if (surface.live(f)) table_.expand_bounds(leaf_index, face_bounds(surface, f));
         mark_dirty(leaf_index, /*topology=*/false);
-        touched_.push_back(leaf_index);
+        touched.push_back(leaf_index);
     }
-    std::sort(touched_.begin(), touched_.end());
-    touched_.erase(std::unique(touched_.begin(), touched_.end()), touched_.end());
-    for (std::uint32_t i : touched_) {
+    std::sort(touched.begin(), touched.end());
+    touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
+    for (std::uint32_t i : touched) {
         const SurfaceLeaf* leaf = table_.chunk(i);
         if (leaf->node != 0xffffffffu) refit_ancestors(leaf->node);
     }
@@ -440,21 +443,65 @@ void DynamicBvh::update_many(const DynamicSurface& surface, const std::vector<Fa
 
 // -- queries ------------------------------------------------------------------
 
+namespace {
+
+// The stack a query walks the tree with: INLINE, with a heap tail only for a
+// tree deeper than any realistic one.
+//
+// Each of the three queries below used to build a `std::vector` for this, which
+// is an allocation on every pick, every ball query and every seed resolution —
+// and, growing by doubling from one entry, up to a dozen of them. An adaptive
+// stamp makes three such calls, so this was most of what a stamp allocated
+// after everything else had been made to allocate nothing.
+//
+// The bound is about DEPTH rather than size: a node is pushed only when its
+// parent is popped, so the stack holds at most one sibling per level of the
+// path being walked. Ninety-six levels is far past any tree this library
+// builds, and past it the spill is correct rather than merely safe.
+class TraversalStack {
+   public:
+    explicit TraversalStack(std::uint32_t root) { push(root); }
+
+    bool empty() const { return size_ == 0; }
+    void push(std::uint32_t node) {
+        if (size_ < kInline)
+            inline_[size_] = node;
+        else
+            spill_.push_back(node);
+        ++size_;
+    }
+    std::uint32_t pop() {
+        --size_;
+        if (size_ < kInline) return inline_[size_];
+        const std::uint32_t node = spill_.back();
+        spill_.pop_back();
+        return node;
+    }
+
+   private:
+    static constexpr std::size_t kInline = 96;
+    std::uint32_t inline_[kInline] = {};
+    std::vector<std::uint32_t> spill_;
+    std::size_t size_ = 0;
+};
+
+}  // namespace
+
+
 void DynamicBvh::faces_in_ball(const DynamicSurface& surface, kernel::cfloat3 centre, float radius,
                                std::vector<FaceId>* out) const {
     out->clear();
     ensure_tree();
     if (root_ == 0xffffffffu || radius <= 0.0f) return;
     const float r2 = radius * radius;
-    std::vector<std::uint32_t> stack{root_};
+    TraversalStack stack(root_);
     while (!stack.empty()) {
-        const std::uint32_t node = stack.back();
-        stack.pop_back();
+        const std::uint32_t node = stack.pop();
         const Node& n = nodes_[node];
         if (aabb_distance2(n.bounds, centre) > r2) continue;
         if (n.leaf == kNoLeaf) {
-            if (n.left != 0xffffffffu) stack.push_back(n.left);
-            if (n.right != 0xffffffffu) stack.push_back(n.right);
+            if (n.left != 0xffffffffu) stack.push(n.left);
+            if (n.right != 0xffffffffu) stack.push(n.right);
             continue;
         }
         // OVER-ADMITTED at the leaf, EXACT at the face: a leaf whose bounds
@@ -481,15 +528,14 @@ DynamicBvh::ClosestPoint DynamicBvh::closest(const DynamicSurface& surface,
     ensure_tree();
     if (root_ == 0xffffffffu) return out;
     float best2 = std::numeric_limits<float>::max();
-    std::vector<std::uint32_t> stack{root_};
+    TraversalStack stack(root_);
     while (!stack.empty()) {
-        const std::uint32_t node = stack.back();
-        stack.pop_back();
+        const std::uint32_t node = stack.pop();
         const Node& n = nodes_[node];
         if (aabb_distance2(n.bounds, p) > best2) continue;
         if (n.leaf == kNoLeaf) {
-            if (n.left != 0xffffffffu) stack.push_back(n.left);
-            if (n.right != 0xffffffffu) stack.push_back(n.right);
+            if (n.left != 0xffffffffu) stack.push(n.left);
+            if (n.right != 0xffffffffu) stack.push(n.right);
             continue;
         }
         for (FaceId f : table_.chunk(n.leaf)->faces) {
@@ -526,16 +572,15 @@ DynamicBvh::RayHit DynamicBvh::raycast(const DynamicSurface& surface, kernel::cf
                                             1.0f / (d.y == 0.0f ? 1e-20f : d.y),
                                             1.0f / (d.z == 0.0f ? 1e-20f : d.z));
     float best = std::numeric_limits<float>::max();
-    std::vector<std::uint32_t> stack{root_};
+    TraversalStack stack(root_);
     while (!stack.empty()) {
-        const std::uint32_t node = stack.back();
-        stack.pop_back();
+        const std::uint32_t node = stack.pop();
         const Node& n = nodes_[node];
         float enter = 0.0f;
         if (!aabb_hits_ray(n.bounds, origin, inv, &enter) || enter > best) continue;
         if (n.leaf == kNoLeaf) {
-            if (n.left != 0xffffffffu) stack.push_back(n.left);
-            if (n.right != 0xffffffffu) stack.push_back(n.right);
+            if (n.left != 0xffffffffu) stack.push(n.left);
+            if (n.right != 0xffffffffu) stack.push(n.right);
             continue;
         }
         for (FaceId f : table_.chunk(n.leaf)->faces) {
@@ -614,7 +659,7 @@ std::size_t DynamicBvh::bytes() const {
     n += nodes_.capacity() * sizeof(Node);
     n += table_.bytes();
     n += face_leaf_.capacity() * sizeof(std::uint32_t);
-    n += touched_.capacity() * sizeof(std::uint32_t) + moved_faces_.capacity() * sizeof(FaceId);
+    n += update_scratch_.capacity() * sizeof(std::uint32_t) + moved_faces_.capacity() * sizeof(FaceId);
     return n;
 }
 

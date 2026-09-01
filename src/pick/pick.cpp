@@ -211,6 +211,7 @@ float item_field_distance(const scene::Layer& layer, const scene::Node& item, cf
     scene::Document single;
     scene::Layer& l = single.add_sdf_layer("probe");
     l.xform = layer.xform;
+    l.scale_axes = layer.scale_axes;  // a probe of a squashed layer is squashed
     l.mirror_axes = layer.mirror_axes;
     l.mirror_k = layer.mirror_k;
     scene::Node copy = item;
@@ -533,22 +534,21 @@ math::Aabb node_shape_bounds(const scene::SdfContent& content, const scene::Node
     }
     math::Aabb local = scene::item_local_bounds(n);
     if (local.empty()) return local;
-    math::Transform world = layer.xform * n.xform;
-    // The item's per-axis scale, innermost, as scene::item_geometry_bound
-    // composes it — a selection box around the shape the item IS, not around
-    // the one its primitive was authored as.
+    // Both per-axis scales, each innermost at its own level, as
+    // scene::geometry_bound composes them — a selection box around the shape
+    // the item IS, not around the one its primitive was authored as.
     const math::cfloat4x4 axes = math::scale_matrix(n.scale_axes);
-    const float axis_factor = scene::scale_axes_factor(n.scale_axes);
-    math::Aabb bound = local.transformed(math::mul(world.matrix(), axes));
+    math::Aabb bound = local.transformed(scene::placed_matrix(layer, n));
     if (n.mirror && layer.mirror_axes != 0) {
         for (int axis = 0; axis < 3; ++axis) {
             if (!(layer.mirror_axes & (1u << axis))) continue;
             bound.expand(local.transformed(math::mul(
-                layer.xform.matrix(),
+                scene::layer_matrix(layer),
                 math::mul(math::reflection_matrix(axis), math::mul(n.xform.matrix(), axes)))));
         }
     }
-    return bound.dilated(kernel::cmax(n.rounding * world.scale * axis_factor, 0.0f));
+    return bound.dilated(
+        kernel::cmax(n.rounding * scene::placed_distance_scale(layer, n), 0.0f));
 }
 
 }  // namespace

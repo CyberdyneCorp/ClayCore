@@ -133,9 +133,29 @@ PreparedMove prepare_item(const scene::Layer& layer, const scene::Node& n, scene
     // deformer chain, so a warp authored in the placed frame lands
     // somewhere the squashed item is not. Dragging the surface of an item
     // scaled 3x on one axis did nothing at all.
+    // The LAYER's per-axis scale sits BETWEEN the two placements
+    // (`layer.xform * diag(L) * node.xform * diag(N)`, #373), so it cannot ride
+    // the composed `math::Transform` the unsquashed path uses. Only that path
+    // is taken when the layer carries no per-axis scale, which is every
+    // document written before this one — and the branch is the reason a
+    // uniform layer's warps stay bit-identical rather than merely equal: the
+    // squashed path applies two placements where this one applies their
+    // composition, and those round differently.
+    const bool layer_squashed = scene::layer_is_squashed(layer);
     const math::Transform world = layer.xform * n.xform;
     const float scale = world.scale != 0.0f ? world.scale : 1.0f;
     const cfloat3 axes = n.scale_axes;
+    const float layer_scale = layer.xform.scale != 0.0f ? layer.xform.scale : 1.0f;
+    const float node_scale = n.xform.scale != 0.0f ? n.xform.scale : 1.0f;
+
+    // World -> the space the item's DEFORMER chain runs in, with the layer's
+    // per-axis scale taken off between the two placements.
+    auto to_item_local = [&](cfloat3 p) {
+        return scene::into_scaled_local(
+            n.xform.apply_inverse(
+                scene::into_scaled_local(layer.xform.apply_inverse(p), layer.scale_axes)),
+            axes);
+    };
 
     PreparedMove prepared;
     prepared.node = id;
@@ -147,7 +167,10 @@ PreparedMove prepare_item(const scene::Layer& layer, const scene::Node& n, scene
         // half is `resolve_prepared_move`, held to the same order and the same
         // operations. The per-axis scale comes off both last, because it is
         // innermost.
-        image.local_centre = scene::into_scaled_local(world.apply_inverse(balls[k].centre), axes);
+        image.local_centre = layer_squashed
+                                 ? to_item_local(balls[k].centre)
+                                 : scene::into_scaled_local(
+                                       world.apply_inverse(balls[k].centre), axes);
         if (balls[k].linear) {
             image.linear = *balls[k].linear;
             image.copy = true;
@@ -159,6 +182,15 @@ PreparedMove prepare_item(const scene::Layer& layer, const scene::Node& n, scene
     prepared.world_scale = scale;
     prepared.scale_axes = axes;
     prepared.layer_xform = layer.xform;
+    // The squashed path's own half of the displacement map, so
+    // resolve_prepared_move needs no Layer and the two halves stay one
+    // arithmetic. Left at the identity otherwise, which is the branch above.
+    prepared.layer_squashed = layer_squashed;
+    prepared.layer_scale_axes = layer.scale_axes;
+    prepared.layer_rotation = layer.xform.rotation;
+    prepared.node_rotation = n.xform.rotation;
+    prepared.layer_uniform_scale = layer_scale;
+    prepared.node_uniform_scale = node_scale;
     // A grab carries ONE radius, and a squashed frame turns the artist's
     // world-space sphere into a local ELLIPSOID, so no scalar is exact.
     // Dividing by the LARGEST factor is the conservative reading: every
@@ -166,7 +198,12 @@ PreparedMove prepare_item(const scene::Layer& layer, const scene::Node& n, scene
     // a drag never takes geometry the artist did not enclose. Under-reach
     // is recoverable by dragging again; over-reach is not. This is the same
     // instinct cscale_nu_dist follows by taking the smallest factor.
-    prepared.local_radius = settings.radius / (scale * scene::scale_axes_reach(axes));
+    // The LAYER's largest factor joins it for the same reason and by the same
+    // rule: the artist's world sphere is stretched by both, and dividing by the
+    // largest of each keeps every world reach at most the radius circled.
+    prepared.local_radius =
+        settings.radius /
+        (scale * scene::scale_axes_reach(axes) * scene::scale_axes_reach(layer.scale_axes));
     prepared.ease = settings.ease;
     prepared.front_only = settings.front_only;
     return prepared;
@@ -296,9 +333,22 @@ void resolve_prepared_move(const PreparedMove& prepared, cfloat3 total_world_dis
             image.copy ? image_displacement(prepared.layer_xform, image.linear,
                                             total_world_displacement)
                        : total_world_displacement;
-        const cfloat3 local_displacement = scene::into_scaled_local(
-            prepared.inverse_rotation.rotate(world_displacement) / prepared.world_scale,
-            prepared.scale_axes);
+        // A displacement is a vector: the same map as a point, without the
+        // translation. Held to the same order and the same operations as
+        // `prepare_item`'s centre, on both branches, or a grab's centre and its
+        // displacement would describe different spaces.
+        const cfloat3 local_displacement =
+            prepared.layer_squashed
+                ? scene::into_scaled_local(
+                      prepared.node_rotation.conjugate().rotate(scene::into_scaled_local(
+                          prepared.layer_rotation.conjugate().rotate(world_displacement) /
+                              prepared.layer_uniform_scale,
+                          prepared.layer_scale_axes)) /
+                          prepared.node_uniform_scale,
+                      prepared.scale_axes)
+                : scene::into_scaled_local(
+                      prepared.inverse_rotation.rotate(world_displacement) / prepared.world_scale,
+                      prepared.scale_axes);
         scene::Deformer grab =
             scene::Deformer::grab(image.local_centre, prepared.local_radius, local_displacement,
                                   prepared.ease, prepared.front_only);

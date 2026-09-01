@@ -62,15 +62,54 @@ math::Aabb item_geometry_bound(const Node& item, const Layer& layer);
 // would silently drop the item from per-brick tapes only).
 bool item_influence_is_local(const Node& item);
 
-// World-space INFLUENCE bound: the geometry bound for local ops, infinite
-// for ops that change the field arbitrarily far away (intersect, the spatial
-// morphs). This is what per-brick culling must consult.
-math::Aabb item_influence_bound(const Node& item, const Layer& layer);
+// WHY an item's influence is not its own geometry — the three answers, split
+// out because two of them used to share one (#319).
+enum class Nonlocality : std::uint8_t {
+    None,            // the item's own geometry bounds it
+    BoundedByLayer,  // an INTERSECT: it can only take material away, and what
+                     // it takes away is inside what the layer already occupies
+    Unbounded,       // a spatial morph, an infinite grid repeat, an unbounded
+                     // primitive: no finite box holds it
+};
+Nonlocality item_nonlocality(const Node& item);
+
+// The union of a layer's visible item geometry, and infinite the moment one of
+// them has none — the box an intersect is bounded by. An intersect in a layer
+// holding a plane is bounded by a plane.
+math::Aabb layer_influence_extent(const SdfContent& content, const Layer& layer);
+
+// World-space INFLUENCE bound: the geometry bound for local ops, the LAYER's
+// extent for an intersect, and infinite for what genuinely has none — a
+// spatial morph, an infinite grid repeat, an unbounded primitive.
+//
+// The intersect case is what #319 asked for and #326 measured. `max(acc, item)`
+// cannot put material where the layer has none, so the layer bounds it: over
+// 400,000 sample points on two fixtures the band-clamped drift outside the
+// layer's extent is exactly 0, against 0.100 and 0.065 outside the item's own
+// geometry — which looks like the tighter answer and does not hold. A spatial
+// morph's weight SATURATES, so past its span the result is the item's own
+// field arbitrarily far away, and it keeps the infinite answer (measured:
+// 0.0157 of drift outside the layer extent for the radial morph).
+//
+// This is the DIRTY bound. It is not the cull gate: `item_influence_is_local`
+// stays false for every non-local op, so per-brick culling still cannot drop
+// an intersect from a tape.
+//
+// `layer_extent` is an optimisation, not a parameter with meaning: pass the
+// layer's extent if you already hold it and this will not recompute it. Only
+// an intersect reads it, so a layer without one pays nothing either way.
+math::Aabb item_influence_bound(const Node& item, const Layer& layer,
+                                const math::Aabb* layer_extent = nullptr);
 
 // The item ALONE, as the layer places it: the influence bound without the
 // reflected and rotated copies the layer's symmetry emits and without the
 // seam dilation they bring. Same rounding and combine dilations, infinite for
 // the same non-local items.
+//
+// NOT given the intersect fallback above: this answers "how far does this
+// item's own body reach", and for a non-local item the honest answer to THAT
+// is still everywhere — the caller is deciding whether to warp the item at
+// all, not which bricks to redraw.
 //
 // This is what a brush that has already reflected ITSELF tests against
 // (brush/move.cpp): under a mirror every participating item's

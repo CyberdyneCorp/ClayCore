@@ -139,6 +139,16 @@ std::vector<std::uint8_t> BrushPreset::serialize() const {
     put_f32(out, settings.automask.normal_angle);
     put_i32(out, settings.automask.boundary_rings);
     put_f32(out, settings.automask.cavity_strength);
+
+    // VERSION 2. The azimuth is identity and not placement, which is the whole
+    // reason it is here and `direction` is not: `direction` says where the
+    // finger went, the azimuth says how the brush's own pattern is turned, and
+    // two presets that differ only in it are two different brushes to the person
+    // using them. A stroke resolver that one day drives it from the direction of
+    // travel will overwrite it per stamp exactly as it overwrites `center` — an
+    // artist's saved value is the default that resolver starts from, not
+    // something it makes redundant.
+    put_f32(out, settings.stamp_azimuth);
     return out;
 }
 
@@ -190,6 +200,13 @@ std::optional<BrushPreset> BrushPreset::deserialize(const std::uint8_t* data, st
     p.settings.automask.normal_angle = r.f32();
     p.settings.automask.boundary_rings = r.i32();
     p.settings.automask.cavity_strength = r.f32();
+
+    // Whatever the older schema did not carry keeps its default, which the
+    // header states as the rule and which no version had exercised until this
+    // one: version 1 had nothing after the automask block, and reading a f32
+    // that is not there would fail `r.ok` and refuse a record that is perfectly
+    // good.
+    if (version >= 2) p.settings.stamp_azimuth = r.f32();
 
     if (!r.ok) return std::nullopt;
     // A verb outside the vocabulary is a corrupt or hostile record, and

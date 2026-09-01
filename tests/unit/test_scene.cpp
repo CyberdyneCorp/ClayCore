@@ -128,11 +128,62 @@ TEST_CASE("influence bounds are conservative (band-clamped bit-identity outside)
     }
 }
 
-TEST_CASE("intersect items report infinite influence") {
-    Document doc;
-    Layer& l = doc.add_sdf_layer("l");
-    NodeId id = l.sdf->insert(item(Prim::sphere(1.0f), cf3(0, 0, 0), Op::Intersect));
-    CHECK(item_influence_bound(*l.sdf->find(id), l).is_infinite());
+TEST_CASE("an intersect is bounded by its LAYER; a spatial morph is not") {
+    // The split #319 asked for and #326 measured. Both are non-local — neither
+    // may ever be CULLED — but they are non-local for different reasons and
+    // only one of them has a finite answer.
+    {
+        // `max(acc, item)` can only take material away, and what it takes away
+        // is inside what the layer already occupies. So the layer bounds it.
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        l.sdf->insert(item(Prim::sphere(1.0f), cf3(0, 0, 0)));
+        NodeId id = l.sdf->insert(item(Prim::sphere(0.3f), cf3(2.0f, 0, 0), Op::Intersect));
+        const math::Aabb b = item_influence_bound(*l.sdf->find(id), l);
+        CHECK(!b.is_infinite());
+        // The LAYER's extent, not the item's own: the sphere at the origin is
+        // in it even though the intersect sits at x = 2.
+        CHECK(b.min.x <= -1.0f);
+        CHECK(b.max.x >= 2.0f);
+        // and it is still never culled, which is the other half of the contract
+        CHECK(!item_influence_is_local(*l.sdf->find(id)));
+        CHECK(item_nonlocality(*l.sdf->find(id)) == Nonlocality::BoundedByLayer);
+    }
+    {
+        // A morph's weight SATURATES, so past its span the result is the item's
+        // own field arbitrarily far away. No box holds that.
+        for (Op op : {Op::TransitionLinear, Op::TransitionRadial}) {
+            Document doc;
+            Layer& l = doc.add_sdf_layer("l");
+            l.sdf->insert(item(Prim::sphere(1.0f), cf3(0, 0, 0)));
+            NodeId id = l.sdf->insert(item(Prim::sphere(0.3f), cf3(0.2f, 0, 0), op));
+            CHECK(item_influence_bound(*l.sdf->find(id), l).is_infinite());
+            CHECK(item_nonlocality(*l.sdf->find(id)) == Nonlocality::Unbounded);
+        }
+    }
+    {
+        // An intersect in a layer that holds something unbounded is bounded by
+        // that: a plane's extent is a plane's.
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        Node plane;
+        plane.prim = Prim::plane(cf3(0, 1, 0), 0.0f);
+        l.sdf->insert(plane);
+        NodeId id = l.sdf->insert(item(Prim::sphere(0.3f), cf3(0, 0, 0), Op::Intersect));
+        CHECK(item_influence_bound(*l.sdf->find(id), l).is_infinite());
+    }
+    {
+        // And an intersect that ALSO repeats infinitely is unbounded: the
+        // weaker answer must not win.
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        l.sdf->insert(item(Prim::sphere(1.0f), cf3(0, 0, 0)));
+        Node n = item(Prim::sphere(0.3f), cf3(0, 0, 0), Op::Intersect);
+        n.repeat = Repeat::grid_infinite(cf3(1.0f, 1.0f, 1.0f));
+        NodeId id = l.sdf->insert(n);
+        CHECK(item_influence_bound(*l.sdf->find(id), l).is_infinite());
+        CHECK(item_nonlocality(*l.sdf->find(id)) == Nonlocality::Unbounded);
+    }
 }
 
 TEST_CASE("per-brick culled tape: band-clamped bit-identity") {

@@ -61,6 +61,7 @@
 #include "clay/mesh/detail_field.h"
 #include "clay/mesh/mesh_data.h"
 #include "clay/mesh/project.h"
+#include "clay/mesh/sculpt_layer.h"
 #include "clay/mesh/subdivide.h"
 #include "clay/mesh/surface_chunks.h"
 #include "clay/mesh/surface_frame.h"
@@ -97,11 +98,22 @@ enum class MultiresError : std::uint32_t {
     // A stream declaring a hierarchy this build will not reconstruct.
     DepthLimit = 10,
     Decode = 11,
+    // No layer with that id on this hierarchy's stack.
+    NoSuchSculptLayer = 12,
+    // A sculpt write, a merge or a bake aimed at a LOCKED layer. A lock
+    // refuses a write to a layer's coefficients and still permits every
+    // property change, which is the rule stated rather than discovered.
+    SculptLayerLocked = 13,
+    // A composition change asked for while a stroke is open. The stroke reads
+    // the evaluated surface, which includes every visible layer, so moving a
+    // slider between two stamps would author one gesture against two different
+    // surfaces.
+    SculptLayerStrokeOpen = 14,
     // The capacity estimate itself overflowed 64 bits. Reported as a refusal
     // rather than as a number, because the number would be wrong in the one
     // direction that matters: a wrapped estimate is a SMALL one, and a small
     // one is allowed.
-    CapacityOverflow = 12,
+    CapacityOverflow = 15,
 };
 
 // The name of the refusal, for a message. Never null.
@@ -150,10 +162,20 @@ struct MultiresMemory {
     std::size_t base = 0;      // the cage, with its attributes
     std::size_t topology = 0;  // every level's face list
     std::size_t detail = 0;    // every level's coefficients
+    // Every sculpt layer's coefficients and masks. AUTHORITATIVE and reported
+    // apart from `detail`, because they are the same quantity under a different
+    // owner and a host deciding what to merge, bake or delete needs to see
+    // which of the two is costing it — a combined figure would hide the only
+    // number an artist can act on.
+    std::size_t sculpt_layers = 0;
     std::size_t authoritative = 0;
 
     // -- rebuildable, in the order a host should reach for it -----------------
     std::size_t evaluated = 0;      // subdivided positions, frames, positions, normals
+    // The composed detail, `B + Σ s·m·L`, materialized per level. Derived from
+    // the two rows above and droppable, which is why it is on this side of the
+    // split even though it is the array evaluation actually reads.
+    std::size_t composed = 0;
     std::size_t runtime_index = 0;  // connectivity, level meshes, adjacency
     // The per-level chunk tables and their face maps. Its own line rather than
     // part of `runtime_index`, because a host answering a memory warning acts
@@ -346,7 +368,126 @@ class MultiresSurface {
     // A hash of every level's authoritative detail. What a test compares to
     // assert that releasing and rebuilding the caches changed nothing that
     // matters.
+    //
+    // THE BASE DETAIL ONLY, and that is what keeps its meaning across this
+    // change: `MultiresLevel::detail` still means exactly what it meant before
+    // sculpt layers existed. The stack has its own checksum, so a test can ask
+    // the two questions apart — "did the form change" and "did a pass change".
     std::uint64_t detail_checksum() const;
+    // The same for the layer stack: every layer's coefficients and mask, and
+    // nothing derived from them.
+    std::uint64_t sculpt_layer_checksum() const;
+
+    // -- the sculpt layer stack (mesh-sculpt-layers) --------------------------
+    //
+    // OWNED HERE rather than held beside the surface. Composition happens
+    // inside the evaluation — `apply_detail` reads the composed field, which is
+    // `B + Σ s·m·L` — and a stack living outside could only reach that loop
+    // through a per-vertex callback, or by having a host recompose into
+    // `detail_mutable()`, which overwrites the base detail and is exactly the
+    // second displacement representation this change exists not to create.
+    //
+    // Owning it also puts the stack inside `encode()` (at `kSurfaceVersion`
+    // 2 — see the serialization note below), inside `memory()`, and behind the
+    // `MultiresFor` resolver `session::History` already has.
+    //
+    // The stack is exposed for READING and for the operations below. It is not
+    // exposed mutably: every structural and compositional change has to keep
+    // the per-level sizes, the pending vertex lists and the surface's own
+    // revisions in step, and a caller reaching past these would leave a
+    // hierarchy whose cached positions and stored coefficients disagree.
+    const SculptLayerStack& sculpt_layers() const;
+
+    // A new empty layer on top, made active. `kNoSculptLayer` when a stroke
+    // holds the composition. `record`, when given, receives what an undo of
+    // this operation needs.
+    SculptLayerId add_sculpt_layer(std::string name = {},
+                                   SculptLayerProperty* record = nullptr);
+    // Discard a layer. Re-evaluates the removed layer's COVERAGE and nothing
+    // else: no stroke is replayed, and no other layer's coefficients, strength
+    // or relative order change.
+    bool remove_sculpt_layer(SculptLayerId id, SculptLayerProperty* record = nullptr);
+    // Slide a layer through the stack. Organisation only — additive layers
+    // commute, so this cannot move a vertex.
+    bool move_sculpt_layer(SculptLayerId id, std::size_t index,
+                           SculptLayerProperty* record = nullptr);
+    // Fold a layer into the one below it. Defined by VISUAL PARITY: the
+    // evaluated surface before equals the evaluated surface after, at any
+    // strength including zero. See `SculptLayerStack::merge_down`.
+    bool merge_sculpt_layer_down(SculptLayerId id, SculptLayerProperty* record = nullptr);
+    // Fold a layer into the BASE — the level's own detail, and the cage itself
+    // for a level-0 base deformation layer — and discard it. The same parity
+    // statement with the base as the target, where the identity already holds
+    // because the base has neither a strength nor a mask.
+    bool bake_sculpt_layer_to_base(SculptLayerId id, SculptLayerProperty* record = nullptr);
+
+    bool set_sculpt_layer_strength(SculptLayerId id, float strength,
+                                   SculptLayerProperty* record = nullptr);
+    bool set_sculpt_layer_visible(SculptLayerId id, bool visible,
+                                  SculptLayerProperty* record = nullptr);
+    bool set_sculpt_layer_locked(SculptLayerId id, bool locked,
+                                 SculptLayerProperty* record = nullptr);
+    bool rename_sculpt_layer(SculptLayerId id, std::string name,
+                             SculptLayerProperty* record = nullptr);
+    // Which layer the next sculpt write lands in. `kNoSculptLayer` writes the
+    // BASE detail, which is what every stroke did before this change and what
+    // a hierarchy with no layers still does.
+    bool set_active_sculpt_layer(SculptLayerId id, SculptLayerProperty* record = nullptr);
+
+    // Write one vertex's mask weight on a layer. 1.0 is the identity and
+    // releases storage; the mask says where a STORED LAYER CONTRIBUTES, which
+    // is a different question from where a brush writes.
+    bool set_sculpt_layer_mask(SculptLayerId id, std::uint32_t level, std::uint32_t vertex,
+                               float weight);
+
+    // One vertex's coefficients on a layer. Writing marks the block, so the
+    // next evaluation recomposes it and the levels above follow — the same
+    // propagation `set_detail` gives the base. REFUSED on a locked layer, which
+    // is the one thing a lock does.
+    bool set_sculpt_layer_detail(SculptLayerId id, std::uint32_t level, std::uint32_t vertex,
+                                 const LocalDetail& value);
+    LocalDetail sculpt_layer_detail(SculptLayerId id, std::uint32_t level,
+                                    std::uint32_t vertex) const;
+
+    // HOLD THE COMPOSITION for the length of a stroke. While it is held,
+    // strength, visibility, mask, order, add, remove and merge refuse; rename,
+    // lock and set-active still work, because none of them moves a vertex.
+    //
+    // A stamp reads the evaluated surface, which includes every visible layer,
+    // so a slider moved between two stamps would author one gesture against two
+    // different surfaces. `LayeredMultiresSculptor` takes and releases this;
+    // a host driving stamps itself takes it for the same reason.
+    void hold_sculpt_layer_composition(bool held);
+    bool sculpt_layer_composition_held() const;
+
+    // Release the layer storage a stroke that undid itself left behind. One of
+    // the four levers task 5.7 leaves a host — the other three being merge,
+    // bake and delete — and the reason none of them is a CAP: a cap that
+    // silently stopped recording would leave the pass on the surface and
+    // un-dialable, which is a correctness bug wearing a memory limit's clothes.
+    void compact_sculpt_layers();
+
+    // -- replaying one step ---------------------------------------------------
+    //
+    // What `session::History` calls, in both directions. Kept here rather than
+    // in the history module because a sculpt layer is reached through the
+    // surface its id lives on, and because applying either of these has to
+    // re-mark the vertices whose evaluated position moved — which only the
+    // surface can do.
+    bool apply_sculpt_layer_delta(const SculptLayerDelta& delta, bool forward);
+    bool apply_sculpt_layer_property(const SculptLayerProperty& property, bool forward);
+
+    // What composition actually did. Both scale gates read these; see
+    // `SculptLayerStats`.
+    const SculptLayerStats& sculpt_layer_stats() const;
+    void reset_sculpt_layer_stats();
+
+    // The stack's three revisions, mirroring the three below. A rename moves
+    // only the first, so a host keyed on the second or the third does not
+    // re-evaluate a model because a layer was renamed.
+    std::uint64_t sculpt_layer_metadata_revision() const;
+    std::uint64_t sculpt_layer_composition_revision() const;
+    std::uint64_t sculpt_layer_content_revision() const;
 
     // -- editing --------------------------------------------------------------
 
@@ -372,6 +513,12 @@ class MultiresSurface {
     // hierarchy's shape changed, re-reads detail only when it changed, and
     // redraws only when the evaluated surface moved; one counter cannot say
     // which happened.
+    // The last two FOLD IN the layer stack's composition and content bumps, so
+    // a host written against this ABI before sculpt layers existed keeps
+    // working without learning a new counter: a strength change moves
+    // `detail_revision` and `evaluated_revision` exactly as writing a
+    // coefficient does. A host that wants to know WHICH of the three kinds of
+    // layer change happened reads the three counters above instead.
     std::uint64_t base_revision() const;
     std::uint64_t detail_revision() const;
     std::uint64_t evaluated_revision() const;
@@ -467,6 +614,16 @@ class MultiresSurface {
     // the rule, and a level 4 face list is eighty megabytes of something a
     // reader can derive. What is written is the cage, the rule, the level
     // count, the active levels, and each level's detail.
+    // VERSION 2 SINCE add-mesh-sculpt-layers, and the bump is deliberate rather
+    // than incidental. `decode` ignores trailing bytes, so the cheap route —
+    // append a layer chunk and leave the version at 1 — would let a predating
+    // binary open a layered document, load the base detail only, and present a
+    // surface missing the artist's passes with no signal at all. A reader that
+    // cannot present the whole surface must say so, so the version moves and an
+    // older build refuses by the strict equality check it already has.
+    //
+    // This build's decoder accepts BOTH: a version-1 stream is a hierarchy with
+    // no layers, which is exactly what it was.
     std::vector<std::uint8_t> encode() const;
     // Refuses a truncated, hostile or newer buffer rather than returning a
     // surface whose stencils point at nothing — including a stream that

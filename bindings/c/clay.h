@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 77
+#define CLAY_ABI_MINOR 78
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -497,7 +497,7 @@ typedef struct clay_memory_report {
     uint64_t mesh_layer_count;
     uint64_t mask_count;
 
-    /* -- the surface tier (ABI 0.77.0, add-extreme-poly-runtime) -------------
+    /* -- the surface tier (ABI 0.78.0, add-extreme-poly-runtime) -------------
      *
      * ZERO THROUGH clay_document_memory, AND THAT IS OWNERSHIP RATHER THAN AN
      * OMISSION. A clay_multires and a clay_dynamic_sculptor are opaque and
@@ -1218,11 +1218,82 @@ clay_result clay_document_set_layer_protection(clay_document* doc, clay_layer_id
 clay_result clay_document_layer_protection(const clay_document* doc, clay_layer_id layer,
                                            int32_t* out_ghost, int32_t* out_locked);
 /* Place the whole layer. Same terms as clay_layer_set_transform: `position`
- * and `rotation_axis` are required, the axis must be non-zero, `scale` > 0. */
+ * and `rotation_axis` are required, the axis must be non-zero, `scale` > 0.
+ *
+ * SETS THE WHOLE PLACEMENT, so it clears any per-axis scale the layer carried:
+ * a placement is one value in this ABI, and a caller setting it means the whole
+ * of it rather than "the parts this call can name". */
 clay_result clay_document_set_layer_transform(clay_document* doc, clay_layer_id layer,
                                               const float position[3],
                                               const float rotation_axis[3],
                                               float rotation_angle, float scale);
+
+/* -- a layer's PER-AXIS scale (ABI 0.74.0, issue #373) ----------------------
+ *
+ * The whole-layer half of clay_layer_set_transform_nonuniform, which has placed
+ * a NODE per axis since 0.54.0. A ZBrush-style gizmo scales per axis — the
+ * three boxes on the arms — on a placed object AND on a whole subtool, and a
+ * layer that took one factor is why a host had to hide the boxes in scale mode
+ * for the subtool case.
+ *
+ * COMPOSED INNERMOST in the layer's own frame, before its rotation and
+ * translation, exactly as a node's is in its own:
+ *
+ *     world = layer.xform * diag(layer_scale) * node.xform * diag(node_scale)
+ *
+ * so a triple of (1, 1, 1) is the identity and a document that never calls this
+ * compiles byte-identical tape.
+ *
+ * WHAT A NON-UNIFORM SCALE COSTS, and what it does not. The evaluated distance
+ * is multiplied back by the product of the SMALLEST component of each per-axis
+ * scale in the composition, which never overestimates the true distance — so
+ * the field stays a conservative bound and stays 1-Lipschitz, and
+ * clay_safe_step_scale does not move. What goes is exactness:
+ * clay_tape_info's out_is_exact drops, as it does for any non-uniform scale.
+ *
+ * A world RADIUS mapped inward is divided by the LARGEST component instead —
+ * the dual, so a gesture never reaches outside the region it named.
+ * clay_layer_move_surface takes the layer's factor into that rule.
+ *
+ * clay_layer_bounds, the influence bounds, clay_document_raycast_attributed and
+ * the placed mesh of a mesh layer all read the three factors. A mesh layer's
+ * NORMALS go through the inverse transpose, as clay_mesh_transform_nonuniform
+ * documents: rotating a normal is right for a similarity and tilts every one of
+ * them off the surface under a squash.
+ *
+ * ONE THING IS REFUSED RATHER THAN APPROXIMATED. clay_layer_lattice_gizmo
+ * returns no warps for a layer carrying a per-axis scale. A cage records its
+ * item-to-cage placement as a rigid transform, and on a squashed layer the map
+ * it needs is a general affine one — the layer's diagonal sits BETWEEN the two
+ * placements. Placing a cage through the narrower record would warp every item
+ * in a space it does not occupy, silently. A host that gets nothing back should
+ * offer the uniform gizmo. */
+clay_result clay_document_set_layer_transform_nonuniform(clay_document* doc, clay_layer_id layer,
+                                                         const float position[3],
+                                                         const float rotation_axis[3],
+                                                         float rotation_angle,
+                                                         const float scale[3]);
+
+/* Reading it back. Every out pointer is optional.
+ *
+ * The per-axis reader answers the PRODUCT of the layer's two scales, so a layer
+ * placed through the uniform setter answers (s, s, s) rather than (1, 1, 1)
+ * with the factor hidden somewhere the caller cannot see — which is what lets
+ * one manipulator read this call and never branch.
+ *
+ * The single-factor reader REFUSES a layer carrying three different factors
+ * with CLAY_ERROR_INVALID_ARGUMENT, exactly as clay_layer_node_transform
+ * refuses a squashed node: one float cannot express three, the uniform factor
+ * alone describes a differently-shaped subtool, and a read-change-write through
+ * the uniform setter would round the artist's squash away. */
+clay_result clay_document_layer_transform(const clay_document* doc, clay_layer_id layer,
+                                          float out_position[3], float out_rotation_axis[3],
+                                          float* out_rotation_angle, float* out_scale);
+clay_result clay_document_layer_transform_nonuniform(const clay_document* doc, clay_layer_id layer,
+                                                     float out_position[3],
+                                                     float out_rotation_axis[3],
+                                                     float* out_rotation_angle,
+                                                     float out_scale[3]);
 /* Symmetry. Each enabled axis reflects the layer's items through the plane
  * where that LOCAL coordinate is 0 (the layer transform moves the plane with
  * the layer), and every item participates: place a lump on one side and both
@@ -2018,6 +2089,53 @@ clay_result clay_layer_eval_gradients(const clay_document* doc, clay_layer_id la
                                       const char* backend, const float* points_xyz, size_t count,
                                       float* out_gradients_xyz);
 
+/* -- the document WITHOUT one layer (ABI 0.74.0, issue #378) ----------------
+ *
+ * The third question, beside "the whole document" and "one layer": every
+ * visible SDF layer EXCEPT the one named. They answer what the whole-document
+ * calls would answer for a document that layer had been removed from.
+ *
+ * WHAT THIS IS FOR. A live sculpt transaction previews ONE layer — that is
+ * what clay_sdf_smooth_preview_delta_take hands over, and it is the reason a
+ * dab costs what it touches instead of what the artist has already made. A
+ * host drawing only that is drawing the layer alone, and every other visible
+ * field layer vanishes for the length of the gesture. With these, a host
+ * evaluates the rest of the document ONCE at pointer-down — the layers it
+ * excluded do not move while the artist drags — and composes that with its
+ * live preview per frame.
+ *
+ * COMPOSING IS A MINIMUM, AND IT IS EXACT. Visible SDF layers hard-union, and
+ * the union of two fields IS the smaller of the two distances, so
+ *
+ *     min(excluding(L) , your preview of L)
+ *
+ * is the field the whole document would evaluate to, not an approximation of
+ * it. There is no blend parameter to match and no seam to hide.
+ *
+ * NEITHER CALL EDITS THE DOCUMENT, which is the other half of why they exist.
+ * The route a host would otherwise take — hide the layer, sample the rest,
+ * show it again — is three edits, and an edit taken between
+ * clay_sdf_smooth_begin and its commit is one the commit correctly refuses.
+ * These are safe to call at any point inside a transaction and record no undo
+ * entry.
+ *
+ * AN UNKNOWN LAYER IS REFUSED with CLAY_ERROR_NOT_FOUND rather than read as
+ * "exclude nothing". A host whose layer id went stale would otherwise be
+ * handed the whole document and would draw the excluded layer twice — once
+ * from here and once from its own preview — which is the exact defect these
+ * calls exist to prevent, and it would look like a shading artefact rather
+ * than a bug.
+ *
+ * A HIDDEN layer, or one carrying no SDF content, SUCCEEDS: it contributes
+ * nothing to the union already, so excluding it is a no-op, and refusing would
+ * make a host branch on state it has no reason to track. */
+clay_result clay_eval_points_excluding(const clay_document* doc, clay_layer_id excluded,
+                                       const char* backend, const float* points_xyz, size_t count,
+                                       float* out_distances, float* out_colors_rgb);
+clay_result clay_eval_gradients_excluding(const clay_document* doc, clay_layer_id excluded,
+                                          const char* backend, const float* points_xyz,
+                                          size_t count, float* out_gradients_xyz);
+
 /* Multiply a field distance by this before stepping along a ray: the tape's
  * Lipschitz safety factor, which a scaled or displaced edit lowers.
  *
@@ -2205,7 +2323,27 @@ clay_result clay_layer_consolidation_cost(const clay_document* doc, clay_layer_i
  * would spend their parameters on nothing.
  *
  * `out_cost` may be NULL. Undo grouping is the document's own, so this lands
- * as a single step when undo is enabled and as a plain edit when it is not. */
+ * as a single step when undo is enabled and as a plain edit when it is not.
+ *
+ * THE SAMPLING IS ON THE CPU, AND TAKES NO BACKEND. Every call in this header
+ * that bakes a field to a lattice — this one and its _cancellable form,
+ * clay_layer_consolidation_cost, clay_layer_consolidate_region,
+ * clay_sdf_smooth_begin and clay_sdf_move_begin —
+ * evaluates through the CPU backend's reference arithmetic, spread across its
+ * thread pool. There is no parameter to route it elsewhere and no registered
+ * backend it will pick up: a bake lives in a layer this library keeps below
+ * the one that names backends, so it is handed an evaluator rather than
+ * choosing one, and the evaluator it is handed is the CPU's.
+ *
+ * That is a DESIGN STATEMENT, not an omission to work around. A baked volume
+ * is content the document then carries, so it must not depend on which GPU the
+ * machine has, and byte-identity with the serial walk is the contract the pool
+ * is held to. What a device backend does or does not agree with cannot reach
+ * this result, in either direction: a bake taken on a Metal machine and the
+ * same bake taken on a Linux box produce the same samples from the same
+ * document. Evaluating that volume AFTERWARDS is where a backend enters, and
+ * clay_eval_points, the parity suite and clay_backend_supports are how that
+ * half is asked about. */
 clay_result clay_layer_consolidate(clay_document* doc, clay_layer_id layer,
                                    const clay_consolidation_params* params,
                                    const float region_min[3], const float region_max[3],
@@ -5188,6 +5326,12 @@ typedef struct clay_sculpt_budget {
  * pointer-down cost, and it is the trade this design makes deliberately: the
  * whole finite layer once, so that every dab afterwards costs what it touches.
  *
+ * The pooled evaluator is the CPU's, and nothing in this transaction reaches a
+ * device backend — not this sampling, not clay_sdf_smooth_update's dabs, not
+ * the commit. See clay_layer_consolidate for the statement and why it is one.
+ * A host comparing a committed Smooth across platforms is comparing what it
+ * DRAWS the result with, not what produced it.
+ *
  * `token` may be NULL. It cancels only the sampling. */
 clay_sdf_smooth_tx* clay_sdf_smooth_begin(clay_document* doc, clay_layer_id layer,
                                           const clay_sculpt_policy* policy,
@@ -5718,6 +5862,23 @@ typedef struct clay_mesh_brush_desc {
     int32_t automask_boundary_rings;
     /* CAVITY: how much of the measured cavity to apply, in [0,1]. */
     float automask_cavity_strength;
+    /* THE STAMP'S GRAIN: how far the stamp's in-plane axes are turned about its
+     * own facing, in radians. This is what makes a rake, a chisel, clay strips,
+     * a directional scratch and a rotated alpha presets over one frame rather
+     * than five code paths — a stroke resolver that knows the direction of
+     * travel sets this, and no verb has to know that it did.
+     *
+     * ZERO IS NO ROTATION AT ALL, not a rotation by zero, and the difference is
+     * observable: turning the basis by cos 0 and sin 0 leaves a -0.0f where an
+     * unrotated axis has +0.0f, and the fixed mesh's bit-parity goldens move.
+     * The engine branches on it — see make_stamp_frame in
+     * include/clay/mesh/stamp_frame.h.
+     *
+     * Appended, so a host compiled against ABI minor 74 sends the shorter
+     * descriptor, this reads as zero, and its stamps are what they were.
+     * Observable only through an alpha or a directional kernel: a round brush
+     * has nothing to orient. */
+    float stamp_azimuth;
     /* WHICH CLASS SPACE `seed_class` WAS PICKED IN — the token
      * clay_mesh_hit.seed_revision handed back, or the one
      * clay_mesh_sculptor_seed_revision reports. Zero, which is what a host
@@ -5881,7 +6042,33 @@ clay_result clay_brush_preset_by_name(const char* name, clay_brush_preset* out_p
  * The mesh must outlive the sculptor. A sculptor over a mesh LAYER's triangles
  * refuses every call once that layer is gone, rather than reading freed
  * storage, and refuses one over a LOCKED or GHOSTED layer, because both flags
- * mean "never edited" and a vertex displacement is an edit. */
+ * mean "never edited" and a vertex displacement is an edit.
+ *
+ * THREADING. Building a sculptor is a READ of the mesh, on exactly the footing
+ * clay_brick_cache_eval_requests documents: clay_mesh_sculptor_create,
+ * clay_mesh_sculptor_refresh and clay_mesh_sculptor_refit may run on any number
+ * of threads against one const document, and are NOT safe concurrently with a
+ * mutating clay_document_* / clay_layer_* call. None of the three writes the
+ * document — the adjacency and the tree are read from `positions` and `indices`
+ * into the sculptor's own storage — and clay_last_error is per-thread, so a
+ * worker reads its own. Calls on ONE sculptor handle must still be serialized
+ * by the host, const readers included, exactly as a cache handle's are; two
+ * sculptors share nothing.
+ *
+ * SO ARM A SCULPTOR OFF THE INTERFACE THREAD. On a large mesh this is the
+ * difference between a click and a freeze: the adjacency is ~116 ms at 296k
+ * triangles and the tree another ~89 ms, and both are owed before the first
+ * pick can be answered. Note that the tree is built LAZILY, on first use — so a
+ * host that calls only clay_mesh_sculptor_create on the worker still pays the
+ * tree on whichever thread reaches clay_mesh_sculptor_raycast first. Call
+ * clay_mesh_sculptor_refresh on the worker too, and hand over a sculptor that
+ * is warm for the pick.
+ *
+ * The host owes the serialization against its OWN edits, and gets no help
+ * detecting a missed one: a mesh mutated while a build reads it produces an
+ * adjacency over positions that have since moved, which is a wrong
+ * neighbourhood rather than a refused call. What IS detected is a layer
+ * REBUILT under a finished sculptor — see clay_mesh_sculptor_create. */
 typedef struct clay_mesh_sculptor clay_mesh_sculptor;
 
 /* A sparse, coalesced record of what a gesture moved: the undo a mesh stroke
@@ -6367,7 +6554,18 @@ typedef enum clay_multires_error {
     CLAY_MULTIRES_DETAIL_PRESENT = 9,
     CLAY_MULTIRES_DEPTH_LIMIT = 10,
     CLAY_MULTIRES_DECODE = 11,
-    CLAY_MULTIRES_CAPACITY_OVERFLOW = 12
+    /* No layer with that id on this hierarchy's stack. */
+    CLAY_MULTIRES_NO_SUCH_SCULPT_LAYER = 12,
+    /* A sculpt write, a merge or a bake aimed at a LOCKED layer. A lock
+     * refuses a write to a layer's coefficients and still permits every
+     * property change, which is the rule stated rather than discovered. */
+    CLAY_MULTIRES_SCULPT_LAYER_LOCKED = 13,
+    /* A composition change asked for while a stroke is open. The stroke reads
+     * the evaluated surface, which includes every visible layer, so moving a
+     * slider between two stamps would author one gesture against two different
+     * surfaces. */
+    CLAY_MULTIRES_SCULPT_LAYER_STROKE_OPEN = 14,
+    CLAY_MULTIRES_CAPACITY_OVERFLOW = 15
 } clay_multires_error;
 
 /* Never NULL, for any value. */
@@ -6481,7 +6679,22 @@ typedef struct clay_multires_memory {
     uint64_t runtime_index; /* connectivity, level meshes, adjacency */
     uint64_t rebuildable;   /* the two above, plus chunk_index below */
     uint64_t total;
-    /* The per-level chunk tables and their face maps (ABI 0.77.0). Its own line
+    /* Appended in ABI 0.76.0, which is why the two sit at the end rather than
+     * beside the rows they belong with: a descriptor grows at its tail or every
+     * host compiled against the older layout reads the wrong field.
+     *
+     * `sculpt_layers` is every layer's coefficients and masks. It is counted in
+     * `authoritative` and reported apart from `detail` because the two are the
+     * same quantity under different owners, and a host deciding what to merge,
+     * bake or delete needs to see which of them is costing it — a combined
+     * figure would hide the only number an artist can act on.
+     *
+     * `composed` is the materialized `B + sum(s*m*L)` per level. Derived and
+     * droppable, so it is counted in `rebuildable` even though it is the array
+     * evaluation actually reads. */
+    uint64_t sculpt_layers;
+    uint64_t composed;
+    /* The per-level chunk tables and their face maps (ABI 0.78.0). Its own line
      * because a host answering a memory warning acts on the categories
      * separately, and this is the one that follows the FACE count rather than
      * the vertex count.
@@ -6666,6 +6879,442 @@ clay_result clay_multires_copy_block(clay_multires* surface, uint32_t patch, uin
                                      uint32_t* out_indices, size_t index_capacity,
                                      clay_multires_block_info* out_written);
 
+/* -- sculpt layers (mesh-sculpt-layers spec, add-mesh-sculpt-layers) ----------
+ *
+ * A named, reorderable, dialable CHANNEL of detail over the hierarchy. The
+ * artist's statement of it: make a wrinkle pass, dial it to half, hide it,
+ * delete it — days later, without redoing the work under it and without
+ * replaying a single stroke.
+ *
+ *     E(n) = B(n) + SUM over i of  s_i * m_i(v) * L_i(n, v)
+ *
+ * B is the level's own detail — what every stroke wrote before this existed and
+ * what clay_multires_detail_checksum still hashes. L_i is layer i's
+ * coefficients, in the SAME transported frame at the SAME block size, so a
+ * layer contribution and a base coefficient are one quantity under two owners
+ * rather than a second displacement representation to keep in step.
+ *
+ * THE NAME IS DELIBERATE, AND THE DISCIPLINE IS GATED. `CLAY_MESH_BRUSH_LAYER`
+ * is a brush ALGORITHM (deposit to a ceiling above the stroke-start surface)
+ * and clay_layer_id is a DOCUMENT layer; an artist's sculpt layer is a third
+ * thing. So every entry point here says `sculpt_layer` — the same word the
+ * voxel stack already spends, so the two artist stacks read alike and neither
+ * reads like the brush — and tools/check_c_abi.py refuses a new entry point
+ * that says `layer` without saying `sculpt_layer` or `mesh_layer`. Renaming
+ * the brush enumerator was the obvious alternative and was rejected: it ships
+ * in this header, in the Swift enum and in every host's serialized preset, so
+ * renaming it would break all three to fix a documentation problem.
+ *
+ * ADDITIVE LAYERS COMMUTE. Reordering changes ORGANISATION and not geometry,
+ * which is the sharpest difference from the voxel stack: that one replays CELL
+ * WRITES and is genuinely order-dependent. A host that invents an ordering
+ * rule here is solving a problem this representation does not have.
+ *
+ * IDS, NEVER INDICES. clay_multires_move_sculpt_layer changes every index at or
+ * below the layer it moves, so an index handed to a host, written into a file
+ * or held across a drag would name a different pass afterwards. Ids come from a
+ * counter that is itself serialized: a save, a load and a reorder leave every
+ * id exactly where the host left it. An index is offered for walking the stack
+ * in draw order and is valid only until the next structural change.
+ *
+ * STRENGTH IS COMPOSITION, NOT A SCALE ON THE PEN, and this is the behaviour
+ * most likely to be reported as a bug. A stroke into a layer at strength 0.5
+ * records its FULL contribution, so the surface moves half as far as the pen
+ * asked for; raising the slider to 1 afterwards doubles what is on screen and
+ * replays no stroke. Nothing in this ABI divides by a strength — which is also
+ * why merge-down and bake are defined by the surface they leave rather than by
+ * concatenating coefficients, an arithmetic that is undefined at zero and zero
+ * is a state one slider reaches. */
+
+typedef uint64_t clay_sculpt_layer_id;
+/* No layer: what an empty stack's active layer reads as, and what a host sets
+ * to route the next stroke into the BASE detail — the form under the passes. */
+#define CLAY_NO_SCULPT_LAYER 0
+
+/* What KIND of thing a layer stores. Versioned from the first release even
+ * though only one kind ships: a reader that meets a kind it does not know
+ * REFUSES the document rather than skipping the layer, because a stream
+ * carrying a pass a reader silently drops presents a surface missing an
+ * artist's work while claiming to be complete. */
+typedef enum clay_sculpt_layer_kind {
+    CLAY_SCULPT_LAYER_SAMPLED = 0,   /* coefficients per vertex; the only kind that ships */
+    CLAY_SCULPT_LAYER_PROCEDURAL = 1 /* reserved, and refused by this build's decoder */
+} clay_sculpt_layer_kind;
+
+/* One layer, as a host lists it. The NAME IS NOT HERE: it crosses through
+ * clay_multires_sculpt_layer_name into a buffer the caller owns, because a
+ * pointer into an engine-owned std::string has no lifetime a host can reason
+ * about — the next rename, remove or reorder frees it. `name_bytes` is what
+ * that call will ask for, including the terminator, so a host sizes one buffer
+ * from this descriptor instead of calling twice. */
+typedef struct clay_sculpt_layer_info {
+    uint32_t struct_size; /* = sizeof(clay_sculpt_layer_info); required */
+    uint64_t id;
+    uint32_t index; /* bottom-first; valid until the next structural change */
+    int32_t kind;   /* clay_sculpt_layer_kind */
+    float strength;
+    int32_t visible;
+    int32_t locked;
+    uint32_t name_bytes; /* including the terminator */
+    /* Coefficients and mask, allocated. A layer costs its COVERAGE and not the
+     * model, which is what makes a hundred passes over one cheek affordable. */
+    uint64_t bytes;
+    uint64_t coverage_vertices;
+} clay_sculpt_layer_info;
+
+/* What composition actually did, so the two scale claims are MEASUREMENTS
+ * rather than assertions: there is no other way to see either from outside,
+ * because a correct implementation and a quadratic one produce the same
+ * surface. `blocks_recomposed` is what a strength change cost — the layer's
+ * allocated blocks, never the level's — and `layer_blocks_visited` is the
+ * (block, layer) pairs actually summed, so a stamp on top of a deep stack can
+ * be shown not to sum every layer beneath it over unrelated geometry. */
+typedef struct clay_sculpt_layer_stats {
+    uint32_t struct_size; /* = sizeof(clay_sculpt_layer_stats); required */
+    uint64_t blocks_recomposed;
+    uint64_t layer_blocks_visited;
+    uint64_t compositions; /* calls that recomposed at least one block */
+} clay_sculpt_layer_stats;
+
+/* -- reading the stack ------------------------------------------------------ */
+
+clay_result clay_multires_sculpt_layer_count(const clay_multires* surface, size_t* out_count);
+/* The id at a stack position, bottom-first. The loop a host draws its list
+ * with; past the end is CLAY_ERROR_NOT_FOUND. */
+clay_result clay_multires_sculpt_layer_id_at(const clay_multires* surface, size_t index,
+                                             uint64_t* out_id);
+/* An unknown id is CLAY_ERROR_NOT_FOUND rather than a zeroed descriptor: a
+ * zeroed one is indistinguishable from a real layer at strength 0. */
+clay_result clay_multires_sculpt_layer_info(const clay_multires* surface, uint64_t id,
+                                            clay_sculpt_layer_info* out_info);
+/* Size-query pattern, into a buffer the CALLER owns: call with buffer == NULL
+ * for the byte count including the terminator. */
+clay_result clay_multires_sculpt_layer_name(const clay_multires* surface, uint64_t id,
+                                            char* buffer, size_t* size);
+/* Which layer the next sculpt write lands in. CLAY_NO_SCULPT_LAYER is the base
+ * detail, which is what every stroke did before this existed. */
+clay_result clay_multires_active_sculpt_layer(const clay_multires* surface, uint64_t* out_id);
+
+/* -- lifecycle -------------------------------------------------------------- */
+/*
+ * `out_error` receives a clay_multires_error on every refusal below and may be
+ * NULL. It is what separates the three sentences a host UI has to be able to
+ * say: no such layer, this layer is locked, and finish the stroke first. A bare
+ * failure makes them indistinguishable. */
+
+/* A new empty layer on top, full strength, visible, made active. Refused while
+ * a stroke holds the composition. `name` may be NULL for an unnamed pass. */
+clay_result clay_multires_add_sculpt_layer(clay_multires* surface, const char* name,
+                                           uint64_t* out_id, int32_t* out_error);
+/* Discard a layer. Re-evaluates the removed layer's COVERAGE and nothing else:
+ * no stroke is replayed, and no other layer's coefficients, strength or
+ * relative order change. */
+clay_result clay_multires_remove_sculpt_layer(clay_multires* surface, uint64_t id,
+                                              int32_t* out_error);
+/* Slide a layer through the stack. Organisation only — see the note on
+ * commuting above; this cannot move a vertex. */
+clay_result clay_multires_move_sculpt_layer(clay_multires* surface, uint64_t id, size_t index,
+                                            int32_t* out_error);
+/* Fold a layer into the one below it and discard it. Defined by VISUAL PARITY:
+ * the evaluated surface before equals the evaluated surface after, at any
+ * strength including zero. What is lost is real and is named rather than
+ * smoothed over — the merged layer's slider no longer scales what the upper
+ * layer contributed independently, which is what merging MEANS. */
+clay_result clay_multires_merge_sculpt_layer_down(clay_multires* surface, uint64_t id,
+                                                  int32_t* out_error);
+/* The same statement with the BASE as the target: the level's own detail, and
+ * the cage itself for a level-0 base deformation layer. */
+clay_result clay_multires_bake_sculpt_layer_to_base(clay_multires* surface, uint64_t id,
+                                                    int32_t* out_error);
+
+/* -- properties ------------------------------------------------------------- */
+/*
+ * A LOCK REFUSES A COEFFICIENT WRITE AND PERMITS EVERY PROPERTY CHANGE, which
+ * is the rule stated rather than discovered: locking exists so an artist can
+ * keep working over a finished pass, and a lock that also froze the name and
+ * the slider would make "lock" mean "hide from the UI".
+ *
+ * A COMPOSITION CHANGE REFUSES WHILE A STROKE IS OPEN. The stroke reads the
+ * evaluated surface, which includes every visible layer, so a slider moved
+ * between two stamps would author one gesture against two different surfaces.
+ * Rename, lock and set-active still work, because none of them moves a vertex.
+ * Refusing rather than deferring until commit is deliberate: a slider that
+ * appears to move and then silently applies later is the worse surprise. */
+
+clay_result clay_multires_rename_sculpt_layer(clay_multires* surface, uint64_t id,
+                                              const char* name, int32_t* out_error);
+/* 1 contributes fully, 0 contributes nothing, and neither replays a stroke. */
+clay_result clay_multires_set_sculpt_layer_strength(clay_multires* surface, uint64_t id,
+                                                    float strength, int32_t* out_error);
+/* Invisible is exactly zero rather than nearly zero: hiding a layer removes its
+ * contribution bit for bit, so a host can compare the two. */
+clay_result clay_multires_set_sculpt_layer_visible(clay_multires* surface, uint64_t id,
+                                                   int32_t visible, int32_t* out_error);
+clay_result clay_multires_set_sculpt_layer_locked(clay_multires* surface, uint64_t id,
+                                                  int32_t locked, int32_t* out_error);
+clay_result clay_multires_set_active_sculpt_layer(clay_multires* surface, uint64_t id,
+                                                  int32_t* out_error);
+
+/* -- content ---------------------------------------------------------------- */
+
+/* One vertex's coefficients on a layer: three floats, tangent, bitangent and
+ * normal, in the vertex's transported frame — the same three the base detail
+ * stores, because they are the same quantity. Writing marks the block, so the
+ * next evaluation recomposes it and the levels above follow. */
+clay_result clay_multires_set_sculpt_layer_detail(clay_multires* surface, uint64_t id,
+                                                  uint32_t level, uint32_t vertex,
+                                                  const float* tbn, int32_t* out_error);
+clay_result clay_multires_sculpt_layer_detail(const clay_multires* surface, uint64_t id,
+                                              uint32_t level, uint32_t vertex, float* out_tbn);
+/* The per-layer MASK, whose identity is 1 and which is a different question
+ * from the brush gate: the gate says where a brush writes and is gone when the
+ * pointer comes up, this says where a STORED LAYER CONTRIBUTES and is
+ * serialized with it. Writing exactly 1 releases the storage again. */
+clay_result clay_multires_set_sculpt_layer_mask(clay_multires* surface, uint64_t id,
+                                                uint32_t level, uint32_t vertex, float weight,
+                                                int32_t* out_error);
+clay_result clay_multires_sculpt_layer_mask(const clay_multires* surface, uint64_t id,
+                                            uint32_t level, uint32_t vertex, float* out_weight);
+
+/* -- what changed, and what it costs ---------------------------------------- */
+
+/* Every layer's coefficients and mask, and nothing derived from them. Apart
+ * from clay_multires_detail_checksum, which still hashes the BASE detail only —
+ * so a host can ask "did the form change" and "did a pass change" separately. */
+clay_result clay_multires_sculpt_layer_checksum(const clay_multires* surface,
+                                                uint64_t* out_checksum);
+/* THREE revisions, for the same reason the hierarchy already has three: one
+ * counter cannot say which of three things happened.
+ *
+ *   metadata     a rename, a change of active layer. Invalidates NOTHING.
+ *   composition  strength, visibility, mask, order, add, remove.
+ *   content      coefficients written.
+ *
+ * A host keyed on the second or the third does not re-evaluate a model because
+ * a layer was renamed. A host that has never heard of these keeps working:
+ * clay_multires_revision's detail and evaluated counters already fold in the
+ * two that move geometry. Any output may be NULL. */
+clay_result clay_multires_sculpt_layer_revision(const clay_multires* surface,
+                                                uint64_t* out_metadata,
+                                                uint64_t* out_composition,
+                                                uint64_t* out_content);
+clay_result clay_multires_sculpt_layer_stats(const clay_multires* surface,
+                                             clay_sculpt_layer_stats* out_stats);
+clay_result clay_multires_reset_sculpt_layer_stats(clay_multires* surface);
+/* Release every all-zero coefficient block and every all-identity mask block —
+ * the storage a stroke that undid itself left behind. NEVER CALL THIS INSIDE A
+ * POINTER EVENT: it walks the stored blocks of every layer, which is
+ * proportional to the stack rather than to the dab.
+ *
+ * The cheapest of the four levers a host under memory pressure has, the other
+ * three being merge, bake and delete. There is deliberately no CAP: a cap that
+ * silently stopped recording would leave the pass on the surface and
+ * un-dialable, which is a correctness bug wearing a memory limit's clothes. */
+clay_result clay_multires_compact_sculpt_layers(clay_multires* surface);
+/* Hold the composition for the length of a gesture a host drives itself, stamp
+ * by stamp. clay_multires_sculpt_layer_stroke_begin takes and releases this; a
+ * host using the plain sculptor takes it for the same reason. */
+clay_result clay_multires_hold_sculpt_layer_composition(clay_multires* surface, int32_t held);
+
+/* -- high-detail stamps ------------------------------------------------------
+ *
+ * A height map or a TANGENT-SPACE vector displacement, over the same alpha
+ * square the mesh brushes already project. What is new is one thing only: what
+ * the sampled value MEANS.
+ *
+ * VECTOR DISPLACEMENT IS NEVER WORLD-SPACE, and that is not a preference. A
+ * world-space stamp is orientation-dependent: the same map applied to the same
+ * feature on the left and right of a face produces two different shapes, and
+ * across a curved surface it shears. So the three components are read in the
+ * vertex's own transported frame — the same frame the coefficients are stored
+ * in, so a stamp and a stroke deposit into one representation.
+ *
+ * THE IMAGE IS PLANAR AND BORROWED. Three channels means three consecutive
+ * width*height planes, not interleaved triples, because a plane is exactly the
+ * buffer the existing alpha sampler reads; interleaving would need a second
+ * lookup with its own stride rules, which is the drift this avoids. The engine
+ * decodes no images and copies nothing: the pointer must outlive the call and
+ * nothing holds it afterwards. */
+
+typedef enum clay_detail_stamp_mode {
+    /* A scalar in [0,1] multiplying the brush's per-vertex weight. This is
+     * clay_mesh_brush_desc's alpha, and it is named here so the three modes
+     * read as one enumeration — clay_multires_sculpt_layer_stroke_stamp_detail
+     * REFUSES it, because routing a scalar alpha through a second entry point
+     * would be two ways to say one thing. */
+    CLAY_DETAIL_STAMP_WEIGHT = 0,
+    CLAY_DETAIL_STAMP_HEIGHT = 1, /* signed displacement along the vertex normal */
+    CLAY_DETAIL_STAMP_VECTOR = 2  /* three components in the vertex's frame */
+} clay_detail_stamp_mode;
+
+typedef struct clay_detail_stamp_desc {
+    uint32_t struct_size; /* = sizeof(clay_detail_stamp_desc); required */
+    int32_t mode;         /* clay_detail_stamp_mode */
+    /* width*height samples per channel, PLANAR and BORROWED: channel c starts
+     * at image + c*width*height. One channel for Height, three for Vector. */
+    const float* image;
+    int32_t width;
+    int32_t height;
+    /* World units per unit of sampled value. Signed, so one map deposits or
+     * digs without a second image. */
+    float amplitude;
+    /* What a Height map's zero is. A map cut out of a photograph sits around
+     * 0.5 and one authored as a displacement sits around 0, and guessing wrong
+     * inflates or deflates the whole stamp. */
+    float bias;
+    /* The square, with clay_mesh_brush_desc's meanings: the plane through
+     * `center` whose normal is `direction`, oriented by `tangent` (any rough
+     * "up" works, it is re-orthogonalised), of side `extent`. A zero direction
+     * or tangent takes the brush's own. */
+    float center[3];
+    float direction[3];
+    float tangent[3];
+    float extent;
+} clay_detail_stamp_desc;
+
+/* WHETHER THE LEVEL CAN CARRY WHAT THE STAMP HOLDS, reported rather than
+ * smoothed over. A 2048-sample map across a 5 mm square carries features finer
+ * than a level whose mean edge is 1 mm can represent, and applying it anyway
+ * produces a surface that looks like the map through a blur — which reads as a
+ * bug in the map, or in the brush, or in the artist's file, and is none of
+ * those. The library that implied the resolution says when it does not have
+ * it. */
+typedef struct clay_detail_stamp_report {
+    uint32_t struct_size; /* = sizeof(clay_detail_stamp_report); required */
+    float sample_size;    /* the world size of one image sample */
+    float vertex_spacing; /* the level's mean edge length */
+    float oversampling;   /* samples per vertex spacing; above 1 is too fine */
+    int32_t under_resolved;
+} clay_detail_stamp_report;
+
+/* -- the sculpt layer stroke transaction ------------------------------------
+ *
+ * WHERE A STROKE LANDS, chosen by the caller rather than inferred, because the
+ * two cases a host needs are opposite and neither is a default: "sculpt the
+ * pass I am working on" and "fix the form UNDER the passes without disturbing
+ * them" are both ordinary. */
+typedef enum clay_multires_write_domain {
+    CLAY_MULTIRES_WRITE_AUTOMATIC = 0, /* the active layer if there is one, the base if not */
+    CLAY_MULTIRES_WRITE_GEOMETRY = 1,  /* the base: the cage at level 0, the level's own detail */
+    /* The active layer. Refuses to BEGIN when there is none, rather than
+     * silently writing the form the caller asked not to touch. */
+    CLAY_MULTIRES_WRITE_DETAIL = 2
+} clay_multires_write_domain;
+
+/* WHICH FREQUENCY A SMOOTH ACTS ON. Three operations rather than one filter
+ * with a cutoff, and the split is REPRESENTATIONAL: the hierarchy already
+ * stores the form and the detail apart, so these are three different arrays
+ * rather than three settings of one pass. A plain Laplacian over pores removes
+ * the pores, which is rarely what was asked. */
+typedef enum clay_multires_smooth_mode {
+    CLAY_MULTIRES_SMOOTH_GEOMETRY = 0,    /* positions; exactly CLAY_MESH_BRUSH_SMOOTH */
+    CLAY_MULTIRES_SMOOTH_DETAIL_ONLY = 1, /* coefficients in the target channel only */
+    /* The FORM, with the detail re-applied unchanged. The mode an artist
+     * correcting anatomy under pores is asking for, and the one that is
+     * impossible on a flat mesh. */
+    CLAY_MULTIRES_SMOOTH_PRESERVE_DETAIL = 2
+} clay_multires_smooth_mode;
+
+/* A gesture into one channel: begin, stamp, commit, cancel, the same shape the
+ * SDF sculpt transaction already established.
+ *
+ * WHY A TRANSACTION AND NOT A LOOP OF STAMPS. Three reasons, and none of them
+ * exists until a stack does. A stroke has to enter ONE layer, fixed at
+ * pointer-down rather than read again per dab, or a host that changes the
+ * active layer mid-stroke splits one gesture across two channels. A stamp READS
+ * the evaluated surface, so the composition is held for the length of the
+ * stroke. And CANCEL has to be exact — a layered write is `L += dE`, so the
+ * only exact restore is the recorded `before` values, which means the record
+ * has to exist from the first stamp rather than be reconstructed at the end.
+ *
+ * Under symmetry every mirrored stamp is another stamp in the same
+ * transaction, so a mirrored stroke is one layer and one record whose coverage
+ * is the union of the two sides.
+ *
+ * THE RECORD ITSELF DOES NOT CROSS THIS ABI YET, which is stated here rather
+ * than left to be discovered — the same sentence
+ * clay_multires_sculptor_apply_stroke already carries about MultiresDelta. A
+ * host that wants a layered gesture in an undo stack reaches it through pyclay
+ * or the C++ SculptLayerDelta; commit reports how many entries the record held
+ * so a host can at least see that the gesture coalesced. */
+typedef struct clay_multires_sculpt_layer_stroke clay_multires_sculpt_layer_stroke;
+
+clay_result clay_multires_sculpt_layer_stroke_create(
+    clay_multires* surface, clay_multires_sculpt_layer_stroke** out_stroke);
+void clay_multires_sculpt_layer_stroke_destroy(clay_multires_sculpt_layer_stroke* stroke);
+
+/* Set before begin. Changing it while a stroke is open does nothing: the domain
+ * is resolved once, which is the whole of the first reason above. */
+clay_result clay_multires_sculpt_layer_stroke_set_write_domain(
+    clay_multires_sculpt_layer_stroke* stroke, int32_t domain);
+/* Open a gesture. Fixes the target channel, holds the composition and clears
+ * the record. Refuses — changing nothing — on a stroke that is already open, on
+ * a LOCKED target layer, and on CLAY_MULTIRES_WRITE_DETAIL with no active
+ * layer. */
+clay_result clay_multires_sculpt_layer_stroke_begin(clay_multires_sculpt_layer_stroke* stroke,
+                                                    int32_t* out_error);
+/* The channel this stroke is writing; CLAY_NO_SCULPT_LAYER means the base. */
+clay_result clay_multires_sculpt_layer_stroke_target_layer(
+    const clay_multires_sculpt_layer_stroke* stroke, uint64_t* out_id);
+
+/* One stamp at the surface's sculpt level, into the target channel: the same
+ * sixteen verbs, the same falloffs, the same mask and the same automasking,
+ * because it is the same code. `mask` is the freeze and may be NULL. */
+clay_result clay_multires_sculpt_layer_stroke_stamp(clay_multires_sculpt_layer_stroke* stroke,
+                                                    const clay_mesh_brush_desc* brush,
+                                                    const clay_mask* mask,
+                                                    clay_multires_stamp_report* out_report);
+/* A height or vector-displacement stamp through the brush's own weight, so the
+ * falloff, the mask gate, the automasking and the alpha compose with it exactly
+ * as they do with a verb. `out_stamp_report` carries the oversampling reading;
+ * either report may be NULL. */
+clay_result clay_multires_sculpt_layer_stroke_stamp_detail(
+    clay_multires_sculpt_layer_stroke* stroke, const clay_detail_stamp_desc* stamp,
+    const clay_mesh_brush_desc* brush, const clay_mask* mask,
+    clay_detail_stamp_report* out_stamp_report, clay_multires_stamp_report* out_report);
+clay_result clay_multires_sculpt_layer_stroke_smooth(clay_multires_sculpt_layer_stroke* stroke,
+                                                     int32_t mode,
+                                                     const clay_mesh_brush_desc* brush,
+                                                     const clay_mask* mask,
+                                                     clay_multires_stamp_report* out_report);
+/* The target channel toward zero. Touches neither the base nor any other
+ * layer, which is what makes it an eraser for THIS pass rather than a
+ * flattening brush. */
+clay_result clay_multires_sculpt_layer_stroke_erase(clay_multires_sculpt_layer_stroke* stroke,
+                                                    const clay_mesh_brush_desc* brush,
+                                                    const clay_mask* mask,
+                                                    clay_multires_stamp_report* out_report);
+/* The LEVEL'S OWN detail toward zero: the form back toward the pure
+ * subdivision, with every layer left alone. Refused at level 0, where the cage
+ * has no pure subdivision to return to.
+ *
+ * Neither of these is undo, and the difference is worth stating because a host
+ * will be tempted to wire one to the other: undo walks a step list backwards
+ * and restores what a gesture changed, wherever it was; these move the surface
+ * toward a named target under the cursor, and are themselves gestures. */
+clay_result clay_multires_sculpt_layer_stroke_restore(clay_multires_sculpt_layer_stroke* stroke,
+                                                      const clay_mesh_brush_desc* brush,
+                                                      const clay_mask* mask,
+                                                      clay_multires_stamp_report* out_report);
+
+/* How many stamps this gesture has taken, and how many entries the record
+ * holds. A hundred stamps over one vertex is ONE entry — the record's size
+ * follows the vertices the stroke reached, not the stamps it took — and
+ * comparing these two is how a host sees that. */
+clay_result clay_multires_sculpt_layer_stroke_stamps(
+    const clay_multires_sculpt_layer_stroke* stroke, size_t* out_stamps);
+clay_result clay_multires_sculpt_layer_stroke_record_size(
+    const clay_multires_sculpt_layer_stroke* stroke, size_t* out_entries);
+
+/* Close the gesture: releases the composition hold and restores the stack's
+ * active layer. A gesture that changed nothing produces an empty record rather
+ * than a step. */
+clay_result clay_multires_sculpt_layer_stroke_commit(clay_multires_sculpt_layer_stroke* stroke,
+                                                     size_t* out_entries);
+/* Discard. Restores the target channel EXACTLY — the recorded `before` values,
+ * not a recomputation — and leaves the composition and the active layer as they
+ * were found. */
+clay_result clay_multires_sculpt_layer_stroke_cancel(clay_multires_sculpt_layer_stroke* stroke);
 /* -- one transport for all three surfaces ------------------------------------
  *
  * (c-abi spec, add-extreme-poly-runtime.)
@@ -7307,6 +7956,52 @@ clay_result clay_mesh_sculptor_refresh(clay_mesh_sculptor* sculptor);
  * number of triangle tests a random ray must make. Lower is better; compare it
  * against what the same tree scored when it was built. */
 clay_result clay_mesh_sculptor_quality(clay_mesh_sculptor* sculptor, float* out_quality);
+
+/* -- WHAT A STROKE'S SCRATCH COSTS -------------------------------------------
+ *
+ * Every sculptor keeps ONE bump arena for the buffers a stamp needs and cannot
+ * hold as members — the affected-vertex list, the temporary normals, the
+ * surface traversal, the alpha samples, the automask's frontiers and floods,
+ * the topology candidates. It grows to the largest footprint it has actually
+ * been given and is reset, not freed, between stamps, so a warm stamp on a
+ * stable surface allocates nothing at all.
+ *
+ * THIS CROSSES BECAUSE A HOST HAS TO BUDGET FOR IT. The device this library
+ * targets kills an application for memory rather than warning it twice — the
+ * same reason the multiresolution preflight crosses — and a per-stroke scratch
+ * high-water mark is a number such a host budgets against. A host that cannot
+ * see it is guessing.
+ *
+ * THERE IS DELIBERATELY NOTHING TO TUNE. No reserve, no cap, no growth factor.
+ * Each would be a number a host tunes against one device and is then wrong
+ * about after the brush radius changes, and the arena already sizes itself from
+ * the largest footprint it has seen, which is the measurement such a knob would
+ * be guessing at.
+ *
+ * `growths` is the one to watch, and it is why a current usage is not reported:
+ * a usage reads zero between stamps whatever the arena is doing. A count that
+ * has stopped rising over stamps of similar footprint is the arena having
+ * converged; one that rises every stamp is scratch that is never released,
+ * which allocates nothing after warm-up and consumes memory without bound. */
+
+typedef struct clay_brush_arena_stats {
+    uint32_t struct_size; /* = sizeof(clay_brush_arena_stats); required */
+    uint64_t capacity_bytes;   /* what the arena currently OWNS */
+    uint64_t high_water_bytes; /* the largest a single stamp has ever used */
+    uint64_t growths;          /* how many times it has had to take more */
+} clay_brush_arena_stats;
+
+clay_result clay_mesh_sculptor_arena_stats(const clay_mesh_sculptor* sculptor,
+                                           clay_brush_arena_stats* out_stats);
+clay_result clay_dynamic_sculptor_arena_stats(const clay_dynamic_sculptor* sculptor,
+                                              clay_brush_arena_stats* out_stats);
+/* The multiresolution sculptor's arena is the BOUND LEVEL SCULPTOR's: a stamp
+ * runs the fixed sculptor over the active level's own mesh, so that is the
+ * arena that grows, and reporting a second empty one here would tell a host its
+ * scratch cost nothing. Before the first stamp there is no bound level and
+ * every field reads zero, which is the truth rather than a placeholder. */
+clay_result clay_multires_sculptor_arena_stats(const clay_multires_sculptor* sculptor,
+                                               clay_brush_arena_stats* out_stats);
 
 typedef struct clay_mesh_hit {
     uint32_t struct_size; /* = sizeof(clay_mesh_hit); required, as every descriptor's is */
@@ -8304,7 +8999,31 @@ typedef struct clay_brick_stats {
  * Both counts are CUMULATIVE over the document's life and never reset, so read
  * them as differences across the interval you care about. A seed is a pure
  * performance cache: dropping every one of them changes no geometry, only the
- * time it takes to produce it. */
+ * time it takes to produce it.
+ *
+ * THE SEED STORE BELONGS TO THE DOCUMENT, not to a cache and not to a thread.
+ * Two caches over one document share it, and a refill on ONE thread leaves
+ * seeds that a refill on ANOTHER can resume from. That is what makes the
+ * expensive case schedulable.
+ *
+ * WARM A COLD WINDOW OFF THE INTERACTION THREAD. A brick with no seed pays the
+ * whole surviving edit list, and that cost follows the size of the sculpt: a
+ * 12-brick window over a 50,000-item document measures ~108 ms, against ~0.16
+ * ms for a dab whose bricks are all warm. It is the tail rather than the median
+ * that hurts — a stroke's median dab is flat in document size and its worst dab
+ * is not, because a moving brush keeps reaching ground it has not covered.
+ *
+ * Because clay_brick_cache_eval_requests is free-threaded against a const
+ * document and the seeds are the document's, a host can pay that on a worker
+ * and hand the frame a warm window. Measured on the same 50,000-item document:
+ * the interaction thread pays 107.99 ms with no warming and 0.004 ms after a
+ * worker refilled the same requests, bit-identically.
+ *
+ * WHAT THAT COSTS YOU IS AN EDIT. The warming refill is only safe while the
+ * document is not being mutated, so it belongs at pointer-DOWN, between
+ * strokes, or on a camera move — not between the dabs of a live stroke, where
+ * every dab is a mutating call. A host that warms the neighbourhood the brush
+ * is about to enter pays for it once, before the stroke that needs it. */
 typedef struct clay_resume_stats {
     uint32_t struct_size;      /* = sizeof(clay_resume_stats); required */
     uint64_t entries;          /* bricks currently holding a seed */
@@ -8541,6 +9260,32 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
                                            const clay_brick_request* requests, size_t count,
                                            float* out_values, size_t values_capacity,
                                            float* out_colors_rgb, size_t colors_capacity);
+
+/* The same refill over every visible SDF layer EXCEPT one (issue #378) — the
+ * brick-cache half of clay_eval_points_excluding, and what a host actually
+ * fills a preview atlas from. Same arguments, same ceilings, same fixed
+ * per-brick slots at the same stride; brick i still occupies
+ * out_values[i * dim^3 ...].
+ *
+ * TAKES NO SEED AND LEAVES NONE, and that is deliberate rather than an
+ * omission. A seed is a brick's value for THIS document, which a later refill
+ * continues with the items the document has gained since; a value computed
+ * without one of the layers is not that, and storing it would hand the next
+ * whole-document refill a seed with a layer missing from it — silently, since a
+ * seeded answer is bit-identical to a walked one by contract and nothing in the
+ * values could show it. So this is a plain batched walk, priced like a stroke's
+ * first dab rather than its tenth.
+ *
+ * Which is the right price for what it is for: a host takes this ONCE at
+ * pointer-down, because the layers it excludes do not move while the artist
+ * drags, and composes the result with its live preview per frame.
+ *
+ * clay_document_resume_stats is untouched by this call — neither counter moves,
+ * because neither a resume nor a seedable full walk happened. */
+clay_result clay_brick_cache_eval_requests_excluding(
+    const clay_document* doc, clay_layer_id excluded, const char* backend,
+    const clay_brick_request* requests, size_t count, float* out_values, size_t values_capacity,
+    float* out_colors_rgb, size_t colors_capacity);
 
 /* clay_brick_cache_eval_requests with the destination on the device — the call
  * a host refilling a brick atlas actually wants. Brick i occupies

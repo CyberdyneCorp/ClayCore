@@ -1745,6 +1745,174 @@ there, still attached, with the locality of the propagation and the advantage of
 the transported frame both measured.
 
 
+### Sculpt layers over the hierarchy: a pass you can dial afterwards
+
+The section above makes a pass **survive** an edit beneath it. A sculpt layer
+makes it **addressable** afterwards: make a wrinkle pass, come back days later
+and dial it to half, hide it, reorder it, delete it — without redoing the work
+under it and without replaying a single stroke.
+
+The model is one line, per level:
+
+    E(n) = B(n) + SUM over layers of  s_i * m_i(v) * L_i(n, v)
+
+`B` is the level's own base detail — the **form** — unchanged in meaning, and
+still what `detail_checksum` hashes. `L_i` is layer *i*'s coefficients, in the
+**same** `DetailField`, in the **same** transported frame, at the **same** block
+size. A layer contribution and a base detail coefficient are one quantity under
+two owners, so there is no second displacement representation to keep in step
+with the first. With an empty stack the composed field is never allocated and a
+hierarchy evaluates bit-identically to before layers existed.
+
+#### `MeshBrush::Layer` is a brush; a sculpt layer is a channel
+
+`Layer` means three things in this library and the API is written so the
+difference cannot be missed:
+
+| | What it is | Lives for |
+|---|---|---|
+| `MeshBrush::Layer` | a brush **algorithm** — deposit to a ceiling above the surface as the stroke found it | one stroke |
+| `scene::LayerId` | a **document** layer, which the session history keys every step by | the document |
+| `SculptLayer` | an artist **channel** — named, reorderable, dialable, stored | the document, addressably |
+
+So nothing is spelled `Layer` unqualified: every type is `SculptLayer*`, every C
+entry point is `clay_multires_sculpt_layer_*` — the same prefix the voxel stack
+already spends, so the two artist stacks read alike and neither reads like the
+brush — and `tools/check_c_abi.py` **gates** the discipline rather than leaving
+it to be remembered. It caught this change's own first spelling. Renaming the
+brush enumerator was the obvious alternative and was rejected: it is shipped in
+the C enum, the Swift enum and every host's serialized preset, so renaming it
+would break all three to fix a documentation problem.
+
+#### Strength is composition, not a scale on the pen
+
+This is the behaviour most likely to be reported as a bug. A stroke into a layer
+at strength 0.5 records its **full** contribution and moves the surface half as
+far as the pen asked for; raising the slider to 1 afterwards **doubles what is on
+screen** and replays no stroke. Nothing in the change divides by a strength —
+which is also why merge-down and bake are defined by **visual parity** (the
+evaluated surface before equals the evaluated surface after) rather than by
+concatenating coefficients, an arithmetic that divides by the lower layer's
+strength and is undefined at exactly the value one slider reaches.
+
+Strength 0 and invisible contribute **nothing, to the bit**: a layer at zero
+effective strength is skipped rather than multiplied by zero.
+
+#### Three revisions, because one counter cannot say which of three things happened
+
+| | moved by | invalidates |
+|---|---|---|
+| `metadata_revision` | rename, change of active layer | nothing |
+| `composition_revision` | strength, visibility, mask, order, add, remove | the layer's **allocated blocks** |
+| `content_revision` | coefficients written | the block written |
+
+A rename must not re-evaluate a model, which keying the cache on a single stack
+revision would have made it do. `detail_revision` and `evaluated_revision` fold
+in the two that move geometry, so a host written against the multires ABI before
+this existed keeps working without learning a new counter.
+
+Both scale claims are **measurements** rather than assertions, because a correct
+implementation and a quadratic one produce the same surface and there is no other
+way to tell them apart from outside. `SculptLayerStats::blocks_recomposed` after
+a strength change is the layer's own coverage and never the level's;
+`layer_blocks_visited` is the (block, layer) pairs actually summed, so a stamp on
+top of a deep stack can be shown not to sum every layer beneath it over unrelated
+geometry — measured flat (1.05x wall clock) from 1 to 128 local layers.
+
+#### The gesture is a transaction, and cancel is exact
+
+`LayeredMultiresSculptor` — `surface.sculpt_layer_stroke()` in pyclay,
+`clay_multires_sculpt_layer_stroke_*` in C — is begin / stamp / commit / cancel,
+the shape the SDF sculpt transaction already established. Three reasons, none of
+which exists until a stack does:
+
+1. **A stroke enters one channel**, fixed at pointer-down and re-asserted per
+   dab. A host that changes the active layer mid-stroke must not split one
+   gesture across two of them. Under symmetry a mirrored stamp is another stamp
+   of the same transaction, so a mirrored stroke is one layer, one delta and the
+   union of the two sides' coverage.
+2. **A stamp reads the evaluated surface**, which includes every visible layer,
+   so the composition is **held** for the length of the stroke: strength,
+   visibility, mask, order, add, remove and merge refuse, and rename, lock and
+   set-active still work because none of them moves a vertex. Refusing rather
+   than deferring is deliberate — a slider that appears to move and then silently
+   applies later is the worse surprise.
+3. **Cancel has to be exact.** A layered write is `L += dE`, so the only exact
+   restore is the recorded `before` values, which is why the record exists from
+   the first stamp rather than being reconstructed at the end.
+
+Commit produces **one** delta for the whole gesture, coalesced: a hundred stamps
+over one vertex are one entry keeping the first `before` and the last `after`.
+In Python the transaction is a context manager, and the asymmetry is the point —
+a clean exit commits and **a raising block cancels**, because a half-finished
+gesture committed on the way out of an exception is an undo step for work nobody
+asked for.
+
+Layer **property** changes are in the history too — rename, strength, visibility,
+reorder, lock, add, remove, merge, bake — which is the thing this does better
+than the voxel stack, whose renames and strengths are still outside it. An artist
+who dials a pass from 100% to 40% and presses undo means the dial.
+
+#### The verbs the split makes possible
+
+Because the hierarchy stores the form and the detail in different arrays, a
+smooth can act on either:
+
+| mode | acts on | leaves alone |
+|---|---|---|
+| `geometry` | positions; exactly the `Smooth` brush | — |
+| `detail_only` | coefficients in the target channel | the form, every other layer |
+| `preserve_detail` | the **form**, with the detail re-applied unchanged | every layer's contribution, bit for bit |
+
+A plain Laplacian over pores removes the pores, which is rarely what was asked.
+`erase` fades the active channel toward zero and can never reach the base;
+`restore` fades the level's **own** detail toward the pure subdivision and leaves
+every layer standing. Neither is undo, and the distinction is worth stating
+because the temptation is to wire one to the other: undo walks a step list
+backwards, these move the surface toward a named target under the cursor and are
+themselves gestures that undo.
+
+`stamp_detail` deposits a **height map** or a **tangent-space vector
+displacement** through the brush's own weight, over the alpha square the mesh
+brushes already project and through the same sampler. Vector displacement is
+never world-space — the same map on the left and right of a face would make two
+different shapes, and across a curve it would shear — so the three channels are
+read in the vertex's own transported frame, which is the frame the coefficients
+are already stored in. Images are **planar and borrowed**: three channels means
+three consecutive `width * height` planes, `(3, H, W)` in numpy, because a plane
+is exactly the buffer the alpha sampler reads. A map finer than the level can
+carry is **reported** (`oversampling`, `under_resolved`) rather than silently
+blurred.
+
+#### Memory is reported and never capped
+
+`memory()` grew two rows: `sculpt_layers` is every layer's coefficients and masks
+and is **authoritative**, reported apart from `detail` because the two are the
+same quantity under different owners and a host deciding what to merge, bake or
+delete needs to see which is costing it; `composed` is the materialized
+`B + SUM(s*m*L)` and is rebuildable. A layer costs its **coverage** and not the
+model, which is what makes a hundred passes over one cheek affordable.
+
+There is deliberately **no cap**. A cap that silently stopped recording would
+leave the pass on the surface and un-dialable, which is a correctness bug wearing
+a memory limit's clothes. A host under pressure has four levers instead:
+`compact_sculpt_layers()` (the cheapest — it releases every all-zero block a
+gesture that undid itself left behind), merge, bake and delete.
+
+The stack is serialized **inside the multires stream**, at surface version 2. The
+bump is deliberate rather than incidental: `decode` ignores trailing bytes, so
+appending a layer chunk and leaving the version at 1 would let a predating binary
+open a layered document, load the base detail only, and present a surface missing
+an artist's work with no signal at all. Version 1 still loads here, as what it
+was — a hierarchy with no layers. A layer's **kind** is written and an unknown
+one is **refused** rather than skipped, for the same reason one level down.
+
+Runnable: [`examples/69_mesh_sculpt_layers.py`](../examples/69_mesh_sculpt_layers.py)
+— a wrinkle pass dialled 0 -> 50% -> 100% over a form that never changes, one
+layer removed with the others byte-identical, what a slider costs measured
+against the level, and a stroke loop that raises leaving nothing behind.
+
+
 ## 8c. Voxel remesh — throwing the topology away on purpose
 
 Section 8 preserves topology and section 8b adapts it locally. This replaces all
@@ -2115,7 +2283,7 @@ reads — while its bytes grow with the model. The allocation gate was
 deliberately regressed that way to check it: the count read 1 against 1 and the
 bytes read 9,604 against 148,996, a 15.5x ratio against a 15.5x model.
 
-Runnable: [`examples/69_extreme_poly.py`](../examples/69_extreme_poly.py) — the
+Runnable: [`examples/71_extreme_poly.py`](../examples/71_extreme_poly.py) — the
 same dab on two models sixteen times apart, with the per-dab upload, the dirty
 chunk count and the reconstruction from the dirty stream all measured and
 asserted from the host's side rather than the engine's.
@@ -2195,6 +2363,14 @@ reading a prefix of it, and **carries no image bytes**: an alpha stays
 caller-owned and borrowed for the call, so a preset is a couple of hundred
 bytes and a host owns its own resource cache.
 
+**v2 appends the stamp azimuth.** The azimuth is what turns Rake, Chisel and a
+rotated alpha, and nothing in the stroke engine derives it from the direction of
+travel yet — so a preset is the only place an artist can put one, and v1 wrote
+every other identity field and stopped one short of this one. A v1 record still
+loads and takes the unrotated default, which is what it was in fact saved with;
+a v2 record read by a v1 build is refused rather than reinterpreted, which is
+the whole reason the number is there.
+
 ### Automasking
 
 The gates a brush applies to itself — normal angle, topology connectivity,
@@ -2225,6 +2401,79 @@ structurally cannot write a second estimator to disagree with.
 Runnable: [`examples/65_brush_presets.py`](../examples/65_brush_presets.py) —
 one gesture through five presets, with every claim above asserted rather than
 illustrated.
+
+### The runtime the three mesh representations share
+
+Everything above — the five weight factors, the automask, the alpha, the stamp's
+frame — is one implementation read by three sculptors, and the parts that are
+NOT shared are named rather than left to be discovered.
+
+**One workset, one identity.** `SculptWorkset` addresses work by a 64-bit
+`WorkItemId` rather than by weld class, because a weld class is the fixed mesh's
+identity and nothing else's: the adaptive surface's is a generational
+`VertexId`, the hierarchy's is (level, vertex). The low 32 bits are the dense
+index in all three, which is what lets one `compose_workset` publish the slot
+map for each. Each representation still walks its own region — a weld-class ring,
+a half-edge ring, or a delegation to the bound level — and all three END in that
+one composition, which is where the factor order lives.
+
+**Three representations, four consumers.** `LayeredMultiresSculptor` is the
+fourth, and it reaches the runtime by a route none of the other three take: its
+`gather()` builds no region of its own, it takes a zero-strength `Draw` through
+the bound level's `MeshSculptor` and reads the workset back. That is deliberate —
+a layered stroke must weight a vertex by exactly what an unlayered stamp would,
+so the falloff, the mask gate, the alpha and the composed automask have to be
+ONE answer rather than two that agree today. It is also where the divergence this
+runtime exists to remove would come back, and asymmetrically: `stamp` routes
+through `MultiresSculptor` and keeps its automask, so a mask that stopped
+reaching `gather()` would appear to work for the sixteen ordinary verbs and
+silently stop for `erase`, `restore`, `smooth` and `stamp_detail` — the four
+that exist only on the layered path. `test_multires_shared_brush_parity.cpp`
+pins that route on its own for that reason.
+
+**The automask reaches all three.** It used to reach two. `clay_mesh_brush_desc`
+carried the factors to `clay_dynamic_sculptor_stamp`, which decoded them and
+never read them, so an automask an artist enabled was silently absent on the
+adaptive representation while the header promised "the same descriptor the fixed
+path takes". The neutral core asks a `WorkItemTopology` two questions — the
+in-workset ring of a slot, and whether a slot is on an open border — and three
+of the five factors need no topology at all.
+
+**A per-stamp scratch arena.** "A stamp costs what it touches" is kept by the
+sculptors owning a buffer for every array a stamp needs, which stops working the
+moment a buffer is wanted DEEP inside the call: the automask's breadth-first
+frontier, the adaptive region's sort permutation. `BrushScratchArena` is a bump
+pointer that is reset rather than freed between stamps, so a warm dab on a
+stable surface allocates nothing on any of the three. It reports
+`capacity_bytes`, `high_water_bytes` and `growths` — the last is the one to
+watch, because scratch that grows a little every stamp allocates nothing after
+warm-up and consumes memory without bound, which no allocation count can see.
+One arena per sculptor, never a process-global: two layers stamped on two
+threads must not alias each other's scratch.
+
+**A stamp frame, and its grain.** `MeshBrushSettings::stamp_azimuth` turns the
+stamp's in-plane axes about its own facing, which is what makes a rake, a
+chisel, clay strips, a directional scratch and a rotated alpha presets over one
+frame rather than five code paths. A zero azimuth takes **no rotation at all**
+rather than a rotation by zero, and that is a correctness rule: `x + 0.0f` is
+not the identity when `x` is `-0.0f`, and one flipped sign bit moves an alpha
+sample across a texel boundary.
+
+**Three things in `mesh` are called a frame**, and they are different:
+`BrushFrame` is an enum naming the direction a kernel displaces along,
+`StampFrame` is the orthonormal basis a stamp is oriented in, and `SurfaceFrame`
+is the transported frame a multiresolution detail coefficient is measured in.
+The first keeps its name because it is serialized at preset version 1 and
+mirrored in the C ABI.
+
+Runnable: [`examples/70_shared_brush_runtime.py`](../examples/70_shared_brush_runtime.py)
+— one preset gesture replayed over a fixed mesh, an adaptive surface and a
+multiresolution cage built from the same model. The three write byte-identical
+positions for a normal-free verb, the automask masks the same vertices on each,
+the arena stops growing over the stroke, and Draw's divergence between the
+representations is asserted **as a difference** with its measured bound, because
+a gate that only checked agreement would be satisfied by three representations
+that had become equally wrong.
 
 ---
 

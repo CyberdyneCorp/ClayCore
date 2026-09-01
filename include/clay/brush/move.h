@@ -189,6 +189,18 @@ struct PreparedMove {
     // reflected or rotated before it is mapped into the item.
     math::Transform layer_xform;
 
+    // The LAYER's per-axis scale, which sits BETWEEN the two placements and so
+    // cannot ride the composed transform above (#373). When `layer_squashed` is
+    // false — every document written before that field existed — the fields
+    // below go unread and the composed path is taken unchanged, which is what
+    // keeps a uniform layer's warps bit-identical rather than merely equal.
+    bool layer_squashed = false;
+    kernel::cfloat3 layer_scale_axes = kernel::cf3(1.0f, 1.0f, 1.0f);
+    math::Quat layer_rotation = math::Quat::identity();
+    math::Quat node_rotation = math::Quat::identity();
+    float layer_uniform_scale = 1.0f;
+    float node_uniform_scale = 1.0f;
+
     std::uint8_t ease = 0;
     bool front_only = false;
 };

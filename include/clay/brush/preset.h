@@ -33,7 +33,15 @@ namespace brush {
 // `StrokePreset` already records: presets outlive engine versions, and a
 // library of them silently reinterpreted by a later build is the failure a
 // version number exists to prevent.
-inline constexpr std::uint16_t kBrushPresetVersion = 1;
+//
+// VERSION 2 APPENDS `settings.stamp_azimuth` (add-shared-brush-runtime). The
+// azimuth is what turns Rake, Chisel and a rotated alpha, and a preset library
+// is the only place an artist can put one — nothing in `brush` resolves it from
+// the stroke yet. Version 1 wrote every other identity field and stopped one
+// field short of this one, so a saved chisel came back unturned and looked like
+// it had worked. A version-1 record still loads and takes the default, which is
+// the unrotated basis it was in fact saved with.
+inline constexpr std::uint16_t kBrushPresetVersion = 2;
 
 struct BrushPreset {
     // What the artist calls it. Carried rather than derived, because two

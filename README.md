@@ -291,10 +291,15 @@ protecting.
 - Pre-bake repair: report, close holes, fill voids
 - A stack of resolution levels — block out coarse, `add_level` to refine where
   the detail goes, without paying for a fine grid everywhere
-- **Sculpt layers** — ZBrush's headline feature, on a grid: bracket a run of
-  strokes and the grid records what they *changed*, so their strength stays
-  adjustable long after they are finished. Not undo, which is a stack you pop;
-  a layer is addressable
+- **Sculpt layers** — ZBrush's headline feature, on **two** representations:
+  bracket a run of strokes and the grid records what they *changed*, so their
+  strength stays adjustable long after they are finished; a subdivision
+  hierarchy has the same stack over its *detail*, where a pass is a named,
+  reorderable, dialable channel that survives a save, a load and a reorder
+  (§8b). Not undo, which is a stack you pop; a layer is addressable.
+  The two differ in one thing worth knowing: voxel layers replay cell writes and
+  are **order-dependent**, while additive displacement **commutes**, so
+  reordering a mesh pass changes organisation and not geometry
 
 | | |
 |---|---|
@@ -533,6 +538,7 @@ short version:
 | **Author** | 28 primitives and 7 lifted 2D profiles, 17 combine ops under 5 blend profiles, 21 deformers, armatures (ZSpheres), control-point curves, the cut tool, grid/radial repetition and mirrors — all as an ordered, re-editable edit list with per-node exactness and Lipschitz tracking |
 | **Sculpt** | One stroke engine feeding four consumers: SDF edit items, voxel cells, mask fields and a mesh layer's own vertices. 10 voxel verbs with sculpt layers, 16 fixed-topology mesh verbs including colour, taper and twist on meshes, baked field relax/flatten/move-topological, and masking that gates *any* operation |
 | **Sculpt big** | Four mesh modes — fixed topology, adaptive topology, a Catmull-Clark multires hierarchy and a global voxel remesh. Under the three that persist, ONE chunk unit with four revisions, a dirty-chunk readback, a host-declared memory budget with an ordered pressure trim, and preflighted peaks. A dab costs what it touches: 200x the vertices at the same footprint is the same dab, gated in CI |
+| **Sculpt** | One stroke engine feeding four consumers: SDF edit items, voxel cells, mask fields and a mesh layer's own vertices. 10 voxel verbs with sculpt layers, 16 fixed-topology mesh verbs including colour, taper and twist on meshes, baked field relax/flatten/move-topological, and masking that gates *any* operation. The mesh verbs run one shared runtime across all three mesh representations — fixed, adaptive and multiresolution — so the falloff, the alpha, the mask, the automask and the stamp's grain are one implementation read three times rather than three that have to be kept in step |
 | **Evaluate** | CPU, Metal, CUDA, OpenCL and Vulkan from one kernel source, tolerance-gated against the CPU reference; a sparse fp16 brick cache with LOD mips, a memory budget and eviction, so a host can answer a platform memory warning without destroying it |
 | **Get it out** | Watertight marching tetrahedra, surface nets, dual contouring and quad-only meshing; scene and brick picking; `.clayspace` documents; OBJ, PLY, FBX and glTF GLB **in both directions** |
 | **Embed** | A stable C ABI with versioned descriptors, a SwiftPM xcframework, `pyclay` (nanobind, numpy-native) and a `clay` CLI — with C-ABI/pyclay parity gated in CI |
@@ -567,6 +573,16 @@ Recorded as decisions rather than gaps, with the reasoning in
   Catmull-Clark hierarchy with detail stored in a transported local frame, so a
   change to the form beneath a wrinkle does not destroy the wrinkle. Sculpt
   level and display level are independent — `examples/68_mesh_multires.py`.
+  **`mesh::MultiresSurface` shipped**, a fifth representation: a deterministic
+  Catmull-Clark hierarchy with detail stored in a transported local frame, a
+  sculpt level independent of the display level, and local low-to-high
+  propagation. `openspec/ROADMAP.md` Phase 5 row 3.
+  **All three mesh representations run one brush runtime** — one workset, one
+  factor order, one automask, one scratch arena, and a stamp azimuth a rake or
+  a chisel is a preset over. They are not three sculptors that happen to agree:
+  the same brush descriptor through each writes byte-identical positions for a
+  normal-free verb and masks the same vertices, asserted in
+  `examples/70_shared_brush_runtime.py` rather than claimed here.
 - ~~**No global topology reset**~~ — **`mesh::voxel_remesh` shipped.** A whole
   surface rebuilt through a signed narrow-band field at an explicit world voxel
   size: overlaps fuse, open surfaces close under an explicit policy, the result
@@ -594,7 +610,7 @@ Recorded as decisions rather than gaps, with the reasoning in
   exists for — a dab costs what it TOUCHES, not what the model HOLDS** — and
   that is a CI gate rather than an aspiration: 200x the vertices at the same
   touched region is the same dab to within the measurement, with an identical
-  gathered workset from 100k to 20M. `examples/69_extreme_poly.py`, and the
+  gathered workset from 100k to 20M. `examples/71_extreme_poly.py`, and the
   matrix in
   [`docs/09-brush-latency-and-coverage.md`](docs/09-brush-latency-and-coverage.md).
 - **No PBR channels.** Polypaint works on all three representations; roughness

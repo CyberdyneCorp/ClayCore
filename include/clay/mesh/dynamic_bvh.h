@@ -189,11 +189,16 @@ class DynamicBvh {
     // face slot -> leaf index. A vector rather than a map: the slot space is
     // dense enough that the vector is smaller and the lookup is a load.
     std::vector<std::uint32_t> face_leaf_;
-    // Scratch for the two operations that run per stamp: the leaves a refit
-    // touched, and the half of a chunk a split moves. Members rather than
-    // locals, for the reason every other per-stamp buffer in this library is
-    // one — a stroke must allocate on its first stamp and never again.
-    std::vector<std::uint32_t> touched_;
+    std::vector<std::uint32_t> dirty_;
+    std::vector<std::uint32_t> dirty_epoch_;
+    // `update_many`'s per-stamp leaf list, kept so a stroke of similar stamps
+    // allocates on its first one and never again.
+    std::vector<std::uint32_t> update_scratch_;
+    std::uint32_t epoch_ = 1;
+    std::uint64_t revision_ = 1;
+    // The half of a chunk a split moves. A member for the same reason
+    // `update_scratch_` above is one -- this runs per stamp, and a local would
+    // allocate and free on every dab.
     std::vector<FaceId> moved_faces_;
     mutable bool tree_stale_ = false;
 };

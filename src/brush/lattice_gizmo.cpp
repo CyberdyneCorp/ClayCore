@@ -91,6 +91,21 @@ void collect(const scene::SdfContent& content, const scene::Layer& layer,
 std::vector<LatticeWarp> lattice_gizmo(const scene::Layer& layer, const GizmoCage& cage) {
     std::vector<LatticeWarp> out;
     if (!layer.sdf) return out;
+    // A PER-AXIS SCALED LAYER IS REFUSED, not placed through a record that
+    // cannot hold its map (#373). `local_to_cage` below is built as a
+    // math::Transform, and with a layer per-axis scale the map an item actually
+    // needs is
+    //     cage.placement^-1 * layer.xform * diag(L) * node.xform * diag(N)
+    // which is a general affine map — not a similarity, and not a similarity
+    // composed with one diagonal either, since the layer's diag sits BETWEEN
+    // the two placements. Placing a cage through the rigid record would warp
+    // every item in a space it does not occupy, silently and with no error.
+    //
+    // Refusing is not a fix for the widening `drag-a-squashed-item` deferred
+    // here, and does not pretend to be: the same record still drops a NODE's
+    // per-axis scale, which predates this change and is untouched by it. This
+    // stops the layer scale from adding a second silent case to it.
+    if (scene::layer_is_squashed(layer)) return out;
     // An untouched cage warps nothing anywhere, and a chain of no-op deformers
     // is worse than none — each still costs a tape record on every evaluation.
     if (cage.is_identity()) return out;

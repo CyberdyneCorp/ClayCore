@@ -374,12 +374,12 @@ def pictures(centre, rows):
         labels.append(f"{name}: {np.asarray(mesh.indices).reshape(-1, 3).shape[0]:,d} "
                       f"triangles, {len(hit)} chunks touched")
 
-    R.contact_sheet(tiles, "69_extreme_poly.png", columns=2,
+    R.contact_sheet(tiles, "71_extreme_poly.png", columns=2,
                     caption=" | ".join(labels))
 
 
 def one_chunk_on_disk(view, chunk):
-    path = R.output_path("69_extreme_poly_chunk.obj")
+    path = R.output_path("71_extreme_poly_chunk.obj")
     got = view.copy_chunk(chunk, normals=False)
     clay.Mesh.from_triangles(got["positions"],
                              got["indices"].reshape(-1, 3)).save(path)

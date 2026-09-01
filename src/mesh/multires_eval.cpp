@@ -32,10 +32,19 @@ LevelCache& ensure_cache(MultiresSurface::State& s, std::uint32_t level) {
 
 // P(n) = S(n) + Frame(n) * Detail(n), for these vertices. The one place the
 // model in `multires.h` is actually written down in code.
+//
+// `Detail(n)` IS `effective_detail`, which is the level's composed field when a
+// sculpt layer reaches this level and the level's own base field when none
+// does. The widening is deliberately confined to that one call: with no stack
+// the read is the read it always was, so a hierarchy with no layers evaluates
+// to the same bits it did before layers existed. An implementation that always
+// composed — even summing an empty stack — would move the last bits of every
+// vertex and break every existing golden for nothing.
 void apply_detail(MultiresLevel& lev, const std::vector<std::uint32_t>& vertices) {
     LevelCache& c = *lev.cache;
+    const DetailField& field = effective_detail(lev);
     for (std::uint32_t v : vertices) {
-        const LocalDetail d = lev.detail.get(v);
+        const LocalDetail d = field.get(v);
         c.mesh.positions[v] =
             c.subdivided[v] + frame_to_world(c.frames[v], d.tangent, d.bitangent, d.normal);
     }
@@ -43,13 +52,42 @@ void apply_detail(MultiresLevel& lev, const std::vector<std::uint32_t>& vertices
 
 void apply_detail_all(MultiresLevel& lev) {
     LevelCache& c = *lev.cache;
+    const DetailField& field = effective_detail(lev);
     const std::uint32_t n = lev.topology.vertex_count;
     c.mesh.positions.resize(n);
     for (std::uint32_t v = 0; v < n; ++v) {
-        const LocalDetail d = lev.detail.get(v);
+        const LocalDetail d = field.get(v);
         c.mesh.positions[v] =
             c.subdivided[v] + frame_to_world(c.frames[v], d.tangent, d.bitangent, d.normal);
     }
+}
+
+// P(0) for a cage carrying BASE DEFORMATION LAYERS: the cage's own position
+// plus the stack's contribution, read in the cage's REST frame. Written from
+// the rest positions rather than accumulated onto the cached ones, so it is
+// idempotent — a re-evaluation after a strength change must land on the same
+// answer as a re-evaluation from cold.
+//
+// Nothing at all when no layer reaches level 0, which is every hierarchy that
+// has no proportion pass on it.
+void apply_base_layers(MultiresSurface::State& s, const std::vector<std::uint32_t>* vertices) {
+    if (s.levels.empty() || !s.levels[0].composed) return;
+    const MultiresSurface::State::BaseRestFrames* rest = base_rest_frames(s);
+    if (!rest) return;
+    LevelCache& c = *s.levels[0].cache;
+    const DetailField& field = *s.levels[0].composed;
+    const auto write = [&](std::uint32_t v) {
+        if (v >= rest->positions.size() || v >= c.mesh.positions.size()) return;
+        const LocalDetail d = field.get(v);
+        c.mesh.positions[v] =
+            rest->positions[v] + frame_to_world(rest->frames[v], d.tangent, d.bitangent, d.normal);
+    };
+    if (vertices) {
+        for (std::uint32_t v : *vertices) write(v);
+        return;
+    }
+    for (std::uint32_t v = 0; v < static_cast<std::uint32_t>(c.mesh.positions.size()); ++v)
+        write(v);
 }
 
 // The cage's own normals and frames, refreshed where it moved. Level 0 is the
@@ -93,12 +131,27 @@ void drain_normals_pending(MultiresSurface::State& s, std::uint32_t level) {
 void evaluate_level0(MultiresSurface::State& s) {
     MultiresLevel& lev = s.levels[0];
     LevelCache& c = ensure_cache(s, 0);
+    // The stack's contribution at level 0 first, because the cage's positions
+    // are what the base frames — the transport frames for level 1 — are then
+    // built from, and a proportion pass has to be under them.
+    std::vector<std::uint32_t> recomposed;
+    ensure_composed(s, 0, &recomposed);
     if (!c.evaluated) {
         gather_class_positions(s, &c.mesh.positions);
+        apply_base_layers(s, nullptr);
         c.subdivided.clear();  // S(0) IS P(0); see LevelCache
         s.base_frames_all = true;
         c.evaluated = true;
         lev.pending_all = true;
+    } else if (!recomposed.empty()) {
+        apply_base_layers(s, &recomposed);
+        // A base layer that moved has moved the CAGE the artist sees, so the
+        // frames, the normals and every level above it follow — exactly as they
+        // would for a level-0 stamp, because that is what this is.
+        s.base_frames_dirty.insert(s.base_frames_dirty.end(), recomposed.begin(),
+                                   recomposed.end());
+        lev.pending.insert(lev.pending.end(), recomposed.begin(), recomposed.end());
+        mark_patches(s, 0, recomposed);
     }
     refresh_base_frames(s);
     drain_normals_pending(s, 0);
@@ -162,6 +215,26 @@ void partial_evaluate(MultiresSurface::State& s, std::uint32_t level) {
     mark_patches(s, level, s.scratch_b);
 }
 
+// The vertices a recomposition moved, brought up to the state a stamp's
+// vertices are in: position re-applied, display normals re-shaded one ring
+// further, and queued for the level above.
+//
+// COSTS THE RECOMPOSED BLOCKS and nothing else, which is task 5.4's gate said
+// in code: the list arrives from the composer, which walked the blocks the
+// changed layer had allocated.
+void reapply_recomposed(MultiresSurface::State& s, std::uint32_t level,
+                        const std::vector<std::uint32_t>& vertices) {
+    MultiresLevel& lev = s.levels[level];
+    LevelCache& c = *lev.cache;
+    apply_detail(lev, vertices);
+    expand_by_face_ring(lev.topology, c.conn, vertices, &s.scratch_mark, &s.scratch_c);
+    level_normals_partial(lev.topology, c.conn, c.mesh.positions, s.scratch_c, &c.mesh.normals);
+    s.stats.vertices_evaluated += vertices.size();
+    s.stats.normals_recomputed += s.scratch_c.size();
+    lev.pending.insert(lev.pending.end(), vertices.begin(), vertices.end());
+    mark_patches(s, level, vertices);
+}
+
 }  // namespace
 
 void expand_by_face_ring(const LevelTopology& topology, const LevelConnectivity& conn,
@@ -215,6 +288,10 @@ namespace {
 // directly instead, which is why they are not tested here.
 bool below_is_current(const MultiresSurface::State& s, std::uint32_t target) {
     if (!s.levels[target].cache || !s.levels[target].cache->evaluated) return false;
+    // A COMPOSITION CHANGE IS PENDING WORK. Without this a strength change on a
+    // hierarchy nobody has edited since is silently swallowed: nothing is
+    // pending, every cache says it is evaluated, and the dial does nothing.
+    if (composition_pending(s)) return false;
     if (s.base_frames_all || !s.base_frames_dirty.empty()) return false;
     for (std::uint32_t l = 0; l < target; ++l) {
         const MultiresLevel& lev = s.levels[l];
@@ -236,16 +313,28 @@ void evaluate_up_to(MultiresSurface::State& s, std::uint32_t level) {
         return;
     }
     evaluate_level0(s);
+    std::vector<std::uint32_t> recomposed;
     for (std::uint32_t l = 1; l <= target; ++l) {
         ensure_cache(s, l);
         // A level with no cache, a level that was never evaluated, and a level
-        // whose parent changed everywhere are the same case: rebuild it whole.
+        // whose parent changed everywhere are the same case: rebuild it whole,
+        // and a whole rebuild reads the composed field so the recomposition
+        // only has to happen first.
         if (!s.levels[l].cache->evaluated || s.levels[l - 1].pending_all) {
+            ensure_composed(s, l, nullptr);
             full_evaluate(s, l);
             s.levels[l].pending_all = true;
             s.levels[l].pending.clear();
         } else {
+            recomposed.clear();
+            ensure_composed(s, l, &recomposed);
             if (!s.levels[l - 1].pending.empty()) partial_evaluate(s, l);
+            // A block whose COMPOSITION changed moved vertices that nothing
+            // below this level touched — a strength change on a layer that
+            // lives here and nowhere else. Those vertices get the same
+            // treatment a stamp's do: re-applied, re-shaded, and pushed to the
+            // level above.
+            if (!recomposed.empty()) reapply_recomposed(s, l, recomposed);
             drain_normals_pending(s, l);
         }
         s.levels[l - 1].pending.clear();
@@ -534,6 +623,152 @@ Mesh MultiresSurface::mesh_at_level(std::uint32_t level, const MultiresExportOpt
 
 // -- editing ------------------------------------------------------------------
 
+namespace {
+
+// Put the cached positions back to what the STORED coefficients reconstruct to.
+// What a refused write needs: the brush has already moved the level's mesh by
+// the time the hierarchy is told about it, so refusing a locked layer means
+// putting those vertices back rather than merely declining to record them.
+void restore_positions(MultiresSurface::State& s, std::uint32_t level,
+                       const std::vector<std::uint32_t>& vertices) {
+    MultiresLevel& lev = s.levels[level];
+    LevelCache& c = *lev.cache;
+    if (level == 0) {
+        const MultiresSurface::State::BaseRestFrames* rest = base_rest_frames(s);
+        for (std::uint32_t v : vertices) {
+            if (v >= s.class_count) continue;
+            c.mesh.positions[v] = s.base.positions[s.class_members[s.class_offsets[v]]];
+        }
+        if (rest) apply_base_layers(s, &vertices);
+        return;
+    }
+    apply_detail(lev, vertices);
+}
+
+// Is the write the caller is about to make refused because the layer it would
+// land in is locked?
+bool active_layer_locked(const MultiresSurface::State& s) {
+    const SculptLayer* layer = s.stack.find(s.stack.active());
+    return layer != nullptr && layer->locked;
+}
+
+// THE LAYERED WRITE PATH, and the one arithmetic rule the whole change is built
+// around: it stores a DIFFERENCE, never a residual.
+//
+// Today's unlayered path stores `P_written − S(n)` whole. With a stack that
+// would be wrong twice over — it would attribute the level's own base detail
+// AND every other layer's contribution to the layer being written into. So the
+// layered path reads what the composed field said BEFORE the stamp, expresses
+// what the brush wrote in the same coefficients, and adds the difference:
+//
+//     ΔE = frame⁻¹(P_written) − E_before          (the frames do not move
+//     L_active(v) += ΔE                            inside one stamp)
+//
+// which is exactly the displacement the brush applied, recorded AT FULL SIZE
+// whatever the layer's strength is. That is requirement 3.2, and the visible
+// consequence is stated rather than hidden: sculpting on a layer at strength
+// 0.5 moves the surface by half of what the pen asked for, and raising the
+// strength to 1 afterwards doubles it. That is the only reading under which "no
+// work was lost" is true, and NOTHING here divides by a strength — the
+// alternative, scaling the pen up by 1/s so the surface tracks the cursor, is
+// undefined at exactly the value one slider reaches.
+void absorb_layered_detail(MultiresSurface::State& s, std::uint32_t level,
+                           const std::vector<std::uint32_t>& vertices) {
+    MultiresLevel& lev = s.levels[level];
+    LevelCache& c = *lev.cache;
+    const SculptLayerId active = s.stack.active();
+    const std::uint32_t bs = s.stack.block_size();
+
+    for (std::uint32_t v : vertices) {
+        if (v >= lev.topology.vertex_count) continue;
+        const LocalDetail before = effective_detail(lev).get(v);
+        const kernel::cfloat3 offset = c.mesh.positions[v] - c.subdivided[v];
+        LocalDetail written;
+        world_to_frame(c.frames[v], offset, &written.tangent, &written.bitangent,
+                       &written.normal);
+        LocalDetail delta;
+        delta.tangent = written.tangent - before.tangent;
+        delta.bitangent = written.bitangent - before.bitangent;
+        delta.normal = written.normal - before.normal;
+        if (active != kNoSculptLayer) {
+            s.stack.add_detail(active, level, v, delta);
+            continue;
+        }
+        // No active layer, but the level carries a stack: the difference goes
+        // into the BASE, which is what "sculpt the form under the passes"
+        // means.
+        LocalDetail base = lev.detail.get(v);
+        base.tangent += delta.tangent;
+        base.bitangent += delta.bitangent;
+        base.normal += delta.normal;
+        lev.detail.set(v, base);
+        s.stack.invalidate(level, v / bs);
+    }
+    // AND READ IT BACK from the recomposed field, for the reason the unlayered
+    // path reads back from its own: the stored coefficients are authoritative,
+    // so the cached position has to be what they reconstruct to rather than
+    // what the brush wrote — the two differ by the last bits of a round trip
+    // through the frame, and a redo would otherwise land on neither.
+    ensure_composed(s, level, nullptr);
+    apply_detail(lev, vertices);
+}
+
+// A stamp at level 0 on a hierarchy carrying base deformation layers. The cage
+// stays the FORM: what the brush added over the layer's own contribution is
+// either the layer's (an active layer) or the cage's (none), and either way the
+// contribution is subtracted out rather than baked in.
+void absorb_base_edit(MultiresSurface::State& s, const std::vector<std::uint32_t>& vertices) {
+    LevelCache& c = *s.levels[0].cache;
+    const SculptLayerId active = s.stack.active();
+    const bool layered = s.levels[0].composed != nullptr;
+    const MultiresSurface::State::BaseRestFrames* rest = layered ? base_rest_frames(s) : nullptr;
+    const std::uint32_t bs = s.stack.block_size();
+
+    for (std::uint32_t v : vertices) {
+        if (v >= s.class_count) continue;
+        if (rest && v < rest->frames.size()) {
+            const LocalDetail before = s.levels[0].composed->get(v);
+            LocalDetail written;
+            world_to_frame(rest->frames[v], c.mesh.positions[v] - rest->positions[v],
+                           &written.tangent, &written.bitangent, &written.normal);
+            if (active != kNoSculptLayer) {
+                LocalDetail delta;
+                delta.tangent = written.tangent - before.tangent;
+                delta.bitangent = written.bitangent - before.bitangent;
+                delta.normal = written.normal - before.normal;
+                s.stack.add_detail(active, 0, v, delta);
+                continue;
+            }
+            // The CAGE takes the difference, with the layer's contribution
+            // subtracted out — otherwise sculpting the form under a proportion
+            // pass would bake that pass into the cage and the slider would stop
+            // meaning anything.
+            const kernel::cfloat3 contribution = frame_to_world(
+                rest->frames[v], before.tangent, before.bitangent, before.normal);
+            const kernel::cfloat3 form = c.mesh.positions[v] - contribution;
+            for (std::uint32_t i = s.class_offsets[v]; i < s.class_offsets[v + 1]; ++i)
+                s.base.positions[s.class_members[i]] = form;
+            s.stack.invalidate(0, v / bs);
+            continue;
+        }
+        // The cage is authoritative: what the brush wrote IS the geometry, and
+        // it is copied to every raw vertex of the class so a seam's duplicates
+        // stay coincident and cannot open into a crack.
+        const kernel::cfloat3 p = c.mesh.positions[v];
+        for (std::uint32_t i = s.class_offsets[v]; i < s.class_offsets[v + 1]; ++i)
+            s.base.positions[s.class_members[i]] = p;
+    }
+    if (s.base_rest) s.base_rest->valid = false;
+    if (layered) {
+        ensure_composed(s, 0, nullptr);
+        apply_base_layers(s, &vertices);
+    }
+    s.base_frames_dirty.insert(s.base_frames_dirty.end(), vertices.begin(), vertices.end());
+    ++s.base_revision;
+}
+
+}  // namespace
+
 void MultiresSurface::absorb_level_edit(std::uint32_t level,
                                         const std::vector<std::uint32_t>& vertices) {
     if (!state_ || !state_->level_ok(level) || vertices.empty()) return;
@@ -541,24 +776,28 @@ void MultiresSurface::absorb_level_edit(std::uint32_t level,
     MultiresLevel& lev = state_->levels[level];
     LevelCache& c = *lev.cache;
 
+    // A LOCKED LAYER REFUSES THE WRITE, and refusing means putting the level's
+    // mesh back: the brush moved it before the hierarchy was told, so declining
+    // to record would leave a cached surface that no stored coefficient
+    // reconstructs.
+    if (active_layer_locked(*state_)) {
+        restore_positions(*state_, level, vertices);
+        return;
+    }
+
+    const bool layered = lev.composed != nullptr;
+    const bool into_layer = state_->stack.active() != kNoSculptLayer;
     if (level == 0) {
-        // The cage is authoritative: what the brush wrote IS the geometry, and
-        // it is copied to every raw vertex of the class so a seam's duplicates
-        // stay coincident and cannot open into a crack.
-        for (std::uint32_t v : vertices) {
-            if (v >= state_->class_count) continue;
-            const kernel::cfloat3 p = c.mesh.positions[v];
-            for (std::uint32_t i = state_->class_offsets[v]; i < state_->class_offsets[v + 1]; ++i)
-                state_->base.positions[state_->class_members[i]] = p;
-        }
-        state_->base_frames_dirty.insert(state_->base_frames_dirty.end(), vertices.begin(),
-                                         vertices.end());
-        ++state_->base_revision;
+        absorb_base_edit(*state_, vertices);
+    } else if (layered || into_layer) {
+        absorb_layered_detail(*state_, level, vertices);
+        ++state_->detail_revision;
     } else {
-        // Above the cage the surface is the subdivision plus a residual, so
-        // what is stored is the residual: the difference between where the
-        // brush left the vertex and where the subdivision would have put it,
-        // read in the transported frame.
+        // THE UNLAYERED PATH, unchanged bit for bit. Above the cage the surface
+        // is the subdivision plus a residual, so what is stored is the
+        // residual: the difference between where the brush left the vertex and
+        // where the subdivision would have put it, read in the transported
+        // frame.
         for (std::uint32_t v : vertices) {
             if (v >= lev.topology.vertex_count) continue;
             const kernel::cfloat3 delta = c.mesh.positions[v] - c.subdivided[v];
@@ -608,7 +847,16 @@ void MultiresSurface::set_detail(std::uint32_t level, std::uint32_t vertex,
     MultiresLevel& lev = state_->levels[level];
     if (vertex >= lev.topology.vertex_count) return;
     lev.detail.set(vertex, value);
-    if (lev.cache && lev.cache->evaluated) {
+    if (lev.composed) {
+        // THE BASE BENEATH THE STACK MOVED, so the composed field is stale in
+        // this block — and the position is deliberately NOT written here. The
+        // next evaluation recomposes the block and re-applies its positions and
+        // its display normals together; writing one now, from a composed value
+        // that has not been recomposed yet, would leave a cached position that
+        // no stored coefficient reconstructs. Not a layer change, so no layer
+        // revision moves.
+        state_->stack.invalidate(level, vertex / state_->stack.block_size());
+    } else if (lev.cache && lev.cache->evaluated) {
         LevelCache& c = *lev.cache;
         c.mesh.positions[vertex] =
             c.subdivided[vertex] +
@@ -627,7 +875,16 @@ void MultiresSurface::set_base_position(std::uint32_t vertex, kernel::cfloat3 po
          ++i)
         state_->base.positions[state_->class_members[i]] = position;
     MultiresLevel& lev = state_->levels[0];
-    if (lev.cache && lev.cache->evaluated) lev.cache->mesh.positions[vertex] = position;
+    // The cage moved, so the REST frames a base deformation layer is measured
+    // in moved with it and have to be rebuilt before the next read.
+    if (state_->base_rest) state_->base_rest->valid = false;
+    if (lev.cache && lev.cache->evaluated) {
+        lev.cache->mesh.positions[vertex] = position;
+        if (lev.composed) {
+            const std::vector<std::uint32_t> one{vertex};
+            apply_base_layers(*state_, &one);
+        }
+    }
     state_->base_frames_dirty.push_back(vertex);
     lev.pending.push_back(vertex);
     lev.normals_pending.push_back(vertex);

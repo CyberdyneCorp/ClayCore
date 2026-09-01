@@ -73,6 +73,10 @@ CLASS_PREFIX = {
     # Multiresolution (add-mesh-multires).
     "MultiresSurface": ("clay_multires_",),
     "MultiresSculptor": ("clay_multires_sculptor_", "clay_multires_"),
+    # A layered gesture (add-mesh-sculpt-layers). Its verbs cross as
+    # clay_multires_sculpt_layer_stroke_stamp / _smooth / _erase / _restore /
+    # _commit / _cancel; only the `with` statement itself has no C counterpart.
+    "SculptLayerStroke": ("clay_multires_sculpt_layer_stroke_",),
     "BrushModel": ("clay_brush_model_",),
     "AutomaskSettings": ("clay_automask_",),
     "MeshBrushSettings": ("clay_mesh_brush_",),
@@ -140,6 +144,8 @@ CLASS_ENUM_PREFIX = {
 # The names that do not derive. Kept explicit so the difference is reviewable.
 ALIASES = {
     "Document.eval": "clay_eval_points",
+    "Document.eval_excluding": "clay_eval_points_excluding",
+    "Document.gradients_excluding": "clay_eval_gradients_excluding",
     "Document.colors": "clay_eval_points",  # the colors ride the same call
     "Document.gradients": "clay_eval_gradients",
     # The C names say more than the Python ones can: "_points" marks the
@@ -257,6 +263,23 @@ ALIASES = {
     "SurfaceView.over_dynamic": "clay_surface_view_from_dynamic",
     "SurfaceView.over_level": "clay_surface_view_from_multires",
     "SurfaceView.chunk_info": "clay_surface_view_chunk_infos",
+    # Sculpt layers (add-mesh-sculpt-layers). The three revisions are one C
+    # call with three out parameters, for the same reason the hierarchy's own
+    # three are — a host reads whichever it keyed on, and one call is cheaper
+    # than three across the boundary.
+    "MultiresSurface.sculpt_layer_metadata_revision": "clay_multires_sculpt_layer_revision",
+    "MultiresSurface.sculpt_layer_composition_revision": "clay_multires_sculpt_layer_revision",
+    "MultiresSurface.sculpt_layer_content_revision": "clay_multires_sculpt_layer_revision",
+    # Python hands back the whole list; C walks it, because a C caller owns the
+    # buffer an id list would land in and the walk is the loop it was going to
+    # write anyway.
+    "MultiresSurface.sculpt_layer_ids": "clay_multires_sculpt_layer_id_at",
+    # The context manager IS the transaction object, so the call that makes one
+    # is the call that builds the C handle.
+    "MultiresSurface.sculpt_layer_stroke": "clay_multires_sculpt_layer_stroke_create",
+    # The oversampling reading rides the stamp that produced it, filled into the
+    # caller's own descriptor rather than read back afterwards.
+    "SculptLayerStroke.last_stamp_report": "clay_multires_sculpt_layer_stroke_stamp_detail",
     "DynamicSculptor.rebuild_index": "clay_dynamic_sculptor_rebuild_index",
     "DynamicSculptor.chunk_count": "clay_dynamic_surface_chunk_count",
     "DynamicSculptor.dirty_chunks": "clay_dynamic_surface_dirty_chunks",
@@ -298,6 +321,7 @@ ALIASES = {
     "MeshBrushSettings.smooth_iterations": "clay_mesh_brush_defaults",
     "MeshBrushSettings.layer_height": "clay_mesh_brush_defaults",
     "MeshBrushSettings.automask": "clay_mesh_brush_defaults",
+    "MeshBrushSettings.stamp_azimuth": "clay_mesh_brush_defaults",
     "StrokePreset.rotate_to_azimuth": "clay_stroke_preset_serialize",
     "StrokePreset.velocity_size": "clay_stroke_preset_serialize",
     "StrokePreset.velocity_strength": "clay_stroke_preset_serialize",
@@ -383,6 +407,7 @@ CLASS_CTOR = {
     "SurfaceKind": None,
     "MaintenanceKind": None,
     "MultiresSculptor": "clay_multires_sculptor_create",
+    "SculptLayerStroke": "clay_multires_sculpt_layer_stroke_create",
     "DetailMode": None,
     "BrushModel": "clay_brush_model_of",
     # Value types carried INSIDE another descriptor rather than built on their
@@ -450,6 +475,26 @@ CLASS_CTOR = {
 # instead of disappearing, and it fails when one becomes reachable in C or
 # vanishes from pyclay.
 EXEMPT = {
+    # The two automask factors a mesh module cannot compute for itself — the
+    # cavity measure and the surface-group lattice — reach a sculptor as
+    # std::functions, and a std::function is exactly what the C ABI cannot
+    # carry. The three factors that need no input DO cross, as the
+    # automask_factors block on clay_mesh_brush_desc; clay.h says so at that
+    # field and calls the descriptor carrying the other two a follow-up rather
+    # than a guess made against a sample of one. pyclay can wire them because it
+    # has non-callable objects that answer a world point — a MaskField and the
+    # document's own group lattice — which is what makes this a genuine
+    # difference between the bindings rather than a gap in one.
+    "MeshSculptor.set_automask_inputs": "the cavity and surface-group "
+                                        "estimators are std::functions; the C "
+                                        "ABI carries the three input-free "
+                                        "automask factors on "
+                                        "clay_mesh_brush_desc and says at that "
+                                        "field that a descriptor for these two "
+                                        "is a follow-up",
+    "DynamicSculptor.set_automask_inputs": "as above",
+    "MultiresSculptor.set_automask_inputs": "as above",
+
     "VoxelGrid.sculpt_layer": "a Python-idiom wrapper, not a capability: it "
                               "returns the context manager over "
                               "clay_voxel_begin_sculpt_layer and "
@@ -570,6 +615,11 @@ STRING_CHOICES = (
     ("parse_axis", "mirror axis", "CLAY_MIRROR_"),
     ("parse_extrude_side", "mask extrude side", "CLAY_EXTRUDE_"),
     ("mesh_document", "mesher", "CLAY_MESHER_"),
+    # Sculpt layers (add-mesh-sculpt-layers). Three axes a layered stroke
+    # names, each an enumerator on the C side.
+    ("parse_write_domain", "multires write domain", "CLAY_MULTIRES_WRITE_"),
+    ("parse_smooth_mode", "multires smooth mode", "CLAY_MULTIRES_SMOOTH_"),
+    ("parse_detail_stamp_mode", "detail stamp mode", "CLAY_DETAIL_STAMP_"),
 )
 
 

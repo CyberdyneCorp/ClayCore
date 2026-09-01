@@ -160,6 +160,11 @@ struct SetLayerProtectionCmd {
 struct SetLayerTransformCmd {
     LayerId id = 0;
     math::Transform xform;
+    // The whole layer's per-axis scale, set with the placement it belongs to
+    // (#373). One command rather than two, because they are one placement: two
+    // would let an undo restore a frame that never existed, with the rotation
+    // from one step and the squash from another.
+    kernel::cfloat3 scale_axes = kernel::cf3(1.0f, 1.0f, 1.0f);
 };
 // Mirroring is an edit like any other: it changes what the layer evaluates to.
 // It was written straight into the layer, which meant it neither respected the
@@ -266,7 +271,7 @@ LayerId content_sharer_of(const Document& doc, LayerId layer);
 // Writing AT minor 14 or below writes every layer's content inline exactly as
 // it always did, and the instances come back as independent copies: the shapes
 // are right, the sharing is gone.
-inline constexpr std::uint16_t kSceneMinor = 15;
+inline constexpr std::uint16_t kSceneMinor = 16;
 
 // Apply a command; returns its inverse, or nullopt if the target does not
 // exist or is protected (ghosted or locked). The document is unchanged in

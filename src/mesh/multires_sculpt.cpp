@@ -167,10 +167,64 @@ void MultiresSculptor::bind() {
     sculptor_->set_telemetry(telemetry_);
 }
 
+void build_multires_workset(const MeshSculptor& level_sculptor, std::uint32_t level,
+                            SculptWorkset* out) {
+    const SculptWorkset& src = level_sculptor.workset();
+    const Adjacency& adjacency = level_sculptor.adjacency();
+
+    // Retire the LAST stamp's marks through its own list, so the reset costs
+    // what that stamp touched rather than what the level holds. Same rule the
+    // two walks follow.
+    for (WorkItemId item : out->items)
+        if (item.key() < out->slot.size()) out->slot[item.key()] = kNoClass;
+    const std::size_t vertices = level_sculptor.mesh().positions.size();
+    if (out->slot.size() < vertices) out->slot.resize(vertices, kNoClass);
+
+    const std::size_t n = src.size();
+    out->items.resize(n);
+    // `assign` rather than a copy-construct, so the member keeps the storage a
+    // stroke already warmed.
+    out->weights.assign(src.weights.begin(), src.weights.end());
+    out->positions.assign(src.positions.begin(), src.positions.end());
+    out->normals.assign(src.normals.begin(), src.normals.end());
+    out->automask.assign(src.automask.begin(), src.automask.end());
+    out->average_normal = src.average_normal;
+    out->centroid = src.centroid;
+    out->plane_point = src.plane_point;
+    out->plane_normal = src.plane_normal;
+
+    for (std::size_t i = 0; i < n; ++i) {
+        std::size_t members = 0;
+        const std::uint32_t v = adjacency.members(src.items[i].as_weld_class(), &members)[0];
+        out->items[i] = WorkItemId::level_vertex(level, v);
+        out->slot[v] = static_cast<std::uint32_t>(i);
+    }
+
+    out->write_region.clear();
+    for (WorkItemId item : src.write_region) {
+        std::size_t members = 0;
+        const std::uint32_t v = adjacency.members(item.as_weld_class(), &members)[0];
+        out->write_region.push_back(WorkItemId::level_vertex(level, v));
+    }
+    out->write_bounds = src.write_bounds;
+}
+
+const BrushScratchArena* MultiresSculptor::arena() const {
+    return sculptor_ ? &sculptor_->arena() : nullptr;
+}
+
 std::size_t MultiresSculptor::stamp(MeshBrush verb, const MeshBrushSettings& settings,
-                                    const field::MaskGate& gate, MultiresDelta* record) {
+                                    const field::MaskGate& gate, MultiresDelta* record,
+                                    SculptLayerDelta* layer_record) {
     touched_.clear();
     if (!surface_.valid()) return 0;
+    // REFUSED BEFORE THE BRUSH MOVES ANYTHING. `absorb_level_edit` refuses a
+    // locked layer too and puts the level's mesh back when it does, but that is
+    // the belt for a direct caller; here the whole stamp is simply not taken,
+    // so a locked layer costs a comparison rather than a gather and a restore.
+    const SculptLayerId active_layer = surface_.sculpt_layers().active();
+    const SculptLayer* layer = surface_.sculpt_layers().find(active_layer);
+    if (layer && layer->locked) return 0;
     bind();
     const std::uint32_t level = bound_level_;
 
@@ -187,14 +241,30 @@ std::size_t MultiresSculptor::stamp(MeshBrush verb, const MeshBrushSettings& set
     // coincide bit for bit weld into one class, and from that class onward
     // every id would be off by one. The hierarchy stores detail per VERTEX, so
     // an off-by-one here writes a wrinkle onto its neighbour.
+    // The hierarchy's own view of the stamp, before the level's weld classes are
+    // expanded into the level vertices `absorb_level_edit` consumes.
+    build_multires_workset(*sculptor_, level, &workset_);
+
     const Adjacency& adjacency = sculptor_->adjacency();
-    for (std::uint32_t cls : sculptor_->write_region()) {
+    for (WorkItemId item : sculptor_->write_region()) {
         std::size_t member_count = 0;
-        const std::uint32_t* members = adjacency.members(cls, &member_count);
+        const std::uint32_t* members = adjacency.members(item.as_weld_class(), &member_count);
         for (std::size_t i = 0; i < member_count; ++i) touched_.push_back(members[i]);
     }
 
-    if (record) {
+    if (active_layer != kNoSculptLayer) {
+        // THE LAYER'S coefficients, not the base's: with an active layer the
+        // base is untouched, so recording it would produce an undo that
+        // restores something the gesture never changed and leaves the pass in
+        // place. The stack still holds the PRE-stamp values here, because
+        // `absorb_level_edit` below is the one call that writes them.
+        if (layer_record) {
+            layer_record->set_layer(active_layer);
+            const DetailField* field = surface_.sculpt_layers().detail_at(active_layer, level);
+            for (std::uint32_t v : touched_)
+                layer_record->note_detail(level, v, field ? field->get(v) : LocalDetail{});
+        }
+    } else if (record) {
         if (level == 0) {
             for (std::uint32_t v : touched_) {
                 // Where the STROKE found it, which the level record already
@@ -213,7 +283,11 @@ std::size_t MultiresSculptor::stamp(MeshBrush verb, const MeshBrushSettings& set
     }
 
     surface_.absorb_level_edit(level, touched_);
-    if (record) record->sync_after(surface_);
+    if (active_layer != kNoSculptLayer) {
+        if (layer_record) layer_record->sync_after(surface_.sculpt_layers());
+    } else if (record) {
+        record->sync_after(surface_);
+    }
     return moved;
 }
 

@@ -47,6 +47,14 @@ enum class BrushFootprint : std::uint8_t {
 
 // The direction a kernel displaces along, named rather than implied.
 //
+// ONE OF THREE THINGS CALLED A FRAME IN `mesh`, and the only one that is an
+// enum. `mesh::StampFrame` (`stamp_frame.h`) is the orthonormal basis a stamp
+// is ORIENTED in, rebuilt every stamp; `mesh::SurfaceFrame` (`surface_frame.h`)
+// is the transported basis a multiresolution detail coefficient is MEASURED in,
+// built once and never rebuilt. This one names a direction and nothing else.
+// It keeps the name because its value is serialized at `BrushPreset` version 1
+// and mirrored in the public C ABI as `clay_brush_frame`.
+//
 // THIS AXIS IS WHY DRAW AND INFLATE ARE ONE KERNEL. They were two verbs whose
 // documented difference was the direction each takes; naming the direction
 // makes them one deformation under two frames, and the results are unchanged

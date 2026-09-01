@@ -35,6 +35,10 @@ scene::Document local_view_document(const scene::Document& doc, scene::LayerId l
         }
         l.visible = true;
         l.xform = math::Transform{};
+        // The placement is neutralised whole, per-axis scale included: a view
+        // that reset the transform and kept the squash would compile a prefix
+        // in a frame no document has.
+        l.scale_axes = kernel::cf3(1.0f, 1.0f, 1.0f);
     }
     return view;
 }

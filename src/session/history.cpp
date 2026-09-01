@@ -298,6 +298,35 @@ void History::record_multires_step(scene::LayerId layer, mesh::MultiresDelta del
     push(std::move(step));
 }
 
+void History::record_multires_layer_step(scene::LayerId layer, mesh::SculptLayerDelta delta) {
+    if (!enabled_ || delta.empty()) return;
+    Step step;
+    step.kind = Step::Kind::MultiresLayer;
+    step.layer = layer;
+    step.sculpt_layer_delta = std::move(delta);
+    JournalEvent e;
+    e.kind = JournalEvent::Kind::MultiresLayer;
+    e.layer = step.layer;
+    e.sculpt_layer_delta = step.sculpt_layer_delta;
+    journal_.push_back(std::move(e));
+    push(std::move(step));
+}
+
+void History::record_multires_layer_property(scene::LayerId layer,
+                                             mesh::SculptLayerProperty property) {
+    if (!enabled_) return;
+    Step step;
+    step.kind = Step::Kind::MultiresLayerProperty;
+    step.layer = layer;
+    step.sculpt_layer_property = std::move(property);
+    JournalEvent e;
+    e.kind = JournalEvent::Kind::MultiresLayerProperty;
+    e.layer = step.layer;
+    e.sculpt_layer_property = step.sculpt_layer_property;
+    journal_.push_back(std::move(e));
+    push(std::move(step));
+}
+
 namespace {
 
 // A mesh as bytes, for the journal.
@@ -477,6 +506,21 @@ bool History::apply_step(const Step& step, bool forward, scene::Document& doc,
             if (!surface) return false;
             return forward ? step.multires_delta.apply(*surface)
                            : step.multires_delta.revert(*surface);
+        }
+        case Step::Kind::MultiresLayer: {
+            mesh::MultiresSurface* surface = multires_for_ ? multires_for_(step.layer) : nullptr;
+            // Reached through the SURFACE its id lives on rather than through a
+            // fifth resolver: adding a parameter to undo, redo and replay would
+            // break every host compiled against this header to serve a payload
+            // most documents never carry, which is the argument this header
+            // already makes twice.
+            if (!surface) return false;
+            return surface->apply_sculpt_layer_delta(step.sculpt_layer_delta, forward);
+        }
+        case Step::Kind::MultiresLayerProperty: {
+            mesh::MultiresSurface* surface = multires_for_ ? multires_for_(step.layer) : nullptr;
+            if (!surface) return false;
+            return surface->apply_sculpt_layer_property(step.sculpt_layer_property, forward);
         }
         case Step::Kind::Mask: {
             voxel::MaskField* mask = mask_for ? mask_for(step.layer) : nullptr;
@@ -755,6 +799,12 @@ std::vector<std::uint8_t> History::journal_since(std::size_t from, std::size_t* 
             case JournalEvent::Kind::Multires:
                 put_bytes(out, e.multires_delta.encode());
                 break;
+            case JournalEvent::Kind::MultiresLayer:
+                put_bytes(out, e.sculpt_layer_delta.encode());
+                break;
+            case JournalEvent::Kind::MultiresLayerProperty:
+                put_bytes(out, e.sculpt_layer_property.encode());
+                break;
             case JournalEvent::Kind::Mask:
                 put_bytes(out, encode_mask_cells(e.mask_cells));
                 break;
@@ -913,6 +963,46 @@ bool History::replay(const std::uint8_t* data, std::size_t size, scene::Document
                 push(std::move(step));
                 break;
             }
+            case JournalEvent::Kind::MultiresLayer: {
+                mesh::MultiresSurface* surface = multires_for_ ? multires_for_(layer) : nullptr;
+                mesh::SculptLayerDelta delta;
+                if (!surface || !mesh::SculptLayerDelta::decode(body, payload, &delta) ||
+                    !surface->apply_sculpt_layer_delta(delta, true)) {
+                    if (out) *out = result;
+                    return false;
+                }
+                Step step;
+                step.kind = Step::Kind::MultiresLayer;
+                step.layer = layer;
+                step.sculpt_layer_delta = delta;
+                JournalEvent e;
+                e.kind = JournalEvent::Kind::MultiresLayer;
+                e.layer = layer;
+                e.sculpt_layer_delta = std::move(delta);
+                journal_.push_back(std::move(e));
+                push(std::move(step));
+                break;
+            }
+            case JournalEvent::Kind::MultiresLayerProperty: {
+                mesh::MultiresSurface* surface = multires_for_ ? multires_for_(layer) : nullptr;
+                mesh::SculptLayerProperty property;
+                if (!surface || !mesh::SculptLayerProperty::decode(body, payload, &property) ||
+                    !surface->apply_sculpt_layer_property(property, true)) {
+                    if (out) *out = result;
+                    return false;
+                }
+                Step step;
+                step.kind = Step::Kind::MultiresLayerProperty;
+                step.layer = layer;
+                step.sculpt_layer_property = property;
+                JournalEvent e;
+                e.kind = JournalEvent::Kind::MultiresLayerProperty;
+                e.layer = layer;
+                e.sculpt_layer_property = std::move(property);
+                journal_.push_back(std::move(e));
+                push(std::move(step));
+                break;
+            }
             case JournalEvent::Kind::Mask: {
                 voxel::MaskField* mask = mask_for ? mask_for(layer) : nullptr;
                 std::vector<voxel::MaskField::MaskChange> cells;
@@ -1030,6 +1120,12 @@ std::size_t History::step_bytes(const Step& s) {
     // is not free, and a budget that could not see it would evict the wrong
     // things.
     n += s.multires_delta.bytes();
+    // A layer gesture follows the vertices it reached in ONE channel, and a
+    // property step is two scalars — except for the structural ones, which
+    // carry the whole stack on each side. Counted apart from the kind above
+    // precisely so a host can see which of the two is filling its budget.
+    n += s.sculpt_layer_delta.bytes();
+    n += s.sculpt_layer_property.bytes();
     // A SurfaceGroup step holds two whole serialised fields, which makes this
     // the term that matters for it rather than a rounding error — the same
     // omission roll-up-document-memory found six of in node_bytes.
@@ -1055,6 +1151,8 @@ std::size_t History::event_bytes(const JournalEvent& e) {
     n += e.deltas.bytes();
     n += e.topology_delta.bytes();
     n += e.multires_delta.bytes();
+    n += e.sculpt_layer_delta.bytes();
+    n += e.sculpt_layer_property.bytes();
     n += e.group_after.capacity();
     n += e.mesh_after.capacity();
     n += scene::command_bytes(e.command);

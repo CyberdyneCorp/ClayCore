@@ -46,18 +46,9 @@
 namespace clay {
 namespace mesh {
 
-// The four element kinds, each its own type so one cannot be passed where
-// another belongs. Half the interesting bugs in a half-edge implementation are
-// exactly that mistake.
-struct VertexTag {};
-struct HalfEdgeTag {};
-struct EdgeTag {};
-struct FaceTag {};
-
-using VertexId = SlotId<VertexTag>;
-using HalfEdgeId = SlotId<HalfEdgeTag>;
-using EdgeId = SlotId<EdgeTag>;
-using FaceId = SlotId<FaceTag>;
+// `VertexId`, `HalfEdgeId`, `EdgeId` and `FaceId` are in `slot_pool.h`, with
+// the storage they address — a handle is not the surface, and `WorkItemId` is
+// built out of a `VertexId` without wanting anything else in this file.
 
 // What an operator may not do to an edge. Flags ON THE EDGE rather than policy
 // in the remesher: an operator refuses on its own rather than depending on a
@@ -288,6 +279,15 @@ class DynamicSurface {
     bool outgoing_halfedges(VertexId v, std::vector<HalfEdgeId>* out) const;
     // The vertices one edge away, appended to `out`. Cleared first.
     bool one_ring(VertexId v, std::vector<VertexId>* out) const;
+    // The same, over a BORROWED half-edge fan.
+    //
+    // The one-argument form builds that fan as a local, so it allocates once
+    // per call — which is once per workset entry in an adaptive gather and once
+    // per entry again in the neighbour build. That is invisible to any test
+    // that reads results and is exactly what the allocation gate exists to
+    // catch, so every per-vertex caller on a stamp path takes this one and
+    // hands it a buffer it already owns.
+    bool one_ring(VertexId v, std::vector<VertexId>* out, std::vector<HalfEdgeId>* fan) const;
     // The faces incident to `v`. Cleared first.
     bool incident_faces(VertexId v, std::vector<FaceId>* out) const;
     // The three vertices of a face, in winding order.
@@ -305,11 +305,27 @@ class DynamicSurface {
     // lattice rather than the surface, and `inflate` turns that into a
     // golf-ball dimple.
     kernel::cfloat3 compute_vertex_normal(VertexId v) const;
+    // Over a BORROWED fan, for the reason `one_ring`'s overload gives: this
+    // runs once per vertex of every face a stamp touched.
+    kernel::cfloat3 compute_vertex_normal(VertexId v, std::vector<HalfEdgeId>* fan) const;
+
+    // The borrowed buffers a local normal refresh needs. Owned by whoever is
+    // driving the stamp, so a stroke allocates on its first dab and never
+    // again.
+    struct NormalRefreshScratch {
+        std::vector<VertexId> vertices;
+        std::vector<HalfEdgeId> fan;
+    };
 
     // Recompute the normals of these faces and of every vertex they touch.
     // The unit of a local update: an operator names what it changed, and this
     // is what makes the change visible.
+    //
+    // The one-argument form builds its own scratch and is what an operator
+    // called once per topology edit wants; the two-argument form is for the
+    // per-stamp caller, which is the sculptor.
     void refresh_normals(const std::vector<FaceId>& faces);
+    void refresh_normals(const std::vector<FaceId>& faces, NormalRefreshScratch* scratch);
     void refresh_all_normals();
 
     // -- revisions -----------------------------------------------------------

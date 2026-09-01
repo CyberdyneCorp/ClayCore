@@ -526,9 +526,9 @@ which is precisely the outcome 5.3 exists to prevent.
 | `bindings/python/pyclay_module.cpp` | 6.6: the same transport, so parity stays green. |
 | `tools/check_layering.py` | `"memory": set()`, and `memory` added to the sets of `mesh`, `voxel`, `brick`, `session`, `io`. |
 | `tools/check_c_abi.py` | `clay_chunk_info` in `ARRAY_ELEMENT_STRUCTS`, with its reason. |
-| `CMakeLists.txt` | The new sources, the new benchmark targets, `VERSION 0.77.0`. |
+| `CMakeLists.txt` | The new sources, the new benchmark targets, `VERSION 0.78.0`. |
 | `tests/CMakeLists.txt` | The eight new test files. |
-| `pyproject.toml` | `0.77.0`. |
+| `pyproject.toml` | `0.78.0`. |
 | `tools/release_check.py` | The version row follows the three above. |
 | `tests/unit/test_sculpt_allocation.cpp` | D7's third assertion. |
 | `docs/09-brush-latency-and-coverage.md` | 7.10: the new representations' measured costs and the scaling ratios. |

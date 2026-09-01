@@ -224,6 +224,18 @@ struct MeshBrushSettings {
     kernel::cfloat3 alpha_tangent = kernel::cf3(0, 0, 0);    // 0 = derived
     float alpha_extent = 0.0f;                               // 0 = 2 * radius
 
+    // -- the stamp's grain ----------------------------------------------------
+    // How far the stamp's in-plane axes are turned about its own facing, in
+    // radians. Zero — the default — is no rotation AT ALL rather than a
+    // rotation by zero: see `make_stamp_frame`, where the difference is a sign
+    // bit and a moved golden.
+    //
+    // On the brush's own frame rather than on the alpha, although the alpha is
+    // its first consumer, because it orients everything the stamp does
+    // directionally — a rotated alpha and a raked grain are the same angle, and
+    // two fields for one angle is two chances for a host to set the wrong one.
+    float stamp_azimuth = 0.0f;
+
     // -- colour ---------------------------------------------------------------
     // Paint's target. Whatever space the caller keeps `Mesh::colors` in: this
     // is blended toward componentwise and never converted, so a linear buffer

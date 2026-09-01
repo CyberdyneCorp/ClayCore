@@ -8,9 +8,12 @@
 
 #include <doctest/doctest.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <string>
+#include <thread>
 #include <vector>
 
 #include "clay.h"
@@ -385,6 +388,129 @@ TEST_CASE("c abi: a mesh layer sculpts in place, and a locked one refuses") {
 
     clay_mesh_sculptor_destroy(s);
     clay_mesh_destroy(borrowed);
+}
+
+// Issue #368. The header now says a sculptor may be BUILT on any thread against
+// one const document, which is what lets a host arm a mesh subtool without
+// freezing on the weld and the tree. Nothing else in the ABI made that
+// promise, so nothing else was holding it: this is the test the paragraph
+// stands on.
+TEST_CASE("c abi: sculptors build concurrently against one const document") {
+    Doc d;
+    // Two layers, so the workers cover both cases the contract covers: several
+    // threads over ONE mesh, and threads over different meshes of the same
+    // document at once.
+    clay_layer_id layers[2] = {0, 0};
+    clay_mesh* meshes[2] = {nullptr, nullptr};
+    for (int i = 0; i < 2; ++i) {
+        clay_mesh* source = grid_mesh(10 + i * 4, 1.0f);
+        clay_mesh_layer_desc desc;
+        std::memset(&desc, 0, sizeof desc);
+        desc.struct_size = static_cast<std::uint32_t>(sizeof desc);
+        desc.name = i == 0 ? "first" : "second";
+        REQUIRE(clay_document_add_mesh_layer(d.doc, source, &desc, &layers[i], &meshes[i]) ==
+                CLAY_OK);
+        clay_mesh_destroy(source);
+    }
+
+    // What a serial build answers, which is what a concurrent one must answer.
+    struct Reference {
+        std::size_t vertices = 0;
+        std::size_t classes = 0;
+        clay_mesh_hit hit{};
+    };
+    const float origin[3] = {0.1f, 1.0f, -0.2f};
+    const float direction[3] = {0.0f, -1.0f, 0.0f};
+    Reference reference[2];
+    for (int i = 0; i < 2; ++i) {
+        clay_mesh_sculptor* s = nullptr;
+        REQUIRE(clay_mesh_sculptor_create(meshes[i], -1.0f, &s) == CLAY_OK);
+        REQUIRE(clay_mesh_sculptor_vertex_count(s, &reference[i].vertices) == CLAY_OK);
+        REQUIRE(clay_mesh_sculptor_class_count(s, &reference[i].classes) == CLAY_OK);
+        reference[i].hit.struct_size = static_cast<std::uint32_t>(sizeof(clay_mesh_hit));
+        REQUIRE(clay_mesh_sculptor_raycast(s, origin, direction, nullptr, &reference[i].hit) ==
+                CLAY_OK);
+        REQUIRE(reference[i].hit.hit != 0);  // the ray must reach the grid, or this proves nothing
+        clay_mesh_sculptor_destroy(s);
+    }
+
+    // The document is not touched from here on: no thread below mutates it, and
+    // no thread here is the one the host would be editing from. That IS the
+    // contract — free-threaded against a const document, not against an edit.
+    std::atomic<int> mismatches{0};
+    std::vector<std::thread> workers;
+    for (int t = 0; t < 8; ++t) {
+        workers.emplace_back([&, t] {
+            const int which = t % 2;
+            for (int k = 0; k < 6; ++k) {
+                clay_mesh_sculptor* s = nullptr;
+                if (clay_mesh_sculptor_create(meshes[which], -1.0f, &s) != CLAY_OK) {
+                    mismatches.fetch_add(1);
+                    continue;
+                }
+                // What the header tells a host to do on the worker: build, then
+                // warm the tree, so the interface thread's first pick pays for
+                // neither.
+                if (clay_mesh_sculptor_refresh(s) != CLAY_OK) mismatches.fetch_add(1);
+                std::size_t vertices = 0, classes = 0;
+                clay_mesh_hit hit{};
+                hit.struct_size = static_cast<std::uint32_t>(sizeof hit);
+                if (clay_mesh_sculptor_vertex_count(s, &vertices) != CLAY_OK ||
+                    clay_mesh_sculptor_class_count(s, &classes) != CLAY_OK ||
+                    clay_mesh_sculptor_raycast(s, origin, direction, nullptr, &hit) != CLAY_OK)
+                    mismatches.fetch_add(1);
+                if (vertices != reference[which].vertices ||
+                    classes != reference[which].classes || hit.hit != reference[which].hit.hit ||
+                    hit.triangle != reference[which].hit.triangle ||
+                    hit.t != reference[which].hit.t)
+                    mismatches.fetch_add(1);
+                clay_mesh_sculptor_destroy(s);
+            }
+        });
+    }
+    for (std::thread& w : workers) w.join();
+    CHECK(mismatches.load() == 0);
+
+    for (clay_mesh* m : meshes) clay_mesh_destroy(m);
+}
+
+// The other half of the same paragraph: a worker that fails reads its OWN
+// message. A shared error slot would make the contract unusable — a host could
+// not tell which build failed, or read a message belonging to another thread.
+TEST_CASE("c abi: a failed build on a worker leaves the calling thread's error alone") {
+    clay_mesh* m = grid_mesh(6, 1.0f);
+    clay_mesh_sculptor* ours = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(nullptr, -1.0f, &ours) == CLAY_ERROR_INVALID_ARGUMENT);
+    const std::string here = clay_last_error() ? clay_last_error() : "";
+    REQUIRE(!here.empty());
+
+    std::string theirs;
+    std::thread worker([&] {
+        // A DIFFERENT failure, so the two messages cannot be confused for one
+        // another: this one is refused on the out pointer, ours on the mesh.
+        CHECK(clay_mesh_sculptor_create(m, -1.0f, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+        theirs = clay_last_error() ? clay_last_error() : "";
+    });
+    worker.join();
+
+    CHECK(!theirs.empty());
+    CHECK(theirs != here);
+    // Ours survived the worker's, which is the whole point.
+    CHECK(std::string(clay_last_error() ? clay_last_error() : "") == here);
+
+    // A successful build on a worker is the case that actually matters, and it
+    // must not disturb this thread's message either.
+    std::atomic<clay_result> built{CLAY_ERROR_INVALID_ARGUMENT};
+    std::thread ok([&] {
+        clay_mesh_sculptor* s = nullptr;
+        built.store(clay_mesh_sculptor_create(m, -1.0f, &s));
+        clay_mesh_sculptor_destroy(s);
+    });
+    ok.join();
+    CHECK(built.load() == CLAY_OK);
+    CHECK(std::string(clay_last_error() ? clay_last_error() : "") == here);
+
+    clay_mesh_destroy(m);
 }
 
 TEST_CASE("c abi: the null paths refuse rather than crash") {
