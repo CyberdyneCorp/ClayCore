@@ -14694,7 +14694,7 @@ clay_result clay_dynamic_surface_dirty_chunks(const clay_dynamic_sculptor* sculp
     }
     if (*count < dirty.size()) {
         *count = dirty.size();
-        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
                     "capacity below the " + std::to_string(dirty.size()) + " dirty chunks");
     }
     for (std::size_t i = 0; i < dirty.size(); ++i) out_indices[i] = dirty[i];
@@ -16025,7 +16025,7 @@ clay_result clay_surface_view_dirty_chunks(clay_surface_view* view, uint32_t* ou
     }
     if (*count < dirty.size()) {
         *count = dirty.size();
-        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
                     "capacity below the " + std::to_string(dirty.size()) + " dirty chunks");
     }
     for (std::size_t i = 0; i < dirty.size(); ++i) out_chunks[i] = dirty[i];
@@ -16083,7 +16083,7 @@ clay_result clay_surface_view_copy_chunk(clay_surface_view* view, uint32_t chunk
         write_desc(out_readback, out_readback->struct_size, out);
     }
     if (got.truncated)
-        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
                     "capacity below the " + std::to_string(got.vertex_count) +
                         " vertices and " + std::to_string(got.index_count) +
                         " indices this chunk needs; nothing was written");

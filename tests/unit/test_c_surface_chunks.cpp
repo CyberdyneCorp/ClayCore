@@ -844,3 +844,101 @@ TEST_CASE("c surface view: an absurd declared size is refused as a size, not rea
     clay_surface_view_destroy(view);
     clay_mesh_destroy(mesh);
 }
+
+TEST_CASE("c regression: a short buffer is a SIZE refusal, and a dead chunk is not") {
+    // THE BUG THIS HOLDS. Both of the transport's size queries reported a
+    // too-small buffer as CLAY_ERROR_INVALID_ARGUMENT, and to a host those two
+    // codes mean opposite things. A short buffer is RETRYABLE — read the count
+    // the call just wrote, grow, ask again — and that retry loop is what the
+    // eight other size queries in this header ask a caller to write. An invalid
+    // argument says the call itself was malformed, so retrying it unchanged is
+    // a spin; a host with one shared error path drops the chunk and draws the
+    // frame without it, and the surface is silently a frame out of date. The
+    // library's own helper for the pattern, `write_sized`, has always returned
+    // CLAY_ERROR_BUFFER_TOO_SMALL. Three hand-rolled copies of the pattern did
+    // not, one of which predates this change on the adaptive surface.
+    //
+    // So the assertion is not "it refused" — the code under test refused
+    // before the fix too. It is that the refusals are DISTINGUISHABLE: a short
+    // buffer, a chunk id that names nothing and a malformed descriptor come
+    // back as three different codes from the same entry point.
+    std::vector<float> positions;
+    std::vector<uint32_t> indices;
+    sphere(24, 1.0f, &positions, &indices);
+    clay_mesh* mesh = mesh_from(positions, indices);
+
+    clay_dynamic_surface* surface = nullptr;
+    int32_t err = -1;
+    REQUIRE(clay_dynamic_surface_from_mesh(mesh, nullptr, &surface, &err) == CLAY_OK);
+    clay_dynamic_sculptor* sculptor = nullptr;
+    REQUIRE(clay_dynamic_sculptor_create(surface, &sculptor) == CLAY_OK);
+    clay_surface_view* view = nullptr;
+    REQUIRE(clay_surface_view_from_dynamic(sculptor, &view) == CLAY_OK);
+    REQUIRE(clay_surface_view_clear_dirty(view) == CLAY_OK);
+
+    const clay_mesh_brush_desc brush = draw_brush(0.0f, 0.0f, 1.0f, 0.15f, 0.3f);
+    clay_dynamic_stamp_report report{};
+    report.struct_size = sizeof(report);
+    REQUIRE(clay_dynamic_sculptor_stamp(sculptor, &brush, nullptr, nullptr, &report) == CLAY_OK);
+
+    size_t needed = 0;
+    REQUIRE(clay_surface_view_dirty_chunks(view, nullptr, &needed) == CLAY_OK);
+    REQUIRE(needed > 1);
+
+    // THE DRAIN LOOP A HOST ACTUALLY WRITES, run against a deliberately short
+    // buffer so it takes the retry branch. It terminates only if the refusal is
+    // the retryable one and the count it left behind is the truth.
+    std::vector<uint32_t> chunks(1, 0xFFFFFFFFu);
+    size_t capacity = chunks.size();
+    int retries = 0;
+    clay_result r = clay_surface_view_dirty_chunks(view, chunks.data(), &capacity);
+    while (r == CLAY_ERROR_BUFFER_TOO_SMALL && retries < 4) {
+        CHECK(chunks[0] == 0xFFFFFFFFu);  // nothing written on the way to the refusal
+        chunks.assign(capacity, 0xFFFFFFFFu);
+        ++retries;
+        r = clay_surface_view_dirty_chunks(view, chunks.data(), &capacity);
+    }
+    CHECK(r == CLAY_OK);
+    CHECK(retries == 1);  // ONE growth, because the refusal reported the exact size
+    CHECK(capacity == needed);
+
+    // The same shape on the copy, whose truncation had the same wrong code and
+    // whose flag says the buffer was left alone.
+    clay_chunk_readback need = fresh_readback();
+    REQUIRE(clay_surface_view_copy_chunk(view, chunks[0], nullptr, nullptr, 0, nullptr, 0,
+                                         nullptr, 0, &need) == CLAY_OK);
+    REQUIRE(need.vertex_count > 1);
+    std::vector<float> tiny(3, -7.0f);
+    std::vector<uint32_t> room(need.index_count, 0u);
+    clay_chunk_readback refused = fresh_readback();
+    CHECK(clay_surface_view_copy_chunk(view, chunks[0], nullptr, tiny.data(), tiny.size(),
+                                       nullptr, 0, room.data(), room.size(),
+                                       &refused) == CLAY_ERROR_BUFFER_TOO_SMALL);
+    CHECK(refused.truncated == 1);
+    CHECK(refused.vertex_count == need.vertex_count);
+    CHECK(tiny[0] == -7.0f);
+    // NOT A PARTIAL FILL: the index buffer was big enough, and is still empty,
+    // because one short buffer stops the whole copy rather than half of it.
+    CHECK(std::all_of(room.begin(), room.end(), [](uint32_t i) { return i == 0u; }));
+
+    // ...and now the three codes, side by side, from the one entry point. This
+    // is the assertion the fix exists for: before it, the first two were equal.
+    std::vector<float> enough(static_cast<std::size_t>(need.vertex_count) * 3, 0.0f);
+    clay_chunk_readback probe = fresh_readback();
+    CHECK(clay_surface_view_copy_chunk(view, chunks[0], nullptr, tiny.data(), tiny.size(),
+                                       nullptr, 0, nullptr, 0,
+                                       &probe) == CLAY_ERROR_BUFFER_TOO_SMALL);
+    CHECK(clay_surface_view_copy_chunk(view, 0xFFFFFFFEu, nullptr, enough.data(), enough.size(),
+                                       nullptr, 0, nullptr, 0,
+                                       &probe) == CLAY_ERROR_NOT_FOUND);
+    clay_chunk_readback malformed{};
+    malformed.struct_size = 0;
+    CHECK(clay_surface_view_copy_chunk(view, chunks[0], nullptr, enough.data(), enough.size(),
+                                       nullptr, 0, nullptr, 0,
+                                       &malformed) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    clay_surface_view_destroy(view);
+    clay_dynamic_sculptor_destroy(sculptor);
+    clay_dynamic_surface_destroy(surface);
+    clay_mesh_destroy(mesh);
+}

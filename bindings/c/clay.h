@@ -6315,7 +6315,9 @@ clay_result clay_dynamic_surface_chunk_info(const clay_dynamic_sculptor* sculpto
                                             clay_dynamic_chunk_info* out_info);
 
 /* The chunks the stamps since the last clear touched. Size-query pattern: call
- * with out_indices == NULL for the count. */
+ * with out_indices == NULL for the count; a buffer that is too small gets
+ * CLAY_ERROR_BUFFER_TOO_SMALL with the needed count in *count and writes
+ * nothing. */
 clay_result clay_dynamic_surface_dirty_chunks(const clay_dynamic_sculptor* sculptor,
                                               uint32_t* out_indices, size_t* count);
 clay_result clay_dynamic_surface_clear_dirty(clay_dynamic_sculptor* sculptor);
@@ -6785,7 +6787,14 @@ typedef struct clay_chunk_readback {
      * plan can tell that its plan is out of date. */
     int32_t stale;
     /* A buffer was too small, so NOTHING was written into it — not a partial
-     * fill a caller might draw. The counts above say what it needed. */
+     * fill a caller might draw. The counts above say what it needed, and the
+     * call returns CLAY_ERROR_BUFFER_TOO_SMALL rather than
+     * CLAY_ERROR_INVALID_ARGUMENT: the two mean opposite things to a host. A
+     * too-small buffer is RETRYABLE — grow to the counts and call again, which
+     * is the loop every other size query in this header asks for — while an
+     * invalid argument says the call itself was wrong and retrying it is a
+     * spin. A drain loop written against the general pattern would have
+     * treated this one as a fault and dropped the chunk. */
     int32_t truncated;
     int32_t ok; /* zero when the id names no live chunk */
 } clay_chunk_readback;
@@ -6819,7 +6828,9 @@ clay_result clay_surface_view_chunk_infos(clay_surface_view* view, const uint32_
                                           size_t count, clay_chunk_info* out_infos);
 
 /* The chunks the stamps since the last drain touched. Size-query pattern: call
- * with out_chunks == NULL for the count. */
+ * with out_chunks == NULL for the count; a buffer that is too small gets
+ * CLAY_ERROR_BUFFER_TOO_SMALL with the needed count in *count and writes
+ * nothing. */
 clay_result clay_surface_view_dirty_chunks(clay_surface_view* view, uint32_t* out_chunks,
                                            size_t* count);
 

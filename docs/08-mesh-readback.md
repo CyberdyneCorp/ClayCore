@@ -644,7 +644,14 @@ Four things about that loop are the whole point.
   allocates a heap object per chunk per frame, and nothing hands back a pointer
   into the engine: a mutation can move or free anything, and at this scale it
   does so mid-drag. A buffer that is too small has NOTHING written into it —
-  not a partial fill you might draw — and the counts say what it needed.
+  not a partial fill you might draw — and the counts say what it needed. It
+  comes back as `CLAY_ERROR_BUFFER_TOO_SMALL`, which is the code to branch on:
+  grow to the counts and call again. Reserve your error path for
+  `CLAY_ERROR_NOT_FOUND`, which means the chunk id names nothing live and
+  retrying will never help, and `CLAY_ERROR_INVALID_ARGUMENT`, which means the
+  call itself was wrong. Those three are deliberately distinct — a drain loop
+  that treats a short buffer as a fault drops the chunk and leaves the viewport
+  a frame behind, with nothing on screen saying so.
 - **Four revisions, not one.** `clay_chunk_info.revisions` separates topology,
   geometry, normals and attributes, so you re-upload an index buffer only when
   connectivity actually changed and can tell a deferred normal flush from a

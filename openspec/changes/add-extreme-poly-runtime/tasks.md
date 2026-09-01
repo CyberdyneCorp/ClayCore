@@ -290,6 +290,29 @@
       per frame
       DONE: every buffer null IS the capacity query, and a buffer too small
       writes NOTHING rather than a partial fill a host might draw
+      FIXED IN THE TEST STAGE, because the refusal was the wrong KIND. Both of
+      the transport's size queries reported a too-small buffer as
+      CLAY_ERROR_INVALID_ARGUMENT, and to a host those two codes mean opposite
+      things: a short buffer is retryable — read the count the call just wrote,
+      grow, ask again, which is the loop the eight other size queries in
+      `clay.h` explicitly ask a caller to write and which the library's own
+      helper `write_sized` has always supported — while an invalid argument says
+      the call itself was malformed and retrying it unchanged is a spin. A drain
+      loop written against the general pattern would have treated a short buffer
+      as a fault and dropped the chunk, leaving the viewport a frame out of date
+      with nothing on screen saying so. Three hand-rolled copies of the pattern
+      had the wrong code, one of which (`clay_dynamic_surface_dirty_chunks`)
+      predates this branch on main and had a test asserting the wrong code; all
+      three now return CLAY_ERROR_BUFFER_TOO_SMALL, the header says so at each
+      one, and `clay_chunk_readback.truncated` carries the reasoning.
+      `tests/unit/test_c_surface_chunks.cpp` gains "c regression: a short buffer
+      is a SIZE refusal, and a dead chunk is not", which runs the retry loop a
+      host writes and asserts it terminates in ONE growth, that nothing was
+      written on the way to either refusal, and that the three refusals a single
+      entry point can give — short buffer, dead chunk id, malformed descriptor —
+      come back as three DIFFERENT codes. PROVEN to catch its regression: with
+      the old code restored the branch COMPILES and the case fails three
+      assertions, the drain loop never taking its retry branch
 - [x] 6.3 Topology revision distinct from geometry revision, so an index buffer
       is re-uploaded only when connectivity changed
       DONE: `clay_chunk_revisions` carries all four, and the single `revision`

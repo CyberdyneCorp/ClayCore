@@ -21,6 +21,11 @@ An acknowledgement call SHALL let a host drain incrementally across frames witho
 - **WHEN** a host applies a readback taken before a further mutation
 - **THEN** the revisions it carries let the host detect that it is stale
 
+#### Scenario: A short buffer is refused as a size, not as a fault
+- **WHEN** a host calls a chunk size query or a chunk copy with a buffer smaller than the chunk needs
+- **THEN** the call returns `CLAY_ERROR_BUFFER_TOO_SMALL`, writes nothing into the buffer, and leaves the needed count where the host can read it
+- **AND** a chunk id that names nothing returns `CLAY_ERROR_NOT_FOUND` and a malformed descriptor returns `CLAY_ERROR_INVALID_ARGUMENT`, so a host can tell a retryable condition from one that will never succeed
+
 ### Requirement: A host sets a memory profile and asks for a trim
 The C ABI SHALL accept a memory profile descriptor, SHALL expose a trim call taking a pressure level and returning what was released, and SHALL report runtime memory by the same categories the document report uses.
 
