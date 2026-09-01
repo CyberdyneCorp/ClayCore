@@ -597,6 +597,31 @@ coarse edit causes costs 1.01x at ten times the model, which is what "the levels
 above re-evaluate the descendants of what moved and nothing else" is worth as a
 number rather than as a design note.
 
+**And that column is where a correctness fix was paid for, so its price is
+stated here rather than absorbed.** A sculpted level's display normals used to
+be nobody's: `MeshSculptor` derives them from the level mesh's TRIANGLES and
+everything in `multires_eval.cpp` derives them from the level's own faces by
+Newell, which on a subdivision quad is a different vector — so a hierarchy
+shaded one way warm and another way after any cache rebuild, measured at 497 of
+2401 vertices and up to 0.02 in the unit normal. The level now owes its own
+normals and `drain_normals_pending` pays them, which is a SECOND recompute over
+the region the sculptor has just recomputed with the other definition.
+
+Measured in the same run, so the shared box's load applies to both halves
+equally: at 1M level vertices the drain is **8.7%** of the stamp at a 1k
+footprint and **22%** at a 20k one (274 us against 2876, and 4379 against
+15557; before the fix the same column read 0.07 and 0.17 us, because nothing
+was pending). It is duplicated work and it is not free.
+
+The cheap way to remove it — defer the level sculptor's own normals and let the
+hierarchy be the only writer — is not correct as things stand:
+`MultiresSculptor::bind` short-circuits on the second stamp of a stroke, so the
+hierarchy's drain would not have run before the next gather and the deformation
+would read stale normals. Removing the duplication therefore needs the
+deferral and the drain sequenced together, which is more than a correctness fix
+should carry. The 22% buys a hierarchy that shades the same before and after a
+memory warning.
+
 **And the hierarchy's stamp column is a MEASURED GAP, not noise.** 0.49 ms to
 1.58 ms at the 1k footprint is +1.09 ms for +888k vertices — about 1.2 ns a
 vertex, which is the shape of a linear scan and not of a tree. The cause is
