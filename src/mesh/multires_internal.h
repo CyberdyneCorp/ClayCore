@@ -128,6 +128,8 @@ struct MultiresSurface::State {
     // attributes need their own connectivity.
     bool attribute_split = false;
 
+    memory::SculptMemoryProfile profile;
+
     std::vector<MultiresLevel> levels;
     std::uint32_t sculpt_level = 0;
     std::uint32_t display_level = 0;

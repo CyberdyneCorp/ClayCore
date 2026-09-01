@@ -14920,6 +14920,7 @@ clay_result clay_multires_memory_get(const clay_multires* surface,
     out.authoritative = m.authoritative;
     out.evaluated = m.evaluated;
     out.runtime_index = m.runtime_index;
+    out.chunk_index = m.chunk_index;
     out.rebuildable = m.rebuildable;
     out.total = m.total;
     write_desc(out_memory, declared, out);

@@ -432,7 +432,7 @@ TEST_CASE("c multires: the memory report separates detail from cache") {
     CHECK(m.detail > 0);
     CHECK(m.rebuildable > 0);
     CHECK(m.authoritative == m.base + m.topology + m.detail);
-    CHECK(m.rebuildable == m.evaluated + m.runtime_index);
+    CHECK(m.rebuildable == m.evaluated + m.runtime_index + m.chunk_index);
     CHECK(m.total == m.authoritative + m.rebuildable);
     CHECK(m.resident_levels > 0);
 

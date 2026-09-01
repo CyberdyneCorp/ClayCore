@@ -382,6 +382,52 @@ TEST_CASE("memory: a pin turns a trim into a report of what it would have releas
     CHECK(surface->memory().authoritative == authoritative);
 }
 
+TEST_CASE("memory: a constrained profile keeps the active levels and no others") {
+    const Mesh cage = grid_quads(4, 1.0f);
+    auto surface = MultiresSurface::from_mesh(cage);
+    REQUIRE(surface.has_value());
+    REQUIRE(surface->add_level());
+    REQUIRE(surface->add_level());
+    REQUIRE(surface->add_level());
+    surface->positions_at(surface->max_level());
+
+    const std::uint64_t checksum = surface->detail_checksum();
+    std::uint32_t resident_before = 0;
+    for (std::uint32_t l = 0; l < surface->level_count(); ++l)
+        if (surface->level_resident(l)) ++resident_before;
+    REQUIRE(resident_before > 2);
+
+    // THE PROFILE IS FILLED BY THE HOST, and a desktop test is exactly where
+    // constrained behaviour has to be observable — the portable core detects no
+    // device, so there is nothing else to exercise it.
+    memory::SculptMemoryProfile profile;
+    profile.memory_class = memory::MemoryClass::Constrained;
+    surface->set_memory_profile(profile);
+    surface->set_display_level(surface->max_level());
+
+    std::uint32_t resident_after = 0;
+    for (std::uint32_t l = 0; l < surface->level_count(); ++l)
+        if (surface->level_resident(l)) ++resident_after;
+    CHECK(resident_after < resident_before);
+    CHECK(surface->level_resident(surface->display_level()));
+    // The levels that went kept their authoritative detail: residency is a
+    // cache decision and never a content one.
+    CHECK(surface->detail_checksum() == checksum);
+
+    // And the surface reconstructs identically from what is left.
+    const std::vector<kernel::cfloat3> rebuilt = surface->positions_at(surface->max_level());
+    surface->drop_all_caches();
+    const std::vector<kernel::cfloat3>& again = surface->positions_at(surface->max_level());
+    REQUIRE(again.size() == rebuilt.size());
+    for (std::size_t i = 0; i < again.size(); ++i) {
+        // BIT-IDENTICAL, not close. The only honest account of "this was a
+        // cache" is that rebuilding it produced the same bytes.
+        CHECK(again[i].x == rebuilt[i].x);
+        CHECK(again[i].y == rebuilt[i].y);
+        CHECK(again[i].z == rebuilt[i].z);
+    }
+}
+
 TEST_CASE("maintenance: the queue coalesces, refuses mid-stroke, and honours a budget") {
     mesh::MaintenanceQueue queue;
     queue.request(mesh::MaintenanceKind::IndexRebuild, 0, 100);

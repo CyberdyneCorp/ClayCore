@@ -417,6 +417,18 @@ class MultiresSurface {
     // use-after-free that a host under memory pressure would find first.
     std::uint64_t cache_generation() const;
 
+    // WHAT THE HOST WILL SPEND. Filled by the host, never detected: the
+    // portable core makes no platform call and branches on no device model, so
+    // constrained behaviour is exercised by a desktop test in three lines.
+    //
+    // Setting it takes effect immediately and then at every residency change
+    // the host itself causes — which is the only moment this class releases
+    // anything on its own. On a constrained profile the sculpt and display
+    // levels stay resident and every other level keeps its authoritative detail
+    // alone.
+    void set_memory_profile(const memory::SculptMemoryProfile& profile);
+    const memory::SculptMemoryProfile& memory_profile() const;
+
     MultiresMemory memory() const;
     // Release the rebuildable caches of every level that is neither the sculpt
     // level nor the display level nor an ancestor one of them needs. Rebuilding
@@ -472,6 +484,10 @@ class MultiresSurface {
     struct State;
 
    private:
+    // Apply the profile's residency rule. Called from the level setters and
+    // from `set_memory_profile`, and from nowhere else.
+    void enforce_residency();
+
     std::unique_ptr<State> state_;
 };
 

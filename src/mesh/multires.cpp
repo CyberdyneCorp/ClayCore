@@ -142,13 +142,50 @@ std::uint32_t MultiresSurface::display_level() const { return state_ ? state_->d
 bool MultiresSurface::set_sculpt_level(std::uint32_t level) {
     if (!state_ || !state_->level_ok(level)) return false;
     state_->sculpt_level = level;
+    enforce_residency();
     return true;
 }
 
 bool MultiresSurface::set_display_level(std::uint32_t level) {
     if (!state_ || !state_->level_ok(level)) return false;
     state_->display_level = level;
+    enforce_residency();
     return true;
+}
+
+void MultiresSurface::set_memory_profile(const memory::SculptMemoryProfile& profile) {
+    if (!state_) return;
+    state_->profile = profile;
+    enforce_residency();
+}
+
+const memory::SculptMemoryProfile& MultiresSurface::memory_profile() const {
+    static const memory::SculptMemoryProfile kDefault;
+    return state_ ? state_->profile : kDefault;
+}
+
+void MultiresSurface::enforce_residency() {
+    // ONE OF THE THREE MOMENTS EVICTION IS ALLOWED, and the one the host caused
+    // itself: it just said which level it is sculpting or drawing. Nothing here
+    // runs on a timer or on a high-water mark, because an engine that released a
+    // cache the host did not ask about would be a second invalidation source the
+    // host cannot predict — and `cache_generation` exists precisely because a
+    // released cache is a use-after-free waiting for pressure to find it.
+    //
+    // On a constrained profile the SCULPT and DISPLAY levels stay resident and
+    // everything else keeps its authoritative detail alone, which is the
+    // residency rule the spec states. `drop_intermediate_caches` flushes pending
+    // work first, so this drops a cache and never an edit.
+    if (!state_ || !state_->profile.constrained()) return;
+    const std::uint32_t resident =
+        state_->profile.max_resident_levels == 0 ? 2u : state_->profile.max_resident_levels;
+    // Two is what "the sculpt level and the display level" costs. A host that
+    // asks for more gets the levels above the active ones released and the ones
+    // between them kept, which is the cheaper of the two drops.
+    if (resident <= 2)
+        drop_intermediate_caches();
+    else
+        drop_inactive_caches();
 }
 
 // -- construction -------------------------------------------------------------

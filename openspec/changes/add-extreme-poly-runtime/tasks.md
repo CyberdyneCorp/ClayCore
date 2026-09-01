@@ -99,8 +99,12 @@
 - [x] 4.5 A trim report saying what was released and how much
 - [ ] 4.6 THE GATE: after a critical trim, the authoritative checksum is
       unchanged and every dropped cache reconstructs to an identical surface
-- [ ] 4.7 Residency: sculpt level and display level resident by default on a
+- [x] 4.7 Residency: sculpt level and display level resident by default on a
       constrained profile, other levels compact detail only
+      DONE via `MultiresSurface::set_memory_profile`, applied at the residency
+      changes the HOST causes (the two level setters) and nowhere else — an
+      engine evicting on its own high-water mark is the second invalidation
+      source design.md D5 refuses
 - [x] 4.8 Scratch capacity tracks the largest recent footprint with a soft and
       a hard bound; past the hard bound the work is processed in blocks rather
       than allocated

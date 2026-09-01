@@ -6220,8 +6220,22 @@ typedef struct clay_multires_memory {
     uint64_t authoritative; /* the three above; none of it droppable */
     uint64_t evaluated;     /* subdivided positions, frames, positions, normals */
     uint64_t runtime_index; /* connectivity, level meshes, adjacency */
-    uint64_t rebuildable;   /* the two above */
+    uint64_t rebuildable;   /* the two above, plus chunk_index below */
     uint64_t total;
+    /* The per-level chunk tables and their face maps (ABI 0.77.0). Its own line
+     * because a host answering a memory warning acts on the categories
+     * separately, and this is the one that follows the FACE count rather than
+     * the vertex count.
+     *
+     * APPENDED, not inserted beside `runtime_index` where it belongs by
+     * meaning: every field before `total` is at an offset a shipped caller
+     * already compiled in, and this struct's compatibility rule is that a
+     * smaller struct_size gets the original layout. A caller built against an
+     * older header therefore never sees this field, while `rebuildable` and
+     * `total` include it either way — the totals stay true rather than the
+     * breakdown staying constant, which is the direction a memory report has to
+     * err in. */
+    uint64_t chunk_index;
 } clay_multires_memory;
 
 clay_result clay_multires_memory_get(const clay_multires* surface,
