@@ -168,14 +168,14 @@ class SparseWeightField {
 
    private:
     std::size_t reserve_slot(std::uint32_t vertex);
+    // Same postcondition, and the same reason, as
+    // `DetailField::shrink_to_content`: `bytes()` reports capacity, so a
+    // compaction has to release capacity to be one.
+    void shrink_to_content();
 
     std::uint32_t vertex_count_ = 0;
     std::uint32_t block_size_ = DetailField::kDefaultBlockSize;
     // block -> slot, kNoBlock when the block is untouched and therefore 1.0.
-    // Same postcondition, and the same reason, as `DetailField::shrink_to_content`:
-    // `bytes()` reports capacity, so a compaction has to release it to be one.
-    void shrink_to_content();
-
     std::vector<std::uint32_t> block_slot_;
     // slot -> block, so a walk over stored blocks costs the stored ones. The
     // same pair `DetailField` keeps, and for the same reason.
