@@ -30,9 +30,25 @@ A sculptor that composes another — a multiresolution sculptor over a level scu
 - **WHEN** a host sets the cavity and group estimators on the fixed, adaptive and multiresolution sculptors
 - **THEN** all three accept them through the same call, and a stamp on each applies the cavity and surface-group factors
 
+A STROKE RESOLVER THAT DRIVES A SCULPTOR SHALL WIRE THEM, and where no such
+resolver exists for a representation the change SHALL say so rather than leave
+the gap unnamed. `brush::apply_to_mesh` and `brush::apply_to_multires` wire
+them from `MeshStrokeOptions`; there is no `brush::apply_to_dynamic`, so an
+adaptive stroke is driven by the host calling `DynamicSculptor::stamp` directly,
+and it is the host that calls `set_automask_inputs` — which it now can, and
+before this change could not. Adding an adaptive stroke resolver is a larger
+piece of work than this change is: it owns spacing, drag re-anchoring, the
+snakehook anchor and the remesh schedule around every dab, none of which is
+about the automask. What this change is responsible for is that the estimators
+have somewhere to go on all three sculptors, and they do.
+
 #### Scenario: Setting them allocates nothing per dab
 - **WHEN** a stroke of many stamps runs after the estimators were set once
 - **THEN** no stamp allocates on their behalf
+
+#### Scenario: The adaptive path has no stroke resolver of its own
+- **WHEN** a host drives an adaptive surface
+- **THEN** it sets the estimators on the sculptor itself, with the same call the fixed sculptor takes, because there is no `brush::apply_to_dynamic` to do it on the host's behalf
 
 ### Requirement: A directional brush family is a preset over the shared frame
 Rake, chisel, clay strips, a directional scratch and a rotated alpha SHALL be expressible as axis values over the shared stamp frame, and SHALL NOT require a frame, a sampler or a code path of their own.

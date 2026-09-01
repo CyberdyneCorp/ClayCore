@@ -126,6 +126,23 @@ class BrushScratchArena {
    public:
     BrushScratchArena() = default;
 
+    // MOVE-ONLY, AND THE DELETION IS EXPLICIT RATHER THAN IMPLIED.
+    //
+    // The blocks are `unique_ptr`s, so a copy could never have worked — but a
+    // `std::vector` of a move-only type still SATISFIES
+    // `std::is_copy_constructible_v` (its copy constructor is declared, not
+    // deleted) and only hard-errors deep inside libstdc++ when something
+    // instantiates it. That is not a hypothetical: nanobind asks exactly that
+    // trait to decide whether to register a copy for a bound class, and adding
+    // an arena to `DynamicSculptor` turned a clean answer into a page of
+    // `stl_construct.h` errors naming no line of ours. Deleting it here makes
+    // the trait tell the truth and any future misuse point at its own call
+    // site.
+    BrushScratchArena(const BrushScratchArena&) = delete;
+    BrushScratchArena& operator=(const BrushScratchArena&) = delete;
+    BrushScratchArena(BrushScratchArena&&) = default;
+    BrushScratchArena& operator=(BrushScratchArena&&) = default;
+
     // Storage for `count` objects of `T`, aligned for `T`, uninitialized.
     //
     // A request that does not fit in the current block takes a NEW block rather

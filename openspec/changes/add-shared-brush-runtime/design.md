@@ -141,7 +141,19 @@ workset index — CANNOT be neutral: it is a dense array keyed by weld class,
 vertex slot or level vertex, and its size is the representation's, not the
 workset's. It stays, typed `std::vector<std::uint32_t>` and OWNED BY THE
 ADAPTER, sized and reset by whoever filled the workset. The neutral code never
-indexes it; it asks the topology adapter (D6) instead.
+READS a neighbour through it; it asks the topology adapter (D6) instead.
+
+*Refined during implementation.* The composition has to PUBLISH into that map —
+twice, since the automask's topology reads a ring neighbour's membership through
+it and a second drop invalidates it — and splitting `compose_workset` in two so
+that a caller could publish between the halves would have made "the one step all
+three walks end in" two steps with a representation-specific one wedged between
+them. It publishes directly instead, keyed by `WorkItemId::key()`: the weld
+class, the vertex slot and the level vertex are each the LOW 32 bits of the id,
+which is why the encoding puts the generation and the level in the high half.
+One spelling, `slot[item.key()] = i`, is correct on all three. Sizing and
+resetting stay with the adapter, which is the half that actually needs to know
+how big the array is.
 
 ### D3 — The arena is a bump allocator for trivially destructible scratch, one per sculptor, and nothing else
 

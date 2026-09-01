@@ -155,6 +155,52 @@ void MultiresSculptor::bind() {
     sculptor_->set_defer_normals(defer_normals_);
 }
 
+void build_multires_workset(const MeshSculptor& level_sculptor, std::uint32_t level,
+                            SculptWorkset* out) {
+    const SculptWorkset& src = level_sculptor.workset();
+    const Adjacency& adjacency = level_sculptor.adjacency();
+
+    // Retire the LAST stamp's marks through its own list, so the reset costs
+    // what that stamp touched rather than what the level holds. Same rule the
+    // two walks follow.
+    for (WorkItemId item : out->items)
+        if (item.key() < out->slot.size()) out->slot[item.key()] = kNoClass;
+    const std::size_t vertices = level_sculptor.mesh().positions.size();
+    if (out->slot.size() < vertices) out->slot.resize(vertices, kNoClass);
+
+    const std::size_t n = src.size();
+    out->items.resize(n);
+    // `assign` rather than a copy-construct, so the member keeps the storage a
+    // stroke already warmed.
+    out->weights.assign(src.weights.begin(), src.weights.end());
+    out->positions.assign(src.positions.begin(), src.positions.end());
+    out->normals.assign(src.normals.begin(), src.normals.end());
+    out->automask.assign(src.automask.begin(), src.automask.end());
+    out->average_normal = src.average_normal;
+    out->centroid = src.centroid;
+    out->plane_point = src.plane_point;
+    out->plane_normal = src.plane_normal;
+
+    for (std::size_t i = 0; i < n; ++i) {
+        std::size_t members = 0;
+        const std::uint32_t v = adjacency.members(src.items[i].as_weld_class(), &members)[0];
+        out->items[i] = WorkItemId::level_vertex(level, v);
+        out->slot[v] = static_cast<std::uint32_t>(i);
+    }
+
+    out->write_region.clear();
+    for (WorkItemId item : src.write_region) {
+        std::size_t members = 0;
+        const std::uint32_t v = adjacency.members(item.as_weld_class(), &members)[0];
+        out->write_region.push_back(WorkItemId::level_vertex(level, v));
+    }
+    out->write_bounds = src.write_bounds;
+}
+
+const BrushScratchArena* MultiresSculptor::arena() const {
+    return sculptor_ ? &sculptor_->arena() : nullptr;
+}
+
 std::size_t MultiresSculptor::stamp(MeshBrush verb, const MeshBrushSettings& settings,
                                     const field::MaskGate& gate, MultiresDelta* record) {
     touched_.clear();
@@ -175,6 +221,10 @@ std::size_t MultiresSculptor::stamp(MeshBrush verb, const MeshBrushSettings& set
     // coincide bit for bit weld into one class, and from that class onward
     // every id would be off by one. The hierarchy stores detail per VERTEX, so
     // an off-by-one here writes a wrinkle onto its neighbour.
+    // The hierarchy's own view of the stamp, before the level's weld classes are
+    // expanded into the level vertices `absorb_level_edit` consumes.
+    build_multires_workset(*sculptor_, level, &workset_);
+
     const Adjacency& adjacency = sculptor_->adjacency();
     for (WorkItemId item : sculptor_->write_region()) {
         std::size_t member_count = 0;

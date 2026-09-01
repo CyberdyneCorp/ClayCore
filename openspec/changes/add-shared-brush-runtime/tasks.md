@@ -36,63 +36,74 @@
 
 ## 2. The arena
 
-- [ ] 2.1 `include/clay/mesh/brush_arena.h` + `src/mesh/brush_arena.cpp` —
+- [x] 2.1 `include/clay/mesh/brush_arena.h` + `src/mesh/brush_arena.cpp` —
       `BrushScratchArena`: `allocate<T>(count)`, `reset()`, `capacity_bytes()`,
       `high_water_bytes()`, `growths()`. `static_assert` on trivial
       destructibility; alignment honoured per `T`
-- [ ] 2.2 A `ScratchVector<T>` view over an arena block — size, `push_back` up
+- [x] 2.2 A `ScratchVector<T>` view over an arena block — size, `push_back` up
       to a reserved capacity, and a hard refusal past it. The automask's
       frontiers and the region sort want a growable thing with no allocator
-- [ ] 2.3 A member of `MeshSculptor`, `DynamicSculptor` and (forwarded to the
+- [x] 2.3 A member of `MeshSculptor`, `DynamicSculptor` and (forwarded to the
       level sculptor) `MultiresSculptor`. NEVER a process-global
-- [ ] 2.4 Move `compute_automask`'s five per-stamp vectors onto it —
+- [x] 2.4 Move `compute_automask`'s five per-stamp vectors onto it —
       `depth`, `frontier`, `next`, `reached`, `stack`
-- [ ] 2.5 Move `DynamicSculptor`'s per-stamp vectors onto it — the sort
+- [x] 2.5 Move `DynamicSculptor`'s per-stamp vectors onto it — the sort
       permutation and its two sorted copies in both region functions, the ball
       query's face list, and `write_positions`' per-moved-vertex incident-face
-      vector (which is an allocation PER VERTEX, not per stamp)
-- [ ] 2.6 `DynamicSurface::refresh_normals` takes the touched-vertex buffer
+      vector (which is an allocation PER VERTEX, not per stamp).
+      DONE, with one deviation recorded rather than papered over: the sort
+      permutation and its two copies are the arena's; the ball query's face list
+      became a member (`ball_faces_`), because `DynamicBvh::faces_in_ball` takes
+      a `std::vector<FaceId>*` and its size is not knowable before the query;
+      and the per-vertex incident-face vector was REMOVED rather than moved — it
+      existed only to call `incident_faces`, whose signature is a `std::vector`,
+      so `write_positions` walks the borrowed half-edge fan directly and needs
+      no buffer of its own. A bump block cannot be sized from a valence the
+      caller has not asked for yet, and the requirement — no allocation after
+      warm-up — is met either way. Measured 14 allocations per warm adaptive
+      stamp before, 0 after
+- [x] 2.6 `DynamicSurface::refresh_normals` takes the touched-vertex buffer
       from the caller instead of building one. It is called once per stamp from
       the sculptor and once per remesh
-- [ ] 2.7 The arena's persistent-buffer boundary is respected: the sculptors'
+- [x] 2.7 The arena's persistent-buffer boundary is respected: the sculptors'
       `std::vector` members stay members. The arena is for what is transient
       WITHIN one stamp — D3
 
 ## 3. The neutral work item and workset
 
-- [ ] 3.1 `include/clay/mesh/work_item.h` — `WorkItemId` with
+- [x] 3.1 `include/clay/mesh/work_item.h` — `WorkItemId` with
       `weld_class` / `surface_vertex` / `level_vertex` constructors and
       readbacks, and the `WorkItemTopology` interface (`ring_slots`,
       `on_open_border`)
-- [ ] 3.2 `SculptWorkset::classes` becomes `items`, typed `WorkItemId`.
+- [x] 3.2 `SculptWorkset::classes` becomes `items`, typed `WorkItemId`.
       `BrushRegion` stays as the alias it already is
-- [ ] 3.3 `MeshSculptor::write_region()` widens to
+- [x] 3.3 `MeshSculptor::write_region()` widens to
       `const std::vector<WorkItemId>&`. Two call sites —
       `src/mesh/multires_sculpt.cpp:179` and one assertion in
       `tests/unit/test_mesh_sculpt.cpp`
-- [ ] 3.4 `compose_workset(...)` in `sculpt_workset.h` — the five factors in
+- [x] 3.4 `compose_workset(...)` in `sculpt_workset.h` — the five factors in
       the one fixed order, the zero drop, the automask, the second drop, and
       the frame resolution. Names no representation
-- [ ] 3.5 `build_fixed_mesh_workset` (declared in `sculpt.h`),
+- [x] 3.5 `build_fixed_mesh_workset` (declared in `sculpt.h`),
       `build_dynamic_surface_workset` (`dynamic_sculpt.h`),
       `build_multires_workset` (`multires_sculpt.h`). Each walks its own
       representation and ends in `compose_workset` — D7
-- [ ] 3.6 `DynamicSculptor`'s five parallel arrays and its `slot_` become the
+- [x] 3.6 `DynamicSculptor`'s five parallel arrays and its `slot_` become the
       shared `SculptWorkset`. `last_region()` keeps returning `VertexId`s,
       projected out of it
 
 ## 4. The automask reaches every representation
 
-- [ ] 4.1 Split `compute_automask` into the neutral core over
+- [x] 4.1 Split `compute_automask` into the neutral core over
       `WorkItemTopology` and the `Mesh`/`Adjacency` overload that adapts to it.
       No factor arithmetic changes — D6
-- [ ] 4.2 `DynamicSurfaceTopology` in `src/mesh/dynamic_sculpt.cpp`:
+- [x] 4.2 `DynamicSurfaceTopology` in `src/mesh/dynamic_sculpt.cpp`:
       `ring_slots` from `one_ring` through the workset's slot map,
       `on_open_border` from `DynamicSurface::is_boundary_edge`
-- [ ] 4.3 `DynamicSculptor::set_automask_inputs` / `automask_inputs()`, matching
+- [x] 4.3 `DynamicSculptor::set_automask_inputs` / `automask_inputs()`, matching
       `MeshSculptor`'s signature exactly. Set per STROKE — they hold
       `std::function`s
-- [ ] 4.4 `DynamicSculptor::gather` reads `brush.automask` and applies it as
+- [x] 4.4 `DynamicSculptor::gather` reads `brush.automask` and applies it as
       the LAST factor, dropping a fully masked entry from the workset entirely
       so it is bit-identical to its input rather than merely close
 - [ ] 4.5 REGRESSION TEST for the divergence this change exists to close: a
@@ -104,25 +115,33 @@
       different report from the same call with 0, because
       `clay_dynamic_sculptor_stamp`'s own header says the descriptor is "the
       same descriptor the fixed path takes". It fails on main
-- [ ] 4.7 `brush::apply_to_mesh`'s adaptive counterpart wires the cavity and
+- [x] 4.7 `brush::apply_to_mesh`'s adaptive counterpart wires the cavity and
       group callbacks the same way `src/brush/stroke.cpp:543` does for the
       fixed path, or the change states in the delta why an adaptive stroke does
-      not get them yet
+      not get them yet. THE SECOND BRANCH: there is no `brush::apply_to_dynamic`
+      to wire them in — an adaptive stroke is driven by the host calling
+      `DynamicSculptor::stamp` directly — and writing one owns spacing, drag
+      re-anchoring, the snakehook anchor and the remesh schedule, none of which
+      is about the automask. Stated in `specs/brush-engine/spec.md`, with the
+      scenario that the host sets them on the sculptor itself, which it now can
+      and before this change could not
 
 ## 5. The stamp frame
 
-- [ ] 5.1 `include/clay/mesh/stamp_frame.h` + `src/mesh/stamp_frame.cpp` —
+- [x] 5.1 `include/clay/mesh/stamp_frame.h` + `src/mesh/stamp_frame.cpp` —
       `StampFrame`, `make_stamp_frame(origin, normal, azimuth,
       explicit_rotation)`, `stamp_uv(frame, p, extent)`
 - [ ] 5.2 The zero-azimuth branch, with the `-0.0f` reasoning in the comment —
       D5. A test asserts the unrotated basis is byte-identical to the basis
-      built with `azimuth = 0`
-- [ ] 5.3 `alpha_frame_for` reimplemented over `make_stamp_frame`, reaching
+      built with `azimuth = 0`.
+      HALF DONE: the branch and its reasoning are in `src/mesh/stamp_frame.cpp`.
+      The assertion is 6.6's and is not written yet, so this stays open
+- [x] 5.3 `alpha_frame_for` reimplemented over `make_stamp_frame`, reaching
       `kernel::calpha_frame` with the same two arguments exactly once.
       `AlphaFrame` and `alpha_at` unchanged
-- [ ] 5.4 `MeshBrushSettings::stamp_azimuth` (radians, default 0), read by all
+- [x] 5.4 `MeshBrushSettings::stamp_azimuth` (radians, default 0), read by all
       three sculptors when they build the stamp frame
-- [ ] 5.5 The three "frame" headers each name the other two —
+- [x] 5.5 The three "frame" headers each name the other two —
       `brush_model.h`'s enum, `stamp_frame.h`'s basis, `surface_frame.h`'s
       transported detail frame — so a reader who meets one knows there are
       three — D4
