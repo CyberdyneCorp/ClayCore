@@ -1351,9 +1351,20 @@ that will not catch what it was drawn to catch.
 ### The fixtures record history, because a host does
 
 `Fixture.voxelGrid` and `Fixture.perforatedBlock` call
-`clay_document_enable_undo` before they prime, so the voxel verbs are measured
-against a document that journals — which is the state a shipping host is in and
-the state the budgets are read as though they were.
+`clay_document_enable_undo`, so the voxel verbs are measured against a document
+that journals — which is the state a shipping host is in and the state the
+budgets are read as though they were.
+
+**After the priming stamps, not before, and that placement was measured.**
+Priming walks fresh ground, so at 1,000 stamps it journals about 2.4 MB and
+leaves about 5.3 MB of history standing per fixture for the whole run. Enabled
+before priming, two consecutive four-session gates were killed by jetsam in a
+LATER session — the latency bundle in one, the heavy verb bundle in the other,
+neither of which builds these fixtures — where the gate immediately before the
+change passed all four. System-level pressure is not returned by a process
+boundary, which is the same reason the sessions are split at all. Enabled after
+priming, the timed verb still journals every cell it changes, which is the
+question; the fixture just stops carrying the priming's history.
 
 **They did not, through v0.73.0** (#242). Every voxel verb funnels through
 `VoxelGrid::set`, which appends a 16-byte record per cell it CHANGES once undo
