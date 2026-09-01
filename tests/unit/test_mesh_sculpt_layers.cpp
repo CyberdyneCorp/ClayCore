@@ -130,11 +130,20 @@ TEST_CASE("strength dials a recorded pass without replaying it") {
     SUBCASE("a rename invalidates no geometry") {
         surface.positions_at(2);
         surface.reset_sculpt_layer_stats();
+        // Task 5.3's three revisions, each read BEFORE the rename. Comparing
+        // the composition revision to a second read of itself — which is what
+        // this case did until the test suite was audited — is a check that
+        // cannot fail, and the whole claim of 5.2 lives in it: a name is
+        // metadata, and metadata must not invalidate geometry.
+        const std::uint64_t metadata = surface.sculpt_layer_metadata_revision();
+        const std::uint64_t composition = surface.sculpt_layer_composition_revision();
+        const std::uint64_t content = surface.sculpt_layer_content_revision();
         REQUIRE(surface.rename_sculpt_layer(id, "pores"));
         surface.positions_at(2);
         CHECK(surface.sculpt_layer_stats().blocks_recomposed == 0);
-        CHECK(surface.sculpt_layer_composition_revision() ==
-              surface.sculpt_layer_composition_revision());
+        CHECK(surface.sculpt_layer_metadata_revision() > metadata);
+        CHECK(surface.sculpt_layer_composition_revision() == composition);
+        CHECK(surface.sculpt_layer_content_revision() == content);
     }
 }
 
@@ -154,7 +163,64 @@ TEST_CASE("additive layers commute") {
     CHECK(a.sculpt_layers().id_at(0) == high);
     // Reordering changes ORGANISATION and not geometry, and the requirement
     // says so rather than implying an order dependence that does not exist.
+    //
+    // This is the CHEAP half of the claim and it is worth saying which half:
+    // `move_to` invalidates no block, so what this asserts is that a reorder
+    // does not disturb a composed cache that is already there. The half that
+    // can actually catch an order-dependent composition is the case below,
+    // which recomposes after the reorder.
     CHECK(bit_equal(before, a.positions_at(2)));
+}
+
+TEST_CASE("a reorder still moves no vertex once the blocks it holds recompose") {
+    // THE SAME CLAIM, ASSERTED WHERE IT CAN ACTUALLY FAIL — and it did. The
+    // case above cannot see the interesting half of task 3.1 for two
+    // independent reasons, which is how the defect this pins survived:
+    //
+    //   * `move_to` invalidates NO block, on purpose, so reading the surface
+    //     straight after a reorder reads the composed cache back unchanged.
+    //     That comparison is the cache against itself whatever composition
+    //     does;
+    //   * two layers over a zero base sum as `(0 + x) + y` against `(0 + y) +
+    //     x`, and a single IEEE addition commutes exactly. Order can only bite
+    //     from the third term on, or from the second over a non-zero base,
+    //     because float addition does not ASSOCIATE.
+    //
+    // So: three deep, on a base detail that is already there, with the blocks
+    // driven through composition again AFTER the reorder. The numbers are
+    // chosen rather than pretty — 0.4·0.03 twice and 0.7·0.03 over a base of
+    // 0.05 is a sum whose value depends on the order it is taken in, at
+    // 0.0949999988 against 0.0950000063.
+    MultiresSurface surface = build(2);
+    for (std::uint32_t v = 30; v < 50; ++v) surface.set_detail(2, v, lift(0.05f));
+    const SculptLayerId a = surface.add_sculpt_layer("a");
+    const SculptLayerId b = surface.add_sculpt_layer("b");
+    const SculptLayerId c = surface.add_sculpt_layer("c");
+    for (std::uint32_t v = 30; v < 50; ++v) {
+        surface.set_sculpt_layer_detail(a, 2, v, lift(0.03f));
+        surface.set_sculpt_layer_detail(b, 2, v, lift(0.03f));
+        surface.set_sculpt_layer_detail(c, 2, v, lift(0.03f));
+    }
+    REQUIRE(surface.set_sculpt_layer_strength(a, 0.4f));
+    REQUIRE(surface.set_sculpt_layer_strength(b, 0.4f));
+    REQUIRE(surface.set_sculpt_layer_strength(c, 0.7f));
+    const std::vector<cfloat3> before = surface.positions_at(2);
+
+    REQUIRE(surface.move_sculpt_layer(c, 0));
+    // A slider away and back is the cheapest way to make every block this
+    // layer covers compose a second time. It ends on the value it started
+    // from, so the only thing that changed between the two readings is the
+    // order the stack is listed in.
+    REQUIRE(surface.set_sculpt_layer_strength(b, 0.55f));
+    REQUIRE(surface.set_sculpt_layer_strength(b, 0.4f));
+    CHECK(bit_equal(before, surface.positions_at(2)));
+
+    // And the other direction, so the case is not passing because the reorder
+    // happened to be undone: put the stack back and recompose again.
+    REQUIRE(surface.move_sculpt_layer(c, 2));
+    REQUIRE(surface.set_sculpt_layer_strength(b, 0.55f));
+    REQUIRE(surface.set_sculpt_layer_strength(b, 0.4f));
+    CHECK(bit_equal(before, surface.positions_at(2)));
 }
 
 TEST_CASE("merge down is defined by the surface it leaves, including at zero strength") {
@@ -360,4 +426,145 @@ TEST_CASE("a write on top of a deep stack sums only the layers that reach the bl
     // their own block table and are never summed.
     CHECK(surface.sculpt_layer_stats().blocks_recomposed == 1);
     CHECK(surface.sculpt_layer_stats().layer_blocks_visited == 8);
+}
+
+TEST_CASE("merge folds the per-layer mask in, once, and leaves the identity behind") {
+    // THE HALF OF THE PARITY GATE THE MASK WAS MISSING FROM. Task 2.7's
+    // per-layer mask is a SECOND multiplier in `E = B + Σ sᵢ·mᵢ(v)·Lᵢ`, and a
+    // merge that is defined by the surface it leaves has to fold it into the
+    // coefficients it writes AND clear it — a mask left standing would apply
+    // itself a second time to a coefficient that already carries it, and one
+    // dropped would lose the shape the artist masked. Every merge and bake case
+    // in this suite ran with the identity mask, so the arithmetic that handles a
+    // real one was written and never asked a question.
+    for (float lower_strength : {1.0f, 0.37f, 0.0f}) {
+        CAPTURE(lower_strength);
+        MultiresSurface surface = build(2);
+        const SculptLayerId lower = surface.add_sculpt_layer("lower");
+        const SculptLayerId upper = surface.add_sculpt_layer("upper");
+        for (std::uint32_t v = 30; v < 50; ++v) {
+            surface.set_sculpt_layer_detail(lower, 2, v, lift(0.04f));
+            surface.set_sculpt_layer_detail(upper, 2, v, lift(0.02f));
+            // Two masks that DISAGREE and that vary along the run, so a merge
+            // dropping either one, or applying one of them twice, lands
+            // somewhere a constant mask would have hidden.
+            const float t = static_cast<float>(v - 30);
+            REQUIRE(surface.set_sculpt_layer_mask(lower, 2, v, 0.25f + 0.03f * t));
+            REQUIRE(surface.set_sculpt_layer_mask(upper, 2, v, 0.95f - 0.04f * t));
+        }
+        REQUIRE(surface.set_sculpt_layer_strength(lower, lower_strength));
+        REQUIRE(surface.set_sculpt_layer_strength(upper, 0.6f));
+        const std::vector<cfloat3> before = surface.positions_at(2);
+
+        REQUIRE(surface.merge_sculpt_layer_down(upper));
+        REQUIRE(surface.sculpt_layers().size() == 1);
+        const std::vector<cfloat3> after = surface.positions_at(2);
+        for (std::size_t i = 0; i < before.size(); ++i) {
+            CAPTURE(i);
+            CHECK(after[i].y == doctest::Approx(before[i].y).epsilon(1e-6));
+        }
+        // The identity the target needs is the mask's as well as the slider's:
+        // the weight is in the coefficients now, so the mask has to be gone
+        // rather than combined.
+        const mesh::SparseWeightField* mask = surface.sculpt_layers().mask_at(lower, 2);
+        REQUIRE(mask != nullptr);
+        for (std::uint32_t v = 30; v < 50; ++v) CHECK(mask->get(v) == 1.0f);
+    }
+}
+
+TEST_CASE("bake carries the mask into the base, and the surface stays where it was") {
+    MultiresSurface surface = build(2);
+    for (std::uint32_t v = 30; v < 50; ++v) surface.set_detail(2, v, lift(0.011f));
+    const SculptLayerId id = surface.add_sculpt_layer("pass");
+    for (std::uint32_t v = 30; v < 50; ++v) {
+        surface.set_sculpt_layer_detail(id, 2, v, lift(0.03f));
+        REQUIRE(surface.set_sculpt_layer_mask(id, 2, v, 0.2f + 0.04f * static_cast<float>(v - 30)));
+    }
+    REQUIRE(surface.set_sculpt_layer_strength(id, 0.55f));
+    const std::vector<cfloat3> before = surface.positions_at(2);
+
+    REQUIRE(surface.bake_sculpt_layer_to_base(id));
+    CHECK(surface.sculpt_layers().empty());
+    const std::vector<cfloat3> after = surface.positions_at(2);
+    for (std::size_t i = 0; i < before.size(); ++i) {
+        CAPTURE(i);
+        CHECK(after[i].y == doctest::Approx(before[i].y).epsilon(1e-6));
+    }
+    // The base has neither a strength nor a mask to carry, so what landed there
+    // must be the MASKED, SCALED coefficient and not the raw one — a bake that
+    // ignored the mask would write 0.011 + 0.55·0.03 at every masked vertex.
+    const float w = 0.2f + 0.04f * 10.0f;
+    CHECK(surface.detail_at(2).get(40).normal ==
+          doctest::Approx(0.011f + 0.55f * w * 0.03f).epsilon(1e-5));
+    CHECK(surface.memory().composed == 0);
+}
+
+TEST_CASE("compacting is a memory lever, not a change to the picture") {
+    // Task 5.7 leaves a host four levers instead of a cap, and `compact` is the
+    // one that costs nothing to reach for. The case beside it asserts that the
+    // bytes go down — which is also what a lever that ATE THE PASS would do.
+    // What has to hold is that the surface does not move: not immediately,
+    // where the composed cache would answer for it whatever compaction did, and
+    // not once every covered block has composed again out of what survived.
+    MultiresSurface surface = build(4);
+    const std::uint32_t level = 4;
+    const std::uint32_t vertices = surface.topology_at(level).vertex_count;
+    const SculptLayerId a = surface.add_sculpt_layer("a");
+    const SculptLayerId b = surface.add_sculpt_layer("b");
+    for (std::uint32_t v = 0; v < vertices; ++v) {
+        if (v % 3 == 0) surface.set_sculpt_layer_detail(a, level, v, lift(0.004f));
+        if (v >= 1000 && v < 1400) surface.set_sculpt_layer_detail(b, level, v, lift(-0.002f));
+        // A mask that is real over part of the layer and identity over the
+        // rest, so compaction has identity blocks to drop AND weighted ones it
+        // must not.
+        if (v % 7 == 0) REQUIRE(surface.set_sculpt_layer_mask(a, level, v, 0.6f));
+    }
+    REQUIRE(surface.set_sculpt_layer_strength(a, 0.8f));
+    REQUIRE(surface.set_sculpt_layer_strength(b, 0.45f));
+    // A whole block written back to zero, which is what actually gives
+    // compaction something to release.
+    for (std::uint32_t v = 1024; v < 2048 && v < vertices; ++v)
+        surface.set_sculpt_layer_detail(a, level, v, lift(0.0f));
+    const std::vector<cfloat3> before = surface.positions_at(level);
+    const std::size_t bytes_before = surface.memory().sculpt_layers;
+
+    {
+        const mesh::SculptLayer* la = surface.sculpt_layers().find(a);
+        const mesh::SculptLayer* lb = surface.sculpt_layers().find(b);
+        MESSAGE("PRE a.detail dense=" << la->detail[level].dense()
+                << " blocks=" << la->detail[level].stored_block_count()
+                << " bytes=" << la->detail[level].bytes()
+                << " | a.mask blocks=" << la->mask[level].stored_block_count()
+                << " bytes=" << la->mask[level].bytes()
+                << " | b.detail dense=" << lb->detail[level].dense()
+                << " blocks=" << lb->detail[level].stored_block_count()
+                << " bytes=" << lb->detail[level].bytes());
+    }
+    surface.compact_sculpt_layers();
+    {
+        const mesh::SculptLayer* la = surface.sculpt_layers().find(a);
+        const mesh::SculptLayer* lb = surface.sculpt_layers().find(b);
+        MESSAGE("POST a.detail dense=" << la->detail[level].dense()
+                << " blocks=" << la->detail[level].stored_block_count()
+                << " bytes=" << la->detail[level].bytes()
+                << " | a.mask blocks=" << la->mask[level].stored_block_count()
+                << " bytes=" << la->mask[level].bytes()
+                << " | b.detail dense=" << lb->detail[level].dense()
+                << " blocks=" << lb->detail[level].stored_block_count()
+                << " bytes=" << lb->detail[level].bytes());
+    }
+    MESSAGE("bytes_before=" << bytes_before
+            << " after=" << surface.memory().sculpt_layers
+            << " vertices=" << vertices);
+    CHECK(surface.memory().sculpt_layers < bytes_before);
+    CHECK(bit_equal(before, surface.positions_at(level)));
+
+    // And the reading that matters: dial both sliders away and back so every
+    // block either layer covers is composed again from the storage compaction
+    // left behind.
+    REQUIRE(surface.set_sculpt_layer_strength(a, 0.5f));
+    REQUIRE(surface.set_sculpt_layer_strength(a, 0.8f));
+    REQUIRE(surface.set_sculpt_layer_strength(b, 0.5f));
+    REQUIRE(surface.set_sculpt_layer_strength(b, 0.45f));
+    CHECK(bit_equal(before, surface.positions_at(level)));
 }

@@ -269,3 +269,51 @@ TEST_CASE("a smaller block wastes less on a footprint and costs more in table") 
     }
     CHECK(small_bytes < large_bytes);
 }
+
+// The bug this pins: `compact()` packed the CONTENT and left the CAPACITY, and
+// `bytes()` reports capacity. Compaction therefore released nothing a host could
+// observe -- and on the demotion path, which rebuilds through `set()`, the
+// vectors grow by the standard library's own factor. libstdc++ doubles and MSVC
+// grows by 1.5, so the same compaction landed on a different capacity per
+// toolchain: on MSVC it landed ABOVE the dense form it replaced and the stack's
+// bytes went UP after compacting, which is how CI caught it.
+//
+// Asserted as "no slack against a field built sparse from the start" rather than
+// as "fewer bytes than before", because that is the claim that is true on every
+// toolchain instead of true on the one it was written on.
+TEST_CASE("detail field: compaction releases capacity, not only content") {
+    const std::uint32_t vertices = 8192;
+    const std::uint32_t block = 1024;
+
+    // Dense, then emptied back to a handful of live blocks, which is the path
+    // that demotes -- and the path whose rebuild overshoots.
+    DetailField promoted;
+    promoted.reset(vertices, block);
+    for (std::uint32_t v = 0; v < vertices; ++v) promoted.set(v, d(0.001f, 0.0f, 0.002f));
+    REQUIRE(promoted.dense());
+    for (std::uint32_t v = block; v < vertices; ++v) promoted.set(v, d(0.0f, 0.0f, 0.0f));
+
+    const std::size_t before = promoted.bytes();
+    promoted.compact();
+    CHECK_FALSE(promoted.dense());
+    CHECK(promoted.bytes() < before);
+
+    // The toolchain-independent half: what survived is one block of content, so
+    // the compacted field must cost what a field that only ever held that block
+    // costs. Any slack here is capacity the compaction did not give back.
+    DetailField built_sparse;
+    built_sparse.reset(vertices, block);
+    for (std::uint32_t v = 0; v < block; ++v) built_sparse.set(v, d(0.001f, 0.0f, 0.002f));
+    REQUIRE_FALSE(built_sparse.dense());
+    CHECK(promoted.bytes() == built_sparse.bytes());
+
+    // And compaction stays a memory lever rather than a change to the picture.
+    for (std::uint32_t v = 0; v < vertices; ++v)
+        CHECK(promoted.get(v).normal == built_sparse.get(v).normal);
+
+    // Idempotent: a second compaction of an already-packed field must not move
+    // the number either way.
+    const std::size_t packed = promoted.bytes();
+    promoted.compact();
+    CHECK(promoted.bytes() == packed);
+}

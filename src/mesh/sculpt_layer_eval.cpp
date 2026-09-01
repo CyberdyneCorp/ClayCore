@@ -52,6 +52,7 @@ namespace {
 // composes to EXACTLY the base detail — bit for bit, which is what makes
 // "invisible contributes nothing" a bit-comparison rather than a tolerance.
 struct BlockContributor {
+    SculptLayerId id = kNoSculptLayer;
     const DetailField* detail = nullptr;
     const SparseWeightField* mask = nullptr;
     float factor = 0.0f;
@@ -68,11 +69,37 @@ void gather_contributors(const SculptLayerStack& stack, std::uint32_t level, std
         const DetailField& field = layer->detail[level];
         if (!field.block_stored(block)) continue;
         BlockContributor c;
+        c.id = layer->id;
         c.detail = &field;
         c.mask = &layer->mask[level];
         c.factor = factor;
         out->push_back(c);
     }
+    // SUMMED IN ID ORDER, NOT IN STACK ORDER, and that is the whole of task
+    // 3.1's bit-for-bit claim rather than a tidiness. Addition COMMUTES, which
+    // is what the requirement says; float addition does not ASSOCIATE, which is
+    // what an implementation that accumulated in stack order would run into the
+    // moment a stack is three layers deep or sits on a non-zero base detail:
+    // `B + a + b + c` and `B + c + a + b` differ in the last bit.
+    //
+    // It matters more than a last bit because `move_to` invalidates NOTHING, on
+    // purpose. Without a stable order the two orders would not even coexist
+    // quietly: after a drag in the layer list, the blocks some later stroke
+    // happened to recompose would carry the new order and the blocks still
+    // cached would carry the old, and the surface would be composed two ways at
+    // once with no operation able to tell you which. An id is minted once from
+    // the stack's counter and a reorder never renumbers, so ordering the sum on
+    // it makes composition invariant under exactly the operation the
+    // requirement promises is free.
+    //
+    // THE REJECTED ALTERNATIVE was to let `move_to` dirty the moved layer's
+    // coverage and accept a ULP-scale shift. That charges a drag in a list the
+    // union of two layers' blocks — the one operation the design promises costs
+    // nothing — and it still moves the surface, which is the thing 3.1 forbids.
+    // Sorting costs the layers that reach ONE block, against the 1024 vertices
+    // × contributors of multiply-adds the same block is about to run.
+    std::sort(out->begin(), out->end(),
+              [](const BlockContributor& a, const BlockContributor& b) { return a.id < b.id; });
 }
 
 void recompose_block(MultiresSurface::State& s, MultiresLevel& lev, std::uint32_t level,
@@ -466,6 +493,58 @@ void bake_detail_vertex(MultiresSurface::State& s, std::uint32_t level, std::uin
     s.stack.invalidate(level, vertex / s.stack.block_size());
 }
 
+// AT LEVEL 0 THE BASE IS THE CAGE. There is no base detail there —
+// `base_mesh()`'s meaning would change for every existing caller if there were
+// — so the offset is applied to the cage position itself, in the REST frame it
+// was authored against rather than in the evaluated frame, which with a base
+// layer would move with the thing it measures.
+void bake_cage_vertex(MultiresSurface* surface,
+                      const MultiresSurface::State::BaseRestFrames* rest, std::uint32_t vertex,
+                      const LocalDetail& scaled, SculptLayerProperty* record) {
+    if (!rest || vertex >= rest->frames.size()) return;
+    const kernel::cfloat3 offset =
+        frame_to_world(rest->frames[vertex], scaled.tangent, scaled.bitangent, scaled.normal);
+    const kernel::cfloat3 was = surface->base_position(vertex);
+    if (record) {
+        record->base_vertices.push_back(vertex);
+        record->base_before.push_back(was);
+        record->base_after.push_back(was + offset);
+    }
+    surface->set_base_position(vertex, was + offset);
+}
+
+// One level of a bake, over the blocks the layer actually STORES. A layer that
+// does not reach this level costs the `stored == 0` test and nothing else,
+// which is the same O(1) miss composition relies on.
+void bake_layer_level(MultiresSurface* surface, MultiresSurface::State& s,
+                      const SculptLayer& layer, std::uint32_t level, float factor,
+                      const MultiresSurface::State::BaseRestFrames* rest,
+                      SculptLayerProperty* record) {
+    const DetailField& src = layer.detail[level];
+    const std::uint32_t stored = src.stored_block_count();
+    if (stored == 0) return;
+
+    const SparseWeightField& mask = layer.mask[level];
+    const std::uint32_t bs = s.stack.block_size();
+    for (std::uint32_t i = 0; i < stored; ++i) {
+        const std::uint32_t begin = src.stored_block_at(i) * bs;
+        const std::uint32_t end = std::min(begin + bs, s.levels[level].topology.vertex_count);
+        for (std::uint32_t v = begin; v < end; ++v) {
+            const LocalDetail d = src.get(v);
+            if (d.zero()) continue;
+            const float w = factor * mask.get(v);
+            LocalDetail scaled;
+            scaled.tangent = w * d.tangent;
+            scaled.bitangent = w * d.bitangent;
+            scaled.normal = w * d.normal;
+            if (level == 0)
+                bake_cage_vertex(surface, rest, v, scaled, record);
+            else
+                bake_detail_vertex(s, level, v, scaled, record);
+        }
+    }
+}
+
 }  // namespace
 
 bool MultiresSurface::bake_sculpt_layer_to_base(SculptLayerId id, SculptLayerProperty* record) {
@@ -484,48 +563,11 @@ bool MultiresSurface::bake_sculpt_layer_to_base(SculptLayerId id, SculptLayerPro
     if (record) before = s.stack.encode();
 
     const float factor = layer->composition_factor();
-    const std::uint32_t bs = s.stack.block_size();
-    for (std::uint32_t l = 0; l < static_cast<std::uint32_t>(s.levels.size()); ++l) {
-        if (l >= layer->detail.size()) break;
-        const DetailField& src = layer->detail[l];
-        const std::uint32_t stored = src.stored_block_count();
-        if (stored == 0) continue;
-        const SparseWeightField& mask = layer->mask[l];
-        for (std::uint32_t i = 0; i < stored; ++i) {
-            const std::uint32_t block = src.stored_block_at(i);
-            const std::uint32_t begin = block * bs;
-            const std::uint32_t end = std::min(begin + bs, s.levels[l].topology.vertex_count);
-            for (std::uint32_t v = begin; v < end; ++v) {
-                const LocalDetail d = src.get(v);
-                if (d.zero()) continue;
-                const float w = factor * mask.get(v);
-                LocalDetail scaled;
-                scaled.tangent = w * d.tangent;
-                scaled.bitangent = w * d.bitangent;
-                scaled.normal = w * d.normal;
-                if (l != 0) {
-                    bake_detail_vertex(s, l, v, scaled, record);
-                    continue;
-                }
-                // AT LEVEL 0 THE BASE IS THE CAGE. There is no base detail
-                // there — `base_mesh()`'s meaning would change for every
-                // existing caller if there were — so the offset is applied to
-                // the cage position itself, in the rest frame it was authored
-                // against.
-                if (!rest || v >= rest->frames.size()) continue;
-                const kernel::cfloat3 offset =
-                    frame_to_world(rest->frames[v], scaled.tangent, scaled.bitangent,
-                                   scaled.normal);
-                const kernel::cfloat3 was = base_position(v);
-                if (record) {
-                    record->base_vertices.push_back(v);
-                    record->base_before.push_back(was);
-                    record->base_after.push_back(was + offset);
-                }
-                set_base_position(v, was + offset);
-            }
-        }
-    }
+    const std::uint32_t levels =
+        std::min(static_cast<std::uint32_t>(s.levels.size()),
+                 static_cast<std::uint32_t>(layer->detail.size()));
+    for (std::uint32_t l = 0; l < levels; ++l)
+        bake_layer_level(this, s, *layer, l, factor, rest, record);
     mark_patches(s, 0, {});
     if (!s.stack.remove(id)) return false;
     record_structural(record, id, std::move(before), s.stack);
@@ -540,6 +582,41 @@ bool MultiresSurface::apply_sculpt_layer_delta(const SculptLayerDelta& delta, bo
     if (!state_) return false;
     return forward ? delta.apply(state_->stack) : delta.revert(state_->stack);
 }
+
+namespace {
+
+// STRUCTURAL. The stack is replaced wholesale from the snapshot, and what the
+// operation wrote OUTSIDE the stack — the base detail a bake folded into, and
+// the cage a level-0 bake moved — is restored separately, because neither
+// belongs to the stack and neither could be in its bytes.
+//
+// Separated from the scalar ops below because it is a different KIND of replay:
+// those set one field on one layer, this rebuilds the roster and reaches into
+// two things the stack does not own.
+bool apply_structural_property(MultiresSurface* surface, MultiresSurface::State& s,
+                               const SculptLayerProperty& property, bool forward) {
+    if (s.stack.composition_held()) return false;
+    const std::vector<std::uint8_t>& bytes =
+        forward ? property.stack_after : property.stack_before;
+    SculptLayerStack rebuilt;
+    if (!SculptLayerStack::decode(bytes.data(), bytes.size(), &rebuilt)) return false;
+
+    for (const SculptLayerProperty::DetailEntry& e : property.base_detail)
+        surface->set_detail(e.level, e.vertex, forward ? e.after : e.before);
+    for (std::size_t i = 0; i < property.base_vertices.size(); ++i)
+        surface->set_base_position(property.base_vertices[i],
+                                   forward ? property.base_after[i] : property.base_before[i]);
+
+    s.stack = std::move(rebuilt);
+    // The snapshot was taken against THIS hierarchy, but a caller can pair a
+    // step with the wrong surface — so the levels are re-imposed rather than
+    // trusted, which drops any field whose vertex count does not match.
+    sync_stack_levels(s);
+    s.stack.dirty_all();
+    return true;
+}
+
+}  // namespace
 
 bool MultiresSurface::apply_sculpt_layer_property(const SculptLayerProperty& property,
                                                   bool forward) {
@@ -561,32 +638,9 @@ bool MultiresSurface::apply_sculpt_layer_property(const SculptLayerProperty& pro
         case SculptLayerProperty::Op::Active:
             return s.stack.set_active(forward ? property.active_after : property.active_before);
         case SculptLayerProperty::Op::Structural:
-            break;
+            return apply_structural_property(this, s, property, forward);
     }
-
-    // STRUCTURAL. The stack is replaced wholesale from the snapshot, and what
-    // the operation wrote OUTSIDE the stack — the base detail a bake folded
-    // into, and the cage a level-0 bake moved — is restored separately, because
-    // neither belongs to the stack and neither could be in its bytes.
-    if (s.stack.composition_held()) return false;
-    const std::vector<std::uint8_t>& bytes = forward ? property.stack_after
-                                                     : property.stack_before;
-    SculptLayerStack rebuilt;
-    if (!SculptLayerStack::decode(bytes.data(), bytes.size(), &rebuilt)) return false;
-
-    for (const SculptLayerProperty::DetailEntry& e : property.base_detail)
-        set_detail(e.level, e.vertex, forward ? e.after : e.before);
-    for (std::size_t i = 0; i < property.base_vertices.size(); ++i)
-        set_base_position(property.base_vertices[i],
-                          forward ? property.base_after[i] : property.base_before[i]);
-
-    s.stack = std::move(rebuilt);
-    // The snapshot was taken against THIS hierarchy, but a caller can pair a
-    // step with the wrong surface — so the levels are re-imposed rather than
-    // trusted, which drops any field whose vertex count does not match.
-    sync_stack_levels(s);
-    s.stack.dirty_all();
-    return true;
+    return false;
 }
 
 }  // namespace mesh

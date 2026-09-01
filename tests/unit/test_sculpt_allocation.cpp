@@ -34,6 +34,7 @@
 #include "clay/mesh/sculpt.h"
 #include "clay/mesh/voxel_remesh.h"
 #include "clay/mesh/topology_ops.h"
+#include "clay/mesh/sculpt_layer.h"
 
 #include "clay.h"
 
@@ -529,6 +530,63 @@ TEST_CASE("allocation gate: a surface drag's cost per warped item is bounded") {
     CAPTURE(allocations);
     CAPTURE(per_item);
     CHECK(per_item < 6.0);
+}
+
+TEST_CASE("allocation gate: a stack chunk costs its bytes, not the levels it names") {
+    // THE DECODER'S SIDE OF THE SAME RULE, and the only place in this tree that
+    // can see it. A `SculptLayerStack` chunk rides inside the multires stream
+    // and is the part of it a hostile document actually reaches; every number
+    // it declares is one the decoder RESERVES FROM, and `MultiresSurface::
+    // decode`'s check that the stack matches the hierarchy runs long after.
+    //
+    // Two things were wrong and are gated here together, because only the byte
+    // count separates them from each other:
+    //
+    //   * the chunk applied neither of the two ceilings the stream around it
+    //     applies to exactly these two numbers, so three levels of four billion
+    //     vertices was a legal declaration. `test_mesh_sculpt_layer_io.cpp`
+    //     refuses that one;
+    //   * the LARGEST LEGAL declaration — twelve levels of a billion vertices,
+    //     blocked as finely as the format allows — reserved a per-block dirty
+    //     mark for every one of them: three gigabytes, from ninety-two bytes.
+    //     The mark is read only while `all` is false, and `all` is the resting
+    //     state of a freshly decoded stack, so it is sized in `clear_dirty`
+    //     where it starts being consulted.
+    //
+    // Measured in BYTES rather than in allocations, deliberately. Reserving
+    // three gigabytes is ONE allocation, and a count would have called it
+    // cheaper than the vector of level sizes beside it.
+    std::vector<std::uint8_t> chunk;
+    const auto u32 = [&chunk](std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) chunk.push_back(static_cast<std::uint8_t>((v >> (8 * i)) & 0xffu));
+    };
+    u32(0x534c4d43u);  // 'CMLS'
+    u32(1u);           // version
+    u32(0u);           // no layers at all: everything below is the level table
+    u32(0u);           // active, low half
+    u32(0u);           // active, high half
+    u32(1u);           // the id counter, low half
+    u32(0u);           // the id counter, high half
+    u32(4u);           // the finest blocking the format allows
+    u32(mesh::SculptLayerStack::kMaxLevels);
+    for (std::uint32_t l = 0; l < mesh::SculptLayerStack::kMaxLevels; ++l)
+        u32(mesh::SculptLayerStack::kMaxLevelVertices);
+    REQUIRE(chunk.size() < 128);
+
+    mesh::SculptLayerStack stack;
+    std::size_t bytes = 0;
+    {
+        CountingScope scope;
+        REQUIRE(mesh::SculptLayerStack::decode(chunk.data(), chunk.size(), &stack));
+        bytes = scope.bytes();
+    }
+    REQUIRE(stack.level_count() == mesh::SculptLayerStack::kMaxLevels);
+    CAPTURE(chunk.size());
+    CAPTURE(bytes);
+    // The level table is twelve four-byte counts. A thousand bytes is room for
+    // it and for whatever a vector's growth policy rounds it up to, and is
+    // still six orders of magnitude below what a per-level block index costs.
+    CHECK(bytes < 1024);
 }
 
 // -- THE AUTOMASK MUST COST THE WORKSET AND NOT A HEAP ALLOCATION -------------

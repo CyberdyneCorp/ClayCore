@@ -227,6 +227,13 @@ class LayeredMultiresSculptor {
 
     std::size_t smooth_detail(const MeshBrushSettings& settings, const field::MaskGate& gate);
     std::size_t smooth_form(const MeshBrushSettings& settings, const field::MaskGate& gate);
+    // The Laplacian shift for every vertex of the region, computed BEFORE any
+    // of it is written. Separate from the write for a reason the implementation
+    // spells out: at level 0 the array being read is the array a write moves,
+    // so a fused loop would be a Gauss-Seidel sweep whose answer depends on the
+    // order the region happens to sit in.
+    void form_shift(const Adjacency& adjacency, const std::vector<kernel::cfloat3>& form,
+                    float strength, std::vector<kernel::cfloat3>* shift) const;
     std::size_t fade_toward_zero(const MeshBrushSettings& settings, const field::MaskGate& gate,
                                  bool base);
 

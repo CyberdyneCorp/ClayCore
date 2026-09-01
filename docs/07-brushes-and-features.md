@@ -1798,6 +1798,32 @@ strength and is undefined at exactly the value one slider reaches.
 Strength 0 and invisible contribute **nothing, to the bit**: a layer at zero
 effective strength is skipped rather than multiplied by zero.
 
+Parity is the **mask's** as well as the slider's, and that is the half of it
+easiest to write and never ask about. `m_i` is a second multiplier, so a merge
+has to fold the weight it is removing into the coefficients it writes *and*
+clear the mask it folded — one left standing applies itself a second time to a
+coefficient that already carries it — and a bake writes the **masked, scaled**
+coefficient into a base that has no mask to carry. Both hold, and both are now
+gated with two disagreeing masks at strengths 1.0, 0.37 and 0.0, because every
+parity case before ran with the identity mask.
+
+#### Reordering is organisation, which is why the sum is taken in id order
+
+Additive displacement commutes, so dragging a pass up or down the list changes
+what the list looks like and not where a vertex is — and `move_sculpt_layer`
+therefore invalidates **no block**, which is what makes a drag free.
+
+That freedom is only sound because composition sums a block's contributors in
+**layer-id** order rather than in list order. Addition commutes; float addition
+does not *associate*, so `B + a + b + c` and `B + c + a + b` differ in the last
+bit as soon as a stack is three deep or sits on a base detail that is already
+there. With a reorder invalidating nothing, list-order accumulation would leave
+the blocks a later stroke happened to recompose carrying one order and the
+blocks still cached carrying the other — the surface composed two ways at once,
+with no operation able to say which. An id is minted once and a reorder never
+renumbers it, so ordering the sum on the id makes composition invariant under
+exactly the operation the stack promises is free.
+
 #### Three revisions, because one counter cannot say which of three things happened
 
 | | moved by | invalidates |
@@ -1899,6 +1925,14 @@ a memory limit's clothes. A host under pressure has four levers instead:
 `compact_sculpt_layers()` (the cheapest — it releases every all-zero block a
 gesture that undid itself left behind), merge, bake and delete.
 
+`compact_sculpt_layers()` is a memory lever and **not** a change to the picture,
+which is a stronger claim than its byte count falling: a lever that ate the pass
+would report the same saving. A mask is authoritative rather than rebuildable,
+so what compaction may release is all-zero coefficient blocks and nothing else.
+It is asserted on the evaluated surface bit for bit twice — straight after the
+compaction, and again after every slider has been dialled away and back so that
+every covered block has recomposed out of what survived.
+
 The stack is serialized **inside the multires stream**, at surface version 2. The
 bump is deliberate rather than incidental: `decode` ignores trailing bytes, so
 appending a layer chunk and leaving the version at 1 would let a predating binary
@@ -1906,6 +1940,27 @@ open a layered document, load the base detail only, and present a surface missin
 an artist's work with no signal at all. Version 1 still loads here, as what it
 was — a hierarchy with no layers. A layer's **kind** is written and an unknown
 one is **refused** rather than skipped, for the same reason one level down.
+
+**What the chunk may declare is bounded by the stream around it, and has to be.**
+The surface reader rebuilds the cage first, then requires a decoded stack's level
+count and every level size to be that hierarchy's — but that comparison happens
+*after* the layer decoder has returned, and both of those are numbers the layer
+decoder reserves from. So the chunk applies the same two ceilings itself
+(`kMaxLevels`, `kMaxLevelVertices`, held equal to the surface's by a
+`static_assert`), and a stack's per-block invalidation index is sized when it is
+first consulted rather than when a stream names a level. There is one path with
+no second opinion at all — a **structural undo record** carries a whole stack
+snapshot and is not required to name the surface it was taken against — and on
+that path the decoder's own refusals are the only ones there are.
+
+A layer's coefficients and mask must also share the **stack's blocking**, not
+merely declare a legal one. Block `b` naming the same 1024 vertices in a layer's
+field, in its mask and in the level's composed field is what makes a slider cost
+the layer's coverage; the invalidation path hands a field's block numbers to the
+stack's index without translating them, so a document pairing a 1024-blocked
+stack with a 4-blocked field would mark blocks the level does not have, drop
+them, and leave a surface composed from a stack nobody dialled. That is refused
+at the door.
 
 Runnable: [`examples/69_mesh_sculpt_layers.py`](../examples/69_mesh_sculpt_layers.py)
 — a wrinkle pass dialled 0 -> 50% -> 100% over a form that never changes, one

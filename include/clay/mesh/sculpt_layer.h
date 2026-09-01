@@ -172,6 +172,10 @@ class SparseWeightField {
     std::uint32_t vertex_count_ = 0;
     std::uint32_t block_size_ = DetailField::kDefaultBlockSize;
     // block -> slot, kNoBlock when the block is untouched and therefore 1.0.
+    // Same postcondition, and the same reason, as `DetailField::shrink_to_content`:
+    // `bytes()` reports capacity, so a compaction has to release it to be one.
+    void shrink_to_content();
+
     std::vector<std::uint32_t> block_slot_;
     // slot -> block, so a walk over stored blocks costs the stored ones. The
     // same pair `DetailField` keeps, and for the same reason.
@@ -458,7 +462,30 @@ class SculptLayerStack {
     static constexpr std::uint32_t kMaxLayers = 1u << 16;
     static constexpr std::uint32_t kMaxNameBytes = 1u << 16;
 
+    // THE SAME TWO CEILINGS THE STREAM AROUND THIS ONE ALREADY APPLIES, and
+    // they are here because the stack chunk is read BEFORE the hierarchy it
+    // belongs to can be consulted. `MultiresSurface::decode` does check that a
+    // decoded stack's levels are this hierarchy's — but only after this
+    // function has returned, which is far too late to matter: a level count and
+    // a per-level vertex count are numbers this decoder RESERVES FROM, so a
+    // stack chunk declaring three levels of four billion vertices reserved
+    // three gigabytes of block index before anyone could say it was nonsense.
+    //
+    // Duplicated rather than included, because `multires.h` includes THIS
+    // header and not the other way round; a `static_assert` there holds the two
+    // pairs equal, so the copy cannot drift without failing the build.
+    static constexpr std::uint32_t kMaxLevels = 12;
+    static constexpr std::uint32_t kMaxLevelVertices = DetailField::kMaxVertices;
+
    private:
+    // One level of `merge_down`, and the union of the two layers' coverages it
+    // walks. Both are indices rather than ids: `merge_down` has already
+    // resolved them and a second lookup could not fail differently.
+    void merge_level(std::size_t upper, std::size_t lower, std::uint32_t level, float upper_factor,
+                     float lower_factor);
+    void merge_blocks(std::size_t upper, std::size_t lower, std::uint32_t level,
+                      std::vector<std::uint32_t>* blocks) const;
+
     struct LevelDirty {
         std::vector<std::uint32_t> blocks;
         std::vector<char> mark;

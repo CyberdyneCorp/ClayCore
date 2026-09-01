@@ -7605,13 +7605,25 @@ NB_MODULE(pyclay, m) {
         "transaction, so a mirrored stroke is one layer, one record, and the\n"
         "union of the two sides' coverage.")
         .def("__enter__",
-             [](PySculptLayerStroke& s) {
+             // Returns SELF, the way PyVoxelGrab's does and the way the
+             // statement expects — not a copy of it. Handing back a copy is
+             // wrong twice over. `with surface.sculpt_layer_stroke() as st:`
+             // would bind a different object from the one __exit__ closes, so
+             // `st is cm` is False and any state a caller reads off the name it
+             // was given is read off a second wrapper; and, worse, the copy
+             // carries none of the keep_alive the factory attached, so a handle
+             // that outlives the statement holds LayeredMultiresSculptor's bare
+             // `MultiresSurface&` after the surface it was made from has been
+             // collected. The shared_ptr keeps the sculptor alive and nothing
+             // keeps the surface alive.
+             [](nb::object self) {
+                 PySculptLayerStroke& s = nb::cast<PySculptLayerStroke&>(self);
                  if (!s.sculptor->begin())
                      throw std::invalid_argument(
                          "cannot begin a layered stroke: one is already open, the target layer "
                          "is locked, or write_domain='detail' was asked for with no active "
                          "layer");
-                 return s;
+                 return self;
              })
         .def("__exit__",
              // Variadic: the three arguments are None on a clean exit, and a

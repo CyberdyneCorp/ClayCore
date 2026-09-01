@@ -1167,7 +1167,11 @@ A cap that silently stopped recording would leave the pass on the surface and
 un-dialable, which is a correctness bug wearing a memory limit's clothes. The
 levers are `compact_sculpt_layers()` — the cheapest, and the one to reach for
 first, because it releases every all-zero block a gesture that undid itself left
-behind — then merge, bake and delete. See
+behind — then merge, bake and delete. Only the first is free of a decision: a
+compaction is asserted to leave the **evaluated surface bit for bit**, both
+immediately and after every covered block has been recomposed, so a host under
+pressure may run it without asking the artist. Merge, bake and delete each
+change what is addressable afterwards. See
 [07 §8b](07-brushes-and-features.md#memory-is-reported-and-never-capped).
 
 **Instance layers are counted once**, document-wide, and in full per layer — ten

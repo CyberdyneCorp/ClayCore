@@ -30,6 +30,10 @@
       — design.md D3: `SculptLayerKind : uint16_t`, `Sampled = 0` shipping,
       `Procedural = 1` reserved and REFUSED by the decoder, each layer payload
       length-prefixed so a later format can choose to skip deliberately
+      — AND NOW TESTED, which it was not: the whole enforcement of this decision
+      was one comparison in `decode_layer` that nothing exercised.
+      `test_mesh_sculpt_layer_io.cpp` builds a stream carrying kind 1 and a kind
+      no version of this format has named, and refuses both
 - [x] 1.4 DECIDE whether a colour layer stack is in scope. Recommendation: not
       here — mesh paint and smear write vertex colours and a paint stack is the
       same idea under different arithmetic
@@ -49,6 +53,13 @@
       what a host, a serialized document and the C ABI hold
       — ids are minted from a serialized counter, `index_of` is a lookup, and
       `move_to`/`remove` never renumber anything a host holds
+      — the decoder's side of the same claim is now gated: two layers answering
+      to one id, the reserved id nothing may hold, and an id at or above the
+      serialized counter are each refused, and a stack that came off a stream
+      still mints above everything it carries. The counter check is the one that
+      matters from the other direction — a stream whose counter has been rewound
+      below an id it carries would mint that id again on the next `add`, and the
+      document would hold two layers with one handle without a malformed byte
 - [x] 2.3 Stack operations: add, remove, move, merge down, rename, set
       strength, set visible, set lock, set active
       — all nine on `SculptLayerStack`, each forwarded through `MultiresSurface`
@@ -74,6 +85,13 @@
       contributes
       — `mesh::SparseWeightField`, identity 1.0, same blocking and same block
       index as `DetailField`; the brush gate stays `field::MaskGate`
+      — the mask's own byte form is now gated on its own terms rather than only
+      through a layer: a round trip that asserts the identity survives outside
+      every stored block AND on the tail of one, plus its six refusals (foreign
+      magic, unwritten version, a blocking this reader cannot address, a block
+      index past the level, blocks that are not ascending, and more blocks than
+      the buffer could hold). THE SHARED BLOCKING IS NOW ENFORCED rather than
+      assumed — see 7.5
 - [x] 2.8 Byte accounting per layer and per stack, and coverage per layer, so a
       strength change can dirty coverage rather than the model
       — `MultiresMemory::sculpt_layers` (authoritative) and `::composed`
@@ -88,6 +106,43 @@
       — composition visits a block's layers once and adds; `move_to` invalidates
       no block. `test_mesh_sculpt_layers` swaps two overlapping layers and
       compares the evaluated positions BIT for bit
+      — A REAL BUG, FOUND HERE BY THE ONE THING THAT COULD FIND IT: asking what
+      the existing case would do if the claim stopped holding. It would do
+      nothing, for two independent reasons. `move_to` invalidates NO block, on
+      purpose, so reading the surface straight after a reorder reads the
+      composed cache back unchanged whatever composition does — the comparison
+      was the cache against itself. And two layers over a ZERO base sum as
+      `(0 + x) + y` against `(0 + y) + x`, which is one IEEE addition and
+      commutes exactly. Order can only bite from the third term on, or from the
+      second over a non-zero base, because float addition does not ASSOCIATE.
+      A randomised probe over 300 five-layer stacks (reorder, then dial a slider
+      away and back so the covered blocks compose again) found 158 of them moved
+      the surface, worst delta 1.49e-8. That is ULP-scale and still a bug: with
+      `move_to` invalidating nothing, the blocks a later stroke happened to
+      recompose carried the new order while the blocks still cached carried the
+      old, so ONE reorder left the surface composed two ways at once and no
+      operation could say which.
+      FIXED in `gather_contributors` by summing a block's contributors in
+      LAYER-ID order rather than in stack order — an id is minted once and a
+      reorder never renumbers, so composition is invariant under exactly the
+      operation the requirement promises is free. The rejected alternative was
+      to let `move_to` dirty the moved layer's coverage and accept the shift,
+      which charges a drag in a list the union of two layers' blocks and still
+      moves the surface. The same probe reports 0 of 300 after the fix.
+      REGRESSED by `a reorder still moves no vertex once the blocks it holds
+      recompose`: three layers of 0.03 at strengths 0.4, 0.4 and 0.7 over a base
+      of 0.05 — a sum that reads 0.0949999988 one way and 0.0950000063 the other
+      — reordered and then recomposed, with the move BACK as the control so the
+      case cannot pass by the reorder having been undone. PROVEN: deleting the
+      sort compiles, and the first CHECK then fails while the control still
+      passes. Mirrored through the binding by
+      `test_a_reorder_moves_no_vertex_even_after_the_blocks_recompose`, and the
+      spec delta gained the scenario and the sentence that constrains the
+      summation order. THE PYCLAY MIRROR WAS NOT SEPARATELY REVERT-PROVEN, and
+      the record should not imply four proofs where there are three: it asserts
+      the same property as the C++ case that WAS proven, one binding layer up,
+      and proving it again would have cost a second pyclay rebuild for no new
+      information
 - [x] 3.2 A stroke on a layer at strength 0.5 records its FULL contribution.
       Strength is composition, not a scale on the pen
       — `absorb_layered_detail` stores `ΔE = frame⁻¹(P_written) − E_before`;
@@ -99,6 +154,22 @@
       — `SculptLayerStack::merge_down` sets the target to the identity it needs;
       `bake_sculpt_layer_to_base` is the same statement with the base as target.
       Parity tested at strengths 1.0, 0.37 and 0.0
+      — AND NOW WITH A MASK ON, which no parity case had. The per-layer mask
+      (2.7) is a SECOND multiplier in `E = B + Σ sᵢ·mᵢ(v)·Lᵢ`, so the identity a
+      merge has to construct is the mask's as well as the slider's: the weight
+      must be folded into the coefficients written and the mask CLEARED, because
+      one left standing applies itself twice to a coefficient that already
+      carries it. Every merge and bake case ran with the identity mask, so that
+      arithmetic was written and never asked a question. Both hold — this is a
+      missing gate rather than a bug — and are now gated by `merge folds the
+      per-layer mask in, once, and leaves the identity behind` (two masks that
+      disagree and vary along the run, at the same three strengths, plus the
+      target's mask asserted back at 1.0) and `bake carries the mask into the
+      base, and the surface stays where it was` (the base has no mask to carry,
+      so what lands there must be the MASKED, SCALED coefficient). PROVEN
+      separately, one revert per property: dropping the mask from `merge_level`
+      compiles and fails 60 assertions; dropping it from `bake_layer_level`
+      compiles and fails 21
 - [x] 3.4 Removing a layer re-evaluates its coverage only; it does not replay
       strokes and does not touch other layers
       — `remove` notes the removed layer's coverage and nothing else; tested
@@ -167,6 +238,12 @@
       SHALL NOT invalidate geometry
       — per-level dirty block sets on the stack; `rename` and `set_active` bump
       only `metadata_revision` and mark nothing. Tested
+      — the C++ case asserting it COULD NOT FAIL until this stage: it compared
+      `sculpt_layer_composition_revision()` to a second read of itself. It now
+      reads all three revisions before the rename and asserts metadata rose
+      while composition and content did not — proven by making `rename` bump the
+      composition revision, which compiles and fails the case at 3 == 2. The
+      pyclay case beside it was always correct, which is why nothing noticed
 - [x] 5.3 Separate revisions for metadata, composition and content, so the
       three kinds of change invalidate what they actually affect
       — `metadata_revision`, `composition_revision`, `content_revision`, with
@@ -176,11 +253,26 @@
       large surface costs its coverage, not the surface
       — tested: a layer inside one block of a five-block level recomposes exactly
       one block on a strength change
+      — RE-MEASURED at 31 repetitions (P50 / P95 / P99 / max, load average 4.56
+      before and 2.61 after, so the ratio is the reading):
+        strength change, LOCAL, 1 -> 128 layers
+          752.3 / 754.7 / 811.5 / 811.5 us  ->  1204.2 / 1212.9 / 1264.2 /
+          1264.2 us   ratio 1.60x, and `blocks_recomposed` is 200 at BOTH ends,
+          which is the gate. The clock rises because `layer_blocks_visited` goes
+          200 -> 25600 in a shape where every layer covers the same footprint
 - [x] 5.5 THE GATE: a stamp on the top of a deep stack does not sum every layer
       beneath it over unrelated geometry. Prefix checkpoints if the measurement
       requires them; the cache keys SHALL be designed so they are possible
       — tested: sixteen layers over two disjoint blocks, a write into one visits
       the eight layers that reach it and none of the others
+      — RE-MEASURED at 31 repetitions (P50 / P95 / P99 / max):
+        stamp on a LOCAL stack, 1 -> 128 layers
+          363.3 / 369.2 / 388.2 / 388.2 us  ->  376.3 / 432.0 / 594.5 /
+          594.5 us   ratio 1.04x, `layer_blocks_visited` 2898 at both ends
+        stamp on an OVERLAPPING stack, 1 -> 128
+          439.1 / 550.2 / 683.1 us  ->  536.8 / 539.2 / 604.9 us   ratio 1.22x,
+          `layer_blocks_visited` 2898 -> 14109, so the cost follows the layers
+          that actually cover what the stamp touched and nothing else
 - [x] 5.6 Benchmarks over 1, 4, 16, 64 and 128 layers with local, overlapping
       and dense coverage
       — `BM_SculptLayerCompose*`, `BM_SculptLayerStrengthChange*` and
@@ -210,6 +302,38 @@
           compose 16.80 -> 18.02 ms; strength 5.80 -> 7.03 ms; stamp 1.66 ->
           2.16 ms — reported rather than optimised, because a host should be
           told this shape is expensive
+      — RE-MEASURED at 31 repetitions after the composition order changed, and
+      PRICED against the same binary with the sort removed, because a sort on
+      the per-block path is the kind of change that should be paid for rather
+      than assumed (load 3.8 before and 2.9 after with the sort, 3.8 and 3.4
+      without, so the two sides are comparable; P50 / P95 / P99 / max):
+
+        stamp on a LOCAL stack, 1 -> 128 layers
+          362.9 / 369.4 / 417.4 / 437.6 us  ->  375.9 / 381.5 / 381.8 /
+          381.9 us   ratio 1.04x, `layer_blocks_visited` 2898 at both ends —
+          task 5.5's gate, unmoved
+        stamp on an OVERLAPPING stack, 1 -> 128
+          364.8 / 374.0 / 404.4 / 415.8 us  ->  538.8 / 612.3 / 651.5 /
+          661.4 us   ratio 1.48x, `layer_blocks_visited` 2898 -> 14109
+        strength change, LOCAL, 1 -> 128
+          751.6 / 794.3 / 810.2 / 814.5 us  ->  1204.9 / 1216.4 / 1222.9 /
+          1225.3 us  ratio 1.60x, `blocks_recomposed` 200 at BOTH ends —
+          task 5.4's gate, unmoved
+        cold whole-level compose, LOCAL, 1 -> 128
+          15.67 / 16.04 / 16.48 / 16.57 ms  ->  16.15 / 16.56 / 17.13 /
+          17.37 ms   ratio 1.03x
+        dense, every layer over the whole level, 1 -> 16
+          compose 19.30 -> 18.65 ms; strength 5.96 -> 7.30 ms; stamp 1.76 ->
+          2.32 ms
+
+      WHAT THE SORT COSTS, P50 with it against P50 without, same box and same
+      session: 0.97x to 1.01x on every compose and stamp row, and 0.87x to
+      0.90x on the deep LOCAL strength change at 16, 64 and 128 layers — the
+      shape with the most contributors per block. Free within the noise
+      everywhere and measurably faster there; the cause is not attributed, only
+      measured. The gathered list is already in id order whenever nothing has
+      been moved, so the sort costs a scan over the layers that reach ONE
+      block.
 - [x] 5.7 Memory never silently stops recording. Report the budget and let a
       host merge, bake, delete or compact — a cap that silently stopped
       recording would leave the pass on the surface and un-dialable, which is a
@@ -217,6 +341,19 @@
       — nothing is capped anywhere; `MultiresMemory` reports layer content apart
       from the composed cache and the comment says why a cap would be a
       correctness bug
+      — AND THE LEVER IS NOW GATED ON THE PICTURE, not only on the bytes. The
+      one case for `compact_sculpt_layers` asserted that the byte count goes
+      down, which is also what a lever that ATE THE PASS would do. `compacting
+      is a memory lever, not a change to the picture` builds two layers over a
+      five-block level with a mask that is real over part of it and identity
+      over the rest, writes a whole block back to zero so there is something to
+      release, and asserts the evaluated surface bit for bit TWICE: straight
+      after compaction, where the composed cache would answer for it whatever
+      compaction did, and again after both sliders are dialled away and back so
+      every covered block composes out of what survived. It holds — a missing
+      gate rather than a bug. PROVEN: making `compact` treat the mask as
+      rebuildable and drop it compiles, and the case then fails on the second
+      reading
 
 ## 6. Detail-aware verbs
 
@@ -263,13 +400,79 @@
       by arithmetic BEFORE the array is reserved. A record naming a layer the
       stack does not hold, or a vertex past the level, changes NOTHING rather
       than half of something
+      — ONE CLASS OF RECORD WAS NOT COVERED AND IS THE ONE THAT MATTERS MOST.
+      A STRUCTURAL record (add, remove, move, merge, bake) carries a whole stack
+      on each side, and `apply_structural_property` decodes those bytes and
+      INSTALLS what comes back. The document path has a second opinion available
+      — `MultiresSurface::decode` checks a decoded stack against the hierarchy in
+      the same stream — and this path has none, because a journal record is not
+      required to name a surface it was taken against. So the stack decoder's own
+      ceilings are the only refusal there is, and there were none: see 7.5.
+      `a structural record's stack snapshot is the last thing that can check it`
+      now pokes the snapshot's level table on both sides and checks the stack is
+      untouched afterwards, with the untouched record replayed both ways as the
+      control. PROVEN: removing the ceilings compiles, and the record then
+      applies — `s.sculpt_layers().size() == layers_before` fails, so the hostile
+      snapshot really did mutate the stack rather than merely being accepted
 - [x] 7.5 Versioned serialization of the stack — id, name, kind, visible,
       locked, strength, per-level blocks, masks — inside the multires format
       rather than in the mesh stream
       — `kSurfaceVersion = 2`, the stack chunk inside the multires stream, and
       version 1 still accepted as a hierarchy with no layers
+      — THREE REAL BUGS IN THIS DECODER, found by writing the refusal tests the
+      task did not have and fixed here, each with its own regression test proven
+      against a COMPILING revert. `tests/unit/test_mesh_sculpt_layer_io.cpp` is
+      the new file; it builds hostile streams from parts rather than poking
+      bytes, and asserts a well-formed one is byte-identical to
+      `SculptLayerStack::encode`'s output so a format change fails loudly rather
+      than poking a neighbouring field.
+
+        1. THE CHUNK APPLIED NEITHER CEILING the stream around it applies to the
+           same two numbers. `MultiresSurface::decode` bounds its level count at
+           `kMaxLevels` and each level at `kMaxLevelVertices` before it builds
+           anything; the stack chunk inside it bounded neither, and both are
+           numbers it reserves from. Fixed by spelling the two constants on
+           `SculptLayerStack` with a `static_assert` in `multires.h` holding them
+           equal to `MultiresSurface`'s, so the copy cannot drift.
+        2. THE PER-LEVEL DIRTY INDEX WAS RESERVED FROM A DECLARED LEVEL SIZE.
+           With (1) that made a FORTY-EIGHT-BYTE chunk reserve three gigabytes;
+           with (1) fixed, the largest LEGAL chunk still reserved three. The mark
+           array is read only while `all` is false, and `all` is the resting
+           state of a decoded stack, so it is now sized in `clear_dirty` where it
+           starts being consulted. MEASURED in `test_sculpt_allocation.cpp`, the
+           one translation unit in this tree that can see an allocation: an
+           84-byte chunk naming twelve levels of a billion vertices at the finest
+           blocking allocates 720 bytes. Reverting the fix compiles and the same
+           gate reports 3,221,226,192. Measured in BYTES and not allocations
+           deliberately — reserving three gigabytes is ONE allocation.
+        3. A LAYER'S FIELDS DID NOT HAVE TO SHARE THE STACK'S BLOCKING, which the
+           serializer's own file header claims is the thing every sparse
+           container in this change agrees on. This one is not a memory bug, it
+           is a silent correctness bug: `note_layer_coverage` hands a FIELD's
+           block numbers straight to the STACK's dirty index without translating
+           them, so a coefficient at vertex 5000 is block 4 under the stack's
+           1024 and block 1250 under a field's 4 — marking 1250 falls off the end
+           of a five-entry index, `note_block` drops it, and the strength slider
+           then invalidates nothing and leaves the surface composed from a stack
+           nobody dialled. Refused now, on both the coefficients and the mask.
+
+      Also gated here and previously untested: the kind (1.3), a strength outside
+      [0,1] or NaN, the id invariants (2.2), an active id the stream does not
+      carry, a declared name past `kMaxNameBytes` with the name at the ceiling so
+      the buffer really carries the bytes, a layer declaring a different level
+      count, and a field sized to another level. Every hostile case has a
+      POSITIVE CONTROL beside it — which is how this file found that clearing the
+      layers out of a stream leaves the active id dangling
 - [x] 7.6 A layer id survives a save, a load and a reorder
       — tested: save, load and a reorder before the save; ids and names survive
+      — and composition is now asserted to be ROUTE-INDEPENDENT, which is the
+      property a block cache loses without anyone noticing: the same ten
+      operations run WARM (evaluated after each one, so every one had to
+      invalidate a populated cache) and COLD (evaluated once at the end) must
+      agree bit for bit at every level, and a save-and-load is a third route to
+      the same bits. The reloaded surface is then dialled, because a decoded
+      stack whose dirty index was never sized is exactly the shape that would
+      compose once and go deaf
 
 ## 8. Bindings and gates
 
@@ -293,7 +496,17 @@
       three, and `clay_multires_memory` grown by `sculpt_layers` and `composed`.
       Changed blocks read back through the EXISTING `clay_multires_dirty_blocks`
       and `clay_multires_copy_block`: a layered write marks the same base
-      patches, so a second transport would have been a second answer
+      patches, so a second transport would have been a second answer.
+      THAT SENTENCE IS NOW A TEST rather than a note. It was the one claim in
+      this task nothing asserted, and it is the claim the whole decision rests
+      on — if a layered stamp marked different patches than a base one, a host
+      repainting from `dirty_patches` would show stale geometry and the missing
+      second transport would be the reason.
+      `test_a_layered_write_marks_the_same_patches_a_base_write_does` stamps
+      the same dab twice, once with `write_domain='geometry'` and once with
+      `'detail'`, and compares the sorted patch lists; the layer's coverage is
+      checked afterwards so the two cannot agree for the uninteresting reason
+      that the detail stamp went to the base
 - [x] 8.3 pyclay, with a context manager for a stroke transaction — the voxel
       sculpt layer's `with grid.sculpt_layer(name):` is the precedent, and it
       is the only form that cannot leave a surface recording when a stroke loop
@@ -303,13 +516,35 @@
       `surface.sculpt_layer_stroke()` returns: `__enter__` begins, a clean exit
       commits and a RAISING BLOCK CANCELS. Height and vector maps are numpy
       arrays borrowed for the call, `(H, W)` and `(3, H, W)` — planar, because a
-      plane is the buffer the alpha sampler already reads
+      plane is the buffer the alpha sampler already reads.
+      ONE BUG FOUND AND FIXED at this boundary, which is the reason the stage
+      re-reads its own work: `__enter__` returned the transaction BY VALUE, so
+      nanobind built a second wrapper and `with surface.sculpt_layer_stroke()
+      as stroke:` bound a different object from the one `__exit__` closed.
+      Visible as `stroke is not handle`; the part that matters is invisible.
+      `sculpt_layer_stroke()` attaches a `keep_alive` to the surface because
+      `LayeredMultiresSculptor` holds a bare `MultiresSurface&` — the
+      `shared_ptr` keeps the SCULPTOR alive, not the surface under it — and the
+      copy carried none of it, so a handle that outlived the statement stamped
+      into a collected surface without raising. Now `[](nb::object self)`
+      returning `self`, which is the shape `PyVoxelGrab.__enter__` already had.
+      Regressed by `test_entering_the_stroke_hands_back_the_object_that_holds_
+      the_surface`, proven by reverting the fix: the revert compiles and the
+      test fails on it
 - [x] 8.4 `tools/check_binding_parity.py` green
       — 622 capabilities against the IMPORTED module (`--pyclay`), 29 exempt,
       no new exemption: every sculpt-layer capability pyclay exposes resolves
       onto a C entry point. The three string-valued axes (write domain, smooth
       mode, stamp mode) are registered in `STRING_CHOICES`, so a fourth
-      smoothing mode invented in Python has to exist in `clay.h` too
+      smoothing mode invented in Python has to exist in `clay.h` too.
+      Re-run in BOTH modes, which is the reading the gate's own docstring asks
+      for: parsed and imported agree at 622 / 29 exempt, so the nanobind DSL
+      parser is not drifting from the module it stands in for. The four
+      entry points the gate reports C-only are each reached from Python by a
+      different name and none is a gap — `_stroke_begin` is `__enter__`,
+      `_stroke_destroy` is the refcount, `_set_write_domain` is
+      `sculpt_layer_stroke(write_domain=...)`, and `set_active_sculpt_layer`
+      is the `active_sculpt_layer` property's setter
 - [ ] 8.5 Swift smoke on macOS and in the simulator
       NOT DONE — NEEDS macOS. There is no `swift` or `swiftc` on this Linux box,
       so the file below has never been type-checked, let alone run, and neither
@@ -334,7 +569,12 @@
       simulator one under `simctl spawn` — at release time, so what this task
       asks for has still not happened. To finish: `./tools/check_swift_smoke.sh
       macos` and `./tools/check_swift_smoke.sh sim` on a machine with Xcode and
-      a booted simulator, which is the release workflow's job and not a PR's
+      a booted simulator, which is the release workflow's job and not a PR's.
+      RE-CONFIRMED at the end of the branch rather than carried forward on
+      trust: `which swift swiftc` finds neither, and
+      `./tools/check_swift_smoke.sh typecheck` reports "skipped (Apple platforms
+      only)" on this box. PR #417 has since merged, so the type-check result
+      above is on `main` and covers the section as it stands
 - [x] 8.6 THE MILESTONE, as a numbered example that renders and asserts: a
       wrinkle pass dialled 0 → 50% → 100% over a form that never changes, plus
       one layer removed with the others untouched
@@ -361,6 +601,42 @@
       `cuda`/`opencl`/`vulkan` want hardware this box does not have.
       `check_layering.py`, `check_c_abi.py`, `check_binding_parity.py`,
       `check_gallery.py` and `check_swift_package.py` are all OK.
+      — RE-RUN END TO END after this stage's fix and three new cases, on a box
+      three worktrees and unrelated jobs were sharing, so the load average is
+      recorded either side of every run rather than the wall clock being taken
+      at face value:
+        cpu-only    4/4 in 268.7 s (load 14.8 before, 18.1 after). The same
+                    suite ran 142.5 s earlier in the stage at load 3.7/4.9, so
+                    the 1.9x is the box and not the change. 2078 doctest cases,
+                    14.87 M assertions, 0 failed. Every new translation unit was
+                    force-recompiled: 0 warnings under `-Werror`
+        asan-ubsan  4/4 in 3353.5 s, ZERO AddressSanitizer, LeakSanitizer or
+                    UBSan reports (load 4.3 before, 9.6 after). That binary
+                    predates the last three cases, so asan was rebuilt and the
+                    165-case sculpt-layer, C-ABI and allocation-gate family
+                    re-run on it — 191,170 assertions, 0 reports
+        tsan        4/4 in 1169.1 s under `setarch -R`, ZERO ThreadSanitizer
+                    warnings (load 9.7 before, 15.3 after); the same 165-case
+                    family re-run on a rebuilt tsan binary, 0 warnings.
+                    Composition holds no thread of its own — the gate is that
+                    the surrounding evaluation still does not race with it
+        pyclay      596 passed, 20 skipped, 0 failed under
+                    `LD_PRELOAD=/lib/x86_64-linux-gnu/libstdc++.so.6`;
+                    `examples/69_mesh_sculpt_layers.py` runs to completion with
+                    every `SystemExit` claim holding and its tracked outputs
+                    byte-identical, so `check_gallery` stays green
+        gates       layering OK; c-abi OK in BOTH modes (hygiene-only, and the
+                    ctypes FFI against `build/cpu-only/libclay_shared.so`);
+                    binding parity OK in BOTH modes at 622 capabilities / 29
+                    exempt, parsed and `--pyclay --require-import`; gallery OK
+                    (251 tracked outputs); swift-package OK (textual)
+        release     10 PASS / 5 FAIL, the same five and for the same two
+                    reasons: `tests`, `bindings`, `abi` and `wheel` are one root
+                    cause, the anaconda GLIBCXX_3.4.31 mismatch — `tests` fails
+                    ONLY on ctest job 3, `pyclay_pytest`, and that suite passes
+                    596/0 under `LD_PRELOAD` — and `device` is the environment's
+                    hardware gate. `version` PASSES at cmake=0.76.0 abi=0.76.0
+                    wheel=0.76.0
       `release_check.py` is 13 PASS / 2 FAIL, and NEITHER failure is this
       change's:
         * `device` needs the hardware gate — "engine changed since the gate ran
@@ -385,6 +661,95 @@
       `check_c_abi`, `check_binding_parity` (622 capabilities, 29 exempt,
       against the IMPORTED module), `check_gallery` (251 tracked outputs) and
       `check_swift_package` (textual) are all OK
+      RE-RUN ONE LAST TIME, on the committed tree, with the documentation pass
+      above in it. The box was carrying two sibling worktrees and unrelated
+      jobs, so the load average is recorded either side and the wall clocks
+      below are the box rather than the change:
+        cpu-only    4/4 passed, 0 failed, 2903.3 s, load 2.25 before and 99.8
+                    after — the same suite took 268.7 s earlier in the branch at
+                    load 15 and 142.5 s at load 4, so the 11x is the box.
+                    `cmake --build --preset cpu-only -j 8` exits 0 with a zero
+                    warning count under `-Werror`, and had nothing to rebuild —
+                    no source changed in this stage, so what it re-proves is the
+                    tree, not the compiler; the force-recompile of every new
+                    translation unit is the previous stage's record and is not
+                    re-claimed here. 2078 doctest cases registered;
+                    the layer / stack / multires / allocation-gate family is
+                    218 of them, 117,040 assertions, 0 failed
+        pyclay      596 passed, 20 skipped, 0 failed in 51.6 s under
+                    `LD_PRELOAD=/lib/x86_64-linux-gnu/libstdc++.so.6`
+        example     `examples/69_mesh_sculpt_layers.py` exit 0, every
+                    `SystemExit` claim held, and `git status` clean afterwards —
+                    the tracked PNG and OBJ are byte-identical, so the gallery
+                    gate needed no regeneration
+        gates       `check_layering` OK; `check_c_abi` OK in both modes
+                    (hygiene-only, and the ctypes FFI against
+                    `build/cpu-only/libclay_shared.so`, which needs the same
+                    `LD_PRELOAD` for the same reason as the wheel below);
+                    `check_binding_parity` OK in both modes at 622 capabilities
+                    and 29 exempt, parsed and against the imported module;
+                    `check_gallery` OK at 251 tracked outputs;
+                    `check_swift_package` OK (textual);
+                    `openspec validate add-mesh-sculpt-layers --strict` valid
+        release     `release_check.py` 10 PASS / 5 FAIL. `version` PASSES at
+                    cmake=0.76.0 abi=0.76.0 wheel=0.76.0, and `benchmarks` came
+                    back `bench-gate: OK` on this run — the row that failed
+                    three different ways earlier in the branch without a line of
+                    benchmark code changing, which is what "not reproducible on
+                    this box" means. The five failures are the environment's:
+                      - `tests`, `bindings`, `abi` and `wheel` are ONE root
+                        cause, and it is the interpreter rather than the branch.
+                        `/home/leonardo/anaconda3/lib/libstdc++.so.6` tops out
+                        at GLIBCXX_3.4.29 while the system GCC that builds
+                        `libclay_shared.so` emits GLIBCXX_3.4.31, which the
+                        system `/lib/x86_64-linux-gnu/libstdc++.so.6` has and
+                        anaconda's does not — checked directly rather than
+                        inferred from the message. `tests` fails on ctest job 3,
+                        `pyclay_pytest`, and nothing else (`LastTestsFailed.log`
+                        names exactly that), and that suite passes 596/0 under
+                        `LD_PRELOAD`
+                      - `device` is the hardware gate: "engine changed since the
+                        gate ran at 39c244209"
+        NOT re-run in this stage, and deliberately: `asan-ubsan` and `tsan`. The
+        previous stage ran both whole and clean on this exact source tree, and
+        this stage changed four Markdown files and nothing a sanitizer can see.
+        Re-running them would have cost two hours of a box already at load 100
+        to re-prove an unchanged binary
+      AND ONCE MORE ON THE MERGE, because `main` moved twice while this branch
+      was being read: PR #417 landed the change itself, and
+      `add-shared-brush-runtime` (#419) landed after it and touched the same
+      file this branch's newest allocation gate lives in. `main` was merged in
+      rather than left to conflict — a conflicted PR never starts CI here. ONE
+      conflict, in `tests/unit/test_sculpt_allocation.cpp`, where both branches
+      appended a case to the end of the file; both are kept unchanged, since
+      they gate different things and share no fixture. Everything below was
+      re-run on the MERGED tree, not carried over:
+        build       270 translation units, exit 0. Three `-Warray-bounds`
+                    warnings from `/usr/include/c++/13/bits/stl_algobase.h`,
+                    inlined into `field::relax`, `field::flatten` and
+                    `field::move_topological` — a GCC 13 false positive in
+                    files this branch does not touch at all (`git diff
+                    origin/main...HEAD -- src/field/` is empty), which is why
+                    the earlier incremental builds reported none: those
+                    translation units were never rebuilt
+        cpu-only    4/4 passed, 0 failed, 138.3 s at load 4.5. 2179 doctest
+                    cases now register (2078 before the merge); the layer,
+                    stack, multires and allocation-gate family is 255 of them
+                    with 425,546 assertions and no failures
+        pyclay      617 passed, 20 skipped, 0 failed (596 before the merge),
+                    against a pyclay rebuilt on the merged tree
+        example     `examples/69_mesh_sculpt_layers.py` exit 0 again, tracked
+                    outputs byte-identical
+        gates       layering, c-abi (both modes), binding parity (both modes,
+                    now 631 capabilities and 32 exempt — the merge brought
+                    #419's), gallery, swift-package and `openspec validate
+                    --strict` all OK
+        release     10 PASS / 5 FAIL, the same five for the same two reasons.
+                    `version` PASSES at cmake=0.77.0 abi=0.77.0 wheel=0.77.0 —
+                    this branch's own 0.76.0 went in with #417 and #419 took 77,
+                    so the merge carries no version edit of its own, which is
+                    right: what is left on this branch adds no ABI
+
 - [x] 8.8 Docs: `docs/07-brushes-and-features.md` gains the stack and the
       distinction from `MeshBrush::Layer`; the README's sculpt-layer claim is
       widened from voxels to the representations that actually have them
@@ -424,3 +789,33 @@
           the voxel half; the morph-target gap re-rated, since a base
           deformation layer at level 0 is its storage; and `add-field-stamps`
           told that the tangent-space stamp vocabulary now exists to be read
+      RE-READ AFTER THE LAST THREE FIXES, because a fix that lands after the
+      documentation pass leaves the documentation describing the version that
+      was wrong. Four gaps, all of them introduced by this branch's own last
+      stage and none of them caught by a gate, since none of these documents
+      has one:
+        * `docs/09` carried the second 31-repetition table and stopped there,
+          so the sort the id-order composition put on the per-block path was
+          undocumented. It now carries the third run (P50 / P95 / P99 / max at
+          load 3.76 -> 2.86) and, more usefully, WHAT THE SORT COSTS measured
+          against the same binary with it removed: 0.97x-1.01x on every compose
+          and stamp row and 0.87x-0.90x on the deep local strength change. Both
+          counters land on their integers for the third time across runs whose
+          clocks moved by up to 2x, which is the argument for reading the
+          counter rather than the clock
+        * `docs/07` said merge and bake are defined by visual parity and left
+          the reader to assume that meant the SLIDER. It now says parity is the
+          MASK's too — the weight is folded into the coefficients and the mask
+          cleared, because one left standing applies itself twice — which is
+          the arithmetic 3.3's new cases gate
+        * `docs/07` and `docs/05` both described `compact_sculpt_layers()` by
+          what it releases, which is also how a lever that ate the pass would
+          be described. Both now say it cannot change the picture and that the
+          claim is asserted on the evaluated surface bit for bit; `docs/05`
+          separates it from merge, bake and delete on exactly that ground — a
+          host may run a compaction under pressure without asking the artist
+        * `openspec/ROADMAP.md` row 4 said reordering is organisation and not
+          geometry, which was the claim the branch found untrue in the last
+          bit. The row now says the property is ENFORCED and how: a reorder
+          invalidates no block, float addition does not associate, so the sum
+          is taken in layer-id order

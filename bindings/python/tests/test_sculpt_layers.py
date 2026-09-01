@@ -83,6 +83,38 @@ def test_the_stack_is_addressed_by_id_and_an_id_survives_a_reorder():
     assert s.sculpt_layer_info(lower)["strength"] == pytest.approx(1.0)
 
 
+def test_a_reorder_moves_no_vertex_even_after_the_blocks_recompose():
+    # THE HALF OF "additive layers commute" THAT A REORDER ALONE CANNOT SHOW.
+    # `move_sculpt_layer` invalidates no block by design, so reading the surface
+    # straight after it reads the composed cache back unchanged whatever
+    # composition does. The claim only becomes falsifiable once the blocks are
+    # driven through composition AGAIN, three layers deep, on a base detail that
+    # is already there — float addition commutes but does not associate, so a
+    # stack summed in list order would land on different bits from this point on.
+    s = surface()
+    for v in range(30, 50):
+        s.set_detail(2, v, 0.0, 0.0, 0.05)
+    a = s.add_sculpt_layer("a")
+    b = s.add_sculpt_layer("b")
+    c = s.add_sculpt_layer("c")
+    for v in range(30, 50):
+        for layer in (a, b, c):
+            s.set_sculpt_layer_detail(layer, 2, v, 0.0, 0.0, 0.03)
+    s.set_sculpt_layer_strength(a, 0.4)
+    s.set_sculpt_layer_strength(b, 0.4)
+    s.set_sculpt_layer_strength(c, 0.7)
+    before = positions(s)
+
+    s.move_sculpt_layer(c, 0)
+    # A slider away and back is the cheapest way to make every block this layer
+    # covers compose a second time; it ends where it started, so the reorder is
+    # the only thing that differs between the two readings.
+    s.set_sculpt_layer_strength(b, 0.55)
+    s.set_sculpt_layer_strength(b, 0.4)
+    assert np.array_equal(before, positions(s))
+    assert s.sculpt_layer_ids == [c, a, b]
+
+
 def test_strength_is_composition_and_replays_no_stroke():
     s = surface()
     flat = positions(s)
@@ -193,6 +225,36 @@ def test_a_clean_block_commits_and_a_raising_block_cancels():
     # ...and the composition is not left held, which is the failure the context
     # manager exists to make impossible.
     s.set_sculpt_layer_strength(layer, 0.5)
+
+
+
+def test_entering_the_stroke_hands_back_the_object_that_holds_the_surface():
+    """REGRESSION: `__enter__` returned a COPY, so `as` bound a second wrapper.
+
+    Two failures in one, and only the first is visible from Python. `stroke is
+    handle` was False, so state read off the name the `with` gave you came from
+    a different object than the one `__exit__` closed.
+
+    The second is the reason this is a test and not a style note.
+    surface.sculpt_layer_stroke() attaches a keep_alive to the surface, because
+    LayeredMultiresSculptor holds a bare `MultiresSurface&` and the shared_ptr
+    keeps the SCULPTOR alive, not the surface under it. A copy carries none of
+    that, so a handle that outlived the statement pointed into a collected
+    surface — and stamping through it wrote into freed memory without raising.
+    Returning self is what puts the two back on one object.
+    """
+    s = surface()
+    layer = s.add_sculpt_layer("pass")
+    s.active_sculpt_layer = layer
+
+    handle = s.sculpt_layer_stroke()
+    with handle as stroke:
+        assert stroke is handle
+        stroke.stamp("draw", center=(0.0, 0.0, 0.0), radius=0.35, strength=0.4)
+        # One object, so one view of the gesture. Read off the copy these
+        # agreed by luck, because the shared_ptr underneath was shared.
+        assert stroke.stamps == handle.stamps == 1
+        assert stroke.target_layer == handle.target_layer == layer
 
 
 def test_the_write_domain_is_the_callers_choice():
@@ -344,6 +406,45 @@ def test_merge_and_bake_are_defined_by_the_surface_they_leave():
         assert s.memory()["composed"] == 0
 
 
+
+def test_a_layered_write_marks_the_same_patches_a_base_write_does():
+    """The reason there is no second changed-block transport, asserted.
+
+    A host repaints from `dirty_patches` and `clay_multires_copy_block`, and
+    this change deliberately added neither a layered twin nor a per-layer
+    variant of them: a stamp into a layer moves the EVALUATED surface, which is
+    the only surface a renderer has, so it marks the patches a base stamp would
+    have marked and a host repaints without learning a new word. A second
+    transport would have been a second answer to one question, and the two
+    would drift.
+
+    Nothing else in the suite asserts it — the note in the change says it, and a
+    note is not a test.
+    """
+    s = surface()
+    layer = s.add_sculpt_layer("pores")
+    s.active_sculpt_layer = layer
+
+    # The base's own answer first, as the thing to match.
+    s.clear_dirty()
+    with s.sculpt_layer_stroke(write_domain="geometry") as stroke:
+        stroke.stamp("draw", center=(0.0, 0.0, 0.0), radius=0.35, strength=0.5)
+    base_patches = sorted(s.dirty_patches)
+    assert base_patches, "a base stamp marks the patches it moved"
+
+    s.clear_dirty()
+    assert s.dirty_patches == []
+    with s.sculpt_layer_stroke(write_domain="detail") as stroke:
+        assert stroke.target_layer == layer
+        stroke.stamp("draw", center=(0.0, 0.0, 0.0), radius=0.35, strength=0.5)
+    assert sorted(s.dirty_patches) == base_patches
+
+    # And the write really did land in the CHANNEL, not the form — otherwise
+    # the patches above would match for the uninteresting reason.
+    assert s.sculpt_layer_checksum != 0
+    assert s.sculpt_layer_info(layer)["coverage_vertices"] > 0
+
+
 def test_the_stack_round_trips_through_serialize():
     s = surface()
     first = s.add_sculpt_layer("first")
@@ -388,3 +489,56 @@ def test_memory_reports_the_stack_apart_from_the_form_and_never_caps_it():
         s.set_sculpt_layer_detail(layer, 2, v, 0.0, 0.0, 0.0)
     s.compact_sculpt_layers()
     assert s.memory()["sculpt_layers"] < memory["sculpt_layers"]
+
+
+def _stack_chunk(block_size, level_vertices, layers=0, active=0, next_id=1):
+    """A layer stack chunk, as `SculptLayerStack::encode` writes one.
+
+    Hand-written because the point is to say something the engine would never
+    write. `_splice_stack_chunk` below asserts that a chunk built from the
+    hierarchy's own numbers still loads, which is what keeps a refusal here
+    attributable to the field that was changed.
+    """
+    import struct
+    body = struct.pack("<IIIQQII", 0x534C4D43, 1, layers, active, next_id,
+                       block_size, len(level_vertices))
+    body += b"".join(struct.pack("<I", v) for v in level_vertices)
+    return struct.pack("<I", len(body)) + body
+
+
+def _splice_stack_chunk(document, chunk):
+    """Replace a serialized surface's trailing layer chunk with `chunk`.
+
+    The stack is the last thing in the stream and announces itself with its own
+    magic, so a document can be rewritten without knowing anything about the
+    bytes in front of it — which is exactly the position a hostile file is in.
+    """
+    at = document.rindex(b"CMLS")
+    return document[:at - 4] + chunk
+
+
+def test_a_document_whose_stack_chunk_names_an_impossible_hierarchy_is_refused():
+    # THE SURFACE'S SECOND OPINION, at the boundary a script actually calls.
+    # `deserialize` rebuilds the cage from the stream and then requires the
+    # decoded stack's level count and every one of its level sizes to be that
+    # hierarchy's, rather than taking the chunk's word for them — otherwise a
+    # document could pair one sculpt's passes with another's levels and attach
+    # every wrinkle somewhere else. The ceilings the layer decoder applies on
+    # its own, and what a refused document costs on the way, are gated in the
+    # C++ suite, which can see both.
+    s = surface()
+    s.add_sculpt_layer("pass")
+    document = s.serialize()
+    vertices = [len(s.positions_at(level)) for level in range(3)]
+
+    # The control first: the same surgery with the hierarchy's own numbers.
+    legal = _splice_stack_chunk(document, _stack_chunk(1024, vertices))
+    assert clay.MultiresSurface.deserialize(legal).sculpt_layer_ids == []
+
+    for name, chunk in [
+        ("four billion vertices a level", _stack_chunk(4, [0xFFFFFFF0] * 3)),
+        ("more levels than a hierarchy has", _stack_chunk(1024, [4] * 13)),
+        ("a blocking that is not a power of two", _stack_chunk(1000, vertices)),
+    ]:
+        with pytest.raises(ValueError):
+            clay.MultiresSurface.deserialize(_splice_stack_chunk(document, chunk))

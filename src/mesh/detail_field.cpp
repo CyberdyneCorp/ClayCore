@@ -179,10 +179,50 @@ void DetailField::compact() {
         if (blocks == 0 ||
             static_cast<float>(live) >= kDensePromotionCoverage * static_cast<float>(blocks))
             return;
+        // REBUILT AT EXACTLY THE SIZE IT NEEDS, rather than through `reset()`
+        // and a `set()` per vertex. The `set()` loop was correct about content
+        // and wrong about CAPACITY: it grows `slot_block_` and `storage_` by
+        // the standard library's own factor, and `reset()` only `clear()`s, so
+        // the capacity of the dense era survived into the sparse field. Since
+        // `bytes()` reports capacity -- capacity is what the allocator is
+        // actually holding -- compaction released nothing a host could see, and
+        // on MSVC, whose growth factor is 1.5 against libstdc++'s 2, the
+        // rebuilt field measured LARGER than the dense array it replaced.
+        //
+        // `shrink_to_fit` is the obvious repair and is not one: the standard
+        // makes it a non-binding request, and it did not reduce `slot_block_`
+        // here. Constructing each vector at its final size is not a request.
         std::vector<LocalDetail> flat = std::move(storage_);
-        reset(vertex_count_, block_size_);
-        for (std::uint32_t v = 0; v < vertex_count_; ++v)
-            if (!flat[v].zero()) set(v, flat[v]);
+        std::vector<std::uint32_t> keep;
+        keep.reserve(live);
+        for (std::uint32_t b = 0; b < blocks; ++b) {
+            const std::uint32_t begin = b * block_size_;
+            const std::uint32_t end = std::min(begin + block_size_, vertex_count_);
+            for (std::uint32_t v = begin; v < end; ++v)
+                if (!flat[v].zero()) {
+                    keep.push_back(b);
+                    break;
+                }
+        }
+        std::vector<LocalDetail> packed(static_cast<std::size_t>(keep.size()) * block_size_);
+        std::vector<std::uint32_t> new_slot_block(keep.size());
+        block_slot_.assign(blocks, kNoBlock);
+        for (std::size_t i = 0; i < keep.size(); ++i) {
+            const std::uint32_t begin = keep[i] * block_size_;
+            // CLAMPED, because a dense field is `vertex_count_` long and the
+            // last block is short whenever the level is not a whole number of
+            // blocks. The sparse branch below copies a full block safely only
+            // because its own storage is a whole number of them.
+            const std::uint32_t end = std::min(begin + block_size_, vertex_count_);
+            std::copy(flat.begin() + static_cast<std::ptrdiff_t>(begin),
+                      flat.begin() + static_cast<std::ptrdiff_t>(end),
+                      packed.begin() + static_cast<std::ptrdiff_t>(i * block_size_));
+            new_slot_block[i] = keep[i];
+            block_slot_[keep[i]] = static_cast<std::uint32_t>(i);
+        }
+        dense_ = false;
+        storage_ = std::move(packed);
+        slot_block_ = std::move(new_slot_block);
         return;
     }
 
@@ -211,6 +251,13 @@ void DetailField::compact() {
     }
     storage_ = std::move(packed);
     slot_block_ = std::move(new_slot_block);
+    shrink_to_content();
+}
+
+void DetailField::shrink_to_content() {
+    storage_.shrink_to_fit();
+    slot_block_.shrink_to_fit();
+    block_slot_.shrink_to_fit();
 }
 
 bool DetailField::block_stored(std::uint32_t block) const {
