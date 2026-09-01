@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "clay/memory/budget.h"
 #include "clay/mesh/dynamic_sculpt.h"
 #include "clay/mesh/dynamic_validate.h"
 #include "clay/mesh/sculpt.h"
@@ -355,4 +356,50 @@ TEST_CASE("dynamic sculpt: layer is declined rather than silently partial") {
     const mesh::DynamicStampResult r = sculptor.stamp(MeshBrush::Layer, s, topology_off());
     CHECK(r.moved_vertices == 0);
     CHECK_FALSE(r.changed());
+}
+
+// The topology half of the peak telemetry (task 7.7). A split allocates a slot,
+// so the stamp that split the most is the stamp that decides how big the pools
+// have to be — and it is the one number in `PeakTelemetry` that no caller can
+// reconstruct from outside, because `DynamicStampResult::remesh` is per stamp
+// and a stroke throws every one of them away but the last.
+TEST_CASE("dynamic sculpt: the sculptor reports its topology peak and its workset") {
+    auto surface = DynamicSurface::from_mesh(cube_sphere(6, 1.0f));
+    REQUIRE(surface.has_value());
+    DynamicSculptor sculptor(*surface);
+
+    memory::PeakTelemetry peak;
+    sculptor.set_telemetry(&peak);
+    CHECK(sculptor.telemetry() == &peak);
+
+    MeshBrushSettings s;
+    s.center = cf3(0, 0, 1);
+    s.radius = 0.35f;
+    s.strength = 0.5f;
+
+    DynamicTopologySettings topo;
+    topo.detail_mode = mesh::DynamicDetailMode::BrushRelative;
+    topo.detail_resolution = 6.0f;
+
+    const mesh::DynamicStampResult refining = sculptor.stamp(MeshBrush::Draw, s, topo);
+    REQUIRE(refining.remesh.total() > 0u);
+    CHECK(peak.topology_ops == refining.remesh.total());
+    CHECK(peak.workset_vertices > 0u);
+    const std::size_t peak_ops = peak.topology_ops;
+    const std::size_t peak_workset = peak.workset_vertices;
+
+    // A stamp that changes NO topology must not pull the peak down: the pools
+    // still have to hold what the refining stamp needed.
+    const mesh::DynamicStampResult quiet = sculptor.stamp(MeshBrush::Draw, s, topology_off());
+    CHECK(quiet.remesh.total() == 0u);
+    CHECK(peak.topology_ops == peak_ops);
+    CHECK(peak.workset_vertices >= peak_workset);
+
+    // And a stamp that reaches nothing at all reports nothing rather than
+    // resetting what a host has accumulated.
+    MeshBrushSettings away = s;
+    away.center = cf3(0, 0, 40.0f);
+    CHECK(sculptor.stamp(MeshBrush::Draw, away, topology_off()).moved_vertices == 0u);
+    CHECK(peak.topology_ops == peak_ops);
+    CHECK(peak.workset_vertices >= peak_workset);
 }

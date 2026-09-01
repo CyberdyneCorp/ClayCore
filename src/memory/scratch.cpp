@@ -107,6 +107,9 @@ std::size_t ScratchArena::block_count(std::size_t element_bytes, std::size_t wan
 void ScratchArena::end_stamp() {
     recent_[recent_head_] = used_;
     recent_head_ = (recent_head_ + 1) % kRecentStamps;
+    // Published BEFORE `used_` is cleared: what the host wants is the peak a
+    // stamp reached, and after the reset there is nothing left to report.
+    if (telemetry_ != nullptr) telemetry_->observe_scratch(used_);
     used_ = 0;
 }
 

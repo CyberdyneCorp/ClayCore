@@ -332,6 +332,10 @@ void ChunkTable::enter_dirty(std::uint32_t chunk) {
     dirty_epoch_[chunk] = epoch_;
     dirty_slot_[chunk] = static_cast<std::uint32_t>(dirty_.size());
     dirty_.push_back(chunk);
+    // The ONE place the dirty set grows, so it is the one place the peak can be
+    // observed without counting a chunk twice — `mark` is called once per
+    // revision and a chunk already dirty this epoch returns above.
+    if (telemetry_ != nullptr) telemetry_->observe_dirty(dirty_.size());
 }
 
 void ChunkTable::mark(std::uint32_t chunk, ChunkDirty what) {

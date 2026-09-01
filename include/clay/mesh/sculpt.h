@@ -47,6 +47,7 @@
 #include "clay/mesh/deform.h"
 #include "clay/mesh/bvh.h"
 #include "clay/mesh/lattice.h"
+#include "clay/memory/budget.h"  // PeakTelemetry
 #include "clay/mesh/mesh_data.h"
 #include "clay/mesh/brush_model.h"
 #include "clay/mesh/sculpt_common.h"
@@ -296,6 +297,18 @@ class MeshSculptor {
     // that passes because the walk found its way anyway.
     std::size_t stale_seeds_rejected() const { return stale_seeds_rejected_; }
 
+    // -- peak telemetry (task 7.7) -------------------------------------------
+    // Where this sculptor publishes the high-water mark of its WORKSET, for a
+    // host tuning a `SculptMemoryProfile`. Borrowed and never owned; null is
+    // the default and the only cost is a null check once per stamp.
+    //
+    // The peak rather than the last value, and the workset rather than the
+    // write region: what a stamp has to hold is everything it GATHERED,
+    // including the rim of the falloff that never moves, and a host sizing an
+    // arena against the write region would size it against the wrong number.
+    void set_telemetry(memory::PeakTelemetry* telemetry) { telemetry_ = telemetry; }
+    memory::PeakTelemetry* telemetry() const { return telemetry_; }
+
     // -- picking -------------------------------------------------------------
     // Built lazily on the first query. Positions move under it, and what a
     // stale tree reports is worth stating precisely, because the obvious guess
@@ -409,6 +422,7 @@ class MeshSculptor {
     // has turned away. Assigned once at construction; see `seed_revision`.
     std::uint64_t seed_revision_ = 0;
     std::size_t stale_seeds_rejected_ = 0;
+    memory::PeakTelemetry* telemetry_ = nullptr;
     // The multi-pass kernels' buffers, reset rather than freed between stamps.
     SculptScratch scratch_;
     // The compiled plan and the three inputs it depends on. Not the whole

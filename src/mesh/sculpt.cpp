@@ -593,6 +593,13 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
         r.plane_point = r.centroid;
         r.plane_normal = r.average_normal;
     }
+
+    // The workset's peak, published once the region is FINAL — after the
+    // falloff and the automask have dropped what they drop. Reporting the
+    // pre-compaction count would make the number a property of the brush radius
+    // rather than of the memory a stamp actually stands on, which is what a
+    // host tunes a profile against.
+    if (telemetry_ != nullptr) telemetry_->observe_workset(r.size());
 }
 
 // THE PLAN IS COMPILED ONCE PER STROKE, not per stamp.

@@ -94,6 +94,20 @@ class ScratchArena {
     // high-water mark; allocates nothing.
     void end_stamp();
 
+    // Where this arena publishes its peak, so a host reads one struct rather
+    // than asking four subsystems for one number each. Borrowed and never
+    // owned: the host outlives the arena in every arrangement this library
+    // supports, and an arena that owned its telemetry would reset a host's
+    // numbers when a stroke replaced it.
+    //
+    // Null is the default and costs a null check per stamp. The alternative was
+    // making the arena always accumulate into a member and letting the host
+    // read it — which is what `high_water()` already is, and which does not
+    // compose: the workset and the topology counts come from other objects, and
+    // a host tuning a profile wants the four together.
+    void set_telemetry(PeakTelemetry* telemetry) { telemetry_ = telemetry; }
+    PeakTelemetry* telemetry() const { return telemetry_; }
+
     // THE ONE PLACE CAPACITY GOES DOWN. Called at a stroke boundary by whoever
     // owns the stroke, never by the arena on its own behalf.
     void end_stroke();
@@ -129,6 +143,7 @@ class ScratchArena {
     std::size_t recent_head_ = 0;
     std::size_t high_water_ = 0;
     std::size_t growths_ = 0;
+    PeakTelemetry* telemetry_ = nullptr;
 };
 
 }  // namespace memory

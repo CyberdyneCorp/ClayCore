@@ -365,6 +365,23 @@ std::size_t DynamicSculptor::write_colors(TopologyDelta* record) {
 DynamicStampResult DynamicSculptor::stamp(MeshBrush verb, const MeshBrushSettings& brush,
                                           const DynamicTopologySettings& topology,
                                           const field::MaskGate& gate, TopologyDelta* record) {
+    const DynamicStampResult out = stamp_impl(verb, brush, topology, gate, record);
+    // ONE observation point for a call with several early returns. Splitting the
+    // body out is what makes that possible without repeating the publish at
+    // every `return`, where a later edit would eventually forget one.
+    if (telemetry_ != nullptr) {
+        telemetry_->observe_topology(out.remesh.total());
+        // The adaptive surface's workset, which `MeshSculptor` cannot report
+        // because this representation never builds one.
+        telemetry_->observe_workset(region_vertices_.size());
+    }
+    return out;
+}
+
+DynamicStampResult DynamicSculptor::stamp_impl(MeshBrush verb, const MeshBrushSettings& brush,
+                                               const DynamicTopologySettings& topology,
+                                               const field::MaskGate& gate,
+                                               TopologyDelta* record) {
     DynamicStampResult out;
     out.topology_revision = surface_.topology_revision();
     out.geometry_revision = surface_.geometry_revision();

@@ -46,6 +46,7 @@
 #include <vector>
 
 #include "clay/memory/budget.h"
+#include "clay/memory/scratch.h"
 #include "clay/mesh/sculpt.h"
 #include "clay/mesh/surface_view.h"
 
@@ -149,6 +150,10 @@ Row measure(int n, float spacing, MeshBrush verb, float radius) {
     brush.geodesic = mesh::default_geodesic(verb);
 
     memory::PeakTelemetry peak;
+    // The ENGINE accumulates this now (task 7.7), rather than the test doing it
+    // per stamp from the outside. That is the difference the task names: a host
+    // can read a peak it did not have to compute for itself.
+    sculptor.set_telemetry(&peak);
     // WARM. Growth on first encountering a footprint is permitted by the
     // requirement; steady repeated local sculpting is not.
     for (int i = 0; i < 8; ++i) sculptor.stamp(verb, brush);
@@ -161,7 +166,6 @@ Row measure(int n, float spacing, MeshBrush verb, float radius) {
         const auto end = std::chrono::steady_clock::now();
         micros.push_back(
             std::chrono::duration<double, std::micro>(end - begin).count());
-        peak.observe_workset(sculptor.workset().size());
     }
     std::sort(micros.begin(), micros.end());
     row.median_micros = micros[micros.size() / 2];
@@ -259,4 +263,92 @@ TEST_CASE("preview gate: what a host is handed follows the region, not the surfa
     // A HOST'S FRAME IS CHEAPER THAN THE MODEL BY THE MODEL RATIO, which is
     // the whole reason the transport is per chunk.
     CHECK(large.preview_bytes * 50u < large_full);
+}
+
+// -- the engine fills the telemetry (task 7.7) --------------------------------
+//
+// `PeakTelemetry` and its high-water semantics were here before the engine
+// reported into it, which left a host able to read only the numbers it had
+// accumulated for itself — and the two it cannot see from outside, the dirty
+// set's depth and a stamp's topology operations, not at all.
+//
+// These cases assert the wiring rather than the arithmetic: that each of the
+// four numbers arrives without the caller computing it, and that what arrives
+// is the PEAK and not the last value, which is the property a profile is tuned
+// against.
+TEST_CASE("the engine accumulates the peaks a host tunes a profile against") {
+    Mesh m = plane(64, 0.05f);
+    MeshSculptor sculptor(m);
+    (void)sculptor.bvh();
+
+    memory::PeakTelemetry peak;
+    sculptor.set_telemetry(&peak);
+    CHECK(sculptor.telemetry() == &peak);
+
+    MeshBrushSettings brush;
+    brush.center = cf3(0, 0, 0);
+    brush.strength = 0.2f;
+
+    // A BIG dab, then a small one. A last-value report would end at the small
+    // one; a high-water mark keeps the big one, and that is the whole
+    // difference between a number worth sizing a buffer from and one that is
+    // not.
+    brush.radius = 0.5f;
+    REQUIRE(sculptor.stamp(MeshBrush::Draw, brush) > 0);
+    const std::size_t wide = sculptor.workset().size();
+    CHECK(wide > 0u);
+    CHECK(peak.workset_vertices == wide);
+
+    brush.radius = 0.2f;
+    REQUIRE(sculptor.stamp(MeshBrush::Draw, brush) > 0);
+    CHECK(sculptor.workset().size() < wide);  // the stamp really was smaller
+    CHECK(peak.workset_vertices == wide);     // and the peak did not follow it down
+
+    // The dirty set's DEPTH, which no caller can reconstruct after the fact:
+    // a host draining every frame sees `dirty()` shallow forever and still has
+    // to size the staging buffer for the frame it dropped.
+    ChunkTable table;
+    memory::PeakTelemetry chunk_peak;
+    table.set_telemetry(&chunk_peak);
+    mesh::partition_mesh_chunks(m, ChunkOptions{}, &table);
+    REQUIRE(table.live_count() > 2u);
+    // A FRESH PARTITION IS ENTIRELY DIRTY, and the peak says so: a host has
+    // never seen any of these chunks, so the first drain is the whole surface.
+    // That is the largest the set will ever be, which is exactly what a staging
+    // buffer has to be sized for.
+    CHECK(chunk_peak.dirty_chunks == table.live_count());
+
+    table.clear_dirty();
+    REQUIRE(table.dirty().empty());
+    table.mark(0, mesh::ChunkDirty::Geometry);
+    table.mark(1, mesh::ChunkDirty::Geometry);
+    table.mark(2, mesh::ChunkDirty::Geometry);
+    CHECK(table.dirty().size() == 3u);
+    // The drained frame is still what it cost: the peak does not follow the
+    // live set back down.
+    CHECK(chunk_peak.dirty_chunks == table.live_count());
+
+    // Marking the same chunk twice in one epoch is one chunk, not two: the peak
+    // is a SET depth, and `enter_dirty` is the one place the set grows.
+    memory::PeakTelemetry epoch_peak;
+    table.set_telemetry(&epoch_peak);
+    table.clear_dirty();
+    table.mark(0, mesh::ChunkDirty::Geometry);
+    table.mark(0, mesh::ChunkDirty::Normals);
+    CHECK(table.dirty().size() == 1u);
+    CHECK(epoch_peak.dirty_chunks == 1u);
+
+    // And the arena publishes what a stamp stood on, at the moment it is still
+    // knowable — after `end_stamp` resets `used()` there is nothing to report.
+    memory::ScratchArena arena;
+    memory::PeakTelemetry scratch_peak;
+    arena.set_telemetry(&scratch_peak);
+    REQUIRE(arena.prepare(4096));
+    REQUIRE(arena.allocate(2048) != nullptr);
+    arena.end_stamp();
+    CHECK(scratch_peak.scratch_bytes == 2048u);
+    REQUIRE(arena.prepare(4096));
+    REQUIRE(arena.allocate(512) != nullptr);
+    arena.end_stamp();
+    CHECK(scratch_peak.scratch_bytes == 2048u);
 }

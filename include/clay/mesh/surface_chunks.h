@@ -333,6 +333,16 @@ class ChunkTable {
     const std::vector<std::uint32_t>& dirty() const { return dirty_; }
     void clear_dirty();
 
+    // Where this table publishes the DEEPEST its dirty set has been, for a host
+    // sizing the staging buffer it drains chunks into. Borrowed and never
+    // owned; null is the default.
+    //
+    // The peak is the number that matters and the live count is not: a host
+    // that drains every frame sees a small `dirty()` forever and still needs a
+    // buffer for the frame it dropped. That frame is what this records.
+    void set_telemetry(memory::PeakTelemetry* telemetry) { telemetry_ = telemetry; }
+    memory::PeakTelemetry* telemetry() const { return telemetry_; }
+
     // Retire ONE chunk from the dirty set, and only if it has not changed since
     // the caller read it.
     //
@@ -388,6 +398,7 @@ class ChunkTable {
     // The faces the live chunks actually hold, so the arena's slack is a
     // subtraction rather than a walk over every chunk on every query.
     std::size_t live_faces_ = 0;
+    memory::PeakTelemetry* telemetry_ = nullptr;
 };
 
 // The name the adaptive surface's leaf had, and still has. It IS a chunk now
