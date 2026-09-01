@@ -5622,6 +5622,33 @@ NB_MODULE(pyclay, m) {
                                    Want::Colors);
              },
              "points"_a, "backend"_a = "cpu", "Field colors at (N, 3) points -> (N, 3)")
+        .def("eval_excluding",
+             [](const PyDocument& d, scene::LayerId excluded, nb::handle points,
+                const std::string& backend) {
+                 if (!d.doc->document.find_layer(excluded))
+                     throw std::invalid_argument(
+                         "no layer " + std::to_string(excluded) + " to exclude: excluding a "
+                         "layer the document does not hold would evaluate the whole document");
+                 return eval_field(scene::compile_document_except(d.doc->document, excluded),
+                                   points, backend, Want::Distances);
+             },
+             "excluded"_a, "points"_a, "backend"_a = "cpu",
+             "Signed distances of every visible SDF layer EXCEPT `excluded` -> (N,) float32.\n"
+             "Layers hard-union, so np.minimum(this, your own preview of that layer) is\n"
+             "exactly what the whole document evaluates to. A layer the document does not\n"
+             "hold raises rather than evaluating everything.")
+        .def("gradients_excluding",
+             [](const PyDocument& d, scene::LayerId excluded, nb::handle points,
+                const std::string& backend) {
+                 if (!d.doc->document.find_layer(excluded))
+                     throw std::invalid_argument(
+                         "no layer " + std::to_string(excluded) + " to exclude: excluding a "
+                         "layer the document does not hold would evaluate the whole document");
+                 return eval_field(scene::compile_document_except(d.doc->document, excluded),
+                                   points, backend, Want::Gradients);
+             },
+             "excluded"_a, "points"_a, "backend"_a = "cpu",
+             "Gradients of every visible SDF layer EXCEPT `excluded` -> (N, 3)")
         .def("safe_step_scale",
              [](const PyDocument& d) {
                  return scene::compile_document(d.doc->document).safe_step_scale();

@@ -340,6 +340,64 @@ The document tree the app and specs already define, owned here so every consumer
 
 `clay::brick`: sparse virtual grid of 8³/16³ bricks, fp16 narrow band (±3 voxels), dirty-set tracking, async-friendly (evaluation requests are plain data; the app owns threading/queues via the backend), LOD mip bricks for far view.
 
+### Drawing a preview beside the rest of the document
+
+A live sculpt transaction previews **one layer** — that is what
+`clay_sdf_smooth_preview_delta_take` hands over, and it is why a dab costs what
+it touches rather than what the artist has already made. But
+`clay_brick_cache_eval_requests` evaluates the hard union of every visible SDF
+layer and attributes no brick to the layer it came from, so a host drawing only
+the preview was drawing that layer **alone**: every other visible field layer
+vanished for the length of the gesture. ClaySpaceDesktop's answer was to refuse
+— open a live gesture only when the sculpted layer is the only visible one —
+which took the feature away from exactly the documents subtools exist for
+(#378).
+
+The missing question was the third one. There was "the whole document"
+(`clay_eval_points`) and "one layer" (`clay_layer_eval_points`), and no way to
+ask for **every visible SDF layer except one**. `clay_eval_points_excluding`,
+`clay_eval_gradients_excluding` and `clay_brick_cache_eval_requests_excluding`
+are that question; `Document.eval_excluding` and `.gradients_excluding` are the
+pyclay half.
+
+**Composing is a minimum, and it is exact.** Visible SDF layers hard-union, and
+the union of two fields IS the smaller of the two distances, so
+`min(excluding(L), your own preview of L)` is the field the whole document would
+evaluate to — not an approximation of it. There is no blend parameter to match
+and no seam to hide. A host takes the excluded evaluation **once at
+pointer-down**, because the layers it excluded do not move while the artist
+drags, and composes it with the live preview per frame.
+
+**Neither call edits the document**, which is the other half of why they exist.
+The route a host would otherwise take — hide the layer, sample the rest, show it
+again — is three edits, and an edit taken between `clay_sdf_smooth_begin` and its
+commit is one the commit correctly refuses.
+
+The engine half is `scene::compile_document_except`, a third case in the
+predicate `compile_document_part` already had. That function's `below` **stops**
+at the named layer, so it is "before" rather than "except" and drops everything
+above it too; the new case skips the layer and keeps walking. Both cull under
+the **whole document's** pad, for the reason the split already documented: a
+part compiled under its own smaller pad drops items the whole compile keeps, and
+the parts then stop summing to the whole.
+
+Two deliberate refusals. An **unknown layer** is `CLAY_ERROR_NOT_FOUND` rather
+than "exclude nothing" — a host whose id went stale would otherwise be handed the
+whole document and would draw the excluded layer twice, once from here and once
+from its own preview, which looks like a shading artefact rather than a bug. A
+**hidden or empty** layer succeeds, because it contributes nothing to the union
+already and refusing would make a host branch on state it has no reason to
+track.
+
+And the excluded refill **takes no seed and leaves none**. A seed is a brick's
+value for *this* document, which a later refill continues with the items the
+document has gained since; a value computed without one of the layers is not
+that, and storing it would hand the next whole-document refill a seed with a
+layer missing — silently, because a seeded answer is bit-identical to a walked
+one by contract. So it is a plain batched walk, priced like a stroke's first dab
+rather than its tenth, which is the right price for something taken once a
+gesture. `clay_document_resume_stats` does not move for it.
+
 ### Duplicating a subtool costs a layer record
 
 An **instance layer** is a second layer over the same edit list. It is what a

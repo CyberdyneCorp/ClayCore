@@ -118,6 +118,8 @@ CLASS_ENUM_PREFIX = {
 # The names that do not derive. Kept explicit so the difference is reviewable.
 ALIASES = {
     "Document.eval": "clay_eval_points",
+    "Document.eval_excluding": "clay_eval_points_excluding",
+    "Document.gradients_excluding": "clay_eval_gradients_excluding",
     "Document.colors": "clay_eval_points",  # the colors ride the same call
     "Document.gradients": "clay_eval_gradients",
     # The C names say more than the Python ones can: "_points" marks the
