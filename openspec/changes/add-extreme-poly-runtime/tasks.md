@@ -8,15 +8,22 @@
 
 ## 1. Decide first
 
-- [ ] 1.1 DECIDE the chunk size from a benchmark matrix over 64, 128, 256, 512
+- [x] 1.1 DECIDE the chunk size from a benchmark matrix over 64, 128, 256, 512
       and 1024 triangles per leaf, measuring query cost, false-positive touched
       vertices, normal recompute, upload size, locality and topology mutation
       cost. Do not adopt a number from prior art without running it here.
-      NOT ticked by the design stage: design.md D2 fixes the matrix, the six
-      measured quantities and the decision rule for reading them, and leaves
-      the NUMBER to the benchmark. Ticking this on an unrun benchmark is the
-      failure the task was written against. Null hypothesis to beat: 256/64/512,
-      `DynamicBvhOptions`'s current and unmeasured defaults
+      ANSWERED: 128 target / 32 min / 256 max, from
+      `benchmarks/bench_surface_chunks.cpp` over a 2.08M-vertex plane at five
+      footprints, three repeats at a stable load. design.md D2a records the
+      table, the two harness defects that had reversed the ordering before the
+      number was read, and the one place the decision departs from the letter
+      of the rule: 64 and 128 tie on the term the rule minimises and the rule
+      breaks a tie toward the smaller chunk ON THE GROUND that mutation cost
+      grows superlinearly in chunk size — which the measurement falsifies.
+      Mutation is a shallow U with its minimum at 128. The null hypothesis 256
+      is beaten by 5-6% on the decision term, outside the spread, and 1.51x
+      against 1.64x on false positives; it wins 14% on index memory, which the
+      rule does not weigh and which is named as the cost
 - [x] 1.2 DECIDE where the memory profile lives — a new `memory` module with a
       layering entry, or `io` beside the existing report. `parallel` is the
       precedent for a new leaf module; `io::MemoryReport` is the precedent for
@@ -53,9 +60,23 @@
 ## 3. Local update path
 - [ ] 3.1 The query path is: brush volume → top-level tree → candidate chunks →
       candidate vertices → exact footprint. Never a scan over every vertex
+      NOT ticked, and now MEASURED rather than argued. It holds on the fixed
+      mesh and the adaptive surface, where the tree is what `classes_in_ball`
+      and `faces_in_ball` descend: 20M vertices against 1M at the same 20k
+      footprint costs 1.05x the total dab. It is FALSE on the hierarchy, and
+      the benchmark says by how much: 0.49 ms at 100k level vertices against
+      1.58 ms at 1M for the same 1k footprint, about 1.2 ns a vertex, which is
+      a scan. `MeshSculptor::surface_index` never builds a tree on its own
+      behalf and `MultiresSculptor` is a caller that never picks, so nothing
+      ever builds one for a level. Recorded in docs/09 with the numbers; the
+      fix is 3.2 rather than a tree per level
 - [ ] 3.2 An optional caller-supplied seed from the pick subsystem, validated
       against a revision, so a stroke does not re-search a centre the host
       already picked
+      NOT DONE. `MeshBrushSettings::seed_class` is the caller-supplied half and
+      is shipped; nothing validates it against a revision, and nothing supplies
+      it on the hierarchy path — which 3.1's measurement now prices at 1.1 to
+      1.6 ms a stamp at a million level vertices
 - [x] 3.3 Local normals over the write region and its ring, with an optional
       deferral to stroke end whose FINAL state is exact
       ALREADY TRUE in `MeshSculptor` (`defer_normals` / `flush_normals` over
@@ -76,6 +97,10 @@
       inline-nesting behaviour. No new nested dispatch was introduced
 - [ ] 3.7 A serial threshold below which a small footprint does not dispatch at
       all, measured rather than guessed
+      NOT DONE. `kChunkParallelGrain` and `kVertexParallelGrain` exist and are
+      one level each, and both are still guesses. This stage measured the chunk
+      SIZE and not the dispatch threshold; ticking it on the first would be the
+      same failure 1.1 was written against
 
 ## 4. Memory
 
@@ -97,8 +122,18 @@
       `memory::MemoryPin` making a trim honest during a save. History is left to
       the host's own policy and is never touched here
 - [x] 4.5 A trim report saying what was released and how much
-- [ ] 4.6 THE GATE: after a critical trim, the authoritative checksum is
+- [x] 4.6 THE GATE: after a critical trim, the authoritative checksum is
       unchanged and every dropped cache reconstructs to an identical surface
+      DONE as `tests/unit/test_memory_trim.cpp`: the checksum and the cage
+      position-by-position across a critical trim, every level's positions AND
+      normals bit-identical after the rebuild, the chunk partition coming back
+      naming the same faces under the same ids, every category the report names
+      being a rebuildable one, the four pressures as a monotone chain with
+      `None` releasing nothing, and the pin. Two defects found by writing it and
+      fixed with the cases that catch them: a sculpted level's display normals
+      were nobody's and moved by up to 0.02 across a rebuild, and
+      `ScratchArena::trim` released nothing at all because `shrink_to_fit` is a
+      no-op under `-fno-exceptions`
 - [x] 4.7 Residency: sculpt level and display level resident by default on a
       constrained profile, other levels compact detail only
       DONE via `MultiresSurface::set_memory_profile`, applied at the residency
@@ -147,14 +182,17 @@
       a shipped host reads stays beside them as the maximum
 - [x] 6.4 A stale-revision result is discardable by the host: the revision it
       requested is echoed with what the engine is at now
-- [ ] 6.5 The whole-surface path stays for correctness, and the test compares
+- [x] 6.5 The whole-surface path stays for correctness, and the test compares
       the reconstruction from the dirty stream against it
-      NOT DONE, and deliberately left to the test stage: the whole-surface
-      paths are untouched and `tests/unit/test_c_surface_chunks.cpp` asserts
-      that the chunks COVER the surface exactly once (triangle count against
-      the source mesh, and against `clay_multires_level_counts`), but a full
-      reconstruction compared against the whole-surface path is
-      `test_chunk_transport.cpp`, which is not written
+      DONE in all three places: `tests/unit/test_chunk_transport.cpp` for C++
+      (hierarchy, adaptive surface and fixed mesh, including a SECOND edit
+      drained on top of the first, which a reconstruction that rebuilt from the
+      newest stream alone would fail), the C boundary in
+      `test_c_surface_chunks.cpp` against `clay_multires_copy_level_mesh`, and
+      pyclay in `test_surface_transport.py`. Compared as canonicalised
+      TRIANGLES rather than as index buffers, because the two paths number
+      their vertices differently on purpose, and canonicalised by ROTATION
+      rather than by a sort, which would call an inside-out surface equal
 - [x] 6.6 pyclay reaches the same transport, and parity is green
       DONE: `clay.SurfaceView` with numpy-native `copy_chunk`, plus the ledger,
       the trim, the profile, the preflights and a `clay.MemoryPin` context
@@ -165,28 +203,99 @@
 
 ## 7. The gates
 
-- [ ] 7.1 A benchmark suite at 100k, 1M, 5M, 10M and 20M vertices with
+- [x] 7.1 A benchmark suite at 100k, 1M, 5M, 10M and 20M vertices with
       footprints of 1k, 5k, 20k, 100k and 500k, across fixed mesh, adaptive
       surface, multires, and multires with layers
+      DONE as `benchmarks/bench_extreme_poly.cpp` plus
+      `tools/bench_extreme_poly.py`. RUN: the fixed mesh at all five sizes and
+      all five footprints (a footprint larger than the model is SKIPPED and
+      says so rather than measuring the boundary — 500k needs 5M vertices to
+      be interior); the adaptive surface and the hierarchy at 100k and 1M. The
+      20M rows were run and are in docs/09. The LAYERED rows are scripted and
+      recorded as awaiting the rebase: this branch is cut from main and does
+      not carry add-mesh-sculpt-layers, and a layer stack of the benchmark's
+      own invention would be a measurement of the benchmark
 - [ ] 7.2 Per-stage timing — seed, chunk query, gather, geodesic, snapshot,
       weight, alpha, automask, kernel, remesh, detail write, normals, index
       update, readback — because a total without stages is not actionable
-- [ ] 7.3 THE LOCALITY GATE: for one footprint, stamp time stays in one band
+      PARTIAL, and the benchmark says which half. Six stages are timed as
+      themselves because each is its own call: seed, chunk query, index update,
+      remesh, detail write and readback. The eight inside `MeshSculptor::stamp`
+      — gather, geodesic, snapshot, weight, alpha, automask, kernel, normals —
+      are ONE bucket named `stamp*`, because the library has no per-stage
+      timers, adding them would perturb what is being measured, and it would
+      touch a file two concurrent branches are also editing. Named in the
+      output rather than folded silently into a total. The stage split was
+      already actionable: it is what located the hierarchy's seed scan in 3.1
+- [x] 7.3 THE LOCALITY GATE: for one footprint, stamp time stays in one band
       from 1M to 20M vertices
-- [ ] 7.4 THE ALLOCATION GATE: after warm-up an ordinary stable-topology stamp
+      DONE twice. As a ctest gate at sizes CI can afford,
+      `tests/unit/test_extreme_poly_scaling.cpp` at 9,409 against 148,225
+      vertices on both query shapes (a geodesic verb and a ball verb): the
+      workset, the write region and the peak workset are IDENTICAL and the
+      median time ratio is 0.94 to 1.9 against a model ratio of 16, banded at
+      4.0 because the box is shared. Proven to catch its regression — with
+      `surface_index` returning null the ratio goes to 6.4 and 4.4 and the gate
+      fails, while the allocation gate still passes, which is the division of
+      labour design.md describes. And as the benchmark at the sizes the
+      requirement names: 20M against 1M at the same 20k footprint is 1.05x the
+      total dab, 1.01x for the stamp itself
+- [x] 7.4 THE ALLOCATION GATE: after warm-up an ordinary stable-topology stamp
       performs no heap allocation; adaptive stamps allocate only from
       preallocated pools
-- [ ] 7.5 THE PREVIEW GATE: bytes handed to a host per stamp follow the dirty
+      DONE with all three of D7's assertions, in the two places the mechanisms
+      live. Count and bytes, at TWO model sizes sixteen times apart with the
+      same world footprint, in `test_sculpt_allocation.cpp` — zero and zero at
+      both, with the workset and write region identical, so the gate cannot be
+      satisfied by a runtime whose cost follows the model. The high-water
+      assertion in `test_scratch_arena.cpp`, on `memory::ScratchArena`, which is
+      where the mechanism is: the sculptor's gather does not consume the arena
+      yet (3.1, 3.7), and asserting it there would assert something nothing
+      implements
+- [x] 7.5 THE PREVIEW GATE: bytes handed to a host per stamp follow the dirty
       chunks and not the model size
-- [ ] 7.6 THE MEMORY-PRESSURE GATE: 4.6, as a test rather than a claim
+      DONE in `test_chunk_transport.cpp` (a hierarchy at 10 against 40 base
+      quads a side: 16x the model, 1.36x the bytes, with the FULL upload
+      asserted to have grown so that "the dirty bytes did not" is a claim),
+      in `test_extreme_poly_scaling.cpp` on the fixed mesh, and in pyclay. The
+      example measures it too: 9.2 KiB on both of two models 16x apart
+- [x] 7.6 THE MEMORY-PRESSURE GATE: 4.6, as a test rather than a claim
+      DONE: `tests/unit/test_memory_trim.cpp`, and the C and pyclay halves in
+      `test_c_surface_chunks.cpp` and `test_surface_transport.py`. Proven to
+      catch its regression: with `trim_blocked` returning false the pin cases
+      fail
 - [ ] 7.7 Peak telemetry — scratch, workset, dirty chunks, topology operations
       — reported as high-water marks for profile tuning
+      PARTIAL. `memory::PeakTelemetry` exists, observes all four as high-water
+      marks rather than averages, is asserted in `test_scratch_arena.cpp`, and
+      is what `test_extreme_poly_scaling.cpp` reads for the peak-workset half of
+      the locality gate. What is NOT done is the engine reporting into it: no
+      sculptor, no BVH and no chunk table observes anything, so a host cannot
+      read a peak it did not accumulate itself. The type and its gate are here;
+      the wiring is not
 - [ ] 7.8 Measured on the reference iPad as well as on a desktop: median and
       p95 stamp latency, footprint and peak memory, and a sustained multi-minute
       session for thermal behaviour. The device gate already exists and this
       extends it rather than inventing a second one
+      NOT DONE and NOT DOABLE HERE: there is no reference iPad on this box, and
+      `release_check.py`'s `device` row refuses for the same reason. The desktop
+      half is done and is in docs/09
 - [ ] 7.9 Four presets green plus `release_check`; `tsan` under `setarch -R`;
       `check_layering.py` green including whatever 1.2 decided
-- [ ] 7.10 Docs: `docs/09-brush-latency-and-coverage.md` gains the new
+      PARTIAL, and the report says exactly which. `cpu-only` green (2079 cases).
+      `asan-ubsan` green over the new cases. `tsan` under `setarch -R` run over
+      the new cases. `check_layering.py`, `check_c_abi.py`,
+      `check_binding_parity.py`, `check_gallery.py` and `check_swift_package.py`
+      all green. `release_check.py` still reports the four pre-existing failures
+      this environment has (bindings, abi, tests and wheel from the anaconda
+      GLIBCXX_3.4.31 mismatch, device from the hardware gate). The metal, cuda,
+      opencl and vulkan presets need toolkits this box does not have
+- [x] 7.10 Docs: `docs/09-brush-latency-and-coverage.md` gains the new
       representations' measured costs; the memory documentation gains the
       eviction order verbatim, because a host implementer needs it in prose
+      DONE: docs/09 gains "The extreme-poly runtime, measured" — the
+      20M-against-1M per-stage ratio table, the absolutes at 1M for scale, the
+      per-dab upload, the chunk-size decision, the adaptive and hierarchy rows,
+      and the measured gap 3.1 names. docs/05 already carried the eviction order
+      verbatim from the engine stage and now carries the tests that prove each
+      sentence of it — including the one that was not true
