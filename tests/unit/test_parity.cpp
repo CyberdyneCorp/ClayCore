@@ -580,6 +580,48 @@ TEST_CASE("parity: every registered backend matches the scalar reference") {
             for (std::size_t i = 0; i < n * 3; ++i)
                 worst_c = cmax(worst_c, rel_err(ref_c[i], got_c[i]));
             CHECK(worst_c <= cmax(tol, 1e-4f));
+
+            // GRADIENTS, which nothing compared until now — and the omission
+            // had teeth: the Metal backend answered them by falling back to
+            // eval_points_reference for the whole batch, the serial scalar walk,
+            // and took 3442 ms where its own distance path took 13.8 ms. No
+            // test noticed, because no test asked.
+            //
+            // Compared as a DIRECTION rather than componentwise: these are
+            // normalized, so the meaningful error is the angle between them and
+            // a componentwise relative error near a zero component reads huge
+            // for a vector that is barely rotated.
+            //
+            // WHERE THE FIELD IS FLAT the direction is not defined — the four
+            // taps agree, their weighted sum is ~0, and normalizing it yields
+            // whatever the arithmetic happens to produce. Those points are
+            // skipped rather than tolerated loosely, so the check stays tight
+            // where a gradient means something.
+            std::vector<float> ref_g(n * 3), got_g(n * 3);
+            eval::PointResults ref_grad{nullptr, ref_g.data(), nullptr};
+            eval::eval_points_reference(tape, q, ref_grad);
+            eval::PointResults got_grad{nullptr, got_g.data(), nullptr};
+            REQUIRE(backend->eval_points(tape, q, got_grad) == eval::Status::Ok);
+            float worst_dot = 1.0f;
+            std::size_t compared_g = 0;
+            for (std::size_t i = 0; i < n; ++i) {
+                const cfloat3 a = cf3(ref_g[i * 3], ref_g[i * 3 + 1], ref_g[i * 3 + 2]);
+                const cfloat3 b = cf3(got_g[i * 3], got_g[i * 3 + 1], got_g[i * 3 + 2]);
+                if (kernel::cabs(kernel::clength(a) - 1.0f) > 1e-3f) continue;  // degenerate
+                worst_dot = cmin(worst_dot, kernel::cdot(a, b));
+                ++compared_g;
+            }
+            CAPTURE(worst_dot);
+            CAPTURE(compared_g);
+            // Most of the corpus is surface, so a scene that compared almost
+            // nothing here would be a fixture problem rather than a pass.
+            CHECK(compared_g > n / 8);
+            // MEASURED, not guessed: the worst dot over the whole corpus on
+            // Metal is 0.999986, so 0.999 (about 2.6 degrees) is loose enough
+            // to survive another Apple GPU and tight enough that a gradient
+            // pointing anywhere else fails. Reverting the device path to zeros
+            // fails this with 70 assertions.
+            CHECK(worst_dot >= (is_cpu ? 0.9999f : 0.999f));
         }
     }
 }

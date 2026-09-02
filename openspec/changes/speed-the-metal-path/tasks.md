@@ -20,8 +20,28 @@
       Held by "pooled batch scratch survives interleaved batch sizes" in
       `test_backend_residency.cpp`.
 - [ ] 1.5 Avoid the copies unified memory does not need: `bytesNoCopy` for inputs where alignment permits, read results from `contents()` in place. Keep the copying path for callers whose memory cannot be wrapped, and state which callers those are
-- [ ] 1.6 Gradients on the device — remove `gradients_from_taps`' whole-batch fallback to `eval_points_reference`
-- [ ] 1.7 RESOLVE the meshing contradiction: either implement device meshing, or amend the spec to say the backend triangulates on the host through `grid_mesh` and leave `device_meshing` false. Record which and why. A flag that disagrees with the spec is not an outcome
+- [x] 1.6 DONE. The four-tap tetrahedron is dispatched as ONE batch of 4n
+      points through the kernel the distances already use — no second pipeline
+      and no new MSL, because a tap is an ordinary point. The taps, the weighted
+      sum and the normalize are written out as four arrays exactly as
+      `tape_block.cpp` writes them for the CPU's blocked path.
+      **3442 ms -> 37.3 ms** for 20,000 points over a 2,000-item document, which
+      also takes it from 23x SLOWER than the CPU backend to 4x faster.
+      Two things found while doing it: nothing in the suite compared gradients
+      on any backend (so the old fallback's cost was invisible), and Metal
+      REFUSED a gradient-only query the interface documents. Both fixed.
+- [x] 1.7 RESOLVED THE SECOND WAY: the spec is amended and `device_meshing`
+      stays false, because the CODE was the honest side of the contradiction.
+      `MetalBackend::mesh` is a hybrid — values from its own `eval_grid`,
+      triangulation on the host through `grid_mesh` — and the flag correctly
+      said so while `evaluation-backends` required "on-device meshing".
+      Why not the other way: topology is fully determined by the evaluated
+      values, so a device triangulator would produce the same mesh while being a
+      second implementation of the step most able to drift — the reason
+      `BrickCache::submit` keeps quantization and band classification off the
+      device as well. And the flag is load-bearing: `test_vulkan.cpp` asserts it
+      false with the note that a caller who trusts it and gets host meshing is
+      measuring the wrong thing.
 - [x] 1.8 HOLDS. `test_parity.cpp` compares every registered backend against
       the scalar reference and reports `PARITY_BACKENDS_CHECKED: cpu,metal` on a
       Metal build; worst relative error 0. `ship-metal-in-the-xcframework` task
@@ -54,7 +74,8 @@ work landed under `patch-the-resident-tape`, `batch-brick-eval` and
 releases, which made #243 describe a backend that no longer existed and would
 have had anyone starting here rebuild both.
 
-FOUR ARE GENUINELY OPEN, and they are the four that were never touched:
+TWO ARE GENUINELY OPEN. 1.6 and 1.7 were closed on 2026-09-01; the two below
+were never touched:
 
 - **1.2** the attribution baseline (breaking the 288 us into allocation,
   upload, dispatch and readback). Superseded in spirit — the two costs it was
@@ -62,12 +83,6 @@ FOUR ARE GENUINELY OPEN, and they are the four that were never touched:
   recorded, so the number is not defensible today either.
 - **1.5** `bytesNoCopy` for inputs and reading results from `contents()` in
   place. Every path still `memcpy`s out of a shared buffer.
-- **1.6** gradients on the device. `gradients_from_taps` still falls back to
-  `eval_points_reference` for the whole batch.
-- **1.7** the `device_meshing` contradiction. The flag is still false and the
-  spec still says the backend meshes on device; this needs a decision recorded
-  either way, and a flag disagreeing with a spec is not an outcome.
 
-NONE of the four needs Apple hardware to WRITE, though 1.2 and 1.5 need it to
-measure. That is the correction #243 rests on: this change is not "fully
+NEITHER needs Apple hardware to WRITE, though both need it to measure. That is the correction #243 rests on: this change is not "fully
 blocked".

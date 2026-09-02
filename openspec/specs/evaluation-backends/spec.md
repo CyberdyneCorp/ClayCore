@@ -97,7 +97,9 @@ A GPU backend MAY rely on that identity to keep the uploaded form of recently ev
 - **THEN** each evaluation returns that tape's own field, within the backend's parity tolerance of the scalar reference
 
 ### Requirement: Metal backend (tier 1)
-The Metal backend SHALL use `metal-cpp` (pure C++, no Objective-C in the core), compile the kernel headers as MSL, pass tapes via argument buffers, and implement the full backend interface including `eval_bricks` and on-device meshing. It is the iPad app's production path.
+The Metal backend SHALL use `metal-cpp` (pure C++, no Objective-C in the core), compile the kernel headers as MSL, pass tapes via argument buffers, and implement `eval_points`, `eval_grid`, `eval_bricks` and `raycast`. It is the iPad app's production path.
+
+It SHALL mesh as a HYBRID and report `device_meshing` false: the field values come from its own `eval_grid` and the triangulation runs on the host through `grid_mesh`. Topology is fully determined by the evaluated values, so the hybrid produces the mesh a device triangulator would and the parity contract compares the same thing either way — while a second triangulator would be a second implementation of the step most able to drift, which is the reason `BrickCache::submit` keeps quantization and band classification off the device too. A backend that reported `device_meshing` true and meshed on the host would tell a caller it had saved a readback that it had not.
 
 #### Scenario: Metal brick fill
 - **WHEN** a dirty brick set is submitted to the Metal backend
