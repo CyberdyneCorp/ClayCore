@@ -271,6 +271,19 @@ LayerId content_sharer_of(const Document& doc, LayerId layer);
 // Writing AT minor 14 or below writes every layer's content inline exactly as
 // it always did, and the instances come back as independent copies: the shapes
 // are right, the sharing is gone.
+//
+// Minor 16 adds a LAYER's per-axis scale (issue #373): one cfloat3 in the layer
+// record, appended and gated exactly as the radial fields before it are. It is
+// the same field minor 14 gave an ITEM, one level up, and it is what gives a
+// subtool gizmo three handles instead of one.
+//
+// Same shape as minors 7, 8, 11, 14 and 15, so the same two directions. A build
+// that predates 16 reading a 16 document is one cfloat3 long on the first layer
+// record and desynchronised for every record after it, and FAILS — the reader's
+// own bounds and element-count checks reject the stream rather than misread it.
+// Writing AT minor 15 or below drops the field and the layer comes back at the
+// identity triple (1, 1, 1), which is what every file written before this field
+// meant: the squash is gone, and visibly so.
 inline constexpr std::uint16_t kSceneMinor = 16;
 
 // Apply a command; returns its inverse, or nullopt if the target does not

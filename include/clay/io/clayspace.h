@@ -164,6 +164,16 @@ inline constexpr std::uint16_t kClaySpaceMajor = 1;
 // reopening it here does not restore the link. That is the recoverable
 // direction: duplicated geometry is visible and re-instanceable, whereas a
 // silently dropped layer would not be.
+//
+// Minor 16 adds a LAYER's per-axis scale, and like 14 it is a SCENE PAYLOAD
+// change — see scene::kSceneMinor for the field and its gating. Same shape as
+// 15 and the same two directions: a build that predates 16 desynchronises on
+// the first layer record and FAILS rather than misreading, and writing AT minor
+// 15 hands such a build a document it can open, whose layers are unsquashed to
+// the identity triple rather than dropped. What is lost is a squash an artist
+// applied to a whole subtool; it is visible, and re-applying it is one gizmo
+// drag, which is why this is the recoverable direction rather than a reason to
+// refuse the downgrade.
 inline constexpr std::uint16_t kClaySpaceMinor = 16;
 
 // The document bundle a .clayspace file holds. Voxel layer content is keyed
