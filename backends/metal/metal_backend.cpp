@@ -83,29 +83,47 @@ class MetalBackend final : public Backend {
 
     Status eval_points(const scene::Tape& tape, const PointQuery& q,
                        const PointResults& out) override {
-        if (!q.points_xyz || !out.distances) return Status::InvalidInput;
+        // `out` says what is WANTED, and a null buffer means "not this one" —
+        // the interface's own words. This used to require `out.distances`, so a
+        // caller after ONLY the gradient was refused here and served by the CPU
+        // backend, which is the shape the interface explicitly allows. Asking
+        // for nothing at all is still refused.
+        if (!q.points_xyz) return Status::InvalidInput;
+        if (!out.distances && !out.gradients_xyz && !out.colors_rgb)
+            return Status::InvalidInput;
         if (q.count == 0) return Status::Ok;
         std::lock_guard<std::mutex> lock(mutex_);
 
-        ClayEvalUniforms u{};
-        u.instr_count = static_cast<unsigned int>(tape.instrs.size());
-        u.point_count = static_cast<unsigned int>(q.count);
-        u.has_colors = out.colors_rgb ? 1u : 0u;
+        bool ok = true;
+        // The base walk produces the DISTANCE and the COLOUR. The four taps
+        // below need neither, so a caller who asked for neither skips this
+        // entirely rather than paying a fifth of the work for an answer nobody
+        // reads — the same saving `tape_block.cpp` makes on the CPU.
+        if (out.distances || out.colors_rgb) {
+            ClayEvalUniforms u{};
+            u.instr_count = static_cast<unsigned int>(tape.instrs.size());
+            u.point_count = static_cast<unsigned int>(q.count);
+            u.has_colors = out.colors_rgb ? 1u : 0u;
 
-        MTL::Buffer* pts = copy_in(kSlotIn, q.points_xyz, q.count * 3 * sizeof(float));
-        MTL::Buffer* dist = scratch(kSlotValues, q.count * sizeof(float));
-        MTL::Buffer* cols =
-            scratch(kSlotColors, out.colors_rgb ? q.count * 3 * sizeof(float) : 0);
+            MTL::Buffer* pts = copy_in(kSlotIn, q.points_xyz, q.count * 3 * sizeof(float));
+            MTL::Buffer* dist = scratch(kSlotValues, q.count * sizeof(float));
+            MTL::Buffer* cols =
+                scratch(kSlotColors, out.colors_rgb ? q.count * 3 * sizeof(float) : 0);
 
-        TapeBuffers tb = upload_tape(tape);
-        bool ok = dispatch(pso_points_, {tb.instrs, tb.params, tb.blob, pts, dist, cols},
-                           &u, sizeof(u), 6, q.count);
-        if (ok) {
-            std::memcpy(out.distances, dist->contents(), q.count * sizeof(float));
-            if (out.colors_rgb)
-                std::memcpy(out.colors_rgb, cols->contents(), q.count * 3 * sizeof(float));
-            if (out.gradients_xyz) gradients_from_taps(tape, q, out);
+            TapeBuffers tb = upload_tape(tape);
+            ok = dispatch(pso_points_, {tb.instrs, tb.params, tb.blob, pts, dist, cols}, &u,
+                          sizeof(u), 6, q.count);
+            if (ok) {
+                if (out.distances)
+                    std::memcpy(out.distances, dist->contents(), q.count * sizeof(float));
+                if (out.colors_rgb)
+                    std::memcpy(out.colors_rgb, cols->contents(), q.count * 3 * sizeof(float));
+            }
         }
+        // The taps go to the device too. Safe to reuse the scratch slots the
+        // walk above used: `dispatch` waits for completion, and the results have
+        // already been copied out.
+        if (ok && out.gradients_xyz) ok = gradients_on_device(tape, q, out);
         return ok ? Status::Ok : Status::DeviceError;
     }
 
@@ -900,17 +918,64 @@ class MetalBackend final : public Backend {
         return wait_for(cmd, /*allow_spin=*/true);
     }
 
-    // Gradients on the host from 4 extra device evaluations would need a
-    // second dispatch; for now derive them CPU-side from the tape (rarely
-    // requested on the GPU path — brick fills don't need them).
-    void gradients_from_taps(const scene::Tape& tape, const PointQuery& q,
+    // THE FOUR-TAP TETRAHEDRON, ON THE DEVICE, as one dispatch of 4n points
+    // through the kernel the distances already use — no second pipeline and no
+    // new MSL, because a tap is an ordinary point.
+    //
+    // What this replaces was a whole-batch fallback to `eval_points_reference`,
+    // which is the SERIAL SCALAR reference walk: the slowest evaluator in the
+    // tree. A host that selected this backend for speed and asked for normals
+    // got 3442 ms where the CPU backend — blocked and pooled — took 151 ms and
+    // this backend's own distance-only path took 13.8 ms (20,000 points over a
+    // 2,000-item document). Being 23x slower than not using the backend at all
+    // is not a fallback, it is a trap.
+    //
+    // The taps, the weighted sum and the normalize are `kernel::cnormal`'s,
+    // written out here as four arrays exactly as `tape_block.cpp` writes them
+    // for the CPU's blocked path — same expressions in the same order, so the
+    // only difference from the CPU's answer is that the four tap DISTANCES came
+    // off the device, which is the ordinary parity question every other value
+    // this backend returns already answers.
+    bool gradients_on_device(const scene::Tape& tape, const PointQuery& q,
                              const PointResults& out) {
-        PointResults grad_only;
-        grad_only.gradients_xyz = out.gradients_xyz;
-        PointQuery sub = q;
-        std::vector<float> tmp(q.count);
-        grad_only.distances = tmp.data();
-        eval_points_reference(tape, sub, grad_only);
+        const std::size_t n = q.count;
+        const kernel::cfloat3 e[4] = {kernel::cf3(1.0f, -1.0f, -1.0f),
+                                      kernel::cf3(-1.0f, -1.0f, 1.0f),
+                                      kernel::cf3(-1.0f, 1.0f, -1.0f),
+                                      kernel::cf3(1.0f, 1.0f, 1.0f)};
+        MTL::Buffer* taps = scratch(kSlotIn, n * 4 * 3 * sizeof(float));
+        float* tp = static_cast<float*>(taps->contents());
+        for (int k = 0; k < 4; ++k) {
+            for (std::size_t j = 0; j < n; ++j) {
+                const kernel::cfloat3 p = kernel::cf3(
+                    q.points_xyz[j * 3], q.points_xyz[j * 3 + 1], q.points_xyz[j * 3 + 2]);
+                const kernel::cfloat3 t = p + e[k] * q.gradient_eps;
+                const std::size_t at = (static_cast<std::size_t>(k) * n + j) * 3;
+                tp[at] = t.x;
+                tp[at + 1] = t.y;
+                tp[at + 2] = t.z;
+            }
+        }
+        ClayEvalUniforms u{};
+        u.instr_count = static_cast<unsigned int>(tape.instrs.size());
+        u.point_count = static_cast<unsigned int>(n * 4);
+        u.has_colors = 0u;
+        MTL::Buffer* dist = scratch(kSlotValues, n * 4 * sizeof(float));
+        MTL::Buffer* cols = scratch(kSlotColors, 0);
+        TapeBuffers tb = upload_tape(tape);
+        if (!dispatch(pso_points_, {tb.instrs, tb.params, tb.blob, taps, dist, cols}, &u,
+                      sizeof(u), 6, n * 4))
+            return false;
+        const float* d = static_cast<const float*>(dist->contents());
+        for (std::size_t j = 0; j < n; ++j) {
+            const kernel::cfloat3 nn = e[0] * d[j] + e[1] * d[n + j] + e[2] * d[2 * n + j] +
+                                       e[3] * d[3 * n + j];
+            const kernel::cfloat3 g = kernel::cnormalize(nn);
+            out.gradients_xyz[j * 3] = g.x;
+            out.gradients_xyz[j * 3 + 1] = g.y;
+            out.gradients_xyz[j * 3 + 2] = g.z;
+        }
+        return true;
     }
 
     // Serializes the public entry points: the scratch pool and the resident

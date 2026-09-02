@@ -122,34 +122,57 @@ class VulkanBackend final : public Backend {
 
     Status eval_points(const scene::Tape& tape, const PointQuery& q,
                        const PointResults& out) override {
-        if (!q.points_xyz || !out.distances) return Status::InvalidInput;
+        // `out` says what is WANTED, and a null buffer means "not this one".
+        // This used to require `out.distances`, so a caller after ONLY the
+        // gradient was refused — a shape the interface explicitly allows, and
+        // one the Metal backend refused for the same reason until the parity
+        // suite started asking for it. Asking for nothing at all is still
+        // refused.
+        if (!q.points_xyz) return Status::InvalidInput;
+        if (!out.distances && !out.gradients_xyz && !out.colors_rgb)
+            return Status::InvalidInput;
         if (q.count == 0) return Status::Ok;
 
-        PushConstants pc{};
-        pc.count = static_cast<std::uint32_t>(q.count);
-        pc.has_colors = out.colors_rgb ? 1u : 0u;
-        if (!upload_tape(tape, &pc)) return Status::DeviceError;
-        if (!ensure(&in_, q.count * 3 * sizeof(float))) return Status::DeviceError;
-        if (!ensure(&dist_, q.count * sizeof(float))) return Status::DeviceError;
-        if (!ensure(&color_, (out.colors_rgb ? q.count * 3 : 1) * sizeof(float)))
-            return Status::DeviceError;
-        std::memcpy(in_.mapped, q.points_xyz, q.count * 3 * sizeof(float));
+        // The device walk produces the DISTANCE and the COLOUR. The gradient
+        // taps below need neither, so a caller who asked for neither skips the
+        // dispatch and its two copies entirely.
+        if (out.distances || out.colors_rgb) {
+            PushConstants pc{};
+            pc.count = static_cast<std::uint32_t>(q.count);
+            pc.has_colors = out.colors_rgb ? 1u : 0u;
+            if (!upload_tape(tape, &pc)) return Status::DeviceError;
+            if (!ensure(&in_, q.count * 3 * sizeof(float))) return Status::DeviceError;
+            if (!ensure(&dist_, q.count * sizeof(float))) return Status::DeviceError;
+            if (!ensure(&color_, (out.colors_rgb ? q.count * 3 : 1) * sizeof(float)))
+                return Status::DeviceError;
+            std::memcpy(in_.mapped, q.points_xyz, q.count * 3 * sizeof(float));
 
-        if (!dispatch(pipe_points_, pc, q.count)) return Status::DeviceError;
+            if (!dispatch(pipe_points_, pc, q.count)) return Status::DeviceError;
 
-        std::memcpy(out.distances, dist_.mapped, q.count * sizeof(float));
-        if (out.colors_rgb)
-            std::memcpy(out.colors_rgb, color_.mapped, q.count * 3 * sizeof(float));
-        // Gradients stay on the host, as they do on the OpenCL backend: the
-        // tetrahedron tap lives in field.h, which is templated C++ and not
-        // part of any compute dialect. Stated rather than silent -- a caller
-        // asking a tier-3 backend for gradients is paying CPU for them.
+            if (out.distances)
+                std::memcpy(out.distances, dist_.mapped, q.count * sizeof(float));
+            if (out.colors_rgb)
+                std::memcpy(out.colors_rgb, color_.mapped, q.count * 3 * sizeof(float));
+        }
+        // Gradients stay on the host here, unlike Metal, and the reason is that
+        // nobody has measured the alternative on this backend. Metal takes the
+        // four taps to the device as one dispatch of 4n points through the
+        // kernel the distances already use — no shader change, because a tap is
+        // an ordinary point — and the same trick applies here. It is not done
+        // in this change because it cannot be measured without Vulkan hardware,
+        // and an unmeasured device path claiming to be faster is what
+        // `resume-the-device-refill` refused to write for Metal.
+        //
+        // What DID change is which host walk: `eval_points_blocked` rather than
+        // `eval_points_reference`. The reference is the SERIAL SCALAR
+        // definition of correctness and the slowest evaluator in the tree;
+        // blocked walks the tape once per block of points and is bit-identical
+        // to it, so this is free. On Metal the same fallback measured 3442 ms
+        // against 13.8 ms for its own distance path before it was replaced.
         if (out.gradients_xyz) {
             PointResults grad_only;
             grad_only.gradients_xyz = out.gradients_xyz;
-            std::vector<float> scratch(q.count);
-            grad_only.distances = scratch.data();
-            eval_points_reference(tape, q, grad_only);
+            eval_points_blocked(tape, q, grad_only);
         }
         return Status::Ok;
     }
