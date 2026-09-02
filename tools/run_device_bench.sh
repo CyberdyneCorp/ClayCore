@@ -92,6 +92,22 @@ command -v xcodegen > /dev/null || {
 rm -rf "$RESULTS"
 mkdir -p "$(dirname "$RESULTS")"
 
+# THE GATE NOW SIGNS UNDER TEAM 2C69VJZSNR.
+#
+#     CLAY_DEVICE_TEAM=2C69VJZSNR tools/run_device_bench.sh <udid>
+#
+# Worth saying here because the failure is a wall rather than a hint. The team
+# this project signed under until 2026-09-02, E9TF4UGU7L, has no unexpired
+# certificate left — the last one died at 03:08 UTC that day — and a free
+# personal team's certificates lapse yearly, so this will happen again. What
+# xcodebuild says when it does is "No Accounts: Add a new account in Accounts
+# settings" and "No signing certificate \"iOS Development\" found", neither of
+# which mentions expiry, and on one run it segfaulted at GatherProvisioningInputs
+# instead of reporting anything. `security find-identity -v -p codesigning` is
+# the check that answers it in one line: an identity listed under `-p codesigning`
+# but absent from the `-v` output is expired, and the fix is a sign-in in Xcode's
+# Accounts settings rather than anything in this repo.
+#
 # macOS ships bash 3.2, where an empty array expanded under `set -u` is an
 # unbound-variable error rather than nothing at all.
 team_arg=()
