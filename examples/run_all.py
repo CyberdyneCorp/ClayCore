@@ -151,6 +151,12 @@ CAPABILITY_EXAMPLES = {
     # memory tier a host can act on. Listed while add-extreme-poly-runtime is
     # still active, which is what the asymmetry above is for.
     "sculpt-runtime": "71_extreme_poly",
+    # The honesty of a device measurement -- a floor a case must clear, a
+    # budget that is reported when nothing can reach it, coverage counted over
+    # what the gate decides on. Nothing to render: what it governs is whether a
+    # NUMBER means anything, and the numbers are taken on the reference device
+    # by tests/device, not in this gallery.
+    "device-gate": None,
     "examples": None,             # this file
 }
 

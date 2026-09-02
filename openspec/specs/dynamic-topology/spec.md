@@ -1,7 +1,17 @@
 # dynamic-topology Specification
 
 ## Purpose
-TBD - created by archiving change add-dynamic-topology. Update Purpose after archive.
+Sculpting where the triangles follow the brush instead of constraining it.
+
+A mutable surface with identities stable across edits, local split, collapse and
+flip that are atomic and refuse to corrupt, and a remesher driven by brush-
+relative detail rather than by a global target. What it promises beyond "it
+changes topology" is that the change is BOUNDED: a dab costs what it touches, a
+gesture is one sparse undo step, the result is deterministic, and a host is told
+which chunks moved instead of being handed the whole surface.
+
+Its own capability rather than part of meshing because meshing turns a field
+into triangles once, and this owns triangles that keep changing.
 
 ## Requirements
 

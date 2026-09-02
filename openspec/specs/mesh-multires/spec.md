@@ -1,7 +1,20 @@
 # mesh-multires Specification
 
 ## Purpose
-TBD - created by archiving change add-mesh-multires. Update Purpose after archive.
+Coarse form and fine detail on one surface, each editable without destroying the
+other.
+
+A level is its parent subdivided plus its own detail, and the detail is stored
+in a frame transported with the surface — which is what lets a sweep at a low
+level carry the pores at a high one instead of smearing them. The sculpt level
+is independent of the display level, propagation between them is local, adding a
+level reports its cost before paying it, and a hierarchy carrying detail refuses
+the arbitrary topology change that would leave that detail describing a surface
+that no longer exists.
+
+Its own capability rather than part of dynamic-topology because the two are
+opposite bargains: that one changes the triangle count to follow the brush, this
+one fixes a base cage and layers detail over it.
 
 ## Requirements
 

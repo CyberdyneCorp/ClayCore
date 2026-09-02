@@ -1,7 +1,17 @@
 # device-gate Specification
 
 ## Purpose
-TBD - created by archiving change lift-a-case-over-the-gates-floor. Update Purpose after archive.
+What a performance number on the reference device is allowed to claim.
+
+A gate that cannot fail protects nothing, so a case counts as measured only
+where its figure clears the absolute floor the gate compares against, a batched
+case must still measure the path its verb names rather than the batch around it,
+and a budget nothing can reach is reported instead of passed. Coverage is
+counted over what the gate DECIDES on, not over what it happens to time, and a
+figure published anywhere in the tree has to be the one the baseline holds.
+
+Its own capability rather than part of build-packaging because the subject is
+the honesty of a measurement, not the making of a build.
 
 ## Requirements
 
