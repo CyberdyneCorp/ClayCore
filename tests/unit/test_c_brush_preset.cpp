@@ -166,3 +166,47 @@ TEST_CASE("c brush preset: automasking crosses on the brush descriptor") {
     CHECK(back.brush.automask_factors == d.automask_factors);
     CHECK(back.brush.automask_boundary_rings == 3);
 }
+
+TEST_CASE("c brush preset: a preset sized as it shipped survives the brush growing a field") {
+    // THE REGRESSION (add-extreme-poly-runtime). clay_brush_preset EMBEDS
+    // clay_mesh_brush_desc, and the preset's "original layout" used to be
+    // computed as `offsetof(brush) + sizeof(clay_mesh_brush_desc)`. That reads
+    // like a constant and is not one: appending a field to the BRUSH moved the
+    // PRESET's original size up with it, so every host holding a correctly
+    // sized clay_brush_preset from the previous header would have been refused
+    // as TooShort — the exact break struct_size exists to absorb, arriving
+    // through the one descriptor that contains another.
+    //
+    // Appending `seed_revision` to the brush is what would have done it, so
+    // this spends a preset declared at the size it had BEFORE that field, and
+    // requires it to be read rather than refused. Revert the frozen constant in
+    // bindings/c/clay_c.cpp and every check below fails.
+    const size_t shipped = offsetof(clay_brush_preset, brush) +
+                           offsetof(clay_mesh_brush_desc, seed_revision);
+    REQUIRE(shipped < sizeof(clay_brush_preset));
+
+    clay_brush_preset p{};
+    p.struct_size = sizeof(p);
+    REQUIRE(clay_brush_preset_by_name("Standard", &p) == CLAY_OK);
+    p.struct_size = static_cast<uint32_t>(shipped);
+
+    size_t needed = 0;
+    REQUIRE(clay_brush_preset_serialize(&p, nullptr, &needed) == CLAY_OK);
+    std::vector<uint8_t> bytes(needed);
+    size_t written = needed;
+    REQUIRE(clay_brush_preset_serialize(&p, bytes.data(), &written) == CLAY_OK);
+
+    // And the fill in the other direction stays bounded by what the caller
+    // declared: a preset read back into the older layout is not written past.
+    clay_brush_preset older{};
+    older.struct_size = static_cast<uint32_t>(shipped);
+    REQUIRE(clay_brush_preset_deserialize(bytes.data(), bytes.size(), &older) == CLAY_OK);
+    CHECK(older.struct_size == shipped);
+    CHECK(std::string(older.name) == "Standard");
+
+    // Below the shipped layout is still a refusal — the rule is that a caller
+    // may be OLDER than this build, not that anything goes.
+    clay_brush_preset stunted{};
+    stunted.struct_size = 8;
+    CHECK(clay_brush_preset_serialize(&stunted, nullptr, &needed) == CLAY_ERROR_INVALID_ARGUMENT);
+}

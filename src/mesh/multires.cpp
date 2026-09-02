@@ -1,7 +1,9 @@
-#include "multires_internal.h"
-
 #include <algorithm>
 #include <cstring>
+
+#include "clay/memory/capacity.h"
+
+#include "multires_internal.h"
 
 namespace clay {
 namespace mesh {
@@ -56,6 +58,7 @@ LevelCache::Bytes LevelCache::byte_split() const {
                 mesh.quads.capacity() * sizeof(std::uint32_t) +
                 mesh.colors.capacity() * sizeof(kernel::cfloat3) +
                 mesh.uvs.capacity() * sizeof(kernel::cfloat2);
+    b.chunk_index = chunks.bytes() + face_chunk.capacity() * sizeof(std::uint32_t);
     if (adjacency) {
         // The adjacency's own arrays are not exposed; its three CSR pairs are
         // close enough to ten words a vertex that pricing it any more precisely
@@ -94,6 +97,8 @@ const char* multires_error_text(MultiresError error) {
             return "the hierarchy carries detail; project onto a new cage instead of replacing it";
         case MultiresError::DepthLimit:
             return "the declared hierarchy is deeper than this build will reconstruct";
+        case MultiresError::CapacityOverflow:
+            return "the capacity estimate overflowed; the operation is refused rather than sized";
         case MultiresError::Decode:
             return "the buffer is truncated, corrupt, or from a newer writer";
         case MultiresError::NoSuchSculptLayer:
@@ -143,13 +148,50 @@ std::uint32_t MultiresSurface::display_level() const { return state_ ? state_->d
 bool MultiresSurface::set_sculpt_level(std::uint32_t level) {
     if (!state_ || !state_->level_ok(level)) return false;
     state_->sculpt_level = level;
+    enforce_residency();
     return true;
 }
 
 bool MultiresSurface::set_display_level(std::uint32_t level) {
     if (!state_ || !state_->level_ok(level)) return false;
     state_->display_level = level;
+    enforce_residency();
     return true;
+}
+
+void MultiresSurface::set_memory_profile(const memory::SculptMemoryProfile& profile) {
+    if (!state_) return;
+    state_->profile = profile;
+    enforce_residency();
+}
+
+const memory::SculptMemoryProfile& MultiresSurface::memory_profile() const {
+    static const memory::SculptMemoryProfile kDefault;
+    return state_ ? state_->profile : kDefault;
+}
+
+void MultiresSurface::enforce_residency() {
+    // ONE OF THE THREE MOMENTS EVICTION IS ALLOWED, and the one the host caused
+    // itself: it just said which level it is sculpting or drawing. Nothing here
+    // runs on a timer or on a high-water mark, because an engine that released a
+    // cache the host did not ask about would be a second invalidation source the
+    // host cannot predict — and `cache_generation` exists precisely because a
+    // released cache is a use-after-free waiting for pressure to find it.
+    //
+    // On a constrained profile the SCULPT and DISPLAY levels stay resident and
+    // everything else keeps its authoritative detail alone, which is the
+    // residency rule the spec states. `drop_intermediate_caches` flushes pending
+    // work first, so this drops a cache and never an edit.
+    if (!state_ || !state_->profile.constrained()) return;
+    const std::uint32_t resident =
+        state_->profile.max_resident_levels == 0 ? 2u : state_->profile.max_resident_levels;
+    // Two is what "the sculpt level and the display level" costs. A host that
+    // asks for more gets the levels above the active ones released and the ones
+    // between them kept, which is the cheaper of the two drops.
+    if (resident <= 2)
+        drop_intermediate_caches();
+    else
+        drop_inactive_caches();
 }
 
 // -- construction -------------------------------------------------------------
@@ -260,6 +302,14 @@ MultiresPreflight MultiresSurface::preflight_add_level() const {
 
     // Arithmetic, not a build: a child's counts follow from the parent's, which
     // is why `MultiresLevel::edge_count` is kept.
+    //
+    // CHECKED arithmetic, through the one estimator every priced operation in
+    // this library now shares. A level's vertex count is quadratic in the
+    // depth, so `vertices * bytes_per_vertex` is exactly the multiply that
+    // wraps on a hostile or merely ambitious hierarchy — and the failure mode
+    // of a wrapped estimate is that the level is ALLOWED, which is the one
+    // outcome this call exists to prevent. An overflow is reported as a
+    // refusal.
     p.vertices = static_cast<std::uint64_t>(parent.topology.vertex_count) + parent.edge_count +
                  parent.topology.face_count;
     p.faces = parent.topology.corners.size();
@@ -267,37 +317,55 @@ MultiresPreflight MultiresSurface::preflight_add_level() const {
     const auto with_slack = [](std::uint64_t exact) {
         return static_cast<std::uint64_t>(static_cast<double>(exact) * kCapacitySlack);
     };
+    memory::CapacityBuilder topology_cost;
     // The face list is ONE exactly-sized allocation, so it needs no slack.
-    p.topology_bytes = p.faces * kTopologyBytesPerFace;
+    topology_cost.authoritative(p.faces, kTopologyBytesPerFace);
+    p.topology_bytes = topology_cost.finish().persistent_bytes;
     // FULLY detailed means DENSE, and a promoted field's payload is one exact
     // allocation — so the coefficients are exact and only the block table it
     // leaves behind is grown. Two `uint32` vectors over the blocks, at the
     // doubling ceiling.
     {
+        memory::CapacityBuilder detail_cost;
         const std::uint64_t blocks =
             (p.vertices + DetailField::kDefaultBlockSize - 1) / DetailField::kDefaultBlockSize;
-        p.detail_bytes = p.vertices * kDetailBytesPerVertex + blocks * 4u * 2u * 2u;
+        detail_cost.authoritative(p.vertices, kDetailBytesPerVertex);
+        detail_cost.authoritative(blocks, 4u * 2u * 2u);
+        p.detail_bytes = detail_cost.finish().persistent_bytes;
     }
-    p.evaluated_bytes = with_slack(p.vertices * kEvaluatedBytesPerVertex);
-    p.runtime_bytes = with_slack(p.faces * (kConnBytesPerFace + kRuntimeBytesPerFace) +
-                                 p.vertices * (kConnBytesPerVertex + kRuntimeBytesPerVertex));
 
-    // What SURVIVES the call is the face list; the detail field starts empty
-    // and grows only where the artist works. What the call itself needs on top
-    // of that is the parent's connectivity, which is transient and is the
-    // reason peak and persistent are reported apart.
-    p.persistent_bytes = p.topology_bytes;
-    const std::uint64_t parent_conn =
-        static_cast<std::uint64_t>(parent.topology.face_count) * kConnBytesPerFace +
-        static_cast<std::uint64_t>(parent.topology.vertex_count) * kConnBytesPerVertex;
-    p.peak_bytes = p.persistent_bytes + parent_conn;
+    memory::CapacityBuilder cost;
+    // Persistent: the face list. What the call NEEDS on top of it is the
+    // parent's connectivity, which is transient and is the reason peak and
+    // persistent are reported apart.
+    cost.authoritative(p.faces, kTopologyBytesPerFace);
+    cost.transient(parent.topology.face_count, kConnBytesPerFace);
+    cost.transient(parent.topology.vertex_count, kConnBytesPerVertex);
+    const memory::CapacityEstimate estimate =
+        cost.finish(state_->options.memory_budget);
+
+    memory::CapacityBuilder evaluated_cost;
+    evaluated_cost.authoritative(p.vertices, kEvaluatedBytesPerVertex);
+    p.evaluated_bytes = with_slack(evaluated_cost.finish().persistent_bytes);
+    memory::CapacityBuilder runtime_cost;
+    runtime_cost.authoritative(p.faces, kConnBytesPerFace + kRuntimeBytesPerFace);
+    runtime_cost.authoritative(p.vertices, kConnBytesPerVertex + kRuntimeBytesPerVertex);
+    p.runtime_bytes = with_slack(runtime_cost.finish().persistent_bytes);
+
+    p.persistent_bytes = estimate.persistent_bytes;
+    p.peak_bytes = estimate.peak_bytes;
+    if (estimate.error == memory::BudgetError::Overflow) {
+        p.allowed = false;
+        p.error = MultiresError::CapacityOverflow;
+        return p;
+    }
 
     if (p.vertices > kMaxLevelVertices) {
         p.allowed = false;
         p.error = MultiresError::OverBudget;
         return p;
     }
-    if (state_->options.memory_budget != 0 && p.peak_bytes > state_->options.memory_budget) {
+    if (!estimate.allowed) {
         p.allowed = false;
         p.error = MultiresError::OverBudget;
     }
@@ -483,6 +551,9 @@ void mark_patches(MultiresSurface::State& s, std::uint32_t level,
     const LevelConnectivity& conn = connectivity_of(s, level);
     if (s.patch_dirty.size() != s.levels[0].topology.face_count)
         s.patch_dirty.assign(s.levels[0].topology.face_count, 0);
+    LevelCache* cache = s.levels[level].cache.get();
+    ChunkTable* level_chunks =
+        cache != nullptr && !cache->face_chunk.empty() ? &cache->chunks : nullptr;
     for (std::uint32_t v : vertices) {
         if (v >= topology.vertex_count) continue;
         std::size_t count = 0;
@@ -493,6 +564,16 @@ void mark_patches(MultiresSurface::State& s, std::uint32_t level,
                 s.patch_dirty[patch] = 1;
                 s.dirty_patches.push_back(patch);
             }
+            // The SAME event in the shared vocabulary, and only when the level
+            // has been partitioned — nothing here builds a chunk table on a
+            // sculpting path. The base patch stays the hierarchy's own dirty
+            // unit because a patch is what dirty propagation is defined over;
+            // the chunk is what a host uploads. They are the same granularity
+            // keyed two ways, which is why one walk marks both rather than two
+            // walks disagreeing.
+            if (level_chunks != nullptr && faces[i] < s.levels[level].cache->face_chunk.size())
+                level_chunks->mark(s.levels[level].cache->face_chunk[faces[i]],
+                                   ChunkDirty::Geometry);
         }
     }
 }
@@ -527,6 +608,7 @@ MultiresMemory MultiresSurface::memory() const {
         const LevelCache::Bytes split = l.cache->byte_split();
         m.evaluated += split.evaluated;
         m.runtime_index += split.runtime;
+        m.chunk_index += split.chunk_index;
     }
     for (const AttrLevel& a : state_->attr) m.runtime_index += a.bytes();
     // MEMORY MULTIPLIES TWICE with a layer stack, and the report says so rather
@@ -540,7 +622,7 @@ MultiresMemory MultiresSurface::memory() const {
     const SculptLayerMemory layers = state_->stack.memory();
     m.sculpt_layers = layers.content + layers.masks;
     m.authoritative = m.base + m.topology + m.detail + m.sculpt_layers;
-    m.rebuildable = m.evaluated + m.composed + m.runtime_index;
+    m.rebuildable = m.evaluated + m.composed + m.runtime_index + m.chunk_index;
     m.total = m.authoritative + m.rebuildable;
     return m;
 }
@@ -549,9 +631,34 @@ bool MultiresSurface::level_resident(std::uint32_t level) const {
     return state_ && state_->level_ok(level) && state_->levels[level].cache != nullptr;
 }
 
+namespace {
+
+// RELEASING storage moves the generation for the same reason CREATING it does.
+//
+// `cache_generation` is what a `MeshSculptor` bound to a level's `Mesh`
+// compares to decide whether the reference it is holding still points into live
+// storage, and `ensure_cache` bumped it on the way in. Nothing bumped it on the
+// way out, which left a window one call wide — drop, then stamp — where the
+// number had not moved and `MultiresSculptor::bind` therefore kept a sculptor
+// whose `Mesh&` pointed into a freed `LevelCache`.
+//
+// WHAT THAT LOOKED LIKE was not a crash, which is why it survived: the stamp
+// wrote its displacement into released storage, `absorb_level_edit` rebuilt the
+// level from the authoritative detail before reading it back, and the dab
+// simply was not there — with the sculptor still returning the number of weld
+// classes it believed it had moved. Under a memory warning arriving mid-stroke
+// that is a brush that stops working for one dab and says nothing.
+void release_generation(MultiresSurface::State& s, bool released) {
+    if (released) ++s.cache_generation;
+}
+
+}  // namespace
+
 void MultiresSurface::drop_all_caches() {
     if (!state_) return;
+    bool released = false;
     for (MultiresLevel& l : state_->levels) {
+        released = released || l.cache != nullptr;
         l.cache.reset();
         // The composed detail goes with the rest: it is `B + Σ s·m·L` and
         // every input to it is still here, so it rebuilds bit-identically.
@@ -563,6 +670,7 @@ void MultiresSurface::drop_all_caches() {
     state_->attr.clear();
     state_->base_frames_all = true;
     state_->base_frames_dirty.clear();
+    release_generation(*state_, released);
 }
 
 void MultiresSurface::drop_intermediate_caches() {
@@ -573,12 +681,15 @@ void MultiresSurface::drop_intermediate_caches() {
     // changes have not reached the one above it yet, and dropping it would drop
     // the edit rather than the cache.
     evaluate_up_to(*state_, std::max(keep_a, keep_b));
+    bool released = false;
     for (std::uint32_t l = 0; l < state_->levels.size(); ++l) {
         if (l == keep_a || l == keep_b) continue;
+        released = released || state_->levels[l].cache != nullptr;
         state_->levels[l].cache.reset();
         state_->levels[l].composed.reset();
     }
     state_->attr.clear();
+    release_generation(*state_, released);
 }
 
 void MultiresSurface::drop_inactive_caches() {
@@ -587,13 +698,16 @@ void MultiresSurface::drop_inactive_caches() {
     // ones in use have to stay. What goes is everything above them, which on a
     // deep hierarchy is most of it.
     const std::uint32_t keep = std::max(state_->sculpt_level, state_->display_level);
+    bool released = false;
     for (std::uint32_t l = keep + 1; l < state_->levels.size(); ++l) {
+        released = released || state_->levels[l].cache != nullptr;
         state_->levels[l].cache.reset();
         state_->levels[l].composed.reset();
         state_->levels[l].pending.clear();
         state_->levels[l].pending_all = true;
     }
     state_->attr.resize(std::min<std::size_t>(state_->attr.size(), keep + 1u));
+    release_generation(*state_, released);
 }
 
 }  // namespace mesh

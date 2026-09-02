@@ -43,7 +43,10 @@
 #include "clay/io/handoff.h"
 #include "clay/io/memory.h"
 #include "clay/io/mesh_io.h"
+#include "clay/mesh/maintenance.h"
 #include "clay/mesh/bvh.h"
+#include "clay/mesh/preflight.h"
+#include "clay/mesh/surface_view.h"
 #include "clay/mesh/decimate.h"
 #include "clay/mesh/dual_contouring.h"
 #include "clay/mesh/lattice.h"
@@ -93,6 +96,20 @@ nb::dict memory_dict(const io::MemoryReport& r) {
     out["voxel_layers"] = r.voxel_layers;
     out["mesh_layer_count"] = r.mesh_layer_count;
     out["mask_count"] = r.mask_count;
+    // The surface tier: zero unless the caller handed in the ledgers of the
+    // surfaces it holds BESIDE the document, because a hierarchy and an
+    // adaptive surface are owned by the host and a document cannot walk them.
+    out["surface_content"] = r.surface_content;
+    out["multires_detail"] = r.multires_detail;
+    out["sculpt_layers"] = r.sculpt_layers;
+    out["surface_caches"] = r.surface_caches;
+    out["surface_scratch"] = r.surface_scratch;
+    out["surface_undo"] = r.surface_undo;
+    // What a memory warning actually asks: not how big the document is, but
+    // WHICH PART — that is what decides what a host may release.
+    out["essential"] = r.essential();
+    out["rebuildable"] = r.rebuildable();
+    out["undoable"] = r.undoable();
     return out;
 }
 
@@ -678,6 +695,10 @@ struct PyMeshSculptor {
     // landing on the same vertex and index counts.
     std::uint64_t geometry_revision = 0;
     std::shared_ptr<mesh::MeshSculptor> sculptor;
+    // The peaks this session measured, OWNED HERE and pointed at once when the
+    // sculptor is built. See `peak_dict` for why a script reads a copy of this
+    // rather than being handed the block the engine writes into.
+    memory::PeakTelemetry peak;
 
     mesh::MeshSculptor& live(bool for_edit) const {
         if (!sculptor) throw std::runtime_error("this sculptor was never built");
@@ -698,6 +719,270 @@ struct PyMeshSculptor {
                 "the mesh layer was rebuilt under this sculptor; build a new one");
         return *sculptor;
     }
+};
+
+// The adaptive sculptor and the hierarchy's, each owning the block its peaks
+// publish into.
+//
+// SUBCLASSED RATHER THAN WRAPPED because there is exactly one thing to add and
+// every existing member should keep meaning what it means. The engine's seam
+// borrows a pointer on purpose — a C++ host has somewhere to put the numbers
+// and may want one block for several surfaces — and the borrow is what a
+// scripting binding must not expose: a telemetry object the interpreter can
+// collect while a stroke is still writing into it is a use-after-free with a
+// stack trace nobody would connect to the object they dropped. Owning it for
+// the sculptor's whole life removes the question.
+struct PyDynamicSculptor : mesh::DynamicSculptor {
+    memory::PeakTelemetry peak;
+    explicit PyDynamicSculptor(mesh::DynamicSurface& surface) : mesh::DynamicSculptor(surface) {
+        set_telemetry(&peak);
+        // Two publishers, one block: the sculptor reports the topology
+        // operations and the workset, and its chunked index reports how deep
+        // the dirty set got. A host sizing a staging buffer needs both, and
+        // needs them measured over the same stamps.
+        bvh().chunks_mutable().set_telemetry(&peak);
+    }
+};
+
+struct PyMultiresSculptor : mesh::MultiresSculptor {
+    memory::PeakTelemetry peak;
+    explicit PyMultiresSculptor(mesh::MultiresSurface& surface)
+        : mesh::MultiresSculptor(surface) {
+        // Forwarded to whichever level is bound, including one bound later, so
+        // the peak belongs to the SESSION rather than to whichever level was
+        // bound first — a hierarchy rebinds on a level change and on a trim.
+        set_telemetry(&peak);
+    }
+};
+
+// -- the surface tier: budgets, ledgers and the chunk transport ---------------
+//
+// (add-extreme-poly-runtime.) A dab costs approximately what it TOUCHES, and a
+// host at twenty million vertices needs three things across this boundary to
+// keep it that way: what changed, those bytes and nothing else, and what the
+// whole thing costs.
+
+nb::dict ledger_dict(const memory::MemoryLedger& ledger) {
+    nb::dict out;
+    // KEYED BY THE CATEGORY'S OWN NAME rather than by an integer, so a script
+    // reading this does not have to hold the enumeration's order — and so a
+    // category added later appears in the dict instead of shifting an index
+    // somebody wrote down.
+    for (std::size_t i = 0; i < memory::kMemoryCategoryCount; ++i)
+        out[memory::memory_category_name(static_cast<memory::MemoryCategory>(i))] =
+            ledger.bytes[i];
+    out["essential"] = ledger.essential();
+    out["rebuildable"] = ledger.rebuildable();
+    out["undoable"] = ledger.undoable();
+    out["total"] = ledger.total();
+    return out;
+}
+
+// The four high-water marks a host tunes a `SculptMemoryProfile` against.
+//
+// A SNAPSHOT rather than a live object, and that is the decision worth stating:
+// the engine's seam borrows a pointer the host owns, which is right for a C++
+// host that already has somewhere to put the numbers and wrong for a Python
+// one — a `PeakTelemetry` handed across `set_telemetry` would be a lifetime the
+// interpreter can end while a stroke is still writing into it. So the binding
+// owns the block for as long as the sculptor, and a script reads a copy. It is
+// the same shape the C ABI gives a host, which is the point: the two bindings
+// say the same thing about the same feature.
+nb::dict peak_dict(const memory::PeakTelemetry& peak) {
+    nb::dict out;
+    out["scratch_bytes"] = peak.scratch_bytes;
+    out["workset_vertices"] = peak.workset_vertices;
+    out["dirty_chunks"] = peak.dirty_chunks;
+    out["topology_ops"] = peak.topology_ops;
+    return out;
+}
+
+// One queued maintenance job, as a dict.
+//
+// `kind` comes back as the bound `MaintenanceKind` rather than an integer, so
+// the value a drain reads out of an item is the value `complete` and `has` take
+// — a script never has to know the enumeration's order to hand an item back.
+nb::dict item_dict(const mesh::MaintenanceItem& item) {
+    nb::dict out;
+    out["kind"] = item.kind;
+    out["target"] = item.target;
+    out["requests"] = item.requests;
+    out["estimated_micros"] = item.estimated_micros;
+    return out;
+}
+
+// The `with` form of a maintenance queue's stroke gate.
+//
+// IT HOLDS THE QUEUE OBJECT AND NOT ONLY A POINTER INTO IT. `with
+// clay.MaintenanceQueue().stroke():` builds a queue that nothing else refers
+// to, and a scope carrying a bare pointer would outlive it by exactly the
+// length of the block it exists to guard.
+struct PyMaintenanceStroke {
+    mesh::MaintenanceQueue* queue = nullptr;
+    nb::object owner;
+};
+
+// What the spatial index is worth right now, behind the maintenance item that
+// asks about it. A dict rather than three properties for the same reason
+// `peak_dict` is one: the three numbers only mean anything together, and a
+// script that read `quality` without `wants_rebuild` has read the half it
+// cannot act on.
+nb::dict index_quality_dict(const mesh::DynamicBvh& index) {
+    nb::dict out;
+    out["leaf_count"] = index.leaf_count();
+    // The mean leaf VOLUME against the volume of their union: 1 is a perfect
+    // partition, larger means the leaves overlap, which is what local edits do
+    // to a tree over time. LOWER IS BETTER, and it is only meaningful against
+    // this same tree's own history — never against another model's.
+    //
+    // A SURFACE WITH NO VOLUME REPORTS 0, which follows from the measure rather
+    // than from a bug: a flat plane's leaves and their union are both
+    // zero-volume boxes. Every model with thickness reports a real figure.
+    out["quality"] = index.quality();
+    out["wants_rebuild"] = index.wants_rebuild();
+    return out;
+}
+
+nb::dict trim_dict(const memory::TrimReport& report) {
+    nb::dict out;
+    for (std::size_t i = 0; i < memory::kMemoryCategoryCount; ++i)
+        out[memory::memory_category_name(static_cast<memory::MemoryCategory>(i))] =
+            report.released[i];
+    out["pressure"] = memory::pressure_name(report.pressure);
+    out["total_released"] = report.total_released;
+    // Nothing was released and the figures above are what the call WOULD have
+    // released: a memory warning arriving mid-save gets an honest answer rather
+    // than a document mutating under the writer.
+    out["pinned"] = report.pinned;
+    return out;
+}
+
+nb::dict preflight_dict(const mesh::SurfacePreflight& p) {
+    nb::dict out;
+    out["authoritative_bytes"] = p.authoritative_bytes;
+    out["runtime_bytes"] = p.runtime_bytes;
+    out["persistent_bytes"] = p.persistent_bytes;
+    // The high-water mark DURING the call, and the number that matters: the
+    // peak is what kills an application on a memory-constrained device, and a
+    // steady-state figure that "fits" is what makes it happen half way through.
+    out["peak_bytes"] = p.peak_bytes;
+    out["allowed"] = p.allowed;
+    out["error"] = memory::budget_error_text(p.error);
+    return out;
+}
+
+// A ledger dict, back into the ledger it came out of. Keyed by the category's
+// own NAME, which is what `ledger_dict` emitted — the roll-ups it also carries
+// are derived and are ignored here rather than double-counted.
+void merge_ledger_dict(nb::handle h, memory::MemoryLedger* out) {
+    nb::dict d;
+    if (!nb::try_cast(h, d))
+        throw std::invalid_argument(
+            "a surface ledger must be a dict as memory_ledger() returns, or a list of them");
+    for (std::size_t i = 0; i < memory::kMemoryCategoryCount; ++i) {
+        const char* key = memory::memory_category_name(static_cast<memory::MemoryCategory>(i));
+        if (d.contains(key))
+            out->add(static_cast<memory::MemoryCategory>(i),
+                     nb::cast<std::size_t>(d[key]));
+    }
+}
+
+nb::dict revisions_dict(const mesh::ChunkRevisions& r) {
+    nb::dict out;
+    out["topology"] = r.topology;
+    out["geometry"] = r.geometry;
+    out["normals"] = r.normals;
+    out["attributes"] = r.attributes;
+    return out;
+}
+
+// The four counters a host echoes back when it acknowledges a chunk. A dict
+// rather than a class, because it is what `copy_chunk` handed the caller a
+// moment ago and a round trip through a bound type would buy nothing.
+mesh::ChunkRevisions to_revisions(nb::handle h, const char* what) {
+    mesh::ChunkRevisions r;
+    if (h.is_none()) return r;
+    nb::dict d;
+    if (!nb::try_cast(h, d))
+        throw std::invalid_argument(std::string(what) +
+                                    " must be a dict of topology/geometry/normals/attributes, "
+                                    "as copy_chunk returns");
+    const auto field = [&](const char* key, std::uint64_t* out) {
+        if (d.contains(key)) *out = nb::cast<std::uint64_t>(d[key]);
+    };
+    field("topology", &r.topology);
+    field("geometry", &r.geometry);
+    field("normals", &r.normals);
+    field("attributes", &r.attributes);
+    return r;
+}
+
+// The read seam, as a Python object.
+//
+// IT STORES THE SOURCE AND REBUILDS THE VIEW PER CALL. `mesh::SurfaceView` is a
+// call-site convenience by construction — valid only while the surface it names
+// is unchanged — and a Python object outlives a stamp by definition. Caching
+// the view would hand back spans into a table the next stamp has moved.
+struct PySurfaceView {
+    nb::object owner;  // the Python surface this names, kept alive for our life
+    mesh::SurfaceKind kind = mesh::SurfaceKind::Fixed;
+    PyMesh* mesh_handle = nullptr;
+    // Fixed only, and OURS: the fixed sculptor tracks dirty weld classes and
+    // has no chunk table of its own yet, so this view partitions the mesh and
+    // reports a static partition with an empty dirty set.
+    mesh::ChunkTable table;
+    mesh::DynamicSculptor* dynamic_sculptor = nullptr;
+    mesh::MultiresSurface* multires = nullptr;
+    std::uint32_t level = 0;
+
+    mesh::SurfaceView view() {
+        switch (kind) {
+            case mesh::SurfaceKind::Fixed:
+                return mesh::SurfaceView::over_mesh(mesh_handle->data(), table);
+            case mesh::SurfaceKind::Adaptive:
+                return mesh::SurfaceView::over_dynamic(dynamic_sculptor->surface(),
+                                                       dynamic_sculptor->bvh().chunks());
+            case mesh::SurfaceKind::Multires:
+                if (level >= multires->level_count())
+                    throw std::runtime_error(
+                        "that level is gone from this hierarchy; take a new view");
+                return mesh::SurfaceView::over_level(*multires, level);
+        }
+        throw std::runtime_error("corrupt surface view");
+    }
+
+    // The acknowledgement is a WRITE, which is why the read seam does not carry
+    // one. Null for a hierarchy, whose dirty set is retired through the surface.
+    mesh::ChunkTable* writable_table() {
+        switch (kind) {
+            case mesh::SurfaceKind::Fixed: return &table;
+            case mesh::SurfaceKind::Adaptive: return &dynamic_sculptor->bvh().chunks_mutable();
+            case mesh::SurfaceKind::Multires: return nullptr;
+        }
+        return nullptr;
+    }
+};
+
+// The gate a serializer or a readback holds. A CONTEXT MANAGER, and that is the
+// point of binding it rather than exposing a counter: a `with` block is the only
+// form that cannot leave a document pinned when the body raises, and a document
+// pinned forever is one no trim can ever help.
+struct PyMemoryPin {
+    PyMemoryPin() = default;
+    // NOT COPYABLE, said out loud rather than left to the member below. A
+    // vector of unique_ptr is copy-constructible as a DECLARATION and fails
+    // only when the copy is instantiated, so a binding generator that probes
+    // `is_copy_constructible` gets True and then a hard error inside the
+    // standard library. Copying a pin is also meaningless: the balance belongs
+    // to the scope that took it.
+    PyMemoryPin(const PyMemoryPin&) = delete;
+    PyMemoryPin& operator=(const PyMemoryPin&) = delete;
+
+    memory::TrimGate gate;
+    // One live scope per acquire. The count is private to memory::MemoryPin on
+    // purpose — RAII is the mechanism rather than a convenience over it — so a
+    // balance kept by hand is a stack of scopes and never a second counter.
+    std::vector<std::unique_ptr<memory::MemoryPin>> held;
 };
 
 struct PyVertexDeltas {
@@ -809,7 +1094,8 @@ math::Aabb to_aabb(nb::handle obj);
 mesh::MeshBrushSettings mesh_brush_settings(
     const std::string& verb, nb::handle center, float radius, float strength,
     const std::string& falloff, nb::handle direction, nb::handle deposit_normal,
-    nb::handle geodesic, nb::handle seed_class, const std::string& flatten_mode,
+    nb::handle geodesic, nb::handle seed_class, nb::handle seed_revision,
+    const std::string& flatten_mode,
     nb::handle plane_point, nb::handle plane_normal, float polish_angle, int smooth_iterations,
     float layer_height, nb::handle alpha, nb::handle alpha_direction, nb::handle alpha_tangent,
     float alpha_extent, nb::handle color, nb::handle automask, float stamp_azimuth,
@@ -838,6 +1124,15 @@ mesh::MeshBrushSettings mesh_brush_settings(
         geodesic.is_none() ? mesh::default_geodesic(*out_verb) : nb::cast<bool>(geodesic);
     settings.seed_class =
         seed_class.is_none() ? mesh::kNoClass : nb::cast<std::uint32_t>(seed_class);
+    // WHICH NUMBERING THAT SEED CAME FROM. None claims nothing and leaves the
+    // bounds check that was always here, which is what every caller that does
+    // not pick sends. It is worth passing whenever the class was: a seed picked
+    // in a numbering that has since been replaced is still IN BOUNDS, and the
+    // surface walk answers an empty region rather than a wrong one — so the dab
+    // is lost outright and looks exactly like a fully masked stroke.
+    settings.seed_revision = seed_revision.is_none()
+                                 ? mesh::kNoSeedRevision
+                                 : nb::cast<std::uint64_t>(seed_revision);
     settings.flatten_mode = parse_flatten_mode(flatten_mode);
     // A plane is given when EITHER half of it is, so a caller who names only the
     // normal gets the plane they meant rather than a silently ignored argument.
@@ -4398,7 +4693,31 @@ NB_MODULE(pyclay, m) {
             "ONE stated difference from `save`: an in-memory OBJ carries no\n"
             "`mtllib` line. The path form writes a companion .mtl beside the\n"
             "object file and names it; a buffer has no companion, and naming a\n"
-            "file that was never written is worse than naming none.");
+            "file that was never written is worse than naming none.")
+        .def(
+            "preflight_to_dynamic",
+            [](const PyMesh& pm, std::uint64_t budget) {
+                return preflight_dict(mesh::preflight_to_dynamic(pm.data(), budget));
+            },
+            "budget"_a = 0,
+            "What converting this mesh into an adaptive surface WOULD cost,\n"
+            "asked before any of it is paid. Allocates nothing and has no side\n"
+            "effects.\n\n"
+            "Read `peak_bytes`, not `persistent_bytes`: the conversion holds the\n"
+            "source mesh, the half-edge structure and the weld map at once, and\n"
+            "the peak is what kills an application on a constrained device.\n"
+            "A budget of 0 means no budget and always allows — except on an\n"
+            "arithmetic overflow, which refuses at any budget, because an\n"
+            "estimate nobody can compute is not one anybody may rely on.")
+        .def(
+            "preflight_global_remesh",
+            [](const PyMesh& pm, std::uint64_t target_triangles, std::uint64_t budget) {
+                return preflight_dict(
+                    mesh::preflight_global_remesh(pm.data(), target_triangles, budget));
+            },
+            "target_triangles"_a, "budget"_a = 0,
+            "The same question for a global remesh, where source and target are\n"
+            "live at the same time — which is the whole reason it is asked.");
 
     // -- fixed-topology mesh brushes -------------------------------------------------
     nb::class_<parallel::CancelToken>(
@@ -4580,6 +4899,10 @@ NB_MODULE(pyclay, m) {
                 self->geometry_revision =
                     pm->revisions ? revision_of(*pm->revisions, pm->layer) : 0;
                 self->sculptor = std::make_shared<mesh::MeshSculptor>(data, weld_epsilon);
+                // Pointed at the block this object owns and never re-pointed:
+                // the sculptor is built once here and `live()` refuses rather
+                // than rebuilding, so the peaks belong to the session.
+                self->sculptor->set_telemetry(&self->peak);
             },
             "mesh"_a, "weld_epsilon"_a = mesh::kDefaultWeldEpsilon,
             "`weld_epsilon` is relative to the bounding-box diagonal: vertices\n"
@@ -4598,7 +4921,8 @@ NB_MODULE(pyclay, m) {
             [](PyMeshSculptor& s, const std::string& verb, nb::handle center, float radius,
                float strength, const std::string& falloff, nb::handle direction,
                nb::handle deposit_normal, nb::handle geodesic, nb::handle seed_class,
-               const std::string& flatten_mode, nb::handle plane_point, nb::handle plane_normal,
+               nb::handle seed_revision, const std::string& flatten_mode, nb::handle plane_point,
+               nb::handle plane_normal,
                float polish_angle, int smooth_iterations, float layer_height, nb::handle alpha,
                nb::handle alpha_direction, nb::handle alpha_tangent, float alpha_extent,
                nb::handle color, nb::handle automask, float stamp_azimuth, nb::handle mask,
@@ -4606,9 +4930,9 @@ NB_MODULE(pyclay, m) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, center, radius, strength, falloff, direction, deposit_normal, geodesic,
-                    seed_class, flatten_mode, plane_point, plane_normal, polish_angle,
-                    smooth_iterations, layer_height, alpha, alpha_direction, alpha_tangent,
-                    alpha_extent, color, automask, stamp_azimuth, &chosen);
+                    seed_class, seed_revision, flatten_mode, plane_point, plane_normal,
+                    polish_angle, smooth_iterations, layer_height, alpha, alpha_direction,
+                    alpha_tangent, alpha_extent, color, automask, stamp_azimuth, &chosen);
                 mesh::VertexDeltas* record =
                     deltas.is_none() ? nullptr : nb::cast<PyVertexDeltas*>(deltas)->deltas.get();
                 field::MaskGate gate = mask_gate_of(mask);
@@ -4618,7 +4942,8 @@ NB_MODULE(pyclay, m) {
             },
             "verb"_a, "center"_a, "radius"_a, "strength"_a = 0.5f, "falloff"_a = "smooth",
             "direction"_a = nb::none(), "deposit_normal"_a = nb::none(), "geodesic"_a = nb::none(),
-            "seed_class"_a = nb::none(), "flatten_mode"_a = "two_sided",
+            "seed_class"_a = nb::none(), "seed_revision"_a = nb::none(),
+            "flatten_mode"_a = "two_sided",
             "plane_point"_a = nb::none(), "plane_normal"_a = nb::none(), "polish_angle"_a = 0.20f,
             "smooth_iterations"_a = 1, "layer_height"_a = 0.05f, "alpha"_a = nb::none(),
             "alpha_direction"_a = nb::none(), "alpha_tangent"_a = nb::none(),
@@ -4792,7 +5117,8 @@ NB_MODULE(pyclay, m) {
             "apply_stroke",
             [](PyMeshSculptor& s, nb::handle samples, const brush::StrokePreset& preset,
                const std::string& verb, const std::string& falloff, nb::handle deposit_normal,
-               nb::handle geodesic, nb::handle seed_class, const std::string& flatten_mode,
+               nb::handle geodesic, nb::handle seed_class, nb::handle seed_revision,
+               const std::string& flatten_mode,
                nb::handle plane_point, nb::handle plane_normal, float polish_angle,
                int smooth_iterations, float layer_height, float strength, nb::handle color,
                nb::handle automask, float stamp_azimuth, nb::handle mask, nb::handle deltas,
@@ -4804,9 +5130,9 @@ NB_MODULE(pyclay, m) {
                 // is its own decision — see the proposal's open question.
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, nb::none(), 1.0f, strength, falloff, nb::none(), deposit_normal, geodesic,
-                    seed_class, flatten_mode, plane_point, plane_normal, polish_angle,
-                    smooth_iterations, layer_height, nb::none(), nb::none(), nb::none(), 0.0f,
-                    color, automask, stamp_azimuth, &chosen);
+                    seed_class, seed_revision, flatten_mode, plane_point, plane_normal,
+                    polish_angle, smooth_iterations, layer_height, nb::none(), nb::none(),
+                    nb::none(), 0.0f, color, automask, stamp_azimuth, &chosen);
                 std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
                 mesh::VertexDeltas* record =
                     deltas.is_none() ? nullptr : nb::cast<PyVertexDeltas*>(deltas)->deltas.get();
@@ -4820,6 +5146,7 @@ NB_MODULE(pyclay, m) {
             },
             "samples"_a, "preset"_a, "verb"_a, "falloff"_a = "smooth",
             "deposit_normal"_a = nb::none(), "geodesic"_a = nb::none(), "seed_class"_a = nb::none(),
+            "seed_revision"_a = nb::none(),
             "flatten_mode"_a = "two_sided", "plane_point"_a = nb::none(),
             "plane_normal"_a = nb::none(), "polish_angle"_a = 0.20f, "smooth_iterations"_a = 1,
             "layer_height"_a = 0.05f, "strength"_a = 1.0f, "color"_a = nb::none(),
@@ -4878,6 +5205,7 @@ NB_MODULE(pyclay, m) {
                 out["u"] = hit.u;
                 out["v"] = hit.v;
                 out["seed_class"] = live.adjacency().class_of(mm.indices[hit.triangle * 3]);
+                out["seed_revision"] = live.seed_revision();
                 return nb::object(out);
             },
             "origin"_a, "direction"_a, "position"_a = nb::none(), "rotation_axis"_a = nb::none(),
@@ -4890,7 +5218,82 @@ NB_MODULE(pyclay, m) {
             "shell means it.\n\n"
             "The dict carries `seed_class`, which is what `stamp`'s `seed_class`\n"
             "wants: it starts the surface walk where the finger did, instead of\n"
-            "scanning the whole mesh for the nearest vertex.")
+            "scanning the whole mesh for the nearest vertex — and beside it\n"
+            "`seed_revision`, which is the numbering that class was picked in.\n"
+            "Pass both back or neither. They are handed out together because a\n"
+            "class kept without its token is exactly the half nothing can\n"
+            "check: a seed from a numbering that has been replaced is still in\n"
+            "bounds, and the stamp it seeds reports 0 moved rather than moving\n"
+            "the wrong thing.")
+        .def_prop_ro(
+            "seed_revision", [](PyMeshSculptor& s) { return s.live(false).seed_revision(); },
+            "The numbering this sculptor's weld classes are in — what `raycast`\n"
+            "hands back beside a `seed_class`, and what `stamp` wants in\n"
+            "`seed_revision`.\n\n"
+            "Constant for the life of the sculptor: the adjacency is built once\n"
+            "and nothing rebuilds it, so vertices moving under a stroke leave\n"
+            "the token alone and a seed stays valid across the stamps of a\n"
+            "gesture. What retires one is a NEW sculptor — and a hierarchy\n"
+            "makes one on every rebind, which is the case it exists for.")
+        .def_prop_ro(
+            "stale_seeds_rejected",
+            [](PyMeshSculptor& s) { return s.live(false).stale_seeds_rejected(); },
+            "How many stamps refused a `seed_class` because its\n"
+            "`seed_revision` did not match. The number that makes a rejection\n"
+            "OBSERVABLE: without it a script cannot tell a seed that was\n"
+            "refused from one that was taken and happened to be harmless.")
+        .def_prop_ro(
+            "peak_telemetry", [](PyMeshSculptor& s) { return peak_dict(s.peak); },
+            "The high-water marks this session has reached, for tuning a\n"
+            "`SculptMemoryProfile`: `scratch_bytes`, `workset_vertices`,\n"
+            "`dirty_chunks`, `topology_ops`.\n\n"
+            "PEAKS RATHER THAN AVERAGES, and that is what makes them worth\n"
+            "reading. A buffer sized to the vertex count, allocated once and\n"
+            "reused forever, allocates nothing on a warm stamp and costs no\n"
+            "bytes on one — it satisfies every count-based check — and it is\n"
+            "still O(model) storage. What catches it is a peak that does not\n"
+            "move between a small model and a large one at the same footprint.\n\n"
+            "`workset_vertices` is the live one here: the fixed stamp path does\n"
+            "not consume the scratch arena yet, so `scratch_bytes` reports the\n"
+            "0 it measured rather than a number nothing filled.")
+        .def(
+            "reset_peak_telemetry", [](PyMeshSculptor& s) { s.peak.reset(); },
+            "Start the high-water marks again, which is what a script does\n"
+            "between the case it is measuring and the one before it.")
+        .def_prop_rw(
+            "defer_normals",
+            [](PyMeshSculptor& s) { return s.live(false).defer_normals(); },
+            [](PyMeshSculptor& s, bool defer) { s.live(true).set_defer_normals(defer); },
+            "Recompute normals once at the end of a drag instead of once per\n"
+            "stamp. False by default, because a moved vertex with a stale\n"
+            "normal shades wrong immediately.\n\n"
+            "THE FINAL STATE IS EXACT EITHER WAY. That is the whole contract:\n"
+            "this changes WHEN the work happens and nothing about the result,\n"
+            "which is what makes it a hint a `SculptMemoryProfile` may carry\n"
+            "rather than a decision that would make a committed sculpt a\n"
+            "function of machine speed.\n\n"
+            "A SCRIPT THAT DEFERS MUST FLUSH. Nothing flushes on its own: the\n"
+            "sculptor does not know where a stroke ends, and a guess at it\n"
+            "would flush mid-drag, which is the cost this exists to avoid.\n"
+            "`apply_stroke`'s own `defer_normals` argument is a different\n"
+            "thing and still flushes at the end of the stroke it drove:\n"
+            "there the library does know where the stroke ended.")
+        .def(
+            "flush_normals",
+            [](PyMeshSculptor& s, nb::handle deltas) {
+                mesh::VertexDeltas* record =
+                    deltas.is_none() ? nullptr : nb::cast<PyVertexDeltas*>(deltas)->deltas.get();
+                s.live(true).flush_normals(record);
+            },
+            "deltas"_a = nb::none(),
+            "Recompute the normals a deferred drag left pending, over the write\n"
+            "region and its ring, and clear it. A no-op when nothing is\n"
+            "pending, so calling it at the end of every stroke is right whether\n"
+            "or not that stroke deferred.\n\n"
+            "PASS THE SAME `deltas` THE STAMPS WERE RECORDED INTO. A deferred\n"
+            "stroke's undo is exact only if the flush records the normals it\n"
+            "changed; omitting it leaves an undo that restores positions and\n"
+            "not shading.")
         .def_prop_ro(
             "has_colors", [](PyMeshSculptor& s) { return s.live(false).has_colors(); },
             "Whether the mesh carries a vertex colour attribute, which 'paint'\n"
@@ -4939,7 +5342,21 @@ NB_MODULE(pyclay, m) {
             "by the root box so it is comparable across meshes.\n\n"
             "A rise means queries are getting slower. It does NOT mean rebuild:\n"
             "measured over five deformations, a rebuild produced a better tree in\n"
-            "exactly one of them, and was dramatically worse in two.");
+            "exactly one of them, and was dramatically worse in two.")
+        .def(
+            "memory_ledger",
+            [](const PyMeshSculptor& s) {
+                memory::MemoryLedger ledger;
+                mesh::report_surface_memory(s.live(false), &ledger);
+                return ledger_dict(ledger);
+            },
+            "What this sculptor's surface costs, by category, in the same\n"
+            "vocabulary the hierarchy and the adaptive surface answer in — so a\n"
+            "host holding one of each gets one set of three roll-ups rather than\n"
+            "three reports it has to reconcile.\n\n"
+            "THE MESH AND NOTHING ELSE. The ray tree is built lazily, so asking\n"
+            "a const report for its size would mean building one — 1.3 s on a 2M\n"
+            "vertex mesh — which is a report nobody would call twice.");
 
     // -- layer -----------------------------------------------------------------------
     nb::class_<PyLayer>(m, "Layer", "SDF layer: an ordered edit list inside a Document")
@@ -6608,6 +7025,35 @@ NB_MODULE(pyclay, m) {
             "same chunk cost the same. Expect it to move independently of\n"
             "occupied_count.")
         .def(
+            "memory_with_surfaces",
+            [](const PyDocument& d, nb::handle surfaces) {
+                // THE SURFACE SEAM, and the reason `memory` did not simply gain
+                // an argument: a hierarchy and an adaptive surface are owned by
+                // the HOST and held BESIDE a document rather than inside one, so
+                // a document cannot walk them and a guess would be worse than
+                // the honest zero `memory` reports. A caller that holds them
+                // passes their ledgers — one, or a list of them — here.
+                memory::MemoryLedger held;
+                if (!surfaces.is_none()) {
+                    nb::list items;
+                    if (nb::try_cast(surfaces, items)) {
+                        for (nb::handle h : items) merge_ledger_dict(h, &held);
+                    } else {
+                        merge_ledger_dict(surfaces, &held);
+                    }
+                }
+                return memory_dict(io::document_memory(
+                    *d.doc, d.undo ? d.undo->get() : nullptr,
+                    surfaces.is_none() ? nullptr : &held));
+            },
+            "surfaces"_a.none(),
+            "The same report, with the surfaces the host holds beside this\n"
+            "document folded into the surface-tier lines.\n\n"
+            "`surfaces` is a ledger `memory_ledger()` returned, or a list of\n"
+            "them — only the caller knows which surfaces belong to this\n"
+            "document. Passing None is exactly `memory`, which is why that one\n"
+            "stays rather than gaining an argument.")
+        .def(
             "layer_memory",
             [](const PyDocument& d, const std::string& name) {
                 // BY NAME, because every other layer lookup in this module is
@@ -6880,9 +7326,28 @@ NB_MODULE(pyclay, m) {
                                 "truncated, or written by a newer schema version");
                         return out;
                     },
-                    "data"_a);
+                    "data"_a)
+        .def(
+            "preflight_to_mesh",
+            [](const mesh::DynamicSurface& s, std::uint64_t budget) {
+                return preflight_dict(mesh::preflight_to_mesh(s, budget));
+            },
+            "budget"_a = 0,
+            "What exporting this surface as a flat mesh WOULD cost. The export\n"
+            "SPLITS a geometric vertex into as many export vertices as it has\n"
+            "distinct corner attributes, so the result is bounded by CORNERS\n"
+            "rather than by vertices — the term that makes this bigger than it\n"
+            "looks on a seam-heavy model.")
+        .def(
+            "preflight_encode",
+            [](const mesh::DynamicSurface& s, std::uint64_t budget) {
+                return preflight_dict(mesh::preflight_encode(s, budget));
+            },
+            "budget"_a = 0,
+            "The same for serialization, where the blob is a second copy of\n"
+            "everything and exists while the surface still does.");
 
-    nb::class_<mesh::DynamicSculptor>(
+    nb::class_<PyDynamicSculptor>(
         m, "DynamicSculptor",
         "The brush engine over an adaptive surface: the same verbs, the same\n"
         "falloffs, the same mask, and the same deformation math — the shared\n"
@@ -6890,13 +7355,13 @@ NB_MODULE(pyclay, m) {
         "representations.\n\n"
         "The surface must outlive the sculptor.")
         .def("__init__",
-             [](mesh::DynamicSculptor* self, mesh::DynamicSurface& surface) {
-                 new (self) mesh::DynamicSculptor(surface);
+             [](PyDynamicSculptor* self, mesh::DynamicSurface& surface) {
+                 new (self) PyDynamicSculptor(surface);
              },
              "surface"_a, nb::keep_alive<1, 2>())
         .def(
             "stamp",
-            [](mesh::DynamicSculptor& self, const std::string& verb, nb::handle center,
+            [](PyDynamicSculptor& self, const std::string& verb, nb::handle center,
                float radius, float strength, const std::string& falloff,
                const mesh::DynamicTopologySettings& topology, nb::handle direction,
                nb::handle mask, bool geodesic, int smooth_iterations, nb::handle automask,
@@ -6904,9 +7369,9 @@ NB_MODULE(pyclay, m) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, center, radius, strength, falloff, direction, nb::none(),
-                    nb::cast(geodesic), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
-                    smooth_iterations, 0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(),
-                    automask, stamp_azimuth, &chosen);
+                    nb::cast(geodesic), nb::none(), nb::none(), "two_sided", nb::none(),
+                    nb::none(), 0.2f, smooth_iterations, 0.0f, nb::none(), nb::none(), nb::none(),
+                    0.0f, nb::none(), automask, stamp_azimuth, &chosen);
                 if (!mesh::dynamic_offers(chosen))
                     throw std::invalid_argument(
                         "an adaptive surface does not offer '" + verb +
@@ -6940,25 +7405,105 @@ NB_MODULE(pyclay, m) {
             "One stamp: remesh where the verb's timing says, deform through the\n"
             "shared kernels, recompute the normals of what moved, and keep the\n"
             "chunked index in step.")
-        .def("rebuild_index", &mesh::DynamicSculptor::rebuild_index,
+        .def("rebuild_index", [](PyDynamicSculptor& s) { s.rebuild_index(); },
              "Rebuild the chunked index. BETWEEN strokes, never mid-drag: a refit\n"
              "stays correct and does not stay fast, and a rebuild is not\n"
              "automatically an improvement.")
+        .def_prop_ro(
+            "index_quality", [](const PyDynamicSculptor& s) { return index_quality_dict(s.bvh()); },
+            "What the chunked index is worth right now: `leaf_count`,\n"
+            "`quality` and `wants_rebuild`.\n\n"
+            "The measurement behind a `MaintenanceKind.index_rebuild` item, so\n"
+            "a host declining that item declines something it can see rather\n"
+            "than a name.\n\n"
+            "`quality` is the mean leaf volume against the volume of their\n"
+            "union: 1 is a perfect partition and larger means the leaves\n"
+            "overlap. A SURFACE WITH NO VOLUME REPORTS 0 — a flat plane's\n"
+            "leaves and their union are both zero-volume boxes — so a script\n"
+            "testing this on a ground plane sees 0 and a `wants_rebuild` that\n"
+            "is never true. Every model with thickness reports a real figure.\n\n"
+            "`wants_rebuild` is the ENGINE's opinion of its own\n"
+            "partition and NOT an instruction: it is one of the two conditions\n"
+            "`request_index_rebuild` checks, and the other is the host's\n"
+            "`SculptMemoryProfile.allow_index_rebuild`. Keeping them apart is\n"
+            "the point — the engine measures, the host decides whether it has\n"
+            "the room.")
+        .def(
+            "request_index_rebuild",
+            [](const PyDynamicSculptor& s, mesh::MaintenanceQueue& queue, nb::handle profile,
+               std::uint32_t target) {
+                // None IS the default profile, rather than a second spelling of
+                // one: `SculptMemoryProfile` is registered after this class, so
+                // a default-constructed instance in the signature would be cast
+                // at module-init time against a type that does not exist yet —
+                // which is a std::bad_cast on `import clay`, not a bad default.
+                memory::SculptMemoryProfile p;
+                if (!profile.is_none()) p = nb::cast<memory::SculptMemoryProfile>(profile);
+                return mesh::request_index_rebuild(s.bvh(), p, target, &queue);
+            },
+            "queue"_a, "profile"_a = nb::none(), "target"_a = 0u,
+            "Queue an index rebuild if the tree wants one AND the profile\n"
+            "allows it, and report whether anything was queued.\n\n"
+            "Still a REQUEST: it puts the job where a host can see it and\n"
+            "rebuilds nothing. `rebuild_index` is what performs it, between\n"
+            "strokes.")
         .def_prop_ro("chunk_count",
-                     [](const mesh::DynamicSculptor& s) { return s.bvh().leaf_count(); })
+                     [](const PyDynamicSculptor& s) { return s.bvh().leaf_count(); })
         .def_prop_ro("dirty_chunks",
-                     [](const mesh::DynamicSculptor& s) {
+                     [](const PyDynamicSculptor& s) {
                          const std::vector<std::uint32_t>& d = s.bvh().dirty_leaves();
                          return std::vector<std::uint32_t>(d.begin(), d.end());
                      },
                      "The chunks the stamps since the last clear touched.")
-        .def("clear_dirty", [](mesh::DynamicSculptor& s) { s.bvh().clear_dirty(); })
+        .def("clear_dirty", [](PyDynamicSculptor& s) { s.bvh().clear_dirty(); })
+        .def_prop_ro(
+            "peak_telemetry", [](const PyDynamicSculptor& s) { return peak_dict(s.peak); },
+            "The high-water marks this sculptor has reached:\n"
+            "`scratch_bytes`, `workset_vertices`, `dirty_chunks`,\n"
+            "`topology_ops`.\n\n"
+            "The adaptive surface is the only representation that fills\n"
+            "`topology_ops`, and it is the number that decides how big the slot\n"
+            "pools have to be: a split allocates a slot, and the stamp that\n"
+            "split five hundred times is the one a pool must survive.\n"
+            "`dirty_chunks` comes from the same chunked index the transport\n"
+            "drains, so it is what a staging buffer has to hold.")
+        .def(
+            "reset_peak_telemetry", [](PyDynamicSculptor& s) { s.peak.reset(); },
+            "Start the high-water marks again.")
+        .def(
+            "memory_ledger",
+            [](const PyDynamicSculptor& s) {
+                memory::MemoryLedger ledger;
+                mesh::report_surface_memory(s, &ledger);
+                return ledger_dict(ledger);
+            },
+            "What this surface costs, by category, with the three roll-ups a\n"
+            "host under pressure can act on.")
+        .def(
+            "trim",
+            [](PyDynamicSculptor& s, memory::Pressure pressure, PyMemoryPin* pin) {
+                return trim_dict(
+                    mesh::trim_surface(s, pressure, pin ? &pin->gate : nullptr));
+            },
+            "pressure"_a, "pin"_a.none() = nb::none(),
+            "Release rebuildable caches at a stated pressure and report what\n"
+            "went.\n\n"
+            "NEVER THE SURFACE ITSELF, and never the tree: an adaptive surface's\n"
+            "index is its only means of asking a local question, and releasing\n"
+            "it would not save a host memory so much as make the next dab a scan\n"
+            "over every face. What goes is the chunk arena's SLACK. Nor is the\n"
+            "slot pool's slack released: rebuilding it renumbers slots, so the\n"
+            "surface would come back identical as a surface and different as a\n"
+            "partition — and what a host had already uploaded would be addressed\n"
+            "by ids that no longer mean the same chunks.\n\n"
+            "A held pin makes this a no-op that reports what it WOULD have\n"
+            "released.")
         .def_prop_ro("arena_stats",
-                     [](const mesh::DynamicSculptor& s) { return arena_stats_of(&s.arena()); },
+                     [](const PyDynamicSculptor& s) { return arena_stats_of(&s.arena()); },
                      kArenaStatsDoc)
         .def(
             "set_automask_inputs",
-            [](mesh::DynamicSculptor& s, nb::handle cavity, nb::handle groups,
+            [](PyDynamicSculptor& s, nb::handle cavity, nb::handle groups,
                std::uint32_t active_group) {
                 s.set_automask_inputs(automask_inputs_of(cavity, groups, active_group));
             },
@@ -7493,9 +8038,57 @@ NB_MODULE(pyclay, m) {
                                 "not a multiresolution surface, or from a newer writer");
                         return out;
                     },
-                    "data"_a);
+                    "data"_a)
+        .def_prop_rw(
+            "memory_profile",
+            [](const mesh::MultiresSurface& s) { return s.memory_profile(); },
+            [](mesh::MultiresSurface& s, const memory::SculptMemoryProfile& p) {
+                s.set_memory_profile(p);
+            },
+            "What the HOST is willing to spend. Filled by the host and never\n"
+            "detected: the portable core makes no platform call and branches on\n"
+            "no device model, so constrained behaviour is exercised by a desktop\n"
+            "test in three lines.\n\n"
+            "Setting it takes effect immediately and then at every residency\n"
+            "change the host itself causes, which is the only moment this class\n"
+            "releases anything on its own. On a constrained profile the sculpt\n"
+            "and display levels stay resident and every other level keeps its\n"
+            "authoritative detail alone.")
+        .def(
+            "memory_ledger",
+            [](const mesh::MultiresSurface& s) {
+                memory::MemoryLedger ledger;
+                mesh::report_surface_memory(s, &ledger);
+                return ledger_dict(ledger);
+            },
+            "The same figures `memory()` reports, in the vocabulary the other\n"
+            "two representations answer in, with the three roll-ups a host under\n"
+            "pressure can act on.")
+        .def(
+            "trim",
+            [](mesh::MultiresSurface& s, memory::Pressure pressure, PyMemoryPin* pin) {
+                return trim_dict(
+                    mesh::trim_surface(s, pressure, pin ? &pin->gate : nullptr));
+            },
+            "pressure"_a, "pin"_a.none() = nb::none(),
+            "Release rebuildable caches at a stated pressure, in a fixed order,\n"
+            "and report what went.\n\n"
+            "NEVER AUTHORITATIVE CONTENT: not the cage, not a level's topology,\n"
+            "not the detail. `detail_checksum` is unchanged across any trim, and\n"
+            "that is how a host proves it rather than taking this sentence on\n"
+            "trust. A held pin makes this a no-op that reports what it WOULD\n"
+            "have released.")
+        .def(
+            "preflight_encode",
+            [](const mesh::MultiresSurface& s, std::uint64_t budget) {
+                return preflight_dict(mesh::preflight_encode(s, budget));
+            },
+            "budget"_a = 0,
+            "What serializing this hierarchy WOULD cost. The blob is a second\n"
+            "copy of everything and it exists while the hierarchy still does, so\n"
+            "read `peak_bytes`.");
 
-    nb::class_<mesh::MultiresSculptor>(
+    nb::class_<PyMultiresSculptor>(
         m, "MultiresSculptor",
         "The brush engine over a hierarchy: the same verbs, the same falloffs,\n"
         "the same mask and the same deformation math — the fixed sculptor run\n"
@@ -7506,23 +8099,24 @@ NB_MODULE(pyclay, m) {
         "coefficients in the transported frame above it.\n\n"
         "The surface must outlive the sculptor.")
         .def("__init__",
-             [](mesh::MultiresSculptor* self, mesh::MultiresSurface& surface) {
-                 new (self) mesh::MultiresSculptor(surface);
+             [](PyMultiresSculptor* self, mesh::MultiresSurface& surface) {
+                 new (self) PyMultiresSculptor(surface);
              },
              "surface"_a, nb::keep_alive<1, 2>())
         .def(
             "stamp",
-            [](mesh::MultiresSculptor& self, const std::string& verb, nb::handle center,
+            [](PyMultiresSculptor& self, const std::string& verb, nb::handle center,
                float radius, float strength, const std::string& falloff, nb::handle direction,
                nb::handle mask, bool geodesic, int smooth_iterations, nb::handle alpha,
                nb::handle alpha_direction, nb::handle alpha_tangent, float alpha_extent,
-               nb::handle automask, float stamp_azimuth) {
+               nb::handle seed_class, nb::handle seed_revision, nb::handle automask,
+               float stamp_azimuth) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, center, radius, strength, falloff, direction, nb::none(),
-                    nb::cast(geodesic), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
-                    smooth_iterations, 0.0f, alpha, alpha_direction, alpha_tangent, alpha_extent,
-                    nb::none(), automask, stamp_azimuth, &chosen);
+                    nb::cast(geodesic), seed_class, seed_revision, "two_sided", nb::none(),
+                    nb::none(), 0.2f, smooth_iterations, 0.0f, alpha, alpha_direction,
+                    alpha_tangent, alpha_extent, nb::none(), automask, stamp_azimuth, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
                 nb::gil_scoped_release release;
                 return self.stamp(chosen, settings, gate, nullptr);
@@ -7531,15 +8125,27 @@ NB_MODULE(pyclay, m) {
             "direction"_a = nb::none(), "mask"_a = nb::none(), "geodesic"_a = true,
             "smooth_iterations"_a = 1, "alpha"_a = nb::none(),
             "alpha_direction"_a = nb::none(), "alpha_tangent"_a = nb::none(),
-            "alpha_extent"_a = 0.0f, "automask"_a = nb::none(), "stamp_azimuth"_a = 0.0f,
+            "alpha_extent"_a = 0.0f, "seed_class"_a = nb::none(),
+            "seed_revision"_a = nb::none(), "automask"_a = nb::none(),
+            "stamp_azimuth"_a = 0.0f,
             "One stamp at the surface's current sculpt level. Returns how many\n"
-            "weld classes moved.")
-        .def("begin_stroke", &mesh::MultiresSculptor::begin_stroke,
+            "weld classes moved.\n\n"
+            "`seed_class` starts the surface walk where the finger did instead\n"
+            "of scanning the level for the nearest vertex, and `seed_revision`\n"
+            "is `seed_revision` READ AT THE TIME OF THE PICK. Pass both or\n"
+            "neither. A hierarchy renumbers its classes on every rebind — a\n"
+            "level change, or a trim releasing the level caches — and a seed\n"
+            "from the old numbering is still IN BOUNDS, so nothing catches it:\n"
+            "the walk finds no class within the radius and the stamp reports 0\n"
+            "moved, which is indistinguishable from a fully masked stroke. With\n"
+            "the token the stale seed is rejected and the walk finds its own\n"
+            "way, which is slower for one stamp and correct.")
+        .def("begin_stroke", [](PyMultiresSculptor& s) { s.begin_stroke(); },
              "Start a gesture. Clears the record the Layer verb measures its\n"
              "ceiling against.")
         .def(
             "apply_stroke",
-            [](mesh::MultiresSculptor& self, nb::handle samples, const brush::StrokePreset& preset,
+            [](PyMultiresSculptor& self, nb::handle samples, const brush::StrokePreset& preset,
                const std::string& verb, const std::string& falloff, float strength,
                nb::handle geodesic, int smooth_iterations, float layer_height, nb::handle mask,
                bool defer_normals, nb::handle automask, float stamp_azimuth) {
@@ -7548,9 +8154,9 @@ NB_MODULE(pyclay, m) {
                 // the same reading the fixed sculptor's stroke path takes.
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, nb::none(), 1.0f, strength, falloff, nb::none(), nb::none(), geodesic,
-                    nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, smooth_iterations,
-                    layer_height, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), automask,
-                    stamp_azimuth, &chosen);
+                    nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
+                    smooth_iterations, layer_height, nb::none(), nb::none(), nb::none(), 0.0f,
+                    nb::none(), automask, stamp_azimuth, &chosen);
                 const std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
                 const voxel::MaskField* field_mask = borrow_mask(mask);
                 brush::MeshStrokeOptions options;
@@ -7567,19 +8173,53 @@ NB_MODULE(pyclay, m) {
             "stamps by the same engine that drives a mesh layer — so a stamp\n"
             "lands in the same place with the same radius and the same\n"
             "pressure-scaled strength on either representation.")
-        .def_prop_ro("bound_level", &mesh::MultiresSculptor::bound_level)
+        .def_prop_ro("bound_level", [](const PyMultiresSculptor& s) { return s.bound_level(); })
+        .def_prop_ro(
+            "seed_revision", [](PyMultiresSculptor& s) { return s.seed_revision(); },
+            "The numbering the CURRENTLY BOUND level's classes are in, to store\n"
+            "beside a `seed_class` picked off that level and pass back to\n"
+            "`stamp`.\n\n"
+            "Reading it BINDS, which is why it is not a free question: the\n"
+            "answer belongs to the level bound now, and asking before the first\n"
+            "stamp would otherwise report whichever level was bound last. A\n"
+            "hierarchy renumbers on every rebind — a level change, or a trim\n"
+            "releasing the level caches — and both happen behind a host.")
+        .def_prop_ro(
+            "peak_telemetry", [](const PyMultiresSculptor& s) { return peak_dict(s.peak); },
+            "The high-water marks this session has reached, across every level\n"
+            "it has been bound to. A rebind builds a new level sculptor and\n"
+            "this block keeps filling, so the peak belongs to the session\n"
+            "rather than to whichever level happened to be bound first — which\n"
+            "is what a host sizing one arena for a stroke needs.")
+        .def(
+            "reset_peak_telemetry", [](PyMultiresSculptor& s) { s.peak.reset(); },
+            "Start the high-water marks again.")
+        .def_prop_rw(
+            "defer_normals", [](const PyMultiresSculptor& s) { return s.defer_normals(); },
+            [](PyMultiresSculptor& s, bool defer) { s.set_defer_normals(defer); },
+            "The hierarchy's half of the deferral, forwarded to whichever level\n"
+            "is bound INCLUDING one bound later — a rebind builds a new level\n"
+            "sculptor, and a deferral that stopped applying the moment the host\n"
+            "changed level would leave a drag half deferred and half not.\n\n"
+            "The final state is exact either way, and a script that sets this\n"
+            "must call `flush_normals` at the end of the drag.")
+        .def(
+            "flush_normals", [](PyMultiresSculptor& s) { s.flush_normals(); },
+            "Recompute what a deferred drag left pending on the bound level.\n"
+            "Binds nothing: there is nothing to flush on a level nobody has\n"
+            "stamped, so this is safe to call at every stroke end.")
         .def_prop_ro("last_write_vertices",
-                     [](const mesh::MultiresSculptor& s) {
+                     [](const PyMultiresSculptor& s) {
                          const std::vector<std::uint32_t>& v = s.last_write_vertices();
                          return std::vector<std::uint32_t>(v.begin(), v.end());
                      },
                      "The level vertices the last stamp actually moved.")
         .def_prop_ro("arena_stats",
-                     [](const mesh::MultiresSculptor& s) { return arena_stats_of(s.arena()); },
+                     [](const PyMultiresSculptor& s) { return arena_stats_of(s.arena()); },
                      kArenaStatsDoc)
         .def(
             "set_automask_inputs",
-            [](mesh::MultiresSculptor& s, nb::handle cavity, nb::handle groups,
+            [](PyMultiresSculptor& s, nb::handle cavity, nb::handle groups,
                std::uint32_t active_group) {
                 s.set_automask_inputs(automask_inputs_of(cavity, groups, active_group));
             },
@@ -7662,7 +8302,7 @@ NB_MODULE(pyclay, m) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, center, radius, strength, falloff, direction, nb::none(),
-                    nb::cast(geodesic), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
+                    nb::cast(geodesic), nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
                     smooth_iterations, 0.0f, alpha, alpha_direction, alpha_tangent, alpha_extent,
                     nb::none(), nb::none(), 0.0f, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
@@ -7730,7 +8370,7 @@ NB_MODULE(pyclay, m) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     "draw", center, radius, strength, falloff, direction, nb::none(),
-                    nb::cast(true), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
+                    nb::cast(true), nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
                     0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), nb::none(),
                     0.0f, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
@@ -7775,7 +8415,7 @@ NB_MODULE(pyclay, m) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     "smooth", center, radius, strength, falloff, nb::none(), nb::none(),
-                    nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
+                    nb::none(), nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
                     smooth_iterations, 0.0f, nb::none(), nb::none(), nb::none(), 0.0f,
                     nb::none(), nb::none(), 0.0f, &chosen);
                 const mesh::MultiresSmoothMode chosen_mode = parse_smooth_mode(mode);
@@ -7804,7 +8444,7 @@ NB_MODULE(pyclay, m) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     "draw", center, radius, strength, falloff, nb::none(), nb::none(),
-                    nb::cast(true), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
+                    nb::cast(true), nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
                     0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), nb::none(),
                     0.0f, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
@@ -7823,7 +8463,7 @@ NB_MODULE(pyclay, m) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     "draw", center, radius, strength, falloff, nb::none(), nb::none(),
-                    nb::cast(true), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
+                    nb::cast(true), nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f, 1,
                     0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(), nb::none(),
                     0.0f, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
@@ -7853,6 +8493,557 @@ NB_MODULE(pyclay, m) {
         .def("cancel", [](PySculptLayerStroke& s) { s.sculptor->cancel(); },
              "Discard. Restores this channel EXACTLY — the recorded `before`\n"
              "values, not a recomputation.");
+
+    // -- the surface tier: budgets, the pin and one transport -----------------
+    //
+    // (add-extreme-poly-runtime.) The principle the whole thing serves is that
+    // a dab costs approximately what it TOUCHES rather than what the model
+    // HOLDS, and these are the three things a host needs across this boundary
+    // to keep it that way at twenty million vertices.
+
+    nb::enum_<memory::MemoryClass>(
+        m, "MemoryClass",
+        "How much room the host is working in. A LABEL RATHER THAN A DEVICE:\n"
+        "nothing here detects anything, so a desktop test sets `constrained`\n"
+        "and observes constrained behaviour where the tests actually run.")
+        .value("full", memory::MemoryClass::Full,
+               "No budget. Every byte field is advisory and the runtime keeps\n"
+               "what it builds — what a desktop host and most tests want.")
+        .value("constrained", memory::MemoryClass::Constrained,
+               "Budgets are real, inactive levels hold compact detail only, and\n"
+               "maintenance runs between interactions.")
+        .value("minimal", memory::MemoryClass::Minimal,
+               "What a host sets when the operating system has already warned\n"
+               "it once: everything rebuildable is a candidate the moment it is\n"
+               "not being read.");
+
+    nb::enum_<memory::Pressure>(
+        m, "Pressure",
+        "How hard a host is asking for memory back. Passed to `trim`, and\n"
+        "never inferred by the engine — the host owns the moment, the engine\n"
+        "owns the order.")
+        .value("none", memory::Pressure::None,
+               "Give back what is free anyway: scratch above its steady\n"
+               "capacity, and preview staging already drained.")
+        .value("warning", memory::Pressure::Warning)
+        .value("urgent", memory::Pressure::Urgent)
+        .value("critical", memory::Pressure::Critical,
+               "The last stop before the operating system kills the process.\n"
+               "Everything rebuildable goes and the next edit pays to rebuild\n"
+               "what it needs.");
+
+    nb::enum_<mesh::SurfaceKind>(
+        m, "SurfaceKind",
+        "Which representation a SurfaceView is over. It changes exactly one\n"
+        "thing a caller can see, and copy_chunk says which.")
+        .value("fixed", mesh::SurfaceKind::Fixed)
+        .value("adaptive", mesh::SurfaceKind::Adaptive)
+        .value("multires", mesh::SurfaceKind::Multires);
+
+    nb::class_<memory::SculptMemoryProfile>(
+        m, "SculptMemoryProfile",
+        "What a host is willing to spend, filled by the HOST.\n\n"
+        "NO DEVICE DETECTION ANYWHERE. Not one platform call, not one\n"
+        "model-name comparison. A host knows what its operating system is\n"
+        "telling it; an engine guessing from a model string is both wrong and,\n"
+        "worse, untestable — because the tests run on a desktop.\n\n"
+        "EVERY FIELD IS A HINT, AND THE TYPE IS WHAT SAYS SO. Each one names\n"
+        "something that can be recomputed EXACTLY from what was committed:\n"
+        "normals during a drag, index quality, cache residency, the rate a\n"
+        "preview drains. There is deliberately no field for anything that IS\n"
+        "the committed result — the deformation, split and collapse\n"
+        "thresholds, remesh targets, detail coefficients, layer content,\n"
+        "masks, brush strength and falloff. A deferred split would make the\n"
+        "committed mesh a function of machine speed, and this library spends\n"
+        "real effort on determinism that would throw away. So 'a memory-saving\n"
+        "mode changed my sculpt' is unrepresentable here rather than merely\n"
+        "forbidden.\n\n"
+        "A byte field of 0 means no budget for that thing, which is what\n"
+        "`full` means field by field.")
+        .def(nb::init<>())
+        .def_rw("memory_class", &memory::SculptMemoryProfile::memory_class)
+        .def_rw("cache_budget", &memory::SculptMemoryProfile::cache_budget,
+                "Rebuildable caches: chunk indices, per-level runtime caches,\n"
+                "evaluated layer caches, derived positions. What a trim reaches\n"
+                "for first.")
+        .def_rw("undo_budget", &memory::SculptMemoryProfile::undo_budget,
+                "The engine never trims this on its own; the figure exists so a\n"
+                "host can set its own history budget from the same struct.")
+        .def_rw("scratch_budget", &memory::SculptMemoryProfile::scratch_budget,
+                "The per-stamp working set, and a HARD bound: a footprint\n"
+                "larger than it is processed in blocks rather than allocated,\n"
+                "which is what stops a 500k-vertex footprint on a constrained\n"
+                "profile from becoming the peak that kills the app.")
+        .def_rw("preview_budget", &memory::SculptMemoryProfile::preview_budget)
+        .def_rw("max_resident_levels", &memory::SculptMemoryProfile::max_resident_levels,
+                "How many multires levels keep their rebuildable caches; 0 is\n"
+                "no limit.")
+        .def_rw("defer_normals_in_stroke",
+                &memory::SculptMemoryProfile::defer_normals_in_stroke,
+                "Recompute exact normals at stroke end rather than per stamp.\n"
+                "The final state is exact either way — that is the gate — and\n"
+                "this only decides when the work happens.")
+        .def_rw("allow_index_rebuild", &memory::SculptMemoryProfile::allow_index_rebuild,
+                "Whether a spatial index may be REBUILT, never whether it may\n"
+                "be refitted: a refit is correctness. Defaults to True and\n"
+                "stays advisory, because a rebuild helped one of five measured\n"
+                "deformations and hurt two.")
+        .def_rw("preview_chunks_per_frame",
+                &memory::SculptMemoryProfile::preview_chunks_per_frame,
+                "How many dirty chunks a host expects to drain per frame; 0\n"
+                "means 'as many as there are'. Lossless at any value, because\n"
+                "the transport acknowledges per chunk.");
+
+    nb::class_<PyMemoryPin>(
+        m, "MemoryPin",
+        "Hold this across a save or a readback and a trim becomes a no-op that\n"
+        "reports what it WOULD have released.\n\n"
+        "A CONTEXT MANAGER, and that is the point of it:\n\n"
+        "    with MemoryPin() as pin:\n"
+        "        surface.trim(Pressure.critical, pin)   # releases nothing\n"
+        "        blob = surface.serialize()\n\n"
+        "`with` is the only form that cannot leave a document pinned when the\n"
+        "body raises, and a document pinned forever is one no trim can ever\n"
+        "help. REENTRANT, because a readback inside a save must not un-pin the\n"
+        "save when it returns.")
+        .def(nb::init<>())
+        .def("acquire",
+             [](PyMemoryPin& p) {
+                 p.held.push_back(std::make_unique<memory::MemoryPin>(p.gate));
+             },
+             "Hold it by hand. Prefer the `with` block, which cannot be\n"
+             "unbalanced by an exception.")
+        .def("release",
+             [](PyMemoryPin& p) {
+                 if (!p.held.empty()) p.held.pop_back();
+             },
+             "Releasing one nobody acquired does nothing: an unbalanced release\n"
+             "is a caller's bug, and leaving the count at zero is the harmless\n"
+             "reading of it. Underflowing to 'pinned forever' is not.")
+        .def_prop_ro("held", [](const PyMemoryPin& p) { return p.gate.pinned(); },
+                     "Whether a trim would do nothing right now.")
+        .def("__enter__",
+             [](nb::object self) {
+                 PyMemoryPin& p = nb::cast<PyMemoryPin&>(self);
+                 p.held.push_back(std::make_unique<memory::MemoryPin>(p.gate));
+                 return self;
+             })
+        .def("__exit__",
+             // Variadic: the three arguments are None on a clean exit, and a
+             // typed signature would refuse them.
+             [](PyMemoryPin& p, nb::args) {
+                 // Releases whether the block finished or threw, which is the
+                 // whole reason to bind this as a context manager.
+                 if (!p.held.empty()) p.held.pop_back();
+                 return false;  // an exception in the body propagates
+             });
+
+    // -- work that is not required for correctness (task 3.5) -----------------
+
+    nb::enum_<mesh::MaintenanceKind>(
+        m, "MaintenanceKind",
+        "A job that makes the NEXT interaction cheaper and this one slower.\n"
+        "Queued and not done: every one of them is a stall if it happens while\n"
+        "a finger is on the glass, and none of them changes what is committed.")
+        .value("index_rebuild", mesh::MaintenanceKind::IndexRebuild,
+               "The spatial index's partition has decayed under local edits.\n"
+               "Advisory, and the most likely one to decline: over five\n"
+               "measured deformations a rebuild produced a better tree in\n"
+               "exactly one and a dramatically worse one in two.")
+        .value("chunk_compaction", mesh::MaintenanceKind::ChunkCompaction,
+               "The chunk table's face arena has slack a split left behind.")
+        .value("detail_promotion", mesh::MaintenanceKind::DetailPromotion,
+               "A sparse detail field whose coverage has passed the promotion\n"
+               "threshold. Speed rather than memory: the block table stays\n"
+               "smaller than the dense form until coverage passes 99.9%, and\n"
+               "what argues for promotion is the indirection on every read.")
+        .value("slot_pool_compaction", mesh::MaintenanceKind::SlotPoolCompaction,
+               "Dead slots an adaptive surface's edits left in its pools.")
+        .value("normal_flush", mesh::MaintenanceKind::NormalFlush,
+               "Normals a drag deferred. THE ONE ITEM THAT IS NOT OPTIONAL:\n"
+               "the committed state has to be exact, so a script that never\n"
+               "services the queue must still call `flush_normals` at stroke\n"
+               "end. It is here so a host can spend its budget on these FIRST,\n"
+               "not so it can decide whether to do them.");
+
+    nb::class_<PyMaintenanceStroke>(
+        m, "MaintenanceStroke",
+        "The `with` form of a MaintenanceQueue's stroke gate. Returned by\n"
+        "`MaintenanceQueue.stroke()`; there is nothing to construct.")
+        .def("__enter__",
+             [](nb::object self) {
+                 nb::cast<PyMaintenanceStroke&>(self).queue->begin_stroke();
+                 return self;
+             })
+        .def("__exit__",
+             // Variadic: the three arguments are None on a clean exit, and a
+             // typed signature would refuse them.
+             [](PyMaintenanceStroke& s, nb::args) {
+                 // Closes whether the body finished or threw, which is the
+                 // whole reason to bind this as a context manager: a stroke
+                 // loop that raises would otherwise leave the gate shut and
+                 // every later drain silently doing nothing.
+                 s.queue->end_stroke();
+                 return false;  // an exception in the body propagates
+             });
+
+    nb::class_<mesh::MaintenanceQueue>(
+        m, "MaintenanceQueue",
+        "Jobs a host services BETWEEN interactions, with a budget it owns.\n\n"
+        "A sculpt runtime accumulates work that is not required for\n"
+        "correctness — an index whose partition has decayed, a chunk arena\n"
+        "with slack, a detail field that is now dense, normals a drag\n"
+        "deferred. This is where those requests go, and nothing here performs\n"
+        "one: an item names a kind and a target, and what services it is an\n"
+        "ordinary call the script already has.\n\n"
+        "    with queue.stroke():\n"
+        "        for p in drag:\n"
+        "            sculptor.stamp(...)     # requests pile up; none of them run\n"
+        "    while budget_left():\n"
+        "        item = queue.take_next()\n"
+        "        if item is None:\n"
+        "            break\n"
+        "        do_the_work(item)\n"
+        "        queue.complete(item['kind'], item['target'])\n\n"
+        "THE STROKE GATE IS A MECHANISM RATHER THAN A CONVENTION. 'we only\n"
+        "call this between strokes' is a rule that survives until the second\n"
+        "caller, so `take_next` and `complete` do nothing while a stroke is\n"
+        "open — a script that wired the drain to the wrong callback finds out\n"
+        "by nothing happening rather than by a stutter it will blame on the\n"
+        "brush.\n\n"
+        "NO CALLBACK, DELIBERATELY. The C++ form takes a `run` function and a\n"
+        "budget; this takes neither, because the caller holds the clock the\n"
+        "budget is measured on and because host code that queued another item\n"
+        "from inside the drain would mutate the list being walked. Take one,\n"
+        "do it, say it is done.\n\n"
+        "REFERS TO NO SURFACE, so one queue may collect the items of every\n"
+        "surface a document holds — which is what a script with a hierarchy, an\n"
+        "adaptive surface and a fixed mesh open at once actually has.")
+        .def(nb::init<>())
+        .def(
+            "request",
+            [](mesh::MaintenanceQueue& q, mesh::MaintenanceKind kind, std::uint32_t target,
+               std::uint64_t estimated_micros) { q.request(kind, target, estimated_micros); },
+            "kind"_a, "target"_a = 0u, "estimated_micros"_a = 0u,
+            "Queue an item, or FOLD it into the identical one already queued —\n"
+            "same kind, same target — bumping that entry's `requests` and\n"
+            "taking the latest non-zero estimate.\n\n"
+            "NOT GATED, and that asymmetry is what the gate is made of: a stamp\n"
+            "is exactly where an item is DISCOVERED, and refusing to record one\n"
+            "mid-stroke would lose the request rather than defer the work.\n\n"
+            "`target` is what the item is about — a multires level, a chunk, a\n"
+            "surface id. The queue never interprets it; it is what makes two\n"
+            "requests the same request.")
+        .def("__len__", [](const mesh::MaintenanceQueue& q) { return q.size(); })
+        .def_prop_ro("count", [](const mesh::MaintenanceQueue& q) { return q.size(); },
+                     "How many distinct items are queued.")
+        .def_prop_ro(
+            "items",
+            [](const mesh::MaintenanceQueue& q) {
+                nb::list out;
+                for (const mesh::MaintenanceItem& item : q.items()) out.append(item_dict(item));
+                return out;
+            },
+            "Every queued item in queue order, as dicts: `kind`, `target`,\n"
+            "`requests`, `estimated_micros`.\n\n"
+            "`requests` is the one worth watching. An entry whose count keeps\n"
+            "climbing is one the host is starving, and a queue that only ever\n"
+            "reported its length could not say so.")
+        .def(
+            "has",
+            [](const mesh::MaintenanceQueue& q, mesh::MaintenanceKind kind,
+               std::uint32_t target) { return q.has(kind, target); },
+            "kind"_a, "target"_a = 0u, "Whether that exact item is queued.")
+        .def("begin_stroke", [](mesh::MaintenanceQueue& q) { q.begin_stroke(); },
+             "Shut the gate by hand. Prefer `stroke()`, which cannot be left\n"
+             "shut by an exception.")
+        .def("end_stroke", [](mesh::MaintenanceQueue& q) { q.end_stroke(); },
+             "Open it again. Prefer `stroke()`.")
+        .def_prop_ro("in_stroke", [](const mesh::MaintenanceQueue& q) { return q.in_stroke(); },
+                     "Whether the gate is shut, which is why a drain is\n"
+                     "reporting nothing to do.")
+        .def(
+            "stroke",
+            [](nb::object self) {
+                PyMaintenanceStroke scope;
+                scope.queue = &nb::cast<mesh::MaintenanceQueue&>(self);
+                scope.owner = self;
+                return scope;
+            },
+            "The gate as a `with` block:\n\n"
+            "    with queue.stroke():\n"
+            "        ...the drag...\n\n"
+            "`with` is the only form that cannot leave the gate shut when a\n"
+            "stroke loop raises, and a gate shut forever is a queue that\n"
+            "silently never runs again.")
+        .def(
+            "take_next",
+            [](mesh::MaintenanceQueue& q) -> nb::object {
+                // A PEEK THROUGH THE DRAIN, so the stroke gate has exactly one
+                // implementation and it is the engine's. `run` declines every
+                // item, which leaves the queue as it was and walks it under the
+                // same check a real drain gets — a gate that changed there
+                // could not stay true here by accident.
+                mesh::MaintenanceItem found;
+                bool have = false;
+                q.service(0, [&](const mesh::MaintenanceItem& item) {
+                    if (!have) {
+                        found = item;
+                        have = true;
+                    }
+                    return false;
+                });
+                if (!have) return nb::none();
+                return item_dict(found);
+            },
+            "The next item a host may do right now, or None.\n\n"
+            "PEEKS: the item stays queued until `complete` says it was done, so\n"
+            "a script that took one and then found it could not afford it has\n"
+            "declined rather than dropped it. None while a stroke is open and\n"
+            "None when the queue is empty — the same answer to 'is there work I\n"
+            "may do now', which is the question a drain is actually asking.")
+        .def(
+            "complete",
+            [](mesh::MaintenanceQueue& q, mesh::MaintenanceKind kind, std::uint32_t target) {
+                // Through `service` for the same reason `take_next` is: the
+                // matching item is "completed" and every other one declined, so
+                // a budget of zero removes exactly the one named under the gate
+                // the engine keeps.
+                return q.service(0, [&](const mesh::MaintenanceItem& item) {
+                           return item.kind == kind && item.target == target;
+                       }) != 0;
+            },
+            "kind"_a, "target"_a = 0u,
+            "Retire the item naming that kind and target, and report whether\n"
+            "one was there. Gated like `take_next`: an item completed\n"
+            "mid-stroke would have been performed mid-stroke.")
+        .def("clear", [](mesh::MaintenanceQueue& q) { q.clear(); },
+             "Drop every queued item. Correct at any moment, because none of\n"
+             "them was correctness.")
+        .def_prop_ro("bytes", [](const mesh::MaintenanceQueue& q) { return q.bytes(); },
+                     "What the queue itself costs. A handful of structs: five\n"
+                     "kinds and a target apiece is the working size.");
+
+    nb::class_<PySurfaceView>(
+        m, "SurfaceView",
+        "What changed, and those bytes and no others — for whichever of the\n"
+        "three representations you are holding.\n\n"
+        "A host at twenty million vertices asks the same three questions\n"
+        "whatever the surface is, and answering them per representation is\n"
+        "three code paths whose dirty sets mean different things: a weld class,\n"
+        "a face chunk and a base patch are not interchangeable, and a host that\n"
+        "treated them as such would upload the wrong thing. So there is ONE\n"
+        "chunk unit underneath and this is the seam over it.\n\n"
+        "FOUR REVISIONS, NOT ONE — topology, geometry, normals, attributes — so\n"
+        "an index buffer is re-uploaded only when connectivity actually\n"
+        "changed, and a deferred normal flush is distinguishable from a move.\n\n"
+        "AN ACKNOWLEDGEMENT RATHER THAN A CLEAR. `clear_dirty` is\n"
+        "all-or-nothing: a host that drains half a set and drops a frame must\n"
+        "either re-upload everything or lose a change. `acknowledge` retires a\n"
+        "chunk only if it has not changed since you copied it, so draining\n"
+        "across frames is lossless at any rate.\n\n"
+        "A CALL-SITE CONVENIENCE, NOT A HANDLE TO STORE. It names a surface it\n"
+        "does not own; the surface must outlive it, and everything it reports\n"
+        "is read at the moment it is asked rather than cached.")
+        .def_static(
+            "over_mesh",
+            [](nb::object mesh_obj, std::size_t target_faces) {
+                PyMesh& handle = nb::cast<PyMesh&>(mesh_obj);
+                PySurfaceView v;
+                v.owner = mesh_obj;
+                v.kind = mesh::SurfaceKind::Fixed;
+                v.mesh_handle = &handle;
+                mesh::ChunkOptions options;
+                if (target_faces > 0) {
+                    options.target_faces = target_faces;
+                    options.min_faces = target_faces / 4 ? target_faces / 4 : 1;
+                    options.max_faces = target_faces * 2;
+                }
+                mesh::partition_mesh_chunks(handle.data(), options, &v.table);
+                return v;
+            },
+            "mesh"_a, "target_faces"_a = 0,
+            "A flat mesh, partitioned on the spot. The partition is this\n"
+            "view's, because the fixed sculptor tracks dirty WELD CLASSES and\n"
+            "whether that list is retired in favour of a chunk dirty set\n"
+            "depends on a measurement this change has not made yet — so this\n"
+            "view reports one partition of a static mesh and an empty dirty\n"
+            "set. The other two carry live dirty sets.\n\n"
+            "`target_faces` of 0 takes the library's default of 128, which is\n"
+            "MEASURED: benchmarks/bench_surface_chunks.cpp sweeps 64 to 1024\n"
+            "over a 2.08M-vertex plane against query cost, false positives,\n"
+            "normal recompute, upload bytes, locality and split/merge cost.")
+        .def_static(
+            "over_dynamic",
+            [](nb::object sculptor_obj) {
+                PyDynamicSculptor& s = nb::cast<PyDynamicSculptor&>(sculptor_obj);
+                PySurfaceView v;
+                v.owner = sculptor_obj;
+                v.kind = mesh::SurfaceKind::Adaptive;
+                v.dynamic_sculptor = &s;
+                return v;
+            },
+            "sculptor"_a, "The adaptive surface, whose table is its chunked index.")
+        .def_static(
+            "over_level",
+            [](nb::object surface_obj, std::uint32_t level) {
+                mesh::MultiresSurface& s = nb::cast<mesh::MultiresSurface&>(surface_obj);
+                if (level >= s.level_count())
+                    throw std::invalid_argument("no such level in this hierarchy");
+                PySurfaceView v;
+                v.owner = surface_obj;
+                v.kind = mesh::SurfaceKind::Multires;
+                v.multires = &s;
+                v.level = level;
+                return v;
+            },
+            "surface"_a, "level"_a,
+            "One level of a hierarchy. Asking for its chunks EVALUATES the\n"
+            "level, exactly as reading its positions does.")
+        .def_prop_ro("kind", [](PySurfaceView& v) { return v.kind; })
+        .def_prop_ro("chunk_count", [](PySurfaceView& v) { return v.view().chunk_count(); },
+                     "Chunk ids run from 0 to this, and a slot in that range may\n"
+                     "be dead — read `live` from chunk_info.")
+        .def_prop_ro(
+            "dirty_chunks",
+            [](PySurfaceView& v) {
+                // The view is a temporary and the dirty set is a reference INTO
+                // it, so the view has to outlive the copy.
+                mesh::SurfaceView s = v.view();
+                const std::vector<std::uint32_t>& d = s.dirty_chunks();
+                return std::vector<std::uint32_t>(d.begin(), d.end());
+            },
+            "The chunks the stamps since the last drain touched, in the order\n"
+            "they were first marked.\n\n"
+            "MAY NAME A CHUNK THAT HAS SINCE BEEN RELEASED, whose chunk_info\n"
+            "reports live=False. Retiring a merged chunk from this list would\n"
+            "be an erase on a path that runs during a stroke, to save a check\n"
+            "that does not — so skip it rather than treating it as an error.")
+        .def(
+            "chunk_info",
+            [](PySurfaceView& v, std::uint32_t chunk) {
+                mesh::SurfaceView s = v.view();
+                nb::dict out;
+                const mesh::SurfaceChunk* record = s.chunks().chunk(chunk);
+                out["chunk"] = chunk;
+                out["live"] = record != nullptr;
+                if (record == nullptr) return out;
+                // The capacity query answers the counts rather than arithmetic
+                // repeated here: welded and unwelded chunks count differently,
+                // and a second copy of that rule is how the two come to
+                // disagree about how much a caller should allocate.
+                const mesh::ChunkReadback r =
+                    s.copy_chunk(chunk, nullptr, nullptr, 0, nullptr, 0, nullptr, 0);
+                out["vertex_count"] = r.vertex_count;
+                out["index_count"] = r.index_count;
+                out["revision"] = record->revision;
+                out["revisions"] = revisions_dict(record->revisions);
+                out["geometry_dirty"] = record->geometry_dirty;
+                out["topology_dirty"] = record->topology_dirty;
+                if (!record->bounds.empty()) {
+                    out["bounds_min"] = nb::make_tuple(record->bounds.min.x,
+                                                       record->bounds.min.y,
+                                                       record->bounds.min.z);
+                    out["bounds_max"] = nb::make_tuple(record->bounds.max.x,
+                                                       record->bounds.max.y,
+                                                       record->bounds.max.z);
+                }
+                return out;
+            },
+            "chunk"_a,
+            "What one chunk holds and what it costs to copy, without copying\n"
+            "it.")
+        .def(
+            "copy_chunk",
+            [](PySurfaceView& v, std::uint32_t chunk, nb::handle expected, bool normals) {
+                mesh::SurfaceView s = v.view();
+                const bool has_expected = !expected.is_none();
+                const mesh::ChunkRevisions want = to_revisions(expected, "expected");
+                const mesh::ChunkRevisions* want_p = has_expected ? &want : nullptr;
+
+                const mesh::ChunkReadback need =
+                    s.copy_chunk(chunk, want_p, nullptr, 0, nullptr, 0, nullptr, 0);
+                if (!need.ok) throw std::invalid_argument("no live chunk with that id");
+                const std::size_t nv = need.vertex_count, ni = need.index_count;
+
+                auto own_f = [](void* q) noexcept { delete[] static_cast<float*>(q); };
+                auto own_u = [](void* q) noexcept {
+                    delete[] static_cast<std::uint32_t*>(q);
+                };
+                // Each buffer is handed to its capsule the moment it exists, so
+                // a throw between here and the return frees it rather than
+                // leaking it into the interpreter.
+                float* pos = new float[nv ? nv * 3 : 1];
+                nb::capsule pos_owner(pos, own_f);
+                std::uint32_t* idx = new std::uint32_t[ni ? ni : 1];
+                nb::capsule idx_owner(idx, own_u);
+
+                nb::dict out;
+                float* nor = nullptr;
+                if (normals) {
+                    nor = new float[nv ? nv * 3 : 1];
+                    nb::capsule nor_owner(nor, own_f);
+                    out["normals"] =
+                        nb::ndarray<nb::numpy, float>(nor, {nv, std::size_t(3)}, nor_owner);
+                }
+
+                const mesh::ChunkReadback got =
+                    s.copy_chunk(chunk, want_p, pos, nv * 3, nor, nor ? nv * 3 : 0, idx, ni);
+                if (got.truncated)
+                    throw std::runtime_error(
+                        "the chunk changed size between the query and the copy; ask again");
+
+                out["positions"] = nb::ndarray<nb::numpy, float>(pos, {nv, std::size_t(3)},
+                                                                 pos_owner);
+                out["indices"] = nb::ndarray<nb::numpy, std::uint32_t>(idx, {ni}, idx_owner);
+                out["revisions"] = revisions_dict(got.current);
+                out["requested"] = revisions_dict(got.requested);
+                // The engine moved on after you took your snapshot. The data is
+                // CURRENT — this is not a failure — but a caller applying an
+                // older frame's plan can tell that its plan is out of date.
+                out["stale"] = got.stale;
+                return out;
+            },
+            "chunk"_a, "expected"_a.none() = nb::none(), "normals"_a = true,
+            "One chunk's geometry as numpy arrays: positions (N, 3), normals\n"
+            "(N, 3) and triangle indices (M,) LOCAL to the chunk, so it draws\n"
+            "as a standalone mesh.\n\n"
+            "`expected` is a revisions dict a previous copy returned; pass it\n"
+            "to learn whether what you get back has already been superseded.\n\n"
+            "WELDED WHERE THE REPRESENTATION ALLOWS IT. A fixed mesh and a\n"
+            "multires level have a stable per-chunk vertex list, so a chunk\n"
+            "copies as its own vertices. An adaptive surface's topology changes\n"
+            "under the stamp being uploaded, so its chunks copy as UNWELDED\n"
+            "triangles — read the array shapes rather than assuming either.")
+        .def(
+            "acknowledge",
+            [](PySurfaceView& v, std::uint32_t chunk, nb::handle seen) {
+                const mesh::ChunkRevisions r = to_revisions(seen, "seen");
+                mesh::ChunkTable* table = v.writable_table();
+                if (table != nullptr) return table->acknowledge(chunk, r);
+                return v.multires->acknowledge_chunk(v.level, chunk, r);
+            },
+            "chunk"_a, "seen"_a,
+            "Retire one chunk from the dirty set, and ONLY if it has not\n"
+            "changed since you copied it. `seen` is the revisions dict that\n"
+            "copy returned.\n\n"
+            "Returns whether the chunk is clean afterwards: True when it was\n"
+            "retired and True when it was never dirty, False only when it moved\n"
+            "on after you read it — in which case it is still waiting and you\n"
+            "have lost nothing.")
+        .def(
+            "clear_dirty",
+            [](PySurfaceView& v) {
+                mesh::ChunkTable* table = v.writable_table();
+                if (table != nullptr) {
+                    table->clear_dirty();
+                    return;
+                }
+                v.multires->clear_dirty_chunks(v.level);
+            },
+            "Drop the whole dirty set. The all-or-nothing form, for a caller\n"
+            "that uploads everything it was told about in one pass; prefer\n"
+            "`acknowledge` if you drain incrementally.");
 
     // -- the brush model, and brushes as data ---------------------------------
     nb::class_<mesh::AutomaskSettings>(

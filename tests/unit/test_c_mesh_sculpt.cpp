@@ -789,3 +789,182 @@ TEST_CASE("c abi: a deform descriptor from before a field was appended still wor
     clay_mesh_sculptor_destroy(sc);
     clay_mesh_destroy(mesh);
 }
+
+// -- the seed token and the peaks (add-extreme-poly-runtime) ------------------
+//
+// The C ABI's half of task 3.2 and task 7.7. What is defended here is the
+// BOUNDARY: that a pick hands out the token beside the class it belongs to,
+// that a token from a numbering that no longer exists is refused rather than
+// spending the dab on an empty region, and that the peaks a host tunes a
+// profile against are readable without owning anything.
+
+TEST_CASE("c abi: a pick hands out the numbering its seed class was taken from") {
+    clay_mesh* m = grid_mesh(16, 1.0f);
+    clay_mesh_sculptor* s = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(m, -1.0f, &s) == CLAY_OK);
+
+    std::uint64_t session = 0;
+    REQUIRE(clay_mesh_sculptor_seed_revision(s, &session) == CLAY_OK);
+    CHECK(session != 0);  // a real sculptor always claims a numbering
+
+    const float origin[3] = {0.0f, 1.0f, 0.0f};
+    const float down[3] = {0.0f, -1.0f, 0.0f};
+    clay_mesh_hit hit{};
+    hit.struct_size = sizeof(hit);
+    REQUIRE(clay_mesh_sculptor_raycast(s, origin, down, nullptr, &hit) == CLAY_OK);
+    REQUIRE(hit.hit == 1);
+    CHECK(hit.seed_class != CLAY_MESH_NO_CLASS);
+    // THE POINT: the class and the token come back together. A host that had to
+    // fetch the token separately is a host that can forget to.
+    CHECK(hit.seed_revision == session);
+
+    // A miss carries neither, rather than a token beside no class at all.
+    const float up[3] = {0.0f, 1.0f, 0.0f};
+    clay_mesh_hit miss{};
+    miss.struct_size = sizeof(miss);
+    REQUIRE(clay_mesh_sculptor_raycast(s, origin, up, nullptr, &miss) == CLAY_OK);
+    CHECK(miss.hit == 0);
+    CHECK(miss.seed_class == CLAY_MESH_NO_CLASS);
+    CHECK(miss.seed_revision == 0);
+
+    clay_mesh_sculptor_destroy(s);
+    clay_mesh_destroy(m);
+}
+
+TEST_CASE("c abi: a seed from a numbering that no longer exists is refused, not spent") {
+    // Three sculptors over three identical grids. `picker` supplies a seed
+    // numbered in ITS class space, which is genuinely not the other two's —
+    // that is what a hierarchy produces on every rebind. `stale` and `honest`
+    // then take the same dab, one with the wrong token and one with its own,
+    // and each starts from an untouched grid so the two counts are comparable:
+    // a stamp changes the surface the next stamp reaches across.
+    clay_mesh* picked_mesh = grid_mesh(16, 1.0f);
+    clay_mesh* stale_mesh = grid_mesh(16, 1.0f);
+    clay_mesh* honest_mesh = grid_mesh(16, 1.0f);
+    clay_mesh_sculptor* picker = nullptr;
+    clay_mesh_sculptor* stale = nullptr;
+    clay_mesh_sculptor* honest = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(picked_mesh, -1.0f, &picker) == CLAY_OK);
+    REQUIRE(clay_mesh_sculptor_create(stale_mesh, -1.0f, &stale) == CLAY_OK);
+    REQUIRE(clay_mesh_sculptor_create(honest_mesh, -1.0f, &honest) == CLAY_OK);
+
+    const float origin[3] = {0.0f, 1.0f, 0.0f};
+    const float down[3] = {0.0f, -1.0f, 0.0f};
+    clay_mesh_hit hit{};
+    hit.struct_size = sizeof(hit);
+    REQUIRE(clay_mesh_sculptor_raycast(picker, origin, down, nullptr, &hit) == CLAY_OK);
+    REQUIRE(hit.hit == 1);
+
+    std::uint64_t theirs = 0;
+    REQUIRE(clay_mesh_sculptor_seed_revision(honest, &theirs) == CLAY_OK);
+    REQUIRE(theirs != hit.seed_revision);
+
+    clay_mesh_brush_desc d = brush(CLAY_MESH_BRUSH_DRAW, 0.5f, 0.5f);
+    d.seed_class = hit.seed_class;
+    d.seed_revision = hit.seed_revision;  // the PICKER's token, spent elsewhere
+
+    std::size_t rejected = 0;
+    REQUIRE(clay_mesh_sculptor_stale_seeds_rejected(stale, &rejected) == CLAY_OK);
+    CHECK(rejected == 0);
+
+    std::size_t stale_moved = 0;
+    REQUIRE(clay_mesh_sculptor_stamp(stale, &d, nullptr, nullptr, &stale_moved) == CLAY_OK);
+    // The dab still lands, through the scan the refusal fell back to. That is
+    // the shape of the fix: a rejected seed costs one query, an accepted stale
+    // one costs the whole stamp.
+    CHECK(stale_moved > 0);
+    REQUIRE(clay_mesh_sculptor_stale_seeds_rejected(stale, &rejected) == CLAY_OK);
+    CHECK(rejected == 1);
+
+    clay_mesh_brush_desc own = d;
+    own.seed_revision = theirs;
+    std::size_t honest_moved = 0;
+    REQUIRE(clay_mesh_sculptor_stamp(honest, &own, nullptr, nullptr, &honest_moved) == CLAY_OK);
+    // THE CLAIM: refusing the seed changed what the stamp COST, not what it
+    // did. Both dabs moved the same region of the same grid.
+    CHECK(honest_moved == stale_moved);
+    REQUIRE(clay_mesh_sculptor_stale_seeds_rejected(honest, &rejected) == CLAY_OK);
+    CHECK(rejected == 0);  // this one was accepted
+
+    clay_mesh_sculptor_destroy(picker);
+    clay_mesh_sculptor_destroy(stale);
+    clay_mesh_sculptor_destroy(honest);
+    clay_mesh_destroy(picked_mesh);
+    clay_mesh_destroy(stale_mesh);
+    clay_mesh_destroy(honest_mesh);
+}
+
+TEST_CASE("c abi: a brush descriptor from before seed_revision was appended still stamps") {
+    clay_mesh* m = grid_mesh(16, 1.0f);
+    clay_mesh_sculptor* s = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(m, -1.0f, &s) == CLAY_OK);
+
+    clay_mesh_brush_desc d = brush(CLAY_MESH_BRUSH_DRAW, 0.5f, 0.5f);
+    // What a host compiled against the previous header sends: the layout
+    // through automask_cavity_strength, with nothing after it. The appended
+    // field then reads as zero, which is the value that claims no numbering.
+    d.struct_size = static_cast<std::uint32_t>(offsetof(clay_mesh_brush_desc, seed_revision));
+    std::size_t moved = 0;
+    REQUIRE(clay_mesh_sculptor_stamp(s, &d, nullptr, nullptr, &moved) == CLAY_OK);
+    CHECK(moved > 0);
+    std::size_t rejected = 0;
+    REQUIRE(clay_mesh_sculptor_stale_seeds_rejected(s, &rejected) == CLAY_OK);
+    CHECK(rejected == 0);  // claiming nothing is not a stale claim
+
+    clay_mesh_sculptor_destroy(s);
+    clay_mesh_destroy(m);
+}
+
+TEST_CASE("c abi: the peaks are high-water marks a host reads without owning anything") {
+    clay_mesh* m = grid_mesh(24, 1.0f);
+    clay_mesh_sculptor* s = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(m, -1.0f, &s) == CLAY_OK);
+
+    clay_peak_telemetry t{};
+    t.struct_size = sizeof(t);
+    REQUIRE(clay_mesh_sculptor_peak_telemetry(s, &t) == CLAY_OK);
+    CHECK(t.workset_vertices == 0);  // nothing has been stamped
+
+    const clay_mesh_brush_desc wide = brush(CLAY_MESH_BRUSH_DRAW, 0.8f, 0.5f);
+    std::size_t moved = 0;
+    REQUIRE(clay_mesh_sculptor_stamp(s, &wide, nullptr, nullptr, &moved) == CLAY_OK);
+    REQUIRE(moved > 0);
+    REQUIRE(clay_mesh_sculptor_peak_telemetry(s, &t) == CLAY_OK);
+    const std::uint64_t widest = t.workset_vertices;
+    CHECK(widest > 0);
+
+    // A HIGH-WATER MARK, not the last value: a smaller stamp afterwards does
+    // not pull the peak down, because what a host has to size for is the
+    // largest thing that happened rather than the most recent one.
+    //
+    // Placed in a CORNER the wide stamp did not reach. A second stamp at the
+    // same centre would find the surface already displaced out from under the
+    // brush and gather nothing, which would make this assert on an empty
+    // region rather than on a small one.
+    clay_mesh_brush_desc narrow = brush(CLAY_MESH_BRUSH_DRAW, 0.15f, 0.5f);
+    narrow.center[0] = -0.9f;
+    narrow.center[2] = -0.9f;
+    REQUIRE(clay_mesh_sculptor_stamp(s, &narrow, nullptr, nullptr, &moved) == CLAY_OK);
+    REQUIRE(moved > 0);
+    REQUIRE(clay_mesh_sculptor_peak_telemetry(s, &t) == CLAY_OK);
+    CHECK(t.workset_vertices == widest);
+
+    REQUIRE(clay_mesh_sculptor_reset_peak_telemetry(s) == CLAY_OK);
+    REQUIRE(clay_mesh_sculptor_peak_telemetry(s, &t) == CLAY_OK);
+    CHECK(t.workset_vertices == 0);
+    REQUIRE(clay_mesh_sculptor_stamp(s, &narrow, nullptr, nullptr, &moved) == CLAY_OK);
+    REQUIRE(clay_mesh_sculptor_peak_telemetry(s, &t) == CLAY_OK);
+    CHECK(t.workset_vertices > 0);
+    CHECK(t.workset_vertices < widest);  // the narrow stamp gathers less
+
+    // The descriptor rules, on an out parameter like any other.
+    CHECK(clay_mesh_sculptor_peak_telemetry(s, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+    clay_peak_telemetry stunted{};
+    stunted.struct_size = 4;
+    CHECK(clay_mesh_sculptor_peak_telemetry(s, &stunted) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_mesh_sculptor_peak_telemetry(nullptr, &t) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_mesh_sculptor_seed_revision(nullptr, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    clay_mesh_sculptor_destroy(s);
+    clay_mesh_destroy(m);
+}

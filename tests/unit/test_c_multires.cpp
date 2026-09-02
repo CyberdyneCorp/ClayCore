@@ -432,7 +432,7 @@ TEST_CASE("c multires: the memory report separates detail from cache") {
     CHECK(m.detail > 0);
     CHECK(m.rebuildable > 0);
     CHECK(m.authoritative == m.base + m.topology + m.detail);
-    CHECK(m.rebuildable == m.evaluated + m.runtime_index);
+    CHECK(m.rebuildable == m.evaluated + m.runtime_index + m.chunk_index);
     CHECK(m.total == m.authoritative + m.rebuildable);
     CHECK(m.resident_levels > 0);
 
@@ -507,4 +507,104 @@ TEST_CASE("c multires: the descriptor rules are enforced") {
     CHECK(clay_multires_dirty_block_count(nullptr) == 0);
     clay_multires_sculptor_destroy(nullptr);
     clay_multires_destroy(nullptr);
+}
+
+// -- the seed token and the peaks (add-extreme-poly-runtime) ------------------
+
+TEST_CASE("c multires: the seed token follows the bound level, and a stale seed is refused") {
+    // The hierarchy is the representation the token exists for, because it is
+    // the one that RENUMBERS behind the host: every rebind — a level change, or
+    // a trim releasing the level caches — builds a new class space, and a seed
+    // picked in the old one is still comfortably in bounds. The C++ suite owns
+    // the mechanism; what is gated here is that a C host can see it at all.
+    Fixture f(4, 2);
+
+    REQUIRE(clay_multires_set_sculpt_level(f.surface, 1) == CLAY_OK);
+    uint64_t coarse = 0;
+    REQUIRE(clay_multires_sculptor_seed_revision(f.sculptor, &coarse) == CLAY_OK);
+    CHECK(coarse != 0);
+
+    // A class picked off the COARSE level, well away from where the stamp
+    // below lands — all that matters is that it is farther from the brush
+    // centre than the brush's radius, which is the condition under which the
+    // surface walk gives up and returns nothing. Picked at (-1.5, -1.5) rather
+    // than at the cage's own corner: a ray at the extreme rim of a subdivided
+    // plane misses (measured — (-1.9, -1.9) reports no hit), and a fixture that
+    // depends on the rim would be testing the level mesh's edge rather than the
+    // seed. The level mesh is what a host picks against, and its class
+    // numbering is the level's own.
+    clay_mesh* coarse_mesh = nullptr;
+    REQUIRE(clay_multires_copy_level_mesh(f.surface, 1, &coarse_mesh) == CLAY_OK);
+    clay_mesh_sculptor* picker = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(coarse_mesh, -1.0f, &picker) == CLAY_OK);
+    const float above_corner[3] = {-1.5f, 1.0f, -1.5f};
+    const float down[3] = {0.0f, -1.0f, 0.0f};
+    clay_mesh_hit corner{};
+    corner.struct_size = sizeof(corner);
+    REQUIRE(clay_mesh_sculptor_raycast(picker, above_corner, down, nullptr, &corner) == CLAY_OK);
+    REQUIRE(corner.hit == 1);
+    clay_mesh_sculptor_destroy(picker);
+    clay_mesh_destroy(coarse_mesh);
+
+    // Sculpt at the FINE level instead: a different, larger numbering in which
+    // that seed still names something.
+    REQUIRE(clay_multires_set_sculpt_level(f.surface, 2) == CLAY_OK);
+    uint64_t fine = 0;
+    REQUIRE(clay_multires_sculptor_seed_revision(f.sculptor, &fine) == CLAY_OK);
+    CHECK(fine != coarse);  // the rebind renumbered, and the token says so
+
+    clay_mesh_brush_desc d = draw_brush(0.6f, 0.5f);
+    d.seed_class = corner.seed_class;
+
+    clay_multires_stamp_report report{};
+    report.struct_size = sizeof(report);
+
+    // WITHOUT the token — what every caller written before it sends. The seed
+    // is trusted, the surface walk finds nothing within the radius of a corner
+    // it should never have started from, and the dab is LOST rather than
+    // misplaced: indistinguishable from a fully masked stroke.
+    d.seed_revision = 0;
+    REQUIRE(clay_multires_sculptor_stamp(f.sculptor, &d, nullptr, &report) == CLAY_OK);
+    CHECK(report.moved_vertices == 0);
+
+    // WITH the token it carries the numbering it was picked in, which is not
+    // this level's, so it is refused and the walk finds its own way.
+    d.seed_revision = coarse;
+    REQUIRE(clay_multires_sculptor_stamp(f.sculptor, &d, nullptr, &report) == CLAY_OK);
+    CHECK(report.moved_vertices > 0);
+}
+
+TEST_CASE("c multires: the peaks survive a rebind, because they belong to the session") {
+    Fixture f(4, 2);
+    clay_peak_telemetry t{};
+    t.struct_size = sizeof(t);
+    REQUIRE(clay_multires_sculptor_peak_telemetry(f.sculptor, &t) == CLAY_OK);
+    CHECK(t.workset_vertices == 0);
+
+    REQUIRE(clay_multires_set_sculpt_level(f.surface, 2) == CLAY_OK);
+    const clay_mesh_brush_desc wide = draw_brush(1.2f, 0.5f);
+    clay_multires_stamp_report report{};
+    report.struct_size = sizeof(report);
+    REQUIRE(clay_multires_sculptor_stamp(f.sculptor, &wide, nullptr, &report) == CLAY_OK);
+    REQUIRE(report.moved_vertices > 0);
+    REQUIRE(clay_multires_sculptor_peak_telemetry(f.sculptor, &t) == CLAY_OK);
+    const uint64_t fine_peak = t.workset_vertices;
+    CHECK(fine_peak > 0);
+
+    // A LEVEL CHANGE REBINDS, which builds a new level sculptor underneath. The
+    // peak must not restart with it: a host sizes one arena for a stroke, and a
+    // stroke may cross levels.
+    REQUIRE(clay_multires_set_sculpt_level(f.surface, 1) == CLAY_OK);
+    const clay_mesh_brush_desc narrow = draw_brush(0.5f, 0.5f);
+    REQUIRE(clay_multires_sculptor_stamp(f.sculptor, &narrow, nullptr, &report) == CLAY_OK);
+    REQUIRE(clay_multires_sculptor_peak_telemetry(f.sculptor, &t) == CLAY_OK);
+    CHECK(t.workset_vertices == fine_peak);  // the coarse level gathered less
+
+    REQUIRE(clay_multires_sculptor_reset_peak_telemetry(f.sculptor) == CLAY_OK);
+    REQUIRE(clay_multires_sculptor_peak_telemetry(f.sculptor, &t) == CLAY_OK);
+    CHECK(t.workset_vertices == 0);
+    REQUIRE(clay_multires_sculptor_stamp(f.sculptor, &narrow, nullptr, &report) == CLAY_OK);
+    REQUIRE(clay_multires_sculptor_peak_telemetry(f.sculptor, &t) == CLAY_OK);
+    CHECK(t.workset_vertices > 0);
+    CHECK(t.workset_vertices < fine_peak);
 }

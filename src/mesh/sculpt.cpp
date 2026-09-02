@@ -1,6 +1,7 @@
 #include "clay/mesh/sculpt.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <cmath>
 
@@ -163,11 +164,31 @@ bool VertexDeltas::apply(Mesh& m) const {
 
 // -- MeshSculptor -------------------------------------------------------------
 
+namespace {
+
+// The seed-token counter. Process-wide and monotonic, so no two live sculptors
+// share a token and a token is never reused after one is destroyed — a
+// hierarchy destroys and rebuilds its level sculptor on every rebind, and a
+// counter that restarted would hand the new one the retired one's identity,
+// which is precisely the confusion the token exists to catch.
+//
+// Relaxed ordering is enough: the only thing required of the value is that it
+// differs between sculptors, never that it orders anything against other
+// memory.
+std::atomic<std::uint64_t> g_seed_revision{kNoSeedRevision};
+
+std::uint64_t next_seed_revision() {
+    return g_seed_revision.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+}  // namespace
+
 MeshSculptor::MeshSculptor(Mesh& m, float weld_epsilon)
-    : mesh_(m), adjacency_(Adjacency::build(m, weld_epsilon)) {}
+    : mesh_(m), adjacency_(Adjacency::build(m, weld_epsilon)),
+      seed_revision_(next_seed_revision()) {}
 
 MeshSculptor::MeshSculptor(Mesh& m, Adjacency adjacency)
-    : mesh_(m), adjacency_(std::move(adjacency)) {}
+    : mesh_(m), adjacency_(std::move(adjacency)), seed_revision_(next_seed_revision()) {}
 
 const Bvh& MeshSculptor::bvh() {
     if (!bvh_) bvh_ = std::make_unique<Bvh>(Bvh::build(mesh_));
@@ -342,6 +363,22 @@ kernel::cfloat3 MeshSculptor::automask_reference(const MeshBrushSettings& settin
     return near != kNoClass ? class_normal(mesh_, adjacency_, near) : kernel::cf3(0, 1, 0);
 }
 
+std::uint32_t MeshSculptor::accepted_seed(const MeshBrushSettings& settings) {
+    if (settings.seed_class >= adjacency_.class_count()) return kNoClass;
+    // A caller that claims nothing gets what it has always got: the bounds
+    // check above and nothing more. Silently REFUSING an unrevisioned seed
+    // would have been the stricter design and was rejected — it turns every
+    // shipped caller's fast path into a full scan, which is a performance
+    // regression delivered as a correctness fix.
+    if (settings.seed_revision == kNoSeedRevision) return settings.seed_class;
+    if (settings.seed_revision == seed_revision_) return settings.seed_class;
+    // In bounds, and from somebody else's numbering. Falling back to the scan
+    // costs one query; honouring it costs the stamp, because a seed outside the
+    // radius makes `geodesic_region` return an empty region.
+    ++stale_seeds_rejected_;
+    return kNoClass;
+}
+
 // The fixed mesh's answers to the two questions `compose_workset` cannot
 // answer for itself. Free functions with a `this` context rather than lambdas,
 // because `WorkItemReader` holds function pointers — see the note there on why
@@ -372,6 +409,11 @@ void MeshSculptor::build_fixed_mesh_workset(const MeshBrushSettings& settings) {
             if (c < r.slot.size()) r.slot[c] = kNoClass;
         }
     }
+    // Resolved ONCE, before the two region shapes divide, because both of them
+    // read the caller's seed and a seed rejected on one path must be rejected
+    // on the other. `kNoClass` from here means "no usable seed was given",
+    // which is the state each branch below already knows how to handle.
+    const std::uint32_t given_seed = accepted_seed(settings);
     if (settings.geodesic) {
         // Seeded from the index when there is one. `geodesic_region` scans
         // every class for a seed when it is given none, which put an O(mesh)
@@ -383,7 +425,7 @@ void MeshSculptor::build_fixed_mesh_workset(const MeshBrushSettings& settings) {
         // measured 1.30 -> 1.98 ms at a million classes, and the cause was one
         // extra branch per iteration in a differently-shaped copy of the same
         // loop. Two copies of a hot scan is a defect whichever is faster.
-        std::uint32_t seed = settings.seed_class;
+        std::uint32_t seed = given_seed;
         if (seed >= adjacency_.class_count() && surface_index() != nullptr)
             seed = nearest_class(settings.center);
         automask_seed_ = seed < adjacency_.class_count() ? seed : kNoClass;
@@ -399,9 +441,8 @@ void MeshSculptor::build_fixed_mesh_workset(const MeshBrushSettings& settings) {
         // factor actually wants it, because it costs a query.
         automask_seed_ = kNoClass;
         if (has_factor(settings.automask.factors, AutomaskFactor::TopologyConnected)) {
-            automask_seed_ = settings.seed_class < adjacency_.class_count()
-                                 ? settings.seed_class
-                                 : nearest_class(settings.center);
+            automask_seed_ =
+                given_seed < adjacency_.class_count() ? given_seed : nearest_class(settings.center);
         }
         if (classes_in_ball(settings.center, settings.radius, &candidates_)) {
             // SORTED, so the region is the same list whether it came from the
@@ -480,6 +521,20 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
     in.reader.context = this;
 
     compose_workset(in, arena_, &region_);
+
+    // The workset's peak, published once the region is FINAL -- after the
+    // falloff and the automask have dropped what they drop. Reporting the
+    // pre-compaction count would make the number a property of the brush radius
+    // rather than of the memory a stamp actually stands on, which is what a
+    // host tunes a profile against.
+    //
+    // Everything above this line used to be spelled out here: the automask's
+    // second pass, the compaction it drives, and the plane. `compose_workset`
+    // owns all of it now (add-shared-brush-runtime), which is why this branch
+    // keeps only the measurement -- the thing being measured moved, the
+    // measurement did not.
+    if (telemetry_ != nullptr) telemetry_->observe_workset(region_.size());
+
 }
 
 // THE PLAN IS COMPILED ONCE PER STROKE, not per stamp.

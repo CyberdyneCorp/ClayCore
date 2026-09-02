@@ -428,6 +428,49 @@ TEST_CASE("a write on top of a deep stack sums only the layers that reach the bl
     CHECK(surface.sculpt_layer_stats().layer_blocks_visited == 8);
 }
 
+// THE SHORT CIRCUIT MUST NOT SKIP AN OUTSTANDING RELEASE
+// (add-extreme-poly-runtime; regression for a defect this change introduced).
+//
+// `evaluate_up_to` returns early when nothing below the target moved, which is
+// what keeps a display-normal drain from costing the hierarchy. That short
+// circuit asks `composition_pending`, and that function used to answer "no"
+// the moment the stack was EMPTY -- which is exactly the state removing or
+// baking the LAST layer leaves behind, with a composed field still allocated on
+// every level the stack used to reach.
+//
+// The bytes are the visible half. The half that matters is that
+// `composed_or_detail` PREFERS a composed field wherever one exists, so the
+// level goes on reading the composed coefficients after its last layer is gone
+// -- a baked layer contributing to the base it was just baked into.
+//
+// Asserted through a second evaluation with nothing pending, because the first
+// one after a bake has patches marked and takes the full walk either way. It is
+// the SECOND read that engages the short circuit, and it was green while the
+// surface underneath it was wrong.
+TEST_CASE("sculpt layers: removing the last layer releases the composed field") {
+    MultiresSurface surface = build(2);
+    const std::vector<cfloat3> pristine = surface.positions_at(2);
+
+    const SculptLayerId id = surface.add_sculpt_layer("pass");
+    for (std::uint32_t v = 30; v < 50; ++v) surface.set_sculpt_layer_detail(id, 2, v, lift(0.03f));
+    const std::vector<cfloat3> with_layer = surface.positions_at(2);
+    REQUIRE(surface.memory().composed > 0);
+    // The fixture has to actually move something, or every check below passes
+    // over a layer that never contributed.
+    bool moved = false;
+    for (std::size_t i = 0; i < pristine.size(); ++i)
+        if (with_layer[i].y != pristine[i].y) moved = true;
+    REQUIRE(moved);
+
+    REQUIRE(surface.remove_sculpt_layer(id));
+    surface.positions_at(2);              // the walk that has patches marked
+    const std::vector<cfloat3> after = surface.positions_at(2);  // the short circuit
+
+    CHECK(surface.memory().composed == 0);
+    for (std::size_t i = 0; i < pristine.size(); ++i)
+        CHECK(after[i].y == doctest::Approx(pristine[i].y).epsilon(1e-6));
+}
+
 TEST_CASE("merge folds the per-layer mask in, once, and leaves the identity behind") {
     // THE HALF OF THE PARITY GATE THE MASK WAS MISSING FROM. Task 2.7's
     // per-layer mask is a SECOND multiplier in `E = B + Σ sᵢ·mᵢ(v)·Lᵢ`, and a

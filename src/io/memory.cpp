@@ -14,7 +14,9 @@ namespace {
 // than by restating the number.
 void finish(MemoryReport* r) {
     r->total = r->edit_list + r->voxel_content + r->mesh_layers + r->masks +
-               r->voxel_sculpt_layers + r->history + r->passthrough + r->transient;
+               r->voxel_sculpt_layers + r->history + r->passthrough + r->transient +
+               r->surface_content + r->multires_detail + r->sculpt_layers +
+               r->surface_caches + r->surface_scratch + r->surface_undo;
 }
 
 void add_voxel(MemoryReport* r, const voxel::VoxelGrid& g) {
@@ -34,9 +36,44 @@ void add_mesh(MemoryReport* r, const mesh::Mesh& m) {
     ++r->mesh_layer_count;
 }
 
+// The surface tier, from the ledger the host filled. One place, so the mapping
+// from a category to a report line is written once and the two cannot drift.
+void add_surfaces(MemoryReport* r, const memory::MemoryLedger& ledger) {
+    using memory::MemoryCategory;
+    r->surface_content += ledger.of(MemoryCategory::BaseGeometry) +
+                          ledger.of(MemoryCategory::Topology) + ledger.of(MemoryCategory::Masks);
+    r->multires_detail += ledger.of(MemoryCategory::MultiresDetail);
+    r->sculpt_layers += ledger.of(MemoryCategory::SculptLayers);
+    r->surface_caches += ledger.of(MemoryCategory::ChunkIndex) +
+                         ledger.of(MemoryCategory::EvaluatedCache) +
+                         ledger.of(MemoryCategory::LevelRuntimeCache) +
+                         ledger.of(MemoryCategory::LayerEvalCache) +
+                         ledger.of(MemoryCategory::DerivedPositions);
+    r->surface_scratch +=
+        ledger.of(MemoryCategory::Scratch) + ledger.of(MemoryCategory::PreviewStaging);
+    r->surface_undo += ledger.of(MemoryCategory::UndoHistory);
+}
+
 }  // namespace
 
-MemoryReport document_memory(const ClaySpaceDoc& doc, const session::History* history) {
+std::size_t MemoryReport::essential() const {
+    return edit_list + voxel_content + mesh_layers + masks + surface_content + multires_detail +
+           sculpt_layers;
+}
+
+std::size_t MemoryReport::rebuildable() const {
+    // `transient` is here rather than in `essential` because it is a stroke's
+    // copy-on-write shadow: it is going away when the gesture ends whether or
+    // not anybody releases it.
+    return surface_caches + surface_scratch + passthrough + transient;
+}
+
+std::size_t MemoryReport::undoable() const {
+    return history + voxel_sculpt_layers + surface_undo;
+}
+
+MemoryReport document_memory(const ClaySpaceDoc& doc, const session::History* history,
+                             const memory::MemoryLedger* surfaces) {
     MemoryReport r;
     r.edit_list = scene::document_bytes(doc.document);
     for (const auto& [id, grid] : doc.voxel_layers) add_voxel(&r, grid);
@@ -44,6 +81,7 @@ MemoryReport document_memory(const ClaySpaceDoc& doc, const session::History* hi
     for (const auto& [id, m] : doc.mesh_layers) add_mesh(&r, m);
     if (history) r.history = history->bytes().total;
     r.passthrough = vector_bytes(doc.thumbnail_png) + vector_bytes(doc.camera_bookmarks);
+    if (surfaces != nullptr) add_surfaces(&r, *surfaces);
     finish(&r);
     return r;
 }

@@ -3,6 +3,7 @@
 #include "clay/io/parity_fixture.h"
 
 #include "clay/field/volume.h"
+#include "clay/kernel/field.h"
 
 #include <cmath>
 #include <cstdint>
@@ -28,7 +29,9 @@ using scene::Node;
 using scene::Op;
 using scene::Prim;
 
-constexpr int kFixtureSchema = 1;
+// 2 adds the march half (a `march` block and a `rays` array per case). Purely
+// additive: every schema-1 field is unchanged and in the same place.
+constexpr int kFixtureSchema = 2;
 
 // -- deterministic sampling --------------------------------------------------
 
@@ -465,10 +468,78 @@ void append_case(std::string* out, const FixtureCase& c) {
     append_floats(out, c.distances.data(), c.distances.size());
     *out += ",\"color\":";
     append_vec3_array(out, c.colors);
-    *out += '}';
+    *out += ",\"rays\":[";
+    for (std::size_t i = 0; i < c.rays.size(); ++i) {
+        if (i) *out += ',';
+        *out += '[';
+        const float v[7] = {c.rays[i].origin.x,    c.rays[i].origin.y,    c.rays[i].origin.z,
+                            c.rays[i].direction.x, c.rays[i].direction.y, c.rays[i].direction.z,
+                            c.rays[i].t};
+        for (int k = 0; k < 7; ++k) {
+            if (k) *out += ',';
+            append_float(out, v[k]);
+        }
+        *out += ']';
+    }
+    *out += "]}";
 }
 
 // -- case assembly -------------------------------------------------------------
+
+// The march half of a case: rays fired inward at the tape from every side,
+// kept only where a differently-written marcher lands in the same place.
+//
+// The variants below are all CORRECT ways to trace the same field — over-
+// relaxation off, a finer and a coarser epsilon, half the budget, and a step
+// scale four times more conservative than the tape asks for. A ray they do not
+// agree on is grazing or unresolvable, and exporting it would be shipping an
+// expectation a consumer cannot meet however right it is. See FixtureRay.
+std::vector<FixtureRay> march_rays(const scene::Tape& tape) {
+    const FixtureMarch m = kernel_parity_march();
+    const float scale = tape.safe_step_scale();
+    auto field = [&tape](cfloat3 p) { return tape.eval(p).d; };
+    auto trace = [&](cfloat3 ro, cfloat3 rd, float eps, float step_scale, float relax, int steps) {
+        return kernel::craycast(field, ro, rd, m.tmin, m.tmax, eps, step_scale, relax, steps);
+    };
+
+    std::vector<FixtureRay> rays;
+    Lcg rng{0xD1B54A32D192ED03ull};
+    for (int i = 0; i < 96; ++i) {
+        cfloat3 dir = cf3(rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1));
+        const float len = kernel::clength(dir);
+        if (len < 1e-3f) continue;
+        dir = dir * (1.0f / len);
+        // Inward from outside tmax's reach of the surface, so tmin does not
+        // clip the approach on any case in the table.
+        const cfloat3 origin = dir * 3.0f;
+        const cfloat3 direction = dir * -1.0f;
+
+        const kernel::CRayHit ref = trace(origin, direction, m.eps, scale, 1.4f, m.max_steps);
+        if (!ref.hit) continue;
+
+        const kernel::CRayHit variants[] = {
+            trace(origin, direction, m.eps, scale, 1.0f, m.max_steps),
+            trace(origin, direction, m.eps * 0.2f, scale, 1.4f, m.max_steps),
+            trace(origin, direction, m.eps * 5.0f, scale, 1.4f, m.max_steps),
+            trace(origin, direction, m.eps, scale, 1.4f, m.max_steps / 2),
+            trace(origin, direction, m.eps, scale * 0.25f, 1.4f, m.max_steps * 4),
+        };
+        const FixtureTolerance tol;
+        bool stable = true;
+        for (const kernel::CRayHit& h : variants) {
+            // Half the published allowance, so the exported expectation has
+            // room for a consumer's own arithmetic on top of the spread we
+            // already know about.
+            if (!h.hit || h.t - ref.t > tol.hit_t_late_abs * 0.5f ||
+                ref.t - h.t > tol.hit_t_early_abs * 0.5f) {
+                stable = false;
+                break;
+            }
+        }
+        if (stable) rays.push_back(FixtureRay{origin, direction, ref.t});
+    }
+    return rays;
+}
 
 void add_case(std::vector<FixtureCase>* cases, std::string name, std::string note,
               const Document& doc) {
@@ -484,6 +555,7 @@ void add_case(std::vector<FixtureCase>* cases, std::string name, std::string not
         c.distances.push_back(v.d);
         c.colors.push_back(v.color);
     }
+    c.rays = march_rays(c.tape);
     cases->push_back(std::move(c));
 }
 
@@ -598,6 +670,8 @@ std::vector<cfloat3> kernel_parity_probe_points() {
     return points;
 }
 
+FixtureMarch kernel_parity_march() { return FixtureMarch{}; }
+
 std::vector<FixtureCase> kernel_parity_cases() {
     std::vector<FixtureCase> cases;
     add_blend_cases(&cases);
@@ -677,13 +751,28 @@ std::string kernel_parity_fixture_json(const std::vector<FixtureCase>& cases,
     out += std::to_string(v.major) + "." + std::to_string(v.minor) + "." + std::to_string(v.patch);
     out += "\",\n  \"note\": \"Evaluate each case's tape with kernels compiled from "
            "clay/kernel/*.h and compare against distance/color at every probe point. "
-           "See docs/06-host-gpu-previews.md.\",\n  \"tolerance\": {\"distance_abs\": ";
+           "Then march each case's rays with the \\\"march\\\" parameters and compare "
+           "where they land. See docs/06-host-gpu-previews.md.\",\n  \"tolerance\": "
+           "{\"distance_abs\": ";
     append_float(&out, tol.distance_abs);
     out += ", \"distance_rel\": ";
     append_float(&out, tol.distance_rel);
     out += ", \"color_abs\": ";
     append_float(&out, tol.color_abs);
-    out += "},\n  \"cases\": [\n";
+    out += ", \"hit_t_late_abs\": ";
+    append_float(&out, tol.hit_t_late_abs);
+    out += ", \"hit_t_early_abs\": ";
+    append_float(&out, tol.hit_t_early_abs);
+    out += "},\n  \"march\": {\"tmin\": ";
+    const FixtureMarch march = kernel_parity_march();
+    append_float(&out, march.tmin);
+    out += ", \"tmax\": ";
+    append_float(&out, march.tmax);
+    out += ", \"eps\": ";
+    append_float(&out, march.eps);
+    out += ", \"max_steps\": ";
+    out += std::to_string(march.max_steps);
+    out += ", \"relax\": 1.4},\n  \"cases\": [\n";
     for (std::size_t i = 0; i < cases.size(); ++i) {
         out += "    ";
         append_case(&out, cases[i]);

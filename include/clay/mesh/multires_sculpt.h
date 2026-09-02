@@ -187,6 +187,23 @@ class MultiresSculptor {
     std::uint32_t bound_level() const { return bound_level_; }
     MeshSculptor* level_sculptor();
 
+    // The seed token for the level this sculptor is bound to RIGHT NOW, for a
+    // host that picked a `seed_class` off the level mesh and wants the stamp to
+    // be able to tell whether that class still means what it meant.
+    //
+    // This is the call the token exists for. A hierarchy rebinds — and so
+    // renumbers — whenever the sculpt level or the cache generation moves, and
+    // both happen behind a host: the first when it changes level, the second
+    // when a trim releases the caches under memory pressure. A seed picked
+    // before either is in bounds and wrong, and spends the dab on an empty
+    // region rather than reporting anything.
+    //
+    // BINDS, because the answer is a property of the bound level and a caller
+    // asking before the first stamp would otherwise get the token of whatever
+    // was bound last. Returns `kNoSeedRevision` for a surface that cannot bind,
+    // which is the value that claims nothing.
+    std::uint64_t seed_revision();
+
     // Normals follow the vertices, and a host draining a stroke can defer the
     // recompute to the end of it. Forwarded to whichever level sculptor is
     // bound, because deferring is a property of the STROKE rather than of the
@@ -194,6 +211,20 @@ class MultiresSculptor {
     void set_defer_normals(bool defer);
     bool defer_normals() const { return defer_normals_; }
     void flush_normals();
+
+    // Where the level sculptor publishes the workset high-water mark a host
+    // tunes a `SculptMemoryProfile` against. Borrowed and never owned; null is
+    // the default.
+    //
+    // Forwarded to whichever level is bound, INCLUDING one bound later, for the
+    // same reason `set_defer_normals` is forwarded rather than set once: a
+    // rebind builds a NEW `MeshSculptor`, and a telemetry block that stopped
+    // filling the moment the host changed level — or the moment a trim moved
+    // the cache generation — would report a peak belonging to whichever level
+    // happened to be bound first rather than to the session. That is worse than
+    // reporting nothing, because it looks like an answer.
+    void set_telemetry(memory::PeakTelemetry* telemetry);
+    memory::PeakTelemetry* telemetry() const { return telemetry_; }
 
     // The automask factors `mesh` cannot compute for itself, set once for a
     // STROKE. Forwarded to whichever level sculptor is bound, including one
@@ -225,6 +256,7 @@ class MultiresSculptor {
     std::uint64_t bound_generation_ = 0;
     AutomaskInputs automask_;
     bool automask_set_ = false;
+    memory::PeakTelemetry* telemetry_ = nullptr;
     bool defer_normals_ = false;
     // The record the level sculptor writes, which is where a level-0 gesture's
     // "before" positions come from. Reset per stamp above level 0, kept across

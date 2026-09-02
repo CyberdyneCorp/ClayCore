@@ -215,11 +215,23 @@ TEST_CASE("C ABI: an ABI-74 host declares the shorter layout and is unaffected")
     //
     // `offsetof(stamp_azimuth)` is exactly what that older `sizeof` was: the
     // struct's tail is 8-byte aligned because of its pointer member, so the
-    // field sits at 184 and the new size is 192 — it grew by eight, not four.
+    // field sits at 184 and minor 77's size was 192 — it grew by eight, not four.
     const uint32_t abi74 =
         static_cast<uint32_t>(offsetof(clay_mesh_brush_desc, stamp_azimuth));
     CHECK(abi74 == 184u);
-    CHECK(sizeof(clay_mesh_brush_desc) == 192u);
+
+    // AND THE SAME RULE ONE MINOR LATER. add-extreme-poly-runtime appends
+    // `seed_revision` at minor 78, so the offset above is now TWO older layouts
+    // back and the size is 200: `stamp_azimuth` is a float at 184, and a
+    // uint64_t cannot start at 188, so the tail pads to 192 before it.
+    //
+    // Both offsets are asserted rather than just the size. A size check alone
+    // passes if a field is INSERTED and another removed, which is the one edit
+    // that silently breaks every host already compiled against this header.
+    const uint32_t abi77 =
+        static_cast<uint32_t>(offsetof(clay_mesh_brush_desc, seed_revision));
+    CHECK(abi77 == 192u);
+    CHECK(sizeof(clay_mesh_brush_desc) == 200u);
 
     clay_mesh_brush_desc b{};
     b.struct_size = sizeof(b);

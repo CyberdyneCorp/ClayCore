@@ -68,6 +68,16 @@ ARRAY_ELEMENT_STRUCTS = {
     # rather than a convenience, and a struct_size would negotiate a layout
     # whose whole point is that it is fixed.
     "clay_tape_instr",
+    # The four chunk counters, and one chunk's record. A host draining a stroke
+    # passes one clay_chunk_revisions per acknowledged chunk and reads a
+    # clay_chunk_info per chunk of the surface — thousands of each, filled in
+    # one bulk call — so the layout is the contract and a struct_size per
+    # element would forbid the bulk fill that is the point. Appending a field to
+    # either moves every element after the first, which is a break either way;
+    # the versioned half of this transport is clay_chunk_readback, which is one
+    # per call and carries a struct_size.
+    "clay_chunk_revisions",
+    "clay_chunk_info",
 }
 
 
@@ -120,6 +130,9 @@ BOUNDED_FILLS = (
     "begin_out_cost",
     "write_voxel_remesh_estimate",
     "write_voxel_remesh_report",
+    # The five preflight entry points end here, so they cannot fill the
+    # descriptor five different ways.
+    "write_preflight",
 )
 
 
@@ -729,7 +742,10 @@ def parity_fixture_exercise(lib) -> list[str]:
     if lib.clay_parity_fixture_json(buf, ctypes.byref(cap)) != 0:
         errors.append("clay_parity_fixture_json rejected an adequate buffer")
     text = buf.value.decode()
-    for key in ('"cases"', '"instrs"', '"safe_step_scale"', '"tolerance"'):
+    # "march" and "rays" are schema 2: the half that says how a host must TRACE
+    # the field, not just evaluate it. A build that stopped exporting them would
+    # still pass every point comparison.
+    for key in ('"cases"', '"instrs"', '"safe_step_scale"', '"tolerance"', '"march"', '"rays"'):
         if key not in text:
             errors.append(f"the parity fixture is missing {key}")
     # a short buffer is refused AND reports what was needed, so the retry is
