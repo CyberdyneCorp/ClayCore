@@ -264,3 +264,16 @@ feature by an operation on its NEIGHBOUR.
 - [x] C.3 `EdgeConstraint::Material` was declared, wired into both blocker
       defaults, and referenced by no test, example or binding anywhere in the
       tree. Now pinned for both refusals
+- [x] C.4 The python-bindings requirement is stated as REACHABILITY — "every
+      adaptive-surface capability reachable from the C ABI is reachable from
+      `pyclay`" — and `check_binding_parity.py` reads registrations, so it went
+      green over a binding no Python test had ever driven. Every adaptive case
+      in `bindings/python/tests/` passed `topology_off()`, deliberately: they
+      exist to compare the shared brush kernels against the fixed
+      representation, and a remesh mid-comparison would measure the remesher.
+      So the deformation half was covered from Python and the ADAPTATION half —
+      split, collapse, flip, and the chunk table they resize — was covered only
+      from C++, as were `DynamicSurface.serialize`/`deserialize` and
+      `validate`. `bindings/python/tests/test_dyntopo.py` now drives them.
+      Undo/redo parity is NOT included: `revert`/`apply` over a `TopologyDelta`
+      wedge the next stamp on an open defect, and belong with that fix
