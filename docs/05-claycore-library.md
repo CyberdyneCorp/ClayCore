@@ -165,8 +165,43 @@ unrepresentable rather than merely forbidden.
 **The library therefore spawns threads**, which the "the caller owns threading
 and queues" principle in §2 does not say and should: one process-wide pool,
 `hardware_concurrency() - 1` workers, created lazily the first time anything
-dispatches a batch. Making it host-configurable (worker count, QoS class) is
+dispatches a batch. Making the worker COUNT host-configurable is
 `add-mobile-thread-scheduling` and is not done.
+
+**What the work is for, it now says.** Every dispatch carries a
+`parallel::WorkClass` — `Interactive`, `UserInitiated`, `Utility`,
+`Background` — and the pool applies it to each worker for the duration of a job
+and restores it afterwards, because the workers are persistent and a class left
+behind would schedule the next job wrong. On Apple that maps onto the pthread
+QoS classes; everywhere else it currently records the class and does nothing
+else, which is a written branch in `src/parallel/thread_policy.cpp` rather than
+an absent file. `Interactive` maps to `QOS_CLASS_USER_INITIATED` and not to
+`USER_INTERACTIVE`, which Apple reserves for a main thread's event handling; a
+pool of workers claiming it would compete with the UI thread it exists to feed.
+
+A call site that says nothing means `UserInitiated`, so nothing changed meaning
+by being ported. A nested dispatch inherits the class of the job it is already
+inside rather than its own argument: it runs inline on that thread, and
+re-scheduling it would re-schedule the outer work with it.
+
+**THE HOST OWNS THE OTHER HALF, and the library cannot do it for you.** A QoS
+class propagates from the thread that makes a call, so a dab issued from a
+background queue is background work no matter what the pool does with its own
+workers — the pool can only classify the threads it created. Call the
+interactive entry points from a thread the OS already considers interactive:
+
+```swift
+// Swift host: the class the pool inherits is the one you dispatch from.
+DispatchQueue.global(qos: .userInitiated).async {
+    clay_dynamic_sculptor_stamp(...)
+}
+```
+
+Long or deferrable work — a mesh export, cache maintenance, a rebuild between
+strokes — belongs on `.utility` for the same reason. Per-operation QoS is
+deliberately NOT exposed through the C ABI: an operation knows what it is for
+better than its caller does, and a knob there invites a host to mark everything
+interactive.
 
 **What a host may call from its own worker.** Three contracts, all stated in
 `clay.h` where the calls are, and all of the same shape — free-threaded against

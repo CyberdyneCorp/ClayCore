@@ -25,8 +25,10 @@
 #include <vector>
 
 #include "clay/parallel/thread_pool.h"
+#include "clay/parallel/work_class.h"
 
 using clay::parallel::ThreadPool;
+using clay::parallel::WorkClass;
 
 namespace {
 
@@ -151,5 +153,146 @@ TEST_CASE("results do not depend on how the work was split") {
         });
         CAPTURE(min_chunk);
         CHECK(out == reference);
+    }
+}
+
+// -- work classes -------------------------------------------------------------
+//
+// What is testable OFF Apple is the propagation, and it is the half that can
+// actually be wrong. The platform call is one line with no branches; the rules
+// about which class a given piece of code runs under have four of them, and a
+// worker adopting a class and forgetting to put it back is invisible until some
+// unrelated job runs at the wrong priority hours later.
+//
+// `current_work_class()` is readable everywhere for exactly this reason.
+
+namespace {
+
+// The distinct classes observed by the bodies of a dispatch, and how many
+// times a body ran at all.
+struct ClassTally {
+    std::mutex mutex;
+    std::vector<WorkClass> seen;
+    std::atomic<int> bodies{0};
+
+    void observe() {
+        const WorkClass c = clay::parallel::current_work_class();
+        ++bodies;
+        std::lock_guard<std::mutex> lock(mutex);
+        for (WorkClass s : seen)
+            if (s == c) return;
+        seen.push_back(c);
+    }
+    bool only(WorkClass c) const { return seen.size() == 1 && seen.front() == c; }
+};
+
+}  // namespace
+
+TEST_CASE("an unclassified dispatch is UserInitiated") {
+    // The migration rule. Every call site that existed before work classes did
+    // keeps compiling and keeps meaning what it meant: somebody is waiting on
+    // this. Porting a call site must not silently promote it to Interactive nor
+    // demote it to Background.
+    ClassTally tally;
+    clay::parallel::for_range(4096, 1, [&](std::size_t b, std::size_t e) {
+        (void)b;
+        (void)e;
+        tally.observe();
+    });
+    CHECK(tally.bodies.load() > 0);
+    CHECK(tally.only(WorkClass::UserInitiated));
+}
+
+TEST_CASE("a declared class reaches every body that runs the job") {
+    // Including the issuing thread's own participation: it runs chunks through
+    // the same path as the workers, so it has to be scheduled the same way.
+    for (WorkClass cls : {WorkClass::Interactive, WorkClass::UserInitiated,
+                          WorkClass::Utility, WorkClass::Background}) {
+        CAPTURE(static_cast<int>(cls));
+        ClassTally tally;
+        clay::parallel::for_range(1 << 16, 1,
+                                  [&](std::size_t b, std::size_t e) {
+                                      (void)b;
+                                      (void)e;
+                                      tally.observe();
+                                  },
+                                  cls);
+        CHECK(tally.bodies.load() > 0);
+        CHECK(tally.only(cls));
+    }
+}
+
+TEST_CASE("a small batch that stays on the calling thread still takes its class") {
+    // The serial fallback is a different branch from the pooled one, and a
+    // class that applied to pooled work only would make scheduling depend on
+    // the batch size — the same call fast on one input and starved on another.
+    ClassTally tally;
+    clay::parallel::for_range(1, 1,
+                              [&](std::size_t b, std::size_t e) {
+                                  (void)b;
+                                  (void)e;
+                                  tally.observe();
+                              },
+                              WorkClass::Interactive);
+    CHECK(tally.bodies.load() == 1);
+    CHECK(tally.only(WorkClass::Interactive));
+}
+
+TEST_CASE("a nested dispatch inherits its caller rather than its argument") {
+    // A nested call runs INLINE, on a thread that is already inside somebody
+    // else's job. Applying the nested class there would re-schedule the OUTER
+    // work: a Utility helper called from an Interactive dab would drag the dab
+    // down for as long as the helper ran. The argument is honoured for
+    // top-level calls and deliberately ignored here.
+    ClassTally outer, inner;
+    clay::parallel::for_range(1 << 16, 1,
+                              [&](std::size_t b, std::size_t e) {
+                                  (void)b;
+                                  (void)e;
+                                  outer.observe();
+                                  clay::parallel::for_range(64, 1,
+                                                            [&](std::size_t, std::size_t) {
+                                                                inner.observe();
+                                                            },
+                                                            WorkClass::Background);
+                              },
+                              WorkClass::Interactive);
+    CHECK(outer.only(WorkClass::Interactive));
+    CHECK(inner.bodies.load() > 0);
+    CHECK(inner.only(WorkClass::Interactive));
+}
+
+TEST_CASE("a class does not outlive the job that asked for it") {
+    // THE LEAK THIS EXISTS TO CATCH. The workers are persistent: one that
+    // adopts Background and does not put it back keeps running everything
+    // after it as Background, and nothing about the next job looks wrong.
+    // Checked on the issuing thread, whose class is observable directly, and
+    // then by dispatching again and seeing the default come back.
+    const WorkClass before = clay::parallel::current_work_class();
+    clay::parallel::for_range(1 << 16, 1, [](std::size_t, std::size_t) {},
+                              WorkClass::Background);
+    CHECK(clay::parallel::current_work_class() == before);
+
+    ClassTally after;
+    clay::parallel::for_range(1 << 16, 1, [&](std::size_t, std::size_t) { after.observe(); });
+    CHECK(after.only(WorkClass::UserInitiated));
+}
+
+TEST_CASE("classifying a dispatch does not change what it computes") {
+    // The pool's contract is that it changes speed and nothing else, and a
+    // scheduling hint is exactly the kind of change that is supposed to be
+    // invisible to results. Run the ragged case under every class.
+    for (WorkClass cls : {WorkClass::Interactive, WorkClass::UserInitiated,
+                          WorkClass::Utility, WorkClass::Background}) {
+        CAPTURE(static_cast<int>(cls));
+        const std::size_t n = 100003;  // prime: the last chunk is always ragged
+        Tally tally(n);
+        clay::parallel::for_range(n, 1,
+                                  [&](std::size_t b, std::size_t e) {
+                                      for (std::size_t i = b; i < e; ++i)
+                                          tally.visits[i].fetch_add(1);
+                                  },
+                                  cls);
+        CHECK(tally.each_exactly_once());
     }
 }

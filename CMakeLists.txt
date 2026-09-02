@@ -118,6 +118,7 @@ add_library(claycore
   src/mesh/voxel_remesh.cpp
   src/mesh/voxel_remesh_sample.cpp
   src/mesh/voxel_remesh_finish.cpp
+  src/parallel/thread_policy.cpp
   src/pick/pick.cpp
   src/io/file_bytes.cpp
   src/io/clayspace.cpp

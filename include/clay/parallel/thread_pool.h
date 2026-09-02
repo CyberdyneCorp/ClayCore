@@ -62,6 +62,8 @@
 #include <thread>
 #include <vector>
 
+#include "clay/parallel/work_class.h"
+
 namespace clay {
 namespace parallel {
 
@@ -73,11 +75,28 @@ class ThreadPool {
     }
 
     // fn(begin, end) is called on worker threads over disjoint ranges.
+    //
+    // The class-less overload is the one every existing call site uses and it
+    // keeps compiling unchanged. It means UserInitiated, which is the honest
+    // reading of the work that was already here: a caller was waiting on all
+    // of it. Nothing silently becomes Interactive by being ported, and nothing
+    // silently drops to Background.
     void parallel_for(std::size_t n, std::size_t min_chunk,
                       const std::function<void(std::size_t, std::size_t)>& fn) {
+        parallel_for(n, min_chunk, fn, WorkClass::UserInitiated);
+    }
+
+    void parallel_for(std::size_t n, std::size_t min_chunk,
+                      const std::function<void(std::size_t, std::size_t)>& fn, WorkClass cls) {
         if (n == 0) return;
         // Nested: run it here. See the note at the top of this file — going to
         // the pool would evict the job this thread is already running.
+        //
+        // IT INHERITS THE CALLER'S CLASS AND IGNORES `cls`. This runs on a
+        // thread that is already inside somebody else's job, and lowering that
+        // thread's class mid-job would slow the OUTER work — a Utility helper
+        // called from an Interactive dab would drag the dab down with it. The
+        // requested class is honoured when the call is a top-level one.
         if (in_job()) {
             fn(0, n);
             return;
@@ -101,6 +120,11 @@ class ThreadPool {
         if (chunk == 0) chunk = 1;
         std::size_t num_tasks = (n + chunk - 1) / chunk;
         if (num_tasks <= 1) {
+            // A top-level call small enough to stay here still ASKED for a
+            // class, and the thread it runs on is the one that will do the
+            // work. Same scope the workers get, so a batch that crosses the
+            // threshold does not change how it is scheduled.
+            WorkClassScope scope(cls);
             fn(0, n);
             return;
         }
@@ -110,6 +134,7 @@ class ThreadPool {
         job->n = n;
         job->chunk = chunk;
         job->num_tasks = num_tasks;
+        job->cls = cls;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             current_ = job;
@@ -143,6 +168,8 @@ class ThreadPool {
         std::size_t n = 0;
         std::size_t chunk = 0;
         std::size_t num_tasks = 0;
+        // What the workers should be scheduled as while they run this job.
+        WorkClass cls = WorkClass::UserInitiated;
         std::atomic<std::size_t> next{0};
         std::atomic<std::size_t> done{0};
         // Waited on by the thread that issued the job, signalled by whichever
@@ -170,6 +197,13 @@ class ThreadPool {
     };
 
     static void run(Job& job) {
+        // ADOPTED PER JOB, AND RESTORED AFTER. The workers are persistent, so a
+        // class set and left would leak into whatever job this thread picks up
+        // next — a Utility rebuild would keep running as Interactive because an
+        // earlier dab happened to land on this worker. The calling thread goes
+        // through here too, which is how the issuer's participation is
+        // scheduled the same as the workers it is waiting on.
+        WorkClassScope qos(job.cls);
         InJobScope scope;
         for (;;) {
             std::size_t idx = job.next.fetch_add(1, std::memory_order_relaxed);
@@ -231,6 +265,13 @@ class ThreadPool {
 inline void for_range(std::size_t n, std::size_t min_chunk,
                       const std::function<void(std::size_t, std::size_t)>& fn) {
     ThreadPool::instance().parallel_for(n, min_chunk, fn);
+}
+
+// The same, said out loud. A call site that knows what its work is for says so
+// here; one that does not keeps the overload above and means UserInitiated.
+inline void for_range(std::size_t n, std::size_t min_chunk,
+                      const std::function<void(std::size_t, std::size_t)>& fn, WorkClass cls) {
+    ThreadPool::instance().parallel_for(n, min_chunk, fn, cls);
 }
 
 }  // namespace parallel
