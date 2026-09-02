@@ -231,7 +231,60 @@ target_include_directories(clay_unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.
 clay_apply_warnings(clay_unit_tests)
 clay_apply_sanitizers(clay_unit_tests)
 
-add_test(NAME clay_unit_tests COMMAND clay_unit_tests)
+# THE UNIT SUITE, IN SHARDS, because it was the CI critical path and the reason
+# was not the tests (issue #430).
+#
+# `clay_unit_tests` is one doctest binary running 2267 cases on ONE thread, and
+# it was registered here as ONE ctest entry. So the ASan+UBSan job — the longest
+# in the matrix at ~1h50m, and the gate every PR waits on — spent 1h39m of that
+# using a single core of the runner's four. Nothing was slow; three quarters of
+# the machine was idle.
+#
+# Sharding by SOURCE FILE rather than by test case, and that is the whole design
+# decision. A `-tc` filter names a test by its title, so renaming a case would
+# silently drop it from every shard and the suite would go on passing with less
+# in it. A source file is a thing the build already knows about, and
+# `tools/check_test_shards.py` proves the partition is exact on every run.
+#
+# The groups come from measurement, not from guessing — `clay_unit_tests -d`
+# under the asan-ubsan preset, recorded in issue #430. Two files are 57% of the
+# runtime, so they get a shard each; the rest is one catch-all that is still the
+# fastest of the four.
+set(CLAY_SHARD_PREFIX "*test_sdf_prefix_cache.cpp")
+set(CLAY_SHARD_CULL "*test_cull_index.cpp")
+set(CLAY_SHARD_HEAVY
+    "*test_voxel_levels.cpp,*test_voxel_remesh.cpp,*test_consolidate.cpp,*test_voxel_rasterize_mesh.cpp,*test_voxel_to_field.cpp,*test_points_batch.cpp")
+
+add_test(NAME clay_unit_tests_prefix COMMAND clay_unit_tests -sf=${CLAY_SHARD_PREFIX})
+add_test(NAME clay_unit_tests_cull COMMAND clay_unit_tests -sf=${CLAY_SHARD_CULL})
+add_test(NAME clay_unit_tests_heavy COMMAND clay_unit_tests -sf=${CLAY_SHARD_HEAVY})
+# THE CATCH-ALL IS AN EXCLUSION, not a list. A new test file joins this shard by
+# existing, so adding one can never leave it unrun — the failure mode a hand-
+# maintained inclusion list has and this one cannot.
+add_test(NAME clay_unit_tests_rest
+         COMMAND clay_unit_tests
+                 -sfe=${CLAY_SHARD_PREFIX},${CLAY_SHARD_CULL},${CLAY_SHARD_HEAVY})
+
+# LONGEST FIRST. ctest packs by descending COST, so the shard that sets the wall
+# clock starts at t=0 rather than after three short ones have finished. The
+# numbers are the measured seconds under asan-ubsan; they are relative weights
+# and do not need to be re-measured to stay useful.
+set_tests_properties(clay_unit_tests_prefix PROPERTIES COST 1272)
+set_tests_properties(clay_unit_tests_cull PROPERTIES COST 875)
+set_tests_properties(clay_unit_tests_heavy PROPERTIES COST 810)
+set_tests_properties(clay_unit_tests_rest PROPERTIES COST 633)
+
+# THE PARTITION IS A GATE, not a comment. Every case runs in exactly one shard —
+# a file in two shards would run twice and a file in none would stop running
+# while the suite still reported green, which is the only way this change can do
+# harm.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_FOUND)
+add_test(NAME clay_unit_shards_partition
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_test_shards.py
+                 --binary $<TARGET_FILE:clay_unit_tests>)
+endif()
 
 # CUDA architecture selection is pure CMake, so it is tested by script rather
 # than by the C++ suite — and needs neither a CUDA toolkit nor a GPU to run
