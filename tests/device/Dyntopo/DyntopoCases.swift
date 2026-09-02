@@ -16,26 +16,33 @@
 // spatial index is meant to be queried, not walked. A slope is the regression
 // `test_dynamic_scale.cpp` gates on desktop and nothing gated on hardware.
 //
-// THE FLATNESS IS CHECKED, not asserted. These four cases have been run on an
-// iPad Pro SIMULATOR — which answers no question about latency and every
-// question about whether the fixture holds — and a host-side replay driving the
-// same C ABI against a desktop build agrees with it. The growth exponents the
-// harness recorded:
+// BASELINED ON HARDWARE, 2026-09-02, iPad15,5 on iPadOS 26.5.2, thermally
+// nominal start to end, in the fifth session of a five-session gate:
 //
-//     dyntopo_stamp         +0.067    p95  5.15 /  5.65 /  7.01 ms  (batch 8)
-//     dyntopo_stamp_fixed   +0.497    p95  0.12 /  0.30 /  1.20 ms  (batch 8)
-//     dyntopo_stamp_fine    +0.006    p95 25.9  / 26.9  / 26.7  ms  (batch 4)
-//     dyntopo_chunk_copy    +0.027    p95  0.87 /  0.88 /  0.99 ms  (batch 256)
+//     dyntopo_stamp         +0.050    p95  3.99 /  4.09 /  5.03 ms  (batch 8)
+//     dyntopo_stamp_fixed   +0.405    p95  0.10 /  0.17 /  0.62 ms  (batch 8)
+//     dyntopo_stamp_fine    +0.010    p95 20.6  / 21.0  / 21.6  ms  (batch 4)
+//     dyntopo_chunk_copy    -0.170    p95  0.66 /  0.45 /  0.30 ms  (batch 256)
 //
-// The desktop replay puts the footprint at 751 / 790 / 784 splits across the
-// three axis points, so the fixture is delivering the constant dab it promises.
+// Per dab that is 0.63 ms adaptive, 0.078 ms deformation-only and 5.39 ms at
+// twice the detail. THE FINE DAB DOES NOT FIT A FRAME — 5.39 ms against a
+// 4.17 ms share — and check_device_bench.py says so on every run. That is the
+// feature's shape rather than a defect in the case: a detail slider costs this,
+// and the host decides what to do about it.
 //
-// Three of the four are flat. The DEFORMATION-ONLY dab is not, and it is the
-// one case with no remesher in it: +0.497, an 8.9x rise on a document a hundred
-// times larger, for work whose footprint does not change. That is the shape
-// `tests/unit/test_dynamic_scale.cpp` gates on desktop, and it is why the pair
-// is worth more than either half of it. Whether it also holds on the tablet is
-// what the baseline run is for.
+// Three of the four are flat across a hundredfold growth in document size, which
+// is what the constant-footprint fixture promises. The DEFORMATION-ONLY dab is
+// not, and it is the one case with no remesher in it: +0.405, a 7.8x rise for
+// work whose footprint does not change. That is the shape
+// `tests/unit/test_dynamic_scale.cpp` gates on desktop, arriving on hardware.
+//
+// THE CHUNK COPY'S -0.170 IS THE CHUNKER, not a speed-up, and the sign is worth
+// keeping in mind before reading it as one. One chunk is a smaller unit of work
+// on a bigger surface: the same dab dirties chunks of 708, 462 and 279 vertices
+// across the axis because the partition goes from 6 chunks to 64 to 517. The
+// case measures what a host pays per chunk, which is the thing it loops over.
+// check_device_bench.py only gates growth from ABOVE (MAX_GROWTH_EXPONENT), so
+// a negative exponent is recorded and never fails.
 //
 // Each adaptive case is paired with the same dab at `enabled: false`. The pair
 // is what makes the number a statement about ADAPTATION rather than about the
