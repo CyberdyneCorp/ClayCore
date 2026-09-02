@@ -22,6 +22,34 @@
       "measuredMs": 0.207,
       "rawMs": 0.4909
     },
+    "dyntopo_chunk_copy": {
+      "budgetMs": 0.9861,
+      "class": "interactive",
+      "machineFactor": 1.0007,
+      "measuredMs": 0.6574,
+      "rawMs": 0.6578
+    },
+    "dyntopo_stamp": {
+      "budgetMs": 7.5636,
+      "class": "interactive",
+      "machineFactor": 0.9982,
+      "measuredMs": 5.0424,
+      "rawMs": 5.0332
+    },
+    "dyntopo_stamp_fine": {
+      "budgetMs": 32.382,
+      "class": "interactive",
+      "machineFactor": 0.9992,
+      "measuredMs": 21.588,
+      "rawMs": 21.5717
+    },
+    "dyntopo_stamp_fixed": {
+      "budgetMs": 0.9361,
+      "class": "interactive",
+      "machineFactor": 1.0,
+      "measuredMs": 0.6241,
+      "rawMs": 0.624
+    },
     "magnify_pinch": {
       "budgetMs": 0.4341,
       "class": "gesture",
@@ -990,6 +1018,66 @@
       "atMs": 157156.580083,
       "bundle": "com.cyberdyne.claycore.devicemeasure",
       "ms": 130.459125,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 0.000292,
+      "bundle": "com.cyberdyne.claycore.devicedyntopo",
+      "ms": 131.954666,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 131.958917,
+      "bundle": "com.cyberdyne.claycore.devicedyntopo",
+      "ms": 130.851416,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 2049.1475,
+      "bundle": "com.cyberdyne.claycore.devicedyntopo",
+      "ms": 130.404667,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 2179.647375,
+      "bundle": "com.cyberdyne.claycore.devicedyntopo",
+      "ms": 130.281084,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 2553.800958,
+      "bundle": "com.cyberdyne.claycore.devicedyntopo",
+      "ms": 131.446084,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 2685.289708,
+      "bundle": "com.cyberdyne.claycore.devicedyntopo",
+      "ms": 130.122542,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 5317.255875,
+      "bundle": "com.cyberdyne.claycore.devicedyntopo",
+      "ms": 131.414125,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 5448.713958,
+      "bundle": "com.cyberdyne.claycore.devicedyntopo",
+      "ms": 130.745042,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 5970.128542,
+      "bundle": "com.cyberdyne.claycore.devicedyntopo",
+      "ms": 131.165042,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 6102.221542,
+      "bundle": "com.cyberdyne.claycore.devicedyntopo",
+      "ms": 130.882542,
       "thermalState": "nominal"
     }
   ],
@@ -4861,6 +4949,178 @@
       "thermalStateEnd": "nominal",
       "thermalStateStart": "nominal",
       "verb": "sdf_stroke_in_group"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "bundle": "com.cyberdyne.claycore.devicedyntopo",
+      "canaryAfterMs": 130.404667,
+      "canaryBeforeMs": 130.851416,
+      "growthExponent": 0.05030230418813441,
+      "measurements": [
+        {
+          "batch": 8,
+          "p50Ms": 3.017,
+          "p95Ms": 3.992458,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 170,
+          "stamps": 10
+        },
+        {
+          "batch": 8,
+          "p50Ms": 3.031917,
+          "p95Ms": 4.090417,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 154,
+          "stamps": 100
+        },
+        {
+          "batch": 8,
+          "p50Ms": 3.623125,
+          "p95Ms": 5.033209,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 141,
+          "stamps": 1000
+        }
+      ],
+      "name": "dyntopo_stamp",
+      "servedBy": "cpu",
+      "startedAtMs": 262.824292,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
+      "verb": "dynamic_sculptor_stamp"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "bundle": "com.cyberdyne.claycore.devicedyntopo",
+      "canaryAfterMs": 131.446084,
+      "canaryBeforeMs": 130.281084,
+      "growthExponent": 0.4052510135012279,
+      "measurements": [
+        {
+          "batch": 8,
+          "p50Ms": 0.076292,
+          "p95Ms": 0.096541,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 200,
+          "stamps": 10
+        },
+        {
+          "batch": 8,
+          "p50Ms": 0.154125,
+          "p95Ms": 0.174417,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 200,
+          "stamps": 100
+        },
+        {
+          "batch": 8,
+          "p50Ms": 0.594125,
+          "p95Ms": 0.624042,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 200,
+          "stamps": 1000
+        }
+      ],
+      "name": "dyntopo_stamp_fixed",
+      "servedBy": "cpu",
+      "startedAtMs": 2309.929208,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
+      "verb": "dynamic_sculptor_stamp"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "bundle": "com.cyberdyne.claycore.devicedyntopo",
+      "canaryAfterMs": 131.414125,
+      "canaryBeforeMs": 130.122542,
+      "growthExponent": 0.009554987096501044,
+      "measurements": [
+        {
+          "batch": 4,
+          "p50Ms": 8.37575,
+          "p95Ms": 20.643083,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 72,
+          "stamps": 10
+        },
+        {
+          "batch": 4,
+          "p50Ms": 8.162541,
+          "p95Ms": 20.978958,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 72,
+          "stamps": 100
+        },
+        {
+          "batch": 4,
+          "p50Ms": 9.611084,
+          "p95Ms": 21.571708,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 71,
+          "stamps": 1000
+        }
+      ],
+      "name": "dyntopo_stamp_fine",
+      "servedBy": "cpu",
+      "startedAtMs": 2815.412917,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
+      "verb": "dynamic_sculptor_stamp"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "bundle": "com.cyberdyne.claycore.devicedyntopo",
+      "canaryAfterMs": 131.165042,
+      "canaryBeforeMs": 130.745042,
+      "growthExponent": -0.17031665003142923,
+      "measurements": [
+        {
+          "batch": 256,
+          "p50Ms": 0.652541,
+          "p95Ms": 0.657834,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 200,
+          "stamps": 10
+        },
+        {
+          "batch": 256,
+          "p50Ms": 0.445125,
+          "p95Ms": 0.44575,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 200,
+          "stamps": 100
+        },
+        {
+          "batch": 256,
+          "p50Ms": 0.2985,
+          "p95Ms": 0.30025,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 200,
+          "stamps": 1000
+        }
+      ],
+      "name": "dyntopo_chunk_copy",
+      "servedBy": "cpu",
+      "startedAtMs": 5579.460083,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
+      "verb": "dynamic_surface_copy_chunk"
     }
   ],
   "claycoreCommit": "240316506c7ab587ee041a322948b447c2cfdb53",

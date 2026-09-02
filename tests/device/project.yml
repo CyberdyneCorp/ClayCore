@@ -228,6 +228,44 @@ targets:
         BUNDLE_LOADER: "$(TEST_HOST)"
         OTHER_LDFLAGS: -lc++
 
+  # Adaptive topology, alone in a process and LAST in the run.
+  #
+  # ALONE for the reason every bundle here is alone: a process is the only
+  # boundary that returns a high-water mark, and this file already records
+  # three jetsam kills caused by suites sharing one. A remeshing dab allocates
+  # -- it creates vertices, half-edges, edges and faces per split -- so it has
+  # no business sharing a process with a suite that has been killed twice at
+  # its own tail.
+  #
+  # LAST, and that is a deliberate trade rather than an oversight. This file
+  # measures the run order at 2.7x on a gate whose tolerance is 1.4x, and the
+  # 69 existing baselines were all taken in the current order. Inserting a new
+  # bundle anywhere earlier moves every one of them. So the new suite takes the
+  # warm end of the window and the existing numbers keep meaning what they
+  # meant. If the dyntopo figures come in thermally suppressed when they are
+  # first baselined, moving this session earlier is one line in
+  # tools/run_device_bench.sh -- and re-baselining everything below it is the
+  # price.
+  ClayCoreDeviceDyntopoTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Dyntopo
+      - path: Shared
+    dependencies:
+      - target: ClayCoreDeviceHost
+      - framework: ../../dist/claycore.xcframework
+        embed: false
+      - sdk: Metal.framework
+      - sdk: Foundation.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.cyberdyne.claycore.devicedyntopo
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/ClayCoreDeviceHost.app/ClayCoreDeviceHost"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        OTHER_LDFLAGS: -lc++
+
   ClayCoreDeviceGalleryTests:
     type: bundle.unit-test
     platform: iOS
@@ -258,6 +296,7 @@ schemes:
         ClayCoreDeviceVerbTests: [test]
         ClayCoreDeviceVerbHeavyTests: [test]
         ClayCoreDeviceGalleryTests: [test]
+        ClayCoreDeviceDyntopoTests: [test]
     test:
       targets:
         # THIS LIST IS NOT THE RUN ORDER. tools/run_device_bench.sh drives the
@@ -281,3 +320,4 @@ schemes:
         - ClayCoreDeviceVerbHeavyTests
         - ClayCoreDeviceGalleryTests
         - ClayCoreDeviceTests
+        - ClayCoreDeviceDyntopoTests
