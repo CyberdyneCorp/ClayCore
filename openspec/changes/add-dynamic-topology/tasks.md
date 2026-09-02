@@ -239,3 +239,28 @@
       and what it costs; `README.md`'s "deliberately does not do" entry is
       corrected rather than left contradicting the code; `docs/09` gains the
       measured latencies
+
+## Found after the change was marked complete
+
+Every box above was ticked while two requirements in this change's own specs
+were unmet. Both were invisible to the tests that existed because neither
+defect needs a constrained edge to be the OPERAND — the refusal tests all
+operate on the constrained edge itself, and both of these are damage done to a
+feature by an operation on its NEIGHBOUR.
+
+- [x] C.1 `collapse_blockers` was missing `UvSeam`, so a seam edge collapsed and
+      took the seam with it. The pair-merge in the write phase carries
+      constraints from the two edges that WELD and never from the edge that
+      dies. Measured on a 6-subdivision sphere: twenty marked seams became zero.
+      Contradicted `specs/dynamic-topology/spec.md` — "a collapse SHALL be
+      refused when it would ... destroy a UV seam"
+- [x] C.2 `collapse_target` asked only `is_boundary_vertex`, so an endpoint held
+      by a seam, a crease or a material boundary was averaged to the midpoint
+      like any other and the feature bent by that distance. Measured on a unit
+      sphere: a crease endpoint moved 0.137385, exactly onto the midpoint.
+      Contradicted D12 in `design.md` — "exactly one endpoint constrained
+      (boundary, seam, sharp, user-locked) → the constrained endpoint's
+      position, so the feature does not move"
+- [x] C.3 `EdgeConstraint::Material` was declared, wired into both blocker
+      defaults, and referenced by no test, example or binding anywhere in the
+      tree. Now pinned for both refusals

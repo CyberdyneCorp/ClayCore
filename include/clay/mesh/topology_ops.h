@@ -92,8 +92,14 @@ struct TopologyOpOptions {
     // because a boundary edge collapsing ALONG the boundary is exactly how a
     // border is allowed to simplify; what is forbidden is collapsing ACROSS
     // one, which the link condition catches on its own.
-    std::uint32_t collapse_blockers =
-        EdgeConstraint::Sharp | EdgeConstraint::Material | EdgeConstraint::UserLocked;
+    //
+    // UvSeam IS in the default, and was missing: the requirement is that a
+    // collapse is refused where it would DESTROY a seam, and a seam edge that
+    // collapses takes its constraint with it — the pair-merge below carries a
+    // constraint from the two edges that WELD, never from the edge that dies.
+    // Measured before the fix: twenty marked seams on a sphere became zero.
+    std::uint32_t collapse_blockers = EdgeConstraint::UvSeam | EdgeConstraint::Sharp |
+                                      EdgeConstraint::Material | EdgeConstraint::UserLocked;
     // Which stop a flip. Every constraint does: a flip moves the edge itself,
     // so a constrained edge flipping is the constraint being deleted.
     std::uint32_t flip_blockers = EdgeConstraint::Boundary | EdgeConstraint::UvSeam |

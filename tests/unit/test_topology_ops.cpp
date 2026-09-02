@@ -454,3 +454,167 @@ TEST_CASE("topology ops: thousands of interleaved operations keep every invarian
         CHECK(surface->stats().faces > 0);
     }
 }
+
+// -- constraint preservation --------------------------------------------------
+//
+// The tests above pin the REFUSALS: a constrained edge declines to be operated
+// on. Refusing is only half of honouring a constraint. The other half is what
+// happens to a feature an operator is allowed to run NEXT TO, and both halves
+// were broken in a way no refusal test could see, because neither defect needed
+// a constrained edge to be the operand.
+
+// Counts the live edges carrying `c`.
+std::size_t count_constraint(const DynamicSurface& s, EdgeConstraint c) {
+    std::size_t n = 0;
+    s.edges().for_each_live([&](EdgeId, const mesh::DynamicEdge& e) {
+        if (mesh::has_constraint(e.constraints, c)) ++n;
+    });
+    return n;
+}
+
+// Marks the first `n` live edges with `c` and returns how many were marked.
+std::size_t mark_first(DynamicSurface& s, EdgeConstraint c, std::size_t n) {
+    std::size_t marked = 0;
+    s.edges_mutable().for_each_live_mutable([&](EdgeId, mesh::DynamicEdge& e) {
+        if (marked < n) {
+            e.constraints |= c;
+            ++marked;
+        }
+    });
+    return marked;
+}
+
+TEST_CASE("topology ops: a collapse leaves a pinned endpoint exactly where it was") {
+    // D12: exactly one constrained endpoint keeps its position, so the feature
+    // does not move. This asked only `is_boundary_vertex`, so a vertex held by
+    // a crease, a seam or a material boundary was averaged to the midpoint like
+    // any other and the feature bent by whatever that distance happened to be.
+    //
+    // A CLOSED sphere on purpose: no vertex is on a border, so the boundary
+    // rule cannot fire and the only thing that can hold the vertex is the
+    // constraint under test. On main this collapse moved the crease endpoint
+    // 0.137385 -- exactly onto the midpoint, i.e. the constraint counted for
+    // nothing at all.
+    for (EdgeConstraint c : {EdgeConstraint::UvSeam, EdgeConstraint::Sharp,
+                             EdgeConstraint::Material}) {
+        CAPTURE(static_cast<std::uint32_t>(c));
+        auto surface = DynamicSurface::from_mesh(cube_sphere(4, 1.0f));
+        REQUIRE(surface.has_value());
+
+        const EdgeId feature = live_edges(*surface).front();
+        surface->edges_mutable().at(feature).constraints |= c;
+        const mesh::HalfEdgeId hf = surface->halfedge_of(feature);
+        const mesh::VertexId va = surface->origin_of(hf);
+        const mesh::VertexId vb = surface->origin_of(surface->twin_of(hf));
+        REQUIRE_FALSE(surface->is_boundary_vertex(va));
+        const cfloat3 pinned = surface->position_of(va);
+
+        std::size_t checked = 0;
+        for (EdgeId e : live_edges(*surface)) {
+            if (e == feature) continue;
+            if (surface->edges().at(e).constraints != 0) continue;
+            const mesh::HalfEdgeId h = surface->halfedge_of(e);
+            const mesh::VertexId p = surface->origin_of(h);
+            const mesh::VertexId q = surface->origin_of(surface->twin_of(h));
+            // One endpoint held by the feature, the other free: the case D12
+            // resolves in favour of the feature.
+            if ((p == va) == (q == va)) continue;
+            const mesh::VertexId other = (p == va) ? q : p;
+            if (other == vb) continue;
+            if (surface->edges().at(e).constraints != 0) continue;
+            const cfloat3 midpoint = surface->edge_midpoint(e);
+
+            const mesh::CollapseResult r = mesh::collapse_edge(*surface, e);
+            if (r.result != TopologyResult::Ok) continue;
+
+            const cfloat3 landed = surface->position_of(r.kept);
+            // Exactly where it was, not merely near: the feature is pinned, so
+            // there is no tolerance to spend. The midpoint is 0.137 away, so a
+            // loose threshold here would pass for the broken behaviour too.
+            CHECK(clength(landed - pinned) == doctest::Approx(0.0f));
+            CHECK(clength(landed - midpoint) > 0.05f);
+            CHECK(mesh::validate_dynamic_surface(*surface).ok);
+            ++checked;
+            break;
+        }
+        REQUIRE(checked == 1);
+    }
+}
+
+TEST_CASE("topology ops: a seam refuses to collapse rather than vanishing") {
+    // The requirement is that a collapse is refused where it would DESTROY a
+    // UV seam, and UvSeam was absent from `collapse_blockers`. The pair-merge
+    // in the write phase carries constraints from the two edges that WELD, and
+    // never from the edge that dies -- so a collapsed seam edge took the seam
+    // with it and left no trace. Marked twenty, and twenty went.
+    auto surface = DynamicSurface::from_mesh(cube_sphere(6, 1.0f));
+    REQUIRE(surface.has_value());
+    REQUIRE(mark_first(*surface, EdgeConstraint::UvSeam, 20) == 20);
+
+    std::size_t refused = 0;
+    for (EdgeId e : live_edges(*surface)) {
+        if (!surface->edges().live(e)) continue;
+        if (!mesh::has_constraint(surface->edges().at(e).constraints, EdgeConstraint::UvSeam))
+            continue;
+        const mesh::CollapseResult r = mesh::collapse_edge(*surface, e);
+        CHECK(r.result == TopologyResult::Constrained);
+        ++refused;
+    }
+    CHECK(refused == 20);
+    CHECK(count_constraint(*surface, EdgeConstraint::UvSeam) == 20);
+}
+
+TEST_CASE("topology ops: a storm of collapses erases no constraint") {
+    // The whole-surface statement, and the one that fails loudest: collapse
+    // everything that will collapse, and count the feature afterwards. Nothing
+    // here operates ON a constrained edge -- the blockers refuse those -- so
+    // every loss is a feature destroyed by an operation on a NEIGHBOUR.
+    //
+    // On main: seam 20 -> 0, crease 20 -> 18, material 20 -> 18.
+    for (EdgeConstraint c : {EdgeConstraint::UvSeam, EdgeConstraint::Sharp,
+                             EdgeConstraint::Material}) {
+        CAPTURE(static_cast<std::uint32_t>(c));
+        auto surface = DynamicSurface::from_mesh(cube_sphere(6, 1.0f));
+        REQUIRE(surface.has_value());
+        REQUIRE(mark_first(*surface, c, 20) == 20);
+
+        std::size_t collapses = 0;
+        for (EdgeId e : live_edges(*surface)) {
+            if (!surface->edges().live(e)) continue;
+            if (mesh::collapse_edge(*surface, e).result == TopologyResult::Ok) ++collapses;
+        }
+        // The run has to do real work, or "nothing was lost" is vacuous.
+        CHECK(collapses > 100);
+        CHECK(count_constraint(*surface, c) == 20);
+        CHECK(mesh::validate_dynamic_surface(*surface).ok);
+    }
+}
+
+TEST_CASE("topology ops: a material boundary refuses to collapse and to flip") {
+    // Material was declared, wired into both blocker defaults, and never once
+    // exercised -- no test, no example, no binding referenced it. It is in the
+    // defaults for collapse and for flip, so both refusals are pinned here.
+    auto surface = DynamicSurface::from_mesh(cube_sphere(4, 1.0f));
+    REQUIRE(surface.has_value());
+    const mesh::DynamicSurfaceStats before = surface->stats();
+
+    std::size_t collapse_refusals = 0, flip_refusals = 0;
+    for (EdgeId e : live_edges(*surface)) {
+        surface->edges_mutable().at(e).constraints |= EdgeConstraint::Material;
+        if (mesh::collapse_edge(*surface, e).result == TopologyResult::Constrained)
+            ++collapse_refusals;
+        if (mesh::flip_edge(*surface, e, {}, nullptr, true).result ==
+            TopologyResult::Constrained)
+            ++flip_refusals;
+        surface->edges_mutable().at(e).constraints &=
+            ~static_cast<std::uint32_t>(EdgeConstraint::Material);
+    }
+    CHECK(collapse_refusals == before.edges);
+    CHECK(flip_refusals == before.edges);
+    // Refused means CHANGED NOTHING, which is the half of atomicity a refusal
+    // test is actually for.
+    const mesh::DynamicSurfaceStats after = surface->stats();
+    CHECK(after.vertices == before.vertices);
+    CHECK(after.edges == before.edges);
+    CHECK(after.faces == before.faces);
+}
