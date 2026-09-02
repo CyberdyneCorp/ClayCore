@@ -1,5 +1,10 @@
 # Tasks: add-item-spatial-index
 
+> **CLOSED 2026-09-02.** Every task below is done, 1.1 having DECIDED against
+> the tree; see the proposal's header for what has changed since and why there
+> is no decision left to reopen. Ticked does not mean an index shipped — none
+> did, and none will.
+
 - [x] 1.1 DECIDED, by building the BVH and measuring it: **a per-revision tree
       cannot pay for itself, and BVH-vs-grid is the wrong question to answer
       first.** The warning already in this task turned out to be exactly right,
