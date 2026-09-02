@@ -150,18 +150,28 @@ class SlotPool {
 
     bool live_at(std::uint32_t slot) const { return slot < slots_.size() && slots_[slot].live; }
 
-    // DIAGNOSTIC: walk the free list and report what it actually contains.
-    // Returns false if it cycles or if it does not name exactly the dead slots.
+    // THE FREE LIST'S OWN INVARIANT: it names every dead slot, once, and
+    // nothing else.
+    //
+    // Worth checking because it is the one piece of a pool that the SURFACE's
+    // validator cannot see. Connectivity can be flawless while this list holds
+    // live slots and cycles, and the symptom is not a wrong answer -- `create`
+    // walks the list, so it is the next allocation never returning.
+    //
+    // BOUNDED WALK RATHER THAN A VISITED SET: a list longer than the pool has
+    // to repeat a slot, so exceeding the slot count IS the cycle test. That
+    // keeps this allocation-free, which matters because the debug build
+    // validates after every split, collapse and flip.
     bool free_list_intact(std::size_t* out_visited = nullptr, bool* out_cycle = nullptr,
                           std::size_t* out_live_on_list = nullptr) const {
-        std::vector<char> seen(slots_.size(), 0);
         std::size_t visited = 0, live_on_list = 0;
         bool cycle = false;
         std::uint32_t h = free_head_;
         while (h != Id::kInvalid) {
-            if (h >= slots_.size()) { cycle = true; break; }
-            if (seen[h]) { cycle = true; break; }
-            seen[h] = 1;
+            if (h >= slots_.size() || visited > slots_.size()) {
+                cycle = true;
+                break;
+            }
             ++visited;
             if (slots_[h].live) ++live_on_list;
             h = slots_[h].next_free;

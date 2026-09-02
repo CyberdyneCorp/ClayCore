@@ -445,3 +445,70 @@ TEST_CASE("dynamic surface: a hostile or truncated encoding is refused") {
     inconsistent[27] = 0x00;
     CHECK_FALSE(DynamicSurface::decode(inconsistent.data(), inconsistent.size(), &out));
 }
+
+// -- the storage under the surface -------------------------------------------
+//
+// The validator's other checks walk the connectivity, and connectivity can be
+// flawless while the pool holding it is wrecked. That is not hypothetical: an
+// undo followed by a redo left every slot, generation, link, position and
+// attribute identical to before, this validator passing, and the vertex free
+// list holding 201 live slots against 16 dead, with a cycle. `SlotPool::create`
+// walks that list, so nothing was wrong anywhere -- the next dab never
+// returned.
+
+TEST_CASE("dynamic surface: a live slot left on the free list is reported") {
+    auto surface = DynamicSurface::from_mesh(cube_sphere(3, 1.0f));
+    REQUIRE(surface.has_value());
+    REQUIRE(mesh::validate_dynamic_surface(*surface).ok);
+
+    // Retire a vertex and immediately restore it with the value it had. That is
+    // exactly what a replay does to a slot, and it is invisible to every other
+    // check: the connectivity, the generation and the contents all come back
+    // identical. Only the free list is left naming a slot that is alive again.
+    mesh::VertexId victim;
+    surface->vertices().for_each_live([&](mesh::VertexId id, const mesh::DynamicVertex&) {
+        if (!victim.valid()) victim = id;
+    });
+    REQUIRE(victim.valid());
+    const mesh::DynamicVertex saved = surface->vertices().at(victim);
+    REQUIRE(surface->vertices_mutable().retire(victim));
+    REQUIRE(surface->vertices_mutable().restore(victim, saved));
+
+    const mesh::DynamicValidationReport report = mesh::validate_dynamic_surface(*surface);
+    CAPTURE(report.summary());
+    CHECK_FALSE(report.ok);
+    CHECK(report.summary().find("free list") != std::string::npos);
+}
+
+TEST_CASE("dynamic surface: a cycling free list is reported rather than walked forever") {
+    // The shape that hangs `create`. Built directly, because once the replay is
+    // fixed nothing in the public API produces one -- and a check that cannot
+    // be shown to fire is not a check.
+    auto surface = DynamicSurface::from_mesh(cube_sphere(3, 1.0f));
+    REQUIRE(surface.has_value());
+
+    // Two slots retired, then the first restored: the list still runs through
+    // it, and retiring it again links it ahead of a chain that already reaches
+    // it.
+    std::vector<mesh::VertexId> live;
+    surface->vertices().for_each_live(
+        [&](mesh::VertexId id, const mesh::DynamicVertex&) { live.push_back(id); });
+    REQUIRE(live.size() > 4);
+    const mesh::DynamicVertex a = surface->vertices().at(live[0]);
+    REQUIRE(surface->vertices_mutable().retire(live[0]));
+    REQUIRE(surface->vertices_mutable().retire(live[1]));
+    REQUIRE(surface->vertices_mutable().restore(live[0], a));
+    REQUIRE(surface->vertices_mutable().retire(live[0]));
+
+    std::size_t visited = 0, live_on_list = 0;
+    bool cycle = false;
+    const bool intact =
+        surface->vertices().free_list_intact(&visited, &cycle, &live_on_list);
+    CHECK_FALSE(intact);
+    CHECK(cycle);
+    // And the validator says so instead of the caller finding out in `create`.
+    const mesh::DynamicValidationReport report = mesh::validate_dynamic_surface(*surface);
+    CAPTURE(report.summary());
+    CHECK_FALSE(report.ok);
+    CHECK(report.summary().find("cycles") != std::string::npos);
+}
