@@ -99,7 +99,7 @@ if [ -n "${CLAY_DEVICE_TEAM:-}" ]; then
     team_arg=(DEVELOPMENT_TEAM="$CLAY_DEVICE_TEAM")
 fi
 
-# -- four sessions, each started cold -----------------------------------------
+# -- five sessions, each started cold -----------------------------------------
 #
 # A gate run is THREE xcodebuild sessions rather than one, and the reason is not
 # tidiness. Every bundle that allocates heavily is killed by jetsam if another
@@ -137,7 +137,9 @@ RESULTS_VERB="${RESULTS%.xcresult}.verb.xcresult"
 RESULTS_VERBH="${RESULTS%.xcresult}.verbheavy.xcresult"
 RESULTS_CORE="${RESULTS%.xcresult}.core.xcresult"
 RESULTS_GALLERY="${RESULTS%.xcresult}.gallery.xcresult"
-rm -rf "$RESULTS_VERB" "$RESULTS_VERBH" "$RESULTS_CORE" "$RESULTS_GALLERY"
+RESULTS_DYNTOPO="${RESULTS%.xcresult}.dyntopo.xcresult"
+rm -rf "$RESULTS_VERB" "$RESULTS_VERBH" "$RESULTS_CORE" "$RESULTS_GALLERY" \
+       "$RESULTS_DYNTOPO"
 
 run_session() {
     # $1 = result bundle, rest = extra xcodebuild args
@@ -174,24 +176,36 @@ cool() {
     sleep "$COOLDOWN"
 }
 
-session "1/4 — the light verb cases, cold" "$RESULTS_VERB" \
+session "1/5 — the light verb cases, cold" "$RESULTS_VERB" \
     -only-testing:ClayCoreDeviceVerbTests
 cool
-session "2/4 — the heavy verb cases, cold" "$RESULTS_VERBH" \
+session "2/5 — the heavy verb cases, cold" "$RESULTS_VERBH" \
     -only-testing:ClayCoreDeviceVerbHeavyTests
 cool
-session "3/4 — latency and parity, cold" "$RESULTS_CORE" \
+session "3/5 — latency and parity, cold" "$RESULTS_CORE" \
     -only-testing:ClayCoreDeviceMeasureTests -only-testing:ClayCoreDeviceTests
 cool
-session "4/4 — the gallery, cold" "$RESULTS_GALLERY" \
+session "4/5 — the gallery, cold" "$RESULTS_GALLERY" \
     -only-testing:ClayCoreDeviceGalleryTests
+cool
+# ADAPTIVE TOPOLOGY, LAST. Appended rather than inserted: the 69 committed
+# baselines were all taken in the order above, this file measures ordering at
+# 2.7x against a 1.4x tolerance, and a new suite has no business moving them.
+# The cost is that dyntopo is measured at the warm end of a five-session run,
+# which can only make its own figures pessimistic -- the safe direction for a
+# suite whose baselines do not exist yet. Move it earlier only together with a
+# full re-baseline.
+session "5/5 — adaptive topology, cold" "$RESULTS_DYNTOPO" \
+    -only-testing:ClayCoreDeviceDyntopoTests
 
 JSON="${CLAY_DEVICE_JSON:-$ROOT/build/device/device-bench.json}"
 python3 "$ROOT/tools/collect_device_bench.py" \
-    "$RESULTS_VERB" "$RESULTS_VERBH" "$RESULTS_CORE" "$RESULTS_GALLERY" "$JSON"
+    "$RESULTS_VERB" "$RESULTS_VERBH" "$RESULTS_CORE" "$RESULTS_GALLERY" \
+    "$RESULTS_DYNTOPO" "$JSON"
 
 echo "device-bench: OK"
 echo "  result bundles: $RESULTS_VERB"
 echo "                  $RESULTS_VERBH"
 echo "                  $RESULTS_CORE"
 echo "                  $RESULTS_GALLERY"
+echo "                  $RESULTS_DYNTOPO"

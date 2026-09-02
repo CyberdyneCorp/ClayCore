@@ -241,6 +241,23 @@ enum Coverage {
         .measured("session_voxel_fill_cavities", by: "session_voxel_fill_cavities"),
         .measured("session_voxel_carve_alpha", by: "session_voxel_carve_alpha"),
 
+        // -- adaptive topology ------------------------------------------------
+        //
+        // Added with the Dyntopo bundle. Until then this family was not in this
+        // table AT ALL -- not measured and not exempt, which is the one state
+        // the table exists to make impossible. `clay_dynamic_sculptor_stamp`
+        // and `clay_dynamic_surface_copy_chunk` are now in the checker's
+        // patterns too, so the family is covered-or-exempt rather than
+        // invisible.
+        //
+        // The three stamp entries name one entry point driven three ways, in
+        // the manner of the `session_*` rows above: what a host actually does
+        // is a gesture, and the gesture is what a budget can be set against.
+        .measured("dynamic_sculptor_stamp", by: "dyntopo_stamp"),
+        .measured("dynamic_stamp_deformation_only", by: "dyntopo_stamp_fixed"),
+        .measured("dynamic_stamp_fine_detail", by: "dyntopo_stamp_fine"),
+        .measured("dynamic_surface_copy_chunk", by: "dyntopo_chunk_copy"),
+
         // -- exemptions, each a decision rather than an omission --------------
         .exempt("snakehook",
                 because: "no C entry point exists. The binding-parity table maps "

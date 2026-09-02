@@ -226,4 +226,116 @@ enum Fixture {
         }
         return samples
     }
+
+    // MARK: - The adaptive surface
+
+    /// A triangle patch whose SPACING is fixed and whose EXTENT grows with the
+    /// axis.
+    ///
+    /// FIXED DENSITY IS THE WHOLE POINT, and it is the opposite of what a
+    /// "bigger model" usually means. Subdividing one patch finer would grow the
+    /// document and shrink the triangles together, so a dab covering a constant
+    /// area would touch a growing number of them and the case would measure the
+    /// fixture rather than the engine. Holding the spacing and growing the
+    /// extent keeps the dab's footprint constant in triangles, which is what
+    /// makes the growth axis mean "does a bigger document cost more" rather
+    /// than "does more work cost more".
+    ///
+    /// So this case SHOULD be flat across the axis, like the voxel verbs and
+    /// unlike the SDF ones. A slope here is the local remesher or the spatial
+    /// index having become a function of document size, which is the specific
+    /// regression `test_dynamic_scale.cpp` gates on desktop and nothing gates
+    /// on hardware.
+    ///
+    /// Sides are 15 / 50 / 158 quads for the 10 / 100 / 1000 axis — a hundred-
+    /// fold span in area, topping out around 50k triangles, which is a real
+    /// working surface and well under the jetsam ceiling this harness keeps
+    /// walking into.
+    static func dynamicPatch(stamps: Int, spacing: Float = 0.02)
+        -> (mesh: OpaquePointer, surface: OpaquePointer, sculptor: OpaquePointer)? {
+        let side = max(4, Int(Double(stamps).squareRoot() * 5.0))
+        let stride = side + 1
+        let half = Float(side) * spacing * 0.5
+
+        var positions = [Float]()
+        positions.reserveCapacity(stride * stride * 3)
+        for z in 0...side {
+            for x in 0...side {
+                positions.append(Float(x) * spacing - half)
+                positions.append(0)
+                positions.append(Float(z) * spacing - half)
+            }
+        }
+        var indices = [UInt32]()
+        indices.reserveCapacity(side * side * 6)
+        for z in 0..<side {
+            for x in 0..<side {
+                let a = UInt32(z * stride + x)
+                let b = a + 1
+                let c = a + UInt32(stride)
+                let d = c + 1
+                indices.append(contentsOf: [a, c, b, b, c, d])
+            }
+        }
+
+        var mesh: OpaquePointer? = nil
+        let built = positions.withUnsafeBufferPointer { p in
+            indices.withUnsafeBufferPointer { i in
+                clay_mesh_from_triangles(p.baseAddress, stride * stride,
+                                         i.baseAddress, indices.count, &mesh)
+            }
+        }
+        guard built == CLAY_OK, let m = mesh else { return nil }
+
+        var surface: OpaquePointer? = nil
+        var buildError: Int32 = -1
+        guard clay_dynamic_surface_from_mesh(m, nil, &surface, &buildError) == CLAY_OK,
+              let sf = surface else {
+            clay_mesh_destroy(m)
+            return nil
+        }
+        var sculptor: OpaquePointer? = nil
+        guard clay_dynamic_sculptor_create(sf, &sculptor) == CLAY_OK, let sc = sculptor else {
+            clay_dynamic_surface_destroy(sf)
+            clay_mesh_destroy(m)
+            return nil
+        }
+        return (m, sf, sc)
+    }
+
+    /// The topology descriptor these cases share. `enabled: false` gives the
+    /// same dab with adaptation off, which is what makes the pair a statement
+    /// about what adaptation COSTS rather than about the brush.
+    static func topology(enabled: Bool, resolution: Float = 4.0,
+                         maxOps: Int32 = 200) -> clay_dynamic_topology_desc {
+        var topo = clay_dynamic_topology_desc()
+        topo.struct_size = UInt32(MemoryLayout<clay_dynamic_topology_desc>.size)
+        _ = clay_dynamic_topology_defaults(&topo)
+        topo.enabled = enabled ? 1 : 0
+        topo.detail_mode = Int32(CLAY_DETAIL_BRUSH_RELATIVE.rawValue)
+        topo.detail_resolution = resolution
+        topo.max_ops_per_stamp = maxOps
+        return topo
+    }
+
+    /// A dab centred on the patch, walking so a stroke passes over ground it
+    /// has already touched — same reasoning as `VerbCaseGroup.walkWindow`.
+    static func patchBrush(radius: Float = 0.12, strength: Float = 0.3)
+        -> clay_mesh_brush_desc {
+        var b = clay_mesh_brush_desc()
+        b.struct_size = UInt32(MemoryLayout<clay_mesh_brush_desc>.size)
+        _ = clay_mesh_brush_defaults(&b)
+        b.verb = Int32(CLAY_MESH_BRUSH_CLAY.rawValue)
+        b.radius = radius
+        b.strength = strength
+        return b
+    }
+
+    /// Where the i-th dab of the walk lands, inside the smallest patch so every
+    /// axis point sees the same gesture.
+    static func patchCenter(_ i: Int) -> (Float, Float, Float) {
+        let t = Float(i % 64) / 64.0
+        return (0.10 * cosf(t * 6.2831853), 0.0, 0.10 * sinf(t * 6.2831853))
+    }
+
 }

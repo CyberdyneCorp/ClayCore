@@ -43,6 +43,13 @@ VERB_PATTERNS = [
     r"clay_voxel_mask_extrude",
     r"clay_stroke_resolve",
     r"clay_mask_paint",
+    # Adaptive topology. NARROW on purpose: `clay_dynamic_sculptor_\w+` would
+    # sweep create, destroy, trim, rebuild_index, arena_stats and the telemetry
+    # readers and demand a latency case for each. The stamp is the verb a
+    # sculptor drives; the chunk copy is the transport a host pays per frame
+    # for the result. The rest are lifetime and accessors.
+    r"clay_dynamic_sculptor_stamp",
+    r"clay_dynamic_surface_copy_chunk",
     r"clay_document_mask_extrude",
     r"clay_item_volume_(relax|flatten|move_topological)",
     r"clay_layer_(move_surface|consolidate)",
