@@ -1,5 +1,55 @@
 # Proposal: a dab's cost should not grow with everything already drawn
 
+> ## CLOSED 2026-09-02 — the premise held, the term did not
+>
+> **Nothing further will be built here, and the reason is measurement rather
+> than effort.** The tasks below are all ticked because they were all done,
+> including the one that mattered: 1.1 DECIDED against building the tree. What
+> has changed since is that the term the tree would have accelerated has been
+> made small by other means, so there is no longer a decision left to revisit.
+>
+> `pack-the-cull-scan` (#441) folded the constant clauses out of the survive
+> test and packed the boxes the scan reads: `plan()` at 50 000 items went
+> 0.1368 -> 0.0258 ms, 5.3x, without touching the shape. What a perfect broad
+> phase has left to win after that, on a fixture that grows in EXTENT and a
+> 24-brick dab:
+>
+> | items | `plan()` | the whole dab's cull | a perfect query saves |
+> |---:|---:|---:|---:|
+> | 50 000 | 0.027 ms | 0.098 ms | 0.027 ms |
+> | 200 000 | 0.102 ms | 0.171 ms | 0.102 ms |
+> | 500 000 | 0.272 ms | 0.343 ms | 0.272 ms |
+>
+> Against which a prototype of the dynamic tree adds **+0.140 ms at 50 000 and
+> +0.905 ms at 200 000** to the copy `append_cached` makes when a reader holds
+> the index — so the copy alone exceeds the saving at every size measured, and
+> that is before the tree's own build, insert and maintenance. Two further
+> numbers from the same prototype, for anyone who reopens this: unbalanced
+> insertion of a fixed-spacing sheet reaches height 450 at 50 000 (build
+> 107 ms), so the rotations are not optional; and even balanced, building by
+> repeated insertion costs 7.9 ms against the 2.6 ms full `CullIndex` build it
+> would replace, so a bulk builder belongs in the first PR rather than a later
+> one.
+>
+> **The measurement that reframed all of it is the FIXTURE.** Every SDF
+> benchmark fixture grows a unit sphere's DENSITY, where a dab's region keeps a
+> constant 28.3% of the items at every size — so `plan()` is ~3% of a dab's cull
+> there and a 590x query lands inside a 2.4x slower operation, which is exactly
+> what the 2026-08-24 revert recorded. `BM_CullPlanLocal{10000,50000}` grows the
+> other axis and is the row any future broad phase has to flatten. On the
+> density axis, which no spatial index reaches, the cost is the per-brick
+> compiles: 15.0 ms for that same dab at 50 000 items, of which
+> `reject-a-brick-without-the-node` (#442) took 1.7 ms by deciding the per-brick
+> cull from the cached entry rather than the node behind it. The remaining
+> 11.7 ms is real emission — 9 634 items genuinely reach one 8³ brick — and
+> shrinking it is a blend-radius, LOD or consolidation question, not a culling
+> one.
+>
+> Superseded by `pack-the-cull-scan` and `reject-a-brick-without-the-node`. The
+> rest of this document is kept as written, because the premise it argues — a
+> dab should cost what it touches — is right and is the reason both of those
+> exist.
+
 ## Why
 
 > **UPDATED after measurement.** The numbers below were taken before
