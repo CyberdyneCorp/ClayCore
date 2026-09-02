@@ -40,6 +40,45 @@ void CullIndex::refresh_pad() {
                             p.terms.total(p.nodes * layer_symmetry_multiplicity(*p.layer)));
 }
 
+namespace {
+// The box a chain's scan tests for one entry: the entry's own bound, or an
+// infinite box when the entry can never be culled. `!local` and an infinite
+// bound are exactly the two clauses that make an entry survive whatever region
+// is asked about, so deciding them at build time leaves the scan one box
+// intersection instead of three tests.
+math::Aabb probe_for(const CullIndex::Entry& e) {
+    return (e.local && !e.bound.is_infinite()) ? e.bound : math::Aabb::infinite();
+}
+
+// `Aabb::intersects` with both of its emptiness guards discharged: the entry's
+// by `probe_for`, the region's by `plan` before the loop starts. Six
+// comparisons, no branches, and it is the whole of the scan.
+bool probe_hits(const math::Aabb& p, const math::Aabb& t) {
+    return p.min.x <= t.max.x && p.max.x >= t.min.x && p.min.y <= t.max.y &&
+           p.max.y >= t.min.y && p.min.z <= t.max.z && p.max.z >= t.min.z;
+}
+
+// The scan a plan runs over one chain, packed: `probes` is parallel to
+// `entries`, so the survivors come out in chain order without a sort.
+void scan_packed(const std::vector<CullIndex::Entry>& entries,
+                 const std::vector<math::Aabb>& probes, const math::Aabb& test,
+                 std::vector<CullIndex::Entry>* kept) {
+    for (std::size_t i = 0; i < entries.size(); ++i)
+        if (probe_hits(probes[i], test)) kept->push_back(entries[i]);
+}
+
+// The same scan with the predicate as the compiler writes it, for the one
+// region the packed form cannot answer (see `plan`).
+void scan_exact(const std::vector<CullIndex::Entry>& entries, const math::Aabb& test,
+                std::vector<CullIndex::Entry>* kept) {
+    for (const CullIndex::Entry& e : entries)
+        // The compiler's own test (Compiler::culled), inverted: an entry
+        // survives unless it is local, finite and misses the region.
+        if (!e.local || e.bound.is_infinite() || e.bound.intersects(test)) kept->push_back(e);
+}
+
+}  // namespace
+
 // One Chain per (layer, child list), mirroring the compiler's traversal:
 // every group's children are their own chain — cull_dropped, which the
 // feathered-replace choice reads, is scoped to a single compile_list call,
@@ -51,6 +90,7 @@ void CullIndex::build_chain(const SdfContent& content, const std::vector<NodeId>
     chain.ids = &ids;
     chain.prunable = true;
     chain.entries.reserve(ids.size());
+    chain.probes.reserve(ids.size());
     for (NodeId id : ids) {
         const Node* n = content.find(id);
         if (!n || !n->visible) continue;
@@ -73,6 +113,7 @@ void CullIndex::build_chain(const SdfContent& content, const std::vector<NodeId>
             if (item_is_feathered_replace(*n)) chain.prunable = false;
         }
         chain.entries.push_back(e);
+        chain.probes.push_back(probe_for(e));
     }
     chains_.push_back(std::move(chain));
 }
@@ -193,6 +234,7 @@ bool CullIndex::append(const std::vector<NodeId>& appended) {
                 forbids_pruning = item_is_feathered_replace(*n);
             }
             chains_[at].entries.push_back(e);
+            chains_[at].probes.push_back(probe_for(e));
             if (forbids_pruning) chains_[at].prunable = false;
         }
     }
@@ -219,14 +261,34 @@ CullPlan CullIndex::plan(const math::Aabb& region) const {
     // (Compiler::begin_cull), so coarse survival stays a superset of
     // per-brick survival.
     const math::Aabb test = pad_ > 0.0f ? region.dilated(pad_) : region;
+    // The packed scan folds `Aabb::intersects`' two emptiness guards away, which
+    // is exact only for a region that discharges them itself. An INFINITE one
+    // does not: it makes six bare comparisons true for EVERY probe, including
+    // the probe of an entry whose own bound is empty -- a stroke or armature
+    // with no points, a volume with no payload -- which the predicate drops.
+    // So that region alone takes the predicate as written; it is a plan over
+    // the whole document, where the scan is not what costs anything anyway.
+    //
+    // An EMPTY region needs no such fallback, and the asymmetry is worth
+    // stating because it looks like an oversight. Against `min = +FLT_MAX,
+    // max = -FLT_MAX` the bare test passes only a probe that is infinite on
+    // all three axes, and `probe_for` gives exactly the always-survive entries
+    // exactly that box -- which is what the predicate returns there too, every
+    // `intersects` against an empty region being false. Equal by construction,
+    // and `test_cull_index.cpp` holds both regions against the predicate.
+    //
+    // `is_infinite` reads only the x axis, and that is enough: an empty probe
+    // survives only where BOTH x bounds are extreme, which is a subset of what
+    // it reports, so it can send an answerable region down the slow path but
+    // never a diverging one down the fast one.
+    const bool packed = !test.is_infinite();
     for (const Chain& chain : chains_) {
         if (!chain.prunable) continue;
         std::vector<Entry> kept;
-        for (const Entry& e : chain.entries)
-            // The compiler's own test (Compiler::culled), inverted: an entry
-            // survives unless it is local, finite and misses the region.
-            if (!e.local || e.bound.is_infinite() || e.bound.intersects(test))
-                kept.push_back(e);
+        if (packed)
+            scan_packed(chain.entries, chain.probes, test, &kept);
+        else
+            scan_exact(chain.entries, test, &kept);
         // Stored even when nothing was dropped: the survivors carry the
         // cached bounds, so a planned chain never recomputes one per brick.
         plan.pruned_.emplace(Key{chain.layer, chain.ids}, std::move(kept));

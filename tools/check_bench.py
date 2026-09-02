@@ -164,6 +164,20 @@ FLOORS = {
     # Ceilings are ~6x the local number because the CI runner measures about 3x
     # slower and a benchmark gate that flakes gets ignored.
     "BM_DeepDocCullPlanned10000": {"max_ms": 6},
+    # THE CULL PLAN ALONE, on a document that grows in EXTENT rather than in
+    # density (benchmarks/bench_main.cpp, cull_plan_local). 0.026 ms locally,
+    # and the ceiling follows this file's ~6x convention.
+    #
+    # What it holds is the packed scan. `CullPlan` used to ask each entry the
+    # survive test as the compiler writes it -- `!local || bound.is_infinite()
+    # || bound.intersects(region)` -- over a 40 B Entry it read 24 B of. Folding
+    # the first two clauses into one box per entry at build time and packing
+    # those boxes beside the entries made the scan 5.3x faster at 50 000 items
+    # (0.1368 -> 0.0258 ms), most of it `Aabb::intersects`' two emptiness
+    # guards, which cost six comparisons and two branches per entry to answer a
+    # question that cannot change once the entry is built. A revert lands
+    # around 0.41 ms on a runner measuring 3x slower and trips this.
+    "BM_CullPlanLocal50000": {"max_ms": 0.2},
     "BM_DeepDocRefillPlanned10000": {"max_ms": 6},
     "BM_DeepDocRefill2000": {"max_ms": 12},
     "BM_VoxelMeshSparse64Chunks": {"max_ms": 120},
@@ -411,6 +425,23 @@ MAX_RATIO = [
     # 4,590 against 2,802. The ceiling is well above that because the failure
     # worth catching is the pad widening again, not a few per cent of drift.
     ("BM_DeepDocCullPlanned2000K06", "BM_DeepDocCullPlanned2000", 2.0),
+    # THE SLOPE A SPATIAL INDEX WOULD FLATTEN, and the row that exists so that
+    # one can be judged at all. Five times the document, the same dab-sized
+    # region, and a survivor count the fixture holds FLAT at 81 -- so whatever
+    # this ratio is above 1.0 is the document showing through a query that only
+    # its neighbourhood should have cost.
+    #
+    # It sits at 4.3x, because the scan is still linear: `add-item-spatial-index`
+    # is unshipped and packing the scan lowered the constant without touching
+    # the shape. The ceiling is therefore a REGRESSION gate, not the feature's
+    # acceptance -- 7x catches a plan that went superlinear, and a broad phase
+    # that lands would drive this toward 1.0 and should tighten it then.
+    #
+    # Gated on the ratio because the absolute numbers are a machine's and this
+    # is the only cull row whose fixture can show a slope: every other one grows
+    # a unit sphere's DENSITY, where a dab legitimately keeps 28% of the
+    # document at every size and no index can help.
+    ("BM_CullPlanLocal50000", "BM_CullPlanLocal10000", 7.0),
     # EXTENDING THE CULL INDEX MUST COST THE DAB, NOT THE DOCUMENT (#347). The
     # same one-item append onto a document ten times the size must measure the
     # same, because what an append does is bounded by the subtree it adds.

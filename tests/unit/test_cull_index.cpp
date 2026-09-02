@@ -446,6 +446,78 @@ TEST_CASE("cull index: an entry that can never be culled always survives") {
     CHECK((*got)[1].id == near);
 }
 
+TEST_CASE("cull index: a degenerate region takes the predicate, not the packed scan") {
+    // The scan folds `!local || bound.is_infinite()` into one box per entry and
+    // then tests it with six bare comparisons -- `Aabb::intersects` without its
+    // two emptiness guards. That is exact only while the REGION discharges
+    // those guards itself, and two regions do not:
+    //
+    //   an EMPTY region  -- every intersection is false, but an entry the fold
+    //                       stored as an infinite box would survive it;
+    //   an INFINITE one  -- every intersection is true, but an entry whose own
+    //                       bound is EMPTY is dropped by the predicate.
+    //
+    // The second is not hypothetical: a stroke or an armature with no points,
+    // and a volume with no payload, all bound to an empty box and all local, so
+    // this document holds one of each beside the non-local plane and the
+    // ordinary spheres. Without the fallback the infinite region keeps them and
+    // the plan stops matching the compiler.
+    Document doc;
+    Layer& l = doc.add_sdf_layer("l");
+    const NodeId plane = l.sdf->insert(item(Prim::plane(cf3(0, 1, 0), 0.0f), cf3(0, 0, 0)));
+    Node pointless;
+    pointless.prim.type = PrimType::Stroke;  // no stroke points: an empty bound
+    const NodeId stroke = l.sdf->insert(pointless);
+    Node boneless;
+    boneless.prim.type = PrimType::Armature;  // likewise
+    l.sdf->insert(boneless);
+    Node hollow;
+    hollow.prim.type = PrimType::Volume;  // no payload, likewise
+    l.sdf->insert(hollow);
+    for (int i = 0; i < 12; ++i)
+        l.sdf->insert(item(Prim::sphere(0.1f), cf3(0.3f * static_cast<float>(i), 0, 0)));
+
+    // Empty is the default-constructed box; infinite is the one a plan over
+    // "everything" would be given.
+    const math::Aabb regions[] = {
+        math::Aabb{},
+        math::Aabb::infinite(),
+        math::Aabb{cf3(-0.05f, -0.05f, -0.05f), cf3(0.05f, 0.05f, 0.05f)},
+        math::Aabb{cf3(40, 40, 40), cf3(41, 41, 41)},
+    };
+    const CullIndex index(doc);
+    for (const math::Aabb& region : regions) {
+        CAPTURE(region.empty());
+        CAPTURE(region.is_infinite());
+        const CullPlan plan = index.plan(region);
+        const std::vector<CullIndex::Entry>* got = plan.chain(l, l.sdf->roots);
+        REQUIRE(got);
+        const std::vector<NodeId> want = expected_survivors(
+            l, index.cull_pad() > 0.0f ? region.dilated(index.cull_pad()) : region);
+        REQUIRE(got->size() == want.size());
+        for (std::size_t i = 0; i < want.size(); ++i) CHECK((*got)[i].id == want[i]);
+    }
+
+    // Spelled out, so a fold that quietly changed either answer is named rather
+    // than merely counted: over EVERYTHING the empty-bound items are dropped and
+    // everything else is kept, and over NOTHING only the plane -- which can
+    // never be culled -- comes back.
+    {
+        const CullPlan all = index.plan(math::Aabb::infinite());
+        const std::vector<CullIndex::Entry>* got = all.chain(l, l.sdf->roots);
+        REQUIRE(got);
+        CHECK(got->size() == 13);  // the plane and the 12 spheres, not the 3 empties
+        for (const CullIndex::Entry& e : *got) CHECK(e.id != stroke);
+    }
+    {
+        const CullPlan none = index.plan(math::Aabb{});
+        const std::vector<CullIndex::Entry>* got = none.chain(l, l.sdf->roots);
+        REQUIRE(got);
+        REQUIRE(got->size() == 1);
+        CHECK((*got)[0].id == plane);
+    }
+}
+
 TEST_CASE("cull index: the cost is SUBLINEAR in document size, not merely smaller") {
     // The gate the proposal asked for. A constant-factor win would keep the
     // per-item cost flat while lowering it; this asserts the per-item cost
