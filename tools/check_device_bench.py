@@ -262,6 +262,34 @@ def worst_p95(case: dict) -> float:
     return max(values)
 
 
+def case_batch(case: dict) -> int:
+    """How many applications of the verb one timed body performed.
+
+    The widest batch on the axis, so a case whose points disagree is divided by
+    the one that would most overstate a per-application cost rather than the one
+    that would flatter it. 1 when nothing says otherwise.
+    """
+    return max((m.get("batch", 1) for m in case.get("measurements", [])), default=1)
+
+
+def frame_share_peak(case: dict) -> float:
+    """What ONE application of this verb cost at its worst point.
+
+    A frame share is a claim about the time a hand waits for a single dab, and a
+    batched case does not measure one — `voxel_stamp` times 128 of them per body
+    on purpose, because a figure under 0.125 ms cannot be objected to at any
+    ratio (#337). Comparing the batched total against half a 120 Hz frame asks a
+    128-dab drag to fit in one frame, which is not a claim anyone made.
+
+    check_doc_latency.py has divided by the batch since the table existed, for
+    exactly this reason and in almost these words. This function is the same
+    rule on the gate's side of the fence, and until it existed the two tools
+    disagreed: `sdf_stroke_smooth_bricks` was reported as missing a frame share
+    at 4.373 ms while docs/09 quoted the same case, correctly, at 0.182 ms.
+    """
+    return reported_p95(case) / max(case_batch(case), 1)
+
+
 def reported_p95(case: dict) -> float:
     """The worst point, whatever the case is scored on — what a user would feel.
 
@@ -391,8 +419,13 @@ def write_baseline(run: dict, path: pathlib.Path, tolerance: float) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(baseline, indent=2, sort_keys=True) + "\n")
     print(f"device-bench: wrote baseline for {len(budgets)} case(s) -> {path}")
+    # Per application, for the reason frame_share_peak gives: a batched case's
+    # measuredMs is a drag rather than a dab, and dividing is what makes this
+    # line and check_doc_latency.py's table say the same thing about one case.
+    batch_of = {c["name"]: case_batch(c) for c in run["cases"]}
     over = [n for n, b in budgets.items()
-            if b["class"] == "interactive" and b["measuredMs"] > INTERACTIVE_FRAME_SHARE_MS]
+            if b["class"] == "interactive"
+            and b["measuredMs"] / max(batch_of.get(n, 1), 1) > INTERACTIVE_FRAME_SHARE_MS]
     if over:
         print("device-bench: interactive cases that do NOT fit a 120 Hz frame share "
               f"({INTERACTIVE_FRAME_SHARE_MS:.2f} ms): {', '.join(sorted(over))}")
@@ -475,13 +508,19 @@ def main() -> int:
                     f"{name}: BUDGET {shown} exceeds "
                     f"{budget['budgetMs']:.3f} ms ({budget['class']})")
             elif (budget["class"] == "interactive"
-                  and peak > INTERACTIVE_FRAME_SHARE_MS):
+                  and frame_share_peak(case) > INTERACTIVE_FRAME_SHARE_MS):
                 # The PEAK here, deliberately: a frame share is about the time a
                 # hand waits, a throttled device still makes it wait, and a
                 # single-timing case's worst stroke was waited for even though
                 # the median is what the budget gates.
-                notes.append(f"{name}: {peak:.3f} ms p95 is inside its budget but "
-                             f"outside a 120 Hz frame share "
+                #
+                # PER APPLICATION, because that is what a frame holds. See
+                # frame_share_peak: the batched total is a drag, not a dab.
+                batch = case_batch(case)
+                per = frame_share_peak(case)
+                of_batch = f" ({peak:.3f} ms / batch {batch})" if batch > 1 else ""
+                notes.append(f"{name}: {per:.3f} ms p95 per application{of_batch} is "
+                             f"inside its budget but outside a 120 Hz frame share "
                              f"({INTERACTIVE_FRAME_SHARE_MS:.2f} ms)")
             # Its own `if`, not chained to the frame share above: a case can be
             # both inside a frame and far under its budget, and the two say
