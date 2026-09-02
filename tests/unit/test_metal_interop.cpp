@@ -133,6 +133,40 @@ std::vector<clay_brick_request> equator_window(int n) {
     return reqs;
 }
 
+
+// WHY ADOPTION MAY LEGITIMATELY FAIL, and why that is a SKIP rather than a
+// failure (#63, and the rule #106 settled).
+//
+// `HostDevice::ok` says a Metal device exists. It does NOT say the backend can
+// build its pipelines on that device, and on Apple Paravirtual GPUs -- macOS
+// VMs, which is exactly what GitHub's macOS runners are -- it sometimes cannot.
+// #63 was `clay_raycast` failing there while point and grid evaluation built
+// fine; #106 made the backend register anyway in that case, on the ground that
+// a working device should not be discarded over a kernel no ABI entry point can
+// call. But it kept point and grid MANDATORY:
+//
+//     if (!pso_points_ || !pso_grid_) return false;
+//
+// so when the paravirtual compiler fails on `clay_eval_points` itself -- which
+// it did on main at 61444b9d, and not on the commit either side of it -- the
+// whole backend is discarded and adoption returns null.
+//
+// A bare REQUIRE turns that into a red build. It asserts something #106
+// explicitly stopped promising, and it does so on the one device class where
+// the promise was known not to hold. Skipping keeps the test honest on real
+// hardware, where it runs every release, without failing CI for a condition the
+// library is designed to tolerate.
+//
+// The DIAGNOSTIC is what separates the two cases, and is why #106 added it: a
+// backend that was never compiled in reads differently from one compiled in and
+// rejected. Anything that is not a pipeline-compilation refusal still fails.
+bool adoption_refused_by_the_compiler() {
+    const std::string why = eval::backend_diagnostic("metal");
+    MESSAGE("metal did not adopt; diagnostic: " << why);
+    return why.find("no compute pipeline") != std::string::npos ||
+           why.find("Compilation failed") != std::string::npos;
+}
+
 }  // namespace
 
 TEST_CASE("metal interop: the batched device form is the host-memory batch, bit for bit") {
@@ -142,6 +176,7 @@ TEST_CASE("metal interop: the batched device form is the host-memory batch, bit 
         return;
     }
     std::unique_ptr<eval::Backend> adopted = eval::make_backend("metal", host.handles());
+    if (!adopted && adoption_refused_by_the_compiler()) return;
     REQUIRE(static_cast<bool>(adopted));
 
     const scene::Document doc = scene_doc();
@@ -472,6 +507,7 @@ TEST_CASE("metal interop: only an adopted backend serves a device copy") {
         return;
     }
     std::unique_ptr<eval::Backend> adopted = eval::make_backend("metal", host.handles());
+    if (!adopted && adoption_refused_by_the_compiler()) return;
     REQUIRE(adopted != nullptr);
     CHECK(adopted->caps().device_copy);
 
