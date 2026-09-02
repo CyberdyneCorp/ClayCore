@@ -19,6 +19,25 @@ has to be recorded on the reference iPad before anything in this document can
 quote one. Until then this table is silent about adaptive sculpting, and that
 silence is a gap rather than a pass.
 
+What HAS been established without hardware is that the four cases measure what
+they claim to. The bundle compiles for iOS and passes on an iPad simulator,
+which answers no question about latency and every question about whether the
+fixture holds: an identical brush footprint at all three points of the growth
+axis, an adaptive dab that adds triangles rather than removing them, and a
+chunk copy large enough for the 1.4x tolerance to bind rather than the 0.05 ms
+noise floor. Those figures are recorded in
+`tests/device/Dyntopo/DyntopoCases.swift`; they are simulator and desktop
+numbers and belong in the source rather than in this table, which quotes
+hardware.
+
+One result from it is worth stating here because it is about shape rather than
+magnitude, and shape survives the change of machine. `dyntopo_stamp_fixed` —
+one deformation-only dab, adaptation off, on a footprint that does not change
+with the document — costs **8.9x more on a document a hundred times larger**.
+An adaptive dab over the same fixture is nearly flat, so the growth is not the
+remesher. That is the regression `tests/unit/test_dynamic_scale.cpp` gates on
+desktop, and the reason the pair is worth more than either half of it.
+
 ## How to read this
 
 **The budget.** A 120 Hz ProMotion frame is 8.33 ms and the host still has to

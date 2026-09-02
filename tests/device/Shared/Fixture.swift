@@ -251,6 +251,23 @@ enum Fixture {
     /// fold span in area, topping out around 50k triangles, which is a real
     /// working surface and well under the jetsam ceiling this harness keeps
     /// walking into.
+    ///
+    /// THE DAB MUST FIT INSIDE THE SMALLEST PATCH, and that is a constraint on
+    /// `patchBrush` and `patchCenter` rather than on this function. The
+    /// smallest patch is 15 quads at 0.02, so its half-extent is 0.15, and a
+    /// gesture reaching past that is clipped by the boundary at the small end
+    /// of the axis and not at the large end — which measures the fixture in
+    /// exactly the way holding the spacing was meant to prevent.
+    ///
+    /// This was measured rather than reasoned about. The original 0.12 radius
+    /// on a 0.10 orbit reaches 0.22, half again the smallest half-extent, and
+    /// a host-side replay of these four cases showed the smallest axis point
+    /// doing EIGHT TIMES the topological work of the other two (1797 splits
+    /// and 1853 collapses against 229 and 438) while its triangle count fell
+    /// 450 -> 338 and the larger points barely moved. At the gesture below,
+    /// the same replay gives 751 / 790 / 784 splits and 415 / 422 / 417
+    /// collapses across the three points: the footprint is constant, which is
+    /// the invariant this fixture exists to provide.
     static func dynamicPatch(stamps: Int, spacing: Float = 0.02)
         -> (mesh: OpaquePointer, surface: OpaquePointer, sculptor: OpaquePointer)? {
         let side = max(4, Int(Double(stamps).squareRoot() * 5.0))
@@ -303,6 +320,13 @@ enum Fixture {
         return (m, sf, sc)
     }
 
+    /// Half the side length of the patch `dynamicPatch(stamps:)` builds — the
+    /// distance from its centre to its boundary, which is what a dab has to
+    /// stay inside. Kept beside the builder so the two cannot drift.
+    static func patchHalfExtent(stamps: Int, spacing: Float = 0.02) -> Float {
+        Float(max(4, Int(Double(stamps).squareRoot() * 5.0))) * spacing * 0.5
+    }
+
     /// The topology descriptor these cases share. `enabled: false` gives the
     /// same dab with adaptation off, which is what makes the pair a statement
     /// about what adaptation COSTS rather than about the brush.
@@ -318,9 +342,24 @@ enum Fixture {
         return topo
     }
 
-    /// A dab centred on the patch, walking so a stroke passes over ground it
-    /// has already touched — same reasoning as `VerbCaseGroup.walkWindow`.
-    static func patchBrush(radius: Float = 0.12, strength: Float = 0.3)
+    /// The dab these cases drive.
+    ///
+    /// THE RADIUS IS BOUNDED BY THE SMALLEST PATCH, not chosen for feel:
+    /// `patchCenter`'s orbit plus this radius is the gesture's reach, and it
+    /// has to sit well inside the 0.15 half-extent of the 15-quad patch. 0.035
+    /// + 0.04 = 0.075 is half of it, and a host-side replay confirms the
+    /// footprint is then constant across the axis (see `dynamicPatch`).
+    ///
+    /// IT ALSO DECIDES THE DETAIL TARGET, because these cases use
+    /// CLAY_DETAIL_BRUSH_RELATIVE, where the target edge length is
+    /// `radius / detail_resolution`. At radius 0.04 and resolution 4 the target
+    /// is 0.01, comfortably below the fixture's 0.02 spacing, so the dab SPLITS
+    /// — which is what "an adaptive dab" is supposed to mean. The original 0.12
+    /// radius put the target at 0.03, above the spacing and above the 0.8
+    /// collapse factor's 0.024, so the flagship adaptive case decimated the
+    /// patch instead of refining it. Changing the radius changes what the
+    /// remesher does; it is not a cosmetic constant.
+    static func patchBrush(radius: Float = 0.04, strength: Float = 0.3)
         -> clay_mesh_brush_desc {
         var b = clay_mesh_brush_desc()
         b.struct_size = UInt32(MemoryLayout<clay_mesh_brush_desc>.size)
@@ -331,11 +370,24 @@ enum Fixture {
         return b
     }
 
-    /// Where the i-th dab of the walk lands, inside the smallest patch so every
-    /// axis point sees the same gesture.
+    /// Where the i-th dab of the walk lands: a circle of radius 0.035 about the
+    /// patch centre, so the whole gesture — orbit plus brush radius — reaches
+    /// 0.075 and sits inside the smallest patch's 0.15 half-extent with the
+    /// same margin at every axis point. Walking so a stroke passes over ground
+    /// it has already touched is the same reasoning as
+    /// `VerbCaseGroup.walkWindow`.
+    ///
+    /// THE WALK CONVERGES, and the cases say so rather than pretending
+    /// otherwise: 64 positions revisited means the remesher brings the region
+    /// to target within about a lap, after which a dab does almost no
+    /// topological work (measured: 726 splits over the first eight batched
+    /// bodies, 1 over the last eight). The p50 is therefore the STEADY STATE of
+    /// a held stroke and the p95 carries the transient. Both are stable and
+    /// both are worth a budget; neither is "the first dab onto fresh ground",
+    /// which no fixture with a bounded extent can keep supplying.
     static func patchCenter(_ i: Int) -> (Float, Float, Float) {
         let t = Float(i % 64) / 64.0
-        return (0.10 * cosf(t * 6.2831853), 0.0, 0.10 * sinf(t * 6.2831853))
+        return (0.035 * cosf(t * 6.2831853), 0.0, 0.035 * sinf(t * 6.2831853))
     }
 
 }
