@@ -10,7 +10,9 @@ Beside it are the preview, quad and dual-contouring meshers, decimation,
 validation, attribute transfer and the sculpting a mesh accepts once it exists.
 `mesh::Mesh` — flat arrays every producer and consumer shares — is defined here,
 which is why this capability is also where its invariants are written down.
+
 ## Requirements
+
 ### Requirement: Default mesher with watertight guarantee
 `clay::mesh` SHALL provide a default cell-marching mesher whose output is watertight and 2-manifold by construction, running only over surface-crossing bricks. v1 implements this with marching tetrahedra (Freudenthal 6-tet decomposition with globally consistent face diagonals — no ambiguous configurations exist, so the guarantee is structural); a table-based marching cubes with asymptotic-decider ambiguity resolution MAY replace it later as a triangle-count optimization provided the same guarantees hold. The CPU implementation is the golden reference; GPU implementations (Metal/CUDA) SHALL match its topology invariants (watertight, manifold, Euler characteristic on golden scenes) though not bit-identical vertex positions.
 
@@ -25,9 +27,15 @@ which is why this capability is also where its invariants are written down.
 ### Requirement: Surface nets preview mesher
 The module SHALL provide a surface-nets mesher for cheap smooth preview meshes, sharing the brick traversal and attribute sampling of marching cubes.
 
+"Cheap" SHALL mean cheap to BUILD as well as cheap to carry, and the two SHALL be gated separately, because a mesher can look cheap on either one while being expensive on the other. Surface nets emits about a third of marching cubes' vertices, so any comparison that charges per vertex — an attribute pass, an upload, a draw — reports it as cheaper whatever its geometry step costs. A gate that means to say the MESHER is cheaper SHALL therefore compare the two over the SAME precomputed lattice, with no field evaluation and no attribute pass on either side, or it is measuring something else and will pass while the claim is false.
+
+#### Scenario: Preview mesh from a lattice
+- **WHEN** surface nets and marching cubes are run over the same precomputed lattice at equal resolution
+- **THEN** surface nets produces a valid mesh in less time, and the comparison includes no field evaluation and no vertex attributes on either side
+
 #### Scenario: Preview mesh from bricks
 - **WHEN** surface nets runs over a filled brick cache
-- **THEN** it produces a valid mesh in less time than marching cubes at equal resolution (benchmarked, regression-gated)
+- **THEN** it produces a valid mesh with fewer vertices and triangles than marching cubes at equal resolution
 
 ### Requirement: Dual contouring (flagged)
 The module SHALL provide dual contouring with QEF minimization over Hermite data (position + normal per edge crossing) for sharp-edge export, in its manifold variant, shipped behind an explicit opt-in flag until hardened post-v1.
@@ -75,9 +83,15 @@ For a brick mesh, gradient normals and vertex colors SHALL be evaluated through 
 
 Culling SHALL NOT change the attributes: inside a brick's band-dilated cull region the culled tape's band-clamped results are bit-identical to the full tape's, mesh vertices lie on the surface far inside the band, and the gradient taps move by the gradient epsilon, which the cull region is additionally dilated by. The normals and colors SHALL equal a full-document-tape evaluation at every vertex.
 
+EVERY mesher's attribute pass SHALL evaluate its vertices through the evaluation backend as ONE batch rather than a tap at a time. A colour is one walk of the tape and a gradient is four, so a mesh of a hundred thousand vertices asks for half a million walks; taken one at a time on one thread they are the whole cost of the mesh — measured at 96% of a coloured `mesh_tape`, and 58x slower than the same taps batched. A mesher that reaches for the tape directly is paying for an interpreter per point that the backend walks once per BLOCK of points, and for one core out of however many the machine has.
+
+Batching SHALL NOT change the attributes. The backend evaluates the same taps against the same tape at the same points, so the colours and normals SHALL be identical to the serial walk BIT FOR BIT rather than within a tolerance — a bound would admit a reordered gradient tap, which is the one mistake this is likely to make.
+
+A build with NO evaluation backend registered SHALL still produce attributes, by the serial walk, rather than producing none.
+
 #### Scenario: Blend gradient in vertex colors
-- **WHEN** two differently colored shapes joined by a smooth blend are meshed
-- **THEN** vertex colors across the joint interpolate following the blend's material-mix falloff, not a hard color seam
+- **WHEN** a mesh is emitted across a blend between two colored items
+- **THEN** the vertex colors vary smoothly across the blend rather than stepping at the seam
 
 #### Scenario: Far nodes do not change a brick mesh's attributes
 - **WHEN** a fixed brick set is meshed with gradient normals and colors from a document holding hundreds of nodes far outside those bricks' influence, and from a document holding only the nearby nodes
@@ -85,7 +99,15 @@ Culling SHALL NOT change the attributes: inside a brick's band-dilated cull regi
 
 #### Scenario: Gradient normals cost the bricks, not the document
 - **WHEN** the same fixed brick set is re-meshed with gradient normals as the document grows with far-away edits
-- **THEN** the meshing time stays with the brick set rather than growing linearly with the document's node count, which the benchmark gate enforces as a ratio
+- **THEN** the meshing time follows the brick count rather than the node count
+
+#### Scenario: The batched attribute pass is the serial one
+- **WHEN** a mesh is given colors and gradient normals through the backend's batch, and the same tape is walked at the same vertices a tap at a time
+- **THEN** every colour and every normal is the same float, bit for bit
+
+#### Scenario: Attributes survive a build with no backend
+- **WHEN** a mesh is given colors and gradient normals with no evaluation backend registered
+- **THEN** it carries the same attributes, evaluated serially
 
 ### Requirement: A mesh can be queried for distance and insideness
 The library SHALL provide an acceleration structure over a mesh's triangles answering two queries: the distance to the nearest point on the surface, and whether a point is inside it.
@@ -241,6 +263,8 @@ The straight-line region SHALL remain available and SHALL be the default for the
 The library SHALL provide vertex-displacement brushes over a mesh's own triangles: `grab`, `draw`, `inflate`, `smooth`, `pinch`, `flatten`, `clay`, `crease`, `scrape`, `polish` and `snakehook`.
 
 **Topology SHALL NOT change.** No verb SHALL create, split, delete or reorder a polygon or a vertex. `Mesh::indices` and `Mesh::quads` SHALL be byte-identical before and after any verb, so a quad mesh sculpted here is still a quad mesh.
+
+That contract belongs to THIS sculptor and is not a statement about the library. A separate representation whose connectivity changes under a brush is specified in `dynamic-topology`; it is a representation a caller converts into deliberately, never a mode these verbs enter. The guarantee here is what makes a mesh layer worth holding after a retopology pass, and adding adaptive topology elsewhere SHALL NOT weaken it.
 
 `draw` SHALL displace along the region's AVERAGED normal — one shared direction per stamp — and `inflate` SHALL displace along each vertex's OWN normal. That difference SHALL be the distinction between the two verbs.
 
@@ -660,7 +684,9 @@ A deformer whose parameters describe no deformation — a zero angle, a unit sca
 
 Deforming a mesh SHALL be DETERMINISTIC: the same mesh, frame and parameters SHALL produce bit-identical positions on every run and every platform.
 
-The library SHALL NOT re-tessellate to recover from a deformation. Stretching the triangles a mesh already has is the accepted cost of fixed topology, and remeshing remains outside this engine's scope. `relax` SHALL NOT be documented as the recovery for a deformation: a taper leaves a cross-section with the same vertex count around a smaller circumference, which is anisotropy rather than uneven spacing, and a verb that slides vertices along the surface cannot change how many of them a cross-section has.
+A FIXED-TOPOLOGY mesh layer SHALL NOT be re-tessellated to recover from a deformation. Stretching the triangles a mesh already has is the accepted cost of fixed topology, and the recovery is a conversion to the adaptive representation specified in `dynamic-topology` rather than a hidden re-tessellation of this one. `relax` SHALL NOT be documented as the recovery for a deformation: a taper leaves a cross-section with the same vertex count around a smaller circumference, which is anisotropy rather than uneven spacing, and a verb that slides vertices along the surface cannot change how many of them a cross-section has.
+
+The sentence this replaces said remeshing was outside the engine's scope. That was a decision about the whole library and it was reversed on 2026-08-29 for the reason recorded in `openspec/ROADMAP.md`: shipping fixed-topology brushes made "the stretch is your signal to retopologise elsewhere" a signal to leave the engine. What survives the reversal is the narrower and more useful rule stated here — this layer does not re-tessellate, and a caller who wants adaptive topology asks for it by name.
 
 #### Scenario: A taper on a mesh and on a field agree
 - **WHEN** the same shape is tapered as a mesh layer and as an SDF item, and both are meshed
@@ -717,3 +743,334 @@ Transfer SHALL be DETERMINISTIC: the same pair of meshes SHALL produce the same 
 - **WHEN** attributes are transferred by any options
 - **THEN** the target's positions and indices are byte-identical before and after
 
+### Requirement: The dual walk visits each cell once
+The dual meshers — surface nets, dual contouring and the quad mesher — SHALL place a cell's vertex and emit the quads on the lattice edges it owns in ONE walk of the cell range.
+
+This is sound rather than merely convenient: a quad sits on an edge leaving a cell's minimum corner, and the four cells around that edge are reached by stepping BACK along the two axes that are not the edge's, never forward. They are the owning cell and three already placed, so a single walk never needs a vertex it has not yet made. The vertices and the indices SHALL come out in the order two separate walks produced them.
+
+A second walk SHALL NOT re-read the corners the first already had. The minimum corner and its three axis neighbours are four of the eight the vertex pass reads, and reading them again cost a third of the mesher — for every cell in the range, including the ones that own no vertex and therefore can contribute no quad, since an edge leaving the minimum corner changes sign only when the cell has corners of both signs.
+
+The lattice sampler SHALL be reached without an indirect call in the meshers that supply one directly. Eight corners for every cell of a range is tens of millions of calls for a preview-resolution mesh, and through a function object none of them inlines: measured at 52.6 ms against 6.7 ms for the same reads on one lattice.
+
+#### Scenario: A cell's vertex exists before any quad that references it
+- **WHEN** the quads of a dual mesh are read in the order they were emitted
+- **THEN** the largest vertex index in successive quads never goes backwards, so no quad references a vertex placed later
+
+#### Scenario: One walk is what two walks were
+- **WHEN** a dual mesh is built after the walk is changed
+- **THEN** its vertices, indices, quads and normals are unchanged bit for bit, for every mesher that shares the walk
+
+### Requirement: A hierarchy exports through the interchange mesh
+`mesh::Mesh` SHALL remain the flat interchange format and SHALL NOT gain hierarchy, level or detail members. A multiresolution surface SHALL export a level as an ordinary mesh, and every existing producer and consumer SHALL continue to see exactly the arrays it saw before.
+
+Attribute transfer SHALL keep its current contract — it moves colours, UVs and normals and moves no position. Geometry and detail reprojection SHALL be a separate operation sharing the same spatial query and not the same guarantee.
+
+The fixed-topology sculptor SHALL be unaffected. A mesh layer that carries no hierarchy behaves exactly as it did.
+
+#### Scenario: An exported level is an ordinary mesh
+- **WHEN** a level is exported and passed to validation, decimation, an exporter and the readback accessors
+- **THEN** each accepts it unchanged
+
+#### Scenario: Attribute transfer still moves no position
+- **WHEN** attribute transfer runs after this change
+- **THEN** the target's positions are byte-identical to before it
+
+### Requirement: Brush deformation math is representation-neutral
+The deformation math behind the mesh verbs SHALL live behind an interface that names no mesh, no adjacency structure and no vertex numbering — a span of positions, normals and weights, a neighbourhood view, the stamp's frame, and the plane a flatten-family verb was given or computed.
+
+Every sculptor the library gains SHALL call those kernels rather than reimplement them, so that a verb means the same thing on every representation that offers it. Where a representation cannot offer a verb, it SHALL omit the verb rather than approximate it.
+
+Extracting the kernels SHALL NOT change what the fixed-topology sculptor produces. The results SHALL be compared BIT FOR BIT against the pre-extraction implementation rather than within a tolerance, because a tolerance would admit a reordered accumulation and that is the mistake this refactor is most likely to make.
+
+#### Scenario: The fixed path is unchanged by the extraction
+- **WHEN** every verb is applied to the golden fixtures before and after the kernels are extracted
+- **THEN** the resulting positions, normals and colours are byte-identical
+
+#### Scenario: A kernel names no representation
+- **WHEN** the kernel interface is compiled against a translation unit that includes no mesh, adjacency or BVH header
+- **THEN** it compiles
+
+### Requirement: A stamp allocates and scans for what it touches
+A brush stamp SHALL gather a WORKSET whose capacity tracks the largest recent brush footprint and SHALL NOT allocate, clear or scan storage proportional to the total surface.
+
+The workset SHALL distinguish the READ HALO from the WRITE REGION. Verbs that average over a one-ring read vertices they do not move, and a dirty report SHALL name the write region only, so a host does not upload geometry that did not change.
+
+After warm-up, an ordinary local stamp on a mesh whose topology is stable SHALL perform no heap allocation. Growth on first encountering a larger footprint is permitted; steady repeated local sculpting is not.
+
+A multi-pass verb SHALL query the spatial index once per stamp and iterate over local buffers, rather than re-querying per pass.
+
+#### Scenario: Warm stamps do not allocate
+- **WHEN** a stroke of many stamps of similar footprint runs after the first stamp has warmed the scratch
+- **THEN** the instrumented allocation count for the subsequent stamps is zero
+
+#### Scenario: The dirty report excludes the read halo
+- **WHEN** a smoothing verb runs and reports the vertices it changed
+- **THEN** the report names the vertices it moved and not the ring it only read
+
+### Requirement: Global voxel remesh
+The library SHALL provide a global voxel-remesh operation that takes a polygonal surface, samples it into a signed volumetric representation at an explicit spatial resolution, and extracts a new polygonal surface from that representation.
+
+The operation SHALL be a single semantic verb reachable by a consumer of the library, not an assembly a caller performs out of the sampling, meshing and validation primitives. It SHALL compose those existing primitives — the mesh BVH, its generalized winding sign, the sparse narrow-band sampled field, the default watertight mesher, the validator and the attribute transfer — and SHALL NOT introduce a second implementation of any of them.
+
+Overlapping shells and self-intersections SHALL be resolved volumetrically: where two surfaces of one input overlap, the result SHALL describe the occupied region with one exterior surface rather than reproducing both shells.
+
+The result SHALL NOT preserve source vertex or polygon identity. Vertex count, triangle count, ordering and connectivity are all replaced, and no consumer may index the result with a source index.
+
+#### Scenario: Overlapping shells fuse
+- **WHEN** two spheres whose interiors overlap are remeshed as one input
+- **THEN** the result is a single connected watertight component enclosing their union, not two intersecting shells
+
+#### Scenario: Stretched topology is rebuilt
+- **WHEN** a surface whose triangles have been stretched far past uniformity is remeshed
+- **THEN** the result's edge lengths cluster around the requested spatial resolution rather than reproducing the input's distribution
+
+#### Scenario: Identity is not preserved
+- **WHEN** a mesh is remeshed
+- **THEN** the report states the source and result vertex and triangle counts separately, and nothing in the API maps a source index onto a result index
+
+### Requirement: Voxel remesh resolution is a physical size
+The canonical resolution of a voxel remesh SHALL be a voxel size in world units. A longest-axis resolution MAY be offered as a convenience, and SHALL map onto the canonical size as the source's longest bounding extent divided by that resolution, resolved BEFORE any sampling padding is applied.
+
+The resolved voxel size SHALL be reported by both the estimate and the result, because it — not the resolution integer — is what predicts which features survive.
+
+A voxel size that is not finite and positive, or a longest-axis resolution of zero, SHALL fail with a typed status and produce no mesh.
+
+#### Scenario: Two spellings of one resolution agree
+- **WHEN** a mesh is remeshed at longest-axis resolution N, and again at the voxel size that resolution resolved to
+- **THEN** both runs report the same resolved voxel size and produce the identical mesh
+
+#### Scenario: Finer resolution keeps more of the source
+- **WHEN** a model is remeshed at two voxel sizes, one half the other
+- **THEN** the finer result's symmetric surface distance to the source is smaller than the coarser result's
+
+#### Scenario: An invalid resolution is refused
+- **WHEN** a remesh is requested with a zero, negative, infinite or NaN voxel size
+- **THEN** it fails with an invalid-resolution status and returns no mesh
+
+### Requirement: Voxel remesh preflights its cost
+The library SHALL provide an estimate of a voxel remesh that runs before the operation and without performing it, reporting at least: the resolved voxel size, the grid dimensions, the number of active samples the sparse domain will hold, the estimated working memory in bytes, a range for the result triangle count, the source's open-boundary edge count and connected-component count, and whether the source carries features at risk of being lost at this resolution.
+
+A request whose estimated memory exceeds a caller-supplied budget, or which exceeds the library's own ceilings on active samples or lattice cells, SHALL fail with a typed resource status BEFORE allocating the field, the acceleration structure or the result.
+
+The library SHALL NOT silently reduce a requested resolution to fit a budget. Fitting a resolution to a budget is a caller policy built from repeated estimates.
+
+#### Scenario: An oversized request is refused before it allocates
+- **WHEN** a remesh is requested at a resolution whose estimated memory exceeds the supplied budget
+- **THEN** it returns an exceeds-budget status, the estimate that justified it, and no mesh, without having allocated the field
+- **AND** the peak memory of the refused call is a small fraction of the estimate it refused
+
+#### Scenario: The estimate predicts the run
+- **WHEN** a remesh is estimated and then performed at the same parameters
+- **THEN** the reported resolved voxel size matches, the result triangle count falls inside the estimated range, and the actual active sample count does not exceed the estimate
+
+#### Scenario: A resolution is never quietly lowered
+- **WHEN** a remesh at a resolution over budget is requested
+- **THEN** no mesh is produced at any other resolution
+
+### Requirement: Voxel remesh sampling follows the surface
+The sampling domain of a voxel remesh SHALL be marked from the source geometry and its narrow band, so that the number of expensive per-sample evaluations follows the source's surface area and the band's thickness rather than the volume of the source's bounding box.
+
+The samples the sparse domain STORES SHALL be bit-identical to those a dense evaluation of the same region at the same voxel size, band and sign parameters would store, for a source with no open boundaries. Sparsity is an optimisation of the same field, not a different field.
+
+For a source WITH open boundaries the two MAY differ, and only in the recorded sign of bricks that store no samples: the generalized winding number's half-crossing can fall away from every triangle, where the dense path resolves it per brick and the sparse path resolves it per connected region. This SHALL be stated in the API rather than left to be discovered.
+
+Large remesh requests SHALL use sparse narrow-band storage. A dense lattice over the bounding box SHALL NOT be the normal production path at any resolution the API accepts.
+
+#### Scenario: Sparse and dense agree on a closed source
+- **WHEN** a closed mesh is remeshed and the same region is sampled densely at the same voxel size and band
+- **THEN** the two fields store the same bricks and every stored sample is bit-identical
+
+#### Scenario: A long thin model does not pay for its bounding box
+- **WHEN** a long thin model is remeshed at a fixed voxel size, and again after being made longer along one axis at the same spacing
+- **THEN** the active sample count and the sampling time grow with the added surface, not with the cube of the bounding box's growth
+- **AND** the field's stored sample count stays a small fraction of the bounding box's lattice point count
+
+### Requirement: Voxel remesh open-surface policy
+A voxel remesh SHALL take an explicit policy for a source with open boundaries: reject it, close it, or proceed best-effort.
+
+`Reject` SHALL return a typed status and no mesh. `Close` SHALL produce the closed volumetric interpretation and SHALL return a typed failure rather than an invalid mesh if the result is not watertight and 2-manifold. `BestEffort` SHALL proceed and SHALL report that the source was open and whether the result met the normal guarantees.
+
+An open source SHALL NEVER be silently treated as though it had been watertight. The report SHALL carry the source's boundary-edge count whatever the policy.
+
+#### Scenario: Reject leaves the caller with a reason
+- **WHEN** a mesh with a hole is remeshed under `Reject`
+- **THEN** the call fails with an open-surface status and the report names the source's boundary-edge count
+
+#### Scenario: Close produces a watertight body
+- **WHEN** a sphere with triangles removed is remeshed under `Close` in the default surface mode
+- **THEN** the result is watertight, 2-manifold and consistently oriented, and the report records that the source was open
+
+#### Scenario: Best effort says what it did
+- **WHEN** an open surface is remeshed under `BestEffort`
+- **THEN** the result is returned with the source recorded as open and the result's own boundary-edge count reported
+
+### Requirement: Voxel remesh output is validated
+The default surface mode of a voxel remesh SHALL produce a watertight, 2-manifold, consistently oriented mesh with no degenerate triangles and no non-finite vertex positions, and SHALL validate that before returning rather than asserting it.
+
+A result failing that contract SHALL be reported as a typed failure and SHALL NOT be returned as a successful remesh, except under `BestEffort`, which returns it with the failure recorded.
+
+A sharp surface mode MAY be offered and SHALL be marked experimental. The watertight contract above SHALL NOT be claimed for it, matching the existing flagged status of dual contouring.
+
+The result SHALL carry a report holding at least: the resolved voxel size, source and result vertex and triangle counts, source and result signed volume and their relative difference, source and result boundary-edge and connected-component counts, whether the source was open, whether projection ran, and which attribute channels moved.
+
+#### Scenario: The default mode's output is clean
+- **WHEN** each fixture in the golden set is remeshed in the default surface mode
+- **THEN** every result validates as watertight, 2-manifold and oriented, with zero degenerate triangles and every position finite
+
+#### Scenario: A report accompanies every success
+- **WHEN** a remesh succeeds
+- **THEN** the report carries both meshes' counts and volumes, the relative volume difference, and the resolved voxel size
+
+### Requirement: Voxel remesh preserves attributes spatially
+Where a voxel remesh is asked to preserve vertex colour, it SHALL resample it from the source by closest point through the existing attribute transfer, never by source vertex index. A source carrying no colour SHALL produce a result carrying no colour: the operation SHALL NOT invent one.
+
+The library SHALL provide a spatial resampling of a caller-owned per-vertex scalar array — a mask, a weight — from one mesh onto another, so that a mask held outside `mesh::Mesh` survives a remesh without the mask's storage being moved into the mesh to suit this operation.
+
+UVs SHALL be dropped by the operation, and the API SHALL say dropped. A spatially reprojected UV is not a preserved UV layout and SHALL NOT be presented as one.
+
+A malformed source attribute array — one whose length is neither zero nor the vertex count — SHALL be treated as absent rather than read.
+
+#### Scenario: Colour survives a rebuild
+- **WHEN** a mesh whose vertex colours vary smoothly across it is remeshed with colour preservation on
+- **THEN** every result vertex carries approximately the source colour at its own position, and the report records that colour moved
+
+#### Scenario: Absent attributes stay absent
+- **WHEN** a mesh carrying no colour and no UVs is remeshed with preservation requested
+- **THEN** the result carries no colour and no UVs, and the report records that neither moved
+
+#### Scenario: A mask is resampled onto new topology
+- **WHEN** a per-vertex mask over a source mesh is transferred onto a remeshed result
+- **THEN** the masked region of the result covers the same volume of space the source's masked region did, within the voxel size
+
+### Requirement: Voxel remesh projection is clamped
+Where a voxel remesh is asked to project its result back onto the source, each result vertex SHALL move toward the closest point on the source by at most a configured fraction of the way, and SHALL NOT move at all when the closest point is further than a configured multiple of the voxel size, or when the source surface there faces away from the vertex's own reconstructed normal.
+
+Projection SHALL NOT hard-snap vertices onto the source. A rejected candidate SHALL leave its vertex where extraction placed it.
+
+#### Scenario: Projection recovers detail
+- **WHEN** a model is remeshed with projection on and off at the same resolution
+- **THEN** the projected result's symmetric surface distance to the source is smaller
+
+#### Scenario: Projection does not cross a gap
+- **WHEN** a shape with two surfaces closer together than the projection clamp is remeshed with projection on
+- **THEN** no result vertex is moved onto the surface facing away from it, and the result stays free of self-intersection introduced by projection
+
+#### Scenario: The clamp is honoured
+- **WHEN** a remesh projects with a maximum distance of k voxels
+- **THEN** no vertex moves further than the projection strength times k voxel sizes
+
+### Requirement: Voxel remesh component and volume policy
+A voxel remesh SHALL preserve disconnected components by default. Removing components below a volume threshold SHALL be an explicit opt-in with an explicit threshold, because a floating component is as likely to be a tooth, a lash or an armour plate as it is to be debris.
+
+Where volume preservation is requested, the operation MAY apply a uniform correction about the result's centroid, bounded by a strict clamp, and SHALL skip it where the topology changed in a way that makes the comparison meaningless — an open source closed under policy, or components removed. The report SHALL carry both volumes and their relative difference whether or not a correction was applied.
+
+#### Scenario: A floating component is kept by default
+- **WHEN** a mesh with a large body and a small separate island is remeshed with the default policy
+- **THEN** the result has two components
+
+#### Scenario: Removal is by the caller's threshold
+- **WHEN** the same mesh is remeshed with removal below a volume that the island falls under
+- **THEN** the result has one component and the report records the component counts before and after
+
+### Requirement: Voxel remesh is cancellable and reports progress
+A voxel remesh SHALL be cancellable through the library's cooperative cancellation token, and SHALL check for cancellation at bounded intervals within every expensive stage — domain marking, field sampling, extraction, projection and attribute transfer — rather than only between stages.
+
+A cancelled remesh SHALL return a cancelled status and no result mesh, and SHALL leave the source mesh unmodified.
+
+The operation SHALL publish its progress through the same token, naming the stage it is in.
+
+#### Scenario: Cancellation during sampling is non-destructive
+- **WHEN** a remesh is cancelled while sampling the field
+- **THEN** it returns a cancelled status with no mesh, and the source mesh is byte-identical to what it was before the call
+
+#### Scenario: Cancellation does not wait for a stage to end
+- **WHEN** a token is cancelled during a multi-second stage
+- **THEN** the call returns without completing that stage
+
+### Requirement: Voxel remesh is deterministic
+The CPU reference path of a voxel remesh SHALL be deterministic: the same source mesh and the same parameters SHALL produce a bit-identical result mesh — positions, indices and every attribute — on every run of the same build, whatever the thread pool's scheduling.
+
+This SHALL be a property of how the work is decomposed rather than of running it on one thread: every parallel stage SHALL write disjoint outputs computed from position-only inputs.
+
+#### Scenario: Repeated runs are bit-identical
+- **WHEN** the same mesh is remeshed twice at the same parameters in the same process
+- **THEN** the two results are byte-identical in positions, indices, normals and colours
+
+### Requirement: Parallel lattice marching is a public mesher
+The library SHALL expose a parallel form of the lattice marcher, for a sample function that is safe to call concurrently, producing a mesh byte-identical to the serial marcher's.
+
+Byte-identity SHALL be structural: parallel slabs record their crossings without welding and one builder replays them in slab order, so the builder observes the same call sequence the serial march makes.
+
+#### Scenario: Parallel and serial marches agree exactly
+- **WHEN** a lattice is marched serially and in parallel from the same pure sample function
+- **THEN** the two meshes are byte-identical in positions and indices
+
+### Requirement: A voxel remesh reports what it cost and how far it strayed
+The report of a voxel remesh SHALL carry the result's distance to the source surface as a root-mean-square, a 95th percentile and a maximum; the wall clock spent in each stage; and the working-memory figure the resource guard compared against the budget.
+
+The distance SHALL be documented as ONE-SIDED — every result vertex against the source — and the API SHALL say what that cannot see: a source feature the result deleted entirely leaves no result vertex near it to report, so a rebuild that lost a spike scores well on it. The estimate's thin-feature warning and the relative volume difference are what answer that question.
+
+The stage timings SHALL be diagnostics rather than a contract: they vary between runs, and nothing about the resulting mesh does.
+
+The memory figure SHALL NOT be described as a measured peak. The library has no allocator hook; the number is what the guard computed.
+
+#### Scenario: A finer rebuild strays less
+- **WHEN** a model is rebuilt at two resolutions, one finer
+- **THEN** the finer rebuild's root-mean-square distance to the source is smaller
+
+#### Scenario: The timings account for the run
+- **WHEN** a rebuild succeeds
+- **THEN** every stage has a non-negative time and their sum is within the call's own duration
+
+### Requirement: Source projection weights an incompatible sheet rather than rejecting it
+Where a voxel remesh projects its result onto the source, the movement of each vertex SHALL be scaled continuously by how well the source surface there faces the same way as the vertex's own reconstructed normal, reaching zero where it faces away.
+
+A hard rejection SHALL NOT be used. Moving a vertex fully while leaving its neighbour untouched tears the surface into itself: measured on a sheet folded back through itself, a hard rejection left self-intersecting triangle pairs where the unprojected surface had none and where the continuous weight leaves none.
+
+Projection SHALL NOT increase the result's self-intersection count, and SHALL NOT increase its distance to the source.
+
+#### Scenario: Projection does not tear a fold
+- **WHEN** a surface that folds back through itself is rebuilt with projection on and off
+- **THEN** the projected result has no more self-intersecting triangle pairs than the unprojected one, and is no further from the source
+
+#### Scenario: The weight is exercised, not merely present
+- **WHEN** that same fold is rebuilt
+- **THEN** a measurable share of the vertices within the projection clamp have a closest source point whose surface faces away from them
+
+### Requirement: Coincident vertices can be merged and the collapse removed
+The library SHALL provide a verb that merges vertices within a tolerance into one, rewrites the triangles against the survivors, removes any triangle whose corners have become the same vertex, and reports what it did.
+
+This SHALL be distinct from the weld a sculpting adjacency performs. That one groups vertices into classes and leaves every one of them in the mesh, so that a seam's duplicates move together and the triangle list is byte-identical afterwards; this one merges them and rewrites the triangles. Both SHALL resolve "are these the same vertex" through the same code, so a caller welding before building an adjacency does not get two different answers.
+
+The tolerance SHALL be relative to the mesh's own size, matching the existing convention, and a tolerance of zero SHALL merge only bit-identical positions.
+
+#### Scenario: A marched mesh becomes convertible to an adaptive surface
+- **WHEN** a mesh produced by the default mesher is welded and then converted to an adaptive half-edge surface
+- **THEN** the conversion succeeds, where before welding it was refused for a degenerate triangle
+
+#### Scenario: Welding below the consumer's tolerance is not enough
+- **WHEN** a mesh is welded at a tolerance smaller than the one a downstream consumer welds at
+- **THEN** that consumer may still refuse it, because it merges pairs the smaller tolerance left apart
+
+### Requirement: Welding preserves what it must
+Welding SHALL NOT open a hole: a triangle whose corners coincide bounds no volume, so removing it leaves the surrounding triangles bounding exactly the region they bounded before. A mesh that was watertight before welding SHALL be watertight after.
+
+Welding SHALL NOT merge two vertices whose vertex attributes disagree, unless the caller asks for that explicitly. A UV seam is duplicated positions carrying different UVs — that is how a flat mesh represents a seam at all — and merging across one destroys the layout silently.
+
+Welding SHALL clear the quad list whenever it rewrites the triangles, per the rule that a quad list must never describe triangles that no longer exist. A weld that changed nothing SHALL leave the mesh byte-identical, quads included.
+
+Every index SHALL be within range afterwards: a triangle naming a vertex that does not exist is removed, and that counts as work, so a malformed mesh is not handed back unchanged merely because nothing else needed merging.
+
+The result SHALL be deterministic: the same mesh and tolerance produce the same bytes on every run and platform.
+
+#### Scenario: A watertight mesh stays watertight
+- **WHEN** a marched mesh carrying zero-area triangles is welded
+- **THEN** the result is watertight, 2-manifold and consistently oriented, and carries no zero-area triangles
+
+#### Scenario: A seam survives
+- **WHEN** a mesh whose seam is duplicated positions with different UVs is welded with the default options
+- **THEN** no vertices are merged and the seam is intact
+
+#### Scenario: A clean mesh is untouched
+- **WHEN** a mesh with nothing to merge is welded
+- **THEN** the report says nothing merged and nothing collapsed, and the positions and indices are byte-identical to the input

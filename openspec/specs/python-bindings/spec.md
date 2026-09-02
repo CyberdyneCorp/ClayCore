@@ -10,7 +10,9 @@ and the parity gates are written in, which is why its coverage is held EQUAL to
 the C ABI's rather than allowed to be a convenience subset —
 `check_binding_parity` fails on a capability reachable from one and not the
 other.
+
 ## Requirements
+
 ### Requirement: pyclay module
 The library SHALL ship a nanobind extension module `pyclay` exposing: document/layer construction (`Document`, `add_sdf_layer`, `add_voxel_layer`), the full edit vocabulary (primitives, ops, blends, transforms, deformers, mirrors, strokes) with Pythonic parameter names, field evaluation (`eval`, `gradients`), meshing with resolution/decimation/backend selection, mesh predicates (`is_watertight()` etc.), and save/load of `.clayspace` plus mesh export (OBJ/FBX/PLY/glTF).
 
@@ -752,3 +754,118 @@ The report SHALL be returned as a structure whose fields are readable by name ra
 - **WHEN** a layer of a document is asked for its memory
 - **THEN** the same fields are readable and the voxel content figure reflects that layer alone
 
+### Requirement: Adaptive sculpting is reachable from Python
+`pyclay` SHALL expose the adaptive surface, its sculptor, its topology settings and its conversion to and from a mesh, so the binding-parity gate passes rather than recording an exemption.
+
+Buffers SHALL be numpy-native, and the conversion to a mesh SHALL return the same arrays the existing mesh readback returns.
+
+#### Scenario: Parity holds
+- **WHEN** `tools/check_binding_parity.py` runs after this change
+- **THEN** every adaptive-surface capability reachable from the C ABI is reachable from `pyclay`
+
+### Requirement: The hierarchy is reachable from Python
+`pyclay` SHALL expose level creation and removal, the sculpt and display levels, sculpting at a level, export at a level, and the memory accounting, so the binding-parity gate passes rather than recording an exemption.
+
+Arrays SHALL be numpy-native, and an exported level SHALL return the same arrays the existing mesh readback returns.
+
+#### Scenario: Parity holds
+- **WHEN** `tools/check_binding_parity.py` runs after this change
+- **THEN** every multiresolution capability reachable from the C ABI is reachable from `pyclay`
+
+### Requirement: The brush model is reachable from Python
+`pyclay` SHALL expose the brush model and preset surface the C ABI exposes, so that the binding-parity gate passes rather than recording an exemption.
+
+Arrays SHALL be numpy-native where a sequence is natural, and a preset SHALL serialize to and from `bytes`.
+
+#### Scenario: Parity holds
+- **WHEN** `tools/check_binding_parity.py` runs after this change
+- **THEN** every brush-model capability reachable from the C ABI is reachable from `pyclay`
+
+### Requirement: Voxel remesh from Python
+`pyclay` SHALL expose the global voxel remesh and its preflight estimate, taking resolution as either a longest-axis integer or a world voxel size, and returning the result mesh together with the report's fields as named values rather than as a positional tuple.
+
+A refused remesh SHALL raise with a message naming which contract refused it — resolution, budget, open surface, validation or cancellation — rather than returning an empty mesh a caller has to diagnose.
+
+The binding SHALL be covered by the repository's binding-parity check, so a parameter added to the C++ or C surface and not to Python is caught by the same gate every other surface is.
+
+#### Scenario: A remesh runs from Python
+- **WHEN** a mesh is remeshed from Python at a longest-axis resolution
+- **THEN** a new mesh is returned whose triangle count differs from the source's, together with the resolved voxel size and the validation counts
+
+#### Scenario: The estimate is reachable before the run
+- **WHEN** the estimate is called from Python
+- **THEN** it returns the resolved voxel size, the estimated memory and triangle range, and the open-boundary and component counts, without performing the remesh
+
+#### Scenario: A refusal is an exception naming its cause
+- **WHEN** a Python caller requests a remesh at an invalid resolution and one over a supplied memory budget
+- **THEN** each raises, and the two messages name different causes
+
+### Requirement: A document rebuilds one of its mesh layers
+`pyclay` SHALL expose, on the document, a rebuild of one mesh layer that returns the report as named values; the layer's geometry revision; and a revision-checked replacement for a caller that ran the pure rebuild itself.
+
+A stale commit and a refused rebuild SHALL raise with messages naming which contract refused them, rather than returning silently.
+
+A sculpting session held over a layer that has since been rebuilt SHALL raise on its next operation, including when the replacement had the same vertex and triangle counts.
+
+#### Scenario: The layer rebuild is one undo step from Python
+- **WHEN** a mesh layer is rebuilt from Python with undo enabled
+- **THEN** the layer holds the new triangles, the returned report carries the stage timings and the surface distance, and one undo restores the previous triangles
+
+#### Scenario: A stale commit raises
+- **WHEN** a caller commits a rebuild at a revision the layer has moved past
+- **THEN** it raises, and the layer keeps the newer geometry
+
+### Requirement: Welding is reachable from Python
+`pyclay` SHALL expose the weld on a mesh, returning what it did as named values, and SHALL raise on a negative tolerance rather than clamping it.
+
+#### Scenario: A marched mesh converts after welding
+- **WHEN** a mesh produced by a voxel remesh is welded and then converted to an adaptive surface
+- **THEN** the conversion succeeds and the surface's face count matches the welded mesh's triangle count
+
+#### Scenario: The report says what happened
+- **WHEN** a mesh with nothing to merge is welded
+- **THEN** the returned values report zero merged and zero collapsed
+
+### Requirement: A magnify on the assembled surface is reachable from pyclay
+pyclay SHALL expose `Layer.magnify_surface` and `Layer.magnify_surface_preview` alongside `Layer.move_surface`, returning the nodes that took a warp, making the whole gesture one undo step, and refusing a zero strength or a non-positive radius with a ValueError.
+
+#### Scenario: A blended form swells as one surface
+- **WHEN** Layer.magnify_surface is called over a form built from two blended items
+- **THEN** both items are named in the result and the surface swells symmetrically about the centre
+
+#### Scenario: The preview is pure
+- **WHEN** Layer.magnify_surface_preview is called
+- **THEN** it names the nodes the apply would touch and the field is bit-for-bit unchanged
+
+### Requirement: The field report names its mechanism from Python
+`Layer.field_report` SHALL report `steepest_deformer_chain`, `drawable_count` and `degradation` — the last as one of "none", "volumes", "deformers", "both" — alongside what it already returns, and `advises_consolidation` SHALL follow the mechanism.
+
+#### Scenario: A brush chain on one item is not advised
+- **WHEN** a layer of one item carrying a deep grab is reported below the caller's threshold
+- **THEN** `degradation` is "deformers" and `advises_consolidation` is False
+
+#### Scenario: The same chain over an edit list is advised
+- **WHEN** the same grab is applied to a layer of twenty items
+- **THEN** `degradation` is "both" and `advises_consolidation` is True
+
+### Requirement: A voxel drag is a context manager in pyclay
+`VoxelGrid.grab` SHALL return a gesture usable as a context manager: leaving the block commits it and an exception cancels it. `update` SHALL take the total displacement from the anchor, and `written_box` SHALL report the footprint the gesture writes.
+
+#### Scenario: However the drag is delivered, it lands the same
+- **WHEN** the same total drag is delivered as one, two, four and eight updates
+- **THEN** the occupied cells are identical, and differ from the untouched grid
+
+#### Scenario: An exception inside the block cancels
+- **WHEN** the block raises after an update
+- **THEN** the material is what it was when the gesture began
+
+### Requirement: A region of a layer can be merged from pyclay
+`Layer.consolidate_region` SHALL bake the influence closure of a region and install it in the absorbed items' place, reporting the bake's cost alongside how many roots it absorbed and whether the closure took the whole layer. `Layer.plan_region_merge` SHALL report the same without baking.
+
+#### Scenario: The rest stays parametric
+- **WHEN** a region over one of four separated items is merged
+- **THEN** one is absorbed, the item count is unchanged, and the surface outside the closure has not moved
+
+#### Scenario: Repeated merges do not stack
+- **WHEN** the same patch is merged six times
+- **THEN** the item count is what it was after the first
