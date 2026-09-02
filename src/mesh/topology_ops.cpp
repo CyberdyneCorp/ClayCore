@@ -590,27 +590,68 @@ TopologyResult collapse_duplicate_face_refusal(const DynamicSurface& surface, Ha
 
 // WHERE THE MERGED VERTEX GOES.
 //
+// The constraints that PIN A VERTEX. Moving a vertex incident to one of these
+// drags the feature through the surface with it, which is the thing D12 exists
+// to prevent. Material is here although D12's parenthetical lists only
+// boundary, seam, sharp and user-locked: the requirement above it says an
+// operator honours the constraints ITSELF, and a material boundary that slides
+// because a neighbouring edge collapsed is a bake reading the wrong surface.
+constexpr std::uint32_t kPinningConstraints =
+    static_cast<std::uint32_t>(EdgeConstraint::Boundary) |
+    static_cast<std::uint32_t>(EdgeConstraint::UvSeam) |
+    static_cast<std::uint32_t>(EdgeConstraint::Sharp) |
+    static_cast<std::uint32_t>(EdgeConstraint::Material) |
+    static_cast<std::uint32_t>(EdgeConstraint::UserLocked);
+
+// Which pinning constraints hold `v`, as the union over its incident edges.
+//
+// The boundary flag is taken from the incidence rather than only from the edge
+// flags, because `is_boundary_vertex` is the authority the rest of the file
+// trusts and a vertex can sit on a border whose flags a caller never set.
+std::uint32_t pinning_constraints(const DynamicSurface& surface, VertexId v) {
+    std::uint32_t flags = surface.is_boundary_vertex(v)
+                              ? static_cast<std::uint32_t>(EdgeConstraint::Boundary)
+                              : 0u;
+    std::vector<HalfEdgeId> fan;
+    if (surface.outgoing_halfedges(v, &fan))
+        for (HalfEdgeId h : fan) {
+            const EdgeId e = surface.edge_of(h);
+            if (surface.live(e)) flags |= surface.edges().at(e).constraints;
+        }
+    return flags & kPinningConstraints;
+}
+
 // Midpoint, except that a constraint wins over geometry: exactly one
 // constrained endpoint keeps its position so the feature does not move, and
 // both constrained is refused unless the edge itself carries the same
 // constraint, in which case the feature collapses along itself. See D12.
+//
+// THIS USED TO ASK ONLY WHETHER THE ENDPOINT WAS ON A BORDER, so a vertex held
+// by a crease, a seam or a material boundary was moved to the midpoint like any
+// other and the feature bent by however far the midpoint was. Measured on a
+// unit sphere before the fix: a crease endpoint landed 0.137 away from where it
+// started, exactly on the midpoint.
 TopologyResult collapse_target(const DynamicSurface& surface, EdgeId edge, VertexId v0, VertexId v1,
                                std::uint32_t edge_constraints, kernel::cfloat3* out) {
-    const bool b0 = surface.is_boundary_vertex(v0);
-    const bool b1 = surface.is_boundary_vertex(v1);
-    const bool edge_is_boundary = has_constraint(edge_constraints, EdgeConstraint::Boundary);
-    if (b0 && b1 && !edge_is_boundary) {
-        // Two border vertices joined by an INTERIOR edge: collapsing them welds
-        // two parts of the border together, which changes the surface's shape
-        // in a way no local rule can justify.
-        return TopologyResult::LinkCondition;
-    }
-    if (b0 && !b1)
-        *out = surface.position_of(v0);
-    else if (b1 && !b0)
-        *out = surface.position_of(v1);
-    else
+    const std::uint32_t c0 = pinning_constraints(surface, v0);
+    const std::uint32_t c1 = pinning_constraints(surface, v1);
+    if (c0 && c1) {
+        // Both endpoints held. Allowed only where the edge ITSELF carries a
+        // constraint both of them share, which is the feature collapsing along
+        // its own length; the midpoint stays on the feature. Anything else
+        // welds two separate features together, and no local rule can justify
+        // that — two border vertices joined by an INTERIOR edge is the case
+        // that motivated the rule.
+        if (!(edge_constraints & c0 & c1 & kPinningConstraints))
+            return TopologyResult::LinkCondition;
         *out = surface.edge_midpoint(edge);
+    } else if (c0) {
+        *out = surface.position_of(v0);
+    } else if (c1) {
+        *out = surface.position_of(v1);
+    } else {
+        *out = surface.edge_midpoint(edge);
+    }
     return TopologyResult::Ok;
 }
 
