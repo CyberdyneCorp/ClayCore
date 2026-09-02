@@ -468,3 +468,85 @@ TEST_CASE("dynamic sculpt: a dropped candidate leaves no mark in the slot map") 
     for (mesh::WorkItemId item : workset.items)
         CHECK(workset.positions[workset.slot[item.key()]].x <= 0.0f);
 }
+
+// -- what a redo owes the normals ---------------------------------------------
+//
+// The record's contract is that reverting and re-applying a gesture gives back
+// the surface it found and the surface it left. It did that for connectivity,
+// positions, colours, masks and UVs, and NOT for normals: `write_positions`
+// synced each moved vertex the instant its position changed, while the local
+// normal recompute ran afterwards over the whole touched-face set. So `after`
+// held the normal the vertex had BEFORE the recompute, faces were never noted
+// at all, and the ring vertices the recompute also reaches were in the record
+// in neither direction.
+//
+// Measured on a two-dab gesture before the fix: 138 vertex normals and 216
+// face normals wrong on redo, worst 0.089. A host uploading normals after a
+// redo shades the wrong surface until the next edit touches those faces.
+
+TEST_CASE("dynamic sculpt: a redo restores the normals it recomputed") {
+    auto surface = DynamicSurface::from_mesh(cube_sphere(4, 1.0f));
+    REQUIRE(surface.has_value());
+    DynamicSculptor sculptor(*surface);
+
+    MeshBrushSettings brush;
+    brush.radius = 0.45f;
+    brush.strength = 0.22f;
+    DynamicTopologySettings topo;
+    topo.detail_mode = mesh::DynamicDetailMode::BrushRelative;
+    topo.detail_resolution = 3.2f;
+    topo.max_ops_per_stamp = 200;
+
+    mesh::TopologyDelta delta;
+    brush.center = cf3(0.362f, -0.616f, 0.699f);
+    sculptor.stamp(MeshBrush::Flatten, brush, topo, {}, &delta);
+    brush.center = cf3(-0.548f, 0.741f, 0.387f);
+    sculptor.stamp(MeshBrush::Flatten, brush, topo, {}, &delta);
+    REQUIRE_FALSE(delta.empty());
+
+    // The state the gesture left, by slot, so the comparison survives the
+    // revert emptying and the apply refilling the pools.
+    std::vector<cfloat3> vn(surface->vertices().capacity_slots(), cf3(0, 0, 0));
+    std::vector<cfloat3> vp(surface->vertices().capacity_slots(), cf3(0, 0, 0));
+    std::vector<char> vlive(surface->vertices().capacity_slots(), 0);
+    surface->vertices().for_each_live([&](mesh::VertexId id, const mesh::DynamicVertex& v) {
+        vn[id.slot] = v.normal;
+        vp[id.slot] = v.position;
+        vlive[id.slot] = 1;
+    });
+    std::vector<cfloat3> fn(surface->faces().capacity_slots(), cf3(0, 0, 0));
+    std::vector<char> flive(surface->faces().capacity_slots(), 0);
+    surface->faces().for_each_live([&](mesh::FaceId id, const mesh::DynamicFace& f) {
+        fn[id.slot] = f.normal;
+        flive[id.slot] = 1;
+    });
+
+    REQUIRE(delta.revert(*surface));
+    REQUIRE(delta.apply(*surface));
+
+    // 1e-6 is far tighter than the 0.089 this used to be wrong by, and far
+    // looser than the ~9e-8 that survives: three elements come back through the
+    // OPERATORS' own recompute rather than the deformation's, and those are
+    // refreshed over a ring wider than the scribe notes. Same shape, different
+    // file, and not addressed here.
+    std::size_t vbad = 0, fbad = 0, pbad = 0;
+    float worst_v = 0.0f, worst_f = 0.0f;
+    surface->vertices().for_each_live([&](mesh::VertexId id, const mesh::DynamicVertex& v) {
+        if (id.slot >= vlive.size() || !vlive[id.slot]) return;
+        const float dn = clength(v.normal - vn[id.slot]);
+        if (dn > 1e-6f) { ++vbad; worst_v = std::max(worst_v, dn); }
+        if (clength(v.position - vp[id.slot]) != 0.0f) ++pbad;
+    });
+    surface->faces().for_each_live([&](mesh::FaceId id, const mesh::DynamicFace& f) {
+        if (id.slot >= flive.size() || !flive[id.slot]) return;
+        const float df = clength(f.normal - fn[id.slot]);
+        if (df > 1e-6f) { ++fbad; worst_f = std::max(worst_f, df); }
+    });
+    CAPTURE(worst_v);
+    CAPTURE(worst_f);
+    CHECK(vbad == 0);
+    CHECK(fbad == 0);
+    // Positions were already exact; asserted so a fix here cannot trade one
+    // for the other.
+    CHECK(pbad == 0);
+}

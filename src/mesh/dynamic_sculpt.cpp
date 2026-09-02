@@ -467,10 +467,46 @@ std::size_t DynamicSculptor::write_positions(TopologyDelta* record) {
     touched_faces_.erase(std::unique(touched_faces_.begin(), touched_faces_.end(),
                                      [](FaceId a, FaceId b) { return a.slot == b.slot; }),
                          touched_faces_.end());
+    // THE RECORD HAS TO COVER THE NORMALS TOO, and covering them means noting
+    // BEFORE the recompute and syncing AFTER it.
+    //
+    // What was here recorded a moved vertex's position and synced it
+    // immediately, so `after` held the normal the vertex had BEFORE this call
+    // rewrote it. Faces were never noted at all, and a face carries a normal.
+    // And the recompute reaches every vertex of every touched face — the ring —
+    // while only the vertices that MOVED had been noted, so a neighbour whose
+    // normal changed was not in the record in either direction.
+    //
+    // Measured before this: re-applying a two-dab gesture left 138 vertex and
+    // 216 face normals at their pre-refresh values, worst 0.089. The
+    // connectivity, positions, colours, masks and UVs were all exact, which is
+    // what made it invisible to everything except a byte comparison.
+    //
+    // `note_*` keeps the FIRST sighting, so noting a vertex here that was
+    // already noted above leaves its true `before` intact; `sync_*` keeps the
+    // LAST, which is what makes the second sync the one that counts.
+    if (record) {
+        for (FaceId f : touched_faces_) {
+            record->note_face(surface_, f);
+            VertexId fv[3];
+            if (!surface_.face_vertices(f, fv)) continue;
+            for (const VertexId v : fv) record->note_vertex(surface_, v);
+        }
+    }
+
     // LOCAL normal recompute over the changed faces and every vertex they
     // touch, which is the ring — a face normal is shared, so a moved vertex
     // makes its neighbours' normals stale too.
     surface_.refresh_normals(touched_faces_, &normal_scratch_);
+
+    if (record) {
+        for (FaceId f : touched_faces_) {
+            record->sync_face(surface_, f);
+            VertexId fv[3];
+            if (!surface_.face_vertices(f, fv)) continue;
+            for (const VertexId v : fv) record->sync_vertex(surface_, v);
+        }
+    }
     bvh_.update_many(surface_, touched_faces_);
     surface_.bump_geometry();
     return moved;
