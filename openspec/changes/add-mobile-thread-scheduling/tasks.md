@@ -1,9 +1,9 @@
 # Tasks: add-mobile-thread-scheduling
 
-- [ ] 1.1 DECIDE and record in `design.md`: the default QoS class, and whether interactive dabs and background refills want one pool or two. Decide against how the app actually drives the library, not in the abstract
+- [x] 1.1 DECIDE and record in `design.md`: the default QoS class, and whether interactive dabs and background refills want one pool or two. Decide against how the app actually drives the library, not in the abstract — D1 (UserInitiated, and why neither Default nor Interactive) and D2 (one pool, class per job; Strategy 2 left available and unjustified without device numbers)
 - [ ] 1.2 DECIDE and record: how performance cores are counted per platform (`hw.perflevel0.logicalcpu` on Apple), and what the fallback is where the platform does not distinguish them
 - [x] 1.3 Baseline on `main`: a dab dispatched from a thread simulating the UI thread, with the CPU time burned in the join-spin measured separately from useful work
-- [ ] 1.4 Workers declare a QoS class on Apple platforms; the no-op elsewhere is stated in code rather than silent
+- [x] 1.4 Workers declare a QoS class on Apple platforms; the no-op elsewhere is stated in code rather than silent — `src/parallel/thread_policy.cpp`, one TU with one `#if`, no Objective-C++ (D5)
 - [ ] 1.5 Pool sized from performance cores, host-overridable, zero meaning serial on the calling thread
 - [x] 1.6 Replace the yield-spin at the join with a real wait. Preserve the existing guarantee exactly: once done == num_tasks no worker is inside `fn`, and a late-waking worker can never touch a completed call's state
 - [ ] 1.7 C ABI: a versioned worker-configuration descriptor plus a query, with an out-of-range value refused rather than clamped
@@ -71,3 +71,25 @@ where the issuing thread runs out of chunks early and waits:
 
 Wall time is unchanged, which is the point: the core comes back and the batch
 does not get slower.
+
+## Classification foundation — landed with the header and the seam
+
+- [x] Q1 `parallel::WorkClass` — Interactive / UserInitiated / Utility / Background
+- [x] Q2 Per-job work class on `ThreadPool`, adopted by every body that runs the
+      job including the issuing thread's own participation
+- [x] Q3 Source-compatible `for_range` / `parallel_for` overload; the old
+      signature means UserInitiated (D1)
+- [x] Q4 Platform thread-policy seam, with the non-Apple no-op written out
+- [x] Q5 Apple QoS mapping, Interactive to USER_INITIATED and not
+      USER_INTERACTIVE (D3)
+- [x] Q6 Class applied AND RESTORED per job generation — the workers are
+      persistent, so a class left behind schedules the next job wrong
+- [x] Q7 The calling thread's participation runs under the same scope
+- [x] Q8 Nested-call behaviour tested after the change: inherits its caller,
+      ignores its own argument (D4)
+- [x] Q23 Host threading contract documented, including the half the library
+      cannot do — QoS propagates from the calling thread
+- [ ] Q10-Q14 Classify call sites. Deferred on purpose: a mechanical edit across
+      many files on top of a design change makes the review of neither possible
+- [ ] Q16-Q20, Q24 Device gates. Left unfrozen rather than set from container
+      numbers
