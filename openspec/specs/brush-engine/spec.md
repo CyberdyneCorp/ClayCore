@@ -11,7 +11,9 @@ applies in its own vocabulary.
 Apart from the representations it drives, and that separation is the point: a
 gesture must mean the same thing on a voxel layer, an SDF layer, a mask and a
 mesh, and it can only do that if "what the gesture was" is decided in one place.
+
 ## Requirements
+
 ### Requirement: Strokes resolve to stamps
 The module SHALL resolve a sequence of stroke samples — position, pressure, tilt and a monotone path parameter — into an ordered list of stamps, each carrying a position, radius, strength and orientation. Resolution SHALL be pure: it SHALL NOT read or modify a document.
 
@@ -140,7 +142,9 @@ Each warp SHALL be expressed in its item's OWN frame, mapping the world centre, 
 
 Each warp SHALL be marked for the FRONT of its item's chain, because a warp appended behind an existing deformer has its region weight evaluated at a point that deformer already moved.
 
-An item whose influence bounds do not reach the drag's region SHALL receive no warp at all: a deformer with finite support, outside its own support, is a no-op that still costs a tape record on every evaluation.
+Under the layer's symmetry the drag SHALL be stated as its IMAGES — the ball itself, one reflection per set mirror axis and one rotation per radial copy, additively and never as products, which is exactly the set of copies the compiler emits of an item — and each item SHALL be tested on its OWN influence bound, without the reflected or rotated copies, against each image. An image that reaches an item yields one grab at that image's centre with that image's displacement, so the reflected ball grabs the items whose reflections sit under the ball; an item no image reaches SHALL receive no warp at all, since a deformer with finite support, outside its own support, is a no-op that still costs a tape record on every evaluation. An item that does not participate in the symmetry SHALL see the drag alone. A node's grabs SHALL be ordered by their values, never by which image produced them, and a warp SHALL name every image the item can see so that a continuing gesture can recognise all of its earlier frames.
+
+Where the drag is resolved in two halves, the half that does not depend on the displacement SHALL carry the images the item sees — where each lands in the item's frame, and whether it reaches the item's own bound — so that the per-frame half maps the displacement through each image without the layer, and preparing once then resolving under symmetry is bit-identical to resolving in one step.
 
 #### Scenario: A blended form moves as one surface
 - **WHEN** a drag centred between two smooth-unioned items is resolved and applied
@@ -166,6 +170,40 @@ An item whose influence bounds do not reach the drag's region SHALL receive no w
 - **WHEN** a drag is resolved
 - **THEN** the document is unchanged until the caller applies the result
 
+#### Scenario: Under a mirror the drag selects what the ball or its reflection touches
+- **GIVEN** an x-mirrored layer holding a base ball on the plane, an item under the ball and an item whose reflection sits under the ball
+- **WHEN** the drag is resolved
+- **THEN** the two items are selected and the base is not, and the item reached through its reflection takes a grab at the reflected centre with the reflected displacement — where selecting on the mirror-expanded bound took the base as well and gave that item a grab two diameters off its body
+
+#### Scenario: Material under the ball moves even when it is a copy
+- **WHEN** a mirrored drag is applied over an item and over another item's reflection
+- **THEN** the material under the ball moves by the same amount whether it is an item or a copy, and so do both of their reflections
+
+#### Scenario: A mirrored drag is the mirror image of its mirror image
+- **GIVEN** a mirrored layer with an identity transform and no item opted out of the mirror
+- **WHEN** a drag is applied to one document and its reflection across the plane to a fresh one
+- **THEN** the two documents carry identical deformer chains and evaluate to identical fields at every sample, bit for bit
+
+#### Scenario: An item both images reach takes one grab per image, in a fixed order
+- **WHEN** a drag's ball and its reflection both reach an item straddling the plane
+- **THEN** the item takes one warp carrying one grab per image, the two pulls compose as two brushes would, and the grabs are ordered by value so the +x drag and its mirror image produce the same field whether or not the item is itself plane-symmetric
+
+#### Scenario: An opted-out item sees the ball, not its reflection
+- **WHEN** an item that does not participate in the mirror sits only where the reflected ball would reach it
+- **THEN** it takes no warp, and the same item participating takes one through its copy
+
+#### Scenario: Two mirror axes make two reflections, not four quadrants
+- **WHEN** a layer mirrors about two axes and a drag is resolved in one quadrant
+- **THEN** the items in the two single-reflection quadrants are selected and the item in the diagonal quadrant is not
+
+#### Scenario: A prepared drag under symmetry is the one-step drag
+- **WHEN** a drag on a mirrored, two-axis or radial layer is prepared once and resolved for a displacement
+- **THEN** every item's grabs and the rest of its gesture identity are bit-identical to resolving the drag in one step, and an item reached only through its copy is prepared with that image marked as the one that reaches it
+
+#### Scenario: Radial symmetry rotates the brush the same way
+- **WHEN** a layer carries a radial count and an item's rotated copy sits under the ball
+- **THEN** that item takes a grab at the ball rotated by the copy's inverse angle, the copy under the ball moves, and the rotated-image drag on a fresh document matches the original to floating-point tolerance
+
 ### Requirement: The Move brush inherits grab's pull, and says so
 The move SHALL use the existing `grab` deformation rather than a new one, and SHALL therefore inherit its behaviour: the surface moves LESS than the displacement asked for, because the region weight is taken at the sample point rather than at its preimage.
 
@@ -176,7 +214,7 @@ This SHALL be documented rather than corrected. Solving for the true preimage co
 - **THEN** the surface moves further each time, by less than the displacement given
 
 ### Requirement: A drag coalesces rather than accumulating
-A Move applied repeatedly as one gesture SHALL replace that gesture's warp rather than adding another beside it. A drag holds its centre and radius fixed and grows only its displacement, so those two identify the gesture without a caller having to thread an identifier through.
+A Move applied repeatedly as one gesture SHALL replace that gesture's warps rather than adding others beside them. A drag holds its centre and radius fixed and grows only its displacement, so those two identify the gesture without a caller having to thread an identifier through — under symmetry, the centre and radius of each image of the gesture on that item, whether or not the image reaches the item this frame.
 
 Otherwise a drag adds one warp per frame: the chain grows without bound, and because each warp multiplies into the declared Lipschitz, the safe step scale collapses over the length of the gesture.
 
@@ -197,6 +235,14 @@ A drag whose centre or radius differs is a different gesture and SHALL be kept b
 #### Scenario: An unrelated chain is left alone
 - **WHEN** a Move is applied to an item whose chain already begins with a deformer that is not this drag
 - **THEN** that deformer is kept, and the move goes in front of it
+
+#### Scenario: An item on the mirror plane does not stack its two grabs
+- **WHEN** a mirrored Move whose ball and reflection both reach an item is applied over several frames
+- **THEN** the item carries exactly two grabs after every frame, and the field equals a single application of the final displacement
+
+#### Scenario: An image that starts or stops reaching mid-drag is still the same gesture
+- **WHEN** a frame's pull widens an item's bound so that a second image reaches it, or a later frame's smaller pull lets that image miss it again
+- **THEN** the chain holds one grab per image reaching the item that frame and never two grabs of one identity, because every leading grab matching any image of the gesture is replaced
 
 ### Requirement: A move can be previewed without applying it
 The library SHALL expose which items a drag would warp without modifying the document, so a host can preview a Move, or show what it is about to affect, before committing it.
@@ -445,3 +491,124 @@ The indexed path and the fallback SHALL produce the SAME region, so a brush cann
 - **WHEN** a region query consults the ray tree after earlier stamps have moved vertices
 - **THEN** the tree is refitted first, so the region is the set of vertices that are under the brush NOW
 
+### Requirement: A brush is composed from orthogonal policies
+The library SHALL express a brush as a composition of named, independent axes rather than as a verb with a settings struct: a stroke preset, a footprint, a weight model, a reference frame, a deformation kernel, an accumulation rule, a write target and a post policy.
+
+Artist-facing brush families — ClayBuildup, DamStandard, hPolish, Trim Dynamic, Snake Hook, Rake — SHALL be expressible as values of those axes and SHALL NOT require an engine path of their own. A new named brush that needs a new code path is evidence an axis is missing, and the axis is what SHALL be added.
+
+The axes SHALL be enums and plain data, not polymorphic objects. A per-vertex loop that dispatches virtually cannot be specialized, serialized or mirrored across a C ABI, and all three are required of this model.
+
+The reference frame SHALL be explicit. `draw` displacing along the region's averaged normal and `inflate` along each vertex's own normal SHALL be the same kernel under two frames, and the results SHALL be identical to the two separate verbs they replace.
+
+#### Scenario: A named brush family is a preset
+- **WHEN** a preset library entry for a named brush family is loaded and applied
+- **THEN** it resolves to axis values over existing kernels, and no kernel exists whose only caller is that one family
+
+#### Scenario: Draw and inflate remain distinct under one kernel
+- **WHEN** the same kernel is applied under the region-normal frame and under the vertex-normal frame to a region straddling a saddle
+- **THEN** the two results differ in the way `draw` and `inflate` differed before this change, bit for bit
+
+### Requirement: A stroke compiles its preset once
+The library SHALL validate and compile a brush preset into a flat runtime plan at the beginning of a stroke, and each stamp SHALL read that plan rather than re-inspect the preset.
+
+The plan SHALL record what the kernel actually needs — normals, neighbours, a pre-stamp snapshot, an alpha sampler, automask factors — so that a stamp gathers only what it will use.
+
+A plan SHALL be cached against the preset's revision, and an unchanged preset SHALL NOT be recompiled between stamps.
+
+#### Scenario: A plan is compiled once per stroke
+- **WHEN** a stroke of many stamps runs with an unchanged preset
+- **THEN** the preset is compiled exactly once and every stamp reads the compiled plan
+
+### Requirement: Brush behaviour does not depend on event batching
+Resolving the same stroke path SHALL produce the same stamps whether the host delivers its samples in one batch or in several, provided the stroke's transaction state is retained between calls.
+
+Deterministic jitter, spacing, taper and clamped accumulation SHALL all hold under that split, because a host's event coalescing is a property of the device and not of the artist's gesture.
+
+#### Scenario: One batch and five batches agree
+- **WHEN** a stroke path is resolved as one batch of samples and then as five consecutive batches through one transaction
+- **THEN** the resolved stamps are identical
+
+### Requirement: Automasking gates a brush without a per-verb branch
+The library SHALL provide automask factors — normal angle, topology connectivity, boundary proximity, cavity, and surface-group membership — evaluated over the brush's WORKSET and composed into the per-vertex weight by multiplication.
+
+An automask SHALL be computed for the vertices a stamp reaches and SHALL NOT be computed, allocated or scanned for the whole surface.
+
+Cavity and curvature automasks SHALL be derived from the SAME estimator the procedural mask verbs use, so that a painted cavity mask and a cavity automask cannot disagree about one surface.
+
+The surface-group automask SHALL read the document's group field rather than a per-face group identifier. Groups are addressed on a world lattice so that they survive a representation bridge; a per-face copy would be a second answer to the same question and would not survive one.
+
+A fully automasked vertex SHALL be bit-identical to its input position.
+
+#### Scenario: A cavity automask and a painted cavity mask agree
+- **WHEN** a cavity automask and a procedural cavity mask are evaluated over the same surface with the same parameters
+- **THEN** they report the same values within the estimator's own tolerance
+
+#### Scenario: An automask costs the workset, not the model
+- **WHEN** a stamp with every automask enabled runs on a mesh of a million vertices with a footprint of a few thousand
+- **THEN** the automask evaluation touches the workset and its read halo only
+
+### Requirement: A brush preset is versioned and carries no image data
+A brush preset SHALL carry a schema version from its first release, SHALL deserialize an older version by supplying defaults, and SHALL REFUSE an unknown newer version rather than interpreting the prefix it recognises.
+
+A preset SHALL NOT embed alpha, height or displacement image bytes. Image content SHALL remain caller-owned and borrowed for the duration of a call, as the mesh alpha stamp already requires, so that a preset library costs kilobytes and a host owns its own resource cache.
+
+#### Scenario: A newer preset is refused
+- **WHEN** a preset serialized by a newer schema version is deserialized
+- **THEN** the call fails with a typed error and produces no partially populated preset
+
+#### Scenario: A preset round-trips
+- **WHEN** a preset is serialized, deserialized and used to resolve a stroke
+- **THEN** the resolved stamps are identical to those from the original preset
+
+### Requirement: A world magnify resolves into a field-level radial scale
+A magnify stated in WORLD space — a centre, a radius and a SIGNED strength — SHALL resolve into one `magnify` deformer per item the region reaches, each already in that item's own frame, so that the layer's ASSEMBLED surface swells or gathers rather than one item's share of it.
+
+`magnify` is per item and applied to that item's local point, exactly as `grab` is, so a magnify put on one item of a smooth-unioned form scales that item's field and leaves the others where they were. This is the hazard `move_brush` exists for, and it applies to the radial scale verbatim.
+
+A POSITIVE strength SHALL swell the surface away from the centre and a NEGATIVE one gather it toward. One signed parameter covers Magnify and Pinch, which are one deformation.
+
+The strength SHALL cross the layer's symmetry images unchanged: a reflection or a rotation of a radial scale is a radial scale of equal strength, unlike a drag's displacement, which has to be mapped per image.
+
+This SHALL follow the resolver pattern the Move brush established: the layer is READ and never written so a host can preview the gesture, the warps are RETURNED rather than applied so one command per node inside an undo group makes the gesture one undo step, and each warp SHALL belong at the FRONT of its node's chain.
+
+Items the region cannot reach SHALL take no deformer, a strength of zero SHALL produce nothing, and a non-positive radius SHALL produce nothing.
+
+#### Scenario: A blended form swells as one surface
+- **WHEN** a magnify is resolved over a form smooth-unioned from two items and the warps are applied
+- **THEN** both items take a share and the surface swells symmetrically about the gesture's centre
+
+#### Scenario: Magnifying one item is not the same thing
+- **WHEN** the same deformation is expressed as a magnify on a single item instead
+- **THEN** that item's side moves and the other is left behind
+
+#### Scenario: The sign chooses Magnify or Pinch
+- **WHEN** the same region is resolved at a positive and then a negative strength
+- **THEN** the surface swells away from the centre in the first case and gathers toward it in the second
+
+#### Scenario: A transformed layer maps correctly
+- **WHEN** the layer carries a transform and a magnify is resolved in world space
+- **THEN** the surface changes where the gesture was aimed, and the radius each item sees is the world radius through that layer's scale
+
+#### Scenario: Nothing is written
+- **WHEN** a magnify is resolved
+- **THEN** the document is unchanged until the caller applies the result
+
+### Requirement: A magnify gesture coalesces rather than accumulating
+A magnify applied repeatedly as one gesture SHALL replace that gesture's deformers rather than adding another beside them, for the reason a drag does: otherwise the chain grows by one entry per frame and each entry multiplies into the declared Lipschitz.
+
+A gesture SHALL be recognised by its KIND as well as by its centre and radius. A drag and a magnify over the same ball are two gestures, and neither SHALL replace the other's leading deformer.
+
+#### Scenario: A live gesture replaces its own last frame
+- **WHEN** a magnify is applied over several frames at a growing strength
+- **THEN** each item carries one magnify, and the document is the one a single frame at the final strength produces
+
+#### Scenario: A pinch does not swallow a drag over the same ball
+- **WHEN** a magnify is applied over a ball that already carries a drag's grab
+- **THEN** both remain, the magnify in front
+
+### Requirement: A magnify can be previewed without applying it
+Resolving SHALL be pure, and a caller SHALL be able to learn which nodes a magnify would warp without touching the document. The preview SHALL refuse exactly what the apply refuses, so a host does not discover a malformed gesture only on commit.
+
+#### Scenario: The preview names what the apply touches
+- **WHEN** a magnify is previewed and then applied over the same region
+- **THEN** the preview names the same nodes, and the document is unchanged until the apply

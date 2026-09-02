@@ -10,7 +10,9 @@ It is its own capability because of what it may not name. A kernel that mentions
 a document, a layer, a host type or a threading primitive cannot be compiled for
 four devices and compared bit for bit, and that comparison is what makes a field
 one field rather than four that resemble each other.
+
 ## Requirements
+
 ### Requirement: Kernel dialect portability
 All distance functions and operators SHALL be written once, in header-only files under `include/clay/kernel/`, in a restricted C++ dialect accepted by every target compiler: no virtual functions, no exceptions, no heap allocation, no recursion, `constexpr`-friendly, using only fixed-size vector/scalar types from `shim.h` (`cfloat3`, `cfloat4x4`, …). `shim.h` SHALL map those types and qualifiers to the native types of each backend (Apple `simd`/scalar C++ for CPU, MSL vectors for Metal, CUDA vectors, OpenCL vectors) under the macros `CLAY_KERNEL_CPU`, `CLAY_KERNEL_METAL`, `CLAY_KERNEL_CUDA`, `CLAY_KERNEL_OPENCL`. The `kernel` module SHALL depend on nothing outside itself.
 
@@ -618,12 +620,35 @@ Flattening SHALL mean the same thing it means for voxels: material on the plane'
 - **WHEN** a flattened volume is placed in a document
 - **THEN** it combines, saves and evaluates exactly as any other volume does
 
-### Requirement: Flatten samples a new volume rather than editing one
-Flatten SHALL build its result by SAMPLING a source field with the plane blended in, so that the new band brackets the flattened surface. It SHALL NOT transform an existing volume's stored samples in place.
+### Requirement: Flatten's result is classified from the flattened values
+Flatten SHALL decide which bricks its result stores from values the plane has
+ALREADY been blended into, so that the new band brackets the flattened surface.
+It SHALL NOT reclassify a volume against where the surface used to be, and it
+SHALL NOT rewrite an existing volume's samples under a fixed sparse support.
 
-This is why: a narrow band tracks the surface only while the surface stays inside it. Smoothing moves the surface by less than a cell, so `relax` can rewrite samples where they lie. Flatten moves it by many band widths, and once the surface has walked outside the band there are no samples left describing where it now is — the isosurface comes apart. Sampling builds the band around the flattened surface instead, and makes the blend closed-form: no iteration, no step budget, no band to narrow afterwards.
+This is why: a narrow band tracks the surface only while the surface stays
+inside it. Smoothing moves the surface by less than a cell, so `relax` can
+rewrite samples where they lie under support that cannot change. Flatten moves
+it by many band widths, and once the surface has walked outside the band there
+are no samples left describing where it now is — the isosurface comes apart. So
+a brick that held nothing before the blend SHALL be able to hold the facet
+after it, and a brick whose samples the blend carried past the band SHALL be
+able to stop storing them.
 
-Where an exact source exists — a document's field — flatten SHALL prefer it to a volume, because a volume reports a lower bound rather than a distance outside its own band, and sampling a field that mixes the two records the boundary between them as part of the shape.
+What that forbids is CULLING BEFORE THE BLEND. A brick that looks irrelevant
+against the source surface may be exactly where the facet lands, so a source
+evaluator's own near-surface decision is not the result's.
+
+Where an exact source exists — a document's field — flatten SHALL prefer it to
+a volume, because a volume reports a lower bound rather than a distance outside
+its own band, and sampling a field that mixes the two records the boundary
+between them as part of the shape. Where flatten must read a volume, it SHALL
+prefer that volume's STORED SAMPLE at a position to an evaluation of it, and
+fall back to evaluation only where no brick stores one. A stored sample is a
+measurement; an evaluation away from the band is a bound that steps by brick,
+and re-recording those bounds as though they were distances is what made an
+in-place flatten inflate a volume 2.8x and declare a Lipschitz of 14 where its
+source declared 1.
 
 #### Scenario: The band brackets the flattened surface
 - **WHEN** a shape is flattened so its surface moves well beyond the original band
@@ -632,6 +657,16 @@ Where an exact source exists — a document's field — flatten SHALL prefer it 
 #### Scenario: A ray still finds the surface
 - **WHEN** a ray is marched at a flattened volume
 - **THEN** it stops at the facet rather than passing through it
+
+#### Scenario: A facet appears where nothing was stored
+- **GIVEN** a plane far enough from the surface that the bricks it crosses hold no samples
+- **WHEN** the shape is flattened onto it
+- **THEN** those bricks store the facet afterwards
+
+#### Scenario: Flattening a volume does not re-record its bounds as distances
+- **GIVEN** a volume whose samples are an exact distance, declaring a Lipschitz of one
+- **WHEN** a small region of it is flattened
+- **THEN** the count of stored bricks and the declared Lipschitz are set by what the brush did, not by the volume having been read back through evaluation
 
 ### Requirement: The declared Lipschitz is measured, not assumed
 A region blends under a weight that varies across it, which adds a term proportional to how far the value moves times the gradient of the weight — so flatten CAN make the field steeper than its source. The result SHALL declare a Lipschitz bound its samples actually satisfy, and that bound SHALL be measured from the samples produced rather than bounded in advance.
@@ -1279,13 +1314,37 @@ different cures and an aggregate cannot tell them apart:
 - a verb that appends a domain warp per gesture, so a stroke multiplies the
   chain's Lipschitz factor without any volume being involved at all.
 
+Each cause SHALL be reported as a FACTOR, not only as a count. A chain's length says nothing about what it costs the marcher, so a count cannot be weighed against the volume mechanism's steepness.
+
+The report SHALL name which mechanism is responsible, so a host picks a cure rather than deriving one from a single number.
+
+Any advice the report offers SHALL be keyed on that mechanism. Consolidation wins back exactly two things — the cost of walking an EDIT LIST, and the Lipschitz of STACKED VOLUMES, which the bake redistances away — so it SHALL NOT be advised for a layer that has neither, where it swaps a cheap analytic item for a dense volume and is measurably a loss.
+
+The count of nodes and the count of nodes that are EVALUATED SHALL both be available. A group is a transform and a name; it contributes no field, so it is not an edit list to win back.
+
 #### Scenario: A chain reports its own degradation
 - **WHEN** a region verb is applied to the result of a previous region verb
 - **THEN** the declared Lipschitz and the safe step scale reflect the chained cost, and both are readable before the next edit
 
 #### Scenario: The report names which mechanism degraded the chain
 - **WHEN** a host asks a layer what its chain costs
-- **THEN** it is told the steepest sample Lipschitz among the layer's volumes and the longest deformer chain on any of its items, alongside the aggregate
+- **THEN** it is told the steepest sample Lipschitz among the layer's volumes and the steepest deformer chain factor among its items, alongside the aggregate and the name of the mechanism responsible
+
+#### Scenario: The chain's factor separates chains of equal length
+- **WHEN** two layers each carry one deformer, one gentle and one deep
+- **THEN** they report the same chain LENGTH and different chain factors
+
+#### Scenario: Consolidation is not advised where it does not apply
+- **WHEN** a layer is one evaluated item carrying a brush chain, degraded past the caller's threshold
+- **THEN** the mechanism is reported as the deformer chain and consolidation is NOT advised
+
+#### Scenario: Consolidation is advised where there is something to absorb
+- **WHEN** a layer degraded past the caller's threshold holds several evaluated items, or a volume whose samples are steep
+- **THEN** consolidation is advised
+
+#### Scenario: A group is not an edit list
+- **WHEN** a single item degraded by its own chain is wrapped in a group
+- **THEN** the node count includes the group, the evaluated count does not, and consolidation is still not advised
 
 ### Requirement: A sampled volume declares what its samples measure
 A volume produced by sampling a field SHALL declare a sample Lipschitz no smaller than the slope its stored samples actually have.
@@ -1395,6 +1454,8 @@ An item SHALL be able to carry a mask that scales how much it contributes at eac
 
 This SHALL apply to every combine operation, including booleans, not only to edits made through the stroke engine.
 
+A gate SHALL be evaluated in WORLD space. The mask it is measured from is stored in world units on its own lattice, so the region it protects is where it was painted and SHALL NOT be moved, turned or scaled by the transform of the item it gates, nor by that item's layer. A gate placed by the gated item's own transform protects a region that moves with the very item it holds back, which is indistinguishable from a gate that does nothing.
+
 #### Scenario: A fully protected region is untouched by a subtract
 - **WHEN** a subtract item overlaps a region whose mask is fully protective
 - **THEN** the field in that region is exactly what it was without the item
@@ -1403,8 +1464,18 @@ This SHALL apply to every combine operation, including booleans, not only to edi
 - **WHEN** an item is masked but the mask is zero over the evaluated region
 - **THEN** the field is exactly the unmasked result
 
+#### Scenario: The gated item is placed
+- **WHEN** a gated item is moved, turned or scaled in a way that leaves what it carves unchanged
+- **THEN** the protected region is the same one it was at identity
+
+#### Scenario: The gated item's layer is placed
+- **WHEN** the layer holding a gated item is turned onto its own footprint
+- **THEN** the protected region is the same one it was at identity
+
 ### Requirement: A gated item declares its Lipschitz cost
 Mixing two fields by a spatially varying weight is not a distance field. The tape SHALL charge the mix against the item's Lipschitz bound, derived from the mask's own gradient bound, so raymarching a gated document does not overshoot.
+
+The falloff width SHALL be charged in world units, as given. It is already a world quantity and the gate is read in world space, so applying the layer's scale to it would declare a softness the kernel does not have — and because a wider gate costs LESS, doing so overstates the safe step scale rather than understating it.
 
 #### Scenario: A uniform mask costs no step scale
 - **WHEN** an item's mask is constant over its influence
@@ -1413,6 +1484,10 @@ Mixing two fields by a spatially varying weight is not a distance field. The tap
 #### Scenario: Raymarching a gated document does not overshoot
 - **WHEN** a gated item's document is marched by its declared step scale
 - **THEN** no step lands past the surface
+
+#### Scenario: The same world split differently between layer and item scale
+- **WHEN** two documents describe the same geometry and the same gate, one with a unit layer scale and one with the scale moved onto the layer and divided out of every item
+- **THEN** both declare the same safe step scale, and marching either by it does not overshoot
 
 ### Requirement: A culled tape agrees with the full tape inside the band
 Compiling against a culling region SHALL produce a tape whose band-clamped values are identical to the full tape's at every point inside that region. A consumer that culls does so to go faster, not to get a different field, and the surface lies inside the band.
@@ -1466,3 +1541,156 @@ A verb that transforms the sampled block before it is stored SHALL NOT cull, bec
 - **WHEN** it is baked
 - **THEN** the volume is the one the whole tape produces
 
+### Requirement: An operator that moves the surface resamples its region locally
+An operator confined to a region SHALL cost what that region contains rather
+than what the volume contains, even when it can move the surface OUTSIDE the
+sampled band, exactly as a region-limited rewrite does for an operator that
+cannot. The two
+differ only in what they may change: a rewrite preserves which bricks store
+samples, a resample decides that again from the values it produced.
+
+A resample SHALL therefore support, for the bricks that meet its region, a
+brick that stored samples storing different ones, a brick that stored none
+storing some, and a brick that stored some storing none. A brick that does not
+meet the region SHALL keep its samples unchanged, byte for byte.
+
+The operator SHALL be the identity outside the region it declares, for the same
+two reasons a region-limited rewrite requires it: the bricks that are skipped
+keep their old values, which is the same answer only if the operator would have
+returned them; and a sample on a brick face is stored by every brick sharing
+it, so an operator that changed such a sample where one sharer was selected and
+another was not would leave the two copies disagreeing and the field stepping at
+the brick face.
+
+The region SHALL be measured to where the operator's weight can be non-zero,
+INCLUDING its taper. No margin for how far the surface MOVES is needed and none
+SHALL be added on that account: the field outside the region is unchanged, so
+its zero set outside the region is unchanged, and whatever surface the operator
+creates lies within the region that created it.
+
+The far bounds of sample-free bricks SHALL be re-derived after the sparse
+support changes, since they are each a distance to the nearest brick that
+stores samples and that set has moved.
+
+The declared Lipschitz SHALL remain one the result's samples satisfy. Bricks
+the resample did not touch cannot have become steeper than the volume already
+declared, so measuring the bricks it did touch and keeping the volume's own
+declaration as a floor is sufficient, and may only overstate.
+
+#### Scenario: A resampled region is the resampled whole
+- **GIVEN** an operator that leaves every sample outside a region exactly as it found it
+- **WHEN** it is resampled over that region only, and again over the whole volume from the same source
+- **THEN** the two volumes store the same bricks and the same samples, including both copies of every sample shared across a brick face
+
+#### Scenario: A dab's cost follows the dab
+- **GIVEN** two volumes of the same surface at the same cell size, one covering far more of it
+- **WHEN** the same small brush is flattened into each
+- **THEN** the number of bricks whose samples are evaluated is the same
+
+#### Scenario: Samples beyond the taper are untouched
+- **GIVEN** a flatten confined to a region
+- **WHEN** the stored samples beyond the region and its taper are compared with the input's
+- **THEN** each is bit-identical to the value it had
+
+#### Scenario: A brush on a brick corner keeps the copies together
+- **GIVEN** a brush centred on a brick face, edge or corner, so that selected and unselected bricks share samples
+- **WHEN** the result's stored samples are read back by global coordinate from each brick that holds them
+- **THEN** every copy of a shared sample agrees
+
+### Requirement: A volume producer measures its Lipschitz once
+A verb that builds a volume through the library's sampling SHALL NOT measure
+the result's Lipschitz again itself. Sampling already measures what it stored,
+over the same samples and by the same rule, and a verb that measures a second
+time pays a sweep of every stored sample in the volume — 4.7% of a flatten at
+cell 0.015 — to arrive at the number it was already given.
+
+#### Scenario: Sampling's declared bound is the verb's
+- **WHEN** a verb that samples a volume returns it
+- **THEN** the volume's declared Lipschitz already equals a measurement of its stored samples
+
+### Requirement: An appended edit can be evaluated without replaying the chain
+An edit list SHALL be evaluable from the value its unchanged prefix produced, rather than by re-running that prefix. A brush stamp appends one item to a list of thousands, and re-evaluating the thousands over a dirty brick's samples is what makes a dab cost what the document holds instead of what the dab adds: measured at a 0.05 voxel, one dab into twelve bricks is 0.23 ms against 200 items and 18.07 ms against 50,000, with per-brick culling working on both.
+
+Continuing from that value SHALL be EXACT, not an approximation. The compiler emits each item's contribution as a self-contained expression and folds it into one running accumulator, so after every item the stack holds exactly one value — including under a layer mirror, where an item emits two primitives and a combine before folding in. Continuing therefore runs the same instructions in the same order over the same floats, with the part already folded represented by the number it produced, and the result SHALL be bit-identical to evaluating the whole document. A tolerance SHALL NOT be accepted in its place: the two are the same arithmetic, so anything short of identity means the suffix is not the suffix.
+
+A suffix SHALL be refused wherever the compiler cannot be certain the prefix still describes the document — no checkpoint, the layer gone or no longer the one an append extends, or the appended items not actually at the tail of its list. A refusal costs the full evaluation the caller would have paid anyway; a wrong reuse is silent.
+
+A suffix tape SHALL NOT be evaluable as an ordinary tape. It holds only the appended items and its bounds describe only them, so an evaluator whose stack starts empty would compute the suffix against empty space rather than against the shape.
+
+#### Scenario: A seeded suffix is the whole document
+- **GIVEN** a document whose last few items were appended to a chain
+- **WHEN** only those items are compiled and evaluated from the value the rest produced
+- **THEN** every point is bit-identical to evaluating the whole document
+
+#### Scenario: The saving follows the dab rather than the document
+- **WHEN** the same appended item is evaluated against documents of very different sizes
+- **THEN** what it costs is set by the item rather than by how much history precedes it
+
+#### Scenario: A suffix of nothing is the value it was given
+- **WHEN** nothing was appended
+- **THEN** evaluation returns the seed, rather than the "far outside" an empty tape means to an empty stack
+
+#### Scenario: An uncertain prefix is refused
+- **WHEN** the items claimed as appended are not the tail of the layer they name, or the checkpoint names a layer that is no longer there
+- **THEN** the compile is refused and the caller evaluates in full
+
+### Requirement: An alpha stamp is authored in the item's own space
+An alpha deformer's centre, direction, tangent, extent and radius SHALL be interpreted in the item's own local space, as a bend curve's guide and a lattice's box already are, and the API SHALL say so at every door that authors one.
+
+The consequence is the point: they RIDE the item's transform. Moving the item moves the stamp, scaling it scales the stamp, and a stroke's template alpha therefore arrives in every stamp's own frame — turned by that stamp's rotation and scaled by its radius — without the stroke resolver transforming anything. A resolver that pre-transformed a template's alpha would apply the stamp transform twice.
+
+The library SHALL provide the conversion from a world-space surface placement into an item's frame, because the helper that derives a placement from a surface hit necessarily produces world coordinates and the deformer necessarily consumes local ones.
+
+#### Scenario: A stamp lands where the surface was hit
+- **WHEN** a world-space placement derived from a surface hit on an item with a non-identity transform is converted into that item's frame and applied
+- **THEN** the field moves by the authored amplitude at the hit point, and falls off symmetrically away from it
+
+#### Scenario: An alpha rides its item's transform
+- **WHEN** the same local alpha is applied to an item at the identity and to one translated, rotated and scaled
+- **THEN** the second's field at each transformed point equals the first's at the original point, scaled by the item's scale
+
+#### Scenario: A stroke carries the template's alpha unchanged
+- **WHEN** a template item carrying an alpha is stroked into several stamps of differing radius and rotation
+- **THEN** every resolved stamp carries the alpha with its samples, and its centre, direction and radius are unchanged in local coordinates
+
+### Requirement: A degenerate alpha is refused rather than appended
+An alpha whose direction has no length, or whose radius is not positive, SHALL be refused, leaving the item unchanged.
+
+Both were previously accepted: the kernel substitutes a fixed axis for a zero direction and floors a non-positive radius, so each appended a deformer that returned success and did nothing. That is the case the width-below-two refusal already exists for.
+
+The all-zeroes direction that a mesh brush descriptor documents as "the surface normal under the centre" SHALL NOT be given that meaning here, and the API SHALL say why: a mesh brush resolves it by querying the surface, and an item being authored has no surface to query.
+
+#### Scenario: A zero direction is refused
+- **WHEN** an alpha is added with an all-zeroes direction, or with a zero or negative radius
+- **THEN** the call is refused and the item is byte-identical to one the call was never made on
+
+### Requirement: A chain's Lipschitz is priced where its links can reach
+Composing a deformer chain's Lipschitz factors SHALL account for FINITE SUPPORT. A link that is the identity outside its own region cannot compound with one whose region it cannot reach, and the chain's bound SHALL therefore be the worst such GROUP rather than the product of every link.
+
+Two finite-support links SHALL be treated as able to compound when their regions are closer than `r_i + r_k` plus the total distance the chain's point warps can carry a point. That is conservative in the safe direction and does not depend on where the two sit in the chain.
+
+A link with UNBOUNDED support acts everywhere and SHALL be charged against every group. A link whose region is degenerate SHALL be treated as unbounded rather than as empty, the other way round being the unsafe direction.
+
+The composition SHALL keep the distinction the fold already had: a point warp multiplies the slope through the chain rule, a distance offset adds its own gradient to it.
+
+The result SHALL remain a bound. This relaxation makes the declared step scale LARGER, so it is the one place where being wrong lets a marcher step through a surface.
+
+#### Scenario: Disjoint brushes cost what one costs
+- **WHEN** a chain carries eight grabs whose regions cannot reach one another
+- **THEN** the declared step scale is the one a single grab declares
+
+#### Scenario: Brushes that can reach each other still compound
+- **WHEN** a chain carries grabs piled on one spot
+- **THEN** every additional one lowers the declared step scale
+
+#### Scenario: The threshold is the reach, not the radii
+- **WHEN** two grabs' regions do not overlap but the first can carry a point into the second
+- **THEN** they compound, and moving them past that reach stops them compounding
+
+#### Scenario: An unbounded link is charged everywhere
+- **WHEN** a chain carries two disjoint grabs and a twist between them
+- **THEN** the bound is the twist's factor times one grab's, not the larger of the two
+
+#### Scenario: Marching by the relaxed bound is still safe
+- **WHEN** a document whose items carry disjoint brushes is marched by its declared step scale
+- **THEN** no step lands past the surface

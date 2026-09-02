@@ -9,7 +9,9 @@ without the parts it does not know rather than failing. The interchange formats
 — OBJ, PLY, FBX, glTF — carry geometry out to other tools and carry meshes in,
 under import guardrails, because an imported file is the one input this library
 does not control.
+
 ## Requirements
+
 ### Requirement: Document format (.clayspace)
 `clay::io` SHALL read and write the `.clayspace` single-file binary chunked container: versioned chunks for scene commands (the undo command vocabulary), palettes, voxel grids (palette+RLE compressed), thumbnails (PNG), and camera bookmarks. Readers SHALL open any older format version (backward-open) and SHALL refuse newer major versions with a clear error (forward-refuse), never crashing or partially loading. The format lives entirely in claycore so Python and CI read/write projects without the app.
 
@@ -381,3 +383,71 @@ A mask is already a painted scalar in `[0, 1]` resolvable at any point, which is
 - **WHEN** a handoff is written without a mask
 - **THEN** the material mix is zero for every vertex, and the payload is still present
 
+### Requirement: A layer record may reference another layer's content
+From scene minor 15 a layer record SHALL carry a content-source layer id: 0 meaning the layer owns the content that follows in the record, any other id meaning the layer shares the content of the layer with that id and carries none of its own.
+
+Ownership SHALL be derived at write time from the identity of the content itself, in STACK ORDER: the first layer holding a given edit list owns it and every later holder names it. No flag is stored for it, so the file cannot disagree with the document, and a document whose original source layer was removed while its instances remain writes correctly with no special case.
+
+A reader SHALL resolve the names in a second pass, after every layer record is read, and SHALL REFUSE a document naming a source it does not have rather than open it with an empty or duplicated edit list.
+
+Writing at minor 14 or below SHALL write every layer's content inline as it always did. Such a document opens in an older build with the instances as INDEPENDENT COPIES: the shapes are right and the share is gone, so an edit through one no longer reaches the others. That is the recoverable direction, and it is why the writer takes a minor.
+
+A build that predates minor 15 reading a minor 15 document SHALL fail rather than misread, which is the layer record's existing trade: the record is not length-prefixed, so a field it does not expect desynchronises every record after it and the reader's bounds and count checks reject the stream.
+
+#### Scenario: Shared content is written once
+- **WHEN** a document with a source layer and nine instances of it is saved
+- **THEN** the edit list appears once in the file and the nine instances carry a reference to it
+
+#### Scenario: A reload restores the sharing
+- **WHEN** such a document is loaded
+- **THEN** the ten layers hold one edit list and an edit through any of them is visible through all
+
+#### Scenario: A removed source still writes
+- **WHEN** the layer that was originally instanced is removed and the document is saved and reloaded
+- **THEN** the surviving instances hold one edit list, owned by the first of them in stack order
+
+#### Scenario: Writing at an older minor drops only the sharing
+- **WHEN** a document with an instance is written at minor 14
+- **THEN** each layer carries its own copy of the content, and both evaluate as they did
+
+#### Scenario: A reference to a layer that is not in the file is refused
+- **WHEN** a document names a content source it does not contain
+- **THEN** the load fails
+
+### Requirement: An adaptive surface has its own versioned encoding
+An adaptive surface SHALL serialize through its own versioned encoding carrying a magic, a version, validated counts, overflow-checked sizes and the attribute channels present. It SHALL NOT be written into the existing mesh stream, whose readers expect flat interchange arrays.
+
+A decoder SHALL reject hostile or truncated counts BEFORE allocating, following the defensive style the sparse vertex delta decoder already uses.
+
+The document format SHALL remain BACKWARD-OPEN: a reader that predates this chunk SHALL open the document without it rather than failing, and a document containing no adaptive surface SHALL be byte-identical to one written before this change.
+
+A round trip SHALL restore the surface exactly. Where an identity that cannot survive a round trip is not preserved — a generation counter, say — the format SHALL state that rather than imply preservation it does not provide.
+
+#### Scenario: A round trip preserves the surface
+- **WHEN** a document holding an adaptive surface is saved and reloaded
+- **THEN** the surface's geometry, connectivity and attributes are restored exactly
+
+#### Scenario: An older reader is not broken
+- **WHEN** a reader that predates this chunk opens a document containing one
+- **THEN** it opens the document without the adaptive surface rather than reporting a corrupt file
+
+#### Scenario: A truncated stream is refused
+- **WHEN** a stream declares counts larger than its own remaining bytes
+- **THEN** the decode fails before allocating and reports a typed error
+
+### Requirement: A multiresolution surface has its own versioned encoding
+A multiresolution surface SHALL serialize through its own versioned encoding carrying a magic, a version, the subdivision rule it was built with, validated counts, overflow-checked sizes and the detail channels present.
+
+The subdivision rule SHALL be recorded rather than assumed. A hierarchy reconstructed with a different rule than it was authored with is a different surface, and nothing else in the stream reveals the substitution.
+
+The document format SHALL remain UNCHANGED. A hierarchy is a standalone handle no layer owns, so its encoding is a blob a host stores beside the document — the shape an adaptive surface's encoding already has — and the `.clayspace` format gains no chunk. A document written after this change is therefore byte-identical to one written before it, which is a stronger guarantee than the backward-open one this requirement originally asked for and is available for the same reason the memory accounting is per surface.
+
+A decoder SHALL reject counts and depths whose reconstruction would exceed its own ceiling BEFORE allocating, as the voxel level tail already requires — a few hundred bytes declaring a deep hierarchy over a large base is a request for more memory than a machine holds.
+
+#### Scenario: A hierarchy round-trips
+- **WHEN** a hierarchy with detail at several levels is encoded and decoded
+- **THEN** the cage, the rule, every level's detail and the active levels are restored exactly, and the surface it reconstructs is bit-identical
+
+#### Scenario: A hostile depth is refused before allocation
+- **WHEN** a stream declares a depth whose subdivision of its base would exceed the reader's ceiling
+- **THEN** the load fails with a typed error and allocates nothing

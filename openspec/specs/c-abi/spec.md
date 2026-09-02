@@ -8,7 +8,9 @@ exception in a signature — so that Swift, C# or Rust can consume it without a
 shim. The versioned descriptor convention is what lets the surface GROW without
 breaking a host compiled against an older header: a caller declares the layout
 it knows, and a field appended later keeps its documented default.
+
 ## Requirements
+
 ### Requirement: Flat versioned C API
 `bindings/c/clay.h` SHALL expose documents, layers, edit commands, evaluation, brick access, meshing, picking, and file I/O through a flat C API: opaque handles, integer error codes, caller-owned buffers, no C++ types and no exceptions crossing the boundary. The header SHALL carry an ABI version triple queryable at runtime (`clay_version()`), and the ABI SHALL follow SemVer: from 1.0 breaking changes only on major, and below 1.0 under SemVer's 0.x rule a minor bump MAY break the ABI. A break below 1.0 SHALL be stated in the header, the proposal and the release notes, and SHALL be detectable rather than silent: a call made in the older layout SHALL be rejected with an error code, never read as if it were the newer one.
 
@@ -1414,6 +1416,12 @@ The available size SHALL be required and checked against the lattice the call wa
 
 The device form SHALL produce the same values as the host form for the same inputs, so that a consumer can verify one against the other.
 
+The device-destination brick refill SHALL resume on the same terms as the host-memory one: a brick whose seed can be carried forward exactly SHALL be answered from it rather than by walking the whole surviving edit list, and a brick that the device walked in full SHALL leave a seed behind for the next call. The seed store SHALL be the DOCUMENT's, so a brick seeded through either refill entry point can be served by the other.
+
+Where the adopted backend cannot move bytes between host memory and the consumer's buffer, the refill SHALL walk every brick in full — the behaviour it had before it resumed anything — rather than partially resuming, failing, or producing a field a full walk would not produce. The decision SHALL be taken before anything is written.
+
+Where a seed cannot be described exactly for a brick this path answered — in particular where more than one visible SDF layer means a seed is two values and this path evaluated the document whole — the refill SHALL store no seed for it rather than store one whose meaning it cannot state.
+
 #### Scenario: A brick refill never crosses host memory
 - **WHEN** a consumer evaluates drained brick requests into its own device buffer
 - **THEN** each brick occupies its own fixed stride in that buffer and no value is written to host memory
@@ -1422,6 +1430,28 @@ The device form SHALL produce the same values as the host form for the same inpu
 - **WHEN** the size available from the offset is smaller than the results require
 - **THEN** the call is refused and nothing is written
 
+#### Scenario: A stroke resumes into the caller's buffer
+- **GIVEN** a device-destination refill has left seeds for a window of bricks
+- **AND** one item is appended to the active layer
+- **WHEN** the same window is refilled into the consumer's buffer again
+- **THEN** the bricks carrying a usable seed are answered from it
+- **AND** what lands in the consumer's buffer matches a full walk of the same document to the backend-parity standard
+
+#### Scenario: A resumed run lands where it belongs
+- **GIVEN** a window whose resumable bricks neither begin nor end the batch
+- **WHEN** it is refilled into the consumer's buffer
+- **THEN** every brick occupies the same fixed slot it would have occupied had none of them been resumed
+
+#### Scenario: Seeds cross between the two refill entry points
+- **GIVEN** the host-memory refill has stored seeds for some bricks of a window
+- **WHEN** the device-destination refill asks for that window
+- **THEN** those bricks are answered from their seeds and the rest are walked in full
+
+#### Scenario: A backend that cannot move bytes still answers correctly
+- **GIVEN** an adopted backend that reports no host-to-device copy capability
+- **WHEN** a consumer refills bricks into its device buffer
+- **THEN** every brick is walked in full and the values are what a full walk produces
+
 ### Requirement: Undo reports the region it changed
 The C API SHALL offer undo and redo entry points that additionally report the world-space INFLUENCE bound of what they applied, in the three-state shape the influence-bound queries already use: nothing changed, a finite box, or unbounded. The bound SHALL be usable directly as the region argument of the brick cache's dirty marking, with the unbounded state spelled the way that call already spells it.
 
@@ -1429,7 +1459,13 @@ Without this the narrowest region a host can honestly dirty after an undo is the
 
 The bound SHALL be the union, over every command in the step, of what that command targets BEFORE it is applied and AFTER it is applied. One side alone cannot see a move (which has two ends), a removal (whose node is gone afterwards) or an add (whose node was not there before).
 
-The bound MAY be larger than the region that actually changed and SHALL NOT be smaller. Where being tight would cost correctness it SHALL be conservative: a node inside a group SHALL report its root ancestor's bound, because the group's blend spreads a child's influence past the child's own box; and a command on content shared by instanced layers SHALL report the union over every layer that shares that content.
+The bound MAY be larger than the region that actually changed and SHALL NOT be smaller. Where being tight would cost correctness it SHALL be conservative, and the two places that costs something are stated rather than left to the implementation:
+
+A node inside a group SHALL report the bound of the NODE THE COMMAND NAMES, dilated by the blend support of each group on the path from that node up to its root — the group's blend spreads a child's influence past the child's own box, and that spread is what the ancestors' supports measure. It SHALL NOT report the whole root subtree's bound: a sibling's geometry is not something the edit can reach, and reporting it makes the region grow with the size of the group rather than with the size of the edit.
+
+A command on content shared by instanced layers SHALL report the union over every layer that shares that content.
+
+A node whose subtree combines non-locally — an intersect, an unbounded primitive, an infinite grid repeat — SHALL report the unbounded state, exactly as an influence-bound query does for the same node. The path dilation applies to the local case, and it SHALL NOT be used to turn a non-local subtree into a finite box.
 
 A command that cannot change what the document evaluates to SHALL contribute nothing to the bound, so a step made only of such commands reports that there is nothing to dirty rather than reporting the layer.
 
@@ -1449,7 +1485,21 @@ The existing undo and redo entry points SHALL keep their signatures and their be
 
 #### Scenario: A group's blend is not cut off
 - **WHEN** a child of a smooth-blended group is edited and the edit is undone
-- **THEN** the reported bound is the group's influence bound, which reaches past the child's own box by the group's blend support
+- **THEN** the reported bound reaches past the child's own box by the group's blend support, is never smaller than the child's own influence bound, and band-clamped values outside it are unchanged
+
+#### Scenario: A sibling's geometry does not widen the bound
+- **GIVEN** a group holding one small child and a large one far from it
+- **WHEN** the small child is transformed and the transform is undone
+- **THEN** the reported bound is strictly inside the group's own influence bound on the side facing the sibling, and it does not contain the far sibling's geometry
+
+#### Scenario: Nested groups each contribute their support
+- **GIVEN** a child inside a smooth-blended group which is itself inside another smooth-blended group
+- **WHEN** the child is edited and the edit is undone
+- **THEN** the reported bound is the child's bound dilated by both groups' blend supports, and band-clamped values outside it are unchanged
+
+#### Scenario: A non-local subtree is still unbounded
+- **WHEN** a child of a group whose combine is an intersect is edited and the edit is undone
+- **THEN** the call reports the unbounded state rather than a finite box
 
 #### Scenario: An instanced layer is not missed
 - **WHEN** a layer is instanced, an edit is made through one instance, and that edit is undone
@@ -1662,3 +1712,847 @@ The interface SHALL state where this figure can and cannot be observed, rather t
 - **WHEN** a document is asked for its memory after any sequence of mask edits through the C entry points
 - **THEN** the transient figure is zero, because no step can be open at that moment
 
+### Requirement: An append reuses what an edit did not change
+A document that is edited by appending an item SHALL rebuild its remembered tape by reusing the part the append did not touch, rather than recompiling the whole document. Appending is how a stroke works — one node per brush stamp — and recompiling the whole document per stamp makes each dab cost more the longer the sculpt has been worked on, on the path where the host is already waiting to place the next one.
+
+Mutating a document while another thread reads it was never supported and still is not; this concerns readers racing each other, and the rebuild one of them triggers.
+
+This SHALL NOT weaken any promise the remembered tape already makes. Every mutation SHALL still be visible to the next read; where the ABI cannot establish that an edit was an append — including undo, redo, event replay, and any layer or document change applied outside the command vocabulary — it SHALL invalidate and recompile in full, as it does today. A reader SHALL still receive a snapshot that stays valid for its whole call, so a concurrent append cannot pull the tape out from under it.
+
+#### Scenario: A stroke's cost per dab stops growing with the document
+- **WHEN** items are appended one at a time to a large document and the field is read after each
+- **THEN** every read returns what a fresh compile would have returned, and the work of rebuilding the tape is proportional to the appended item rather than to the whole document
+
+#### Scenario: An append is still visible to the next read
+- **WHEN** the field is read, an item is appended, and the field is read again
+- **THEN** the second read reflects the appended item
+
+#### Scenario: Undo after an append is exact
+- **WHEN** an appended item is undone and the field is read
+- **THEN** it reads exactly as it did before the append, and redoing restores it again
+
+#### Scenario: Concurrent readers are unaffected by prefix reuse
+- **WHEN** several threads evaluate and pick against one document whose remembered tape is stale from appends not yet consumed
+- **THEN** every reader gets the answer a single-threaded reader would, the rebuild happens once however many readers race for it, and no reader observes a partially rebuilt tape
+
+### Requirement: An edit only invalidates the bricks it can reach
+An edit that is not an append SHALL NOT discard a brick's kept value when the edit cannot change what that brick evaluates to. A kept value is the value of that brick's CULLED tape, and an item whose influence misses the brick's cull region is dropped from that tape — so editing it leaves the brick's answer exactly as it was, and the value SHALL be carried forward to the new revision rather than recomputed.
+
+The region an edit reaches SHALL be taken on BOTH sides of it and unioned. One side is not an answer: an item being added is not there beforehand, one being removed is not there afterwards, and one being moved has two ends.
+
+An edit whose region is EMPTY — one that cannot change what the document evaluates to, such as a rename — SHALL keep every value. One whose region is unbounded SHALL discard them all.
+
+An edit whose reach is NOT known SHALL discard everything, and that SHALL remain the default. An entry point that does not positively know what it changed must land there, exactly as it must for an append.
+
+A kept value already at the current revision SHALL be served as it is, since nothing remains to fold into it.
+
+#### Scenario: An edit outside every brick read costs nothing
+- **GIVEN** bricks refilled once, and an item edited that lies outside all of their cull regions
+- **WHEN** those bricks are refilled again
+- **THEN** the values equal a full refill's, and what the refill costs is set by the edit rather than by the length of the edit list
+
+#### Scenario: An edit the bricks do reach is recomputed
+- **WHEN** an item within the bricks' cull regions is removed
+- **THEN** those bricks are evaluated again and their values equal a full refill's
+
+#### Scenario: Refilling twice with no edit between costs nothing
+- **WHEN** the same bricks are refilled twice and the document did not change
+- **THEN** the second refill returns the values the first produced
+
+### Requirement: A layer's bounds answer from whichever representation it holds
+`clay_layer_bounds` SHALL report the tight world-space extent of a layer's content whatever representation that content is, and SHALL NOT report the absence of bounds for a layer that holds material. A mesh layer answers from its vertex positions and a voxel layer from its occupied cells, as an SDF layer answers from its shapes.
+
+The reason this is a requirement rather than a convenience is that the alternative is not a conservative answer, it is a WRONG one: a mesh's vertices are a box and a grid's occupied cells are a box, so "this layer is nowhere" is false for either whenever it holds anything, and a host cannot tell that answer apart from an empty layer's.
+
+A voxel layer's extent SHALL treat a cell as the BOX it is rather than as a point, so the far corner covers the whole of the last occupied cell. A single occupied cell therefore has the extent of one cell rather than none, which is what stops a one-cell grid reporting an empty box and reading as nowhere again.
+
+Every representation SHALL answer in WORLD space, composing the layer transform, since a caller comparing two layers, framing a camera or placing a manipulator is asking one question and would otherwise be answered in two different spaces.
+
+A layer holding NO material SHALL still report no bounds. An empty grid is genuinely nowhere, and that is a different answer from a representation that cannot say.
+
+The composition SHALL live where the document that owns every representation is in scope, and SHALL NOT be obtained by giving `clay::scene` sight of the voxel or mesh modules. The layering rule that withholds them is what makes "this content does not change what the document evaluates to" structural, and a bounds query is not a reason to weaken it.
+
+#### Scenario: A mesh layer reports the mesh's own box
+- **GIVEN** a mesh attached as a layer
+- **WHEN** the layer's bounds and the mesh's own bounds are both read
+- **THEN** the two are the same box, and the layer reports that it has bounds
+
+#### Scenario: A voxel layer follows its occupied cells
+- **GIVEN** a voxel layer with a single occupied cell at the origin
+- **WHEN** its layer bounds are read
+- **THEN** they span that one cell rather than collapsing to a point
+- **AND** occupying a second, distant cell grows the box to cover both whole cells
+
+#### Scenario: An empty layer is still nowhere
+- **GIVEN** a voxel layer with no occupied cells
+- **WHEN** its layer bounds are read
+- **THEN** it reports no bounds, as an SDF layer holding no shapes does
+
+#### Scenario: Moving a layer moves its bounds
+- **GIVEN** a mesh or voxel layer with a non-identity layer transform
+- **WHEN** its layer bounds are read
+- **THEN** they are the content's extent under that transform, as an SDF layer's are
+
+#### Scenario: A mesh layer's bounds are a region the mesh rasterizer accepts
+- **GIVEN** a mesh layer in a document
+- **WHEN** its layer bounds are passed as the region to the mesh-to-voxel rasterization
+- **THEN** the call is accepted and rasterizes the geometry, rather than refusing for want of a region
+
+### Requirement: An influence bound covers every place the node is compiled
+A bound reported for a NODE SHALL cover every place that node can change the field, which is once per layer sharing its content and not only the layer the caller named. Instancing a layer shares one edit list between layers with different transforms, so a single node is compiled once per instancing layer and an edit moves every copy.
+
+The bound a host DIRTIES BY and the bound a host is TOLD SHALL be the same union, since a host that dirties by what it was told and is left with stale geometry has no way to discover the disagreement.
+
+The per-layer bound SHALL remain available and unchanged for the compiler, which compiles one tape per layer and wants the box for the layer it is compiling.
+
+#### Scenario: Moving a node changes nothing outside its declared box
+- **GIVEN** any document and any visible item in it
+- **WHEN** the item is moved and the band-clamped field is compared before and after
+- **THEN** every point outside the union of the bound before and the bound after, dilated by the band and the chain pad, evaluates to exactly what it did
+
+#### Scenario: An instanced layer's other copy is inside the box
+- **GIVEN** a layer instanced into a second layer at a different transform
+- **WHEN** a node of the shared content is moved
+- **THEN** the second layer's copy lies inside the declared box, so a host dirtying by it refills that copy too
+
+#### Scenario: A document with no instancing is unaffected
+- **GIVEN** a document in which no layer shares content with another
+- **WHEN** a node's influence bound is read
+- **THEN** it is the bound the single layer reports
+
+### Requirement: A transform's arrays are required, and a missing one is named
+Every entry point taking a transform as position, rotation axis, angle and scale SHALL require BOTH arrays and SHALL refuse a null one with `CLAY_ERROR_INVALID_ARGUMENT`, leaving the document unchanged. A null rotation axis SHALL NOT be read as "no rotation": these calls take the whole transform rather than a partial update, so a null that meant identity would also silently decide the fate of the position beside it, and the caller who passed it wanted the position applied.
+
+The refusal SHALL name WHICH argument was missing. A message covering both equally tells a caller that one of two was null and leaves them to guess, and the refusal is the only thing standing between a host and an edit it believes landed.
+
+The axis refusal SHALL name what to pass instead, since a caller reaches it wanting no rotation and the signature already expresses that as any non-zero axis with an angle of 0 — which is what the readback answers for an unrotated node, so the round trip closes.
+
+#### Scenario: A null rotation axis is refused and nothing moves
+- **WHEN** a node's transform is set with a position and a null rotation axis
+- **THEN** the call returns `CLAY_ERROR_INVALID_ARGUMENT` and the node's placement reads back exactly as it did before, position included
+
+#### Scenario: The message names the missing argument
+- **WHEN** the same call is made once with a null axis and once with a null position
+- **THEN** the two diagnostics differ, and each names the argument that was missing
+
+#### Scenario: No rotation is said with an axis and a zero angle
+- **WHEN** the refused call is repeated with any non-zero axis and `rotation_angle` 0
+- **THEN** it succeeds, the node moves to the position given, and the rotation reads back as 0
+
+#### Scenario: One rule across every transform entry point
+- **WHEN** a null array is passed to the node transform, the per-axis node transform, the layer transform or either mesh transform
+- **THEN** each refuses on the same terms, so a host cannot learn the rule from one call and be caught by the next
+
+### Requirement: a resumed refill does not hold the document cache lock while it evaluates
+
+`clay_brick_cache_eval_requests` SHALL NOT hold the document's cache mutex while
+it compiles a brick's suffix or evaluates it. The mutex SHALL be held only to
+resolve the resume plans and read the seeds, and again to store what the bricks
+reached.
+
+A seed SHALL be COPIED out of the seed store while the mutex is held. No pointer
+into the seed store may be read after it is released: the store is a hash map
+another refill on another thread may be writing to, and the entry a raw pointer
+names can be rewritten or evicted under it.
+
+Before a brick's answer is kept as its next seed, the document's revision SHALL
+be re-checked against the one the plan was made at — the same check the full
+path's store makes — and the answer discarded as a seed, but still returned to
+the caller, when it has moved.
+
+What a refill returns SHALL NOT depend on any of this: a resumed brick is
+bit-identical to what the full walk gives, whether or not other threads were
+refilling or reading the same document at the time.
+
+#### Scenario: a refill racing readers
+
+- **GIVEN** a document with a stored seed for every brick of a window
+- **AND** one item is appended to the active layer
+- **WHEN** several threads refill that window while several others evaluate
+  points against the same document
+- **THEN** every refill is bit-identical to the same window refilled from a
+  document holding the same items that never resumed anything
+- **AND** every point evaluation agrees with the same document read alone
+
+#### Scenario: no data race under a sanitizer
+
+- **GIVEN** the concurrent refill above
+- **WHEN** it is run under ThreadSanitizer
+- **THEN** no data race is reported
+
+#### Scenario: a seed the store no longer holds
+
+- **GIVEN** two threads refilling one document at once
+- **WHEN** one stores a brick's new value while the other is evaluating from
+  that brick's seed
+- **THEN** the evaluating thread reads its own copy of the seed and is
+  unaffected
+
+### Requirement: the deferred phase is parallel only when it is worth a dispatch
+
+The compile-and-evaluate phase SHALL run over the shared thread pool
+(`clay::parallel::ThreadPool`) only when the work it would spread exceeds the
+pool's dispatch cost, measured as a count of samples times suffix length summed
+over the bricks. Below that threshold it SHALL run on the calling thread — off
+the lock either way.
+
+Whether the pool is used SHALL NOT change what a refill answers.
+
+#### Scenario: a small window
+
+- **GIVEN** a refill of a few bricks whose suffix is one appended item
+- **WHEN** the deferred phase runs
+- **THEN** it runs on the calling thread, without a pool dispatch
+- **AND** the values are the ones the pooled path would give
+
+#### Scenario: a large window
+
+- **GIVEN** a refill of a window large enough, or a suffix long enough, that the
+  deferred work exceeds the threshold
+- **WHEN** the deferred phase runs
+- **THEN** it is spread over the thread pool
+- **AND** the values are the ones the serial path would give
+
+### Requirement: The seed store's eviction order describes the store
+The structure that orders kept brick values for eviction SHALL hold exactly one
+entry per stored value: none for a value that has been discarded, and never more
+than one for the same brick.
+
+Discarding a value — by eviction, or by an edit whose region reaches that
+brick — SHALL remove its place in the order at the same time. Storing a brick
+that already has a value SHALL NOT add a second place for it.
+
+This matters because the order's own memory is NOT counted against the store's
+byte budget: places left behind by a discarded value grow outside the ceiling
+the budget describes, without bound, for as long as edits keep arriving.
+
+#### Scenario: Repeated region-invalidating edits leave nothing behind
+- **GIVEN** bricks refilled, then an item moved that reaches every one of them, repeatedly
+- **WHEN** the store is asked how many places its eviction order holds
+- **THEN** the count equals the number of values the store holds, after every cycle
+
+#### Scenario: A brick discarded and stored again occupies one place
+- **GIVEN** bricks whose values an edit discarded, and which a later refill stores again
+- **THEN** the eviction order holds one place per brick, not one per time it was stored
+
+### Requirement: A kept brick value is evicted by last use, not by first storage
+When the store is over its byte budget it SHALL discard the LEAST RECENTLY USED
+value first. A value is used when it is read to answer a refill and when it is
+written by one; either SHALL make it the most recently used.
+
+Ordering by first storage is not equivalent and is wrong for the access pattern
+the store exists to serve: a stroke stores its working set at the first dab and
+rewrites it at every dab after, so a first-storage order discards precisely the
+bricks the next dab is about to ask for while keeping ground the brush crossed
+once and left.
+
+The most recently used value SHALL NOT be discarded, so that a budget smaller
+than a single brick does not discard what was just stored.
+
+#### Scenario: The rewritten brick survives and the abandoned one does not
+- **GIVEN** a hot brick stored FIRST and a cold brick stored after it, a budget with room for both, and a stroke that rewrites only the hot one
+- **WHEN** a third brick is stored and the store goes over budget
+- **THEN** the cold brick's value is discarded and the hot brick's is still there to be resumed from
+
+### Requirement: The seed store's byte budget bounds what it has allocated
+The bytes the store reports and evicts against SHALL count the memory its
+entries HOLD, not the memory they are currently using. A refill that carries no
+colour empties an entry's colour buffer without releasing it, so a
+usage-based count would report memory the store still holds as free and make the
+ceiling optimistic by an amount no host can see.
+
+The ceiling has one carve-out, which is the floor the requirement above places
+on eviction: the single most recently used value is kept even when it alone
+exceeds the budget. A budget with room for less than one value therefore reports
+one entry and that entry's bytes, above the budget, rather than an empty store.
+
+#### Scenario: The reported bytes stay at or under the budget
+- **GIVEN** a budget with room for at least one stored value
+- **WHEN** more bricks are stored than that budget has room for
+- **THEN** the bytes reported by `clay_document_resume_stats` are at or under the budget it reports, and the entry count is what fits
+
+#### Scenario: A budget below one value keeps that value anyway
+- **GIVEN** a budget smaller than what one brick's value costs
+- **WHEN** bricks are stored
+- **THEN** the store holds exactly one entry — the most recently used — and reports its bytes, which are above the budget
+
+### Requirement: The seed store's budget is not part of the C ABI
+The store's byte budget SHALL NOT be host-settable, and the size of its eviction
+order SHALL NOT be reported to hosts. A kept value is a pure performance cache —
+discarding every one of them changes no geometry — and a store whose order size
+differed from its value count would be describing its own defect rather than a
+state a host could act on.
+
+Reaching either from a test SHALL be through an internal header that is not
+installed and carries no version guarantee, so that changing or removing it is
+not an ABI break.
+
+#### Scenario: The public descriptor is unchanged
+- **WHEN** a host reads `clay_resume_stats`
+- **THEN** it finds the same fields at the same offsets as before, with `budget` reporting the budget in force
+
+### Requirement: A gesture invalidates once, for the region it states
+
+An entry point that applies many commands as one gesture MAY state the region
+those commands can reach and invalidate once for all of them, instead of having
+a region derived per command.
+
+A stated region SHALL cover everything the gesture changes. An entry point that
+cannot state its reach SHALL keep the derived per-command region, which is
+always correct.
+
+The invalidation SHALL happen even when the gesture fails part way, because a
+gesture that applied some of its commands has still changed the document.
+
+`clay_layer_move_surface` SHALL state the drag's own region: the ball of the
+drag radius about its centre, dilated by the displacement. Outside that ball the
+warp's weight is zero, so no sample can evaluate differently.
+
+#### Scenario: A drag across bricks the cache holds
+- **GIVEN** a document whose bricks have been filled once
+- **WHEN** a drag moves the surface those bricks read
+- **THEN** a refill returns exactly what a full evaluation of the dragged document returns
+
+#### Scenario: A drag repeated
+- **GIVEN** a drag whose refill has seeded the bricks again
+- **WHEN** the same drag is applied a second time
+- **THEN** a refill still returns what a full evaluation returns
+
+#### Scenario: A drag the bricks cannot reach
+- **WHEN** a drag moves an item no brick under consideration reads
+- **THEN** those bricks return what they returned before
+
+#### Scenario: A gesture that fails part way
+- **WHEN** a gesture applies some commands and then refuses
+- **THEN** the region it stated is still invalidated
+
+### Requirement: A layer's payload is reachable by layer id
+The C API SHALL provide an id-addressed accessor for each representation that carries a payload beside the document: one that borrows a voxel layer's grid and one that borrows a mesh layer's geometry, each taking the layer id and no name.
+
+This is a requirement rather than a convenience because the ABI already tells a host to hold the id — the rename call states that ids are stable across a save and load while names are not a key anything enforces — and for these two representations that advice could not be followed: the only route back to the payload of a reopened document's layer keyed on the NAME. The consequence is silent rather than loud. Two layers sharing a name shadow one another, the by-name lookup SUCCEEDS on the first in stack order, and an edit lands on the wrong layer with no error for the host to check. A host's only defence was to invent a uniqueness rule for one representation that the create calls have never asked for.
+
+The by-name lookups SHALL remain and SHALL keep their behaviour, since they answer the question they are asked and a document with one layer of a given name is the ordinary case.
+
+The addition SHALL be purely additive: no existing signature changes, no existing call's meaning moves, and no document format version moves, since layer ids are already stable across a save and reload.
+
+#### Scenario: Two layers sharing a name are told apart by id
+- **GIVEN** a document with two voxel layers carrying the same name and different cells, and two mesh layers carrying the same name and different geometry
+- **WHEN** each layer's payload is fetched by its own id
+- **THEN** each fetch reaches that layer's own payload
+- **AND** the by-name lookup reaches only the first of each pair in stack order
+
+#### Scenario: An id still reaches the payload after a save and reload
+- **WHEN** a document holding two same-named voxel layers is saved and loaded into a fresh document, and each id is fetched again
+- **THEN** each id reaches the same payload it reached before the round trip
+
+#### Scenario: A rename does not move what an id reaches
+- **WHEN** a layer is renamed, including onto a name another layer already carries
+- **THEN** its id reaches the same payload it reached before the rename
+
+### Requirement: An id-addressed payload lookup refuses what it cannot answer
+The id-addressed accessors SHALL return the not-found refusal when no layer carries the id, when the layer carrying it is of another representation, and when the layer is of the right representation but has no payload entry.
+
+The layer SHALL be resolved in the DOCUMENT first, not in the payload table. A payload deliberately outlives its layer: undoing the creation of a voxel layer removes the layer and KEEPS the grid beside the document, so that a redo brings the layer back with its cells. An accessor that resolved the id in the payload table alone would therefore hand back a grid whose layer is currently undone — a state the by-name lookup reports as not found, and reaching it would be a new hole rather than a new capability. Whatever the by-name lookup refuses for a given layer, the by-id lookup SHALL refuse.
+
+The output pointer SHALL be REQUIRED, and a null one SHALL be refused as an invalid argument. This deliberately differs from the by-name lookups, where a null output is meaningful because the call doubles as an existence probe and still reports the resolved id. Here the caller supplied the id and the borrowed handle is the only answer the call has, so a null output asks nothing; the layer-info query is the call that answers whether a layer exists and what representation it is. A null document SHALL be refused the same way, and a refused call SHALL write nothing through the output pointer.
+
+#### Scenario: An id of the wrong representation is not found
+- **WHEN** a mesh layer's id is passed to the voxel accessor, or a voxel layer's id to the mesh accessor, or an SDF layer's id to either
+- **THEN** the call returns not-found and writes nothing
+
+#### Scenario: An unknown id is not found
+- **WHEN** an id no layer carries is passed to either accessor
+- **THEN** the call returns not-found and writes nothing
+
+#### Scenario: An undone creation is not reachable by id
+- **GIVEN** a voxel layer whose creation has been undone, so the layer is gone and its grid is still held beside the document
+- **WHEN** its id is passed to the voxel accessor
+- **THEN** the call returns not-found, as the by-name lookup does
+- **AND WHEN** the creation is redone
+- **THEN** the same id reaches the same grid, with the cells it held
+
+#### Scenario: A layer whose payload is absent is not found
+- **GIVEN** a loaded document carrying a voxel layer whose grid did not come with it, and one carrying a mesh layer whose geometry did not come with it
+- **WHEN** each layer's id is passed to the accessor for its own representation
+- **THEN** each call returns not-found rather than borrowing a payload that is not there
+- **AND** the by-name lookup refuses the same layer, so the two agree
+
+#### Scenario: The refusals are typed
+- **WHEN** either accessor is called with a null document, or with a null output pointer
+- **THEN** the call returns the invalid-argument refusal, and nothing is written
+
+### Requirement: A layer can be instanced without copying its edit list
+The C API SHALL offer an entry point that adds a layer SHARING an existing SDF layer's edit list, rather than copying it. The cost of the call SHALL NOT grow with the size of the source's edit list, which is the whole reason the call exists: a host duplicating a subtool today pays memory and time proportional to everything the artist has already sculpted, per copy.
+
+The instance SHALL carry its OWN transform, name, visibility, protection, mirror and radial mode. Those SHALL start at the source's values, because the instance is a copy of the layer, and SHALL diverge freely afterwards — that is what makes ten instances of one blockout ten placements rather than ten identical layers.
+
+An edit through EITHER layer SHALL be an edit to the shared content and SHALL be visible through both, and the dirty bounds reported for it SHALL cover every layer sharing the content, as the undo bounds contract already states.
+
+Creation SHALL go through the same command vocabulary the other layer-creating entry points use, so that an enabled undo stack records it as ONE step and a single undo removes the instance.
+
+Instancing an INSTANCE SHALL share the same content as the original, not chain. There is one allocation and the relation between the layers holding it is symmetric; a chain would invent a parent whose removal would then have to mean something.
+
+A source that is not an SDF layer SHALL be refused with `CLAY_ERROR_INVALID_ARGUMENT` and a message saying so, since a voxel grid and a mesh are held beside the document by layer id rather than by a shared pointer. A source id that does not exist SHALL be `CLAY_ERROR_NOT_FOUND`. A NULL or empty name SHALL be refused, matching the rename entry point: an empty name is what a cleared text field submits.
+
+#### Scenario: An edit through the instance reaches the source
+- **WHEN** a layer is instanced and an item is added through the INSTANCE's id
+- **THEN** the source layer evaluates with that item too
+
+#### Scenario: One edit list, two placements
+- **WHEN** an instance is given a different layer transform from its source
+- **THEN** the document evaluates the shared edit list at both placements
+
+#### Scenario: Creating an instance is one undo step
+- **WHEN** an instance is created on a document with undo enabled and one undo is performed
+- **THEN** the instance is gone and the source is unchanged, and a redo brings the instance back still sharing the content
+
+#### Scenario: The instance's own properties diverge
+- **WHEN** an instance is renamed, hidden, ghosted or given a mirror
+- **THEN** the source keeps the properties it had
+
+#### Scenario: A voxel or mesh source is refused
+- **WHEN** an instance is asked for with a voxel or mesh layer as the source
+- **THEN** the call fails with an invalid-argument error naming the layer's representation
+
+#### Scenario: An unknown source is not found
+- **WHEN** an instance is asked for with a layer id the document does not have
+- **THEN** the call fails with a not-found error
+
+#### Scenario: An empty name is refused
+- **WHEN** an instance is asked for with a NULL or empty name
+- **THEN** the call fails and no layer is added
+
+#### Scenario: An instance of an instance shares one edit list
+- **WHEN** an instance is itself instanced
+- **THEN** all three layers share one edit list and the document counts it once
+
+### Requirement: A gesture that states its own reach covers every placement
+An entry point that states the region it invalidates ANALYTICALLY instead of deriving it per command — the surface drag is the only one — SHALL widen that region to cover every layer sharing the edited content.
+
+The drag's reach is a ball around the drag centre, and that ball is stated in the EDITED layer's placement. An instanced edit list is placed by every layer sharing it, so the same warp changes the field wherever those layers put the nodes, outside the ball. Left unwidened the host is told nothing about that region, its cached bricks there are advanced to the new revision while still holding pre-drag values, and it draws stale geometry with nothing to say so — the same failure the dirty-bounds contract already forbids for the per-command paths.
+
+Only a shared edit list SHALL pay the widening; a layer nothing instances SHALL invalidate its ball alone, which is what makes the drag cheaper than the per-item union it replaced.
+
+#### Scenario: A drag through one placement dirties the other
+- **WHEN** a layer is instanced and placed elsewhere, a brick over the instance's placement is refilled, and the SOURCE layer's surface is then dragged
+- **THEN** refilling that brick again yields what the document now evaluates to, not the values from before the drag
+
+### Requirement: Reordering a shared layer keeps it shared
+Reordering a layer is expressed as a remove and an add. When the layer's edit list is shared, the add SHALL name a surviving sharer as its content source, so that the pair carries a reference wherever it travels rather than only in memory.
+
+Without it the reorder is silent in memory and wrong once serialized: the add writes the edit list inline, and a journal replay after a crash restores the layers UNLINKED and the edit list multiplied, with every shape right and nothing to see.
+
+#### Scenario: Replaying a reorder keeps the sharing
+- **WHEN** an instance is reordered on a document with undo enabled and the journal is replayed onto the snapshot it was taken against
+- **THEN** the recovered layers still share one edit list, and an edit through one is visible through the other
+
+### Requirement: An instance survives a save and load as a reference
+A document holding instanced layers SHALL serialize the shared edit list ONCE and SHALL restore the sharing on load. A round trip SHALL NOT multiply the allocation the memory report promises to count once, and SHALL NOT silently unlink the layers.
+
+The document-wide memory report for a document of N instances SHALL therefore be unchanged, within container overhead, by a save and reload — and each instance SHALL still report the content in full, exactly as it did before the round trip.
+
+Removing the SOURCE layer while instances remain SHALL be legal: the content stays alive because the instances hold it. A surviving instance SHALL still evaluate, SHALL still save, and SHALL reload with its content intact.
+
+#### Scenario: Ten instances reload as one allocation
+- **WHEN** a document holding a source layer and nine instances is saved and reloaded
+- **THEN** the document-wide edit-list figure is what it was before the round trip, and does not scale with the instance count
+
+#### Scenario: The share survives the round trip
+- **WHEN** a document with an instance is saved, reloaded, and an item is added through one of the two layers
+- **THEN** the other layer evaluates with that item too
+
+#### Scenario: An orphaned instance keeps its content
+- **WHEN** the source layer is removed and the document is saved and reloaded
+- **THEN** the surviving instance still evaluates to the same field
+
+### Requirement: A host can see that a layer is an instance
+The layer information descriptor SHALL report which layer a given layer takes its content from, and how many layers share that content. Without both, a host cannot draw the link: the id alone marks the following end of it and leaves the SOURCE indistinguishable from an ordinary layer.
+
+The reported source SHALL be the FIRST layer in stack order holding that content, and a layer that IS that first layer SHALL report 0. This is the same rule the writer uses to decide which layer owns the content in the file, so what a host is told is what a save would write, and the answer SHALL be unchanged by a save and reload.
+
+It follows that removing a source layer SHALL NOT leave a dangling reference: the first surviving sharer becomes the owner and reports 0, and any others report its id.
+
+These fields SHALL be APPENDED to the existing descriptor, so a host compiled against the older layout declares a shorter `struct_size` and simply does not receive them.
+
+#### Scenario: An instance names its source
+- **WHEN** the layer information is read for an instanced layer
+- **THEN** the reported content source is the source layer's id and the reported share count is 2
+
+#### Scenario: A source reports no source of its own
+- **WHEN** the layer information is read for the layer that was instanced
+- **THEN** the reported content source is 0 and the reported share count is 2
+
+#### Scenario: An ordinary layer shares with nobody
+- **WHEN** the layer information is read for a layer nothing instances
+- **THEN** the reported content source is 0 and the reported share count is 1
+
+#### Scenario: The link survives a reload
+- **WHEN** a document with an instance is saved and reloaded and the layer information is read again
+- **THEN** the same source and the same share count are reported
+
+#### Scenario: Removing the source re-homes the link
+- **WHEN** the source layer of two instances is removed
+- **THEN** the first surviving instance reports 0 and the second reports the first's id
+
+### Requirement: Consolidating an instance severs it
+Consolidating a layer whose edit list is shared SHALL give that layer a PRIVATE copy of the content before baking, so the bake replaces that layer's edit list alone and every other layer sharing the content is untouched.
+
+Baking in place would rewrite the edit list of every instance, turning nine subtools into volumes because the artist baked the tenth. That is not a reading of "this shape is finished" anyone asks for, and it is silent.
+
+The sever SHALL be part of the SAME undo step as the bake, so that one undo restores the layer with its original shared content and the link intact. A host SHALL be able to observe that the layers stopped sharing, through the layer information descriptor.
+
+Measuring what a consolidation would cost SHALL NOT sever anything, since it changes nothing.
+
+#### Scenario: Baking one instance leaves the other parametric
+- **WHEN** a layer with two items is instanced and the instance is consolidated
+- **THEN** the instance holds a single baked item and the source still holds its two
+
+#### Scenario: A severed instance stops following the source
+- **WHEN** an item is added to the source after its instance was consolidated
+- **THEN** the consolidated layer is unchanged
+
+#### Scenario: Undoing a bake restores the share
+- **WHEN** an instance is consolidated and the consolidation is undone
+- **THEN** the layer holds its original items again and shares them with the source
+
+#### Scenario: Measuring a consolidation changes nothing
+- **WHEN** the cost of consolidating an instance is read
+- **THEN** the layers still share one edit list
+
+### Requirement: A drag under symmetry reaches every image and keeps its history
+`clay_layer_move_surface` SHALL state its reach as one box per image the layer's symmetry makes of the drag — the ball, one reflection per mirror axis, one rotation per radial copy — since the copies a mirrored or radial layer emits move where the images are. The boxes SHALL be taken as one invalidation, one revision, under one lock, and SHALL NOT be replaced by their union: the union of two balls a diameter apart is the slab between them, which under a mirror is the whole document.
+
+Under symmetry the drag SHALL state the frontier of the items it actually reaches, so a mirrored drag on late-history items keeps the prefix seeds it would keep unmirrored. A drag whose image does reach root ordinal 0 still takes the legacy drop, by design.
+
+`*out_applied` and the preview SHALL count ITEMS: an item that both the ball and an image reach takes its grabs in one command and is reported once.
+
+A live Move transaction SHALL report every grab the last update resolved for an affected node — `clay_sdf_move_preview_grab_count` gives how many, one without symmetry and one per image of the drag that reaches the node with it, and `clay_sdf_move_preview_grab` gives the grab at an index, refusing an index past the count — since a host that drew the first grab alone would preview half of a straddler's drag.
+
+#### Scenario: The reflected side is not stale
+- **GIVEN** a mirrored layer and bricks warm on the side the ball's reflection covers
+- **WHEN** a drag is applied on the other side and those bricks are refilled
+- **THEN** the values match a fresh mirrored document's cold refill bit for bit, and differ from the undragged document's
+
+#### Scenario: A mirrored drag resumes
+- **GIVEN** a mirrored layer whose dragged items were appended last, and a warm window of bricks over them
+- **WHEN** a continuing drag is applied frame after frame
+- **THEN** the frontier probe reports the dragged items' own root ordinal, the window resumes exactly as the unmirrored layer's does, and the refill matches a fresh mirrored oracle bit for bit
+
+#### Scenario: A transaction reports one grab per reaching image
+- **WHEN** a live Move on an unmirrored layer is asked for an affected node's grabs
+- **THEN** the count is one and index 1 is refused, while a node the drag does not reach is not found
+
+#### Scenario: A straddling item counts once
+- **WHEN** a mirrored drag's ball and reflection both reach one item
+- **THEN** the preview names it once and `*out_applied` counts it once, and the two agree
+
+### Requirement: A host can sculpt an adaptive surface across the ABI
+The C ABI SHALL expose the adaptive surface and its sculptor as opaque handles, with versioned descriptors for the surface, the topology policy and the stamp report, following the established `struct_size` pattern with bounded output fills.
+
+`clay_mesh_sculptor` SHALL keep its semantics unchanged. A host compiled against the current header relies on stable vertex and index counts and on borrowed buffers; adaptive topology SHALL NOT reach it.
+
+The ABI SHALL report topology, geometry and attribute revisions separately, and SHALL expose the changed partitions of a stroke with caller-owned buffers and a capacity query rather than copying the whole surface per stamp.
+
+Long operations — construction, global remesh, conversion, serialization — SHALL accept the cancellation token, and a cancelled operation SHALL leave the surface byte-identical.
+
+#### Scenario: The fixed sculptor is unchanged
+- **WHEN** a host built against the previous header calls the fixed mesh sculptor after this change
+- **THEN** it behaves identically, and no adaptive behaviour reaches it
+
+#### Scenario: A stroke updates only what changed
+- **WHEN** a host drives a stroke and drains the changed partitions each frame
+- **THEN** the bytes it copies follow the changed partitions rather than the size of the surface
+
+#### Scenario: A cancelled build changes nothing
+- **WHEN** a long adaptive operation is cancelled through the token
+- **THEN** the call reports cancellation and the surface is byte-identical to before it started
+
+### Requirement: A host can drive a hierarchy across the ABI
+The C ABI SHALL expose the multiresolution surface as an opaque handle with level creation and removal, independent sculpt and display levels, sculpting at the active level, and export of any level as a mesh.
+
+Adding a level SHALL report its predicted cost and SHALL fail with a typed budget error rather than allocating part of it.
+
+The ABI SHALL report revisions for the base, the detail and the evaluated surface separately, and SHALL expose changed blocks with caller-owned buffers and a capacity query rather than copying a display-level mesh per stamp.
+
+Descriptors SHALL follow the established `struct_size` pattern with bounded output fills, and long operations SHALL accept the cancellation token.
+
+#### Scenario: A detail stamp does not copy the display mesh
+- **WHEN** a host stamps detail on a deep hierarchy and drains the changed blocks
+- **THEN** the bytes copied follow the changed blocks rather than the display level's size
+
+#### Scenario: An over-budget level is refused across the ABI
+- **WHEN** a host requests a level whose predicted cost exceeds the budget it declared
+- **THEN** the call returns a typed budget error and the surface is unchanged
+
+### Requirement: A host can carry a brush preset across the ABI
+The C ABI SHALL expose the brush preset — the stroke preset it contains and the model axes the mesh path already honours — through versioned descriptors following the established `struct_size` pattern, with bounded output fills.
+
+Serialization SHALL cross as bytes rather than as a path, matching every other format the library writes, so a host holding a preset library in its own container never writes a temporary file.
+
+Image content SHALL remain borrowed for the duration of a call. The ABI SHALL NOT take ownership of alpha or displacement samples, and SHALL NOT copy them into a preset.
+
+Existing mesh brush entry points SHALL keep their semantics unchanged. A host compiled against the current header SHALL build and behave identically after this change.
+
+#### Scenario: A preset crosses and comes back
+- **WHEN** a preset is serialized through the ABI, deserialized, and used to resolve a stroke
+- **THEN** the resolved stamps equal those from the original preset
+
+#### Scenario: An older descriptor is honoured
+- **WHEN** a host passes a descriptor whose `struct_size` predates a field added later
+- **THEN** the call succeeds using defaults for the fields it does not carry, and writes no byte past the size the caller declared
+
+### Requirement: Voxel remesh over the C ABI
+The C ABI SHALL expose the global voxel remesh and its preflight estimate, taking a versioned `struct_size`-prefixed parameter descriptor and filling versioned `struct_size`-prefixed estimate and report descriptors.
+
+Every descriptor the library FILLS SHALL be written bounded by the size the caller declared, never by the size this build compiled, so a caller built against an older header is not written past. A defaults accessor SHALL be provided for the parameter descriptor so a caller can obtain the library's documented defaults without transcribing them.
+
+The remesh SHALL accept the ABI's existing cancellation token, so a host can drive it from a worker thread and stop it, and SHALL report a cancelled call as a distinct result code rather than as a generic failure.
+
+Failure SHALL be distinguishable by kind: an invalid resolution, a request over budget, an open surface refused by policy, a result that failed its own validation and a cancellation SHALL NOT collapse into one code.
+
+#### Scenario: An older caller is not written past
+- **WHEN** a caller declares an estimate or report descriptor shorter than this build's
+- **THEN** only the bytes the caller declared are written, and the fields the caller does know are correct
+
+#### Scenario: Defaults are obtainable, not transcribed
+- **WHEN** a caller asks for the voxel remesh parameter defaults
+- **THEN** it receives a filled descriptor whose values match the C++ defaults, and a remesh with it behaves as a remesh with the C++ defaults
+
+#### Scenario: Failure kinds stay distinct
+- **WHEN** a remesh is refused for an invalid resolution, for exceeding a budget, and for an open surface under a rejecting policy
+- **THEN** the three calls return three different result codes
+
+#### Scenario: A cancelled remesh is reported as cancelled
+- **WHEN** a remesh is cancelled through the ABI's cancellation token
+- **THEN** the call returns the cancelled result code and produces no mesh
+
+### Requirement: Spatial scalar transfer over the C ABI
+The C ABI SHALL expose the spatial resampling of a caller-owned per-vertex scalar array from one mesh onto another, so a host holding a mask outside the mesh can carry it across a remesh.
+
+The call SHALL require the caller to state the length of both the input array and the output buffer, and SHALL refuse a length that does not match the corresponding mesh's vertex count rather than reading or writing what it was not given.
+
+#### Scenario: A mask crosses a remesh
+- **WHEN** a host transfers a per-vertex mask from a source mesh onto its remeshed result
+- **THEN** the output buffer holds one value per result vertex, resampled from the source by closest point
+
+#### Scenario: A wrong length is refused
+- **WHEN** the call is given an array whose length is not the source's vertex count
+- **THEN** it returns an invalid-argument result and writes nothing
+
+### Requirement: A mesh layer can be rebuilt through the document
+The C ABI SHALL expose a rebuild that targets a mesh LAYER: capture, rebuild, validate, replace and record, as one call and one undo step, taking the same versioned parameter descriptor and filling the same versioned report as the pure mesh-to-mesh form.
+
+It SHALL be transactional. Nothing is written until the rebuild has succeeded and validated, so a refusal, a validation failure or a cancellation leaves the layer byte-identical and adds no undo step.
+
+A protected layer SHALL be refused BEFORE the rebuild rather than after it: rebuilding a locked layer for several seconds and then declining to commit is a worse answer than declining immediately.
+
+The ABI SHALL also expose the layer's geometry revision and a revision-checked replacement, so a host that ran the pure rebuild on its own worker thread can commit it without overwriting newer work. A stale commit SHALL be refused with a result code distinct from the codes for a bad argument and a missing layer.
+
+#### Scenario: One call, one undo step
+- **WHEN** a host rebuilds a mesh layer through the document with undo enabled
+- **THEN** the layer holds the rebuilt triangles, the report describes them, and the undo depth grew by exactly one
+
+#### Scenario: A cancelled rebuild leaves the layer alone
+- **WHEN** a rebuild through the document is cancelled
+- **THEN** it returns the cancelled result code, the layer's triangles are unchanged, and no undo step was added
+
+#### Scenario: A stale commit is refused distinctly
+- **WHEN** a host commits a rebuild at a revision the layer has moved past
+- **THEN** the commit returns a result code distinct from an invalid argument and from a missing layer, and the layer keeps the newer geometry
+
+### Requirement: Welding is reachable over the C ABI
+The C ABI SHALL expose the weld through a versioned descriptor with a defaults accessor, filling a versioned report bounded by the size the caller declared.
+
+Welding a mesh LAYER SHALL respect the same protection every other edit does, and SHALL bump the layer's geometry revision when — and only when — it actually changed something. A weld rewrites the triangles, so it invalidates a cached adjacency, spatial index or sculpting session exactly as a rebuild does; a weld that merged nothing must not invalidate them.
+
+#### Scenario: A weld reports and invalidates
+- **WHEN** a mesh layer holding a marched mesh is welded
+- **THEN** the report names the triangles collapsed and the tolerance used, and the layer's geometry revision has moved
+
+#### Scenario: A weld that did nothing invalidates nothing
+- **WHEN** the same layer is welded a second time
+- **THEN** the report says nothing merged, and the geometry revision is unchanged
+
+#### Scenario: A protected layer and a bad tolerance are refused
+- **WHEN** a ghosted or locked layer is welded, or a negative tolerance is given
+- **THEN** the call is refused and the mesh is unchanged
+
+### Requirement: The alpha entry point refuses a degenerate stamp
+`clay_item_add_alpha` SHALL refuse a direction with no length and a non-positive radius, returning an invalid-argument result and leaving the item unchanged, and its documentation SHALL name the space its coordinates are in.
+
+Both inputs were previously accepted with a success result and appended a deformer that did nothing — the case the header's own note calls harder to notice than a failure.
+
+#### Scenario: The two new refusals leave the item alone
+- **WHEN** an alpha is added with a zero-length direction, and again with a non-positive radius
+- **THEN** both calls return an invalid-argument result, and adding the item afterwards yields the same document as one to which the alpha was never offered
+
+### Requirement: A magnify on the assembled surface is reachable from C
+The C ABI SHALL expose the surface magnify as `clay_layer_magnify_surface`, with a `_preview` counterpart and a versioned `clay_magnify_params`, on the contract `clay_layer_move_surface` already has: it resolves against every item the region reaches, maps the gesture into each item's frame, makes the whole gesture ONE undo step, and issues ONE invalidation for it.
+
+The strength SHALL be a separate argument rather than a field of the params struct, because a live gesture holds its region fixed and grows only the strength.
+
+The gesture SHALL invalidate its own ball, one per image the layer's symmetry makes of it, with NO dilation — outside the radius the region weight is zero and the point is returned unchanged, for either sign of the strength — widened by each sharer's influence bound when the edit list is instanced.
+
+A strength of zero SHALL be refused rather than accepted as a no-op: it scales by one, so it is not a gesture, and a host that reached the call by accident should hear about it at the boundary.
+
+#### Scenario: A gesture reaches every contributing item
+- **WHEN** clay_layer_magnify_surface is called over a form built from two blended items
+- **THEN** it reports two items applied and the surface changes symmetrically about the gesture's centre
+
+#### Scenario: One undo step
+- **WHEN** a magnify that warps several items is applied with undo enabled
+- **THEN** the undo depth grows by one, and undoing it restores the field exactly
+
+#### Scenario: A gesture that reaches nothing succeeds
+- **WHEN** the region is far from any item
+- **THEN** the call returns OK, reports zero applied, and the document is unchanged
+
+#### Scenario: Malformed gestures are refused
+- **WHEN** the call is made with a null centre or params, an unknown layer, a non-positive radius, a strength of zero, or a params struct whose struct_size is stale
+- **THEN** it is refused, and the preview refuses the same cases
+
+### Requirement: The field report names the mechanism and is advised on it
+`clay_field_report` SHALL carry the deformer mechanism's own factor, the count of nodes that are evaluated, and a `clay_degradation` naming which mechanism is costing the marcher. `advises_consolidation` SHALL be keyed on that mechanism rather than on the step scale alone.
+
+The fields SHALL be appended behind `struct_size`, so a caller built against the earlier struct keeps working and nothing is written past the end of the struct it owns.
+
+#### Scenario: An older caller is unaffected
+- **WHEN** clay_layer_field_report is called with the struct_size of the earlier struct
+- **THEN** it succeeds, fills the fields that struct has, and writes nothing past its end
+
+#### Scenario: The advice follows the mechanism
+- **WHEN** a degraded layer holds one evaluated item carrying a brush chain
+- **THEN** `degradation` is CLAY_DEGRADATION_DEFORMERS and `advises_consolidation` is 0
+
+### Requirement: A voxel drag is reachable from C as a transaction
+The C ABI SHALL expose the voxel grab gesture as `clay_voxel_grab_begin`, `_update`, `_written_box`, `_commit`, `_cancel` and `_destroy`, on the shape `clay_sdf_move_begin` already has on the field side.
+
+`_update` SHALL take the TOTAL displacement from the anchor. `_written_box` SHALL report the brush's footprint, fixed for the whole gesture whatever the displacement grows to, so a host has its invalidation region from the first frame. `_destroy` SHALL cancel an uncommitted transaction.
+
+Every write SHALL raise the same undo step and dirty-region bookkeeping a stateless verb does.
+
+`clay_voxel_sculpt_grab`'s documentation SHALL state that it does not compose and point at the transaction.
+
+#### Scenario: A drag delivered in pieces lands where one delivered whole does
+- **WHEN** the same total drag is delivered through the transaction as one, two, four and eight updates
+- **THEN** the grid is identical in every case, and differs from the untouched grid
+
+#### Scenario: The written box does not grow with the drag
+- **WHEN** the box is read at the start of a gesture and after a long update
+- **THEN** it is the same box
+
+#### Scenario: A spent transaction is refused, not silently accepted
+- **WHEN** update or commit is called after a commit or a cancel
+- **THEN** it is refused
+
+### Requirement: A Move drag previews as an ordinary document from C
+The C ABI SHALL expose a live Move transaction's preview as a borrowed, read-only `clay_document` carrying the real document's layers with the dragged one replaced by the preview. It SHALL be usable wherever a document is — evaluation, meshing, picking, brick refill — so a host draws the drag through machinery it already has, and the real document SHALL NOT be modified.
+
+The handle SHALL be valid until the transaction is committed, cancelled or destroyed, and SHALL be NULL for a spent transaction. It SHALL share the transaction's content, so an update is visible through it without a refresh, and the document's compiled-tape cache SHALL be invalidated on each request, since the drag changes the edit list without going through a mutating entry point.
+
+It SHALL carry the SDF layers. Voxel grids, masks and mesh layers are not part of the field tape, so their absence changes nothing that reads the field, and copying them would charge a drag for content it cannot change.
+
+A drag that reaches no items SHALL still preview, as the layer unchanged.
+
+#### Scenario: The preview carries the drag and the document does not move
+- **WHEN** a live drag is updated and the preview document is evaluated
+- **THEN** the surface shows the drag, the real document's field is unchanged, and its saved bytes are identical
+
+#### Scenario: A second update is visible through the same handle
+- **WHEN** the transaction is updated again and the preview document evaluated
+- **THEN** it shows the newer drag rather than the previous frame's
+
+#### Scenario: The preview is what the commit writes
+- **WHEN** the drag is committed
+- **THEN** the real document's field matches what the preview last showed
+
+#### Scenario: The preview dies with the gesture
+- **WHEN** the transaction is committed or cancelled
+- **THEN** the preview document is no longer available
+
+### Requirement: A placed deformer can be taken back
+The C ABI SHALL offer an inverse for `clay_layer_add_deformer`: a count, a remove by index, and a clear. Undo SHALL NOT be the only way to remove a warp, since undoing also spends a history entry the caller never meant to make.
+
+All three SHALL be undoable edits. Removing at an index past the end SHALL be refused rather than silently ignored; clearing a chain that is already empty SHALL succeed.
+
+#### Scenario: A chain can be counted, shortened and emptied
+- **WHEN** two deformers are added to a placed node and one is removed by index
+- **THEN** the count reports two, then one, and clearing takes it to zero
+
+#### Scenario: An index past the end is refused
+- **WHEN** remove names an index the chain does not have
+- **THEN** it is refused and the chain is unchanged
+
+#### Scenario: Removing is undoable
+- **WHEN** a deformer is removed and the edit undone
+- **THEN** the chain is exactly what it was
+
+### Requirement: A region of a layer can be merged from C
+The C ABI SHALL expose the region merge as `clay_layer_consolidate_region`, with `clay_layer_plan_region_merge` reporting what it would absorb without baking, and a versioned `clay_region_merge` carrying the sampled box, the number of roots absorbed and whether the closure took the whole layer.
+
+A missing or empty region SHALL be refused rather than treated as the whole layer: a region merge without a region is a whole-layer consolidation, and a caller should ask for that by name.
+
+#### Scenario: The merge leaves the rest parametric
+- **WHEN** a region over one of four well-separated items is merged
+- **THEN** one item is absorbed, a volume takes its place, the other three remain, and the layer does not report itself consolidated
+
+#### Scenario: Repeated gestures keep one baked item
+- **WHEN** the same region is merged once per gesture over several gestures
+- **THEN** the layer's node count does not grow
+
+#### Scenario: A region it cannot make sense of is refused
+- **WHEN** the call is made with a null or inverted region, an unknown layer, null params, a region over empty space, or a stale struct_size
+- **THEN** it is refused and the document is unchanged
+
+### Requirement: A host can evaluate the document without one layer
+
+The API SHALL expose point evaluation, gradient evaluation and brick-request
+evaluation over **every visible SDF layer except one named layer**, so a host
+previewing a single layer through a transaction can draw the rest of the
+document beside it.
+
+The excluded forms SHALL answer exactly what the whole-document forms answer for
+a document from which that layer had been removed. Visible SDF layers compose by
+hard union, so a caller may take the minimum of an excluded evaluation and its
+own preview and obtain the field the whole document would have — this is exact
+composition, not an approximation, and the API SHALL say so where it is offered.
+
+The excluded forms SHALL take the same arguments, honour the same backend
+selection, and observe the same count ceilings as the whole-document forms they
+mirror. Brick-request evaluation SHALL fill the same fixed per-brick slots at
+the same stride.
+
+Naming an excluded layer the document does not hold SHALL return a not-found
+error. It SHALL NOT be read as "exclude nothing": a host whose layer id went
+stale would otherwise be handed the whole document, and would draw the layer it
+meant to exclude on top of the preview it drew itself.
+
+Naming a layer that is hidden, or that carries no SDF content, SHALL succeed and
+answer what the visible SDF layers evaluate to — such a layer contributes
+nothing to the union, so excluding it is already a no-op and refusing it would
+make a host branch on state it has no reason to track.
+
+These entry points SHALL NOT modify the document. In particular a host SHALL NOT
+need to toggle layer visibility to obtain this result, because visibility is an
+edit and an edit taken during a transaction is one the transaction's commit
+refuses.
+
+#### Scenario: The rest of the document, during a gesture
+- **WHEN** a consumer opens a sculpt transaction on one layer of a multi-layer document and evaluates the document excluding that layer
+- **THEN** it receives the field of the other visible SDF layers, the document is unchanged, no undo entry is recorded, and the transaction's commit still succeeds
+
+#### Scenario: The excluded evaluation composes exactly
+- **WHEN** a consumer takes the minimum of an excluded evaluation and the excluded layer's own evaluation at the same points
+- **THEN** the result equals the whole-document evaluation at those points
+
+#### Scenario: A stale layer id is refused
+- **WHEN** a consumer excludes a layer identifier the document does not hold
+- **THEN** the call returns a not-found error and writes no distances
+
+#### Scenario: Excluding a hidden layer is not an error
+- **WHEN** a consumer excludes a layer that is hidden or carries no SDF content
+- **THEN** the call succeeds and answers what the visible SDF layers evaluate to
+
+#### Scenario: A brick refill without one layer
+- **WHEN** a consumer evaluates brick requests excluding one layer
+- **THEN** brick i occupies the same fixed slot it occupies in the whole-document form, holding what that brick would hold in a document without that layer
