@@ -141,7 +141,7 @@ struct StrokeResult {
 
 // One deterministic stroke. Identical inputs must give an identical surface,
 // which is what the contended and uncontended runs are compared on.
-StrokeResult run_stroke(int dabs, std::size_t budget) {
+StrokeResult run_stroke(int dabs, int budget) {
     auto surface = DynamicSurface::from_mesh(cube_sphere(6, 1.0f));
     REQUIRE(surface.has_value());
     DynamicSculptor sculptor(*surface);
@@ -197,7 +197,7 @@ TEST_CASE("dyntopo stress: a stroke under utility load gives the same surface") 
     // shared pool, or by anything else -- these two meshes differ, and no
     // amount of latency measurement would have found it.
     constexpr int kDabs = 24;
-    constexpr std::size_t kBudget = 400;
+    constexpr int kBudget = 400;
 
     const StrokeResult quiet = run_stroke(kDabs, kBudget);
 
@@ -213,8 +213,8 @@ TEST_CASE("dyntopo stress: a stroke under utility load gives the same surface") 
     // The per-dab budget is a COUNT, so it holds on any machine and under any
     // scheduling. A dab that blew its budget under load would mean the bound is
     // enforced by timing somewhere, which it must not be.
-    CHECK(quiet.max_ops_in_a_dab <= kBudget);
-    CHECK(contended.max_ops_in_a_dab <= kBudget);
+    CHECK(quiet.max_ops_in_a_dab <= static_cast<std::size_t>(kBudget));
+    CHECK(contended.max_ops_in_a_dab <= static_cast<std::size_t>(kBudget));
     CHECK(quiet.max_ops_in_a_dab == contended.max_ops_in_a_dab);
 
     MESSAGE("idle      P50 " << percentile(quiet.dab_ms, 0.5) << " ms  P95 "
@@ -256,7 +256,6 @@ TEST_CASE("dyntopo stress: a long session does not drift") {
     constexpr int kProbeEvery = 10;
     constexpr int kValidateEvery = 20;
     constexpr int kRoundTripEvery = 25;
-    constexpr int kUndoEvery = 1000;
     constexpr int kRebuildEvery = 30;
 
     auto surface = DynamicSurface::from_mesh(cube_sphere(4, 1.0f));
@@ -287,8 +286,6 @@ TEST_CASE("dyntopo stress: a long session does not drift") {
     std::vector<double> probe_ms;
     std::vector<std::size_t> probe_verts;
     std::size_t validations = 0, roundtrips = 0, rebuilds = 0;
-    std::size_t undos = 0;
-    (void)undos;  // see the disabled block below
 
     for (int s = 0; s < kStrokes; ++s) {
         MeshBrushSettings brush;
@@ -313,7 +310,7 @@ TEST_CASE("dyntopo stress: a long session does not drift") {
         // probe below is deliberately not recorded, so running it before this
         // would invalidate the revert -- which is exactly what the first draft
         // of this test did, and it read like a library defect.
-        // UNDO IS DISABLED HERE, AND THAT IS THE FINDING RATHER THAN AN
+        // UNDO IS ABSENT HERE, AND THAT IS THE FINDING RATHER THAN AN
         // OMISSION. `TopologyDelta` replay leaves a surface that passes
         // `validate_dynamic_surface`, reports the same vertex and face counts,
         // and breaks a LATER stamp:
@@ -324,17 +321,18 @@ TEST_CASE("dyntopo stress: a long session does not drift") {
         //   revert() alone  looks clean, and a Smooth stamp four strokes later
         //                   never returns
         //
-        // Measured: this same 20-stroke run takes 0.10 s with the revert at
-        // stroke 15 removed and does not terminate with it. Reproduced on
+        // Measured: this run takes 0.10 s at twenty strokes with the revert at
+        // stroke 15 removed, and does not terminate with it. Reproduced on
         // 96a79059, so it predates the collapse work in #427.
         //
-        // Re-enable this block when that is fixed; it is the coverage guide 73
-        // asks for and the only part of it currently missing.
-        if (false && s % kUndoEvery == 0 && !delta.empty()) {
-            REQUIRE(delta.revert(*surface));
-            REQUIRE(mesh::validate_dynamic_surface(*surface).ok);
-            ++undos;
-        }
+        // Written out rather than left behind an `if (false)`, which is dead
+        // code MSVC rejects under /W4 /WX. Restore this when the defect is
+        // fixed -- it is the one piece of guide 73's coverage still missing:
+        //
+        //   if (s > 0 && s % kUndoEvery == 0 && !delta.empty()) {
+        //       REQUIRE(delta.revert(*surface));
+        //       REQUIRE(mesh::validate_dynamic_surface(*surface).ok);
+        //   }
 
         if (s % kProbeEvery == 0) {
             probe_ms.push_back(probe());
