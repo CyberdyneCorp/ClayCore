@@ -326,7 +326,25 @@ TEST_CASE("preflight: a hierarchy deep enough to wrap the estimate refuses rathe
     // reaches the ceiling long before the arithmetic wraps — and BOTH refusals
     // have to arrive as refusals, because the one that wraps produces a small
     // number and a small number is allowed.
-    auto surface = MultiresSurface::from_mesh(quad_grid(4, 1.0f));
+    // UNDER A BUDGET, and the budget is the whole reason this test is cheap.
+    // `memory_budget = 0` means UNBOUNDED, so this loop used to ADD every level
+    // it asked about -- Catmull-Clark quadruples the face count, so from a 4x4
+    // cage it allocated 16 * 4^n and peaked at 5.4 GB before the depth limit
+    // stopped it. A test whose subject is "refused BEFORE it is paid for" was
+    // paying for it. It was the largest single allocation in the suite by a
+    // factor of sixty, it killed the ThreadSanitizer and Vulkan CI jobs, whose
+    // shadow memory multiplies it, and it took a developer desktop down twice.
+    //
+    // 64 MiB refuses after a few real levels, which is what the assertions
+    // below actually need: that the loop ENDS in a refusal and leaves a valid
+    // hierarchy. The arithmetic-wrap refusal is not reachable from any real
+    // hierarchy anyway -- `kMaxLevels` is 12, and level 12 of this cage is nine
+    // orders of magnitude short of wrapping 64 bits -- so it is tested where it
+    // can be tested, by handing synthetic values straight to the checked
+    // arithmetic in the two cases above.
+    mesh::MultiresOptions options;
+    options.memory_budget = 64ull << 20;
+    auto surface = MultiresSurface::from_mesh(quad_grid(4, 1.0f), options);
     REQUIRE(surface.has_value());
     int added = 0;
     mesh::MultiresError error = mesh::MultiresError::None;
