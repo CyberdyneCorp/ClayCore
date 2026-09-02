@@ -501,6 +501,30 @@ std::size_t DynamicSculptor::write_colors(TopologyDelta* record) {
 DynamicStampResult DynamicSculptor::stamp(MeshBrush verb, const MeshBrushSettings& brush,
                                           const DynamicTopologySettings& topology,
                                           const field::MaskGate& gate, TopologyDelta* record) {
+    const DynamicStampResult out = stamp_impl(verb, brush, topology, gate, record);
+    // ONE observation point for a call with several early returns. Splitting the
+    // body out is what makes that possible without repeating the publish at
+    // every `return`, where a later edit would eventually forget one.
+    if (telemetry_ != nullptr) {
+        telemetry_->observe_topology(out.remesh.total());
+        // The COMPOSED workset, not `candidates_`: the walk's candidate list is
+        // what the footprint reached, and the weight, the gate and the automask
+        // still drop entries from it. The fixed path publishes its peak after
+        // the same drops, and a peak that meant "reached" on one representation
+        // and "kept" on the other would not be one number.
+        //
+        // This used to read `region_vertices_.size()` and to say that the
+        // adaptive sculptor builds no workset. Both stopped being true when
+        // add-shared-brush-runtime gave it `region_`.
+        telemetry_->observe_workset(region_.size());
+    }
+    return out;
+}
+
+DynamicStampResult DynamicSculptor::stamp_impl(MeshBrush verb, const MeshBrushSettings& brush,
+                                               const DynamicTopologySettings& topology,
+                                               const field::MaskGate& gate,
+                                               TopologyDelta* record) {
     DynamicStampResult out;
     out.topology_revision = surface_.topology_revision();
     out.geometry_revision = surface_.geometry_revision();

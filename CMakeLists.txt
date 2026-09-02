@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(claycore
-  VERSION 0.77.0
+  VERSION 0.78.0
   DESCRIPTION "Portable C++20 SDF + voxel engine library"
   LANGUAGES C CXX)  # C: ufbx
 
@@ -28,6 +28,9 @@ include(Dependencies)
 
 add_library(claycore
   src/version.cpp
+  src/memory/budget.cpp
+  src/memory/capacity.cpp
+  src/memory/scratch.cpp
   src/brush/procedural_mask.cpp
   src/brush/surface_measure.cpp
   src/voxel/groups.cpp
@@ -88,6 +91,10 @@ add_library(claycore
   src/mesh/topology_delta.cpp
   src/mesh/topology_ops.cpp
   src/mesh/dynamic_bvh.cpp
+  src/mesh/surface_chunks.cpp
+  src/mesh/surface_view.cpp
+  src/mesh/preflight.cpp
+  src/mesh/maintenance.cpp
   src/mesh/remesh_local.cpp
   src/mesh/dynamic_sculpt.cpp
   src/mesh/subdivide.cpp
@@ -95,6 +102,7 @@ add_library(claycore
   src/mesh/detail_field.cpp
   src/mesh/multires.cpp
   src/mesh/multires_eval.cpp
+  src/mesh/multires_chunks.cpp
   src/mesh/multires_sculpt.cpp
   src/mesh/project.cpp
   src/mesh/multires_serialize.cpp
@@ -452,4 +460,33 @@ if(CLAY_BUILD_BENCHMARKS)
   add_executable(tape_stack_probe benchmarks/tape_stack_probe.cpp)
   target_link_libraries(tape_stack_probe PRIVATE claycore)
   clay_apply_warnings(tape_stack_probe)
+
+  # The chunk-size measurement (add-extreme-poly-runtime task 1.1). Its own
+  # target rather than a case of clay_bench, because the decision rule reads
+  # percentiles of a sum across four stages and google-benchmark reports one
+  # aggregate per case. Exits non-zero if the partition it measures stops
+  # being a partition.
+  add_executable(bench_surface_chunks benchmarks/bench_surface_chunks.cpp)
+  target_link_libraries(bench_surface_chunks PRIVATE claycore)
+  clay_apply_warnings(bench_surface_chunks)
+
+  # The 7.1 scaling matrix with 7.2's per-stage timers. Driven by
+  # tools/bench_extreme_poly.py, which records the load average either side of
+  # every row and reports ratios rather than bare milliseconds.
+  # The 3.7 serial threshold: where dispatching a per-vertex pass starts to
+  # pay. Prints the load average either side of the run, because the crossover
+  # is unreadable on a box that picked up a job mid-sweep.
+  add_executable(bench_parallel_grain benchmarks/bench_parallel_grain.cpp)
+  target_link_libraries(bench_parallel_grain PRIVATE claycore)
+  clay_apply_warnings(bench_parallel_grain)
+
+  add_executable(bench_extreme_poly benchmarks/bench_extreme_poly.cpp)
+  target_link_libraries(bench_extreme_poly PRIVATE claycore)
+  clay_apply_warnings(bench_extreme_poly)
+
+  # What a memory warning costs the dab after it, which the correctness gates
+  # deliberately do not measure. See the file's own header.
+  add_executable(bench_trim_recovery benchmarks/bench_trim_recovery.cpp)
+  target_link_libraries(bench_trim_recovery PRIVATE claycore)
+  clay_apply_warnings(bench_trim_recovery)
 endif()

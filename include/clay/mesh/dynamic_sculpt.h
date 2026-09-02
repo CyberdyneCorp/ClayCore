@@ -24,6 +24,7 @@
 
 #include "clay/field/relax.h"  // MaskGate
 #include "clay/math/geom.h"
+#include "clay/memory/budget.h"  // PeakTelemetry
 #include "clay/mesh/dynamic_bvh.h"
 #include "clay/mesh/dynamic_surface.h"
 #include "clay/mesh/remesh_local.h"
@@ -86,6 +87,17 @@ class DynamicSculptor {
                              const DynamicTopologySettings& topology,
                              const field::MaskGate& gate = {}, TopologyDelta* record = nullptr);
 
+    // Where this sculptor publishes the peaks only it can see — the topology
+    // operations one stamp ran, and the adaptive surface's workset. Borrowed
+    // and never owned; null is the default.
+    //
+    // Topology operations are the fourth of the four numbers a host tunes a
+    // profile against, and the one with no other source: a split allocates a
+    // slot, and a stamp that split five hundred times is the stamp that decides
+    // how big the pools have to be.
+    void set_telemetry(memory::PeakTelemetry* telemetry) { telemetry_ = telemetry; }
+    memory::PeakTelemetry* telemetry() const { return telemetry_; }
+
     const DynamicSurface& surface() const { return surface_; }
     DynamicSurface& surface() { return surface_; }
     const DynamicBvh& bvh() const { return bvh_; }
@@ -128,6 +140,11 @@ class DynamicSculptor {
     const BrushScratchArena& arena() const { return arena_; }
 
    private:
+    // The stamp's body. Split out so `stamp` has exactly one place to publish
+    // its telemetry from, rather than one at each of the early returns.
+    DynamicStampResult stamp_impl(MeshBrush verb, const MeshBrushSettings& brush,
+                                  const DynamicTopologySettings& topology,
+                                  const field::MaskGate& gate, TopologyDelta* record);
     // THE WALK, and only the walk: everything the brush reaches, into
     // `candidates_` and `region_distance_`. Declared here rather than in
     // `sculpt_workset.h` because it names a `DynamicSurface`, and a neutral
@@ -206,6 +223,7 @@ class DynamicSculptor {
     std::vector<FaceId> ball_faces_;
     std::vector<VertexId> ring_scratch_;
     std::vector<HalfEdgeId> fan_scratch_;
+    memory::PeakTelemetry* telemetry_ = nullptr;
     // The buffers `DynamicSurface::refresh_normals` would otherwise build for
     // itself, once per stamp plus one half-edge fan per vertex it touched.
     DynamicSurface::NormalRefreshScratch normal_scratch_;

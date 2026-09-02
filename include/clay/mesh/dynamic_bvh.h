@@ -23,6 +23,15 @@
 // demonstrates the shape: a sparse set of fixed units with revisions, refilled
 // and uploaded independently.
 //
+// THE CHUNK ITSELF IS NO LONGER THIS FILE'S (add-extreme-poly-runtime). It is
+// `mesh::ChunkTable`, which the fixed sculptor and the hierarchy share: the
+// six roles above are claimed for all three representations rather than for
+// this one, and what stays here is the PARTITIONER — which faces go in which
+// chunk, and the tree over the chunks. `SurfaceLeaf` is now a name for
+// `SurfaceChunk`, so every existing reader of a leaf's faces, bounds, revision
+// and dirty flags is unchanged; what it gained is three more revisions, an
+// arena instead of a vector per leaf, and an acknowledgement.
+//
 // WHAT "LOCAL" MEANS HERE, precisely, because it is the requirement: moving a
 // vertex refits its leaf and the leaf's ANCESTORS, which is logarithmic in the
 // number of leaves — not the whole tree, and not the whole surface. A split or
@@ -34,37 +43,33 @@
 
 #include "clay/math/geom.h"
 #include "clay/mesh/dynamic_surface.h"
+#include "clay/mesh/surface_chunks.h"
 
 namespace clay {
 namespace mesh {
 
 struct DynamicBvhOptions {
-    // Faces per leaf. A few hundred is the band where the leaf is big enough to
-    // be worth uploading as a unit and small enough that a brush touching one
-    // does not drag in a neighbourhood it does not need.
-    std::size_t target_leaf_faces = 256;
+    // Faces per leaf. MEASURED, and the same number `ChunkOptions` carries —
+    // one size for the library, not one per representation, because a
+    // per-representation size is the second granularity the shared table exists
+    // to prevent, arriving by the back door. `surface_chunks.h` holds the
+    // matrix and `benchmarks/bench_surface_chunks.cpp` produces it; the short
+    // version is that 128 minimises the query-plus-normals-plus-index P95 at
+    // the 20k footprint and sits at the minimum of the split-and-merge cost,
+    // and that 256 — what this field said before anybody measured it here — is
+    // beaten by 5 to 6% on the first and by 1.51x against 1.64x on false
+    // positives.
+    std::size_t target_leaf_faces = 128;
     // Above this a leaf splits; below it, two siblings merge. The gap is
     // hysteresis: a leaf hovering at the threshold must not split and merge on
     // alternate stamps.
-    std::size_t max_leaf_faces = 512;
-    std::size_t min_leaf_faces = 64;
+    std::size_t max_leaf_faces = 256;
+    std::size_t min_leaf_faces = 32;
 };
 
-// One chunk. `revision` advances whenever anything in it changes, so a host can
-// ask "what do I need to re-upload" without diffing geometry.
-struct SurfaceLeaf {
-    math::Aabb bounds;
-    std::vector<FaceId> faces;
-    std::uint64_t revision = 0;
-    // Set when the faces moved but the membership did not, and when the
-    // membership itself changed. A host re-uploads an index buffer only for the
-    // second.
-    bool geometry_dirty = false;
-    bool topology_dirty = false;
-    // The tree node that owns this leaf.
-    std::uint32_t node = 0xffffffffu;
-    bool live = false;
-};
+// `SurfaceLeaf` — the chunk record, its four revisions and its face span — is
+// in `surface_chunks.h`. It is not redefined here, because two definitions of
+// "one chunk" is the exact failure the shared table exists to remove.
 
 class DynamicBvh {
    public:
@@ -122,8 +127,15 @@ class DynamicBvh {
     // BY EPOCH MARK, not by a hash set per dab. A leaf carries the epoch it was
     // last marked in; the "clear" is an increment of the current epoch, which
     // costs nothing and cannot grow.
-    const std::vector<std::uint32_t>& dirty_leaves() const { return dirty_; }
+    const std::vector<std::uint32_t>& dirty_leaves() const { return table_.dirty(); }
     void clear_dirty();
+
+    // The table itself, for the transport and the ledger. A caller that wants
+    // the four revisions, the chunk-local vertex map or the per-chunk
+    // acknowledgement asks it directly; `dirty_leaves` and `leaf` stay as the
+    // shipped shorthand over the same records.
+    const ChunkTable& chunks() const { return table_; }
+    ChunkTable& chunks_mutable() { return table_; }
 
     // -- introspection --------------------------------------------------------
     std::size_t leaf_count() const;
@@ -168,19 +180,31 @@ class DynamicBvh {
     math::Aabb face_bounds(const DynamicSurface& surface, FaceId f) const;
 
     DynamicBvhOptions options_;
-    std::vector<SurfaceLeaf> leaves_;
+    // The chunks, their faces and their dirty set. Shared with the other two
+    // representations; what is private to this file is the tree below and the
+    // face-to-chunk map beside it.
+    ChunkTable table_;
     std::vector<Node> nodes_;
     std::uint32_t root_ = 0xffffffffu;
     // face slot -> leaf index. A vector rather than a map: the slot space is
     // dense enough that the vector is smaller and the lookup is a load.
     std::vector<std::uint32_t> face_leaf_;
-    std::vector<std::uint32_t> dirty_;
-    std::vector<std::uint32_t> dirty_epoch_;
     // `update_many`'s per-stamp leaf list, kept so a stroke of similar stamps
     // allocates on its first one and never again.
     std::vector<std::uint32_t> update_scratch_;
-    std::uint32_t epoch_ = 1;
-    std::uint64_t revision_ = 1;
+    // NO `dirty_`, `dirty_epoch_`, `epoch_` OR `revision_` HERE. They were the
+    // epoch-marked dirty set this class kept for itself, and the chunk table
+    // owns that now: `dirty_leaves()` answers out of `table_.dirty()`, and one
+    // dirty set serving the spatial index, the brush candidate set, the normal
+    // recompute and the host upload is the whole point of the chunk unit.
+    //
+    // Worth a note rather than a silent deletion, because they survived the
+    // merge with main once -- unused, which GCC tolerates and Clang rejects
+    // under -Wunused-private-field, so it was the macOS job that caught it.
+    // The half of a chunk a split moves. A member for the same reason
+    // `update_scratch_` above is one -- this runs per stamp, and a local would
+    // allocate and free on every dab.
+    std::vector<FaceId> moved_faces_;
     mutable bool tree_stale_ = false;
 };
 

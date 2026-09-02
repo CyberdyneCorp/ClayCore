@@ -304,14 +304,19 @@ TEST_CASE("c dynamic: a stamp dirties the chunks it touched and no others") {
     CHECK(filled == dirty);
     for (uint32_t i : indices) CHECK(i < chunks);
 
-    // A capacity below what is needed is refused rather than truncating.
+    // A capacity below what is needed is refused rather than truncating, and
+    // refused as a SIZE — CLAY_ERROR_BUFFER_TOO_SMALL, the code every other
+    // size query in this header returns, because that is the one a host retries
+    // after growing. See the note on clay_chunk_readback.truncated.
     std::vector<uint32_t> tiny(1);
     size_t small = 0;
     if (dirty > 1) {
         small = tiny.size();
+        tiny[0] = 0xFFFFFFFFu;
         CHECK(clay_dynamic_surface_dirty_chunks(fx.sculptor, tiny.data(), &small) ==
-              CLAY_ERROR_INVALID_ARGUMENT);
-        CHECK(small == dirty);  // and it says how much was needed
+              CLAY_ERROR_BUFFER_TOO_SMALL);
+        CHECK(small == dirty);        // and it says how much was needed
+        CHECK(tiny[0] == 0xFFFFFFFFu);  // and wrote nothing on the way to saying it
     }
 
     REQUIRE(clay_dynamic_surface_clear_dirty(fx.sculptor) == CLAY_OK);

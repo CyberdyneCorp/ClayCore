@@ -63,6 +63,7 @@
 #include "clay/mesh/project.h"
 #include "clay/mesh/sculpt_layer.h"
 #include "clay/mesh/subdivide.h"
+#include "clay/mesh/surface_chunks.h"
 #include "clay/mesh/surface_frame.h"
 #include "clay/parallel/cancel.h"
 
@@ -108,6 +109,11 @@ enum class MultiresError : std::uint32_t {
     // slider between two stamps would author one gesture against two different
     // surfaces.
     SculptLayerStrokeOpen = 14,
+    // The capacity estimate itself overflowed 64 bits. Reported as a refusal
+    // rather than as a number, because the number would be wrong in the one
+    // direction that matters: a wrapped estimate is a SMALL one, and a small
+    // one is allowed.
+    CapacityOverflow = 15,
 };
 
 // The name of the refusal, for a message. Never null.
@@ -171,6 +177,11 @@ struct MultiresMemory {
     // split even though it is the array evaluation actually reads.
     std::size_t composed = 0;
     std::size_t runtime_index = 0;  // connectivity, level meshes, adjacency
+    // The per-level chunk tables and their face maps. Its own line rather than
+    // part of `runtime_index`, because a host answering a memory warning acts
+    // on the categories separately and the chunk index is the one that follows
+    // the FACE COUNT rather than the vertex count.
+    std::size_t chunk_index = 0;
     std::size_t rebuildable = 0;
 
     std::size_t total = 0;
@@ -520,16 +531,55 @@ class MultiresSurface {
     const std::vector<std::uint32_t>& dirty_patches() const;
     void clear_dirty();
 
+    // The level's CHUNKS: the same events as `dirty_patches`, in the vocabulary
+    // the other two representations report in, with four revisions instead of
+    // three and a per-chunk acknowledgement instead of an all-or-nothing clear.
+    //
+    // A chunk here is a run of consecutive faces in patch-major order — the
+    // (base patch, quadrant at depth d) identity — because a base patch is not
+    // a fixed-size unit: subdivision quadruples its faces per level, so one
+    // base quad owns 1024 faces at level 5. `src/mesh/multires_chunks.cpp` says
+    // why that is the same granularity keyed by the only identity subdivision
+    // preserves, rather than a second one.
+    //
+    // NOT const: the chunk bounds are read from P(n), so asking for them
+    // evaluates the level exactly as `positions_at` does. Built once per cache
+    // lifetime and released with the cache, because a partition of a level's
+    // own faces is reconstructed bit-identically from authoritative topology.
+    const ChunkTable& chunks_at(std::uint32_t level);
+    // Retire one chunk from a level's dirty set, and only if it has not changed
+    // since the caller read it. What lets a host drain across frames without
+    // either re-uploading everything or losing a change.
+    bool acknowledge_chunk(std::uint32_t level, std::uint32_t chunk, const ChunkRevisions& seen);
+    void clear_dirty_chunks(std::uint32_t level);
+
     const MultiresEvalStats& eval_stats() const;
     void reset_eval_stats();
 
     // -- residency ------------------------------------------------------------
 
-    // Bumped whenever a level's rebuildable cache is created. A sculptor bound
-    // to a level's mesh compares it and rebinds rather than holding a reference
-    // into storage a `drop_*_caches` released underneath it — which is a
-    // use-after-free that a host under memory pressure would find first.
+    // Bumped whenever a level's rebuildable cache is created OR RELEASED. A
+    // sculptor bound to a level's mesh compares it and rebinds rather than
+    // holding a reference into storage a `drop_*_caches` released underneath it
+    // — which is a use-after-free that a host under memory pressure would find
+    // first.
+    //
+    // BOTH HALVES, and the release half is the one that was missing: bumping
+    // only on create leaves the window between a drop and the next build, which
+    // is exactly where a stamp taken right after a memory warning lands.
     std::uint64_t cache_generation() const;
+
+    // WHAT THE HOST WILL SPEND. Filled by the host, never detected: the
+    // portable core makes no platform call and branches on no device model, so
+    // constrained behaviour is exercised by a desktop test in three lines.
+    //
+    // Setting it takes effect immediately and then at every residency change
+    // the host itself causes — which is the only moment this class releases
+    // anything on its own. On a constrained profile the sculpt and display
+    // levels stay resident and every other level keeps its authoritative detail
+    // alone.
+    void set_memory_profile(const memory::SculptMemoryProfile& profile);
+    const memory::SculptMemoryProfile& memory_profile() const;
 
     MultiresMemory memory() const;
     // Release the rebuildable caches of every level that is neither the sculpt
@@ -602,6 +652,10 @@ class MultiresSurface {
     struct State;
 
    private:
+    // Apply the profile's residency rule. Called from the level setters and
+    // from `set_memory_profile`, and from nowhere else.
+    void enforce_residency();
+
     std::unique_ptr<State> state_;
 };
 

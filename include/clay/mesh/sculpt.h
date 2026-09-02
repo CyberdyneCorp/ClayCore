@@ -48,6 +48,7 @@
 #include "clay/mesh/deform.h"
 #include "clay/mesh/bvh.h"
 #include "clay/mesh/lattice.h"
+#include "clay/memory/budget.h"  // PeakTelemetry
 #include "clay/mesh/mesh_data.h"
 #include "clay/mesh/brush_model.h"
 #include "clay/mesh/sculpt_common.h"
@@ -280,6 +281,42 @@ class MeshSculptor {
     kernel::cfloat3 class_position(std::uint32_t cls) const;
     std::uint32_t nearest_class(kernel::cfloat3 p);
 
+    // -- the seed token ------------------------------------------------------
+    // What a caller stores beside a `seed_class` it picked, and sends back in
+    // `MeshBrushSettings::seed_revision` so a stamp can tell a live seed from
+    // one taken out of a numbering that no longer exists.
+    //
+    // It identifies the CLASS SPACE, not the positions: this sculptor's
+    // adjacency is fixed for its whole life (both constructors take one and
+    // nothing rebuilds it), so vertices moving under a stroke leave the token
+    // alone — a seed stays valid across the stamps of a stroke, which is
+    // exactly when re-picking would be wasted. What DOES retire a token is a
+    // new sculptor, and a hierarchy makes one on every rebind, which is the
+    // case `seed_revision` was added for.
+    //
+    // A monotonic counter rather than a hash of the adjacency: a hash costs a
+    // walk over the whole class space to compute and would make two sculptors
+    // over identical topology interchangeable, which they are not — they index
+    // different `Mesh` storage.
+    std::uint64_t seed_revision() const { return seed_revision_; }
+    // How many stamps rejected a seed because its revision did not match. The
+    // only way a test can prove the rejection HAPPENED rather than the seed
+    // having been harmless, which is the difference between this gate and one
+    // that passes because the walk found its way anyway.
+    std::size_t stale_seeds_rejected() const { return stale_seeds_rejected_; }
+
+    // -- peak telemetry (task 7.7) -------------------------------------------
+    // Where this sculptor publishes the high-water mark of its WORKSET, for a
+    // host tuning a `SculptMemoryProfile`. Borrowed and never owned; null is
+    // the default and the only cost is a null check once per stamp.
+    //
+    // The peak rather than the last value, and the workset rather than the
+    // write region: what a stamp has to hold is everything it GATHERED,
+    // including the rim of the falloff that never moves, and a host sizing an
+    // arena against the write region would size it against the wrong number.
+    void set_telemetry(memory::PeakTelemetry* telemetry) { telemetry_ = telemetry; }
+    memory::PeakTelemetry* telemetry() const { return telemetry_; }
+
     // -- picking -------------------------------------------------------------
     // Built lazily on the first query. Positions move under it, and what a
     // stale tree reports is worth stating precisely, because the obvious guess
@@ -372,6 +409,9 @@ class MeshSculptor {
     // one of the three things it actually depends on changes.
     const BrushRuntimePlan& plan_for(MeshBrush verb, const MeshBrushSettings& settings);
     kernel::cfloat3 automask_reference(const MeshBrushSettings& settings);
+    // The caller's seed if it is usable by THIS sculptor, `kNoClass` otherwise.
+    // Counts the rejections it makes on revision grounds.
+    std::uint32_t accepted_seed(const MeshBrushSettings& settings);
     // The ray tree, refitted — or null when the host has never built one, in
     // which case every caller below falls back to the scan it replaced.
     const Bvh* surface_index();
@@ -408,6 +448,11 @@ class MeshSculptor {
     // and the normal-angle reference so the two cannot disagree about where the
     // brush landed.
     std::uint32_t automask_seed_ = kNoClass;
+    // This sculptor's identity in the seed-token space, and how many seeds it
+    // has turned away. Assigned once at construction; see `seed_revision`.
+    std::uint64_t seed_revision_ = 0;
+    std::size_t stale_seeds_rejected_ = 0;
+    memory::PeakTelemetry* telemetry_ = nullptr;
     // The multi-pass kernels' buffers, reset rather than freed between stamps.
     SculptScratch scratch_;
     // The compiled plan and the three inputs it depends on. Not the whole

@@ -1205,6 +1205,16 @@ do {
     brush.radius = 0.8
     brush.strength = 0.4
 
+    // The seed token (add-extreme-poly-runtime 3.2). A hierarchy renumbers its
+    // classes on every rebind, so a `seed_class` a host picked at one level and
+    // spends at another is IN BOUNDS and means nothing — and the walk answers an
+    // empty region, so the dab is LOST rather than misplaced. Reading this binds,
+    // which is why the token belongs to the level that is bound now.
+    var seedRevision: UInt64 = 0
+    check(clay_multires_sculptor_seed_revision(sculptor, &seedRevision) == CLAY_OK,
+          "read the bound level's seed numbering")
+    check(seedRevision != 0, "a bound level always claims a numbering")
+
     check(clay_multires_clear_dirty(surface) == CLAY_OK, "drained what building reported")
     var report = clay_multires_stamp_report()
     report.struct_size = UInt32(MemoryLayout<clay_multires_stamp_report>.size)
@@ -1234,6 +1244,20 @@ do {
         check(clay_multires_dirty_blocks(surface, b.baseAddress, &blockCount) == CLAY_OK,
               "drained the changed blocks")
     }
+
+    // The peaks a host tunes a memory profile against (add-extreme-poly-runtime
+    // 7.7). Read into a descriptor the caller owns: the handle measures itself
+    // from the moment it is created and there is nothing to attach or free.
+    var peak = clay_peak_telemetry()
+    peak.struct_size = UInt32(MemoryLayout<clay_peak_telemetry>.size)
+    check(clay_multires_sculptor_peak_telemetry(sculptor, &peak) == CLAY_OK,
+          "read the session's peaks")
+    check(peak.workset_vertices > 0, "the stamp above gathered something")
+    check(clay_multires_sculptor_reset_peak_telemetry(sculptor) == CLAY_OK,
+          "restarted the high-water marks")
+    check(clay_multires_sculptor_peak_telemetry(sculptor, &peak) == CLAY_OK,
+          "read the peaks again")
+    check(peak.workset_vertices == 0, "a reset starts the marks over")
 
     var info = clay_multires_block_info()
     info.struct_size = UInt32(MemoryLayout<clay_multires_block_info>.size)
@@ -1282,6 +1306,147 @@ do {
     check(clay_mesh_vertex_count(level) > 0, "the exported level has vertices")
     clay_mesh_destroy(level)
 
+    // -- the surface tier (add-extreme-poly-runtime) -------------------------
+    //
+    // One transport over all three representations, and the budget a host
+    // fills for them. The Swift-specific hazards are the two this repository
+    // has been bitten by before: a C enumerator crosses as a struct with a
+    // UInt32 rawValue rather than as an Int32, and `size_t` crosses as `Int`,
+    // so a count declared UInt32 would not compile against these signatures.
+
+    var view: OpaquePointer? = nil
+    check(clay_surface_view_from_multires(surface, 2, &view) == CLAY_OK,
+          "took a surface view over a level")
+    check(clay_surface_view_kind(view) == Int32(CLAY_SURFACE_MULTIRES.rawValue),
+          "the view names the representation underneath it")
+    let viewChunks = clay_surface_view_chunk_count(view)
+    check(viewChunks > 0, "the level is partitioned into chunks")
+
+    var chunkInfos = [clay_chunk_info](repeating: clay_chunk_info(), count: viewChunks)
+    chunkInfos.withUnsafeMutableBufferPointer { c in
+        check(clay_surface_view_chunk_infos(view, nil, viewChunks, c.baseAddress) == CLAY_OK,
+              "filled every chunk's record in ONE call, which is why it carries no struct_size")
+    }
+    check(chunkInfos[0].live == 1 && chunkInfos[0].index_count % 3 == 0,
+          "a chunk is whole triangles")
+
+    var readback = clay_chunk_readback()
+    readback.struct_size = UInt32(MemoryLayout<clay_chunk_readback>.size)
+    check(clay_surface_view_copy_chunk(view, chunkInfos[0].chunk, nil, nil, 0, nil, 0, nil, 0,
+                                       &readback) == CLAY_OK,
+          "asked what one chunk needs without copying it")
+    check(readback.vertex_count > 0, "the capacity query reports what to allocate")
+    check(readback.stale == 0, "a readback nobody asked a revision of is never stale")
+
+    var chunkPositions = [Float](repeating: 0, count: Int(readback.vertex_count) * 3)
+    var chunkIndices = [UInt32](repeating: 0, count: Int(readback.index_count))
+    var copied = clay_chunk_readback()
+    copied.struct_size = UInt32(MemoryLayout<clay_chunk_readback>.size)
+    chunkPositions.withUnsafeMutableBufferPointer { p in
+        chunkIndices.withUnsafeMutableBufferPointer { i in
+            check(clay_surface_view_copy_chunk(view, chunkInfos[0].chunk, nil, p.baseAddress,
+                                               p.count, nil, 0, i.baseAddress, i.count,
+                                               &copied) == CLAY_OK,
+                  "copied a chunk into memory Swift owns")
+        }
+    }
+    check(copied.truncated == 0 && copied.vertex_count == readback.vertex_count,
+          "the copy filled what the query promised")
+
+    var clean = 0
+    var seen = copied.current
+    check(clay_surface_view_acknowledge(view, [chunkInfos[0].chunk], &seen, 1, &clean) == CLAY_OK,
+          "acknowledged one chunk against the revision actually copied")
+    clay_surface_view_destroy(view)
+
+    var profile = clay_sculpt_memory_profile()
+    profile.struct_size = UInt32(MemoryLayout<clay_sculpt_memory_profile>.size)
+    check(clay_sculpt_memory_profile_defaults(&profile) == CLAY_OK,
+          "took the memory profile defaults")
+    check(profile.memory_class == Int32(CLAY_MEMORY_CLASS_FULL.rawValue),
+          "the default profile is the library as it behaved before one existed")
+    profile.memory_class = Int32(CLAY_MEMORY_CLASS_CONSTRAINED.rawValue)
+    profile.max_resident_levels = 2
+    check(clay_multires_set_memory_profile(surface, &profile) == CLAY_OK,
+          "a host declares its budget; nothing here detects a device")
+
+    var ledger = clay_memory_ledger()
+    ledger.struct_size = UInt32(MemoryLayout<clay_memory_ledger>.size)
+    check(clay_multires_memory_ledger(surface, &ledger) == CLAY_OK, "read the memory ledger")
+    check(ledger.total == ledger.essential + ledger.rebuildable + ledger.undoable,
+          "the three roll-ups partition the total")
+
+    var checksumBefore: UInt64 = 0
+    var checksumAfter: UInt64 = 0
+    check(clay_multires_detail_checksum(surface, &checksumBefore) == CLAY_OK,
+          "hashed the authoritative detail before a trim")
+    var trimmed = clay_trim_report()
+    trimmed.struct_size = UInt32(MemoryLayout<clay_trim_report>.size)
+    check(clay_multires_trim(surface, Int32(CLAY_PRESSURE_CRITICAL.rawValue), nil,
+                             &trimmed) == CLAY_OK,
+          "released the rebuildable caches at critical pressure")
+    check(clay_multires_detail_checksum(surface, &checksumAfter) == CLAY_OK,
+          "hashed it again")
+    check(checksumBefore == checksumAfter, "a trim never touches the user's work")
+
+    var encodeCost = clay_surface_preflight()
+    encodeCost.struct_size = UInt32(MemoryLayout<clay_surface_preflight>.size)
+    check(clay_multires_preflight_encode(surface, 0, &encodeCost) == CLAY_OK,
+          "priced the serialization before paying for it")
+    check(encodeCost.allowed == 1 && encodeCost.peak_bytes >= encodeCost.persistent_bytes,
+          "the peak is never below what remains")
+
+    // -- work a host services between interactions (task 3.5) ----------------
+    //
+    // The Swift-specific hazards are the two this repository has been bitten by
+    // before, and both are here: a C enumerator crosses as a struct with a
+    // UInt32 rawValue rather than as an Int32, so every kind has to be widened
+    // explicitly; and `size_t` crosses as `Int`, so a count declared UInt32
+    // would not compile against these signatures.
+
+    var queue: OpaquePointer? = nil
+    check(clay_maintenance_queue_create(&queue) == CLAY_OK, "made a maintenance queue")
+
+    check(clay_maintenance_queue_request(
+              queue, Int32(CLAY_MAINTENANCE_INDEX_REBUILD.rawValue), 0, 0) == CLAY_OK,
+          "queued an index rebuild")
+    check(clay_maintenance_queue_request(
+              queue, Int32(CLAY_MAINTENANCE_INDEX_REBUILD.rawValue), 0, 900) == CLAY_OK,
+          "asked for the same job again")
+
+    var queued: Int = 0
+    check(clay_maintenance_queue_count(queue, &queued) == CLAY_OK, "read the queue depth")
+    check(queued == 1, "an identical request FOLDS rather than queueing twice")
+
+    var queuedItem = clay_maintenance_item()
+    queuedItem.struct_size = UInt32(MemoryLayout<clay_maintenance_item>.size)
+    check(clay_maintenance_queue_item(queue, 0, &queuedItem) == CLAY_OK, "read the item")
+    check(queuedItem.requests == 2 && queuedItem.estimated_micros == 900,
+          "the fold bumped the count and took the newer estimate")
+
+    // THE GATE. A pointer event is not a maintenance window, and a host that
+    // wired the drain to the wrong callback gets nothing done rather than a
+    // stutter it will blame on the brush.
+    check(clay_maintenance_queue_begin_stroke(queue) == CLAY_OK, "opened a stroke")
+    var have: Int32 = 1
+    check(clay_maintenance_queue_take_next(queue, &queuedItem, &have) == CLAY_OK,
+          "asked for work mid-stroke")
+    check(have == 0, "the gate hands out nothing while a stroke is open")
+    check(clay_maintenance_queue_end_stroke(queue) == CLAY_OK, "closed the stroke")
+    check(clay_maintenance_queue_take_next(queue, &queuedItem, &have) == CLAY_OK,
+          "asked again between strokes")
+    check(have == 1, "and now there is work")
+
+    // TAKE PEEKS, COMPLETE REMOVES: a host that took an item and then found it
+    // could not afford it has declined rather than dropped it.
+    check(clay_maintenance_queue_count(queue, &queued) == CLAY_OK, "read the depth again")
+    check(queued == 1, "taking an item does not retire it")
+    var completed: Int32 = 0
+    check(clay_maintenance_queue_complete(queue, queuedItem.kind, queuedItem.target,
+                                          &completed) == CLAY_OK,
+          "said the job was done")
+    check(completed == 1, "and it was there to retire")
+    clay_maintenance_queue_destroy(queue)
 
     // -- sculpt layers -------------------------------------------------------
     //

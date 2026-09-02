@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 77
+#define CLAY_ABI_MINOR 78
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -496,9 +496,229 @@ typedef struct clay_memory_report {
     uint64_t voxel_layers;
     uint64_t mesh_layer_count;
     uint64_t mask_count;
+
+    /* -- the surface tier (ABI 0.78.0, add-extreme-poly-runtime) -------------
+     *
+     * ZERO THROUGH clay_document_memory, AND THAT IS OWNERSHIP RATHER THAN AN
+     * OMISSION. A clay_multires and a clay_dynamic_sculptor are opaque and
+     * OWNING: a host holds one beside its document, never inside it, so a
+     * document cannot walk them and reporting a guess would be worse than
+     * reporting nothing. clay_document_memory_with_surfaces is the seam — the
+     * host fills a clay_memory_ledger from the surfaces it holds and hands it
+     * in, and these lines are what that ledger becomes.
+     *
+     * APPENDED after mask_count, not inserted beside the model lines they
+     * belong with, because every field above is at an offset a shipped caller
+     * compiled in. `total` includes them either way: the totals stay true
+     * rather than the breakdown staying constant, which is the direction a
+     * memory report has to err in. */
+    uint64_t surface_content;  /* adaptive surfaces: geometry and connectivity */
+    uint64_t multires_detail;  /* the coefficients: the wrinkles themselves */
+    uint64_t sculpt_layers;    /* a mesh layer stack's content */
+    uint64_t surface_caches;   /* chunk indices, evaluated levels, runtime caches */
+    uint64_t surface_scratch;  /* per-stamp working sets and preview staging */
+    uint64_t surface_undo;     /* vertex deltas and detail undo */
+
+    /* -- the three a host under pressure can act on --------------------------
+     *
+     * WHAT A MEMORY WARNING ACTUALLY ASKS. A single total is not the answer:
+     * under pressure a host does not need to know how big the document is, it
+     * needs to know WHICH PART, because that is what decides what it is allowed
+     * to release. Derived from the fields above rather than counted separately,
+     * so a line added without being classified cannot make these disagree with
+     * `total`. */
+    uint64_t essential;    /* the user's work; never released */
+    uint64_t rebuildable;  /* reconstructs to an identical surface */
+    uint64_t undoable;     /* undo depth, and the host's own policy */
 } clay_memory_report;
 
+/* -- what a host will spend, and what it may take back ------------------------
+ *
+ * (sculpt-runtime and c-abi specs, add-extreme-poly-runtime.)
+ *
+ * The report above answers "what does this document cost". A device under
+ * pressure asks two more questions it cannot answer — "what am I allowed to
+ * spend" and "what can I release right now" — and these are them.
+ *
+ * FILLED BY THE HOST, WITH NO DEVICE DETECTION ANYWHERE. Not one platform call,
+ * not one model-name comparison. A host knows what its operating system is
+ * telling it; an engine guessing from a model string is both wrong and — worse
+ * — untestable, because the tests run on a desktop. A constrained profile is a
+ * struct a desktop test fills in three lines, which is the whole point.
+ *
+ * EVERY FIELD IS A HINT AND THE TYPE IS WHAT SAYS SO. Each one names something
+ * that can be recomputed EXACTLY from what was committed: normals during a
+ * drag, index quality, cache residency, the rate a preview drains. There is
+ * deliberately no field for anything that IS the committed result — the
+ * deformation, split and collapse thresholds, remesh targets, detail
+ * coefficients, layer content, masks, brush strength and falloff. A deferred
+ * split would make the committed mesh a function of machine speed, and this
+ * library spends real effort on determinism that a budget-dependent topology
+ * would throw away. So "a memory-saving mode changed my sculpt" is
+ * unrepresentable here rather than merely forbidden. */
+
+typedef enum clay_memory_class {
+    /* No budget. Every byte field is advisory and the runtime keeps what it
+     * builds. What a desktop host and every existing caller get. */
+    CLAY_MEMORY_CLASS_FULL = 0,
+    /* Budgets are real, inactive levels hold compact detail only, and
+     * maintenance runs between interactions. */
+    CLAY_MEMORY_CLASS_CONSTRAINED = 1,
+    /* What a host sets when the operating system has already warned it once. */
+    CLAY_MEMORY_CLASS_MINIMAL = 2
+} clay_memory_class;
+
+/* How hard a host is asking. Passed to a trim; never inferred by the engine. */
+typedef enum clay_pressure {
+    CLAY_PRESSURE_NONE = 0,     /* give back what is free anyway */
+    CLAY_PRESSURE_WARNING = 1,
+    CLAY_PRESSURE_URGENT = 2,
+    /* The last stop before the operating system kills the process: everything
+     * rebuildable goes, and the next edit pays to rebuild what it needs. */
+    CLAY_PRESSURE_CRITICAL = 3
+} clay_pressure;
+
+/* The vocabulary every subsystem answers in. The split that matters is not
+ * "big versus small" but WHAT IT COSTS TO LET IT GO: the first group is the
+ * user's work and is never released, the second reconstructs bit-identically,
+ * the third is undo depth and belongs to the host's own policy. */
+typedef enum clay_memory_category {
+    /* authoritative: releasing any of this destroys work */
+    CLAY_MEMORY_BASE_GEOMETRY = 0,       /* cages, fixed meshes, surface elements */
+    CLAY_MEMORY_TOPOLOGY = 1,            /* per-level face lists, half-edge connectivity */
+    CLAY_MEMORY_MULTIRES_DETAIL = 2,     /* the coefficients: the wrinkles themselves */
+    CLAY_MEMORY_SCULPT_LAYERS = 3,       /* a layer stack's content */
+    CLAY_MEMORY_MASKS = 4,               /* authoring state */
+    /* rebuildable: reconstructs to an identical surface */
+    CLAY_MEMORY_CHUNK_INDEX = 5,         /* the chunk table, its arena and the trees over it */
+    CLAY_MEMORY_EVALUATED_CACHE = 6,     /* subdivided positions, frames, normals */
+    CLAY_MEMORY_LEVEL_RUNTIME_CACHE = 7, /* per-level meshes, adjacency, connectivity */
+    CLAY_MEMORY_LAYER_EVAL_CACHE = 8,    /* an evaluated layer stack */
+    CLAY_MEMORY_DERIVED_POSITIONS = 9,   /* positions of levels nobody is looking at */
+    CLAY_MEMORY_SCRATCH = 10,            /* the per-stamp working set */
+    CLAY_MEMORY_PREVIEW_STAGING = 11,    /* what is queued for the host's next upload */
+    /* undoable: the host's policy, never the engine's */
+    CLAY_MEMORY_UNDO_HISTORY = 12
+} clay_memory_category;
+
+/* How many of them this build knows. The ledger and the trim report below carry
+ * an array of exactly this length, LAST in each struct, so a build that adds a
+ * category grows the array without moving anything a shipped caller reads — the
+ * same appended-field rule the report above follows, applied to an array. Both
+ * structs also report the count they were filled with, so a caller reading a
+ * shorter array knows it is reading a prefix rather than a total. */
+#define CLAY_MEMORY_CATEGORY_COUNT 13
+
+/* Never NULL, for any value, including one this build does not know. */
+const char* clay_memory_class_text(int32_t memory_class);
+const char* clay_pressure_text(int32_t pressure);
+const char* clay_memory_category_text(int32_t category);
+
+typedef struct clay_sculpt_memory_profile {
+    uint32_t struct_size; /* = sizeof(clay_sculpt_memory_profile); required */
+    int32_t memory_class; /* clay_memory_class */
+
+    /* -- byte budgets. Zero means "no budget for this", which is what
+     * CLAY_MEMORY_CLASS_FULL means field by field. */
+    uint64_t cache_budget;   /* chunk indices, runtime caches, derived positions */
+    uint64_t undo_budget;    /* the engine never trims this on its own */
+    /* The per-stamp working set, and a HARD bound: a footprint larger than it is
+     * processed in blocks rather than allocated, which is what stops a
+     * 500k-vertex footprint on a constrained profile from becoming the peak
+     * that kills the app. */
+    uint64_t scratch_budget;
+    uint64_t preview_budget; /* what a host may hold for the next frame's upload */
+
+    /* -- residency and deferral. */
+    /* How many multires levels keep their rebuildable caches; 0 means no limit.
+     * On a constrained profile the sculpt level and the display level stay
+     * resident and the rest hold compact detail only. */
+    uint32_t max_resident_levels;
+    /* Recompute exact normals at stroke end rather than per stamp. The final
+     * state is exact either way; this only decides when the work happens. */
+    int32_t defer_normals_in_stroke;
+    /* Whether a spatial index may be REBUILT — never whether it may be
+     * refitted, which is correctness. Defaults to 1 and stays advisory: a
+     * rebuild helped one of five measured deformations and hurt two. */
+    int32_t allow_index_rebuild;
+    /* How many dirty chunks a host expects to drain per frame; 0 means "as many
+     * as there are". Lossless at any value, because the transport acknowledges
+     * per chunk. */
+    uint32_t preview_chunks_per_frame;
+} clay_sculpt_memory_profile;
+
+clay_result clay_sculpt_memory_profile_defaults(clay_sculpt_memory_profile* out_profile);
+
+/* Bytes by category, plus the three roll-ups. What a host holding an adaptive
+ * surface, a hierarchy and a document gets ONE of, rather than three reports it
+ * has to reconcile. */
+typedef struct clay_memory_ledger {
+    uint32_t struct_size;   /* = sizeof(clay_memory_ledger); required */
+    /* How many entries of `bytes` this library filled. A caller from a later
+     * header reads this rather than assuming its own CLAY_MEMORY_CATEGORY_COUNT
+     * was reached. */
+    uint32_t category_count;
+    uint64_t essential;
+    uint64_t rebuildable;
+    uint64_t undoable;
+    uint64_t total;
+    /* Indexed by clay_memory_category. LAST, deliberately: see the count. */
+    uint64_t bytes[CLAY_MEMORY_CATEGORY_COUNT];
+} clay_memory_ledger;
+
+/* What a trim actually did, per category — reported rather than returned as one
+ * number, because a host that asked for 40 MB and got it out of preview staging
+ * made a different decision from one that got it out of the evaluated caches it
+ * is about to need again. */
+typedef struct clay_trim_report {
+    uint32_t struct_size; /* = sizeof(clay_trim_report); required */
+    int32_t pressure;     /* clay_pressure, echoed */
+    uint64_t total_released;
+    /* Non-zero when a pin was held: NOTHING was released and the figures are
+     * what the call WOULD have released. A host that receives a memory warning
+     * while a save is running gets an honest answer instead of a document
+     * mutating under the writer. */
+    int32_t pinned;
+    uint32_t category_count;
+    uint64_t released[CLAY_MEMORY_CATEGORY_COUNT]; /* LAST, as above */
+} clay_trim_report;
+
+/* -- the pin -----------------------------------------------------------------
+ *
+ * What a serializer or a readback holds so a trim arriving mid-save is honest
+ * rather than destructive. Consulted by every trim entry point; a NULL pin is
+ * "nothing is held", which is what every caller that has not adopted it passes.
+ *
+ * REENTRANT, because a readback inside a save must not un-pin the save when it
+ * returns: acquire and release are a counter, and the pin is held while the
+ * count is non-zero. In C++ this is an RAII scope and in pyclay a `with` block;
+ * in C a caller brackets the region itself, which is the same discipline every
+ * other paired call in this header asks for. */
+typedef struct clay_memory_pin clay_memory_pin;
+
+clay_result clay_memory_pin_create(clay_memory_pin** out_pin);
+void clay_memory_pin_destroy(clay_memory_pin* pin);
+clay_result clay_memory_pin_acquire(clay_memory_pin* pin);
+/* Releasing a pin nobody acquired is CLAY_OK and does nothing: an unbalanced
+ * release is a caller's bug, and leaving the count at zero is the harmless
+ * reading of it. Underflowing to "pinned forever" is not. */
+clay_result clay_memory_pin_release(clay_memory_pin* pin);
+int32_t clay_memory_pin_held(const clay_memory_pin* pin);
+
 clay_result clay_document_memory(const clay_document* doc, clay_memory_report* out_report);
+
+/* The same report, with the surfaces the host holds BESIDE the document folded
+ * into the surface-tier lines. `surfaces` is a ledger the caller filled from
+ * clay_multires_memory_ledger, clay_dynamic_sculptor_memory_ledger and
+ * clay_mesh_sculptor_memory_ledger — merged by the caller, since only the
+ * caller knows which surfaces belong to this document.
+ *
+ * A NULL ledger is exactly clay_document_memory, which is why that call stays
+ * rather than gaining an argument: a host with no surfaces should not have to
+ * pass a zeroed struct to say so. */
+clay_result clay_document_memory_with_surfaces(const clay_document* doc,
+                                               const clay_memory_ledger* surfaces,
+                                               clay_memory_report* out_report);
 
 /* The same breakdown for ONE layer, so a large document can be attributed to
  * the layer responsible rather than merely reported as large.
@@ -5686,6 +5906,27 @@ typedef struct clay_mesh_brush_desc {
      * Observable only through an alpha or a directional kernel: a round brush
      * has nothing to orient. */
     float stamp_azimuth;
+    /* WHICH CLASS SPACE `seed_class` WAS PICKED IN — the token
+     * clay_mesh_hit.seed_revision handed back, or the one
+     * clay_mesh_sculptor_seed_revision reports. Zero, which is what a host
+     * compiled against the older layout sends and what a host that does not
+     * pick sends, claims nothing and leaves the bounds check that was always
+     * here; nothing gets slower and nothing behaves differently.
+     *
+     * WHY A TOKEN AND NOT A BOUNDS CHECK. A seed is an INDEX, and an index
+     * outlives the numbering it was taken from. A hierarchy renumbers its
+     * classes whenever the sculpt level moves or a trim releases the level
+     * caches — both of which happen behind the host — and a seed picked before
+     * either is still comfortably in bounds, so a bounds check sees nothing.
+     * What it costs is not a slightly misplaced dab: the surface walk returns
+     * an EMPTY region when the seed lies farther than the radius from the
+     * centre, so a stale seed loses the stamp whole, and "nothing moved" is
+     * indistinguishable from a fully masked stroke.
+     *
+     * Sending the token turns that into a rejected seed and a scan — one stamp
+     * slower, and correct. clay_mesh_sculptor_stale_seeds_rejected counts the
+     * rejections, so a host sees it happen rather than inferring it. */
+    uint64_t seed_revision;
 } clay_mesh_brush_desc;
 
 /* The automask factors. A bit set, so a host sends one integer. */
@@ -5896,6 +6137,22 @@ clay_result clay_mesh_sculptor_vertex_count(const clay_mesh_sculptor* sculptor, 
 /* Welded classes: fewer than the vertex count exactly where the mesh has
  * seams, which is how a host can tell it imported a split model. */
 clay_result clay_mesh_sculptor_class_count(const clay_mesh_sculptor* sculptor, size_t* out_count);
+
+/* The token this sculptor's weld classes are numbered in, to store beside a
+ * `seed_class` and send back in clay_mesh_brush_desc.seed_revision. Constant
+ * for the life of the handle: a sculptor's adjacency is built once and nothing
+ * rebuilds it, so vertices moving under a stroke leave the token alone and a
+ * seed stays valid across the stamps of a gesture — which is exactly when
+ * re-picking would be wasted work. What retires a token is a NEW sculptor, and
+ * a hierarchy makes one on every rebind. */
+clay_result clay_mesh_sculptor_seed_revision(const clay_mesh_sculptor* sculptor,
+                                             uint64_t* out_revision);
+/* How many stamps rejected a seed because its token did not match, over the
+ * life of this sculptor. The number that makes a rejection OBSERVABLE: without
+ * it a host cannot tell a seed that was refused from one that was accepted and
+ * happened to be harmless, and neither can a test. */
+clay_result clay_mesh_sculptor_stale_seeds_rejected(const clay_mesh_sculptor* sculptor,
+                                                    size_t* out_count);
 
 /* One stamp. `mask` and `deltas` may be NULL. *out_moved receives how many weld
  * classes moved — zero for a stamp that reached nothing, that was fully masked,
@@ -6272,7 +6529,9 @@ clay_result clay_dynamic_surface_chunk_info(const clay_dynamic_sculptor* sculpto
                                             clay_dynamic_chunk_info* out_info);
 
 /* The chunks the stamps since the last clear touched. Size-query pattern: call
- * with out_indices == NULL for the count. */
+ * with out_indices == NULL for the count; a buffer that is too small gets
+ * CLAY_ERROR_BUFFER_TOO_SMALL with the needed count in *count and writes
+ * nothing. */
 clay_result clay_dynamic_surface_dirty_chunks(const clay_dynamic_sculptor* sculptor,
                                               uint32_t* out_indices, size_t* count);
 clay_result clay_dynamic_surface_clear_dirty(clay_dynamic_sculptor* sculptor);
@@ -6332,7 +6591,8 @@ typedef enum clay_multires_error {
      * the evaluated surface, which includes every visible layer, so moving a
      * slider between two stamps would author one gesture against two different
      * surfaces. */
-    CLAY_MULTIRES_SCULPT_LAYER_STROKE_OPEN = 14
+    CLAY_MULTIRES_SCULPT_LAYER_STROKE_OPEN = 14,
+    CLAY_MULTIRES_CAPACITY_OVERFLOW = 15
 } clay_multires_error;
 
 /* Never NULL, for any value. */
@@ -6444,7 +6704,7 @@ typedef struct clay_multires_memory {
     uint64_t authoritative; /* the three above; none of it droppable */
     uint64_t evaluated;     /* subdivided positions, frames, positions, normals */
     uint64_t runtime_index; /* connectivity, level meshes, adjacency */
-    uint64_t rebuildable;   /* the two above */
+    uint64_t rebuildable;   /* the two above, plus chunk_index below */
     uint64_t total;
     /* Appended in ABI 0.76.0, which is why the two sit at the end rather than
      * beside the rows they belong with: a descriptor grows at its tail or every
@@ -6461,6 +6721,20 @@ typedef struct clay_multires_memory {
      * evaluation actually reads. */
     uint64_t sculpt_layers;
     uint64_t composed;
+    /* The per-level chunk tables and their face maps (ABI 0.78.0). Its own line
+     * because a host answering a memory warning acts on the categories
+     * separately, and this is the one that follows the FACE count rather than
+     * the vertex count.
+     *
+     * APPENDED, not inserted beside `runtime_index` where it belongs by
+     * meaning: every field before `total` is at an offset a shipped caller
+     * already compiled in, and this struct's compatibility rule is that a
+     * smaller struct_size gets the original layout. A caller built against an
+     * older header therefore never sees this field, while `rebuildable` and
+     * `total` include it either way — the totals stay true rather than the
+     * breakdown staying constant, which is the direction a memory report has to
+     * err in. */
+    uint64_t chunk_index;
 } clay_multires_memory;
 
 clay_result clay_multires_memory_get(const clay_multires* surface,
@@ -6542,6 +6816,23 @@ void clay_multires_sculptor_destroy(clay_multires_sculptor* sculptor);
  * against, so a second stroke over the same place deposits from the surface as
  * THAT stroke found it. */
 clay_result clay_multires_sculptor_begin_stroke(clay_multires_sculptor* sculptor);
+/* The token the CURRENTLY BOUND level's classes are numbered in, to store
+ * beside a `seed_class` picked off that level's mesh and send back in
+ * clay_mesh_brush_desc.seed_revision.
+ *
+ * THIS IS THE CALL THE TOKEN EXISTS FOR, and it is not const: it BINDS, because
+ * the answer is a property of the bound level and a host asking before the
+ * first stamp would otherwise be handed the token of whatever was bound last. A
+ * hierarchy renumbers on every rebind — a level change, or a trim releasing the
+ * level caches — and both happen behind the host, so a seed picked before
+ * either is in bounds, wrong, and silent: the walk finds nothing within the
+ * radius and the dab is lost rather than misplaced.
+ *
+ * Reports zero for a surface that cannot bind, which is the value that claims
+ * nothing. */
+clay_result clay_multires_sculptor_seed_revision(clay_multires_sculptor* sculptor,
+                                                 uint64_t* out_revision);
+
 /* ONE STAMP at the surface's current sculpt level. `mask` is the freeze, taken
  * exactly as every other representation takes one, and may be NULL. */
 clay_result clay_multires_sculptor_stamp(clay_multires_sculptor* sculptor,
@@ -7051,6 +7342,617 @@ clay_result clay_multires_sculpt_layer_stroke_commit(clay_multires_sculpt_layer_
  * not a recomputation — and leaves the composition and the active layer as they
  * were found. */
 clay_result clay_multires_sculpt_layer_stroke_cancel(clay_multires_sculpt_layer_stroke* stroke);
+/* -- one transport for all three surfaces ------------------------------------
+ *
+ * (c-abi spec, add-extreme-poly-runtime.)
+ *
+ * A host at twenty million vertices asks three questions, and they are the same
+ * three whichever representation it is holding: what changed, give me those
+ * bytes into a buffer I own, and what does this cost me. Answering them per
+ * representation is three sets of entry points and three host code paths whose
+ * dirty sets mean different things — a weld class, a face chunk and a base
+ * patch are not interchangeable, and a host that treated them as such would
+ * upload the wrong thing. So there is ONE chunk unit underneath, and this is
+ * the seam over it.
+ *
+ * THE SHIPPED PATHS STAY. clay_dynamic_surface_chunk_* and
+ * clay_multires_copy_block are unchanged, byte for byte, and a host using them
+ * keeps working. What this adds is what they structurally cannot express:
+ *
+ *   FOUR REVISIONS, NOT ONE. A single counter cannot say "geometry moved,
+ *   connectivity did not, normals are still deferred, colours are unchanged",
+ *   so a host that has only one re-uploads an index buffer on every dab.
+ *
+ *   AN ACKNOWLEDGEMENT. clay_dynamic_surface_clear_dirty is all-or-nothing: a
+ *   host that drains half a set and then drops a frame must either re-upload
+ *   everything or lose a change. clay_surface_view_acknowledge retires a chunk
+ *   only when its CURRENT revision matches the one the caller actually copied,
+ *   so a chunk that changed again in between stays dirty.
+ *
+ *   STALENESS. A readback echoes the revision the caller asked for beside what
+ *   the engine is at now, so a superseded result is IDENTIFIABLE rather than
+ *   merely wrong. A host that draws a stale chunk draws something the engine
+ *   does not think it made, and nothing in the pixels says so.
+ *
+ * CALLER-OWNED BUFFERS AND NO BORROWED POINTERS, the rule the shipped transport
+ * already states and which has only got stronger at this scale: a mutation can
+ * move or free anything, and it does so mid-drag.
+ *
+ * THE VIEW IS A CALL-SITE CONVENIENCE, NOT A HANDLE TO STORE. It names a
+ * surface it does not own, so the surface — the mesh, the sculptor, the
+ * hierarchy — must outlive it, and a caller that mutates the surface through
+ * another handle should destroy the view and take a new one. It holds no copy
+ * of the geometry: everything it reports is read at the moment it is asked. */
+
+typedef struct clay_surface_view clay_surface_view;
+
+/* Which representation is underneath. It changes exactly one thing a caller can
+ * see, and the copy call says which. */
+typedef enum clay_surface_kind {
+    CLAY_SURFACE_FIXED = 0,
+    CLAY_SURFACE_ADAPTIVE = 1,
+    CLAY_SURFACE_MULTIRES = 2
+} clay_surface_kind;
+
+/* The four counters, drawn from one table-wide sequence so a comparison ACROSS
+ * chunks is meaningful: "this chunk changed after that one" is a question a
+ * host draining incrementally actually asks.
+ *
+ * AN ARRAY ELEMENT, not a versioned descriptor: a caller passes one per chunk
+ * per frame and reads thousands of them, so the layout is the contract. There
+ * is nothing here for a struct_size to negotiate, and appending a field would
+ * move every element after the first — a break either way. */
+typedef struct clay_chunk_revisions {
+    uint64_t topology;   /* membership changed: the one an index buffer follows */
+    uint64_t geometry;   /* the same faces, in different places */
+    uint64_t normals;    /* positions unchanged, shading normals rewritten */
+    uint64_t attributes; /* colour, mask, UV */
+} clay_chunk_revisions;
+
+/* One chunk, as a host reads it. An array element for the same reason its
+ * revisions are: clay_surface_view_chunk_infos fills thousands in one call, and
+ * a struct_size per element would forbid the bulk fill that is the point. */
+typedef struct clay_chunk_info {
+    uint64_t revision; /* the maximum of the four below, and the shipped counter */
+    clay_chunk_revisions revisions;
+    uint32_t chunk;
+    uint32_t vertex_count; /* float3 the chunk needs */
+    uint32_t index_count;  /* uint32 the chunk needs; triangles */
+    int32_t geometry_dirty;
+    int32_t topology_dirty;
+    /* Zero when the id names a chunk that has since been released. A dirty set
+     * MAY name one: retiring a merged chunk from the list would be an
+     * O(dirty) erase on a path that runs during a stroke, to save a check that
+     * does not. Skip it; do not treat it as an error. */
+    int32_t live;
+    float bounds_min[3];
+    float bounds_max[3];
+} clay_chunk_info;
+
+/* What a chunk aims to hold, for a view over a flat mesh — the one case where
+ * the caller chooses, because a fixed mesh has no partitioner of its own yet.
+ * NULL takes the library's defaults, which are 128 / 32 / 256 and are MEASURED:
+ * benchmarks/bench_surface_chunks.cpp sweeps 64 to 1024 over a 2.08M-vertex
+ * plane at five footprints against chunk-query time, false-positive touched
+ * vertices, normal recompute, upload bytes, a locality proxy and split/merge
+ * cost. A host with a different draw-call budget may want a different number;
+ * a host with no opinion should pass NULL. */
+typedef struct clay_chunk_options {
+    uint32_t struct_size; /* = sizeof(clay_chunk_options); required */
+    uint32_t target_faces;
+    uint32_t min_faces; /* below this two siblings merge */
+    uint32_t max_faces; /* above this a chunk splits; the gap is hysteresis */
+} clay_chunk_options;
+
+clay_result clay_chunk_options_defaults(clay_chunk_options* out_options);
+
+/* What one copy did, and against what. */
+typedef struct clay_chunk_readback {
+    uint32_t struct_size; /* = sizeof(clay_chunk_readback); required */
+    uint32_t chunk;
+    /* What the chunk NEEDS, whether or not anything was written. A capacity
+     * query — every buffer NULL — fills exactly these two and returns. */
+    uint32_t vertex_count;
+    uint32_t index_count;
+    /* What the caller said it had seen, echoed, and what the engine is at now.
+     * Equal on a fresh readback. */
+    clay_chunk_revisions requested;
+    clay_chunk_revisions current;
+    /* The engine moved on after the caller took its snapshot. The data written
+     * is CURRENT — this is not a failure — but a host applying an older frame's
+     * plan can tell that its plan is out of date. */
+    int32_t stale;
+    /* A buffer was too small, so NOTHING was written into it — not a partial
+     * fill a caller might draw. The counts above say what it needed, and the
+     * call returns CLAY_ERROR_BUFFER_TOO_SMALL rather than
+     * CLAY_ERROR_INVALID_ARGUMENT: the two mean opposite things to a host. A
+     * too-small buffer is RETRYABLE — grow to the counts and call again, which
+     * is the loop every other size query in this header asks for — while an
+     * invalid argument says the call itself was wrong and retrying it is a
+     * spin. A drain loop written against the general pattern would have
+     * treated this one as a fault and dropped the chunk. */
+    int32_t truncated;
+    int32_t ok; /* zero when the id names no live chunk */
+} clay_chunk_readback;
+
+/* A view over a flat mesh, partitioned on the spot. The chunk table is the
+ * VIEW's, because the fixed sculptor keeps its own weld-class dirty list and
+ * whether that is retired in favour of a chunk dirty set is a measurement this
+ * change has not made yet. So this view reports one partition of a static mesh
+ * and an empty dirty set; the two below carry live dirty sets. */
+clay_result clay_surface_view_from_mesh(const clay_mesh* mesh, const clay_chunk_options* options,
+                                        clay_surface_view** out_view);
+/* The adaptive surface, whose table is its own chunked index. */
+clay_result clay_surface_view_from_dynamic(clay_dynamic_sculptor* sculptor,
+                                           clay_surface_view** out_view);
+/* One level of a hierarchy. NOT const: reading a level's chunks evaluates it,
+ * exactly as clay_multires_copy_block does. */
+clay_result clay_surface_view_from_multires(clay_multires* surface, uint32_t level,
+                                            clay_surface_view** out_view);
+void clay_surface_view_destroy(clay_surface_view* view);
+
+/* clay_surface_kind, or -1 for a NULL view. */
+int32_t clay_surface_view_kind(const clay_surface_view* view);
+/* Chunk ids run from 0 to this, and a slot in that range may be dead — see
+ * clay_chunk_info.live. */
+size_t clay_surface_view_chunk_count(clay_surface_view* view);
+
+/* Fill one clay_chunk_info per id in `chunks`. A NULL `chunks` means "the first
+ * `count` ids in order", which is what a host walking the whole surface wants
+ * and saves it building an ascending array to say so. */
+clay_result clay_surface_view_chunk_infos(clay_surface_view* view, const uint32_t* chunks,
+                                          size_t count, clay_chunk_info* out_infos);
+
+/* The chunks the stamps since the last drain touched. Size-query pattern: call
+ * with out_chunks == NULL for the count; a buffer that is too small gets
+ * CLAY_ERROR_BUFFER_TOO_SMALL with the needed count in *count and writes
+ * nothing. */
+clay_result clay_surface_view_dirty_chunks(clay_surface_view* view, uint32_t* out_chunks,
+                                           size_t* count);
+
+/* Copy one chunk into buffers the caller owns.
+ *
+ * A NULL `out_positions`, `out_normals` AND `out_indices` is the CAPACITY
+ * QUERY: it writes nothing and reports what the chunk needs, so a host sizes
+ * once and copies once. `expected` may be NULL, which means "I have not seen
+ * this chunk before" and never reports stale.
+ *
+ * Positions and normals are three floats per vertex; indices are triangles.
+ *
+ * WELDED WHERE THE REPRESENTATION ALLOWS IT. A fixed mesh and a multires level
+ * have a stable per-chunk vertex list, so a chunk copies as its own vertices
+ * with local indices. An adaptive surface does not — its topology changes under
+ * the stamp being uploaded — so its chunks copy as UNWELDED triangles, byte for
+ * byte as clay_dynamic_surface_copy_chunk already does. Read
+ * clay_chunk_readback.vertex_count rather than assuming either. */
+clay_result clay_surface_view_copy_chunk(clay_surface_view* view, uint32_t chunk,
+                                         const clay_chunk_revisions* expected,
+                                         float* out_positions, size_t position_capacity,
+                                         float* out_normals, size_t normal_capacity,
+                                         uint32_t* out_indices, size_t index_capacity,
+                                         clay_chunk_readback* out_readback);
+
+/* Retire chunks from the dirty set, each one only if it has not changed since
+ * the caller copied it. `seen` is one clay_chunk_revisions per id — the
+ * `current` a copy reported, not the one a host wishes it had.
+ *
+ * `out_clean` receives how many of the ids are clean afterwards, which includes
+ * ones that were never dirty; the rest changed again between the copy and this
+ * call and are still waiting. Draining across frames is therefore lossless at
+ * any rate, which is what makes a preview budget a hint rather than a lie. */
+clay_result clay_surface_view_acknowledge(clay_surface_view* view, const uint32_t* chunks,
+                                          const clay_chunk_revisions* seen, size_t count,
+                                          size_t* out_clean);
+/* Drop the whole dirty set. The all-or-nothing form, kept for a host that
+ * uploads everything it was told about in one frame and has nothing to
+ * reconcile. Prefer the acknowledgement if you drain incrementally. */
+clay_result clay_surface_view_clear_dirty(clay_surface_view* view);
+
+/* -- the profile, the ledger and the trim, per surface ------------------------
+ *
+ * The profile is set on the hierarchy alone, and that is a statement rather
+ * than an omission: it is the representation that HOLDS levels, so residency is
+ * the only place a budget currently changes what the engine keeps. The other
+ * two report and trim without one. */
+
+clay_result clay_multires_set_memory_profile(clay_multires* surface,
+                                             const clay_sculpt_memory_profile* profile);
+clay_result clay_multires_memory_profile(const clay_multires* surface,
+                                         clay_sculpt_memory_profile* out_profile);
+
+/* Each representation answers for itself, in the shared vocabulary, so a host
+ * holding one of each gets one set of three roll-ups rather than three reports
+ * it has to reconcile. The ledger is FILLED, not merged: a caller accumulating
+ * several surfaces adds the fields itself, because only it knows which surfaces
+ * belong together. */
+clay_result clay_multires_memory_ledger(const clay_multires* surface,
+                                        clay_memory_ledger* out_ledger);
+clay_result clay_dynamic_sculptor_memory_ledger(const clay_dynamic_sculptor* sculptor,
+                                                clay_memory_ledger* out_ledger);
+clay_result clay_mesh_sculptor_memory_ledger(clay_mesh_sculptor* sculptor,
+                                             clay_memory_ledger* out_ledger);
+
+/* Release rebuildable caches at a stated pressure, in a fixed order: transient
+ * scratch beyond its steady capacity, preview staging, evaluated caches,
+ * spatial indices for inactive levels, derived positions for inactive levels,
+ * other rebuildable caches.
+ *
+ * NEVER AUTHORITATIVE CONTENT, and never history. Not the cage, not a level's
+ * topology, not the detail, not a sculpt layer, not a mask —
+ * clay_multires_detail_checksum is unchanged across any trim, which is how a
+ * host proves this to itself rather than taking the sentence on trust. Undo is
+ * the host's own policy through clay_document_set_history_budget.
+ *
+ * `pin` may be NULL. A held pin makes the call a no-op that reports what it
+ * WOULD have released, with `pinned` set. */
+clay_result clay_multires_trim(clay_multires* surface, int32_t pressure,
+                               const clay_memory_pin* pin, clay_trim_report* out_report);
+clay_result clay_dynamic_sculptor_trim(clay_dynamic_sculptor* sculptor, int32_t pressure,
+                                       const clay_memory_pin* pin, clay_trim_report* out_report);
+
+/* -- what an operation would cost, asked before it is paid --------------------
+ *
+ * clay_multires_preflight_add_level already did this for one operation and was
+ * already the right shape: persistent and peak reported apart, a typed refusal,
+ * no allocation and no side effects. Four more operations have the same
+ * property — a transient PEAK that exceeds the size of their result — and had
+ * no answer at all.
+ *
+ * THE PEAK IS THE NUMBER THAT MATTERS on a device that kills an application
+ * rather than warning it, and an engine that discovers this by being terminated
+ * cannot tell the user what happened.
+ *
+ * ONE ESTIMATOR UNDERNEATH ALL FIVE, and the reason is arithmetic rather than
+ * tidiness: five bespoke estimates is five places for vertices * bytes to wrap
+ * 64 bits and report a SMALL number, and the failure mode of that bug is that
+ * the operation is ALLOWED. Every multiply here is checked and an overflow
+ * reports CLAY_BUDGET_OVERFLOW rather than a number. */
+
+typedef enum clay_budget_error {
+    CLAY_BUDGET_OK = 0,
+    /* The predicted peak exceeds the declared budget. Refused whole; nothing
+     * was allocated. */
+    CLAY_BUDGET_OVER_BUDGET = 1,
+    /* The arithmetic itself overflowed. A refusal at ANY budget including no
+     * budget: an estimate nobody can compute is not one anybody may rely on. */
+    CLAY_BUDGET_OVERFLOW = 2
+} clay_budget_error;
+
+/* Never NULL, for any value. */
+const char* clay_budget_error_text(int32_t error);
+
+/* These are CEILINGS, deliberately. The structural figures are exact byte
+ * costs, but the arrays that carry them are grown rather than reserved, so a
+ * figure measured afterwards includes capacity slack the prediction does not. A
+ * budget that errs LOW is the one that gets an application killed: it says yes
+ * to an operation that does not fit. */
+typedef struct clay_surface_preflight {
+    uint32_t struct_size; /* = sizeof(clay_surface_preflight); required */
+    int32_t allowed;
+    uint64_t authoritative_bytes; /* kept, and the user's work */
+    uint64_t runtime_bytes;       /* kept, and rebuildable */
+    uint64_t persistent_bytes;    /* the two above: what remains after the call */
+    uint64_t peak_bytes;          /* the high-water mark during it */
+    int32_t error;                /* clay_budget_error when allowed == 0 */
+} clay_surface_preflight;
+
+/* `budget` of zero means no budget, which is what a desktop host passes and
+ * what every one of these did before there was a budget to pass. */
+
+/* A flat mesh becoming an adaptive surface: the peak holds the source mesh, the
+ * half-edge structure and the weld map at once. */
+clay_result clay_mesh_preflight_to_dynamic(const clay_mesh* mesh, uint64_t budget,
+                                           clay_surface_preflight* out_preflight);
+/* A global remesh to a target triangle count. Source and target are live at the
+ * same time, which is the whole reason this one is asked. */
+clay_result clay_mesh_preflight_global_remesh(const clay_mesh* mesh, uint64_t target_triangles,
+                                              uint64_t budget,
+                                              clay_surface_preflight* out_preflight);
+/* An adaptive surface becoming a flat mesh. The export SPLITS a geometric
+ * vertex into as many export vertices as it has distinct corner attributes, so
+ * the result is bounded by CORNERS rather than by vertices — the term that
+ * makes this bigger than it looks on a seam-heavy model. */
+clay_result clay_dynamic_surface_preflight_to_mesh(const clay_dynamic_surface* surface,
+                                                   uint64_t budget,
+                                                   clay_surface_preflight* out_preflight);
+/* Serialization: the blob is a second copy of everything, and it exists while
+ * the surface still does. */
+clay_result clay_dynamic_surface_preflight_encode(const clay_dynamic_surface* surface,
+                                                  uint64_t budget,
+                                                  clay_surface_preflight* out_preflight);
+clay_result clay_multires_preflight_encode(const clay_multires* surface, uint64_t budget,
+                                           clay_surface_preflight* out_preflight);
+
+/* -- peak telemetry ----------------------------------------------------------
+ *
+ * (add-extreme-poly-runtime, task 7.7.) The four high-water marks a host tunes
+ * a clay_sculpt_memory_profile against, measured by the engine while it works.
+ *
+ * HIGH-WATER MARKS, NOT AVERAGES, and that is the whole point rather than a
+ * detail. A buffer sized to the vertex count, allocated once during warm-up and
+ * reused forever, allocates nothing on a warm stamp and costs no bytes on one
+ * — it satisfies every count-based assertion — and it is still O(model)
+ * storage. The only thing that catches it is a PEAK that does not move between
+ * a one-million and a twenty-million-vertex model at the same footprint, which
+ * is what a host reads here to check the claim on its own content rather than
+ * on the library's fixtures.
+ *
+ * EVERY SCULPTING HANDLE MEASURES ITSELF, always, from the moment it is
+ * created. There is no attach step and no telemetry object to own, which is
+ * deliberate: the C++ seam takes a BORROWED pointer a host sets, and a borrowed
+ * pointer across this boundary is a lifetime a caller can get wrong exactly
+ * once, mid-stroke, by destroying a block a sculptor still writes into. Four
+ * counters cost a store each; a dangling one costs the process. So the handle
+ * owns the block, the host reads a COPY into a descriptor it owns, and there is
+ * nothing to keep alive.
+ *
+ * scratch_bytes is reported for completeness and is ZERO from these handles
+ * today: the stamp path does not consume the scratch arena yet (see the change's
+ * tasks 3.1 and 3.7), and reporting a number nothing measured would be worse
+ * than reporting the truth. The other three are live. */
+
+typedef struct clay_peak_telemetry {
+    uint32_t struct_size; /* = sizeof(clay_peak_telemetry); required */
+    uint64_t scratch_bytes;    /* the largest working set one stamp needed */
+    uint64_t workset_vertices; /* the largest footprint GATHERED, rim included */
+    uint64_t dirty_chunks;     /* the deepest the dirty set has been */
+    uint64_t topology_ops;     /* splits and collapses in one stamp */
+} clay_peak_telemetry;
+
+/* uint64_t rather than size_t in the struct on purpose: a peak is a measurement
+ * a host records, compares against a run on another device and puts in a
+ * report, and a field whose width follows the pointer size makes two of those
+ * runs incomparable at the byte level. size_t stays on the COUNT out-parameters
+ * elsewhere, where the value is an index into this process's own memory. */
+
+/* The workset peak of a fixed-topology session. */
+clay_result clay_mesh_sculptor_peak_telemetry(const clay_mesh_sculptor* sculptor,
+                                              clay_peak_telemetry* out_telemetry);
+clay_result clay_mesh_sculptor_reset_peak_telemetry(clay_mesh_sculptor* sculptor);
+/* The hierarchy's, which is the bound level's and follows the level: a rebind
+ * builds a new level sculptor and this one keeps filling, so the peak belongs
+ * to the SESSION rather than to whichever level happened to be bound first. */
+clay_result clay_multires_sculptor_peak_telemetry(const clay_multires_sculptor* sculptor,
+                                                  clay_peak_telemetry* out_telemetry);
+clay_result clay_multires_sculptor_reset_peak_telemetry(clay_multires_sculptor* sculptor);
+/* The adaptive surface's, and the only one of the three that fills all three
+ * live counters: topology_ops is a split-and-collapse count no other
+ * representation has, and it is the number that decides how big the slot pools
+ * have to be, while dirty_chunks comes from the same chunked index the transport
+ * drains. */
+clay_result clay_dynamic_sculptor_peak_telemetry(const clay_dynamic_sculptor* sculptor,
+                                                 clay_peak_telemetry* out_telemetry);
+clay_result clay_dynamic_sculptor_reset_peak_telemetry(clay_dynamic_sculptor* sculptor);
+
+/* -- work that is not required for correctness --------------------------------
+ *
+ * (sculpt-runtime spec, add-extreme-poly-runtime, tasks 3.3, 3.4 and 3.5.)
+ *
+ * A sculpt runtime accumulates jobs that make the NEXT interaction cheaper and
+ * THIS one slower: rebuilding a spatial index whose partition has decayed,
+ * compacting a chunk arena that splits have left holes in, promoting a detail
+ * field that is now dense, compacting a slot pool full of dead slots, recomputing
+ * normals a drag deferred. Every one of them is a stall if it happens while a
+ * finger is on the glass, and none of them is the engine's decision, because
+ * the engine does not own the moment between two interactions. The host does.
+ *
+ * SO THEY ARE QUEUED AND NOT DONE. The queue is a host's own object here, not a
+ * hidden member of a sculptor, for the same reason the memory profile is filled
+ * by the host: one application may service maintenance on a background thread
+ * between strokes, another only when a document is idle, and a third never. A
+ * queue nobody services costs a handful of structs and changes no result.
+ *
+ * THE STROKE GATE IS A MECHANISM RATHER THAN A CONVENTION. "we only call this
+ * between strokes" is a rule that survives until the second caller, so the
+ * queue refuses to hand anything out between clay_maintenance_queue_begin_stroke
+ * and _end_stroke — a host that wired the drain to the wrong callback finds out
+ * by nothing happening rather than by a stutter it will blame on the brush.
+ *
+ * WHY A TAKE/COMPLETE PAIR RATHER THAN A CALLBACK. The C++ form of this is
+ * `MaintenanceQueue::service(budget, run)`, and a function pointer with a void*
+ * would have crossed here unchanged. Two reasons it does not. The first is that
+ * this header has never taken a callback and gains nothing by starting: the
+ * budget loop is four lines in the caller's own language, and the caller is the
+ * one holding the clock the budget is measured on. The second is reentrancy —
+ * `run` is host code, host code that queues another item while the queue is
+ * mid-drain would mutate the vector being walked, and a boundary that cannot
+ * prevent that should not offer it. Take one, do it, say it is done.
+ *
+ * NOTHING HERE PERFORMS THE WORK. An item is a REQUEST naming a kind and a
+ * target; what services it is an ordinary entry point the host already has —
+ * clay_dynamic_sculptor_rebuild_index for an index, clay_mesh_sculptor_flush_-
+ * normals for deferred normals. That is deliberate: an item a host declines,
+ * defers forever or performs differently must leave the surface correct either
+ * way, and it does, because none of it was correctness in the first place. */
+
+typedef enum clay_maintenance_kind {
+    /* The spatial index's partition has decayed under local edits. Advisory,
+     * and the most likely one for a host to decline: measured over five
+     * deformations, a rebuild produced a better tree in exactly one and a
+     * dramatically worse one in two. */
+    CLAY_MAINTENANCE_INDEX_REBUILD = 0,
+    /* The chunk table's face arena has slack a split left behind. */
+    CLAY_MAINTENANCE_CHUNK_COMPACTION = 1,
+    /* A sparse detail field whose coverage has passed the promotion threshold.
+     * Speed rather than memory: the block table is smaller than the dense form
+     * until coverage passes 99.9%, and what argues for promotion is the
+     * indirection on every read. */
+    CLAY_MAINTENANCE_DETAIL_PROMOTION = 2,
+    /* Dead slots an adaptive surface's edits left in its pools. */
+    CLAY_MAINTENANCE_SLOT_POOL_COMPACTION = 3,
+    /* Normals a drag deferred. THE ONE ITEM THAT IS NOT OPTIONAL: the committed
+     * state has to be exact, so a host that never services the queue must still
+     * flush these at stroke end with clay_mesh_sculptor_flush_normals. It is
+     * here so a host can spend its budget on them FIRST, not so it can decide
+     * whether to do them at all. */
+    CLAY_MAINTENANCE_NORMAL_FLUSH = 4
+} clay_maintenance_kind;
+
+/* Never NULL, for any value, including one this build does not know. */
+const char* clay_maintenance_kind_text(int32_t kind);
+
+typedef struct clay_maintenance_item {
+    uint32_t struct_size; /* = sizeof(clay_maintenance_item); required */
+    int32_t kind;         /* clay_maintenance_kind */
+    /* What the item is about: a multires level, a chunk, a surface id. The
+     * queue never interprets it — it is what makes two requests the SAME
+     * request rather than two entries for the same job. */
+    uint32_t target;
+    /* How many times this item has been re-requested since it was last
+     * serviced. An entry whose count keeps climbing is one the host is
+     * starving, and that is worth being able to see. */
+    uint32_t requests;
+    /* The requester's own estimate. Zero means "unknown", which is what most
+     * callers honestly have — clay_dynamic_sculptor_request_index_rebuild fills
+     * it with a LEAF COUNT rather than a time, because a rebuild is O(leaves)
+     * and this library carries no machine model to turn that into microseconds.
+     * A host that has measured its own device replaces it by requesting the
+     * same item again with a figure of its own. */
+    uint64_t estimated_micros;
+} clay_maintenance_item;
+
+/* A host's queue. Owns nothing but its own entries and refers to no surface, so
+ * one queue may collect items from every surface a document holds. */
+typedef struct clay_maintenance_queue clay_maintenance_queue;
+
+clay_result clay_maintenance_queue_create(clay_maintenance_queue** out_queue);
+void clay_maintenance_queue_destroy(clay_maintenance_queue* queue);
+
+/* Queue an item, or FOLD it into the identical one already queued — same kind,
+ * same target — bumping that entry's `requests` and taking the latest non-zero
+ * estimate. Never allocates once the queue has reached its working size, which
+ * is what makes it safe to call from a stamp: a stroke requests the same
+ * rebuild on every dab. */
+clay_result clay_maintenance_queue_request(clay_maintenance_queue* queue, int32_t kind,
+                                           uint32_t target, uint64_t estimated_micros);
+
+clay_result clay_maintenance_queue_count(const clay_maintenance_queue* queue, size_t* out_count);
+/* The item at `index`, in queue order, without removing it. Indexed rather than
+ * filled in bulk because the queue holds a HANDFUL of entries by construction —
+ * five kinds and a target apiece — so a bulk fill would trade a struct_size
+ * every descriptor here has for a copy nobody is making per frame. */
+clay_result clay_maintenance_queue_item(const clay_maintenance_queue* queue, size_t index,
+                                        clay_maintenance_item* out_item);
+clay_result clay_maintenance_queue_has(const clay_maintenance_queue* queue, int32_t kind,
+                                       uint32_t target, int32_t* out_has);
+
+/* The gate. A pointer event is not a maintenance window. */
+clay_result clay_maintenance_queue_begin_stroke(clay_maintenance_queue* queue);
+clay_result clay_maintenance_queue_end_stroke(clay_maintenance_queue* queue);
+clay_result clay_maintenance_queue_in_stroke(const clay_maintenance_queue* queue,
+                                             int32_t* out_in_stroke);
+
+/* The drain, in two halves.
+ *
+ *     while (budget_left()) {
+ *         int32_t have = 0;
+ *         clay_maintenance_queue_take_next(q, &item, &have);
+ *         if (!have) break;
+ *         ... do the work ...
+ *         clay_maintenance_queue_complete(q, item.kind, item.target, NULL);
+ *     }
+ *
+ * take_next PEEKS: the item stays queued until _complete says it was done, so a
+ * host that took one and then decided it could not afford it has declined
+ * rather than dropped it. It reports *out_have as 0 while a stroke is open and
+ * while the queue is empty — the same answer to "is there work I may do now",
+ * which is the question a drain is actually asking.
+ *
+ * complete removes the item naming that kind and target and reports whether one
+ * was there. Also gated: an item completed mid-stroke would have been performed
+ * mid-stroke. `out_completed` may be NULL. */
+clay_result clay_maintenance_queue_take_next(clay_maintenance_queue* queue,
+                                             clay_maintenance_item* out_item, int32_t* out_have);
+clay_result clay_maintenance_queue_complete(clay_maintenance_queue* queue, int32_t kind,
+                                            uint32_t target, int32_t* out_completed);
+
+clay_result clay_maintenance_queue_clear(clay_maintenance_queue* queue);
+clay_result clay_maintenance_queue_bytes(const clay_maintenance_queue* queue, size_t* out_bytes);
+
+/* -- what the index is worth right now ---------------------------------------
+ *
+ * The measurement behind CLAY_MAINTENANCE_INDEX_REBUILD, so a host declining
+ * the item is declining something it can see rather than a name.
+ *
+ * `quality` is the mean leaf VOLUME against the volume of their union: 1 is a
+ * perfect partition and larger means the leaves overlap, which is what local
+ * edits do to a tree over time. LOWER IS BETTER, and it is only meaningful
+ * against this same tree's own history — never against another model's.
+ *
+ * A SURFACE WITH NO VOLUME REPORTS 0, and that follows from the measure rather
+ * than from a bug: a flat plane's leaves and their union are both zero-volume
+ * boxes, so the ratio is 0, `wants_rebuild` is never true, and the number says
+ * nothing about how far the partition has drifted. Any model with thickness —
+ * which is every model anybody sculpts — reports a real figure. Stated because
+ * a host testing this on a ground plane would otherwise conclude the field is
+ * broken.
+ *
+ * `wants_rebuild` is the engine's opinion of its own partition and NOT an
+ * instruction. It is one of the two conditions
+ * clay_dynamic_sculptor_request_index_rebuild checks; the other is the host's
+ * clay_sculpt_memory_profile.allow_index_rebuild, and keeping them apart is the
+ * point: the engine measures, the host decides whether it has the room. */
+typedef struct clay_index_quality {
+    uint32_t struct_size; /* = sizeof(clay_index_quality); required */
+    uint64_t leaf_count;
+    float quality;
+    int32_t wants_rebuild;
+} clay_index_quality;
+
+clay_result clay_dynamic_sculptor_index_quality(const clay_dynamic_sculptor* sculptor,
+                                                clay_index_quality* out_quality);
+
+/* Queue an index rebuild if the tree wants one AND the profile allows it, and
+ * report whether anything was queued. `profile` may be NULL, which is the
+ * default profile and therefore allows it.
+ *
+ * A convenience over the two calls above and deliberately still a REQUEST: it
+ * puts the job where a host can see it and rebuilds nothing.
+ * clay_dynamic_sculptor_rebuild_index is what performs it, between strokes. */
+clay_result clay_dynamic_sculptor_request_index_rebuild(
+    const clay_dynamic_sculptor* sculptor, const clay_sculpt_memory_profile* profile,
+    uint32_t target, clay_maintenance_queue* queue, int32_t* out_queued);
+
+/* -- normals a drag deferred --------------------------------------------------
+ *
+ * Normals follow the vertices, so a moved vertex with a stale normal shades
+ * wrong immediately — which is why they are recomputed per stamp by DEFAULT and
+ * this is opt-in. What it buys is the recompute of a stroke's overlapping dabs
+ * done once instead of once per dab; what it costs is that the shading lags the
+ * geometry until the flush.
+ *
+ * THE FINAL STATE IS EXACT EITHER WAY. That is the whole contract: deferring
+ * changes WHEN the work happens and nothing about the result, which is what
+ * makes it a hint a memory profile may set (clay_sculpt_memory_profile.defer_-
+ * normals_in_stroke) rather than a decision that would make a committed sculpt
+ * a function of machine speed.
+ *
+ * A HOST THAT DEFERS MUST FLUSH. Nothing flushes on its own: the sculptor does
+ * not know where a stroke ends, and guessing at it — a timer, a stamp with no
+ * predecessor — would flush mid-drag, which is the cost this exists to avoid.
+ * clay_mesh_sculptor_apply_stroke's own `defer_normals` argument is unaffected
+ * and still flushes at the end of the stroke it drove, because there the
+ * library does know where the stroke ended.
+ *
+ * The deltas argument matters and is easy to miss: a deferred stroke's undo is
+ * only exact if the flush records the normals it changed, so pass the same
+ * clay_mesh_deltas the stamps were recorded into, or NULL if none was. */
+clay_result clay_mesh_sculptor_set_defer_normals(clay_mesh_sculptor* sculptor, int32_t defer);
+clay_result clay_mesh_sculptor_defer_normals(const clay_mesh_sculptor* sculptor,
+                                             int32_t* out_defer);
+clay_result clay_mesh_sculptor_flush_normals(clay_mesh_sculptor* sculptor,
+                                             clay_mesh_deltas* deltas);
+
+/* The hierarchy's half. Forwarded to whichever level is bound, INCLUDING one
+ * bound later, for the same reason the peak telemetry is: a rebind builds a new
+ * level sculptor, and a deferral that stopped applying the moment the host
+ * changed level would leave a drag half deferred and half not. Flushing binds
+ * nothing — there is nothing to flush on a level nobody has stamped. */
+clay_result clay_multires_sculptor_set_defer_normals(clay_multires_sculptor* sculptor,
+                                                     int32_t defer);
+clay_result clay_multires_sculptor_defer_normals(const clay_multires_sculptor* sculptor,
+                                                 int32_t* out_defer);
+clay_result clay_multires_sculptor_flush_normals(clay_multires_sculptor* sculptor);
 
 /* Update the ray-query tree for vertices that have moved.
  *
@@ -7139,6 +8041,14 @@ typedef struct clay_mesh_hit {
     /* A weld class of the triangle hit, ready to hand back as the descriptor's
      * seed_class so the surface walk starts where the finger did. */
     uint32_t seed_class;
+    /* The class space that seed_class was picked in, to send back in
+     * clay_mesh_brush_desc.seed_revision.
+     *
+     * Handed out HERE, beside the class, rather than through a call of its own,
+     * because the two are only meaningful together: a host that keeps the class
+     * and forgets the token has kept exactly the half that cannot be checked,
+     * and the stale-seed failure is silent. */
+    uint64_t seed_revision;
 } clay_mesh_hit;
 
 /* Turn a tap into a brush centre. `xform` is where the mesh sits, or NULL for

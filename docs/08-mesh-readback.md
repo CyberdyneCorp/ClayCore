@@ -599,6 +599,235 @@ field with `clay_item_volume_from_mesh` (`clay.Volume.from_mesh` in Python); see
 [05 §7](05-claycore-library.md#7-meshing--mesh-processing-claymesh). That path
 discards the topology, which is exactly the difference between the two.
 
+## Reading back only what changed
+
+Everything above copies a whole mesh, and at twenty million vertices a host that
+does that per dab has already lost. A dab touches a few thousand vertices; the
+readback should cost what it TOUCHED and not what the model HOLDS.
+
+`clay_surface_view` is the seam for that, and it is one seam for all three
+representations — a fixed mesh, an adaptive surface and a level of a
+multiresolution hierarchy. They are partitioned into CHUNKS, a stamp marks the
+chunks it reached, and a host drains that set into buffers it owns.
+
+```c
+clay_surface_view* view = NULL;
+clay_surface_view_from_dynamic(sculptor, &view);   /* or _from_mesh / _from_multires */
+
+size_t n = 0;
+clay_surface_view_dirty_chunks(view, NULL, &n);    /* size query */
+uint32_t* dirty = malloc(n * sizeof(uint32_t));
+clay_surface_view_dirty_chunks(view, dirty, &n);
+
+for (size_t i = 0; i < n; ++i) {
+    clay_chunk_readback need = { .struct_size = sizeof(need) };
+    clay_surface_view_copy_chunk(view, dirty[i], NULL, NULL, 0, NULL, 0, NULL, 0, &need);
+
+    float* positions = malloc(need.vertex_count * 3 * sizeof(float));
+    uint32_t* indices = malloc(need.index_count * sizeof(uint32_t));
+    clay_chunk_readback got = { .struct_size = sizeof(got) };
+    clay_surface_view_copy_chunk(view, dirty[i], NULL,
+                                 positions, need.vertex_count * 3, NULL, 0,
+                                 indices, need.index_count, &got);
+    upload(dirty[i], positions, indices);          /* your renderer */
+
+    /* Retire it — against what you actually copied. */
+    size_t clean = 0;
+    clay_surface_view_acknowledge(view, &dirty[i], &got.current, 1, &clean);
+}
+clay_surface_view_destroy(view);
+```
+
+Four things about that loop are the whole point.
+
+- **The buffers are yours, and the capacity query comes first.** Nothing here
+  allocates a heap object per chunk per frame, and nothing hands back a pointer
+  into the engine: a mutation can move or free anything, and at this scale it
+  does so mid-drag. A buffer that is too small has NOTHING written into it —
+  not a partial fill you might draw — and the counts say what it needed. It
+  comes back as `CLAY_ERROR_BUFFER_TOO_SMALL`, which is the code to branch on:
+  grow to the counts and call again. Reserve your error path for
+  `CLAY_ERROR_NOT_FOUND`, which means the chunk id names nothing live and
+  retrying will never help, and `CLAY_ERROR_INVALID_ARGUMENT`, which means the
+  call itself was wrong. Those three are deliberately distinct — a drain loop
+  that treats a short buffer as a fault drops the chunk and leaves the viewport
+  a frame behind, with nothing on screen saying so.
+- **Four revisions, not one.** `clay_chunk_info.revisions` separates topology,
+  geometry, normals and attributes, so you re-upload an index buffer only when
+  connectivity actually changed and can tell a deferred normal flush from a
+  move. The single `revision` beside them is the maximum of the four.
+- **Acknowledge, do not clear.** `clay_surface_view_acknowledge` retires a chunk
+  only if its revision still matches the one you copied. Drop a frame half way
+  through the set and the rest stays dirty; if a chunk changed again between the
+  copy and the acknowledgement it stays dirty too, so draining across frames at
+  any rate loses nothing. `clay_surface_view_clear_dirty` is the
+  all-or-nothing form, for a host that uploads everything in one pass.
+- **A stale readback is identifiable.** Pass the revisions you last saw as
+  `expected` and the result carries them back beside what the engine is at now,
+  with `stale` set when they differ. Without that a host drawing a superseded
+  chunk draws something the engine does not think it made, and nothing in the
+  pixels says so.
+
+A chunk of a fixed mesh or a multires level is WELDED — its own vertices, with
+indices local to it, so it uploads as a standalone draw. An adaptive surface's
+chunks are UNWELDED triangles, because its topology changes under the very stamp
+being uploaded and a per-chunk vertex map would have to be rebuilt per chunk per
+frame. Read `vertex_count` rather than assuming either.
+
+In Python the same loop is numpy-native:
+
+```python
+view = clay.SurfaceView.over_dynamic(sculptor)
+for chunk in view.dirty_chunks:
+    got = view.copy_chunk(chunk)          # positions (N,3), normals (N,3), indices (M,)
+    upload(chunk, got["positions"], got["indices"])
+    view.acknowledge(chunk, got["revisions"])
+```
+
+### Telling the engine what you can afford
+
+A host on a memory-constrained device fills a profile and asks for memory back
+when the operating system asks it for memory back. Nothing in the library
+detects a device, and nothing evicts on its own high-water mark:
+
+```python
+profile = clay.SculptMemoryProfile()
+profile.memory_class = clay.MemoryClass.constrained
+profile.max_resident_levels = 2
+hierarchy.memory_profile = profile
+
+led = hierarchy.memory_ledger()           # bytes by category, plus three roll-ups
+print(led["essential"], led["rebuildable"], led["undoable"])
+
+report = hierarchy.trim(clay.Pressure.critical)
+```
+
+A trim never touches unsaved authoritative content — the eviction order and what
+it excludes are in [05](05-claycore-library.md#memory-under-pressure-who-decides-what-and-in-what-order),
+verbatim. If a save or a readback is in flight, hold a pin and the trim becomes a
+no-op that reports what it WOULD have released:
+
+```python
+with clay.MemoryPin() as pin:
+    report = hierarchy.trim(clay.Pressure.critical, pin)
+    assert report["pinned"]               # nothing went; this is the estimate
+    blob = hierarchy.serialize()
+```
+
+And any operation whose transient PEAK exceeds its result can be priced before
+it is paid — `Mesh.preflight_to_dynamic`, `Mesh.preflight_global_remesh`,
+`DynamicSurface.preflight_to_mesh`, `DynamicSurface.preflight_encode`,
+`MultiresSurface.preflight_encode`, and `clay_multires_preflight_add_level`
+which came first. Read `peak_bytes`: an operation priced by what it leaves
+behind is the one that terminates the process half way through.
+
+### Work that is not required for correctness
+
+A sculpt runtime accumulates jobs that make the **next** interaction cheaper and
+this one slower: an index whose partition has decayed under local edits, a chunk
+arena with slack a split left behind, a detail field that is now dense enough to
+be worth promoting, normals a drag deferred. Every one of them is a stall if it
+happens while a finger is on the glass, and none of them is the engine's
+decision — the engine does not own the moment between two interactions.
+
+So they are **queued and not done**, and a host drains the queue with a budget of
+its own:
+
+```python
+queue = clay.MaintenanceQueue()
+
+with queue.stroke():                       # the gate: nothing runs in here
+    for point in drag:
+        adaptive.stamp("draw", center=point, radius=r, strength=s)
+    adaptive.request_index_rebuild(queue)  # discovered mid-stroke, run later
+
+deadline = time.monotonic() + 0.004        # your frame, your clock
+while time.monotonic() < deadline:
+    item = queue.take_next()               # None while a stroke is open
+    if item is None:
+        break
+    if item["kind"] == clay.MaintenanceKind.index_rebuild:
+        adaptive.rebuild_index()
+    elif item["kind"] == clay.MaintenanceKind.normal_flush:
+        fixed.flush_normals()
+    queue.complete(item["kind"], item["target"])
+```
+
+`adaptive` is a `DynamicSculptor` and `fixed` a `MeshSculptor`: one queue serves
+every surface a document holds, which is why an item carries a `target` the
+queue never interprets — it is what makes two requests the same request.
+
+`clay_maintenance_queue_*` is the same surface in C, with the same take/complete
+pair — the budget loop is the caller's because the caller holds the clock, and a
+callback across the boundary could be re-entered by host code that queued another
+item mid-drain.
+
+**The stroke gate is a mechanism rather than a convention.** "We only call this
+between strokes" is a rule that survives until the second caller, so `take_next`
+and `complete` do nothing while a stroke is open. A **request** is not gated, and
+that asymmetry is the whole design: a stamp is exactly where an item is
+discovered, and refusing to record one mid-stroke would lose the request rather
+than defer the work.
+
+**Nothing in the queue performs anything.** An item names a kind and a target;
+what services it is an ordinary call you already have. An item you decline, defer
+forever or perform differently leaves the surface correct either way, because
+none of it was correctness.
+
+`MaintenanceKind.normal_flush` is the one exception and is marked so: the
+committed state has to be exact. It is in the queue so you can spend your budget
+on it first, not so you can decide whether to do it.
+
+### Deferring normals across a drag
+
+Normals follow the vertices, so a moved vertex with a stale normal shades wrong
+immediately — which is why they are recomputed per stamp by default and the
+deferral is opt-in. What it buys is the recompute of a stroke's overlapping dabs
+done once instead of once per dab.
+
+```python
+sculptor.defer_normals = True
+for point in drag:
+    sculptor.stamp("draw", center=point, radius=r, strength=s, deltas=step)
+sculptor.flush_normals(step)      # pass the same record the stamps used
+```
+
+**The final state is exact either way.** That is the whole contract: deferring
+changes *when* the work happens and nothing about the result, which is what makes
+it a hint `SculptMemoryProfile.defer_normals_in_stroke` may carry rather than a
+decision that would make a committed sculpt a function of machine speed.
+
+**A host that defers must flush**, because nothing flushes on its own — the
+sculptor does not know where a stroke ends, and a guess at it would flush
+mid-drag, which is the cost the deferral exists to avoid. `apply_stroke`'s own
+`defer_normals` argument is a different thing and still flushes at the end of the
+stroke it drove; there the library does know where the stroke ended.
+
+Pass the same delta record the stamps were recorded into. A deferred stroke's
+undo is exact only if the flush records the normals it changed; omit it and undo
+restores positions and leaves shading from a stroke that no longer exists.
+
+### Asking what the index is worth
+
+`DynamicSculptor.index_quality` reports `leaf_count`, `quality` and
+`wants_rebuild` — the measurement behind the one maintenance item you are most
+likely to decline, so declining it is declining something you can see rather than
+a name.
+
+`quality` is the mean leaf volume against the volume of their union: 1 is a
+perfect partition and larger means the leaves overlap, which is what local edits
+do to a tree over time. Compare it against what **this** tree scored when it was
+built, never against another model's. A surface with **no volume reports 0** — a
+flat ground plane's leaves and their union are both zero-volume boxes — so on a
+plane the number says nothing and `wants_rebuild` is never true.
+
+`wants_rebuild` is the engine's opinion of its own partition and not an
+instruction. `request_index_rebuild` checks it **and**
+`SculptMemoryProfile.allow_index_rebuild`, and the two are deliberately apart:
+the engine measures, the host decides whether it has the room. A rebuild is not
+automatically an improvement — over five measured deformations one produced a
+better tree in exactly one case and a dramatically worse one in two.
+
 ## Handing a sculpt to the retopology engine
 
 `clay_mesh_save_handoff` writes the **sculpt handoff** that CyberRemesherAndUV's

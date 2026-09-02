@@ -102,6 +102,7 @@ EXAMPLES = [
     "68_mesh_multires",
     "69_mesh_sculpt_layers",
     "70_shared_brush_runtime",
+    "71_extreme_poly",
 ]
 
 
@@ -146,6 +147,10 @@ CAPABILITY_EXAMPLES = {
     # own example. Listed here while the change is still active, for the reason
     # the entry above gives.
     "mesh-sculpt-layers": "69_mesh_sculpt_layers",
+    # The surface tier: one chunk unit, one dirty-chunk transport, and a
+    # memory tier a host can act on. Listed while add-extreme-poly-runtime is
+    # still active, which is what the asymmetry above is for.
+    "sculpt-runtime": "71_extreme_poly",
     "examples": None,             # this file
 }
 

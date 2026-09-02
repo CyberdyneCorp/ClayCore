@@ -440,3 +440,74 @@ TEST_CASE("a stroke onto a hierarchy takes the mask and the deferred normals") {
     // documents.
     CHECK(mesh::multires_offers(MeshBrush::Layer));
 }
+
+// -- the stale seed (sculpt-runtime spec, task 3.2) ---------------------------
+//
+// A seed is an INDEX, and an index outlives the numbering it came from. A
+// hierarchy renumbers on every rebind, so a host that picks at one level and
+// stamps at another hands the walk a class that is still in bounds and no
+// longer means anything. The bounds check cannot see it, and the cost is not a
+// slightly wrong dab: `geodesic_region` gives up and returns an empty region
+// when the seed sits farther than the radius from the centre, so the stamp
+// silently does nothing.
+//
+// The three cases below are the same stale seed spent three ways, and the
+// middle one is the defect still reachable on purpose — an unrevisioned seed is
+// exactly what every caller written before the token sends.
+TEST_CASE("a seed from another level is refused rather than spent on an empty region") {
+    MultiresSurface s = build(plane_quads(4, 2.0f), 2);
+    MultiresSculptor sculptor(s);
+
+    // Pick at the COARSE level, at a corner — far from where the stamp lands.
+    REQUIRE(s.set_sculpt_level(1));
+    const std::uint64_t coarse_revision = sculptor.seed_revision();
+    REQUIRE(coarse_revision != mesh::kNoSeedRevision);
+    mesh::MeshSculptor* coarse = sculptor.level_sculptor();
+    REQUIRE(coarse != nullptr);
+    const std::uint32_t corner = coarse->nearest_class(cf3(-2.0f, 0, -2.0f));
+
+    // Now sculpt at the FINE level, whose class space is a different, larger
+    // numbering. The seed stays in bounds there, which is the whole problem.
+    REQUIRE(s.set_sculpt_level(2));
+    const std::uint64_t fine_revision = sculptor.seed_revision();
+    CHECK(fine_revision != coarse_revision);
+    REQUIRE(corner < sculptor.level_sculptor()->adjacency().class_count());
+
+    MeshBrushSettings settings;
+    settings.center = cf3(0, 0, 0);
+    settings.radius = 0.6f;
+    settings.strength = 0.5f;
+    settings.geodesic = true;
+    settings.seed_class = corner;
+
+    SUBCASE("unrevisioned: the seed is trusted, and the dab is lost") {
+        // The behaviour every caller had before the token existed, kept
+        // deliberately so this file can show what the token buys rather than
+        // assert it. A corner seed is farther than 0.6 from the origin, so the
+        // walk returns nothing and the stamp moves nobody.
+        settings.seed_revision = mesh::kNoSeedRevision;
+        CHECK(sculptor.stamp(MeshBrush::Draw, settings) == 0);
+        CHECK(s.detail_at(2).empty());
+    }
+
+    SUBCASE("revisioned and stale: refused, and the stamp lands anyway") {
+        settings.seed_revision = coarse_revision;
+        const std::size_t moved = sculptor.stamp(MeshBrush::Draw, settings);
+        CHECK(moved > 0);
+        CHECK_FALSE(s.detail_at(2).empty());
+        // Proves the rejection HAPPENED rather than the seed having been
+        // harmless — without this the case would pass on a build that ignored
+        // the revision and got lucky.
+        CHECK(sculptor.level_sculptor()->stale_seeds_rejected() == 1);
+    }
+
+    SUBCASE("revisioned and live: honoured, and costs no rejection") {
+        // The same seed, now genuinely of this level's numbering: the class
+        // nearest the centre. This is the case the seed exists to make fast.
+        mesh::MeshSculptor* fine = sculptor.level_sculptor();
+        settings.seed_class = fine->nearest_class(settings.center);
+        settings.seed_revision = fine_revision;
+        CHECK(sculptor.stamp(MeshBrush::Draw, settings) > 0);
+        CHECK(sculptor.level_sculptor()->stale_seeds_rejected() == 0);
+    }
+}

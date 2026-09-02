@@ -521,6 +521,301 @@ several. `BM_MultiresSubdivide` is **Tier 4**: adding a level is an explicit
 action an artist takes and waits on, which is also why it is priced by
 `preflight_add_level` before it is paid.
 
+### The extreme-poly runtime, measured (add-extreme-poly-runtime)
+
+Everything above prices a dab at ONE model size. The question this section
+answers is the other one — what happens to that price when the model grows and
+the dab does not — because it is the question an artist actually asks, in the
+form "why does the brush get slower as I add detail".
+
+**The fixture is fixed-spacing with a growing extent**, and that is the whole
+experiment rather than a detail of it. A bigger model here is more of the same
+geometry at the same detail; a more finely subdivided model would put more
+vertices under a brush of the same radius, and then a dab costing more on the
+bigger model would prove nothing at all. Linux desktop, Release,
+`benchmarks/bench_extreme_poly.cpp` driven by `tools/bench_extreme_poly.py`,
+which records the one-minute load average either side of every row and flags a
+row whose load moved.
+
+**RATIOS, because a millisecond on that box is a fact about that box.** 20M
+vertices against 1M at the same 20k-vertex footprint, per stage:
+
+| Stage | 20M / 1M, P50 | 20M / 1M, P95 |
+|---|---|---|
+| seed (nearest class through the index) | 1.33x | 1.22x |
+| chunk query | 1.88x | 1.65x |
+| stamp (gather, geodesic, weights, kernel, normals) | **1.01x** | **1.03x** |
+| index update (mark + refit) | 1.25x | 1.32x |
+| readback (the dirty chunks, sized and copied) | 1.72x | 1.66x |
+| **total** | **1.05x** | **1.11x** |
+
+**Twenty times the vertices, at the same footprint, is 1.05x the dab.** The two
+stages above 1.5x are the two that are supposed to grow: a tree query is
+logarithmic in the chunk count and both are microseconds against a stamp of
+milliseconds. Seven repeats of the total read 0.83, 1.04, 1.05, 1.20 and 1.41
+under a stable load and 2.68 and 3.34 under a moving one — so on that box the
+honest statement is "under 3x for 20x the model", and even the worst reading is
+six times under what an O(model) path would give.
+
+Absolutes, for scale, at 1M vertices and a 20k footprint: seed 35 us, chunk
+query 10 us, stamp 4.7 ms, index update 1.8 ms, readback 8 us. The stamp
+dominates, which is the shape a runtime should have — the work is the
+deformation and not the bookkeeping around it.
+
+**And now at ALL FIVE footprints, which the report used to drop.** The table
+above is one footprint because for a long time one footprint was all the driver
+would print: it took its baseline from the smallest size in the run, and a
+footprint that does not fit inside a model is skipped, so the 100k footprint
+first exists at 1M vertices and the 500k one at 5M. Neither was in the baseline
+row, so neither appeared — measured by the binary every time, printed in the raw
+output every time, and absent from the only table anybody reads. The baseline is
+now taken per footprint from the smallest size that measured it, and every row
+names the size it is against. TOTAL, P50 and P95, on a quiet box (load 5.80 ->
+2.39 across the whole matrix, no row flagged):
+
+| Footprint | Against | P50 | P95 | Model ratio |
+|---|---|---|---|---|
+| 1k | 20M vs 100k | **1.00x** | 1.02x | 200x |
+| 5k | 20M vs 100k | **0.96x** | 1.01x | 200x |
+| 20k | 20M vs 100k | **0.92x** | 0.90x | 200x |
+| 100k | 20M vs 1M | **0.99x** | 0.99x | 20x |
+| 500k | 20M vs 5M | **0.98x** | 1.02x | 4x |
+
+Two hundred times the vertices, at the same touched region, is the same dab to
+within the measurement. The only stage anywhere above 1.5x is the chunk query at
+the 100k footprint (1.52-1.57x), which is the logarithmic term and is 25 us
+against a stamp of 27 ms. Absolutes at the 20k footprint, 1M against 20M: P50
+6279 -> 6216 us, P95 7980 -> 7995, P99 8243 -> 8353, max 8664 -> 8715.
+
+**The counts are the part that does not depend on the box at all**, and they
+are the strongest form of the claim because no amount of load moves them. At
+each footprint the gathered workset is IDENTICAL from 100k to 20M vertices —
+885, 3415, 11178, 56339 and 252935 vertices — and the per-dab upload holds a
+band of a few per cent (69-87 KB at 1k, 1125-1163 KB at 20k, 26.5-26.7 MB at
+500k) while the model behind it grows two hundredfold. A timing ratio can be
+argued with on a shared machine; an identical workset cannot.
+
+**A word on measuring this here, because it cost two full matrices to learn.**
+The driver records the one-minute load either side of every row and flags a row
+whose load MOVED. That check is necessary and it is not sufficient: a row taken
+under a load that held steady at 11.6 for its whole duration passes it, and the
+ratio between that row and one taken under 7 is still noise. The first full
+matrix read 2.6x-8.5x at 5M and 1.3x-2.7x at 20M — the model getting cheaper as
+it grows, which is arithmetic nothing about the engine can produce — and nothing
+in the output said why. The driver now also compares the load LEVEL across rows
+and refuses to let a spread pass silently.
+
+**What a host is handed per dab.** The transport is per chunk and the four
+revisions are what make it cheap: a stamp with stable topology advances the
+GEOMETRY revision and leaves the TOPOLOGY revision alone, so a host re-uploads
+a vertex buffer and keeps the index buffer it already has.
+`examples/71_extreme_poly.py` measures it on two models sixteen times apart:
+9.2 KiB on both, against a whole surface of 28 KiB and 437 KiB — 1.00x for a 16x
+model, and 48x cheaper than handing over the surface.
+
+**The chunk size is 128 faces and it is measured, not adopted.**
+`benchmarks/bench_surface_chunks.cpp` sweeps 64/128/256/512/1024 over a 2.08M
+vertex plane against chunk-query time, false-positive touched vertices, normal
+recompute, upload bytes, a locality proxy and split/merge cost. At the 20k
+footprint 128 minimises P95(query + normals + index update) at 337-354 us and
+sits at the minimum of the split-and-merge term at 8.8 ms; 256 — the previous
+default — reads 358-373 us and 1.64x false positives against 1.51x. The change
+is real and it is modest, and 256 wins 14% on index memory, which the decision
+rule does not weigh.
+
+**These are Tier 1 at every size measured.** A dab at 20M vertices fits a frame
+with the same room to spare it has at 1M, which is the entire point of the
+change.
+
+**Across the other two representations**, at 100k against 1M vertices with the
+same footprints (load average 2.27 to 2.40, stable):
+
+| Representation | What is constant | What is not |
+|---|---|---|
+| adaptive surface | dirty chunks (26 → 25 at 1k, 85 → 84 at 20k), upload (104 → 95 KB, 162 → 176 KB), topology ops (identical) | stamp+remesh P50 1.27x at 1k and 1.55x at 20k for a 10x model |
+| hierarchy | dirty chunks (14 → 15, 146 → 146), upload (67 → 72 KB, 700 → 700 KB), **detail write 180 → 188 us and 2912 → 2927 us** | stamp P50 **3.2x** at the 1k footprint |
+
+The detail-write column is the one worth reading twice: the propagation a
+coarse edit causes costs 1.01x at ten times the model, which is what "the levels
+above re-evaluate the descendants of what moved and nothing else" is worth as a
+number rather than as a design note.
+
+**And that column is where a correctness fix was paid for, so its price is
+stated here rather than absorbed.** A sculpted level's display normals used to
+be nobody's: `MeshSculptor` derives them from the level mesh's TRIANGLES and
+everything in `multires_eval.cpp` derives them from the level's own faces by
+Newell, which on a subdivision quad is a different vector — so a hierarchy
+shaded one way warm and another way after any cache rebuild, measured at 497 of
+2401 vertices and up to 0.02 in the unit normal. The level now owes its own
+normals and `drain_normals_pending` pays them, which is a SECOND recompute over
+the region the sculptor has just recomputed with the other definition.
+
+Measured in the same run, so the shared box's load applies to both halves
+equally: at 1M level vertices the drain is **8.7%** of the stamp at a 1k
+footprint and **22%** at a 20k one (274 us against 2876, and 4379 against
+15557; before the fix the same column read 0.07 and 0.17 us, because nothing
+was pending). It is duplicated work and it is not free.
+
+The cheap way to remove it — defer the level sculptor's own normals and let the
+hierarchy be the only writer — is not correct as things stand:
+`MultiresSculptor::bind` short-circuits on the second stamp of a stroke, so the
+hierarchy's drain would not have run before the next gather and the deformation
+would read stale normals. Removing the duplication therefore needs the
+deferral and the drain sequenced together, which is more than a correctness fix
+should carry. The 22% buys a hierarchy that shades the same before and after a
+memory warning.
+
+**And the hierarchy's stamp column is a MEASURED GAP, not noise.** 0.49 ms to
+1.58 ms at the 1k footprint is +1.09 ms for +888k vertices — about 1.2 ns a
+vertex, which is the shape of a linear scan and not of a tree. The cause is
+known and is in the fixed sculptor's own header: `MeshSculptor::surface_index`
+never BUILDS a ray tree on its own behalf (measured at 689 ms against 1.24 ms
+saved per stamp), so a host that picks gets one for free and a caller that does
+not is left with `geodesic_region` scanning every class for a seed.
+`MultiresSculptor` binds a `MeshSculptor` to the level mesh and is exactly that
+caller: nothing picks against a hierarchy level, so nothing ever builds its
+index. The fixed and adaptive paths do not have this term, which is why their
+rows are flat.
+
+It is a fixed cost per stamp rather than a growing one — 1.1 to 1.6 ms at a
+million level vertices — so it is invisible at a large footprint and dominant at
+a small one, which is the wrong way round: a detail pass is small footprints.
+The fix is task 3.2's caller-supplied seed rather than building a tree per
+level. The seed half is now DONE and the term is avoidable: a host that picks
+against a level passes the class it hit as `MeshBrushSettings::seed_class`
+together with the token from `MultiresSculptor::seed_revision()`, and the walk
+starts there instead of scanning. What is still true is that nothing supplies it
+automatically — a caller that passes no seed pays the scan exactly as measured
+above, because nothing picks against a hierarchy level on the engine's own
+behalf.
+
+The token is not bureaucracy. A hierarchy renumbers its classes on every rebind
+— a sculpt-level change, or a cache generation moving under a trim — so a seed
+picked before one is still IN BOUNDS afterwards and names unrelated geometry.
+`geodesic_region` returns an empty region when the seed lies farther than the
+radius from the brush centre, so an unvalidated stale seed does not misplace the
+dab, it silently loses it. Passing the revision is what turns that into a scan
+and a correct stamp.
+
+BOTH BINDINGS REACH IT, which matters more here than for most of this document:
+the caller most exposed to the stale seed is a scripted one, because pyclay's
+`raycast` hands back a `seed_class` a script is meant to feed straight into the
+next `stamp`. From C the token rides on `clay_mesh_hit.seed_revision` and
+`clay_mesh_brush_desc.seed_revision`, with `clay_mesh_sculptor_seed_revision`,
+`clay_multires_sculptor_seed_revision` and
+`clay_mesh_sculptor_stale_seeds_rejected` beside them; from pyclay it is a
+`seed_revision` key in the dict `raycast` returns, a `seed_revision` keyword on
+`stamp` and `apply_stroke`, and the `seed_revision` / `stale_seeds_rejected`
+properties. Zero, and a Python `None`, mean "I claim no numbering" and leave
+every caller written before the token behaving exactly as it did.
+
+`clay_mesh_brush_desc` growing a field is also what surfaced a latent break in
+the descriptor rule, which is worth recording because it is not the kind a
+review catches: `clay_brush_preset` EMBEDS the brush descriptor, and its
+"original layout" was computed as `offsetof(brush) + sizeof(clay_mesh_brush_desc)`.
+That reads as a constant and is not one — appending to the brush moved the
+PRESET's original size with it, so the next growth of either would have refused
+every correctly-sized preset from the previous header. The constant is now
+frozen at the offset of the first field appended after the preset shipped, and
+`tests/unit/test_c_brush_preset.cpp` spends a preset declared at that size.
+
+### The peaks a host tunes a profile against, from a host
+
+Task 7.7's four high-water marks are readable from both bindings without owning
+anything: `clay_peak_telemetry` filled by `clay_mesh_sculptor_peak_telemetry`,
+`clay_multires_sculptor_peak_telemetry` and
+`clay_dynamic_sculptor_peak_telemetry` (each with a `_reset_` companion), and a
+`peak_telemetry` dict plus `reset_peak_telemetry()` on the same three pyclay
+classes.
+
+The C++ seam BORROWS a pointer the host sets, and neither binding exposes that
+borrow. A pointer that crossed the C boundary would be a lifetime a host can get
+wrong exactly once, mid-stroke, by freeing a block a stamp still writes into;
+the Python equivalent is a telemetry object the interpreter collects while a
+stroke is still running. So each handle owns its block, wires it once at
+creation, and hands out a COPY. Four stores per stamp is the whole cost.
+
+What they report today, stated rather than implied: `workset_vertices` is live
+on all three, `topology_ops` and `dirty_chunks` on the adaptive surface, and
+`scratch_bytes` is 0 from every handle because the stamp path does not consume
+the scratch arena yet — the same gap 3.1 and 3.7 name. Reporting the zero it
+measured is the honest answer; a number nothing filled would not be.
+
+### What a memory warning costs the dab after it
+
+A trim is called from an operating-system callback, which means it lands where
+the host did not schedule it — including between two dabs of a drag. The
+memory-pressure gate says that is CORRECT: the checksum survives it and every
+dropped cache reconstructs. It says nothing about what the next dab pays, and
+that is the number a host needs in order to choose between answering the warning
+now and holding a `memory::MemoryPin` until the stroke ends.
+
+`benchmarks/bench_trim_recovery` times each dab of a 200-dab stroke on a
+hierarchy at three cage sizes, with no trim, with `Pressure::Warning` after every
+dab, and with `Pressure::Critical` after every dab. Two runs, loads 2.5 → 5.3
+and 6.6 → 8.3, reported as the p50 and p95 ratio against the undisturbed stroke
+because the absolutes belong to this machine:
+
+| cage | after Warning (p50 / p95) | after Critical (p50 / p95) |
+|---|---|---|
+| 6^2, 3 levels  | 0.62-0.98x / 0.97-1.01x | 13.5-15.5x / 11.4-14.6x |
+| 12^2, 3 levels | 1.00x / 0.95-1.00x      | 38.5-59.2x / 44.3-67.3x |
+| 24^2, 3 levels | 0.98-1.78x / 1.00-2.04x | 124-182x / 129-200x |
+
+The two columns are a decision, not a spread. `Warning` drops the levels nobody
+is looking at and leaves the sculpt level resident, so the next dab pays nothing
+and a host may answer it mid-drag freely. `Critical` drops everything, so the
+next dab pays a full re-evaluation of every level under the one being sculpted —
+and that cost GROWS with the model while the dab's own cost does not, which is
+precisely the shape this whole change exists to keep out of the stroke. A host
+that must answer a critical warning mid-drag should expect to drop the frame;
+one that can wait should hold a pin and answer it at the stroke boundary.
+
+**The recovery used to be free, and that was the defect.**
+`MultiresSculptor::bind` decides whether the `Mesh&` its `MeshSculptor` holds is
+still live by comparing `MultiresSurface::cache_generation()`, and that counter
+was bumped when a level's cache was BUILT and not when it was released. Between
+a `drop_*_caches` and the next build the number had not moved, so the sculptor
+was kept — bound to a freed `LevelCache`. It did not crash: the stamp wrote its
+displacement into released storage, `absorb_level_edit` rebuilt the level from
+the authoritative detail before reading the displacement back out of it, and the
+dab was simply not there, with `stamp` still returning the weld-class count it
+believed it had moved. With a trim after every dab the symptom was every SECOND
+dab vanishing. Releasing a cache now moves the generation too; the table above
+is what correctness costs, and the `Warning` row is the answer for a host that
+cannot afford it.
+
+### What it costs to dispatch a dab across threads
+
+The stamp path is SERIAL, and this is the measurement that says it should stay
+that way until a footprint is much larger than a dab.
+
+`benchmarks/bench_parallel_grain` runs one per-vertex sculpt pass — a falloff
+weight from a distance, applied along the vertex normal — serially and through
+`parallel::for_range`, at 64 to 131,072 vertices, 201 repetitions a cell, and
+prints the load average either side. Four sweeps at loads from 2.5 to 8.7:
+
+| vertices | serial P50 | parallel P50 | ratio |
+|---|---|---|---|
+| 1,024   | 1.9-2.3 us   | 18.9-20.0 us | 0.10-0.12x |
+| 8,192   | 11.0-11.9 us | 22.3-24.3 us | 0.47-0.49x |
+| 16,384  | 20.2-22.7 us | 24.1-25.6 us | 0.81-0.93x |
+| 32,768  | 39.2-42.7 us | 24.9-27.5 us | 1.45-1.58x |
+| 131,072 | 149-170 us   | 32.5-40.8 us | 4.17-4.66x |
+
+The dispatch costs 17-20 us at ANY size — that flat floor is the whole story.
+Break-even is 32,768 vertices, and it holds at every larger size in every run.
+A typical dab is 1k to 20k vertices, which is entirely below it: dispatching a
+stamp across threads would make it two to ten times SLOWER, and the serial
+stamp path is not a gap in the implementation but the faster arrangement at the
+footprints artists actually use.
+
+`kVertexParallelGrain` (32,768) and `kChunkParallelGrain` (576, the same
+crossover converted through a measured 58.0 vertices per chunk) record it.
+Nothing reads them yet; they are what a future chunk-parallel pass has to clear
+before it is worth writing. Their previous values, 1024 and 4, were guesses, and
+a pass built on them would have been a pessimisation at every footprint this
+document measures.
 ### What the shared brush runtime costs (add-shared-brush-runtime)
 
 Three mesh representations now run ONE brush runtime — one workset, one factor

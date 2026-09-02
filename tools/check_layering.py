@@ -25,6 +25,19 @@ ALLOWED = {
     # legally reach it, not because they resist parallelism. Moving it here is
     # what lets a core module use it AND lets this gate see that it does.
     "parallel": set(),
+    # The memory budget, the ledger, the trim vocabulary and the scratch arena,
+    # below everything and depending on nothing but the standard library. It is
+    # a leaf for the same reason `parallel` is one: `mesh` has to consult a
+    # budget on every stamp — the scratch hard bound, what may be deferred, what
+    # is resident, what an operation is allowed to peak at — and `io` is the TOP
+    # of this table, so a profile living beside `io::MemoryReport` would mean
+    # either a `mesh -> io` edge that makes the table cyclic or a byte count
+    # threaded through every call signature from the host down, which puts
+    # residency policy in the host. `scene` was the other candidate and is worse
+    # in a subtler way: `scene` is what gets SERIALIZED, so a device budget
+    # landing there would drift into the file format and travel with a document
+    # to another machine.
+    "memory": set(),
     "kernel": set(),  # the GPU dialect: no host threading, deliberately
     "math": {"parallel", "kernel"},
     "scene": {"parallel", "kernel", "math", "field"},
@@ -36,7 +49,7 @@ ALLOWED = {
     # depends on scene, and scene depends on field — and creates no cycle,
     # because field depends on nothing above kernel and math.
     "eval": {"parallel", "kernel", "math", "scene", "field"},
-    "brick": {"parallel", "kernel", "math", "scene", "eval"},
+    "brick": {"memory", "parallel", "kernel", "math", "scene", "eval"},
     # voxel -> field is the return trip (#90): a sculpt converting into a
     # sampled field so it can be an operand again. It adds no edge to the
     # transitive graph — voxel already depends on scene, and scene depends on
@@ -45,8 +58,8 @@ ALLOWED = {
     # both see field, but a representation conversion is neither a brush nor a
     # mesher, and putting it there would hide it from the type that owns the
     # cells.
-    "voxel": {"parallel", "kernel", "math", "scene", "mesh", "field"},  # mesh_data.h is a leaf data type
-    "mesh": {"parallel", "kernel", "math", "scene", "eval", "brick", "field"},
+    "voxel": {"memory", "parallel", "kernel", "math", "scene", "mesh", "field"},  # mesh_data.h is a leaf data type
+    "mesh": {"memory", "parallel", "kernel", "math", "scene", "eval", "brick", "field"},
     # brush -> field is mask extrude: the join of a mask (above scene) and a
     # sampled field (below it). It cannot live in field without making
     # field -> voxel -> scene -> field a cycle, and brush already sits above
@@ -91,9 +104,10 @@ ALLOWED = {
     # src/mesh reaches the backend registry exactly as this does. The INJECTION
     # pattern (scene::BakePointEval) exists for the opposite case, a module
     # BELOW eval that must not name it; session is above.
-    "session": {"parallel", "kernel", "math", "scene", "voxel", "mesh", "field", "brush", "eval"},
-    "io": {"parallel", "kernel", "math", "scene", "eval", "brick", "voxel", "mesh", "field",
-           "session"},
+    "session": {"memory", "parallel", "kernel", "math", "scene", "voxel", "mesh", "field",
+                "brush", "eval"},
+    "io": {"memory", "parallel", "kernel", "math", "scene", "eval", "brick", "voxel", "mesh",
+           "field", "session"},
 }
 CORE_MODULES = set(ALLOWED)
 INCLUDE_RE = re.compile(r'#\s*include\s*[<"]clay/(\w+)/')
