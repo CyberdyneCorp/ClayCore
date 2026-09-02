@@ -588,6 +588,84 @@ void BM_DeepDocCullPlanned2000K06(benchmark::State& state) {
 }
 BENCHMARK(BM_DeepDocCullPlanned2000K06)->Unit(benchmark::kMillisecond);
 
+// THE CULL PLAN ALONE, ON A DOCUMENT THAT GROWS IN EXTENT.
+//
+// Every SDF fixture above -- sculpted_sphere, pole_dense_sphere, deep_sphere,
+// spread_sculpt -- is a UNIT SPHERE with a growing node COUNT. A dab's cull
+// region therefore keeps covering the same FRACTION of the model at every
+// size, and the survivor count grows with the document: measured at a flat
+// 28.3% of the items at 2 000, 10 000 and 50 000 alike. On such a document
+// `plan` is ~3% of a dab's cull and the per-brick compiles over its survivors
+// are the other 97%, so a broad phase that answered instantly would win 3%.
+//
+// That is not a property of the engine, it is a property of the fixture, and it
+// is how `add-item-spatial-index` came to be measured as a 590x faster query
+// inside a 2.4x slower operation (ROADMAP P1). A sculpt does not get denser
+// forever at a fixed size; it gets BIGGER. This fixture is the other axis --
+// dabs at a fixed spacing over a growing sheet, so a fixed region keeps a flat
+// number of survivors (36 here at every size) and `plan` is what grows.
+//
+// Timed ALONE, with the index built outside the loop, because that is how a
+// stroke pays it: the C ABI keeps one index per revision and extends it with
+// `CullIndex::append`, so a stamp pays one append and one plan, not a build.
+// The same reason `check_bench.py` gates this on a ratio -- what a broad phase
+// changes is the SLOPE, and an absolute ceiling on a 0.02 ms row is noise.
+namespace {
+
+scene::Document spread_grid(int nodes) {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("sculpt");
+    const int side = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(nodes))));
+    int made = 0;
+    for (int i = 0; i < side && made < nodes; ++i)
+        for (int j = 0; j < side && made < nodes; ++j, ++made) {
+            scene::Node dab;
+            dab.prim = scene::Prim::sphere(0.05f);
+            dab.xform.position = cf3(static_cast<float>(i) * 0.15f, 0.0f,
+                                     static_cast<float>(j) * 0.15f);
+            dab.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.03f};
+            l.sdf->insert(dab);
+        }
+    return doc;
+}
+
+void cull_plan_local(benchmark::State& state, int nodes) {
+    scene::Document doc = spread_grid(nodes);
+    brick::BrickCache cache(brick::BrickConfig{8, 0.05f, 3, 0});
+    // A dab's worth of bricks at the sheet's corner, which is where the grid
+    // starts however far it runs -- so the region is the same box at every size
+    // and the survivor count is the thing held flat.
+    math::Aabb batch;
+    for (int i = 0; i < 2; ++i)
+        for (int j = 0; j < 2; ++j)
+            for (int k = 0; k < 2; ++k) {
+                math::Aabb brick;
+                brick.expand(cf3(0.4f * i, 0.4f * j, 0.4f * k));
+                brick.expand(cf3(0.4f * (i + 1), 0.4f * (j + 1), 0.4f * (k + 1)));
+                batch.expand(brick.dilated(cache.config().band()));
+            }
+    const scene::CullIndex index(doc);
+    for (auto _ : state) {
+        const scene::CullPlan plan = index.plan(batch);
+        benchmark::DoNotOptimize(&plan);
+    }
+    const scene::CullPlan plan = index.plan(batch);
+    const scene::Layer& layer = doc.layers[0];
+    const std::vector<scene::CullIndex::Entry>* kept = plan.chain(layer, layer.sdf->roots);
+    // The deterministic half, and the premise the whole row rests on: this must
+    // NOT grow with `nodes`. If it ever does, the fixture stopped being local
+    // and the ratio gate below is measuring something else.
+    state.counters["survivors"] = static_cast<double>(kept ? kept->size() : 0);
+    state.counters["nodes"] = static_cast<double>(nodes);
+}
+
+}  // namespace
+
+void BM_CullPlanLocal10000(benchmark::State& state) { cull_plan_local(state, 10000); }
+BENCHMARK(BM_CullPlanLocal10000)->Unit(benchmark::kMillisecond);
+void BM_CullPlanLocal50000(benchmark::State& state) { cull_plan_local(state, 50000); }
+BENCHMARK(BM_CullPlanLocal50000)->Unit(benchmark::kMillisecond);
+
 void BM_DeepDocCull193(benchmark::State& state) { deep_doc_cull(state, 193); }
 BENCHMARK(BM_DeepDocCull193)->Unit(benchmark::kMillisecond);
 void BM_DeepDocCull2000(benchmark::State& state) { deep_doc_cull(state, 2000); }
