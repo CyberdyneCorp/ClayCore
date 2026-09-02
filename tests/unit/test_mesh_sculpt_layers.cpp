@@ -571,34 +571,7 @@ TEST_CASE("compacting is a memory lever, not a change to the picture") {
     const std::vector<cfloat3> before = surface.positions_at(level);
     const std::size_t bytes_before = surface.memory().sculpt_layers;
 
-    {
-        const mesh::SculptLayer* la = surface.sculpt_layers().find(a);
-        const mesh::SculptLayer* lb = surface.sculpt_layers().find(b);
-        MESSAGE("PRE a.detail dense=" << la->detail[level].dense()
-                << " blocks=" << la->detail[level].stored_block_count()
-                << " bytes=" << la->detail[level].bytes()
-                << " | a.mask blocks=" << la->mask[level].stored_block_count()
-                << " bytes=" << la->mask[level].bytes()
-                << " | b.detail dense=" << lb->detail[level].dense()
-                << " blocks=" << lb->detail[level].stored_block_count()
-                << " bytes=" << lb->detail[level].bytes());
-    }
     surface.compact_sculpt_layers();
-    {
-        const mesh::SculptLayer* la = surface.sculpt_layers().find(a);
-        const mesh::SculptLayer* lb = surface.sculpt_layers().find(b);
-        MESSAGE("POST a.detail dense=" << la->detail[level].dense()
-                << " blocks=" << la->detail[level].stored_block_count()
-                << " bytes=" << la->detail[level].bytes()
-                << " | a.mask blocks=" << la->mask[level].stored_block_count()
-                << " bytes=" << la->mask[level].bytes()
-                << " | b.detail dense=" << lb->detail[level].dense()
-                << " blocks=" << lb->detail[level].stored_block_count()
-                << " bytes=" << lb->detail[level].bytes());
-    }
-    MESSAGE("bytes_before=" << bytes_before
-            << " after=" << surface.memory().sculpt_layers
-            << " vertices=" << vertices);
     CHECK(surface.memory().sculpt_layers < bytes_before);
     CHECK(bit_equal(before, surface.positions_at(level)));
 

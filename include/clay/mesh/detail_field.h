@@ -188,8 +188,6 @@ class DetailField {
     // that vertex.
     std::size_t reserve_slot(std::uint32_t vertex);
     void promote_to_dense();
-
-    std::uint32_t vertex_count_ = 0;
     // THE POSTCONDITION `compact()` EXISTS FOR. `bytes()` reports CAPACITY,
     // not size, because capacity is what the allocator is actually holding —
     // so a compaction that packs the content but leaves capacity where it was
@@ -205,6 +203,7 @@ class DetailField {
     // written on.
     void shrink_to_content();
 
+    std::uint32_t vertex_count_ = 0;
     bool dense_ = false;
     // block -> slot in `storage_`, kNoBlock when the block has never been
     // written. Empty when dense.
