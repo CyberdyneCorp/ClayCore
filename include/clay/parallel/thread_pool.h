@@ -77,13 +77,22 @@ class ThreadPool {
     // fn(begin, end) is called on worker threads over disjoint ranges.
     //
     // The class-less overload is the one every existing call site uses and it
-    // keeps compiling unchanged. It means UserInitiated, which is the honest
-    // reading of the work that was already here: a caller was waiting on all
-    // of it. Nothing silently becomes Interactive by being ported, and nothing
-    // silently drops to Background.
+    // keeps compiling unchanged. It takes the class THIS THREAD IS ALREADY
+    // RUNNING AS, which is UserInitiated until something says otherwise — so an
+    // unclassified dispatch on an unclassified thread behaves exactly as it did
+    // before, and no call site silently became Interactive or Background.
+    //
+    // TAKING IT FROM THE THREAD RATHER THAN HARDCODING IT IS THE WHOLE POINT.
+    // Almost every dispatch in this library is in a LEAF: `eval_points` in the
+    // CPU backend, a marching wave, a volume bake. Those are reached from an
+    // interactive dab and from a background rebuild alike, and annotating them
+    // would have to pick one and be wrong for the other caller — which, since
+    // the leaves are the hot paths, means marking everything Interactive and
+    // arriving back where this started. The operation at the top knows what it
+    // is for; the leaf underneath it does not and should not have to.
     void parallel_for(std::size_t n, std::size_t min_chunk,
                       const std::function<void(std::size_t, std::size_t)>& fn) {
-        parallel_for(n, min_chunk, fn, WorkClass::UserInitiated);
+        parallel_for(n, min_chunk, fn, current_work_class());
     }
 
     void parallel_for(std::size_t n, std::size_t min_chunk,

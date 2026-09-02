@@ -89,7 +89,21 @@ does not get slower.
       ignores its own argument (D4)
 - [x] Q23 Host threading contract documented, including the half the library
       cannot do — QoS propagates from the calling thread
-- [ ] Q10-Q14 Classify call sites. Deferred on purpose: a mechanical edit across
-      many files on top of a design change makes the review of neither possible
+- [x] Q10 Audit every `parallel::for_range` call site — 21 of them, and the
+      audit is what changed the answer. Nineteen are LEAVES (CPU backend
+      `eval_points`, marching waves, volume bake, brick refill, voxel grid
+      planes) reached from interactive and background callers alike, so a class
+      written at any of them is wrong for one of its callers; the two in
+      `clay_c.cpp` that are not leaves are host-facing queries that serve a
+      live preview and an offline bake through the same entry point
+- [x] Q11-Q14 Classify by PROPAGATION rather than by annotation. An
+      unclassified dispatch takes the class the thread is already running as,
+      so an operation declares once at the top and every leaf beneath it
+      inherits. Annotating the leaves would have marked the hot paths
+      Interactive, which is the failure the classes exist to prevent
+- [ ] Q11b Declare a class inside the sculpt entry points themselves, once
+      there is an entry point whose intent is intrinsic rather than the
+      caller's. The dab-level C ABI commits do not currently reach a pool
+      dispatch, so a scope there would be decorative today
 - [ ] Q16-Q20, Q24 Device gates. Left unfrozen rather than set from container
       numbers

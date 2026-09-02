@@ -179,10 +179,21 @@ an absent file. `Interactive` maps to `QOS_CLASS_USER_INITIATED` and not to
 `USER_INTERACTIVE`, which Apple reserves for a main thread's event handling; a
 pool of workers claiming it would compete with the UI thread it exists to feed.
 
-A call site that says nothing means `UserInitiated`, so nothing changed meaning
-by being ported. A nested dispatch inherits the class of the job it is already
-inside rather than its own argument: it runs inline on that thread, and
-re-scheduling it would re-schedule the outer work with it.
+A call site that says nothing runs as whatever the thread is already running
+as, which is `UserInitiated` until something says otherwise — so nothing
+changed meaning by being ported. A nested dispatch inherits the class of the
+job it is already inside rather than its own argument: it runs inline on that
+thread, and re-scheduling it would re-schedule the outer work with it.
+
+**THE CLASS TRAVELS DOWN, IT IS NOT WRITTEN AT THE BOTTOM.** Almost every
+dispatch in the library is in a leaf — `eval_points` in the CPU backend, a
+marching wave, a volume bake, a brick refill — and every one of those is
+reached from an interactive dab and from a background rebuild alike. A class
+written at the leaf would have to pick one caller and be wrong for the other,
+and since the leaves are the hot paths, picking "interactive" marks the whole
+library interactive, which is the same as having no classes at all. The
+operation at the top declares; everything beneath inherits and needs to know
+nothing about it.
 
 **THE HOST OWNS THE OTHER HALF, and the library cannot do it for you.** A QoS
 class propagates from the thread that makes a call, so a dab issued from a
@@ -198,7 +209,16 @@ DispatchQueue.global(qos: .userInitiated).async {
 ```
 
 Long or deferrable work — a mesh export, cache maintenance, a rebuild between
-strokes — belongs on `.utility` for the same reason. Per-operation QoS is
+strokes — belongs on `.utility` for the same reason.
+
+This is not a workaround for the library being unclassified; it is where the
+decision genuinely lives for the host-facing queries.
+`clay_brick_cache_eval_requests` refills bricks for a live preview AND for an
+offline bake, and `clay_brick_cache_raycast_many` answers a pointer AND a batch
+of rays with nobody waiting. Nothing inside those functions can tell which, so
+they do NOT declare a class: they inherit the thread the host called them on,
+which is the host saying what this particular call is for. Calling them from a
+`.utility` queue makes them utility work all the way down to the last chunk. Per-operation QoS is
 deliberately NOT exposed through the C ABI: an operation knows what it is for
 better than its caller does, and a knob there invites a host to mark everything
 interactive.

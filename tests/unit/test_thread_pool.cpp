@@ -296,3 +296,63 @@ TEST_CASE("classifying a dispatch does not change what it computes") {
         CHECK(tally.each_exactly_once());
     }
 }
+
+// -- propagation into leaves --------------------------------------------------
+//
+// WHY THERE IS NO ANNOTATION ON THE LEAVES. Almost every dispatch in this
+// library is in one: `eval_points` in the CPU backend, a marching wave, a
+// volume bake, a brick refill. Each is reached from an interactive dab AND
+// from a background rebuild, so a class written at the leaf has to pick one
+// caller and be wrong for the other — and because the leaves are the hot
+// paths, picking "interactive" marks the whole library interactive, which is
+// the failure the classes exist to prevent.
+//
+// The class therefore travels DOWN from the operation that knows what it is
+// for. These pin that it actually arrives, including through code that has
+// never heard of a work class.
+
+namespace {
+
+// Stands in for a leaf: a dispatching helper compiled with no knowledge of
+// work classes, exactly like the backends and meshers that call for_range.
+WorkClass leaf_dispatch_observes() {
+    std::atomic<int> bodies{0};
+    WorkClass seen = WorkClass::UserInitiated;
+    std::mutex m;
+    clay::parallel::for_range(1 << 16, 1, [&](std::size_t, std::size_t) {
+        const WorkClass c = clay::parallel::current_work_class();
+        ++bodies;
+        std::lock_guard<std::mutex> lock(m);
+        seen = c;
+    });
+    CHECK(bodies.load() > 0);
+    return seen;
+}
+
+}  // namespace
+
+TEST_CASE("an unannotated leaf dispatch runs as whatever the caller declared") {
+    for (WorkClass cls : {WorkClass::Interactive, WorkClass::Utility,
+                          WorkClass::Background}) {
+        CAPTURE(static_cast<int>(cls));
+        clay::parallel::WorkClassScope scope(cls);
+        CHECK(leaf_dispatch_observes() == cls);
+    }
+}
+
+TEST_CASE("a leaf dispatch with nothing declared is still UserInitiated") {
+    // The migration guarantee, restated at the other end: making the class
+    // ambient must not change what an unclassified program does.
+    CHECK(leaf_dispatch_observes() == WorkClass::UserInitiated);
+}
+
+TEST_CASE("one operation's declaration does not leak into the next") {
+    // The scope is what bounds it. An operation that declared Background and
+    // returned must leave the thread as it found it, or every later operation
+    // on that thread inherits Background and nothing looks wrong.
+    {
+        clay::parallel::WorkClassScope scope(WorkClass::Background);
+        CHECK(leaf_dispatch_observes() == WorkClass::Background);
+    }
+    CHECK(leaf_dispatch_observes() == WorkClass::UserInitiated);
+}
