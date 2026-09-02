@@ -133,6 +133,15 @@ void restore_kind(Pool& pool, const Vec& list, bool to_before) {
         // handle taken at that end stops resolving exactly when it should.
         pool.retire(to_before ? e.before_id : e.after_id);
     }
+
+    // THE FREE LIST IS NOT AN INVARIANT EITHER OF THE TWO PASSES KEEPS.
+    // `restore` revives a slot in place and leaves it linked; `retire` pushes
+    // unconditionally. After a replay the list therefore names live slots and
+    // can cycle, and `create` walks it — so the damage does not show as a
+    // broken surface, it shows as the NEXT allocation never returning.
+    // Measured before this call: after one revert-and-reapply of a two-dab
+    // gesture, the vertex list cycled and held 201 live slots against 16 dead.
+    pool.rebuild_free_list();
 }
 
 }  // namespace

@@ -150,6 +150,28 @@ class SlotPool {
 
     bool live_at(std::uint32_t slot) const { return slot < slots_.size() && slots_[slot].live; }
 
+    // DIAGNOSTIC: walk the free list and report what it actually contains.
+    // Returns false if it cycles or if it does not name exactly the dead slots.
+    bool free_list_intact(std::size_t* out_visited = nullptr, bool* out_cycle = nullptr,
+                          std::size_t* out_live_on_list = nullptr) const {
+        std::vector<char> seen(slots_.size(), 0);
+        std::size_t visited = 0, live_on_list = 0;
+        bool cycle = false;
+        std::uint32_t h = free_head_;
+        while (h != Id::kInvalid) {
+            if (h >= slots_.size()) { cycle = true; break; }
+            if (seen[h]) { cycle = true; break; }
+            seen[h] = 1;
+            ++visited;
+            if (slots_[h].live) ++live_on_list;
+            h = slots_[h].next_free;
+        }
+        if (out_visited) *out_visited = visited;
+        if (out_cycle) *out_cycle = cycle;
+        if (out_live_on_list) *out_live_on_list = live_on_list;
+        return !cycle && live_on_list == 0 && visited == dead_;
+    }
+
     std::size_t capacity_slots() const { return slots_.size(); }
     std::size_t size() const { return slots_.size() - dead_; }
     bool empty() const { return size() == 0; }
@@ -220,6 +242,36 @@ class SlotPool {
         free_head_ = id.slot;
         ++dead_;
         return true;
+    }
+
+    // REBUILD THE FREE LIST FROM THE SLOTS THEMSELVES.
+    //
+    // `restore` revives a slot in place and CANNOT unlink it from the free
+    // list: the list is singly linked, so finding the predecessor is a walk,
+    // and an undo touching thousands of slots would be quadratic. `retire`
+    // pushes unconditionally for the same reason. Across one revert or apply
+    // the two therefore leave a list that names live slots, names some of them
+    // twice, and — once a slot pushed a second time still carries its old link
+    // — CYCLES.
+    //
+    // `create` walks that list to skip revived slots, so a cycle there is an
+    // infinite loop inside the next allocation: the surface is intact, every
+    // handle resolves, and the next dab never returns.
+    //
+    // Relinking once at the end of a replay is O(slots) against a replay that
+    // is already O(slots), and it restores the invariant exactly: the list
+    // names every dead slot, once, and nothing else. Ascending order, so the
+    // lowest dead slot is handed out first and reuse does not depend on the
+    // order the undo happened to touch things.
+    void rebuild_free_list() {
+        free_head_ = Id::kInvalid;
+        dead_ = 0;
+        for (std::size_t i = slots_.size(); i-- > 0;) {
+            if (slots_[i].live) continue;
+            slots_[i].next_free = free_head_;
+            free_head_ = static_cast<std::uint32_t>(i);
+            ++dead_;
+        }
     }
 
     // Make room for a slot index a decoder or an undo record names, without

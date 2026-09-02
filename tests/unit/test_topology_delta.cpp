@@ -311,3 +311,109 @@ TEST_CASE("topology delta: bytes round-trip and a hostile record is refused") {
     newer[4] = 99;
     CHECK_FALSE(TopologyDelta::decode(newer.data(), newer.size(), &rejected));
 }
+
+// -- the pool's own invariant, which the surface's does not cover -------------
+//
+// THE SURFACE CAN BE PERFECT AND THE POOL BROKEN. Reverting and re-applying a
+// gesture restored, on the run that found this: every slot, every generation,
+// every liveness flag, every half-edge link, every position, colour, mask and
+// UV -- and left every free list CYCLIC and holding hundreds of live slots.
+// `validate_dynamic_surface` passed on both sides, because it walks the
+// connectivity and the connectivity was right.
+//
+// It surfaced as the NEXT DAB NEVER RETURNING. `SlotPool::create` walks the
+// free list to skip slots an undo revived, so a cycle there is an infinite
+// loop inside the following allocation rather than a wrong answer anywhere.
+//
+// These assert the invariant DIRECTLY and with REQUIRE, so a regression fails
+// in milliseconds instead of hanging a CI job until it is killed.
+
+namespace {
+
+// Every free list of a surface names exactly its dead slots, once each.
+void check_free_lists(const DynamicSurface& s, const char* when) {
+    std::size_t visited = 0, live_on_list = 0;
+    bool cycle = false;
+    CAPTURE(when);
+    REQUIRE(s.vertices().free_list_intact(&visited, &cycle, &live_on_list));
+    REQUIRE(s.halfedges().free_list_intact(&visited, &cycle, &live_on_list));
+    REQUIRE(s.edges().free_list_intact(&visited, &cycle, &live_on_list));
+    REQUIRE(s.faces().free_list_intact(&visited, &cycle, &live_on_list));
+}
+
+}  // namespace
+
+TEST_CASE("topology delta: a replay leaves every free list intact") {
+    auto surface = DynamicSurface::from_mesh(cube_sphere(4, 1.0f));
+    REQUIRE(surface.has_value());
+    check_free_lists(*surface, "before the gesture");
+
+    // A gesture that creates AND destroys slots, which is what makes the two
+    // directions of the replay touch the same slots from both ends.
+    TopologyDelta delta;
+    std::size_t splits = 0, collapses = 0;
+    for (EdgeId e : live_edges(*surface)) {
+        if (splits >= 12) break;
+        if (mesh::split_edge(*surface, e, 0.5f, {}, &delta).result == TopologyResult::Ok)
+            ++splits;
+    }
+    for (EdgeId e : live_edges(*surface)) {
+        if (collapses >= 8) break;
+        if (!surface->live(e)) continue;
+        if (mesh::collapse_edge(*surface, e, {}, &delta).result == TopologyResult::Ok)
+            ++collapses;
+    }
+    REQUIRE(splits > 4);
+    REQUIRE(collapses > 2);
+    check_free_lists(*surface, "after the gesture");
+
+    REQUIRE(delta.revert(*surface));
+    check_free_lists(*surface, "after revert");
+    REQUIRE(mesh::validate_dynamic_surface(*surface).ok);
+
+    REQUIRE(delta.apply(*surface));
+    check_free_lists(*surface, "after apply");
+    REQUIRE(mesh::validate_dynamic_surface(*surface).ok);
+
+    // And again, because the replay is idempotent and a fix that only holds
+    // for one round is not a fix.
+    REQUIRE(delta.revert(*surface));
+    check_free_lists(*surface, "after second revert");
+    REQUIRE(delta.apply(*surface));
+    check_free_lists(*surface, "after second apply");
+}
+
+TEST_CASE("topology delta: a surface still allocates after a replay") {
+    // THE END-TO-END SHAPE, and the one a user hits: undo, redo, keep
+    // sculpting. Every allocation below went through the corrupted free list
+    // before the fix, and the first one did not return.
+    auto surface = DynamicSurface::from_mesh(cube_sphere(4, 1.0f));
+    REQUIRE(surface.has_value());
+
+    TopologyDelta delta;
+    std::size_t splits = 0;
+    for (EdgeId e : live_edges(*surface)) {
+        if (splits >= 16) break;
+        if (mesh::split_edge(*surface, e, 0.5f, {}, &delta).result == TopologyResult::Ok)
+            ++splits;
+    }
+    REQUIRE(splits > 8);
+
+    REQUIRE(delta.revert(*surface));
+    REQUIRE(delta.apply(*surface));
+    // The invariant first, so a regression trips here rather than spinning in
+    // the loop below.
+    check_free_lists(*surface, "after replay");
+
+    // Now allocate. Splitting takes a vertex, two half-edges, an edge and two
+    // faces per operation, so this exercises every pool's free list.
+    std::size_t after = 0;
+    for (EdgeId e : live_edges(*surface)) {
+        if (after >= 24) break;
+        if (!surface->live(e)) continue;
+        if (mesh::split_edge(*surface, e, 0.5f).result == TopologyResult::Ok) ++after;
+    }
+    CHECK(after >= 24);
+    CHECK(mesh::validate_dynamic_surface(*surface).ok);
+    check_free_lists(*surface, "after allocating again");
+}
