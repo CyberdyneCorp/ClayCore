@@ -807,7 +807,6 @@ struct Compiler {
         const bool chain_on_tail = on_tail_path_;
         for (std::size_t at = 0; at < member_count; ++at) {
             const CullIndex::Entry* e = pruned ? &(*pruned)[at] : nullptr;
-            const Node* n = e ? e->node : content.find(ids[at]);
             // The tail path is the LAST member of a chain that is itself on it.
             // A checkpoint may only be taken where an append would land, and an
             // append lands at a tail: anywhere else, the prefix would have to be
@@ -817,11 +816,53 @@ struct Compiler {
             // last surviving member of a culled chain is not the last member of
             // the chain, and a checkpoint that thought it was would be a prefix
             // the next compile does not reproduce.
+            //
+            // Reads the ENTRY's id rather than the node's -- the same value,
+            // and it is the last thing here that needed the node before the
+            // cull test has run. `e` is dereferenced only under `pruned`, which
+            // the first disjunct short-circuits on.
             on_tail_path_ = chain_on_tail && at + 1 == member_count &&
-                            (!pruned || ids.empty() || ids.back() == n->id);
+                            (!pruned || ids.empty() || ids.back() == e->id);
+            // REJECT BEFORE DEREFERENCING THE NODE.
+            //
+            // A plan is ONE coarse cull over a batch's union region, and every
+            // brick then re-tests its survivors against its own smaller region:
+            // 24 bricks over 21,633 survivors on a 50,000-item document, about
+            // 12,000 of them dropped per brick. Rejecting one used to reach
+            // `Entry::node` -- a pointer into the layer's hash map, walked in
+            // chain order, so a cache miss -- for `visible`, and then
+            // `item_influence_is_local` on the node it landed on.
+            //
+            // The entry already holds both answers. `local` IS
+            // `item_influence_is_local` for that node, cached when the chain was
+            // built, and `bound` is the same bound; a planned entry is visible
+            // by construction, since `build_chain` skips the ones that are not.
+            // So the survive test reads two fields already in cache and the
+            // node is reached only by a member this brick keeps. 15.0 -> 13.3 ms
+            // for that dab, and the wasted-test share of it 21.7% -> 12.1%.
+            //
+            // The test is the compiler's own, inverted, and covers both branches
+            // below: an item survives unless it is local, finite and misses the
+            // region, and a group -- whose entry is always local, its bound
+            // infinite when its subtree is not -- reduces to the same thing.
+            //
+            // `pruned` implies `cull`: both entry points drop the plan when
+            // there is no cull region (`c.plan = cull && index ? plan :
+            // nullptr`), because a plan without one could only mean a pruned
+            // whole-document tape. That is what lets this read `cull_test`,
+            // which `begin_cull` sets only where there is a region to set it
+            // from -- and it is pinned by a test rather than assumed, because
+            // it is an invariant of a DIFFERENT function than this one.
+            if (pruned && !(!e->local || e->bound.is_infinite() ||
+                            e->bound.intersects(cull_test))) {
+                cull_dropped = true;
+                continue;
+            }
+            const Node* n = e ? e->node : content.find(ids[at]);
             if (!n || !n->visible) continue;
             if (n->is_group) {
-                if (culled(e ? e->bound : node_influence_bound(content, n->id, layer))) {
+                if ((!pruned || !cull) &&
+                    culled(e ? e->bound : node_influence_bound(content, n->id, layer))) {
                     cull_dropped = true;
                     continue;
                 }
@@ -840,7 +881,7 @@ struct Compiler {
                 // A non-local item has an infinite influence bound and so can
                 // never be culled; item_influence_is_local is the single
                 // definition of that test, shared with item_influence_bound.
-                if (cull && item_influence_is_local(*n) && culled(geometry)) {
+                if (!pruned && cull && item_influence_is_local(*n) && culled(geometry)) {
                     cull_dropped = true;
                     continue;
                 }

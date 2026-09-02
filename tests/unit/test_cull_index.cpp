@@ -446,6 +446,30 @@ TEST_CASE("cull index: an entry that can never be culled always survives") {
     CHECK((*got)[1].id == near);
 }
 
+TEST_CASE("cull index: a plan handed in without a cull region is dropped") {
+    // An invariant of `compile_document`, pinned here because the per-brick
+    // compile now DEPENDS on it. That compile rejects a plan survivor by
+    // reading the entry -- `local` and `bound`, both cached when the chain was
+    // built -- against `cull_test`, and `begin_cull` sets `cull_test` only
+    // where there is a region to set it from. Reading it with no region would
+    // test against the empty box, which every entry misses, and the tape would
+    // come back empty.
+    //
+    // What makes that unreachable is one line in a DIFFERENT function: both
+    // entry points drop the plan when the cull region is null, on the reasoning
+    // that a plan without one could only mean a pruned whole-document tape. So
+    // the pairing resolves to an ordinary uncalled compile, and this says so --
+    // if that line ever goes, the per-brick reject needs its own guard back.
+    const Document doc = gnarly_document();
+    const Tape full = compile_document(doc);
+    const CullIndex index(doc);
+    // Deliberately a plan over a SMALL region, so it prunes hard: were it not
+    // dropped, the compile would emit its handful of survivors instead of the
+    // whole document and the tapes would differ by more than a rounding.
+    const CullPlan narrow = index.plan(math::Aabb{cf3(50, 50, 50), cf3(51, 51, 51)});
+    require_same_tape(compile_document(doc, nullptr, &index, &narrow), full);
+}
+
 TEST_CASE("cull index: a degenerate region takes the predicate, not the packed scan") {
     // The scan folds `!local || bound.is_infinite()` into one box per entry and
     // then tests it with six bare comparisons -- `Aabb::intersects` without its
