@@ -1225,13 +1225,42 @@ do {
     check(report.detail_revision > 1, "a fine stamp is detail, not cage geometry")
 
     // The hierarchy's arena is the BOUND LEVEL SCULPTOR's — a stamp runs the
-    // fixed sculptor over the active level's own mesh — so it has bytes only
-    // because the stamp above bound one.
+    // fixed sculptor over the active level's own mesh — so it reads through to
+    // whichever level is bound now.
+    //
+    // A STAMP THAT NEEDS NO SCRATCH REPORTS ZERO, AND THAT IS THE ARENA
+    // WORKING. Only two automask factors allocate from it, `boundary` and
+    // `topology_connected`, whose ring walks need a frontier and a depth array;
+    // falloff, taper, gate, alpha, normal-angle and cavity all compose in
+    // place. So the draw above — brush defaults, no automask — is entitled to
+    // leave the arena untouched, and asserting bytes after it asserted an
+    // implementation detail no header promises. That is what failed this suite
+    // on the v0.78.0 tag while every other check passed.
     var arena = clay_brush_arena_stats()
     arena.struct_size = UInt32(MemoryLayout<clay_brush_arena_stats>.size)
     check(clay_multires_sculptor_arena_stats(sculptor, &arena) == CLAY_OK,
           "read what the hierarchy's scratch arena costs")
+    check(arena.high_water_bytes <= arena.capacity_bytes,
+          "an arena never reports having used more than it holds")
+
+    // Now make a stamp that DOES take scratch, and prove the reader followed
+    // the bound level sculptor rather than answering zero for a null one —
+    // which is the difference this check exists to catch, and the one a plain
+    // draw cannot see.
+    var masked = brush
+    masked.automask_factors = CLAY_AUTOMASK_BOUNDARY.rawValue
+    masked.automask_boundary_rings = 2
+    var maskedReport = clay_multires_stamp_report()
+    maskedReport.struct_size = UInt32(MemoryLayout<clay_multires_stamp_report>.size)
+    check(clay_multires_sculptor_stamp(sculptor, &masked, nil, &maskedReport) == CLAY_OK,
+          "stamped again with an automask that needs a ring walk")
+    arena.struct_size = UInt32(MemoryLayout<clay_brush_arena_stats>.size)
+    check(clay_multires_sculptor_arena_stats(sculptor, &arena) == CLAY_OK,
+          "read the arena after a stamp that allocates")
     check(arena.capacity_bytes > 0, "the bound level sculptor's arena is the one reported")
+    check(arena.high_water_bytes > 0, "and it says what the widest stamp actually took")
+    check(arena.high_water_bytes <= arena.capacity_bytes,
+          "the high-water mark still fits inside what the arena holds")
 
     // The changed-block transport: a host copies the blocks the dab reached
     // rather than the display level.
