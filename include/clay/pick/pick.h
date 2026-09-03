@@ -167,11 +167,30 @@ SceneHit raycast_scene(const scene::Document& doc, const scene::Tape& tape,
                        const scene::CullIndex* index, const math::Ray& ray,
                        const RaycastOptions& options = {});
 
-// Raycast against a filled brick cache (trilinear narrow-band samples, brick
-// DDA across non-surface bricks). Position/normal only — pass the document
-// to attribute() for ids.
+// Raycast against a filled brick cache. Position/normal only — pass the
+// document to attribute() for ids.
+//
+// The cache's field is the trilinear reconstruction of its lattice, and the
+// walk is analytic on it: a brick DDA that skips uniform (Inside, Outside,
+// never-evaluated) bricks whole, a cell DDA under the Surface bricks, and in
+// each cell the first root of the cubic the trilinear field is along the ray
+// (Hansson Söderlund, Evans and Akenine-Möller, JCGT 2022). The hit is where
+// the field falls below `eps` scaled by the distance — the same crossing the
+// sphere trace it replaced stopped at — and the normal is the field's own
+// gradient in the cell that was hit. `max_steps` is not consulted: the walk
+// is bounded by the surface bricks' box, not by a step budget.
 SceneHit raycast_bricks(const brick::BrickCache& cache, const math::Ray& ray,
                         const RaycastOptions& options = {});
+
+namespace detail {
+// The sphere trace raycast_bricks used to be, kept as the REFERENCE the
+// analytic walk is tested against: it samples the same reconstruction at
+// `max_steps` points along the ray and stops at the same eps, so the two must
+// agree on every hit, every miss, and every t to well within a voxel. Not
+// part of the C ABI, and not to be called by anything but that test.
+SceneHit raycast_bricks_sphere_traced(const brick::BrickCache& cache, const math::Ray& ray,
+                                      const RaycastOptions& options = {});
+}  // namespace detail
 
 // Attribute a world position to the nearest (layer, item) of the document.
 //

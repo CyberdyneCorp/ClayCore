@@ -1,5 +1,6 @@
 #include "clay/pick/pick.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "clay/kernel/field.h"
@@ -433,25 +434,35 @@ float brick_field(const brick::BrickCache& cache, cfloat3 p) {
     return kernel::cmix(kernel::cmix(c00, c10, fy), kernel::cmix(c01, c11, fy), fz);
 }
 
-}  // namespace
-
-SceneHit raycast_bricks(const brick::BrickCache& cache, const math::Ray& ray,
-                        const RaycastOptions& options) {
-    SceneHit hit;
-    const float band = cache.config().band();
-    const float brick_span =
-        static_cast<float>(cache.config().dim) * cache.config().voxel_size;
-
+// The domain a brick ray can hit at all: the surface bricks' box dilated by the
+// band, clipped to the options' range. False when the ray misses it.
+bool brick_ray_range(const brick::BrickCache& cache, const math::Ray& ray,
+                     const RaycastOptions& options, float* t, float* tmax) {
     // Overall bounds of the surface bricks — the cache keeps this current, so
     // a ray no longer enumerates every surface key before its first step.
     // Picking runs once per Pencil event, and on a whole-model cache that
     // walk cost more than the march it preceded.
     const math::Aabb domain = cache.surface_bounds();
-    if (domain.empty()) return hit;
+    if (domain.empty()) return false;
     float t0, t1;
-    if (!math::ray_aabb(ray, domain.dilated(band), &t0, &t1)) return hit;
-    float t = kernel::cmax(options.tmin, t0);
-    float tmax = kernel::cmin(options.tmax, t1);
+    if (!math::ray_aabb(ray, domain.dilated(cache.config().band()), &t0, &t1)) return false;
+    *t = kernel::cmax(options.tmin, t0);
+    *tmax = kernel::cmin(options.tmax, t1);
+    return true;
+}
+
+}  // namespace
+
+namespace detail {
+
+SceneHit raycast_bricks_sphere_traced(const brick::BrickCache& cache, const math::Ray& ray,
+                                      const RaycastOptions& options) {
+    SceneHit hit;
+    const float band = cache.config().band();
+    const float brick_span =
+        static_cast<float>(cache.config().dim) * cache.config().voxel_size;
+    float t, tmax;
+    if (!brick_ray_range(cache, ray, options, &t, &tmax)) return hit;
 
     float prev_d = 3.4e38f;
     float prev_t = t;
@@ -481,6 +492,522 @@ SceneHit raycast_bricks(const brick::BrickCache& cache, const math::Ray& ray,
         // clamped field caps steps at the band; jump a brick when saturated
         t += (d >= band * 0.999f) ? kernel::cmax(band, brick_span * 0.5f) : d;
     }
+    return hit;
+}
+
+}  // namespace detail
+
+// The analytic walk. The cache's field is a trilinear reconstruction of the
+// lattice, so inside one cell it is a cubic in the ray parameter (Hansson
+// Söderlund, Evans and Akenine-Möller, "Ray Tracing of Signed Distance
+// Function Grids", JCGT 2022, §2), and the first crossing in a cell is a root
+// of that cubic rather than something to creep up on. The ray is walked
+// brick by brick, and only the cells a Surface brick (or a uniform brick's
+// face layer against a differing neighbour) puts under it are solved; every
+// other brick is skipped whole.
+//
+// Everything below works in LATTICE UNITS: positions divided by voxel_size,
+// the direction left unit, so the parameter `u` is a world t over the voxel
+// size. A cell is then [c, c+1]³ for an integer triple c, a brick is dim of
+// them, and the cubic's coefficients see a cell as the paper's canonical
+// [0, 1]³ — which also keeps the cubic well conditioned, its terms at the
+// band's scale rather than the band over the voxel size cubed.
+namespace {
+
+constexpr float kFarU = 3.4e38f;
+
+// The eight bricks a cell's corner samples can be stored in. A cell owned by
+// brick K (its low corner's lattice index lies in K) has its high corners on
+// K's +x/+y/+z faces, and those lattice points are STORED by the neighbour
+// bricks — sample 0 of K+x is the point on K's +x face — so a gather touches
+// up to eight bricks. Each slot is looked up at most once per brick walked,
+// and only when a corner actually needs it: the sphere trace this replaces
+// paid eight hash lookups per SAMPLE, and the lookups were most of its cost.
+//
+// A slot that holds no evaluated brick answers +band, as sample() does: never
+// evaluated is empty space, which is what the reference reconstruction says.
+class CellCorners {
+  public:
+    CellCorners(const brick::BrickCache& cache, brick::BrickKey key)
+        : cache_(&cache), key_(key), dim_(cache.config().dim), band_(cache.config().band()) {}
+
+    // The table for the brick one step along `axis` from `prev`'s, seeded
+    // with what prev already resolved: stepping +x, prev's +x slots are this
+    // brick's own slots (prev+x is this brick, prev+xy is this+y, ...), and
+    // stepping -x the other way round. A ray leaves a brick through the face
+    // layer whose neighbour is the brick it enters next, so the walk that
+    // resolved that layer's slots has already paid for the lookups the next
+    // brick starts with — most of a uniform brick's cost was those lookups.
+    CellCorners(const CellCorners& prev, brick::BrickKey key, int axis, int step)
+        : CellCorners(*prev.cache_, key) {
+        const int bit = 1 << axis;
+        for (int s = 0; s < 8; ++s) {
+            if (s & bit) continue;
+            const int from = step > 0 ? (s | bit) : s;
+            const int to = step > 0 ? s : (s | bit);
+            if (!(prev.known_ & (1u << from))) continue;
+            slot_[to] = prev.slot_[from];
+            known_ |= 1u << to;
+        }
+    }
+
+    // Uniform bricks fall into two sign classes, and a Surface brick is its
+    // own: the classes decide whether the cells between two bricks can hold
+    // a crossing at all.
+    enum Class { Inside = -1, Surface = 0, Outside = 1 };
+    Class klass(int slot) {
+        const brick::Brick* b = brick(slot);
+        if (!b || b->state == brick::BrickState::Outside) return Outside;
+        return b->state == brick::BrickState::Inside ? Inside : Surface;
+    }
+
+    // The decoded, band-clamped sample at local lattice coordinates in
+    // [0, dim]³ — dim on an axis meaning "the neighbour's face sample".
+    float at(int i, int j, int k) {
+        const int slot = (i == dim_ ? 1 : 0) | (j == dim_ ? 2 : 0) | (k == dim_ ? 4 : 0);
+        const brick::Brick* b = brick(slot);
+        if (!b || b->state == brick::BrickState::Outside) return band_;
+        if (b->state == brick::BrickState::Inside) return -band_;
+        if (slot & 1) i = 0;
+        if (slot & 2) j = 0;
+        if (slot & 4) k = 0;
+        return brick::half_to_float(b->values[(static_cast<std::size_t>(k) * dim_ + j) * dim_ + i]);
+    }
+
+  private:
+    const brick::Brick* brick(int slot) {
+        if (!(known_ & (1u << slot))) {
+            slot_[slot] = cache_->find(brick::BrickKey{key_.x + (slot & 1), key_.y + ((slot >> 1) & 1),
+                                                      key_.z + (slot >> 2)});
+            known_ |= 1u << slot;
+        }
+        return slot_[slot];
+    }
+
+    // A pointer so the table can be assigned: the walk replaces it per brick.
+    const brick::BrickCache* cache_;
+    brick::BrickKey key_;
+    int dim_;
+    float band_;
+    const brick::Brick* slot_[8] = {};
+    unsigned known_ = 0;
+};
+
+// Amanatides & Woo over a grid of `size` lattice units, at the brick level and
+// again at the cell level. Boundaries are computed from the ray origin each
+// time rather than accumulated, so the brick walk and the cell walk inside it
+// agree on where a brick ends: (key+1)*dim and (cell+1) are the same integer,
+// and the same integer through the same expression is the same float.
+struct Dda {
+    int cell[3];
+    int step[3];
+    float next[3];
+    float delta[3];
+
+    void init(cfloat3 o, cfloat3 d, float size, const int start[3]) {
+        const float os[3] = {o.x, o.y, o.z};
+        const float ds[3] = {d.x, d.y, d.z};
+        for (int a = 0; a < 3; ++a) {
+            cell[a] = start[a];
+            if (kernel::cabs(ds[a]) < 1e-12f) {
+                step[a] = 0;
+                next[a] = kFarU;
+                delta[a] = kFarU;
+                continue;
+            }
+            step[a] = ds[a] > 0 ? 1 : -1;
+            const float boundary = static_cast<float>(cell[a] + (ds[a] > 0 ? 1 : 0)) * size;
+            next[a] = (boundary - os[a]) / ds[a];
+            delta[a] = size / kernel::cabs(ds[a]);
+        }
+    }
+    float exit() const { return kernel::cmin(next[0], kernel::cmin(next[1], next[2])); }
+    // Step into the next cell along the axis whose boundary comes first, and
+    // say which axis that was.
+    int advance() {
+        const int a = next[0] <= next[1] ? (next[0] <= next[2] ? 0 : 2) : (next[1] <= next[2] ? 1 : 2);
+        cell[a] += step[a];
+        next[a] += delta[a];
+        return a;
+    }
+};
+
+// f(u) - eps along the ray inside one cell, as c3 u³ + c2 u² + c1 u + c0.
+struct CellCubic {
+    float c0, c1, c2, c3;
+    float eval(float u) const { return ((c3 * u + c2) * u + c1) * u + c0; }
+    float slope(float u) const { return (3.0f * c3 * u + 2.0f * c2) * u + c1; }
+};
+
+// The paper's equations (3), (6) and (7) with the k4..k7 signs flipped: it
+// writes the surface as z·K(x,y) − A(x,y) = 0, which is the NEGATIVE of the
+// trilinear value, and the sign matters here because a hit is where the
+// field falls below eps, not merely where it is zero. With
+//   A = k0 + k1 x + k2 y + k3 xy,   K = k4 + k5 x + k6 y + k7 xy,
+//   f = A + z K,
+// substituting x = ox + u dx (and y, z) gives the coefficients below; eps is
+// folded into c0 so a root of the cubic IS the eps crossing. s is indexed
+// s[i | j<<1 | k<<2] for the corner (i, j, k) of the unit cell.
+CellCubic cell_cubic(const float s[8], cfloat3 o, cfloat3 d, float eps) {
+    const float k0 = s[0];
+    const float k1 = s[1] - s[0];
+    const float k2 = s[2] - s[0];
+    const float k3 = s[3] - s[2] - k1;
+    const float a = s[5] - s[4];
+    const float k4 = s[4] - s[0];
+    const float k5 = a - k1;
+    const float k6 = (s[6] - s[4]) - k2;
+    const float k7 = (s[7] - s[6] - a) - k3;
+    const float m0 = o.x * o.y;
+    const float m1 = d.x * d.y;
+    const float m2 = o.x * d.y + o.y * d.x;
+    const float m3 = k1 + k5 * o.z;
+    const float m4 = k2 + k6 * o.z;
+    const float m5 = k3 + k7 * o.z;
+    CellCubic c;
+    c.c0 = (k0 + k4 * o.z) + o.x * m3 + o.y * m4 + m0 * m5 - eps;
+    c.c1 = d.x * m3 + d.y * m4 + m2 * m5 + d.z * (k4 + k5 * o.x + k6 * o.y + k7 * m0);
+    c.c2 = m1 * m5 + d.z * (k5 * d.x + k6 * d.y + k7 * m2);
+    c.c3 = k7 * m1 * d.z;
+    return c;
+}
+
+// The gradient of the trilinear field at a point of the unit cell — the
+// paper's equations (9)–(11), a bilinear blend of the corner differences on
+// each axis. Lattice units, but a uniform scale leaves the direction alone.
+cfloat3 cell_gradient(const float s[8], cfloat3 p) {
+    using kernel::cmix;
+    const float gx = cmix(cmix(s[1] - s[0], s[3] - s[2], p.y), cmix(s[5] - s[4], s[7] - s[6], p.y), p.z);
+    const float gy = cmix(cmix(s[2] - s[0], s[3] - s[1], p.x), cmix(s[6] - s[4], s[7] - s[5], p.x), p.z);
+    const float gz = cmix(cmix(s[4] - s[0], s[5] - s[1], p.x), cmix(s[6] - s[2], s[7] - s[3], p.x), p.y);
+    return cf3(gx, gy, gz);
+}
+
+// Newton–Raphson from the secant guess, inside a bracket [lo, hi] with
+// g(lo) >= 0 >= g(hi) (the paper's Listing 1, with the bracket kept so a step
+// that leaves it becomes a bisection — a cubic's tangent can point anywhere).
+float refine_root(const CellCubic& g, float lo, float g_lo, float hi, float g_hi) {
+    float u = (g_hi != g_lo) ? (g_hi * lo - g_lo * hi) / (g_hi - g_lo) : 0.5f * (lo + hi);
+    for (int i = 0; i < 8; ++i) {
+        const float gu = g.eval(u);
+        if (gu >= 0.0f) lo = u; else hi = u;
+        const float du = g.slope(u);
+        float next = du != 0.0f ? u - gu / du : 0.5f * (lo + hi);
+        if (!(next > lo && next < hi)) next = 0.5f * (lo + hi);
+        if (kernel::cabs(next - u) < 1e-6f) return next;
+        u = next;
+    }
+    return u;
+}
+
+// Where g'(u) = 3 c3 u² + 2 c2 u + c1 is zero, ascending, into `ends`; how
+// many there are. The stable form of the quadratic, so a near-linear
+// derivative does not cancel its own smaller root away.
+int turning_points(const CellCubic& g, float ends[2]) {
+    const float qa = 3.0f * g.c3, qb = 2.0f * g.c2, qc = g.c1;
+    if (kernel::cabs(qa) < 1e-12f) {
+        if (kernel::cabs(qb) < 1e-12f) return 0;
+        ends[0] = -qc / qb;
+        return 1;
+    }
+    const float disc = qb * qb - 4.0f * qa * qc;
+    if (disc < 0.0f) return 0;
+    const float q = -0.5f * (qb + (qb >= 0.0f ? 1.0f : -1.0f) * std::sqrt(disc));
+    const float r1 = q / qa;
+    const float r2 = q != 0.0f ? qc / q : r1;
+    ends[0] = kernel::cmin(r1, r2);
+    ends[1] = kernel::cmax(r1, r2);
+    return 2;
+}
+
+// The first root of g in (0, ufar], given g(0) >= 0. The derivative's roots
+// split the span into monotone pieces (Marmitt et al.'s split, the paper's
+// Figure 4); the first piece whose far end is at or below zero brackets the
+// first crossing, and no piece changing sign means no crossing at all.
+bool first_root(const CellCubic& g, float ufar, float* root) {
+    float ends[3];
+    int count = turning_points(g, ends);
+    ends[count++] = ufar;
+    float lo = 0.0f, g_lo = g.c0;
+    for (int i = 0; i < count; ++i) {
+        const float hi = ends[i];
+        if (!(hi > lo) || hi > ufar) continue;   // a turning point behind us, or past the cell
+        const float g_hi = g.eval(hi);
+        if (g_hi <= 0.0f) {
+            *root = refine_root(g, lo, g_lo, hi, g_hi);
+            return true;
+        }
+        lo = hi;
+        g_lo = g_hi;
+    }
+    return false;
+}
+
+class BrickWalker {
+  public:
+    BrickWalker(const brick::BrickCache& cache, const math::Ray& ray, float eps)
+        : cache_(cache), ray_(ray), dim_(cache.config().dim), vs_(cache.config().voxel_size),
+          eps_(eps), o_(ray.origin / cache.config().voxel_size), d_(ray.dir) {}
+
+    // Walk the bricks the ray crosses in [u0, u1]; true with `hit` filled at
+    // the first crossing.
+    bool march(float u0, float u1, SceneHit* hit) {
+        int start[3];
+        cell_at(u0, static_cast<float>(dim_), start);
+        Dda bricks;
+        bricks.init(o_, d_, static_cast<float>(dim_), start);
+        float u = u0;
+        brick::BrickKey key{start[0], start[1], start[2]};
+        CellCorners corners(cache_, key);
+        // The DDA is monotone and u1 is finite, so this ends; the guard is
+        // against a NaN that would make every comparison false.
+        for (int guard = 0; guard < (1 << 20) && u < u1; ++guard) {
+            const float u_exit = bricks.exit();
+            if (visit_brick(corners, key, u, kernel::cmin(u_exit, u1), hit)) return true;
+            u = u_exit;
+            const int axis = bricks.advance();
+            key = brick::BrickKey{bricks.cell[0], bricks.cell[1], bricks.cell[2]};
+            corners = CellCorners(corners, key, axis, bricks.step[axis]);
+        }
+        return false;
+    }
+
+  private:
+    void cell_at(float u, float size, int out[3]) const {
+        const cfloat3 p = (o_ + d_ * u) / size;
+        out[0] = static_cast<int>(std::floor(p.x));
+        out[1] = static_cast<int>(std::floor(p.y));
+        out[2] = static_cast<int>(std::floor(p.z));
+    }
+
+    // A uniform brick is skipped whole unless the ray's segment through it
+    // reaches a face layer (the last cell on an axis) whose neighbour is of
+    // a different class — only there can a cell of a uniform brick hold a
+    // crossing, its high corners being the neighbour's face samples. The
+    // segment is straight, so on each axis the stretch of it inside the face
+    // layer is one interval of u; a diagonal neighbour (+xy, +xyz) is reached
+    // only where those intervals OVERLAP, which is what makes this cheap: a
+    // ray crossing a brick corner to corner reaches all three face layers
+    // but rarely their common edge, and it is the lookups this decides.
+    bool touches_differing_neighbour(CellCorners& corners, brick::BrickKey key, float u_in,
+                                     float u_out) {
+        float lo[3], hi[3];
+        face_layer_intervals(key, u_in, u_out, lo, hi);
+        const CellCorners::Class own = corners.klass(0);
+        for (int slot = 1; slot < 8; ++slot) {
+            if (!reaches_slot(slot, u_in, u_out, lo, hi)) continue;
+            if (corners.klass(slot) != own) return true;
+        }
+        return false;
+    }
+
+    // For each axis, the u-interval of [u_in, u_out] spent in the brick's
+    // high face layer (empty when hi < lo).
+    void face_layer_intervals(brick::BrickKey key, float u_in, float u_out, float lo[3],
+                              float hi[3]) const {
+        const float span = static_cast<float>(dim_);
+        const float face = static_cast<float>(dim_ - 1);
+        const float o[3] = {o_.x - static_cast<float>(key.x) * span,
+                            o_.y - static_cast<float>(key.y) * span,
+                            o_.z - static_cast<float>(key.z) * span};
+        const float d[3] = {d_.x, d_.y, d_.z};
+        for (int a = 0; a < 3; ++a) {
+            lo[a] = u_in;
+            hi[a] = u_out;
+            if (kernel::cabs(d[a]) < 1e-12f) {
+                if (o[a] < face) hi[a] = -kFarU;   // never in the layer
+                continue;
+            }
+            const float at = (face - o[a]) / d[a];
+            if (d[a] > 0) lo[a] = kernel::cmax(lo[a], at); else hi[a] = kernel::cmin(hi[a], at);
+        }
+    }
+
+    // Whether the segment is ever in every face layer the slot's neighbour
+    // sits behind at once.
+    static bool reaches_slot(int slot, float u_in, float u_out, const float lo[3],
+                             const float hi[3]) {
+        float from = u_in, to = u_out;
+        for (int a = 0; a < 3; ++a) {
+            if (!(slot & (1 << a))) continue;
+            from = kernel::cmax(from, lo[a]);
+            to = kernel::cmin(to, hi[a]);
+        }
+        return from <= to;
+    }
+
+    bool visit_brick(CellCorners& corners, brick::BrickKey key, float u_in, float u_out,
+                     SceneHit* hit) {
+        if (!(u_out > u_in)) return false;
+        const CellCorners::Class own = corners.klass(0);
+        if (own != CellCorners::Surface && !touches_differing_neighbour(corners, key, u_in, u_out)) {
+            // Uniform through and through. Inside is the paper's solid voxel:
+            // a hit on the entry face, which the sphere trace would also have
+            // reported there (its first sample reads -band). Reachable only by
+            // a ray that starts inside the solid, since the crossing into it
+            // was in a cell walked before this one.
+            if (own == CellCorners::Inside) return report(u_in, -d_, hit);
+            return false;
+        }
+        // An Outside brick beside something else: only its face-layer cells
+        // can differ from +band, so the walk gathers nothing for the rest.
+        return walk_cells(corners, key, u_in, u_out, own == CellCorners::Outside, hit);
+    }
+
+    // Cell-level DDA through one brick. The starting cell is clamped into the
+    // brick, because the entry point sits on the brick's face and rounding can
+    // put floor() one cell out; the far boundary in the direction of travel is
+    // then still ahead of u_in, so no cell is exited before it is entered.
+    //
+    // `faces_only` walks an Outside brick: every cell off its +x/+y/+z face
+    // layers has eight +band corners and is passed without a gather, and the
+    // corner table is rebuilt at the next face cell rather than shifted
+    // across the gap.
+    bool walk_cells(CellCorners& corners, brick::BrickKey key, float u_in, float u_out,
+                    bool faces_only, SceneHit* hit) {
+        const int lo[3] = {key.x * dim_, key.y * dim_, key.z * dim_};
+        int start[3];
+        cell_at(u_in, 1.0f, start);
+        for (int a = 0; a < 3; ++a) start[a] = std::clamp(start[a], lo[a], lo[a] + dim_ - 1);
+        Dda cells;
+        cells.init(o_, d_, 1.0f, start);
+        Corners8 s;
+        float u = u_in;
+        while (u < u_out) {
+            const float u_exit = cells.exit();
+            if (cell_matters(faces_only, cells.cell, lo)) {
+                load_corners(corners, cells, lo, &s);
+                if (solve_cell(s.v, cells.cell, u, kernel::cmin(u_exit, u_out), hit)) return true;
+            } else {
+                s.valid = false;
+            }
+            if (u_exit >= u_out) break;
+            u = u_exit;
+            s.moved = cells.advance();
+            if (!inside_brick(cells.cell[s.moved], lo[s.moved])) return false;
+        }
+        return false;
+    }
+
+    // The corners of the cell the walk is on, and what it takes to reuse
+    // them for the next: whether they are current, and the axis of the step
+    // taken since.
+    struct Corners8 {
+        float v[8];
+        bool valid = false;
+        int moved = 0;
+    };
+
+    bool cell_matters(bool faces_only, const int cell[3], const int lo[3]) const {
+        return !faces_only || cell[0] - lo[0] == dim_ - 1 || cell[1] - lo[1] == dim_ - 1 ||
+               cell[2] - lo[2] == dim_ - 1;
+    }
+    bool inside_brick(int cell, int lo) const { return cell >= lo && cell < lo + dim_; }
+
+    // Fill `s` for the DDA's current cell: shifted from the cell one step
+    // back when that one was gathered, from scratch otherwise.
+    static void load_corners(CellCorners& corners, const Dda& cells, const int lo[3],
+                             Corners8* s) {
+        if (s->valid) {
+            shift_corners(corners, cells.cell, lo, s->moved, cells.step[s->moved], s->v);
+        } else {
+            for (int c = 0; c < 8; ++c) s->v[c] = corner(corners, cells.cell, lo, c);
+        }
+        s->valid = true;
+    }
+
+    // Corner `c` (bits x, y<<1, z<<2) of the cell at global lattice index
+    // `cell`, from the brick whose low corner is `lo`.
+    static float corner(CellCorners& corners, const int cell[3], const int lo[3], int c) {
+        return corners.at(cell[0] - lo[0] + (c & 1), cell[1] - lo[1] + ((c >> 1) & 1),
+                          cell[2] - lo[2] + (c >> 2));
+    }
+
+    // The DDA moved one cell along `axis`: the four corners on the face the
+    // two cells share are already decoded, and only the far face is new.
+    // Half the gathers of a cell, and the gathers were most of a cell's cost.
+    static void shift_corners(CellCorners& corners, const int cell[3], const int lo[3], int axis,
+                              int step, float s[8]) {
+        const int bit = 1 << axis;
+        for (int c = 0; c < 8; ++c) {
+            const bool high = (c & bit) != 0;
+            if (step > 0) {
+                if (!high) s[c] = s[c | bit];
+            } else {
+                if (high) s[c] = s[c & ~bit];
+            }
+        }
+        for (int c = 0; c < 8; ++c) {
+            const bool high = (c & bit) != 0;
+            if (high == (step > 0)) s[c] = corner(corners, cell, lo, c);
+        }
+    }
+
+    // One cell, [u_in, u_out] of the ray inside it, its corners gathered in
+    // `s`. The trilinear value is bounded by its corners, so a cell whose
+    // lowest corner clears eps has no crossing and costs the gather and
+    // nothing else — which is most of the cells under a Surface brick, and
+    // the reason the cubic is cheap on average despite its 37 operations. A
+    // cell entirely below eps is solid: the hit is its entry, where the
+    // sphere trace would have read a sample below eps and stopped.
+    bool solve_cell(const float s[8], const int cell[3], float u_in, float u_out,
+                    SceneHit* hit) {
+        if (!(u_out > u_in)) return false;
+        float lo = kFarU, hi = -kFarU;
+        for (int c = 0; c < 8; ++c) {
+            lo = kernel::cmin(lo, s[c]);
+            hi = kernel::cmax(hi, s[c]);
+        }
+        // The sphere trace stops where the field falls below eps scaled by
+        // the distance, so this solves for that crossing rather than for
+        // zero: the two report the same point, and the difference from the
+        // true zero is eps — below anything a pick can see.
+        const float eps = eps_ * kernel::cmax(u_in * vs_, 1.0f);
+        if (lo > eps) return false;
+        if (hi < eps) return report(u_in, -d_, hit);
+        // Into the unit cell: origin at the cell's low corner, in voxels.
+        const cfloat3 cell_origin = (o_ + d_ * u_in) - cf3(static_cast<float>(cell[0]),
+                                                           static_cast<float>(cell[1]),
+                                                           static_cast<float>(cell[2]));
+        const CellCubic g = cell_cubic(s, cell_origin, d_, eps);
+        float root;
+        if (g.c0 < 0.0f) {
+            root = 0.0f;   // already below eps on entry: the face is the hit
+        } else if (!first_root(g, u_out - u_in, &root)) {
+            return false;
+        }
+        return report(u_in + root, cell_gradient(s, cell_origin + d_ * root), hit);
+    }
+
+    bool report(float u, cfloat3 gradient, SceneHit* hit) const {
+        hit->hit = true;
+        hit->t = u * vs_;
+        hit->position = ray_.at(hit->t);
+        const float len = kernel::clength(gradient);
+        // A flat gradient (a uniform cell, or a saturated one) has no normal
+        // to offer; facing the ray is the one defined answer.
+        hit->normal = len > 1e-20f ? gradient / len : -ray_.dir;
+        return true;
+    }
+
+    const brick::BrickCache& cache_;
+    const math::Ray& ray_;
+    int dim_;
+    float vs_;
+    float eps_;
+    cfloat3 o_, d_;
+};
+
+}  // namespace
+
+SceneHit raycast_bricks(const brick::BrickCache& cache, const math::Ray& ray,
+                        const RaycastOptions& options) {
+    SceneHit hit;
+    float t, tmax;
+    if (!brick_ray_range(cache, ray, options, &t, &tmax)) return hit;
+    const float vs = cache.config().voxel_size;
+    BrickWalker walker(cache, ray, options.eps);
+    walker.march(t / vs, tmax / vs, &hit);
     return hit;
 }
 

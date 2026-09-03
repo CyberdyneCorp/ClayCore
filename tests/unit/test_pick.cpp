@@ -170,6 +170,103 @@ TEST_CASE("brick raycast agrees with the analytic tape within a voxel") {
     CHECK(agreements > 20);
 }
 
+namespace {
+
+// Defined with the attribution tests below: a sphere under a spiral of dabs.
+scene::Document dabs_document(int dabs);
+
+// A cache filled over the whole of a document, at the given voxel size.
+brick::BrickCache filled_cache(const scene::Document& doc, float voxel_size) {
+    scene::Tape tape = scene::compile_document(doc);
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    brick::BrickCache cache(brick::BrickConfig{8, voxel_size, 3, 0});
+    cache.mark_dirty(tape.bounds);
+    for (const brick::BrickRequest& req : cache.take_dirty()) {
+        scene::CullRegion cull{cache.cull_region(req.key)};
+        scene::Tape t = scene::compile_document(doc, &cull);
+        std::vector<float> values(static_cast<std::size_t>(req.grid.nx) * req.grid.ny *
+                                  req.grid.nz);
+        REQUIRE(cpu->eval_grid(t, req.grid, values.data()) == eval::Status::Ok);
+        cache.submit(req, values.data());
+    }
+    return cache;
+}
+
+// Fire one ray at both walks and hold the analytic one to the sphere trace.
+// Every hit and miss must agree, and a hit's t to a twentieth of a voxel —
+// the sphere trace's own resolution is its eps and the secant it refines
+// with, both well under that.
+void check_brick_walk_agrees(const brick::BrickCache& cache, const math::Ray& ray, int* hits) {
+    const pick::SceneHit reference = pick::detail::raycast_bricks_sphere_traced(cache, ray);
+    const pick::SceneHit analytic = pick::raycast_bricks(cache, ray);
+    CAPTURE(ray.origin.x);
+    CAPTURE(ray.origin.y);
+    CAPTURE(ray.origin.z);
+    CAPTURE(ray.dir.x);
+    CAPTURE(ray.dir.y);
+    CAPTURE(ray.dir.z);
+    REQUIRE(analytic.hit == reference.hit);
+    if (!reference.hit) return;
+    ++*hits;
+    CAPTURE(reference.t);
+    CAPTURE(analytic.t);
+    CHECK(cabs(analytic.t - reference.t) < cache.config().voxel_size * 0.05f);
+    // A ray that starts below eps is answered with its origin by both walks,
+    // and a normal there is whatever the clamped interior offers; only a
+    // crossing has one worth comparing. There the analytic normal is the
+    // gradient of the cell that was hit and the reference's central
+    // difference spans the neighbouring cells too: the same field, so they
+    // agree except across a crease of the reconstruction, and both face the
+    // ray.
+    if (reference.t <= 0.0f) return;
+    CHECK(cdot(analytic.normal, reference.normal) > 0.9f);
+    CHECK(cdot(analytic.normal, ray.dir) < 0.0f);
+}
+
+}  // namespace
+
+TEST_CASE("analytic brick raycast agrees with the sphere-traced reference") {
+    const brick::BrickCache cache = filled_cache(dabs_document(120), 0.025f);
+    REQUIRE(cache.surface_bricks().size() > 50);
+    clay_test::Lcg rng(9031);
+    int hits = 0;
+
+    SUBCASE("rays from a sphere around the model, aimed near its middle") {
+        for (int i = 0; i < 400; ++i) {
+            const cfloat3 origin = rng.unit3() * 2.0f;
+            const cfloat3 target = cf3(rng.range(-0.6f, 0.6f), rng.range(-0.6f, 0.6f),
+                                       rng.range(-0.6f, 0.6f));
+            check_brick_walk_agrees(cache, {origin, cnormalize(target - origin)}, &hits);
+        }
+        CHECK(hits > 150);
+    }
+    SUBCASE("rays that start inside the domain, in and beside surface bricks") {
+        // Origins scattered through the model's box: some in empty bricks, some
+        // in a Surface brick in front of the surface, some inside the solid —
+        // where both walks report the origin itself as the hit.
+        for (int i = 0; i < 300; ++i) {
+            const cfloat3 origin = cf3(rng.range(-0.7f, 0.7f), rng.range(-0.7f, 0.7f),
+                                       rng.range(-0.7f, 0.7f));
+            check_brick_walk_agrees(cache, {origin, rng.unit3()}, &hits);
+        }
+        CHECK(hits > 100);
+    }
+    SUBCASE("axis-aligned rays, along the lattice and along brick faces") {
+        // Degenerate directions and rays that run exactly along cell boundaries
+        // are the DDA's own corner cases.
+        const float bs = cache.config().voxel_size * static_cast<float>(cache.config().dim);
+        for (int i = 0; i < 60; ++i) {
+            const int axis = i % 3;
+            const float a = std::floor(rng.range(-6.0f, 6.0f)) * bs;
+            const float b = rng.range(-0.5f, 0.5f);
+            cfloat3 origin = cf3(a, b, -3.0f), dir = cf3(0, 0, 1);
+            if (axis == 1) { origin = cf3(-3.0f, a, b); dir = cf3(1, 0, 0); }
+            if (axis == 2) { origin = cf3(b, -3.0f, a); dir = cf3(0, 1, 0); }
+            check_brick_walk_agrees(cache, {origin, dir}, &hits);
+        }
+    }
+}
+
 TEST_CASE("surface snapping: position and normal from nearby points") {
     scene::Document doc;
     scene::Layer& l = doc.add_sdf_layer("l");
