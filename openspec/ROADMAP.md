@@ -765,6 +765,16 @@ differ in what it writes and in nothing else. And the mesh multires level stack 
 region with watertight transitions as a construction, which is the property the
 mesh hierarchy will be asked for next.
 
+## Phase 6 — the asset, the region and the stack, proposed 2026-09-03
+
+Three changes raised by `ClayCore_Field_Stamps_Regional_Multires_Layer_Boolean_Implementation_Guide`, audited against the tree rather than accepted — the same discipline Phase 5 used, and it moved work out of the plan again.
+
+| Order | Change | Why here |
+|---|---|---|
+| 1 | `stamp-a-captured-field` | **Smaller than the guide describes**, because three of its four pillars already exist: `PrimType::Volume` compiles through the tape, the Node holds a volume by `shared_ptr` so "a thousand uses of one 4 MB asset must not consume ~4 GB" is already true, and `clay_item_volume_from_document` already captures a finite world region with redistance. What is missing is an ORIENTED capture frame (today's region is world-axis-aligned), an asset IDENTITY with a standalone form, a placement helper on `calpha_frame`, and stroke integration. First because it is the smallest and touches nothing the other two need |
+| 2 | `refine-one-region-of-a-hierarchy` | The gap `add-mesh-multires` recorded in its own row. Depth becomes a property of a base patch, with 2:1 balance in stable patch-id order, transitions watertight by construction rather than by repair, and refinement monotonic in v1 — removal needs a policy for the detail authored there, and picking one silently is worse than not offering it. Reuses the extreme-poly chunk identity; adds no second table |
+| 3 | `fold-the-layers-with-an-operator` | Last, and the audit sharpened the reason. The inter-layer hard union is not one line in `compile_document`: it is **eight sites**, including `compile_document_part`'s "the union to fold them with is a HARD Add … anything else is a different field" and the brick refill's own multi-layer fold in `clay_c.cpp`. A layer fold that is not a hard Add breaks the multi-layer resume unless each is taught the operator, and the failure is SILENT — a refill folding wrongly returns a field that never existed. The change decides what each site does before writing any of them, and leans toward REFUSING the split on a non-union fold because it is the only option that cannot be quietly wrong |
+
 ## Deferred, but recorded
 
 Not scheduled, and not rejected either — small enough to slot in when something
