@@ -600,13 +600,17 @@ TEST_CASE("a shared payload is written once, and an older minor writes it per no
     // per node. Four nodes, one payload.
     const Node* first = content.find(content.roots[0]);
     REQUIRE(first != nullptr);
-    REQUIRE(first->volume != nullptr);
+    REQUIRE((first->volume != nullptr));
     for (NodeId id : content.roots) {
         const Node* n = content.find(id);
         REQUIRE(n != nullptr);
-        // Double parens: doctest stringifies the operands of a bare CHECK, and
-        // MSVC has no ostream operator for a shared_ptr (C2676). The comparison
-        // two cases up follows the same rule for the same reason.
+        // DOUBLE PARENS ON EVERY shared_ptr ASSERTION IN THIS CASE, comparisons
+        // and null checks alike. doctest stringifies the operands of a bare
+        // CHECK/REQUIRE and MSVC has no ostream operator for a shared_ptr, so
+        // the bare form builds on GCC and AppleClang and fails only the
+        // windows-latest /WX job with C2676. Wrapping makes the expression one
+        // bool, which streams anywhere. The shared-edit-list case above follows
+        // the same rule, which is where the idiom comes from.
         CHECK((n->volume == first->volume));
     }
 
@@ -625,7 +629,7 @@ TEST_CASE("a shared payload is written once, and an older minor writes it per no
     REQUIRE(old_content.roots.size() == 4);
     const Node* old_first = old_content.find(old_content.roots[0]);
     REQUIRE(old_first != nullptr);
-    REQUIRE(old_first->volume != nullptr);
+    REQUIRE((old_first->volume != nullptr));
     const Node* old_second = old_content.find(old_content.roots[1]);
     REQUIRE(old_second != nullptr);
     // Four unrelated copies, and the same field in each.
