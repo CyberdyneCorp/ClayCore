@@ -373,6 +373,43 @@ struct Writer {
     // The layout version being written. Mirrors Reader::minor so the two
     // gates sit side by side and cannot drift apart.
     std::uint16_t minor = kSceneMinor;
+    // -- shared payloads (minor 17) ------------------------------------------
+    // A `FieldVolume` a Node holds is SHARED — `types.h` says so of both
+    // `volume` and `gate`: "several items gated by one painted mask should not
+    // each carry a copy of it". That was true of memory and false of the file:
+    // every node serialized its own payload, so eight placements of one capture
+    // wrote eight copies (measured: 187,531 bytes for one, 1,499,457 for
+    // eight) and loaded as eight unrelated volumes.
+    //
+    // This is the SdfContent rule applied one level down. A shared edit list is
+    // already written once and named by every later holder; a shared payload
+    // now is too. Keyed on POINTER IDENTITY, because that is what sharing IS
+    // here — two volumes with equal contents and separate allocations are two
+    // payloads, exactly as two identical edit lists are.
+    //
+    // The id is document-wide and NOT a NodeId: node ids are per-layer, every
+    // layer numbering from 1, so a back-reference by node id would name a
+    // different node in another layer. It is an index into this map's insertion
+    // order, which is deterministic because the node walk is.
+    std::unordered_map<const field::FieldVolume*, std::uint32_t> payload_ids;
+    // Whether the bytes for a given id have been emitted yet. The first node
+    // holding a payload writes it; every later one writes the id alone.
+    std::vector<bool> payload_written;
+
+    // The id for `v`, assigning one if it is new. 0 means no payload.
+    std::uint32_t payload_id(const std::shared_ptr<const field::FieldVolume>& v) {
+        if (!v || v->empty()) return 0;
+        auto [it, fresh] = payload_ids.emplace(v.get(), static_cast<std::uint32_t>(
+                                                            payload_ids.size() + 1));
+        if (fresh) payload_written.push_back(false);
+        return it->second;
+    }
+    bool claim_payload(std::uint32_t id) {
+        if (id == 0 || id > payload_written.size()) return false;
+        if (payload_written[id - 1]) return false;
+        payload_written[id - 1] = true;
+        return true;
+    }
     void bytes(const void* p, std::size_t n) {
         const auto* b = static_cast<const std::uint8_t*>(p);
         out.insert(out.end(), b, b + n);
@@ -389,6 +426,12 @@ struct Reader {
     const std::uint8_t* p;
     std::size_t remaining;
     bool ok = true;
+    // The other half of Writer's payload table. Indexed by the id minus one, so
+    // a node naming an id it has already seen gets the SAME shared_ptr rather
+    // than its own copy — which is the half that is easy to lose: a writer that
+    // deduplicates met by a reader calling make_shared per node loads N
+    // unrelated volumes and the next save writes N payloads again.
+    std::vector<std::shared_ptr<const field::FieldVolume>> payloads;
     bool bytes(void* dst, std::size_t n) {
         if (!ok || remaining < n) return ok = false;
         std::memcpy(dst, p, n);
@@ -440,47 +483,82 @@ StrokePoint read_point(Reader& r) {
 // reason read_point and read_prim are: read_node is a long flat walk over the
 // record, and a nested multi-branch block in the middle of it is where that
 // walk stops being readable.
+// The read half of write_payload. Returns the shared payload, which is the
+// SAME object for every node naming one id — the point of the exercise: a
+// reader that deduplicates the bytes and then calls make_shared per node has
+// saved disk and rebuilt the duplication in memory, and the next save writes
+// N payloads again.
+//
+// `out_present` says whether the node has a payload, which the gate needs
+// because gate_width follows only when there is one.
+std::shared_ptr<const field::FieldVolume> read_payload(Reader& r, bool* out_present) {
+    *out_present = false;
+    if (r.minor < 17) {
+        // The pre-17 shape: a length and the bytes, per node.
+        std::uint32_t bytes = r.u32();
+        if (bytes > r.remaining) {
+            r.ok = false;
+            return nullptr;
+        }
+        if (bytes == 0) return nullptr;
+        std::vector<std::uint8_t> raw(bytes);
+        if (!r.bytes(raw.data(), raw.size())) return nullptr;
+        std::optional<field::FieldVolume> v =
+            field::FieldVolume::deserialize(raw.data(), raw.size());
+        if (!v) {
+            r.ok = false;
+            return nullptr;
+        }
+        *out_present = true;
+        return std::make_shared<field::FieldVolume>(std::move(*v));
+    }
+    const std::uint32_t id = r.u32();
+    if (id == 0) return nullptr;
+    // An id at or below what has been loaded names a payload already read. An
+    // id exactly one past it carries its bytes. Anything else is a file whose
+    // ids do not ascend from one, which no writer produces, so it is refused
+    // rather than tolerated.
+    if (id <= r.payloads.size()) {
+        *out_present = true;
+        return r.payloads[id - 1];
+    }
+    if (id != r.payloads.size() + 1) {
+        r.ok = false;
+        return nullptr;
+    }
+    std::uint32_t bytes = r.u32();
+    if (bytes > r.remaining) {
+        r.ok = false;
+        return nullptr;
+    }
+    std::vector<std::uint8_t> raw(bytes);
+    if (!r.bytes(raw.data(), raw.size())) return nullptr;
+    std::optional<field::FieldVolume> v = field::FieldVolume::deserialize(raw.data(), raw.size());
+    // A malformed payload fails the read rather than loading an item that would
+    // silently contribute nothing, or a gate that would silently protect
+    // nothing — a document that has quietly lost a shape, or lost its
+    // protection, is the harder thing to notice.
+    if (!v) {
+        r.ok = false;
+        return nullptr;
+    }
+    auto shared = std::make_shared<const field::FieldVolume>(std::move(*v));
+    r.payloads.push_back(shared);
+    *out_present = true;
+    return shared;
+}
+
 // A node's gate, minor 11 and above — its own function for the reason
 // read_volume is one.
 void read_gate(Reader& r, Node& n) {
-    std::uint32_t bytes = r.u32();
-    if (bytes > r.remaining) {
-        r.ok = false;
-        return;
-    }
-    if (bytes == 0) return;  // a node without one wrote a zero length
-    std::vector<std::uint8_t> raw(bytes);
-    if (!r.bytes(raw.data(), raw.size())) return;
-    std::optional<field::FieldVolume> v = field::FieldVolume::deserialize(raw.data(), raw.size());
-    // A malformed gate fails the read rather than loading an item that would
-    // silently act everywhere. A gate that has quietly stopped protecting is
-    // the harder thing to notice, and the destructive direction.
-    if (!v) {
-        r.ok = false;
-        return;
-    }
-    n.gate = std::make_shared<field::FieldVolume>(std::move(*v));
-    n.gate_width = r.pod<float>();
+    bool present = false;
+    n.gate = read_payload(r, &present);
+    if (present) n.gate_width = r.pod<float>();
 }
 
 void read_volume(Reader& r, Node& n) {
-    std::uint32_t bytes = r.u32();
-    if (bytes > r.remaining) {
-        r.ok = false;
-        return;
-    }
-    if (bytes == 0) return;  // a node without one wrote a zero length
-    std::vector<std::uint8_t> raw(bytes);
-    if (!r.bytes(raw.data(), raw.size())) return;
-    std::optional<field::FieldVolume> v = field::FieldVolume::deserialize(raw.data(), raw.size());
-    // A malformed volume fails the read rather than loading an item that would
-    // silently contribute nothing — a document that had quietly lost a shape is
-    // the harder thing to notice.
-    if (!v) {
-        r.ok = false;
-        return;
-    }
-    n.volume = std::make_shared<field::FieldVolume>(std::move(*v));
+    bool present = false;
+    n.volume = read_payload(r, &present);
 }
 
 void write_prim(Writer& w, const Prim& p) {
@@ -554,6 +632,37 @@ void write_deformers(Writer& w, const std::vector<Deformer>& deformers) {
             for (float v : d.stamp.samples) w.pod(v);
         }
     }
+}
+
+// One shared `FieldVolume` on the wire.
+//
+// Before minor 17 this was a length and the bytes, per node, so a payload held
+// by several nodes was written once per node. From 17 it is an ID and the bytes
+// only where the id is new — the same rule a shared edit list has followed since
+// minor 15, one level down.
+//
+// Returns whether the node has a payload at all, which the gate needs because
+// `gate_width` follows only when there is one.
+bool write_payload(Writer& w, const std::shared_ptr<const field::FieldVolume>& v, bool colour) {
+    const bool present = v != nullptr && !v->empty();
+    if (w.minor < 17) {
+        // The old shape, so writing at an older minor is a DOWNGRADE that an
+        // older build reads exactly as it always did rather than a document it
+        // cannot open. It costs the deduplication and nothing else.
+        std::vector<std::uint8_t> bytes;
+        if (present) bytes = v->serialize(colour);
+        w.u32(static_cast<std::uint32_t>(bytes.size()));
+        w.bytes(bytes.data(), bytes.size());
+        return present;
+    }
+    const std::uint32_t id = w.payload_id(v);
+    w.u32(id);
+    if (id != 0 && w.claim_payload(id)) {
+        const std::vector<std::uint8_t> bytes = v->serialize(colour);
+        w.u32(static_cast<std::uint32_t>(bytes.size()));
+        w.bytes(bytes.data(), bytes.size());
+    }
+    return present;
 }
 
 void write_node(Writer& w, const Node& n) {
@@ -633,14 +742,7 @@ void write_node(Writer& w, const Node& n) {
     // flat float block the tape's blob carries, so there is one layout to keep
     // right rather than two. A node without one writes a zero length.
     if (w.minor >= 4) {
-        std::vector<std::uint8_t> volume_bytes;
-        // Colour is a minor-9 section. Writing at 8 or below drops it and
-        // keeps everything else, which is what makes an older minor a
-        // downgrade rather than a different document.
-        if (n.volume && !n.volume->empty())
-            volume_bytes = n.volume->serialize(w.minor >= 9);
-        w.u32(static_cast<std::uint32_t>(volume_bytes.size()));
-        w.bytes(volume_bytes.data(), volume_bytes.size());
+        write_payload(w, n.volume, w.minor >= 9);
     }
     // The item's GATE, from minor 11: the same shape as the volume above, a
     // length then the bytes, so a node without one writes a zero and a build
@@ -649,11 +751,8 @@ void write_node(Writer& w, const Node& n) {
     // older minor a downgrade rather than a different document, and means a
     // gated item degrades to an ungated one rather than to a missing one.
     if (w.minor >= 11) {
-        std::vector<std::uint8_t> gate_bytes;
-        if (n.gate && !n.gate->empty()) gate_bytes = n.gate->serialize(false);
-        w.u32(static_cast<std::uint32_t>(gate_bytes.size()));
-        w.bytes(gate_bytes.data(), gate_bytes.size());
-        if (!gate_bytes.empty()) w.pod(n.gate_width);
+        const bool has_gate = write_payload(w, n.gate, false);
+        if (has_gate) w.pod(n.gate_width);
     }
     w.pod(n.transition.a);
     w.pod(n.transition.b);
@@ -1170,7 +1269,7 @@ std::vector<std::uint8_t> serialize(const Command& cmd) {
 }
 
 std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
-    Reader r{data, size};
+    Reader r{data, size, true, {}};
     Tag tag = r.pod<Tag>();
     Command cmd;
     switch (tag) {
@@ -1382,7 +1481,7 @@ std::vector<std::uint8_t> serialize_document(const Document& doc, std::uint16_t 
 
 std::optional<Document> deserialize_document(const std::uint8_t* data, std::size_t size,
                                              std::uint16_t minor) {
-    Reader r{data, size};
+    Reader r{data, size, true, {}};
     r.minor = minor;
     std::uint32_t count = r.u32();
     if (!r.ok || count > 100000) return std::nullopt;

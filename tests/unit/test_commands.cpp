@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include "clay/scene/consolidate.h"
 #include "clay/scene/commands.h"
 #include "kernel_utils.h"
 
@@ -548,4 +549,83 @@ TEST_CASE("undo: an empty outer bracket with an empty inner one records nothing"
     stack.end_group();
     stack.end_group();
     CHECK(stack.undo_depth() == 0);
+}
+
+TEST_CASE("a shared payload is written once, and an older minor writes it per node") {
+    // Minor 17. `types.h` says of a Node's volume and gate that they are shared
+    // "so two items sampling the same source share one set of samples", and
+    // that was true of memory and false of the file: every node serialized its
+    // own copy, so N placements of one capture wrote N payloads and loaded as N
+    // unrelated volumes.
+    //
+    // This is the rule minor 15 gave a shared EDIT LIST, one level down.
+    Document doc;
+    Layer& l = doc.add_sdf_layer("stamps");
+
+    // One volume, held by four nodes. Built by hand rather than baked: this is
+    // a test of the wire format, and a bake would make it a test of the bake.
+    field::FieldVolume vol;
+    {
+        Document src;
+        Layer& s = src.add_sdf_layer("src");
+        Node sphere;
+        sphere.id = s.sdf->reserve_id();
+        sphere.prim = Prim::sphere(1.0f);
+        s.sdf->insert(sphere);
+        ConsolidationParams cp;
+        cp.cell_size = 0.1f;
+        std::optional<field::FieldVolume> baked = bake_layer(s, cp);
+        REQUIRE(baked.has_value());
+        vol = std::move(*baked);
+    }
+    REQUIRE(!vol.empty());
+    auto shared = std::make_shared<const field::FieldVolume>(vol);
+
+    for (int i = 0; i < 4; ++i) {
+        Node n;
+        n.id = l.sdf->reserve_id();
+        n.prim = Prim::volume();
+        n.volume = shared;
+        n.xform.position = kernel::cf3(static_cast<float>(i) * 3.0f, 0.0f, 0.0f);
+        l.sdf->insert(n);
+    }
+
+    const std::vector<std::uint8_t> bytes = serialize_document(doc);
+    std::optional<Document> back = deserialize_document(bytes.data(), bytes.size());
+    REQUIRE(back.has_value());
+    const SdfContent& content = *back->layers.front().sdf;
+    REQUIRE(content.roots.size() == 4);
+
+    // SHARED, not merely equal — the half a reader loses by calling make_shared
+    // per node. Four nodes, one payload.
+    const Node* first = content.find(content.roots[0]);
+    REQUIRE(first != nullptr);
+    REQUIRE(first->volume != nullptr);
+    for (NodeId id : content.roots) {
+        const Node* n = content.find(id);
+        REQUIRE(n != nullptr);
+        CHECK(n->volume == first->volume);
+    }
+
+    // And a re-save is the same size, which is what says the sharing survived
+    // rather than merely the bytes being smaller once.
+    CHECK(serialize_document(*back).size() == bytes.size());
+
+    // AT MINOR 16 the deduplication is what is lost, and only that: the same
+    // four items, each carrying the payload, which is exactly what every build
+    // before 17 wrote and reads.
+    const std::vector<std::uint8_t> old = serialize_document(doc, 16);
+    CHECK(old.size() > bytes.size() * 3);
+    std::optional<Document> older = deserialize_document(old.data(), old.size(), 16);
+    REQUIRE(older.has_value());
+    const SdfContent& old_content = *older->layers.front().sdf;
+    REQUIRE(old_content.roots.size() == 4);
+    const Node* old_first = old_content.find(old_content.roots[0]);
+    REQUIRE(old_first != nullptr);
+    REQUIRE(old_first->volume != nullptr);
+    const Node* old_second = old_content.find(old_content.roots[1]);
+    REQUIRE(old_second != nullptr);
+    // Four unrelated copies, and the same field in each.
+    CHECK((old_first->volume != old_second->volume));
+    CHECK(old_first->volume->bytes() == old_second->volume->bytes());
 }
