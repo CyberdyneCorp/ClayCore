@@ -537,6 +537,72 @@ camera move — not between the dabs of a live stroke, where every dab is a
 mutating call. A host that warms the neighbourhood a brush is about to enter
 pays for it once, before the stroke that needs it.
 
+### A brick proven uniform is not walked
+
+The cold walk above is mostly spent on bricks that store nothing. A dab dirties
+the solid box its influence bound covers, and on a worked model most of that
+box is clay: on the sculpted-sphere fixture (`BM_DabRefillSculpted`), **57 of
+the 80 bricks** one dab dirties are uniformly inside at 400 dabs and 64 of 80
+at 1,500 — and `BrickCache::submit` is where a brick is classified, from its
+samples, so each of them paid 512 walks of its culled tape to be told it holds
+no lattice.
+
+One evaluation says the same thing. The compiler tracks every tape's Lipschitz
+bound *L* (the number the raycaster steps by), so `|f(x) − f(c)| ≤ L·|x − c|`;
+every lattice sample sits within the lattice's half-diagonal *hd* of its centre
+*c*; so when
+
+```
+|f(c)| > band + L · hd
+```
+
+no sample can be within the band, let alone cross zero, and every one carries
+`f(c)`'s sign. The brick is uniform, its class is what submit would have found,
+and it is a **proof rather than a heuristic** — a sample inside the band would
+contradict the bound. The ball is the **lattice's own**, not the band-dilated
+cull region (that puts the band term in twice and collapses the proof rate to
+~21%), and the bound read is the brick's **own culled tape's**, never the whole
+document's (the cull is what keeps *L* small — a deformer far from the brick is
+not in this tape). Measured on the fixture, **91% of the uniform bricks pass at
+400 dabs and 97% at 1,500, none falsely**; the rest walk as before.
+
+A proven brick keeps its place in the batch: a **stub tape** — one
+`ctape_empty`, the far field for an outside brick and, through a zero scale
+and a rounding of `band + spacing`, the constant `−(band + spacing)` for an
+inside one, carrying the colour submit reads at sample *n/2* — takes its
+tape's slot, so the device
+copy, the fixed-stride destination and submit all see an ordinary brick, and
+what the cache **stores** is bit-identical to the walk's. What the refill
+**returns** for such a brick is the stub's samples, every one beyond the band
+with the brick's sign, which is the only property of a uniform brick's values
+that anything downstream reads (`clay.h` says so at the entry point).
+
+**A gated brick's seed is its proof**, not the stub. Storing the stub would
+poison the store — the next dab's suffix would fold onto numbers the field never
+produced, and a seeded answer is bit-identical to a walked one by contract, so
+nothing could tell — and storing nothing measured worse than the walk it
+replaced: a seedless brick pays its culled compile again on every dab, and the
+warm dab went **0.55 → 2.5 ms at 400 items and 0.44 → 8.4 ms at 1,500**, for a
+cold-dab win of 2x. So the entry holds the field's unclamped value and colour at
+the centre and at sample *n/2*, plus the tape's bound; the next dab folds its
+suffix onto those two points — the walk's own arithmetic there — and re-proves
+the brick with `max(stored, suffix)` as the new bound. That bound is exact when
+every appended item folds by a max rule (Add, Subtract, Intersect, hard or
+smooth); anything else — extended modes, transitions, gates, a group — takes the
+full path, where the gate reads the bound the compiler declared. A dab that
+reaches a proven brick fails the re-proof and walks it once, as a cold brick
+would. A proof counts as **resumed** when it is carried forward and as
+**refilled** when it is made on the full path (it neither walks nor resumes
+there; `clay_internal_gated_bricks` counts those), so the ratio `clay.h`
+documents keeps its meaning.
+
+Cold dab through the C ABI, medians of 7 on an M2 Max: **9.22 → 5.58 ms at 400
+dabs (1.65x), 33.4 → 14.1 ms at 1,500 (2.4x)**; a whole-model fill of 9,240
+bricks **580 → 335 ms and 2,213 → 1,180 ms**, with the same brick counts in
+every class. The warm dab — the same window, one appended dab later — goes
+**0.52 → 0.25 ms at 400 and 0.44 → 0.17 ms at 1,500**, because a brick carried
+forward as a proof skips the 512-point seeded walk a lattice seed still runs.
+
 ### An intersect is bounded by its layer
 
 `item_influence_bound` reported `Everything` for any op that is not local, and

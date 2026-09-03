@@ -9021,7 +9021,10 @@ typedef struct clay_brick_stats {
  *
  * over a stroke. A stroke that is warm and appending should sit high. Bricks
  * the stroke has just grown into have no seed and are counted as refilled,
- * correctly — a moving brush never reaches 1.0, and does not need to.
+ * correctly — a moving brush never reaches 1.0, and does not need to. A brick
+ * the refill PROVES uniform rather than walks (clay_brick_cache_eval_requests)
+ * counts the same way: refilled where the proof is made, resumed where a later
+ * dab carries it forward, so the ratio reads as it always did.
  *
  * Both counts are CUMULATIVE over the document's life and never reset, so read
  * them as differences across the interval you care about. A seed is a pure
@@ -9271,6 +9274,21 @@ clay_result clay_brick_cache_take_dirty(clay_brick_cache* cache,
  * colors_capacity must be exactly that or 0 when it is NULL. It is what a
  * colour-carrying cache's clay_brick_cache_submit wants; a distance-only cache
  * needs neither and passing NULL costs nothing to compute.
+ *
+ * A BRICK PROVEN UNIFORM IS NOT WALKED. Most of the bricks a dab dirties on a
+ * worked model are clay all the way through, and one evaluation at the
+ * brick's centre with the tape's own Lipschitz bound proves it: no sample can
+ * be within the band, and all carry the centre's sign. Such a brick is
+ * classified exactly as its samples would have classified it -- what
+ * clay_brick_cache_submit stores for it is bit-identical -- and the values
+ * written to its slot are a STAND-IN rather than the field's samples: every
+ * one beyond the band with the brick's sign, and the colour at sample dim^3/2
+ * (the one submit keeps for a uniform brick) the field's own. That is the
+ * whole of what a uniform brick's values say to submit, to a mip, or to a
+ * renderer reading the buffer directly; a host that wants the field's own
+ * distance past the band should ask clay_eval_points for it. The brick still
+ * resumes on later dabs -- its seed is the proof, carried through the appended
+ * items -- and counts in clay_resume_stats as any other.
  *
  * ROUTE BY BATCH SIZE. The whole batch reaches the backend as batched
  * evaluations, so a GPU backend runs it as a single device submission rather

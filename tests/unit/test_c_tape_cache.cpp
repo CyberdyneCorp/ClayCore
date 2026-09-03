@@ -1813,8 +1813,19 @@ std::size_t drag_applied(Doc& doc, float cx, float dx, float radius) {
 TEST_CASE("move drag: a dragged brick reads as a full refill of the dragged document") {
     // THE TEST THAT WOULD CATCH AN UNDER-INVALIDATION. The drag lands on the
     // brick row, so every one of those seeds must be dropped and recomputed.
-    auto oracle = [](float cx, float dx, float radius) {
+    //
+    // RAW VALUES, so the uniform-brick gate is off on every document here. A
+    // brick the gate proves uniform returns a stub beyond the band rather than
+    // the field's own samples, and a brick the drag resumed from its lattice
+    // seed returns the samples -- same classification, same stored brick,
+    // different floats. This test reads the floats to catch a drag that
+    // leaves a seed it should have dropped, and the gate would hide exactly
+    // the bricks the drag reaches deep in the clay. test_c_uniform_gate.cpp
+    // holds the gate's own contract on what the cache stores.
+    auto raw = [](Doc& d) { REQUIRE(clay_internal_set_uniform_gate(d.d, 0) == CLAY_OK); };
+    auto oracle = [&](float cx, float dx, float radius) {
         Doc fresh;
+        raw(fresh);
         add_sphere(fresh, 1.0f, 0.0f);
         REQUIRE(drag(fresh, cx, dx, radius) == CLAY_OK);
         return refill_signature(fresh.d);   // no seeds: the full evaluation
@@ -1822,6 +1833,7 @@ TEST_CASE("move drag: a dragged brick reads as a full refill of the dragged docu
 
     SUBCASE("a drag across the bricks the cache already holds") {
         Doc doc;
+        raw(doc);
         add_sphere(doc, 1.0f, 0.0f);
         const std::vector<float> seeded = refill_signature(doc.d);  // seeds the store
 
@@ -1838,6 +1850,7 @@ TEST_CASE("move drag: a dragged brick reads as a full refill of the dragged docu
 
     SUBCASE("a drag repeated, so the second starts from seeds the first wrote") {
         Doc doc;
+        raw(doc);
         add_sphere(doc, 1.0f, 0.0f);
         refill_signature(doc.d);
         REQUIRE(drag_applied(doc, 0.0f, 0.10f, 0.6f) > 0);
@@ -1846,6 +1859,7 @@ TEST_CASE("move drag: a dragged brick reads as a full refill of the dragged docu
         const std::vector<float> got = refill_signature(doc.d);
 
         Doc fresh;
+        raw(fresh);
         add_sphere(fresh, 1.0f, 0.0f);
         REQUIRE(drag(fresh, 0.0f, 0.10f, 0.6f) == CLAY_OK);
         REQUIRE(drag(fresh, 0.0f, 0.10f, 0.6f) == CLAY_OK);
@@ -1858,11 +1872,13 @@ TEST_CASE("move drag: a dragged brick reads as a full refill of the dragged docu
         // it reaches these bricks. A region computed from the drag centre alone,
         // without the radius, would miss this.
         Doc doc;
+        raw(doc);
         add_sphere(doc, 1.0f, 0.0f);
         const std::vector<float> seeded = refill_signature(doc.d);
         REQUIRE(drag_applied(doc, 0.0f, 0.0f, 0.6f) >= 0);  // re-seed at the same state
 
         Doc moved;
+        raw(moved);
         add_sphere(moved, 1.0f, 0.0f);
         refill_signature(moved.d);
         REQUIRE(drag_applied(moved, 0.9f, -0.25f, 0.7f) > 0);

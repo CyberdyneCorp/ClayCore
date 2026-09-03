@@ -1072,6 +1072,94 @@ BENCHMARK(BM_BrickRefillResumed)->Unit(benchmark::kMillisecond);
 void BM_BrickRefillFull(benchmark::State& state) { refill_stroke(state, false); }
 BENCHMARK(BM_BrickRefillFull)->Unit(benchmark::kMillisecond);
 
+// A DAB'S WORTH OF DIRTY BRICKS ON A SCULPTED SURFACE, cold, through the
+// library refill: the case the uniform-brick gate exists for. A dab dirties
+// the solid box its influence bound covers, and on a worked model most of
+// that box is clay -- 57 of the 80 bricks here are uniformly inside -- so
+// most of a cold refill used to be 512 walks per brick to discover the brick
+// stores nothing. The gate proves it from one evaluation and the tape's
+// Lipschitz bound (bindings/c/clay_c.cpp, prove_uniform).
+//
+// bench_unspent's fixture and window: a sphere r=0.5 plus `dabs` smooth-union
+// dabs on a 3-turn helix, a dim-8 cache at a 0.01 voxel and a 3-voxel band,
+// the box one more dab at (0.5, 0, 0) with reach 0.05 + 0.06 would touch.
+// A FRESH DOCUMENT per iteration, untimed: seeds belong to the document, so
+// a second refill of the same one would resume rather than walk, and this
+// row is the cold walk. Measured 9.22 -> 5.58 ms at 400 dabs and 33.4 -> 14.1
+// ms at 1,500 on an M2 Max (medians of 7). The warm dab is
+// BM_BrickRefillResumed's shape and is held elsewhere; what this row catches
+// is the gate switching off, which reads as a correct document and 2x.
+namespace {
+clay_document* helix_sculpt(int dabs) {
+    clay_document* d = clay_document_create();
+    clay_layer_id l = 0;
+    clay_add_sdf_layer(d, "s", &l);
+    auto add = [&](float r, float x, float y, float z, float k) {
+        clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+        const float p[3] = {x, y, z};
+        clay_item_set_position(it, p);
+        if (k > 0.0f) clay_item_set_blend(it, CLAY_BLEND_QUADRATIC, k);
+        clay_layer_add_item(d, l, it, nullptr);
+        clay_item_destroy(it);
+    };
+    add(0.5f, 0.0f, 0.0f, 0.0f, 0.0f);
+    for (int i = 0; i < dabs; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(dabs);
+        const float a = t * 6.2831853f * 3.0f;
+        const float z = -0.9f + 1.8f * t;
+        const float r = std::sqrt(std::max(0.0f, 1.0f - z * z)) * 0.5f;
+        add(0.05f, r * std::cos(a), r * std::sin(a), z * 0.5f, 0.06f);
+    }
+    return d;
+}
+
+void dab_refill_sculpted(benchmark::State& state, int dabs) {
+    clay_brick_config cfg{};
+    cfg.struct_size = sizeof(cfg);
+    clay_brick_config_defaults(&cfg);
+    cfg.dim = 8;
+    cfg.voxel_size = 0.01f;
+    cfg.band_voxels = 3;
+    cfg.memory_budget = 0;
+    cfg.colors = 0;
+    const float reach = 0.05f + 0.06f;
+    const float lo[3] = {0.5f - reach, -reach, -reach};
+    const float hi[3] = {0.5f + reach, reach, reach};
+    std::size_t bricks = 0;
+    for (auto _ : state) {
+        state.PauseTiming();
+        clay_document* d = helix_sculpt(dabs);
+        clay_brick_cache* c = clay_brick_cache_create(&cfg);
+        clay_brick_cache_mark_dirty(c, lo, hi);
+        std::vector<clay_brick_request> reqs(4096);
+        std::size_t count = reqs.size(), remaining = 0;
+        clay_brick_cache_take_dirty(c, reqs.data(), &count, &remaining);
+        reqs.resize(count);
+        bricks = count;
+        std::vector<float> values(count * 512);
+        std::vector<int32_t> results(count);
+        std::size_t accepted = 0;
+        state.ResumeTiming();
+        clay_brick_cache_eval_requests(d, "cpu", reqs.data(), count, values.data(), values.size(),
+                                       nullptr, 0);
+        clay_brick_cache_submit(c, reqs.data(), count, values.data(), values.size(), nullptr, 0,
+                                results.data(), &accepted);
+        state.PauseTiming();
+        clay_brick_cache_destroy(c);
+        clay_document_destroy(d);
+        state.ResumeTiming();
+    }
+    state.counters["bricks"] = static_cast<double>(bricks);
+    state.counters["dabs"] = static_cast<double>(dabs);
+}
+}  // namespace
+
+void BM_DabRefillSculpted400(benchmark::State& state) { dab_refill_sculpted(state, 400); }
+BENCHMARK(BM_DabRefillSculpted400)->Unit(benchmark::kMillisecond);
+
+void BM_DabRefillSculpted1500(benchmark::State& state) { dab_refill_sculpted(state, 1500); }
+BENCHMARK(BM_DabRefillSculpted1500)->Unit(benchmark::kMillisecond);
+
 // The pair above holds one window still. A REAL stroke drags its dirty window
 // across the model, and that is the case the resumed path used to lose: a
 // refill re-stamps only the bricks it filled and an append re-stamps none, so
