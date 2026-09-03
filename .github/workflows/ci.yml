@@ -121,11 +121,22 @@ jobs:
         run: python3 tools/check_kernel_dialect.py
       # Swift used to compile only in the release workflow, so anything that
       # broke tests/swift/smoke.swift passed every PR and failed on the tag —
-      # which is exactly what happened to v0.24.0. Type-checking needs the
-      # header alone, no xcframework, so it costs seconds here; building and
-      # RUNNING the smoke against the real slices stays release-time.
-      - name: Swift smoke type-check (clay.h is consumable from Swift)
-        run: ./tools/check_swift_smoke.sh typecheck
+      # which is exactly what happened to v0.24.0. Type-checking was the answer
+      # then, because it needs the header alone and costs seconds.
+      #
+      # IT WAS NOT ENOUGH, AND v0.78.0 IS THE PROOF. A check that asserted the
+      # multires scratch arena had bytes after a plain draw type-checked
+      # perfectly and failed at runtime — 394 of 395 — on the tag, after every
+      # one of the sixteen PR jobs had gone green. The gap type-checking leaves
+      # is every claim the suite makes about what the library DOES, which is
+      # what 395 of its checks are.
+      #
+      # So this now builds the slices and RUNS the smoke, on macOS and inside a
+      # booted simulator. It is the slowest step in this job by a wide margin,
+      # and that is the price of a release-time gate becoming a pull-request
+      # one. The script builds the xcframework itself when dist/ has none.
+      - name: Swift smoke (build the slices and run them, macOS + Simulator)
+        run: ./tools/check_swift_smoke.sh all
       # The only runner with a Swift toolchain, so the only one where this gate
       # reads the product's linkage out of SwiftPM rather than out of the
       # manifest text. It also runs in the Linux gates job, weaker, so a
