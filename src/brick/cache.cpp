@@ -116,7 +116,8 @@ SubmitResult BrickCache::submit(const BrickRequest& request, const float* values
         if (!all_inside && !all_outside) break;
     }
 
-    std::size_t old_bytes = t.brick.state == BrickState::Surface ? config_.brick_bytes() : 0;
+    const bool was_surface = t.brick.state == BrickState::Surface;
+    std::size_t old_bytes = was_surface ? config_.brick_bytes() : 0;
     // A uniform brick's whole color payload, so a padded or unpadded readback
     // still answers one value per texel without allocating a lattice for it.
     // The brick's CENTRE sample rather than a fixed constant: near the surface
@@ -130,6 +131,9 @@ SubmitResult BrickCache::submit(const BrickRequest& request, const float* values
         t.brick.colors.clear();
         t.brick.colors.shrink_to_fit();
         surface_bytes_ -= old_bytes;
+        // The surface moved out of this brick: the domain a raycast starts
+        // from may have shrunk, and this is the one call that knows.
+        if (was_surface) surface_bounds_removed(request.key);
     } else {
         std::size_t new_usage = surface_bytes_ - old_bytes + config_.brick_bytes();
         if (config_.memory_budget != 0 && new_usage > config_.memory_budget)
@@ -144,15 +148,59 @@ SubmitResult BrickCache::submit(const BrickRequest& request, const float* values
                 t.brick.colors[i] = to_brick_color(colors_rgb + i * 3);
         }
         surface_bytes_ = new_usage;
+        surface_bounds_added(request.key);
     }
     t.brick.generation = request.generation;
     t.evaluated = true;
+    refresh_surface_bounds();
     return SubmitResult::Accepted;
+}
+
+// -- surface bounds -----------------------------------------------------------
+
+void BrickCache::surface_bounds_added(BrickKey key) {
+    // A stale box is about to be refolded from the map, which will see this
+    // brick; widening it now would only be thrown away.
+    if (!surface_bounds_stale_) surface_bounds_.expand(brick_bounds(key));
+}
+
+void BrickCache::surface_bounds_removed(BrickKey key) {
+    if (surface_bounds_stale_) return;
+    // A brick strictly inside the box on every axis decided none of its six
+    // faces, so the box is unchanged by losing it. The comparisons are exact:
+    // brick_bounds() computes the same floats the fold did, and a union of
+    // mins and maxes is order-independent, so "touches a face" is equality
+    // rather than a tolerance. This is the shortcut that makes an eviction
+    // O(1) in the common case — on a closed shape only the handful of bricks
+    // at the extremes ever reach the refold.
+    const math::Aabb b = brick_bounds(key);
+    const bool interior = b.min.x > surface_bounds_.min.x && b.max.x < surface_bounds_.max.x &&
+                          b.min.y > surface_bounds_.min.y && b.max.y < surface_bounds_.max.y &&
+                          b.min.z > surface_bounds_.min.z && b.max.z < surface_bounds_.max.z;
+    if (!interior) surface_bounds_stale_ = true;
+}
+
+void BrickCache::refresh_surface_bounds() {
+    if (!surface_bounds_stale_) return;
+    // The same fold the raycast used to run per ray, now once per mutation
+    // that actually moved a face. Empty when nothing is Surface, which is
+    // what the raycast reads as "nothing to hit".
+    math::Aabb box;
+    for (const auto& [key, t] : bricks_)
+        if (t.evaluated && t.brick.state == BrickState::Surface) box.expand(brick_bounds(key));
+    surface_bounds_ = box;
+    surface_bounds_stale_ = false;
 }
 
 // -- eviction -----------------------------------------------------------------
 
 bool BrickCache::evict(BrickKey key) {
+    const bool dropped = evict_deferring_bounds(key);
+    refresh_surface_bounds();
+    return dropped;
+}
+
+bool BrickCache::evict_deferring_bounds(BrickKey key) {
     auto it = bricks_.find(key);
     if (it == bricks_.end()) return false;
     Tracked& t = it->second;
@@ -161,7 +209,10 @@ bool BrickCache::evict(BrickKey key) {
     // memory for the one thing the host is actively waiting on.
     if (t.queued) return false;
 
-    if (t.brick.state == BrickState::Surface) surface_bytes_ -= config_.brick_bytes();
+    if (t.brick.state == BrickState::Surface) {
+        surface_bytes_ -= config_.brick_bytes();
+        surface_bounds_removed(key);
+    }
     t.brick.values.clear();
     t.brick.values.shrink_to_fit();
     t.brick.colors.clear();
@@ -216,11 +267,15 @@ std::size_t BrickCache::trim_to(std::size_t target_bytes, kernel::cfloat3 focus)
                std::tie(b.second.x, b.second.y, b.second.z);
     });
 
+    // A trim drops the far bricks first, which are exactly the ones on the
+    // faces of surface_bounds(); refolding per eviction would be a walk of the
+    // map per brick dropped, so the box is refolded once at the end.
     std::size_t dropped = 0;
     for (const auto& [dist, key] : ranked) {
         if (surface_bytes_ <= target_bytes) break;
-        if (evict(key)) ++dropped;
+        if (evict_deferring_bounds(key)) ++dropped;
     }
+    refresh_surface_bounds();
     return dropped;
 }
 
@@ -239,8 +294,9 @@ std::size_t BrickCache::trim_to(std::size_t target_bytes) {
     std::size_t dropped = 0;
     for (BrickKey key : keys) {
         if (surface_bytes_ <= target_bytes) break;
-        if (evict(key)) ++dropped;
+        if (evict_deferring_bounds(key)) ++dropped;
     }
+    refresh_surface_bounds();
     return dropped;
 }
 

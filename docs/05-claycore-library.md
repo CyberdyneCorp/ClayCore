@@ -1115,7 +1115,7 @@ Runnable: [`examples/60_surviving_a_crash.py`](../examples/60_surviving_a_crash.
 
 CPU-side, latency-critical, called every Pencil event:
 
-- Ray ↔ scene raycast (analytic tape or brick cache, whichever is fresher) with layer/item hit attribution.
+- Ray ↔ scene raycast (analytic tape or brick cache, whichever is fresher) with layer/item hit attribution. The brick raycast starts from `BrickCache::surface_bounds()`, the union of the surface bricks' boxes that the cache keeps current across submit, evict and trim — it used to fold that box from `surface_bricks()` on every ray, a walk of the whole map per Pencil event that cost more than the march it preceded on a whole-model cache.
 - Surface snapping: closest-point-on-surface (gradient descent on the field), position and position+normal modes.
 - Build-plane and grid cell resolution for voxel mode; face picking on voxel grids.
 - Bounds/frustum utilities for zoom-to-selection and culling.

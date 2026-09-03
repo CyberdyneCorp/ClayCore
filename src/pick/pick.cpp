@@ -377,10 +377,11 @@ SceneHit raycast_bricks(const brick::BrickCache& cache, const math::Ray& ray,
     const float brick_span =
         static_cast<float>(cache.config().dim) * cache.config().voxel_size;
 
-    // overall bounds of surface bricks
-    math::Aabb domain;
-    for (const brick::BrickKey& key : cache.surface_bricks())
-        domain.expand(cache.brick_bounds(key));
+    // Overall bounds of the surface bricks — the cache keeps this current, so
+    // a ray no longer enumerates every surface key before its first step.
+    // Picking runs once per Pencil event, and on a whole-model cache that
+    // walk cost more than the march it preceded.
+    const math::Aabb domain = cache.surface_bounds();
     if (domain.empty()) return hit;
     float t0, t1;
     if (!math::ray_aabb(ray, domain.dilated(band), &t0, &t1)) return hit;

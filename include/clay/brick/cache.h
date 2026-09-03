@@ -179,6 +179,32 @@ class BrickCache {
     void read_colors_padded(BrickKey key, int apron, BrickColor* dst) const;
 
     std::vector<BrickKey> surface_bricks() const;
+    // The union of brick_bounds() over every Surface brick — exactly the fold
+    // `for (key : surface_bricks()) box.expand(brick_bounds(key))`, and empty
+    // when there is no surface brick. Kept incrementally, so this is a copy of
+    // twelve floats rather than an allocation and a walk of the whole map.
+    //
+    // It exists for the brick raycast, which needs the domain a ray can
+    // possibly hit BEFORE its first march step, and which runs once per Pencil
+    // event: enumerating every surface key per ray cost more than the march
+    // itself on a whole-model cache. The bound is what the raycast needs and
+    // nothing wider — the band dilation is the caller's, as cull_region's is.
+    //
+    // Maintenance is done by the MUTATIONS, never by this query. A submit that
+    // produces a Surface brick expands the box; a Surface brick leaving that
+    // state (a submit that reclassifies it uniform, an eviction) shrinks it
+    // only if it touched a face of the box, since a brick strictly inside the
+    // box cannot have been the one deciding any face. When it did touch one,
+    // the box is refolded from the map at the end of that same mutation — one
+    // fold per trim_to however many bricks it drops, one per single evict or
+    // reclassifying submit that lands on a face. A lazy refold on the next
+    // query was the obvious alternative and is the wrong one here: the cache
+    // is queried from many threads at once (clay_brick_cache_raycast_many fans
+    // rays across the worker pool against a const cache), and a const query
+    // that writes a cached field is a data race no matter how benign the
+    // value. Paying the fold on the mutating side keeps every const query a
+    // pure read, which is the property the free-threaded readers rely on.
+    math::Aabb surface_bounds() const { return surface_bounds_; }
     // The keys that store a lattice AT A LEVEL: surface_bricks() at level 0,
     // the coarse keys whose mip is built at level 1, and nothing at any other
     // level. What a whole-level mesh marches, so that "level 1 holds no bricks"
@@ -285,6 +311,17 @@ class BrickCache {
 
     void invalidate_mip_of(BrickKey key);
 
+    // surface_bounds() bookkeeping, see its comment. `added` widens the box in
+    // place; `removed` decides whether the box can still be trusted and, when
+    // it cannot, leaves it to `refresh_surface_bounds` — which every mutation
+    // that can remove a Surface brick calls once before it returns.
+    void surface_bounds_added(BrickKey key);
+    void surface_bounds_removed(BrickKey key);
+    void refresh_surface_bounds();
+    // evict() without the refold, so trim_to can drop many bricks and refold
+    // once. Same contract as evict() otherwise.
+    bool evict_deferring_bounds(BrickKey key);
+
     // Global lattice coordinates -> the stored value there. The coordinate is
     // split back into a brick key and a local index, so these answer for any
     // point in space, which is what makes the halo total.
@@ -296,6 +333,11 @@ class BrickCache {
     std::unordered_map<BrickKey, Brick, BrickKeyHash> mips_;
     std::vector<BrickKey> dirty_;
     std::size_t surface_bytes_ = 0;
+    // Union of the Surface bricks' bounds, and whether a removal has left it
+    // wider than the truth. Stale only INSIDE a mutation — every public call
+    // that can set the flag clears it by refolding before it returns.
+    math::Aabb surface_bounds_;
+    bool surface_bounds_stale_ = false;
 };
 
 }  // namespace brick
