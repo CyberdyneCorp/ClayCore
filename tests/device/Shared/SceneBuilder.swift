@@ -304,6 +304,128 @@ enum SceneBuilder {
         return (doc, layer)
     }
 
+    // -- the DETAIL-RESOLUTION fixture --------------------------------------
+    //
+    // Every SDF fixture above stamps radius-0.12 spheres into empty space and
+    // every brick case above evaluates them at voxel_size 0.05, where one
+    // brick spans 0.4 units. A dab is then SMALLER THAN A BRICK, so the bricks
+    // it dirties all straddle its surface and none of them has an interior.
+    // That is a real regime — a blockout, a coarse preview — and it is the only
+    // one the suite has ever measured.
+    //
+    // It is not the regime a sculptor spends their time in. Detailing means a
+    // small dab on a form that is already there, at a resolution fine enough to
+    // resolve the dab: the brick is small against the FORM, so most of what a
+    // dab dirties is solid clay well inside the surface, and the refill's work
+    // is dominated by bricks that store nothing.
+    //
+    // Measured on an M2 Max through the library, one dab's dirty set:
+    //
+    //   fixture                              voxel   dirty  straddling  interior
+    //   scattered r=0.12 (above)              0.05      27          21         6
+    //   scattered r=0.12 (above)              0.01     125          90        35
+    //   this form + dabs                      0.05       8           8         0
+    //   this form + dabs                      0.01      80          16        64
+    //
+    // Both axes have to move: the spread has no interior to find at any
+    // resolution, and this form has none at a resolution whose bricks are wider
+    // than its features. The bottom row is what a detail pass looks like, and
+    // until this fixture the gate had no case anywhere near it.
+
+    /// The form a detail pass is sculpted ON, rather than into empty space.
+    ///
+    /// Radius 0.5 against the dab's 0.06 and the brick's 0.08 at
+    /// `sculptVoxelSize`: the form is six bricks thick, so it HAS an interior
+    /// for the refill to walk over. It sits inside the same 1.6-unit working
+    /// volume every other fixture here uses.
+    static let sculptFormRadius: Float = 0.5
+
+    /// A detail dab: half the radius of the blockout stamp above, because a
+    /// detail pass is not a blockout and a dab the size of the form's features
+    /// would be one.
+    static let sculptDabRadius: Float = 0.06
+
+    /// Smooth, like `smoothBlendK` and for the same reason — a hard blend
+    /// contributes nothing to the chain pad, and the clay brush is smooth.
+    static let sculptBlendK: Float = 0.05
+
+    /// The resolution a detail pass runs at: a brick (8 x this) spans 0.08,
+    /// which is a sixth of the form's radius and a little over the dab's.
+    ///
+    /// NOT a free parameter. At 0.05 this fixture reports ZERO interior bricks
+    /// (the table above) and the case would measure the same regime
+    /// `sdf_stamp_bricks` already covers, more slowly. At 0.005 the whole-form
+    /// fill costs seconds of untimed setup per axis point for nothing the case
+    /// says that 0.01 does not.
+    static let sculptVoxelSize: Float = 0.01
+
+    /// Where detail dab `k` lands ON the form.
+    ///
+    /// A Fibonacci spiral over the sphere, which spreads the dabs evenly and
+    /// deterministically — the point of the axis is a form that has been worked
+    /// over, not one region hit `count` times. Consecutive dabs are far apart,
+    /// so this is a SPREAD in the sense `strokeDabPosition`'s note draws: it is
+    /// right for a case whose reset breaks the chain every iteration, and would
+    /// be wrong for one measuring the resumed refill.
+    ///
+    /// The index wraps at 4096 so a long axis cannot walk off the sequence into
+    /// a degenerate pole cluster.
+    static func sculptDabPosition(_ k: Int) -> (Float, Float, Float) {
+        let n = k % 4096
+        let t = (Float(n) + 0.5) / 4096.0
+        let z = 1.0 - 2.0 * t
+        let r = (1.0 - z * z).squareRoot()
+        let a = Float(n) * 2.399963  // the golden angle
+        return (r * cos(a) * sculptFormRadius,
+                r * sin(a) * sculptFormRadius,
+                z * sculptFormRadius)
+    }
+
+    /// One detail dab, at `sculptDabPosition(k)`, returning its node so the
+    /// case can dirty exactly the region it influences.
+    static func addSculptDabNode(_ doc: OpaquePointer, _ layer: clay_layer_id,
+                                 dab k: Int) -> clay_node_id? {
+        var params: [Float] = [sculptDabRadius]
+        guard let item = clay_item_create(Int32(CLAY_PRIM_SPHERE.rawValue), &params, 1) else {
+            return nil
+        }
+        defer { clay_item_destroy(item) }
+        let (x, y, z) = sculptDabPosition(k)
+        var position: [Float] = [x, y, z]
+        guard clay_item_set_position(item, &position) == CLAY_OK,
+              clay_item_set_blend(item, Int32(CLAY_BLEND_QUADRATIC.rawValue),
+                                  sculptBlendK) == CLAY_OK else { return nil }
+        var node: clay_node_id = 0
+        guard clay_layer_add_item(doc, layer, item, &node) == CLAY_OK else { return nil }
+        return node
+    }
+
+    /// The form, plus `dabs` detail dabs already worked into it.
+    ///
+    /// The form is the layer's FIRST item, so every dab smooth-unions onto
+    /// something — which is what gives the fixture an interior. A document of
+    /// dabs alone would be the scattered spread again, at a finer resolution.
+    static func sculptDocument(dabs count: Int) -> (OpaquePointer, clay_layer_id)? {
+        guard let doc = clay_document_create() else { return nil }
+        var layer: clay_layer_id = 0
+        guard clay_add_sdf_layer(doc, "bench", &layer) == CLAY_OK else {
+            clay_document_destroy(doc); return nil
+        }
+        var formParams: [Float] = [sculptFormRadius]
+        guard let form = clay_item_create(Int32(CLAY_PRIM_SPHERE.rawValue), &formParams, 1) else {
+            clay_document_destroy(doc); return nil
+        }
+        let formOK = clay_layer_add_item(doc, layer, form, nil) == CLAY_OK
+        clay_item_destroy(form)
+        guard formOK else { clay_document_destroy(doc); return nil }
+        for i in 0..<count {
+            guard addSculptDabNode(doc, layer, dab: i) != nil else {
+                clay_document_destroy(doc); return nil
+            }
+        }
+        return (doc, layer)
+    }
+
     @discardableResult
     static func addStamp(_ doc: OpaquePointer, _ layer: clay_layer_id, index: Int) -> Bool {
         addStampNode(doc, layer, index: index) != nil
