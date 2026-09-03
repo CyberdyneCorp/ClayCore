@@ -761,6 +761,85 @@ every correctly-sized preset from the previous header. The constant is now
 frozen at the offset of the first field appended after the preset shipped, and
 `tests/unit/test_c_brush_preset.cpp` spends a preset declared at that size.
 
+### The hierarchy, with and without sculpt layers (finish-extreme-poly-integration)
+
+The row above was the fixed mesh. The two rows 7.1 could not run were the
+HIERARCHY's — the branch that measured them was cut before
+`add-mesh-sculpt-layers` landed, so `bench_extreme_poly` carried a printed
+apology where the layered numbers belonged rather than inventing a layer stack
+of its own. Both now run (`--which=multires`, `--which=layers`).
+
+Linux desktop, `cpu-only`, 30 reps after 4 warm-up stamps, three levels.
+**Load 6.81 before the pair and 6.42 after** — the two halves ran back to back
+for exactly this reason, so the ratio between them is not a ratio across two
+sessions on a box whose load moved. Ten times the model: 97,969 against 986,049
+level vertices at the same world footprint.
+
+| Path | Footprint | 98k P50 | 986k P50 | **10x model** |
+|---|---:|---:|---:|---:|
+| multires | 1,000 | 500.50 us | 434.68 us | **0.87x** |
+| multires | 5,000 | 1,827.60 us | 1,757.35 us | **0.96x** |
+| multires | 20,000 | 6,132.94 us | 6,160.31 us | **1.00x** |
+| multires + layers | 1,000 | 699.27 us | 755.47 us | **1.08x** |
+| multires + layers | 5,000 | 2,204.89 us | 2,466.72 us | **1.12x** |
+| multires + layers | 20,000 | 6,955.78 us | 7,965.48 us | **1.15x** |
+
+**The locality property holds on the fourth path too**, which is what these rows
+existed to establish. The dirty chunks and the upload are IDENTICAL at both model
+sizes on every row — 14/15, 40/40 and 117/117 chunks, 67.1/71.9, 191.7/191.7 and
+560.8/560.8 KB — so the transport is not following the model either.
+
+**What the stamp column does not say, and the totals do.** A layered gesture
+holds the composition between `begin` and `commit`, so the per-dab detail write
+that the base path pays disappears: 2,494 us against 0.14 us at the 20k
+footprint. Per dab, stamp plus detail write at 986k vertices:
+
+| Footprint | multires | + layers | layers / base |
+|---:|---:|---:|---:|
+| 1,000 | 615.9 us | 755.5 us | 1.23x |
+| 5,000 | 2,491.1 us | 2,466.8 us | 0.99x |
+| 20,000 | 8,654.4 us | 7,965.6 us | **0.92x** |
+
+So a non-destructive pass is not a tax that grows with the brush — it is dearer
+at a small footprint, where the transaction is a larger share of a cheap dab,
+and CHEAPER at a large one, where holding the composition saves more than the
+layer costs.
+
+**Stated rather than glossed: the commit is not in these numbers.** `commit()`
+runs once per row, outside the timed loop, because a gesture is one transaction
+and charging it to each of thirty dabs would price it wrong in the other
+direction. The layered path defers work there that the base path pays per dab,
+so "cheaper at 20k" is a claim about the DAB — which is the thing with a
+deadline — and not about the gesture's total. What a host feels while dragging
+is the dab; what it feels on release is the commit, and that is a number this
+matrix does not yet carry.
+
+### Where a dab's time actually goes (7.2)
+
+`stamp*` was one bucket of eight stages until `mesh::StageTelemetry`. The
+argument for leaving it that way was that timers would perturb what was being
+measured; what resolved it is that no clock is read when the telemetry pointer
+is null, so a stamp outside a benchmark pays one predictable branch per stage.
+
+The first row it produced, hierarchy at 98k level vertices and a 20k footprint,
+mean per stamp:
+
+| Stage | us | share |
+|---|---:|---:|
+| seed | 128.9 | 1.8% |
+| query | 1,598.0 | 22.6% |
+| weight | 1,997.6 | 28.3% |
+| writeback | 867.0 | 12.3% |
+| normals | 2,354.0 | 33.3% |
+| chunkmark | 110.2 | 1.6% |
+| kernel | 5.2 | **0.1%** |
+| alpha, automask, snapshot, neighbors | < 0.1 | ~0% |
+
+**The verb is 0.1% of the dab.** Three stages — the region walk, the falloff and
+the normal refresh — are 84% of it, and all three were invisible inside one
+bucket. This is the half of 7.2 that was open, and it is worth more than the
+timing: it is what tells an optimiser which stage to look at.
+
 ### The peaks a host tunes a profile against, from a host
 
 Task 7.7's four high-water marks are readable from both bindings without owning

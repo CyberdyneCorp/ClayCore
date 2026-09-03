@@ -167,12 +167,21 @@ void resolve_frame(const WorkComposeInputs& in, SculptWorkset& r, std::size_t ke
 std::size_t compose_workset(const WorkComposeInputs& in, BrushScratchArena& arena,
                             SculptWorkset* workset) {
     SculptWorkset& r = *workset;
-    const std::size_t kept = compose_weights(in, r);
-    // Published before the automask runs, because its topology adapter reads a
-    // ring neighbour's membership through this map. Republished inside
-    // `apply_automask` only if it dropped something.
-    publish_slots(r, kept);
-    const std::size_t survived = apply_automask(in, arena, r, kept);
+    std::size_t kept = 0;
+    {
+        // The falloff, the gate and the alpha, over the whole candidate list.
+        StageTimer weight_timer(in.stages, SculptStage::Weight);
+        kept = compose_weights(in, r);
+        // Published before the automask runs, because its topology adapter reads
+        // a ring neighbour's membership through this map. Republished inside
+        // `apply_automask` only if it dropped something.
+        publish_slots(r, kept);
+    }
+    std::size_t survived = 0;
+    {
+        StageTimer automask_timer(in.stages, SculptStage::Automask);
+        survived = apply_automask(in, arena, r, kept);
+    }
     resolve_frame(in, r, survived);
     return survived;
 }

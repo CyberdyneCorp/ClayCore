@@ -224,6 +224,10 @@ class MultiresSculptor {
     // happened to be bound first rather than to the session. That is worse than
     // reporting nothing, because it looks like an answer.
     void set_telemetry(memory::PeakTelemetry* telemetry);
+    // Per-stage timing, forwarded to whichever level sculptor is bound now and
+    // to every one bound after — a rebind must not silently drop it, which is
+    // the same rule the automask and the peak telemetry already follow here.
+    void set_stage_telemetry(StageTelemetry* stages);
     memory::PeakTelemetry* telemetry() const { return telemetry_; }
 
     // The automask factors `mesh` cannot compute for itself, set once for a
@@ -257,6 +261,7 @@ class MultiresSculptor {
     AutomaskInputs automask_;
     bool automask_set_ = false;
     memory::PeakTelemetry* telemetry_ = nullptr;
+    StageTelemetry* stages_ = nullptr;
     bool defer_normals_ = false;
     // The record the level sculptor writes, which is where a level-0 gesture's
     // "before" positions come from. Reset per stamp above level 0, kept across

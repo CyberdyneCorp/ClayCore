@@ -92,6 +92,7 @@ add_library(claycore
   src/mesh/topology_ops.cpp
   src/mesh/dynamic_bvh.cpp
   src/mesh/surface_chunks.cpp
+  src/mesh/chunk_tree.cpp
   src/mesh/surface_view.cpp
   src/mesh/preflight.cpp
   src/mesh/maintenance.cpp

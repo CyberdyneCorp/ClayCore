@@ -154,6 +154,12 @@ struct WorkItemReader {
 
 // Everything `compose_workset` needs that is not already in the workset.
 struct WorkComposeInputs {
+    // Per-stage timing, shared with the sculptor that called in. Borrowed and
+    // null by default; no clock is read while it is null. It is here rather
+    // than a parameter because this struct is already how a caller says what
+    // this composition is, and a fourth argument would be a second answer to
+    // the same question.
+    StageTelemetry* stages = nullptr;
     const MeshBrushSettings* settings = nullptr;
     // The caller's freeze. May be an empty `MaskGate`, which costs nothing.
     const field::MaskGate* gate = nullptr;

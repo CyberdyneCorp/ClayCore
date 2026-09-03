@@ -547,6 +547,12 @@ class MultiresSurface {
     // lifetime and released with the cache, because a partition of a level's
     // own faces is reconstructed bit-identically from authoritative topology.
     const ChunkTable& chunks_at(std::uint32_t level);
+    // The same table, MUTABLE, for the level sculptor: it answers its spatial
+    // queries from these bounds and publishes its dirty set into them, which
+    // means refitting the bounds it moved. A host reads through `chunks_at`;
+    // this is for the one writer, and it is separate so that "who may mark a
+    // chunk dirty" stays a question with one answer.
+    ChunkTable& level_chunks(std::uint32_t level);
     // Retire one chunk from a level's dirty set, and only if it has not changed
     // since the caller read it. What lets a host drain across frames without
     // either re-uploading everything or losing a change.

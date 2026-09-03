@@ -23,6 +23,7 @@
 // curves with the same values and the same weights as `voxel::BrushFalloff`,
 // and the duplication is the module layering rather than an oversight.
 
+#include <chrono>
 #include <cstdint>
 
 #include "clay/field/flatten.h"  // FlattenMode
@@ -264,5 +265,92 @@ struct MeshBrushSettings {
 // walk would refuse to flatten across a groove — which is the one place a
 // flatten is most wanted.
 bool default_geodesic(MeshBrush verb);
+
+// -- per-stage timing (add-extreme-poly-runtime 7.2) --------------------------
+//
+// ONE stage vocabulary for the fixed mesh, the adaptive surface and the
+// hierarchy, so a stage name means the same thing whichever sculptor produced
+// it and the three can be compared row for row. A total without stages is not
+// actionable — and the stage split is what LOCATED the hierarchy's anchor scan
+// in the first place, so this is a diagnostic that has already paid for itself
+// once.
+enum class SculptStage : std::uint32_t {
+    // Resolving where the dab landed: the caller's seed, the ray tree, or the
+    // chunk descent that replaced the scan.
+    SeedResolve = 0,
+    // The region walk itself — geodesic or ball.
+    SpatialQuery,
+    // Lifting the walk's classes into a workset: positions, weights, the
+    // falloff, the alpha and the automask, which is `compose_workset`.
+    Weight,
+    Alpha,
+    Automask,
+    // The pre-stamp positions the verbs read.
+    Snapshot,
+    // The one-ring flattening the smoothing family needs.
+    NeighborBuild,
+    // The verb.
+    Kernel,
+    // Writing displacements back, and the undo record.
+    Writeback,
+    NormalRefresh,
+    // Local topology change; adaptive surfaces only.
+    Topology,
+    // Publishing the dirty chunk stream and refitting chunk bounds.
+    ChunkMark,
+    // Keeping the spatial index current.
+    BvhUpdate,
+    Count
+};
+
+inline constexpr std::size_t kSculptStageCount = static_cast<std::size_t>(SculptStage::Count);
+
+// Where a sculptor publishes its stage timings. BORROWED and null by default,
+// and NO CLOCK IS READ when it is null — a stamp is the thing being measured
+// and an unconditional pair of `steady_clock::now()` calls per stage is a cost
+// the measurement would then include.
+struct StageTelemetry {
+    std::uint64_t nanos[kSculptStageCount] = {};
+    std::uint64_t calls[kSculptStageCount] = {};
+
+    void add(SculptStage stage, std::uint64_t ns) {
+        const std::size_t i = static_cast<std::size_t>(stage);
+        if (i >= kSculptStageCount) return;
+        nanos[i] += ns;
+        ++calls[i];
+    }
+    void reset() { *this = StageTelemetry{}; }
+    static const char* name(SculptStage stage);
+};
+
+// Times one stage into `telemetry`, or does nothing at all when it is null.
+// Constructed per stage per stamp, so the null case has to be free: it is one
+// predictable branch and no clock read.
+class StageTimer {
+  public:
+    StageTimer(StageTelemetry* telemetry, SculptStage stage)
+        : telemetry_(telemetry), stage_(stage) {
+        if (telemetry_ != nullptr) start_ = std::chrono::steady_clock::now();
+    }
+    ~StageTimer() { stop(); }
+    // Ends the stage early, for a scope that continues past what it measures.
+    // Idempotent, so the destructor after an explicit stop adds nothing.
+    void stop() {
+        if (telemetry_ == nullptr) return;
+        const auto end = std::chrono::steady_clock::now();
+        telemetry_->add(stage_, static_cast<std::uint64_t>(
+                                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        end - start_)
+                                        .count()));
+        telemetry_ = nullptr;
+    }
+    StageTimer(const StageTimer&) = delete;
+    StageTimer& operator=(const StageTimer&) = delete;
+
+  private:
+    StageTelemetry* telemetry_ = nullptr;
+    SculptStage stage_ = SculptStage::Count;
+    std::chrono::steady_clock::time_point start_{};
+};
 }  // namespace mesh
 }  // namespace clay

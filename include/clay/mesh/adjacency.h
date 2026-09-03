@@ -129,6 +129,16 @@ struct WalkScratch {
     // are exactly what `priority_queue` calls internally, so the pop sequence
     // is unchanged; what changes is that the storage is reused.
     std::vector<std::pair<float, std::uint32_t>> frontier;
+    // How many class positions the walk has MEASURED to find its own seed,
+    // accumulated over every walk this scratch has served.
+    //
+    // The walk scans every class when it is given no seed, and that scan is the
+    // one term in a stamp that follows the MODEL rather than the brush. It
+    // cannot be timed on a shared box and it cannot be seen from outside any
+    // other way — the region it produces is identical either way, which is the
+    // whole point — so it is counted. A test asserts on it; nothing else reads
+    // it.
+    std::size_t seed_scan = 0;
     static constexpr float kUnreached = -1.0f;
 };
 

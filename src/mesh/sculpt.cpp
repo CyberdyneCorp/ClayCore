@@ -72,6 +72,26 @@ bool writes_color(MeshBrush verb) {
     return verb == MeshBrush::Paint || verb == MeshBrush::Smear;
 }
 
+const char* StageTelemetry::name(SculptStage stage) {
+    switch (stage) {
+        case SculptStage::SeedResolve: return "seed";
+        case SculptStage::SpatialQuery: return "query";
+        case SculptStage::Weight: return "weight";
+        case SculptStage::Alpha: return "alpha";
+        case SculptStage::Automask: return "automask";
+        case SculptStage::Snapshot: return "snapshot";
+        case SculptStage::NeighborBuild: return "neighbors";
+        case SculptStage::Kernel: return "kernel";
+        case SculptStage::Writeback: return "writeback";
+        case SculptStage::NormalRefresh: return "normals";
+        case SculptStage::Topology: return "topology";
+        case SculptStage::ChunkMark: return "chunkmark";
+        case SculptStage::BvhUpdate: return "index";
+        case SculptStage::Count: break;
+    }
+    return "?";
+}
+
 bool default_geodesic(MeshBrush verb) {
     // Flatten and Scrape mean "everything under this disc". A surface walk
     // would refuse to flatten across a groove, which is where a flatten is
@@ -286,7 +306,10 @@ const Bvh* MeshSculptor::surface_index() {
 bool MeshSculptor::classes_in_ball(kernel::cfloat3 centre, float radius,
                                    std::vector<std::uint32_t>* out) {
     const Bvh* tree = surface_index();
-    if (!tree) return false;  // no index; the caller scans
+    // The ray tree first where there is one, so a host that picks keeps exactly
+    // the path it had; the chunk tree is what a sculptor NOTHING picks against
+    // has instead of a scan, which is the multires level.
+    if (!tree) return classes_in_ball_chunked(centre, radius, out);
     out->clear();
     tree->triangles_in_ball(centre, radius, &ball_tris_);
     const float r2 = radius * radius;
@@ -328,8 +351,14 @@ std::uint32_t MeshSculptor::nearest_class(kernel::cfloat3 p) {
     // the two answers differ only where the old one was useless.
     const Bvh* tree = surface_index();
     if (!tree) {
+        // The chunk tree, when this sculptor was given a table: a descent over
+        // chunk bounds returning the same class the scan below returns, tie for
+        // tie. See `nearest_class_chunked`.
+        std::uint32_t chunked = kNoClass;
+        if (nearest_class_chunked(p, &chunked)) return chunked;
         // No ray tree to ask, so the scan this replaced is still the answer.
         const std::uint32_t classes = static_cast<std::uint32_t>(adjacency_.class_count());
+        anchor_measurements_ += classes;
         std::uint32_t best = kNoClass;
         float best_d2 = 0.0f;
         for (std::uint32_t c = 0; c < classes; ++c) {
@@ -379,6 +408,218 @@ std::uint32_t MeshSculptor::accepted_seed(const MeshBrushSettings& settings) {
     return kNoClass;
 }
 
+// -- the chunk query path -----------------------------------------------------
+
+void MeshSculptor::set_chunks(ChunkTable* chunks) {
+    if (chunks_ == chunks) return;
+    chunks_ = chunks;
+    chunk_tree_.clear();
+    chunk_tree_built_ = false;
+    chunk_of_.clear();
+}
+
+void MeshSculptor::rebuild_chunk_of() {
+    chunk_of_.assign(mesh_.positions.size(), ChunkTable::kNoChunk);
+    if (chunks_ == nullptr) return;
+    for (std::uint32_t id = 0; id < chunks_->slot_count(); ++id) {
+        if (chunks_->chunk(id) == nullptr) continue;
+        const ChunkVertexSpan span = chunks_->vertices(id);
+        for (std::size_t i = 0; i < span.size(); ++i) {
+            const std::uint32_t v = span[i];
+            // A vertex on a chunk boundary is listed by every chunk whose faces
+            // reference it. The FIRST wins, so the map is a function and a
+            // write region turns into one dirty id per vertex rather than a
+            // set — the other chunks holding it are reached anyway, because
+            // this stamp wrote their faces' corners too.
+            if (v < chunk_of_.size() && chunk_of_[v] == ChunkTable::kNoChunk) chunk_of_[v] = id;
+        }
+    }
+}
+
+const ChunkTree* MeshSculptor::chunk_index() {
+    if (chunks_ == nullptr) return nullptr;
+    if (!chunk_tree_built_) {
+        chunk_tree_.build(*chunks_);
+        chunk_tree_built_ = true;
+        rebuild_chunk_of();
+    }
+    return chunk_tree_.empty() ? nullptr : &chunk_tree_;
+}
+
+// Every class with a vertex inside the ball, from the chunk tree. EXACT and not
+// merely close: the tree admits a chunk whose BOX meets the ball, and then every
+// vertex of every admitted chunk is tested against the radius itself — so the
+// set is the one the scan produces, and the sort below makes the ORDER the same
+// too. That is what lets this replace the scan without moving a single result.
+bool MeshSculptor::classes_in_ball_chunked(kernel::cfloat3 centre, float radius,
+                                           std::vector<std::uint32_t>* out) {
+    const ChunkTree* tree = chunk_index();
+    if (tree == nullptr) return false;
+    const math::Aabb ball{centre - kernel::cf3(radius, radius, radius),
+                          centre + kernel::cf3(radius, radius, radius)};
+    tree->query(ball, &chunk_hits_);
+    out->clear();
+    const float r2 = radius * radius;
+    if (ball_mark_.size() != adjacency_.class_count())
+        ball_mark_.assign(adjacency_.class_count(), 0);
+    for (std::uint32_t id : chunk_hits_) {
+        const ChunkVertexSpan span = chunks_->vertices(id);
+        for (std::size_t i = 0; i < span.size(); ++i) {
+            const std::uint32_t v = span[i];
+            if (v >= mesh_.positions.size()) continue;
+            const std::uint32_t c = adjacency_.class_of(v);
+            if (c >= ball_mark_.size() || ball_mark_[c]) continue;
+            if (kernel::cdot2(mesh_.positions[v] - centre) > r2) continue;
+            ball_mark_[c] = 1;
+            out->push_back(c);
+        }
+    }
+    for (std::uint32_t c : *out) ball_mark_[c] = 0;
+    return true;
+}
+
+// The class nearest `p`, from the chunk tree, and EXACTLY the one the scan
+// returns — including its tie-break.
+//
+// Two-pass rather than a best-first descent with a running bound: the first
+// pass takes the nearest CHUNK's nearest vertex to get a radius, the second is
+// an ordinary ball query at that radius. It is two descents instead of one, and
+// it is the version whose answer is provably the scan's: a priority descent
+// that prunes on the bound it is still refining has to get the >= / > right at
+// every step to stay exact, and the two-pass form has nowhere to put that
+// mistake.
+bool MeshSculptor::nearest_class_chunked(kernel::cfloat3 p, std::uint32_t* out) {
+    const ChunkTree* tree = chunk_index();
+    if (tree == nullptr) return false;
+    // The starting radius comes from the NEAREST CHUNK, not from the model.
+    // Seeding it from the table's extent was the first version and it was
+    // O(model) by construction: a sixteen-times-bigger plane has a four-times
+    // wider box, so the first query admitted sixteen times the chunks and the
+    // locality gate read 2.28x instead of 1.00x. The nearest chunk is a
+    // branch-and-bound descent and its answer is a property of the surface
+    // near `p`.
+    float radius = 0.0f;
+    {
+        float chunk_distance = 0.0f;
+        const std::uint32_t near = tree->nearest_chunk(p, &chunk_distance);
+        if (near == ChunkTable::kNoChunk) return false;
+        // The nearest vertex OF that chunk bounds the answer from above: the
+        // true nearest vertex is no further than this one, so a ball of this
+        // radius certainly contains it.
+        const ChunkVertexSpan span = chunks_->vertices(near);
+        float bound = 0.0f;
+        bool have = false;
+        anchor_measurements_ += span.size();
+        for (std::size_t i = 0; i < span.size(); ++i) {
+            const std::uint32_t v = span[i];
+            if (v >= mesh_.positions.size()) continue;
+            const float d2 = kernel::cdot2(mesh_.positions[v] - p);
+            if (!have || d2 < bound) {
+                bound = d2;
+                have = true;
+            }
+        }
+        if (!have) return false;
+        radius = std::sqrt(bound);
+        // A degenerate chunk of coincident vertices can put `p` exactly on one,
+        // and a zero-radius box admits only what touches the point. The chunk's
+        // own distance is the smallest step that certainly widens it.
+        if (!(radius > 0.0f)) radius = chunk_distance > 0.0f ? chunk_distance : 1e-6f;
+    }
+    std::uint32_t best = kNoClass;
+    float best_d2 = 0.0f;
+    for (int attempt = 0; attempt < 24; ++attempt) {
+        const math::Aabb box{p - kernel::cf3(radius, radius, radius),
+                             p + kernel::cf3(radius, radius, radius)};
+        tree->query(box, &chunk_hits_);
+        best = kNoClass;
+        for (std::uint32_t id : chunk_hits_) {
+            const ChunkVertexSpan span = chunks_->vertices(id);
+            anchor_measurements_ += span.size();
+            for (std::size_t i = 0; i < span.size(); ++i) {
+                const std::uint32_t v = span[i];
+                if (v >= mesh_.positions.size()) continue;
+                const std::uint32_t c = adjacency_.class_of(v);
+                // `class_position` is the class's FIRST member, and a class is
+                // a set of coincident vertices, so any member's position is the
+                // class's. Reading `v` rather than the first member is the same
+                // number and one fewer indirection.
+                const float d2 = kernel::cdot2(mesh_.positions[v] - p);
+                // Strictly closer, or exactly as close and lower-numbered:
+                // the ascending scan keeps the first of a tie and so does this.
+                if (best == kNoClass || d2 < best_d2 || (d2 == best_d2 && c < best)) {
+                    best = c;
+                    best_d2 = d2;
+                }
+            }
+        }
+        // A vertex inside the BOX may still be further than any vertex outside
+        // it, because the box is a cube and the answer is a sphere. The result
+        // stands only once the nearest found sits within the half-extent, which
+        // is the largest sphere the box certainly covered.
+        if (best != kNoClass && std::sqrt(best_d2) <= radius) {
+            *out = best;
+            return true;
+        }
+        radius *= 2.0f;
+    }
+    // Twenty-four doublings from a fraction of the model without covering it
+    // means the table's bounds do not describe this mesh. Refusing hands the
+    // caller back to the scan, which cannot be wrong.
+    return false;
+}
+
+// Refit the bounds of the chunks this stamp wrote and mark them, so a host's
+// dirty stream is a property of the sculptor rather than of the host.
+void MeshSculptor::publish_chunks(bool normals_changed, bool attributes_changed) {
+    dirty_chunks_.clear();
+    if (chunks_ == nullptr) return;
+    // The MAP is what this needs, not the tree. Requiring the tree tied the
+    // dirty stream to the query path, so a caller that supplied a table purely
+    // for the transport — and passed its own `seed_class`, which is what a host
+    // that picks does — got an empty stream and a silent zero-byte upload.
+    if (chunk_of_.size() != mesh_.positions.size()) rebuild_chunk_of();
+    if (dirty_mark_.size() != chunks_->slot_count()) dirty_mark_.assign(chunks_->slot_count(), 0);
+    for (WorkItemId item : region_.write_region) {
+        const std::uint32_t c = item.as_weld_class();
+        if (c >= adjacency_.class_count()) continue;
+        std::size_t n = 0;
+        const std::uint32_t* members = adjacency_.members(c, &n);
+        for (std::size_t i = 0; i < n; ++i) {
+            const std::uint32_t v = members[i];
+            if (v >= chunk_of_.size()) continue;
+            const std::uint32_t id = chunk_of_[v];
+            if (id == ChunkTable::kNoChunk || id >= dirty_mark_.size() || dirty_mark_[id]) continue;
+            dirty_mark_[id] = 1;
+            dirty_chunks_.push_back(id);
+        }
+    }
+    for (std::uint32_t id : dirty_chunks_) {
+        dirty_mark_[id] = 0;
+        // The bounds are recomputed from the chunk's own vertices rather than
+        // expanded. A brush that pulls a vertex IN would leave an expanded box
+        // permanently too large, and a query's cost follows the boxes.
+        math::Aabb bounds;
+        const ChunkVertexSpan span = chunks_->vertices(id);
+        for (std::size_t i = 0; i < span.size(); ++i) {
+            const std::uint32_t v = span[i];
+            if (v < mesh_.positions.size()) bounds.expand(mesh_.positions[v]);
+        }
+        chunks_->set_bounds(id, bounds);
+        // Geometry, always: this is the write region. NEVER topology — the
+        // fixed-topology contract is that `indices` and `quads` come back
+        // byte-identical, so marking it would tell a host to re-upload an index
+        // buffer that cannot have changed.
+        chunks_->mark(id, ChunkDirty::Geometry);
+        if (normals_changed) chunks_->mark(id, ChunkDirty::Normals);
+        if (attributes_changed) chunks_->mark(id, ChunkDirty::Attributes);
+    }
+    // Only when there IS a tree: a table supplied for the transport alone has
+    // no index to keep current.
+    if (chunk_tree_built_ && !dirty_chunks_.empty())
+        chunk_tree_.refit(*chunks_, dirty_chunks_.data(), dirty_chunks_.size());
+}
+
 // The fixed mesh's answers to the two questions `compose_workset` cannot
 // answer for itself. Free functions with a `this` context rather than lambdas,
 // because `WorkItemReader` holds function pointers — see the note there on why
@@ -414,6 +655,7 @@ void MeshSculptor::build_fixed_mesh_workset(const MeshBrushSettings& settings) {
     // on the other. `kNoClass` from here means "no usable seed was given",
     // which is the state each branch below already knows how to handle.
     const std::uint32_t given_seed = accepted_seed(settings);
+    StageTimer seed_timer(stages_, SculptStage::SeedResolve);
     if (settings.geodesic) {
         // Seeded from the index when there is one. `geodesic_region` scans
         // every class for a seed when it is given none, which put an O(mesh)
@@ -426,9 +668,19 @@ void MeshSculptor::build_fixed_mesh_workset(const MeshBrushSettings& settings) {
         // extra branch per iteration in a differently-shaped copy of the same
         // loop. Two copies of a hot scan is a defect whichever is faster.
         std::uint32_t seed = given_seed;
-        if (seed >= adjacency_.class_count() && surface_index() != nullptr)
+        // Resolved HERE only when there is an index to resolve it with — a ray
+        // tree, or the chunk tree a multires level supplies. With neither, the
+        // seed is deliberately left unset and `geodesic_region` finds it by the
+        // scan it already contains: doing that scan here instead measured
+        // 1.30 -> 1.98 ms at a million classes, because it is one extra branch
+        // per iteration in a differently-shaped copy of the same loop. Two
+        // copies of a hot scan is a defect whichever is faster.
+        if (seed >= adjacency_.class_count() &&
+            (surface_index() != nullptr || chunk_index() != nullptr))
             seed = nearest_class(settings.center);
         automask_seed_ = seed < adjacency_.class_count() ? seed : kNoClass;
+        seed_timer.stop();
+        StageTimer query_timer(stages_, SculptStage::SpatialQuery);
         geodesic_region(mesh_, adjacency_, settings.center, settings.radius, walk_, &candidates_,
                         &distance_, seed);
     } else {
@@ -444,6 +696,8 @@ void MeshSculptor::build_fixed_mesh_workset(const MeshBrushSettings& settings) {
             automask_seed_ =
                 given_seed < adjacency_.class_count() ? given_seed : nearest_class(settings.center);
         }
+        seed_timer.stop();
+        StageTimer query_timer(stages_, SculptStage::SpatialQuery);
         if (classes_in_ball(settings.center, settings.radius, &candidates_)) {
             // SORTED, so the region is the same list whether it came from the
             // tree or from the scan below — and so it does not depend on the
@@ -487,6 +741,8 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
     // centre. Good enough, and cheaper than a second pass: the stamp is a disc
     // on a surface, and its normal barely varies across one brush radius.
     AlphaFrame alpha_frame;
+    {
+        StageTimer alpha_timer(stages_, SculptStage::Alpha);
     if (settings.has_alpha()) {
         // The fallback is resolved LAZILY, only when the caller supplied no
         // direction: it costs a nearest-class query, and a caller that named a
@@ -497,6 +753,7 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
             if (near != kNoClass) fallback = class_normal(mesh_, adjacency_, near);
         }
         alpha_frame = alpha_frame_for(settings, fallback);
+    }
     }
 
     const MeshWorkItemTopology topology(mesh_, adjacency_, region_);
@@ -520,6 +777,7 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
     in.reader.normal_at = &MeshSculptor::normal_of_item;
     in.reader.context = this;
 
+    in.stages = stages_;
     compose_workset(in, arena_, &region_);
 
     // The workset's peak, published once the region is FINAL -- after the
@@ -568,8 +826,12 @@ std::size_t MeshSculptor::stamp(MeshBrush verb, const MeshBrushSettings& setting
     if (plan.needs_neighbors)
         build_neighbors(plan.needs_neighbor_normals, plan.needs_neighbor_colors);
 
+    StageTimer snapshot_timer(stages_, SculptStage::Snapshot);
     const SculptSnapshot snapshot = snapshot_of();
+    snapshot_timer.stop();
+    StageTimer neighbor_timer(stages_, SculptStage::NeighborBuild);
     const SculptNeighbors neighbors = plan.needs_neighbors ? neighbors_of() : SculptNeighbors{};
+    neighbor_timer.stop();
 
     // The colour verbs take a different path end to end: they fill a colour
     // target rather than a displacement, and they write through write_colors.
@@ -581,6 +843,7 @@ std::size_t MeshSculptor::stamp(MeshBrush verb, const MeshBrushSettings& setting
     displacement_.assign(region_.size(), kernel::cf3(0, 0, 0));
     kernel::cfloat3* out = displacement_.data();
 
+    StageTimer kernel_timer(stages_, SculptStage::Kernel);
     switch (verb) {
         case MeshBrush::Grab:
         case MeshBrush::Snakehook:
@@ -634,6 +897,7 @@ std::size_t MeshSculptor::stamp(MeshBrush verb, const MeshBrushSettings& setting
             // left to a default so that adding a verb still fails the switch.
             break;
     }
+    kernel_timer.stop();
     return write(record);
 }
 
@@ -773,10 +1037,16 @@ std::size_t MeshSculptor::write_colors(VertexDeltas* record) {
             if (record) record->sync_after(members[k], mesh_);
         }
     }
+    // Attributes only: a colour verb comes back with `positions` and `normals`
+    // byte-identical, which is the contract `paint` and `smear` are the two
+    // verbs holding, so telling a host to re-upload geometry here would be
+    // telling it to re-upload what it already has.
+    if (painted != 0) publish_chunks(/*normals_changed=*/false, /*attributes_changed=*/true);
     return painted;
 }
 
 std::size_t MeshSculptor::write(VertexDeltas* record) {
+    StageTimer write_timer(stages_, SculptStage::Writeback);
     // Retire the marks the LAST write set, which `pending_normals_` names
     // exactly, rather than clearing an array the size of the mesh. Same rule as
     // `gather`'s slot reset above.
@@ -826,12 +1096,22 @@ std::size_t MeshSculptor::write(VertexDeltas* record) {
             }
     }
     if (moved == 0) return 0;
-    if (defer_normals_) {
-        deferred_normals_.insert(deferred_normals_.end(), pending_normals_.begin(),
-                                 pending_normals_.end());
-    } else {
-        recompute_normals(pending_normals_, record);
+    write_timer.stop();
+    {
+        StageTimer normal_timer(stages_, SculptStage::NormalRefresh);
+        if (defer_normals_) {
+            deferred_normals_.insert(deferred_normals_.end(), pending_normals_.begin(),
+                                     pending_normals_.end());
+        } else {
+            recompute_normals(pending_normals_, record);
+        }
     }
+    StageTimer chunk_timer(stages_, SculptStage::ChunkMark);
+    // The dirty stream, computed here rather than by every host. Normals are
+    // marked only where they were actually recomputed: a DEFERRED flush marks
+    // them when it runs, which is what makes "positions now, normals at the end
+    // of the stroke" two uploads rather than one wrong one.
+    publish_chunks(/*normals_changed=*/!defer_normals_, /*attributes_changed=*/false);
     return moved;
 }
 
@@ -841,6 +1121,35 @@ void MeshSculptor::flush_normals(VertexDeltas* record) {
     deferred_normals_.erase(std::unique(deferred_normals_.begin(), deferred_normals_.end()),
                             deferred_normals_.end());
     recompute_normals(deferred_normals_, record);
+    // The chunks the flush rewrote normals in, which is the union over every
+    // deferred stamp rather than the last one's write region. Marked through
+    // the same path a stamp uses, so a host draining the stream cannot tell a
+    // deferred flush from an immediate one except by when it arrived.
+    if (chunks_ != nullptr) {
+        if (chunk_of_.size() != mesh_.positions.size()) rebuild_chunk_of();
+        if (dirty_mark_.size() != chunks_->slot_count())
+            dirty_mark_.assign(chunks_->slot_count(), 0);
+        std::vector<std::uint32_t>& hit = dirty_chunks_;
+        hit.clear();
+        for (std::uint32_t c : deferred_normals_) {
+            if (c >= adjacency_.class_count()) continue;
+            std::size_t n = 0;
+            const std::uint32_t* members = adjacency_.members(c, &n);
+            for (std::size_t i = 0; i < n; ++i) {
+                const std::uint32_t v = members[i];
+                if (v >= chunk_of_.size()) continue;
+                const std::uint32_t id = chunk_of_[v];
+                if (id == ChunkTable::kNoChunk || id >= dirty_mark_.size() || dirty_mark_[id])
+                    continue;
+                dirty_mark_[id] = 1;
+                hit.push_back(id);
+            }
+        }
+        for (std::uint32_t id : hit) {
+            dirty_mark_[id] = 0;
+            chunks_->mark(id, ChunkDirty::Normals);
+        }
+    }
     deferred_normals_.clear();
 }
 

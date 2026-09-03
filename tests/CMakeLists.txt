@@ -65,6 +65,7 @@ add_executable(clay_unit_tests
   unit/test_scratch_arena.cpp
   unit/test_memory_profile.cpp
   unit/test_extreme_poly_scaling.cpp
+  unit/test_chunk_query_locality.cpp
   unit/test_extreme_poly_exactness.cpp
   unit/test_mesh_project.cpp
   unit/test_multires_history.cpp

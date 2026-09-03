@@ -43,6 +43,7 @@
 
 #include "clay/field/flatten.h"  // FlattenMode
 #include "clay/field/relax.h"    // MaskGate
+#include "clay/mesh/chunk_tree.h"
 #include "clay/mesh/adjacency.h"
 #include "clay/mesh/brush_arena.h"
 #include "clay/mesh/deform.h"
@@ -317,6 +318,63 @@ class MeshSculptor {
     void set_telemetry(memory::PeakTelemetry* telemetry) { telemetry_ = telemetry; }
     memory::PeakTelemetry* telemetry() const { return telemetry_; }
 
+    // -- per-stage timing (add-extreme-poly-runtime 7.2) ---------------------
+    // Where this sculptor publishes how long each stage of a stamp took.
+    // Borrowed, null by default, and NO CLOCK IS READ while it is null: a stamp
+    // is the thing being measured, so an unconditional pair of clock reads per
+    // stage would be a cost the measurement then included.
+    //
+    // The vocabulary is `SculptStage` in `sculpt_common.h`, shared with the
+    // adaptive and hierarchy paths so a stage name means one thing across the
+    // three and a row from each can be compared.
+    void set_stage_telemetry(StageTelemetry* stages) { stages_ = stages; }
+    StageTelemetry* stage_telemetry() const { return stages_; }
+
+    // -- the chunk query path ------------------------------------------------
+    // Borrow the `ChunkTable` describing this sculptor's surface, which turns
+    // the brush's two spatial questions — everything in this ball, and the
+    // class nearest this point — into a DESCENT over chunk bounds instead of a
+    // scan over every class.
+    //
+    // WHY THIS EXISTS. `surface_index()` deliberately never builds a ray tree
+    // (689 ms against 1.24 ms saved per stamp), so a sculptor nothing has
+    // picked against has no index at all and both questions fall back to a
+    // scan. On a fixed mesh a host picks, so the tree is there for free. On a
+    // MULTIRES LEVEL nothing picks, nothing builds one, and every unseeded
+    // stamp was proportional to the level — measured at 0.49 ms for 100k level
+    // vertices against 1.58 ms for 1M at the same 1k footprint.
+    //
+    // A chunk table is the structure that was already there, per level, with
+    // bounds and vertex lists. This makes it answer the query.
+    //
+    // BORROWED, NEVER OWNED, and null by default: the adaptive surface's table
+    // belongs to its `DynamicBvh` and a level's to the hierarchy, so a table
+    // owned here would be a second ownership rule for one concept. A sculptor
+    // given none behaves exactly as it does today, which is what leaves the
+    // fixed-mesh goldens untouched.
+    //
+    // The table must describe THIS sculptor's mesh: chunk vertex lists are
+    // indices into `mesh().positions`. Passing one that does not is a defect
+    // this cannot detect.
+    void set_chunks(ChunkTable* chunks);
+    ChunkTable* chunks() const { return chunks_; }
+
+    // The chunk ids this sculptor's last stamp wrote to, for a host draining a
+    // dirty stream it did not have to compute itself.
+    const std::vector<std::uint32_t>& dirty_chunks() const { return dirty_chunks_; }
+
+    // How many class positions this sculptor has MEASURED while resolving where
+    // a stamp landed — the chunk descent's candidates, the scan's whole class
+    // space, and the walk's own internal scan when it had to find its own seed.
+    //
+    // It exists because the property this is about cannot be timed on a shared
+    // box and cannot be counted any other way: the region a stamp produces is
+    // identical whether it was found by a descent or by a scan, which is the
+    // whole claim, so "a dab costs what it touches" is only observable as this
+    // number ceasing to follow the model. A test asserts on it; a host has no
+    // use for it.
+    std::size_t anchor_measurements() const { return anchor_measurements_ + walk_.seed_scan; }
+
     // -- picking -------------------------------------------------------------
     // Built lazily on the first query. Positions move under it, and what a
     // stale tree reports is worth stating precisely, because the obvious guess
@@ -365,6 +423,17 @@ class MeshSculptor {
     // `VertexDeltas::revert` and `::apply` take the `Mesh&` directly, so
     // nothing tells the sculptor those vertices moved. Call `refresh_bvh` after
     // an undo or a redo.
+    // The chunk tree, built or refit as the table requires. Null when this
+    // sculptor was given no table.
+    const ChunkTree* chunk_index();
+    // `classes_in_ball` and `nearest_class`, answered from the chunk tree.
+    // Both return false when there is no table, and the caller falls back.
+    bool classes_in_ball_chunked(kernel::cfloat3 centre, float radius,
+                                 std::vector<std::uint32_t>* out);
+    bool nearest_class_chunked(kernel::cfloat3 p, std::uint32_t* out);
+    // Refit the bounds of the chunks the write region touched, and mark them.
+    void publish_chunks(bool normals_changed, bool attributes_changed);
+    void rebuild_chunk_of();
     void refit_bvh();
 
     // What the per-stamp scratch arena owns and how far it has had to grow.
@@ -453,6 +522,7 @@ class MeshSculptor {
     std::uint64_t seed_revision_ = 0;
     std::size_t stale_seeds_rejected_ = 0;
     memory::PeakTelemetry* telemetry_ = nullptr;
+    StageTelemetry* stages_ = nullptr;
     // The multi-pass kernels' buffers, reset rather than freed between stamps.
     SculptScratch scratch_;
     // The compiled plan and the three inputs it depends on. Not the whole
@@ -488,6 +558,22 @@ class MeshSculptor {
     // Set by the whole-mesh operations, which have no small dirty set to name.
     bool bvh_all_dirty_ = false;
     std::unique_ptr<Bvh> bvh_;
+    // The borrowed chunk table and the tree over it. The tree is OURS — it is
+    // derived from the table's bounds and several sculptors over one table
+    // would each want their own refit state — and is built on the first query
+    // that needs it, so a sculptor handed a table it never queries builds
+    // nothing.
+    std::size_t anchor_measurements_ = 0;
+    ChunkTable* chunks_ = nullptr;
+    ChunkTree chunk_tree_;
+    bool chunk_tree_built_ = false;
+    // Scratch for the chunk query and the write-back, kept so a stamp does not
+    // allocate. `chunk_of_` maps a mesh vertex to the chunk holding it, which
+    // is what turns a write region into a dirty set without a search.
+    std::vector<std::uint32_t> chunk_hits_;
+    std::vector<std::uint32_t> chunk_of_;
+    std::vector<std::uint32_t> dirty_chunks_;
+    std::vector<char> dirty_mark_;
     bool defer_normals_ = false;
 };
 
