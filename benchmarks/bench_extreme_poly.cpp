@@ -24,16 +24,21 @@
 // hides the dab that dropped the frame, and a dropped frame is the only thing
 // an artist can feel.
 //
-// WHAT THE STAGE BREAKDOWN HONESTLY IS. Requirement 7.2 names fourteen stages,
-// and this program times the ones that are separable FROM OUTSIDE the library:
-// seed, chunk query, index update, remesh, detail write and readback are each
-// their own call, and the eight that happen inside `MeshSculptor::stamp` —
-// gather, geodesic, snapshot, weight, alpha, automask, kernel and normals — are
-// reported as ONE bucket called `stamp`, because the library has no per-stage
-// timers and adding them to the stamp path would perturb the thing being
-// measured and would touch a file two concurrent branches are also editing.
-// The bucket is named rather than silently folded into a total, so a reader
-// knows which half of 7.2 this artefact answers.
+// WHAT THE STAGE BREAKDOWN IS. Requirement 7.2 names fourteen stages. This
+// program times the ones separable FROM OUTSIDE the library — seed, chunk
+// query, index update, remesh, detail write and readback, each its own call —
+// and the ones INSIDE `MeshSculptor::stamp` are now timed by the library and
+// printed under `stage breakdown`: seed, query, weight, alpha, automask,
+// snapshot, neighbors, kernel, writeback, normals and chunkmark.
+//
+// They were one bucket called `stamp*` until `mesh::StageTelemetry` existed,
+// on the argument that adding timers would perturb what was being measured.
+// What resolved that is that NO CLOCK IS READ when the telemetry pointer is
+// null, so a stamp outside this program pays one predictable branch per stage
+// and nothing else. The two views are kept side by side rather than one
+// replacing the other: the wall-clock rows are a distribution and the stage
+// rows are a mean, and a mean that disagreed with the p50 above it is itself
+// worth seeing.
 //
 // NOT A GATED BENCHMARK. The gate at sizes CI can afford is
 // `tests/unit/test_extreme_poly_scaling.cpp`; this is the evidence behind it.
@@ -152,6 +157,26 @@ cfloat3 centre_for(int rep) {
     return kCentres[static_cast<std::size_t>(rep) % (sizeof(kCentres) / sizeof(kCentres[0]))];
 }
 
+// The library's own stage breakdown, as a MEAN per stamp: the accumulators are
+// sums over the measured reps, so there is no distribution here to quote a p95
+// from. The wall-clock percentiles above stay the headline; this says where the
+// stamp's own time went.
+void print_stages(const mesh::StageTelemetry& stages, double reps) {
+    if (reps <= 0.0) return;
+    double total = 0.0;
+    for (std::size_t i = 0; i < mesh::kSculptStageCount; ++i)
+        total += static_cast<double>(stages.nanos[i]);
+    if (total <= 0.0) return;
+    std::printf("        stage breakdown (mean us/stamp, %.0f reps):\n", reps);
+    for (std::size_t i = 0; i < mesh::kSculptStageCount; ++i) {
+        if (stages.calls[i] == 0) continue;
+        const double us = static_cast<double>(stages.nanos[i]) / reps / 1000.0;
+        std::printf("          %-10s %8.3f  (%4.1f%%)\n",
+                    mesh::StageTelemetry::name(static_cast<mesh::SculptStage>(i)), us,
+                    100.0 * static_cast<double>(stages.nanos[i]) / total);
+    }
+}
+
 void print_stage(const char* name, const Stats& s) {
     if (s.n == 0) return;
     std::printf("      %-14s p50 %9.2f  p95 %9.2f  p99 %9.2f  max %9.2f  mean %9.2f us\n", name,
@@ -201,12 +226,24 @@ void run_fixed(std::size_t vertices, const std::vector<std::size_t>& footprints,
         brush.geodesic = mesh::default_geodesic(mesh::MeshBrush::Draw);
 
         std::vector<double> seed, query, stamp, index, readback;
+        // 7.2: the eight stages inside the stamp, timed by the library rather
+        // than bucketed by this program. `set_stage_telemetry` is what closed
+        // the `stamp*` bucket below.
+        mesh::StageTelemetry stages;
+        sculptor.set_stage_telemetry(&stages);
+        // The sculptor publishes the dirty stream this row's readback measures.
+        // Without it the marking that used to happen in the loop below is gone
+        // and the upload column reads zero — which is how this was caught.
+        sculptor.set_chunks(&table);
         std::size_t reached = 0, upload = 0, workset = 0;
         const mesh::SurfaceView view = mesh::SurfaceView::over_mesh(mesh, table);
         std::vector<std::uint32_t> admitted;
 
         for (int rep = -4; rep < reps; ++rep) {  // negatives are the warm-up
             brush.center = centre_for(rep < 0 ? 0 : rep);
+            // Reset after the warm-up, so the stage means are over the measured
+            // reps and not diluted by four cold ones.
+            if (rep == 0) stages.reset();
 
             const double t0 = now_micros();
             const std::uint32_t anchor = sculptor.nearest_class(brush.center);
@@ -227,7 +264,11 @@ void run_fixed(std::size_t vertices, const std::vector<std::size_t>& footprints,
             sculptor.stamp(mesh::MeshBrush::Draw, brush);
             const double t3 = now_micros();
 
-            for (std::uint32_t id : admitted) table.mark(id, mesh::ChunkDirty::Geometry);
+            // The sculptor marks its own chunks now. This loop used to do it
+            // from OUTSIDE, over the chunks the QUERY admitted rather than the
+            // ones the stamp WROTE — host-side logic every host had to copy,
+            // and a superset: the query's ball reaches chunks a falloff and an
+            // automask then decline to move.
             sculptor.refit_bvh();
             const double t4 = now_micros();
 
@@ -261,10 +302,11 @@ void run_fixed(std::size_t vertices, const std::vector<std::size_t>& footprints,
                     static_cast<double>(upload) / 1024.0);
         print_stage("seed", summarise(seed));
         print_stage("chunk query", summarise(query));
-        print_stage("stamp*", summarise(stamp));
+        print_stage("stamp", summarise(stamp));
         print_stage("index update", summarise(index));
         print_stage("readback", summarise(readback));
         print_stage("TOTAL", summarise(total));
+        print_stages(stages, static_cast<double>(stamp.size()));
     }
 }
 
@@ -496,12 +538,12 @@ int main(int argc, char** argv) {
     const std::string& which = options.which;
 
     std::printf("# bench_extreme_poly: the 7.1 matrix with 7.2's separable stages\n");
+    std::printf("# `stage breakdown` is the library's own per-stage timing inside\n");
+    std::printf("#   MeshSculptor::stamp (mesh::StageTelemetry). No clock is read when the\n");
+    std::printf("#   telemetry pointer is null, which is what let 7.2's remaining stages be\n");
+    std::printf("#   timed without perturbing a stamp outside this program.\n");
     std::printf("# spacing %.4f, %d repetitions per cell after 4 warm-up stamps\n",
                 static_cast<double>(kSpacing), reps);
-    std::printf("# `stamp*` is the eight stages inside MeshSculptor::stamp as ONE bucket:\n");
-    std::printf("#   gather, geodesic, snapshot, weight, alpha, automask, kernel, normals.\n");
-    std::printf("#   The library has no per-stage timers and adding them would perturb what\n");
-    std::printf("#   is being measured; that half of 7.2 is not answered by this artefact.\n\n");
 
     for (std::size_t size : sizes) {
         std::printf("== %zu vertices ==============================================\n", size);

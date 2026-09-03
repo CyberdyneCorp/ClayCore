@@ -72,6 +72,26 @@ bool writes_color(MeshBrush verb) {
     return verb == MeshBrush::Paint || verb == MeshBrush::Smear;
 }
 
+const char* StageTelemetry::name(SculptStage stage) {
+    switch (stage) {
+        case SculptStage::SeedResolve: return "seed";
+        case SculptStage::SpatialQuery: return "query";
+        case SculptStage::Weight: return "weight";
+        case SculptStage::Alpha: return "alpha";
+        case SculptStage::Automask: return "automask";
+        case SculptStage::Snapshot: return "snapshot";
+        case SculptStage::NeighborBuild: return "neighbors";
+        case SculptStage::Kernel: return "kernel";
+        case SculptStage::Writeback: return "writeback";
+        case SculptStage::NormalRefresh: return "normals";
+        case SculptStage::Topology: return "topology";
+        case SculptStage::ChunkMark: return "chunkmark";
+        case SculptStage::BvhUpdate: return "index";
+        case SculptStage::Count: break;
+    }
+    return "?";
+}
+
 bool default_geodesic(MeshBrush verb) {
     // Flatten and Scrape mean "everything under this disc". A surface walk
     // would refuse to flatten across a groove, which is where a flatten is
@@ -553,7 +573,11 @@ bool MeshSculptor::nearest_class_chunked(kernel::cfloat3 p, std::uint32_t* out) 
 // dirty stream is a property of the sculptor rather than of the host.
 void MeshSculptor::publish_chunks(bool normals_changed, bool attributes_changed) {
     dirty_chunks_.clear();
-    if (chunks_ == nullptr || !chunk_tree_built_) return;
+    if (chunks_ == nullptr) return;
+    // The MAP is what this needs, not the tree. Requiring the tree tied the
+    // dirty stream to the query path, so a caller that supplied a table purely
+    // for the transport — and passed its own `seed_class`, which is what a host
+    // that picks does — got an empty stream and a silent zero-byte upload.
     if (chunk_of_.size() != mesh_.positions.size()) rebuild_chunk_of();
     if (dirty_mark_.size() != chunks_->slot_count()) dirty_mark_.assign(chunks_->slot_count(), 0);
     for (WorkItemId item : region_.write_region) {
@@ -590,7 +614,9 @@ void MeshSculptor::publish_chunks(bool normals_changed, bool attributes_changed)
         if (normals_changed) chunks_->mark(id, ChunkDirty::Normals);
         if (attributes_changed) chunks_->mark(id, ChunkDirty::Attributes);
     }
-    if (!dirty_chunks_.empty())
+    // Only when there IS a tree: a table supplied for the transport alone has
+    // no index to keep current.
+    if (chunk_tree_built_ && !dirty_chunks_.empty())
         chunk_tree_.refit(*chunks_, dirty_chunks_.data(), dirty_chunks_.size());
 }
 
@@ -629,6 +655,7 @@ void MeshSculptor::build_fixed_mesh_workset(const MeshBrushSettings& settings) {
     // on the other. `kNoClass` from here means "no usable seed was given",
     // which is the state each branch below already knows how to handle.
     const std::uint32_t given_seed = accepted_seed(settings);
+    StageTimer seed_timer(stages_, SculptStage::SeedResolve);
     if (settings.geodesic) {
         // Seeded from the index when there is one. `geodesic_region` scans
         // every class for a seed when it is given none, which put an O(mesh)
@@ -652,6 +679,8 @@ void MeshSculptor::build_fixed_mesh_workset(const MeshBrushSettings& settings) {
             (surface_index() != nullptr || chunk_index() != nullptr))
             seed = nearest_class(settings.center);
         automask_seed_ = seed < adjacency_.class_count() ? seed : kNoClass;
+        seed_timer.stop();
+        StageTimer query_timer(stages_, SculptStage::SpatialQuery);
         geodesic_region(mesh_, adjacency_, settings.center, settings.radius, walk_, &candidates_,
                         &distance_, seed);
     } else {
@@ -667,6 +696,8 @@ void MeshSculptor::build_fixed_mesh_workset(const MeshBrushSettings& settings) {
             automask_seed_ =
                 given_seed < adjacency_.class_count() ? given_seed : nearest_class(settings.center);
         }
+        seed_timer.stop();
+        StageTimer query_timer(stages_, SculptStage::SpatialQuery);
         if (classes_in_ball(settings.center, settings.radius, &candidates_)) {
             // SORTED, so the region is the same list whether it came from the
             // tree or from the scan below — and so it does not depend on the
@@ -710,6 +741,8 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
     // centre. Good enough, and cheaper than a second pass: the stamp is a disc
     // on a surface, and its normal barely varies across one brush radius.
     AlphaFrame alpha_frame;
+    {
+        StageTimer alpha_timer(stages_, SculptStage::Alpha);
     if (settings.has_alpha()) {
         // The fallback is resolved LAZILY, only when the caller supplied no
         // direction: it costs a nearest-class query, and a caller that named a
@@ -720,6 +753,7 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
             if (near != kNoClass) fallback = class_normal(mesh_, adjacency_, near);
         }
         alpha_frame = alpha_frame_for(settings, fallback);
+    }
     }
 
     const MeshWorkItemTopology topology(mesh_, adjacency_, region_);
@@ -743,6 +777,7 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
     in.reader.normal_at = &MeshSculptor::normal_of_item;
     in.reader.context = this;
 
+    in.stages = stages_;
     compose_workset(in, arena_, &region_);
 
     // The workset's peak, published once the region is FINAL -- after the
@@ -791,8 +826,12 @@ std::size_t MeshSculptor::stamp(MeshBrush verb, const MeshBrushSettings& setting
     if (plan.needs_neighbors)
         build_neighbors(plan.needs_neighbor_normals, plan.needs_neighbor_colors);
 
+    StageTimer snapshot_timer(stages_, SculptStage::Snapshot);
     const SculptSnapshot snapshot = snapshot_of();
+    snapshot_timer.stop();
+    StageTimer neighbor_timer(stages_, SculptStage::NeighborBuild);
     const SculptNeighbors neighbors = plan.needs_neighbors ? neighbors_of() : SculptNeighbors{};
+    neighbor_timer.stop();
 
     // The colour verbs take a different path end to end: they fill a colour
     // target rather than a displacement, and they write through write_colors.
@@ -804,6 +843,7 @@ std::size_t MeshSculptor::stamp(MeshBrush verb, const MeshBrushSettings& setting
     displacement_.assign(region_.size(), kernel::cf3(0, 0, 0));
     kernel::cfloat3* out = displacement_.data();
 
+    StageTimer kernel_timer(stages_, SculptStage::Kernel);
     switch (verb) {
         case MeshBrush::Grab:
         case MeshBrush::Snakehook:
@@ -857,6 +897,7 @@ std::size_t MeshSculptor::stamp(MeshBrush verb, const MeshBrushSettings& setting
             // left to a default so that adding a verb still fails the switch.
             break;
     }
+    kernel_timer.stop();
     return write(record);
 }
 
@@ -1005,6 +1046,7 @@ std::size_t MeshSculptor::write_colors(VertexDeltas* record) {
 }
 
 std::size_t MeshSculptor::write(VertexDeltas* record) {
+    StageTimer write_timer(stages_, SculptStage::Writeback);
     // Retire the marks the LAST write set, which `pending_normals_` names
     // exactly, rather than clearing an array the size of the mesh. Same rule as
     // `gather`'s slot reset above.
@@ -1054,12 +1096,17 @@ std::size_t MeshSculptor::write(VertexDeltas* record) {
             }
     }
     if (moved == 0) return 0;
-    if (defer_normals_) {
-        deferred_normals_.insert(deferred_normals_.end(), pending_normals_.begin(),
-                                 pending_normals_.end());
-    } else {
-        recompute_normals(pending_normals_, record);
+    write_timer.stop();
+    {
+        StageTimer normal_timer(stages_, SculptStage::NormalRefresh);
+        if (defer_normals_) {
+            deferred_normals_.insert(deferred_normals_.end(), pending_normals_.begin(),
+                                     pending_normals_.end());
+        } else {
+            recompute_normals(pending_normals_, record);
+        }
     }
+    StageTimer chunk_timer(stages_, SculptStage::ChunkMark);
     // The dirty stream, computed here rather than by every host. Normals are
     // marked only where they were actually recomputed: a DEFERRED flush marks
     // them when it runs, which is what makes "positions now, normals at the end
@@ -1078,7 +1125,7 @@ void MeshSculptor::flush_normals(VertexDeltas* record) {
     // deferred stamp rather than the last one's write region. Marked through
     // the same path a stamp uses, so a host draining the stream cannot tell a
     // deferred flush from an immediate one except by when it arrived.
-    if (chunks_ != nullptr && chunk_tree_built_) {
+    if (chunks_ != nullptr) {
         if (chunk_of_.size() != mesh_.positions.size()) rebuild_chunk_of();
         if (dirty_mark_.size() != chunks_->slot_count())
             dirty_mark_.assign(chunks_->slot_count(), 0);

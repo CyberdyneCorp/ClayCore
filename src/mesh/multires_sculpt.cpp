@@ -122,6 +122,11 @@ void MultiresSculptor::set_defer_normals(bool defer) {
     if (sculptor_) sculptor_->set_defer_normals(defer);
 }
 
+void MultiresSculptor::set_stage_telemetry(StageTelemetry* stages) {
+    stages_ = stages;
+    if (sculptor_) sculptor_->set_stage_telemetry(stages_);
+}
+
 void MultiresSculptor::set_telemetry(memory::PeakTelemetry* telemetry) {
     telemetry_ = telemetry;
     if (sculptor_) sculptor_->set_telemetry(telemetry_);
@@ -165,6 +170,7 @@ void MultiresSculptor::bind() {
     if (automask_set_) sculptor_->set_automask_inputs(automask_);
     sculptor_->set_defer_normals(defer_normals_);
     sculptor_->set_telemetry(telemetry_);
+    sculptor_->set_stage_telemetry(stages_);
     // THE HIERARCHY'S SPATIAL INDEX. Nothing picks against a level, so nothing
     // builds a ray tree for one, and without this every unseeded stamp resolves
     // its anchor by scanning the level — 0.49 ms at 100k level vertices against

@@ -37,12 +37,16 @@
 
 ## 3. Per-stage telemetry (closes 7.2)
 
-- [ ] 3.1 One `SculptStage` enum in `sculpt_common.h`, shared by the fixed,
+- [x] 3.1 One `SculptStage` enum in `sculpt_common.h`, shared by the fixed,
       adaptive and hierarchy paths
-- [ ] 3.2 The eight stages inside `MeshSculptor::stamp`: gather, geodesic,
+- [x] 3.2 The stages inside `MeshSculptor::stamp`: gather, geodesic,
       snapshot, weight, alpha, automask, kernel, normals
-- [ ] 3.3 Null by default and NO clock read when null
-- [ ] 3.4 `bench_extreme_poly` prints the eight instead of the `stamp*` bucket
+- [x] 3.3 Null by default and NO clock read when null
+- [x] 3.4 `bench_extreme_poly` prints the eight instead of the `stamp*` bucket.
+      DONE, and the first row it produced was already actionable: at 100k
+      vertices and a 20k footprint the stamp divides into query 27.0%, weight
+      33.5% and normals 33.0%, with kernel at 0.1% — so the verb is not where a
+      dab's time goes and three stages that were one bucket are now three
 
 ## 4. Chunk marking
 
@@ -51,8 +55,13 @@
 - [x] 4.2 NEVER topology — the fixed-topology contract
 - [x] 4.3 The gate: a stamp's dirty stream reconstructs the same surface as
       `to_mesh()`, with the marking done by the sculptor rather than the test
-- [ ] 4.4 `bench_extreme_poly.cpp:230` and `test_extreme_poly_scaling.cpp` stop
-      marking from outside
+- [x] 4.4 `bench_extreme_poly.cpp` stops marking from outside.
+      DONE, and it found the defect: `publish_chunks` required the chunk TREE
+      to have been built, which tied the dirty stream to the query path — so a
+      caller supplying a table purely for transport, and passing its own
+      `seed_class` as a host that picks does, got an empty stream and a silent
+      zero-byte upload. The map is what the stream needs, not the tree. Caught
+      by the benchmark's upload column reading 0.0 KB
 
 ## 5. The benchmark rows (closes 7.1's layered rows)
 

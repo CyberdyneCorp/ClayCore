@@ -318,6 +318,18 @@ class MeshSculptor {
     void set_telemetry(memory::PeakTelemetry* telemetry) { telemetry_ = telemetry; }
     memory::PeakTelemetry* telemetry() const { return telemetry_; }
 
+    // -- per-stage timing (add-extreme-poly-runtime 7.2) ---------------------
+    // Where this sculptor publishes how long each stage of a stamp took.
+    // Borrowed, null by default, and NO CLOCK IS READ while it is null: a stamp
+    // is the thing being measured, so an unconditional pair of clock reads per
+    // stage would be a cost the measurement then included.
+    //
+    // The vocabulary is `SculptStage` in `sculpt_common.h`, shared with the
+    // adaptive and hierarchy paths so a stage name means one thing across the
+    // three and a row from each can be compared.
+    void set_stage_telemetry(StageTelemetry* stages) { stages_ = stages; }
+    StageTelemetry* stage_telemetry() const { return stages_; }
+
     // -- the chunk query path ------------------------------------------------
     // Borrow the `ChunkTable` describing this sculptor's surface, which turns
     // the brush's two spatial questions — everything in this ball, and the
@@ -510,6 +522,7 @@ class MeshSculptor {
     std::uint64_t seed_revision_ = 0;
     std::size_t stale_seeds_rejected_ = 0;
     memory::PeakTelemetry* telemetry_ = nullptr;
+    StageTelemetry* stages_ = nullptr;
     // The multi-pass kernels' buffers, reset rather than freed between stamps.
     SculptScratch scratch_;
     // The compiled plan and the three inputs it depends on. Not the whole
