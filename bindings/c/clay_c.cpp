@@ -1047,6 +1047,20 @@ struct clay_mesh {
     std::optional<QuadProvenance> quad_provenance;
 };
 
+// What the uniform-brick gate proves about a brick, and keeps as that brick's
+// seed (prove_uniform, below the refill pipeline). `centre` and `mid` are the
+// culled field's UNCLAMPED values -- distance and colour -- at the lattice's
+// centre and at sample n/2, the sample BrickCache::submit reads a uniform
+// brick's colour from. Carried forward exactly as a lattice seed is: a suffix
+// folded onto them is the walk's own arithmetic at those two points.
+struct UniformProof {
+    bool proven = false;
+    bool inside = false;
+    float lipschitz = 1.0f;       // the culled tape's declared bound, floored at 1
+    kernel::CTapeValue centre{};  // the field at the lattice centre
+    kernel::CTapeValue mid{};     // the field at sample n/2
+};
+
 struct clay_document {
     io::ClaySpaceDoc doc;
     // Opt-in undo. Null means off, and a document that never enables it
@@ -1333,6 +1347,22 @@ struct clay_document {
         std::uint64_t prefix_structure = 0;  // 0 = no prefix recorded
         std::vector<float> prefix_values;    // roots[0..prefix_boundary) at this lattice
         std::vector<float> prefix_colors;    // empty when the entry is distance-only
+        // -- the uniform kind: what the gate proved, where it proved it -------
+        //
+        // A brick the uniform-brick gate answered (prove_uniform) has no
+        // per-sample values to keep, and keeping the stub's would poison the
+        // store. What it keeps instead is the PROOF: the field at two points
+        // and the tape's bound, which the next dab's suffix carries forward
+        // exactly as it carries a lattice, and re-proves in two evaluations
+        // instead of a culled compile and 512 walks. Without this a gated brick
+        // paid its culled compile on every dab of a stroke, and the warm dab
+        // measured 4.5x slower at 400 items and 19x at 1,500 -- for a cold-dab
+        // win of 2x. An entry is EITHER a lattice seed (`values` holds the
+        // lattice, `uniform` false) or a uniform one (`values` empty, `uniform`
+        // true): shaped_entry refuses the second and uniform_seed_for the
+        // first, so neither path can read the other's.
+        bool uniform = false;
+        UniformProof proof;
     };
 
     // A BYTE budget, not a brick count. With colour a brick carries four times
@@ -1357,12 +1387,18 @@ struct clay_document {
     // Exact because every mutation is bracketed: entry_bytes is subtracted
     // before the vectors are touched and added back after, so the number taken
     // out is always the one that was put in.
+    //
+    // A UNIFORM entry holds no vectors, so it is charged its own struct: not
+    // nothing, because a gated brick is stored for every brick a stroke crosses
+    // deep inside the clay, and a seed the budget cannot see is one it can
+    // never evict.
     static std::size_t entry_bytes(const ResumeEntry& e) {
         return (e.values.capacity() + e.colors.capacity() + e.below.capacity() +
                 e.below_colors.capacity() + e.prefix_values.capacity() +
                 e.prefix_colors.capacity() + e.stack.capacity() + e.stack_colors.capacity()) *
                    sizeof(float) +
-               e.frames.capacity() * sizeof(scene::TapeCheckpointFrame);
+               e.frames.capacity() * sizeof(scene::TapeCheckpointFrame) +
+               (e.uniform ? sizeof(ResumeEntry) : 0);
     }
 
     // Move an entry to the most-recently-used end. O(1), and it neither
@@ -1733,17 +1769,97 @@ struct clay_document {
         e.prefix_had_acc = false;
         e.prefix_values.clear();
         e.prefix_colors.clear();
+        // A lattice seed replaces a uniform one outright: the brick was walked,
+        // so it holds real samples now.
+        e.uniform = false;
         resume_bytes_ += entry_bytes(e);
         evict_locked();
+    }
+
+    // The uniform kind's store: the proof in place of a lattice. Caller holds
+    // cache_mutex_. Everything a lattice entry holds is RELEASED rather than
+    // cleared -- a uniform entry is one of thousands on a whole-model fill,
+    // and 2 KiB of retained capacity apiece would be the lattice it exists not
+    // to keep. `evict` is true from the full path's store, as store_seed
+    // evicts, and false from the resumed path's rewrite, which is the one
+    // store that does not (store_active).
+    void store_uniform_seed(const clay_brick_request& request, std::uint64_t at, float pad,
+                            const UniformProof& proof, bool evict) const {
+        const ResumeKey key = resume_key(request);
+        auto [it, fresh] = resume_.try_emplace(key);
+        ResumeEntry& e = it->second;
+        resume_bytes_ -= entry_bytes(e);
+        if (fresh)
+            e.lru = resume_order_.insert(resume_order_.end(), key);
+        else
+            touch_lru(e);
+        for (std::vector<float>* v : {&e.values, &e.colors, &e.below, &e.below_colors, &e.stack,
+                                      &e.stack_colors, &e.prefix_values, &e.prefix_colors})
+            std::vector<float>().swap(*v);
+        std::vector<scene::TapeCheckpointFrame>().swap(e.frames);
+        e.stack_levels = 0;
+        e.had_acc = false;
+        e.revision = at;
+        e.pad = pad;
+        e.dirty_from = kFrontierClean;
+        e.prefix_structure = 0;
+        e.prefix_boundary = 0;
+        e.prefix_had_acc = false;
+        e.uniform = true;
+        e.proof = proof;
+        resume_bytes_ += entry_bytes(e);
+        if (evict) evict_locked();
+    }
+
+    struct UniformSeed {
+        bool found = false;
+        std::uint64_t revision = 0;
+        UniformProof proof;
+    };
+
+    // The uniform seed a brick holds, or `found == false`. Caller holds
+    // cache_mutex_. The pad gate is seed_for's, for its reason: the proof was
+    // taken through a tape culled under that pad, and a suffix culled under
+    // another continues a different field. The frontier half is NOT served --
+    // a dirty uniform entry has no prefix to fold onto -- so a drag over deep
+    // clay re-proves through the full path, once per frame, exactly as a
+    // lattice seed without a recorded prefix would walk.
+    // Shape only, the way seed_revision_for is for the lattice kind: whether
+    // the store holds a proof for this brick at all. Caller holds cache_mutex_.
+    bool has_uniform_seed(const clay_brick_request& request) const {
+        auto it = resume_.find(resume_key(request));
+        return it != resume_.end() && it->second.uniform;
+    }
+
+    UniformSeed uniform_seed_for(const clay_brick_request& request, float pad) const {
+        UniformSeed s;
+        auto it = resume_.find(resume_key(request));
+        if (it == resume_.end() || !it->second.uniform) return s;
+        const ResumeEntry& e = it->second;
+        if (e.pad != pad || e.dirty_from != kFrontierClean) return s;
+        touch_lru(const_cast<ResumeEntry&>(e));
+        s.found = true;
+        s.revision = e.revision;
+        s.proof = e.proof;
+        return s;
     }
 
     // The batch's results, kept as the next dab's seeds. `at` 0 means "the
     // current revision", which is what the full path passes -- it has just
     // produced the document as it is now.
+    //
+    // `proofs`, when given, is one per request: where `proven`, the
+    // uniform-brick gate answered the brick (prove_uniform) and what the batch
+    // holds for it is a stub, uniformly beyond the band, NOT the field's
+    // samples. Storing those would poison the store -- the next dab's suffix
+    // would be folded onto numbers the field never produced, and a seeded
+    // answer is bit-identical to a walked one by contract, so nothing
+    // downstream could tell. The proof is stored in the lattice's place.
     void store_seeds(const clay_brick_request* requests, std::size_t count, const float* values,
                      const float* colors, const float* below, const float* below_colors,
                      std::size_t per, std::uint64_t at, float pad,
-                     const SeedStack* stacks = nullptr) const {
+                     const SeedStack* stacks = nullptr,
+                     const UniformProof* proofs = nullptr) const {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         const std::uint64_t now = revision.load(std::memory_order_relaxed);
         if (at == 0) {
@@ -1752,11 +1868,16 @@ struct clay_document {
         } else if (at != now) {
             return;  // the document moved under the batch; keeping it would lie
         }
-        for (std::size_t i = 0; i < count; ++i)
+        for (std::size_t i = 0; i < count; ++i) {
+            if (proofs && proofs[i].proven) {
+                store_uniform_seed(requests[i], at, pad, proofs[i], /*evict=*/true);
+                continue;
+            }
             store_seed(requests[i], at, pad, values + i * per,
                        colors ? colors + i * per * 3 : nullptr, below ? below + i * per : nullptr,
                        below_colors ? below_colors + i * per * 3 : nullptr, per,
                        stacks ? &stacks[i] : nullptr);
+        }
     }
 
     // The resumed path's store: the ACTIVE layer's value moved, the half
@@ -1891,6 +2012,24 @@ struct clay_document {
         refilled_bricks_.fetch_add(refilled, std::memory_order_relaxed);
     }
 
+    // How many of the refilled bricks the uniform-brick gate answered without
+    // a walk (prove_uniform). A subset of `refilled`: the gate sits INSIDE the
+    // full path, so `resumed / (resumed + refilled)` still reads as clay.h
+    // documents it. Cumulative and internal (clay_internal.h): a gated brick
+    // is bit-identical in what it stores to a walked one, so this count is the
+    // only way to see the gate fire, and the only way a test can hold the
+    // proof rate above the floor it was built at.
+    void note_gated(std::uint64_t gated) const {
+        gated_bricks_.fetch_add(gated, std::memory_order_relaxed);
+    }
+    std::uint64_t gated_bricks() const { return gated_bricks_.load(std::memory_order_relaxed); }
+
+    // The gate can be switched off per document, for the tests that hold a
+    // gated fill against an ungated one over the same items. Never off for a
+    // host: there is nothing to gain but the walk.
+    bool uniform_gate() const { return uniform_gate_.load(std::memory_order_relaxed); }
+    void set_uniform_gate(bool on) const { uniform_gate_.store(on, std::memory_order_relaxed); }
+
     void resume_stats(std::uint64_t* entries, std::uint64_t* bytes, std::uint64_t* budget,
                       std::uint64_t* resumed, std::uint64_t* refilled) const {
         {
@@ -1989,6 +2128,13 @@ struct clay_document {
         out.structure = structure_revision_;
         for (const auto& [k, e] : resume_) {
             if (e.dirty_from != kFrontierClean || e.revision != out.now) continue;
+            // A uniform entry holds a proof and no lattice (ResumeEntry::uniform),
+            // so there is no prefix to slice out of it: a job made from one
+            // carried `per` 0 and phase B wrote dims^3 points into a buffer
+            // sized for none. The drag re-proves such a brick through the
+            // full path (uniform_seed_for refuses a dirty proof), which is
+            // the contract for a proof the frontier cannot serve.
+            if (e.uniform) continue;
             const float width = static_cast<float>(k.dims[0]) * k.spacing;
             const kernel::cfloat3 lo =
                 kernel::cf3(static_cast<float>(k.x), static_cast<float>(k.y),
@@ -2313,6 +2459,8 @@ struct clay_document {
     // than a slightly stale one.
     mutable std::atomic<std::uint64_t> resumed_bricks_{0};
     mutable std::atomic<std::uint64_t> refilled_bricks_{0};
+    mutable std::atomic<std::uint64_t> gated_bricks_{0};
+    mutable std::atomic<bool> uniform_gate_{true};
     // The one-shot test seam of set_resume_store_interleave. Not under
     // cache_mutex_: it is armed and fired on the one thread a test owns, and
     // the point where it fires holds no lock by design.
@@ -3731,10 +3879,258 @@ struct NoPost {
                     const std::vector<scene::TapeCheckpoint>&) const {}
 };
 
+// -- classifying a brick before filling it: the uniform-brick gate ----------
+//
+// A dab on a sculpted surface dirties a solid BOX of bricks -- mark_dirty takes
+// the dab's influence bound, and a bound is a box -- and on a worked model most
+// of that box is clay. Measured on the sculpted-sphere fixture (bench_main.cpp's
+// BM_DabRefillSculpted): of the 80 bricks one dab dirties, 57 are uniformly
+// INSIDE at 400 dabs and 64 at 1,500. Each of them paid 512 walks of its culled
+// tape to discover it stores nothing, because BrickCache::submit is where a
+// brick is classified and it classifies from the samples.
+//
+// One evaluation says the same thing, when the field lets it. The compiler
+// tracks each tape's Lipschitz bound L (kernel/exactness.h -- the number the
+// raycaster steps by), so |f(x) - f(c)| <= L |x - c| everywhere. Every lattice
+// sample lies within the half-diagonal hd of the lattice's centre c, so when
+//
+//     |f(c)| > band + L * hd
+//
+// no sample can be within the band, let alone cross zero, and every one of them
+// carries f(c)'s sign. The brick is uniform, and its class is the one submit
+// would have found from the 512 values -- a sample inside the band would
+// contradict the bound -- so a gated brick is classified exactly as a walked
+// one. That is what makes this a PROOF rather than a heuristic. Measured, 91%
+// of the uniform bricks above pass it at 400 dabs and 97% at 1,500, none
+// falsely; the rest walk as before.
+//
+// THE BOUND HAS TO BE A SLOPE BOUND, and the compiler says whether it is one
+// (scene::Tape::lipschitz_bounds_gradient). exactness.h keeps L = 1 for the
+// "underestimating" fields -- an ellipsoid, an overflowing repeat, a loft --
+// because |f| <= distance makes stepping by f safe, and that is not
+// |grad f| <= 1: an ellipsoid's bound field has a slope of 1.09 near its tips,
+// 3.6 for a needle. Under that L the inequality above is false by more than
+// its margin, and a needle on the lattice diagonal proved 852 of 1,000 bricks
+// and stored one the walk finds SURFACE as OUTSIDE. Three deformer factors
+// are exceeded the same way (taper, wrap_around, bend_curve). prove_uniform
+// refuses such a tape and the brick walks; the refusal is per brick, through
+// the cull, so a brick the ellipsoid does not reach keeps the gate.
+//
+// Two things about the ball. It is the LATTICE's -- the samples that would have
+// been evaluated -- and not the band-dilated cull region the tape was compiled
+// against: dilating by the band puts the band term in twice, and the proof rate
+// collapses to ~21%. And the tape whose L and f(c) are read is the brick's OWN
+// culled tape, never the whole document's: the cull is what keeps L small (a
+// deformer far from the brick is not in this tape), and it is this tape the
+// samples would have gone through.
+//
+// The colour is the one thing a uniform brick keeps from its samples: submit
+// records the colour at sample n/2 as the brick's uniform colour, so the gate
+// evaluates that sample too, and the stub carries its colour to every sample.
+// Two evaluations instead of 512.
+//
+// ONLY the whole-document compile may be gated. A per-layer half (Below,
+// Active, Except) is a partial field: its centre value and its L say nothing
+// about the union the caller folds it into.
+//
+// A GATED BRICK KEEPS ITS PROOF AS ITS SEED (ResumeEntry::uniform). The next
+// dab folds its suffix onto the two stored values -- the walk's own arithmetic
+// at those two points, bit-identical to walking them -- and re-proves the
+// brick with the suffix's bound folded into the stored one, so a brick deep in
+// the clay costs a suffix compile and two point evaluations per dab, never a
+// culled compile: resume_bricks, the uniform task.
+
+// The lattice a request evaluates; `origin` is what read_grid produced for it.
+eval::GridQuery request_lattice(const clay_brick_request& req, kernel::cfloat3 origin) {
+    eval::GridQuery g;
+    g.origin = origin;
+    g.spacing = req.spacing;
+    g.nx = req.dims[0];
+    g.ny = req.dims[1];
+    g.nz = req.dims[2];
+    return g;
+}
+
+// Sample (x, y, z) of a lattice, by the expression the CPU backend's eval_rows
+// uses -- the same operations in the same order, so the value the gate reads at
+// sample n/2 is bit-for-bit what the walk would have written there.
+kernel::cfloat3 lattice_point(const eval::GridQuery& g, std::size_t x, std::size_t y,
+                              std::size_t z) {
+    return g.origin +
+           kernel::cf3(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)) *
+               g.spacing;
+}
+
+// The ball the proof is made in: the lattice's centre and half-diagonal, and
+// the point of sample n/2.
+struct LatticeBall {
+    kernel::cfloat3 centre = kernel::cf3(0.0f, 0.0f, 0.0f);
+    kernel::cfloat3 mid = kernel::cf3(0.0f, 0.0f, 0.0f);
+    float half_diagonal = 0.0f;
+};
+
+LatticeBall lattice_ball(const eval::GridQuery& g) {
+    LatticeBall b;
+    const kernel::cfloat3 span =
+        kernel::cf3(static_cast<float>(g.nx - 1), static_cast<float>(g.ny - 1),
+                    static_cast<float>(g.nz - 1)) *
+        g.spacing;
+    b.centre = g.origin + span * 0.5f;
+    b.half_diagonal = kernel::clength(span) * 0.5f;
+    const std::size_t nx = static_cast<std::size_t>(g.nx), ny = static_cast<std::size_t>(g.ny);
+    const std::size_t mid = nx * ny * static_cast<std::size_t>(g.nz) / 2;
+    b.mid = lattice_point(g, mid % nx, (mid / nx) % ny, mid / (nx * ny));
+    return b;
+}
+
+// The proof's inequality. The bound is exact over the reals and the walk is
+// float32: a sample the proof places a hair beyond the band could round onto
+// it, so the threshold carries a margin of 1/64 -- orders of magnitude above
+// float rounding at these magnitudes, and a fraction of a cell at any brick
+// this cache accepts. It costs no measurable proof rate. A NaN refuses.
+bool uniform_beyond_band(float band, float lipschitz, float half_diagonal, float centre_d) {
+    const float threshold = (band + lipschitz * half_diagonal) * (1.0f + 1.0f / 64.0f);
+    return std::fabs(centre_d) > threshold;
+}
+
+UniformProof prove_uniform(const clay_brick_request& req, const LatticeBall& ball,
+                           const scene::Tape& tape) {
+    UniformProof p;
+    // The proof reads L as a bound on |grad f|, and the tape says whether it is
+    // one (scene::Tape::lipschitz_bounds_gradient). Where it is not -- a bound
+    // field such as an ellipsoid, whose L = 1 is safe to step by while its
+    // slope reaches 1.09 -- the walk classifies from samples the inequality
+    // cannot see, and a brick it finds SURFACE was stored OUTSIDE here. The
+    // brick walks instead, as it always did; the ellipsoid's own bricks lose
+    // the gate, and a brick whose cull dropped the ellipsoid keeps it.
+    if (!tape.lipschitz_bounds_gradient) return p;
+    // 1.0 is the floor the raycaster applies too: a tape is never declared
+    // flatter than a distance field. A bound that is not finite proves nothing.
+    p.lipschitz = std::max(tape.info.lipschitz, 1.0f);
+    if (!std::isfinite(p.lipschitz)) return p;
+    p.centre = tape.eval(ball.centre);
+    if (!uniform_beyond_band(req.band, p.lipschitz, ball.half_diagonal, p.centre.d)) return p;
+    p.proven = true;
+    p.inside = p.centre.d < 0.0f;
+    p.mid = tape.eval(ball.mid);
+    return p;
+}
+
+// The stand-in evaluated in the gated brick's place. Same batch slot, same
+// per-sample outputs, so nothing downstream -- the device copy, the fixed-stride
+// destination, submit -- sees anything but an ordinary brick; only the tape is
+// one instruction, and a CONSTANT one: `ctape_empty`, which pushes the far
+// field (CLAY_TAPE_FAR) through `prim * scale - round`. An OUTSIDE brick takes
+// it as it is, beyond any band. An INSIDE brick takes it with scale 0 and a
+// rounding of band + spacing, so every sample reads exactly -(band + spacing):
+// inside the band by a cell, the mildest number that classifies. (FAR * 0 is
+// exactly 0 on every backend -- FAR is finite -- and 0 - r exactly -r, which is
+// what lets fill_uniform_stub write the same bytes without an interpreter.)
+// The colour is sample n/2's, in the primitive's own colour slot, which the
+// interpreter reports unchanged -- so the sample submit reads carries exactly
+// what the walk would have put there.
+//
+// Hand-assembled, so compile_id stays 0 and no backend caches it. The layout is
+// emit_prim's (scene/tape_build.cpp): the prim header (inverse transform, scale,
+// rounding, colour), the fixed-width prim params, the repeat record (none) and
+// a deformer count of 0.
+float uniform_stub_value(const clay_brick_request& req, const UniformProof& p) {
+    return p.inside ? 0.0f - (req.band + req.spacing) : CLAY_TAPE_FAR;
+}
+
+scene::Tape uniform_stub_tape(const clay_brick_request& req, const UniformProof& p) {
+    scene::Tape stub;
+    kernel::CTapeInstr instr;
+    instr.op = kernel::ctape_empty;
+    instr.param_offset = 0;
+    stub.instrs.push_back(instr);
+    const kernel::cfloat3 c = p.mid.color;
+    const float scale = p.inside ? 0.0f : 1.0f;
+    const float round = p.inside ? req.band + req.spacing : 0.0f;
+    const float header[CLAY_TAPE_PRIM_HEADER] = {1.0f, 0.0f, 0.0f, 0.0f,  1.0f, 0.0f, 0.0f, 0.0f, 1.0f,
+                                                 0.0f, 0.0f, 0.0f, scale, round, c.x, c.y, c.z};
+    stub.params.assign(header, header + CLAY_TAPE_PRIM_HEADER);
+    stub.params.resize(CLAY_TAPE_PRIM_HEADER + CLAY_TAPE_PRIM_PARAMS + CLAY_TAPE_REPEAT_FLOATS + 1,
+                       0.0f);
+    return stub;
+}
+
+// The stub's samples written straight into a host lattice -- what a brick
+// answered from its uniform SEED returns, with no batch to run. Byte for byte
+// what a batch over the stub tape produces, because the stub is a constant:
+// the value above and the colour the header carries. A constant rather than a
+// shape (this was once a sphere) because a brick deep in the clay is answered
+// this way on EVERY dab of a stroke, and 512 interpreted samples per brick
+// measured as a third of the warm dab.
+void fill_uniform_stub(const clay_brick_request& req, const eval::GridQuery& g,
+                       const UniformProof& p, float* values, float* colors_rgb) {
+    const std::size_t n = static_cast<std::size_t>(g.nx) * static_cast<std::size_t>(g.ny) *
+                          static_cast<std::size_t>(g.nz);
+    const float d = uniform_stub_value(req, p);
+    std::fill(values, values + n, d);
+    if (!colors_rgb) return;
+    for (std::size_t i = 0; i < n; ++i) {
+        colors_rgb[i * 3] = p.mid.color.x;
+        colors_rgb[i * 3 + 1] = p.mid.color.y;
+        colors_rgb[i * 3 + 2] = p.mid.color.z;
+    }
+}
+
+// Runs the proof on one compiled brick and, where it holds, swaps the tape for
+// the stub IN PLACE (the batch already points at it) and retires the
+// checkpoint: it described the tape that was just replaced, and a stack taken
+// through it would be the stub's. Returns the proof, `proven` false where the
+// brick walks.
+UniformProof gate_uniform_brick(const clay_brick_request& req, kernel::cfloat3 origin,
+                                scene::Tape* tape, scene::TapeCheckpoint* cp) {
+    const LatticeBall ball = lattice_ball(request_lattice(req, origin));
+    const UniformProof proof = prove_uniform(req, ball, *tape);
+    if (!proof.proven) return proof;
+    *tape = uniform_stub_tape(req, proof);
+    if (cp) *cp = scene::TapeCheckpoint{};
+    return proof;
+}
+
+// One request's tape for `half`: the whole document, resumable when a
+// checkpoint is wanted, or the per-layer half the multi-layer refill asked
+// for. The cull is the brick's box dilated by its band, as it always was.
+scene::Tape compile_request_tape(const clay_document* doc, const clay_brick_request& req,
+                                 ChunkHalf half, scene::LayerId active,
+                                 const scene::CullIndex* index, const scene::CullPlan* plan,
+                                 scene::TapeCheckpoint* cp) {
+    scene::CullRegion cull{request_brick_box(req).dilated(req.band)};
+    const scene::Document& d = doc->doc.document;
+    if (half == ChunkHalf::Whole)
+        return cp ? scene::compile_document_resumable(d, cp, &cull, index, plan)
+                  : scene::compile_document(d, &cull, index, plan);
+    if (cp && half == ChunkHalf::Active)
+        return scene::compile_document_part_resumable(d, active, /*below=*/false, &cull, index, cp);
+    if (half == ChunkHalf::Except) return scene::compile_document_except(d, active, &cull, index);
+    return scene::compile_document_part(d, active, half == ChunkHalf::Below, &cull, index);
+}
+
+// What the batch proved, onto the document's counter (clay_internal_gated_bricks).
+void note_gated(const clay_document* doc, const std::vector<UniformProof>* gated) {
+    if (!gated) return;
+    std::uint64_t n = 0;
+    for (const UniformProof& p : *gated) n += p.proven ? 1 : 0;
+    if (n) doc->note_gated(n);
+}
+
+// `gated`, when given, receives one proof per request, `proven` where the
+// uniform-brick gate answered the brick with a stub instead of its tape. The
+// gate runs ONLY when a caller asks for the proofs, because a gated brick's
+// outputs are not the field's values and must not become a lattice seed --
+// passing `gated` is the caller's undertaking to hand the proofs to
+// store_seeds. A caller that stores no seed (the excluded refill) has no use
+// for it, and the per-layer halves are never gated whatever the caller passes.
 template <typename Run, typename Post = NoPost>
 clay_result eval_requests_in_chunks(const clay_document* doc, const clay_brick_request* requests,
                                     std::size_t count, Run&& run, ChunkHalf half = ChunkHalf::Whole,
-                                    scene::LayerId active = 0, Post&& post = Post{}) {
+                                    scene::LayerId active = 0, Post&& post = Post{},
+                                    std::vector<UniformProof>* gated = nullptr) {
+    if (gated) gated->assign(count, UniformProof{});
+    const bool gate = gated && half == ChunkHalf::Whole && doc->uniform_gate();
     std::vector<kernel::cfloat3> origins(count);
     for (std::size_t i = 0; i < count; ++i) {
         eval::GridQuery q;
@@ -3770,24 +4166,11 @@ clay_result eval_requests_in_chunks(const clay_document* doc, const clay_brick_r
         tape_ptrs.reserve(n);
         if (kWantCheckpoints) cps.resize(n);
         for (std::size_t i = base; i < base + n; ++i) {
-            scene::CullRegion cull{request_brick_box(requests[i]).dilated(requests[i].band)};
             scene::TapeCheckpoint* cp = kWantCheckpoints ? &cps[i - base] : nullptr;
-            if (half == ChunkHalf::Whole)
-                tapes.push_back(cp ? scene::compile_document_resumable(doc->doc.document, cp, &cull,
-                                                                       index.get(), &plan)
-                                   : scene::compile_document(doc->doc.document, &cull, index.get(),
-                                                             &plan));
-            else if (cp && half == ChunkHalf::Active)
-                tapes.push_back(scene::compile_document_part_resumable(
-                    doc->doc.document, active, /*below=*/false, &cull, index.get(), cp));
-            else if (half == ChunkHalf::Except)
-                tapes.push_back(scene::compile_document_except(doc->doc.document, active, &cull,
-                                                               index.get()));
-            else
-                tapes.push_back(scene::compile_document_part(doc->doc.document, active,
-                                                             half == ChunkHalf::Below, &cull,
-                                                             index.get()));
+            tapes.push_back(
+                compile_request_tape(doc, requests[i], half, active, index.get(), &plan, cp));
             tape_ptrs.push_back(&tapes.back());
+            if (gate) (*gated)[i] = gate_uniform_brick(requests[i], origins[i], &tapes.back(), cp);
         }
         eval::GridBatchQuery bq;
         bq.tapes = tape_ptrs.data();
@@ -3802,6 +4185,7 @@ clay_result eval_requests_in_chunks(const clay_document* doc, const clay_brick_r
         post(base, n, tapes, cps);
         base += n;
     }
+    note_gated(doc, gated);
     return CLAY_OK;
 }
 
@@ -7406,6 +7790,26 @@ clay_result clay_raycast_many(const clay_document* doc, const float* rays_origin
 
 // -- picking (picking spec, through the C boundary) --------------------------
 
+// pick::raycast_scene on the document's CACHED pickable tape. The library
+// entry point compiles the document per call, and a pick runs per Pencil
+// event: at 1,500 items that compile was 0.3 ms of a 1.0 ms pick, paid
+// again for a document that had not changed. The tape is the one every other
+// pick query here already marches, keyed on the document revision.
+//
+// The cull index is fetched only when the tape's step scale is below 1, which
+// is the one case raycast_scene compiles a ray-local tape and has a use for
+// it (see the declaration in pick.h). It is cached per revision too, so the
+// fetch is a lock and a pointer once the brick path or an earlier pick has
+// built it; skipping it otherwise keeps a plain document's pick from building
+// an index nothing will read.
+static pick::SceneHit raycast_pickable(const clay_document* doc, const math::Ray& ray,
+                                       const pick::RaycastOptions& opts) {
+    std::shared_ptr<const scene::Tape> tape = doc->pickable_tape();
+    std::shared_ptr<const scene::CullIndex> index;
+    if (tape->safe_step_scale() < 1.0f) index = doc->cull_index();
+    return pick::raycast_scene(doc->doc.document, *tape, index.get(), ray, opts);
+}
+
 clay_result clay_raycast_attributed(const clay_document* doc, const float origin[3],
                                     const float dir[3], int32_t* out_hit, float* out_t,
                                     float out_position[3], float out_normal[3],
@@ -7418,7 +7822,7 @@ clay_result clay_raycast_attributed(const clay_document* doc, const float origin
     // Hidden surface is stepped over, not turned into a miss: hiding the front
     // of a head is how an artist reaches the inside of it.
     if (doc->doc.groups) ropts.groups = &*doc->doc.groups;
-    pick::SceneHit hit = pick::raycast_scene(doc->doc.document, ray, ropts);
+    const pick::SceneHit hit = raycast_pickable(doc, ray, ropts);
     *out_hit = hit.hit ? 1 : 0;
     if (out_t) *out_t = hit.t;
     if (out_position) write_f3(out_position, hit.position);
@@ -9596,17 +10000,13 @@ clay_result clay_raycast_bounded(const clay_document* doc, const float origin[3]
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
     if (!(tmax > tmin)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "tmax must exceed tmin");
     *out_hit = 0;
-    std::shared_ptr<const scene::Tape> tape_ref = doc->pickable_tape();
-    const scene::Tape& tape = *tape_ref;
-    if (tape.empty()) return CLAY_OK;  // nothing to hit is not an error
-
     pick::RaycastOptions opts;
     opts.tmin = tmin;
     opts.tmax = tmax;
     if (doc->doc.groups) opts.groups = &*doc->doc.groups;
     const math::Ray ray{kernel::cf3(origin[0], origin[1], origin[2]),
                         kernel::cnormalize(kernel::cf3(dir[0], dir[1], dir[2]))};
-    const pick::SceneHit hit = pick::raycast_scene(doc->doc.document, ray, opts);
+    const pick::SceneHit hit = raycast_pickable(doc, ray, opts);
     *out_hit = hit.hit ? 1 : 0;
     if (out_t) *out_t = hit.t;
     if (out_position) {
@@ -11513,6 +11913,11 @@ clay_result clay_brick_cache_eval_requests_device(const clay_document* doc, clay
     // is the largest thing that can land at the slots it belongs in. A batch
     // with nothing resumed is one run and is exactly the call this made before.
     return for_each_run(resumed, false, [&](std::size_t at, std::size_t n) {
+        // The gate's proofs for this run: a gated brick's slot holds the stub's
+        // samples, which land in the caller's buffer like any other brick's
+        // and are read back below like any other's -- and are then NOT kept as
+        // its seed; the proof is, which is what the vector is for.
+        std::vector<UniformProof> gated;
         const clay_result walked = eval_requests_in_chunks(
             doc, requests + at, n,
             [&](const eval::GridBatchQuery& bq, std::size_t base) -> clay_result {
@@ -11520,7 +11925,8 @@ clay_result clay_brick_cache_eval_requests_device(const clay_document* doc, clay
                     bq, brick_slot(values, at + base, bq.count, per),
                     colors.empty() ? eval::DeviceBuffer{}
                                    : brick_slot(colors, at + base, bq.count, per * 3)));
-            });
+            },
+            ChunkHalf::Whole, 0, NoPost{}, &gated);
         if (walked != CLAY_OK || !keep_seeds) return walked;
         // Read back what the device just produced, so the NEXT dab over this
         // ground resumes instead of walking the edit list again. A few
@@ -11536,7 +11942,7 @@ clay_result clay_brick_cache_eval_requests_device(const clay_document* doc, clay
             return fail(CLAY_ERROR_BACKEND, "reading a refilled brick's colours back failed");
         doc->store_seeds(requests + at, n, host_values.data() + at * per,
                          want_colour ? host_colors.data() + at * per * 3 : nullptr, nullptr,
-                         nullptr, per, 0, 0.0f);
+                         nullptr, per, 0, 0.0f, nullptr, gated.data());
         return CLAY_OK;
     });
 }
@@ -11765,6 +12171,18 @@ clay_result clay_internal_set_resume_budget(clay_document* doc, uint64_t bytes) 
     return CLAY_OK;
 }
 
+clay_result clay_internal_gated_bricks(const clay_document* doc, uint64_t* out_gated) {
+    if (!doc || !out_gated) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out");
+    *out_gated = doc->gated_bricks();
+    return CLAY_OK;
+}
+
+clay_result clay_internal_set_uniform_gate(clay_document* doc, int32_t enabled) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    doc->set_uniform_gate(enabled != 0);
+    return CLAY_OK;
+}
+
 clay_result clay_internal_resume_frontier(const clay_document* doc,
                                           const clay_brick_request* request,
                                           uint32_t* out_dirty_from, uint32_t* out_boundary,
@@ -11972,6 +12390,334 @@ void fold_layers_below(const float* below_d, const float* below_rgb, const float
 // the same hard Add the whole-document compile emits between layers. The
 // layers beneath are static across a stroke, so their half is stored once
 // and carried forward untouched.
+// One brick of a resumed batch, planned under the lock and run off it
+// (resume_bricks). At namespace scope so the uniform probe below can plan one.
+struct ResumeTask {
+    std::size_t slot = 0;  // which brick of the batch
+    const clay_document::ResumePlan* plan = nullptr;
+    eval::GridQuery grid;
+    // Where the seed IS, valid only while the lock is held. Cleared by the
+    // copy pass below, so nothing can still be holding one when the lock
+    // drops.
+    clay_document::Seed seed;
+    // The seed on entry and the ACTIVE layer's answer on exit: the walk
+    // runs in place. The caller's own output slot when nothing sits
+    // beneath, staging when something does and a union is still to apply.
+    float* active = nullptr;
+    float* active_rgb = nullptr;
+    const float* below = nullptr;
+    const float* below_rgb = nullptr;
+    // The group half, copied off the seed under the lock. Empty means this
+    // brick resumes at a root list, which is the path that always existed.
+    std::vector<float> stack;
+    std::vector<float> stack_rgb;
+    std::uint32_t stack_levels = 0;
+    // The checkpoint's own: false where the chain it sits in had produced
+    // nothing, which an empty tail group leaves behind. Part of the shape,
+    // so the level check has to see it.
+    bool layer_have_acc = true;
+    std::vector<scene::TapeCheckpointFrame> frames;
+    // What this task produces for the NEXT dab, when it produces one.
+    std::vector<float> snap;
+    std::vector<float> snap_rgb;
+    std::size_t snap_levels = 0;
+    bool snap_layer_have_acc = true;
+    bool ok = false;
+    // A UNIFORM seed (the gate's proof, kept in a lattice's place): carried
+    // through the suffix at two points and re-proved, never walked. `proof`
+    // is the seed on entry and the next dab's seed on exit.
+    bool uniform = false;
+    UniformProof proof;
+};
+
+// Whether a UNIFORM seed may be carried through `plan`'s suffix (the uniform
+// task in resume_bricks). The re-proof needs the new tape's Lipschitz bound,
+// and the only bound it can compute without compiling that tape is
+// max(stored, suffix): exact when every appended item folds by a max rule --
+// Add, Subtract and Intersect, hard or smooth (kernel/exactness.h,
+// cfi_boolean and cfi_smooth_blend) -- and an understatement for anything
+// else: the extended modes fold diagonally, a transition adds a term of the
+// region, a gate adds a term of its width, and a group folds a stack the
+// proof never held. Those take the full path, where the gate compiles the
+// tape and reads the bound the compiler declared.
+bool uniform_resume_allowed(const clay_document* doc, const clay_document::ResumePlan& plan,
+                            const std::vector<scene::NodeId>& chain) {
+    if (!chain.empty()) return false;
+    const scene::Layer* layer = doc->doc.document.find_layer(plan.active);
+    if (!layer || !layer->sdf) return false;
+    for (scene::NodeId id : plan.appended) {
+        const scene::Node* n = layer->sdf->find(id);
+        if (!n || n->is_group || n->gated()) return false;
+        if (n->op != scene::Op::Add && n->op != scene::Op::Subtract &&
+            n->op != scene::Op::Intersect)
+            return false;
+    }
+    return true;
+}
+
+// The uniform half of resume_bricks's probe loop, for a brick with no lattice
+// seed. Caller holds cache_mutex_ and has set the task's slot and destination.
+// `plans` is the batch's memo, as for a lattice seed. A Task still has to pass
+// uniform_resume_allowed, which the caller asks with its own chain memo.
+enum class UniformProbe { None, Answered, Task };
+
+UniformProbe probe_uniform_seed(const clay_document* doc, const clay_brick_request& req,
+                                std::uint64_t now, float resume_pad,
+                                std::unordered_map<std::uint64_t, clay_document::ResumePlan>& plans,
+                                ResumeTask* task) {
+    const clay_document::UniformSeed us = doc->uniform_seed_for(req, resume_pad);
+    if (!us.found) return UniformProbe::None;
+    std::size_t samples = 0;
+    if (read_grid(req.origin, req.spacing, req.dims, &task->grid, &samples) != CLAY_OK)
+        return UniformProbe::None;
+    // At the current revision the proof still holds as it stands and the
+    // answer is the stub, written here as a lattice seed is copied here: one
+    // fill either way.
+    if (us.revision == now) {
+        fill_uniform_stub(req, task->grid, us.proof, task->active, task->active_rgb);
+        return UniformProbe::Answered;
+    }
+    auto pit = plans.find(us.revision);
+    if (pit == plans.end()) pit = plans.emplace(us.revision, doc->plan_resume(us.revision)).first;
+    const clay_document::ResumePlan* plan = &pit->second;
+    // No frontier half for a proof (uniform_seed_for), so an unusable plan is
+    // the full path.
+    if (!plan->usable) return UniformProbe::None;
+    task->plan = plan;
+    task->uniform = true;
+    task->proof = us.proof;
+    return UniformProbe::Task;
+}
+
+// THE UNIFORM TASK: the gate's proof carried through the suffix (resume_bricks).
+//
+// The same suffix the lattice task compiles, seeded at TWO points instead of
+// 512 -- the lattice centre the proof is made at and sample n/2, whose colour
+// submit keeps -- so the two values come out exactly as the walk would have
+// produced them there. The new tape's bound is max(stored, suffix), exact for
+// what uniform_resume_allowed admits. Where the proof holds again the brick is
+// answered with the stub, as the full path would have answered it; where it
+// does not, the dab reached the brick and the task is left un-ok, which sends
+// it down the full path to be walked (or proved there, with the compiled
+// tape's own bound). A suffix the cull emptied -- most bricks of most dabs --
+// folds nothing and the proof stands unchanged.
+//
+// Runs off the lock, as the lattice task does: it reads the document and the
+// cull index snapshot and writes only its own brick's slot.
+void run_uniform_task(const clay_document* doc, const clay_brick_request& req,
+                      const scene::CullIndex* index, ResumeTask& t) {
+    scene::CullRegion cull{request_brick_box(req).dilated(req.band)};
+    scene::Tape suffix;
+    scene::TapeCheckpoint next;
+    if (!scene::compile_layer_suffix(t.plan->checkpoint, doc->doc.document, t.plan->appended,
+                                     &suffix, &next, &cull, index))
+        return;
+    // The stored bound is a slope bound (prove_uniform refused otherwise), and
+    // max(stored, suffix) is one only while the suffix's is too. An appended
+    // ellipsoid that reaches this brick takes it to the full path, where the
+    // compiled tape carries the same refusal and the brick walks.
+    if (!suffix.lipschitz_bounds_gradient) return;
+    const LatticeBall ball = lattice_ball(t.grid);
+    float pts[6] = {ball.centre.x, ball.centre.y, ball.centre.z,
+                    ball.mid.x,    ball.mid.y,    ball.mid.z};
+    float d[2] = {t.proof.centre.d, t.proof.mid.d};
+    float rgb[6] = {t.proof.centre.color.x, t.proof.centre.color.y, t.proof.centre.color.z,
+                    t.proof.mid.color.x,    t.proof.mid.color.y,    t.proof.mid.color.z};
+    eval::PointQuery pq;
+    pq.points_xyz = pts;
+    pq.count = 2;
+    eval::PointResults pr;
+    pr.distances = d;
+    pr.colors_rgb = rgb;
+    eval::eval_points_seeded(suffix, pq, d, rgb, pr);  // in place, as the lattice task
+    UniformProof proof = t.proof;
+    proof.lipschitz = std::max(t.proof.lipschitz, std::max(suffix.info.lipschitz, 1.0f));
+    if (!std::isfinite(proof.lipschitz)) return;
+    proof.centre = kernel::CTapeValue{d[0], kernel::cf3(rgb[0], rgb[1], rgb[2])};
+    proof.mid = kernel::CTapeValue{d[1], kernel::cf3(rgb[3], rgb[4], rgb[5])};
+    if (!uniform_beyond_band(req.band, proof.lipschitz, ball.half_diagonal, proof.centre.d))
+        return;
+    proof.proven = true;
+    proof.inside = proof.centre.d < 0.0f;
+    fill_uniform_stub(req, t.grid, proof, t.active, t.active_rgb);
+    t.proof = proof;
+    t.ok = true;
+}
+
+// What one resumed brick's walk needs of its batch: read-only, shared by
+// every task, so the tasks can run off the lock and over the pool.
+struct ResumeRun {
+    const clay_document* doc = nullptr;
+    const clay_brick_request* requests = nullptr;
+    const scene::CullIndex* index = nullptr;
+    std::size_t per = 0;
+    bool want_colour = false;
+    float* out_values = nullptr;
+    float* out_colors_rgb = nullptr;
+};
+
+// The walk of one resumed brick, OFF the lock (resume_bricks's released
+// phase). Nothing here reads the seed store. What it does read -- the
+// document and the cull index snapshot -- is what the full path reads
+// unlocked too: the ABI's contract is that a mutating clay_document_* call
+// is not concurrent with a refill (clay.h, THREADING), while any number of
+// refills and readers may be. Each task writes its own brick's samples and
+// nothing else, so the tasks are disjoint by construction. `points` is the
+// caller's scratch, reused across the bricks one worker walks.
+void run_resume_task(const ResumeRun& run, ResumeTask& t, std::vector<float>& points) {
+    if (t.uniform) {
+        run_uniform_task(run.doc, run.requests[t.slot], run.index, t);
+        return;
+    }
+    const math::Aabb box = request_brick_box(run.requests[t.slot]).dilated(run.requests[t.slot].band);
+    scene::CullRegion cull{box};
+    // The checkpoint is PER BRICK where it has frames, because a frame's
+    // `emits` depends on this brick's own cull. The plan supplies what is
+    // batch-wide -- the layer and the appended ids -- and the seed the rest.
+    scene::TapeCheckpoint cp = t.plan->checkpoint;
+    cp.frames = t.frames;
+    // Per brick for the same reason `frames` is: whether the chain the
+    // checkpoint sits in produced anything is a statement about THIS
+    // brick's cull, and the seed is what was there when it was taken.
+    if (t.stack_levels > 0) cp.layer_have_acc = t.layer_have_acc;
+    scene::Tape suffix;
+    scene::TapeCheckpoint next;
+    const bool resumable =
+        scene::compile_layer_suffix(cp, run.doc->doc.document, t.plan->appended, &suffix, &next,
+                                    &cull, run.index);
+    if (!resumable) {
+        // REBUILD: one full walk of the active half -- what this brick
+        // would have cost anyway -- taking the stack where its own
+        // checkpoint sits so the dabs after it resume. Once per stroke
+        // rather than once per dab, and it is how a brick whose seed has
+        // no stack ever gets one.
+        scene::TapeCheckpoint own;
+        const scene::Tape whole = scene::compile_document_part_resumable(
+            run.doc->doc.document, t.plan->active, /*below=*/false, &cull, run.index, &own);
+        const eval::GridQuery& gq = t.grid;
+        points.resize(run.per * 3);
+        std::size_t m = 0;
+        for (int k = 0; k < gq.nz; ++k)
+            for (int j = 0; j < gq.ny; ++j)
+                for (int x = 0; x < gq.nx; ++x) {
+                    const kernel::cfloat3 pt =
+                        gq.origin + kernel::cf3(static_cast<float>(x) * gq.spacing,
+                                                static_cast<float>(j) * gq.spacing,
+                                                static_cast<float>(k) * gq.spacing);
+                    points[m * 3] = pt.x;
+                    points[m * 3 + 1] = pt.y;
+                    points[m * 3 + 2] = pt.z;
+                    ++m;
+                }
+        eval::PointQuery pqr;
+        pqr.points_xyz = points.data();
+        pqr.count = run.per;
+        eval::PointResults prr;
+        prr.distances = t.active;
+        prr.colors_rgb = t.active_rgb;
+        // ONE walk where a stack is wanted: the field is the top of the
+        // stack, so asking for both costs what asking for either did. A
+        // stack that came back the wrong shape is simply not stored, but
+        // the field it produced alongside is still the brick's answer.
+        if (own.valid && !own.frames.empty()) {
+            // Sized for the deepest the tape can reach, not for what the
+            // checkpoint claims: the walk writes what it finds, and the
+            // two disagreeing is the bug this once had. The shape is
+            // CHECKED below, after the write, where it is safe to be wrong.
+            const std::size_t room = eval::tape_stack_depth(whole);
+            const std::size_t want =
+                scene::checkpoint_stack_levels(own.frames, own.layer_have_acc);
+            t.snap.assign(run.per * std::max(room, want), 0.0f);
+            float* snap_rgb = nullptr;
+            if (t.active_rgb) {
+                t.snap_rgb.assign(run.per * std::max(room, want) * 3, 0.0f);
+                snap_rgb = t.snap_rgb.data();
+            }
+            eval::eval_points_stack(whole, pqr, t.snap.data(), snap_rgb, &t.snap_levels,
+                                    own.instrs, 0, &prr);
+            if (t.snap_levels == want) {
+                t.frames = own.frames;
+                t.snap_layer_have_acc = own.layer_have_acc;
+                t.snap.resize(run.per * want);
+                if (snap_rgb) t.snap_rgb.resize(run.per * want * 3);
+            } else {
+                t.snap_levels = 0;
+                t.snap_rgb.clear();
+            }
+        } else {
+            eval::Backend* cpu_b = eval::Registry::instance().find("cpu");
+            if (!cpu_b || cpu_b->eval_points(whole, pqr, prr) != eval::Status::Ok) return;
+        }
+        if (t.below)
+            fold_layers_below(t.below, t.below_rgb, t.active, t.active_rgb, run.per,
+                              run.out_values + t.slot * run.per,
+                              run.want_colour ? run.out_colors_rgb + t.slot * run.per * 3 : nullptr);
+        t.ok = true;
+        return;
+    }
+    const eval::GridQuery& g = t.grid;
+    points.resize(run.per * 3);
+    std::size_t at = 0;
+    for (int k = 0; k < g.nz; ++k)
+        for (int j = 0; j < g.ny; ++j)
+            for (int x = 0; x < g.nx; ++x) {
+                const kernel::cfloat3 pt =
+                    g.origin + kernel::cf3(static_cast<float>(x) * g.spacing,
+                                           static_cast<float>(j) * g.spacing,
+                                           static_cast<float>(k) * g.spacing);
+                points[at * 3] = pt.x;
+                points[at * 3 + 1] = pt.y;
+                points[at * 3 + 2] = pt.z;
+                ++at;
+            }
+    eval::PointQuery pq;
+    pq.points_xyz = points.data();
+    pq.count = run.per;
+    eval::PointResults pr;
+    pr.distances = t.active;
+    pr.colors_rgb = t.active_rgb;  // null unless the batch asked for colour
+    // In place: the seed was copied here under the lock, and the answer
+    // lands on top of it.
+    if (t.stack_levels == 0) {
+        // In place, as always: with nothing open above it the answer IS
+        // the accumulator the next dab folds onto.
+        eval::eval_points_seeded(suffix, pq, t.active, t.active_rgb, pr);
+    } else {
+        // Inside a group the answer is NOT the next seed -- the group's
+        // combine has folded the chain into what sits above it -- so the
+        // walk snapshots where the checkpoint sits on its way past, and
+        // one walk produces the field and the next stack together.
+        // The NEXT checkpoint's shape, which is not always this one's: a
+        // dab into a group that was EMPTY gives the group's chain its
+        // first value, so the stack goes from one plane to two. Sizing by
+        // the incoming count would drop the stack on exactly the dab that
+        // made the group worth resuming into.
+        const std::size_t want_next =
+            scene::checkpoint_stack_levels(next.frames, next.layer_have_acc);
+        const std::size_t room_next =
+            std::max(want_next, t.stack_levels + eval::tape_stack_depth(suffix));
+        t.snap.assign(run.per * room_next, 0.0f);
+        if (!t.stack_rgb.empty()) t.snap_rgb.assign(run.per * room_next * 3, 0.0f);
+        eval::eval_points_seeded_stack(
+            suffix, pq, t.stack.data(), t.stack_rgb.empty() ? nullptr : t.stack_rgb.data(),
+            t.stack_levels, pr, t.snap.data(),
+            t.snap_rgb.empty() ? nullptr : t.snap_rgb.data(), &t.snap_levels, next.instrs);
+        if (t.snap_levels != want_next) {
+            t.snap_levels = 0;
+        } else {
+            t.snap.resize(run.per * want_next);
+            if (!t.snap_rgb.empty()) t.snap_rgb.resize(run.per * want_next * 3);
+            t.frames = next.frames;
+            t.snap_layer_have_acc = next.layer_have_acc;
+        }
+    }
+    if (t.below)
+        fold_layers_below(t.below, t.below_rgb, t.active, t.active_rgb, run.per,
+                          run.out_values + t.slot * run.per,
+                          run.want_colour ? run.out_colors_rgb + t.slot * run.per * 3 : nullptr);
+    t.ok = true;
+}
+
 std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* requests,
                           std::size_t count, std::size_t per, bool want_colour, float* out_values,
                           float* out_colors_rgb, std::uint8_t* resumed) {
@@ -12052,38 +12798,6 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
     // the split shape at T >= 2, where both are below the gate -- measure
     // 1.01-1.07x apart here, which is this harness's noise floor and wider than
     // several of the differences the table would otherwise invite reading.
-    struct ResumeTask {
-        std::size_t slot = 0;  // which brick of the batch
-        const clay_document::ResumePlan* plan = nullptr;
-        eval::GridQuery grid;
-        // Where the seed IS, valid only while the lock is held. Cleared by the
-        // copy pass below, so nothing can still be holding one when the lock
-        // drops.
-        clay_document::Seed seed;
-        // The seed on entry and the ACTIVE layer's answer on exit: the walk
-        // runs in place. The caller's own output slot when nothing sits
-        // beneath, staging when something does and a union is still to apply.
-        float* active = nullptr;
-        float* active_rgb = nullptr;
-        const float* below = nullptr;
-        const float* below_rgb = nullptr;
-        // The group half, copied off the seed under the lock. Empty means this
-        // brick resumes at a root list, which is the path that always existed.
-        std::vector<float> stack;
-        std::vector<float> stack_rgb;
-        std::uint32_t stack_levels = 0;
-        // The checkpoint's own: false where the chain it sits in had produced
-        // nothing, which an empty tail group leaves behind. Part of the shape,
-        // so the level check has to see it.
-        bool layer_have_acc = true;
-        std::vector<scene::TapeCheckpointFrame> frames;
-        // What this task produces for the NEXT dab, when it produces one.
-        std::vector<float> snap;
-        std::vector<float> snap_rgb;
-        std::size_t snap_levels = 0;
-        bool snap_layer_have_acc = true;
-        bool ok = false;
-    };
     std::vector<ResumeTask> tasks;
     // Staging for the multi-layer case only, where the walk cannot write to the
     // caller's slot because a union still has to be applied to it. Sized once
@@ -12147,14 +12861,36 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
         for (std::size_t i = 0; i < count; ++i) {
             const std::uint64_t rev =
                 doc->seed_revision_for(requests[i], per, want_colour, has_below);
-            if (rev == 0) continue;
+            // No lattice seed. The other kind is the gate's proof, which serves
+            // only what it was made for: the whole document, with nothing
+            // beneath the active layer -- a proof about the whole is not one
+            // about a half.
+            if (rev == 0 && has_below) continue;
             // The cull index is only wanted once a brick turns out to have a
             // seed: obtaining it copies the cached one, and a batch with
             // nothing to resume should not pay for that on its way to the full
             // path.
-            if (!index) {
+            if (!index && (rev != 0 || doc->has_uniform_seed(requests[i]))) {
                 index = doc->cull_index_locked();
                 resume_pad = index->cull_pad();
+            }
+            if (rev == 0) {
+                if (!index) continue;
+                ResumeTask task;
+                task.slot = i;
+                task.active = out_values + i * per;
+                task.active_rgb = want_colour ? out_colors_rgb + i * per * 3 : nullptr;
+                const UniformProbe got =
+                    probe_uniform_seed(doc, requests[i], now, resume_pad, plans, &task);
+                if (got == UniformProbe::Answered) {
+                    resumed[i] = 1;
+                    ++resumed_count;
+                } else if (got == UniformProbe::Task &&
+                           uniform_resume_allowed(doc, *task.plan, chain_for(task.plan))) {
+                    units += 2 * task.plan->appended.size();
+                    tasks.push_back(task);
+                }
+                continue;
             }
             const clay_document::Seed seed =
                 doc->seed_for(requests[i], per, resume_pad, want_colour, has_below);
@@ -12235,6 +12971,10 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
         }
         for (std::size_t t = 0; t < tasks.size(); ++t) {
             ResumeTask& task = tasks[t];
+            // A uniform task's seed is its proof, already copied, and its
+            // destination is the caller's slot, already set: a proof is only
+            // ever taken with nothing beneath.
+            if (task.uniform) continue;
             if (has_below) {
                 task.active = stage_active.data() + t * per;
                 task.below = stage_below.data() + t * per;
@@ -12287,171 +13027,19 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
 
     // -- released ---------------------------------------------------------
     //
-    // Nothing here reads the seed store. What it does read -- the document and
-    // the cull index snapshot -- is what the full path reads unlocked too: the
-    // ABI's contract is that a mutating clay_document_* call is not concurrent
-    // with a refill (clay.h, THREADING), while any number of refills and
-    // readers may be. Each task writes its own brick's samples and nothing
-    // else, so the tasks are disjoint by construction.
-    auto run_task = [&](ResumeTask& t, std::vector<float>& points) {
-        const math::Aabb box = request_brick_box(requests[t.slot]).dilated(requests[t.slot].band);
-        scene::CullRegion cull{box};
-        // The checkpoint is PER BRICK where it has frames, because a frame's
-        // `emits` depends on this brick's own cull. The plan supplies what is
-        // batch-wide -- the layer and the appended ids -- and the seed the rest.
-        scene::TapeCheckpoint cp = t.plan->checkpoint;
-        cp.frames = t.frames;
-        // Per brick for the same reason `frames` is: whether the chain the
-        // checkpoint sits in produced anything is a statement about THIS
-        // brick's cull, and the seed is what was there when it was taken.
-        if (t.stack_levels > 0) cp.layer_have_acc = t.layer_have_acc;
-        scene::Tape suffix;
-        scene::TapeCheckpoint next;
-        const bool resumable =
-            scene::compile_layer_suffix(cp, doc->doc.document, t.plan->appended, &suffix, &next,
-                                        &cull, index.get());
-        if (!resumable) {
-            // REBUILD: one full walk of the active half -- what this brick
-            // would have cost anyway -- taking the stack where its own
-            // checkpoint sits so the dabs after it resume. Once per stroke
-            // rather than once per dab, and it is how a brick whose seed has
-            // no stack ever gets one.
-            scene::TapeCheckpoint own;
-            const scene::Tape whole = scene::compile_document_part_resumable(
-                doc->doc.document, t.plan->active, /*below=*/false, &cull, index.get(), &own);
-            const eval::GridQuery& gq = t.grid;
-            points.resize(per * 3);
-            std::size_t m = 0;
-            for (int k = 0; k < gq.nz; ++k)
-                for (int j = 0; j < gq.ny; ++j)
-                    for (int x = 0; x < gq.nx; ++x) {
-                        const kernel::cfloat3 pt =
-                            gq.origin + kernel::cf3(static_cast<float>(x) * gq.spacing,
-                                                    static_cast<float>(j) * gq.spacing,
-                                                    static_cast<float>(k) * gq.spacing);
-                        points[m * 3] = pt.x;
-                        points[m * 3 + 1] = pt.y;
-                        points[m * 3 + 2] = pt.z;
-                        ++m;
-                    }
-            eval::PointQuery pqr;
-            pqr.points_xyz = points.data();
-            pqr.count = per;
-            eval::PointResults prr;
-            prr.distances = t.active;
-            prr.colors_rgb = t.active_rgb;
-            // ONE walk where a stack is wanted: the field is the top of the
-            // stack, so asking for both costs what asking for either did. A
-            // stack that came back the wrong shape is simply not stored, but
-            // the field it produced alongside is still the brick's answer.
-            if (own.valid && !own.frames.empty()) {
-                // Sized for the deepest the tape can reach, not for what the
-                // checkpoint claims: the walk writes what it finds, and the
-                // two disagreeing is the bug this once had. The shape is
-                // CHECKED below, after the write, where it is safe to be wrong.
-                const std::size_t room = eval::tape_stack_depth(whole);
-                const std::size_t want =
-                    scene::checkpoint_stack_levels(own.frames, own.layer_have_acc);
-                t.snap.assign(per * std::max(room, want), 0.0f);
-                float* snap_rgb = nullptr;
-                if (t.active_rgb) {
-                    t.snap_rgb.assign(per * std::max(room, want) * 3, 0.0f);
-                    snap_rgb = t.snap_rgb.data();
-                }
-                eval::eval_points_stack(whole, pqr, t.snap.data(), snap_rgb, &t.snap_levels,
-                                        own.instrs, 0, &prr);
-                if (t.snap_levels == want) {
-                    t.frames = own.frames;
-                    t.snap_layer_have_acc = own.layer_have_acc;
-                    t.snap.resize(per * want);
-                    if (snap_rgb) t.snap_rgb.resize(per * want * 3);
-                } else {
-                    t.snap_levels = 0;
-                    t.snap_rgb.clear();
-                }
-            } else {
-                eval::Backend* cpu_b = eval::Registry::instance().find("cpu");
-                if (!cpu_b || cpu_b->eval_points(whole, pqr, prr) != eval::Status::Ok) return;
-            }
-            if (t.below)
-                fold_layers_below(t.below, t.below_rgb, t.active, t.active_rgb, per,
-                                  out_values + t.slot * per,
-                                  want_colour ? out_colors_rgb + t.slot * per * 3 : nullptr);
-            t.ok = true;
-            return;
-        }
-        const eval::GridQuery& g = t.grid;
-        points.resize(per * 3);
-        std::size_t at = 0;
-        for (int k = 0; k < g.nz; ++k)
-            for (int j = 0; j < g.ny; ++j)
-                for (int x = 0; x < g.nx; ++x) {
-                    const kernel::cfloat3 pt =
-                        g.origin + kernel::cf3(static_cast<float>(x) * g.spacing,
-                                               static_cast<float>(j) * g.spacing,
-                                               static_cast<float>(k) * g.spacing);
-                    points[at * 3] = pt.x;
-                    points[at * 3 + 1] = pt.y;
-                    points[at * 3 + 2] = pt.z;
-                    ++at;
-                }
-        eval::PointQuery pq;
-        pq.points_xyz = points.data();
-        pq.count = per;
-        eval::PointResults pr;
-        pr.distances = t.active;
-        pr.colors_rgb = t.active_rgb;  // null unless the batch asked for colour
-        // In place: the seed was copied here under the lock, and the answer
-        // lands on top of it.
-        if (t.stack_levels == 0) {
-            // In place, as always: with nothing open above it the answer IS
-            // the accumulator the next dab folds onto.
-            eval::eval_points_seeded(suffix, pq, t.active, t.active_rgb, pr);
-        } else {
-            // Inside a group the answer is NOT the next seed -- the group's
-            // combine has folded the chain into what sits above it -- so the
-            // walk snapshots where the checkpoint sits on its way past, and
-            // one walk produces the field and the next stack together.
-            // The NEXT checkpoint's shape, which is not always this one's: a
-            // dab into a group that was EMPTY gives the group's chain its
-            // first value, so the stack goes from one plane to two. Sizing by
-            // the incoming count would drop the stack on exactly the dab that
-            // made the group worth resuming into.
-            const std::size_t want_next =
-                scene::checkpoint_stack_levels(next.frames, next.layer_have_acc);
-            const std::size_t room_next =
-                std::max(want_next, t.stack_levels + eval::tape_stack_depth(suffix));
-            t.snap.assign(per * room_next, 0.0f);
-            if (!t.stack_rgb.empty()) t.snap_rgb.assign(per * room_next * 3, 0.0f);
-            eval::eval_points_seeded_stack(
-                suffix, pq, t.stack.data(), t.stack_rgb.empty() ? nullptr : t.stack_rgb.data(),
-                t.stack_levels, pr, t.snap.data(),
-                t.snap_rgb.empty() ? nullptr : t.snap_rgb.data(), &t.snap_levels, next.instrs);
-            if (t.snap_levels != want_next) {
-                t.snap_levels = 0;
-            } else {
-                t.snap.resize(per * want_next);
-                if (!t.snap_rgb.empty()) t.snap_rgb.resize(per * want_next * 3);
-                t.frames = next.frames;
-                t.snap_layer_have_acc = next.layer_have_acc;
-            }
-        }
-        if (t.below)
-            fold_layers_below(t.below, t.below_rgb, t.active, t.active_rgb, per,
-                              out_values + t.slot * per,
-                              want_colour ? out_colors_rgb + t.slot * per * 3 : nullptr);
-        t.ok = true;
-    };
+    // The walks (run_resume_task) run with the lock down, over the pool when
+    // the table above says the dispatch pays for itself.
+    const ResumeRun run{doc, requests, index.get(), per, want_colour, out_values, out_colors_rgb};
     constexpr std::size_t kResumeParallelUnits = 256u * 1024u;
     if (tasks.size() > 1 && units >= kResumeParallelUnits) {
         parallel::ThreadPool::instance().parallel_for(
             tasks.size(), 1, [&](std::size_t task_b, std::size_t task_e) {
                 std::vector<float> points;  // one per chunk, reused across its bricks
-                for (std::size_t t = task_b; t < task_e; ++t) run_task(tasks[t], points);
+                for (std::size_t t = task_b; t < task_e; ++t) run_resume_task(run, tasks[t], points);
             });
     } else {
         std::vector<float> points;
-        for (ResumeTask& t : tasks) run_task(t, points);
+        for (ResumeTask& t : tasks) run_resume_task(run, t, points);
     }
     for (const ResumeTask& t : tasks)
         if (t.ok) {
@@ -12477,6 +13065,12 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
         const std::uint64_t now = doc->current_revision();
         for (const ResumeTask& t : tasks) {
             if (!t.ok || t.plan->now != now) continue;
+            // A proof re-proved is the next proof, under the same gate.
+            if (t.uniform) {
+                doc->store_uniform_seed(requests[t.slot], t.plan->now, resume_pad, t.proof,
+                                        /*evict=*/false);
+                continue;
+            }
             // The FIELD always, and the stack beside it when this task made one.
             const bool have_stack =
                 t.snap_levels > 0 && scene::checkpoint_stack_levels(t.frames,
@@ -12742,7 +13336,11 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
     };
 
     // The ACTIVE half -- or the whole document when nothing is beneath it, in
-    // which case the two are the same tape and only one batch is run.
+    // which case the two are the same tape and only one batch is run. Only
+    // that whole-document case can gate a brick; `gated` stays unproven for
+    // the halves, and every proof it holds is what store_seeds keeps in the
+    // lattice's place.
+    std::vector<UniformProof> gated;
     clay_result br = eval_requests_in_chunks(
         doc, todo, todo_count,
         [&](const eval::GridBatchQuery& bq, std::size_t base) -> clay_result {
@@ -12752,7 +13350,7 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
                 return fail(CLAY_ERROR_BACKEND, "eval_grid_batch failed");
             return CLAY_OK;
         },
-        has_below ? ChunkHalf::Active : ChunkHalf::Whole, active_layer, take_stacks);
+        has_below ? ChunkHalf::Active : ChunkHalf::Whole, active_layer, take_stacks, &gated);
     if (br != CLAY_OK) return br;
     if (has_below) {
         br = eval_requests_in_chunks(
@@ -12788,7 +13386,7 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
     // move while the active layer is being sculpted.
     doc->store_seeds(todo, todo_count, act.data(), act_rgb.empty() ? nullptr : act_rgb.data(),
                      has_below ? bel.data() : nullptr, bel_rgb.empty() ? nullptr : bel_rgb.data(),
-                     per, 0, 0.0f, stacks.data());
+                     per, 0, 0.0f, stacks.data(), gated.data());
     return CLAY_OK;
 }
 

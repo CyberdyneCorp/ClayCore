@@ -21,6 +21,28 @@ struct Tape {
     std::vector<float> params;
     std::vector<float> blob;  // out-of-line payload: stroke points, polygon verts
     kernel::CFieldInfo info{true, 1.0f};
+    // Whether `info.lipschitz` bounds |grad f| EVERYWHERE, and not only the
+    // step a marcher may take. Those are two different numbers. exactness.h
+    // keeps L = 1 for the "underestimating" fields -- an ellipsoid, a tri
+    // prism, an overflowing repeat, a loft, a sweep, a sampled volume --
+    // because |f| <= distance makes stepping by f safe, and says nothing about
+    // the slope: an ellipsoid's bound field measures a slope of 1.09 near its
+    // tips and 3.6 for a needle-shaped one (400k close pairs, kernel
+    // evaluation). Three deformer bounds are exceeded outright by the same
+    // measure: taper's (1.03x mild, 1.44x smoothstep, 2.5x linear -- it omits
+    // the easing curve's slope and the 1/s(y)^2 in d(p/s(y))/dy), wrap_around's
+    // (1.05x on the surface) and bend_curve's (7-9x, at the guide's ends).
+    //
+    // A marcher never needs more than the stepping bound. A consumer that
+    // reasons about VALUES from L does -- the uniform-brick gate proves from
+    // |f(c)| and L that no lattice sample lies within the band, and under a
+    // stepping bound it stored a brick the walk finds SURFACE as OUTSIDE --
+    // and may only do so while this holds. Folded as `info` is: true for an
+    // empty tape, false once any item in the tape brought one of the fields
+    // or deformers above, and copied with `info` where a compile continues
+    // another's prefix. The cull applies: a brick whose region no such item
+    // reaches compiles a tape without it, and keeps the flag.
+    bool lipschitz_bounds_gradient = true;
     math::Aabb bounds;  // union of item influence bounds (raycast clipping)
 
     // Content identity for backend upload caching. compile_document and
@@ -133,6 +155,31 @@ Tape compile_document(const Document& doc, const CullRegion* cull = nullptr,
 
 // Single layer.
 Tape compile_layer(const Layer& layer, const CullRegion* cull = nullptr);
+
+// ONE ITEM, alone, under `layer`'s placement and symmetry: the tape a layer
+// holding nothing but this item would compile to, with the item's op read as
+// Add and its children ignored. Byte-identical to compile_layer over such a
+// layer — instrs, params, blob, info and bounds — and that is a test, not a
+// claim.
+//
+// What it is for. Hit attribution (pick::attribute) asks, for every item whose
+// influence reaches the hit point, how far the point is from THAT item's own
+// surface, and picks the closest. Asking through compile_layer means building
+// a Document, a Layer and an SdfContent, inserting a copy of the node into a
+// hash map and running the whole-document walk, per candidate item per pick —
+// dozens of times a Pencil event on a stroke whose dabs overlap, and it was
+// the larger half of a pick at 1,500 items. This emits the item and nothing
+// else.
+//
+// Read as an ADD because the question is about the item's own shape: a
+// subtract's field is the shape it carved with, a paint's the shape it painted
+// with, and both attribute the surface they touched. Nothing beneath it means
+// no combine, so a carve or a paint that would emit nothing at the head of a
+// chain still has a field here. The item's visibility is not consulted: this
+// is a probe of one item the caller already chose, and attribution checks
+// visibility before it asks. A group has no field of its own and yields an
+// empty tape; attribution walks a group's children instead.
+Tape compile_item(const Layer& layer, const Node& item);
 
 // -- resuming a whole-document compile after an append -----------------------
 //

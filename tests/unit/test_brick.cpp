@@ -56,6 +56,37 @@ TEST_CASE("fp16 conversion: exact round trips and monotone quantization") {
     CHECK(brick::float_to_half(0.123456f) == brick::float_to_half(0.123456f));
 }
 
+TEST_CASE("fp16 conversion: subnormal halves quantize instead of exploding") {
+    // Distances below 2^-14 (6.1e-5) are subnormal in half. The conversion
+    // used to shift their mantissa by the wrong amount and store a huge value
+    // or a NaN for them, so a brick sample within 6e-5 of the surface poisoned
+    // the eight cells around it. The bit patterns are IEEE 754 round-to-
+    // nearest-even, the same ones a hardware conversion produces.
+    struct Case {
+        float f;
+        std::uint16_t h;
+    };
+    const Case cases[] = {
+        {5e-5f, 0x0347},   {-5e-5f, 0x8347},  {3e-5f, 0x01F7},  {6.1e-5f, 0x03FF},
+        {1e-5f, 0x00A8},   {5.96e-8f, 0x0001}, {3e-8f, 0x0001}, {2.98e-8f, 0x0000},
+        {1e-9f, 0x0000},   {6.2e-5f, 0x0410},
+    };
+    for (const Case& c : cases) {
+        CAPTURE(c.f);
+        CHECK(brick::float_to_half(c.f) == c.h);
+    }
+    // And across the whole subnormal range: the round trip lands within one
+    // subnormal step (2^-24) of the input, with its sign, never elsewhere.
+    clay_test::Lcg rng(602);
+    for (int i = 0; i < 5000; ++i) {
+        const float f = rng.range(-6.1e-5f, 6.1e-5f);
+        const float q = brick::half_to_float(brick::float_to_half(f));
+        CAPTURE(f);
+        CHECK(q == q);
+        CHECK(cabs(q - f) <= 5.97e-8f);
+    }
+}
+
 TEST_CASE("sparse storage: only surface bricks allocate") {
     scene::Document doc;
     scene::Layer& l = doc.add_sdf_layer("l");
@@ -561,4 +592,119 @@ TEST_CASE("forgetting a key never turns solid interior into empty space") {
 
     // ...and still does after. The interior survived the sweep.
     CHECK(cache.sample(centre, 4, 4, 4) == inside_before);
+}
+
+namespace {
+
+// The definition surface_bounds() promises: the fold the brick raycast used to
+// run per ray. Compared field by field and exactly — a union of mins and maxes
+// over the same floats is order-independent, so any difference is a
+// bookkeeping bug, never rounding.
+math::Aabb folded_surface_bounds(const BrickCache& cache) {
+    math::Aabb box;
+    for (BrickKey key : cache.surface_bricks()) box.expand(cache.brick_bounds(key));
+    return box;
+}
+
+void check_surface_bounds(const BrickCache& cache, const char* step) {
+    CAPTURE(step);
+    const math::Aabb want = folded_surface_bounds(cache);
+    const math::Aabb got = cache.surface_bounds();
+    REQUIRE(got.empty() == want.empty());
+    if (want.empty()) return;
+    CHECK(got.min.x == want.min.x);
+    CHECK(got.min.y == want.min.y);
+    CHECK(got.min.z == want.min.z);
+    CHECK(got.max.x == want.max.x);
+    CHECK(got.max.y == want.max.y);
+    CHECK(got.max.z == want.max.z);
+}
+
+// A surface brick on a face of the box, and one strictly inside it — the two
+// removals that exercise the different branches of the bookkeeping.
+BrickKey face_surface_brick(const BrickCache& cache) {
+    const math::Aabb box = cache.surface_bounds();
+    for (BrickKey key : cache.surface_bricks())
+        if (cache.brick_bounds(key).min.x == box.min.x) return key;
+    FAIL("no surface brick on the -x face");
+    return BrickKey{};
+}
+
+BrickKey interior_surface_brick(const BrickCache& cache) {
+    const math::Aabb box = cache.surface_bounds();
+    for (BrickKey key : cache.surface_bricks()) {
+        const math::Aabb b = cache.brick_bounds(key);
+        if (b.min.x > box.min.x && b.max.x < box.max.x && b.min.y > box.min.y &&
+            b.max.y < box.max.y && b.min.z > box.min.z && b.max.z < box.max.z)
+            return key;
+    }
+    FAIL("no surface brick strictly inside the box");
+    return BrickKey{};
+}
+
+}  // namespace
+
+TEST_CASE("surface_bounds equals the fold over surface_bricks after every mutation") {
+    // The raycast reads surface_bounds() instead of folding surface_bricks()
+    // per ray. The two must never disagree, so every path that changes which
+    // bricks are Surface — submit in both directions, evict, both trims,
+    // forget_empty — is followed by the equality it promises.
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    REQUIRE(cpu != nullptr);
+    scene::Document doc;
+    scene::Layer& layer = doc.add_sdf_layer("s");
+    const scene::NodeId ball = layer.sdf->insert(item(scene::Prim::sphere(0.6f), cf3(0, 0, 0)));
+
+    BrickConfig cfg;
+    cfg.voxel_size = 0.03f;
+    cfg.dim = 8;
+    BrickCache cache(cfg);
+    check_surface_bounds(cache, "empty cache");
+    CHECK(cache.surface_bounds().empty());
+
+    // A domain well wider than the ball: a mix of Surface, Inside and Outside
+    // bricks, with never-evaluated keys at the rim.
+    cache.mark_dirty(math::Aabb{cf3(-1.2f, -1.2f, -1.2f), cf3(1.2f, 1.2f, 1.2f)});
+    check_surface_bounds(cache, "dirty, nothing submitted");
+    fill_cache(cache, doc, cpu);
+    check_surface_bounds(cache, "filled");
+    REQUIRE_FALSE(cache.surface_bounds().empty());
+
+    // Single evictions: one that cannot move a face, one that must.
+    REQUIRE(cache.evict(interior_surface_brick(cache)));
+    check_surface_bounds(cache, "evicted an interior brick");
+    REQUIRE(cache.evict(face_surface_brick(cache)));
+    check_surface_bounds(cache, "evicted a face brick");
+
+    // Both trims: the focused one drops the far bricks — the faces — first.
+    REQUIRE(cache.trim_to(cache.memory_usage() / 2, cf3(0, 0, 0)) > 0);
+    check_surface_bounds(cache, "trim_to with focus");
+    REQUIRE(cache.trim_to(cache.memory_usage() / 2) > 0);
+    check_surface_bounds(cache, "trim_to without focus");
+    REQUIRE(cache.forget_empty() > 0);
+    check_surface_bounds(cache, "forget_empty");
+
+    // Reclassification through submit: shrink the ball and refill, so bricks
+    // that were Surface at the old extremes come back Outside or Inside.
+    layer.sdf->find_mut(ball)->prim = scene::Prim::sphere(0.3f);
+    cache.mark_dirty(math::Aabb{cf3(-1.2f, -1.2f, -1.2f), cf3(1.2f, 1.2f, 1.2f)});
+    fill_cache(cache, doc, cpu);
+    check_surface_bounds(cache, "shrunk and refilled");
+    // ...and grown again, so submit widens the box from a smaller one.
+    layer.sdf->find_mut(ball)->prim = scene::Prim::sphere(0.8f);
+    cache.mark_dirty(math::Aabb{cf3(-1.2f, -1.2f, -1.2f), cf3(1.2f, 1.2f, 1.2f)});
+    fill_cache(cache, doc, cpu);
+    check_surface_bounds(cache, "grown and refilled");
+
+    // Evict every surface brick one at a time, checking after each, down to
+    // the empty box; then a whole-cache refill brings it back.
+    for (BrickKey key : cache.surface_bricks()) {
+        REQUIRE(cache.evict(key));
+        check_surface_bounds(cache, "evicting one by one");
+    }
+    CHECK(cache.surface_bounds().empty());
+    cache.mark_dirty(math::Aabb::infinite());
+    fill_cache(cache, doc, cpu);
+    check_surface_bounds(cache, "refilled after emptying");
+    CHECK_FALSE(cache.surface_bounds().empty());
 }

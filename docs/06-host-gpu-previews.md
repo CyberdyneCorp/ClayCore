@@ -360,8 +360,11 @@ per frame is an expensive thing to write by accident.
 The brick cache already stores exactly what a GPU wants: a sparse set of `dim³`
 fp16 lattices in a narrow band around the surface, in the engine's own bits. So
 a host can upload the band as a sparse 3D texture atlas and sphere-trace it —
-trilinear sampling plus a brick DDA, which is what `clay_brick_cache_raycast`
-does on the CPU — **with no kernel math in the shader**. Nothing to drift.
+trilinear sampling plus a brick DDA over the same lattice that
+`clay_brick_cache_raycast` walks analytically on the CPU (a brick DDA, a cell
+DDA under the surface bricks, and one cubic root per cell instead of a march;
+the same reconstruction, so the two put the surface in the same place) —
+**with no kernel math in the shader**. Nothing to drift.
 
 This route was proposed by ClaySpaceDesktop in issue #43, which found the path
 90% shipped and named the missing 10%. It is all there as of ABI 0.25.0.

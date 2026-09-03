@@ -378,7 +378,14 @@ crashes inside someone else's driver:
 Values stay `float32` and are **not** quantized on the device even though the
 brick cache stores fp16: quantization and band classification are
 `BrickCache::submit`'s, and a device path that did them would be a second
-implementation of the step most able to drift.
+implementation of the step most able to drift. That one implementation is a
+software round-to-nearest-even conversion, bit-identical on every platform,
+and it is exact through the subnormal halves too: a distance below 2⁻¹⁴
+(6.1e-5) is stored as the nearest multiple of 2⁻²⁴, with values under 2⁻²⁵
+rounding to zero. It used to shift those by the wrong amount and store a
+huge value or a NaN, so a lattice sample that landed within 6e-5 of the
+surface poisoned the eight cells around it — a brick raycast through one of
+them fell off the ray and missed the whole model.
 
 `Backend::eval_grid_batch_device` is `eval_grid_batch` for that caller-owned
 destination — the brick-refill shape, with grid *i* landing at the same fixed
@@ -536,6 +543,89 @@ is not being mutated, so it belongs at pointer-down, between strokes, or on a
 camera move — not between the dabs of a live stroke, where every dab is a
 mutating call. A host that warms the neighbourhood a brush is about to enter
 pays for it once, before the stroke that needs it.
+
+### A brick proven uniform is not walked
+
+The cold walk above is mostly spent on bricks that store nothing. A dab dirties
+the solid box its influence bound covers, and on a worked model most of that
+box is clay: on the sculpted-sphere fixture (`BM_DabRefillSculpted`), **57 of
+the 80 bricks** one dab dirties are uniformly inside at 400 dabs and 64 of 80
+at 1,500 — and `BrickCache::submit` is where a brick is classified, from its
+samples, so each of them paid 512 walks of its culled tape to be told it holds
+no lattice.
+
+One evaluation says the same thing. The compiler tracks every tape's Lipschitz
+bound *L* (the number the raycaster steps by), so `|f(x) − f(c)| ≤ L·|x − c|`;
+every lattice sample sits within the lattice's half-diagonal *hd* of its centre
+*c*; so when
+
+```
+|f(c)| > band + L · hd
+```
+
+no sample can be within the band, let alone cross zero, and every one carries
+`f(c)`'s sign. The brick is uniform, its class is what submit would have found,
+and it is a **proof rather than a heuristic** — a sample inside the band would
+contradict the bound. The ball is the **lattice's own**, not the band-dilated
+cull region (that puts the band term in twice and collapses the proof rate to
+~21%), and the bound read is the brick's **own culled tape's**, never the whole
+document's (the cull is what keeps *L* small — a deformer far from the brick is
+not in this tape). Measured on the fixture, **91% of the uniform bricks pass at
+400 dabs and 97% at 1,500, none falsely**; the rest walk as before.
+
+**The bound has to be a slope bound.** `exactness.h` keeps *L* = 1 for the
+underestimating fields — an ellipsoid, a tri prism, an overflowing repeat, a
+loft, a sweep, a sampled volume — because `|f| ≤ distance` makes stepping by
+*f* safe, and that says nothing about `|∇f|`: an ellipsoid's bound field
+measures a slope of 1.09 near its tips and 3.6 for a needle-shaped one, and
+three deformer factors are exceeded outright by the same 400k-pair probe (taper
+1.03–2.5×, `wrap_around` 1.05×, `bend_curve` 7–9× at the guide's ends). Under
+such an *L* the inequality is false by more than its margin: a needle ellipsoid
+on the lattice diagonal proved 852 of 1,000 bricks and stored one the walk
+finds SURFACE as OUTSIDE — the mesh was unchanged, the stored state and halves
+were not. The compiler folds `Tape::lipschitz_bounds_gradient` beside `info`,
+false once any item in the tape brought one of those fields or deformers and
+copied with the prefix on an append, and the gate refuses a tape without it —
+on the full path and on the proof-carrying suffix alike. The refusal is per
+brick, through the cull: a brick whose region the ellipsoid does not reach
+compiles a tape without it and keeps the gate.
+
+A proven brick keeps its place in the batch: a **stub tape** — one
+`ctape_empty`, the far field for an outside brick and, through a zero scale
+and a rounding of `band + spacing`, the constant `−(band + spacing)` for an
+inside one, carrying the colour submit reads at sample *n/2* — takes its
+tape's slot, so the device
+copy, the fixed-stride destination and submit all see an ordinary brick, and
+what the cache **stores** is bit-identical to the walk's. What the refill
+**returns** for such a brick is the stub's samples, every one beyond the band
+with the brick's sign, which is the only property of a uniform brick's values
+that anything downstream reads (`clay.h` says so at the entry point).
+
+**A gated brick's seed is its proof**, not the stub. Storing the stub would
+poison the store — the next dab's suffix would fold onto numbers the field never
+produced, and a seeded answer is bit-identical to a walked one by contract, so
+nothing could tell — and storing nothing measured worse than the walk it
+replaced: a seedless brick pays its culled compile again on every dab, and the
+warm dab went **0.55 → 2.5 ms at 400 items and 0.44 → 8.4 ms at 1,500**, for a
+cold-dab win of 2x. So the entry holds the field's unclamped value and colour at
+the centre and at sample *n/2*, plus the tape's bound; the next dab folds its
+suffix onto those two points — the walk's own arithmetic there — and re-proves
+the brick with `max(stored, suffix)` as the new bound. That bound is exact when
+every appended item folds by a max rule (Add, Subtract, Intersect, hard or
+smooth); anything else — extended modes, transitions, gates, a group — takes the
+full path, where the gate reads the bound the compiler declared. A dab that
+reaches a proven brick fails the re-proof and walks it once, as a cold brick
+would. A proof counts as **resumed** when it is carried forward and as
+**refilled** when it is made on the full path (it neither walks nor resumes
+there; `clay_internal_gated_bricks` counts those), so the ratio `clay.h`
+documents keeps its meaning.
+
+Cold dab through the C ABI, medians of 7 on an M2 Max: **9.22 → 5.58 ms at 400
+dabs (1.65x), 33.4 → 14.1 ms at 1,500 (2.4x)**; a whole-model fill of 9,240
+bricks **580 → 335 ms and 2,213 → 1,180 ms**, with the same brick counts in
+every class. The warm dab — the same window, one appended dab later — goes
+**0.52 → 0.25 ms at 400 and 0.44 → 0.17 ms at 1,500**, because a brick carried
+forward as a proof skips the 512-point seeded walk a lattice seed still runs.
 
 ### An intersect is bounded by its layer
 
@@ -1049,10 +1139,64 @@ Runnable: [`examples/60_surviving_a_crash.py`](../examples/60_surviving_a_crash.
 
 CPU-side, latency-critical, called every Pencil event:
 
-- Ray ↔ scene raycast (analytic tape or brick cache, whichever is fresher) with layer/item hit attribution.
+- Ray ↔ scene raycast (analytic tape or brick cache, whichever is fresher) with layer/item hit attribution. The brick raycast starts from `BrickCache::surface_bounds()`, the union of the surface bricks' boxes that the cache keeps current across submit, evict and trim — it used to fold that box from `surface_bricks()` on every ray, a walk of the whole map per Pencil event that cost more than the march it preceded on a whole-model cache. Inside that box the walk is **analytic on the cache's own reconstruction** rather than a sphere trace of it: the field a brick cache answers is the trilinear interpolation of its lattice, so along a ray inside one cell it is a cubic in *t* (Hansson Söderlund, Evans and Akenine-Möller, *Ray Tracing of Signed Distance Function Grids*, JCGT 2022), and the first crossing in a cell is that cubic's first root — found by splitting at the derivative's zeros and refining with Newton–Raphson inside the bracket — rather than something a march creeps up on at eight hash lookups per sample. A brick-level DDA skips uniform bricks whole (Inside, Outside and never-evaluated alike; an Outside brick beside a Surface one walks only its face-layer cells, since only those have a neighbour's samples for corners), a cell-level DDA under a Surface brick gathers eight corners per cell — four of them carried over from the cell before — and the cubic is solved only where the corners straddle the threshold. The hit is where the field falls below `eps` scaled by the distance, the same crossing the sphere trace stopped at, so a host that picked with the old march picks the same point; the normal is the field's own gradient in the cell that was hit (the paper's analytic normal), which is the same field the old six-tap central difference sampled and agrees with it everywhere but across a crease. The sphere trace is kept as `pick::detail::raycast_bricks_sphere_traced`, the reference the agreement test holds the walk to on hundreds of rays: every hit and miss the same, every t within a twentieth of a voxel. Measured on the 1,500-dab whole-model cache of the `bench_unspent` harness, a pick went from 1.4 µs to 0.6 µs; random rays from a sphere around the model from 1.9 µs to 1.4 µs.
 - Surface snapping: closest-point-on-surface (gradient descent on the field), position and position+normal modes.
 - Build-plane and grid cell resolution for voxel mode; face picking on voxel grids.
 - Bounds/frustum utilities for zoom-to-selection and culling.
+
+**A pick marches the cached tape, and pays only the step scale its own ray
+needs.** Two things the pick path used to do per Pencil event, neither of them
+visible from the hit. It compiled the document: `pick::raycast_scene(doc, ray)`
+built a fresh pickable tape every call, while the C ABI already held one per
+revision for every other pick query — at 1,500 items that compile was 0.3 ms
+of a 1.0 ms pick. `clay_raycast_attributed` and `clay_raycast_bounded` now hand
+the cached tape (and the document's cull index) to an overload of
+`raycast_scene` that takes them; the library entry point keeps its signature
+and compiles as before. And it marched at the document's worst step scale: the
+tape's `safe_step_scale` is ONE Lipschitz bound folded over every visible node,
+so a twisted box two units from the model dropped it from 1 to 0.28 and a ray
+nowhere near the box took 2.4× the steps it needed, because the bound cannot
+say *where* the field is steep. When that scale is below 1, the march now
+compiles a tape culled to the ray's own segment — a box around the clipped ray,
+through the same per-brick cull the refill uses, so the culled field is exact
+wherever the march evaluates — and steps by the culled tape's scale when it is
+larger. An item whose influence misses the segment is dropped, and its
+Lipschitz contribution with it; a ray straight through the steep item keeps it,
+the scales tie, and the whole tape marches as it did (no compile is used
+unless it wins). The hit is the same surface either way — the surface did not
+move, only the step length did — and `SceneHit::steps` reports the march so a
+test can hold the claim. With both, the twisted case measured 1.20 → 0.95 ms
+at 1,500 items and 0.33 → 0.26 ms at 400, the plain case 1.02 → 0.80 ms and
+0.28 → 0.22 ms; a culled compile still emits nearly every item of a long
+blended chain (the blend envelope pads the region), which is why the local
+tape is gated on the step scale rather than compiled for every ray.
+
+**And attribution no longer builds a document per candidate.** Once the march
+has a hit, `pick::attribute` names the layer and item under it: the layer by
+|field| of each visible, unghosted SDF layer's own tape at the hit, the item by
+|field| of each candidate item's own tape — the item as an Add, alone, under
+the layer's placement and mirror — over the items whose influence bound
+reaches the hit. It used to answer the second question by constructing a
+`Document`, a `Layer` and an `SdfContent`, inserting a copy of the node into
+the hash map and running the whole-document compile, once per candidate per
+pick, and the first by compiling every layer per call; on a stroke whose dabs
+overlap that is dozens of document constructions a Pencil event, and at 1,500
+items attribution was 0.42 ms of a 0.80 ms pick whose march was 0.38.
+`scene::compile_item(layer, node)` now emits the one item and nothing else —
+byte-identical to `compile_layer` over a layer holding only that item, held as
+a test over the gnarly corpus — and the tape overload of `attribute`, which
+`raycast_scene` calls with the pickable tape it marched, reads a single-layer
+document's winner off that tape instead of compiling the layer again (one
+candidate layer means the pickable tape *is* its tape; with several the
+per-layer compile stays, since their union cannot say which is nearest). The
+ids a hit attributes to are unchanged: the old implementation is kept verbatim
+in `test_pick.cpp` as the reference, and both entry points are held against it
+over mirrored, squashed, ghosted and radial layers, groups, subtracts, paints
+and strokes. The plain case measured 0.80 → 0.51 ms at 1,500 items and
+0.22 → 0.14 ms at 400, the twisted case 0.91 → 0.65 and 0.25 → 0.18. What is
+left over the bare march is mostly the influence-bound walk over every item of
+the winning layer, which the cull index caches per revision and attribution
+does not yet read.
 
 ### Asking the shape what it is: surface measures
 

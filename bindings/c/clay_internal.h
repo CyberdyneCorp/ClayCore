@@ -41,6 +41,31 @@ extern "C" {
 clay_result clay_internal_resume_order_size(const clay_document* doc, uint64_t* out_entries);
 clay_result clay_internal_set_resume_budget(clay_document* doc, uint64_t bytes);
 
+/* -- the uniform-brick gate --------------------------------------------------
+ *
+ * A brick the full refill can PROVE uniform from one evaluation and its tape's
+ * Lipschitz bound is not walked (bindings/c/clay_c.cpp, prove_uniform): a stub
+ * that classifies the same way stands in for its tape, and its seed is the
+ * PROOF rather than the stub's samples, carried through the next dab's suffix
+ * and re-proved there. What the cache stores for it is bit-identical to what
+ * the walk would have stored, so nothing about a refill's output says whether
+ * the gate fired -- these two seams are how a test sees it.
+ *
+ * clay_internal_gated_bricks: cumulative count of bricks the gate answered,
+ * over the document's life. A subset of clay_resume_stats::refilled_bricks
+ * (the gate sits inside the full path). A test holds the proof rate on a fixed
+ * fixture above a floor, so a change that quietly switched the gate off would
+ * fail rather than merely slow down.
+ *
+ * clay_internal_set_uniform_gate: switches the gate off (0) or on (non-zero)
+ * for one document, so a gated fill can be held against an ungated one over
+ * the same items. On by default; never off for a host.
+ *
+ * Both return CLAY_ERROR_INVALID_ARGUMENT on a null argument.
+ */
+clay_result clay_internal_gated_bricks(const clay_document* doc, uint64_t* out_gated);
+clay_result clay_internal_set_uniform_gate(clay_document* doc, int32_t enabled);
+
 /* -- the frontier half of one brick's seed (issue #360) ---------------------
  *
  * dirty_from / prefix_boundary / prefix_structure of the resume entry serving

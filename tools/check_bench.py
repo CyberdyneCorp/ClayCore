@@ -752,6 +752,17 @@ MAX_RATIO = [
 # re-allocating a 3 MiB buffer per stamp; an iPad is where memory pressure
 # ends sessions.
 MAX_COUNTER = [
+    # The uniform-brick gate (gate-the-uniform-brick): a brick the refill can
+    # prove uniform from one evaluation and its tape's Lipschitz bound is not
+    # walked. The window one dab dirties on the helix fixture is 80 bricks, of
+    # which 57 (400 dabs) and 64 (1,500) are uniformly inside, and the gate
+    # proves 52 and 62 of them -- so the refill WALKS 28 and 18. With the gate
+    # off it walks 80. A wall-clock gate on the 2x that costs would flake on a
+    # shared runner; the count is exact and machine-independent, and the
+    # ceiling sits between the two at the point where a proof rate that
+    # halved would already fail.
+    ("BM_DabRefillSculpted400", "walked", 40),
+    ("BM_DabRefillSculpted1500", "walked", 32),
     # A stroke re-packs when it outgrows its reserved slack, which is
     # geometric — measured 8 re-packs over 8 154 appends, and 0 over the 300
     # this benchmark runs. Per-dab reallocation, which is what the code did

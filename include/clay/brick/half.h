@@ -23,9 +23,20 @@ inline std::uint16_t float_to_half(float f) {
     }
     if (em >= 0x47800000u) return static_cast<std::uint16_t>(sign | 0x7C00u);  // overflow -> inf
     if (em < 0x38800000u) {
-        // subnormal half (or zero): shift with round-to-nearest-even
+        // subnormal half (or zero): shift with round-to-nearest-even.
+        //
+        // A subnormal half is M * 2^-24 for a 10-bit M, and a float below
+        // 2^-14 is mant * 2^(e - 150) for its 24-bit mantissa (implicit bit
+        // included) and biased exponent e, so M = mant >> (126 - e). The
+        // shift used to be 113 - e, which left up to 23 bits in M: every
+        // distance smaller than 2^-14 (6.1e-5) was stored as a huge value or
+        // a NaN, and a brick sample that landed that close to the surface
+        // poisoned its eight cells for every trilinear read — a raycast
+        // through one of them missed the whole model. Below 2^-25 the value
+        // rounds to zero (a tie at exactly 2^-25 rounds to even, which is
+        // zero too), so anything needing more than a 24-bit shift is zero.
         std::uint32_t mant = (em & 0x007FFFFFu) | 0x00800000u;
-        int shift = 113 - static_cast<int>(em >> 23);
+        int shift = 126 - static_cast<int>(em >> 23);
         if (shift > 24) return static_cast<std::uint16_t>(sign);
         std::uint32_t v = mant >> shift;
         std::uint32_t rem = mant & ((1u << shift) - 1u);

@@ -835,6 +835,13 @@ TEST_CASE("frontier: spatial dirtying is the influence union, not a raw box") {
         // influence to [0.1, 2.6], which reaches it.
         const std::vector<clay_brick_request> span = row(-3, 11);  // kx -3..7
         DragFixture fix;
+        // The teeth below read values BEYOND the band -- kx 7 never holds the
+        // surface, and the grab moves its field without bringing it within
+        // reach -- and the uniform-brick gate replaces exactly those with a
+        // stub. Off, on both documents, so the floats still say whether the
+        // brick was recomputed; test_c_uniform_gate.cpp holds the gate's own
+        // contract.
+        REQUIRE(clay_internal_set_uniform_gate(fix.doc.d, 0) == CLAY_OK);
         std::vector<float> warm;
         refill_counting(fix.doc.d, span, &warm);
         const clay_brick_request beyond = brick(7, -1, -1);
@@ -861,6 +868,7 @@ TEST_CASE("frontier: spatial dirtying is the influence union, not a raw box") {
         std::vector<float> got;
         refill_counting(fix.doc.d, span, &got);
         DragFixture oracle;
+        REQUIRE(clay_internal_set_uniform_gate(oracle.doc.d, 0) == CLAY_OK);
         REQUIRE(clay_layer_add_deformer(oracle.doc.d, oracle.doc.layer, oracle.target,
                                         CLAY_DEFORM_GRAB, grab, 8, 0, 1) == CLAY_OK);
         const std::vector<float> want = refill(oracle.doc.d, span);

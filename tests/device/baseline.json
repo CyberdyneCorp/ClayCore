@@ -179,6 +179,13 @@
       "measuredMs": 2.6199,
       "rawMs": 2.6218
     },
+    "sdf_stamp_detail_bricks": {
+      "budgetMs": 97.2766,
+      "class": "interactive",
+      "machineFactor": 1.0325,
+      "measuredMs": 64.851,
+      "rawMs": 66.9569
+    },
     "sdf_stamp_metal": {
       "budgetMs": 3.0375,
       "class": "interactive",
@@ -1078,6 +1085,30 @@
       "atMs": 6102.221542,
       "bundle": "com.cyberdyne.claycore.devicedyntopo",
       "ms": 130.882542,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 0.000375,
+      "bundle": "com.cyberdyne.claycore.devicedetail",
+      "ms": 136.94075,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 136.967125,
+      "bundle": "com.cyberdyne.claycore.devicedetail",
+      "ms": 130.959292,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 16826.475708,
+      "bundle": "com.cyberdyne.claycore.devicedetail",
+      "ms": 145.640166,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 16972.191375,
+      "bundle": "com.cyberdyne.claycore.devicedetail",
+      "ms": 140.373291,
       "thermalState": "nominal"
     }
   ],
@@ -5121,6 +5152,49 @@
       "thermalStateEnd": "nominal",
       "thermalStateStart": "nominal",
       "verb": "dynamic_surface_copy_chunk"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "bundle": "com.cyberdyne.claycore.devicedetail",
+      "canaryAfterMs": 145.640166,
+      "canaryBeforeMs": 130.959292,
+      "growthExponent": 0.7260165858532311,
+      "measurements": [
+        {
+          "batch": 1,
+          "p50Ms": 2.035667,
+          "p95Ms": 2.364625,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 200,
+          "stamps": 10
+        },
+        {
+          "batch": 1,
+          "p50Ms": 11.618583,
+          "p95Ms": 14.180042,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 49,
+          "stamps": 100
+        },
+        {
+          "batch": 1,
+          "p50Ms": 59.968875,
+          "p95Ms": 66.956917,
+          "p95SpreadMs": 4.4042499999999976,
+          "repeats": 3,
+          "samples": 16,
+          "stamps": 1000
+        }
+      ],
+      "name": "sdf_stamp_detail_bricks",
+      "servedBy": "cpu",
+      "startedAtMs": 267.930166,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
+      "verb": "sdf_stamp_incremental"
     }
   ],
   "claycoreCommit": "240316506c7ab587ee041a322948b447c2cfdb53",

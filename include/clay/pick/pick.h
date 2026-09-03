@@ -37,6 +37,13 @@ struct RaycastOptions {
     // The field is not modified, so the ray still marches the true surface and
     // simply refuses to stop on the parts that are hidden.
     const voxel::GroupField* groups = nullptr;
+
+    // Whether the march may run on a tape culled to the ray's own segment when
+    // the document's tape carries a Lipschitz bound above 1 (see raycast_scene
+    // for why that is worth a compile). Off, the march takes the whole
+    // document's step scale everywhere; the option exists so a test can hold
+    // the two marches against each other, not for a caller to tune.
+    bool local_tape = true;
 };
 
 struct SceneHit {
@@ -46,6 +53,10 @@ struct SceneHit {
     kernel::cfloat3 normal = kernel::cf3(0, 1, 0);
     scene::LayerId layer = 0;   // attribution (0 = none)
     scene::NodeId item = scene::kNoNode;
+    // Sphere-march samples taken, summed over hidden-surface restarts. What a
+    // step-scale claim is checked against: the same hit in fewer steps IS the
+    // win, and there is no other way to see it from outside.
+    int steps = 0;
 };
 
 // Analytic raycast against the document's compiled tape, with hit
@@ -60,7 +71,17 @@ struct SceneHit {
 // Exposed rather than kept private because a host doing its own ray marching
 // or snapping needs the same tape, and picking that disagreed with itself
 // depending on which entry point ran would be worse than no ghosting at all.
-scene::Tape pickable_tape(const scene::Document& doc, const scene::CullRegion* cull = nullptr);
+//
+// `index` is the document's cull index (scene/cull_index.h) and `plan` a
+// coarse cull of it over a region containing `cull`; both consulted only with
+// a `cull`, both the pure accelerations compile_document takes them as (cached
+// bounds and a pre-pruned walk instead of per-node recomputation). They are
+// dropped when a ghosted layer forces the compile onto a copy of the document,
+// because the index caches by layer address and every lookup against the copy
+// would miss.
+scene::Tape pickable_tape(const scene::Document& doc, const scene::CullRegion* cull = nullptr,
+                          const scene::CullIndex* index = nullptr,
+                          const scene::CullPlan* plan = nullptr);
 
 // PROJECT A POINT ONTO THE SURFACE, searching BOTH ways within a distance
 // (add-claycore-bridge).
@@ -120,15 +141,85 @@ float next_visible_crossing(const std::function<float(kernel::cfloat3)>& field,
 SceneHit raycast_scene(const scene::Document& doc, const math::Ray& ray,
                        const RaycastOptions& options = {});
 
-// Raycast against a filled brick cache (trilinear narrow-band samples, brick
-// DDA across non-surface bricks). Position/normal only — pass the document
-// to attribute() for ids.
+// The same march against a pickable tape the caller already holds — the C
+// ABI's per-revision cached one — so a pick does not compile the document it
+// was just handed. `tape` MUST be pickable_tape(doc) for this `doc` (or a
+// byte-identical copy): the hit is marched on the tape and attributed on the
+// document, and the two disagreeing is a hit on one surface named after
+// another. `index` is the document's cull index, or null; it only speeds the
+// ray-local compile below, it never changes the answer.
+//
+// THE STEP SCALE A RAY PAYS. The march steps by the field times the tape's
+// safe_step_scale, and that scale is ONE number folded over every visible
+// node — the worst Lipschitz bound anywhere in the document. One twisted box
+// parked two units from the model drops it from 1 to 0.28, and a ray nowhere
+// near the box takes 2.4x the steps it needs, because the bound cannot say
+// WHERE the field is steep. A tape culled to the ray's own segment can: an
+// item whose influence bound misses the segment is dropped, and its Lipschitz
+// contribution with it, so the culled tape's scale is what the field along
+// THAT ray allows. The culled tape is exact wherever the march evaluates —
+// the per-brick cull's guarantee, applied to a box around the segment instead
+// of a brick — so the hit is the same surface; only the step length changes.
+// Compiled only when the whole tape's scale is below 1 (there is nothing to
+// win otherwise), used only when its scale is larger (a ray straight through
+// the steep item gains nothing and marches the tape it already had).
+SceneHit raycast_scene(const scene::Document& doc, const scene::Tape& tape,
+                       const scene::CullIndex* index, const math::Ray& ray,
+                       const RaycastOptions& options = {});
+
+// Raycast against a filled brick cache. Position/normal only — pass the
+// document to attribute() for ids.
+//
+// The cache's field is the trilinear reconstruction of its lattice, and the
+// walk is analytic on it: a brick DDA that skips uniform (Inside, Outside,
+// never-evaluated) bricks whole, a cell DDA under the Surface bricks, and in
+// each cell the first root of the cubic the trilinear field is along the ray
+// (Hansson Söderlund, Evans and Akenine-Möller, JCGT 2022). The hit is where
+// the field falls below `eps` scaled by the distance — the same crossing the
+// sphere trace it replaced stopped at — and the normal is the field's own
+// gradient in the cell that was hit. `max_steps` is not consulted: the walk
+// is bounded by the surface bricks' box, not by a step budget.
 SceneHit raycast_bricks(const brick::BrickCache& cache, const math::Ray& ray,
                         const RaycastOptions& options = {});
 
+namespace detail {
+// The sphere trace raycast_bricks used to be, kept as the REFERENCE the
+// analytic walk is tested against: it samples the same reconstruction at
+// `max_steps` points along the ray and stops at the same eps, so the two must
+// agree on every hit, every miss, and every t to well within a voxel. Not
+// part of the C ABI, and not to be called by anything but that test.
+SceneHit raycast_bricks_sphere_traced(const brick::BrickCache& cache, const math::Ray& ray,
+                                      const RaycastOptions& options = {});
+}  // namespace detail
+
 // Attribute a world position to the nearest (layer, item) of the document.
+//
+// The layer first, by |field| of each visible, unghosted SDF layer's own tape
+// at the position; then the item within it, by |field| of each candidate
+// item's own tape (scene::compile_item — the item as an Add, alone, under the
+// layer's placement and mirror), over the items whose influence bound reaches
+// the position. Subtract items attribute their carved surfaces that way: the
+// shape they carved with is the surface the position sits on.
+//
+// The layer tapes are compiled per call here. The overload below is handed
+// the document's pickable tape and, when ONE layer is a candidate, reads the
+// winner off that instead of compiling it again: a pick runs per Pencil
+// event on a document that has not changed, and at 1,500 items compiling the
+// one layer was a third of the attribution. With several candidate layers it
+// compiles each, as this one does — the whole tape is their union and cannot
+// say which of them the position is nearest.
 void attribute(const scene::Document& doc, kernel::cfloat3 position, scene::LayerId* layer,
                scene::NodeId* item);
+
+// The same attribution, given the tape the position was found on. `tape`
+// MUST be pickable_tape(doc) for this `doc` (or a byte-identical copy), on
+// the terms raycast_scene's tape overload states: it stands in for the one
+// candidate layer's own tape, and a tape of some other document would name
+// a layer the position is not on. Empty means no layer: nothing is compiled
+// on the way to that answer, so the answer is the one the per-call compile
+// gives.
+void attribute(const scene::Document& doc, const scene::Tape& tape, kernel::cfloat3 position,
+               scene::LayerId* layer, scene::NodeId* item);
 
 // -- mesh picking ------------------------------------------------------------
 //

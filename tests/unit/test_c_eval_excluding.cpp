@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "clay.h"
+#include "clay_internal.h"
 
 namespace {
 
@@ -203,6 +204,12 @@ TEST_CASE("c abi: a brick refill without one layer fills the documented slots") 
     // sharing a bug.
     Doc ref;
     sphere_layer(ref.doc, "a", -0.3f, 0.45f);
+    // The excluded refill takes no seed and runs no gate, so its floats are the
+    // field's own at every sample; a whole-document refill proves the bricks
+    // deep inside or far outside uniform and returns a stub for them. Same
+    // classification, different floats -- and this comparison is of floats,
+    // so the reference is read with the gate off.
+    REQUIRE(clay_internal_set_uniform_gate(ref.doc, 0) == CLAY_OK);
 
     std::vector<float> got(total), want(total);
     REQUIRE(clay_brick_cache_eval_requests_excluding(d.doc, b, "cpu", reqs.data(), count,

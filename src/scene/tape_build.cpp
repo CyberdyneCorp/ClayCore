@@ -341,10 +341,13 @@ struct Compiler {
     // that one is local, and dividing an amplitude by a width that is too large
     // understates the slope — the direction that makes a marcher overstep.
     void fold_info(const Node& item, Op op, bool smooth, float round_world) {
-        kernel::CFieldInfo prim_info =
-            prim_is_bound_field(item.prim.type) ? kernel::cfi_bound() : kernel::cfi_exact();
-        if (item.repeat.active() && !repeat_preserves_exactness(item))
-            prim_info = kernel::cfi_bound();
+        const bool bound_field = prim_is_bound_field(item.prim.type) ||
+                                 (item.repeat.active() && !repeat_preserves_exactness(item));
+        kernel::CFieldInfo prim_info = bound_field ? kernel::cfi_bound() : kernel::cfi_exact();
+        // A bound field's L = 1 is a stepping bound and not a slope, and so is
+        // the factor three of the deformers declare: from here on the tape's
+        // L says nothing about |grad f| (Tape::lipschitz_bounds_gradient).
+        if (bound_field || !deformers_bound_gradient(item)) tape.lipschitz_bounds_gradient = false;
 
         if (prim_is_volume(item.prim.type)) {
             // Interpolated samples are not an exact distance, and where there
@@ -1277,6 +1280,7 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& cp, const
     // The layer union the checkpoint sits in front of folds neither of these:
     // a hard Add is exact and adds no extent, so the prefix's are the chain's.
     c.tape.info = prefix.info;
+    c.tape.lipschitz_bounds_gradient = prefix.lipschitz_bounds_gradient;
     c.tape.bounds = prefix.bounds;
     c.resume(cp, *layer, appended);
     c.tape.compile_id = next_compile_id();  // different bytes, so a different identity
@@ -1404,6 +1408,33 @@ Tape compile_layer(const Layer& layer, const CullRegion* cull) {
     c.begin_cull(cull, cull && usable ? cull_pad(*layer.sdf, layer) : 0.0f);
     if (usable) c.compile_list(layer.sdf->roots, *layer.sdf, layer, false);
     c.tape.compile_id = next_compile_id();
+    return std::move(c.tape);
+}
+
+Tape compile_item(const Layer& layer, const Node& item) {
+    Compiler c;
+    c.tape.compile_id = next_compile_id();
+    if (item.is_group) return std::move(c.tape);
+    // A copy rather than the item, because the op is read in more places than
+    // the seed-and-combine decision this skips: the feathered-replace test
+    // that gates the symmetry copies reads it, and so does fold_info. Under
+    // Add a feathered volume takes its mirror copies like any other item —
+    // which is what the single-item layer this stands in for compiled, since
+    // that layer held the same copy.
+    Node alone = item;
+    alone.op = Op::Add;
+    alone.children.clear();
+    // The same three steps compile_list takes for a first Add item, in the
+    // same order, with the same arguments: the bound before the emit (a
+    // transition fold reads tape.bounds, and it must include this item), the
+    // gate reach before the fold. Adding a step here that compile_list does
+    // not take, or skipping one it does, breaks the byte-identity the header
+    // promises, and test_pick.cpp holds it over the gnarly corpus.
+    const math::Aabb geometry = item_geometry_bound(alone, layer);
+    c.tape.bounds.expand(geometry);
+    c.emit_item(alone, layer);
+    c.gate_reach_ = geometry;
+    c.fold_info(alone, Op::Add, false, alone.rounding * placed_distance_scale(layer, alone));
     return std::move(c.tape);
 }
 
