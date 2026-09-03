@@ -1297,6 +1297,46 @@ hits** of the same window. A cache that a host builds on the critical path is
 therefore a loss, which is exactly why `SdfSourceField::open` will use a cached
 prefix and will never build one — scheduling that work is the host's.
 
+#### When a host should actually build one (expose-the-prefix-cache, 17.2)
+
+"870 hits" is the right answer to a different question. It prices a build
+against a HIT, and a host deciding whether to schedule one is asking what a hit
+SAVES — which is the full walk it replaces, not the 2.3 ms it costs. Task 17.2
+asked for "a measured recommendation, not a guess", and this is the arithmetic
+that produces one.
+
+Re-measured together on one box so the two halves are comparable (`build/release`,
+`--benchmark_min_time=1x`, load 1.26 before / 5.70 after):
+
+| fixture | build | dab, full walk | dab, with prefix | **break-even** |
+|---|---:|---:|---:|---:|
+| spread 5,000 | 576 ms | 89.8 ms | 2.32 ms | **6.6 cold windows** |
+| spread 20,000 | 2,170 ms | 242 ms | 2.32 ms | **9.1 cold windows** |
+| piled 5,000 | 511 ms | 79.2 ms | 4.32 ms | **6.8** |
+| piled 20,000 | 2,044 ms | 245 ms | 2.33 ms | **8.4** |
+
+`build / (full dab − accelerated dab)`. **Under ten cold windows at every size
+measured**, and it barely moves with history, because the build and the saving
+grow together.
+
+**So: build between gestures, on the layer being worked, whenever the artist is
+likely to take more than about ten dabs into windows they have not touched
+yet** — which is most of a sculpting session on a deep layer. Never on the
+pointer-down path; that is the whole reason `clay_sdf_prefix_cache_build` is a
+call a host makes and not something a gesture does for itself.
+
+**Two questions with two different inputs**, and the pair is what makes them
+separable:
+
+- The **build time follows the history** — 576 → 2,170 ms for four times the
+  items, near-linear.
+- The **cache size does not.** 268 bricks and 1.4266 MiB at *both* 5,000 and
+  20,000 items (250 and 0.7147 MiB for the piled fixture, likewise at both).
+
+A host therefore **sizes its byte budget from the model and schedules its builds
+from the history**. Sizing a budget from the history would over-provision by the
+ratio of the two, and it is not a small ratio.
+
 ### Where the whole-layer cost actually went
 
 `begin()` no longer samples. It compiles the layer, allocates a lattice index

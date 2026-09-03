@@ -413,16 +413,41 @@
         number, so "no longer O(model)" is a curve and not one assertion;
       - the delta drain against `clay_sdf_smooth_preview_item`, which is the
         per-frame cost P0-3 named
-- [ ] 17.2 A HOST-SIDE SCHEDULING NOTE once the build benchmark exists.
+- [x] 17.2 A HOST-SIDE SCHEDULING NOTE once the build benchmark exists.
       `SdfSourceField::open` never builds, deliberately, which leaves "when
       should a host call `build`" answered only in prose. It wants a measured
       recommendation, not a guess, and the benchmark above is what makes one
       possible
-- [ ] 17.3 THE CACHE ACROSS THE ABI. Deliberately not guessed at here: a cache
+      CLOSED by `expose-the-prefix-cache`. The recommendation is arithmetic and
+      not a feel: `build / (full dab - accelerated dab)` is UNDER TEN COLD
+      WINDOWS at every size measured — 6.6 and 9.1 spread, 6.8 and 8.4 piled —
+      so a host builds between gestures whenever the artist is likely to take
+      more than about ten dabs into untouched windows. docs/09 also corrects the
+      framing that was there: "about 870 hits" prices a build against a HIT, and
+      the scheduling question is what a hit SAVES. And the pair gives a fact
+      neither half gives alone — the BUILD follows the history (576 -> 2,170 ms
+      for 4x the items) and the CACHE SIZE does not (268 bricks, 1.4266 MiB at
+      both), so a budget is sized from the model and a build scheduled from the
+      history
+- [x] 17.3 THE CACHE ACROSS THE ABI. Deliberately not guessed at here: a cache
       is a session's policy and a device's memory ceiling, and the C shape for
       that (who owns it, whether it is per-document or per-host, how a budget is
       expressed) is a design question this change does not need to answer to
       ship. The preview delta is the only C surface in it
+      CLOSED by `expose-the-prefix-cache` (ABI 0.79.0), and none of the three
+      questions needed inventing. `clay_brick_cache` had answered all three and
+      its header states the rule: "a cache belongs to whoever made it, never to a
+      document". So: the HOST owns it, it is PER-HOST, and the budget is BYTES.
+      The one thing that did need deciding was where the SAMPLING comes from,
+      because a prefix is keyed on resolution and one built at a cell size the
+      gesture does not use is a silent miss — so the three cache knobs grew onto
+      `clay_sculpt_policy` beside the `cell_size` already there, mirroring the
+      C++ nesting, and there is nowhere to put a second.
+      It also found that ZERO means opposite things inside the library:
+      `SdfPrefixPolicy::max_bytes == 0` is OFF and `SdfPrefixCache` reads 0 as
+      UNBOUNDED (which is what lets a default-constructed cache in a benchmark
+      hold everything). The ABI enforces OFF at the boundary rather than changing
+      the library under a benchmark that depends on the other reading
 - [ ] 17.4 A BOUNDARY INSIDE A GROUP. `prefix_boundary_for` returns a root count
       precisely so this stays reachable: the fold is at top-level root
       boundaries and a group is one root

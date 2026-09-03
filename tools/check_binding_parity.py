@@ -570,6 +570,15 @@ EXEMPT = {
 # runs one way. An entry is a follow-up, not an exemption: nothing fails while
 # one is listed, and removing it is the point.
 C_ONLY_FOLLOW_UPS = {
+    "SdfPrefixCache": "clay_sdf_prefix_cache_* (ABI 0.79.0) accelerates ONE thing — the "
+                      "SDF Smooth transaction — and pyclay does not expose that "
+                      "transaction at all. A Python binding for the cache would be a "
+                      "handle with nothing to accelerate, which is worse than the gap it "
+                      "closes: it would read as coverage. The order is therefore "
+                      "clay_sdf_smooth_* in pyclay FIRST and the cache with it, as one "
+                      "change with the tests that show a cold window getting cheaper. "
+                      "Until then the acceleration is reachable from C++ and C, which is "
+                      "where the hosts that sculpt deep SDF histories live.",
     "BrickCache": "the incremental sculpting path (brick::BrickCache) is reachable from C "
                   "as clay_brick_cache_* since ABI 0.24.0 — mark_dirty, take_dirty, "
                   "eval_requests, submit — and from pyclay not at all. A Python binding "

@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 78
+#define CLAY_ABI_MINOR 79
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -5288,6 +5288,34 @@ typedef struct clay_sculpt_policy {
     int32_t max_deformer_chain;    /* 0 disables */
     int32_t max_item_count;        /* 0 disables */
     int32_t allow_consolidation;   /* non-zero: destructive collapse is authorised */
+
+    /* -- the prefix cache, when clay_sdf_smooth_begin_cached is given one -----
+     *
+     * The three knobs that decide WHETHER and WHERE a layer's history folds
+     * into a cached prefix. They live here, and not in a descriptor of their
+     * own, for the reason the consolidation numbers do: the cache is KEYED on
+     * its sampling, so a prefix built at one cell size and asked for at another
+     * is a MISS -- no error, no wrong answer, just no acceleration, which is
+     * the one failure shape indistinguishable from the feature not working. A
+     * host that could set the two independently could build a cache nothing
+     * will ever hit. There is one cell_size above and it is both.
+     *
+     * All three zero is TODAY'S BEHAVIOUR EXACTLY: no cache, every window the
+     * full walk. A host that has not heard of this is not opted into it. */
+
+    /* Below this many roots, do not cache: the walk is already cheap and a
+     * volume would cost more memory than it saves time. 0 caches nothing. */
+    uint64_t prefix_min_history_roots;
+    /* How many roots stay LIVE in front of the boundary. The suffix is what
+     * still costs per evaluation, so this trades rebuild frequency against
+     * interactive cost. */
+    uint64_t prefix_keep_live_suffix_roots;
+    /* The cache's ceiling in bytes. 0 DISABLES the cache -- not "unbounded".
+     * A cache with no ceiling is a leak on a device with a memory budget, and
+     * "off" is the safe reading of a field nobody filled in. The handle carries
+     * its own budget too; this is the policy's view of the same limit and the
+     * SMALLER of the two is what a build respects. */
+    uint64_t prefix_max_bytes;
 } clay_sculpt_policy;
 
 /* What one update changed, so a host invalidates a region rather than a model.
@@ -5343,6 +5371,147 @@ typedef struct clay_sculpt_budget {
 clay_sdf_smooth_tx* clay_sdf_smooth_begin(clay_document* doc, clay_layer_id layer,
                                           const clay_sculpt_policy* policy,
                                           clay_cancel_token* token);
+
+/* -- the SDF prefix cache -------------------------------------------------- */
+
+/* What stops a deep layer costing its whole history on every window the artist
+ * has not touched yet.
+ *
+ * THE PROBLEM IT SOLVES. A brick that has already been evaluated keeps an fp32
+ * seed and resumes from it, so an in-stroke dab is flat in document size. A
+ * brick NOBODY HAS TOUCHED has no seed and walks the complete surviving
+ * history. Measured on a 20,000-item layer: 242 ms for that first dab, against
+ * 2.32 ms once a compatible prefix exists -- and 2.32 ms at 5,000 items too,
+ * because the accelerated dab costs its SUFFIX and the suffix does not grow.
+ *
+ * A cache holds, per layer and per resolution, the layer's field sampled at a
+ * BOUNDARY in its root list. A window inside the cached volume is seeded from
+ * it and only the roots after the boundary are evaluated.
+ *
+ * IT BELONGS TO WHOEVER MADE IT, never to a document -- the same rule
+ * clay_brick_cache states, and deliberately the same words: this takes no
+ * document, destroy returns void, and destroying a document leaves every cache
+ * built against it valid. It is a session's policy and a device's memory
+ * ceiling, and neither is a property of the artwork.
+ *
+ * NOTHING IN IT IS AUTHORITATIVE. Every entry is rebuildable from the document,
+ * nothing is serialized, and dropping the whole cache changes no output --
+ * only how long the next cold window takes. That is what makes trimming it
+ * under memory pressure a decision a host may take freely.
+ *
+ * THREADING, as clay_brick_cache: no lock is taken and none is added, so every
+ * call on ONE handle must be serialized by the host. Two handles share
+ * nothing. */
+typedef struct clay_sdf_prefix_cache clay_sdf_prefix_cache; /* opaque */
+
+/* `max_bytes` is the ceiling. 0 means the cache holds NOTHING -- not
+ * "unbounded" -- so a handle created with 0 is a working handle that never
+ * caches, which is the safe reading of a number nobody chose, and the same
+ * reading clay_sculpt_policy's prefix_max_bytes has. A build against a cache
+ * with no budget is REFUSED and says why, rather than quietly caching nothing.
+ *
+ * Worth knowing if you also link the C++ API: SdfPrefixCache::set_max_bytes
+ * reads 0 as UNBOUNDED, which is what lets a default-constructed cache in a
+ * benchmark hold everything. Both readings are defensible in their own place;
+ * shipping both through one C field would be a trap, so this ABI picks the one
+ * every other budget in it uses and enforces it at the boundary.
+ *
+ * Never returns null except on allocation failure; free with
+ * clay_sdf_prefix_cache_destroy. */
+clay_sdf_prefix_cache* clay_sdf_prefix_cache_create(uint64_t max_bytes);
+void clay_sdf_prefix_cache_destroy(clay_sdf_prefix_cache* cache);
+
+/* Lowering the ceiling evicts down to it at once, least-recently-used first. */
+clay_result clay_sdf_prefix_cache_set_max_bytes(clay_sdf_prefix_cache* cache, uint64_t max_bytes);
+
+/* Drop what is cached for one layer, or everything.
+ *
+ * NEITHER IS REQUIRED FOR CORRECTNESS. An entry records the digest of the roots
+ * it represents and is re-checked on every lookup, so an edit that invalidates
+ * a prefix is caught whether or not anyone said so. These exist so a host can
+ * release memory it knows it will not want, not so it can keep the cache
+ * honest -- a missed invalidation here costs nothing, which is the property
+ * that lets a host ignore both calls entirely. */
+clay_result clay_sdf_prefix_cache_invalidate_layer(clay_sdf_prefix_cache* cache,
+                                                   clay_layer_id layer);
+clay_result clay_sdf_prefix_cache_clear(clay_sdf_prefix_cache* cache);
+
+/* What the cache is holding and how it has been used.
+ *
+ * seeded_windows and fallback_windows are the pair a BENCHMARK needs and a host
+ * mostly does not: they say whether a window was served from the cached volume
+ * or fell back to evaluating the prefix tape for itself. Without them "this got
+ * faster" cannot be told from "this test happened to touch the same window
+ * twice", which is the difference between a gate and a hope. */
+typedef struct clay_sdf_prefix_stats {
+    uint32_t struct_size; /* = sizeof(clay_sdf_prefix_stats); required */
+    uint64_t entries;
+    uint64_t bytes;
+    uint64_t hits;
+    uint64_t misses;
+    uint64_t builds;
+    uint64_t evictions;
+    uint64_t invalidations;
+    uint64_t seeded_windows;
+    uint64_t fallback_windows;
+} clay_sdf_prefix_stats;
+
+clay_result clay_sdf_prefix_cache_stats(const clay_sdf_prefix_cache* cache,
+                                        clay_sdf_prefix_stats* out_stats);
+
+/* Where this layer's boundary would fall under this policy, as a count of
+ * top-level roots, or 0 meaning "do not cache this layer".
+ *
+ * BUILDS NOTHING and evaluates nothing -- it reads the root count and the
+ * policy. It is here so a host can decide whether a build is worth scheduling
+ * before it schedules one, which matters because the build is the whole
+ * layer's cost. */
+clay_result clay_sdf_prefix_boundary_for(const clay_document* doc, clay_layer_id layer,
+                                         const clay_sculpt_policy* policy, uint64_t* out_roots);
+
+/* Build and cache this layer's prefix. THIS IS THE EXPENSIVE CALL and it is a
+ * separate one for exactly that reason.
+ *
+ * Measured: 576 ms at 5,000 items and 2,170 ms at 20,000, against 2.32 ms for
+ * the accelerated dab it enables. Nothing begins a gesture here and no gesture
+ * builds one -- clay_sdf_smooth_begin_cached uses a prefix if one is there and
+ * takes the full walk if it is not, because the alternative is the whole
+ * layer's cost at the moment an artist has just put their finger down.
+ *
+ * WHEN TO CALL IT, measured rather than guessed. The build pays for itself
+ * after about nine cold windows on a 20,000-item layer (2,170 / (242 - 2.32))
+ * and about seven at 5,000. So: between gestures, on the layer being worked,
+ * when the artist is likely to take more than a handful of cold dabs on it.
+ * Never on the pointer-down path.
+ *
+ * TWO DIFFERENT QUESTIONS WITH TWO DIFFERENT INPUTS, and this is the part that
+ * surprises: the BUILD TIME follows the history (576 -> 2,170 ms for 4x the
+ * items) and the CACHE SIZE does not -- 268 bricks and 1.43 MiB at both 5,000
+ * and 20,000 items, because the volume is a property of the SHAPE. Size a
+ * budget from the model; schedule a build from the history.
+ *
+ * Refuses when the policy declines the layer (see clay_sdf_prefix_boundary_for),
+ * when the layer is not the document's last visible SDF layer, or when the bake
+ * refuses. `token` may be NULL; a cancelled build caches nothing. */
+clay_result clay_sdf_prefix_cache_build(clay_sdf_prefix_cache* cache, const clay_document* doc,
+                                        clay_layer_id layer, const clay_sculpt_policy* policy,
+                                        clay_cancel_token* token);
+
+/* clay_sdf_smooth_begin, plus the cache to look in.
+ *
+ * A separate entry point rather than an argument on the original, and rather
+ * than a cache attached to the document: a document holding a pointer to memory
+ * the host can free is the hazard this ABI already refuses elsewhere, and an
+ * acceleration hidden in document state is one a reader of the begin call
+ * cannot see. This is the clay_eval_grid / clay_eval_grid_device shape.
+ *
+ * `cache` may be NULL, which is exactly clay_sdf_smooth_begin. A cache holding
+ * no prefix for this layer is also exactly clay_sdf_smooth_begin -- it BUILDS
+ * NOTHING here. */
+clay_sdf_smooth_tx* clay_sdf_smooth_begin_cached(clay_document* doc, clay_layer_id layer,
+                                                 const clay_sculpt_policy* policy,
+                                                 clay_sdf_prefix_cache* cache,
+                                                 clay_cancel_token* token);
 
 /* One live dab, relaxing the transaction's own working volume in place.
  *
