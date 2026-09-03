@@ -311,6 +311,14 @@ class BrickCache {
 
     void invalidate_mip_of(BrickKey key);
 
+    // submit()'s two arms. A brick classified uniform releases its lattice and,
+    // when it had decided a face of the surface bound, marks that bound for the
+    // refold; a brick that keeps a lattice is charged against the budget first
+    // and refused (false) rather than stored when it would exceed it.
+    void submit_uniform(Tracked& t, BrickKey key, bool inside, bool was_surface);
+    bool submit_surface(Tracked& t, BrickKey key, const float* values, const float* colors_rgb,
+                        bool was_surface);
+
     // surface_bounds() bookkeeping, see its comment. `added` widens the box in
     // place; `removed` decides whether the box can still be trusted and, when
     // it cannot, leaves it to `refresh_surface_bounds` — which every mutation

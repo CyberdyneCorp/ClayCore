@@ -117,43 +117,53 @@ SubmitResult BrickCache::submit(const BrickRequest& request, const float* values
     }
 
     const bool was_surface = t.brick.state == BrickState::Surface;
-    std::size_t old_bytes = was_surface ? config_.brick_bytes() : 0;
     // A uniform brick's whole color payload, so a padded or unpadded readback
     // still answers one value per texel without allocating a lattice for it.
     // The brick's CENTRE sample rather than a fixed constant: near the surface
     // the field carries the neighbouring item's color there, and inventing a
     // neutral grey instead would put a grey shell around every sculpt.
     if (want_colors) t.brick.uniform_color = to_brick_color(colors_rgb + (n / 2) * 3);
-    if (all_inside || all_outside) {
-        t.brick.state = all_inside ? BrickState::Inside : BrickState::Outside;
-        t.brick.values.clear();
-        t.brick.values.shrink_to_fit();
-        t.brick.colors.clear();
-        t.brick.colors.shrink_to_fit();
-        surface_bytes_ -= old_bytes;
-        // The surface moved out of this brick: the domain a raycast starts
-        // from may have shrunk, and this is the one call that knows.
-        if (was_surface) surface_bounds_removed(request.key);
-    } else {
-        std::size_t new_usage = surface_bytes_ - old_bytes + config_.brick_bytes();
-        if (config_.memory_budget != 0 && new_usage > config_.memory_budget)
-            return SubmitResult::BudgetExceeded;
-        t.brick.state = BrickState::Surface;
-        t.brick.values.resize(n);
-        for (std::size_t i = 0; i < n; ++i)
-            t.brick.values[i] = float_to_half(kernel::cclamp(values[i], -band, band));
-        if (want_colors) {
-            t.brick.colors.resize(n);
-            for (std::size_t i = 0; i < n; ++i)
-                t.brick.colors[i] = to_brick_color(colors_rgb + i * 3);
-        }
-        surface_bytes_ = new_usage;
-        surface_bounds_added(request.key);
-    }
+    if (all_inside || all_outside)
+        submit_uniform(t, request.key, all_inside, was_surface);
+    else if (!submit_surface(t, request.key, values, colors_rgb, was_surface))
+        return SubmitResult::BudgetExceeded;
     t.brick.generation = request.generation;
     t.evaluated = true;
     refresh_surface_bounds();
     return SubmitResult::Accepted;
+}
+
+void BrickCache::submit_uniform(Tracked& t, BrickKey key, bool inside, bool was_surface) {
+    t.brick.state = inside ? BrickState::Inside : BrickState::Outside;
+    t.brick.values.clear();
+    t.brick.values.shrink_to_fit();
+    t.brick.colors.clear();
+    t.brick.colors.shrink_to_fit();
+    if (!was_surface) return;
+    surface_bytes_ -= config_.brick_bytes();
+    // The surface moved out of this brick: the domain a raycast starts from
+    // may have shrunk, and this is the one call that knows.
+    surface_bounds_removed(key);
+}
+
+bool BrickCache::submit_surface(Tracked& t, BrickKey key, const float* values,
+                                const float* colors_rgb, bool was_surface) {
+    const std::size_t old_bytes = was_surface ? config_.brick_bytes() : 0;
+    const std::size_t new_usage = surface_bytes_ - old_bytes + config_.brick_bytes();
+    if (config_.memory_budget != 0 && new_usage > config_.memory_budget) return false;
+    const float band = config_.band();
+    const std::size_t n = config_.sample_count();
+    t.brick.state = BrickState::Surface;
+    t.brick.values.resize(n);
+    for (std::size_t i = 0; i < n; ++i)
+        t.brick.values[i] = float_to_half(kernel::cclamp(values[i], -band, band));
+    if (config_.colors && colors_rgb != nullptr) {
+        t.brick.colors.resize(n);
+        for (std::size_t i = 0; i < n; ++i) t.brick.colors[i] = to_brick_color(colors_rgb + i * 3);
+    }
+    surface_bytes_ = new_usage;
+    surface_bounds_added(key);
+    return true;
 }
 
 // -- surface bounds -----------------------------------------------------------

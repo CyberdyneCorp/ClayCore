@@ -4091,6 +4091,32 @@ UniformProof gate_uniform_brick(const clay_brick_request& req, kernel::cfloat3 o
     return proof;
 }
 
+// One request's tape for `half`: the whole document, resumable when a
+// checkpoint is wanted, or the per-layer half the multi-layer refill asked
+// for. The cull is the brick's box dilated by its band, as it always was.
+scene::Tape compile_request_tape(const clay_document* doc, const clay_brick_request& req,
+                                 ChunkHalf half, scene::LayerId active,
+                                 const scene::CullIndex* index, const scene::CullPlan* plan,
+                                 scene::TapeCheckpoint* cp) {
+    scene::CullRegion cull{request_brick_box(req).dilated(req.band)};
+    const scene::Document& d = doc->doc.document;
+    if (half == ChunkHalf::Whole)
+        return cp ? scene::compile_document_resumable(d, cp, &cull, index, plan)
+                  : scene::compile_document(d, &cull, index, plan);
+    if (cp && half == ChunkHalf::Active)
+        return scene::compile_document_part_resumable(d, active, /*below=*/false, &cull, index, cp);
+    if (half == ChunkHalf::Except) return scene::compile_document_except(d, active, &cull, index);
+    return scene::compile_document_part(d, active, half == ChunkHalf::Below, &cull, index);
+}
+
+// What the batch proved, onto the document's counter (clay_internal_gated_bricks).
+void note_gated(const clay_document* doc, const std::vector<UniformProof>* gated) {
+    if (!gated) return;
+    std::uint64_t n = 0;
+    for (const UniformProof& p : *gated) n += p.proven ? 1 : 0;
+    if (n) doc->note_gated(n);
+}
+
 // `gated`, when given, receives one proof per request, `proven` where the
 // uniform-brick gate answered the brick with a stub instead of its tape. The
 // gate runs ONLY when a caller asks for the proofs, because a gated brick's
@@ -4105,7 +4131,6 @@ clay_result eval_requests_in_chunks(const clay_document* doc, const clay_brick_r
                                     std::vector<UniformProof>* gated = nullptr) {
     if (gated) gated->assign(count, UniformProof{});
     const bool gate = gated && half == ChunkHalf::Whole && doc->uniform_gate();
-    std::uint64_t gated_count = 0;
     std::vector<kernel::cfloat3> origins(count);
     for (std::size_t i = 0; i < count; ++i) {
         eval::GridQuery q;
@@ -4141,28 +4166,11 @@ clay_result eval_requests_in_chunks(const clay_document* doc, const clay_brick_r
         tape_ptrs.reserve(n);
         if (kWantCheckpoints) cps.resize(n);
         for (std::size_t i = base; i < base + n; ++i) {
-            scene::CullRegion cull{request_brick_box(requests[i]).dilated(requests[i].band)};
             scene::TapeCheckpoint* cp = kWantCheckpoints ? &cps[i - base] : nullptr;
-            if (half == ChunkHalf::Whole)
-                tapes.push_back(cp ? scene::compile_document_resumable(doc->doc.document, cp, &cull,
-                                                                       index.get(), &plan)
-                                   : scene::compile_document(doc->doc.document, &cull, index.get(),
-                                                             &plan));
-            else if (cp && half == ChunkHalf::Active)
-                tapes.push_back(scene::compile_document_part_resumable(
-                    doc->doc.document, active, /*below=*/false, &cull, index.get(), cp));
-            else if (half == ChunkHalf::Except)
-                tapes.push_back(scene::compile_document_except(doc->doc.document, active, &cull,
-                                                               index.get()));
-            else
-                tapes.push_back(scene::compile_document_part(doc->doc.document, active,
-                                                             half == ChunkHalf::Below, &cull,
-                                                             index.get()));
+            tapes.push_back(
+                compile_request_tape(doc, requests[i], half, active, index.get(), &plan, cp));
             tape_ptrs.push_back(&tapes.back());
-            if (gate) {
-                (*gated)[i] = gate_uniform_brick(requests[i], origins[i], &tapes.back(), cp);
-                if ((*gated)[i].proven) ++gated_count;
-            }
+            if (gate) (*gated)[i] = gate_uniform_brick(requests[i], origins[i], &tapes.back(), cp);
         }
         eval::GridBatchQuery bq;
         bq.tapes = tape_ptrs.data();
@@ -4177,7 +4185,7 @@ clay_result eval_requests_in_chunks(const clay_document* doc, const clay_brick_r
         post(base, n, tapes, cps);
         base += n;
     }
-    if (gated_count) doc->note_gated(gated_count);
+    note_gated(doc, gated);
     return CLAY_OK;
 }
 
@@ -12536,6 +12544,180 @@ void run_uniform_task(const clay_document* doc, const clay_brick_request& req,
     t.ok = true;
 }
 
+// What one resumed brick's walk needs of its batch: read-only, shared by
+// every task, so the tasks can run off the lock and over the pool.
+struct ResumeRun {
+    const clay_document* doc = nullptr;
+    const clay_brick_request* requests = nullptr;
+    const scene::CullIndex* index = nullptr;
+    std::size_t per = 0;
+    bool want_colour = false;
+    float* out_values = nullptr;
+    float* out_colors_rgb = nullptr;
+};
+
+// The walk of one resumed brick, OFF the lock (resume_bricks's released
+// phase). Nothing here reads the seed store. What it does read -- the
+// document and the cull index snapshot -- is what the full path reads
+// unlocked too: the ABI's contract is that a mutating clay_document_* call
+// is not concurrent with a refill (clay.h, THREADING), while any number of
+// refills and readers may be. Each task writes its own brick's samples and
+// nothing else, so the tasks are disjoint by construction. `points` is the
+// caller's scratch, reused across the bricks one worker walks.
+void run_resume_task(const ResumeRun& run, ResumeTask& t, std::vector<float>& points) {
+    if (t.uniform) {
+        run_uniform_task(run.doc, run.requests[t.slot], run.index, t);
+        return;
+    }
+    const math::Aabb box = request_brick_box(run.requests[t.slot]).dilated(run.requests[t.slot].band);
+    scene::CullRegion cull{box};
+    // The checkpoint is PER BRICK where it has frames, because a frame's
+    // `emits` depends on this brick's own cull. The plan supplies what is
+    // batch-wide -- the layer and the appended ids -- and the seed the rest.
+    scene::TapeCheckpoint cp = t.plan->checkpoint;
+    cp.frames = t.frames;
+    // Per brick for the same reason `frames` is: whether the chain the
+    // checkpoint sits in produced anything is a statement about THIS
+    // brick's cull, and the seed is what was there when it was taken.
+    if (t.stack_levels > 0) cp.layer_have_acc = t.layer_have_acc;
+    scene::Tape suffix;
+    scene::TapeCheckpoint next;
+    const bool resumable =
+        scene::compile_layer_suffix(cp, run.doc->doc.document, t.plan->appended, &suffix, &next,
+                                    &cull, run.index);
+    if (!resumable) {
+        // REBUILD: one full walk of the active half -- what this brick
+        // would have cost anyway -- taking the stack where its own
+        // checkpoint sits so the dabs after it resume. Once per stroke
+        // rather than once per dab, and it is how a brick whose seed has
+        // no stack ever gets one.
+        scene::TapeCheckpoint own;
+        const scene::Tape whole = scene::compile_document_part_resumable(
+            run.doc->doc.document, t.plan->active, /*below=*/false, &cull, run.index, &own);
+        const eval::GridQuery& gq = t.grid;
+        points.resize(run.per * 3);
+        std::size_t m = 0;
+        for (int k = 0; k < gq.nz; ++k)
+            for (int j = 0; j < gq.ny; ++j)
+                for (int x = 0; x < gq.nx; ++x) {
+                    const kernel::cfloat3 pt =
+                        gq.origin + kernel::cf3(static_cast<float>(x) * gq.spacing,
+                                                static_cast<float>(j) * gq.spacing,
+                                                static_cast<float>(k) * gq.spacing);
+                    points[m * 3] = pt.x;
+                    points[m * 3 + 1] = pt.y;
+                    points[m * 3 + 2] = pt.z;
+                    ++m;
+                }
+        eval::PointQuery pqr;
+        pqr.points_xyz = points.data();
+        pqr.count = run.per;
+        eval::PointResults prr;
+        prr.distances = t.active;
+        prr.colors_rgb = t.active_rgb;
+        // ONE walk where a stack is wanted: the field is the top of the
+        // stack, so asking for both costs what asking for either did. A
+        // stack that came back the wrong shape is simply not stored, but
+        // the field it produced alongside is still the brick's answer.
+        if (own.valid && !own.frames.empty()) {
+            // Sized for the deepest the tape can reach, not for what the
+            // checkpoint claims: the walk writes what it finds, and the
+            // two disagreeing is the bug this once had. The shape is
+            // CHECKED below, after the write, where it is safe to be wrong.
+            const std::size_t room = eval::tape_stack_depth(whole);
+            const std::size_t want =
+                scene::checkpoint_stack_levels(own.frames, own.layer_have_acc);
+            t.snap.assign(run.per * std::max(room, want), 0.0f);
+            float* snap_rgb = nullptr;
+            if (t.active_rgb) {
+                t.snap_rgb.assign(run.per * std::max(room, want) * 3, 0.0f);
+                snap_rgb = t.snap_rgb.data();
+            }
+            eval::eval_points_stack(whole, pqr, t.snap.data(), snap_rgb, &t.snap_levels,
+                                    own.instrs, 0, &prr);
+            if (t.snap_levels == want) {
+                t.frames = own.frames;
+                t.snap_layer_have_acc = own.layer_have_acc;
+                t.snap.resize(run.per * want);
+                if (snap_rgb) t.snap_rgb.resize(run.per * want * 3);
+            } else {
+                t.snap_levels = 0;
+                t.snap_rgb.clear();
+            }
+        } else {
+            eval::Backend* cpu_b = eval::Registry::instance().find("cpu");
+            if (!cpu_b || cpu_b->eval_points(whole, pqr, prr) != eval::Status::Ok) return;
+        }
+        if (t.below)
+            fold_layers_below(t.below, t.below_rgb, t.active, t.active_rgb, run.per,
+                              run.out_values + t.slot * run.per,
+                              run.want_colour ? run.out_colors_rgb + t.slot * run.per * 3 : nullptr);
+        t.ok = true;
+        return;
+    }
+    const eval::GridQuery& g = t.grid;
+    points.resize(run.per * 3);
+    std::size_t at = 0;
+    for (int k = 0; k < g.nz; ++k)
+        for (int j = 0; j < g.ny; ++j)
+            for (int x = 0; x < g.nx; ++x) {
+                const kernel::cfloat3 pt =
+                    g.origin + kernel::cf3(static_cast<float>(x) * g.spacing,
+                                           static_cast<float>(j) * g.spacing,
+                                           static_cast<float>(k) * g.spacing);
+                points[at * 3] = pt.x;
+                points[at * 3 + 1] = pt.y;
+                points[at * 3 + 2] = pt.z;
+                ++at;
+            }
+    eval::PointQuery pq;
+    pq.points_xyz = points.data();
+    pq.count = run.per;
+    eval::PointResults pr;
+    pr.distances = t.active;
+    pr.colors_rgb = t.active_rgb;  // null unless the batch asked for colour
+    // In place: the seed was copied here under the lock, and the answer
+    // lands on top of it.
+    if (t.stack_levels == 0) {
+        // In place, as always: with nothing open above it the answer IS
+        // the accumulator the next dab folds onto.
+        eval::eval_points_seeded(suffix, pq, t.active, t.active_rgb, pr);
+    } else {
+        // Inside a group the answer is NOT the next seed -- the group's
+        // combine has folded the chain into what sits above it -- so the
+        // walk snapshots where the checkpoint sits on its way past, and
+        // one walk produces the field and the next stack together.
+        // The NEXT checkpoint's shape, which is not always this one's: a
+        // dab into a group that was EMPTY gives the group's chain its
+        // first value, so the stack goes from one plane to two. Sizing by
+        // the incoming count would drop the stack on exactly the dab that
+        // made the group worth resuming into.
+        const std::size_t want_next =
+            scene::checkpoint_stack_levels(next.frames, next.layer_have_acc);
+        const std::size_t room_next =
+            std::max(want_next, t.stack_levels + eval::tape_stack_depth(suffix));
+        t.snap.assign(run.per * room_next, 0.0f);
+        if (!t.stack_rgb.empty()) t.snap_rgb.assign(run.per * room_next * 3, 0.0f);
+        eval::eval_points_seeded_stack(
+            suffix, pq, t.stack.data(), t.stack_rgb.empty() ? nullptr : t.stack_rgb.data(),
+            t.stack_levels, pr, t.snap.data(),
+            t.snap_rgb.empty() ? nullptr : t.snap_rgb.data(), &t.snap_levels, next.instrs);
+        if (t.snap_levels != want_next) {
+            t.snap_levels = 0;
+        } else {
+            t.snap.resize(run.per * want_next);
+            if (!t.snap_rgb.empty()) t.snap_rgb.resize(run.per * want_next * 3);
+            t.frames = next.frames;
+            t.snap_layer_have_acc = next.layer_have_acc;
+        }
+    }
+    if (t.below)
+        fold_layers_below(t.below, t.below_rgb, t.active, t.active_rgb, run.per,
+                          run.out_values + t.slot * run.per,
+                          run.want_colour ? run.out_colors_rgb + t.slot * run.per * 3 : nullptr);
+    t.ok = true;
+}
+
 std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* requests,
                           std::size_t count, std::size_t per, bool want_colour, float* out_values,
                           float* out_colors_rgb, std::uint8_t* resumed) {
@@ -12845,175 +13027,19 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
 
     // -- released ---------------------------------------------------------
     //
-    // Nothing here reads the seed store. What it does read -- the document and
-    // the cull index snapshot -- is what the full path reads unlocked too: the
-    // ABI's contract is that a mutating clay_document_* call is not concurrent
-    // with a refill (clay.h, THREADING), while any number of refills and
-    // readers may be. Each task writes its own brick's samples and nothing
-    // else, so the tasks are disjoint by construction.
-    auto run_task = [&](ResumeTask& t, std::vector<float>& points) {
-        if (t.uniform) {
-            run_uniform_task(doc, requests[t.slot], index.get(), t);
-            return;
-        }
-        const math::Aabb box = request_brick_box(requests[t.slot]).dilated(requests[t.slot].band);
-        scene::CullRegion cull{box};
-        // The checkpoint is PER BRICK where it has frames, because a frame's
-        // `emits` depends on this brick's own cull. The plan supplies what is
-        // batch-wide -- the layer and the appended ids -- and the seed the rest.
-        scene::TapeCheckpoint cp = t.plan->checkpoint;
-        cp.frames = t.frames;
-        // Per brick for the same reason `frames` is: whether the chain the
-        // checkpoint sits in produced anything is a statement about THIS
-        // brick's cull, and the seed is what was there when it was taken.
-        if (t.stack_levels > 0) cp.layer_have_acc = t.layer_have_acc;
-        scene::Tape suffix;
-        scene::TapeCheckpoint next;
-        const bool resumable =
-            scene::compile_layer_suffix(cp, doc->doc.document, t.plan->appended, &suffix, &next,
-                                        &cull, index.get());
-        if (!resumable) {
-            // REBUILD: one full walk of the active half -- what this brick
-            // would have cost anyway -- taking the stack where its own
-            // checkpoint sits so the dabs after it resume. Once per stroke
-            // rather than once per dab, and it is how a brick whose seed has
-            // no stack ever gets one.
-            scene::TapeCheckpoint own;
-            const scene::Tape whole = scene::compile_document_part_resumable(
-                doc->doc.document, t.plan->active, /*below=*/false, &cull, index.get(), &own);
-            const eval::GridQuery& gq = t.grid;
-            points.resize(per * 3);
-            std::size_t m = 0;
-            for (int k = 0; k < gq.nz; ++k)
-                for (int j = 0; j < gq.ny; ++j)
-                    for (int x = 0; x < gq.nx; ++x) {
-                        const kernel::cfloat3 pt =
-                            gq.origin + kernel::cf3(static_cast<float>(x) * gq.spacing,
-                                                    static_cast<float>(j) * gq.spacing,
-                                                    static_cast<float>(k) * gq.spacing);
-                        points[m * 3] = pt.x;
-                        points[m * 3 + 1] = pt.y;
-                        points[m * 3 + 2] = pt.z;
-                        ++m;
-                    }
-            eval::PointQuery pqr;
-            pqr.points_xyz = points.data();
-            pqr.count = per;
-            eval::PointResults prr;
-            prr.distances = t.active;
-            prr.colors_rgb = t.active_rgb;
-            // ONE walk where a stack is wanted: the field is the top of the
-            // stack, so asking for both costs what asking for either did. A
-            // stack that came back the wrong shape is simply not stored, but
-            // the field it produced alongside is still the brick's answer.
-            if (own.valid && !own.frames.empty()) {
-                // Sized for the deepest the tape can reach, not for what the
-                // checkpoint claims: the walk writes what it finds, and the
-                // two disagreeing is the bug this once had. The shape is
-                // CHECKED below, after the write, where it is safe to be wrong.
-                const std::size_t room = eval::tape_stack_depth(whole);
-                const std::size_t want =
-                    scene::checkpoint_stack_levels(own.frames, own.layer_have_acc);
-                t.snap.assign(per * std::max(room, want), 0.0f);
-                float* snap_rgb = nullptr;
-                if (t.active_rgb) {
-                    t.snap_rgb.assign(per * std::max(room, want) * 3, 0.0f);
-                    snap_rgb = t.snap_rgb.data();
-                }
-                eval::eval_points_stack(whole, pqr, t.snap.data(), snap_rgb, &t.snap_levels,
-                                        own.instrs, 0, &prr);
-                if (t.snap_levels == want) {
-                    t.frames = own.frames;
-                    t.snap_layer_have_acc = own.layer_have_acc;
-                    t.snap.resize(per * want);
-                    if (snap_rgb) t.snap_rgb.resize(per * want * 3);
-                } else {
-                    t.snap_levels = 0;
-                    t.snap_rgb.clear();
-                }
-            } else {
-                eval::Backend* cpu_b = eval::Registry::instance().find("cpu");
-                if (!cpu_b || cpu_b->eval_points(whole, pqr, prr) != eval::Status::Ok) return;
-            }
-            if (t.below)
-                fold_layers_below(t.below, t.below_rgb, t.active, t.active_rgb, per,
-                                  out_values + t.slot * per,
-                                  want_colour ? out_colors_rgb + t.slot * per * 3 : nullptr);
-            t.ok = true;
-            return;
-        }
-        const eval::GridQuery& g = t.grid;
-        points.resize(per * 3);
-        std::size_t at = 0;
-        for (int k = 0; k < g.nz; ++k)
-            for (int j = 0; j < g.ny; ++j)
-                for (int x = 0; x < g.nx; ++x) {
-                    const kernel::cfloat3 pt =
-                        g.origin + kernel::cf3(static_cast<float>(x) * g.spacing,
-                                               static_cast<float>(j) * g.spacing,
-                                               static_cast<float>(k) * g.spacing);
-                    points[at * 3] = pt.x;
-                    points[at * 3 + 1] = pt.y;
-                    points[at * 3 + 2] = pt.z;
-                    ++at;
-                }
-        eval::PointQuery pq;
-        pq.points_xyz = points.data();
-        pq.count = per;
-        eval::PointResults pr;
-        pr.distances = t.active;
-        pr.colors_rgb = t.active_rgb;  // null unless the batch asked for colour
-        // In place: the seed was copied here under the lock, and the answer
-        // lands on top of it.
-        if (t.stack_levels == 0) {
-            // In place, as always: with nothing open above it the answer IS
-            // the accumulator the next dab folds onto.
-            eval::eval_points_seeded(suffix, pq, t.active, t.active_rgb, pr);
-        } else {
-            // Inside a group the answer is NOT the next seed -- the group's
-            // combine has folded the chain into what sits above it -- so the
-            // walk snapshots where the checkpoint sits on its way past, and
-            // one walk produces the field and the next stack together.
-            // The NEXT checkpoint's shape, which is not always this one's: a
-            // dab into a group that was EMPTY gives the group's chain its
-            // first value, so the stack goes from one plane to two. Sizing by
-            // the incoming count would drop the stack on exactly the dab that
-            // made the group worth resuming into.
-            const std::size_t want_next =
-                scene::checkpoint_stack_levels(next.frames, next.layer_have_acc);
-            const std::size_t room_next =
-                std::max(want_next, t.stack_levels + eval::tape_stack_depth(suffix));
-            t.snap.assign(per * room_next, 0.0f);
-            if (!t.stack_rgb.empty()) t.snap_rgb.assign(per * room_next * 3, 0.0f);
-            eval::eval_points_seeded_stack(
-                suffix, pq, t.stack.data(), t.stack_rgb.empty() ? nullptr : t.stack_rgb.data(),
-                t.stack_levels, pr, t.snap.data(),
-                t.snap_rgb.empty() ? nullptr : t.snap_rgb.data(), &t.snap_levels, next.instrs);
-            if (t.snap_levels != want_next) {
-                t.snap_levels = 0;
-            } else {
-                t.snap.resize(per * want_next);
-                if (!t.snap_rgb.empty()) t.snap_rgb.resize(per * want_next * 3);
-                t.frames = next.frames;
-                t.snap_layer_have_acc = next.layer_have_acc;
-            }
-        }
-        if (t.below)
-            fold_layers_below(t.below, t.below_rgb, t.active, t.active_rgb, per,
-                              out_values + t.slot * per,
-                              want_colour ? out_colors_rgb + t.slot * per * 3 : nullptr);
-        t.ok = true;
-    };
+    // The walks (run_resume_task) run with the lock down, over the pool when
+    // the table above says the dispatch pays for itself.
+    const ResumeRun run{doc, requests, index.get(), per, want_colour, out_values, out_colors_rgb};
     constexpr std::size_t kResumeParallelUnits = 256u * 1024u;
     if (tasks.size() > 1 && units >= kResumeParallelUnits) {
         parallel::ThreadPool::instance().parallel_for(
             tasks.size(), 1, [&](std::size_t task_b, std::size_t task_e) {
                 std::vector<float> points;  // one per chunk, reused across its bricks
-                for (std::size_t t = task_b; t < task_e; ++t) run_task(tasks[t], points);
+                for (std::size_t t = task_b; t < task_e; ++t) run_resume_task(run, tasks[t], points);
             });
     } else {
         std::vector<float> points;
-        for (ResumeTask& t : tasks) run_task(t, points);
+        for (ResumeTask& t : tasks) run_resume_task(run, t, points);
     }
     for (const ResumeTask& t : tasks)
         if (t.ok) {
