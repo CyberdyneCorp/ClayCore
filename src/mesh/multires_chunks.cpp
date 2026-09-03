@@ -137,6 +137,21 @@ void ensure_level_chunks(MultiresSurface::State& s, std::uint32_t level) {
     cache.chunks.clear_dirty();
 }
 
+ChunkTable& MultiresSurface::level_chunks(std::uint32_t level) {
+    // Deliberately the same preparation as the const reader below: a caller
+    // that is about to WRITE the bounds still needs them to have been built
+    // from an evaluated level first, or its first refit repairs a partition
+    // that was never made.
+    static ChunkTable kEmptyMutable;
+    if (!state_ || !state_->level_ok(level)) {
+        kEmptyMutable.clear();
+        return kEmptyMutable;
+    }
+    positions_at(level);
+    ensure_level_chunks(*state_, level);
+    return state_->levels[level].cache->chunks;
+}
+
 const ChunkTable& MultiresSurface::chunks_at(std::uint32_t level) {
     static const ChunkTable kEmpty;
     if (!state_ || !state_->level_ok(level)) return kEmpty;

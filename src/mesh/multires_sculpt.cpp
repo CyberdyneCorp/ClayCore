@@ -165,6 +165,17 @@ void MultiresSculptor::bind() {
     if (automask_set_) sculptor_->set_automask_inputs(automask_);
     sculptor_->set_defer_normals(defer_normals_);
     sculptor_->set_telemetry(telemetry_);
+    // THE HIERARCHY'S SPATIAL INDEX. Nothing picks against a level, so nothing
+    // builds a ray tree for one, and without this every unseeded stamp resolves
+    // its anchor by scanning the level — 0.49 ms at 100k level vertices against
+    // 1.58 ms at 1M for the same 1k footprint, which is the model showing
+    // through a fixed footprint. The chunk table is already there, per level,
+    // with bounds and vertex lists; handing it over is what turns it into the
+    // query the extreme-poly requirement asks for.
+    //
+    // Rebound with the sculptor, so a level or generation change cannot leave a
+    // table describing a different mesh in the hands of a live sculptor.
+    sculptor_->set_chunks(&surface_.level_chunks(level));
 }
 
 void build_multires_workset(const MeshSculptor& level_sculptor, std::uint32_t level,

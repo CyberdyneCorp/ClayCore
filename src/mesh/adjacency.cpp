@@ -220,6 +220,7 @@ void geodesic_region(const Mesh& m, const Adjacency& adj, kernel::cfloat3 seed_p
     if (seed >= classes) {
         float best = std::numeric_limits<float>::max();
         seed = 0;
+        scratch.seed_scan += classes;
         for (std::uint32_t c = 0; c < classes; ++c) {
             const float d2 = kernel::cdot2(position_of(c) - seed_position);
             if (d2 < best) {
