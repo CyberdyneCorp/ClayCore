@@ -604,7 +604,10 @@ TEST_CASE("a shared payload is written once, and an older minor writes it per no
     for (NodeId id : content.roots) {
         const Node* n = content.find(id);
         REQUIRE(n != nullptr);
-        CHECK(n->volume == first->volume);
+        // Double parens: doctest stringifies the operands of a bare CHECK, and
+        // MSVC has no ostream operator for a shared_ptr (C2676). The comparison
+        // two cases up follows the same rule for the same reason.
+        CHECK((n->volume == first->volume));
     }
 
     // And a re-save is the same size, which is what says the sharing survived
