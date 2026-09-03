@@ -12431,13 +12431,17 @@ clay_result clay_brick_cache_mark_dirty_nodes(clay_brick_cache* cache, const cla
     // Every bound is computed and span-checked BEFORE any of them is marked,
     // so a refusal leaves the cache exactly as it was rather than half-dirtied.
     std::vector<math::Aabb> bounds;
+    // One layer extent for the whole selection: an intersect's bound IS that
+    // extent, so taking it per selected node walked the layer once per node
+    // (#451).
+    scene::LayerExtent extent;
     if (layer->sdf) {
         for (std::size_t i = 0; i < count; ++i) {
             // Over every layer sharing this content (issue #325): the same
             // union clay_layer_node_influence_bound reports, so what a host
             // dirties and what the query told it cannot disagree.
-            math::Aabb b = scene::node_influence_bound_in_document(doc->doc.document,
-                                                                  *layer->sdf, nodes[i]);
+            math::Aabb b = scene::node_influence_bound_in_document(
+                doc->doc.document, *layer->sdf, nodes[i], &extent);
             if (b.empty()) continue;  // absent, hidden, or contributing nothing
             r = check_dirty_span(cache->cache, b);
             if (r != CLAY_OK) return r;

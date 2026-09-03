@@ -1279,7 +1279,7 @@ Aabb layer_influence_extent(const SdfContent& content, const Layer& layer) {
     return out;
 }
 
-Aabb item_influence_bound(const Node& item, const Layer& layer, const Aabb* layer_extent) {
+Aabb item_influence_bound(const Node& item, const Layer& layer, LayerExtent* extent) {
     switch (item_nonlocality(item)) {
         case Nonlocality::None:
             return item_geometry_bound(item, layer);
@@ -1287,9 +1287,11 @@ Aabb item_influence_bound(const Node& item, const Layer& layer, const Aabb* laye
             // Computed here when the caller did not already hold it. Only an
             // intersect reaches this, so a layer without one pays nothing --
             // which is why this is a lazy fallback rather than a parameter
-            // every caller has to thread.
-            if (layer_extent) return *layer_extent;
+            // every caller has to thread. A caller that meets several
+            // intersects hands in a LayerExtent and pays for the walk once
+            // (#451).
             if (!layer.sdf) return Aabb::infinite();
+            if (extent) return extent->of(*layer.sdf, layer);
             return layer_influence_extent(*layer.sdf, layer);
         }
         case Nonlocality::Unbounded:
@@ -1327,27 +1329,29 @@ float group_blend_support(const Node& group, const Layer& layer) {
                : kernel::cmax(group.blend.support(), group.blend.k);
 }
 
-Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& layer) {
+Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& layer,
+                          LayerExtent* extent) {
     const Node* n = content.find(id);
     if (!n || !n->visible) return Aabb{};
-    if (!n->is_group) return item_influence_bound(*n, layer);
+    if (!n->is_group) return item_influence_bound(*n, layer, extent);
     // A GROUP takes the same split its items take: an intersecting group reads
     // the running accumulator and can move the result anywhere the LAYER has
     // material, and no further.
     if (!op_is_local(n->op)) {
         if (n->op != Op::Intersect || !layer.sdf) return Aabb::infinite();
-        return layer_influence_extent(*layer.sdf, layer);
+        return extent ? extent->of(*layer.sdf, layer) : layer_influence_extent(*layer.sdf, layer);
     }
     Aabb b;
     for (NodeId c : n->children) {
-        Aabb cb = node_influence_bound(content, c, layer);
+        Aabb cb = node_influence_bound(content, c, layer, extent);
         if (cb.is_infinite()) return Aabb::infinite();
         b.expand(cb);
     }
     return b.empty() ? b : b.dilated(group_blend_support(*n, layer));
 }
 
-Aabb node_reach_bound(const SdfContent& content, NodeId id, const Layer& layer) {
+Aabb node_reach_bound(const SdfContent& content, NodeId id, const Layer& layer,
+                      LayerExtent* extent) {
     // Where an edit to `id` can change the layer's field: the node's own
     // influence bound, then dilated once per enclosing group by that group's
     // blend support.
@@ -1364,7 +1368,7 @@ Aabb node_reach_bound(const SdfContent& content, NodeId id, const Layer& layer) 
     // a sibling's geometry is not something an edit to `id` can reach, so the
     // old answer grew with the size of the GROUP rather than with the size of
     // the edit.
-    Aabb b = node_influence_bound(content, id, layer);
+    Aabb b = node_influence_bound(content, id, layer, extent);
     if (b.empty() || b.is_infinite()) return b;
 
     // Bounded by the node count rather than trusting the tree to be acyclic:
@@ -1391,7 +1395,8 @@ Aabb node_reach_bound(const SdfContent& content, NodeId id, const Layer& layer) 
         // infinite.
         if (!op_is_local(g->op)) {
             if (g->op != Op::Intersect || !layer.sdf) return Aabb::infinite();
-            return layer_influence_extent(*layer.sdf, layer);
+            return extent ? extent->of(*layer.sdf, layer)
+                          : layer_influence_extent(*layer.sdf, layer);
         }
         b = b.dilated(group_blend_support(*g, layer));
         cur = parent;
@@ -1400,7 +1405,7 @@ Aabb node_reach_bound(const SdfContent& content, NodeId id, const Layer& layer) 
 }
 
 Aabb node_influence_bound_in_document(const Document& doc, const SdfContent& content,
-                                      NodeId id) {
+                                      NodeId id, LayerExtent* extent) {
     // A node can be in more than one PLACE. instance_layer copies the Layer and
     // shares the SdfContent by shared_ptr, so one node is compiled once per
     // instancing layer, each under that layer's own transform -- and editing it
@@ -1424,18 +1429,22 @@ Aabb node_influence_bound_in_document(const Document& doc, const SdfContent& con
     Aabb out;
     for (const Layer& l : doc.layers) {
         if (l.sdf.get() != &content) continue;
-        const Aabb b = node_influence_bound(content, id, l);
+        const Aabb b = node_influence_bound(content, id, l, extent);
         if (b.is_infinite()) return Aabb::infinite();
         out.expand(b);
     }
     return out;
 }
 
-Aabb layer_influence_bound(const Layer& layer) {
+Aabb layer_influence_bound(const Layer& layer, LayerExtent* extent) {
     Aabb b;
     if (!layer.sdf) return b;
+    // One walk for the whole root list, not one per intersect among them: the
+    // roots share a layer, so they share its extent (#451).
+    LayerExtent own;
+    if (!extent) extent = &own;
     for (NodeId id : layer.sdf->roots) {
-        Aabb nb = node_influence_bound(*layer.sdf, id, layer);
+        Aabb nb = node_influence_bound(*layer.sdf, id, layer, extent);
         if (nb.is_infinite()) return Aabb::infinite();
         b.expand(nb);
     }

@@ -683,6 +683,35 @@ Measured on the reporter's case, bricks dirtied per drag frame over 20 frames,
 1,000 tracked: subtract **64 → 64**, intersect **1,000 → 216**. 216 is exactly
 the figure the triage on #319 predicted.
 
+**The extent is walked, so share it (#451).** An intersect's bound is the
+layer's extent, and taking that extent walks every visible node for its geometry
+bound — a stroke or a sweep re-tessellates its curve, a mirrored item bounds
+every copy, a deformer chain runs its slope probes. Before #319 an intersect
+answered `Everything` in constant time, so nothing cared how many of them a
+layer held; afterwards every caller that meets an intersect meets it in a loop,
+and each of those went from O(items) to O(intersects × items). Measured on a
+layer of 1,000 spline strokes holding 20 intersects: a layer bound **0.082 ms on
+v0.73.0 against 1.61 ms on v0.78.0**, and an attributed raycast **1.51 ms
+against 3.09 ms**, with a subtracting control flat throughout. The per-brick
+refill did NOT move — it is the bound QUERY that regressed, which is why a host
+saw it on an operation rather than on a code path.
+
+`scene::LayerExtent` is the answer: a scratch memo taken once and threaded
+through `item_influence_bound`, `node_influence_bound`, `node_reach_bound`,
+`node_influence_bound_in_document` and `layer_influence_bound`, and held across
+the loops in `layer_influence_bound`, `pick`'s attribution and
+`clay_brick_cache_mark_dirty_nodes`. It is keyed on the (content, layer) PAIR,
+because an instanced layer shares one `SdfContent` under its own transform and
+therefore has its own extent. Passing nothing is the old behaviour, and a layer
+with no intersect never asks it for anything. It is valid only for one query:
+the extent it holds is the geometry of the nodes as they were when it was taken,
+so it is a local, never a member.
+
+What remains is one walk per query rather than none: `apply_edit` takes
+`command_influence_bound` on both sides of every command, so a drag still pays
+two. Removing that needs a revision-scoped cache on the ABI's document, which
+`clay_document::cached()` is already shaped for.
+
 ### Drawing a preview beside the rest of the document
 
 A live sculpt transaction previews **one layer** — that is what
