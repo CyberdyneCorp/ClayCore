@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -446,4 +447,86 @@ TEST_CASE("uniform gate: a device backend classifies a gated brick as the cpu do
     }
     clay_brick_cache_destroy(cpu_cache);
     clay_brick_cache_destroy(gpu_cache);
+}
+
+// -- a gesture over a layer holding proofs -----------------------------------
+//
+// The frontier path prepares a prefix for every seed a drag will dirty, and a
+// proof has no lattice to slice a prefix out of: a job made from one carried
+// `per` 0 and the prepare pass wrote dims^3 points into a buffer sized for
+// none (a heap overflow, reached by any drag whose node is not root ordinal 0
+// over a document holding proofs). The three cases that run a gesture over
+// seeds read raw refill floats and so run with the gate off; this one reads
+// what the cache STORES, with the gate on, against a fresh document.
+
+namespace {
+
+std::size_t drag(clay_document* doc, clay_layer_id layer, float cx, float cy, float dx,
+                 float radius) {
+    clay_move_params p;
+    std::memset(&p, 0, sizeof p);
+    p.struct_size = sizeof p;
+    p.radius = radius;
+    const float centre[3] = {cx, cy, 0.0f}, disp[3] = {dx, 0.0f, 0.0f};
+    std::size_t applied = 0;
+    REQUIRE(clay_layer_move_surface(doc, layer, centre, disp, &p, &applied) == CLAY_OK);
+    return applied;
+}
+
+std::size_t magnify(clay_document* doc, clay_layer_id layer, float cx, float strength,
+                    float radius) {
+    clay_magnify_params p;
+    std::memset(&p, 0, sizeof p);
+    p.struct_size = sizeof p;
+    p.radius = radius;
+    const float centre[3] = {cx, 0.0f, 0.0f};
+    std::size_t applied = 0;
+    REQUIRE(clay_layer_magnify_surface(doc, layer, centre, strength, &p, &applied) == CLAY_OK);
+    return applied;
+}
+
+const float kModelLo[3] = {-1.7f, -1.7f, -1.7f};
+const float kModelHi[3] = {1.7f, 1.7f, 1.7f};
+
+using Gesture = std::function<std::size_t(clay_document*, clay_layer_id)>;
+
+// Seed a whole-model cache with proofs, apply the gesture, refill, and hold the
+// store against fresh documents given the same gesture with the gate on and
+// off.
+void gesture_over_proofs(const Gesture& gesture) {
+    Doc seeded;
+    worked_sphere(seeded.d, seeded.layer, 60);
+    clay_brick_cache* cache = make_cache(0.05f, 3, false);
+    std::vector<clay_brick_request> reqs = mark_box(cache, kModelLo, kModelHi);
+    const Fill cold = fill(seeded.d, cache, reqs, "cpu", false);
+    REQUIRE(cold.gated > 0);
+    REQUIRE(gesture(seeded.d, seeded.layer) > 1);  // reaches dabs, not only the base
+    reqs = mark_box(cache, kModelLo, kModelHi);
+    fill(seeded.d, cache, reqs, "cpu", false);
+    const Stored got = stored(cache, reqs, false);
+
+    for (const bool gate : {false, true}) {
+        CAPTURE(gate);
+        Doc fresh;
+        REQUIRE(clay_internal_set_uniform_gate(fresh.d, gate ? 1 : 0) == CLAY_OK);
+        worked_sphere(fresh.d, fresh.layer, 60);
+        gesture(fresh.d, fresh.layer);
+        clay_brick_cache* oracle = make_cache(0.05f, 3, false);
+        const std::vector<clay_brick_request> want = mark_box(oracle, kModelLo, kModelHi);
+        REQUIRE(want.size() == reqs.size());
+        fill(fresh.d, oracle, want, "cpu", false);
+        check_same_stored(stored(oracle, want, false), got);
+        clay_brick_cache_destroy(oracle);
+    }
+    clay_brick_cache_destroy(cache);
+}
+
+}  // namespace
+
+TEST_CASE("uniform gate: a drag over a layer holding proofs stores what a fresh document stores") {
+    gesture_over_proofs([](clay_document* d, clay_layer_id l) { return drag(d, l, 0.9f, 0.0f, 0.3f, 0.7f); });
+}
+
+TEST_CASE("uniform gate: a magnify over a layer holding proofs stores what a fresh document stores") {
+    gesture_over_proofs([](clay_document* d, clay_layer_id l) { return magnify(d, l, 0.9f, 0.5f, 0.7f); });
 }

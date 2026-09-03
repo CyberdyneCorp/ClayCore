@@ -2128,6 +2128,13 @@ struct clay_document {
         out.structure = structure_revision_;
         for (const auto& [k, e] : resume_) {
             if (e.dirty_from != kFrontierClean || e.revision != out.now) continue;
+            // A uniform entry holds a proof and no lattice (ResumeEntry::uniform),
+            // so there is no prefix to slice out of it: a job made from one
+            // carried `per` 0 and phase B wrote dims^3 points into a buffer
+            // sized for none. The drag re-proves such a brick through the
+            // full path (uniform_seed_for refuses a dirty proof), which is
+            // the contract for a proof the frontier cannot serve.
+            if (e.uniform) continue;
             const float width = static_cast<float>(k.dims[0]) * k.spacing;
             const kernel::cfloat3 lo =
                 kernel::cf3(static_cast<float>(k.x), static_cast<float>(k.y),

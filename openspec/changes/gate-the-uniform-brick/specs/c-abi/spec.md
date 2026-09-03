@@ -52,6 +52,11 @@ meaning.
 - **THEN** those bricks take the full path
 - **AND** the submitted cache equals one filled from scratch
 
+#### Scenario: a gesture over a layer holding proofs
+- **GIVEN** a layer of many items whose whole-model cache holds proofs
+- **WHEN** its surface is dragged or magnified and the model refilled
+- **THEN** the call returns, and the cache stores what a fresh document given the same gesture stores, with the gate enabled or disabled
+
 #### Scenario: a multi-layer refill is never gated
 - **GIVEN** a document with two visible SDF layers
 - **WHEN** a window is refilled
