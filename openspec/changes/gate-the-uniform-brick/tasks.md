@@ -51,3 +51,13 @@
 - [x] 6.1 docs/05: the proof, the seed, the pick path, the surface bound and the analytic walk; docs/06: the GPU route walks the same reconstruction
 - [x] 6.2 docs/09: a dated section with every before/after number, stated as Mac numbers
 - [x] 6.3 Spec deltas for c-abi, brick-cache and picking
+
+## 7. The device case the gate did not have
+
+- [x] 7.1 `sdf_stamp_detail_bricks`: one dab on a radius-0.5 form worked over by smooth-unioned radius-0.06 dabs, at `voxel_size` 0.01 where a brick is a sixth of the form's radius; axis 10/100/1000
+- [x] 7.2 The fixture asserted at both ends — the filled form stores some surface and is not mostly surface — because a fixture with no interior measures what `sdf_stamp_bricks` already does, and one with no surface at all measures an empty cache
+- [x] 7.3 `out_accepted` passed to `clay_brick_cache_submit` and checked; the five older brick cases pass nil for both and have never stored a brick, which is left for its own change
+- [x] 7.4 Its own bundle AND its own session (6/6), because added to the latency bundle it took that session from nominal to serious on both sides of an A/B
+- [x] 7.5 Baseline appended by hand with the tool's own `normalised_p95`, and the new bundle's canary samples merged so the case can be normalised
+- [x] 7.6 Spec delta for device-gate: a fixture states and asserts its regime; a discarded submit is not a measurement; a new suite takes the warm end
+

@@ -1893,6 +1893,79 @@ What is left:
    are the rows to watch; the gate's proof rate is a property of the fixture,
    and the device fixtures have not been read for it.
 
+## The regime the gate could not see (2026-09-03)
+
+The gate had eleven cases driving the brick refill and every one of them
+measured the same regime. `sdf_stamp_bricks` and its siblings stamp radius-0.12
+spheres into empty space and evaluate them at `voxel_size` 0.05, where one brick
+spans 0.4 units — so the dab is *smaller than a brick*, every brick it dirties
+straddles its surface, and none of them has an interior. That is a real regime
+(a blockout, a coarse preview) and it was the only one measured.
+
+A detail pass is the other one, and it is where a sculptor spends their time: a
+small dab on a form that is already there, at a resolution fine enough to
+resolve it. The brick is then small against the *form*, and most of what a dab
+dirties is clay a band or more inside the surface. One dab's dirty set,
+measured through the library on an M2 Max:
+
+| fixture | voxel | dirty | straddling | interior |
+|---|---:|---:|---:|---:|
+| scattered r=0.12 (the existing cases) | 0.05 | 27 | 21 | 6 |
+| scattered r=0.12 | 0.01 | 125 | 90 | 35 |
+| form + dabs | 0.05 | 8 | 8 | 0 |
+| form + dabs (`sdf_stamp_detail_bricks`) | 0.01 | 80 | 16 | 64 |
+
+Both axes have to move. A spread has no interior at any resolution, and a form
+has none at a resolution whose bricks are wider than its features.
+
+`sdf_stamp_detail_bricks` measures the bottom row: a radius-0.5 form worked over
+by smooth-unioned radius-0.06 dabs along a Fibonacci spiral, at `voxel_size`
+0.01. It drives exactly the three calls `sdf_stamp_bricks` drives — add a node,
+dirty what it influences, drain the refill — so the two differ in fixture and
+resolution and in nothing else, and together they bound the refill from both
+ends.
+
+**What it reads.** iPad15,5 on 26.5.2, both runs same-day, each in its own cold
+session, both `valid`, both nominal at each end, canaries 131/149 and 131/146.
+Before is `main` at 512c8c5d; after is the uniform-brick gate.
+
+| dabs | before | after | |
+|---|---:|---:|---:|
+| 10 | 3.097 ms | 2.036 ms | 1.52x |
+| 100 | 16.401 ms | 11.619 ms | 1.41x |
+| 1,000 | 151.137 ms | 59.969 ms | 2.52x |
+
+Every other case in the latency bundle sat between 0.995x and 1.016x across the
+same pair, `sdf_stamp_bricks` at 1.006x — which is the point: the change is
+invisible to the blockout fixture and worth 2.5x to the detail one.
+
+**64.9 ms does not fit a frame, and the note says so.** It joins the six
+interactive cases already over the 120 Hz frame share. A detail dab on a
+1,000-dab form at this resolution costs that today; the case exists so that
+number is on the record rather than absent from it.
+
+**Two things the case had to get right, and one it found.** Its fixture is
+asserted at both ends — the filled form must store some surface and must not be
+mostly surface — because a fixture that lost its interior would keep passing
+while measuring the case we already have. And it takes its own session rather
+than merely its own bundle: added to the latency bundle it sorted last and moved
+no existing case, and still took that session from `nominal` to `serious` on
+both sides of an A/B, which marks the whole run invalid. A process boundary
+returns a memory high-water mark; it does not return temperature.
+
+What it found is older than this change. `clay_brick_cache_submit` refuses a
+call that asks for neither `out_results` nor `out_accepted`, and has since the
+commit that first exposed the cache — which predates every brick case here. The
+five existing ones pass nil for both and discard the return value, so **their
+caches have never stored a brick**. Their timed work is the eval, which is real
+and dominant, so their numbers are not fiction; but nothing in them measures
+storage, classification, or a refill reading a populated cache, and the fill
+they call a load cost stores nothing. Fixing them moves five committed
+baselines and is left to its own change. Measured here: with submit accepted,
+the detail case runs 23 s -> 7.7 s on the simulator, because a populated cache
+is what lets a refill skip anything at all.
+
+
 ## See also
 
 - [07 — brushes and features](07-brushes-and-features.md) — what each brush does
