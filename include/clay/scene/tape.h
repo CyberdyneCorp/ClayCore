@@ -21,6 +21,28 @@ struct Tape {
     std::vector<float> params;
     std::vector<float> blob;  // out-of-line payload: stroke points, polygon verts
     kernel::CFieldInfo info{true, 1.0f};
+    // Whether `info.lipschitz` bounds |grad f| EVERYWHERE, and not only the
+    // step a marcher may take. Those are two different numbers. exactness.h
+    // keeps L = 1 for the "underestimating" fields -- an ellipsoid, a tri
+    // prism, an overflowing repeat, a loft, a sweep, a sampled volume --
+    // because |f| <= distance makes stepping by f safe, and says nothing about
+    // the slope: an ellipsoid's bound field measures a slope of 1.09 near its
+    // tips and 3.6 for a needle-shaped one (400k close pairs, kernel
+    // evaluation). Three deformer bounds are exceeded outright by the same
+    // measure: taper's (1.03x mild, 1.44x smoothstep, 2.5x linear -- it omits
+    // the easing curve's slope and the 1/s(y)^2 in d(p/s(y))/dy), wrap_around's
+    // (1.05x on the surface) and bend_curve's (7-9x, at the guide's ends).
+    //
+    // A marcher never needs more than the stepping bound. A consumer that
+    // reasons about VALUES from L does -- the uniform-brick gate proves from
+    // |f(c)| and L that no lattice sample lies within the band, and under a
+    // stepping bound it stored a brick the walk finds SURFACE as OUTSIDE --
+    // and may only do so while this holds. Folded as `info` is: true for an
+    // empty tape, false once any item in the tape brought one of the fields
+    // or deformers above, and copied with `info` where a compile continues
+    // another's prefix. The cull applies: a brick whose region no such item
+    // reaches compiles a tape without it, and keeps the flag.
+    bool lipschitz_bounds_gradient = true;
     math::Aabb bounds;  // union of item influence bounds (raycast clipping)
 
     // Content identity for backend upload caching. compile_document and

@@ -573,6 +573,23 @@ document's (the cull is what keeps *L* small — a deformer far from the brick i
 not in this tape). Measured on the fixture, **91% of the uniform bricks pass at
 400 dabs and 97% at 1,500, none falsely**; the rest walk as before.
 
+**The bound has to be a slope bound.** `exactness.h` keeps *L* = 1 for the
+underestimating fields — an ellipsoid, a tri prism, an overflowing repeat, a
+loft, a sweep, a sampled volume — because `|f| ≤ distance` makes stepping by
+*f* safe, and that says nothing about `|∇f|`: an ellipsoid's bound field
+measures a slope of 1.09 near its tips and 3.6 for a needle-shaped one, and
+three deformer factors are exceeded outright by the same 400k-pair probe (taper
+1.03–2.5×, `wrap_around` 1.05×, `bend_curve` 7–9× at the guide's ends). Under
+such an *L* the inequality is false by more than its margin: a needle ellipsoid
+on the lattice diagonal proved 852 of 1,000 bricks and stored one the walk
+finds SURFACE as OUTSIDE — the mesh was unchanged, the stored state and halves
+were not. The compiler folds `Tape::lipschitz_bounds_gradient` beside `info`,
+false once any item in the tape brought one of those fields or deformers and
+copied with the prefix on an append, and the gate refuses a tape without it —
+on the full path and on the proof-carrying suffix alike. The refusal is per
+brick, through the cull: a brick whose region the ellipsoid does not reach
+compiles a tape without it and keeps the gate.
+
 A proven brick keeps its place in the batch: a **stub tape** — one
 `ctape_empty`, the far field for an outside brick and, through a zero scale
 and a rounding of `band + spacing`, the constant `−(band + spacing)` for an

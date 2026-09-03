@@ -15,6 +15,15 @@ and the bound SHALL be the brick's own culled tape's, never the whole
 document's. Only the whole-document evaluation may be so gated; the per-layer
 halves a multi-layer refill evaluates SHALL always be walked.
 
+The bound the proof reads SHALL be a bound on the field's gradient, not only
+on the step a marcher may take. A tape holding a field or deformer whose
+declared bound is not one — the underestimating primitives (ellipsoid, tri
+prism, cheap octahedron, L-norm sphere, loft, sweep, sampled volume), an
+overflowing repeat, taper, wrap_around, bend_curve — SHALL NOT be gated, on
+the full path or through a stored proof's suffix, and its bricks SHALL walk.
+The refusal is per brick: a brick whose culled tape holds no such item keeps
+the gate.
+
 What `clay_brick_cache_submit` stores for a gated brick — its state, and its
 uniform colour, read from sample dim^3/2 — SHALL be bit-identical to what it
 would have stored from the walked samples. The values written to a gated
@@ -51,6 +60,16 @@ meaning.
 - **WHEN** a subtracted item brings the surface into bricks that were proven uniform
 - **THEN** those bricks take the full path
 - **AND** the submitted cache equals one filled from scratch
+
+#### Scenario: a field whose bound is not a gradient bound is walked
+- **GIVEN** a document whose only item is a needle ellipsoid on the lattice diagonal, a tapered box, a wrapped box, or a box bent along a curve
+- **WHEN** the model is refilled with the gate enabled and again with it disabled
+- **THEN** no brick is proven, and the two caches store identical states, halves and colours
+
+#### Scenario: a proof is not carried through a suffix that is not a gradient bound
+- **GIVEN** a window whose bricks hold proofs
+- **WHEN** an ellipsoid reaching some of them is appended and the window refilled
+- **THEN** the bricks it reaches take the full path and none is proven, the rest resume, and the cache equals one filled from scratch
 
 #### Scenario: a gesture over a layer holding proofs
 - **GIVEN** a layer of many items whose whole-model cache holds proofs

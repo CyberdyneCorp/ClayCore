@@ -446,6 +446,20 @@ bool deformers_break_exactness(const Node& item) {
     return false;
 }
 
+bool deformers_bound_gradient(const Node& item) {
+    // A list, not a computation: each of these has a declared factor that a
+    // pairwise slope probe exceeds (taper 1.03-2.5x, wrap 1.05x, bend_curve
+    // 7-9x). Tightening the factors would slow every marcher on every item
+    // that carries one, for a consumer only the uniform-brick gate is; it
+    // refuses these instead, and walks the brick as it always did.
+    for (const Deformer& d : item.deformers) {
+        if (d.type == kernel::cdeform_taper || d.type == kernel::cdeform_wrap ||
+            d.type == kernel::cdeform_bend_curve)
+            return false;
+    }
+    return true;
+}
+
 // -- a chain's Lipschitz, priced where its links can actually reach ----------
 //
 // `deformer_lipschitz` used to fold the whole chain into one running product,

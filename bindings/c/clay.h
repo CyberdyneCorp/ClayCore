@@ -9288,7 +9288,11 @@ clay_result clay_brick_cache_take_dirty(clay_brick_cache* cache,
  * renderer reading the buffer directly; a host that wants the field's own
  * distance past the band should ask clay_eval_points for it. The brick still
  * resumes on later dabs -- its seed is the proof, carried through the appended
- * items -- and counts in clay_resume_stats as any other.
+ * items -- and counts in clay_resume_stats as any other. A tape whose Lipschitz
+ * bound is a stepping bound and not a bound on the field's slope -- one holding
+ * an ellipsoid or another underestimating primitive, an overflowing repeat, or
+ * a taper, wrap_around or bend_curve deformer -- is never proven: its bricks
+ * walk as before, and a brick whose cull drops such an item keeps the gate.
  *
  * ROUTE BY BATCH SIZE. The whole batch reaches the backend as batched
  * evaluations, so a GPU backend runs it as a single device submission rather

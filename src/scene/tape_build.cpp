@@ -341,10 +341,13 @@ struct Compiler {
     // that one is local, and dividing an amplitude by a width that is too large
     // understates the slope — the direction that makes a marcher overstep.
     void fold_info(const Node& item, Op op, bool smooth, float round_world) {
-        kernel::CFieldInfo prim_info =
-            prim_is_bound_field(item.prim.type) ? kernel::cfi_bound() : kernel::cfi_exact();
-        if (item.repeat.active() && !repeat_preserves_exactness(item))
-            prim_info = kernel::cfi_bound();
+        const bool bound_field = prim_is_bound_field(item.prim.type) ||
+                                 (item.repeat.active() && !repeat_preserves_exactness(item));
+        kernel::CFieldInfo prim_info = bound_field ? kernel::cfi_bound() : kernel::cfi_exact();
+        // A bound field's L = 1 is a stepping bound and not a slope, and so is
+        // the factor three of the deformers declare: from here on the tape's
+        // L says nothing about |grad f| (Tape::lipschitz_bounds_gradient).
+        if (bound_field || !deformers_bound_gradient(item)) tape.lipschitz_bounds_gradient = false;
 
         if (prim_is_volume(item.prim.type)) {
             // Interpolated samples are not an exact distance, and where there
@@ -1277,6 +1280,7 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& cp, const
     // The layer union the checkpoint sits in front of folds neither of these:
     // a hard Add is exact and adds no extent, so the prefix's are the chain's.
     c.tape.info = prefix.info;
+    c.tape.lipschitz_bounds_gradient = prefix.lipschitz_bounds_gradient;
     c.tape.bounds = prefix.bounds;
     c.resume(cp, *layer, appended);
     c.tape.compile_id = next_compile_id();  // different bytes, so a different identity

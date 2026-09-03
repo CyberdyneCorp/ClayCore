@@ -3900,9 +3900,21 @@ struct NoPost {
 // carries f(c)'s sign. The brick is uniform, and its class is the one submit
 // would have found from the 512 values -- a sample inside the band would
 // contradict the bound -- so a gated brick is classified exactly as a walked
-// one. That is what makes this a PROOF rather than a heuristic. Measured, 80-88%
-// of the uniform bricks above pass it and none passes falsely; the rest walk
-// as before.
+// one. That is what makes this a PROOF rather than a heuristic. Measured, 91%
+// of the uniform bricks above pass it at 400 dabs and 97% at 1,500, none
+// falsely; the rest walk as before.
+//
+// THE BOUND HAS TO BE A SLOPE BOUND, and the compiler says whether it is one
+// (scene::Tape::lipschitz_bounds_gradient). exactness.h keeps L = 1 for the
+// "underestimating" fields -- an ellipsoid, an overflowing repeat, a loft --
+// because |f| <= distance makes stepping by f safe, and that is not
+// |grad f| <= 1: an ellipsoid's bound field has a slope of 1.09 near its tips,
+// 3.6 for a needle. Under that L the inequality above is false by more than
+// its margin, and a needle on the lattice diagonal proved 852 of 1,000 bricks
+// and stored one the walk finds SURFACE as OUTSIDE. Three deformer factors
+// are exceeded the same way (taper, wrap_around, bend_curve). prove_uniform
+// refuses such a tape and the brick walks; the refusal is per brick, through
+// the cull, so a brick the ellipsoid does not reach keeps the gate.
 //
 // Two things about the ball. It is the LATTICE's -- the samples that would have
 // been evaluated -- and not the band-dilated cull region the tape was compiled
@@ -3984,6 +3996,14 @@ bool uniform_beyond_band(float band, float lipschitz, float half_diagonal, float
 UniformProof prove_uniform(const clay_brick_request& req, const LatticeBall& ball,
                            const scene::Tape& tape) {
     UniformProof p;
+    // The proof reads L as a bound on |grad f|, and the tape says whether it is
+    // one (scene::Tape::lipschitz_bounds_gradient). Where it is not -- a bound
+    // field such as an ellipsoid, whose L = 1 is safe to step by while its
+    // slope reaches 1.09 -- the walk classifies from samples the inequality
+    // cannot see, and a brick it finds SURFACE was stored OUTSIDE here. The
+    // brick walks instead, as it always did; the ellipsoid's own bricks lose
+    // the gate, and a brick whose cull dropped the ellipsoid keeps it.
+    if (!tape.lipschitz_bounds_gradient) return p;
     // 1.0 is the floor the raycaster applies too: a tape is never declared
     // flatter than a distance field. A bound that is not finite proves nothing.
     p.lipschitz = std::max(tape.info.lipschitz, 1.0f);
@@ -12461,6 +12481,61 @@ UniformProbe probe_uniform_seed(const clay_document* doc, const clay_brick_reque
     return UniformProbe::Task;
 }
 
+// THE UNIFORM TASK: the gate's proof carried through the suffix (resume_bricks).
+//
+// The same suffix the lattice task compiles, seeded at TWO points instead of
+// 512 -- the lattice centre the proof is made at and sample n/2, whose colour
+// submit keeps -- so the two values come out exactly as the walk would have
+// produced them there. The new tape's bound is max(stored, suffix), exact for
+// what uniform_resume_allowed admits. Where the proof holds again the brick is
+// answered with the stub, as the full path would have answered it; where it
+// does not, the dab reached the brick and the task is left un-ok, which sends
+// it down the full path to be walked (or proved there, with the compiled
+// tape's own bound). A suffix the cull emptied -- most bricks of most dabs --
+// folds nothing and the proof stands unchanged.
+//
+// Runs off the lock, as the lattice task does: it reads the document and the
+// cull index snapshot and writes only its own brick's slot.
+void run_uniform_task(const clay_document* doc, const clay_brick_request& req,
+                      const scene::CullIndex* index, ResumeTask& t) {
+    scene::CullRegion cull{request_brick_box(req).dilated(req.band)};
+    scene::Tape suffix;
+    scene::TapeCheckpoint next;
+    if (!scene::compile_layer_suffix(t.plan->checkpoint, doc->doc.document, t.plan->appended,
+                                     &suffix, &next, &cull, index))
+        return;
+    // The stored bound is a slope bound (prove_uniform refused otherwise), and
+    // max(stored, suffix) is one only while the suffix's is too. An appended
+    // ellipsoid that reaches this brick takes it to the full path, where the
+    // compiled tape carries the same refusal and the brick walks.
+    if (!suffix.lipschitz_bounds_gradient) return;
+    const LatticeBall ball = lattice_ball(t.grid);
+    float pts[6] = {ball.centre.x, ball.centre.y, ball.centre.z,
+                    ball.mid.x,    ball.mid.y,    ball.mid.z};
+    float d[2] = {t.proof.centre.d, t.proof.mid.d};
+    float rgb[6] = {t.proof.centre.color.x, t.proof.centre.color.y, t.proof.centre.color.z,
+                    t.proof.mid.color.x,    t.proof.mid.color.y,    t.proof.mid.color.z};
+    eval::PointQuery pq;
+    pq.points_xyz = pts;
+    pq.count = 2;
+    eval::PointResults pr;
+    pr.distances = d;
+    pr.colors_rgb = rgb;
+    eval::eval_points_seeded(suffix, pq, d, rgb, pr);  // in place, as the lattice task
+    UniformProof proof = t.proof;
+    proof.lipschitz = std::max(t.proof.lipschitz, std::max(suffix.info.lipschitz, 1.0f));
+    if (!std::isfinite(proof.lipschitz)) return;
+    proof.centre = kernel::CTapeValue{d[0], kernel::cf3(rgb[0], rgb[1], rgb[2])};
+    proof.mid = kernel::CTapeValue{d[1], kernel::cf3(rgb[3], rgb[4], rgb[5])};
+    if (!uniform_beyond_band(req.band, proof.lipschitz, ball.half_diagonal, proof.centre.d))
+        return;
+    proof.proven = true;
+    proof.inside = proof.centre.d < 0.0f;
+    fill_uniform_stub(req, t.grid, proof, t.active, t.active_rgb);
+    t.proof = proof;
+    t.ok = true;
+}
+
 std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* requests,
                           std::size_t count, std::size_t per, bool want_colour, float* out_values,
                           float* out_colors_rgb, std::uint8_t* resumed) {
@@ -12776,56 +12851,9 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
     // with a refill (clay.h, THREADING), while any number of refills and
     // readers may be. Each task writes its own brick's samples and nothing
     // else, so the tasks are disjoint by construction.
-    // THE UNIFORM TASK: the gate's proof carried through the suffix.
-    //
-    // The same suffix the lattice task compiles, seeded at TWO points instead
-    // of 512 -- the lattice centre the proof is made at and sample n/2, whose
-    // colour submit keeps -- so the two values come out exactly as the walk
-    // would have produced them there. The new tape's bound is max(stored,
-    // suffix), exact for what uniform_resume_allowed admits. Where the proof
-    // holds again the brick is answered with the stub, as the full path would
-    // have answered it; where it does not, the dab reached the brick and the
-    // task is left un-ok, which sends it down the full path to be walked (or
-    // proved there, with the compiled tape's own bound). A suffix the cull
-    // emptied -- most bricks of most dabs -- folds nothing and the proof stands
-    // unchanged.
-    auto run_uniform_task = [&](ResumeTask& t) {
-        const clay_brick_request& req = requests[t.slot];
-        scene::CullRegion cull{request_brick_box(req).dilated(req.band)};
-        scene::Tape suffix;
-        scene::TapeCheckpoint next;
-        if (!scene::compile_layer_suffix(t.plan->checkpoint, doc->doc.document, t.plan->appended,
-                                         &suffix, &next, &cull, index.get()))
-            return;
-        const LatticeBall ball = lattice_ball(t.grid);
-        float pts[6] = {ball.centre.x, ball.centre.y, ball.centre.z,
-                        ball.mid.x,    ball.mid.y,    ball.mid.z};
-        float d[2] = {t.proof.centre.d, t.proof.mid.d};
-        float rgb[6] = {t.proof.centre.color.x, t.proof.centre.color.y, t.proof.centre.color.z,
-                        t.proof.mid.color.x,    t.proof.mid.color.y,    t.proof.mid.color.z};
-        eval::PointQuery pq;
-        pq.points_xyz = pts;
-        pq.count = 2;
-        eval::PointResults pr;
-        pr.distances = d;
-        pr.colors_rgb = rgb;
-        eval::eval_points_seeded(suffix, pq, d, rgb, pr);  // in place, as the lattice task
-        UniformProof proof = t.proof;
-        proof.lipschitz = std::max(t.proof.lipschitz, std::max(suffix.info.lipschitz, 1.0f));
-        if (!std::isfinite(proof.lipschitz)) return;
-        proof.centre = kernel::CTapeValue{d[0], kernel::cf3(rgb[0], rgb[1], rgb[2])};
-        proof.mid = kernel::CTapeValue{d[1], kernel::cf3(rgb[3], rgb[4], rgb[5])};
-        if (!uniform_beyond_band(req.band, proof.lipschitz, ball.half_diagonal, proof.centre.d))
-            return;
-        proof.proven = true;
-        proof.inside = proof.centre.d < 0.0f;
-        fill_uniform_stub(req, t.grid, proof, t.active, t.active_rgb);
-        t.proof = proof;
-        t.ok = true;
-    };
     auto run_task = [&](ResumeTask& t, std::vector<float>& points) {
         if (t.uniform) {
-            run_uniform_task(t);
+            run_uniform_task(doc, requests[t.slot], index.get(), t);
             return;
         }
         const math::Aabb box = request_brick_box(requests[t.slot]).dilated(requests[t.slot].band);

@@ -45,6 +45,13 @@ kernel::cfloat2 profile_extent_of(const Profile& profile,
 // factor does not capture (elongation on an asymmetric primitive).
 bool deformers_break_exactness(const Node& item);
 
+// Whether every link of the item's deformer chain declares a factor that
+// bounds the warp's own gradient, and not only a safe step. False for taper,
+// wrap_around and bend_curve, whose declared factors are measured below the
+// field's slope (Tape::lipschitz_bounds_gradient has the numbers). The
+// marcher does not ask; the uniform-brick gate does.
+bool deformers_bound_gradient(const Node& item);
+
 // World-space GEOMETRY bound of one item: shape AABB (deformed, mirrored,
 // transformed) dilated by rounding and blend support. Always finite — this
 // is what meshing and raycast clipping want.

@@ -1302,6 +1302,13 @@ of walking 512:
 None of the proofs is false: the whole model's class counts are identical to
 the walk's either way (2,108 / 2,303 surface, 1,669 / 1,997 inside), and the
 test holds every stored half and colour bit-identical with the gate on and off.
+That held on spheres. Review found the one field kind it does not hold on: a
+primitive whose *L* = 1 is a stepping bound rather than a slope bound (an
+ellipsoid's slope reaches 1.09, a needle's 3.6), and a needle on the lattice
+diagonal proved 852 of 1,000 bricks with one stored OUTSIDE where the walk
+finds SURFACE. The compiler now says whether a tape's bound is a slope bound
+(`Tape::lipschitz_bounds_gradient`) and the gate refuses one that is not; the
+fixture above holds no such item, so its numbers stand.
 **The cold dab at 1,500 is still 14 ms**, three and a half frame shares; what
 is left is the 16 to 18 surface bricks that genuinely walk, which is the
 per-brick culled compile and the 512-point walk the rest of this document is

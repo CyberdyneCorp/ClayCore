@@ -449,6 +449,175 @@ TEST_CASE("uniform gate: a device backend classifies a gated brick as the cpu do
     clay_brick_cache_destroy(gpu_cache);
 }
 
+// -- fields whose bound is not a gradient bound --------------------------------
+//
+// exactness.h keeps L = 1 for the "underestimating" fields (an ellipsoid, an
+// overflowing repeat) because stepping by |f| is safe, and three deformer
+// bounds (taper, wrap_around, bend_curve) are measured below the field's own
+// slope. The proof's inequality is false under such an L by more than its
+// margin: the needle ellipsoid below, placed on the lattice diagonal, proved
+// 852 of 1,000 bricks and stored brick (4,4,4) OUTSIDE where the walk finds
+// samples inside the band. scene::Tape::lipschitz_bounds_gradient is the
+// compiler's word on it, and the gate refuses a tape without it.
+
+namespace {
+
+clay_node_id add_item(clay_document* doc, clay_layer_id layer, int32_t prim,
+                      const std::vector<float>& params, float x, float y, float z,
+                      const std::function<void(clay_item*)>& tweak = nullptr) {
+    clay_item* it = clay_item_create(prim, params.data(), params.size());
+    REQUIRE(it != nullptr);
+    const float p[3] = {x, y, z};
+    REQUIRE(clay_item_set_position(it, p) == CLAY_OK);
+    const float rgb[3] = {0.3f + 0.1f * static_cast<float>(prim), 0.5f, 0.6f};
+    REQUIRE(clay_item_set_color(it, rgb) == CLAY_OK);
+    if (tweak) tweak(it);
+    clay_node_id node = 0;
+    REQUIRE(clay_layer_add_item(doc, layer, it, &node) == CLAY_OK);
+    clay_item_destroy(it);
+    return node;
+}
+
+using Builder = std::function<void(clay_document*, clay_layer_id)>;
+
+// The needle ellipsoid of the review, its long axis on the lattice diagonal.
+const Builder kNeedle = [](clay_document* d, clay_layer_id l) {
+    add_item(d, l, CLAY_PRIM_ELLIPSOID, {1.0f, 0.1f, 0.1f}, 0.013f, 0.007f, 0.011f,
+             [](clay_item* it) {
+                 const float axis[3] = {0.0f, -0.70710678f, 0.70710678f};
+                 REQUIRE(clay_item_set_rotation(it, axis, std::acos(1.0f / std::sqrt(3.0f))) ==
+                         CLAY_OK);
+             });
+};
+const Builder kTapered = [](clay_document* d, clay_layer_id l) {
+    add_item(d, l, CLAY_PRIM_BOX, {0.3f, 0.5f, 0.3f}, 0.0f, 0.0f, 0.0f, [](clay_item* it) {
+        const float taper[4] = {-0.5f, 0.5f, 1.0f, 0.2f};
+        REQUIRE(clay_item_add_deformer(it, CLAY_DEFORM_TAPER, taper, 4, 0) == CLAY_OK);
+    });
+};
+const Builder kWrapped = [](clay_document* d, clay_layer_id l) {
+    add_item(d, l, CLAY_PRIM_BOX, {0.8f, 0.1f, 0.2f}, 0.0f, 0.0f, 0.0f, [](clay_item* it) {
+        const float wrap[2] = {-0.8f, 0.8f};
+        REQUIRE(clay_item_add_deformer(it, CLAY_DEFORM_WRAP_AROUND, wrap, 2, 0) == CLAY_OK);
+    });
+};
+const Builder kBentAlongCurve = [](clay_document* d, clay_layer_id l) {
+    add_item(d, l, CLAY_PRIM_BOX, {0.6f, 0.08f, 0.08f}, 0.0f, 0.0f, 0.0f, [](clay_item* it) {
+        std::vector<float> guide;
+        for (int i = 0; i <= 8; ++i) {
+            const float a = -0.9f + 1.8f * static_cast<float>(i) / 8.0f;
+            guide.push_back(0.5f * std::sin(a));
+            guide.push_back(0.5f * (1.0f - std::cos(a)));
+            guide.push_back(0.0f);
+        }
+        REQUIRE(clay_item_add_bend_curve(it, guide.data(), 9, 0, -0.6f, 0.6f) == CLAY_OK);
+    });
+};
+
+// Whole-model fills of one document kind with the gate on and off, and what
+// each stored. `proved` is the gated fill's count.
+struct WholeModel {
+    Stored gated, walked;
+    std::uint64_t proved = 0;
+    std::size_t bricks = 0;
+};
+
+WholeModel whole_model(const Builder& build, float voxel, int32_t band) {
+    WholeModel w;
+    Doc on, off;
+    REQUIRE(clay_internal_set_uniform_gate(off.d, 0) == CLAY_OK);
+    build(on.d, on.layer);
+    build(off.d, off.layer);
+    clay_brick_cache* a = make_cache(voxel, band, true);
+    clay_brick_cache* b = make_cache(voxel, band, true);
+    REQUIRE(clay_brick_cache_mark_dirty_layer(a, on.d, on.layer) == CLAY_OK);
+    REQUIRE(clay_brick_cache_mark_dirty_layer(b, off.d, off.layer) == CLAY_OK);
+    const std::vector<clay_brick_request> ra = take_all(a), rb = take_all(b);
+    REQUIRE(ra.size() == rb.size());
+    w.bricks = ra.size();
+    w.proved = fill(on.d, a, ra, "cpu", true).gated;
+    fill(off.d, b, rb, "cpu", true);
+    w.gated = stored(a, ra, true);
+    w.walked = stored(b, rb, true);
+    clay_brick_cache_destroy(a);
+    clay_brick_cache_destroy(b);
+    return w;
+}
+
+}  // namespace
+
+TEST_CASE("uniform gate: a field whose bound is not a gradient bound is walked") {
+    // Alone, each of these documents proves NOTHING -- every brick's culled
+    // tape holds the item -- and stores what the walk stores. The needle at a
+    // 0.02 voxel is the placement that stored a wrong brick; the deformers are
+    // the three whose declared factors the slope probe exceeds.
+    struct Case {
+        const char* name;
+        const Builder* build;
+        float voxel;
+    };
+    for (const Case& c : {Case{"needle ellipsoid", &kNeedle, 0.02f}, Case{"taper", &kTapered, 0.05f},
+                          Case{"wrap_around", &kWrapped, 0.05f},
+                          Case{"bend_curve", &kBentAlongCurve, 0.05f}}) {
+        CAPTURE(std::string(c.name));
+        const WholeModel w = whole_model(*c.build, c.voxel, 3);
+        REQUIRE(w.bricks >= 8);  // a box of bricks, with uniform ones at its corners
+        REQUIRE(w.gated.inside + w.gated.outside > 0);
+        CHECK(w.proved == 0);
+        check_same_stored(w.gated, w.walked);
+    }
+}
+
+TEST_CASE("uniform gate: the refusal is per brick, through the cull") {
+    // A worked sphere with a needle ellipsoid beside it: bricks whose cull
+    // region the ellipsoid does not reach compile a tape without it and keep
+    // the gate; the rest walk. Both kinds store what the walk stores.
+    const Builder build = [](clay_document* d, clay_layer_id l) {
+        worked_sphere(d, l, 60);
+        add_item(d, l, CLAY_PRIM_ELLIPSOID, {0.6f, 0.05f, 0.05f}, 1.9f, 0.0f, 0.0f);
+    };
+    const WholeModel w = whole_model(build, 0.05f, 3);
+    CHECK(w.proved > 0);
+    CHECK(w.proved < w.gated.inside + w.gated.outside);
+    check_same_stored(w.gated, w.walked);
+}
+
+TEST_CASE("uniform gate: a proof is not carried through a suffix that is not a gradient bound") {
+    // A window of proofs, then an ellipsoid appended DEEP INSIDE the clay,
+    // reaching bricks that stay uniformly inside. The append folds by a max
+    // rule, so the resumed path would carry the proofs through it with
+    // max(stored, 1) as the bound -- and 1 is not the ellipsoid's slope. Those
+    // bricks take the full path instead, where the compiled tape carries the
+    // same refusal and they walk: refilled, and none proved.
+    Doc doc;
+    worked_sphere(doc.d, doc.layer, 120);
+    clay_brick_cache* cache = make_cache(0.05f, 3, true);
+    const std::vector<clay_brick_request> window = mark_box(cache, kLo, kHi);
+    const Fill cold = fill(doc.d, cache, window, "cpu", true);
+    REQUIRE(cold.gated > 0);
+
+    add_item(doc.d, doc.layer, CLAY_PRIM_ELLIPSOID, {0.3f, 0.05f, 0.05f}, 0.0f, 0.0f, 0.0f);
+    REQUIRE(clay_brick_cache_mark_dirty(cache, kLo, kHi) == CLAY_OK);
+    const std::vector<clay_brick_request> again = take_all(cache);
+    REQUIRE(again.size() == window.size());
+    const Fill warm = fill(doc.d, cache, again, "cpu", true);
+    CHECK(warm.refilled > 0);                          // the reached bricks walked
+    CHECK(warm.refilled < window.size());              // the rest resumed
+    CHECK(warm.resumed + warm.refilled == window.size());
+    CHECK(warm.gated == 0);                            // and none was proved
+
+    Doc fresh;
+    REQUIRE(clay_internal_set_uniform_gate(fresh.d, 0) == CLAY_OK);
+    worked_sphere(fresh.d, fresh.layer, 120);
+    add_item(fresh.d, fresh.layer, CLAY_PRIM_ELLIPSOID, {0.3f, 0.05f, 0.05f}, 0.0f, 0.0f, 0.0f);
+    clay_brick_cache* oracle = make_cache(0.05f, 3, true);
+    const std::vector<clay_brick_request> reqs = mark_box(oracle, kLo, kHi);
+    fill(fresh.d, oracle, reqs, "cpu", true);
+    check_same_stored(stored(oracle, reqs, true), stored(cache, again, true));
+    clay_brick_cache_destroy(oracle);
+    clay_brick_cache_destroy(cache);
+}
+
 // -- a gesture over a layer holding proofs -----------------------------------
 //
 // The frontier path prepares a prefix for every seed a drag will dirty, and a
