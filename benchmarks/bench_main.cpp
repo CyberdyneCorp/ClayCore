@@ -1087,8 +1087,15 @@ BENCHMARK(BM_BrickRefillFull)->Unit(benchmark::kMillisecond);
 // a second refill of the same one would resume rather than walk, and this
 // row is the cold walk. Measured 9.22 -> 5.58 ms at 400 dabs and 33.4 -> 14.1
 // ms at 1,500 on an M2 Max (medians of 7). The warm dab is
-// BM_BrickRefillResumed's shape and is held elsewhere; what this row catches
-// is the gate switching off, which reads as a correct document and 2x.
+// BM_BrickRefillResumed's shape and is held elsewhere.
+//
+// What this row has to catch is the gate switching off, which reads as a
+// correct document and 2x -- and the wall clock is the wrong gate for a 2x
+// on a shared runner. The `walked` counter is the gate: the bricks of the
+// window the refill evaluated in full, which is bricks minus what the gate
+// proved. 28 of 80 at 400 dabs and 18 of 80 at 1,500 here (the 23 and 16
+// surface bricks plus the few uniform ones the proof's margin refuses);
+// with the gate off it is 80. tools/check_bench.py holds a ceiling between.
 namespace {
 clay_document* helix_sculpt(int dabs) {
     clay_document* d = clay_document_create();
@@ -1126,6 +1133,7 @@ void dab_refill_sculpted(benchmark::State& state, int dabs) {
     const float lo[3] = {0.5f - reach, -reach, -reach};
     const float hi[3] = {0.5f + reach, reach, reach};
     std::size_t bricks = 0;
+    std::uint64_t walked = 0;
     for (auto _ : state) {
         state.PauseTiming();
         clay_document* d = helix_sculpt(dabs);
@@ -1145,12 +1153,16 @@ void dab_refill_sculpted(benchmark::State& state, int dabs) {
         clay_brick_cache_submit(c, reqs.data(), count, values.data(), values.size(), nullptr, 0,
                                 results.data(), &accepted);
         state.PauseTiming();
+        std::uint64_t gated = 0;
+        clay_internal_gated_bricks(d, &gated);  // a fresh document: this refill's proofs
+        walked = count - gated;
         clay_brick_cache_destroy(c);
         clay_document_destroy(d);
         state.ResumeTiming();
     }
     state.counters["bricks"] = static_cast<double>(bricks);
     state.counters["dabs"] = static_cast<double>(dabs);
+    state.counters["walked"] = static_cast<double>(walked);
 }
 }  // namespace
 
