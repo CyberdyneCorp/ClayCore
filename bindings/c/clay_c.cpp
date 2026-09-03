@@ -7755,6 +7755,26 @@ clay_result clay_raycast_many(const clay_document* doc, const float* rays_origin
 
 // -- picking (picking spec, through the C boundary) --------------------------
 
+// pick::raycast_scene on the document's CACHED pickable tape. The library
+// entry point compiles the document per call, and a pick runs per Pencil
+// event: at 1,500 items that compile was 0.3 ms of a 1.0 ms pick, paid
+// again for a document that had not changed. The tape is the one every other
+// pick query here already marches, keyed on the document revision.
+//
+// The cull index is fetched only when the tape's step scale is below 1, which
+// is the one case raycast_scene compiles a ray-local tape and has a use for
+// it (see the declaration in pick.h). It is cached per revision too, so the
+// fetch is a lock and a pointer once the brick path or an earlier pick has
+// built it; skipping it otherwise keeps a plain document's pick from building
+// an index nothing will read.
+static pick::SceneHit raycast_pickable(const clay_document* doc, const math::Ray& ray,
+                                       const pick::RaycastOptions& opts) {
+    std::shared_ptr<const scene::Tape> tape = doc->pickable_tape();
+    std::shared_ptr<const scene::CullIndex> index;
+    if (tape->safe_step_scale() < 1.0f) index = doc->cull_index();
+    return pick::raycast_scene(doc->doc.document, *tape, index.get(), ray, opts);
+}
+
 clay_result clay_raycast_attributed(const clay_document* doc, const float origin[3],
                                     const float dir[3], int32_t* out_hit, float* out_t,
                                     float out_position[3], float out_normal[3],
@@ -7767,7 +7787,7 @@ clay_result clay_raycast_attributed(const clay_document* doc, const float origin
     // Hidden surface is stepped over, not turned into a miss: hiding the front
     // of a head is how an artist reaches the inside of it.
     if (doc->doc.groups) ropts.groups = &*doc->doc.groups;
-    pick::SceneHit hit = pick::raycast_scene(doc->doc.document, ray, ropts);
+    const pick::SceneHit hit = raycast_pickable(doc, ray, ropts);
     *out_hit = hit.hit ? 1 : 0;
     if (out_t) *out_t = hit.t;
     if (out_position) write_f3(out_position, hit.position);
@@ -9945,17 +9965,13 @@ clay_result clay_raycast_bounded(const clay_document* doc, const float origin[3]
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
     if (!(tmax > tmin)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "tmax must exceed tmin");
     *out_hit = 0;
-    std::shared_ptr<const scene::Tape> tape_ref = doc->pickable_tape();
-    const scene::Tape& tape = *tape_ref;
-    if (tape.empty()) return CLAY_OK;  // nothing to hit is not an error
-
     pick::RaycastOptions opts;
     opts.tmin = tmin;
     opts.tmax = tmax;
     if (doc->doc.groups) opts.groups = &*doc->doc.groups;
     const math::Ray ray{kernel::cf3(origin[0], origin[1], origin[2]),
                         kernel::cnormalize(kernel::cf3(dir[0], dir[1], dir[2]))};
-    const pick::SceneHit hit = pick::raycast_scene(doc->doc.document, ray, opts);
+    const pick::SceneHit hit = raycast_pickable(doc, ray, opts);
     *out_hit = hit.hit ? 1 : 0;
     if (out_t) *out_t = hit.t;
     if (out_position) {

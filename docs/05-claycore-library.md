@@ -1120,6 +1120,33 @@ CPU-side, latency-critical, called every Pencil event:
 - Build-plane and grid cell resolution for voxel mode; face picking on voxel grids.
 - Bounds/frustum utilities for zoom-to-selection and culling.
 
+**A pick marches the cached tape, and pays only the step scale its own ray
+needs.** Two things the pick path used to do per Pencil event, neither of them
+visible from the hit. It compiled the document: `pick::raycast_scene(doc, ray)`
+built a fresh pickable tape every call, while the C ABI already held one per
+revision for every other pick query — at 1,500 items that compile was 0.3 ms
+of a 1.0 ms pick. `clay_raycast_attributed` and `clay_raycast_bounded` now hand
+the cached tape (and the document's cull index) to an overload of
+`raycast_scene` that takes them; the library entry point keeps its signature
+and compiles as before. And it marched at the document's worst step scale: the
+tape's `safe_step_scale` is ONE Lipschitz bound folded over every visible node,
+so a twisted box two units from the model dropped it from 1 to 0.28 and a ray
+nowhere near the box took 2.4× the steps it needed, because the bound cannot
+say *where* the field is steep. When that scale is below 1, the march now
+compiles a tape culled to the ray's own segment — a box around the clipped ray,
+through the same per-brick cull the refill uses, so the culled field is exact
+wherever the march evaluates — and steps by the culled tape's scale when it is
+larger. An item whose influence misses the segment is dropped, and its
+Lipschitz contribution with it; a ray straight through the steep item keeps it,
+the scales tie, and the whole tape marches as it did (no compile is used
+unless it wins). The hit is the same surface either way — the surface did not
+move, only the step length did — and `SceneHit::steps` reports the march so a
+test can hold the claim. With both, the twisted case measured 1.20 → 0.95 ms
+at 1,500 items and 0.33 → 0.26 ms at 400, the plain case 1.02 → 0.80 ms and
+0.28 → 0.22 ms; a culled compile still emits nearly every item of a long
+blended chain (the blend envelope pads the region), which is why the local
+tape is gated on the step scale rather than compiled for every ray.
+
 ### Asking the shape what it is: surface measures
 
 Curvature, cavity, convexity, "facing up", ambient occlusion and thickness — at

@@ -37,6 +37,13 @@ struct RaycastOptions {
     // The field is not modified, so the ray still marches the true surface and
     // simply refuses to stop on the parts that are hidden.
     const voxel::GroupField* groups = nullptr;
+
+    // Whether the march may run on a tape culled to the ray's own segment when
+    // the document's tape carries a Lipschitz bound above 1 (see raycast_scene
+    // for why that is worth a compile). Off, the march takes the whole
+    // document's step scale everywhere; the option exists so a test can hold
+    // the two marches against each other, not for a caller to tune.
+    bool local_tape = true;
 };
 
 struct SceneHit {
@@ -46,6 +53,10 @@ struct SceneHit {
     kernel::cfloat3 normal = kernel::cf3(0, 1, 0);
     scene::LayerId layer = 0;   // attribution (0 = none)
     scene::NodeId item = scene::kNoNode;
+    // Sphere-march samples taken, summed over hidden-surface restarts. What a
+    // step-scale claim is checked against: the same hit in fewer steps IS the
+    // win, and there is no other way to see it from outside.
+    int steps = 0;
 };
 
 // Analytic raycast against the document's compiled tape, with hit
@@ -60,7 +71,17 @@ struct SceneHit {
 // Exposed rather than kept private because a host doing its own ray marching
 // or snapping needs the same tape, and picking that disagreed with itself
 // depending on which entry point ran would be worse than no ghosting at all.
-scene::Tape pickable_tape(const scene::Document& doc, const scene::CullRegion* cull = nullptr);
+//
+// `index` is the document's cull index (scene/cull_index.h) and `plan` a
+// coarse cull of it over a region containing `cull`; both consulted only with
+// a `cull`, both the pure accelerations compile_document takes them as (cached
+// bounds and a pre-pruned walk instead of per-node recomputation). They are
+// dropped when a ghosted layer forces the compile onto a copy of the document,
+// because the index caches by layer address and every lookup against the copy
+// would miss.
+scene::Tape pickable_tape(const scene::Document& doc, const scene::CullRegion* cull = nullptr,
+                          const scene::CullIndex* index = nullptr,
+                          const scene::CullPlan* plan = nullptr);
 
 // PROJECT A POINT ONTO THE SURFACE, searching BOTH ways within a distance
 // (add-claycore-bridge).
@@ -118,6 +139,32 @@ float next_visible_crossing(const std::function<float(kernel::cfloat3)>& field,
                             const voxel::GroupField& groups);
 
 SceneHit raycast_scene(const scene::Document& doc, const math::Ray& ray,
+                       const RaycastOptions& options = {});
+
+// The same march against a pickable tape the caller already holds — the C
+// ABI's per-revision cached one — so a pick does not compile the document it
+// was just handed. `tape` MUST be pickable_tape(doc) for this `doc` (or a
+// byte-identical copy): the hit is marched on the tape and attributed on the
+// document, and the two disagreeing is a hit on one surface named after
+// another. `index` is the document's cull index, or null; it only speeds the
+// ray-local compile below, it never changes the answer.
+//
+// THE STEP SCALE A RAY PAYS. The march steps by the field times the tape's
+// safe_step_scale, and that scale is ONE number folded over every visible
+// node — the worst Lipschitz bound anywhere in the document. One twisted box
+// parked two units from the model drops it from 1 to 0.28, and a ray nowhere
+// near the box takes 2.4x the steps it needs, because the bound cannot say
+// WHERE the field is steep. A tape culled to the ray's own segment can: an
+// item whose influence bound misses the segment is dropped, and its Lipschitz
+// contribution with it, so the culled tape's scale is what the field along
+// THAT ray allows. The culled tape is exact wherever the march evaluates —
+// the per-brick cull's guarantee, applied to a box around the segment instead
+// of a brick — so the hit is the same surface; only the step length changes.
+// Compiled only when the whole tape's scale is below 1 (there is nothing to
+// win otherwise), used only when its scale is larger (a ray straight through
+// the steep item gains nothing and marches the tape it already had).
+SceneHit raycast_scene(const scene::Document& doc, const scene::Tape& tape,
+                       const scene::CullIndex* index, const math::Ray& ray,
                        const RaycastOptions& options = {});
 
 // Raycast against a filled brick cache (trilinear narrow-band samples, brick

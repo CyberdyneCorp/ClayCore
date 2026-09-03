@@ -1,7 +1,10 @@
 #include <doctest/doctest.h>
 
+#include <cmath>
+
 #include "clay/pick/pick.h"
 #include "clay/scene/bounds.h"
+#include "clay/scene/cull_index.h"
 #include "kernel_utils.h"
 #include "scene_utils.h"
 
@@ -60,6 +63,77 @@ TEST_CASE("subtract items attribute their carved surfaces") {
     REQUIRE(h.hit);
     // the ray lands inside the carved bowl — that surface belongs to the cutter
     CHECK(h.item == carve);
+}
+
+TEST_CASE("a far high-Lipschitz item does not slow a ray that never nears it") {
+    // A sphere with a ring of blended dabs, and a twisted box two units away.
+    // The box's deformer bound (1 + k * r, about 3.5 here) is folded into the
+    // whole tape's step scale, so a ray that never comes near the box used to
+    // march at 0.28 of the step its own field allowed.
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    l.sdf->insert(item(scene::Prim::sphere(0.5f), cf3(0, 0, 0)));
+    for (int i = 0; i < 8; ++i) {
+        const float a = static_cast<float>(i) * 0.785f;
+        l.sdf->insert(item(scene::Prim::sphere(0.05f),
+                           cf3(0.5f * std::cos(a), 0.5f * std::sin(a), 0), scene::Op::Add,
+                           scene::Blend{scene::BlendProfile::Quadratic, 0.06f}));
+    }
+    scene::Node twisted = item(scene::Prim::box(cf3(0.1f, 0.1f, 0.3f)), cf3(2, 0, 0));
+    twisted.deformers.push_back(scene::Deformer::twist(8.0f));
+    const scene::NodeId twisted_id = l.sdf->insert(twisted);
+
+    const scene::Tape whole = pick::pickable_tape(doc);
+    REQUIRE(whole.safe_step_scale() < 1.0f);
+
+    // Down the z axis onto the sphere's pole: the box is two units off to the
+    // side of everything this ray evaluates.
+    const math::Ray ray{cf3(0, 0, 3), cf3(0, 0, -1)};
+    pick::RaycastOptions global;
+    global.local_tape = false;
+    const pick::SceneHit slow = pick::raycast_scene(doc, ray, global);
+    const pick::SceneHit fast = pick::raycast_scene(doc, ray);
+    REQUIRE(slow.hit);
+    REQUIRE(fast.hit);
+    // The same surface — only the step length changed — in fewer steps.
+    CHECK(fast.t == doctest::Approx(2.5f).epsilon(1e-3));
+    CHECK(fast.t == doctest::Approx(slow.t).epsilon(1e-3));
+    CHECK(fast.layer == slow.layer);
+    CHECK(fast.item == slow.item);
+    CHECK(fast.steps < slow.steps);
+
+    // The tape culled to the ray's segment is what bought that: the box is
+    // dropped and its bound with it, so the local scale is the field's own.
+    math::Aabb segment;
+    segment.expand(ray.origin);
+    segment.expand(ray.at(6.0f));
+    const scene::CullRegion cull{segment.dilated(1e-3f)};
+    CHECK(pick::pickable_tape(doc, &cull).safe_step_scale() == 1.0f);
+
+    // The cached-tape entry point (what the C ABI calls) marches the same hit
+    // with the same steps, with the document's cull index and without one:
+    // the index is a pure acceleration of the culled compile.
+    const scene::CullIndex index(doc);
+    const pick::SceneHit cached = pick::raycast_scene(doc, whole, &index, ray);
+    REQUIRE(cached.hit);
+    CHECK(cached.t == fast.t);
+    CHECK(cached.steps == fast.steps);
+    CHECK(cached.item == fast.item);
+    const pick::SceneHit unindexed = pick::raycast_scene(doc, whole, nullptr, ray);
+    CHECK(unindexed.t == fast.t);
+    CHECK(unindexed.steps == fast.steps);
+
+    // A ray THROUGH the box keeps the box: the cull cannot drop it, the local
+    // scale equals the whole tape's, and the march is the whole tape's own —
+    // bit for bit, since equal scale means no local tape is used at all.
+    const math::Ray through{cf3(2, 0, 3), cf3(0, 0, -1)};
+    const pick::SceneHit box_slow = pick::raycast_scene(doc, through, global);
+    const pick::SceneHit box_fast = pick::raycast_scene(doc, through);
+    REQUIRE(box_slow.hit);
+    REQUIRE(box_fast.hit);
+    CHECK(box_fast.item == twisted_id);
+    CHECK(box_fast.t == box_slow.t);
+    CHECK(box_fast.steps == box_slow.steps);
 }
 
 TEST_CASE("brick raycast agrees with the analytic tape within a voxel") {

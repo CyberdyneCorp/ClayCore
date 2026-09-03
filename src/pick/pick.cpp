@@ -4,6 +4,7 @@
 
 #include "clay/kernel/field.h"
 #include "clay/scene/bounds.h"
+#include "clay/scene/cull_index.h"
 
 namespace clay {
 namespace pick {
@@ -15,12 +16,18 @@ using kernel::cfloat3;
 // scene raycast + attribution
 // ---------------------------------------------------------------------------
 
-scene::Tape pickable_tape(const scene::Document& doc, const scene::CullRegion* cull) {
+scene::Tape pickable_tape(const scene::Document& doc, const scene::CullRegion* cull,
+                          const scene::CullIndex* index, const scene::CullPlan* plan) {
     bool any_ghost = false;
     for (const scene::Layer& l : doc.layers) any_ghost = any_ghost || l.ghost;
-    if (!any_ghost) return scene::compile_document(doc, cull);
+    if (!any_ghost) return scene::compile_document(doc, cull, index, plan);
     // A shallow copy: Layer holds its content by shared_ptr, so this shares
     // the edit lists and only the flags differ. Cheap next to compiling.
+    //
+    // The index and its plan stay behind: the index caches bounds by layer
+    // address, and the copy's layers live somewhere else. compile_document
+    // would drop it for that reason anyway (index->document() != &doc); not
+    // passing it says so here rather than relying on the check.
     scene::Document without_ghosts = doc;
     for (scene::Layer& l : without_ghosts.layers)
         if (l.ghost) l.visible = false;
@@ -150,19 +157,84 @@ float next_visible_crossing(const std::function<float(cfloat3)>& field, const ma
     return -1.0f;
 }
 
+namespace {
+
+// How far the ray's cull box reaches beyond the segment itself. Everything
+// the march evaluates lies ON the segment — craycast and the hidden-surface
+// scan sample ray.at(t) for t in [tmin, tmax] — except the normal, whose
+// tetrahedron taps sit 1e-4 off the hit point. Ten times that covers the taps
+// and the rounding of ray.at() against the box built from its endpoints, and
+// nothing else needs covering: the compile pads the box by the document's own
+// blend and feather reach (CullIndex::cull_pad), which is what makes the
+// culled field exact inside it.
+constexpr float kRayCullDilation = 1e-3f;
+
+// Clips [tmin, tmax] to the tape's bounds. False when the ray misses them
+// outright; true — with the range untouched — when there is nothing finite
+// to clip against.
+bool clip_to_bounds(const scene::Tape& tape, const math::Ray& ray, float* tmin, float* tmax) {
+    if (tape.bounds.empty() || tape.bounds.is_infinite()) return true;
+    float t0, t1;
+    if (!math::ray_aabb(ray, tape.bounds.dilated(0.01f), &t0, &t1)) return false;
+    *tmin = kernel::cmax(*tmin, t0);
+    *tmax = kernel::cmin(*tmax, t1);
+    return true;
+}
+
+// The tape the march runs on: `whole`, or a tape culled to the ray's segment
+// when that culls away whatever is holding the step scale down (the reasoning
+// is on raycast_scene's declaration). The culled tape is built into `local`,
+// which the caller owns so the reference returned stays valid.
+//
+// Two ways out without a compile. A scale already at 1 has nothing to win. An
+// unbounded tape — a plane, an infinite repeat — cannot be clipped, so the
+// segment runs to options.tmax and its box culls nothing; the compile would
+// be the whole document again, at the cost of the whole document.
+//
+// And one way out after it: the culled scale must be STRICTLY larger. Equal
+// means the steep item survived the cull (the ray runs through it, or the
+// pad reaches it) and the whole tape marches just as fast without having
+// been compiled for this ray.
+const scene::Tape& march_tape(const scene::Document& doc, const scene::Tape& whole,
+                              const scene::CullIndex* index, const math::Ray& ray, float tmin,
+                              float tmax, const RaycastOptions& options, scene::Tape* local) {
+    if (!options.local_tape || whole.safe_step_scale() >= 1.0f) return whole;
+    if (whole.bounds.empty() || whole.bounds.is_infinite()) return whole;
+    math::Aabb segment;
+    segment.expand(ray.at(tmin));
+    segment.expand(ray.at(tmax));
+    const scene::CullRegion cull{segment.dilated(kRayCullDilation)};
+    if (index) {
+        const scene::CullPlan plan = index->plan(cull.region);
+        *local = pickable_tape(doc, &cull, index, &plan);
+    } else {
+        *local = pickable_tape(doc, &cull, index);
+    }
+    if (local->empty() || local->safe_step_scale() <= whole.safe_step_scale()) return whole;
+    return *local;
+}
+
+}  // namespace
+
 SceneHit raycast_scene(const scene::Document& doc, const math::Ray& ray,
                        const RaycastOptions& options) {
+    // No index: this entry point has nowhere to keep one between calls, and
+    // building it per ray would walk the document to save walking the
+    // document. The culled compile computes its own bounds and pad instead,
+    // to the same tape (the index is a pure acceleration).
+    return raycast_scene(doc, pickable_tape(doc), nullptr, ray, options);
+}
+
+SceneHit raycast_scene(const scene::Document& doc, const scene::Tape& whole,
+                       const scene::CullIndex* index, const math::Ray& ray,
+                       const RaycastOptions& options) {
     SceneHit hit;
-    scene::Tape tape = pickable_tape(doc);
-    if (tape.empty()) return hit;
+    if (whole.empty()) return hit;
 
     float tmin = options.tmin, tmax = options.tmax;
-    if (!tape.bounds.empty() && !tape.bounds.is_infinite()) {
-        float t0, t1;
-        if (!math::ray_aabb(ray, tape.bounds.dilated(0.01f), &t0, &t1)) return hit;
-        tmin = kernel::cmax(tmin, t0);
-        tmax = kernel::cmin(tmax, t1);
-    }
+    if (!clip_to_bounds(whole, ray, &tmin, &tmax)) return hit;
+    scene::Tape local;
+    const scene::Tape& tape = march_tape(doc, whole, index, ray, tmin, tmax, options, &local);
     auto field = [&](cfloat3 p) { return tape.eval(p).d; };
 
     // Marched in segments so a hit on hidden surface can be stepped over rather
@@ -176,6 +248,7 @@ SceneHit raycast_scene(const scene::Document& doc, const math::Ray& ray,
     for (int skip = 0; skip <= kMaxHiddenSkips; ++skip) {
         kernel::CRayHit r = kernel::craycast(field, ray.origin, ray.dir, tmin, tmax, options.eps,
                                              tape.safe_step_scale(), 1.4f, options.max_steps);
+        hit.steps += r.steps;
         if (!r.hit) return hit;
         const cfloat3 p = ray.at(r.t);
         if (options.groups && options.groups->point_hidden(p)) {
