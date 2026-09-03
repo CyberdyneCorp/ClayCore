@@ -1269,6 +1269,106 @@ The byte ratio is exact and identical on every run — it is a count, not a
 timing — and it is gated as `delta_frac`. The time ratio is 0.15×, and matters
 less: what a host feels is the upload it does not have to make.
 
+### Where the dab and the pick were spending it, measured 2026-09-03 (gate-the-uniform-brick)
+
+Every SDF dab pays twice per Pencil event: the refill that shows it and the
+pick that aims the next one. Both were spending most of their time on answers
+they already had, and `gate-the-uniform-brick` takes that back. **These are
+Mac numbers** — an Apple M2 Max, the CPU backend, through the C ABI — and not
+device numbers: the device gate has not been run on this change, and nothing
+here should be read against `tests/device/baseline.json`. Medians of 7 for the
+refill rows and of 41 rays for the pick rows, against `main` at `512c8c5d`,
+on the sculpted-sphere fixture of `BM_DabRefillSculpted` (a sphere plus dabs on
+a three-turn helix, a dim-8 cache at a 0.01 voxel and a 3-voxel band).
+
+**A cold dab mostly walked clay.** A dab dirties the solid box its influence
+bound covers, and on a worked model most of that box is uniformly inside: 57 of
+the 80 bricks one dab dirties at 400 dabs, 64 of 80 at 1,500. `submit` is where
+a brick is classified, from its samples, so each of those paid 512 walks of its
+culled tape to be told it stores nothing. The refill now proves a brick uniform
+from one evaluation at the lattice centre and the tape's own Lipschitz bound —
+`|f(c)| > band + L·hd` means no sample can be in the band — and stores the
+proof as the brick's seed, so the next dab re-proves it at two points instead
+of walking 512:
+
+| | 400 dabs | | 1,500 dabs | |
+|---|---:|---:|---:|---:|
+| cold dab, 80 dirty bricks | 9.22 → **5.58 ms** | 1.65× | 33.4 → **14.1 ms** | 2.37× |
+| whole-model fill, 9,240 bricks | 580 → **335 ms** | 1.73× | 2,213 → **1,180 ms** | 1.88× |
+| warm dab, the same window one dab later | 0.52 → **0.25 ms** | 2.1× | 0.44 → **0.17 ms** | 2.5× |
+| uniform bricks proven, the window | 52 of 57 (91%) | | 62 of 64 (97%) | |
+| uniform bricks proven, the model | 6,669 of 7,132 (93.5%) | | 6,584 of 6,937 (94.9%) | |
+
+None of the proofs is false: the whole model's class counts are identical to
+the walk's either way (2,108 / 2,303 surface, 1,669 / 1,997 inside), and the
+test holds every stored half and colour bit-identical with the gate on and off.
+**The cold dab at 1,500 is still 14 ms**, three and a half frame shares; what
+is left is the 16 to 18 surface bricks that genuinely walk, which is the
+per-brick culled compile and the 512-point walk the rest of this document is
+about.
+
+**The seedless version was measured and rejected.** Storing NO seed for a
+proven brick — re-prove next time — read as the simpler design and made the
+warm dab **4.5× slower at 400 dabs and 19× at 1,500** (0.55 → 2.5 ms, 0.44 →
+8.4 ms), because a brick with no seed pays its culled compile again on every
+dab, and the compile is the expensive half. Worth recording because the shape
+recurs: a cache that skips the cheap part of a computation and drops the
+expensive part's memo is slower than no cache.
+
+**A pick recompiled the document and marched at its worst step.**
+`clay_raycast_attributed` compiled a fresh pickable tape per call while the ABI
+held one per revision for every other query, marched it at ONE Lipschitz bound
+folded over every visible node — a twisted box two units from the model made
+every ray step 2.4× more than it needed — and then attributed the hit by
+constructing a `Document` per candidate item. Each was taken out in turn, and
+each row below is measured against the branch before it:
+
+| `clay_raycast_attributed` | plain, 1,500 | plain, 400 | twisted, 1,500 | twisted, 400 |
+|---|---:|---:|---:|---:|
+| `main` | 1.006 ms | 0.274 ms | 1.234 ms | 0.345 ms |
+| the cached tape, and a tape culled to the ray when the scale is below 1 | 0.805 | 0.219 | 0.953 | 0.259 |
+| attribution from a single-item compile, the layer read off the tape | **0.518** | **0.143** | **0.666** | **0.182** |
+| against `main` | 0.51× | 0.52× | 0.54× | 0.53× |
+
+The cached tape is the whole of the plain win and ~16% of the twisted one; the
+ray-local tape is the rest of the twisted one, and only through the cull
+index's plan — without it the culled compile recomputes every bound and costs
+exactly what the faster march saves, measured as no gain at 1,500. The bare
+march (`clay_raycast`, untouched code) sits at 0.38–0.40 ms plain and
+0.61–0.63 ms twisted at 1,500 in every run, so the pick is now the march plus
+about 0.12 ms, and that remainder is the influence-bound walk over every item
+of the winning layer — cached per revision by the cull index, not yet read by
+attribution. The twisted hit's *t* moved by 1.2e-3 and landed exactly where the
+same ray lands with no box in the document: that is the old march's own
+`eps·t / 0.28` stopping slack removed, not a moved surface.
+
+**The brick raycast walked the whole map before its first step.** It folded
+the domain it marches inside from `surface_bricks()` on every ray — an
+allocation and a walk of every tracked brick, which on a whole-model cache cost
+more than the march — and then sphere-traced a field that is a cubic in *t*
+inside each cell. One ray at the 1,500-dab whole-model cache:
+
+| `clay_brick_cache_raycast` | ms |
+|---|---:|
+| `main` | 0.0639 |
+| the surface bound kept in the cache, maintained by submit, evict and trim | 0.0014 |
+| the analytic walk: a brick DDA, a cell DDA, one cubic root per cell | **0.0006** |
+
+110× together; the same ray in-process 1.45 → 0.56 µs, and 4,000 random rays
+from a sphere around the model 1.95 → 1.37 µs each, since a ray that crosses
+many empty bricks still pays a hash lookup per brick. The walk is held to the
+sphere trace on 760 rays — every hit and miss the same, every *t* within a
+twentieth of a voxel — and it found a bug on the way: `float_to_half` shifted
+subnormals by the wrong amount, so every stored distance under 6.1e-5 was a
+huge value or a NaN, and a raycast through the eight cells around one fell off
+the ray. Fixed, with the IEEE bit patterns pinned.
+
+**What did not move.** `REFILL_DAB`'s submit, the bare march, and every case a
+change did not touch read within the 5% band run to run; the refill rows above
+are the only rows the pick changes could have shifted and they did not. What
+this section cannot say is what any of it costs on the iPad, and that is the
+next thing to run.
+
 ## What does not fit, and by how much
 
 Only three things miss, and one of them is not in the gate at all.
@@ -1779,6 +1879,12 @@ What is left:
    a dab live — only what a whole stroke costs. That is a real gap in this
    document's ability to answer "which brushes are online", and it is a
    measurement question rather than an engine one.
+5. **Run the device gate on `gate-the-uniform-brick`.** The cold dab, the
+   pick and the brick raycast are each 2× to 110× on the M2 Max — [the section
+   above](#where-the-dab-and-the-pick-were-spending-it-measured-2026-09-03-gate-the-uniform-brick)
+   — and none of it has a device figure. `sdf_stamp_bricks` and the pick cases
+   are the rows to watch; the gate's proof rate is a property of the fixture,
+   and the device fixtures have not been read for it.
 
 ## See also
 
