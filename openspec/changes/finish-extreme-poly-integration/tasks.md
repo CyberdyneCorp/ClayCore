@@ -69,7 +69,14 @@
       DONE. `bench_extreme_poly` gains `--which=layers`, replacing the printed
       apology that stood where the numbers belonged. The locality property
       holds on the fourth path: 10x the model at one footprint is 1.08x, 1.12x
-      and 1.15x, with dirty chunks and upload IDENTICAL at both sizes
+      and 1.15x, with dirty chunks and upload IDENTICAL at both sizes.
+      Adding the row also found a defect in the WRAPPER: its `REPRESENTATION`
+      regex matched `hierarchy` followed by a colon, so `hierarchy + layers:`
+      fell through and the layered rows were attributed to the previous
+      representation, overwriting its entries under the same key -- silently,
+      because every field still parsed. Longest alternative first. Through the
+      fixed wrapper the layered stamp reads 1.14x p50 for 10x the model at load
+      3.36 -> 3.25
 - [x] 5.2 Record in `docs/09-brush-latency-and-coverage.md` with the load the box
       carried, per shared-box practice — ratios, not absolutes.
       DONE, load 6.81 before the pair and 6.42 after, the two halves run back to

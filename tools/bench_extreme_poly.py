@@ -41,7 +41,11 @@ STAGE = re.compile(
     r"^\s+(\S[\S ]*?)\s+p50\s+([\d.]+)\s+p95\s+([\d.]+)\s+p99\s+([\d.]+)\s+max\s+([\d.]+)"
     r"\s+mean\s+([\d.]+) us")
 FOOTPRINT = re.compile(r"^\s+footprint\s+(\d+)")
-REPRESENTATION = re.compile(r"^\s+(fixed mesh|adaptive surface|hierarchy):")
+# LONGEST FIRST. "hierarchy + layers" has to be tried before "hierarchy" or the
+# layered rows fall through to the previous representation and overwrite its
+# entries under the same key -- silently, because every field still parses.
+REPRESENTATION = re.compile(
+    r"^\s+(hierarchy \+ layers|fixed mesh|adaptive surface|hierarchy):")
 SIZE = re.compile(r"^== (\d+) vertices")
 
 
