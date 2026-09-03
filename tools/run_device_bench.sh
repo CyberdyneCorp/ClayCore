@@ -115,7 +115,7 @@ if [ -n "${CLAY_DEVICE_TEAM:-}" ]; then
     team_arg=(DEVELOPMENT_TEAM="$CLAY_DEVICE_TEAM")
 fi
 
-# -- five sessions, each started cold -----------------------------------------
+# -- six sessions, each started cold ------------------------------------------
 #
 # A gate run is THREE xcodebuild sessions rather than one, and the reason is not
 # tidiness. Every bundle that allocates heavily is killed by jetsam if another
@@ -154,8 +154,9 @@ RESULTS_VERBH="${RESULTS%.xcresult}.verbheavy.xcresult"
 RESULTS_CORE="${RESULTS%.xcresult}.core.xcresult"
 RESULTS_GALLERY="${RESULTS%.xcresult}.gallery.xcresult"
 RESULTS_DYNTOPO="${RESULTS%.xcresult}.dyntopo.xcresult"
+RESULTS_DETAIL="${RESULTS%.xcresult}.detail.xcresult"
 rm -rf "$RESULTS_VERB" "$RESULTS_VERBH" "$RESULTS_CORE" "$RESULTS_GALLERY" \
-       "$RESULTS_DYNTOPO"
+       "$RESULTS_DYNTOPO" "$RESULTS_DETAIL"
 
 run_session() {
     # $1 = result bundle, rest = extra xcodebuild args
@@ -211,13 +212,23 @@ cool
 # which can only make its own figures pessimistic -- the safe direction for a
 # suite whose baselines do not exist yet. Move it earlier only together with a
 # full re-baseline.
-session "5/5 — adaptive topology, cold" "$RESULTS_DYNTOPO" \
+session "5/6 — adaptive topology, cold" "$RESULTS_DYNTOPO" \
     -only-testing:ClayCoreDeviceDyntopoTests
+cool
+# THE DETAIL CASE, LAST, for the reason dyntopo is second-to-last: its
+# baseline does not exist yet, so the warm end of the run is the safe place
+# to take it. It needs its own session rather than its own bundle because
+# what it costs the run is HEAT -- a whole-form fill at voxel_size 0.01 --
+# and a process boundary returns memory, not temperature. Measured: added to
+# the latency bundle it took that session from `nominal` to `serious` on both
+# sides of an A/B, which marks the run invalid.
+session "6/6 — the detail pass, cold" "$RESULTS_DETAIL" \
+    -only-testing:ClayCoreDeviceDetailTests
 
 JSON="${CLAY_DEVICE_JSON:-$ROOT/build/device/device-bench.json}"
 python3 "$ROOT/tools/collect_device_bench.py" \
     "$RESULTS_VERB" "$RESULTS_VERBH" "$RESULTS_CORE" "$RESULTS_GALLERY" \
-    "$RESULTS_DYNTOPO" "$JSON"
+    "$RESULTS_DYNTOPO" "$RESULTS_DETAIL" "$JSON"
 
 echo "device-bench: OK"
 echo "  result bundles: $RESULTS_VERB"

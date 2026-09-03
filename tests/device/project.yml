@@ -266,6 +266,28 @@ targets:
         BUNDLE_LOADER: "$(TEST_HOST)"
         OTHER_LDFLAGS: -lc++
 
+  # The detail-resolution case; see Detail/DetailCases.swift for why it is
+  # alone and last. Same shape as every other bundle here.
+  ClayCoreDeviceDetailTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Detail
+      - path: Shared
+    dependencies:
+      - target: ClayCoreDeviceHost
+      - framework: ../../dist/claycore.xcframework
+        embed: false
+      - sdk: Metal.framework
+      - sdk: Foundation.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.cyberdyne.claycore.devicedetail
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/ClayCoreDeviceHost.app/ClayCoreDeviceHost"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        OTHER_LDFLAGS: -lc++
+
   ClayCoreDeviceGalleryTests:
     type: bundle.unit-test
     platform: iOS
@@ -297,6 +319,7 @@ schemes:
         ClayCoreDeviceVerbHeavyTests: [test]
         ClayCoreDeviceGalleryTests: [test]
         ClayCoreDeviceDyntopoTests: [test]
+        ClayCoreDeviceDetailTests: [test]
     test:
       targets:
         # THIS LIST IS NOT THE RUN ORDER. tools/run_device_bench.sh drives the
@@ -321,3 +344,4 @@ schemes:
         - ClayCoreDeviceGalleryTests
         - ClayCoreDeviceTests
         - ClayCoreDeviceDyntopoTests
+        - ClayCoreDeviceDetailTests
