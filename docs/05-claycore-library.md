@@ -378,7 +378,14 @@ crashes inside someone else's driver:
 Values stay `float32` and are **not** quantized on the device even though the
 brick cache stores fp16: quantization and band classification are
 `BrickCache::submit`'s, and a device path that did them would be a second
-implementation of the step most able to drift.
+implementation of the step most able to drift. That one implementation is a
+software round-to-nearest-even conversion, bit-identical on every platform,
+and it is exact through the subnormal halves too: a distance below 2⁻¹⁴
+(6.1e-5) is stored as the nearest multiple of 2⁻²⁴, with values under 2⁻²⁵
+rounding to zero. It used to shift those by the wrong amount and store a
+huge value or a NaN, so a lattice sample that landed within 6e-5 of the
+surface poisoned the eight cells around it — a brick raycast through one of
+them fell off the ray and missed the whole model.
 
 `Backend::eval_grid_batch_device` is `eval_grid_batch` for that caller-owned
 destination — the brick-refill shape, with grid *i* landing at the same fixed

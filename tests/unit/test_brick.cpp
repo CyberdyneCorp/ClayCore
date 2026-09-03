@@ -56,6 +56,37 @@ TEST_CASE("fp16 conversion: exact round trips and monotone quantization") {
     CHECK(brick::float_to_half(0.123456f) == brick::float_to_half(0.123456f));
 }
 
+TEST_CASE("fp16 conversion: subnormal halves quantize instead of exploding") {
+    // Distances below 2^-14 (6.1e-5) are subnormal in half. The conversion
+    // used to shift their mantissa by the wrong amount and store a huge value
+    // or a NaN for them, so a brick sample within 6e-5 of the surface poisoned
+    // the eight cells around it. The bit patterns are IEEE 754 round-to-
+    // nearest-even, the same ones a hardware conversion produces.
+    struct Case {
+        float f;
+        std::uint16_t h;
+    };
+    const Case cases[] = {
+        {5e-5f, 0x0347},   {-5e-5f, 0x8347},  {3e-5f, 0x01F7},  {6.1e-5f, 0x03FF},
+        {1e-5f, 0x00A8},   {5.96e-8f, 0x0001}, {3e-8f, 0x0001}, {2.98e-8f, 0x0000},
+        {1e-9f, 0x0000},   {6.2e-5f, 0x0410},
+    };
+    for (const Case& c : cases) {
+        CAPTURE(c.f);
+        CHECK(brick::float_to_half(c.f) == c.h);
+    }
+    // And across the whole subnormal range: the round trip lands within one
+    // subnormal step (2^-24) of the input, with its sign, never elsewhere.
+    clay_test::Lcg rng(602);
+    for (int i = 0; i < 5000; ++i) {
+        const float f = rng.range(-6.1e-5f, 6.1e-5f);
+        const float q = brick::half_to_float(brick::float_to_half(f));
+        CAPTURE(f);
+        CHECK(q == q);
+        CHECK(cabs(q - f) <= 5.97e-8f);
+    }
+}
+
 TEST_CASE("sparse storage: only surface bricks allocate") {
     scene::Document doc;
     scene::Layer& l = doc.add_sdf_layer("l");
