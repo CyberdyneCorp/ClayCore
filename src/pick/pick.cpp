@@ -264,14 +264,14 @@ SceneHit raycast_scene(const scene::Document& doc, const scene::Tape& whole,
             hit.t = t_vis;
             hit.position = ray.at(t_vis);
             hit.normal = kernel::cnormal(field, hit.position, 1e-4f);
-            attribute(doc, hit.position, &hit.layer, &hit.item);
+            attribute(doc, whole, hit.position, &hit.layer, &hit.item);
             return hit;
         }
         hit.hit = true;
         hit.t = r.t;
         hit.position = p;
         hit.normal = kernel::cnormal(field, hit.position, 1e-4f);
-        attribute(doc, hit.position, &hit.layer, &hit.item);
+        attribute(doc, whole, hit.position, &hit.layer, &hit.item);
         return hit;
     }
     return hit;
@@ -279,36 +279,51 @@ SceneHit raycast_scene(const scene::Document& doc, const scene::Tape& whole,
 
 namespace {
 
-// |field| of one item evaluated in isolation at p (its own tape).
-float item_field_distance(const scene::Layer& layer, const scene::Node& item, cfloat3 p) {
-    scene::Document single;
-    scene::Layer& l = single.add_sdf_layer("probe");
-    l.xform = layer.xform;
-    l.scale_axes = layer.scale_axes;  // a probe of a squashed layer is squashed
-    l.mirror_axes = layer.mirror_axes;
-    l.mirror_k = layer.mirror_k;
-    scene::Node copy = item;
-    copy.op = scene::Op::Add;  // isolate the shape regardless of its op
-    copy.id = scene::kNoNode;
-    copy.children.clear();
-    l.sdf->insert(copy);
-    scene::Tape t = scene::compile_document(single);
-    return kernel::cabs(t.eval(p).d);
+// The layer a probe of one item is compiled under: the source layer's
+// placement, per-axis scale and mirror, and nothing else. A probe of a
+// squashed layer is squashed, a probe of a mirrored one carries its copies —
+// a hit on the reflected side attributes to the item it reflects.
+//
+// Not the source layer itself, and not its radial symmetry: this is exactly
+// the layer the probe Document used to build per item (`add_sdf_layer` and
+// these four fields), kept as it was so a hit attributes the same before and
+// after the probe stopped building a Document. Carrying the radial copies is
+// a change to what a hit on one names, and belongs to its own change.
+scene::Layer probe_layer(const scene::Layer& layer) {
+    scene::Layer probe;
+    probe.xform = layer.xform;
+    probe.scale_axes = layer.scale_axes;  // a probe of a squashed layer is squashed
+    probe.mirror_axes = layer.mirror_axes;
+    probe.mirror_k = layer.mirror_k;
+    return probe;
 }
 
-void attribute_content(const scene::Layer& layer, const scene::SdfContent& content,
-                       const std::vector<scene::NodeId>& ids, cfloat3 p, float* best,
-                       scene::NodeId* best_item) {
+// |field| of one item evaluated in isolation at p (its own tape, under the
+// probe layer). One emit and one eval per candidate, where it used to build a
+// Document, a Layer and an SdfContent, insert a copy of the node and walk the
+// whole document, per candidate per pick — the larger half of a 0.80 ms pick
+// at 1,500 overlapping dabs, of which the march itself was 0.38. The tape's
+// own allocations are not what is left: carrying one tape's storage across
+// the candidates measured the same to within 1%, so it is not done.
+float item_field_distance(const scene::Layer& probe, const scene::Node& item, cfloat3 p) {
+    return kernel::cabs(scene::compile_item(probe, item).eval(p).d);
+}
+
+// `layer` is the real layer, whose influence bounds decide which items are
+// asked; `probe` is probe_layer(layer), what each is asked under.
+void attribute_content(const scene::Layer& layer, const scene::Layer& probe,
+                       const scene::SdfContent& content, const std::vector<scene::NodeId>& ids,
+                       cfloat3 p, float* best, scene::NodeId* best_item) {
     for (scene::NodeId id : ids) {
         const scene::Node* n = content.find(id);
         if (!n || !n->visible) continue;
         if (n->is_group) {
-            attribute_content(layer, content, n->children, p, best, best_item);
+            attribute_content(layer, probe, content, n->children, p, best, best_item);
             continue;
         }
         // cheap reject: influence bound
         if (!scene::item_influence_bound(*n, layer).dilated(0.05f).contains(p)) continue;
-        float d = item_field_distance(layer, *n, p);
+        float d = item_field_distance(probe, *n, p);
         if (d < *best) {
             *best = d;
             *best_item = id;
@@ -316,27 +331,77 @@ void attribute_content(const scene::Layer& layer, const scene::SdfContent& conte
     }
 }
 
-}  // namespace
+bool layer_is_candidate(const scene::Layer& l) {
+    return l.visible && !l.ghost && l.kind == scene::LayerKind::Sdf && l.sdf;
+}
 
-void attribute(const scene::Document& doc, cfloat3 position, scene::LayerId* layer,
-               scene::NodeId* item) {
-    *layer = 0;
-    *item = scene::kNoNode;
+// The item within the winning layer. `*item` stays kNoNode when no visible
+// item's influence bound reaches the position.
+void attribute_item(const scene::Document& doc, scene::LayerId layer, cfloat3 position,
+                    scene::NodeId* item) {
+    const scene::Layer* winner = doc.find_layer(layer);
+    if (!winner || !winner->sdf) return;
+    const scene::Layer probe = probe_layer(*winner);
+    float best_item_d = 3.4e38f;
+    attribute_content(*winner, probe, *winner->sdf, winner->sdf->roots, position, &best_item_d,
+                      item);
+}
+
+// The layer whose own field is nearest the position, by compiling each
+// candidate's tape; 0 when no candidate has a non-empty tape.
+scene::LayerId nearest_layer_compiled(const scene::Document& doc, cfloat3 position) {
+    scene::LayerId layer = 0;
     float best_layer_d = 3.4e38f;
     for (const scene::Layer& l : doc.layers) {
-        if (!l.visible || l.ghost || l.kind != scene::LayerKind::Sdf || !l.sdf) continue;
+        if (!layer_is_candidate(l)) continue;
         scene::Tape t = scene::compile_layer(l);
         if (t.empty()) continue;
         float d = kernel::cabs(t.eval(position).d);
         if (d < best_layer_d) {
             best_layer_d = d;
-            *layer = l.id;
+            layer = l.id;
         }
     }
-    const scene::Layer* winner = doc.find_layer(*layer);
-    if (!winner || !winner->sdf) return;
-    float best_item_d = 3.4e38f;
-    attribute_content(*winner, *winner->sdf, winner->sdf->roots, position, &best_item_d, item);
+    return layer;
+}
+
+}  // namespace
+
+void attribute(const scene::Document& doc, cfloat3 position, scene::LayerId* layer,
+               scene::NodeId* item) {
+    *item = scene::kNoNode;
+    *layer = nearest_layer_compiled(doc, position);
+    attribute_item(doc, *layer, position, item);
+}
+
+void attribute(const scene::Document& doc, const scene::Tape& tape, cfloat3 position,
+               scene::LayerId* layer, scene::NodeId* item) {
+    *layer = 0;
+    *item = scene::kNoNode;
+    // With one candidate layer the pickable tape IS that layer's tape: the
+    // document compile chains the visible SDF layers and pickable_tape hides
+    // the ghosted ones first, so the candidates here and the layers in the
+    // tape are the same set, and one layer needs no union. Its tape is empty
+    // exactly when the layer's own would be, and where it is not the layer
+    // wins outright — the only layer whose field is finite anywhere. What the
+    // per-call compile would have found, without the compile.
+    //
+    // Several candidates keep the per-layer compile: the union cannot say
+    // which of its layers the position is nearest.
+    const scene::Layer* only = nullptr;
+    int candidates = 0;
+    for (const scene::Layer& l : doc.layers) {
+        if (!layer_is_candidate(l)) continue;
+        only = &l;
+        ++candidates;
+    }
+    if (candidates == 1) {
+        if (tape.empty()) return;
+        *layer = only->id;
+    } else {
+        *layer = nearest_layer_compiled(doc, position);
+    }
+    attribute_item(doc, *layer, position, item);
 }
 
 // ---------------------------------------------------------------------------

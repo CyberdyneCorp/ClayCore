@@ -1407,5 +1407,32 @@ Tape compile_layer(const Layer& layer, const CullRegion* cull) {
     return std::move(c.tape);
 }
 
+Tape compile_item(const Layer& layer, const Node& item) {
+    Compiler c;
+    c.tape.compile_id = next_compile_id();
+    if (item.is_group) return std::move(c.tape);
+    // A copy rather than the item, because the op is read in more places than
+    // the seed-and-combine decision this skips: the feathered-replace test
+    // that gates the symmetry copies reads it, and so does fold_info. Under
+    // Add a feathered volume takes its mirror copies like any other item —
+    // which is what the single-item layer this stands in for compiled, since
+    // that layer held the same copy.
+    Node alone = item;
+    alone.op = Op::Add;
+    alone.children.clear();
+    // The same three steps compile_list takes for a first Add item, in the
+    // same order, with the same arguments: the bound before the emit (a
+    // transition fold reads tape.bounds, and it must include this item), the
+    // gate reach before the fold. Adding a step here that compile_list does
+    // not take, or skipping one it does, breaks the byte-identity the header
+    // promises, and test_pick.cpp holds it over the gnarly corpus.
+    const math::Aabb geometry = item_geometry_bound(alone, layer);
+    c.tape.bounds.expand(geometry);
+    c.emit_item(alone, layer);
+    c.gate_reach_ = geometry;
+    c.fold_info(alone, Op::Add, false, alone.rounding * placed_distance_scale(layer, alone));
+    return std::move(c.tape);
+}
+
 }  // namespace scene
 }  // namespace clay

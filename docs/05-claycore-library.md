@@ -1147,6 +1147,33 @@ at 1,500 items and 0.33 → 0.26 ms at 400, the plain case 1.02 → 0.80 ms and
 blended chain (the blend envelope pads the region), which is why the local
 tape is gated on the step scale rather than compiled for every ray.
 
+**And attribution no longer builds a document per candidate.** Once the march
+has a hit, `pick::attribute` names the layer and item under it: the layer by
+|field| of each visible, unghosted SDF layer's own tape at the hit, the item by
+|field| of each candidate item's own tape — the item as an Add, alone, under
+the layer's placement and mirror — over the items whose influence bound
+reaches the hit. It used to answer the second question by constructing a
+`Document`, a `Layer` and an `SdfContent`, inserting a copy of the node into
+the hash map and running the whole-document compile, once per candidate per
+pick, and the first by compiling every layer per call; on a stroke whose dabs
+overlap that is dozens of document constructions a Pencil event, and at 1,500
+items attribution was 0.42 ms of a 0.80 ms pick whose march was 0.38.
+`scene::compile_item(layer, node)` now emits the one item and nothing else —
+byte-identical to `compile_layer` over a layer holding only that item, held as
+a test over the gnarly corpus — and the tape overload of `attribute`, which
+`raycast_scene` calls with the pickable tape it marched, reads a single-layer
+document's winner off that tape instead of compiling the layer again (one
+candidate layer means the pickable tape *is* its tape; with several the
+per-layer compile stays, since their union cannot say which is nearest). The
+ids a hit attributes to are unchanged: the old implementation is kept verbatim
+in `test_pick.cpp` as the reference, and both entry points are held against it
+over mirrored, squashed, ghosted and radial layers, groups, subtracts, paints
+and strokes. The plain case measured 0.80 → 0.51 ms at 1,500 items and
+0.22 → 0.14 ms at 400, the twisted case 0.91 → 0.65 and 0.25 → 0.18. What is
+left over the bare march is mostly the influence-bound walk over every item of
+the winning layer, which the cull index caches per revision and attribution
+does not yet read.
+
 ### Asking the shape what it is: surface measures
 
 Curvature, cavity, convexity, "facing up", ambient occlusion and thickness — at

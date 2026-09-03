@@ -174,8 +174,33 @@ SceneHit raycast_bricks(const brick::BrickCache& cache, const math::Ray& ray,
                         const RaycastOptions& options = {});
 
 // Attribute a world position to the nearest (layer, item) of the document.
+//
+// The layer first, by |field| of each visible, unghosted SDF layer's own tape
+// at the position; then the item within it, by |field| of each candidate
+// item's own tape (scene::compile_item — the item as an Add, alone, under the
+// layer's placement and mirror), over the items whose influence bound reaches
+// the position. Subtract items attribute their carved surfaces that way: the
+// shape they carved with is the surface the position sits on.
+//
+// The layer tapes are compiled per call here. The overload below is handed
+// the document's pickable tape and, when ONE layer is a candidate, reads the
+// winner off that instead of compiling it again: a pick runs per Pencil
+// event on a document that has not changed, and at 1,500 items compiling the
+// one layer was a third of the attribution. With several candidate layers it
+// compiles each, as this one does — the whole tape is their union and cannot
+// say which of them the position is nearest.
 void attribute(const scene::Document& doc, kernel::cfloat3 position, scene::LayerId* layer,
                scene::NodeId* item);
+
+// The same attribution, given the tape the position was found on. `tape`
+// MUST be pickable_tape(doc) for this `doc` (or a byte-identical copy), on
+// the terms raycast_scene's tape overload states: it stands in for the one
+// candidate layer's own tape, and a tape of some other document would name
+// a layer the position is not on. Empty means no layer: nothing is compiled
+// on the way to that answer, so the answer is the one the per-call compile
+// gives.
+void attribute(const scene::Document& doc, const scene::Tape& tape, kernel::cfloat3 position,
+               scene::LayerId* layer, scene::NodeId* item);
 
 // -- mesh picking ------------------------------------------------------------
 //

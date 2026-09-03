@@ -134,6 +134,31 @@ Tape compile_document(const Document& doc, const CullRegion* cull = nullptr,
 // Single layer.
 Tape compile_layer(const Layer& layer, const CullRegion* cull = nullptr);
 
+// ONE ITEM, alone, under `layer`'s placement and symmetry: the tape a layer
+// holding nothing but this item would compile to, with the item's op read as
+// Add and its children ignored. Byte-identical to compile_layer over such a
+// layer — instrs, params, blob, info and bounds — and that is a test, not a
+// claim.
+//
+// What it is for. Hit attribution (pick::attribute) asks, for every item whose
+// influence reaches the hit point, how far the point is from THAT item's own
+// surface, and picks the closest. Asking through compile_layer means building
+// a Document, a Layer and an SdfContent, inserting a copy of the node into a
+// hash map and running the whole-document walk, per candidate item per pick —
+// dozens of times a Pencil event on a stroke whose dabs overlap, and it was
+// the larger half of a pick at 1,500 items. This emits the item and nothing
+// else.
+//
+// Read as an ADD because the question is about the item's own shape: a
+// subtract's field is the shape it carved with, a paint's the shape it painted
+// with, and both attribute the surface they touched. Nothing beneath it means
+// no combine, so a carve or a paint that would emit nothing at the head of a
+// chain still has a field here. The item's visibility is not consulted: this
+// is a probe of one item the caller already chose, and attribution checks
+// visibility before it asks. A group has no field of its own and yields an
+// empty tape; attribution walks a group's children instead.
+Tape compile_item(const Layer& layer, const Node& item);
+
 // -- resuming a whole-document compile after an append -----------------------
 //
 // A sculpt grows by one node per brush stamp, and a host that raycasts to

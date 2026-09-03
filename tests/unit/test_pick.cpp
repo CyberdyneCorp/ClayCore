@@ -1,6 +1,10 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <memory>
+#include <vector>
 
 #include "clay/pick/pick.h"
 #include "clay/scene/bounds.h"
@@ -304,5 +308,306 @@ TEST_CASE("pick bounds cover repetition and deformers") {
         math::Aabb all = pick::layer_bounds(l);
         CHECK(sel.max.x == doctest::Approx(all.max.x).epsilon(1e-4));
         CHECK(sel.max.x == doctest::Approx(0.7f).epsilon(1e-4));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// attribution without a Document per candidate
+// ---------------------------------------------------------------------------
+//
+// pick::attribute used to answer "how far is the hit from THIS item's own
+// surface" by building a Document holding a copy of the item and compiling
+// it, once per candidate per pick, and compiled every layer's tape per call
+// to choose the layer. It now emits the item alone (scene::compile_item) and
+// reads a single-layer document's winner off the pickable tape it was
+// marched on. The old implementation is kept HERE, verbatim, as the reference
+// the new one is held against: the ids a hit attributes to must not move.
+
+namespace {
+
+float reference_item_field_distance(const scene::Layer& layer, const scene::Node& item,
+                                    cfloat3 p) {
+    scene::Document single;
+    scene::Layer& l = single.add_sdf_layer("probe");
+    l.xform = layer.xform;
+    l.scale_axes = layer.scale_axes;
+    l.mirror_axes = layer.mirror_axes;
+    l.mirror_k = layer.mirror_k;
+    scene::Node copy = item;
+    copy.op = scene::Op::Add;
+    copy.id = scene::kNoNode;
+    copy.children.clear();
+    l.sdf->insert(copy);
+    scene::Tape t = scene::compile_document(single);
+    return std::fabs(t.eval(p).d);
+}
+
+void reference_attribute_content(const scene::Layer& layer, const scene::SdfContent& content,
+                                 const std::vector<scene::NodeId>& ids, cfloat3 p, float* best,
+                                 scene::NodeId* best_item) {
+    for (scene::NodeId id : ids) {
+        const scene::Node* n = content.find(id);
+        if (!n || !n->visible) continue;
+        if (n->is_group) {
+            reference_attribute_content(layer, content, n->children, p, best, best_item);
+            continue;
+        }
+        if (!scene::item_influence_bound(*n, layer).dilated(0.05f).contains(p)) continue;
+        float d = reference_item_field_distance(layer, *n, p);
+        if (d < *best) {
+            *best = d;
+            *best_item = id;
+        }
+    }
+}
+
+void reference_attribute(const scene::Document& doc, cfloat3 position, scene::LayerId* layer,
+                         scene::NodeId* item) {
+    *layer = 0;
+    *item = scene::kNoNode;
+    float best_layer_d = 3.4e38f;
+    for (const scene::Layer& l : doc.layers) {
+        if (!l.visible || l.ghost || l.kind != scene::LayerKind::Sdf || !l.sdf) continue;
+        scene::Tape t = scene::compile_layer(l);
+        if (t.empty()) continue;
+        float d = std::fabs(t.eval(position).d);
+        if (d < best_layer_d) {
+            best_layer_d = d;
+            *layer = l.id;
+        }
+    }
+    const scene::Layer* winner = doc.find_layer(*layer);
+    if (!winner || !winner->sdf) return;
+    float best_item_d = 3.4e38f;
+    reference_attribute_content(*winner, *winner->sdf, winner->sdf->roots, position,
+                                &best_item_d, item);
+}
+
+// Several layers, each placed and scaled differently, one mirrored, one
+// radial, one ghosted, one hidden; items with per-axis scale, a subtract, a
+// paint, a group, a stroke. Everything attribution reads from a layer or an
+// item, in one document.
+scene::Document attribution_document() {
+    scene::Document doc;
+    scene::Layer& a = doc.add_sdf_layer("mirrored");
+    a.xform.position = cf3(0.1f, 0.05f, 0);
+    a.xform.rotation = math::Quat::from_axis_angle(cf3(0, 1, 0), 0.3f);
+    a.mirror_axes = scene::kMirrorX;
+    a.mirror_k = 0.03f;
+    scene::Node side = item(scene::Prim::sphere(0.45f), cf3(0.6f, 0, 0));
+    side.mirror = true;  // a copy on the far side of the plane
+    a.sdf->insert(side);
+    scene::Node squashed = item(scene::Prim::box(cf3(0.3f, 0.3f, 0.3f)), cf3(0, 0.7f, 0),
+                                scene::Op::Add, scene::Blend{scene::BlendProfile::Quadratic, 0.08f});
+    squashed.scale_axes = cf3(0.5f, 1.0f, 2.0f);
+    squashed.mirror = false;
+    a.sdf->insert(squashed);
+    a.sdf->insert(item(scene::Prim::capped_cylinder(0.2f, 0.5f), cf3(0.6f, 0.4f, 0),
+                       scene::Op::Subtract, scene::Blend{scene::BlendProfile::Cubic, 0.04f}));
+    scene::Node g;
+    g.is_group = true;
+    g.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.05f};
+    scene::NodeId gid = a.sdf->insert(g);
+    a.sdf->insert(item(scene::Prim::sphere(0.25f), cf3(0, -0.6f, 0.3f)), gid);
+    a.sdf->insert(item(scene::Prim::torus(0.3f, 0.08f), cf3(0, -0.6f, -0.3f)), gid);
+    a.sdf->insert(item(scene::Prim::sphere(0.3f), cf3(0.3f, 0.3f, 0.5f), scene::Op::Paint,
+                       scene::Blend{scene::BlendProfile::Quadratic, 0.05f}));
+    scene::Node stroke;
+    stroke.prim = scene::Prim::stroke();
+    stroke.stroke = {{cf3(-0.8f, 0.2f, 0.4f), 0.12f}, {cf3(-0.3f, 0.5f, 0.5f), 0.1f}};
+    stroke.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.06f};
+    a.sdf->insert(stroke);
+
+    scene::Layer& b = doc.add_sdf_layer("squashed layer");
+    b.scale_axes = cf3(1.5f, 1.0f, 0.75f);
+    b.xform.position = cf3(0, -0.9f, 0);
+    b.sdf->insert(item(scene::Prim::sphere(0.4f), cf3(0, 0, 0)));
+    b.sdf->insert(item(scene::Prim::box(cf3(0.6f, 0.1f, 0.6f)), cf3(0, -0.5f, 0), scene::Op::Add,
+                       scene::Blend{scene::BlendProfile::Quadratic, 0.1f}));
+
+    scene::Layer& ghost = doc.add_sdf_layer("ghost");
+    ghost.ghost = true;
+    ghost.sdf->insert(item(scene::Prim::sphere(0.9f), cf3(0, 0, 0)));
+
+    scene::Layer& hidden = doc.add_sdf_layer("hidden");
+    hidden.visible = false;
+    hidden.sdf->insert(item(scene::Prim::sphere(2.0f), cf3(0, 0, 0)));
+
+    scene::Layer& radial = doc.add_sdf_layer("radial");
+    radial.radial_count = 5;
+    radial.radial_k = 0.02f;
+    radial.xform.position = cf3(0, 1.4f, 0);
+    scene::Node petal = item(scene::Prim::ellipsoid(cf3(0.25f, 0.1f, 0.15f)), cf3(0.6f, 0, 0));
+    petal.mirror = true;
+    radial.sdf->insert(petal);
+    return doc;
+}
+
+// The harness's shape: one layer, a sphere and overlapping smooth dabs.
+scene::Document dabs_document(int dabs) {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("dabs");
+    l.sdf->insert(item(scene::Prim::sphere(0.5f), cf3(0, 0, 0)));
+    for (int i = 0; i < dabs; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(dabs);
+        const float a = t * 6.2831853f * 3.0f;
+        const float z = 1.0f - 2.0f * t;
+        const float r = std::sqrt(std::max(0.0f, 1.0f - z * z)) * 0.5f;
+        l.sdf->insert(item(scene::Prim::sphere(0.05f), cf3(r * std::cos(a), r * std::sin(a), z * 0.5f),
+                           scene::Op::Add, scene::Blend{scene::BlendProfile::Quadratic, 0.06f}));
+    }
+    return doc;
+}
+
+// A lattice over the document plus a deterministic scatter, so both the
+// reject-everything far points and the crowded overlaps are covered.
+std::vector<cfloat3> probe_points(float half, float step, int scatter, std::uint32_t seed) {
+    std::vector<cfloat3> pts;
+    for (float x = -half; x <= half + 1e-4f; x += step)
+        for (float y = -half; y <= half + 1e-4f; y += step)
+            for (float z = -half; z <= half + 1e-4f; z += step) pts.push_back(cf3(x, y, z));
+    std::uint32_t s = seed;
+    auto next = [&]() {
+        s = s * 1664525u + 1013904223u;
+        return (static_cast<float>(s >> 8) / 16777216.0f) * 2.0f * half - half;
+    };
+    for (int i = 0; i < scatter; ++i) {
+        float x = next(), y = next(), z = next();
+        pts.push_back(cf3(x, y, z));
+    }
+    return pts;
+}
+
+// Both entry points against the reference, at every point.
+void check_attribution_matches_reference(const scene::Document& doc,
+                                         const std::vector<cfloat3>& pts) {
+    const scene::Tape tape = pick::pickable_tape(doc);
+    int attributed = 0;
+    for (const cfloat3& p : pts) {
+        scene::LayerId want_layer, got_layer, got_layer_tape;
+        scene::NodeId want_item, got_item, got_item_tape;
+        reference_attribute(doc, p, &want_layer, &want_item);
+        pick::attribute(doc, p, &got_layer, &got_item);
+        pick::attribute(doc, tape, p, &got_layer_tape, &got_item_tape);
+        CAPTURE(p.x);
+        CAPTURE(p.y);
+        CAPTURE(p.z);
+        CHECK(got_layer == want_layer);
+        CHECK(got_item == want_item);
+        CHECK(got_layer_tape == want_layer);
+        CHECK(got_item_tape == want_item);
+        if (want_item != scene::kNoNode) ++attributed;
+    }
+    // The corpus has to reach items, or agreeing means nothing.
+    CHECK(attributed > static_cast<int>(pts.size() / 8));
+}
+
+bool tapes_identical(const scene::Tape& a, const scene::Tape& b) {
+    if (a.instrs.size() != b.instrs.size()) return false;
+    for (std::size_t i = 0; i < a.instrs.size(); ++i)
+        if (a.instrs[i].op != b.instrs[i].op ||
+            a.instrs[i].param_offset != b.instrs[i].param_offset)
+            return false;
+    if (a.params != b.params || a.blob != b.blob) return false;
+    if (a.info.is_exact != b.info.is_exact || a.info.lipschitz != b.info.lipschitz) return false;
+    return a.bounds.min.x == b.bounds.min.x && a.bounds.min.y == b.bounds.min.y &&
+           a.bounds.min.z == b.bounds.min.z && a.bounds.max.x == b.bounds.max.x &&
+           a.bounds.max.y == b.bounds.max.y && a.bounds.max.z == b.bounds.max.z;
+}
+
+}  // namespace
+
+TEST_CASE("compile_item is the single-item layer's compile, byte for byte") {
+    // Every non-group item of both corpora, under its own layer with the
+    // layer's full symmetry (mirror AND radial): compile_item must emit what a
+    // layer holding only that item — as an Add, childless — compiles to.
+    int compared = 0;
+    for (const scene::Document& doc : {attribution_document(), gnarly_document()}) {
+        for (const scene::Layer& layer : doc.layers) {
+            if (!layer.sdf) continue;
+            for (const auto& [id, node] : layer.sdf->nodes()) {
+                if (node.is_group) continue;
+                scene::Document single;
+                scene::Layer& l = single.add_sdf_layer("single");
+                const scene::LayerId keep = l.id;
+                std::shared_ptr<scene::SdfContent> content = l.sdf;
+                l = layer;  // placement, scale, mirror, radial, ghost, all of it
+                l.id = keep;
+                l.visible = true;
+                l.sdf = content;
+                scene::Node copy = node;
+                copy.op = scene::Op::Add;
+                copy.id = scene::kNoNode;
+                copy.children.clear();
+                l.sdf->insert(copy);
+                const scene::Tape want = scene::compile_layer(l);
+                const scene::Tape got = scene::compile_item(layer, node);
+                CAPTURE(layer.name);
+                CAPTURE(id);
+                CHECK(tapes_identical(got, want));
+                CHECK(!got.empty());
+                ++compared;
+            }
+        }
+    }
+    CHECK(compared > 20);
+
+    // A group has no field of its own.
+    scene::Node g;
+    g.is_group = true;
+    CHECK(scene::compile_item(attribution_document().layers[0], g).empty());
+}
+
+TEST_CASE("attribution names the same layer and item as the per-candidate Document did") {
+    SUBCASE("mirrored, squashed, ghosted, radial: several layers") {
+        check_attribution_matches_reference(attribution_document(),
+                                            probe_points(2.0f, 0.4f, 400, 7u));
+    }
+    SUBCASE("the gnarly corpus") {
+        check_attribution_matches_reference(gnarly_document(), probe_points(2.0f, 0.5f, 300, 11u));
+    }
+    SUBCASE("one layer of overlapping dabs: the winner read off the pickable tape") {
+        check_attribution_matches_reference(dabs_document(120), probe_points(0.8f, 0.2f, 300, 3u));
+    }
+    SUBCASE("one candidate layer beside a ghost: the pickable tape is the copy's") {
+        scene::Document doc = dabs_document(20);
+        scene::Layer& ghost = doc.add_sdf_layer("ghost");
+        ghost.ghost = true;
+        ghost.sdf->insert(item(scene::Prim::sphere(0.7f), cf3(0, 0, 0)));
+        check_attribution_matches_reference(doc, probe_points(0.8f, 0.4f, 100, 5u));
+    }
+    SUBCASE("one layer whose tape is empty attributes nothing") {
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("carve only");
+        l.sdf->insert(item(scene::Prim::sphere(0.5f), cf3(0, 0, 0), scene::Op::Subtract));
+        const scene::Tape tape = pick::pickable_tape(doc);
+        REQUIRE(tape.empty());
+        scene::LayerId layer = 99;
+        scene::NodeId node = 99;
+        pick::attribute(doc, tape, cf3(0, 0, 0), &layer, &node);
+        CHECK(layer == 0);
+        CHECK(node == scene::kNoNode);
+        pick::attribute(doc, cf3(0, 0, 0), &layer, &node);
+        CHECK(layer == 0);
+        CHECK(node == scene::kNoNode);
+    }
+    SUBCASE("hits attribute as the reference does at the hit point") {
+        const scene::Document doc = attribution_document();
+        const cfloat3 origins[] = {cf3(0, 0, -5), cf3(0, 0, 5),  cf3(-5, 0, 0),
+                                   cf3(5, 0.3f, 0), cf3(0, 5, 0), cf3(0, -5, 0.2f),
+                                   cf3(3, 3, 3),   cf3(-1.2f, 4, 0.4f)};
+        int hits = 0;
+        for (const cfloat3& o : origins) {
+            const math::Ray ray{o, cnormalize(cf3(0, 0, 0) - o)};
+            const pick::SceneHit h = pick::raycast_scene(doc, ray);
+            if (!h.hit) continue;
+            scene::LayerId layer;
+            scene::NodeId node;
+            reference_attribute(doc, h.position, &layer, &node);
+            CHECK(h.layer == layer);
+            CHECK(h.item == node);
+            ++hits;
+        }
+        CHECK(hits >= 6);
     }
 }
