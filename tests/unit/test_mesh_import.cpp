@@ -252,8 +252,17 @@ TEST_CASE("mesh import: the tree is what makes it affordable") {
     // Not a benchmark, a shape check: ten times the triangles must not cost
     // ten times the time, or the summarization is not working and a real
     // import would be unusable.
-    auto time_queries = [](const Mesh& m) {
-        Bvh bvh = Bvh::build(m);
+    //
+    // A ratio of two single wall-clock samples is not that shape check, though.
+    // Both sides run for well under a millisecond on a shared CI runner, so one
+    // preemption lands entirely inside one of them, and it is the COARSE side
+    // being slowed that inflates the ratio. That is how this read 5.379 against
+    // a 5.333 bound on macos-latest with the tree unchanged. Each side is now
+    // the FASTEST of several passes over a BVH built once: noise can only make
+    // a pass slower, so the minimum is the closest thing to the cost of the
+    // walk itself, and the bound below goes on measuring summarization rather
+    // than the scheduler.
+    auto time_queries = [](const Bvh& bvh) {
         auto start = std::chrono::steady_clock::now();
         float sink = 0.0f;
         for (float x = -1.5f; x <= 1.5f; x += 0.05f)
@@ -263,12 +272,19 @@ TEST_CASE("mesh import: the tree is what makes it affordable") {
         CHECK(std::isfinite(sink));
         return std::chrono::duration<double>(elapsed).count();
     };
+    auto fastest_pass = [&time_queries](const Mesh& m) {
+        Bvh bvh = Bvh::build(m);
+        time_queries(bvh);  // warm the caches; not scored
+        double best = time_queries(bvh);
+        for (int pass = 1; pass < 5; ++pass) best = std::min(best, time_queries(bvh));
+        return best;
+    };
 
     Mesh coarse = sphere_mesh(1.0f, 12);
     Mesh fine = sphere_mesh(1.0f, 48);
     double ratio_triangles =
         static_cast<double>(fine.triangle_count()) / static_cast<double>(coarse.triangle_count());
-    double ratio_time = time_queries(fine) / std::max(time_queries(coarse), 1e-9);
+    double ratio_time = fastest_pass(fine) / std::max(fastest_pass(coarse), 1e-9);
     INFO("triangles x" << ratio_triangles << ", time x" << ratio_time);
     CHECK(ratio_triangles > 10.0);
     CHECK(ratio_time < ratio_triangles / 3.0);

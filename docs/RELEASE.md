@@ -260,6 +260,122 @@ forward-refuse).
    size sees none of them and has nothing written past the end of its struct. A
    host wanting the old meaning has `safe_step_scale` and its own threshold.
 
+   **0.74.0, 0.75.0, 0.76.0 and 0.77.0 are not such releases**: all four are
+   additive, and none of them was ever tagged. 0.74.0 adds the multiresolution
+   hierarchy — 31 `clay_multires_*` entry points for the cage, the levels, the
+   detail, the two independent level pointers, the droppable caches, the
+   preflight and the serialization. 0.75.0 adds the three
+   `clay_*_sculptor_arena_stats` readers and `clay_multires_sculptor_apply_stroke`.
+   0.76.0 and 0.77.0 add no symbol at all; they are engine work carrying the
+   version lines forward in lockstep. Nothing that compiled against the version
+   before each of them changes behaviour.
+
+   Worth recording because the header's history says otherwise if read
+   literally: the three `arena_stats` readers appear at 0.75.0, are ABSENT at
+   0.76.0 and 0.77.0, and are back at 0.78.0 with the same signature. That is a
+   branch merging out of the order it was planned in, not a removal — **none of
+   0.74.0 through 0.77.0 was published**, so no released caller can see any of
+   it, and against v0.73.0 the net is additive.
+
+   **0.78.0 IS such a release, in six ways, and two of them are format
+   changes.** No symbol was removed, no signature changed and no struct
+   re-laid out — three descriptors grew, all by appending behind the
+   `struct_size` they already negotiate (`clay_mesh_brush_desc` gains
+   `stamp_azimuth` and `seed_revision`, `clay_mesh_hit` gains `seed_revision`,
+   `clay_memory_report` gains nine fields). What follows is what a caller can
+   observe without calling anything new.
+
+   **First, the scene and `.clayspace` formats go to minor 16**: a layer record
+   carries a per-axis `scale_axes` triple, appended and gated exactly as the
+   radial fields before it are. **A build older than 0.78.0 opening a minor-16
+   document FAILS rather than misreading it** — the layer record is not
+   length-prefixed, so the field desynchronises the stream and the reader's own
+   bounds checks reject it. That is the safe direction and it is the same trade
+   minors 11, 14 and 15 already make. Written AT minor 15 by a 0.78.0 build, a
+   per-axis layer scale degrades to the identity triple (1, 1, 1), which is what
+   every file written before this field meant.
+
+   **Second, the brush preset format goes to version 2**, and the bug it fixes
+   is the reason it is listed here rather than under "additive".
+   `stamp_azimuth` reached `MeshBrushSettings`, the C ABI, pyclay and Swift and
+   did not reach the one format an artist saves it in, because
+   `BrushPreset::serialize` writes an identity subset field by field and the
+   subset was not revisited when the field landed. **A turned chisel came back
+   unturned** — worse than an error, because it looks like it worked. A
+   version-1 record still loads and takes the unrotated default it was in fact
+   saved with; the read is gated on the version. The existing round-trip test
+   could not have caught it: every preset in `reference_presets()` has an
+   azimuth of zero, and a default round-trips to the default whether the schema
+   knows the field or not.
+
+   **Third, `clay_dynamic_sculptor_stamp` honours the automask it was already
+   being given.** `DynamicSculptor::gather` composed falloff, taper, gate and
+   alpha and never read `brush.automask`, while the entry point's own header
+   promises "the same descriptor the fixed path takes" and `read_mesh_brush`
+   dutifully filled the four automask fields it then dropped. A host already
+   setting factors will now see them take effect on the adaptive
+   representation. Two estimator divergences went with it — the adaptive
+   automask reference and the adaptive alpha fallback took the nearest FACE's
+   normal where the fixed path takes the nearest weld class's angle-weighted
+   normal; `nearest_vertex()` is now the one answer for both.
+
+   **Fourth, a short buffer from the surface transport is
+   `CLAY_ERROR_BUFFER_TOO_SMALL` rather than `CLAY_ERROR_INVALID_ARGUMENT`**,
+   and one of the three entry points corrected —
+   `clay_dynamic_surface_dirty_chunks` — SHIPPED IN v0.73.0 with the wrong code
+   and a test asserting it. To a host the two codes mean opposite things: a
+   short buffer is retryable (read the count the call just wrote, grow, ask
+   again), while an invalid argument says the call was malformed, so retrying it
+   unchanged is a spin. A drain loop with one shared error path dropped the
+   chunk and left the viewport a frame behind with nothing on screen saying so.
+
+   **Fifth, a stale `seed_class` is now rejected rather than spent**, when the
+   caller supplies the new `seed_revision`. A seed is an index and outlives the
+   class space it came from: a hierarchy rebinds its level sculptor whenever the
+   sculpt level or the cache generation moves, so a seed picked at one level and
+   spent at another is still in bounds — the only check there was — and names an
+   unrelated part of the surface, on which `geodesic_region` returns EMPTY. The
+   dab lands on nothing and the host cannot tell that from a fully masked
+   stroke. **Passing zero is what a caller compiled against the older descriptor
+   does, and it keeps the bounds check it has always had**, so this adds a way
+   to be correct rather than making existing callers slower.
+
+   **Sixth, `drop_*_caches` moves the cache generation, and compaction releases
+   capacity.** `MultiresSculptor::bind` compares the cache generation to decide
+   whether the `Mesh&` its `MeshSculptor` holds is still live, and that number
+   moved when a level cache was BUILT and not when it was released — so between
+   a drop and the next build a stale sculptor stayed bound to freed storage. It
+   did not crash: the stamp wrote its displacement into released memory, the
+   level was rebuilt from the authoritative detail before reading it back, and
+   the dab simply was not there, with `stamp` still returning the weld-class
+   count it believed it had moved. With a memory warning arriving after every
+   dab — which is what an operating system does under pressure — every second
+   dab vanished silently. Separately, `DetailField::compact()`'s dense-to-sparse
+   demotion rebuilt through `reset()`, which only clears, so the dense era's
+   capacity survived and `set()` regrew it by the standard library's own factor;
+   libstdc++ doubles and MSVC grows by 1.5, and on MSVC one compaction landed
+   ABOVE the dense array it replaced. A compacted field now costs exactly what a
+   field built sparse from the start costs.
+
+   Two smaller movements complete the list, both of them speed rather than
+   answers: an edit to a `CLAY_OP_INTERSECT` item invalidates the layer's box
+   rather than the whole brick cache (the spatial morphs, an infinite grid
+   repeat and an unbounded primitive keep `Everything`, because a radial weight
+   saturates to exactly 1 past `r1` and so IS the item's own field arbitrarily
+   far from anything the layer occupies), and the Metal and Vulkan backends
+   answer a gradient query on the device instead of falling back to the serial
+   reference walk — with the Vulkan backend no longer REFUSING a gradient-only
+   query it was contractually obliged to serve, which it had been leaving to the
+   CPU backend silently.
+
+   **A `.clayspace` still does not carry a multires hierarchy or an adaptive
+   surface**, and that is a decision rather than a gap: both are opaque and
+   owning, the C ABI says so in writing, and they live beside a document rather
+   than inside one. `clay_multires_serialize` hands back the bytes; where they
+   go is the host's. The same ownership boundary is why the surface tier's
+   fields in `clay_memory_report` are ZERO unless the host fills a ledger and
+   passes it to `clay_document_memory_with_surfaces`.
+
    **0.54.1 is not such a release**: no symbol added or removed and no
    signature changed. It is a BEHAVIOUR fix to one existing verb, and the kind
    worth reading because the old behaviour was not wrong-looking, it was inert.
