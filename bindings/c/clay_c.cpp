@@ -77,6 +77,7 @@
 #include "clay/scene/curve.h"
 #include "clay/scene/tape.h"
 #include "clay/session/history.h"
+#include "clay/session/sdf_prefix_cache.h"
 #include "clay/session/sdf_sculpt.h"
 #include "clay/version.h"
 #include "clay/voxel/grab.h"
@@ -6290,6 +6291,27 @@ struct clay_sdf_smooth_tx {
     std::optional<session::SdfSmoothTransaction> tx;
 };
 
+// Held BY VALUE, and the handle is the only owner. No document points at it and
+// nothing else borrows it, which is the whole of the lifetime rule: a cache
+// belongs to whoever made it. See clay_brick_cache, whose header states the
+// same thing for the same reason.
+struct clay_sdf_prefix_cache {
+    session::SdfPrefixCache cache;
+    // THE BUDGET, KEPT HERE because zero has to mean one thing across this ABI
+    // and it does not inside the library. `SdfPrefixPolicy::max_bytes == 0`
+    // means the cache is OFF (`prefix_boundary_for` declines on it), while
+    // `SdfPrefixCache::set_max_bytes(0)` means UNBOUNDED — `evict_to_budget`
+    // returns immediately on it, which is what lets a default-constructed cache
+    // in a benchmark hold everything. Both readings are defensible in their own
+    // place and shipping both through one C field would be a trap: a host that
+    // wrote 0 meaning "none" would get "all of it".
+    //
+    // So the ABI picks the one the rest of it already uses for a budget — 0 is
+    // OFF — and enforces it here rather than changing the library underneath a
+    // benchmark that depends on the other reading.
+    std::size_t budget = 0;
+};
+
 struct clay_sdf_move_tx {
     clay_document* doc = nullptr;
     std::optional<session::SdfMoveTransaction> tx;
@@ -6318,6 +6340,8 @@ namespace {
 
 constexpr std::size_t kSculptPolicyOriginal =
     offsetof(clay_sculpt_policy, allow_consolidation) + sizeof(std::int32_t);
+constexpr std::size_t kPrefixStatsOriginal =
+    offsetof(clay_sdf_prefix_stats, fallback_windows) + sizeof(std::uint64_t);
 constexpr std::size_t kSculptDirtyOriginal =
     offsetof(clay_sculpt_dirty, has_bounds) + sizeof(std::int32_t);
 constexpr std::size_t kSculptBudgetOriginal =
@@ -6341,6 +6365,15 @@ clay_result read_sculpt_policy(const clay_sculpt_policy* policy, session::SdfScu
     sp.complexity.max_deformer_chain = p.max_deformer_chain;
     sp.complexity.max_item_count = p.max_item_count;
     sp.complexity.allow_consolidation = p.allow_consolidation != 0;
+    // The prefix cache's three knobs. Its SAMPLING is not among them and is
+    // taken from this policy's own, for the reason the consolidation note below
+    // gives: a second cell size is a second thing for a host to get out of step
+    // with, and here the consequence is silent -- the cache is keyed on
+    // resolution, so a prefix built at one and asked for at another simply
+    // never hits.
+    sp.prefix.min_history_roots = static_cast<std::size_t>(p.prefix_min_history_roots);
+    sp.prefix.keep_live_suffix_roots = static_cast<std::size_t>(p.prefix_keep_live_suffix_roots);
+    sp.prefix.max_bytes = static_cast<std::size_t>(p.prefix_max_bytes);
     // The consolidation, if it is authorised, resamples at the gesture's own
     // resolution: the ABI has no nested descriptors, and inventing a second
     // cell size for a host to get out of step with would be worse than reusing
@@ -6427,6 +6460,138 @@ clay_sdf_smooth_tx* clay_sdf_smooth_begin(clay_document* doc, clay_layer_id laye
     handle->doc = doc;
     handle->tx = std::move(tx);
     return handle;
+}
+
+clay_sdf_smooth_tx* clay_sdf_smooth_begin_cached(clay_document* doc, clay_layer_id layer,
+                                                 const clay_sculpt_policy* policy,
+                                                 clay_sdf_prefix_cache* cache,
+                                                 clay_cancel_token* token) {
+    if (!doc || !policy) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or policy");
+        return nullptr;
+    }
+    session::SdfSculptPolicy sp;
+    if (read_sculpt_policy(policy, &sp) != CLAY_OK) return nullptr;
+    if (!(sp.cell_size > 0.0f)) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT, "cell_size must be > 0");
+        return nullptr;
+    }
+    std::optional<session::SdfSmoothTransaction> tx = session::SdfSmoothTransaction::begin(
+        doc->doc.document, layer, sp, eval::pooled_bake_eval(),
+        token ? &token->token : nullptr, cache ? &cache->cache : nullptr);
+    if (!tx) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT,
+             "cannot smooth this layer: it is missing, not an SDF layer, protected, or its "
+             "field is empty or unbounded");
+        return nullptr;
+    }
+    auto* handle = new clay_sdf_smooth_tx();
+    handle->doc = doc;
+    handle->tx = std::move(tx);
+    return handle;
+}
+
+// -- the prefix cache --------------------------------------------------------
+
+clay_sdf_prefix_cache* clay_sdf_prefix_cache_create(uint64_t max_bytes) {
+    auto* handle = new clay_sdf_prefix_cache();
+    handle->budget = static_cast<std::size_t>(max_bytes);
+    if (handle->budget != 0) handle->cache.set_max_bytes(handle->budget);
+    return handle;
+}
+
+void clay_sdf_prefix_cache_destroy(clay_sdf_prefix_cache* cache) { delete cache; }
+
+clay_result clay_sdf_prefix_cache_set_max_bytes(clay_sdf_prefix_cache* cache, uint64_t max_bytes) {
+    if (!cache) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null cache");
+    cache->budget = static_cast<std::size_t>(max_bytes);
+    if (cache->budget == 0) {
+        // OFF, and off means empty: a ceiling of nothing that still held what
+        // it had would be a ceiling in name only.
+        cache->cache.clear();
+        return CLAY_OK;
+    }
+    cache->cache.set_max_bytes(cache->budget);
+    return CLAY_OK;
+}
+
+clay_result clay_sdf_prefix_cache_invalidate_layer(clay_sdf_prefix_cache* cache,
+                                                   clay_layer_id layer) {
+    if (!cache) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null cache");
+    cache->cache.invalidate_layer(layer);
+    return CLAY_OK;
+}
+
+clay_result clay_sdf_prefix_cache_clear(clay_sdf_prefix_cache* cache) {
+    if (!cache) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null cache");
+    cache->cache.clear();
+    return CLAY_OK;
+}
+
+clay_result clay_sdf_prefix_cache_stats(const clay_sdf_prefix_cache* cache,
+                                        clay_sdf_prefix_stats* out_stats) {
+    if (!cache) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null cache");
+    if (!out_stats) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_stats");
+    clay_sdf_prefix_stats probe;
+    clay_result r = read_desc(out_stats, kPrefixStatsOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const session::SdfPrefixCacheStats& st = cache->cache.stats();
+    clay_sdf_prefix_stats out{};
+    out.entries = st.entries;
+    out.bytes = st.bytes;
+    out.hits = st.hits;
+    out.misses = st.misses;
+    out.builds = st.builds;
+    out.evictions = st.evictions;
+    out.invalidations = st.invalidations;
+    out.seeded_windows = st.seeded_windows;
+    out.fallback_windows = st.fallback_windows;
+    write_desc(out_stats, out_stats->struct_size, out);
+    return CLAY_OK;
+}
+
+clay_result clay_sdf_prefix_boundary_for(const clay_document* doc, clay_layer_id layer,
+                                         const clay_sculpt_policy* policy, uint64_t* out_roots) {
+    if (!doc || !out_roots) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out_roots");
+    session::SdfSculptPolicy sp;
+    clay_result r = read_sculpt_policy(policy, &sp);
+    if (r != CLAY_OK) return r;
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "no such layer");
+    session::SdfPrefixPolicy pp = sp.prefix;
+    pp.cell_size = sp.cell_size;
+    pp.band = sp.band;
+    pp.padding = sp.padding;
+    *out_roots = static_cast<uint64_t>(session::prefix_boundary_for(*l, pp));
+    return CLAY_OK;
+}
+
+clay_result clay_sdf_prefix_cache_build(clay_sdf_prefix_cache* cache, const clay_document* doc,
+                                        clay_layer_id layer, const clay_sculpt_policy* policy,
+                                        clay_cancel_token* token) {
+    if (!cache || !doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null cache or document");
+    if (cache->budget == 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "this cache has a byte budget of 0, which means OFF: give it a budget with "
+                    "clay_sdf_prefix_cache_create or clay_sdf_prefix_cache_set_max_bytes");
+    session::SdfSculptPolicy sp;
+    clay_result r = read_sculpt_policy(policy, &sp);
+    if (r != CLAY_OK) return r;
+    if (!(sp.cell_size > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "cell_size must be > 0");
+    session::SdfPrefixPolicy pp = sp.prefix;
+    pp.cell_size = sp.cell_size;
+    pp.band = sp.band;
+    pp.padding = sp.padding;
+    const session::SdfPrefixField* built =
+        cache->cache.build(doc->doc.document, layer, pp, eval::pooled_bake_eval(),
+                           token ? &token->token : nullptr);
+    if (!built)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "no prefix was built: the policy declines this layer, it is not the "
+                    "document's last visible SDF layer, the bake refused, or the build was "
+                    "cancelled");
+    return CLAY_OK;
 }
 
 clay_result clay_sdf_smooth_update(clay_sdf_smooth_tx* tx, const clay_relax_params* params,

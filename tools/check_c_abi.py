@@ -1174,6 +1174,11 @@ DOCUMENT_LAYER_CALLS = {
     "clay_set_layer_radial",
     "clay_voxel_to_layer",
     "clay_brick_cache_mark_dirty_layer",
+    # A prefix is cached per DOCUMENT layer -- it is that layer's history folded
+    # at a boundary in its root list -- and an artist's channel has nothing to do
+    # with it. Same reading as clay_brick_cache_mark_dirty_layer beside it, and
+    # for the same reason: a cache is keyed on the document layer it describes.
+    "clay_sdf_prefix_cache_invalidate_layer",
 }
 
 

@@ -2147,6 +2147,46 @@ Two consequences worth knowing at the call. Both C transform setters write the W
 
 **And a live field brush is a transaction** (ABI 0.59.0): `clay_sdf_smooth_*` and `clay_sdf_move_*` are two opaque handles with the same four verbs — `begin`, `update`, `commit`, `cancel` — plus a `destroy` that IS a cancel, so an error path which simply drops the handle leaves no half a stroke behind. They exist because two brushes cannot be spelled as edit-list stamps and so had no live form at all. Smooth BAKES (`field::relax` returns a volume, not an edit list), and a host with nowhere to keep that volume between pointer events must bake the layer again per dab — `sdf_consolidate`, 313 ms on the reference iPad — so the only affordable implementation ran once at pointer-up and the artist smoothed blind. Move warps every item it reaches, and written into the document per pointer event a drag churns revisions, tapes, caches and picking sixty times a second to produce one edit. A transaction holds the transient state instead: `clay_sdf_smooth_begin` samples the layer ONCE, each `clay_sdf_smooth_update` relaxes that retained volume in place, and `clay_sdf_smooth_commit` installs the volume the dabs were applied to rather than baking again; `clay_sdf_move_begin` walks the edit list once to prepare the items the drag reaches — through the ball or, under a layer mirror or radial count, through any image of it — each `clay_sdf_move_update` resolves the grabs of every *affected* item (one per image that reaches it) with no traversal at all, and the commit writes every final chain as one step. **Between begin and commit the document does not change** — no nodes, no deformers, no undo entries, and `clay_document_save_memory` taken mid-gesture returns the bytes it returned before it, which is what the ABI tests assert first. Each update fills a `clay_sculpt_dirty`: a conservative world box, the brick count, and `changed`, with the box and the count *geometric* (what the brush selected, not what happened to move) so they are reproducible however much unrelated model surrounds the brush, and `has_bounds` carrying emptiness as the third state the rest of this ABI already uses. Move's update takes the TOTAL displacement from the anchor, never an increment — 0.1, 0.2, 0.5 must end where a single fresh 0.5 lands, not past it — and `clay_sdf_move_preview_grab_count` / `clay_sdf_move_preview_grab` report the resolved grabs as the parameters `clay_item_add_deformer(CLAY_DEFORM_GRAB, ...)` already takes — one grab without symmetry, one per reaching image with it — so a host draws the preview through machinery it has. A commit **refuses a source that moved underneath it**: the layer is fingerprinted at begin and re-checked at commit, and an external edit stands rather than being written over by a preview computed against a document that no longer exists. `clay_sculpt_policy` carries the sampling (`clay_consolidation_params`' three numbers, with its meanings) and the budget — `min_safe_step_scale`, `max_deformer_chain`, `max_item_count`, where zero disables a criterion so an all-zero policy authorises nothing — plus `allow_consolidation`, which is the whole opt-in for the destructive half: over budget without it fills `clay_sculpt_budget.over_budget` and changes nothing, and with it the collapse happens inside the stroke's own undo step so one undo puts back both. The check runs only between completed strokes, never while the pointer is down.
 
+**And a deep layer's history has a cache a host can hold** (ABI 0.79.0):
+`clay_sdf_prefix_cache_*`. A Smooth gesture on a layer with a long edit list pays
+the whole surviving history on every window the artist has not touched yet — 242
+ms a dab at 20,000 items — because a window with no seed walks everything that
+reaches it. `session::SdfPrefixCache` has folded that history at a boundary since
+#371 and made the same dab 2.32 ms; what shipped with it was reachable from C++
+and from no host, because `clay_sdf_smooth_begin` let the cache argument default
+to null. The handle closes that. It follows `clay_brick_cache`'s ownership rule to
+the word — **it belongs to whoever made it, never to a document**, takes no
+document, destroys with `void`, and outlives any document it was built against —
+because a host should not learn two lifetimes for two caches. Nothing in it is
+authoritative: every entry is rebuildable, nothing is serialized, and dropping the
+lot changes no output and only the next cold window's latency.
+
+The recipe is four calls and the order matters:
+
+1. `clay_sdf_prefix_boundary_for` — is this layer deep enough to be worth
+   caching? It builds and evaluates nothing, so asking is free.
+2. `clay_sdf_prefix_cache_build` — **between gestures**, never on the
+   pointer-down path. It is the whole layer's cost (2,170 ms at 20,000 items) and
+   it is a separate call for exactly that reason: `SdfSourceField::open`
+   deliberately uses a prefix and never makes one.
+3. `clay_sdf_smooth_begin_cached` — the same begin, plus the cache to look in. A
+   null cache, or one holding nothing for this layer, is exactly
+   `clay_sdf_smooth_begin`, and neither builds anything.
+4. `clay_sdf_prefix_cache_stats` — `seeded_windows` against `fallback_windows` is
+   how a host tells "the cache served this gesture" from "this window happened to
+   be warm". The gesture's OUTPUT is identical either way by design, so nothing in
+   the result can say.
+
+The sampling is deliberately NOT settable twice. A prefix is keyed on its
+resolution, so one built at a cell size the gesture does not use is a miss — no
+error, no wrong answer, no acceleration — which is the one failure shape that
+looks like the feature not working. So the three cache knobs live on
+`clay_sculpt_policy` beside the one `cell_size` the gesture already has, and there
+is nowhere to put a second. `docs/09` carries the break-even: **under ten cold
+windows at every size measured**, and the build follows the history while the
+cache's SIZE follows the model — 1.43 MiB at 5,000 items and at 20,000 alike — so
+a budget is sized from one and a build scheduled from the other.
+
 **And the voxel side has one now too** (#86): `clay_voxel_mesh` is the *whole* grid, always, and it costs every occupied chunk on every call — so displaying a sculpt used to cost the model while editing it cost the dab. Two calls close that, in the brick cache's own vocabulary: `clay_voxel_take_dirty_chunks` drains the chunks a mutation could have changed (capacity in, count out, remainder reported — the `clay_brick_cache_take_dirty` shape, not a size query), and `clay_voxel_mesh_chunks` meshes exactly those keys and reports a `clay_voxel_chunk_mesh_range` per key so a host patches GPU sub-ranges instead of rebuilding the buffer. Every mutation feeds the set through the one cell-write choke point, a write that changes nothing dirties nothing, a write on a chunk *face* also dirties the chunk across it — the exposure test reads that cell — and a chunk emptied to nothing is dropped from the grid and *still* reported, because that is the key whose quads a host must remove. Unlike `clay_brick_mesh_range`, these ranges **partition** the mesh with no shared vertex: a voxel face belongs to one cell in one chunk, so clamping the greedy merge to a chunk boundary emits more, smaller quads over the identical surface — never a crack, and no straddler to attribute the way `mesh_bricks` must (#66). The cost is triangle count at chunk seams (+3.7% measured on a realistic sculpt), which is why `clay_voxel_mesh` stays whole-grid for export. Measured on Linux desktop at the device gate's 0.02 cell size — *not* comparable to the device baseline, per `docs/RELEASE.md`; the ratio transfers, the absolute does not — one dab dirties ~2 of 81 occupied chunks and re-meshes in **0.65 ms against 23.3 ms** for the whole grid.
 
 ## 12. Dependencies (all permissive, all C/C++)
