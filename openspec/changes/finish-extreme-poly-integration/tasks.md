@@ -65,14 +65,37 @@
 
 ## 5. The benchmark rows (closes 7.1's layered rows)
 
-- [ ] 5.1 Run `multires + sculpt layers` at the sizes the matrix names
-- [ ] 5.2 Record in `docs/09-brush-latency-and-coverage.md` with the load the box
-      carried, per shared-box practice — ratios, not absolutes
+- [x] 5.1 Run `multires + sculpt layers` at the sizes the matrix names.
+      DONE. `bench_extreme_poly` gains `--which=layers`, replacing the printed
+      apology that stood where the numbers belonged. The locality property
+      holds on the fourth path: 10x the model at one footprint is 1.08x, 1.12x
+      and 1.15x, with dirty chunks and upload IDENTICAL at both sizes
+- [x] 5.2 Record in `docs/09-brush-latency-and-coverage.md` with the load the box
+      carried, per shared-box practice — ratios, not absolutes.
+      DONE, load 6.81 before the pair and 6.42 after, the two halves run back to
+      back so the ratio between them is not one across two sessions. The finding
+      worth carrying: a layered gesture holds the composition, so the per-dab
+      detail write goes from 2,494 us to 0.14 us and a non-destructive pass is
+      CHEAPER per dab at a 20k footprint (0.92x) and dearer at 1k (1.23x). The
+      commit is deliberately not in those numbers and the doc says so
 
 ## 6. Gates
 
-- [ ] 6.1 `cpu-only` green; `check_layering.py`, `check_binding_parity.py`,
-      `check_c_abi.py` green
-- [ ] 6.2 No ABI change, so no version bump. `release_check.py` green
-- [ ] 6.3 7.8 (reference iPad) STAYS OPEN — no device on this box, and nothing
+- [x] 6.1 `cpu-only` green; `check_layering.py`, `check_binding_parity.py`,
+      `check_c_abi.py` green.
+      DONE. 2,313 cases / 16,367,763 assertions, 0 failed (2,310 on main plus
+      this change's 3). layering OK, parity OK (716 pyclay capabilities),
+      c-abi OK. pyclay: 681 passed, 1 skipped, under
+      `LD_PRELOAD=/lib/x86_64-linux-gnu/libstdc++.so.6` — the anaconda
+      GLIBCXX_3.4.31 quirk this box has, not a result of this change
+- [x] 6.2 No ABI change, so no version bump.
+      `release_check.py` fails four rows and NONE of them are this change,
+      verified rather than asserted: `bindings`, `abi` and `wheel` are all the
+      same anaconda GLIBCXX ImportError, and the 681 pyclay tests pass under the
+      preload; `device` says "engine changed since the gate ran at 9ed0a49a9",
+      and main itself already differs from that commit by 843 lines in
+      clay.h/clay_c.cpp, so it fails on main too. `version`, `configure`,
+      `build`, `parity`, `layering`, `dialect`, `licenses`, `kernels`,
+      `openspec` and `benchmarks` all pass
+- [x] 6.3 7.8 (reference iPad) STAYS OPEN — no device on this box, and nothing
       here claims a device number

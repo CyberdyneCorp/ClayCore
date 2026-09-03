@@ -72,7 +72,7 @@
       editing, so it is deferred to the rebase rather than done here
 
 ## 3. Local update path
-- [ ] 3.1 The query path is: brush volume → top-level tree → candidate chunks →
+- [x] 3.1 The query path is: brush volume → top-level tree → candidate chunks →
       candidate vertices → exact footprint. Never a scan over every vertex
       NOT ticked, and now MEASURED rather than argued. It holds on the fixed
       mesh and the adaptive surface, where the tree is what `classes_in_ball`
@@ -101,6 +101,26 @@
       (#419) — whose per-stroke runtime plan is where a carried-forward seed
       belongs. The gap is measured, not
       estimated: 3.22x at ten times the model at the 1k footprint, in docs/09
+      CLOSED by `finish-extreme-poly-integration`, and NOT by the carried seed
+      this entry proposed. That was implemented first and measured: it moves 7
+      of the 80 cases in `test_mesh_sculpt_parity.cpp`, because
+      `geodesic_region` accumulates its path distance FROM the anchor -- so the
+      anchor is an input to the falloff and a different one is a different dab.
+      Five are local minima on a connected surface; two are `two_close_sheets`,
+      where the nearest class is across a gap the adjacency does not cross and
+      no surface-local method can reach it.
+      What closed it is the path this requirement actually names: a top-level
+      tree over the CHUNK TABLE, which every level already has with bounds and
+      vertex lists. `benchmarks/chunk_tree.h` was already that tree and is now
+      `mesh::ChunkTree`; `MeshSculptor` borrows a `ChunkTable` and answers both
+      the ball and the nearest-class query by descending it. EXACT -- the same
+      class the scan returns, tie for tie -- so all 80 goldens are unchanged,
+      and it fixes the euclidean `classes_in_ball` case a carried seed could
+      never have reached. Gated in `tests/unit/test_chunk_query_locality.cpp`:
+      1,960 class positions measured at 9,409 vertices and 1,960 at 148,225,
+      identical rather than banded. Proven to catch its regression -- with
+      `chunk_index()` forced to null the revert COMPILES and the same rows read
+      75,272 and 1,185,800, one whole class scan per dab
 - [x] 3.2 An optional caller-supplied seed from the pick subsystem, validated
       against a revision, so a stroke does not re-search a centre the host
       already picked
@@ -407,7 +427,7 @@
       The hierarchy's stamp at the 1k footprint is 3.22x, which reproduces the
       gap 3.1 names rather than contradicting it. The LAYERED rows still await
       the rebase, unchanged
-- [ ] 7.2 Per-stage timing — seed, chunk query, gather, geodesic, snapshot,
+- [x] 7.2 Per-stage timing — seed, chunk query, gather, geodesic, snapshot,
       weight, alpha, automask, kernel, remesh, detail write, normals, index
       update, readback — because a total without stages is not actionable
       PARTIAL, and the benchmark says which half. Six stages are timed as
@@ -428,6 +448,14 @@
       turned that merge into a harder one, and the shared brush runtime lands a
       per-stroke plan that is the natural owner of the timers anyway. Not
       attempted for that reason and no other
+      CLOSED by `finish-extreme-poly-integration`. `mesh::SculptStage` and
+      `mesh::StageTelemetry` are one vocabulary for the three sculptors, and the
+      objection that timers would perturb the measurement is answered by reading
+      NO CLOCK when the pointer is null. The first row is already the argument
+      for having done it: hierarchy at 98k level vertices and a 20k footprint
+      divides into normals 33.3%, weight 28.3% and query 22.6%, with the KERNEL
+      at 0.1% -- the verb is not where a dab goes, and none of that was visible
+      inside one bucket
 - [x] 7.3 THE LOCALITY GATE: for one footprint, stamp time stays in one band
       from 1M to 20M vertices
       DONE twice. As a ctest gate at sizes CI can afford,

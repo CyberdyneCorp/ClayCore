@@ -55,6 +55,7 @@
 
 #include "clay/mesh/dynamic_sculpt.h"
 #include "clay/mesh/dynamic_surface.h"
+#include "clay/mesh/layered_sculpt.h"
 #include "clay/mesh/multires.h"
 #include "clay/mesh/multires_sculpt.h"
 #include "clay/mesh/sculpt.h"
@@ -381,7 +382,7 @@ void run_adaptive(std::size_t vertices, const std::vector<std::size_t>& footprin
 // -- the hierarchy -------------------------------------------------------------------
 
 void run_multires(std::size_t vertices, const std::vector<std::size_t>& footprints, int reps,
-                  int levels) {
+                  int levels, bool layered) {
     // The cage carries the extent and the levels carry the detail, so the cage
     // side is the model side divided by 2^levels — which keeps the SPACING at
     // the finest level equal to every other representation's.
@@ -427,10 +428,22 @@ void run_multires(std::size_t vertices, const std::vector<std::size_t>& footprin
     surface->positions_at(level);
     surface->chunks_at(level);
     mesh::MultiresSculptor sculptor(*surface);
+    // The LAYERED row (7.1). A non-destructive detail pass writes the same
+    // verbs into a layer's coefficients rather than into the base, through the
+    // same level sculptor -- so the interesting number is not the absolute but
+    // the RATIO against the row above: what a stroke pays for being undoable
+    // and dialable after the fact.
+    mesh::LayeredMultiresSculptor layered_sculptor(*surface);
+    if (layered) {
+        const mesh::SculptLayerId id = surface->add_sculpt_layer("bench");
+        surface->set_active_sculpt_layer(id);
+        layered_sculptor.set_write_domain(mesh::MultiresWriteDomain::Detail);
+    }
     const double build_end = now_micros();
 
-    std::printf("  hierarchy: cage %zu, level %u with %zu vertices, %zu chunks, setup %.2f s, "
+    std::printf("  %s: cage %zu, level %u with %zu vertices, %zu chunks, setup %.2f s, "
                 "rss %zu MB\n",
+                layered ? "hierarchy + layers" : "hierarchy",
                 cage.positions.size(), level, surface->positions_at(level).size(),
                 surface->chunks_at(level).live_count(), (build_end - build_begin) / 1e6,
                 rss_kb() / 1024);
@@ -450,11 +463,29 @@ void run_multires(std::size_t vertices, const std::vector<std::size_t>& footprin
 
         std::vector<double> stamp, detail, readback;
         std::size_t dirty = 0, upload = 0;
-        sculptor.begin_stroke();
+        mesh::StageTelemetry stages;
+        if (layered) {
+            // ONE gesture over the whole row, which is what a layered stroke
+            // is: `begin` fixes the channel and holds the composition, and
+            // paying that per dab would measure the transaction rather than
+            // the dab.
+            if (!layered_sculptor.begin()) {
+                std::printf("    footprint %6zu  SKIPPED: the layer stroke refused to begin\n",
+                            footprint);
+                continue;
+            }
+        } else {
+            sculptor.begin_stroke();
+            sculptor.set_stage_telemetry(&stages);
+        }
         for (int rep = -4; rep < reps; ++rep) {
             brush.center = centre_for(rep < 0 ? 0 : rep);
+            if (rep == 0) stages.reset();
             const double t0 = now_micros();
-            sculptor.stamp(mesh::MeshBrush::Draw, brush);
+            if (layered)
+                layered_sculptor.stamp(mesh::MeshBrush::Draw, brush);
+            else
+                sculptor.stamp(mesh::MeshBrush::Draw, brush);
             const double t1 = now_micros();
             // The detail write and the propagation it causes, which is the
             // stage this representation has and the other two do not.
@@ -478,17 +509,14 @@ void run_multires(std::size_t vertices, const std::vector<std::size_t>& footprin
             detail.push_back(t2 - t1);
             readback.push_back(t3 - t2);
         }
+        if (layered) layered_sculptor.commit();
         std::printf("    footprint %6zu  dirty chunks %5zu  upload %8.1f KB\n", footprint, dirty,
                     static_cast<double>(upload) / 1024.0);
-        print_stage("stamp*", summarise(stamp));
+        print_stage("stamp", summarise(stamp));
         print_stage("detail write", summarise(detail));
         print_stage("readback", summarise(readback));
+        if (!layered) print_stages(stages, static_cast<double>(stamp.size()));
     }
-
-    // The layered rows of 7.1 wait on a rebase and are not invented here.
-    std::printf("    (multires WITH LAYERS: this branch is cut from main and does not carry\n"
-                "     add-mesh-sculpt-layers, so that row awaits the rebase rather than being\n"
-                "     measured against a layer stack of this benchmark's own invention.)\n");
 }
 
 // What the driver asked for. A struct rather than five out-parameters, so
@@ -549,7 +577,13 @@ int main(int argc, char** argv) {
         std::printf("== %zu vertices ==============================================\n", size);
         if (which == "all" || which == "fixed") run_fixed(size, footprints, reps);
         if (which == "all" || which == "adaptive") run_adaptive(size, footprints, reps);
-        if (which == "all" || which == "multires") run_multires(size, footprints, reps, levels);
+        if (which == "all" || which == "multires")
+            run_multires(size, footprints, reps, levels, /*layered=*/false);
+        // 7.1's fourth path. Run beside the third rather than instead of it, so
+        // the pair is a RATIO and not two numbers from different sessions on a
+        // box whose load moves between them.
+        if (which == "all" || which == "layers")
+            run_multires(size, footprints, reps, levels, /*layered=*/true);
         std::printf("\n");
     }
     std::printf("# peak rss %zu MB\n", rss_kb() / 1024);
