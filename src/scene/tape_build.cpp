@@ -102,6 +102,64 @@ struct Compiler {
 
     // -- emission ------------------------------------------------------------
 
+    // A finite-support warp the region cannot reach is the IDENTITY over that
+    // region, so a culled tape need not carry it (issue #452).
+    //
+    // WHY THIS IS WORTH DOING. A grab's weight is zero outside its radius
+    // (`cregion_weight`), and yet every sample of every brick paid for every
+    // grab the item carried: 512 probes taken well away from twelve grabs
+    // measured 3.20x the cost of the same probes with none, and each of those
+    // grabs had touched only 8 of the document's 97 items. The work was being
+    // done for samples that provably could not be affected by it.
+    //
+    // SOUND BY INDUCTION ALONG THE CHAIN. Deformers warp in authoring order, so
+    // deformer k sees the point deformer k-1 produced. If every warp so far has
+    // been the identity over the region then the point is where it started, and
+    // the next one may be tested against the same region. A warp that is KEPT
+    // may move the point, so the region is dilated by the most that warp can
+    // move it before the next test — conservative, and it is what keeps this
+    // exact rather than nearly.
+    //
+    // GRAB ONLY, for now. `pose` and `magnify` share `cregion_weight` and could
+    // join this on the same terms; `pose_line`, the noise and the lattices have
+    // no finite support and never can. One verb at a time, each with the test
+    // that shows the field did not move.
+    std::vector<Deformer> cull_deformers(const std::vector<Deformer>& deformers,
+                                         const cfloat4x4& inv) const {
+        if (!cull || deformers.empty()) return deformers;
+        bool any_finite = false;
+        for (const Deformer& d : deformers)
+            if (d.type == kernel::cdeform_grab) any_finite = true;
+        if (!any_finite) return deformers;
+
+        // The cull's own test box -- already dilated by the band and the chain
+        // pad -- in the frame the deformers act in, which is the item's local
+        // one.
+        math::Aabb region = cull_test.transformed(inv);
+        if (region.empty() || region.is_infinite()) return deformers;
+
+        std::vector<Deformer> kept;
+        kept.reserve(deformers.size());
+        for (const Deformer& d : deformers) {
+            if (d.type != kernel::cdeform_grab) {
+                kept.push_back(d);
+                continue;  // no finite support to test; it stays and may move the point
+            }
+            const kernel::cfloat3 centre = kernel::cf3(d.k, d.a, d.b);
+            const float radius = d.c;
+            const math::Aabb support{centre - kernel::cf3(radius, radius, radius),
+                                     centre + kernel::cf3(radius, radius, radius)};
+            if (!(radius > 0.0f) || !support.intersects(region)) continue;  // identity here
+            kept.push_back(d);
+            // It may move a point by at most its whole displacement, so the
+            // next warp is tested against that much more room.
+            const kernel::cfloat3 disp = kernel::cf3(
+                kernel::cabs(d.ext[0]), kernel::cabs(d.ext[1]), kernel::cabs(d.ext[2]));
+            region = math::Aabb{region.min - disp, region.max + disp};
+        }
+        return kept;
+    }
+
     void emit_prim(unsigned int op, const cfloat4x4& inv, float scale, float round,
                    kernel::cfloat3 color, const float* prim_params, int prim_param_count,
                    const std::vector<Deformer>& deformers, const Repeat& repeat = Repeat{},
@@ -130,8 +188,9 @@ struct Compiler {
         tape.params.push_back(repeat.counts.x);
         tape.params.push_back(repeat.counts.y);
         tape.params.push_back(repeat.counts.z);
-        tape.params.push_back(static_cast<float>(deformers.size()));
-        for (const Deformer& d : deformers) {
+        const std::vector<Deformer> live = cull_deformers(deformers, inv);
+        tape.params.push_back(static_cast<float>(live.size()));
+        for (const Deformer& d : live) {
             // A guide is not a fixed size, so it goes in the blob and slots 1
             // and 2 carry a handle to it — the same arrangement a swept
             // primitive uses. Emitted here rather than by the caller because

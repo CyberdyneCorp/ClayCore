@@ -6340,6 +6340,8 @@ namespace {
 
 constexpr std::size_t kSculptPolicyOriginal =
     offsetof(clay_sculpt_policy, allow_consolidation) + sizeof(std::int32_t);
+constexpr std::size_t kWarpCostOriginal =
+    offsetof(clay_layer_warp_cost, finite_support_warps) + sizeof(std::uint64_t);
 constexpr std::size_t kPrefixStatsOriginal =
     offsetof(clay_sdf_prefix_stats, fallback_windows) + sizeof(std::uint64_t);
 constexpr std::size_t kSculptDirtyOriginal =
@@ -7090,6 +7092,43 @@ clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
     resolver.displacement = world_pull;
     return apply_surface_gesture(doc, layer, *l, prepared, resolver, std::move(reach),
                                  out_applied);
+}
+
+clay_result clay_layer_warp_cost_get(const clay_document* doc, clay_layer_id layer,
+                                     clay_layer_warp_cost* out_cost) {
+    if (!doc || !out_cost) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out_cost");
+    clay_layer_warp_cost probe;
+    clay_result r = read_desc(out_cost, kWarpCostOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "no such layer");
+
+    clay_layer_warp_cost out{};
+    // A layer that cannot carry a warp reports zeroes rather than a refusal:
+    // "none" is the true answer for a mesh or voxel layer, and a host walking
+    // its stack should not have to special-case the kinds.
+    if (l->kind == scene::LayerKind::Sdf && l->sdf) {
+        // Over the node map rather than a walk from the roots, because this is
+        // a SUM and every term is an integer: the map's order is unspecified
+        // and the answer does not depend on it. A walk would also have to
+        // decide what a group contributes, and a group's children each carry
+        // their own warps.
+        for (const auto& entry : l->sdf->nodes()) {
+            const scene::Node& n = entry.second;
+            ++out.items;
+            if (n.deformers.empty()) continue;
+            ++out.warped_items;
+            out.warps += static_cast<uint64_t>(n.deformers.size());
+            for (const scene::Deformer& d : n.deformers)
+                // The ones a culled tape can drop. Kept in step with
+                // `cull_deformers` in tape_build.cpp by naming the same types:
+                // a warp counted here and not dropped there merely reports a
+                // number a host cannot act on, which is the harmless direction.
+                if (d.type == kernel::cdeform_grab) ++out.finite_support_warps;
+        }
+    }
+    write_desc(out_cost, out_cost->struct_size, out);
+    return CLAY_OK;
 }
 
 namespace {
