@@ -8,6 +8,8 @@
 // Intersect items are the exception: max(d_prev, d_item) can change the
 // field arbitrarily far away, so their influence is infinite.
 
+#include <cstddef>
+
 #include "clay/math/geom.h"
 #include "clay/scene/document.h"
 
@@ -85,6 +87,54 @@ Nonlocality item_nonlocality(const Node& item);
 // holding a plane is bounded by a plane.
 math::Aabb layer_influence_extent(const SdfContent& content, const Layer& layer);
 
+// The layer extent an intersect is bounded by, computed AT MOST ONCE for a
+// whole query.
+//
+// `layer_influence_extent` walks every visible node and takes each one's
+// geometry bound, which is real work -- a stroke or a sweep re-tessellates its
+// curve, a mirrored or radial item bounds every copy, a deformer chain runs its
+// slope probes. Before #319 an intersect answered `Everything` in constant
+// time; now it answers with that walk, and the callers that meet an intersect
+// meet it in a LOOP: `layer_influence_bound` once per root, `pick`'s
+// attribution once per item, `clay_brick_cache_mark_dirty_nodes` once per
+// selected node. Each of those was O(items) and became O(intersects * items)
+// (#451: 0.082 -> 1.61 ms for a layer bound over 1,000 strokes holding 20
+// intersects, and 1.51 -> 3.09 ms for an attributed raycast over the same).
+//
+// One of these, carried through such a loop, restores the single walk. It
+// caches the last (content, layer) pair it was asked about, so a loop that
+// crosses layers is still correct and merely recomputes.
+//
+// VALID ONLY WHILE THE DOCUMENT IS NOT MUTATED. It is a scratch value for one
+// query, never a member: the extent it holds is the geometry of the nodes as
+// they were when it was taken.
+class LayerExtent {
+  public:
+    const math::Aabb& of(const SdfContent& content, const Layer& layer) {
+        if (&content != content_ || &layer != layer_) {
+            extent_ = layer_influence_extent(content, layer);
+            content_ = &content;
+            layer_ = &layer;
+            ++walks_;
+        }
+        return extent_;
+    }
+
+    // How many times the walk actually ran. The memo is bit-identical in what
+    // it returns to computing the extent every time, so nothing about a bound
+    // can tell whether it fired -- and a caller that quietly stopped sharing
+    // one reads as correct while paying the walk per intersect again. This
+    // count is the only way a test can hold the contract, which is why it is
+    // here rather than derived from a timing.
+    std::size_t walks() const { return walks_; }
+
+  private:
+    const SdfContent* content_ = nullptr;
+    const Layer* layer_ = nullptr;
+    math::Aabb extent_;
+    std::size_t walks_ = 0;
+};
+
 // World-space INFLUENCE bound: the geometry bound for local ops, the LAYER's
 // extent for an intersect, and infinite for what genuinely has none — a
 // spatial morph, an infinite grid repeat, an unbounded primitive.
@@ -102,11 +152,12 @@ math::Aabb layer_influence_extent(const SdfContent& content, const Layer& layer)
 // stays false for every non-local op, so per-brick culling still cannot drop
 // an intersect from a tape.
 //
-// `layer_extent` is an optimisation, not a parameter with meaning: pass the
-// layer's extent if you already hold it and this will not recompute it. Only
-// an intersect reads it, so a layer without one pays nothing either way.
+// `extent` is an optimisation, not a parameter with meaning: pass one and the
+// layer walk behind the intersect case happens once for the whole query
+// instead of once per call. Only an intersect reads it, so a layer without one
+// pays nothing either way, and passing nothing is the old behaviour.
 math::Aabb item_influence_bound(const Node& item, const Layer& layer,
-                                const math::Aabb* layer_extent = nullptr);
+                                LayerExtent* extent = nullptr);
 
 // The item ALONE, as the layer places it: the influence bound without the
 // reflected and rotated copies the layer's symmetry emits and without the
@@ -282,7 +333,8 @@ float cull_pad(const SdfContent& content, const Layer& layer);
 
 // Influence bound of any node (recursive union for groups, dilated by the
 // group's blend support; infinite for intersect anywhere in the subtree).
-math::Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& layer);
+math::Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& layer,
+                                LayerExtent* extent = nullptr);
 
 // How far a GROUP's combine spreads a change in one of its operands. Shared by
 // node_influence_bound, which applies it to the union of the children, and
@@ -302,7 +354,8 @@ float group_blend_support(const Node& group, const Layer& layer);
 //
 // Infinite when the node is non-local or any group above it is; empty when the
 // node, or any group above it, is hidden or absent.
-math::Aabb node_reach_bound(const SdfContent& content, NodeId id, const Layer& layer);
+math::Aabb node_reach_bound(const SdfContent& content, NodeId id, const Layer& layer,
+                            LayerExtent* extent = nullptr);
 
 // Whole-layer bound (union of root node bounds).
 // The box outside which this node cannot change the DOCUMENT's field: the union
@@ -311,9 +364,9 @@ math::Aabb node_reach_bound(const SdfContent& content, NodeId id, const Layer& l
 // node_influence_bound wherever a Document is in scope and the answer is going
 // to a host as a region to dirty (issue #325).
 math::Aabb node_influence_bound_in_document(const Document& doc, const SdfContent& content,
-                                            NodeId id);
+                                            NodeId id, LayerExtent* extent = nullptr);
 
-math::Aabb layer_influence_bound(const Layer& layer);
+math::Aabb layer_influence_bound(const Layer& layer, LayerExtent* extent = nullptr);
 
 }  // namespace scene
 }  // namespace clay

@@ -314,16 +314,17 @@ float item_field_distance(const scene::Layer& probe, const scene::Node& item, cf
 // asked; `probe` is probe_layer(layer), what each is asked under.
 void attribute_content(const scene::Layer& layer, const scene::Layer& probe,
                        const scene::SdfContent& content, const std::vector<scene::NodeId>& ids,
-                       cfloat3 p, float* best, scene::NodeId* best_item) {
+                       cfloat3 p, float* best, scene::NodeId* best_item,
+                       scene::LayerExtent* extent) {
     for (scene::NodeId id : ids) {
         const scene::Node* n = content.find(id);
         if (!n || !n->visible) continue;
         if (n->is_group) {
-            attribute_content(layer, probe, content, n->children, p, best, best_item);
+            attribute_content(layer, probe, content, n->children, p, best, best_item, extent);
             continue;
         }
         // cheap reject: influence bound
-        if (!scene::item_influence_bound(*n, layer).dilated(0.05f).contains(p)) continue;
+        if (!scene::item_influence_bound(*n, layer, extent).dilated(0.05f).contains(p)) continue;
         float d = item_field_distance(probe, *n, p);
         if (d < *best) {
             *best = d;
@@ -344,8 +345,11 @@ void attribute_item(const scene::Document& doc, scene::LayerId layer, cfloat3 po
     if (!winner || !winner->sdf) return;
     const scene::Layer probe = probe_layer(*winner);
     float best_item_d = 3.4e38f;
+    // One layer extent for the whole walk: every intersect among the items
+    // asks for it, and taking it per item made attribution quadratic (#451).
+    scene::LayerExtent extent;
     attribute_content(*winner, probe, *winner->sdf, winner->sdf->roots, position, &best_item_d,
-                      item);
+                      item, &extent);
 }
 
 // The layer whose own field is nearest the position, by compiling each

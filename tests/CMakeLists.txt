@@ -191,6 +191,7 @@ add_executable(clay_unit_tests
   unit/test_groups.cpp
   unit/test_cull_pad_stability.cpp
   unit/test_node_reach_bound.cpp
+  unit/test_layer_extent_memo.cpp
   unit/test_mesh_layers.cpp
   unit/test_quad_mesh.cpp
   unit/test_c_quad_mesh.cpp
