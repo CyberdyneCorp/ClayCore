@@ -108,6 +108,59 @@ math::Aabb layer_influence_extent(const SdfContent& content, const Layer& layer)
 // VALID ONLY WHILE THE DOCUMENT IS NOT MUTATED. It is a scratch value for one
 // query, never a member: the extent it holds is the geometry of the nodes as
 // they were when it was taken.
+// A layer's extent, KEPT ACROSS EDITS, with the items that define its faces.
+//
+// `LayerExtent` below memoizes one query. This survives them, which is what an
+// intersect drag needs: the extent is recomputed on every edit because every
+// edit might have changed it, and walking a layer is 96% of what an intersect's
+// bound costs (#451).
+//
+// THE TRICK IS THE DEFINERS. The extent is a union of per-item boxes, so each
+// of its six faces is achieved by some item. If an edit moves an item that
+// achieves NONE of them, and the item's new box still fits inside, the union
+// cannot have changed -- the item was never holding a face out and it is not
+// pushing one out now. That is exact, not conservative, and it is decided with
+// one item bound and six comparisons instead of a walk.
+//
+// If the edited item DOES define a face, the extent may have to SHRINK, and a
+// union cannot shrink -- so that case walks. An item at the edge of a model
+// therefore costs what it always did, and an item inside it costs nothing.
+class LayerExtentCache {
+  public:
+    // The extent, walking only if what is held cannot be trusted.
+    const math::Aabb& of(const SdfContent& content, const Layer& layer);
+
+    // What an edit to `node` did to the extent, called AFTER the edit. Returns
+    // true if the cache survived it.
+    //
+    // Conservative in the direction that costs time rather than correctness:
+    // anything it cannot reason about invalidates, and the next `of` walks.
+    bool note_item_changed(const SdfContent& content, const Layer& layer, NodeId node);
+
+    // Everything else -- a layer transform, a mirror, a visibility change, a
+    // command touching more than one item, a document it has never seen.
+    void invalidate() { valid_ = false; }
+
+    // Walks actually performed, for the same reason `LayerExtent::walks()`
+    // exists: the extent is identical whether it was kept or recomputed, so
+    // nothing about it can say which happened.
+    std::size_t walks() const { return walks_; }
+    std::size_t keeps() const { return keeps_; }
+
+  private:
+    void recompute(const SdfContent& content, const Layer& layer);
+
+    const SdfContent* content_ = nullptr;
+    const Layer* layer_ = nullptr;
+    math::Aabb extent_;
+    // The item achieving each face, in the order min.x, min.y, min.z, max.x,
+    // max.y, max.z. kNoNode where the extent is empty.
+    NodeId definers_[6] = {kNoNode, kNoNode, kNoNode, kNoNode, kNoNode, kNoNode};
+    bool valid_ = false;
+    std::size_t walks_ = 0;
+    std::size_t keeps_ = 0;
+};
+
 class LayerExtent {
   public:
     const math::Aabb& of(const SdfContent& content, const Layer& layer) {

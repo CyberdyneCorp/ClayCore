@@ -147,6 +147,7 @@ add_executable(clay_unit_tests
   unit/test_c_field_stamp.cpp
   unit/test_volume_cull.cpp
   unit/test_deformer_cull.cpp
+  unit/test_layer_extent_cache.cpp
   unit/test_relief.cpp
   unit/test_mask_brush.cpp
   unit/test_masked_combine.cpp
