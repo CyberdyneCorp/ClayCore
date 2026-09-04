@@ -347,6 +347,28 @@ class Document {
     std::vector<Layer> layers;
     std::vector<NodeId> selection;
 
+    // Advances whenever a COMMAND changes this document (issue #451).
+    //
+    // Distinct from the ABI's `revision`, which advances at the END of an edit
+    // and therefore cannot separate the document before an apply from the
+    // document after it. `apply_edit` takes `command_influence_bound` on BOTH
+    // sides, so a cache keyed on that revision answers the second call with the
+    // first's geometry -- a bound that is too small, which is
+    // under-invalidation and shows up as stale bricks rather than as an error.
+    // That was measured: a memo keyed on `revision` reported one walk and zero
+    // reuses per drag frame, which is only possible if both calls saw the same
+    // key.
+    //
+    // Bumped in `scene::apply`, which is the ONE funnel every command-based
+    // mutation passes through -- ordinary edits, undo, redo and a replayed
+    // journal all reach it -- so nothing has to be enumerated and nothing can
+    // be missed by adding a command later. A mutation made WITHOUT a command
+    // (a consolidation installing a volume, say) does not reach it, and the
+    // binding that owns such a path bumps this where it already invalidates.
+    //
+    // Runtime only: never serialized, and meaningless across documents.
+    std::uint64_t content_serial = 1;
+
     Layer& add_sdf_layer(std::string name) {
         Layer l;
         l.id = next_layer_id_++;

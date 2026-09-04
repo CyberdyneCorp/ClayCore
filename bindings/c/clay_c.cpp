@@ -1120,6 +1120,36 @@ struct clay_document {
     // another thread invalidating and rebuilding.
     std::atomic<std::uint64_t> revision{1};
 
+    // -- the layer-extent memo (#451) ---------------------------------------
+    //
+    // #319 gave an intersect a finite bound and made computing it a walk of
+    // every visible node; #454 stopped that walk repeating per intersect within
+    // one query. What it left is that `apply_edit` takes
+    // `command_influence_bound` on BOTH sides of every command, so a drag paid
+    // two full layer walks a frame -- 0.0353 ms against 0.0003 for the same
+    // drag with a subtracting operand, on a 401-item layer.
+    //
+    // KEYED ON `content_serial`, NOT ON `revision`. The revision advances at
+    // the END of an edit, so both calls see the same one and a memo keyed on it
+    // hands the second the FIRST's geometry: a bound that is too small, which
+    // is under-invalidation and reads as stale bricks rather than as an error.
+    // That is not hypothetical -- keyed on `revision` this reported one walk
+    // and zero reuses per frame, which is only possible if both calls shared a
+    // key. `content_serial` advances inside `scene::apply`, so the two calls
+    // land either side of it and the memo taken after frame N's apply is the
+    // one frame N+1 opens with.
+    scene::LayerExtent* extent_at(std::uint64_t serial) {
+        if (extent_serial_ != serial) {
+            extent_walks_ += extent_memo_.walks();  // carry the retired tally
+            extent_memo_ = scene::LayerExtent{};
+            extent_serial_ = serial;
+        }
+        return &extent_memo_;
+    }
+    std::uint64_t content_serial() const { return doc.document.content_serial; }
+    std::uint64_t extent_walks() const { return extent_walks_ + extent_memo_.walks(); }
+    std::uint64_t extent_reuses = 0;
+
     // Per mesh layer, bumped only when its triangles are REPLACED wholesale.
     // See mesh_layer_revision_of for why a sculpt deliberately does not bump it
     // and why the pointer and count checks that came before it are not enough.
@@ -1132,6 +1162,12 @@ struct clay_document {
     // appended must land here.
     void touch() {
         std::lock_guard<std::mutex> lock(cache_mutex_);
+        // A mutation that did NOT come through a command -- a consolidation
+        // installing a volume, a replayed journal's non-command half -- never
+        // reaches `scene::apply` and so never advances `content_serial`. This
+        // is where such a path already says "everything I cached is stale", so
+        // it is where the extent memo learns it too.
+        ++doc.document.content_serial;
         forget_appends();
         // A seed is only usable across APPENDS, so one kept past any other
         // edit is memory nothing can ever read again.
@@ -2419,6 +2455,9 @@ struct clay_document {
     }
 
     mutable std::mutex cache_mutex_;
+    scene::LayerExtent extent_memo_;
+    std::uint64_t extent_serial_ = 0;  // never a live serial; those start at 1
+    std::uint64_t extent_walks_ = 0;
     mutable std::shared_ptr<const scene::Tape> tape_cache_;
     mutable std::uint64_t tape_revision_ = 0;
     // Where a resumed compile picks tape_cache_ up, and the appends recorded
@@ -3484,11 +3523,20 @@ clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char
     // Gathered before the apply because after it the old shape is gone.
     clay_result r = edit_guard(doc, cmd);
     if (r != CLAY_OK) return r;
-    const math::Aabb reach_before = scene::command_influence_bound(doc->doc.document, cmd);
+    // The two walks land either side of `scene::apply`, which advances
+    // `content_serial` -- so the memo cannot answer the second with the first's
+    // geometry, and the one left after this edit is the one the NEXT edit opens
+    // with. A drag therefore walks once a frame rather than twice (#451).
+    scene::LayerExtent* before_memo = doc->extent_at(doc->content_serial());
+    const std::size_t walks_before = before_memo->walks();
+    const math::Aabb reach_before =
+        scene::command_influence_bound(doc->doc.document, cmd, before_memo);
+    if (before_memo->walks() == walks_before && walks_before > 0) ++doc->extent_reuses;
     r = perform_edit(doc, cmd, what);
     if (r != CLAY_OK) return r;
     math::Aabb reach = reach_before;
-    reach.expand(scene::command_influence_bound(doc->doc.document, cmd));
+    reach.expand(scene::command_influence_bound(doc->doc.document, cmd,
+                                                doc->extent_at(doc->content_serial())));
     // The funnel every command-based edit passes through, so the tape cache is
     // invalidated in one place for all of them — and the one place that can
     // tell the cache an edit was an APPEND, which is what a brush stamp is
@@ -6340,6 +6388,8 @@ namespace {
 
 constexpr std::size_t kSculptPolicyOriginal =
     offsetof(clay_sculpt_policy, allow_consolidation) + sizeof(std::int32_t);
+constexpr std::size_t kExtentStatsOriginal =
+    offsetof(clay_extent_stats, reuses) + sizeof(std::uint64_t);
 constexpr std::size_t kWarpCostOriginal =
     offsetof(clay_layer_warp_cost, finite_support_warps) + sizeof(std::uint64_t);
 constexpr std::size_t kPrefixStatsOriginal =
@@ -12358,6 +12408,18 @@ clay_result clay_document_resume_stats(const clay_document* doc, clay_resume_sta
     doc->resume_stats(&filled.entries, &filled.bytes, &filled.budget, &filled.resumed_bricks,
                       &filled.refilled_bricks);
     write_desc(out_stats, declared, filled);
+    return CLAY_OK;
+}
+
+clay_result clay_document_extent_stats(const clay_document* doc, clay_extent_stats* out_stats) {
+    if (!doc || !out_stats) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or stats");
+    clay_extent_stats probe;
+    clay_result r = read_desc(out_stats, kExtentStatsOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    clay_extent_stats filled{};
+    filled.walks = doc->extent_walks();
+    filled.reuses = doc->extent_reuses;
+    write_desc(out_stats, out_stats->struct_size, filled);
     return CLAY_OK;
 }
 
