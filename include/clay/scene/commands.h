@@ -226,7 +226,20 @@ LayerId edited_layer(const Command& cmd);
 //     per instance, each through that layer's own transform.
 // A command that cannot change what the document evaluates to — a rename, a
 // protection flag — reports an empty box rather than the layer's.
-math::Aabb command_influence_bound(const Document& doc, const Command& cmd);
+class LayerExtent;  // bounds.h; forward so this header stays light
+
+// `extent` (optional) memoizes the LAYER EXTENT an intersect's bound needs --
+// see bounds.h. It matters here because this is called TWICE per edit, on
+// either side of the apply, and #319 made that walk O(items) where it used to
+// be constant: an intersect drag paid two full layer walks a frame (#451).
+//
+// THE MEMO KEYS ON POINTER IDENTITY, NOT ON CONTENT, so one handed to both
+// calls would answer the second with the first's geometry -- and the two calls
+// straddle the apply precisely because the document differs between them. A
+// caller reusing one across an edit must key it on `Document::content_serial`,
+// which advances inside `apply` for exactly this reason.
+math::Aabb command_influence_bound(const Document& doc, const Command& cmd,
+                                   LayerExtent* extent = nullptr);
 
 // What an AddLayerCmd that REINSERTS an existing layer must name as its
 // content source: the first OTHER layer in stack order holding the same edit
