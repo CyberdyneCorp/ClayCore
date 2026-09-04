@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 80
+#define CLAY_ABI_MINOR 81
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -9288,6 +9288,28 @@ typedef struct clay_resume_stats {
 } clay_resume_stats;
 
 clay_result clay_document_resume_stats(const clay_document* doc, clay_resume_stats* out_stats);
+
+/* What computing an INTERSECT's bound has cost this document (issue #451).
+ *
+ * An intersect is bounded by its layer's EXTENT, and computing that extent
+ * walks every visible node taking its geometry bound. Before ABI 0.74.0 an
+ * intersect answered "everything" in constant time, so nothing cared; after it,
+ * every edit pays, and a host whose drag got slower had no way to see why.
+ *
+ * `walks` is how many of those walks ran. `reuses` is how many were answered
+ * from the previous edit's memo instead -- an edit takes the bound on BOTH
+ * sides, so a drag would otherwise pay two a frame and this is what makes it
+ * one.
+ *
+ * Both are cumulative and diagnostic. A document with no intersect in any layer
+ * reports zeroes forever: nothing else needs a layer's extent. */
+typedef struct clay_extent_stats {
+    uint32_t struct_size; /* = sizeof(clay_extent_stats); required */
+    uint64_t walks;       /* layer walks performed */
+    uint64_t reuses;      /* bounds answered from the memo instead */
+} clay_extent_stats;
+
+clay_result clay_document_extent_stats(const clay_document* doc, clay_extent_stats* out_stats);
 
 /* One evaluation request, and the only thing that crosses between the cache
  * and the host's evaluator.

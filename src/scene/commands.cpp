@@ -286,7 +286,12 @@ std::optional<Command> apply(Document& doc, const Command& cmd) {
         const Layer* l = doc.find_layer(target);
         if (l && l->protected_from_edits()) return std::nullopt;
     }
-    return std::visit([&](const auto& c) { return apply_one(doc, c); }, cmd);
+    std::optional<Command> inverse = std::visit([&](const auto& c) { return apply_one(doc, c); }, cmd);
+    // Only where the document actually changed. A refusal returns nullopt and
+    // leaves it untouched, so advancing the serial there would invalidate a
+    // cache for an edit that never happened.
+    if (inverse) ++doc.content_serial;
+    return inverse;
 }
 
 // ---------------------------------------------------------------------------
@@ -308,22 +313,23 @@ namespace {
 // bounds are defined. A sibling's geometry is not something the edit can
 // reach, and including it made the region grow with the size of the group
 // rather than with the size of the edit.
-math::Aabb node_command_bound(const Document& doc, LayerId layer_id, NodeId node) {
+math::Aabb node_command_bound(const Document& doc, LayerId layer_id, NodeId node,
+                             LayerExtent* extent) {
     const Layer* target = doc.find_layer(layer_id);
     if (!target || !target->sdf) return math::Aabb{};
     math::Aabb bound;
     for (const Layer& l : doc.layers) {
         if (l.sdf != target->sdf) continue;
-        const math::Aabb b = node_reach_bound(*l.sdf, node, l);
+        const math::Aabb b = node_reach_bound(*l.sdf, node, l, extent);
         if (b.is_infinite()) return math::Aabb::infinite();
         bound.expand(b);
     }
     return bound;
 }
 
-math::Aabb layer_command_bound(const Document& doc, LayerId layer_id) {
+math::Aabb layer_command_bound(const Document& doc, LayerId layer_id, LayerExtent* extent) {
     const Layer* l = doc.find_layer(layer_id);
-    return l ? layer_influence_bound(*l) : math::Aabb{};
+    return l ? layer_influence_bound(*l, extent) : math::Aabb{};
 }
 
 }  // namespace
@@ -336,7 +342,8 @@ LayerId content_sharer_of(const Document& doc, LayerId layer) {
     return 0;
 }
 
-math::Aabb command_influence_bound(const Document& doc, const Command& cmd) {
+math::Aabb command_influence_bound(const Document& doc, const Command& cmd,
+                                   LayerExtent* extent) {
     return std::visit(
         [&](const auto& c) -> math::Aabb {
             using C = std::decay_t<decltype(c)>;
@@ -346,18 +353,19 @@ math::Aabb command_influence_bound(const Document& doc, const Command& cmd) {
                           std::is_same_v<C, SetLayerProtectionCmd>)
                 return math::Aabb{};
             else if constexpr (std::is_same_v<C, AddLayerCmd>)
-                return layer_command_bound(doc, c.layer.id);
+                return layer_command_bound(doc, c.layer.id, extent);
             else if constexpr (std::is_same_v<C, RemoveLayerCmd> ||
                                std::is_same_v<C, SetLayerVisibleCmd> ||
                                std::is_same_v<C, SetLayerTransformCmd> ||
                                std::is_same_v<C, SetLayerMirrorCmd> ||
                                std::is_same_v<C, SetLayerRadialCmd>)
-                return layer_command_bound(doc, c.id);
+                return layer_command_bound(doc, c.id, extent);
             else if constexpr (std::is_same_v<C, AddNodeCmd>)
                 return c.subtree.empty() ? math::Aabb{}
-                                         : node_command_bound(doc, c.layer, c.subtree.front().id);
+                                         : node_command_bound(doc, c.layer, c.subtree.front().id,
+                                                              extent);
             else
-                return node_command_bound(doc, c.layer, c.node);
+                return node_command_bound(doc, c.layer, c.node, extent);
         },
         cmd);
 }
