@@ -242,6 +242,10 @@ ALIASES = {
     "MultiresSurface.base_revision": "clay_multires_revision",
     "MultiresSurface.detail_revision": "clay_multires_revision",
     "MultiresSurface.evaluated_revision": "clay_multires_revision",
+    # The struct owns the bare name (`clay_layer_warp_cost`), so the entry point
+    # that fills it takes the `_get` suffix -- the same shape
+    # clay_dynamic_surface_stats_get has above, and for the same reason.
+    "Layer.warp_cost": "clay_layer_warp_cost_get",
     "MultiresSurface.memory": "clay_multires_memory_get",
     "MultiresSurface.eval_stats": "clay_multires_memory_get",
     "MultiresSurface.reset_eval_stats": "clay_multires_memory_get",

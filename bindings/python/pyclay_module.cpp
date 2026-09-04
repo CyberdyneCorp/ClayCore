@@ -5714,6 +5714,43 @@ NB_MODULE(pyclay, m) {
              "Which nodes a move WOULD warp, without touching the document — so a\n"
              "host can preview a drag, or show what it is about to affect, before\n"
              "committing it. Resolving is pure; applying is what changes things.")
+        .def("warp_cost",
+             [](PyLayer& l) {
+                 // Issue #452. `consolidation_cost` says what BAKING the layer
+                 // would cost; this says whether it has accumulated enough
+                 // warps to be worth baking. A drag records a grab on every
+                 // item it reaches and each is evaluated per sample for the
+                 // life of the edit list, so a session of Move gestures gets
+                 // steadily dearer with nothing in the document that looks
+                 // like a cost.
+                 nb::dict out;
+                 std::uint64_t items = 0, warped = 0, warps = 0, finite = 0;
+                 const scene::Layer* layer = l.doc->document.find_layer(l.id);
+                 if (layer && layer->kind == scene::LayerKind::Sdf && layer->sdf) {
+                     for (const auto& entry : layer->sdf->nodes()) {
+                         const scene::Node& n = entry.second;
+                         ++items;
+                         if (n.deformers.empty()) continue;
+                         ++warped;
+                         warps += n.deformers.size();
+                         for (const scene::Deformer& d : n.deformers)
+                             if (d.type == kernel::cdeform_grab) ++finite;
+                     }
+                 }
+                 out["items"] = items;
+                 out["warped_items"] = warped;
+                 out["warps"] = warps;
+                 out["finite_support_warps"] = finite;
+                 return out;
+             },
+             "What the warps this layer has accumulated are charging it.\n\n"
+             "`warps` is what a WHOLE-DOCUMENT evaluation pays for, which is the\n"
+             "number that follows the accumulation. `finite_support_warps` is how\n"
+             "many of those a culled tape can drop where its region does not reach\n"
+             "them, so the per-brick paths pay only for the rest — the difference\n"
+             "is what working in bricks wins. A layer that cannot carry a warp\n"
+             "reports zeroes rather than raising, because 'none' is the true\n"
+             "answer for one.")
         .def("move_surface",
              [](PyLayer& l, nb::handle centre, nb::handle displacement, float radius,
                 int ease, bool front_only) {

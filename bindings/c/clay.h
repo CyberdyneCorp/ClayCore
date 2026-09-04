@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 79
+#define CLAY_ABI_MINOR 80
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -5124,7 +5124,34 @@ typedef struct clay_move_params {
  * The surface moves LESS than the displacement asked for — the region weight
  * is taken at the sample point rather than at its preimage, so a drag of 0.5
  * over a radius of 0.8 moves a tip about 0.31. That is grab's documented
- * behaviour and the pull is monotonic, so a UI can calibrate against it. */
+ * behaviour and the pull is monotonic, so a UI can calibrate against it.
+ *
+ * A GRAB IS NOT FREE AFTER IT LANDS, and this reads like a bounded local edit
+ * that is. Each one is recorded as a WARP on every item it reached, and a warp
+ * is evaluated per sample for as long as it is in the edit list — so the layer
+ * costs more to evaluate after the drag than before, permanently, and by about
+ * the same amount again for every drag after that. Measured on a worked ball
+ * (issue #452): a fixed 16,000-point grid evaluates at 1.00x with no grabs and
+ * 3.60x after twelve, dead linear at roughly 0.14 ms a grab, and it is paid by
+ * every later brush dab, remesh and viewport refresh on that layer rather than
+ * by Move alone.
+ *
+ * It is a property of the representation and not a defect: a warp is a domain
+ * deformation, and two of them do not compose into one that could be stored
+ * instead. What the library does about it is narrower than that:
+ *
+ *   - A CULLED tape drops a grab whose radius its region cannot reach, so the
+ *     per-brick paths — a refill, and meshing with gradient normals — pay only
+ *     for the grabs that actually reach the brick. A whole-document evaluation
+ *     has no region to test against and pays for all of them.
+ *   - clay_layer_warp_cost reports what the layer is currently carrying, so a
+ *     host can decide when the accumulation is worth spending a consolidation
+ *     on rather than guessing.
+ *
+ * clay_layer_consolidate is the only thing that gives the cost back in full,
+ * and it is the large hammer it looks like: it bakes the edit list, so the
+ * items and their parameters are gone. Its price is
+ * clay_layer_consolidation_cost. */
 /* Which nodes a move WOULD warp, without touching the document, so a host can
  * preview a drag before committing it. Size-query pattern: call with
  * out_nodes == NULL to receive the count in *out_count, then again with a
@@ -5140,6 +5167,34 @@ clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
                                     const float centre[3],
                             const float displacement[3], const clay_move_params* params,
                             size_t* out_applied);
+
+/* What the warps a layer has accumulated are charging it (issue #452).
+ *
+ * clay_layer_consolidation_cost answers what it would cost to BAKE the layer.
+ * This answers the question a host actually has first: whether the layer has
+ * accumulated enough warps to be worth baking at all. A drag records a grab on
+ * every item it reaches and every one of those is evaluated per sample for the
+ * life of the edit list, so a session of Move gestures gets steadily dearer to
+ * evaluate with nothing in the document that looks like a cost.
+ *
+ * `warps` is the number a WHOLE-DOCUMENT evaluation pays for, which is the one
+ * that follows the accumulation. `finite_support_warps` is how many of those a
+ * CULLED tape can drop when its region does not reach them — the per-brick
+ * paths pay only for the rest — so the difference between the two is what a
+ * host would win by working in bricks rather than over the whole field.
+ *
+ * A layer that is not an SDF layer reports zeroes rather than being refused:
+ * "no warps" is the true answer for one that cannot carry any. */
+typedef struct clay_layer_warp_cost {
+    uint32_t struct_size; /* = sizeof(clay_layer_warp_cost); required */
+    uint64_t items;                /* items in the layer */
+    uint64_t warped_items;         /* those carrying at least one warp */
+    uint64_t warps;                /* warp records in total */
+    uint64_t finite_support_warps; /* those a culled tape can drop */
+} clay_layer_warp_cost;
+
+clay_result clay_layer_warp_cost_get(const clay_document* doc, clay_layer_id layer,
+                                     clay_layer_warp_cost* out_cost);
 
 /* -- magnify / pinch on the assembled surface ------------------------------- */
 

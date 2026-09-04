@@ -663,3 +663,80 @@ TEST_CASE("c abi: removing a deformer is one undoable edit") {
     CHECK(undone == 1);
     CHECK(saved(d.doc) == with_twist);  // the warp is back, exactly
 }
+
+
+TEST_CASE("c abi: a layer reports what its accumulated warps cost") {
+    // Issue #452's third ask: clay_layer_consolidation_cost says what BAKING
+    // would cost, and a host's first question is whether the layer has
+    // accumulated enough warps to be worth baking at all.
+    CDoc d;
+    const clay_layer_id layer = blended_form(d.doc);
+
+    clay_layer_warp_cost cost;
+    std::memset(&cost, 0, sizeof cost);
+    cost.struct_size = static_cast<uint32_t>(sizeof cost);
+    REQUIRE(clay_layer_warp_cost_get(d.doc, layer, &cost) == CLAY_OK);
+    CHECK(cost.items == 2);
+    CHECK(cost.warps == 0);
+    CHECK(cost.warped_items == 0);
+
+    // Each drag records a warp on every item it reaches, and the count is what
+    // a whole-document evaluation pays for.
+    clay_move_params mp;
+    std::memset(&mp, 0, sizeof mp);
+    mp.struct_size = static_cast<uint32_t>(sizeof mp);
+    mp.radius = 0.6f;
+    const float centre[3] = {-0.45f, 0.0f, 0.5f};
+    const float disp[3] = {0.0f, 0.0f, 0.05f};
+    size_t applied = 0;
+    REQUIRE(clay_layer_move_surface(d.doc, layer, centre, disp, &mp, &applied) == CLAY_OK);
+    REQUIRE(applied > 0);
+
+    clay_layer_warp_cost after = cost;
+    after.struct_size = static_cast<uint32_t>(sizeof after);
+    REQUIRE(clay_layer_warp_cost_get(d.doc, layer, &after) == CLAY_OK);
+    CHECK(after.warps == static_cast<uint64_t>(applied));
+    CHECK(after.warped_items == static_cast<uint64_t>(applied));
+    // A grab has finite support, so every one of these is a warp a culled tape
+    // can drop where its region does not reach it. The gap between this and
+    // `warps` is what a host wins by working in bricks.
+    CHECK(after.finite_support_warps == after.warps);
+
+    // A second drag adds ITS OWN warps; nothing composes them with the first,
+    // which is the whole of why the cost accumulates. Asserted against what the
+    // second drag actually reached rather than against twice the first: a drag
+    // that lands where the surface has already moved away can reach fewer items
+    // than the one before it, and the first version of this check assumed it
+    // could not and read 2 against an expected 4.
+    const uint64_t first_reach = static_cast<uint64_t>(applied);
+    size_t applied_again = 0;
+    const float elsewhere[3] = {0.45f, 0.0f, 0.5f};
+    REQUIRE(clay_layer_move_surface(d.doc, layer, elsewhere, disp, &mp, &applied_again) ==
+            CLAY_OK);
+    clay_layer_warp_cost twice = cost;
+    twice.struct_size = static_cast<uint32_t>(sizeof twice);
+    REQUIRE(clay_layer_warp_cost_get(d.doc, layer, &twice) == CLAY_OK);
+    CHECK(twice.warps == first_reach + static_cast<uint64_t>(applied_again));
+    CHECK(twice.warps > after.warps);  // it accumulated rather than composing
+}
+
+TEST_CASE("c abi: a layer that cannot carry a warp reports none") {
+    // Zeroes rather than a refusal: "no warps" is the true answer for a mesh
+    // layer, and a host walking its stack should not special-case the kinds.
+    CDoc d;
+    clay_layer_id voxel_layer = 0;
+    clay_voxel_grid* grid = nullptr;
+    REQUIRE(clay_document_add_voxel_layer(d.doc, "voxels", 0.1f, &voxel_layer, &grid) ==
+            CLAY_OK);
+    clay_layer_warp_cost cost;
+    std::memset(&cost, 0, sizeof cost);
+    cost.struct_size = static_cast<uint32_t>(sizeof cost);
+    REQUIRE(clay_layer_warp_cost_get(d.doc, voxel_layer, &cost) == CLAY_OK);
+    CHECK(cost.warps == 0);
+    CHECK(cost.items == 0);
+
+    // And a layer that is not there at all is a typed not-found rather than a
+    // zeroed answer, because "no such layer" and "no warps" are different
+    // things a host acts on differently.
+    CHECK(clay_layer_warp_cost_get(d.doc, 99999u, &cost) == CLAY_ERROR_NOT_FOUND);
+}
