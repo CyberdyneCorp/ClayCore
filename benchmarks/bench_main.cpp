@@ -313,6 +313,66 @@ void refill_pole_dab(benchmark::State& state, int nodes) {
 
 }  // namespace
 
+// A 60-frame layer drag: one refill against sixty
+// (drag-a-layer-without-a-refill).
+//
+// Moving a whole layer rigidly changes no shape -- the layer's transform
+// reaches the tape only as a change of frame -- but SetLayerTransformCmd
+// invalidates the layer's whole box, so every frame of a gizmo drag re-walks
+// every brick in it. The gesture holds the placement instead and applies one
+// command at the end.
+//
+// COUNTED, NOT TIMED, in the counter that decides it: `refills` is how many
+// times the dirty set had to be walked. The two rows do the same drag and
+// differ only in how many refills it cost, so a ratio of 60 is the claim and no
+// clock is involved in checking it.
+namespace {
+
+void layer_drag(benchmark::State& state, bool gesture) {
+    scene::Document doc = sculpted_sphere(193);
+    scene::Layer& layer = doc.layers.front();
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    const int frames = 60;
+
+    for (auto _ : state) {
+        brick::BrickCache cache = filled_cache(doc);
+        std::size_t refills = 0;
+        std::vector<float> values;
+        // The whole layer's reach, which is what a placement invalidates.
+        const math::Aabb reach = scene::layer_influence_extent(*layer.sdf, layer);
+
+        for (int f = 0; f < frames; ++f) {
+            math::Transform x;
+            x.position = cf3(0.01f * static_cast<float>(f), 0.0f, 0.0f);
+            layer.xform = x;
+            // A gesture records the frame and invalidates nothing; without one
+            // every frame is a placement, and every placement drops the layer.
+            if (gesture && f + 1 < frames) continue;
+            cache.mark_dirty(reach);
+            const std::vector<brick::BrickRequest> reqs = cache.take_dirty();
+            scene::CullIndex index(doc);
+            for (const brick::BrickRequest& req : reqs) {
+                scene::CullRegion cull{cache.cull_region(req.key)};
+                scene::Tape tape = scene::compile_document(doc, &cull, &index);
+                values.resize(static_cast<std::size_t>(req.grid.nx) * req.grid.ny * req.grid.nz);
+                cpu->eval_grid(tape, req.grid, values.data());
+            }
+            ++refills;
+            benchmark::DoNotOptimize(values.data());
+        }
+        state.counters["refills"] = static_cast<double>(refills);
+    }
+    state.counters["frames"] = static_cast<double>(frames);
+}
+
+}  // namespace
+
+void BM_LayerDragPerFrame(benchmark::State& state) { layer_drag(state, /*gesture=*/false); }
+BENCHMARK(BM_LayerDragPerFrame)->Unit(benchmark::kMillisecond);
+
+void BM_LayerDragOneRefill(benchmark::State& state) { layer_drag(state, /*gesture=*/true); }
+BENCHMARK(BM_LayerDragOneRefill)->Unit(benchmark::kMillisecond);
+
 void BM_DabRefillFreshDoc(benchmark::State& state) { refill_pole_dab(state, 1); }
 BENCHMARK(BM_DabRefillFreshDoc)->Unit(benchmark::kMillisecond);
 

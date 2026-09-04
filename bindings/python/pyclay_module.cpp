@@ -66,6 +66,7 @@
 #include "clay/scene/commands.h"
 #include "clay/session/history.h"
 #include "clay/scene/consolidate.h"
+#include "clay/scene/placement.h"
 #include "clay/scene/curve.h"
 #include "clay/scene/tape.h"
 #include "clay/version.h"
@@ -1510,8 +1511,31 @@ brush::MeasureSettings measure_settings_from(nb::handle params) {
 // format records for it — and, once the undo stack is exposed, is undoable
 // for free. apply() returns nullopt when the target does not exist and leaves
 // the document untouched.
+// Which documents have a placement gesture open, and on which layer.
+//
+// A REGISTRY rather than a parameter on apply_or_throw, because the guard has
+// to hold at every edit and threading an argument through fifty call sites is
+// fifty chances to leave one out -- and a missed one is an edit that silently
+// invalidates a gesture's premise. Keyed on the scene::Document, which is what
+// every edit already carries. Global state, bounded by the GIL and by there
+// being at most one entry per open gesture; the entry is erased when the
+// gesture closes and when the document it names goes away.
+std::unordered_map<const scene::Document*, scene::LayerId>& open_gestures() {
+    static std::unordered_map<const scene::Document*, scene::LayerId> g;
+    return g;
+}
+
+scene::LayerId gesture_on(const scene::Document& doc) {
+    const auto it = open_gestures().find(&doc);
+    return it == open_gestures().end() ? 0u : it->second;
+}
+
 void apply_or_throw(scene::Document& doc, const scene::Command& cmd, const char* what,
                    const UndoRef* undo = nullptr) {
+    if (const scene::LayerId open = gesture_on(doc); open != 0)
+        throw std::invalid_argument(std::string(what) + ": a placement gesture is open on layer " +
+                                    std::to_string(open) +
+                                    "; commit or cancel it before editing");
     // apply() says no for two different reasons. A protected layer is a state
     // the artist chose and deserves its own message; a missing id is a bug.
     scene::LayerId target = scene::edited_layer(cmd);
@@ -1537,6 +1561,29 @@ struct PyDocument {
     std::shared_ptr<MeshRevisions> mesh_revisions = std::make_shared<MeshRevisions>();
 };
 
+
+// A layer placement gesture: the document does not move until it commits.
+//
+// Holds no copy of the document -- the layer, the placement it opened with and
+// the latest one -- which is why an edit made underneath it is refused rather
+// than reconciled. Mirrors clay_placement_tx in the C ABI.
+struct PyPlacementGesture {
+    std::shared_ptr<io::ClaySpaceDoc> doc;
+    std::shared_ptr<UndoRef> undo;
+    scene::LayerId layer = 0;
+    math::Transform opened;
+    kernel::cfloat3 opened_axes = kernel::cf3(1.0f, 1.0f, 1.0f);
+    math::Transform latest;
+    bool updated = false;
+    bool open = false;
+
+    void close() {
+        if (open) open_gestures().erase(&doc->document);
+        open = false;
+    }
+    void cancel_from_exit() { close(); }
+    ~PyPlacementGesture() { close(); }
+};
 
 // The one place a mesh layer's triangles are swapped from Python, so both
 // callers get the same guards, the same undo record and the same invalidation.
@@ -2062,13 +2109,12 @@ nb::object eval_field(const scene::Tape& tape, nb::handle points,
     return nb::cast(nb::ndarray<nb::numpy, float>(aux, {n, 3}, aux_owner));
 }
 
-PyMesh mesh_document(const PyDocument& d, int resolution, nb::handle voxel_size,
-                     nb::handle decimate_ratio, const std::string& backend_name,
-                     const std::string& mesher, bool experimental) {
-    find_backend(backend_name);  // availability changes speed, never results
-    scene::Tape tape = scene::compile_document(d.doc->document);
-    if (tape.empty() || tape.bounds.empty() || tape.bounds.is_infinite())
-        throw std::invalid_argument("document has no bounded SDF content to mesh");
+// The mesher over whatever tape the caller compiled, so the whole-document
+// form and the one-layer form cannot drift on the resolution rule, the hidden
+// group drop or the decimation.
+PyMesh mesh_from_tape(const PyDocument& d, const scene::Tape& tape, int resolution,
+                      nb::handle voxel_size, nb::handle decimate_ratio,
+                      const std::string& mesher, bool experimental) {
     if (resolution <= 0) throw std::invalid_argument("resolution must be > 0");
     float voxel = voxel_size.is_none() ? 0.0f : nb::cast<float>(voxel_size);
     if (voxel <= 0.0f) {
@@ -2107,6 +2153,16 @@ PyMesh mesh_document(const PyDocument& d, int resolution, nb::handle voxel_size,
         }
     }
     return out;
+}
+
+PyMesh mesh_document(const PyDocument& d, int resolution, nb::handle voxel_size,
+                     nb::handle decimate_ratio, const std::string& backend_name,
+                     const std::string& mesher, bool experimental) {
+    find_backend(backend_name);  // availability changes speed, never results
+    scene::Tape tape = scene::compile_document(d.doc->document);
+    if (tape.empty() || tape.bounds.empty() || tape.bounds.is_infinite())
+        throw std::invalid_argument("document has no bounded SDF content to mesh");
+    return mesh_from_tape(d, tape, resolution, voxel_size, decimate_ratio, mesher, experimental);
 }
 
 // -- quad meshing -------------------------------------------------------------
@@ -2188,6 +2244,26 @@ nb::object quad_report_dict(const mesh::QuadFit& fit, std::size_t target) {
     out["within_tolerance"] = fit.within_tolerance;
     out["clamped"] = fit.clamped;
     return out;
+}
+
+// Mesh ONE SDF layer, in world space under that layer's transform. The mesh
+// half of the scoped split a placement preview draws from; `below = false` is
+// "this layer alone", which hard-unions with the excluding half to give the
+// whole document.
+PyMesh mesh_layer_only(const PyDocument& d, scene::LayerId layer, int resolution,
+                       nb::handle voxel_size, nb::handle decimate_ratio,
+                       const std::string& backend_name, const std::string& mesher,
+                       bool experimental) {
+    const scene::Layer* found = d.doc->document.find_layer(layer);
+    if (!found) throw std::invalid_argument("mesh_layer: no layer with that id");
+    if (found->kind != scene::LayerKind::Sdf || !found->sdf)
+        throw std::invalid_argument("mesh_layer: layer " + std::to_string(layer) +
+                                    " is not an SDF layer");
+    find_backend(backend_name);
+    scene::Tape tape = scene::compile_document_part(d.doc->document, layer, /*below=*/false);
+    if (tape.empty() || tape.bounds.empty() || tape.bounds.is_infinite())
+        throw std::invalid_argument("layer has no bounded SDF content to mesh");
+    return mesh_from_tape(d, tape, resolution, voxel_size, decimate_ratio, mesher, experimental);
 }
 
 PyMesh mesh_document_quads(const PyDocument& d, nb::handle cell_size, nb::handle target,
@@ -4230,6 +4306,99 @@ NB_MODULE(pyclay, m) {
                  });
              },
              "points"_a, "beta"_a = 2.0f, "1 where inside, 0 where outside -> (N,)");
+
+    nb::class_<PyPlacementGesture>(
+        m, "PlacementGesture",
+        "A layer placement gesture. The document does not move until commit(), so a drag "
+        "records one command and takes one invalidation instead of one per frame.")
+        .def("update",
+             [](PyPlacementGesture& g, nb::handle position, nb::handle rotation_axis_angle,
+                nb::handle scale) {
+                 if (!g.open) throw std::invalid_argument("update: gesture is closed");
+                 math::Transform x = g.opened;
+                 if (!position.is_none()) x.position = to_f3(position, "position");
+                 if (!rotation_axis_angle.is_none())
+                     x.rotation = to_axis_angle(rotation_axis_angle);
+                 if (!scale.is_none()) x.scale = nb::cast<float>(scale);
+                 // Recorded and nothing else: no bound, no invalidation, no
+                 // command. That is the whole point of the gesture.
+                 g.latest = x;
+                 g.updated = true;
+             },
+             "position"_a = nb::none(), "rotation_axis_angle"_a = nb::none(),
+             "scale"_a = nb::none(),
+             "The placement as it stands this frame. TOTAL, from where the gesture opened -- "
+             "never an increment on the last frame.")
+        .def("preview",
+             [](const PyPlacementGesture& g) {
+                 const scene::Layer* l = g.doc->document.find_layer(g.layer);
+                 if (!l) throw std::invalid_argument("preview: the layer is gone");
+                 scene::PlacementChange c = scene::placement_change(
+                     g.opened, g.opened_axes, g.latest, kernel::cf3(1.0f, 1.0f, 1.0f));
+                 if (c.kind == scene::PlacementKind::Similarity &&
+                     !scene::layer_scales_cleanly(*l))
+                     c = scene::PlacementChange{};
+                 static const char* kNames[] = {"rigid", "similarity", "general"};
+                 const math::cfloat4x4& mm = c.delta;
+                 const kernel::cfloat4 cols[4] = {mm.c0, mm.c1, mm.c2, mm.c3};
+                 nb::list delta;
+                 for (int col = 0; col < 4; ++col) {
+                     delta.append(cols[col].x);
+                     delta.append(cols[col].y);
+                     delta.append(cols[col].z);
+                     delta.append(cols[col].w);
+                 }
+                 nb::dict out;
+                 out["kind"] = kNames[static_cast<int>(c.kind)];
+                 out["scale"] = c.scale;
+                 out["delta"] = delta;
+                 return out;
+             },
+             "What to draw the layer under this frame, against the placement the gesture "
+             "OPENED with -- which is where the surfaces a host already drew still are.")
+        .def("commit",
+             [](PyPlacementGesture& g) {
+                 if (!g.open) throw std::invalid_argument("commit: gesture is closed");
+                 const bool moved = g.updated;
+                 const math::Transform x = g.latest;
+                 const scene::LayerId layer = g.layer;
+                 // Released BEFORE the apply, because the apply passes the same
+                 // guard that refuses edits while a gesture is open.
+                 g.close();
+                 if (!moved) return;
+                 scene::SetLayerTransformCmd cmd{layer, x, kernel::cf3(1.0f, 1.0f, 1.0f)};
+                 apply_or_throw(g.doc->document, scene::Command{cmd}, "commit", g.undo.get());
+             },
+             "Apply the last update as ONE command, with one undo step, and close.")
+        .def("cancel", [](PyPlacementGesture& g) { g.close(); },
+             "Close leaving the placement the gesture opened with. The document never moved, "
+             "so this restores nothing -- it releases the guard.")
+        .def("__enter__", [](PyPlacementGesture& g) { return &g; }, nb::rv_policy::reference)
+        .def("__exit__",
+             [](PyPlacementGesture& g, nb::object exc_type, nb::object, nb::object) {
+                 // An exception inside the block cancels; a clean exit commits.
+                 // A drag abandoned by a raise must not land half a gesture.
+                 if (!g.open) return false;
+                 if (!exc_type.is_none()) {
+                     g.cancel_from_exit();
+                     return false;
+                 }
+                 const bool moved = g.updated;
+                 const math::Transform x = g.latest;
+                 const scene::LayerId layer = g.layer;
+                 g.close();
+                 if (moved) {
+                     scene::SetLayerTransformCmd cmd{layer, x, kernel::cf3(1.0f, 1.0f, 1.0f)};
+                     apply_or_throw(g.doc->document, scene::Command{cmd}, "commit",
+                                    g.undo.get());
+                 }
+                 return false;
+             },
+             // Explicitly nullable: a clean `with` block passes three Nones,
+             // and nanobind refuses None for an object parameter unless the
+             // argument says it may be.
+             nb::arg("exc_type").none(), nb::arg("exc_value").none(),
+             nb::arg("traceback").none());
 
     nb::class_<PyMesh>(m, "Mesh", "Triangle mesh with numpy buffer views")
         .def(
@@ -6981,6 +7150,83 @@ NB_MODULE(pyclay, m) {
              "layer"_a, "position"_a = nb::none(), "rotation_axis_angle"_a = nb::none(),
              "scale"_a = nb::none(),
              "Retransform a whole layer; omitted arguments keep their current value")
+        .def("placement_report",
+             [](const PyDocument& d, scene::LayerId layer, nb::handle position,
+                nb::handle rotation_axis_angle, nb::handle scale, nb::handle scale_axes) {
+                 const scene::Layer* found = d.doc->document.find_layer(layer);
+                 if (!found)
+                     throw std::invalid_argument("placement_report: no layer with that id");
+                 math::Transform proposed = found->xform;
+                 if (!position.is_none()) proposed.position = to_f3(position, "position");
+                 if (!rotation_axis_angle.is_none())
+                     proposed.rotation = to_axis_angle(rotation_axis_angle);
+                 if (!scale.is_none()) proposed.scale = nb::cast<float>(scale);
+                 kernel::cfloat3 axes = found->scale_axes;
+                 if (!scale_axes.is_none()) axes = to_f3(scale_axes, "scale_axes");
+                 const scene::PlacementChange c =
+                     scene::layer_placement_change(*found, proposed, axes);
+                 static const char* kNames[] = {"rigid", "similarity", "general"};
+                 const math::cfloat4x4& m = c.delta;
+                 const kernel::cfloat4 cols[4] = {m.c0, m.c1, m.c2, m.c3};
+                 nb::list delta;
+                 for (int col = 0; col < 4; ++col) {
+                     delta.append(cols[col].x);
+                     delta.append(cols[col].y);
+                     delta.append(cols[col].z);
+                     delta.append(cols[col].w);
+                 }
+                 nb::dict out;
+                 out["kind"] = kNames[static_cast<int>(c.kind)];
+                 out["scale"] = c.scale;
+                 out["delta"] = delta;
+                 return out;
+             },
+             "layer"_a, "position"_a = nb::none(), "rotation_axis_angle"_a = nb::none(),
+             "scale"_a = nb::none(), "scale_axes"_a = nb::none(),
+             "Classify a PROPOSED placement against the one this layer carries, without "
+             "touching the document. Returns {'kind': 'rigid'|'similarity'|'general', 'scale', "
+             "'delta'}, where delta is the column-major matrix taking the old placement to the "
+             "new one. A rigid or similarity change moves the layer's field and nothing else, "
+             "so a host can redraw by transforming what it already has. A scale on a layer "
+             "whose items BLEND is 'general': the layer scale multiplies an item's rounding "
+             "and not its blend radius, so such a field is not similar to itself.")
+        .def("mesh_sdf_layer",
+             &mesh_layer_only, "layer"_a, "resolution"_a = 128, "voxel_size"_a = nb::none(),
+             "decimate_ratio"_a = nb::none(), "backend"_a = "cpu", "mesher"_a = "marching",
+             "experimental"_a = false,
+             "Mesh ONE SDF layer, in world space under its transform. Hard-unions with the "
+             "rest of the document to give what mesh() produces, which is what lets a host "
+             "draw a layer being dragged separately from the form it sits in. NOT mesh_layer, "
+             "which borrows an imported MESH layer's triangles and runs no mesher.")
+        .def("placement_gesture",
+             [](PyDocument& d, scene::LayerId layer) {
+                 const scene::Layer* found = d.doc->document.find_layer(layer);
+                 if (!found)
+                     throw std::invalid_argument("placement_gesture: no layer with that id");
+                 if (found->protected_from_edits())
+                     throw std::invalid_argument(
+                         std::string("placement_gesture: layer ") + std::to_string(layer) +
+                         " is " + (found->ghost ? "ghosted" : "locked") + " and takes no edits");
+                 if (const scene::LayerId open = gesture_on(d.doc->document); open != 0)
+                     throw std::invalid_argument(
+                         "placement_gesture: one is already open on layer " +
+                         std::to_string(open));
+                 auto* g = new PyPlacementGesture();
+                 g->doc = d.doc;
+                 g->undo = d.undo;
+                 g->layer = layer;
+                 g->opened = found->xform;
+                 g->opened_axes = found->scale_axes;
+                 g->latest = found->xform;
+                 g->open = true;
+                 open_gestures()[&d.doc->document] = layer;
+                 return g;
+             },
+             "layer"_a, nb::rv_policy::take_ownership,
+             "Open a placement gesture. The document does not move until commit(), so sixty "
+             "drag frames record ONE command and take ONE invalidation. Every other edit is "
+             "refused while it is open. Usable as a context manager: leaving the block "
+             "commits, and an exception inside it cancels.")
         .def("enable_undo",
              [](PyDocument& d) {
                  if (!*d.undo) {

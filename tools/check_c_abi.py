@@ -1179,6 +1179,12 @@ DOCUMENT_LAYER_CALLS = {
     # with it. Same reading as clay_brick_cache_mark_dirty_layer beside it, and
     # for the same reason: a cache is keyed on the document layer it describes.
     "clay_sdf_prefix_cache_invalidate_layer",
+    # A refill FROM one document layer, the pairing partner of
+    # clay_brick_cache_eval_requests_excluding, which names a document layer for
+    # the same reason. An artist's channel is not a thing a brick refill can be
+    # scoped to: the scope is a slice of the document's hard union between
+    # layers, which is what the two calls sum to.
+    "clay_brick_cache_eval_requests_layer",
 }
 
 

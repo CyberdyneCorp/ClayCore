@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 81
+#define CLAY_ABI_MINOR 82
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -1306,8 +1306,10 @@ typedef struct clay_placement_report {
      * one; 1 for RIGID. Left at 1 for GENERAL rather than at a value a caller
      * might multiply by. */
     float scale;
-    /* Column-major affine matrix taking the OLD placement to the NEW one, in
-     * the same layout clay_item_matrix uses. Identity for GENERAL. */
+    /* Column-major affine matrix taking the OLD placement to the NEW one:
+     * delta[0..3] is the first COLUMN, and delta[12..14] is the translation.
+     * The layout a graphics API wants, and the one math::cfloat4x4 already
+     * has, so a host uploads it without transposing. Identity for GENERAL. */
     float delta[16];
 } clay_placement_report;
 
@@ -1330,6 +1332,66 @@ clay_result clay_layer_placement_report(const clay_document* doc, clay_layer_id 
                                         float rotation_angle, float scale,
                                         const float scale_axes[3],
                                         clay_placement_report* out_report);
+
+/* -- a placement GESTURE, so a drag costs one refill (ABI 0.82.0) -----------
+ *
+ * A gizmo drag sets the layer's transform on every frame it moves, and every
+ * one of those invalidates the layer's whole box and re-walks every brick in
+ * it. Measured on a 1000-item layer over 5832 bricks: 95.7 ms a frame, against
+ * 0.30 ms to transform the finished 120k-vertex mesh by the same matrix.
+ *
+ * Inside a gesture the document DOES NOT MOVE. update records the placement and
+ * invalidates nothing; commit applies ONE command and takes ONE invalidation,
+ * so sixty frames cost what one placement costs and undo gets a single step.
+ *
+ * HOW A HOST DRAWS THE FRAMES IN BETWEEN, since the document is not moving:
+ * once, at the start of the gesture, evaluate the document with this layer
+ * EXCLUDED and this layer ALONE — clay_brick_cache_eval_requests_excluding and
+ * clay_brick_cache_eval_requests_layer, or clay_document_mesh_sdf_layer on the
+ * mesh path. Draw the first where it is and the second under the gesture
+ * matrix, which clay_layer_placement_preview hands back. Because layers combine
+ * by hard union each surface is exact; what the preview cannot show is their
+ * mutual occlusion where they overlap, and that resolves on commit.
+ *
+ * WHILE A GESTURE IS OPEN EVERY OTHER EDIT IS REFUSED with
+ * CLAY_ERROR_INVALID_ARGUMENT, including edits to other layers. The gesture
+ * holds no snapshot of the document — a snapshot of a 1000-item document per
+ * drag is the allocation pattern a tablet's memory pressure punishes — so it
+ * cannot reconcile an edit made underneath it, and refusing is the only answer
+ * that cannot be quietly wrong. One gesture at a time, for the same reason.
+ *
+ * Destroying an open gesture cancels it. */
+typedef struct clay_placement_tx clay_placement_tx;
+
+/* Opens a gesture on a layer. NULL when the document already has one open, when
+ * no layer carries the id, or when the layer is ghosted or locked — the same
+ * refusal an edit to it would take, made at the open rather than at the commit
+ * so a host does not draw a drag it cannot land. clay_last_error says which. */
+clay_placement_tx* clay_layer_placement_begin(clay_document* doc, clay_layer_id layer);
+
+/* The placement as it stands this frame. TOTAL, from the layer's placement when
+ * the gesture opened — never an increment on the last frame, for the reason
+ * clay_layer_move_surface takes a total: a chain of increments composes
+ * rotations authored against different intermediate frames. */
+clay_result clay_layer_placement_update(clay_placement_tx* tx, const float position[3],
+                                        const float rotation_axis[3], float rotation_angle,
+                                        float scale);
+
+/* What to draw the layer under this frame, classified against the placement the
+ * gesture OPENED with. Valid before any update, where it is the identity. */
+clay_result clay_layer_placement_preview(const clay_placement_tx* tx,
+                                         clay_placement_report* out_report);
+
+/* Applies the last update as one command, with one invalidation and one undo
+ * step, and closes the gesture. A commit with no update before it is a no-op
+ * that still closes. The handle stays valid until destroyed. */
+clay_result clay_layer_placement_commit(clay_placement_tx* tx);
+
+/* Closes the gesture leaving the placement it opened with. Since the document
+ * never moved, this restores nothing — it releases the guard. */
+clay_result clay_layer_placement_cancel(clay_placement_tx* tx);
+
+void clay_layer_placement_destroy(clay_placement_tx* tx);
 
 /* Reading it back. Every out pointer is optional.
  *
@@ -2598,6 +2660,27 @@ typedef struct clay_mesh_params {
  * Python bindings make in the same place. */
 clay_result clay_document_mesh(const clay_document* doc, const clay_mesh_params* params,
                                clay_mesh** out_mesh);
+
+/* Mesh ONE SDF layer, in world space under that layer's transform (ABI 0.82.0).
+ *
+ * The mesh-path sibling of clay_brick_cache_eval_requests_layer, and it exists
+ * for the drag case: a host previewing a layer placement draws the rest of the
+ * document once and this layer once, then moves this one under the gesture
+ * matrix. Layers combine by hard union, so each surface is exact on its own.
+ * What a preview drawn that way does NOT show is the mutual occlusion of the
+ * union where the two overlap, which resolves when the gesture commits.
+ *
+ * NOT clay_document_mesh_layer, which BORROWS an imported MESH layer's
+ * triangles and does not run a mesher at all. The names are close because the
+ * two calls are about the two things a "layer" can be; this one is refused with
+ * CLAY_ERROR_INVALID_ARGUMENT for a layer that is not an SDF layer, and that
+ * one is refused for a layer that is.
+ *
+ * A HIDDEN layer meshes by name. Visibility decides what the DOCUMENT
+ * evaluates to, and a caller naming one layer has already said which it wants —
+ * refusing would leave a host unable to draw the ghost it is dragging. */
+clay_result clay_document_mesh_sdf_layer(const clay_document* doc, clay_layer_id layer,
+                                         const clay_mesh_params* params, clay_mesh** out_mesh);
 /* Frees a mesh the caller owns. A mesh BORROWED from a document layer (see
  * clay_document_mesh_layer) is owned by the document, and destroying one is a
  * no-op that leaves the document intact. It is a silent no-op rather than the
@@ -9638,6 +9721,32 @@ clay_result clay_brick_cache_eval_requests_excluding(
     const clay_document* doc, clay_layer_id excluded, const char* backend,
     const clay_brick_request* requests, size_t count, float* out_values, size_t values_capacity,
     float* out_colors_rgb, size_t colors_capacity);
+
+/* The other half of the same split (ABI 0.82.0): refill from ONE layer alone,
+ * ignoring every other. With clay_brick_cache_eval_requests_excluding over the
+ * same layer and the same requests, the pointwise MINIMUM of the two results is
+ * what the whole document would have produced — which is what "layers combine
+ * by hard union" means, expressed as two values a host can hold and move
+ * independently.
+ *
+ * NEITHER SCOPED FORM SEEDS THE RESUME STORE, and that is load-bearing rather
+ * than an optimisation left undone: a partial field stored as a seed would be
+ * resumed later as though it were the whole one, which is a wrong field with
+ * nothing in the result to indicate it. A scoped refill therefore costs a full
+ * walk every time, and an unscoped refill after one is as cold as it would have
+ * been without it.
+ *
+ * CLAY_ERROR_NOT_FOUND when no layer carries the id, and
+ * CLAY_ERROR_INVALID_ARGUMENT for a voxel or mesh layer: "this layer alone" is
+ * a slice of the SDF field, and a layer that contributes none of it is a
+ * caller naming the wrong thing rather than a layer that happens to be empty.
+ * A HIDDEN SDF layer is refilled by name, on the same reading as
+ * clay_document_mesh_sdf_layer: the caller named it, which says more than the
+ * visibility flag does. */
+clay_result clay_brick_cache_eval_requests_layer(
+    const clay_document* doc, clay_layer_id layer, const char* backend,
+    const clay_brick_request* requests, size_t count, float* out_values,
+    size_t values_capacity, float* out_colors_rgb, size_t colors_capacity);
 
 /* clay_brick_cache_eval_requests with the destination on the device — the call
  * a host refilling a brick atlas actually wants. Brick i occupies

@@ -33,6 +33,33 @@ the fix is a host-side one — cap the resolution, or spread the remesh — not 
 number in this table. The default-detail dab beside it is 0.630 ms and fits
 comfortably.
 
+**A layer drag is not measured on hardware, and the row says so rather than
+being left out.** `add-device-transform-cases` names `layer_transform_drag` and
+it has not been taken; what exists is a desktop count and a desktop ratio.
+
+| what it is | gate | figure |
+|---|---|---|
+| 60-frame layer drag, per frame | `BM_LayerDragPerFrame` | 60 refills |
+| the same drag in one gesture | `BM_LayerDragOneRefill` | **1 refill** |
+
+Moving or rotating a whole layer changes no shape — the layer's transform
+reaches the compiled tape only as a change of frame inside each item's inverse
+matrix — so the frames in between a gizmo drag need no walk at all.
+`clay_layer_placement_begin` holds the placement and applies ONE command at the
+end, and `clay_layer_placement_report` tells a host that the change was rigid so
+it can redraw by transforming the surface it already has. The proposal for
+`drag-a-layer-without-a-refill` measured a per-frame drag at 95.7 ms on a
+1000-item layer over 5832 bricks, against 0.30 ms to transform the finished
+120k-vertex mesh by the same matrix.
+
+**The refill COUNT is the gate, not the clock.** 60 against 1, in
+`tests/unit/test_layer_placement_gesture.cpp`, because a count cannot be blamed
+on a busy machine; `check_bench.py` carries the time ratio beside it only to
+catch the categorical failure of a gesture that invalidated per frame anyway.
+Until `layer_transform_drag` is taken there is no p95 for this and no class,
+which is why it sits in its own table above rather than in the one that reports
+device figures.
+
 **The growth is in the deformation, not the remesher.** The fixture holds
 triangle spacing constant and grows the extent, so a dab covers the same
 triangles at every point of the axis. Three of the four cases are flat across a

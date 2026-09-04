@@ -4,12 +4,14 @@ Delta for `drag-a-layer-without-a-refill`.
 
 ## ADDED Requirements
 
-### Requirement: The ABI reports what a layer placement did
-Setting a layer's transform SHALL be able to report, without a second query, how the placement classifies — rigid, similarity or general — and the matrix taking the previous placement to the new one, in the row-major world-space form the ABI already uses for a mesh transform.
+### Requirement: The ABI reports what a layer placement would do
+A caller SHALL be able to learn how a PROPOSED layer placement classifies — rigid, similarity or general — and to obtain the matrix taking the layer's current placement to that one, as a column-major affine matrix.
 
-The report SHALL be optional in the argument sense: a caller passing nothing for it SHALL get exactly the behaviour and the cost the existing entry point has today. The existing entry points SHALL keep their signatures and their behaviour.
+It SHALL be a QUERY that changes nothing, rather than an output added to the placement calls. That shape satisfies the two properties this requirement is for by construction rather than by care: the existing entry points keep their signatures untouched, and asking cannot alter the document, the invalidation or a later refill because it does not write. A caller asks with the placement it is about to set; asking afterwards is legal and answers the identity, which is true and useless.
 
-Reporting SHALL NOT change what is invalidated. A host that ignores the report SHALL see nothing different, which is what lets the report ship before anything acts on it.
+A proposed placement SHALL be refused on the same terms the placement calls refuse it, so a report cannot be obtained for a placement that could not then be set.
+
+Reporting SHALL NOT change what is invalidated. A host that ignores it SHALL see nothing different, which is what lets the report ship before the engine acts on it.
 
 #### Scenario: A rigid placement reports its matrix
 - **WHEN** a layer at the origin is placed with a rotation and a translation and the report is asked for
@@ -19,9 +21,13 @@ Reporting SHALL NOT change what is invalidated. A host that ignores the report S
 - **WHEN** a layer is placed with a per-axis scale and the report is asked for
 - **THEN** the classification is general
 
-#### Scenario: Ignoring the report costs nothing
-- **WHEN** the same placement is applied with and without the report
-- **THEN** the document, the invalidation and the values a subsequent refill produces are identical
+#### Scenario: Asking changes nothing
+- **WHEN** one document is asked for a report many times and an otherwise identical document is not asked at all
+- **THEN** the two evaluate identically and save to the same bytes
+
+#### Scenario: A malformed placement is refused
+- **WHEN** a report is asked for with a zero rotation axis, or a scale that is not positive
+- **THEN** the call is refused, as setting that placement would be
 
 ### Requirement: A layer placement can be dragged as one gesture
 The ABI SHALL offer a placement GESTURE for a layer: an opening call, any number of updates, and a closing call.
@@ -65,7 +71,7 @@ So a host can draw a placement preview without evaluating the composite, the ABI
 
 The two SHALL be exact complements under the document's hard union: at every point, the minimum of the two results SHALL equal what the whole document evaluates to at that point, for a document of visible SDF layers. This is the property that makes drawing them separately a decomposition rather than an approximation.
 
-Naming a layer that does not exist, or one that is not an SDF layer, SHALL be refused rather than treated as naming nothing.
+Naming a layer that does not exist, or one that is not an SDF layer, SHALL be refused rather than treated as naming nothing. A HIDDEN SDF layer SHALL be accepted by name, on the same reading meshing one uses: the caller named it, which says more than the visibility flag does.
 
 #### Scenario: The two halves recompose
 - **WHEN** a document of three visible SDF layers is evaluated whole, then as "without layer 2" and "layer 2 alone" over the same lattice
