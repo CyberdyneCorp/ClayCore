@@ -342,6 +342,32 @@ LayerId content_sharer_of(const Document& doc, LayerId layer) {
     return 0;
 }
 
+EditedItem command_edited_item(const Command& cmd) {
+    return std::visit(
+        [](const auto& c) -> EditedItem {
+            using C = std::decay_t<decltype(c)>;
+            // The kinds that edit one existing item in place. Each leaves the
+            // node in its layer and changes only what that node's own geometry
+            // bound is made of -- a transform, a prim, a blend's dilation, a
+            // deformer chain, a stroke's points, an armature's tree.
+            //
+            // SetColorCmd is here and is a no-op for bounds; it costs one item
+            // bound to say so, which is cheaper than dropping the cache.
+            if constexpr (std::is_same_v<C, SetTransformCmd> ||
+                          std::is_same_v<C, SetPrimCmd> || std::is_same_v<C, SetColorCmd> ||
+                          std::is_same_v<C, SetOpBlendCmd> ||
+                          std::is_same_v<C, SetDeformersCmd> ||
+                          std::is_same_v<C, AppendStrokeCmd> ||
+                          std::is_same_v<C, TrimStrokeCmd> ||
+                          std::is_same_v<C, SetStrokePointsCmd> ||
+                          std::is_same_v<C, SetArmatureCmd>)
+                return EditedItem{c.layer, c.node, true};
+            else
+                return EditedItem{};
+        },
+        cmd);
+}
+
 math::Aabb command_influence_bound(const Document& doc, const Command& cmd,
                                    LayerExtent* extent) {
     return std::visit(

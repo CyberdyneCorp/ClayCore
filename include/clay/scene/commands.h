@@ -228,6 +228,25 @@ LayerId edited_layer(const Command& cmd);
 // protection flag — reports an empty box rather than the layer's.
 class LayerExtent;  // bounds.h; forward so this header stays light
 
+// The ONE existing item a command edits in place, if it is that kind of
+// command: the node stays where it is, in the layer it is in, and only its own
+// geometry can have moved.
+//
+// It exists so a cache of a layer's extent can be told what changed instead of
+// being dropped (#451). Everything else -- adding, removing or reparenting a
+// node, and every layer-level edit -- returns none, and a caller must then
+// assume the whole layer moved.
+//
+// CONSERVATIVE BY CONSTRUCTION: a command kind added later is none until
+// somebody names it here, so the failure of forgetting is a cache that is
+// dropped too often rather than one that is kept when it should not be.
+struct EditedItem {
+    LayerId layer = 0;
+    NodeId node = kNoNode;
+    bool known = false;
+};
+EditedItem command_edited_item(const Command& cmd);
+
 // `extent` (optional) memoizes the LAYER EXTENT an intersect's bound needs --
 // see bounds.h. It matters here because this is called TWICE per edit, on
 // either side of the apply, and #319 made that walk O(items) where it used to

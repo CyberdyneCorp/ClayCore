@@ -1268,78 +1268,82 @@ Nonlocality item_nonlocality(const Node& item) {
     return Nonlocality::None;
 }
 
-void LayerExtentCache::recompute(const SdfContent& content, const Layer& layer) {
-    extent_ = layer_influence_extent(content, layer);
-    content_ = &content;
-    layer_ = &layer;
-    ++walks_;
-    for (int i = 0; i < 6; ++i) definers_[i] = kNoNode;
-    valid_ = true;
-    if (extent_.empty() || extent_.is_infinite()) return;
-
-    // Which item achieves each face. Recorded during the same pass that would
-    // otherwise be a second walk, and the reason the fast path can be exact:
-    // an item that holds no face out cannot be the reason the union is as big
-    // as it is.
-    const float want[6] = {extent_.min.x, extent_.min.y, extent_.min.z,
-                           extent_.max.x, extent_.max.y, extent_.max.z};
+void LayerExtentCache::rebuild(const SdfContent& content, const Layer& layer, NodeId hold_out) {
+    // One walk, splitting the union in two: everything except `hold_out`, and
+    // then that item folded back in. Mirrors `layer_influence_extent` below --
+    // and has to, exactly, which is what the exhaustive gate checks.
+    rest_ = Aabb();
+    Aabb held;
+    bool infinite = false;
     const math::cfloat4x4 lm = layer_matrix(layer);
     for (const auto& [id, n] : content.nodes()) {
         if (n.is_group || !n.visible) continue;
-        if (!item_influence_is_local(n)) continue;
+        if (!item_influence_is_local(n) && item_nonlocality(n) != Nonlocality::BoundedByLayer) {
+            infinite = true;
+            break;
+        }
         const Aabb b = geometry_bound(n, layer, /*with_copies=*/true, &lm);
-        if (b.empty()) continue;
-        const float got[6] = {b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z};
-        for (int i = 0; i < 6; ++i)
-            if (definers_[i] == kNoNode && got[i] == want[i]) definers_[i] = id;
+        if (id == hold_out)
+            held = b;
+        else
+            rest_.expand(b);
     }
+    ++walks_;
+    content_ = &content;
+    layer_ = &layer;
+    valid_ = true;
+    extent_fresh_ = true;
+    pending_ = kNoNode;
+    if (infinite) {
+        // Nothing to hold out of "everywhere". Kept valid so a repeat query is
+        // still free, but with no item excluded no edit can take the fast path.
+        rest_ = Aabb::infinite();
+        extent_ = rest_;
+        excluded_ = kNoNode;
+        return;
+    }
+    excluded_ = hold_out;
+    extent_ = rest_;
+    extent_.expand(held);
 }
 
 const Aabb& LayerExtentCache::of(const SdfContent& content, const Layer& layer) {
-    if (!valid_ || &content != content_ || &layer != layer_) recompute(content, layer);
+    if (!valid_ || &content != content_ || &layer != layer_) {
+        // Hold out whoever was edited last, so the NEXT edit to them -- the
+        // second frame of a drag, and every frame after -- costs no walk.
+        rebuild(content, layer, pending_);
+        return extent_;
+    }
+    if (!extent_fresh_) {
+        // The held-out item moved. Its old box was never in `rest_`, so this is
+        // exact whatever it did: grew, shrank, or left the silhouette.
+        extent_ = rest_;
+        const Node* n = content.find(excluded_);
+        if (n && !n->is_group && n->visible)
+            extent_.expand(geometry_bound(*n, layer, /*with_copies=*/true));
+        extent_fresh_ = true;
+        ++keeps_;
+    }
     return extent_;
 }
 
 bool LayerExtentCache::note_item_changed(const SdfContent& content, const Layer& layer,
                                          NodeId node) {
-    if (!valid_ || &content != content_ || &layer != layer_) return false;
-    // An infinite or empty extent has no faces to reason about.
-    if (extent_.empty() || extent_.is_infinite()) {
+    pending_ = node;
+    const bool same_layer = valid_ && &content == content_ && &layer == layer_;
+    if (!same_layer || node == kNoNode || node != excluded_) {
         valid_ = false;
         return false;
     }
-    // An item that defines a face may have SHRUNK, and a union cannot shrink.
-    for (int i = 0; i < 6; ++i)
-        if (definers_[i] == node) {
-            valid_ = false;
-            return false;
-        }
     const Node* n = content.find(node);
-    // Removed, hidden, a group, or non-local: all things the walk decides and
-    // this cannot.
-    if (!n || n->is_group || !n->visible || !item_influence_is_local(*n)) {
+    if (n && !n->is_group && n->visible && !item_influence_is_local(*n) &&
+        item_nonlocality(*n) != Nonlocality::BoundedByLayer) {
+        // It just became unbounded, which makes the whole layer unbounded -- a
+        // thing the walk decides and `rest_` cannot say.
         valid_ = false;
         return false;
     }
-    const math::cfloat4x4 lm = layer_matrix(layer);
-    const Aabb b = geometry_bound(*n, layer, /*with_copies=*/true, &lm);
-    if (b.empty()) {
-        valid_ = false;
-        return false;
-    }
-    // It held no face out before and it fits inside now, so the union is the
-    // union it was. Where it does NOT fit, it becomes a definer of the faces it
-    // pushes out -- which is still exact, because growing a union is a union.
-    const float lo[3] = {b.min.x, b.min.y, b.min.z};
-    const float hi[3] = {b.max.x, b.max.y, b.max.z};
-    const float elo[3] = {extent_.min.x, extent_.min.y, extent_.min.z};
-    const float ehi[3] = {extent_.max.x, extent_.max.y, extent_.max.z};
-    for (int a = 0; a < 3; ++a) {
-        if (lo[a] < elo[a]) definers_[a] = node;
-        if (hi[a] > ehi[a]) definers_[3 + a] = node;
-    }
-    extent_.expand(b);
-    ++keeps_;
+    extent_fresh_ = false;
     return true;
 }
 

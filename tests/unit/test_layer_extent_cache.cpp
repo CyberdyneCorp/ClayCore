@@ -2,9 +2,15 @@
 //
 // An intersect is bounded by its layer's EXTENT, and computing that walks every
 // visible node -- 96% of what the bound costs, paid on every edit because every
-// edit might have changed it. `LayerExtentCache` keeps the extent AND the items
-// achieving each of its six faces, so an edit to an item that holds no face out
-// and still fits inside is decided with one item bound and six comparisons.
+// edit might have changed it. `LayerExtentCache` holds the union of every item
+// EXCEPT one, so an edit to that one is a single item bound and a union.
+//
+// WHY EXCEPT-ONE AND NOT SOMETHING CLEVERER. The first attempt kept the extent
+// plus the item achieving each of its six faces, letting anything that held no
+// face out move freely inside. It measured as 201 walks over a 200-frame drag,
+// because what a host drags across a form is a boolean OPERAND and an operand
+// big enough to cut something sticks out of it. `a dragged cutter sticks out`
+// below is that fixture, and it is the case to keep working.
 //
 // THIS FILE IS THE EXHAUSTIVE GATE, and it is the reason the cache is allowed
 // to exist at all. A cache that keeps an extent it should have dropped reports
@@ -34,7 +40,8 @@ namespace {
 
 // A layer with room to move: items well inside the extent, and two at the
 // edges so there is something that DOES define a face.
-Document fixture(LayerId* out_layer, NodeId* out_inner, NodeId* out_edge) {
+Document fixture(LayerId* out_layer, NodeId* out_inner, NodeId* out_edge,
+                 NodeId* out_stroke = nullptr) {
     Document doc;
     Layer& l = doc.add_sdf_layer("body");
     for (int i = 0; i < 12; ++i) {
@@ -45,6 +52,19 @@ Document fixture(LayerId* out_layer, NodeId* out_inner, NodeId* out_edge) {
         l.sdf->insert(n);
         if (i == 5) *out_inner = n.id;
     }
+    // A stroke, so the stroke-shaped commands have something they can edit.
+    Node stroke;
+    stroke.id = l.sdf->reserve_id();
+    stroke.prim = Prim::stroke();
+    for (int k = 0; k < 4; ++k) {
+        StrokePoint sp;
+        sp.pos = cf3(0.2f * static_cast<float>(k), 0.1f, 0.0f);
+        sp.radius = 0.08f;
+        stroke.stroke.push_back(sp);
+    }
+    l.sdf->insert(stroke);
+    if (out_stroke) *out_stroke = stroke.id;
+
     Node edge;
     edge.id = l.sdf->reserve_id();
     edge.prim = Prim::sphere(0.3f);
@@ -76,72 +96,87 @@ void check_agrees(LayerExtentCache& cache, const Document& doc, LayerId id) {
 
 }  // namespace
 
-TEST_CASE("layer extent cache: an item that holds no face out is free to move") {
+TEST_CASE("layer extent cache: a drag pays one walk and then none") {
     LayerId id = 0;
     NodeId inner = kNoNode, edge = kNoNode;
     Document doc = fixture(&id, &inner, &edge);
 
     LayerExtentCache cache;
     check_agrees(cache, doc, id);
-    const std::size_t after_first = cache.walks();
-    REQUIRE(after_first == 1);
+    REQUIRE(cache.walks() == 1);
 
-    // Twenty frames of a drag, well inside the extent.
+    // Twenty frames of a drag. The first chooses whom to hold out and walks;
+    // the nineteen after it are answered from what that walk left behind.
     for (int i = 0; i < 20; ++i) {
         Node* n = doc.find_layer(id)->sdf->find_mut(inner);
         REQUIRE(n != nullptr);
         n->xform.position = cf3(0.5f + 0.01f * static_cast<float>(i), 0.02f, 0.0f);
         const Layer& l = layer_of(doc, id);
-        CHECK(cache.note_item_changed(*l.sdf, l, inner));
+        const bool kept = cache.note_item_changed(*l.sdf, l, inner);
+        CHECK(kept == (i > 0));
         check_agrees(cache, doc, id);
     }
-    // Not one further walk in twenty frames, and the extent agreed with the
-    // walk every time.
-    CHECK(cache.walks() == after_first);
-    CHECK(cache.keeps() == 20);
+    CHECK(cache.walks() == 2);
+    CHECK(cache.keeps() == 19);
 }
 
-TEST_CASE("layer extent cache: an item that defines a face is not") {
+TEST_CASE("layer extent cache: a dragged cutter sticks out and is still free") {
+    // THE CASE THE FIRST DESIGN FAILED, and the shape of #451: the dragged item
+    // defines a face of the extent on every single frame, because it is the
+    // boolean operand being swept across the form. Under the old rule that
+    // meant a walk per frame. Here it is the item held out, so it does not.
     LayerId id = 0;
     NodeId inner = kNoNode, edge = kNoNode;
     Document doc = fixture(&id, &inner, &edge);
 
     LayerExtentCache cache;
     check_agrees(cache, doc, id);
-    const std::size_t before = cache.walks();
 
-    // Pulling the +x definer back must SHRINK the extent, and a union cannot
-    // shrink -- so this has to walk rather than be kept.
+    for (int i = 0; i < 20; ++i) {
+        Node* n = doc.find_layer(id)->sdf->find_mut(edge);  // the +x definer
+        REQUIRE(n != nullptr);
+        n->xform.position = cf3(9.0f + 0.5f * static_cast<float>(i), 0.0f, 0.0f);
+        const Layer& l = layer_of(doc, id);
+        CHECK(cache.note_item_changed(*l.sdf, l, edge) == (i > 0));
+        check_agrees(cache, doc, id);
+    }
+    CHECK(cache.walks() == 2);
+}
+
+TEST_CASE("layer extent cache: the held-out item shrinking shrinks the extent") {
+    // A union cannot shrink, so a cache that kept the extent and expanded it
+    // would be WRONG here and wrong in the direction that does not announce
+    // itself -- a bound too large is merely slow, a bound built by expanding a
+    // stale union is too small the moment the thing that made it big moves in.
+    //
+    // Holding the item out is what makes this exact: its old box was never in
+    // `rest_`, so there is nothing stale to expand.
+    LayerId id = 0;
+    NodeId inner = kNoNode, edge = kNoNode;
+    Document doc = fixture(&id, &inner, &edge);
+
+    LayerExtentCache cache;
+    check_agrees(cache, doc, id);
+    const Layer& l = layer_of(doc, id);
+
+    // Fling the far item further out, then haul it back inside the others.
     Node* n = doc.find_layer(id)->sdf->find_mut(edge);
-    REQUIRE(n != nullptr);
-    n->xform.position = cf3(1.0f, 0.0f, 0.0f);
-    const Layer& l = layer_of(doc, id);
-    CHECK_FALSE(cache.note_item_changed(*l.sdf, l, edge));
+    n->xform.position = cf3(40.0f, 0.0f, 0.0f);
+    cache.note_item_changed(*l.sdf, l, edge);  // the walk that holds it out
     check_agrees(cache, doc, id);
-    CHECK(cache.walks() == before + 1);
-}
+    const math::Aabb grown = cache.of(*l.sdf, l);
+    CHECK(grown.max.x > 39.0f);
 
-TEST_CASE("layer extent cache: an item pushed outward grows the extent exactly") {
-    LayerId id = 0;
-    NodeId inner = kNoNode, edge = kNoNode;
-    Document doc = fixture(&id, &inner, &edge);
-
-    LayerExtentCache cache;
+    n = doc.find_layer(id)->sdf->find_mut(edge);
+    n->xform.position = cf3(0.4f, 0.0f, 0.0f);
+    CHECK(cache.note_item_changed(*l.sdf, l, edge));  // kept, and it must SHRINK
     check_agrees(cache, doc, id);
+    CHECK(cache.of(*l.sdf, l).max.x < 2.0f);
 
-    // An inner item flung past every face. It defined none, so the union is
-    // still a union -- kept, and it becomes the definer of what it now holds.
-    Node* n = doc.find_layer(id)->sdf->find_mut(inner);
-    REQUIRE(n != nullptr);
-    n->xform.position = cf3(-30.0f, -30.0f, -30.0f);
-    const Layer& l = layer_of(doc, id);
-    CHECK(cache.note_item_changed(*l.sdf, l, inner));
-    check_agrees(cache, doc, id);
-
-    // And now it IS a definer, so pulling it back must walk.
-    n = doc.find_layer(id)->sdf->find_mut(inner);
-    n->xform.position = cf3(0.5f, 0.0f, 0.0f);
-    CHECK_FALSE(cache.note_item_changed(*l.sdf, l, inner));
+    // Also shrinking it by making the primitive smaller rather than moving it.
+    n = doc.find_layer(id)->sdf->find_mut(edge);
+    n->prim = Prim::sphere(0.01f);
+    CHECK(cache.note_item_changed(*l.sdf, l, edge));
     check_agrees(cache, doc, id);
 }
 
@@ -162,7 +197,8 @@ TEST_CASE("layer extent cache: every command kind leaves it agreeing with the wa
         bool item_edit;  // whether the wiring may use the item fast path
     };
 
-    Document probe = fixture(&id, &inner, &edge);
+    NodeId stroke = kNoNode;
+    Document probe = fixture(&id, &inner, &edge, &stroke);
     const LayerId lid = id;
     Node spare;
     spare.id = probe.find_layer(lid)->sdf->reserve_id();
@@ -170,7 +206,8 @@ TEST_CASE("layer extent cache: every command kind leaves it agreeing with the wa
     spare.xform.position = cf3(2.0f, 0.0f, 0.0f);
 
     std::vector<Case> cases;
-    cases.push_back(Case{"SetTransform", Command{SetTransformCmd{lid, inner, math::Transform{}}}, true});
+    cases.push_back(
+        Case{"SetTransform", Command{SetTransformCmd{lid, inner, math::Transform{}}}, true});
     {
         math::Transform t;
         t.position = cf3(40.0f, 0.0f, 0.0f);
@@ -193,13 +230,30 @@ TEST_CASE("layer extent cache: every command kind leaves it agreeing with the wa
     }
     cases.push_back(Case{"SetLayerMirror", Command{SetLayerMirrorCmd{lid, 1u, 0.0f}}, false});
     cases.push_back(Case{"SetLayerRadial", Command{SetLayerRadialCmd{lid, 4u, 1u, 0.0f}}, false});
-    cases.push_back(Case{"SetDeformers", Command{SetDeformersCmd{lid, inner, {Deformer::twist(1.5f)}}}, true});
+    cases.push_back(
+        Case{"SetDeformers", Command{SetDeformersCmd{lid, inner, {Deformer::twist(1.5f)}}}, true});
+    cases.push_back(
+        Case{"SetLayerProtection", Command{SetLayerProtectionCmd{lid, false, false}}, false});
+    cases.push_back(Case{"SetLayerName", Command{SetLayerNameCmd{lid, "renamed"}}, false});
+    {  // a stroke item, so the stroke-shaped commands have something to edit
+        std::vector<StrokePoint> pts;
+        for (int k = 0; k < 4; ++k) {
+            StrokePoint sp;
+            sp.pos = cf3(0.3f * static_cast<float>(k), 0.0f, 0.0f);
+            sp.radius = 0.1f;
+            pts.push_back(sp);
+        }
+        cases.push_back(Case{"AppendStroke", Command{AppendStrokeCmd{lid, stroke, pts}}, true});
+        cases.push_back(Case{
+            "SetStrokePoints", Command{SetStrokePointsCmd{lid, stroke, pts, false, 0.01f}}, true});
+        cases.push_back(Case{"TrimStroke", Command{TrimStrokeCmd{lid, stroke, 1u}}, true});
+    }
 
     for (Case& c : cases) {
         CAPTURE(std::string(c.name));
         LayerId fid = 0;
-        NodeId finner = kNoNode, fedge = kNoNode;
-        Document doc = fixture(&fid, &finner, &fedge);
+        NodeId finner = kNoNode, fedge = kNoNode, fstroke = kNoNode;
+        Document doc = fixture(&fid, &finner, &fedge, &fstroke);
         LayerExtentCache cache;
         {
             const Layer& l = layer_of(doc, fid);
@@ -210,15 +264,16 @@ TEST_CASE("layer extent cache: every command kind leaves it agreeing with the wa
         // apply.
         REQUIRE(inverse.has_value());
 
-        // The wiring's rule, stated here so the gate tests the rule and not a
-        // reimplementation of it: an item edit may try the fast path, and
-        // anything else invalidates.
-        if (c.item_edit) {
-            const Layer* l = doc.find_layer(fid);
-            if (l && l->sdf) cache.note_item_changed(*l->sdf, *l, finner);
-        } else {
+        // THE REAL RULE, called rather than restated. `command_edited_item` is
+        // what `apply_edit` uses to decide, so this gate tests the wiring and
+        // not a second copy of it that could agree with a bug.
+        const EditedItem edited = command_edited_item(c.cmd);
+        CHECK(edited.known == c.item_edit);  // and the expectation is pinned too
+        const Layer* el = edited.known ? doc.find_layer(edited.layer) : nullptr;
+        if (el && el->sdf)
+            cache.note_item_changed(*el->sdf, *el, edited.node);
+        else
             cache.invalidate();
-        }
         check_agrees(cache, doc, fid);
     }
 }
