@@ -342,6 +342,17 @@ MAX_RATIO = [
     # and still fails loudly at the 4x a mesh-proportional refit would show.
     ("BM_BvhRefitDabBig", "BM_BvhRefitDab", 2.5),
     ("BM_MeshBricksGradGrownDoc", "BM_MeshBricksGradFreshDoc", 3.0),
+    # A stamp PLACEMENT costs a reference and not a payload
+    # (stamp-a-captured-field). Capturing a 128^3 region measured 179 ms and
+    # holds a 2.95 MB payload; placing that asset once more measured 0.004 ms,
+    # because the placement copies a shared_ptr and a transform.
+    #
+    # The ceiling is far above the ~0.00002 measured, deliberately: the failure
+    # this catches is CATEGORICAL. A placement that copied the samples would
+    # land in the milliseconds and scale with the lattice, which is the whole
+    # thing the sharing exists to prevent -- and at the scale a detail brush
+    # works at, a thousand of them.
+    ("BM_StampPlace", "BM_StampCapture128", 0.01),
     # Cull index (accel/cull-index): refilling a fixed dab's bricks against a
     # grown document is gated against the fresh one. Before the per-revision
     # CullIndex + per-batch CullPlan every per-brick compile walked the whole

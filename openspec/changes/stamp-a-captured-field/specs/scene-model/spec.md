@@ -35,6 +35,10 @@ scales the metric rather than the sculpt, so the result is a field whose zero se
 has moved and whose gradient no longer has unit length; scale, the combine op and
 the blend are the controls that mean what an artist expects.
 
+#### Scenario: An asset reloaded on its own is the asset that was saved
+- **WHEN** a captured asset is written to its standalone form and read back
+- **THEN** the two place identically, and the field they contribute agrees at every point
+
 #### Scenario: A placed asset reproduces what was captured
 - **WHEN** a region is captured and the asset is placed back at the transform it was captured from
 - **THEN** the field it contributes agrees with the source over that region within the sampling tolerance the capture declares
@@ -46,6 +50,10 @@ the blend are the controls that mean what an artist expects.
 #### Scenario: A placement is an ordinary item
 - **WHEN** an asset has been placed
 - **THEN** it can be moved, re-combined, hidden and undone exactly as any other item, and one gesture that places several is one undo step
+
+#### Scenario: A scaled placement is still safe to march
+- **WHEN** a placed asset carries a non-uniform scale and the field is sampled outside its surface
+- **THEN** stepping from any such point by the distance the field reports does not cross the surface
 
 #### Scenario: An asset outlives what produced it
 - **WHEN** the items a region was captured from are edited or deleted

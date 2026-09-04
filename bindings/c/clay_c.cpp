@@ -8913,6 +8913,14 @@ clay_result clay_item_stamp_from_document(const clay_document* doc,
     return CLAY_OK;
 }
 
+clay_result clay_item_stamp_content_id(const clay_item* item, uint64_t* out_content_id) {
+    if (!item || !out_content_id) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    if (!item->node.volume)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "item carries no sampled volume");
+    *out_content_id = field::stamp_content_id(*item->node.volume);
+    return CLAY_OK;
+}
+
 clay_result clay_item_stamp_save_memory(const clay_item* item, clay_blob** out_blob) {
     if (!item || !out_blob) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
     *out_blob = nullptr;

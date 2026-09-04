@@ -3570,6 +3570,13 @@ clay_result clay_item_stamp_from_document(const clay_document* doc,
  *
  * The blob is the caller's, freed with clay_blob_destroy. Refused for an item
  * that is not a volume. */
+/* The content id of an item's captured payload, without re-capturing it.
+ *
+ * Same id clay_item_stamp_from_document hands back, so a host that loaded an
+ * asset from somewhere else can ask whether it already holds that one. Refused
+ * for an item carrying no sampled volume. */
+clay_result clay_item_stamp_content_id(const clay_item* item, uint64_t* out_content_id);
+
 clay_result clay_item_stamp_save_memory(const clay_item* item, clay_blob** out_blob);
 clay_result clay_item_stamp_load_memory(const void* data, size_t size, clay_item** out_item,
                                         uint64_t* out_content_id);

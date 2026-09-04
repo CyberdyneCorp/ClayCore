@@ -143,6 +143,7 @@ CLASS_ENUM_PREFIX = {
 
 # The names that do not derive. Kept explicit so the difference is reviewable.
 ALIASES = {
+    "Volume.content_id": "clay_item_stamp_content_id",
     "Document.eval": "clay_eval_points",
     "Document.eval_excluding": "clay_eval_points_excluding",
     "Document.gradients_excluding": "clay_eval_gradients_excluding",

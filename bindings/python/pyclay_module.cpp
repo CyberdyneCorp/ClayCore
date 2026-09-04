@@ -65,6 +65,7 @@
 #include "clay/scene/bounds.h"
 #include "clay/scene/commands.h"
 #include "clay/session/history.h"
+#include "clay/field/stamp.h"
 #include "clay/scene/consolidate.h"
 #include "clay/scene/curve.h"
 #include "clay/scene/tape.h"
@@ -3432,6 +3433,79 @@ NB_MODULE(pyclay, m) {
             CLAY_PLACE_ARGS,
             "Sample a document's field. The default region is the document's\n"
             "bounds padded by the band.")
+        .def_static(
+            "stamp_from_document",
+            [](const PyDocument& d, nb::handle hit, nb::handle normal, float azimuth, float cell,
+               nb::handle band, nb::handle local_bounds, nb::handle position,
+               nb::handle rotation_axis_angle, nb::handle scale) {
+                if (!(cell > 0.0f)) throw std::invalid_argument("cell must be > 0");
+                const float width = band.is_none() ? cell * 3.0f : nb::cast<float>(band);
+                if (!(width > 0.0f)) throw std::invalid_argument("band must be > 0");
+                const kernel::cfloat3 n = to_f3(normal, "normal");
+                if (!(kernel::clength(n) > 1e-9f))
+                    throw std::invalid_argument("normal must be non-zero");
+
+                const field::StampFrame frame =
+                    field::stamp_frame_from_surface(to_f3(hit, "hit"), n, azimuth);
+                const math::Transform placement = field::stamp_frame_transform(frame);
+
+                math::Aabb region;
+                if (local_bounds.is_none()) {
+                    const float r = 8.0f * cell;
+                    region = math::Aabb{kernel::cf3(-r, -r, -r), kernel::cf3(r, r, r)};
+                } else {
+                    region = to_aabb(local_bounds);
+                }
+
+                std::shared_ptr<const scene::Tape> tape_ref = std::make_shared<scene::Tape>(
+                    scene::compile_document(d.doc->document));
+                const scene::Tape& tape = *tape_ref;
+                if (tape.empty()) throw std::invalid_argument("the document has no SDF content");
+
+                PyVolume out;
+                out.prim = scene::Prim::volume();
+                // The lattice is the STAMP's; each sample is asked about the
+                // world point the frame puts it at.
+                out.volume = std::make_shared<const field::FieldVolume>(
+                    field::FieldVolume::sample_blocks(
+                        eval::tape_block_fill(
+                            tape, {},
+                            [placement](kernel::cfloat3 local) { return placement.apply(local); }),
+                        region, cell, width));
+                if (out.volume->brick_count() == 0)
+                    throw std::invalid_argument("the region contains no surface to sample");
+                // The frame IS the placement, so what comes back reproduces the
+                // source and moving it afterwards is an ordinary edit.
+                out.xform = placement;
+                // ... and placing it elsewhere is that edit, made here. Applied
+                // OVER the frame, so an omitted argument leaves the asset where
+                // it came from and a given one puts it somewhere else -- which
+                // is what a stamp is for.
+                place(out, position, rotation_axis_angle, scale);
+                return out;
+            },
+            "document"_a, "hit"_a, "normal"_a, "azimuth"_a = 0.0f, "cell"_a = 0.02f,
+            "band"_a = nb::none(), "local_bounds"_a = nb::none(), CLAY_PLACE_ARGS,
+            "Capture a region of a document's field ABOUT A SURFACE: +Z outward along\n"
+            "`normal`, the tangent plane turned by `azimuth` radians. `local_bounds` is\n"
+            "in the frame's own coordinates, so a box about the origin is a patch\n"
+            "centred on the hit.\n\n"
+            "The frame is never inferred from the content: an orientation derived from\n"
+            "the samples moves when the region does, so re-capturing the same detail\n"
+            "would give an asset that disagrees with placements already made from it.\n\n"
+            "What comes back is an ordinary volume item whose transform is the frame,\n"
+            "so placing it reproduces the source and moving it is an ordinary edit.\n"
+            "`position`, `rotation_axis_angle` and `scale` override that frame, which is\n"
+            "how the asset is put down somewhere other than where it was taken.")
+        .def_prop_ro("content_id",
+                     [](const PyVolume& v) -> nb::object {
+                         if (!v.volume) return nb::none();
+                         return nb::cast(field::stamp_content_id(*v.volume));
+                     },
+                     "An id over this capture's bytes. NOT a uuid: two captures that sample\n"
+                     "identically ARE the same asset, and a host that captured the same\n"
+                     "detail twice should be told rather than accumulating duplicates it\n"
+                     "cannot recognise.")
         .def_prop_ro("cell_size",
                      [](const PyVolume& v) { return v.volume ? v.volume->cell_size() : 0.0f; })
         .def_prop_ro("band", [](const PyVolume& v) { return v.volume ? v.volume->band() : 0.0f; })
