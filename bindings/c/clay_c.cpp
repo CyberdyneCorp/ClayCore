@@ -73,6 +73,7 @@
 #include "clay/scene/bounds.h"
 #include "clay/scene/commands.h"
 #include "clay/scene/consolidate.h"
+#include "clay/scene/placement.h"
 #include "clay/scene/cull_index.h"
 #include "clay/scene/curve.h"
 #include "clay/scene/tape.h"
@@ -481,6 +482,8 @@ void write_desc(Desc* out, std::uint32_t declared, const Desc& value) {
 // Original layouts (ABI 0.2.0), named by their last field so appending one
 // does not silently move the baseline.
 constexpr std::size_t kItemDescOriginal = offsetof(clay_item_desc, mirror) + sizeof(std::int32_t);
+constexpr std::size_t kPlacementReportOriginal =
+    offsetof(clay_placement_report, delta) + 16 * sizeof(float);
 constexpr std::size_t kMeshParamsOriginal =
     offsetof(clay_mesh_params, decimate_ratio) + sizeof(float);
 constexpr std::size_t kBrushParamsOriginal =
@@ -1144,6 +1147,10 @@ struct clay_document {
     // inside is decided with one item bound instead of a walk.
     scene::LayerExtentCache& extent_cache() { return extent_cache_; }
     std::uint64_t content_serial() const { return doc.document.content_serial; }
+    // The layer a placement gesture is open on, or 0. While it is set every
+    // edit is refused: the gesture holds no snapshot and so cannot reconcile a
+    // change made underneath it (drag-a-layer-without-a-refill).
+    clay_layer_id placement_gesture = 0;
     std::uint64_t extent_walks() const { return extent_cache_.walks(); }
     std::uint64_t extent_keeps() const { return extent_cache_.keeps(); }
 
@@ -3430,6 +3437,13 @@ CommandFrontier command_frontier(const scene::Document& doc, const scene::Comman
 // pays nothing for a region it will not touch.
 clay_result edit_guard(const clay_document* doc, const scene::Command& cmd) {
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    // Here rather than at each entry point, for the same reason the protected
+    // layer is here: this is the one place every edit passes.
+    if (doc->placement_gesture != 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "a placement gesture is open on layer " +
+                        std::to_string(doc->placement_gesture) +
+                        "; commit or cancel it before editing");
     // apply() says no for two different reasons, and a caller needs to tell
     // them apart: a missing layer is a bug in the caller's bookkeeping, while
     // a protected one is a state the artist chose and a UI can explain.
@@ -5344,6 +5358,197 @@ clay_result clay_document_set_layer_transform_nonuniform(clay_document* doc, cla
     if (r != CLAY_OK) return r;
     return apply_edit(doc, scene::Command{scene::SetLayerTransformCmd{layer, xform, axes}},
                       "layer not found");
+}
+
+clay_result clay_layer_placement_report(const clay_document* doc, clay_layer_id layer_id,
+                                        const float position[3], const float rotation_axis[3],
+                                        float rotation_angle, float scale,
+                                        const float scale_axes[3],
+                                        clay_placement_report* out_report) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    clay_placement_report probe{};
+    clay_result r = read_desc(out_report, kPlacementReportOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_report->struct_size;
+
+    const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
+    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+
+    // Through the same readers the setters use, so a placement this refuses is
+    // exactly one they would have refused -- a caller cannot get a report for a
+    // placement it could not then set.
+    math::Transform proposed;
+    r = read_transform(position, rotation_axis, rotation_angle, scale, &proposed);
+    if (r != CLAY_OK) return r;
+    kernel::cfloat3 axes = kernel::cf3(1.0f, 1.0f, 1.0f);
+    if (scale_axes) {
+        r = read_scale_axes(scale_axes, &axes);
+        if (r != CLAY_OK) return r;
+    }
+
+    const scene::PlacementChange change =
+        scene::layer_placement_change(*layer, proposed, axes);
+
+    clay_placement_report filled{};
+    filled.kind = static_cast<std::int32_t>(change.kind);
+    filled.scale = change.scale;
+    const math::cfloat4x4& m = change.delta;
+    const kernel::cfloat4 cols[4] = {m.c0, m.c1, m.c2, m.c3};
+    for (int c = 0; c < 4; ++c) {
+        filled.delta[c * 4 + 0] = cols[c].x;
+        filled.delta[c * 4 + 1] = cols[c].y;
+        filled.delta[c * 4 + 2] = cols[c].z;
+        filled.delta[c * 4 + 3] = cols[c].w;
+    }
+    write_desc(out_report, declared, filled);
+    return CLAY_OK;
+}
+
+// -- the placement gesture --------------------------------------------------
+//
+// It holds no copy of the document: the layer id, the placement it opened with,
+// and the latest one. That is enough because the document does not move until
+// commit, and it is why an edit made underneath a gesture is refused rather
+// than reconciled.
+struct clay_placement_tx {
+    clay_document* doc = nullptr;
+    clay_layer_id layer = 0;
+    math::Transform opened;
+    kernel::cfloat3 opened_axes = kernel::cf3(1.0f, 1.0f, 1.0f);
+    math::Transform latest;
+    bool updated = false;
+    bool open = true;
+};
+
+namespace {
+
+void close_gesture(clay_placement_tx* tx) {
+    if (tx->doc && tx->doc->placement_gesture == tx->layer) tx->doc->placement_gesture = 0;
+    tx->open = false;
+}
+
+}  // namespace
+
+clay_placement_tx* clay_layer_placement_begin(clay_document* doc, clay_layer_id layer_id) {
+    if (!doc) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+        return nullptr;
+    }
+    if (doc->placement_gesture != 0) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT,
+             "a placement gesture is already open on layer " +
+                 std::to_string(doc->placement_gesture));
+        return nullptr;
+    }
+    const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
+    if (!layer) {
+        fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+        return nullptr;
+    }
+    // Refused at the OPEN, so a host does not draw a drag whose commit it will
+    // then be told it cannot land.
+    if (layer->protected_from_edits()) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT,
+             std::string("layer ") + std::to_string(layer_id) + " is " +
+                 (layer->ghost ? "ghosted" : "locked") + " and takes no edits");
+        return nullptr;
+    }
+    auto* tx = new clay_placement_tx();
+    tx->doc = doc;
+    tx->layer = layer_id;
+    tx->opened = layer->xform;
+    tx->opened_axes = layer->scale_axes;
+    tx->latest = layer->xform;
+    doc->placement_gesture = layer_id;
+    return tx;
+}
+
+clay_result clay_layer_placement_update(clay_placement_tx* tx, const float position[3],
+                                        const float rotation_axis[3], float rotation_angle,
+                                        float scale) {
+    if (!tx) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null gesture");
+    if (!tx->open) return fail(CLAY_ERROR_INVALID_ARGUMENT, "gesture is closed");
+    math::Transform xform;
+    const clay_result r =
+        read_transform(position, rotation_axis, rotation_angle, scale, &xform);
+    if (r != CLAY_OK) return r;
+    // Recorded and nothing else. No bound, no invalidation, no command -- the
+    // whole point of the gesture.
+    tx->latest = xform;
+    tx->updated = true;
+    return CLAY_OK;
+}
+
+clay_result clay_layer_placement_preview(const clay_placement_tx* tx,
+                                         clay_placement_report* out_report) {
+    if (!tx) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null gesture");
+    clay_placement_report probe{};
+    clay_result r = read_desc(out_report, kPlacementReportOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_report->struct_size;
+
+    // Against the placement the gesture OPENED with, which is where the drawn
+    // surfaces still are -- not against the layer's current placement, which is
+    // the same thing until commit and would answer the identity afterwards.
+    const scene::Layer* layer = tx->doc->doc.document.find_layer(tx->layer);
+    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    scene::PlacementChange reported = scene::placement_change(
+        tx->opened, tx->opened_axes, tx->latest, kernel::cf3(1.0f, 1.0f, 1.0f));
+    // The same blend caveat `layer_placement_change` applies, against the
+    // layer's CONTENT -- which the gesture does not hold and so must look up.
+    if (reported.kind == scene::PlacementKind::Similarity &&
+        !scene::layer_scales_cleanly(*layer))
+        reported = scene::PlacementChange{};
+
+    clay_placement_report filled{};
+    filled.kind = static_cast<std::int32_t>(reported.kind);
+    filled.scale = reported.scale;
+    const math::cfloat4x4& m = reported.delta;
+    const kernel::cfloat4 cols[4] = {m.c0, m.c1, m.c2, m.c3};
+    for (int c = 0; c < 4; ++c) {
+        filled.delta[c * 4 + 0] = cols[c].x;
+        filled.delta[c * 4 + 1] = cols[c].y;
+        filled.delta[c * 4 + 2] = cols[c].z;
+        filled.delta[c * 4 + 3] = cols[c].w;
+    }
+    write_desc(out_report, declared, filled);
+    return CLAY_OK;
+}
+
+clay_result clay_layer_placement_commit(clay_placement_tx* tx) {
+    if (!tx) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null gesture");
+    if (!tx->open) return fail(CLAY_ERROR_INVALID_ARGUMENT, "gesture is closed");
+    clay_document* doc = tx->doc;
+    const bool moved = tx->updated;
+    const math::Transform xform = tx->latest;
+    const clay_layer_id layer = tx->layer;
+    // Released BEFORE the apply, because the apply goes through edit_guard and
+    // the guard refuses every edit while a gesture is open -- including this
+    // one. Closed either way, so a refused commit does not strand the document
+    // behind a guard nobody can lift.
+    close_gesture(tx);
+    if (!moved) return CLAY_OK;
+    // ONE command, so ONE invalidation and ONE undo step for the whole drag.
+    // The region is the one apply_edit already derives from both sides of the
+    // placement, which is exactly the layer's bound where it was unioned with
+    // the layer's bound where it lands.
+    return apply_edit(
+        doc,
+        scene::Command{scene::SetLayerTransformCmd{layer, xform, kernel::cf3(1.0f, 1.0f, 1.0f)}},
+        "layer not found");
+}
+
+clay_result clay_layer_placement_cancel(clay_placement_tx* tx) {
+    if (!tx) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null gesture");
+    // Nothing to restore: the document never moved.
+    close_gesture(tx);
+    return CLAY_OK;
+}
+
+void clay_layer_placement_destroy(clay_placement_tx* tx) {
+    if (!tx) return;
+    close_gesture(tx);
+    delete tx;
 }
 
 clay_result clay_document_layer_transform(const clay_document* doc, clay_layer_id layer,
@@ -8140,16 +8345,13 @@ clay_result clay_layer_selection_bounds(const clay_document* doc, clay_layer_id 
                         out_max, out_has_bounds);
 }
 
-clay_result clay_document_mesh(const clay_document* doc, const clay_mesh_params* params,
-                               clay_mesh** out_mesh) {
-    if (!doc || !params || !out_mesh)
-        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
-    clay_mesh_params p;
-    clay_result r = read_desc(params, kMeshParamsOriginal, &p);
-    if (r != CLAY_OK) return r;
-    std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
-    const scene::Tape& tape = *tape_ref;
-    if (tape.empty()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "empty document");
+// The mesher, over whatever tape the caller has. Shared by the whole-document
+// form and the one-layer form so the two cannot drift on the resolution
+// ceiling, the hidden-group drop or the decimation.
+clay_result mesh_tape(const clay_document* doc, const scene::Tape& tape,
+                      const clay_mesh_params& p, const char* empty_what, clay_mesh** out_mesh) {
+    clay_result r = CLAY_OK;
+    if (tape.empty()) return fail(CLAY_ERROR_INVALID_ARGUMENT, empty_what);
     math::Aabb region = tape.bounds;
     if (region.empty() || region.is_infinite())
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "unbounded scene");
@@ -8194,6 +8396,41 @@ clay_result clay_document_mesh(const clay_document* doc, const clay_mesh_params*
     handle->data = std::move(m);
     *out_mesh = handle;
     return CLAY_OK;
+}
+
+clay_result clay_document_mesh(const clay_document* doc, const clay_mesh_params* params,
+                               clay_mesh** out_mesh) {
+    if (!doc || !params || !out_mesh)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    clay_mesh_params p;
+    clay_result r = read_desc(params, kMeshParamsOriginal, &p);
+    if (r != CLAY_OK) return r;
+    std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
+    return mesh_tape(doc, *tape_ref, p, "empty document", out_mesh);
+}
+
+clay_result clay_document_mesh_sdf_layer(const clay_document* doc, clay_layer_id layer_id,
+                                         const clay_mesh_params* params, clay_mesh** out_mesh) {
+    if (!doc || !params || !out_mesh)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    clay_mesh_params p;
+    clay_result r = read_desc(params, kMeshParamsOriginal, &p);
+    if (r != CLAY_OK) return r;
+    const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
+    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    if (layer->kind != scene::LayerKind::Sdf || !layer->sdf)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "layer " + std::to_string(layer_id) +
+                        " is not an SDF layer; clay_document_mesh_layer borrows a mesh layer's "
+                        "triangles");
+    // `below = false` is "this layer ALONE", which is the pairing that sums to
+    // the whole with the excluding form. Uncached on purpose: a preview compiles
+    // it once at the start of a gesture and moves the result by a matrix, so a
+    // cache keyed on the document revision would be paying for a second copy of
+    // something asked for once.
+    const scene::Tape tape = scene::compile_document_part(doc->doc.document, layer_id,
+                                                          /*below=*/false);
+    return mesh_tape(doc, tape, p, "layer meshes to nothing", out_mesh);
 }
 
 clay_result clay_document_mesh_quads(const clay_document* doc, const clay_quad_params* params,
@@ -13387,22 +13624,23 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
 // That is affordable for what it is for. A host takes this ONCE per gesture —
 // the layers it excludes are static while the artist drags — and composes the
 // result with its own live preview per frame.
-clay_result clay_brick_cache_eval_requests_excluding(
-    const clay_document* doc, clay_layer_id excluded, const char* backend,
-    const clay_brick_request* requests, size_t count, float* out_values,
-    size_t values_capacity, float* out_colors_rgb, size_t colors_capacity) {
+namespace {
+
+// The two SCOPED refills, which differ only in which half they ask for and in
+// what they refuse. Everything before that -- the null checks, the batch
+// ceiling, the grid read, the two capacity checks, the uniform-dims check and
+// the backend lookup -- is identical, and was identical twice before this
+// gathered it. Neither stores a seed: `eval_requests_in_chunks` gates only the
+// Whole half, so a partial field can never be resumed as a whole one.
+clay_result scoped_refill(const clay_document* doc, clay_layer_id layer, const char* backend,
+                          const clay_brick_request* requests, std::size_t count,
+                          float* out_values, std::size_t values_capacity, float* out_colors_rgb,
+                          std::size_t colors_capacity, ChunkHalf half) {
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
     if (count > 0 && (!requests || !out_values))
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null requests or values");
     clay_result r = check_batch("brick requests", count);
     if (r != CLAY_OK) return r;
-    // Checked even for an empty batch, so a stale layer id is reported at the
-    // call that carries it rather than at whichever later call happens to be
-    // the first with work in it.
-    if (!doc->doc.document.find_layer(excluded))
-        return fail(CLAY_ERROR_NOT_FOUND,
-                    "no layer " + std::to_string(excluded) + " to exclude: excluding a layer the "
-                    "document does not hold would evaluate the whole document");
     if (count == 0) {
         if (values_capacity != 0 || colors_capacity != 0)
             return fail(CLAY_ERROR_INVALID_ARGUMENT, "no requests, but a non-empty buffer");
@@ -13424,14 +13662,53 @@ clay_result clay_brick_cache_eval_requests_excluding(
     return eval_requests_in_chunks(
         doc, requests, count,
         [&](const eval::GridBatchQuery& bq, std::size_t base) -> clay_result {
-            if (b->eval_grid_batch(
-                    bq, out_values + base * per,
-                    out_colors_rgb ? out_colors_rgb + base * per * 3 : nullptr) !=
+            if (b->eval_grid_batch(bq, out_values + base * per,
+                                   out_colors_rgb ? out_colors_rgb + base * per * 3 : nullptr) !=
                 eval::Status::Ok)
                 return fail(CLAY_ERROR_BACKEND, "eval_grid_batch failed");
             return CLAY_OK;
         },
-        ChunkHalf::Except, excluded);
+        half, layer);
+}
+
+}  // namespace
+
+clay_result clay_brick_cache_eval_requests_excluding(
+    const clay_document* doc, clay_layer_id excluded, const char* backend,
+    const clay_brick_request* requests, size_t count, float* out_values,
+    size_t values_capacity, float* out_colors_rgb, size_t colors_capacity) {
+    // Checked even for an empty batch, so a stale layer id is reported at the
+    // call that carries it rather than at whichever later call happens to be
+    // the first with work in it.
+    if (doc && !doc->doc.document.find_layer(excluded))
+        return fail(CLAY_ERROR_NOT_FOUND,
+                    "no layer " + std::to_string(excluded) + " to exclude: excluding a layer the "
+                    "document does not hold would evaluate the whole document");
+    return scoped_refill(doc, excluded, backend, requests, count, out_values, values_capacity,
+                         out_colors_rgb, colors_capacity, ChunkHalf::Except);
+}
+
+clay_result clay_brick_cache_eval_requests_layer(
+    const clay_document* doc, clay_layer_id layer, const char* backend,
+    const clay_brick_request* requests, size_t count, float* out_values,
+    size_t values_capacity, float* out_colors_rgb, size_t colors_capacity) {
+    if (doc) {
+        const scene::Layer* scoped = doc->doc.document.find_layer(layer);
+        if (!scoped)
+            return fail(CLAY_ERROR_NOT_FOUND,
+                        "no layer " + std::to_string(layer) + " to refill from");
+        // A voxel or mesh layer contributes none of the SDF field, so "that
+        // layer alone" would be the far value everywhere. Refused rather than
+        // answered, because a caller asking is naming the wrong layer.
+        if (scoped->kind != scene::LayerKind::Sdf || !scoped->sdf)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "layer " + std::to_string(layer) +
+                            " is not an SDF layer, so it has no field to refill from");
+    }
+    // Active is "this layer alone" -- the same half a stroke's active-layer
+    // refill takes, asked for by name rather than by being the top layer.
+    return scoped_refill(doc, layer, backend, requests, count, out_values, values_capacity,
+                         out_colors_rgb, colors_capacity, ChunkHalf::Active);
 }
 
 clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char* backend,

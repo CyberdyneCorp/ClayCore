@@ -108,6 +108,37 @@ None. Both phases add requirements to existing capabilities.
   once-only invalidation, per-layer evaluation agreeing with the whole.
 - `tests/device/` — `layer_transform_drag`, per `add-device-transform-cases`.
 
+## What building it found
+
+**A uniform scale is not a similarity of a layer that blends.** The design above
+says (2) and (3) "scale by the same factor the distances do, which is what keeps
+a rounded or blended shape similar to itself". Only half of that is true:
+`n->rounding * placed_distance_scale(...)` scales, and `emit_combine` pushes
+`blend.k` as it stands. Measured on two boxes blended at k=0.12 and scaled by 2,
+the field came out at a ratio of **1.289** where a similarity says 2.
+
+Fixing that inconsistency would change what every existing document with a
+scaled, blended layer evaluates to — a decision with a format and a gallery
+behind it, not a side effect of this change. So the classification is made
+honest instead: a scale change on such a layer is GENERAL and promises nothing.
+The row belongs on the deferred list rather than in this change.
+
+**The field equality is exact in exact arithmetic, not unconditionally.** The
+tape folds `layer.xform * item.xform` into one inverse matrix, so a placement
+re-rounds every item's transform; with items at arbitrary positions the
+composition rounds even for a translation by an exactly-representable vector.
+The first gate written here compared bitwise and produced 119 mismatches that
+all printed as `1.55501 == 1.55501`. The bit-exact gate now uses positions that
+survive the composition, which proves there is no systematic error, and the
+realistic gates assert a few ulp — 4.17e-07 worst, under a rotation.
+
+**Two phase-2 tasks were already done.** `run_part` already had
+`Part::Except` and `compile_document_except` from #378, so "except `layer`" and
+"`layer` alone" both existed. And a scoped refill already stored no seed —
+`eval_requests_in_chunks` gates only the `Whole` half and says so in its own
+comment — which is stronger than the scope-keyed store the plan asked for. Both
+are gated here rather than rebuilt.
+
 ## Non-goals
 
 **A non-uniform layer scale.** It changes the field's Lipschitz behaviour, as
