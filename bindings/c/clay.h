@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 81
+#define CLAY_ABI_MINOR 83
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -3498,6 +3498,98 @@ clay_result clay_item_volume_from_document(const clay_document* doc,
                                            const float region_min[3], const float region_max[3],
                                            clay_item** out_item);
 
+/* -- a captured region of the field as a reusable STAMP (ABI 0.83.0) --------
+ *
+ * The call above captures a WORLD-AXIS-ALIGNED box. An artist stamping a detail
+ * onto a curved surface needs the capture taken about the SURFACE — +Z outward,
+ * X/Y the tangent plane — or the asset is only reusable at the orientation it
+ * happened to be taken at.
+ *
+ * THE FRAME IS NEVER INFERRED FROM THE CONTENT, and that is a decision rather
+ * than a gap. An orientation derived from the samples moves when the region
+ * moves, so re-capturing the same detail would yield an asset that no longer
+ * agrees with the placements already made from it. The caller supplies it, and
+ * clay_stamp_frame_from_surface builds one from what a host actually has.
+ *
+ * `normal` is +Z of the stamp's own axes — the direction it pushes, the same
+ * meaning `dir` has for a scalar alpha — and `tangent` is a ROUGH +X that is
+ * re-orthogonalised against it, so a caller may hand in a stylus direction
+ * without squaring it up first. Both are resolved through the SAME
+ * kernel::calpha_frame the alpha uses, fallback included, so a stamp and an
+ * alpha placed at one hit cannot disagree about which way is up. */
+typedef struct clay_stamp_frame {
+    uint32_t struct_size; /* = sizeof(clay_stamp_frame); required */
+    float origin[3];      /* where the capture is centred, in world */
+    float normal[3];      /* +Z of the capture frame; must be non-zero */
+    float tangent[3];     /* rough +X; may be zero, and then one is chosen */
+} clay_stamp_frame;
+
+/* A capture frame from a surface hit, its normal, and the stylus azimuth in
+ * radians about that normal.
+ *
+ * The azimuth ROTATES THE TANGENT about the normal, which is what makes an
+ * azimuth worth carrying: without it a stamp cannot be turned by the wrist that
+ * placed it, and a rake or a chisel is not expressible. Measured from the same
+ * reference calpha_frame's own fallback picks, so azimuth 0 means one direction
+ * rather than whichever axis the normal leant on least. */
+clay_result clay_stamp_frame_from_surface(const float hit[3], const float normal[3],
+                                          float azimuth, clay_stamp_frame* out_frame);
+
+/* Capture a region of the document's field IN THAT FRAME.
+ *
+ * `local_min`/`local_max` are the region in the FRAME's coordinates, not the
+ * world's: a box about the origin is a patch centred on the hit, and its +Z
+ * extent is how far above and below the surface the capture reaches.
+ *
+ * The item that comes back is an ordinary volume item whose transform IS the
+ * frame — so adding it changes nothing about the document's field, and moving
+ * it afterwards is an ordinary edit. That is what makes a placement editable,
+ * undoable and instanced without this call knowing anything about layers.
+ *
+ * *out_content_id (optional) receives an id over the captured payload's bytes.
+ * NOT a uuid: two captures that sample identically ARE the same asset, and a
+ * host that captured the same detail twice should be told rather than
+ * accumulating duplicates it cannot recognise. Nothing is dispatched on it —
+ * the payload sharing is pointer identity, not content equality — so a
+ * collision costs a host showing two assets as one in a list.
+ *
+ * CLAY_ERROR_INVALID_ARGUMENT for a zero normal, and for a region with no
+ * surface in it, exactly as the unoriented capture refuses one. */
+clay_result clay_item_stamp_from_document(const clay_document* doc,
+                                          const clay_volume_params* params,
+                                          const clay_stamp_frame* frame,
+                                          const float local_min[3], const float local_max[3],
+                                          clay_item** out_item, uint64_t* out_content_id);
+
+/* A captured stamp on its own, so a host library can keep one outside a
+ * document: the payload, the frame it was captured in, and its content id.
+ *
+ * A volume saved WITHOUT its frame is an asset that has forgotten which way it
+ * faced, which is why this is not clay_item_volume_save. Round-tripping through
+ * these two restores the item's transform along with its samples.
+ *
+ * The blob is the caller's, freed with clay_blob_destroy. Refused for an item
+ * that is not a volume. */
+clay_result clay_item_stamp_save_memory(const clay_item* item, clay_blob** out_blob);
+clay_result clay_item_stamp_load_memory(const void* data, size_t size, clay_item** out_item,
+                                        uint64_t* out_content_id);
+
+/* What a stamp's payload costs, separately from the placements referencing it.
+ *
+ * A document with a thousand placements of one asset holds ONE payload
+ * (write-a-shared-payload-once), so "how much memory do my stamps cost" is a
+ * question about the assets and not about the items — and answering it by
+ * summing per item would multiply by the placement count, which is the number a
+ * host is trying not to pay. *out_assets counts DISTINCT payloads. */
+typedef struct clay_stamp_memory {
+    uint32_t struct_size; /* = sizeof(clay_stamp_memory); required */
+    uint64_t assets;      /* distinct volume payloads the document holds */
+    uint64_t placements;  /* items referencing one */
+    uint64_t payload_bytes; /* summed once per ASSET, not once per placement */
+} clay_stamp_memory;
+
+clay_result clay_document_stamp_memory(const clay_document* doc, clay_stamp_memory* out_memory);
+
 typedef struct clay_relax_params {
     uint32_t struct_size;  /* = sizeof(clay_relax_params); required */
     float strength;        /* how much of the smoothed value to take, 0..1, per pass */
@@ -4977,6 +5069,39 @@ typedef struct clay_stamp {
     float rotation[4]; /* xyzw quaternion */
     float along;       /* [0,1] along the stroke */
 } clay_stamp;
+
+/* Place a captured stamp everywhere a resolved stroke says (ABI 0.83.0).
+ *
+ * `stamps` is what clay_stroke_resolve produces — spacing, pressure, jitter,
+ * taper and azimuth already applied — and this turns each one into an ordinary
+ * placement of `stamp` in `layer`. The whole call is ONE undo step and ONE
+ * invalidation, as every other stroke in this ABI is, so an artist takes back a
+ * stroke rather than a dab of it.
+ *
+ * HOW A RESOLVED STAMP MAPS ONTO A PLACEMENT:
+ *   position -> the placement's translation
+ *   rotation -> its orientation, so the stylus azimuth turns the asset
+ *   radius   -> a UNIFORM SCALE, against the asset's own natural radius (half
+ *               the largest extent of its captured box). Pressure already rode
+ *               into the radius when the stroke resolved, so this is where
+ *               pressure lands.
+ *   strength -> NOTHING, deliberately. Multiplying the captured distance by it
+ *               would scale the METRIC rather than the sculpt: the zero set
+ *               moves and the gradient stops having unit length, which is a
+ *               field that lies about its own distance. Scale, the combine op
+ *               and the blend are the controls that mean what an artist expects.
+ *
+ * Every placement shares ONE payload, in memory and on disk — that is what
+ * clay_document_stamp_memory reports and what makes a detail stroke affordable.
+ *
+ * out_nodes may be NULL to place without collecting ids; otherwise it takes up
+ * to `capacity` of them and *out_count receives how many were placed, which is
+ * `count` unless the layer refused. Refused for a protected layer, and for an
+ * item carrying no sampled volume. */
+clay_result clay_layer_place_stamps(clay_document* doc, clay_layer_id layer,
+                                    const clay_item* stamp, const clay_stamp* stamps,
+                                    size_t count, clay_node_id* out_nodes, size_t capacity,
+                                    size_t* out_count);
 
 /* How overlapping stamps in one stroke combine. */
 typedef enum clay_accumulation {

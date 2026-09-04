@@ -72,6 +72,7 @@
 #include "clay/scene/armature.h"
 #include "clay/scene/bounds.h"
 #include "clay/scene/commands.h"
+#include "clay/field/stamp.h"
 #include "clay/scene/consolidate.h"
 #include "clay/scene/cull_index.h"
 #include "clay/scene/curve.h"
@@ -8817,6 +8818,247 @@ clay_result clay_item_volume_from_document(const clay_document* doc,
     item->node.prim = scene::Prim::volume();
     item->node.volume = std::make_shared<field::FieldVolume>(std::move(volume));
     *out_item = item;
+    return CLAY_OK;
+}
+
+// -- capture as a reusable stamp --------------------------------------------
+
+constexpr std::size_t kStampFrameOriginal =
+    offsetof(clay_stamp_frame, tangent) + 3 * sizeof(float);
+constexpr std::size_t kStampMemoryOriginal =
+    offsetof(clay_stamp_memory, payload_bytes) + sizeof(std::uint64_t);
+
+clay_result clay_stamp_frame_from_surface(const float hit[3], const float normal[3],
+                                          float azimuth, clay_stamp_frame* out_frame) {
+    if (!hit || !normal) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null hit or normal");
+    clay_stamp_frame probe{};
+    clay_result r = read_desc(out_frame, kStampFrameOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_frame->struct_size;
+
+    const kernel::cfloat3 n = kernel::cf3(normal[0], normal[1], normal[2]);
+    if (!(kernel::clength(n) > 1e-9f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "normal must be non-zero");
+    if (!std::isfinite(azimuth))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "azimuth must be finite");
+
+    const field::StampFrame frame = field::stamp_frame_from_surface(
+        kernel::cf3(hit[0], hit[1], hit[2]), n, azimuth);
+    clay_stamp_frame filled{};
+    filled.origin[0] = frame.origin.x;
+    filled.origin[1] = frame.origin.y;
+    filled.origin[2] = frame.origin.z;
+    filled.normal[0] = frame.normal.x;
+    filled.normal[1] = frame.normal.y;
+    filled.normal[2] = frame.normal.z;
+    filled.tangent[0] = frame.tangent.x;
+    filled.tangent[1] = frame.tangent.y;
+    filled.tangent[2] = frame.tangent.z;
+    write_desc(out_frame, declared, filled);
+    return CLAY_OK;
+}
+
+clay_result clay_item_stamp_from_document(const clay_document* doc,
+                                          const clay_volume_params* params,
+                                          const clay_stamp_frame* frame,
+                                          const float local_min[3], const float local_max[3],
+                                          clay_item** out_item, uint64_t* out_content_id) {
+    if (!doc || !params || !frame || !out_item)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_item = nullptr;
+    if (out_content_id) *out_content_id = 0;
+
+    clay_stamp_frame f;
+    clay_result r = read_desc(frame, kStampFrameOriginal, &f);
+    if (r != CLAY_OK) return r;
+    field::StampFrame sf;
+    sf.origin = kernel::cf3(f.origin[0], f.origin[1], f.origin[2]);
+    sf.normal = kernel::cf3(f.normal[0], f.normal[1], f.normal[2]);
+    sf.tangent = kernel::cf3(f.tangent[0], f.tangent[1], f.tangent[2]);
+    if (!(kernel::clength(sf.normal) > 1e-9f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "frame normal must be non-zero");
+
+    math::Aabb region;
+    float cell = 0.0f, band = 0.0f, feather = 0.0f;
+    r = read_volume_sampling(doc, params, local_min, local_max, &region, &cell, &band, &feather);
+    if (r != CLAY_OK) return r;
+
+    const math::Transform placement = field::stamp_frame_transform(sf);
+    std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
+    const scene::Tape& tape = *tape_ref;
+
+    // The lattice is the STAMP's, and each sample is asked about the world
+    // point the frame puts it at. `document_block_fill`'s per-brick cull is not
+    // used here: it culls against WORLD brick boxes, and this lattice's bricks
+    // are not world-axis-aligned. A stamp region is a detail patch, so the
+    // whole-tape path is what the culled one falls back to anyway.
+    field::FieldVolume volume = field::FieldVolume::sample_blocks(
+        eval::tape_block_fill(tape, {},
+                              [placement](kernel::cfloat3 local) {
+                                  return placement.apply(local);
+                              }),
+        region, cell, band);
+    if (volume.brick_count() == 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "the region contains no surface to sample");
+    volume.set_feather(feather);
+    if (out_content_id) *out_content_id = field::stamp_content_id(volume);
+
+    auto* item = new clay_item();
+    item->node.prim = scene::Prim::volume();
+    item->node.volume = std::make_shared<field::FieldVolume>(std::move(volume));
+    // The item's transform IS the frame, so placing what comes back reproduces
+    // the source and moving it afterwards is an ordinary edit.
+    item->node.xform = placement;
+    *out_item = item;
+    return CLAY_OK;
+}
+
+clay_result clay_item_stamp_save_memory(const clay_item* item, clay_blob** out_blob) {
+    if (!item || !out_blob) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_blob = nullptr;
+    if (!item->node.volume)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "item carries no sampled volume");
+
+    field::FieldStamp stamp;
+    stamp.volume = item->node.volume;
+    // The item's transform IS the resolved capture frame -- capture put it
+    // there -- so it is carried across as it stands rather than decomposed into
+    // a normal and a tangent that would have to be resolved again.
+    stamp.placement = item->node.xform;
+    stamp.content_id = field::stamp_content_id(*item->node.volume);
+
+    std::vector<std::uint8_t> bytes = field::stamp_serialize(stamp);
+    if (bytes.empty()) return fail(CLAY_ERROR_BACKEND, "the stamp encoded to nothing");
+    *out_blob = new clay_blob{std::move(bytes)};
+    return CLAY_OK;
+}
+
+clay_result clay_item_stamp_load_memory(const void* data, size_t size, clay_item** out_item,
+                                        uint64_t* out_content_id) {
+    if (!data || !out_item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_item = nullptr;
+    if (out_content_id) *out_content_id = 0;
+    std::optional<field::FieldStamp> stamp =
+        field::stamp_deserialize(static_cast<const std::uint8_t*>(data), size);
+    if (!stamp) return fail(CLAY_ERROR_INVALID_ARGUMENT, "not a stamp, or truncated");
+
+    auto* item = new clay_item();
+    item->node.prim = scene::Prim::volume();
+    item->node.volume = stamp->volume;
+    item->node.xform = stamp->placement;
+    *out_item = item;
+    if (out_content_id) *out_content_id = stamp->content_id;
+    return CLAY_OK;
+}
+
+clay_result clay_document_stamp_memory(const clay_document* doc, clay_stamp_memory* out_memory) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    clay_stamp_memory probe{};
+    clay_result r = read_desc(out_memory, kStampMemoryOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_memory->struct_size;
+
+    // BY POINTER IDENTITY, which is what the sharing is: two placements of one
+    // capture hold the same shared_ptr, and summing per item would report the
+    // multiplied cost a host is trying not to pay.
+    std::unordered_set<const field::FieldVolume*> seen;
+    clay_stamp_memory filled{};
+    for (const scene::Layer& layer : doc->doc.document.layers) {
+        if (!layer.sdf) continue;
+        for (const auto& [id, n] : layer.sdf->nodes()) {
+            (void)id;
+            if (!n.volume) continue;
+            ++filled.placements;
+            if (seen.insert(n.volume.get()).second) {
+                ++filled.assets;
+                filled.payload_bytes += n.volume->bytes();
+            }
+        }
+    }
+    write_desc(out_memory, declared, filled);
+    return CLAY_OK;
+}
+
+clay_result clay_layer_place_stamps(clay_document* doc, clay_layer_id layer_id,
+                                    const clay_item* stamp, const clay_stamp* stamps,
+                                    size_t count, clay_node_id* out_nodes, size_t capacity,
+                                    size_t* out_count) {
+    if (!doc || !stamp) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or stamp");
+    if (count > 0 && !stamps) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null stamps");
+    clay_result r = check_batch("stamps", count);
+    if (r != CLAY_OK) return r;
+    if (!stamp->node.volume)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "the item carries no sampled volume to place");
+    const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
+    if (!layer || !layer->sdf) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    if (layer->protected_from_edits())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    std::string("layer ") + std::to_string(layer_id) + " is " +
+                        (layer->ghost ? "ghosted" : "locked") + " and takes no edits");
+    if (out_count) *out_count = 0;
+    if (count == 0) return CLAY_OK;
+
+    // The asset's own size, so `radius` means the same thing whatever was
+    // captured: half the largest extent of the captured box. Derived rather
+    // than asked for, because a caller would have to store it beside the asset
+    // and the asset already knows.
+    const math::Aabb local = stamp->node.volume->bounds();
+    const kernel::cfloat3 ext = local.extent();
+    const float natural =
+        0.5f * kernel::cmax(ext.x, kernel::cmax(ext.y, ext.z));
+    if (!(natural > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "the captured region has no extent");
+
+    // What the whole stroke reaches, up front, so it costs ONE invalidation
+    // rather than one per dab -- the same shape every other stroke in this ABI
+    // takes, and for the same reason.
+    std::vector<scene::Node> placed;
+    placed.reserve(count);
+    std::vector<math::Aabb> reach;
+    reach.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        const clay_stamp& s = stamps[i];
+        if (!(s.radius > 0.0f) || !std::isfinite(s.radius)) continue;
+        scene::Node n = stamp->node;
+        n.id = scene::kNoNode;
+        n.xform.position = kernel::cf3(s.position[0], s.position[1], s.position[2]);
+        n.xform.rotation = math::Quat{s.rotation[0], s.rotation[1], s.rotation[2], s.rotation[3]};
+        // Uniform, and the header says why a non-uniform one is not offered
+        // here: a stroke has one radius, so there is no second factor to take.
+        n.xform.scale = s.radius / natural;
+        // The payload is SHARED, not copied -- `n.volume` is the same
+        // shared_ptr for every placement, which is what makes a detail stroke
+        // affordable and what clay_document_stamp_memory reports.
+        reach.push_back(scene::item_geometry_bound(n, *layer));
+        placed.push_back(std::move(n));
+    }
+    if (placed.empty()) return CLAY_OK;
+
+    GestureRegion region{doc, std::move(reach)};
+    if (doc->undo) doc->undo->begin_group();
+    std::size_t done = 0;
+    for (scene::Node& n : placed) {
+        scene::Layer* mutable_layer = doc->doc.document.find_layer(layer_id);
+        if (!mutable_layer || !mutable_layer->sdf) {
+            if (doc->undo) doc->undo->end_group();
+            return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+        }
+        // RESERVED PER PLACEMENT, exactly as insert_node does it. Left at
+        // kNoNode every dab after the first landed on the same id and the
+        // stroke came out as one item -- measured, 1 placement for 24 dabs.
+        n.id = mutable_layer->sdf->reserve_id();
+        const scene::NodeId id = n.id;
+        scene::AddNodeCmd cmd{layer_id, scene::kNoNode, -1, {n}};
+        const clay_result er = apply_edit_in_gesture(doc, scene::Command{cmd}, "layer not found");
+        if (er != CLAY_OK) {
+            if (doc->undo) doc->undo->end_group();
+            return er;
+        }
+        if (out_nodes && done < capacity) out_nodes[done] = id;
+        ++done;
+    }
+    if (doc->undo) doc->undo->end_group();
+    if (out_count) *out_count = done;
     return CLAY_OK;
 }
 

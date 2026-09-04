@@ -55,6 +55,19 @@ namespace eval {
 // Empty means "store what the tape said", which is the plain bake.
 using SampleTransform = std::function<float(kernel::cfloat3 p, float source)>;
 
+// Where a sample's LATTICE position sits in the world the tape describes.
+//
+// Empty means "the lattice IS world", which is every bake but one: a STAMP
+// CAPTURE samples an oriented box, so its lattice is the asset's own frame and
+// each sample must be asked about the world point that frame puts it at. The
+// captured volume then holds the region in local coordinates, and placing it
+// under that same frame reproduces the source exactly.
+//
+// A `SampleTransform` alongside this still receives the WORLD position, because
+// what it is for -- flatten drawing samples onto a plane -- is a statement about
+// the world and not about a lattice.
+using SamplePlacement = std::function<kernel::cfloat3(kernel::cfloat3 lattice)>;
+
 // The block fill `FieldVolume::sample_blocks` wants, evaluating `tape` at each
 // window's points through the pool.
 //
@@ -65,19 +78,23 @@ using SampleTransform = std::function<float(kernel::cfloat3 p, float source)>;
 // Falls back to the tape's own scalar walk when no CPU backend is registered,
 // so a build without one bakes slower rather than not at all.
 inline field::FieldVolume::BrickBlockFill tape_block_fill(const scene::Tape& tape,
-                                                          SampleTransform transform = {}) {
+                                                          SampleTransform transform = {},
+                                                          SamplePlacement placement = {}) {
     // One scratch buffer for the whole bake rather than one per window: the
     // windows are walked in order by a single thread, so there is nothing to
     // race, and a bake at an interactive cell has thousands of them.
     auto points = std::make_shared<std::vector<float>>();
-    return [&tape, transform = std::move(transform), points](
+    return [&tape, transform = std::move(transform), placement = std::move(placement), points](
                const field::FieldVolume::BrickGrid& grid, std::size_t first, std::size_t count,
                float* out) {
         const std::size_t n = count * field::kBrickSamples;
         points->resize(n * 3);
         for (std::size_t s = 0; s < count; ++s)
             for (int i = 0; i < field::kBrickSamples; ++i) {
-                const kernel::cfloat3 p = grid.sample_position(first + s, i);
+                kernel::cfloat3 p = grid.sample_position(first + s, i);
+                // The lattice position, put where the tape can be asked about
+                // it. Identity for every bake; a frame for a stamp capture.
+                if (placement) p = placement(p);
                 const std::size_t at =
                     (s * field::kBrickSamples + static_cast<std::size_t>(i)) * 3;
                 (*points)[at] = p.x;
