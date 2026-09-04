@@ -1106,6 +1106,98 @@ std::size_t FieldVolume::blob_floats() const {
     return 14 + index_.size() + far_.size() + data_.size() + colors_.size();
 }
 
+std::optional<FieldVolume> FieldVolume::cropped(const math::Aabb& region) const {
+    if (empty() || region.empty() || region.is_infinite()) return std::nullopt;
+    const float extent = static_cast<float>(kBrickDim) * cell_size_;
+    if (!(extent > 0.0f)) return std::nullopt;
+
+    // THE ORIGIN AND THE GRID DO NOT MOVE, and that is the whole of why this is
+    // exact. The kernel reads a sample through `(p - origin) / cell`, so an
+    // origin shifted to the crop's first brick changes that subtraction and the
+    // trilinear weights that come out of it: the first version of this function
+    // did move it, and the values came back differing in the last ulp
+    // (-0.0598687 against -0.0598688) — the same field, and not the same
+    // answer, which is not what the cull promises.
+    //
+    // Keeping them costs almost nothing, because the grid is not where the
+    // bytes are: `index_` and `far_` are one float per brick SLOT and `data_`
+    // is 729 per STORED brick, so on the measured fixture the samples are
+    // 99.73% of the payload. Dropping only those leaves the arithmetic
+    // identical and still removes essentially all of the copy.
+    const float lo[3] = {region.min.x, region.min.y, region.min.z};
+    const float hi[3] = {region.max.x, region.max.y, region.max.z};
+    const float org[3] = {origin_.x, origin_.y, origin_.z};
+    std::int32_t b0[3], b1[3];
+    for (int a = 0; a < 3; ++a) {
+        // One brick of margin each side: a sample on the region's own face may
+        // take a trilinear tap into the brick beyond it.
+        const float f0 = std::floor((lo[a] - org[a]) / extent) - 1.0f;
+        const float f1 = std::floor((hi[a] - org[a]) / extent) + 2.0f;
+        b0[a] = f0 < 0.0f ? 0 : static_cast<std::int32_t>(f0);
+        b1[a] = f1 > static_cast<float>(bcount_[a]) ? bcount_[a] : static_cast<std::int32_t>(f1);
+        if (b0[a] > bcount_[a]) b0[a] = bcount_[a];
+        if (b1[a] < 0) b1[a] = 0;
+        // No overlap: the caller keeps the whole volume rather than emitting one
+        // with no samples, because that is a different field and this is an
+        // optimisation rather than a cull.
+        if (b1[a] <= b0[a]) return std::nullopt;
+    }
+    if (b0[0] == 0 && b0[1] == 0 && b0[2] == 0 && b1[0] == bcount_[0] && b1[1] == bcount_[1] &&
+        b1[2] == bcount_[2])
+        return std::nullopt;  // reaches every brick; nothing to gain
+
+    FieldVolume out;
+    out.origin_ = origin_;
+    out.cell_size_ = cell_size_;
+    out.band_ = band_;
+    out.sample_lipschitz_ = sample_lipschitz_;
+    out.feather_ = feather_;
+    out.bcount_[0] = bcount_[0];
+    out.bcount_[1] = bcount_[1];
+    out.bcount_[2] = bcount_[2];
+    out.index_.assign(index_.size(), kBrickEmpty);
+    out.far_ = far_;
+    const bool has_colour = !colors_.empty();
+    const float dropped_far = far_value();
+
+    std::size_t kept = 0;
+    for (std::size_t slot = 0; slot < index_.size(); ++slot) {
+        const std::int32_t entry = index_[slot];
+        if (entry == kBrickEmpty) continue;  // already empty; its far_ stands
+        const std::int32_t bx = static_cast<std::int32_t>(slot % static_cast<std::size_t>(bcount_[0]));
+        const std::int32_t by = static_cast<std::int32_t>(
+            (slot / static_cast<std::size_t>(bcount_[0])) % static_cast<std::size_t>(bcount_[1]));
+        const std::int32_t bz = static_cast<std::int32_t>(
+            slot / (static_cast<std::size_t>(bcount_[0]) * static_cast<std::size_t>(bcount_[1])));
+        const bool inside = bx >= b0[0] && bx < b1[0] && by >= b0[1] && by < b1[1] &&
+                            bz >= b0[2] && bz < b1[2];
+        if (!inside) {
+            // Outside the crop this brick reads as empty, at the same
+            // conservative bound an empty brick of this volume already carries.
+            // Nothing evaluates here under the cull's contract; giving it the
+            // volume's own far value rather than a stale one is so that a
+            // reader who does is told something true about the band rather than
+            // whatever the slot happened to hold.
+            out.far_[slot] = dropped_far;
+            continue;
+        }
+        const std::size_t at = static_cast<std::size_t>(entry);
+        if (at + kBrickSamples > data_.size()) return std::nullopt;  // malformed; keep the whole
+        out.index_[slot] = static_cast<std::int32_t>(out.data_.size());
+        out.data_.insert(out.data_.end(), data_.begin() + static_cast<std::ptrdiff_t>(at),
+                         data_.begin() + static_cast<std::ptrdiff_t>(at + kBrickSamples));
+        if (has_colour) {
+            if (at + kBrickSamples > colors_.size()) return std::nullopt;
+            out.colors_.insert(out.colors_.end(),
+                               colors_.begin() + static_cast<std::ptrdiff_t>(at),
+                               colors_.begin() + static_cast<std::ptrdiff_t>(at + kBrickSamples));
+        }
+        ++kept;
+    }
+    if (kept == 0) return std::nullopt;  // the region reaches no STORED brick
+    return out;
+}
+
 std::vector<float> FieldVolume::to_blob() const {
     std::vector<float> out;
     // Slot 13 is the colour offset, 0 when this volume has none. Adding it to

@@ -693,7 +693,29 @@ struct Compiler {
                       item.curve_tolerance);
         } else if (prim_is_volume(item.prim.type)) {
             if (!item.volume || item.volume->empty()) return;  // nothing to read
-            std::vector<float> flat = item.volume->to_blob();
+            // CROPPED TO WHAT THIS COMPILE CAN BE ASKED ABOUT. A volume's
+            // influence bound is its whole box, so the item cull -- which drops
+            // 94 of 97 primitives on a worked ball -- can never drop one, and
+            // every per-brick tape carried the entire payload: 1,243,861 floats
+            // copied so that one 8^3 brick could read 512 of them. Meshing a
+            // baked form with gradient normals compiles one tape per brick, so
+            // that cost was paid 6,859 times (issue #455: 1740 ms against 86 ms
+            // for the primitives it replaced, while the SAME mesh with face
+            // normals cost 80 ms).
+            //
+            // Sound on the cull's own terms and only those: a cropped volume
+            // answers differently outside the crop, exactly as a culled tape
+            // answers differently outside its region, and identically inside.
+            // So the crop is the cull's OWN test region -- already dilated by
+            // the band and the chain pad -- carried into the item's local
+            // frame, which is where the volume's samples live.
+            std::optional<field::FieldVolume> narrowed;
+            if (cull) {
+                const math::Aabb local = cull_test.transformed(inv_world);
+                narrowed = item.volume->cropped(local);
+            }
+            const field::FieldVolume& emitted = narrowed ? *narrowed : *item.volume;
+            std::vector<float> flat = emitted.to_blob();
             // Remembered for the feathered replace combine, which reads the
             // box, band and feather from the same header the prim reads.
             last_volume_blob = tape.blob.size();
