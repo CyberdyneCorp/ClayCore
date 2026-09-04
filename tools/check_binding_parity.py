@@ -147,6 +147,7 @@ CLASS_ENUM_PREFIX = {
 
 # The names that do not derive. Kept explicit so the difference is reviewable.
 ALIASES = {
+    "Volume.content_id": "clay_item_stamp_content_id",
     # The placement calls name the LAYER they act on, which is what the C side
     # has to say and the Python side gets from the argument.
     "Document.placement_report": "clay_layer_placement_report",

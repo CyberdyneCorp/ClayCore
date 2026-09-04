@@ -145,6 +145,7 @@ add_executable(clay_unit_tests
   unit/test_c_sdf_sculpt.cpp
   unit/test_c_sdf_prefix_cache.cpp
   unit/test_c_field_stamp.cpp
+  unit/test_c_stamp_capture.cpp
   unit/test_volume_cull.cpp
   unit/test_deformer_cull.cpp
   unit/test_layer_extent_cache.cpp

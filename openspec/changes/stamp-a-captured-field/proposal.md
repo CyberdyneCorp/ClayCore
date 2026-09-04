@@ -13,6 +13,15 @@ found that most of what it asks for is shipped:
 | "do not add a stamp-specific distance transform" (§3.9) | there is none to add; the bake's redistance is what capture already uses |
 | a new tape opcode, avoided if volume semantics suffice (§3.10) | not needed — a placed stamp IS a volume item |
 
+### Since this was written: the payload defect below is FIXED
+
+`write-a-shared-payload-once` (format minor 17) landed it as its own change,
+because the defect was never stamp-specific — `Node::volume` and `Node::gate`
+are the same member type with the same per-node serialization. The measurement
+below is what it looked like BEFORE that, kept because it is the argument for
+why the asset table was needed; on `main` today 8 placements of one capture save
+189,117 bytes rather than 1,499,457.
+
 ### The one the audit got wrong, corrected by measuring it
 
 `scene/types.h` says "A sampled volume. Held by shared reference on the Node, so
@@ -93,6 +102,30 @@ not give you:
 - `bindings/c/`, `bindings/python/`, `tests/`, `examples/`, `docs/07`.
 - ABI grows.
 
-**Not in v1**: non-uniform scale, an inferred capture frame, a dedicated strength
-parameter, and a stamp-specific distance transform — each because the guide
-argues against it and the tree agrees.
+**Not in v1**: an inferred capture frame, a dedicated strength parameter, and a
+stamp-specific distance transform — each because the guide argues against it and
+the tree agrees.
+
+## What building it found
+
+**A non-uniform scale did not need refusing, and is not refused.** The plan said
+to refuse one "rather than accept it with a bound the marcher will step
+through". Checked against the tree instead of taken: `cfi_scale_nonuniform`
+keeps the Lipschitz constant and drops only EXACTNESS, and `clay.h` already
+states that the evaluated distance is divided by the SMALLEST component of the
+per-axis scale, "which never overestimates the true distance — so the field
+stays a conservative bound and stays 1-Lipschitz, and clay_safe_step_scale does
+not move". Refusing would have removed a working capability to fix a defect that
+is not there. The property the refusal was for is gated directly instead: 3,990
+steps from outside a hard-squashed placement, 0 crossings.
+
+**The frame has to round-trip as a quaternion, not as a normal and a tangent.**
+Storing the two vectors and re-resolving them on load runs the frame back
+through `calpha_frame` and a basis-to-quaternion conversion, and that rounds:
+before this changed, every sample of a reloaded stamp differed from the original
+in the last ulp. Caught because the round-trip gate asserts field equality
+rather than that the file loaded.
+
+**The capture reproduces its source to 0.000206** over 334 in-band samples at a
+0.012 cell, on a frame deliberately chosen not to be axis-aligned — an
+axis-aligned one would pass even if the orientation were being dropped.

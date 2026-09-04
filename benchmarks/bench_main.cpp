@@ -16,6 +16,7 @@
 
 #include "clay.h"
 #include "clay_internal.h"
+#include "clay/field/stamp.h"
 #include "clay/brick/cache.h"
 #include "clay/mesh/dynamic_sculpt.h"
 #include "clay/mesh/multires_sculpt.h"
@@ -372,6 +373,97 @@ BENCHMARK(BM_LayerDragPerFrame)->Unit(benchmark::kMillisecond);
 
 void BM_LayerDragOneRefill(benchmark::State& state) { layer_drag(state, /*gesture=*/true); }
 BENCHMARK(BM_LayerDragOneRefill)->Unit(benchmark::kMillisecond);
+
+// Capturing a region of the field as a stamp, and placing one
+// (stamp-a-captured-field).
+//
+// The capture rows sweep the LATTICE, 32^3 to 256^3, because that is what a
+// capture's cost is proportional to and what an artist picks when they choose a
+// detail size. The placement row is the claim: a new placement costs a
+// REFERENCE and not a payload, so it must not scale with the lattice at all --
+// which is why the two capture sizes either side of it are here to compare
+// against.
+namespace {
+
+scene::Document stamp_source() {
+    scene::Document doc = sculpted_sphere(97);
+    return doc;
+}
+
+void capture_stamp(benchmark::State& state, int side) {
+    scene::Document doc = stamp_source();
+    const scene::Tape tape = scene::compile_document(doc);
+    field::StampFrame frame;
+    frame.origin = cf3(0.95f, -0.2f, 0.0f);
+    frame.normal = cf3(0.95f, -0.2f, 0.0f);
+    frame.tangent = cf3(0.0f, 0.0f, 1.0f);
+    const math::Transform placement = field::stamp_frame_transform(frame);
+
+    const float half = 0.25f;
+    const float cell = 2.0f * half / static_cast<float>(side);
+    const math::Aabb region{cf3(-half, -half, -half), cf3(half, half, half)};
+
+    std::size_t bricks = 0;
+    for (auto _ : state) {
+        field::FieldVolume v = field::FieldVolume::sample_blocks(
+            eval::tape_block_fill(tape, {},
+                                  [placement](kernel::cfloat3 local) {
+                                      return placement.apply(local);
+                                  }),
+            region, cell, cell * 3.0f);
+        bricks = v.brick_count();
+        benchmark::DoNotOptimize(bricks);
+    }
+    state.counters["side"] = static_cast<double>(side);
+    state.counters["bricks"] = static_cast<double>(bricks);
+}
+
+}  // namespace
+
+void BM_StampCapture32(benchmark::State& state) { capture_stamp(state, 32); }
+BENCHMARK(BM_StampCapture32)->Unit(benchmark::kMillisecond);
+void BM_StampCapture64(benchmark::State& state) { capture_stamp(state, 64); }
+BENCHMARK(BM_StampCapture64)->Unit(benchmark::kMillisecond);
+void BM_StampCapture128(benchmark::State& state) { capture_stamp(state, 128); }
+BENCHMARK(BM_StampCapture128)->Unit(benchmark::kMillisecond);
+
+// One more placement of an ALREADY CAPTURED asset. The payload is a
+// shared_ptr copy whatever the lattice holds, so this is flat against the
+// capture rows above -- that is the whole claim, and the counter says how big
+// the payload it did NOT copy is.
+void BM_StampPlace(benchmark::State& state) {
+    scene::Document src = stamp_source();
+    const scene::Tape tape = scene::compile_document(src);
+    field::StampFrame frame;
+    frame.origin = cf3(0.95f, -0.2f, 0.0f);
+    frame.normal = cf3(0.95f, -0.2f, 0.0f);
+    const math::Transform placement = field::stamp_frame_transform(frame);
+    const float half = 0.25f, cell = 2.0f * half / 128.0f;
+    auto asset = std::make_shared<const field::FieldVolume>(field::FieldVolume::sample_blocks(
+        eval::tape_block_fill(tape, {},
+                              [placement](kernel::cfloat3 local) {
+                                  return placement.apply(local);
+                              }),
+        math::Aabb{cf3(-half, -half, -half), cf3(half, half, half)}, cell, cell * 3.0f));
+
+    scene::Document target;
+    scene::Layer& layer = target.add_sdf_layer("stamps");
+    float at = 0.0f;
+    for (auto _ : state) {
+        scene::Node n;
+        n.id = layer.sdf->reserve_id();
+        n.prim = scene::Prim::volume();
+        n.volume = asset;  // A POINTER, not a payload.
+        n.xform.position = cf3(at, 0.0f, 0.0f);
+        at += 1.0f;
+        layer.sdf->insert(n);
+        benchmark::DoNotOptimize(layer.sdf);
+    }
+    state.counters["payload_kb"] =
+        static_cast<double>(asset->bytes()) / 1024.0;
+    state.counters["placements"] = static_cast<double>(layer.sdf->nodes().size());
+}
+BENCHMARK(BM_StampPlace)->Unit(benchmark::kMillisecond);
 
 void BM_DabRefillFreshDoc(benchmark::State& state) { refill_pole_dab(state, 1); }
 BENCHMARK(BM_DabRefillFreshDoc)->Unit(benchmark::kMillisecond);

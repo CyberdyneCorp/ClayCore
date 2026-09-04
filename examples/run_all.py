@@ -104,6 +104,7 @@ EXAMPLES = [
     "70_shared_brush_runtime",
     "71_extreme_poly",
     "72_layer_drag",
+    "73_field_stamps",
 ]
 
 
