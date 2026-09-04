@@ -249,45 +249,97 @@ TEST_CASE("mesh import: summarizing distant nodes agrees with summing every tria
 }
 
 TEST_CASE("mesh import: the tree is what makes it affordable") {
-    // Not a benchmark, a shape check: ten times the triangles must not cost
-    // ten times the time, or the summarization is not working and a real
-    // import would be unusable.
+    // Not a benchmark, a shape check: ten times the triangles must not cost ten
+    // times the WORK, or the summarization is not working and a real import
+    // would be unusable.
     //
-    // A ratio of two single wall-clock samples is not that shape check, though.
-    // Both sides run for well under a millisecond on a shared CI runner, so one
-    // preemption lands entirely inside one of them, and it is the COARSE side
-    // being slowed that inflates the ratio. That is how this read 5.379 against
-    // a 5.333 bound on macos-latest with the tree unchanged. Each side is now
-    // the FASTEST of several passes over a BVH built once: noise can only make
-    // a pass slower, so the minimum is the closest thing to the cost of the
-    // walk itself, and the bound below goes on measuring summarization rather
-    // than the scheduler.
-    auto time_queries = [](const Bvh& bvh) {
-        auto start = std::chrono::steady_clock::now();
+    // COUNTED, NOT TIMED, and the history is the argument. This asserted a
+    // ratio of wall clocks, and both sides run in well under a millisecond on a
+    // shared runner, so one preemption inside the coarse side inflates the
+    // ratio: it read 5.379 against a 5.333 bound on macos-latest with the tree
+    // unchanged. Scoring each side as the fastest of several passes was the
+    // first repair and was not enough -- it read 5.459 on the same platform
+    // twice more, while an A/B on identical hardware put the change that
+    // triggered it at 2.254 against main's 2.246, which is no effect at all.
+    //
+    // The property was never a duration. Summarization means the walk STOPS at
+    // a distant node and answers with one dipole term instead of descending it,
+    // so what it saves is nodes visited and triangles tested -- and those are
+    // integers, identical on every machine. `BvhWalkStats` reports them.
+    auto walk_work = [](const Mesh& m, std::uint64_t* out_summarized) {
+        Bvh bvh = Bvh::build(m);
+        mesh::BvhWalkStats stats;
+        bvh.set_walk_stats(&stats);
         float sink = 0.0f;
+        // `winding_number` rather than `signed_distance`: summarizing is this
+        // walk's own trick and the only thing the gate is about, and counting
+        // it alone keeps the instrumentation off `closest`, which picking and
+        // meshing lean on.
         for (float x = -1.5f; x <= 1.5f; x += 0.05f)
             for (float y = -1.5f; y <= 1.5f; y += 0.05f)
-                sink += bvh.signed_distance(cf3(x, y, 0.03f));
-        auto elapsed = std::chrono::steady_clock::now() - start;
+                sink += bvh.winding_number(cf3(x, y, 0.03f));
+        bvh.set_walk_stats(nullptr);
         CHECK(std::isfinite(sink));
-        return std::chrono::duration<double>(elapsed).count();
-    };
-    auto fastest_pass = [&time_queries](const Mesh& m) {
-        Bvh bvh = Bvh::build(m);
-        time_queries(bvh);  // warm the caches; not scored
-        double best = time_queries(bvh);
-        for (int pass = 1; pass < 5; ++pass) best = std::min(best, time_queries(bvh));
-        return best;
+        *out_summarized = stats.summarized;
+        return stats.work();
     };
 
     Mesh coarse = sphere_mesh(1.0f, 12);
     Mesh fine = sphere_mesh(1.0f, 48);
-    double ratio_triangles =
+    const double ratio_triangles =
         static_cast<double>(fine.triangle_count()) / static_cast<double>(coarse.triangle_count());
-    double ratio_time = fastest_pass(fine) / std::max(fastest_pass(coarse), 1e-9);
-    INFO("triangles x" << ratio_triangles << ", time x" << ratio_time);
+
+    std::uint64_t coarse_summarized = 0, fine_summarized = 0;
+    const std::uint64_t coarse_work = walk_work(coarse, &coarse_summarized);
+    const std::uint64_t fine_work = walk_work(fine, &fine_summarized);
+    const double ratio_work =
+        static_cast<double>(fine_work) / static_cast<double>(std::max<std::uint64_t>(coarse_work, 1));
+
+    INFO("triangles x" << ratio_triangles << ", work x" << ratio_work << " (" << coarse_work
+                       << " -> " << fine_work << "), summarized " << coarse_summarized << " -> "
+                       << fine_summarized);
     CHECK(ratio_triangles > 10.0);
-    CHECK(ratio_time < ratio_triangles / 3.0);
+    // THE GATE. Deterministic, and it fails by the model ratio rather than by a
+    // couple of per cent if the summarization stops working: with beta at 0 the
+    // walk descends to every leaf and this reads about the triangle ratio.
+    CHECK(ratio_work < ratio_triangles / 3.0);
+    // And the summarization is actually happening rather than the tree simply
+    // being small: a walk that never took the dipole branch would pass the
+    // ratio above by descending both sides equally badly.
+    CHECK(fine_summarized > 0);
+    CHECK(coarse_summarized > 0);
+}
+
+TEST_CASE("mesh import: the affordability gate fails when summarizing is off") {
+    // Proof that the gate above catches its own regression, in the same file so
+    // the two cannot drift apart. beta = 0 is the documented way to disable
+    // summarizing -- `winding_number` sums every triangle -- and it is what the
+    // approximation is compared against two cases up. With it off, the work
+    // ratio must climb to about the triangle ratio.
+    auto walk_work = [](const Mesh& m, float beta) {
+        Bvh bvh = Bvh::build(m);
+        mesh::BvhWalkStats stats;
+        bvh.set_walk_stats(&stats);
+        float sink = 0.0f;
+        for (float x = -1.5f; x <= 1.5f; x += 0.05f)
+            for (float y = -1.5f; y <= 1.5f; y += 0.05f)
+                sink += bvh.winding_number(cf3(x, y, 0.03f), beta);
+        bvh.set_walk_stats(nullptr);
+        CHECK(std::isfinite(sink));
+        return stats.work();
+    };
+    Mesh coarse = sphere_mesh(1.0f, 12);
+    Mesh fine = sphere_mesh(1.0f, 48);
+    const double ratio_triangles =
+        static_cast<double>(fine.triangle_count()) / static_cast<double>(coarse.triangle_count());
+    const double summarizing =
+        static_cast<double>(walk_work(fine, 2.0f)) / static_cast<double>(walk_work(coarse, 2.0f));
+    const double flat =
+        static_cast<double>(walk_work(fine, 0.0f)) / static_cast<double>(walk_work(coarse, 0.0f));
+    INFO("triangles x" << ratio_triangles << ", summarizing x" << summarizing << ", off x" << flat);
+    CHECK(summarizing < ratio_triangles / 3.0);   // the gate passes
+    CHECK(flat > ratio_triangles / 3.0);          // and fails with it off
+    CHECK(flat > summarizing * 2.0);              // by a wide margin, not a whisker
 }
 
 TEST_CASE("mesh import: a mesh becomes a field") {

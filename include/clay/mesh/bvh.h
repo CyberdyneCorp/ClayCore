@@ -34,6 +34,38 @@
 namespace clay {
 namespace mesh {
 
+// What a query actually DID, for a test that means to gate the tree's shape
+// rather than the machine it ran on.
+//
+// "Ten times the triangles must not cost ten times the work" is a claim about
+// SUMMARIZATION -- the walk stops at a distant node and answers with one term
+// instead of descending it -- and that is a count. Asserted as a wall clock it
+// became a claim about the scheduler instead: on `macos-latest` the ratio has
+// twice landed just over its bound with the tree unchanged (5.379 and 5.459
+// against 5.333), because both sides run in well under a millisecond and one
+// preemption inside the coarse side inflates the ratio. Taking the fastest of
+// several passes was the first attempt at that and was not enough.
+//
+// These counters are what the claim was always about, and they are identical
+// on every machine.
+// COUNTED IN `winding_number` ONLY, deliberately. Summarizing is that walk's
+// own trick -- the dipole branch -- and `closest` prunes by box distance, which
+// is ordinary BVH pruning and not what this gates. Instrumenting both measured
+// 3.8% on a `signed_distance` sweep with the pointer null (12.87 ms against
+// 12.39, interleaved), which is a permanent cost on the path picking and
+// meshing use, paid to serve a test. Counting the one walk that summarizes
+// keeps the gate and gives the cost back.
+struct BvhWalkStats {
+    std::uint64_t nodes_visited = 0;
+    std::uint64_t triangles_tested = 0;
+    // Subtrees answered by a single dipole term instead of being descended --
+    // the summarization itself. Zero means the tree is being walked to its
+    // leaves everywhere, which is the failure the gate exists to catch.
+    std::uint64_t summarized = 0;
+
+    std::uint64_t work() const { return nodes_visited + triangles_tested; }
+};
+
 class Bvh {
   public:
     // Build over `m`'s triangles. The mesh is not retained: the triangles are
@@ -42,6 +74,15 @@ class Bvh {
 
     bool empty() const { return tris_.empty(); }
     std::size_t triangle_count() const { return tris_.size(); }
+
+    // Where the walks report what they did. BORROWED and null by default, and
+    // nothing is counted while it is null -- one predictable branch per node,
+    // which is what keeps this out of the cost it is used to measure.
+    //
+    // Accumulates across queries, so a caller measuring a sweep resets it once
+    // and reads it at the end rather than per query.
+    void set_walk_stats(BvhWalkStats* stats) const { stats_ = stats; }
+    BvhWalkStats* walk_stats() const { return stats_; }
     math::Aabb bounds() const;
 
     // Distance to the nearest point on the surface. Always non-negative.
@@ -238,6 +279,14 @@ class Bvh {
         std::int32_t parent = -1;  // -1 at the root; the refit walks up it
     };
 
+    // The winding walk, with the counting compiled IN or OUT. A template rather
+    // than a null check because the checks measured 2.3% of a signed_distance
+    // sweep with the pointer null, which is a permanent charge on a query
+    // picking and meshing lean on, paid so one test can assert a count.
+    // `if constexpr` leaves the uncounted instantiation with no branches at all.
+    template <bool kCount>
+    float winding_walk(kernel::cfloat3 p, float beta, BvhWalkStats* stats) const;
+
     std::int32_t partition(std::int32_t first, std::int32_t count, const math::Aabb& box);
     std::int32_t build_node(std::int32_t first, std::int32_t count, std::int32_t parent);
     // From the node's own span of triangles. This is what the BUILD uses for
@@ -261,6 +310,10 @@ class Bvh {
     bool refit_slots(const Mesh& m, const std::uint32_t* changed, std::size_t count);
 
     std::vector<Tri> tris_;
+    // Mutable because the walks are const and this is measurement, not state:
+    // a tree with a counter attached answers every query exactly as one
+    // without.
+    mutable BvhWalkStats* stats_ = nullptr;
     std::vector<Node> nodes_;
     // Source triangle -> index in `tris_`, or kNoSlot for one the build dropped
     // (an out-of-range index) and for the padding up to the mesh's count.
