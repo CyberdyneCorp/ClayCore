@@ -353,6 +353,20 @@ MAX_RATIO = [
     # thing the sharing exists to prevent -- and at the scale a detail brush
     # works at, a thousand of them.
     ("BM_StampPlace", "BM_StampCapture128", 0.01),
+    # A 60-frame layer drag costs ONE refill, not sixty
+    # (drag-a-layer-without-a-refill). Moving a layer rigidly changes no shape,
+    # so the frames in between need no walk at all; the gesture holds the
+    # placement and applies one command at the end.
+    #
+    # The number that actually decides this is the `refills` counter -- 60
+    # against 1 -- and it is gated exactly in
+    # tests/unit/test_layer_placement_gesture.cpp, where a count cannot be
+    # blamed on a busy machine. This ratio is the machine-independent echo of
+    # it: both rows do the same drag on the same document, so a runner that is
+    # slow moves them together. The ceiling is far above the ~0.03 measured
+    # because the failure it catches is CATEGORICAL -- a gesture that quietly
+    # invalidated per frame lands at 1.0, not at 0.2.
+    ("BM_LayerDragOneRefill", "BM_LayerDragPerFrame", 0.2),
     # Cull index (accel/cull-index): refilling a fixed dab's bricks against a
     # grown document is gated against the fresh one. Before the per-revision
     # CullIndex + per-batch CullPlan every per-brick compile walked the whole

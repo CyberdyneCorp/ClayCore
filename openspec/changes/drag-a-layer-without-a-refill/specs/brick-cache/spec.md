@@ -9,7 +9,9 @@ The batched brick evaluation SHALL accept a layer scope: the whole document (wha
 
 A scoped refill SHALL produce the same lattice, the same band clamping and the same brick classification rules as the unscoped one — it evaluates a different field, not a different way. Its results SHALL be storable and readable by the same calls, at the same strides.
 
-A scoped result SHALL NOT be used as a seed for an unscoped refill, or for a refill at a different scope. A seed is the value of a culled tape, and two scopes compile different tapes; the store SHALL key an entry by its scope so a scope it does not hold is a miss rather than a wrong answer.
+A scoped result SHALL NOT be used as a seed for a refill at any other scope. A seed is the value of a culled tape and two scopes compile different tapes, so a scoped result served as an unscoped seed is a partial field answered as a whole one — wrong, with nothing in the result to indicate it.
+
+A scoped refill SHALL therefore STORE NO SEED at all, rather than storing one under a scope-aware key. Storing nothing is the stronger of the two: it cannot be defeated by a key that forgets a dimension, and the cost is only that a scoped refill is always a full walk, which is what a preview drawn once per gesture wants anyway.
 
 #### Scenario: A scoped refill matches an unscoped one on a one-layer document
 - **WHEN** a document holding one visible SDF layer is refilled unscoped, and then scoped to that layer alone

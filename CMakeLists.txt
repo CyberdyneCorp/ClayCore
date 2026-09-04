@@ -49,6 +49,7 @@ add_library(claycore
   src/field/move_topological.cpp
   src/field/redistance.cpp
   src/scene/consolidate.cpp
+  src/scene/placement.cpp
   src/scene/commands.cpp
   src/scene/memory.cpp
   src/scene/armature.cpp

@@ -43,6 +43,10 @@ CLASS_PREFIX = {
     # A voxel drag as a gesture (issue #393). Its members cross as
     # clay_voxel_grab_update / _commit / _cancel / _written_box.
     "VoxelGrab": ("clay_voxel_grab_",),
+    # A LAYER placement drag as a gesture (drag-a-layer-without-a-refill), the
+    # same shape one level up: its members cross as clay_layer_placement_update
+    # / _preview / _commit / _cancel.
+    "PlacementGesture": ("clay_layer_placement_",),
     "MaskField": ("clay_mask_",),
     "GroupField": ("clay_groups_",),
     "MeshSculptor": ("clay_mesh_sculptor_",),
@@ -144,6 +148,10 @@ CLASS_ENUM_PREFIX = {
 # The names that do not derive. Kept explicit so the difference is reviewable.
 ALIASES = {
     "Volume.content_id": "clay_item_stamp_content_id",
+    # The placement calls name the LAYER they act on, which is what the C side
+    # has to say and the Python side gets from the argument.
+    "Document.placement_report": "clay_layer_placement_report",
+    "Document.placement_gesture": "clay_layer_placement_begin",
     "Document.eval": "clay_eval_points",
     "Document.eval_excluding": "clay_eval_points_excluding",
     "Document.gradients_excluding": "clay_eval_gradients_excluding",
@@ -371,6 +379,9 @@ CLASS_CTOR = {
     "Document": "clay_document_create",
     "Layer": "clay_add_sdf_layer",
     "Mesh": "clay_document_mesh",
+    # Opening the gesture is what builds one, exactly as clay_voxel_grab_begin
+    # builds a VoxelGrab.
+    "PlacementGesture": "clay_layer_placement_begin",
     "VoxelGrid": "clay_voxel_grid_create",
     "VoxelGrab": "clay_voxel_grab_begin",
     "MaskField": "clay_mask_create",
