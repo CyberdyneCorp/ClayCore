@@ -1138,17 +1138,14 @@ struct clay_document {
     // key. `content_serial` advances inside `scene::apply`, so the two calls
     // land either side of it and the memo taken after frame N's apply is the
     // one frame N+1 opens with.
-    scene::LayerExtent* extent_at(std::uint64_t serial) {
-        if (extent_serial_ != serial) {
-            extent_walks_ += extent_memo_.walks();  // carry the retired tally
-            extent_memo_ = scene::LayerExtent{};
-            extent_serial_ = serial;
-        }
-        return &extent_memo_;
-    }
+    // The extent, KEPT ACROSS EDITS rather than memoized per query.
+    // `LayerExtentCache` holds the item achieving each of the extent's six
+    // faces, so an edit to an item that holds none of them out and still fits
+    // inside is decided with one item bound instead of a walk.
+    scene::LayerExtentCache& extent_cache() { return extent_cache_; }
     std::uint64_t content_serial() const { return doc.document.content_serial; }
-    std::uint64_t extent_walks() const { return extent_walks_ + extent_memo_.walks(); }
-    std::uint64_t extent_reuses = 0;
+    std::uint64_t extent_walks() const { return extent_cache_.walks(); }
+    std::uint64_t extent_keeps() const { return extent_cache_.keeps(); }
 
     // Per mesh layer, bumped only when its triangles are REPLACED wholesale.
     // See mesh_layer_revision_of for why a sculpt deliberately does not bump it
@@ -1166,8 +1163,9 @@ struct clay_document {
         // installing a volume, a replayed journal's non-command half -- never
         // reaches `scene::apply` and so never advances `content_serial`. This
         // is where such a path already says "everything I cached is stale", so
-        // it is where the extent memo learns it too.
+        // it is where the extent cache learns it too.
         ++doc.document.content_serial;
+        extent_cache_.invalidate();
         forget_appends();
         // A seed is only usable across APPENDS, so one kept past any other
         // edit is memory nothing can ever read again.
@@ -2455,9 +2453,7 @@ struct clay_document {
     }
 
     mutable std::mutex cache_mutex_;
-    scene::LayerExtent extent_memo_;
-    std::uint64_t extent_serial_ = 0;  // never a live serial; those start at 1
-    std::uint64_t extent_walks_ = 0;
+    scene::LayerExtentCache extent_cache_;
     mutable std::shared_ptr<const scene::Tape> tape_cache_;
     mutable std::uint64_t tape_revision_ = 0;
     // Where a resumed compile picks tape_cache_ up, and the appends recorded
@@ -3523,20 +3519,34 @@ clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char
     // Gathered before the apply because after it the old shape is gone.
     clay_result r = edit_guard(doc, cmd);
     if (r != CLAY_OK) return r;
-    // The two walks land either side of `scene::apply`, which advances
-    // `content_serial` -- so the memo cannot answer the second with the first's
-    // geometry, and the one left after this edit is the one the NEXT edit opens
-    // with. A drag therefore walks once a frame rather than twice (#451).
-    scene::LayerExtent* before_memo = doc->extent_at(doc->content_serial());
-    const std::size_t walks_before = before_memo->walks();
+    // BOTH SIDES OFF ONE CACHE THAT SURVIVES THE EDIT (#451). The before-bound
+    // reads the extent as it stands; the apply then changes the document; and
+    // the cache is TOLD what changed before the after-bound reads it again, so
+    // it can keep the extent where the edit provably cannot have moved it --
+    // which is an item that holds none of the extent's faces out and still fits
+    // inside, the drag case the issue is about.
+    //
+    // Told rather than dropped only for a command that edits one existing item
+    // in place. `command_edited_item` names those and is conservative by
+    // construction: a kind nobody has named there drops the cache, so
+    // forgetting one costs a walk rather than a wrong bound.
+    scene::LayerExtent before_memo(&doc->extent_cache());
     const math::Aabb reach_before =
-        scene::command_influence_bound(doc->doc.document, cmd, before_memo);
-    if (before_memo->walks() == walks_before && walks_before > 0) ++doc->extent_reuses;
+        scene::command_influence_bound(doc->doc.document, cmd, &before_memo);
     r = perform_edit(doc, cmd, what);
     if (r != CLAY_OK) return r;
+    {
+        const scene::EditedItem edited = scene::command_edited_item(cmd);
+        const scene::Layer* el =
+            edited.known ? doc->doc.document.find_layer(edited.layer) : nullptr;
+        if (el && el->sdf)
+            doc->extent_cache().note_item_changed(*el->sdf, *el, edited.node);
+        else
+            doc->extent_cache().invalidate();
+    }
     math::Aabb reach = reach_before;
-    reach.expand(scene::command_influence_bound(doc->doc.document, cmd,
-                                                doc->extent_at(doc->content_serial())));
+    scene::LayerExtent after_memo(&doc->extent_cache());
+    reach.expand(scene::command_influence_bound(doc->doc.document, cmd, &after_memo));
     // The funnel every command-based edit passes through, so the tape cache is
     // invalidated in one place for all of them — and the one place that can
     // tell the cache an edit was an APPEND, which is what a brush stamp is
@@ -12418,7 +12428,11 @@ clay_result clay_document_extent_stats(const clay_document* doc, clay_extent_sta
     if (r != CLAY_OK) return r;
     clay_extent_stats filled{};
     filled.walks = doc->extent_walks();
-    filled.reuses = doc->extent_reuses;
+    // Only the extent queries actually ANSWERED from the cache, which is
+    // zero for a layer nobody asks about. An earlier version also counted
+    // every edit whose bound happened not to walk, and so reported 62
+    // reuses on a layer whose extent was never once needed.
+    filled.reuses = doc->extent_keeps();
     write_desc(out_stats, out_stats->struct_size, filled);
     return CLAY_OK;
 }

@@ -108,9 +108,86 @@ math::Aabb layer_influence_extent(const SdfContent& content, const Layer& layer)
 // VALID ONLY WHILE THE DOCUMENT IS NOT MUTATED. It is a scratch value for one
 // query, never a member: the extent it holds is the geometry of the nodes as
 // they were when it was taken.
+// A layer's extent, KEPT ACROSS EDITS, held as "everything except one item".
+//
+// `LayerExtent` below memoizes one query. This survives them, which is what an
+// intersect drag needs: the extent is recomputed on every edit because every
+// edit might have changed it, and walking a layer is 96% of what an intersect's
+// bound costs (#451).
+//
+// THE SHAPE IS THE WHOLE IDEA, and the first attempt had it wrong. That one
+// kept the extent plus the item achieving each of its six faces, reasoning that
+// an item holding no face out could move freely inside. Measured, the fast path
+// never fired: the thing a host drags across a form is a BOOLEAN OPERAND, and
+// an operand big enough to cut something sticks out of it -- so it defines a
+// face every frame and every frame walked. 201 walks over 200 drag frames.
+//
+// So this holds the union of every visible item EXCEPT one, and the extent is
+// that union with the excluded item's own box folded back in. Moving the
+// excluded item is then one item bound and a union, whatever it does: growing,
+// shrinking, or leaving the layer's silhouette entirely. A drag walks once, on
+// the frame that chooses whom to exclude, and never again.
+//
+// Exact, not conservative: the excluded item's old box is not in `rest_`, so a
+// shrink is a shrink rather than a union that cannot shrink.
+class LayerExtentCache {
+  public:
+    // The extent, walking only if what is held cannot be trusted.
+    const math::Aabb& of(const SdfContent& content, const Layer& layer);
+
+    // That `node` was edited, told to the cache AFTER the edit. Returns true if
+    // what is held still describes the layer -- meaning the next `of()` will
+    // answer from it rather than walk.
+    //
+    // NOTHING IS COMPUTED HERE, deliberately. Most layers hold no intersect and
+    // never have their extent asked for at all, and an eager version of this
+    // made every one of them walk once per edit -- a cache that made the common
+    // case slower to make the rare one fast. So this only records, and `of()`
+    // pays if and only if someone asks.
+    bool note_item_changed(const SdfContent& content, const Layer& layer, NodeId node);
+
+    // Everything the exclusion cannot describe: adding or removing an item,
+    // reparenting one, any layer-level edit, a mutation made outside the
+    // command vocabulary.
+    void invalidate() {
+        valid_ = false;
+        pending_ = kNoNode;
+    }
+
+    // Walks actually performed, and edits answered without one. The extent is
+    // identical either way -- that is the point of a cache -- so nothing about
+    // it can say which happened, and a test needs these to tell a cache that
+    // fired from one that quietly stopped. It is how the first design was
+    // found not to fire at all.
+    std::size_t walks() const { return walks_; }
+    std::size_t keeps() const { return keeps_; }
+
+  private:
+    void rebuild(const SdfContent& content, const Layer& layer, NodeId hold_out);
+
+    const SdfContent* content_ = nullptr;
+    const Layer* layer_ = nullptr;
+    NodeId excluded_ = kNoNode;  // the item held out of `rest_`
+    NodeId pending_ = kNoNode;   // edited since the last walk; who to hold out next
+    math::Aabb rest_;            // every visible item except `excluded_`
+    math::Aabb extent_;          // `rest_` with `excluded_`'s box folded in
+    bool valid_ = false;         // `rest_` and `excluded_` describe this layer
+    bool extent_fresh_ = false;  // ... and `extent_` is caught up with it too
+    std::size_t walks_ = 0;
+    std::size_t keeps_ = 0;
+};
+
 class LayerExtent {
   public:
+    LayerExtent() = default;
+    // Backed by a cache that SURVIVES the query, so the walk this memo exists
+    // to do once is not done at all when the cache still holds the answer
+    // (#451). Every caller that already threads a LayerExtent gets that for
+    // free; nothing else changes.
+    explicit LayerExtent(LayerExtentCache* cache) : cache_(cache) {}
+
     const math::Aabb& of(const SdfContent& content, const Layer& layer) {
+        if (cache_) return cache_->of(content, layer);
         if (&content != content_ || &layer != layer_) {
             extent_ = layer_influence_extent(content, layer);
             content_ = &content;
@@ -129,6 +206,7 @@ class LayerExtent {
     std::size_t walks() const { return walks_; }
 
   private:
+    LayerExtentCache* cache_ = nullptr;
     const SdfContent* content_ = nullptr;
     const Layer* layer_ = nullptr;
     math::Aabb extent_;

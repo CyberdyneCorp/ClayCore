@@ -1268,6 +1268,85 @@ Nonlocality item_nonlocality(const Node& item) {
     return Nonlocality::None;
 }
 
+void LayerExtentCache::rebuild(const SdfContent& content, const Layer& layer, NodeId hold_out) {
+    // One walk, splitting the union in two: everything except `hold_out`, and
+    // then that item folded back in. Mirrors `layer_influence_extent` below --
+    // and has to, exactly, which is what the exhaustive gate checks.
+    rest_ = Aabb();
+    Aabb held;
+    bool infinite = false;
+    const math::cfloat4x4 lm = layer_matrix(layer);
+    for (const auto& [id, n] : content.nodes()) {
+        if (n.is_group || !n.visible) continue;
+        if (!item_influence_is_local(n) && item_nonlocality(n) != Nonlocality::BoundedByLayer) {
+            infinite = true;
+            break;
+        }
+        const Aabb b = geometry_bound(n, layer, /*with_copies=*/true, &lm);
+        if (id == hold_out)
+            held = b;
+        else
+            rest_.expand(b);
+    }
+    ++walks_;
+    content_ = &content;
+    layer_ = &layer;
+    valid_ = true;
+    extent_fresh_ = true;
+    pending_ = kNoNode;
+    if (infinite) {
+        // Nothing to hold out of "everywhere". Kept valid so a repeat query is
+        // still free, but with no item excluded no edit can take the fast path.
+        rest_ = Aabb::infinite();
+        extent_ = rest_;
+        excluded_ = kNoNode;
+        return;
+    }
+    excluded_ = hold_out;
+    extent_ = rest_;
+    extent_.expand(held);
+}
+
+const Aabb& LayerExtentCache::of(const SdfContent& content, const Layer& layer) {
+    if (!valid_ || &content != content_ || &layer != layer_) {
+        // Hold out whoever was edited last, so the NEXT edit to them -- the
+        // second frame of a drag, and every frame after -- costs no walk.
+        rebuild(content, layer, pending_);
+        return extent_;
+    }
+    if (!extent_fresh_) {
+        // The held-out item moved. Its old box was never in `rest_`, so this is
+        // exact whatever it did: grew, shrank, or left the silhouette.
+        extent_ = rest_;
+        const Node* n = content.find(excluded_);
+        if (n && !n->is_group && n->visible)
+            extent_.expand(geometry_bound(*n, layer, /*with_copies=*/true));
+        extent_fresh_ = true;
+        ++keeps_;
+    }
+    return extent_;
+}
+
+bool LayerExtentCache::note_item_changed(const SdfContent& content, const Layer& layer,
+                                         NodeId node) {
+    pending_ = node;
+    const bool same_layer = valid_ && &content == content_ && &layer == layer_;
+    if (!same_layer || node == kNoNode || node != excluded_) {
+        valid_ = false;
+        return false;
+    }
+    const Node* n = content.find(node);
+    if (n && !n->is_group && n->visible && !item_influence_is_local(*n) &&
+        item_nonlocality(*n) != Nonlocality::BoundedByLayer) {
+        // It just became unbounded, which makes the whole layer unbounded -- a
+        // thing the walk decides and `rest_` cannot say.
+        valid_ = false;
+        return false;
+    }
+    extent_fresh_ = false;
+    return true;
+}
+
 Aabb layer_influence_extent(const SdfContent& content, const Layer& layer) {
     // Every visible item's geometry, and infinite the moment one of them has
     // none: an intersect in a layer holding a plane is bounded by a plane.
