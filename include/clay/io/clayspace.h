@@ -174,7 +174,16 @@ inline constexpr std::uint16_t kClaySpaceMajor = 1;
 // applied to a whole subtool; it is visible, and re-applying it is one gizmo
 // drag, which is why this is the recoverable direction rather than a reason to
 // refuse the downgrade.
-inline constexpr std::uint16_t kClaySpaceMinor = 16;
+// Minor 17 writes a SHARED PAYLOAD once, and like 14 and 16 it is a SCENE
+// PAYLOAD change — see scene::kSceneMinor for the id, why it is document-wide
+// rather than a NodeId, and the measurement behind it. Unlike 15 and 16 it
+// rewrites a field rather than appending one, so a build that predates 17 reads
+// a length where an id sits and FAILS on the first node carrying a volume or a
+// gate rather than misreading it. Writing AT minor 16 hands such a build a
+// document it can open, with every payload written once per node exactly as
+// before; what is lost is the deduplication, which costs bytes rather than
+// anything an artist authored, and is therefore the recoverable direction.
+inline constexpr std::uint16_t kClaySpaceMinor = 17;
 
 // The document bundle a .clayspace file holds. Voxel layer content is keyed
 // by layer id (the scene module stays voxel-agnostic by layering rule).

@@ -284,7 +284,31 @@ LayerId content_sharer_of(const Document& doc, LayerId layer);
 // Writing AT minor 15 or below drops the field and the layer comes back at the
 // identity triple (1, 1, 1), which is what every file written before this field
 // meant: the squash is gone, and visibly so.
-inline constexpr std::uint16_t kSceneMinor = 16;
+// Minor 17 writes a SHARED PAYLOAD once. A Node's `volume` and its `gate` are
+// both `shared_ptr<const field::FieldVolume>`, and types.h says why: "several
+// items gated by one painted mask should not each carry a copy of it". That was
+// true of memory and false of the file — every node serialized its own payload,
+// so N items sharing one wrote N copies and came back as N unrelated volumes,
+// which meant the next save wrote N again. Measured through the C ABI: one
+// captured volume placed eight times saved 1,499,457 bytes against 187,531 for
+// one placement, and now saves 189,117.
+//
+// It is the rule minor 15 gave a shared EDIT LIST, one level down: the first
+// holder writes the bytes and every later one names them. The name is a
+// DOCUMENT-WIDE payload id and not a NodeId, because node ids are per-layer —
+// every layer numbers from 1 — so an id would name a different node in another
+// layer. Ids ascend from 1 in the order the deterministic node walk first meets
+// each payload, and a reader refuses an id that does not, since no writer
+// produces one.
+//
+// A different shape from 7, 8, 11, 14, 15 and 16: this changes a field that was
+// already there rather than appending one, so a build that predates 17 reads a
+// length where an id now sits and desynchronises on the first node carrying a
+// payload — and FAILS, on the same bounds and element-count checks. Writing AT
+// minor 16 restores the per-node shape exactly, so such a build opens the
+// document and gets what it always got. What is lost by that downgrade is the
+// deduplication and nothing else: the same volumes, once per node.
+inline constexpr std::uint16_t kSceneMinor = 17;
 
 // Apply a command; returns its inverse, or nullopt if the target does not
 // exist or is protected (ghosted or locked). The document is unchanged in
