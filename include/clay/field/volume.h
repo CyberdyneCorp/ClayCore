@@ -573,6 +573,31 @@ class FieldVolume {
     float measure_sample_lipschitz() const;
 
     // Flat float layout for the tape's blob. The kernel reads exactly this.
+    // The sub-volume covering `region` (in this volume's OWN coordinates), or
+    // nullopt when there is nothing to gain — the region reaches every brick,
+    // or reaches none.
+    //
+    // WHAT IT IS FOR. A per-brick culled tape carries every item the brick's
+    // region touches, and for a sampled volume "the item" was its entire
+    // sample payload: compiling a tape for one 8^3 brick copied 1,243,861
+    // floats to read 512 of them. The item cull drops 94 of 97 primitives on
+    // the same document and could drop nothing here, because a volume's
+    // influence bound is its whole box and every brick inside it survives.
+    //
+    // SOUND ON THE CULL'S OWN TERMS, and only those. `ctape_volume_dist`
+    // CLAMPS a query onto the sampled box and folds in the distance to it, so
+    // a cropped volume answers differently OUTSIDE the crop — exactly as a
+    // culled tape already answers differently outside its region. A caller
+    // must therefore crop to a region it will not evaluate beyond, which is
+    // the contract a culled tape already has. Inside, a sample projects to
+    // itself, reads the same brick and the same samples, and the answer is
+    // bit-identical rather than close.
+    //
+    // The crop is dilated by a brick on every side, so a sample on the
+    // region's face still finds the neighbouring brick a trilinear tap may
+    // reach.
+    std::optional<FieldVolume> cropped(const math::Aabb& region) const;
+
     std::vector<float> to_blob() const;
     // How long that blob is, without building it. What a volume COSTS is a
     // question a host asks while deciding, and often repeatedly; materialising
