@@ -73,6 +73,7 @@
 #include "clay/scene/bounds.h"
 #include "clay/scene/commands.h"
 #include "clay/scene/consolidate.h"
+#include "clay/scene/placement.h"
 #include "clay/scene/cull_index.h"
 #include "clay/scene/curve.h"
 #include "clay/scene/tape.h"
@@ -481,6 +482,8 @@ void write_desc(Desc* out, std::uint32_t declared, const Desc& value) {
 // Original layouts (ABI 0.2.0), named by their last field so appending one
 // does not silently move the baseline.
 constexpr std::size_t kItemDescOriginal = offsetof(clay_item_desc, mirror) + sizeof(std::int32_t);
+constexpr std::size_t kPlacementReportOriginal =
+    offsetof(clay_placement_report, delta) + 16 * sizeof(float);
 constexpr std::size_t kMeshParamsOriginal =
     offsetof(clay_mesh_params, decimate_ratio) + sizeof(float);
 constexpr std::size_t kBrushParamsOriginal =
@@ -5344,6 +5347,50 @@ clay_result clay_document_set_layer_transform_nonuniform(clay_document* doc, cla
     if (r != CLAY_OK) return r;
     return apply_edit(doc, scene::Command{scene::SetLayerTransformCmd{layer, xform, axes}},
                       "layer not found");
+}
+
+clay_result clay_layer_placement_report(const clay_document* doc, clay_layer_id layer_id,
+                                        const float position[3], const float rotation_axis[3],
+                                        float rotation_angle, float scale,
+                                        const float scale_axes[3],
+                                        clay_placement_report* out_report) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    clay_placement_report probe{};
+    clay_result r = read_desc(out_report, kPlacementReportOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_report->struct_size;
+
+    const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
+    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+
+    // Through the same readers the setters use, so a placement this refuses is
+    // exactly one they would have refused -- a caller cannot get a report for a
+    // placement it could not then set.
+    math::Transform proposed;
+    r = read_transform(position, rotation_axis, rotation_angle, scale, &proposed);
+    if (r != CLAY_OK) return r;
+    kernel::cfloat3 axes = kernel::cf3(1.0f, 1.0f, 1.0f);
+    if (scale_axes) {
+        r = read_scale_axes(scale_axes, &axes);
+        if (r != CLAY_OK) return r;
+    }
+
+    const scene::PlacementChange change =
+        scene::layer_placement_change(*layer, proposed, axes);
+
+    clay_placement_report filled{};
+    filled.kind = static_cast<std::int32_t>(change.kind);
+    filled.scale = change.scale;
+    const math::cfloat4x4& m = change.delta;
+    const kernel::cfloat4 cols[4] = {m.c0, m.c1, m.c2, m.c3};
+    for (int c = 0; c < 4; ++c) {
+        filled.delta[c * 4 + 0] = cols[c].x;
+        filled.delta[c * 4 + 1] = cols[c].y;
+        filled.delta[c * 4 + 2] = cols[c].z;
+        filled.delta[c * 4 + 3] = cols[c].w;
+    }
+    write_desc(out_report, declared, filled);
+    return CLAY_OK;
 }
 
 clay_result clay_document_layer_transform(const clay_document* doc, clay_layer_id layer,

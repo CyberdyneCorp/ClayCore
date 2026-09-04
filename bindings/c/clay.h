@@ -1274,6 +1274,63 @@ clay_result clay_document_set_layer_transform_nonuniform(clay_document* doc, cla
                                                          float rotation_angle,
                                                          const float scale[3]);
 
+/* -- what a re-placement guarantees (ABI 0.82.0) ----------------------------
+ *
+ * Moving or rotating a whole layer changes no shape. A layer's transform
+ * reaches the compiled tape only as a change of frame inside each item's
+ * inverse matrix, plus a scale on rounding and on the cull gate — so for a
+ * placement change that is RIGID the layer's surface afterwards is its surface
+ * beforehand moved by one matrix, and for one that adds a UNIFORM scale the
+ * field is the old field composed with the inverse and multiplied by the
+ * factor. Layers combine by hard union, so no cross-layer term is re-solved
+ * either: re-placing one layer leaves every other layer's field bit-identical.
+ *
+ * The engine does not act on this yet — the invalidation after a layer
+ * transform is exactly what it always was — but a host CAN: it already holds
+ * the layer's drawn surface, and a matrix multiply over that mesh is the same
+ * result for a fraction of a refill's cost.
+ *
+ * A NON-UNIFORM layer scale classifies as GENERAL and nothing is claimed about
+ * it. It changes the field's Lipschitz behaviour, which is why the per-axis
+ * scale multiplies distances back by its smallest component. */
+typedef enum clay_placement_kind {
+    CLAY_PLACEMENT_RIGID = 0,      /* rotation and translation; distances unchanged */
+    CLAY_PLACEMENT_SIMILARITY = 1, /* those plus a uniform scale; distances scale by it */
+    CLAY_PLACEMENT_GENERAL = 2     /* anything else; no guarantee */
+} clay_placement_kind;
+
+typedef struct clay_placement_report {
+    uint32_t struct_size; /* = sizeof(clay_placement_report); required */
+    int32_t kind;         /* clay_placement_kind */
+    /* The uniform factor from the layer's CURRENT placement to the proposed
+     * one; 1 for RIGID. Left at 1 for GENERAL rather than at a value a caller
+     * might multiply by. */
+    float scale;
+    /* Column-major affine matrix taking the OLD placement to the NEW one, in
+     * the same layout clay_item_matrix uses. Identity for GENERAL. */
+    float delta[16];
+} clay_placement_report;
+
+/* Classify a PROPOSED placement against the one the layer currently carries.
+ *
+ * A QUERY, not a variant of the setters: it changes nothing, so the existing
+ * entry points keep their signatures and a host that never asks pays nothing.
+ * Call it with the placement you are about to set — afterwards the old and the
+ * new are the same placement and the answer is the identity, which is true and
+ * useless.
+ *
+ * scale_axes may be NULL, meaning the identity (1, 1, 1). Passing a non-uniform
+ * triple, or naming a layer that carries one, reports GENERAL.
+ *
+ * CLAY_ERROR_NOT_FOUND when no layer carries the id. Refused for the same
+ * malformed arguments the setters refuse: a zero rotation axis, a scale that is
+ * not positive and finite. */
+clay_result clay_layer_placement_report(const clay_document* doc, clay_layer_id layer,
+                                        const float position[3], const float rotation_axis[3],
+                                        float rotation_angle, float scale,
+                                        const float scale_axes[3],
+                                        clay_placement_report* out_report);
+
 /* Reading it back. Every out pointer is optional.
  *
  * The per-axis reader answers the PRODUCT of the layer's two scales, so a layer
