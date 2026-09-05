@@ -73,6 +73,13 @@ void ensure_level_chunks(MultiresSurface::State& s, std::uint32_t level) {
         const std::uint32_t p = std::min(topology.patch_of(f), patches - 1);
         ++counts[static_cast<std::size_t>(p) + 1];
     }
+    // How many patches this level ACTUALLY holds, which on a regional level is
+    // not how many the cage has. The chunk bound below is one chunk per patch
+    // plus the cuts inside oversized ones, and sizing it to the cage would make
+    // a level refining sixteen patches reserve a table for sixteen hundred.
+    std::uint32_t resident = 0;
+    for (std::size_t i = 1; i < counts.size(); ++i)
+        if (counts[i] != 0) ++resident;
     for (std::size_t i = 1; i < counts.size(); ++i) counts[i] += counts[i - 1];
     std::vector<std::uint32_t> offsets = counts;
     std::vector<std::uint32_t> ordered(topology.face_count);
@@ -81,7 +88,7 @@ void ensure_level_chunks(MultiresSurface::State& s, std::uint32_t level) {
         ordered[offsets[p]++] = f;
     }
 
-    cache.chunks.reset(topology.face_count / target + patches + 1,
+    cache.chunks.reset(topology.face_count / target + resident + 1,
                        topology.face_count + target);
     cache.face_chunk.assign(topology.face_count, ChunkTable::kNoChunk);
 

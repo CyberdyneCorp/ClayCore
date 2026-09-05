@@ -45,8 +45,17 @@ constexpr std::uint32_t kSurfaceMagic = 0x53524d43u;  // 'CMRS'
 //
 // This build accepts BOTH. A version-1 stream is a hierarchy with no layers,
 // which is exactly what it was.
-constexpr std::uint32_t kSurfaceVersion = 2u;
+// 3 adds the per-level patch sets that make a level REGIONAL
+// (refine-one-region-of-a-hierarchy). A version 1 or 2 stream has none and
+// decodes as a uniformly refined hierarchy, which is exactly what it was.
+constexpr std::uint32_t kSurfaceVersion = 3u;
+constexpr std::uint32_t kSurfaceVersionLayered = 2u;
 constexpr std::uint32_t kSurfaceVersionUnlayered = 1u;
+
+// A level that refines every patch, written where a patch list would go. Not a
+// zero-length list, because a level over no patches is a different thing and
+// `add_level_for_patches` refuses it.
+constexpr std::uint32_t kDenseLevel = 0xffffffffu;
 constexpr std::uint32_t kDeltaMagic = 0x44524d43u;  // 'CMRD'
 constexpr std::uint32_t kDeltaVersion = 1u;
 
@@ -180,6 +189,27 @@ std::vector<std::uint8_t> MultiresSurface::encode() const {
     put_indices(&out, m.indices);
     put_indices(&out, m.quads);
 
+    // THE SHAPE OF THE HIERARCHY BEFORE ITS CONTENT, because decode replays the
+    // build: it needs to know which patches each level refines before it can
+    // create the level the coefficients below belong to.
+    //
+    // The PATCH SET rather than what the build produced. `full_of`, the face
+    // list and the chunk table are all derived from it deterministically, so
+    // storing them would be storing a second copy of an answer that has to
+    // agree with the first.
+    for (std::size_t l = 1; l < state_->levels.size(); ++l) {
+        const std::vector<char>& keep = state_->levels[l].patch_kept;
+        if (keep.empty()) {
+            put_u32(&out, kDenseLevel);
+            continue;
+        }
+        std::vector<std::uint32_t> patches;
+        for (std::uint32_t p = 0; p < keep.size(); ++p)
+            if (keep[p]) patches.push_back(p);
+        put_u32(&out, static_cast<std::uint32_t>(patches.size()));
+        for (std::uint32_t p : patches) put_u32(&out, p);
+    }
+
     for (std::size_t l = 1; l < state_->levels.size(); ++l) {
         const std::vector<std::uint8_t> blob = state_->levels[l].detail.encode();
         put_u32(&out, static_cast<std::uint32_t>(blob.size()));
@@ -235,14 +265,20 @@ struct SurfaceHeader {
     // ignores trailing bytes and "there are some bytes left" is not the same
     // question as "this writer wrote a stack".
     bool has_layers = false;
+    // A version-3 stream states, per level, which base patches it refines. An
+    // older one refines all of them.
+    bool has_patch_sets = false;
 };
 
 bool read_header(Reader* r, SurfaceHeader* out) {
     std::uint32_t magic = 0, version = 0, rule = 0;
     if (!r->u32(&magic) || magic != kSurfaceMagic) return false;
     if (!r->u32(&version)) return false;
-    if (version != kSurfaceVersion && version != kSurfaceVersionUnlayered) return false;
-    out->has_layers = version == kSurfaceVersion;
+    if (version != kSurfaceVersion && version != kSurfaceVersionLayered &&
+        version != kSurfaceVersionUnlayered)
+        return false;
+    out->has_layers = version >= kSurfaceVersionLayered;
+    out->has_patch_sets = version >= kSurfaceVersion;
     if (!r->u32(&rule)) return false;
     // THE RULE IS READ RATHER THAN ASSUMED. A hierarchy reconstructed with a
     // different rule than it was authored with is a different surface, and
@@ -278,17 +314,47 @@ bool MultiresSurface::decode(const std::uint8_t* data, std::size_t size, Multire
     std::optional<MultiresSurface> surface = from_mesh(base, options, &err);
     if (!surface) return false;
 
+    // The patch sets first: they say which of the levels below are regional,
+    // and the dense pricing that follows only applies to a hierarchy that is
+    // dense the whole way up.
+    std::vector<std::vector<std::uint32_t>> patch_sets(header.levels);
+    bool uniform = true;
+    if (header.has_patch_sets) {
+        for (std::uint32_t l = 1; l < header.levels; ++l) {
+            std::uint32_t count = 0;
+            if (!r.u32(&count)) return false;
+            if (count == kDenseLevel) continue;
+            uniform = false;
+            // Checked against what the buffer could hold before it is reserved,
+            // the same rule `Reader::count` applies -- open-coded because the
+            // dense sentinel has to be read and recognised first.
+            if (count > kMaxArray || static_cast<std::size_t>(count) > r.remaining() / 4u)
+                return false;
+            patch_sets[l].resize(count);
+            for (std::uint32_t& p : patch_sets[l])
+                if (!r.u32(&p)) return false;
+        }
+    }
+
     // THE DEPTH IS PRICED BEFORE IT IS BUILT. The counts follow from the cage by
     // arithmetic, so a stream declaring a hierarchy nothing could hold is
     // refused here rather than after eleven levels have been allocated.
+    //
+    // The dense recurrence, so it only decides a hierarchy that IS dense. A
+    // regional one is smaller than this bound by construction and is priced
+    // level by level as it is built, by the same preflight the live call uses.
     const MultiresLevel& level0 = surface->state_->levels[0];
-    if (!depth_affordable(level0.topology.vertex_count, level0.edge_count,
-                          level0.topology.face_count, level0.topology.corners.size(),
-                          header.levels))
+    if (uniform && !depth_affordable(level0.topology.vertex_count, level0.edge_count,
+                                     level0.topology.face_count, level0.topology.corners.size(),
+                                     header.levels))
         return false;
 
-    for (std::uint32_t l = 1; l < header.levels; ++l)
-        if (!surface->add_level(&err)) return false;
+    for (std::uint32_t l = 1; l < header.levels; ++l) {
+        const bool dense = patch_sets[l].empty();
+        if (!(dense ? surface->add_level(&err)
+                    : surface->add_level_for_patches(patch_sets[l], &err)))
+            return false;
+    }
 
     for (std::uint32_t l = 1; l < header.levels; ++l) {
         std::uint32_t blob_size = 0;

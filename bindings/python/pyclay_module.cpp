@@ -1001,6 +1001,15 @@ nb::object f3_view(nb::object owner, const std::vector<kernel::cfloat3>& v) {
     return nb::cast(nb::ndarray<nb::numpy, const float>(&v.front().x, {v.size(), 3}, owner));
 }
 
+// The same over a flat index array, which is how a level's face list crosses.
+nb::object u32_view(nb::object owner, const std::vector<std::uint32_t>& v) {
+    if (v.empty()) {
+        nb::module_ np = nb::module_::import_("numpy");
+        return np.attr("empty")(nb::make_tuple(0), "dtype"_a = "uint32");
+    }
+    return nb::cast(nb::ndarray<nb::numpy, const std::uint32_t>(v.data(), {v.size()}, owner));
+}
+
 nb::object f2_view(nb::object owner, const std::vector<kernel::cfloat2>& v) {
     if (v.empty()) {
         nb::module_ np = nb::module_::import_("numpy");
@@ -7922,6 +7931,28 @@ NB_MODULE(pyclay, m) {
             },
             "What a host draws.")
         .def(
+            "topology_at",
+            [](nb::object self, std::uint32_t level) {
+                mesh::MultiresSurface& s = nb::cast<mesh::MultiresSurface&>(self);
+                if (level >= s.level_count()) throw std::invalid_argument("no such level");
+                const mesh::LevelTopology& t = s.topology_at(level);
+                nb::dict out;
+                out["vertex_count"] = t.vertex_count;
+                out["face_count"] = t.face_count;
+                out["patch_count"] = t.patch_count;
+                out["corners"] = u32_view(self, t.corners);
+                // Empty at level 0, where a face IS a patch, and empty on a
+                // level that refines every patch -- see `dense`.
+                out["face_patch"] = u32_view(self, t.face_patch);
+                out["dense"] = t.dense();
+                return out;
+            },
+            "level"_a,
+            "A level's face list: `corners` four per face above level 0,\n"
+            "`face_patch` naming the base patch each face descends from, and\n"
+            "`dense` saying whether the level stores every vertex the rule would\n"
+            "have produced. The arrays are zero-copy views tied to the surface.")
+        .def(
             "level_counts",
             [](const mesh::MultiresSurface& s, std::uint32_t level) {
                 if (level >= s.level_count()) throw std::invalid_argument("no such level");
@@ -7966,6 +7997,68 @@ NB_MODULE(pyclay, m) {
             "Add one level. BUILD-THEN-PUBLISH: a refusal leaves the surface\n"
             "exactly as it was. Sets the sculpt and display levels to the new\n"
             "one, which is what an artist means by 'subdivide'.")
+        .def(
+            "add_level_for_patches",
+            [](mesh::MultiresSurface& s, std::vector<std::uint32_t> patches) {
+                mesh::MultiresError err = mesh::MultiresError::None;
+                nb::gil_scoped_release release;
+                if (!s.add_level_for_patches(patches, &err)) {
+                    nb::gil_scoped_acquire acquire;
+                    throw std::invalid_argument(mesh::multires_error_text(err));
+                }
+            },
+            "patches"_a,
+            "Add one level that refines ONLY these base patches, mirroring\n"
+            "VoxelGrid.add_level_region: outside them the level has no storage\n"
+            "and the patch is read at its own depth. Every vertex it does store\n"
+            "is bit-identical to the uniformly refined hierarchy's, which is why\n"
+            "a fine patch meets the coarse edge beside it exactly.\n"
+            "Refuses when a named patch, or a patch beside it, is not resident\n"
+            "at the parent level; refine_patches_to_level grows the levels below\n"
+            "so that cannot happen.")
+        .def(
+            "refine_patches_to_level",
+            [](mesh::MultiresSurface& s, std::vector<std::uint32_t> patches,
+               std::uint32_t target_level) {
+                mesh::MultiresError err = mesh::MultiresError::None;
+                nb::gil_scoped_release release;
+                if (!s.refine_patches_to_level(patches, target_level, &err)) {
+                    nb::gil_scoped_acquire acquire;
+                    throw std::invalid_argument(mesh::multires_error_text(err));
+                }
+            },
+            "patches"_a, "target_level"_a,
+            "Refine these base patches all the way to `target_level`, growing\n"
+            "each intermediate level by the rings the levels above it need.\n"
+            "THE CALL A HOST MAKES: level `target - k` is refined over the\n"
+            "patches grown by k rings, which is what lets every level above\n"
+            "evaluate against a complete parent.")
+        .def(
+            "patch_max_level",
+            [](const mesh::MultiresSurface& s, std::uint32_t patch) {
+                return s.patch_max_level(patch);
+            },
+            "patch"_a,
+            "The deepest level that stores this base patch: 0 for one nothing\n"
+            "has refined, max_level for every patch of a uniform hierarchy.")
+        .def(
+            "effective_level",
+            [](const mesh::MultiresSurface& s, std::uint32_t patch, std::uint32_t level) {
+                return s.effective_level(patch, level);
+            },
+            "patch"_a, "level"_a,
+            "min(level, patch_max_level(patch)) -- where a host displaying\n"
+            "`level` reads this patch.")
+        .def(
+            "patch_resident",
+            [](const mesh::MultiresSurface& s, std::uint32_t level, std::uint32_t patch) {
+                return s.patch_resident(level, patch);
+            },
+            "level"_a, "patch"_a, "Whether the level stores this patch's faces at all.")
+        .def_prop_ro(
+            "uniform_depth", [](const mesh::MultiresSurface& s) { return s.uniform_depth(); },
+            "True when every level refines every patch, which is what add_level\n"
+            "builds and what every hierarchy written before regional refinement is.")
         .def(
             "remove_highest_level",
             [](mesh::MultiresSurface& s) {
@@ -8081,6 +8174,10 @@ NB_MODULE(pyclay, m) {
                 // evaluation actually reads.
                 out["composed"] = mem.composed;
                 out["runtime_index"] = mem.runtime_index;
+                // Its own line rather than part of `runtime_index`: the chunk
+                // index follows the FACE count rather than the vertex count,
+                // and it is the row that moves when a level is regional.
+                out["chunk_index"] = mem.chunk_index;
                 out["rebuildable"] = mem.rebuildable;
                 out["total"] = mem.total;
                 out["resident_levels"] = mem.resident_levels;

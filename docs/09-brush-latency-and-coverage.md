@@ -590,6 +590,46 @@ several. `BM_MultiresSubdivide` is **Tier 4**: adding a level is an explicit
 action an artist takes and waits on, which is also why it is priced by
 `preflight_add_level` before it is paid.
 
+### Refining one region of it (refine-one-region-of-a-hierarchy)
+
+A hierarchy refined uniformly pays for the finest level everywhere. The measured
+cost of a level is NOT its coefficients — `DetailField` is already sparse, and
+an unsculpted level of a 1,600-patch cage costs 0.0 MB of detail — it is
+topology, the evaluated buffers and the chunk index, all of which follow the
+face count. So `add_level_for_patches` makes those follow the REFINED AREA:
+outside the named base patches the level has no storage, and the patch is read
+at its own depth. The rule is `clay_voxel_add_level_region`'s, stated for a
+mesh.
+
+Measured by `examples/74_regional_multires.py`, a 432-patch cube-sphere refined
+to level 4 over a 26-patch region against the same cage refined uniformly:
+
+| | topology | evaluated | total | cold evaluation |
+|---|---:|---:|---:|---:|
+| uniform to level 4 | 2.21 MB | 7.95 MB | 19.89 MB | 110,168 vertices |
+| the region to level 4 | 0.46 MB | 0.73 MB | 2.39 MB | 9,896 vertices |
+
+**8.3x the memory and 11.1x the work, for the same nose.** The evaluation figure
+is COUNTED (`MultiresEvalStats::vertices_evaluated`) rather than timed, because
+the claim is about how much arithmetic a level costs and a wall clock would
+measure the box as well.
+
+**And the refined patches hold the uniform hierarchy's own positions bit for
+bit** — worst difference 0.0 over all 26 patches. That is not a tolerance: a
+regional level evaluates the same stencils against the same parent
+neighbourhood, so it is the same arithmetic. `refine_patches_to_level` grades
+the levels beneath the region for exactly that reason, growing each one by a
+patch ring, and `add_level_for_patches` REFUSES
+(`CLAY_MULTIRES_PATCH_NOT_REFINABLE`) rather than refine a patch whose parent
+neighbourhood is missing — where it did, Catmull-Clark's border rule would
+apply at an edge that is not a border.
+
+**What is not done yet.** Exporting a mixed-depth hierarchy as ONE mesh needs
+transition polygons on the coarse side of every boundary: a fine patch's corner
+vertex has taken one more subdivision step than its coarse neighbour's, so the
+two are a subdivision step apart rather than a hairline apart.
+`mesh_at_level(n)` exports the faces level `n` HAS, which is the region.
+
 ### The extreme-poly runtime, measured (add-extreme-poly-runtime)
 
 Everything above prices a dab at ONE model size. The question this section

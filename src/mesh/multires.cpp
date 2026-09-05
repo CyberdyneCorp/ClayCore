@@ -99,6 +99,11 @@ const char* multires_error_text(MultiresError error) {
             return "the declared hierarchy is deeper than this build will reconstruct";
         case MultiresError::CapacityOverflow:
             return "the capacity estimate overflowed; the operation is refused rather than sized";
+        case MultiresError::PatchNotRefinable:
+            return "a patch, or a patch beside it, is not resident at the parent level; refining "
+                   "it there would evaluate a border rule where the surface has no border";
+        case MultiresError::NoPatchesRequested:
+            return "a refinement over no patches; a level with no faces is not a level";
         case MultiresError::Decode:
             return "the buffer is truncated, corrupt, or from a newer writer";
         case MultiresError::NoSuchSculptLayer:
@@ -285,34 +290,18 @@ std::optional<MultiresSurface> MultiresSurface::from_mesh(const Mesh& mesh,
 
 // -- pricing ------------------------------------------------------------------
 
-MultiresPreflight MultiresSurface::preflight_add_level() const {
-    MultiresPreflight p;
-    if (!state_ || state_->levels.empty()) {
-        p.allowed = false;
-        p.error = MultiresError::EmptyBase;
-        return p;
-    }
-    const MultiresLevel& parent = state_->levels.back();
-    p.level = static_cast<std::uint32_t>(state_->levels.size());
-    if (p.level >= kMaxLevels) {
-        p.allowed = false;
-        p.error = MultiresError::DepthLimit;
-        return p;
-    }
+namespace {
 
-    // Arithmetic, not a build: a child's counts follow from the parent's, which
-    // is why `MultiresLevel::edge_count` is kept.
-    //
-    // CHECKED arithmetic, through the one estimator every priced operation in
-    // this library now shares. A level's vertex count is quadratic in the
-    // depth, so `vertices * bytes_per_vertex` is exactly the multiply that
-    // wraps on a hostile or merely ambitious hierarchy — and the failure mode
-    // of a wrapped estimate is that the level is ALLOWED, which is the one
-    // outcome this call exists to prevent. An overflow is reported as a
-    // refusal.
-    p.vertices = static_cast<std::uint64_t>(parent.topology.vertex_count) + parent.edge_count +
-                 parent.topology.face_count;
-    p.faces = parent.topology.corners.size();
+// The pricing every `preflight_*` shares, over counts its caller has already
+// worked out. Split out when regional levels arrived: the counts differ, the
+// price of a vertex and a face does not, and two copies of this arithmetic
+// would be two answers to "what does a level cost".
+MultiresPreflight price_level(const MultiresSurface::State& s, const MultiresLevel& parent,
+                              std::uint32_t level, std::uint64_t vertices, std::uint64_t faces) {
+    MultiresPreflight p;
+    p.level = level;
+    p.vertices = vertices;
+    p.faces = faces;
 
     const auto with_slack = [](std::uint64_t exact) {
         return static_cast<std::uint64_t>(static_cast<double>(exact) * kCapacitySlack);
@@ -341,8 +330,7 @@ MultiresPreflight MultiresSurface::preflight_add_level() const {
     cost.authoritative(p.faces, kTopologyBytesPerFace);
     cost.transient(parent.topology.face_count, kConnBytesPerFace);
     cost.transient(parent.topology.vertex_count, kConnBytesPerVertex);
-    const memory::CapacityEstimate estimate =
-        cost.finish(state_->options.memory_budget);
+    const memory::CapacityEstimate estimate = cost.finish(s.options.memory_budget);
 
     memory::CapacityBuilder evaluated_cost;
     evaluated_cost.authoritative(p.vertices, kEvaluatedBytesPerVertex);
@@ -360,7 +348,7 @@ MultiresPreflight MultiresSurface::preflight_add_level() const {
         return p;
     }
 
-    if (p.vertices > kMaxLevelVertices) {
+    if (p.vertices > MultiresSurface::kMaxLevelVertices) {
         p.allowed = false;
         p.error = MultiresError::OverBudget;
         return p;
@@ -371,6 +359,40 @@ MultiresPreflight MultiresSurface::preflight_add_level() const {
     }
     return p;
 }
+
+}  // namespace
+
+MultiresPreflight MultiresSurface::preflight_add_level() const {
+    MultiresPreflight p;
+    if (!state_ || state_->levels.empty()) {
+        p.allowed = false;
+        p.error = MultiresError::EmptyBase;
+        return p;
+    }
+    const MultiresLevel& parent = state_->levels.back();
+    const std::uint32_t level = static_cast<std::uint32_t>(state_->levels.size());
+    if (level >= kMaxLevels) {
+        p.level = level;
+        p.allowed = false;
+        p.error = MultiresError::DepthLimit;
+        return p;
+    }
+
+    // Arithmetic, not a build: a child's counts follow from the parent's, which
+    // is why `MultiresLevel::edge_count` is kept.
+    //
+    // CHECKED arithmetic, through the one estimator every priced operation in
+    // this library now shares. A level's vertex count is quadratic in the
+    // depth, so `vertices * bytes_per_vertex` is exactly the multiply that
+    // wraps on a hostile or merely ambitious hierarchy — and the failure mode
+    // of a wrapped estimate is that the level is ALLOWED, which is the one
+    // outcome this call exists to prevent. An overflow is reported as a
+    // refusal.
+    const std::uint64_t vertices = static_cast<std::uint64_t>(parent.topology.vertex_count) +
+                                   parent.edge_count + parent.topology.face_count;
+    return price_level(*state_, parent, level, vertices, parent.topology.corners.size());
+}
+
 
 bool MultiresSurface::add_level(MultiresError* out_error, const parallel::CancelToken* cancel) {
     if (out_error) *out_error = MultiresError::None;
@@ -413,6 +435,283 @@ bool MultiresSurface::add_level(MultiresError* out_error, const parallel::Cancel
     const std::uint32_t added = static_cast<std::uint32_t>(state_->levels.size() - 1);
     state_->sculpt_level = added;
     state_->display_level = added;
+    return true;
+}
+
+// -- regional levels ----------------------------------------------------------
+
+std::uint32_t patch_total(const MultiresSurface::State& s) {
+    return s.levels.empty() ? 0u : s.levels[0].topology.face_count;
+}
+
+namespace {
+
+// Every face incident to a vertex is a neighbour of every other face incident to
+// it, gathered per patch and then flattened. Sorted and deduplicated, so a ring
+// is in ascending patch order and a dilation over it is deterministic.
+void build_patch_rings(MultiresSurface::State& s, std::uint32_t patches) {
+    const LevelTopology& base = s.levels[0].topology;
+    const LevelConnectivity& conn = connectivity_of(s, 0);
+    std::vector<std::vector<std::uint32_t>> ring(patches);
+    for (std::uint32_t v = 0; v < base.vertex_count; ++v) {
+        std::size_t n = 0;
+        const std::uint32_t* faces = conn.faces_of(v, &n);
+        for (std::size_t i = 0; i < n; ++i)
+            for (std::size_t k = 0; k < n; ++k)
+                if (i != k) ring[faces[i]].push_back(faces[k]);
+    }
+    s.patch_ring_offsets.assign(patches + 1u, 0u);
+    for (std::uint32_t f = 0; f < patches; ++f) {
+        std::vector<std::uint32_t>& r = ring[f];
+        std::sort(r.begin(), r.end());
+        r.erase(std::unique(r.begin(), r.end()), r.end());
+        s.patch_ring_offsets[f + 1] =
+            s.patch_ring_offsets[f] + static_cast<std::uint32_t>(r.size());
+        s.patch_ring.insert(s.patch_ring.end(), r.begin(), r.end());
+    }
+}
+
+}  // namespace
+
+const std::uint32_t* patch_neighbours(MultiresSurface::State& s, std::uint32_t patch,
+                                      std::size_t* count) {
+    const std::uint32_t patches = patch_total(s);
+    if (s.patch_ring_offsets.empty() && patches != 0) build_patch_rings(s, patches);
+    if (patch + 1u >= s.patch_ring_offsets.size()) {
+        *count = 0;
+        return nullptr;
+    }
+    const std::uint32_t begin = s.patch_ring_offsets[patch];
+    *count = s.patch_ring_offsets[patch + 1] - begin;
+    return s.patch_ring.data() + begin;
+}
+
+namespace {
+
+// The requested patches as a per-patch flag, refusing a request this hierarchy
+// cannot answer exactly.
+//
+// EXACTLY, and that is the whole check: a patch may be refined only where its
+// stencils see the same parent neighbourhood the dense level would have seen,
+// which is itself and its vertex ring resident one level down. Anything less
+// evaluates Catmull-Clark's BORDER rule at an edge that is not a border, and
+// the fine patch walks away from the coarse one it is meant to meet.
+bool resolve_keep(MultiresSurface::State& s, const std::vector<std::uint32_t>& patches,
+                  std::vector<char>* out, MultiresError* out_error) {
+    const std::uint32_t patches_total = patch_total(s);
+    const MultiresLevel& parent = s.levels.back();
+    out->assign(patches_total, 0);
+    std::uint32_t named = 0;
+    for (std::uint32_t p : patches) {
+        if (p >= patches_total || (*out)[p]) continue;
+        if (!parent.keeps(p)) {
+            if (out_error) *out_error = MultiresError::PatchNotRefinable;
+            return false;
+        }
+        std::size_t n = 0;
+        const std::uint32_t* ring = patch_neighbours(s, p, &n);
+        for (std::size_t i = 0; i < n; ++i) {
+            if (parent.keeps(ring[i])) continue;
+            if (out_error) *out_error = MultiresError::PatchNotRefinable;
+            return false;
+        }
+        (*out)[p] = 1;
+        ++named;
+    }
+    if (named == 0) {
+        if (out_error) *out_error = MultiresError::NoPatchesRequested;
+        return false;
+    }
+    // A request naming every patch IS the dense level, and is stored as one:
+    // an all-true `patch_kept` would make every level of an ordinary hierarchy
+    // carry a byte per patch to say nothing.
+    if (named == patches_total) out->clear();
+    return true;
+}
+
+// An upper bound on what a regional level costs, without building it.
+//
+// Each kept parent face of arity `a` contributes one face point, `a` edge
+// points and `a` vertex points, and the shared ones are counted once per face
+// that shares them. So this OVER-counts, which is the direction a budget has to
+// err in: the failure mode of an estimate that errs low is a level that is
+// allowed and does not fit.
+std::uint64_t regional_vertex_bound(const LevelTopology& parent, const std::vector<char>& keep,
+                                    std::uint64_t* out_faces) {
+    std::uint64_t vertices = 0, faces = 0;
+    for (std::uint32_t f = 0; f < parent.face_count; ++f) {
+        const std::uint32_t patch = parent.patch_of(f);
+        if (!keep.empty() && (patch >= keep.size() || !keep[patch])) continue;
+        const std::uint64_t arity = parent.face_arity(f);
+        vertices += 1u + 2u * arity;
+        faces += arity;
+    }
+    *out_faces = faces;
+    return vertices;
+}
+
+}  // namespace
+
+MultiresPreflight MultiresSurface::preflight_add_level_for_patches(
+    const std::vector<std::uint32_t>& patches) const {
+    MultiresPreflight p;
+    if (!state_ || state_->levels.empty()) {
+        p.allowed = false;
+        p.error = MultiresError::EmptyBase;
+        return p;
+    }
+    const std::uint32_t level = static_cast<std::uint32_t>(state_->levels.size());
+    if (level >= kMaxLevels) {
+        p.level = level;
+        p.allowed = false;
+        p.error = MultiresError::DepthLimit;
+        return p;
+    }
+    std::vector<char> keep;
+    MultiresError err = MultiresError::None;
+    if (!resolve_keep(*state_, patches, &keep, &err)) {
+        p.level = level;
+        p.allowed = false;
+        p.error = err;
+        return p;
+    }
+    const MultiresLevel& parent = state_->levels.back();
+    std::uint64_t faces = 0;
+    const std::uint64_t vertices = regional_vertex_bound(parent.topology, keep, &faces);
+    return price_level(*state_, parent, level, vertices, faces);
+}
+
+bool MultiresSurface::add_level_for_patches(const std::vector<std::uint32_t>& patches,
+                                            MultiresError* out_error,
+                                            const parallel::CancelToken* cancel) {
+    if (out_error) *out_error = MultiresError::None;
+    if (!state_ || state_->levels.empty()) {
+        if (out_error) *out_error = MultiresError::EmptyBase;
+        return false;
+    }
+    std::vector<char> keep;
+    if (!resolve_keep(*state_, patches, &keep, out_error)) return false;
+    // The DENSE path when every patch is named, so an all-patches regional
+    // refine is not merely equal to a global one -- it is the same code.
+    if (keep.empty()) return add_level(out_error, cancel);
+
+    const MultiresPreflight p = preflight_add_level_for_patches(patches);
+    if (!p.allowed) {
+        if (out_error) *out_error = p.error;
+        return false;
+    }
+
+    // BUILD-THEN-PUBLISH, exactly as `add_level`: nothing below touches the
+    // surface until the last three statements.
+    const std::uint32_t parent_index = static_cast<std::uint32_t>(state_->levels.size() - 1);
+    const LevelConnectivity& conn = connectivity_of(*state_, parent_index);
+    if (cancel && cancel->cancelled()) {
+        if (out_error) *out_error = MultiresError::Cancelled;
+        return false;
+    }
+
+    MultiresLevel level;
+    level.topology =
+        subdivide_topology_for_patches(state_->levels[parent_index].topology, conn, keep);
+    if (cancel && cancel->cancelled()) {
+        if (out_error) *out_error = MultiresError::Cancelled;
+        return false;
+    }
+    level.detail.reset(level.topology.vertex_count);
+    // A BOUND rather than the dense recurrence, which does not hold here: this
+    // level's faces are a subset and its edges are not `2E + C`. Four per quad
+    // counts every shared edge twice, so the next level's preflight errs high
+    // -- the direction the header requires.
+    level.edge_count = 4ull * level.topology.face_count;
+    level.pending_all = true;
+    level.patch_kept = std::move(keep);
+
+    state_->levels.push_back(std::move(level));
+    sync_stack_levels(*state_);
+    const std::uint32_t added = static_cast<std::uint32_t>(state_->levels.size() - 1);
+    state_->sculpt_level = added;
+    state_->display_level = added;
+    return true;
+}
+
+bool MultiresSurface::refine_patches_to_level(const std::vector<std::uint32_t>& patches,
+                                              std::uint32_t target_level,
+                                              MultiresError* out_error,
+                                              const parallel::CancelToken* cancel) {
+    if (out_error) *out_error = MultiresError::None;
+    if (!state_ || state_->levels.empty()) {
+        if (out_error) *out_error = MultiresError::EmptyBase;
+        return false;
+    }
+    if (target_level == 0) return true;
+    if (target_level >= kMaxLevels) {
+        if (out_error) *out_error = MultiresError::DepthLimit;
+        return false;
+    }
+
+    // Level `target - k` is refined over `patches` grown by `k` rings, so every
+    // level above it evaluates its stencils against a parent that is complete
+    // where it needs to be. Grown from the top down into `sets`, which makes
+    // the growth one pass rather than one per level.
+    // The guard FIRST: a hierarchy already at or past the target has nothing to
+    // build, and the subtraction below would wrap rather than say so.
+    const std::uint32_t have = static_cast<std::uint32_t>(state_->levels.size());
+    if (have > target_level) return true;
+    const std::uint32_t depth = target_level - have + 1;
+
+    std::vector<std::vector<std::uint32_t>> sets(depth);
+    std::vector<char> seen(patch_total(*state_), 0);
+    std::vector<std::uint32_t> current;
+    for (std::uint32_t p : patches) {
+        if (p >= seen.size() || seen[p]) continue;
+        seen[p] = 1;
+        current.push_back(p);
+    }
+    std::sort(current.begin(), current.end());
+    for (std::uint32_t k = 0; k < depth; ++k) {
+        sets[depth - 1u - k] = current;
+        if (k + 1u == depth) break;
+        // One ring wider. Ascending, because the frontier is ascending and each
+        // patch's own ring is -- so the same request twice grows the same set.
+        std::vector<std::uint32_t> grown = current;
+        for (std::uint32_t at : current) {
+            std::size_t n = 0;
+            const std::uint32_t* ring = patch_neighbours(*state_, at, &n);
+            for (std::size_t i = 0; i < n; ++i)
+                if (!seen[ring[i]]) {
+                    seen[ring[i]] = 1;
+                    grown.push_back(ring[i]);
+                }
+        }
+        std::sort(grown.begin(), grown.end());
+        current = std::move(grown);
+    }
+
+    for (const std::vector<std::uint32_t>& set : sets)
+        if (!add_level_for_patches(set, out_error, cancel)) return false;
+    return true;
+}
+
+std::uint32_t MultiresSurface::patch_max_level(std::uint32_t patch) const {
+    if (!state_ || state_->levels.empty()) return 0;
+    for (std::uint32_t l = static_cast<std::uint32_t>(state_->levels.size()); l-- > 1;)
+        if (state_->levels[l].keeps(patch)) return l;
+    return 0;
+}
+
+std::uint32_t MultiresSurface::effective_level(std::uint32_t patch, std::uint32_t level) const {
+    return std::min(level, patch_max_level(patch));
+}
+
+bool MultiresSurface::patch_resident(std::uint32_t level, std::uint32_t patch) const {
+    if (!state_ || !state_->level_ok(level)) return false;
+    return state_->levels[level].keeps(patch);
+}
+
+bool MultiresSurface::uniform_depth() const {
+    if (!state_) return true;
+    for (const MultiresLevel& l : state_->levels)
+        if (!l.patch_kept.empty()) return false;
     return true;
 }
 
@@ -468,11 +767,28 @@ bool MultiresSurface::set_base_mesh(const Mesh& mesh, MultiresError* out_error) 
     }
     const std::uint32_t levels = static_cast<std::uint32_t>(state_->levels.size());
     const std::uint32_t sculpt = state_->sculpt_level, display = state_->display_level;
-    for (std::uint32_t l = 1; l < levels; ++l)
-        if (!rebuilt->add_level(&err)) {
+    for (std::uint32_t l = 1; l < levels; ++l) {
+        // A REGIONAL LEVEL IS REBUILT OVER THE SAME PATCH IDS. They are level-0
+        // face ids, and the new cage's faces are its own — so this succeeds
+        // where the new cage keeps the numbering and is REFUSED, by the same
+        // residency check every regional level goes through, where it does not.
+        // Rebuilding a regional hierarchy densely would be the quiet answer,
+        // and it would silently multiply what the artist chose to pay for.
+        const std::vector<char>& keep = state_->levels[l].patch_kept;
+        bool ok = false;
+        if (keep.empty()) {
+            ok = rebuilt->add_level(&err);
+        } else {
+            std::vector<std::uint32_t> patches;
+            for (std::uint32_t p = 0; p < keep.size(); ++p)
+                if (keep[p]) patches.push_back(p);
+            ok = rebuilt->add_level_for_patches(patches, &err);
+        }
+        if (!ok) {
             if (out_error) *out_error = err;
             return false;
         }
+    }
     state_ = std::move(rebuilt->state_);
     state_->sculpt_level = std::min(sculpt, max_level());
     state_->display_level = std::min(display, max_level());
@@ -600,7 +916,10 @@ MultiresMemory MultiresSurface::memory() const {
              state_->class_offsets.capacity() * sizeof(std::uint32_t) +
              state_->class_members.capacity() * sizeof(std::uint32_t);
     for (const MultiresLevel& l : state_->levels) {
-        m.topology += l.topology.bytes();
+        // `patch_kept` is topology: it is the authoritative record of WHICH
+        // faces this level has, and everything else regional is derived from
+        // it.
+        m.topology += l.topology.bytes() + l.patch_kept.capacity();
         m.detail += l.detail.bytes();
         if (l.composed) m.composed += l.composed->bytes();
         if (!l.cache) continue;

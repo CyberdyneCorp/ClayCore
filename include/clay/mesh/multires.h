@@ -114,6 +114,21 @@ enum class MultiresError : std::uint32_t {
     // direction that matters: a wrapped estimate is a SMALL one, and a small
     // one is allowed.
     CapacityOverflow = 15,
+    // A patch asked to be refined that this hierarchy cannot refine exactly:
+    // it is not resident at the parent level, or one of the patches sharing a
+    // vertex with it is not.
+    //
+    // REFUSED RATHER THAN APPROXIMATED, and the reason is the whole of the
+    // watertightness argument. A patch whose neighbour is absent at the parent
+    // sees that shared edge as an OPEN BORDER, and Catmull-Clark's border rule
+    // is a different rule -- so the fine surface would pull away from the
+    // coarse neighbour it is supposed to meet. `refine_patches_to_level` grows
+    // the intermediate levels so this cannot arise; the single-level call
+    // reports it rather than producing a crack.
+    PatchNotRefinable = 16,
+    // A refinement asked for over no patches. A level with no faces is not a
+    // level, and building one would leave a hierarchy whose top is empty.
+    NoPatchesRequested = 17,
 };
 
 // The name of the refusal, for a message. Never null.
@@ -268,6 +283,68 @@ class MultiresSurface {
     // artist means by "subdivide".
     bool add_level(MultiresError* out_error = nullptr,
                    const parallel::CancelToken* cancel = nullptr);
+
+    // What a REGIONAL level would cost: the same pricing over the faces the
+    // named patches actually contribute, rather than over the whole surface.
+    MultiresPreflight preflight_add_level_for_patches(
+        const std::vector<std::uint32_t>& patches) const;
+
+    // Add one level that refines ONLY these base patches
+    // (refine-one-region-of-a-hierarchy).
+    //
+    // `patches` are level-0 face ids. Order does not matter and duplicates are
+    // ignored; the level is built in ascending patch order either way, so the
+    // same request twice is the same surface byte for byte.
+    //
+    // WHAT IS AND IS NOT STORED. The level holds the named patches' faces and
+    // the vertices those faces reference, and nothing else -- so its topology,
+    // its evaluated buffers, its chunk table and its detail all follow the
+    // refined area. A patch not named has no storage here and is READ AT ITS
+    // OWN effective level, which is the same rule `clay_voxel_add_level_region`
+    // states for a voxel lattice.
+    //
+    // EVERY VERTEX IT DOES STORE IS BIT-IDENTICAL to the same vertex of the
+    // dense level. The stencils are evaluated against the parent exactly as
+    // before; only which of their answers are kept changes. That is why
+    // refining a region cannot move the surface, and why an all-patches
+    // regional level IS the dense level.
+    //
+    // Refuses with `PatchNotRefinable` when a named patch, or a patch sharing a
+    // vertex with it, is not resident at the parent level -- see that error.
+    bool add_level_for_patches(const std::vector<std::uint32_t>& patches,
+                               MultiresError* out_error = nullptr,
+                               const parallel::CancelToken* cancel = nullptr);
+
+    // Refine `patches` all the way to `target_level`, building whatever levels
+    // are missing and GROWING each intermediate one by the rings the levels
+    // above it need.
+    //
+    // THE CALL A HOST ACTUALLY MAKES, and the reason the single-level one can
+    // afford to be strict: level `target - k` is refined over `patches` grown
+    // by `k` patch rings, which is exactly the condition every level above it
+    // needs in order to evaluate its own stencils against a complete parent.
+    // The rings are grown in ascending patch id order, so the same request
+    // twice produces the same hierarchy.
+    //
+    // A no-op returning true when the hierarchy already reaches `target_level`
+    // over these patches.
+    bool refine_patches_to_level(const std::vector<std::uint32_t>& patches,
+                                 std::uint32_t target_level,
+                                 MultiresError* out_error = nullptr,
+                                 const parallel::CancelToken* cancel = nullptr);
+
+    // The deepest level that stores this base patch. `0` for a patch nothing
+    // has refined; `max_level()` for every patch of a uniformly refined
+    // hierarchy, which is what an old surface decodes as.
+    std::uint32_t patch_max_level(std::uint32_t patch) const;
+    // `min(level, patch_max_level(patch))` -- where a host reads this patch
+    // when it is displaying `level`.
+    std::uint32_t effective_level(std::uint32_t patch, std::uint32_t level) const;
+    // Whether the level stores this patch's faces at all.
+    bool patch_resident(std::uint32_t level, std::uint32_t patch) const;
+    // True when every level refines every patch, which is what `add_level`
+    // builds and what every hierarchy written before this feature is.
+    bool uniform_depth() const;
 
     // Drop the highest level and everything stored on it. Refuses on a cage
     // with nothing above it.

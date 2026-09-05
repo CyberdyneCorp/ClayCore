@@ -608,3 +608,76 @@ TEST_CASE("c multires: the peaks survive a rebind, because they belong to the se
     CHECK(t.workset_vertices > 0);
     CHECK(t.workset_vertices < fine_peak);
 }
+
+TEST_CASE("c abi: a hierarchy refines one region and reports the depth per patch") {
+    // Ten cells across, so the rings the grading adds do not reach the far
+    // corner and "this patch was never refined" has a witness.
+    std::vector<float> positions;
+    std::vector<uint32_t> indices;
+    plane(10, 1.0f, &positions, &indices);
+    clay_mesh* mesh = nullptr;
+    REQUIRE(clay_mesh_from_triangles(positions.data(), positions.size() / 3, indices.data(),
+                                     indices.size(), &mesh) == CLAY_OK);
+    clay_multires_desc desc{};
+    desc.struct_size = sizeof(desc);
+    REQUIRE(clay_multires_defaults(&desc) == CLAY_OK);
+    clay_multires* surface = nullptr;
+    int32_t err = -1;
+    REQUIRE(clay_multires_from_mesh(mesh, &desc, &surface, &err) == CLAY_OK);
+
+    // The cage arrives as TRIANGLES, so a cell is two patches: cell (x, z) is
+    // faces 2*(z*10+x) and one past it. Naming raw ids here would have named
+    // two cells at opposite ends of the grid, which is a different test.
+    const auto cell = [](uint32_t x, uint32_t z) { return 2u * (z * 10u + x); };
+    const uint32_t block[8] = {cell(4, 4),     cell(4, 4) + 1, cell(5, 4), cell(5, 4) + 1,
+                               cell(4, 5),     cell(4, 5) + 1, cell(5, 5), cell(5, 5) + 1};
+    int32_t uniform = -1;
+    REQUIRE(clay_multires_uniform_depth(surface, &uniform) == CLAY_OK);
+    CHECK(uniform == 1);
+
+    // Priced before it is built, like the uniform call — and cheaper, because
+    // the counts follow the patches actually named.
+    clay_multires_preflight region{}, whole{};
+    region.struct_size = sizeof(region);
+    whole.struct_size = sizeof(whole);
+    REQUIRE(clay_multires_preflight_add_level_for_patches(surface, block, 8, &region) == CLAY_OK);
+    REQUIRE(clay_multires_preflight_add_level(surface, &whole) == CLAY_OK);
+    CHECK(region.allowed == 1);
+    CHECK(region.faces < whole.faces);
+
+    REQUIRE(clay_multires_refine_patches_to_level(surface, block, 8, 3, nullptr, &err) == CLAY_OK);
+    CHECK(err == CLAY_MULTIRES_OK);
+    CHECK(clay_multires_level_count(surface) == 4);
+    REQUIRE(clay_multires_uniform_depth(surface, &uniform) == CLAY_OK);
+    CHECK(uniform == 0);
+
+    uint32_t deep = 0, effective = 0;
+    int32_t resident = -1;
+    REQUIRE(clay_multires_patch_max_level(surface, block[0], &deep) == CLAY_OK);
+    REQUIRE(clay_multires_effective_level(surface, block[0], 3, &effective) == CLAY_OK);
+    REQUIRE(clay_multires_patch_resident(surface, 3, block[0], &resident) == CLAY_OK);
+    CHECK(deep == 3);
+    CHECK(effective == 3);
+    CHECK(resident == 1);
+    // The far corner was never named and never fell inside a ring, so a host
+    // displaying level 3 reads it at the cage.
+    REQUIRE(clay_multires_patch_max_level(surface, 0, &deep) == CLAY_OK);
+    REQUIRE(clay_multires_effective_level(surface, 0, 3, &effective) == CLAY_OK);
+    REQUIRE(clay_multires_patch_resident(surface, 3, 0, &resident) == CLAY_OK);
+    CHECK(deep == 0);
+    CHECK(effective == 0);
+    CHECK(resident == 0);
+
+    // A patch outside every ring cannot be refined at the top level: its parent
+    // neighbourhood is not there, and refining it anyway would open a crack.
+    const uint32_t stranded[1] = {0};
+    CHECK(clay_multires_add_level_for_patches(surface, stranded, 1, nullptr, &err) != CLAY_OK);
+    CHECK(err == CLAY_MULTIRES_PATCH_NOT_REFINABLE);
+    CHECK(clay_multires_level_count(surface) == 4);
+
+    CHECK(clay_multires_add_level_for_patches(surface, nullptr, 0, nullptr, &err) != CLAY_OK);
+    CHECK(err == CLAY_MULTIRES_NO_PATCHES_REQUESTED);
+
+    clay_multires_destroy(surface);
+    clay_mesh_destroy(mesh);
+}

@@ -135,11 +135,27 @@ void transport_frames(const LevelTopology& parent, const LevelConnectivity& conn
                       const std::vector<kernel::cfloat3>& child_normals,
                       std::vector<SurfaceFrame>* out);
 
+// The same for a level that stores only some of the layout's vertices. Both
+// `child_normals` and `out` are in the level's OWN numbering; the rule is still
+// stated over the parent's layout, so a regional level's frame is the frame the
+// dense level would have carried at that vertex.
+void transport_frames(const LevelTopology& parent, const LevelConnectivity& conn,
+                      const std::vector<SurfaceFrame>& parent_frames,
+                      const std::vector<kernel::cfloat3>& child_normals, ChildIndex child,
+                      std::vector<SurfaceFrame>* out);
+
 // The same for a subset, bit-identical to the full call for the entries it
 // writes.
 void transport_frames_partial(const LevelTopology& parent, const LevelConnectivity& conn,
                               const std::vector<SurfaceFrame>& parent_frames,
                               const std::vector<kernel::cfloat3>& child_normals,
+                              const std::vector<std::uint32_t>& child_vertices,
+                              std::vector<SurfaceFrame>* inout);
+
+// The same over a level that stores a subset. `child_vertices` are STORED ids.
+void transport_frames_partial(const LevelTopology& parent, const LevelConnectivity& conn,
+                              const std::vector<SurfaceFrame>& parent_frames,
+                              const std::vector<kernel::cfloat3>& child_normals, ChildIndex child,
                               const std::vector<std::uint32_t>& child_vertices,
                               std::vector<SurfaceFrame>* inout);
 

@@ -574,6 +574,19 @@ EXEMPT = {
     "Profile.point_count": "reads a builder's own state back, as above",
     "Layer.resolution": "per-layer meshing hint the C ABI does not author; "
                         "clay_mesh_params carries the resolution a mesh is built at",
+    "MultiresSurface.topology_at": "a level's face list, which C already reaches "
+                                  "through the transport it is meant to be read by: "
+                                  "clay_multires_block_info_get and "
+                                  "clay_multires_block_get hand a host one base patch's "
+                                  "faces at one level, welded, with indices local to the "
+                                  "block it is about to upload. pyclay wants the arrays "
+                                  "flat instead — it has numpy, and a per-patch handle "
+                                  "would be the slow way to ask 'which faces belong to "
+                                  "this patch' — so the two shapes are the same "
+                                  "information under each language's idiom rather than a "
+                                  "gap. A C caller needing the flat form would be asking "
+                                  "for a copy of the whole level, which is what "
+                                  "clay_multires_copy_level_mesh already is.",
     "Layer.id": "in C the id IS the handle — clay_layer_id is the type every "
                 "layer entry point already takes, so there is nothing to read back",
 }
