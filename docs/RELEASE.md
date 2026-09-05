@@ -376,6 +376,116 @@ forward-refuse).
    fields in `clay_memory_report` are ZERO unless the host fills a ledger and
    passes it to `clay_document_memory_with_surfaces`.
 
+   **A handful of commits carry the version line 0.78.0 and are NOT in
+   v0.78.0.** The tag names commit `9ed0a49a9`; #446, #447 and #448 merged after
+   it while `CMakeLists.txt` still said 0.78.0, and the line moved to 0.79.0 with
+   #449. Nothing published claims those commits, so the first release that
+   carries them is this one — but a header read literally says 0.78.0, and the
+   uniform-brick gate and the halved attributed raycast below are among them.
+
+   **0.79.0, 0.80.0, 0.81.0, 0.82.0 and 0.83.0 are not such releases**: all five
+   are additive, and none of them was ever tagged. 0.79.0 puts the SDF prefix
+   cache across the ABI — the opaque `clay_sdf_prefix_cache` handle, its build /
+   invalidate / clear / budget / stats verbs, `clay_sdf_prefix_boundary_for` and
+   `clay_sdf_smooth_begin_cached` — and grows `clay_sculpt_policy` by three
+   prefix knobs appended behind the `struct_size` it already negotiates, **all
+   three zero being today's behaviour exactly**, so a host that has not heard of
+   the cache is not opted into it. 0.80.0 adds `clay_layer_warp_cost_get` and its
+   descriptor. 0.81.0 adds `clay_document_extent_stats` and its descriptor.
+   0.82.0 adds the layer placement gesture (`clay_layer_placement_begin` /
+   `_update` / `_preview` / `_commit` / `_cancel` / `_destroy` / `_report`, the
+   `clay_placement_tx` handle, `clay_placement_report` and `clay_placement_kind`)
+   plus the two scoped evaluation forms `clay_brick_cache_eval_requests_layer`
+   and `clay_document_mesh_sdf_layer`. 0.83.0 adds the field stamp
+   (`clay_stamp_frame_from_surface`, `clay_item_stamp_from_document`,
+   `clay_item_stamp_content_id`, `clay_item_stamp_save_memory` / `_load_memory`,
+   `clay_layer_place_stamps`, `clay_document_stamp_memory`, and the
+   `clay_stamp_frame` / `clay_stamp_memory` descriptors). Nothing that compiled
+   against the version before each of them changes behaviour, and every new
+   capability is opt-in: invalidation for a host that never opens a placement
+   gesture is what it always was.
+
+   **The FORMAT moves inside that additive run, though, and that is the part to
+   read before upgrading a host that exchanges files.** The scene and
+   `.clayspace` formats go to **minor 17** between 0.82.0 and 0.83.0: a node's
+   volume and gate are written as a document-wide payload id, with the bytes
+   following only where the id is new — the rule a shared edit list has followed
+   since minor 15, one level down. **A build older than this opening a minor-17
+   document FAILS rather than misreading it**, as it does for minors 11, 14, 15
+   and 16, and for the same reason: the records are not length-prefixed, so the
+   new shape desynchronises the stream and the reader's own bounds checks reject
+   it. **Writing at minor 16 restores the per-node shape exactly**, so a build
+   that predates 17 opens the document and gets what it always got; the downgrade
+   costs the deduplication and nothing an artist authored. That makes it the
+   cheapest downgrade this format has had — every earlier one lost a value.
+
+   The id is document-wide and deliberately **not** a `NodeId`: node ids are
+   per-layer, every layer numbering from 1, so a back-reference by node id would
+   name a different node in another layer. And the reader shares too, because a
+   writer that deduplicates met by a reader calling `make_shared` per node has
+   saved disk and rebuilt the duplication in memory — and the next save writes N
+   payloads again. Measured, eight placements of one capture go from 1,499,457
+   bytes to 189,117.
+
+   **0.84.0 IS such a release, in four ways, and none of them is a format or a
+   signature.** It adds `clay_brick_cache_eval_requests_seeded` and
+   `clay_sdf_prefix_cache_build_for_refill` — both opt-in, with the default
+   refill path byte-identical and paying nothing — and it carries four changes a
+   caller observes without calling anything new.
+
+   **First, a deformer chain declares a LARGER safe step**, because the old bound
+   was wrong twice: it summed every link's travel where only the travel *between*
+   two links carries a point from one to the other, and it grouped links by
+   connected component where "both act at one point" is not a transitive
+   relation. Sixteen grabs along a bar measure `clay_safe_step_scale` at 0.098
+   before and **0.647** after; on issue #452's own fixture at twelve grabs, 0.103
+   → 0.469 and a raycast 81.5 → 51.6 ms. It is still an upper bound — every link
+   acting at one point contains that point, so they pairwise can meet, so they
+   all lie inside any one of their neighbourhoods. **A host that calibrated a
+   step budget against the old figure is now conservative rather than wrong**,
+   and a marcher reaches the same surface in fewer steps.
+
+   **Second, a per-brick evaluation drops a `move_surface` warp it cannot
+   reach**, so a refill and gradient-normal meshing over a worked layer cost what
+   the reachable grabs cost rather than what all of them do (a brick-sized region
+   far from twelve grabs: 176 tape params to 32, 0.0824 ms to 0.0052). Sound by
+   induction along the chain, and band-clamped results are bit-identical to the
+   full tape INSIDE the region, which is the property a culled tape already had.
+   **A whole-document evaluation has no region to test against and is
+   unchanged** — it still pays for every warp. Said plainly because the natural
+   reading of "grabs got cheaper" is the one that is false.
+
+   **Third, a culled tape compiles a CROPPED sub-volume** in place of a whole
+   sampled payload (issue #455): 1,243,861 floats to 27,160, a per-brick culled
+   compile 0.3166 → 0.0054 ms, and meshing a bake with gradient normals 1740.5 →
+   142.9 ms. Inside the cull region the values are bit-identical — the origin and
+   the brick grid deliberately do not move, because the kernel reads a sample
+   through `(p - origin) / cell` and a shifted origin changes the trilinear
+   weights, which the first implementation demonstrated in the last ulp. Outside
+   the region a cropped volume answers differently, because `ctape_volume_dist`
+   clamps a query onto the sampled box; that is the property a culled tape
+   already has and already documents.
+
+   **Fourth, a refill may PROVE a brick uniform rather than walk it** (from the
+   untagged 0.78.0 commits above), and `clay_brick_stats` counts it the way it
+   already counted a brick with no seed: refilled where the proof is made,
+   resumed where a later dab carries it forward, so the resume ratio reads as it
+   did. The gate is refused where the tape's Lipschitz bound is not a slope
+   bound — `info.lipschitz` is a stepping bound and the two coincide for most
+   tapes and not for all. From the same run, `clay_raycast_attributed` no longer
+   builds a document per candidate item and costs **0.51–0.54x** of what it did
+   across four fixtures; `clay_raycast` is untouched and is the control.
+
+   **And an edit to a `CLAY_OP_INTERSECT` item stopped being quadratic** in the
+   layer's intersects (issue #451). Same bounds, same invalidation, same bricks —
+   the only thing a caller can observe is that a drag on an intersect now costs
+   what a drag on a subtract costs (0.0003 ms a frame, against 0.0669 at 0.78.0
+   on the issue's 200-frame fixture). Recorded here rather than under "additive"
+   because v0.78.0's own entry is what created it: making an intersect's bound
+   finite made every caller that meets one in a loop pay O(intersects x items).
+   `clay_document_extent_stats` is the only way to see the cache fire, since the
+   bound is identical either way.
+
    **0.54.1 is not such a release**: no symbol added or removed and no
    signature changed. It is a BEHAVIOUR fix to one existing verb, and the kind
    worth reading because the old behaviour was not wrong-looking, it was inert.
@@ -1408,11 +1518,25 @@ run it.
   devices` must list it above the `== Devices Offline ==` heading; a
   paired-but-absent device is listed by name and cannot be run on.
 - **A signing identity and a provisioning profile that covers the device.**
-  Today that is the Cyberdyne team, `2C69VJZSNR`, whose wildcard profile
-  (`iOS Team Provisioning Profile: *`) covers the lab devices. **The signing
-  certificate in use expires 2026-09-02.** An expired certificate blocks the
-  gate and therefore blocks the release, so renewal is on the release critical
-  path rather than being somebody's background chore.
+  Today that is the Cyberdyne team, `2C69VJZSNR`, and the gate runs as
+  `CLAY_DEVICE_TEAM=2C69VJZSNR tools/run_device_bench.sh <udid>`. **Which
+  profile answers matters now, because two of them disagree by a year.** The
+  bundle-specific `iOS Team Provisioning Profile:
+  com.cyberdyne.claycore.devicehost` carries a certificate valid to
+  **2027-09-02**; the wildcard `iOS Team Provisioning Profile: *` on the same
+  team still carries the certificate that **expired 2026-09-02**, which is the
+  deadline v0.78.0's notes were written against. The v0.84.0 gate ran on the
+  bundle-specific one. An expired certificate blocks the gate and therefore
+  blocks the release, so renewal is on the release critical path rather than
+  being somebody's background chore — and the expiry does not announce itself:
+  `xcodebuild` says "No Accounts" and "No signing certificate found", and has
+  once segfaulted at `GatherProvisioningInputs` instead. The one-line
+  diagnostic is `security find-identity -v -p codesigning`; an identity that
+  appears under `-p codesigning` but not in the `-v` list is expired. The fix
+  is an interactive Xcode sign-in. Uninstall the old host first
+  (`xcrun devicectl device uninstall app --device <udid>
+  com.cyberdyne.claycore.devicehost`) — the installed copy was signed by the
+  dead identity.
 
   Check the certificate **inside the profile**, not the first one in the
   keychain — this machine also holds an unrelated, already-expired
@@ -1432,8 +1556,10 @@ for c in d.get("DeveloperCertificates", []):
   done
   ```
 
-  The wildcard profile itself is valid until 2027-06-17; the certificate
-  inside it is the earlier deadline, and the one that matters.
+  Both profiles are valid well into 2027; the certificates inside them are the
+  earlier deadlines, and the ones that matter. Read the whole listing rather
+  than the first row: it is the profile whose name matches the bundle being
+  signed that answers.
 - **`xcodegen`** (`brew install xcodegen`). The Xcode project under
   `tests/device/` is generated from `project.yml` and is not committed: a
   pbxproj is not reviewable, and generating it on every run keeps the spec and

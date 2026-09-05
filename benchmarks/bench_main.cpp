@@ -576,6 +576,25 @@ void cold_window(benchmark::State& state, int items, bool seeded) {
                                               nullptr, 0, &warm);
     }
 
+    // AND THE RING MUST NOT WRAP, which is why the three rows below fix their
+    // iteration count instead of taking one from --benchmark_min_time. There
+    // are only so many brick windows straddling a unit shell at a 0.4 brick,
+    // so "a different window per iteration" is a claim with a hard ceiling on
+    // it; past that the row silently measures the WARM path it was written to
+    // avoid. It is machine-dependent, which is the worst kind: at
+    // --benchmark_min_time=0.2s a GitHub Linux runner takes 13 iterations of a
+    // 16.0 ms cold window and stays honest, and an M-series laptop takes
+    // 135,823 of a 0.002 ms warm one and reports the seeded row as 80x the
+    // plain one -- inverting a gate that reads 0.02x where it is measured as
+    // written. Refuse rather than report: a benchmark that cannot make its
+    // claim must not return a number that looks like one.
+    if (state.max_iterations > static_cast<std::int64_t>(windows.size() - 1)) {
+        state.SkipWithError("cold-window ring wrapped: more iterations than distinct windows");
+        if (cache) clay_sdf_prefix_cache_destroy(cache);
+        clay_document_destroy(doc);
+        return;
+    }
+
     for (auto _ : state) {
         const std::vector<clay_brick_request>& w = windows[next];
         next = (next + 1) % (windows.size() - 1);
@@ -597,12 +616,17 @@ void cold_window(benchmark::State& state, int items, bool seeded) {
 
 }  // namespace
 
+// One iteration per distinct window, on every machine -- see the ring guard in
+// cold_window(). 23 is windows.size() - 1, the length of the ring the loop
+// walks; the guard refuses the run if these two ever disagree.
+constexpr int kColdWindows = 23;
+
 void BM_ColdWindowPlain(benchmark::State& state) { cold_window(state, 20000, false); }
-BENCHMARK(BM_ColdWindowPlain)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_ColdWindowPlain)->Unit(benchmark::kMillisecond)->Iterations(kColdWindows);
 void BM_ColdWindowSeeded(benchmark::State& state) { cold_window(state, 20000, true); }
-BENCHMARK(BM_ColdWindowSeeded)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_ColdWindowSeeded)->Unit(benchmark::kMillisecond)->Iterations(kColdWindows);
 void BM_ColdWindowSeededSmall(benchmark::State& state) { cold_window(state, 5000, true); }
-BENCHMARK(BM_ColdWindowSeededSmall)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_ColdWindowSeededSmall)->Unit(benchmark::kMillisecond)->Iterations(kColdWindows);
 
 void BM_DabRefillFreshDoc(benchmark::State& state) { refill_pole_dab(state, 1); }
 BENCHMARK(BM_DabRefillFreshDoc)->Unit(benchmark::kMillisecond);
