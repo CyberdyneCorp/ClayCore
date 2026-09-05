@@ -752,42 +752,27 @@ float fold_chain(const std::vector<ChainLink>& links, const std::vector<bool>& a
     return l;
 }
 
-// Which finite-support links can reach one another, as a 1-based group number
-// per link (0 for a link that acts everywhere and is therefore in every group).
-// Two links share a group when their balls are closer than the distance the
-// chain can carry a point between them, so a group is a set that MIGHT
-// compound and two groups provably cannot.
+// Whether two finite-support links can BOTH be non-identity at one point.
 //
-// O(n^2) over a chain of tens of links, and the arithmetic is a distance
-// compare — against `chain_links`, which samples an easing curve 512 times per
-// link, this does not show up.
-std::vector<std::size_t> group_by_reach(const std::vector<ChainLink>& links,
-                                        std::size_t* out_groups) {
-    // Summed over the WHOLE chain rather than over the links between the two
-    // being compared: looser, in the safe direction, and it saves having to
-    // reason about which links sit between them.
-    float travel = 0.0f;
-    for (const ChainLink& l : links) travel += l.support.travel;
-
-    const std::size_t n = links.size();
-    std::vector<std::size_t> group(n, 0);
-    std::size_t groups = 0;
-    for (std::size_t i = 0; i < n; ++i) {
-        if (!links[i].support.finite) continue;
-        group[i] = ++groups;
-        for (std::size_t k = 0; k < i; ++k) {
-            if (!links[k].support.finite || group[k] == group[i]) continue;
-            const float gap = kernel::clength(links[i].support.centre - links[k].support.centre);
-            if (gap > links[i].support.radius + links[k].support.radius + travel) continue;
-            // They can meet: fold i's group into k's, and everything already
-            // gathered into i's along with it.
-            const std::size_t from = group[i], into = group[k];
-            for (std::size_t j = 0; j <= i; ++j)
-                if (group[j] == from) group[j] = into;
-        }
-    }
-    *out_groups = groups;
-    return group;
+// The chain evaluates p -> d0 -> d1 -> ... -> prim, so for links i < k to both
+// act, a point must start inside i's ball and still be inside k's when k sees
+// it. What carries it between them is the travel of the links BETWEEN them --
+// not the whole chain's.
+//
+// SUMMING THE WHOLE CHAIN was the original, on the grounds that it is looser in
+// the safe direction and saves reasoning about ordering. It is unusable at
+// scale: every grab adds its own travel to the budget every other pair is
+// measured against, so the more grabs a layer carries the more readily they are
+// judged able to meet. Fifty drags of 0.05 gave a budget of 2.5 against balls
+// of radius 0.3, and every pair on a form 1.7 across passed it.
+bool links_can_meet(const std::vector<ChainLink>& links, const std::vector<float>& travel_prefix,
+                    std::size_t i, std::size_t k) {
+    const std::size_t lo = i < k ? i : k, hi = i < k ? k : i;
+    // Travel of the links strictly between them, plus the earlier one's own:
+    // it moves the point before the next link sees it.
+    const float budget = travel_prefix[hi] - travel_prefix[lo];
+    const float gap = kernel::clength(links[i].support.centre - links[k].support.centre);
+    return gap <= links[i].support.radius + links[k].support.radius + budget;
 }
 
 }  // namespace
@@ -796,22 +781,41 @@ float deformer_lipschitz(const Node& item) {
     if (item.deformers.empty()) return 1.0f;
     const std::vector<ChainLink> links = chain_links(item);
     const std::size_t n = links.size();
-    std::size_t groups = 0;
-    const std::vector<std::size_t> group = group_by_reach(links, &groups);
 
-    // The bound over the whole domain is the WORST place in it. A link with
-    // unbounded support acts everywhere and is always in; the finite ones only
-    // compound within their own group, so each group is priced with the other
-    // groups absent and the largest answer wins.
+    // Travel accumulated up to and including each link, so the budget between
+    // any two is one subtraction.
+    std::vector<float> travel_prefix(n + 1, 0.0f);
+    for (std::size_t i = 0; i < n; ++i)
+        travel_prefix[i + 1] = travel_prefix[i] + links[i].support.travel;
+
+    // THE BOUND IS THE WORST POINT, and every link acting at one point must
+    // contain it -- so they pairwise can meet. Pricing each link's own
+    // NEIGHBOURHOOD is therefore a valid bound, and a far tighter one than the
+    // connected component this used to take.
     //
-    // Group 0 first, which is the chain with every finite link out — the answer
-    // for the part of the item no brush has touched, and the whole answer when
-    // there are no finite links to gather.
+    // Connectedness is not the right relation, and that is the whole defect:
+    // it is TRANSITIVE and "both act here" is not. Balls A-B and B-C may
+    // overlap with A and C disjoint, and no point sees all three -- yet a
+    // union-find puts them in one group and multiplies all three. Along a
+    // stroke that chains every drag on a form into one component and charges
+    // the product of the lot.
+    //
+    // Measured on 50 move_surface drags around a form: safe step scale 8e-05,
+    // a raycast at 933 ms and a mesh at 1471 ms against 10 ms and 36 ms with no
+    // drags. The links themselves were never the cost; the bound was (#452).
     std::vector<bool> active(n);
     float worst = 1.0f;
-    for (std::size_t g = 0; g <= groups; ++g) {
-        for (std::size_t i = 0; i < n; ++i)
-            active[i] = !links[i].support.finite || group[i] == g;
+
+    // First with every finite link out: the answer for the part of the item no
+    // brush has touched, and the whole answer when there are none.
+    for (std::size_t i = 0; i < n; ++i) active[i] = !links[i].support.finite;
+    worst = kernel::cmax(worst, fold_chain(links, active));
+
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!links[i].support.finite) continue;
+        for (std::size_t k = 0; k < n; ++k)
+            active[k] = !links[k].support.finite ||
+                        (k == i) || links_can_meet(links, travel_prefix, i, k);
         worst = kernel::cmax(worst, fold_chain(links, active));
     }
     return worst;

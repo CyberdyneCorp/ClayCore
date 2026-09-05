@@ -1739,13 +1739,20 @@ TEST_CASE("bound: the threshold is the reach, not the radii alone") {
     // r + r + travel, not r + r. A pair just inside that has to cost more than
     // a pair just outside it.
     const float radius = 0.3f, pull = 0.5f;
-    // The travel is summed over the WHOLE chain, so two grabs pulling 0.5 each
-    // reach 0.3 + 0.3 + 1.0 = 1.6. A gap of 1.2 is inside that and 2.0 is not,
-    // and neither pair's balls overlap — which is the point: the radii alone
-    // would call both pairs disjoint.
-    scene::Tape close = scene::compile_document(spaced_grabs(2, 1.2f, radius, pull));
-    scene::Tape apart = scene::compile_document(spaced_grabs(2, 2.0f, radius, pull));
-    scene::Tape alone = scene::compile_document(spaced_grabs(1, 2.0f, radius, pull));
+    // THE TRAVEL IS THE ONE BETWEEN THEM, and this case used to say "the whole
+    // chain" — 0.3 + 0.3 + (0.5 + 0.5) = 1.6, so a gap of 1.2 counted as
+    // reachable. Walk it instead: a point starts within 0.3 of centre 0, the
+    // FIRST grab carries it 0.5, so it ends within 0.8 — and the second grab's
+    // ball begins 1.2 - 0.3 = 0.9 away. It never arrives. The second grab's own
+    // travel cannot help, because a link acts at the point it RECEIVES and
+    // moves it afterwards.
+    //
+    // So the threshold is 0.3 + 0.3 + 0.5 = 1.1: a gap of 0.9 is inside it and
+    // 1.5 is not, and neither pair's balls overlap — which is still the point,
+    // since the radii alone would call both pairs disjoint.
+    scene::Tape close = scene::compile_document(spaced_grabs(2, 0.9f, radius, pull));
+    scene::Tape apart = scene::compile_document(spaced_grabs(2, 1.5f, radius, pull));
+    scene::Tape alone = scene::compile_document(spaced_grabs(1, 1.5f, radius, pull));
     CHECK(close.safe_step_scale() < apart.safe_step_scale());
     CHECK(apart.safe_step_scale() == doctest::Approx(alone.safe_step_scale()));
 }
@@ -1759,6 +1766,48 @@ TEST_CASE("bound: a disjoint chain is still safe to march by") {
         clay_test::check_conservative_steps([&](cfloat3 p) { return t.eval(p).d; },
                                             t.safe_step_scale(), 13.0f, 900, 2201);
     }
+}
+
+TEST_CASE("bound: a chain of brushes is not charged as one clique") {
+    // THE CASE #452 IS ABOUT, and the one the old grouping got badly wrong.
+    //
+    // Grabs walked ALONG a form overlap their neighbours and nothing else. The
+    // grouping used to be a connected component -- a union-find over "these two
+    // can meet" -- and that relation is TRANSITIVE where "both act at one
+    // point" is not: balls A-B and B-C may overlap with A and C disjoint, and
+    // no point sees all three. So a stroke chained every drag into one group
+    // and charged the product of the lot.
+    //
+    // Measured on the form this issue reports, fifty drags: safe step scale
+    // 8e-05, a raycast at 933 ms and a mesh at 1471 ms against 10 ms and 36 ms
+    // with no drags. Pricing each link's own NEIGHBOURHOOD instead is still an
+    // upper bound -- every link acting at one point contains it, so they
+    // pairwise can meet, so they all lie in any one of their neighbourhoods --
+    // and it does not grow with the length of the stroke.
+    //
+    // A LINE of grabs, each overlapping only its neighbours.
+    const scene::Prim bar = scene::Prim::box(cf3(12.0f, 0.5f, 0.5f));
+    const auto walk = [&](int count) {
+        std::vector<Deformer> chain;
+        for (int i = 0; i < count; ++i)
+            chain.push_back(Deformer::grab(cf3(-5.0f + 0.5f * static_cast<float>(i), 0, 0), 0.4f,
+                                           cf3(0, 0.05f, 0)));
+        return scene::compile_document(one_item(bar, chain));
+    };
+
+    const scene::Tape few = walk(2);
+    const scene::Tape many = walk(16);
+    MESSAGE("2 grabs " << few.safe_step_scale() << ", 16 grabs " << many.safe_step_scale());
+    // Eight times as many drags must not be eight compoundings. A connected
+    // component would put all sixteen in one group; the neighbourhood holds
+    // roughly three, so the two numbers stay within a small factor of each
+    // other rather than diverging by orders of magnitude.
+    CHECK(many.safe_step_scale() > few.safe_step_scale() * 0.25f);
+
+    // AND IT IS STILL A BOUND, which is the half that matters: a step scale
+    // that is too large is a marcher that walks through the surface.
+    clay_test::check_conservative_steps([&](cfloat3 p) { return many.eval(p).d; },
+                                        many.safe_step_scale(), 13.0f, 900, 4703);
 }
 
 TEST_CASE("bound: an unbounded link is charged against every group") {
