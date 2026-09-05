@@ -24,9 +24,15 @@
 - [x] 3.5 A stroke keeps hitting after its boundary has moved
 - [x] 3.6 Version lines together; `check_*` green
 
-## 4. What is NOT closed
+## 4. The residual, attributed and removed
 
-- [ ] 4.1 A cold window is still linear in history — 0.47 ms at 2,000 items
-      against 6.80 at 50,000. Neither the digest (memoised) nor the suffix
-      (invariant from 4 to 256 roots) accounts for it. **Attribute the residual
-      before designing anything further**; #306 stays open on that.
+- [x] 4.1 Attributed by phase timing rather than by inference, after two wrong
+      guesses: 3.5 ms of a 5.4 ms window sat in the suffix COMPILE.
+      `compile_layer_suffix` given a cull region but NO index re-derives the
+      document's cull pad by walking every layer, per brick. The cold path had
+      been written to skip the index because `plan_frontier` does not need one
+      — but the compile underneath it does.
+- [x] 4.2 Take the cull index on the prefix path: released phase 3,500 us ->
+      24 us, and a cold window goes flat.
+- [x] 4.3 `BM_ColdWindowSeeded` vs `BM_ColdWindowSeededSmall` holds the
+      flatness; the ratio against `BM_ColdWindowPlain` says what it is worth.

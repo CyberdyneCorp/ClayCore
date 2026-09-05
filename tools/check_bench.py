@@ -353,6 +353,21 @@ MAX_RATIO = [
     # thing the sharing exists to prevent -- and at the scale a detail brush
     # works at, a thousand of them.
     ("BM_StampPlace", "BM_StampCapture128", 0.01),
+    # A cold brick seeded from the layer's prefix (#306). The first touch of a
+    # window used to walk the whole edit list -- and a SECOND cold window cost
+    # the same as the first, so it was the walk and not the index. Measured
+    # 4.80 ms unseeded against 0.304 ms seeded at 20,000 items.
+    ("BM_ColdWindowSeeded", "BM_ColdWindowPlain", 0.25),
+    # THE CLAIM, which the ratio above cannot make: a cold window costs the same
+    # on a document FOUR TIMES LARGER. 0.304 ms at 20,000 items against 0.307 at
+    # 5,000 -- flat, because the brick evaluates the suffix after the prefix
+    # boundary rather than the history before it.
+    #
+    # 2.0 is far above the ~0.99 measured because the failure is CATEGORICAL: a
+    # seed that stopped being found, or a suffix compile that went back to
+    # deriving the cull pad per brick, lands at 4 and not at 1.2. Both rows run
+    # on the same runner, so a slow machine moves them together.
+    ("BM_ColdWindowSeeded", "BM_ColdWindowSeededSmall", 2.0),
     # A 60-frame layer drag costs ONE refill, not sixty
     # (drag-a-layer-without-a-refill). Moving a layer rigidly changes no shape,
     # so the frames in between need no walk at all; the gesture holds the

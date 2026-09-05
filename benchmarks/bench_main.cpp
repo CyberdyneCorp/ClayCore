@@ -17,6 +17,7 @@
 #include "clay.h"
 #include "clay_internal.h"
 #include "clay/field/stamp.h"
+#include "clay/session/sdf_prefix_cache.h"
 #include "clay/brick/cache.h"
 #include "clay/mesh/dynamic_sculpt.h"
 #include "clay/mesh/multires_sculpt.h"
@@ -464,6 +465,144 @@ void BM_StampPlace(benchmark::State& state) {
     state.counters["placements"] = static_cast<double>(layer.sdf->nodes().size());
 }
 BENCHMARK(BM_StampPlace)->Unit(benchmark::kMillisecond);
+
+// A COLD brick seeded from the layer's prefix (#306).
+//
+// A brick refilled before evaluates only what the document gained since; the
+// FIRST touch of a window had no seed and walked everything, and a second cold
+// window cost the same as the first -- so it was the walk, not the index.
+// Given a prefix, such a brick starts from roots [0, K) and evaluates [K, end).
+//
+// THROUGH THE C ABI, because that is where the feature is: an earlier version of
+// this compiled tapes directly and its "seeded" flag changed nothing at all.
+//
+// THE CLAIM IS FLATNESS. `check_bench.py` holds the seeded row at 20,000 items
+// against the seeded row at 5,000 -- a cold window must cost the same on a
+// document four times larger -- and against the unseeded row, which says what
+// that is worth.
+namespace {
+
+clay_layer_id bench_worked_ball(clay_document* doc, int items) {
+    clay_layer_id layer = 0;
+    clay_add_sdf_layer(doc, "body", &layer);
+    clay_item_desc b{};
+    b.struct_size = static_cast<std::uint32_t>(sizeof b);
+    b.prim = CLAY_PRIM_SPHERE;
+    b.params[0] = 1.0f;
+    b.op = CLAY_OP_ADD;
+    clay_node_id n = 0;
+    clay_add_item(doc, layer, &b, &n);
+    for (int i = 0; i < items; ++i) {
+        const float t = static_cast<float>(i) * 2.399963f;
+        const float z = 1.0f - 2.0f * (static_cast<float>(i) + 0.5f) / static_cast<float>(items);
+        const float r = std::sqrt(z * z >= 1.0f ? 0.0f : 1.0f - z * z);
+        clay_item_desc d{};
+        d.struct_size = static_cast<std::uint32_t>(sizeof d);
+        d.prim = CLAY_PRIM_SPHERE;
+        d.params[0] = 0.06f;
+        d.op = CLAY_OP_ADD;
+        d.blend = CLAY_BLEND_QUADRATIC;
+        d.blend_k = 0.02f;
+        d.position[0] = r * std::cos(t);
+        d.position[1] = r * std::sin(t);
+        d.position[2] = z;
+        clay_node_id id = 0;
+        clay_add_item(doc, layer, &d, &id);
+    }
+    return layer;
+}
+
+void cold_window(benchmark::State& state, int items, bool seeded) {
+    constexpr int kDim = 8;
+    constexpr float kVoxel = 0.05f;
+    clay_document* doc = clay_document_create();
+    const clay_layer_id layer = bench_worked_ball(doc, items);
+
+    clay_sculpt_policy pol{};
+    pol.struct_size = static_cast<std::uint32_t>(sizeof pol);
+    pol.cell_size = kVoxel;
+    pol.band = 8.0f * kVoxel;
+    pol.padding = 8.0f * kVoxel;
+    pol.prefix_min_history_roots = 64;
+    pol.prefix_keep_live_suffix_roots = 32;
+    pol.prefix_max_bytes = 1024ull * 1024 * 1024;
+
+    clay_sdf_prefix_cache* cache = nullptr;
+    if (seeded) {
+        cache = clay_sdf_prefix_cache_create(1024ull * 1024 * 1024);
+        clay_sdf_prefix_cache_build_for_refill(cache, doc, layer, &pol, nullptr);
+    }
+
+    // MANY windows, each straddling the surface, and a DIFFERENT one per
+    // iteration -- every iteration has to be a first touch. Re-running one
+    // window measures the warm path from the second iteration on, which an
+    // earlier version of this did: 3.52 ms that was half cold and half warm.
+    //
+    // Off the model would be worse still: there every item is culled away and a
+    // cold refill is free, so the row would measure nothing at all.
+    const float brick = static_cast<float>(kDim) * kVoxel;
+    std::vector<std::vector<clay_brick_request>> windows;
+    for (int k = 0; k < 24; ++k) {
+        const float a = 6.2831853f * static_cast<float>(k) / 24.0f;
+        std::vector<clay_brick_request> w;
+        for (int x = 0; x < 2; ++x)
+            for (int y = 0; y < 2; ++y)
+                for (int z = 0; z < 3; ++z) {
+                    clay_brick_request q{};
+                    q.key[0] = static_cast<std::int32_t>(std::floor(std::cos(a) / brick)) + x;
+                    q.key[1] = static_cast<std::int32_t>(std::floor(std::sin(a) / brick)) + y;
+                    q.key[2] = -1 + z;
+                    q.spacing = kVoxel;
+                    q.dims[0] = q.dims[1] = q.dims[2] = kDim;
+                    q.band = 3.0f * kVoxel;
+                    for (int c = 0; c < 3; ++c)
+                        q.origin[c] = static_cast<float>(q.key[c] * kDim) * kVoxel;
+                    w.push_back(q);
+                }
+        windows.push_back(std::move(w));
+    }
+    const std::size_t per = kDim * kDim * kDim;
+    std::vector<float> values(windows[0].size() * per);
+    std::uint64_t served = 0;
+    std::size_t next = 0;
+
+    // The first window OUTSIDE the timed loop: it pays the prefix's validity
+    // digest, which is O(prefix roots) and is then memoised. Timing it with the
+    // rest would report a per-frame cost no frame after the first ever pays.
+    if (seeded) {
+        std::uint64_t warm = 0;
+        clay_brick_cache_eval_requests_seeded(doc, cache, &pol, "cpu", windows.back().data(),
+                                              windows.back().size(), values.data(), values.size(),
+                                              nullptr, 0, &warm);
+    }
+
+    for (auto _ : state) {
+        const std::vector<clay_brick_request>& w = windows[next];
+        next = (next + 1) % (windows.size() - 1);
+        std::uint64_t s = 0;
+        if (seeded)
+            clay_brick_cache_eval_requests_seeded(doc, cache, &pol, "cpu", w.data(), w.size(),
+                                                  values.data(), values.size(), nullptr, 0, &s);
+        else
+            clay_brick_cache_eval_requests(doc, "cpu", w.data(), w.size(), values.data(),
+                                           values.size(), nullptr, 0);
+        served = s;
+        benchmark::DoNotOptimize(values.data());
+    }
+    state.counters["items"] = static_cast<double>(items);
+    state.counters["seeded"] = static_cast<double>(served);
+    if (cache) clay_sdf_prefix_cache_destroy(cache);
+    clay_document_destroy(doc);
+}
+
+}  // namespace
+
+void BM_ColdWindowPlain(benchmark::State& state) { cold_window(state, 20000, false); }
+BENCHMARK(BM_ColdWindowPlain)->Unit(benchmark::kMillisecond);
+void BM_ColdWindowSeeded(benchmark::State& state) { cold_window(state, 20000, true); }
+BENCHMARK(BM_ColdWindowSeeded)->Unit(benchmark::kMillisecond);
+void BM_ColdWindowSeededSmall(benchmark::State& state) { cold_window(state, 5000, true); }
+BENCHMARK(BM_ColdWindowSeededSmall)->Unit(benchmark::kMillisecond);
 
 void BM_DabRefillFreshDoc(benchmark::State& state) { refill_pole_dab(state, 1); }
 BENCHMARK(BM_DabRefillFreshDoc)->Unit(benchmark::kMillisecond);

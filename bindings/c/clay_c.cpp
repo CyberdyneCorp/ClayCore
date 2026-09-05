@@ -13791,7 +13791,14 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
             // seed: obtaining it copies the cached one, and a batch with
             // nothing to resume should not pay for that on its way to the full
             // path.
-            if (!index && (rev != 0 || doc->has_uniform_seed(requests[i]))) {
+            // The prefix path wants it too, and NOT taking it is the more
+            // expensive mistake: `compile_layer_suffix` given a cull region but
+            // no index computes the document's cull pad by walking every
+            // layer's items, PER BRICK. Measured at 50,000 items, 12 bricks:
+            // 3.5 ms in the suffix compile against 0.23 ms of prefix sampling.
+            // The index is one copy for the batch.
+            if (!index && (rev != 0 || !prefix_scratch.empty() ||
+                           doc->has_uniform_seed(requests[i]))) {
                 index = doc->cull_index_locked();
                 resume_pad = index->cull_pad();
             }
@@ -13824,9 +13831,10 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
                 // ordinary seed, so the SECOND touch takes the warm path and
                 // never comes back here.
                 //
-                // No cull index is taken: plan_frontier reads the root list,
-                // and obtaining the index is the copy this branch already
-                // declines to pay on its way to the full path.
+                // The cull index IS taken for this path -- see the condition
+                // above. plan_frontier does not need it, but the per-brick
+                // suffix compile does: without one it re-derives the document's
+                // cull pad by walking every layer, for every brick.
                 if (prefix_src.field) {
                     float* dst = prefix_scratch.data() + prefix_used * per;
                     const clay_document::PrefixSeed ps =

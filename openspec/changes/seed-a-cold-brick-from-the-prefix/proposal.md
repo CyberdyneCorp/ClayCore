@@ -65,23 +65,43 @@ Gated: 12 of 12 bricks still seeded after 12 stamps.
 
 ## Result
 
-A stroke's worth of cold windows, 8 windows of 12 bricks, per window:
+A cold window, on a document that has never been refilled there:
 
-| items | unseeded | first seeded | subsequent |
-|---:|---:|---:|---:|
-| 5,000 | 1.91 ms | 1.61 ms | **0.75 ms** |
-| 20,000 | 7.08 ms | 8.30 ms | **2.70 ms** |
-| 50,000 | 17.05 ms | 15.50 ms | **6.80 ms** |
+| items | unseeded | seeded |
+|---:|---:|---:|
+| 5,000 | 1.69 ms | **0.271 ms** |
+| 20,000 | 7.68 ms | **0.290 ms** |
+| 50,000 | 14.65 ms | **0.291 ms** |
 
-**~2.5x**, exact to float rounding (4.5e-07 over 26,245 in-band samples), with
-94–95 of 96 bricks served by the prefix.
+**Flat.** 0.271 to 0.291 ms across a ten-fold document, and **50x** at 50,000
+items. Exact to 4.5e-07 over 26,245 in-band samples, with 94-95 of 96 bricks
+served by the prefix.
 
-**This does not close #306.** A cold window is 2.5x cheaper and still LINEAR in
-history: 0.47 ms at 2,000 items against 6.80 at 50,000. The digest is no longer
-the term — it is memoised — and the suffix is not either: holding the document
-fixed and varying the suffix from 4 to 256 roots moves the number by less than
-the noise. What remains is unattributed, and the honest next step is to attribute
-it before designing anything else.
+Held by `BM_ColdWindowSeeded` against `BM_ColdWindowSeededSmall` -- the same
+window on a document four times larger, 0.304 against 0.307 ms -- because
+flatness is the claim and a ratio against the unseeded row cannot make it.
+
+**This closes #306.**
+
+### The residual, and what it turned out to be
+
+The first version of this measured 2.5x and stayed linear, and the cause was
+guessed twice before it was measured. It was neither the validity digest (which
+the witness had already memoised) nor the suffix length (varying it from 4 to
+256 roots moved nothing). Phase timers put 3.5 ms of a 5.4 ms window in the
+suffix COMPILE, and the reason is one branch:
+
+```
+if (cull && index)   pad = index->cull_pad();
+else if (cull)       for (const Layer& l : doc.layers) pad = max(pad, cull_pad(...));
+```
+
+`compile_layer_suffix` given a cull region but no index re-derives the
+document's cull pad by walking every layer's items -- **per brick**. The cold
+path had been written to skip taking the cull index, on the reasoning that
+`plan_frontier` does not need one and the copy is what the branch already
+declines to pay. It does not need one; the per-brick suffix compile underneath
+it does. Taking it took the released phase from **3,500 us to 24 us**.
 
 ## Capabilities
 
