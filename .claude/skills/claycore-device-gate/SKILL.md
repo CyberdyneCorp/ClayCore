@@ -123,6 +123,57 @@ Each case reports p50 and p95 at three document sizes plus a `growthExponent`
 | `BUDGET` | slower than the interaction class allows, regressed or not |
 | `GROWTH` | scaling faster than the document (over `N^1.25`) |
 
+## `signal kill` has two causes and they need opposite fixes
+
+**Read RunningBoard's reason before assuming jetsam.** Found on 2026-09-05
+gating v0.84.0, after an afternoon spent fixing the wrong thing.
+
+The heavy verb bundle died 75-100 s in on six runs -- at HEAD, after thirty
+minutes idle, after a full reboot, at the commit the previous gate passed at,
+with the case alone in its own bundle, and with a 1800 s execution allowance.
+None of those was the cause. The console was:
+
+```
+SpringBoard:   hot condition changed from 0 to 20
+SpringBoard:   Thermal level changed to Warn (1)
+runningboardd: Acquiring assertion targeting system ... "Thermal Condition"
+runningboardd: [app<...devicehost>:706] Terminating with context:
+  <RBSTerminateContext| code:0x05CA1DED explanation:Conditions changed, forcing
+  termination due to outstanding assertion ... 'Developer testing'
+  reportType:None ...>
+```
+
+Crossing into thermal `Warn` makes RunningBoard force-terminate the app holding
+the `Developer testing` assertion. `reportType:None` means **no crash report and
+no JetsamEvent** — both places you would look to confirm a memory kill are
+empty, which is the tell.
+
+Tell them apart, cheapest first:
+
+```sh
+idevicecrashreport -u <udid> -e /tmp/crash    # a memory kill leaves JetsamEvent-*.ips
+idevicesyslog -u <udid> > /tmp/log            # across the run; grep the three lines above
+```
+
+and measure the footprint on the **simulator**, which is a fair proxy for memory
+and none at all for heat (`mask_extrude` peaks at 313 MB and the bundle
+completes there in 158 s).
+
+**Do not reason from repeatability.** A constant workload from a similar
+starting temperature crosses the threshold at the same second — three of those
+kills landed within one second of each other, which is exactly what argued
+against heat until the console said otherwise.
+
+**The harness's own thermal guard cannot catch this**: `ProcessInfo.thermalState`
+is sampled at case boundaries, and the OS kills the process before the boundary
+arrives. It covers a run measured while warm, not one ended for being warm.
+
+**The fix is cooling, not splitting.** This device took ~12 minutes to fall from
+`Warn` to level 0 after one session. Give it a genuinely cold start, raise
+`CLAY_DEVICE_COOLDOWN` above 900 s, run it somewhere cool, and never stack
+attempts. Splitting the bundle is the fix for the *jetsam* kill and does nothing
+here — the case alone in its own process died identically.
+
 Two **refusals**, which are not scores: a run from different hardware, and a
 thermally throttled run (`ProcessInfo` thermal state sampled at both ends;
 anything but `nominal` invalidates it). Let it cool rather than reaching for the

@@ -1716,6 +1716,68 @@ attribution needs a run collected by a `collect_device_bench.py` that stamps
 cases with their bundle, since `startedAtMs` is a within-bundle offset. An older
 record says it cannot attribute rather than guessing.
 
+### A `signal kill` is not always jetsam — read RunningBoard's reason
+
+**`Test crashed with signal kill` has two causes here and they need opposite
+fixes.** Everything above about jetsam is real, and this is the other one, found
+on 2026-09-05 while gating v0.84.0 after an afternoon spent fixing the wrong
+thing.
+
+The heavy verb bundle died 75–100 s in, at `mask_extrude`, on six runs: at HEAD,
+at HEAD after thirty minutes idle, at HEAD after a full device reboot, at
+`9ed0a49a` (the commit the PREVIOUS gate had passed at three days earlier), with
+`mask_extrude` alone in a bundle of its own, and with
+`-maximum-test-execution-time-allowance 1800`. It was neither the engine nor the
+bundle's size. The device console says what it was:
+
+```
+SpringBoard: hot condition changed from 0 to 20
+SpringBoard: Thermal level changed to Warn (1)
+runningboardd: Acquiring assertion targeting system ... "Thermal Condition"
+runningboardd: [app<com.cyberdyne.claycore.devicehost>:706] Terminating with
+  context: <RBSTerminateContext| code:0x05CA1DED explanation:Conditions changed,
+  forcing termination due to outstanding assertion with identifier 33-576-1504
+  and explanation 'Developer testing' reportType:None
+  maxTerminationResistance:Interactive>
+```
+
+**The moment the iPad crosses into thermal `Warn`, RunningBoard force-terminates
+the app holding the `Developer testing` assertion.** `reportType:None` is why
+there is no crash report, and there is no `JetsamEvent` either — so the two
+places you would look to confirm a memory kill are both empty, which is itself
+the tell.
+
+**How to tell them apart**, in order of cost:
+
+1. `idevicecrashreport -u <udid> -e <dir>` (libimobiledevice). A memory kill
+   leaves a `JetsamEvent-*.ips` at the time of death. No report at all points
+   here.
+2. Capture the console across the run — `idevicesyslog -u <udid> > log` — and
+   grep it for `hot condition changed`, `Thermal level changed` and
+   `RBSTerminateContext`. The reason is stated in as many words.
+3. Peak footprint, on the simulator, which is a fair proxy for memory and none
+   at all for heat: `mask_extrude` peaks at **313 MB**, nowhere near a jetsam
+   ceiling, and the whole heavy bundle runs to completion there in 158 s.
+
+**A thermal kill is repeatable, which is what makes it look like anything but
+heat.** A constant workload starting from a similar temperature crosses the same
+threshold at the same second: three of those runs died within one second of each
+other, and that consistency is what argued *against* heat until the console said
+otherwise. Do not reason from repeatability here.
+
+**The harness's own thermal guard cannot catch this.** `ProcessInfo.thermalState`
+is sampled at case boundaries and invalidates a run that is not `nominal`, but
+the OS kills the process before the boundary arrives. The guard covers a run that
+was measured while warm; it does not cover a run that was ended for being warm.
+
+**What to do about it is cooling, not splitting.** Give the device a genuinely
+cold start — this one took about twelve minutes to fall from `Warn` back to
+level 0 after a single session, and had been run repeatedly all morning before
+the gate began. Raise `CLAY_DEVICE_COOLDOWN` above its 900 s default, run it
+somewhere cool, and do not stack attempts. Splitting the bundle is the fix for
+the jetsam kill and does nothing for this one: `mask_extrude` alone in its own
+process died in exactly the same way at the same point.
+
 And two refusals, which are not scores at all: a run from **different
 hardware**, and a run that was **thermally throttled**. `ProcessInfo`'s
 thermal state is sampled at both ends and anything but `nominal` invalidates
