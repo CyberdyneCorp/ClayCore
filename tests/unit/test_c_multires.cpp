@@ -652,14 +652,21 @@ TEST_CASE("c abi: a hierarchy refines one region and reports the depth per patch
     CHECK(uniform == 0);
 
     uint32_t deep = 0, effective = 0;
-    REQUIRE(clay_multires_patch_depth(surface, block[0], 3, &deep, &effective) == CLAY_OK);
+    int32_t resident = -1;
+    REQUIRE(clay_multires_patch_max_level(surface, block[0], &deep) == CLAY_OK);
+    REQUIRE(clay_multires_effective_level(surface, block[0], 3, &effective) == CLAY_OK);
+    REQUIRE(clay_multires_patch_resident(surface, 3, block[0], &resident) == CLAY_OK);
     CHECK(deep == 3);
     CHECK(effective == 3);
+    CHECK(resident == 1);
     // The far corner was never named and never fell inside a ring, so a host
     // displaying level 3 reads it at the cage.
-    REQUIRE(clay_multires_patch_depth(surface, 0, 3, &deep, &effective) == CLAY_OK);
+    REQUIRE(clay_multires_patch_max_level(surface, 0, &deep) == CLAY_OK);
+    REQUIRE(clay_multires_effective_level(surface, 0, 3, &effective) == CLAY_OK);
+    REQUIRE(clay_multires_patch_resident(surface, 3, 0, &resident) == CLAY_OK);
     CHECK(deep == 0);
     CHECK(effective == 0);
+    CHECK(resident == 0);
 
     // A patch outside every ring cannot be refined at the top level: its parent
     // neighbourhood is not there, and refining it anyway would open a crack.

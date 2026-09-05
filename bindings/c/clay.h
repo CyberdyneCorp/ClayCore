@@ -7225,12 +7225,16 @@ clay_result clay_multires_refine_patches_to_level(clay_multires* surface, const 
                                                   size_t patch_count, uint32_t target_level,
                                                   clay_cancel_token* token, int32_t* out_error);
 /* The deepest level that stores this base patch -- 0 for one nothing has
- * refined, and max_level for every patch of a uniformly refined hierarchy.
- * `out_effective` receives min(level, that), which is where a host displaying
- * `level` reads this patch. Either output may be NULL. */
-clay_result clay_multires_patch_depth(const clay_multires* surface, uint32_t patch,
-                                      uint32_t level, uint32_t* out_max_level,
-                                      uint32_t* out_effective);
+ * refined, and max_level for every patch of a uniformly refined hierarchy. */
+clay_result clay_multires_patch_max_level(const clay_multires* surface, uint32_t patch,
+                                          uint32_t* out_level);
+/* min(level, that), which is where a host displaying `level` reads this
+ * patch. */
+clay_result clay_multires_effective_level(const clay_multires* surface, uint32_t patch,
+                                          uint32_t level, uint32_t* out_level);
+/* Whether the level stores this patch's faces at all. */
+clay_result clay_multires_patch_resident(const clay_multires* surface, uint32_t level,
+                                         uint32_t patch, int32_t* out_resident);
 /* Nonzero when every level refines every patch, which is what
  * clay_multires_add_level builds and what every hierarchy written before
  * regional refinement is. */

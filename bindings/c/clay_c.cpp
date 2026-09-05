@@ -16982,13 +16982,33 @@ clay_result clay_multires_refine_patches_to_level(clay_multires* surface, const 
     return CLAY_OK;
 }
 
-clay_result clay_multires_patch_depth(const clay_multires* surface, uint32_t patch, uint32_t level,
-                                      uint32_t* out_max_level, uint32_t* out_effective) {
+clay_result clay_multires_patch_max_level(const clay_multires* surface, uint32_t patch,
+                                          uint32_t* out_level) {
     const mesh::MultiresSurface* s = nullptr;
     clay_result r = resolve_multires_ro(surface, &s);
     if (r != CLAY_OK) return r;
-    if (out_max_level) *out_max_level = s->patch_max_level(patch);
-    if (out_effective) *out_effective = s->effective_level(patch, level);
+    if (!out_level) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_level");
+    *out_level = s->patch_max_level(patch);
+    return CLAY_OK;
+}
+
+clay_result clay_multires_effective_level(const clay_multires* surface, uint32_t patch,
+                                          uint32_t level, uint32_t* out_level) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_level) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_level");
+    *out_level = s->effective_level(patch, level);
+    return CLAY_OK;
+}
+
+clay_result clay_multires_patch_resident(const clay_multires* surface, uint32_t level,
+                                         uint32_t patch, int32_t* out_resident) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_resident) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_resident");
+    *out_resident = s->patch_resident(level, patch) ? 1 : 0;
     return CLAY_OK;
 }
 
