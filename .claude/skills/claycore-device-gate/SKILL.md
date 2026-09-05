@@ -168,6 +168,38 @@ against heat until the console said otherwise.
 is sampled at case boundaries, and the OS kills the process before the boundary
 arrives. It covers a run measured while warm, not one ended for being warm.
 
+## Watching the device while it runs
+
+**Temperature is readable over the wire**, and it is the only *continuous*
+signal — `Thermal level changed` in the console is a transition, so by the time
+it prints the app is already being killed.
+
+```sh
+idevicediagnostics -u <udid> ioregentry AppleSmartBattery   # Temperature, centi-degC
+```
+
+`Temperature = 3350` is 33.50 °C. On the reference iPad: lifetime average 24 °C,
+lifetime maximum 37.9 °C, ~30 °C idle, and it fell from a session's heat back to
+30 °C in about twelve minutes. A gate run that stays under ~33 °C completes.
+Parse it with `/usr/bin/python3`, not Homebrew's — the brewed 3.14 has a broken
+`pyexpat` and `plistlib` cannot load.
+
+**Do NOT redirect a full `idevicesyslog` into a file for a long run.** It writes
+~1.1 GB an hour, and on 2026-09-05 that filled the disk and killed the gallery
+session with "No space left on device" — a *host* failure that looks nothing
+like one in the xcodebuild output. Pipe it through a filter so only the lines
+that matter land:
+
+```sh
+idevicesyslog -u <udid> 2>/dev/null \
+  | grep --line-buffered -E "hot condition changed|Thermal level changed|Terminating with context" \
+  > gate.thermal &
+```
+
+**Check free disk before starting.** The whole gate needs little (~70 MB of
+result bundles), but Xcode's `iOS DeviceSupport` grows ~5.5 GB per device-and-OS
+ever attached and is the usual reason a dev Mac has nothing left.
+
 **The fix is cooling, not splitting.** This device took ~12 minutes to fall from
 `Warn` to level 0 after one session. Give it a genuinely cold start, raise
 `CLAY_DEVICE_COOLDOWN` above 900 s, run it somewhere cool, and never stack
