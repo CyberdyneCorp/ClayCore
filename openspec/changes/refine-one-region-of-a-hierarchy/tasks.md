@@ -1,8 +1,17 @@
 ## 0. Read first
 
-- [ ] 0.1 The voxel regional path (`clay_voxel_add_level_region` and its C++
+- [x] 0.1 The voxel regional path (`clay_voxel_add_level_region` and its C++
       side) BEFORE designing the host-facing API, so the two are one idea rather
-      than two vocabularies
+      than two vocabularies. READ: it keeps the lattice uniform and complete and
+      changes only what is STORED, which is the shape this should take
+- [x] 0.2 MEASURE where a level's memory goes before building sparsity into the
+      wrong place. `DetailField` is already sparse and costs 0.0 MB on an
+      unsculpted level; the 121.4 MB of a level-4 hierarchy is topology (10.4),
+      evaluated (37.6), chunk index (10.8) and runtime. The sparsity belongs in
+      the topology and the derived buffers
+- [x] 0.3 Confirm the identity to reuse: faces are patch-major at every level
+      and `LevelTopology::face_patch[]` already names the base patch. One
+      patch's faces at one level are a contiguous run
 
 ## 1. Per-patch depth
 
@@ -21,7 +30,9 @@
 
 ## 3. Sparsity
 
-- [ ] 3.1 `DetailField` blocks exist only for resident (patch, level) pairs
+- [x] 3.1 `DetailField` blocks exist only for resident (patch, level) pairs —
+      ALREADY TRUE, and measured: an unsculpted level costs 0.0 MB of detail.
+      Nothing to build; the gate is that it stays true
 - [ ] 3.2 `effective_level(patch) = min(requested, patch_max_level[patch])`
 - [ ] 3.3 Cross-level gather over patch-aware work items; per-dab work follows
       touched resident detail

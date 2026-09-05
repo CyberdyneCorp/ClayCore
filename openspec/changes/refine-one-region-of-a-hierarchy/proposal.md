@@ -16,6 +16,61 @@ the rule that outside a refined region a level has no storage and reads from the
 one below. The mesh hierarchy should mirror those semantics where it can rather
 than inventing a second vocabulary for one idea.
 
+## Audited against `main`, 2026-09-05, and it moves the design
+
+The change was written before anyone measured where a level's memory goes. It
+does now, on a 1,600-patch cage:
+
+| level | faces | topology | detail | evaluated | chunk index | total |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 6,400 | 0.1 MB | **0.0** | 0.5 MB | 0.3 MB | 2.1 MB |
+| 3 | 102,400 | 2.6 MB | **0.0** | 9.4 MB | 3.1 MB | 30.8 MB |
+| 4 | 409,600 | 10.4 MB | **0.0** | 37.6 MB | 10.8 MB | **121.4 MB** |
+
+**`DetailField` is already sparse, and it is not the prize.** Its own header
+says so — "a block of `block_size()` vertices exists only once something in it is
+non-zero" — and the measurement confirms it: a level nobody has sculpted costs
+0.0 MB of detail. The intuitive reading of "level 5 everywhere is expensive" is
+that the coefficients are expensive. They are not, until they are authored.
+
+What a level actually costs is **topology, the evaluated buffers and the chunk
+index**, all of which scale with FACE COUNT and none of which is avoided today.
+That is 58.8 MB of the 121.4 above, with the remainder in runtime index and
+composed detail — every byte of it proportional to faces this hierarchy may
+never sculpt.
+
+So the sparsity this change adds SHALL be in the topology and the derived
+buffers, keyed by patch. Making detail sparser would deliver nothing, and a
+proposal that led with the detail argument would have been measured against the
+wrong number.
+
+### Two facts that make it tractable
+
+**Faces are patch-major at every level.** `src/mesh/multires_chunks.cpp` states
+it — "already patch-major everywhere subdivision produced it" — so one patch's
+faces at one level are a CONTIGUOUS RUN. Storing a subset of patches is a
+question of which runs to build, not of a scattered index.
+
+**`LevelTopology` already carries the identity.** `face_patch[]` names the
+level-0 face each face descends from, `patch_count` is beside it, and the header
+already calls that identity stable for the life of the hierarchy. Regional
+refinement extends an existing per-patch structure rather than introducing one.
+
+### What the voxel precedent settles
+
+Task 0.1 says to read `clay_voxel_add_level_region` first "so the two are one
+idea rather than two vocabularies", and read, it decides the shape:
+
+> "Outside the region the new level has no storage and reads its parent's value,
+> so the lattice is still uniform and complete — only what is STORED changes, and
+> meshing, bounds and neighbour indexing are as they were."
+
+Taken across, that is: a patch not refined to level L has no storage at L and is
+READ at its own effective level. Task 2.2's watertightness then holds by
+construction rather than by repair — a boundary vertex on the fine side is the
+coarse edge's exact subdivision because that is literally what the unrefined
+neighbour returns, not because a rule reconciles two authored values.
+
 ## What Changes
 
 - **Depth becomes per base patch**, not per surface. A `patch_max_level[]` beside
