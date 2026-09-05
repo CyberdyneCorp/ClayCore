@@ -176,18 +176,22 @@ TEST_CASE("mask from group: zero erases rather than writing zeros") {
     const float lo[3] = {-1.4f, -1.4f, -1.4f};
     const float hi[3] = {1.4f, 1.4f, 1.4f};
     REQUIRE(clay_mask_fill(mask, lo, hi, 1.0f) == CLAY_OK);
-    uint64_t all = 0;
+    // size_t, not uint64_t: that is what the call takes, and on macOS the two
+    // are distinct types (unsigned long against unsigned long long) where on
+    // Linux they are the same. Written as uint64_t this compiled locally and
+    // failed only on the AppleClang job.
+    std::size_t all = 0;
     REQUIRE(clay_mask_painted_count(mask, &all) == CLAY_OK);
     REQUIRE(all > 0);
 
     uint64_t erased = 0;
     REQUIRE(clay_mask_fill_from_group(mask, g, 5, 0.0f, &erased) == CLAY_OK);
     CHECK(erased > 0);
-    uint64_t left = 0;
+    std::size_t left = 0;
     REQUIRE(clay_mask_painted_count(mask, &left) == CLAY_OK);
     MESSAGE("painted " << all << ", erased " << erased << ", left " << left);
     // Storage RELEASED, not overwritten with zeros.
-    CHECK(left == all - erased);
+    CHECK(left == all - static_cast<std::size_t>(erased));
 
     // And the erased cells really read zero.
     const std::vector<float> pts = probe_points();
@@ -246,7 +250,7 @@ TEST_CASE("mask from group: naming no group paints nothing") {
     uint64_t painted = 1;
     REQUIRE(clay_mask_fill_from_group(mask, g, CLAY_NO_GROUP, 1.0f, &painted) == CLAY_OK);
     CHECK(painted == 0);
-    uint64_t count = 0;
+    std::size_t count = 0;
     REQUIRE(clay_mask_painted_count(mask, &count) == CLAY_OK);
     CHECK(count == 0);
 
