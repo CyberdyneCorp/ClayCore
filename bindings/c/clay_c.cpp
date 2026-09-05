@@ -1696,6 +1696,121 @@ struct clay_document {
         std::uint32_t boundary = 0;
     };
 
+    struct PrefixSeed {
+        bool ok = false;
+        std::uint32_t boundary = 0;
+    };
+
+    struct PrefixSource {
+        const session::SdfPrefixField* field = nullptr;
+        std::uint32_t boundary = 0;
+    };
+
+    // THE COLD BRICK'S SEED (#306).
+    //
+    // `seed_for` and `frontier_seed_for` both need a ResumeEntry, so the FIRST
+    // touch of a window has neither and walks the whole edit list: measured
+    // 0.004 ms warm against 33.7 ms cold at 50,000 items, and a second cold
+    // window costs the same as the first, so it is the walk and not the index.
+    // A stroke crosses brick planes constantly, so it is a hitch in the middle
+    // of a gesture rather than a one-off.
+    //
+    // The prefix cache already holds what such a brick needs -- roots [0, K)
+    // baked into a FieldVolume -- and `plan_frontier(K)` already compiles the
+    // suffix roots [K, end). This resolves the batch's prefix ONCE: `find` has
+    // to prove the entry still describes those roots, and that proof is
+    // O(prefix roots), so asking per brick made a seeded refill scale with
+    // history exactly as the walk it replaces did.
+    //
+    // `find_usable` rather than `find`, because the policy's boundary moves
+    // with every append and a stroke would otherwise miss on every dab.
+    PrefixSource prefix_source(bool want_colour, bool has_below,
+                               session::SdfPrefixCache& cache,
+                               const session::SdfPrefixPolicy& policy) const {
+        PrefixSource src;
+        // A prefix describes ONE layer. With layers beneath, the seed the
+        // resume path wants is the active layer's half plus theirs, and this
+        // has nothing to say about theirs.
+        if (has_below) return src;
+
+        const scene::Layer* active = nullptr;
+        int visible = 0;
+        for (const scene::Layer& l : doc.document.layers) {
+            if (!l.visible || l.kind != scene::LayerKind::Sdf || !l.sdf) continue;
+            active = &l;
+            ++visible;
+        }
+        if (!active || visible != 1 || !active->sdf) return src;
+
+        // The witness: any edit that is not an append to this layer's tail
+        // bumps structure_revision_, and an append cannot change roots [0, K).
+        // So an unchanged witness is a true statement that the prefix's own
+        // roots are untouched, and the digest need not be recomputed.
+        cache.set_structure_witness(structure_revision_);
+        const session::SdfPrefixField* field =
+            cache.find_usable(*active, active->sdf->roots.size(), policy);
+        if (!field) return src;
+        // The seed is a distance; a coloured refill needs the colour that went
+        // with it, and a prefix baked without one cannot supply it.
+        if (want_colour && !field->volume.has_color()) return src;
+        src.field = field;
+        src.boundary = static_cast<std::uint32_t>(field->prefix_roots);
+        return src;
+    }
+
+    // Samples the batch's prefix over one brick's lattice.
+    //
+    // WRITES INTO THE CALLER'S BUFFER rather than returning a pointer, so there
+    // is no question about what owns the seed; every other Seed here points
+    // into the store and is copied out under the lock.
+    //
+    // COVERAGE IS THE WHOLE CORRECTNESS ARGUMENT. A sparse volume answers
+    // interpolation where it stores samples and a conservative FAR BOUND where
+    // it does not, and `sdf_prefix_cache.h` measures a suffix folded onto that
+    // bound at 0.27 -- about 14 cells -- against 3e-7 where the samples exist.
+    // So every sample of the window must be stored, and a window that is not
+    // fully covered takes the full walk. Caller holds cache_mutex_.
+    PrefixSeed sample_prefix_seed(const clay_brick_request& request, std::size_t per,
+                                  const PrefixSource& src, float* out) const {
+        PrefixSeed ps;
+        if (!out || per == 0 || !src.field) return ps;
+        const session::SdfPrefixField* field = src.field;
+
+        // Straight off the request rather than through `read_grid`, which is
+        // declared further down this file: the batch's shape was validated by
+        // the caller before any of this, so what is left is arithmetic.
+        const std::int32_t nx = request.dims[0], ny = request.dims[1], nz = request.dims[2];
+        if (nx <= 0 || ny <= 0 || nz <= 0) return ps;
+        if (static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny) *
+                static_cast<std::size_t>(nz) !=
+            per)
+            return ps;
+        const float sp = request.spacing;
+        if (!(sp > 0.0f)) return ps;
+        const auto pos = [&](std::int32_t x, std::int32_t y, std::int32_t z) {
+            return kernel::cf3(request.origin[0] + static_cast<float>(x) * sp,
+                               request.origin[1] + static_cast<float>(y) * sp,
+                               request.origin[2] + static_cast<float>(z) * sp);
+        };
+
+        // Coverage first, over the whole window, BEFORE anything is written: a
+        // partially covered window must leave the caller's buffer untouched so
+        // the ordinary full walk still owns the brick.
+        for (std::int32_t z = 0; z < nz; ++z)
+            for (std::int32_t y = 0; y < ny; ++y)
+                for (std::int32_t x = 0; x < nx; ++x)
+                    if (!field->volume.has_samples_at(pos(x, y, z))) return ps;
+
+        std::size_t at = 0;
+        for (std::int32_t z = 0; z < nz; ++z)
+            for (std::int32_t y = 0; y < ny; ++y)
+                for (std::int32_t x = 0; x < nx; ++x, ++at)
+                    out[at] = field->volume.eval(pos(x, y, z));
+        ps.ok = true;
+        ps.boundary = src.boundary;
+        return ps;
+    }
+
     // The prefix half of a dirty entry, or seed.values == nullptr. Caller
     // holds cache_mutex_. ELIGIBILITY IS NOT PROOF, so every claim the keep in
     // touch_region_locked relied on is re-checked here per brick: shape
@@ -6834,9 +6949,26 @@ clay_result clay_sdf_prefix_boundary_for(const clay_document* doc, clay_layer_id
     return CLAY_OK;
 }
 
+clay_result prefix_cache_build_impl(clay_sdf_prefix_cache* cache, const clay_document* doc,
+                                    clay_layer_id layer, const clay_sculpt_policy* policy,
+                                    clay_cancel_token* token, bool for_refill);
+
 clay_result clay_sdf_prefix_cache_build(clay_sdf_prefix_cache* cache, const clay_document* doc,
                                         clay_layer_id layer, const clay_sculpt_policy* policy,
                                         clay_cancel_token* token) {
+    return prefix_cache_build_impl(cache, doc, layer, policy, token, /*for_refill=*/false);
+}
+
+clay_result clay_sdf_prefix_cache_build_for_refill(clay_sdf_prefix_cache* cache,
+                                                   const clay_document* doc, clay_layer_id layer,
+                                                   const clay_sculpt_policy* policy,
+                                                   clay_cancel_token* token) {
+    return prefix_cache_build_impl(cache, doc, layer, policy, token, /*for_refill=*/true);
+}
+
+clay_result prefix_cache_build_impl(clay_sdf_prefix_cache* cache, const clay_document* doc,
+                                    clay_layer_id layer, const clay_sculpt_policy* policy,
+                                    clay_cancel_token* token, bool for_refill) {
     if (!cache || !doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null cache or document");
     if (cache->budget == 0)
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
@@ -6851,6 +6983,7 @@ clay_result clay_sdf_prefix_cache_build(clay_sdf_prefix_cache* cache, const clay
     pp.cell_size = sp.cell_size;
     pp.band = sp.band;
     pp.padding = sp.padding;
+    pp.align_to_lattice = for_refill;
     const session::SdfPrefixField* built =
         cache->cache.build(doc->doc.document, layer, pp, eval::pooled_bake_eval(),
                            token ? &token->token : nullptr);
@@ -12367,7 +12500,10 @@ namespace {
 // lock held.
 std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* requests,
                           std::size_t count, std::size_t per, bool want_colour, float* out_values,
-                          float* out_colors_rgb, std::uint8_t* resumed);
+                          float* out_colors_rgb, std::uint8_t* resumed,
+                          session::SdfPrefixCache* prefix_cache = nullptr,
+                          const session::SdfPrefixPolicy* prefix_policy = nullptr,
+                          std::uint64_t* out_prefix_seeded = nullptr);
 
 // A batched device evaluation's outcome in the ABI's words. Its own function
 // because a batch split into runs reports it from more than one place, and a
@@ -13491,8 +13627,17 @@ void run_resume_task(const ResumeRun& run, ResumeTask& t, std::vector<float>& po
 
 std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* requests,
                           std::size_t count, std::size_t per, bool want_colour, float* out_values,
-                          float* out_colors_rgb, std::uint8_t* resumed) {
+                          float* out_colors_rgb, std::uint8_t* resumed,
+                          session::SdfPrefixCache* prefix_cache,
+                          const session::SdfPrefixPolicy* prefix_policy,
+                          std::uint64_t* out_prefix_seeded) {
     std::size_t resumed_count = 0;
+    // One buffer for every prefix-seeded brick in this batch, sized up front so
+    // nothing reallocates while a task holds a pointer into it.
+    std::vector<float> prefix_scratch;
+    std::size_t prefix_used = 0;
+    if (prefix_cache && prefix_policy) prefix_scratch.resize(count * per);
+    clay_document::PrefixSource prefix_src;
 
     // OFF THE LOCK, AND OVER THE POOL (#348).
     //
@@ -13617,6 +13762,11 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
         std::lock_guard<std::mutex> lock(doc->cache_lock());
         const clay_document::ResumePlan probe = doc->plan_resume(1);  // for has_below only
         has_below = probe.has_below;
+        // ONCE for the batch: proving the prefix still describes its roots is
+        // O(prefix roots), and per brick that put the history back into a path
+        // whose whole purpose is to take it out.
+        if (!prefix_scratch.empty())
+            prefix_src = doc->prefix_source(want_colour, has_below, *prefix_cache, *prefix_policy);
         const std::uint64_t now = doc->current_revision();
 
         // One plan per distinct stored revision. A moving window holds one or
@@ -13641,25 +13791,77 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
             // seed: obtaining it copies the cached one, and a batch with
             // nothing to resume should not pay for that on its way to the full
             // path.
-            if (!index && (rev != 0 || doc->has_uniform_seed(requests[i]))) {
+            // The prefix path wants it too, and NOT taking it is the more
+            // expensive mistake: `compile_layer_suffix` given a cull region but
+            // no index computes the document's cull pad by walking every
+            // layer's items, PER BRICK. Measured at 50,000 items, 12 bricks:
+            // 3.5 ms in the suffix compile against 0.23 ms of prefix sampling.
+            // The index is one copy for the batch.
+            if (!index && (rev != 0 || !prefix_scratch.empty() ||
+                           doc->has_uniform_seed(requests[i]))) {
                 index = doc->cull_index_locked();
                 resume_pad = index->cull_pad();
             }
             if (rev == 0) {
-                if (!index) continue;
-                ResumeTask task;
-                task.slot = i;
-                task.active = out_values + i * per;
-                task.active_rgb = want_colour ? out_colors_rgb + i * per * 3 : nullptr;
-                const UniformProbe got =
-                    probe_uniform_seed(doc, requests[i], now, resume_pad, plans, &task);
-                if (got == UniformProbe::Answered) {
-                    resumed[i] = 1;
-                    ++resumed_count;
-                } else if (got == UniformProbe::Task &&
-                           uniform_resume_allowed(doc, *task.plan, chain_for(task.plan))) {
-                    units += 2 * task.plan->appended.size();
-                    tasks.push_back(task);
+                if (index) {
+                    ResumeTask task;
+                    task.slot = i;
+                    task.active = out_values + i * per;
+                    task.active_rgb = want_colour ? out_colors_rgb + i * per * 3 : nullptr;
+                    const UniformProbe got =
+                        probe_uniform_seed(doc, requests[i], now, resume_pad, plans, &task);
+                    if (got == UniformProbe::Answered) {
+                        resumed[i] = 1;
+                        ++resumed_count;
+                        continue;
+                    }
+                    if (got == UniformProbe::Task &&
+                        uniform_resume_allowed(doc, *task.plan, chain_for(task.plan))) {
+                        units += 2 * task.plan->appended.size();
+                        tasks.push_back(task);
+                        continue;
+                    }
+                }
+                // THE COLD BRICK (#306). `rev == 0` is "no lattice seed at
+                // all" -- the first touch of this window -- and until now the
+                // only thing after it was the full walk. The layer's cached
+                // prefix is a starting value for it: roots [0, K) sampled out
+                // of a volume, with plan_frontier(K) compiling roots [K, end)
+                // exactly as the frontier path does. The result is stored as an
+                // ordinary seed, so the SECOND touch takes the warm path and
+                // never comes back here.
+                //
+                // The cull index IS taken for this path -- see the condition
+                // above. plan_frontier does not need it, but the per-brick
+                // suffix compile does: without one it re-derives the document's
+                // cull pad by walking every layer, for every brick.
+                if (prefix_src.field) {
+                    float* dst = prefix_scratch.data() + prefix_used * per;
+                    const clay_document::PrefixSeed ps =
+                        doc->sample_prefix_seed(requests[i], per, prefix_src, dst);
+                    if (ps.ok) {
+                        auto fit = fplans.find(ps.boundary);
+                        if (fit == fplans.end())
+                            fit = fplans.emplace(ps.boundary, doc->plan_frontier(ps.boundary))
+                                      .first;
+                        if (fit->second.usable) {
+                            ResumeTask task;
+                            std::size_t samples = 0;
+                            if (read_grid(requests[i].origin, requests[i].spacing,
+                                          requests[i].dims, &task.grid, &samples) == CLAY_OK) {
+                                task.slot = i;
+                                task.plan = &fit->second;
+                                task.seed.values = dst;
+                                // No stack and no frames: a prefix boundary is
+                                // a ROOT-LIST ordinal, so there is no group
+                                // nesting for the suffix to continue inside.
+                                ++prefix_used;
+                                units += per * fit->second.appended.size();
+                                tasks.push_back(task);
+                                if (out_prefix_seeded) ++*out_prefix_seeded;
+                            }
+                        }
+                    }
                 }
                 continue;
             }
@@ -13961,10 +14163,13 @@ clay_result clay_brick_cache_eval_requests_layer(
                          out_colors_rgb, colors_capacity, ChunkHalf::Active);
 }
 
-clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char* backend,
-                                           const clay_brick_request* requests, size_t count,
-                                           float* out_values, size_t values_capacity,
-                                           float* out_colors_rgb, size_t colors_capacity) {
+clay_result eval_requests_impl(const clay_document* doc, const char* backend,
+                               const clay_brick_request* requests, size_t count,
+                               float* out_values, size_t values_capacity,
+                               float* out_colors_rgb, size_t colors_capacity,
+                               session::SdfPrefixCache* prefix_cache,
+                               const session::SdfPrefixPolicy* prefix_policy,
+                               std::uint64_t* out_prefix_seeded) {
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
     if (count > 0 && (!requests || !out_values))
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null requests or values");
@@ -13995,8 +14200,9 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
     // it kept last dab and leaves the rest to the full walk below.
     std::vector<std::uint8_t> resumed(count, 0);
     const bool want_colour = out_colors_rgb != nullptr;
-    const std::size_t resumed_count = resume_bricks(doc, requests, count, per, want_colour,
-                                                    out_values, out_colors_rgb, resumed.data());
+    const std::size_t resumed_count =
+        resume_bricks(doc, requests, count, per, want_colour, out_values, out_colors_rgb,
+                      resumed.data(), prefix_cache, prefix_policy, out_prefix_seeded);
     doc->note_refill(resumed_count, count - resumed_count);
     if (resumed_count == count) return CLAY_OK;
 
@@ -14199,6 +14405,50 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
                      has_below ? bel.data() : nullptr, bel_rgb.empty() ? nullptr : bel_rgb.data(),
                      per, 0, 0.0f, stacks.data(), gated.data());
     return CLAY_OK;
+}
+
+clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char* backend,
+                                           const clay_brick_request* requests, size_t count,
+                                           float* out_values, size_t values_capacity,
+                                           float* out_colors_rgb, size_t colors_capacity) {
+    return eval_requests_impl(doc, backend, requests, count, out_values, values_capacity,
+                              out_colors_rgb, colors_capacity, nullptr, nullptr, nullptr);
+}
+
+clay_result clay_brick_cache_eval_requests_seeded(
+    const clay_document* doc, clay_sdf_prefix_cache* cache, const clay_sculpt_policy* policy,
+    const char* backend, const clay_brick_request* requests, size_t count, float* out_values,
+    size_t values_capacity, float* out_colors_rgb, size_t colors_capacity,
+    uint64_t* out_prefix_seeded) {
+    if (out_prefix_seeded) *out_prefix_seeded = 0;
+    // A null cache is not an error: it is the caller saying "no acceleration
+    // this call", and it must answer exactly what the unseeded form answers.
+    if (!cache || !policy)
+        return eval_requests_impl(doc, backend, requests, count, out_values, values_capacity,
+                                  out_colors_rgb, colors_capacity, nullptr, nullptr, nullptr);
+    session::SdfSculptPolicy sp;
+    const clay_result r = read_sculpt_policy(policy, &sp);
+    if (r != CLAY_OK) return r;
+    // THE SAMPLING HAS TO BE CARRIED OVER, exactly as every other prefix call
+    // site does it. `read_sculpt_policy` fills only the three knobs and leaves
+    // the prefix policy's cell_size, band and padding at zero, and the cache is
+    // KEYED on those -- so a lookup with them unset simply misses. Measured
+    // before this was here: the cache held its entry and reported 0 hits, 1
+    // miss and 0 bricks seeded, with correct output throughout. That is the
+    // failure shape clay.h warns about at the policy fields.
+    session::SdfPrefixPolicy pp = sp.prefix;
+    pp.cell_size = sp.cell_size;
+    pp.band = sp.band;
+    pp.padding = sp.padding;
+    // A BRICK lattice, not a Smooth one: brick origins are key * dim * voxel,
+    // anchored at the world origin, so a prefix whose own origin is a multiple
+    // of the cell shares their lattice and a seed read off it IS the stored
+    // sample. Without this the seed is an interpolation of two, a quarter of a
+    // cell out -- measured 0.011 at a 0.05 cell against 3.1e-07 with it.
+    pp.align_to_lattice = true;
+    return eval_requests_impl(doc, backend, requests, count, out_values, values_capacity,
+                              out_colors_rgb, colors_capacity, &cache->cache, &pp,
+                              out_prefix_seeded);
 }
 
 clay_result clay_brick_cache_submit(clay_brick_cache* cache,

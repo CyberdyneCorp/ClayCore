@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 83
+#define CLAY_ABI_MINOR 84
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -5824,6 +5824,25 @@ clay_result clay_sdf_prefix_cache_build(clay_sdf_prefix_cache* cache, const clay
                                         clay_layer_id layer, const clay_sculpt_policy* policy,
                                         clay_cancel_token* token);
 
+/* The same build, for a BRICK REFILL rather than a Smooth transaction
+ * (ABI 0.84.0).
+ *
+ * The two consumers read the prefix on different lattices, and a seed read off
+ * the lattice it was built for IS the stored sample where one read off a
+ * lattice half a cell away is an interpolation of two — 3.1e-07 against 0.011
+ * at a 0.05 cell, measured. Smooth's working field is the layer's padded
+ * region; a refill's is the brick grid, anchored at the world origin. So this
+ * builds with the region's origin snapped to the cell, and the two are separate
+ * cache entries that are never served to each other's consumer.
+ *
+ * Build this one for clay_brick_cache_eval_requests_seeded, the other for
+ * clay_sdf_smooth_begin_cached. Building both is legitimate and costs two
+ * bakes; a host that only ever does one kind should build only that one. */
+clay_result clay_sdf_prefix_cache_build_for_refill(clay_sdf_prefix_cache* cache,
+                                                   const clay_document* doc, clay_layer_id layer,
+                                                   const clay_sculpt_policy* policy,
+                                                   clay_cancel_token* token);
+
 /* clay_sdf_smooth_begin, plus the cache to look in.
  *
  * A separate entry point rather than an argument on the original, and rather
@@ -9875,6 +9894,50 @@ clay_result clay_brick_cache_eval_requests_excluding(
  * A HIDDEN SDF layer is refilled by name, on the same reading as
  * clay_document_mesh_sdf_layer: the caller named it, which says more than the
  * visibility flag does. */
+/* The same refill, with a prefix cache to seed COLD bricks from (ABI 0.84.0).
+ *
+ * A brick that has been refilled before carries a seed and evaluates only what
+ * the document gained since. The FIRST touch of a window has none and walks the
+ * whole edit list: measured 0.004 ms warm against 33.7 ms cold at 50,000 items,
+ * and a second cold window costs the same as the first — so it is the walk, not
+ * the index. A stroke crosses brick planes constantly, so this lands in the
+ * middle of a gesture rather than once at the start (issue #306).
+ *
+ * Given a cache, such a brick is seeded from the layer's cached prefix — roots
+ * [0, K) sampled out of a volume — and evaluates only roots [K, end). The
+ * result is stored as an ordinary seed, so the SECOND touch takes the existing
+ * warm path and never comes back here.
+ *
+ * A NULL cache or policy answers exactly what clay_brick_cache_eval_requests
+ * answers, at exactly its cost. The cache is the CALLER'S, as
+ * clay_sdf_smooth_begin_cached's is and for the same reason: a document holding
+ * a pointer to memory the host can free is a hazard this ABI refuses.
+ *
+ * ANY CACHED BOUNDARY WILL DO, not just the policy's current one. The policy's
+ * boundary is `roots - keep_live_suffix_roots`, so every stamp moves it and a
+ * lookup by it would miss on every dab of a stroke — which is exactly when this
+ * is wanted. An older prefix is still valid, since an append cannot change the
+ * roots before it; the suffix is simply longer by the dabs since.
+ *
+ * WHICH BRICKS ARE SEEDED, and why it is not all of them. A sparse volume is
+ * interpolation where it stores samples and a conservative FAR BOUND where it
+ * does not, and a suffix folded onto that bound is wrong by about 14 cells. So
+ * a window is seeded only where the volume stores EVERY sample of it; anything
+ * else takes the full walk — slower, never wrong. *out_prefix_seeded receives
+ * how many bricks the prefix actually served, because a cache that covers
+ * nothing is indistinguishable from one that is off, and the failure mode here
+ * is silent slowness rather than error.
+ *
+ * The prefix is not built by this call. Build it with
+ * clay_sdf_prefix_cache_build when the host is idle: a build is a bake, and
+ * paying for one inside a refill would put the cost back on the frame this
+ * exists to protect. */
+clay_result clay_brick_cache_eval_requests_seeded(
+    const clay_document* doc, clay_sdf_prefix_cache* cache, const clay_sculpt_policy* policy,
+    const char* backend, const clay_brick_request* requests, size_t count, float* out_values,
+    size_t values_capacity, float* out_colors_rgb, size_t colors_capacity,
+    uint64_t* out_prefix_seeded);
+
 clay_result clay_brick_cache_eval_requests_layer(
     const clay_document* doc, clay_layer_id layer, const char* backend,
     const clay_brick_request* requests, size_t count, float* out_values,

@@ -144,6 +144,7 @@ add_executable(clay_unit_tests
   unit/test_c_move_brush.cpp
   unit/test_c_sdf_sculpt.cpp
   unit/test_c_sdf_prefix_cache.cpp
+  unit/test_c_cold_brick_seed.cpp
   unit/test_c_field_stamp.cpp
   unit/test_c_stamp_capture.cpp
   unit/test_volume_cull.cpp

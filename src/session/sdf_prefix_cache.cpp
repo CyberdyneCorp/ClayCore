@@ -4,6 +4,8 @@
 
 #include "clay/session/sdf_prefix_cache.h"
 
+#include <cmath>
+
 #include <algorithm>
 #include <utility>
 #include <vector>
@@ -93,6 +95,10 @@ std::uint64_t SdfPrefixCache::key_of(scene::LayerId layer, std::size_t roots,
     digest::mix(h, policy.cell_size);
     digest::mix(h, policy.band);
     digest::mix(h, policy.padding);
+    // Two consumers, two lattices, two entries. Without this a brick refill and
+    // a Smooth transaction would be served each other's prefix and one of them
+    // would silently read between samples.
+    digest::mix(h, policy.align_to_lattice ? 1u : 0u);
     return h;
 }
 
@@ -103,33 +109,82 @@ void SdfPrefixCache::note_seeded(bool fell_back) {
         ++stats_.seeded_windows;
 }
 
+// THE DIGEST IS THE SAFETY NET. Invalidation by command is an optimisation and
+// can be forgotten; this cannot, because it is computed from what the layer
+// holds right now. A shared SdfContent edited through a sibling instance moves
+// it too, since the digest reads the content and not the pointer.
+//
+// It is also O(prefix roots) -- 13.5 ms at 50,000 -- and that is the right cost
+// for a Smooth transaction, which asks once per gesture, and the wrong one for a
+// brick refill, which asks per frame. `set_structure_witness` lets a caller that
+// holds a monotonic witness of structural change say when it need not be
+// recomputed. Without one, nothing changes.
+bool SdfPrefixCache::verify(std::uint64_t key, const scene::Layer& layer,
+                            std::size_t prefix_roots) {
+    auto it = entries_.find(key);
+    if (it == entries_.end()) return false;
+    Entry& e = it->second;
+    const bool trusted = witness_ != 0 && e.verified_witness == witness_;
+    if (!trusted) {
+        if (layer_prefix_fingerprint(layer, prefix_roots) != e.field.fingerprint) {
+            bytes_ -= e.field.bytes();
+            order_.erase(e.lru);
+            entries_.erase(it);
+            ++stats_.invalidations;
+            stats_.entries = entries_.size();
+            stats_.bytes = bytes_;
+            return false;
+        }
+        e.verified_witness = witness_;
+    }
+    order_.splice(order_.begin(), order_, e.lru);
+    return true;
+}
+
 const SdfPrefixField* SdfPrefixCache::find(const scene::Layer& layer, std::size_t prefix_roots,
                                            const SdfPrefixPolicy& policy) {
     if (prefix_roots == 0) return nullptr;
     const std::uint64_t key = key_of(layer.id, prefix_roots, policy);
-    auto it = entries_.find(key);
-    if (it == entries_.end()) {
+    if (!verify(key, layer, prefix_roots)) {
         ++stats_.misses;
         return nullptr;
     }
-    // THE DIGEST IS THE SAFETY NET. Invalidation by command is an optimisation
-    // and can be forgotten; this cannot, because it is computed from what the
-    // layer holds right now. A shared SdfContent edited through a sibling
-    // instance moves it too, since the digest reads the content and not the
-    // pointer.
-    if (layer_prefix_fingerprint(layer, prefix_roots) != it->second.field.fingerprint) {
-        bytes_ -= it->second.field.bytes();
-        order_.erase(it->second.lru);
-        entries_.erase(it);
-        ++stats_.invalidations;
-        ++stats_.misses;
-        stats_.entries = entries_.size();
-        stats_.bytes = bytes_;
-        return nullptr;
-    }
-    order_.splice(order_.begin(), order_, it->second.lru);
     ++stats_.hits;
-    return &it->second.field;
+    return &entries_.find(key)->second.field;
+}
+
+const SdfPrefixField* SdfPrefixCache::find_usable(const scene::Layer& layer,
+                                                  std::size_t max_boundary,
+                                                  const SdfPrefixPolicy& policy) {
+    if (max_boundary == 0) return nullptr;
+    // The best boundary the cache actually holds, which during a stroke is the
+    // one built before the stroke started rather than the one the policy names
+    // now. Walked over the entries rather than searched by key, because the
+    // key is a hash of the boundary and there is nothing to search.
+    const SdfPrefixField* best = nullptr;
+    std::uint64_t best_key = 0;
+    for (const auto& [key, entry] : entries_) {
+        const SdfPrefixField& f = entry.field;
+        if (f.layer != layer.id) continue;
+        if (f.prefix_roots == 0 || f.prefix_roots >= max_boundary) continue;
+        if (f.cell_size != policy.cell_size || f.band != policy.band ||
+            f.padding != policy.padding || f.align_to_lattice != policy.align_to_lattice)
+            continue;
+        if (best && f.prefix_roots <= best->prefix_roots) continue;
+        best = &f;
+        best_key = key;
+    }
+    if (!best) {
+        ++stats_.misses;
+        return nullptr;
+    }
+    const std::size_t roots = best->prefix_roots;
+    if (!verify(best_key, layer, roots)) {
+        ++stats_.misses;
+        return nullptr;
+    }
+    ++stats_.hits;
+    return &entries_.find(best_key)->second.field;
 }
 
 const SdfPrefixField* SdfPrefixCache::build(const scene::Document& doc, scene::LayerId layer_id,
@@ -168,7 +223,14 @@ const SdfPrefixField* SdfPrefixCache::build(const scene::Document& doc, scene::L
     const float band = policy.band > 0.0f ? policy.band : policy.cell_size * 3.0f;
     const float padding = policy.padding > 0.0f ? policy.padding : band;
     const kernel::cfloat3 pad = kernel::cf3(padding, padding, padding);
-    const math::Aabb region{whole.bounds.min - pad, whole.bounds.max + pad};
+    const kernel::cfloat3 lo = whole.bounds.min - pad;
+    const math::Aabb region =
+        policy.align_to_lattice
+            ? math::Aabb{kernel::cf3(std::floor(lo.x / policy.cell_size) * policy.cell_size,
+                                     std::floor(lo.y / policy.cell_size) * policy.cell_size,
+                                     std::floor(lo.z / policy.cell_size) * policy.cell_size),
+                         whole.bounds.max + pad}
+            : math::Aabb{lo, whole.bounds.max + pad};
 
     scene::ConsolidationParams params;
     params.cell_size = policy.cell_size;
@@ -211,6 +273,7 @@ const SdfPrefixField* SdfPrefixCache::build(const scene::Document& doc, scene::L
     field.cell_size = policy.cell_size;
     field.band = policy.band;
     field.padding = policy.padding;
+    field.align_to_lattice = policy.align_to_lattice;
     field.volume = std::move(*volume);
 
     const std::uint64_t key = key_of(layer_id, boundary, policy);
