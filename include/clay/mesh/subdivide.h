@@ -94,6 +94,28 @@ struct LevelTopology {
     std::vector<std::uint32_t> face_patch;
     std::uint32_t patch_count = 0;
 
+    // WHICH OF THE LAYOUT'S VERTICES THIS LEVEL ACTUALLY STORES, ascending, in
+    // the `ChildLayout` its PARENT defines. Empty on a level that stores all of
+    // them, because there it would be the identity and cost four bytes a vertex
+    // to say so.
+    //
+    // This is what makes a level regional (refine-one-region-of-a-hierarchy).
+    // A level refining a few base patches has faces for those patches only, and
+    // the vertices those faces reference are a small subset of the level the
+    // rule WOULD have produced. Storing the subset -- and renumbering `corners`
+    // to it -- is what makes topology, the evaluated buffers and the chunk
+    // index follow the refined area rather than the whole surface.
+    //
+    // The stencils are untouched by it. `child_value_of` and `child_frame_of`
+    // still ask "what is child c" of the parent's layout; the evaluation walks
+    // stored vertex `i` and asks about `full_of[i]`, so a regional level's
+    // vertex is bit-identical to the same vertex of the dense level -- which is
+    // the whole of the watertightness argument, and gate 5.2's claim.
+    std::vector<std::uint32_t> full_of;
+
+    // A level that stores every vertex its parent's layout defines.
+    bool dense() const { return full_of.empty(); }
+
     bool uniform_quads() const { return face_offsets.empty(); }
 
     std::uint32_t face_begin(std::uint32_t f) const {
@@ -212,11 +234,51 @@ struct ChildLayout {
     }
 };
 
+// Which of a `ChildLayout`'s vertices a level stores, and the translation both
+// ways. Built from the child topology, so a dense level pays no indirection at
+// all and a regional one pays a load.
+//
+// `stored()` is a BINARY SEARCH rather than a reverse table: the reverse table
+// would be one entry per vertex of the level this change exists not to build.
+struct ChildIndex {
+    const std::uint32_t* full_of = nullptr;
+    std::uint32_t count = 0;
+
+    bool dense() const { return full_of == nullptr; }
+    std::uint32_t full(std::uint32_t stored) const { return dense() ? stored : full_of[stored]; }
+    // The stored id of a layout vertex, or `kNoVertex` when this level does not
+    // store it -- which is the ordinary answer beside a refined region, not an
+    // error.
+    std::uint32_t stored(std::uint32_t full) const;
+
+    static ChildIndex of(const LevelTopology& child) {
+        ChildIndex idx;
+        idx.count = child.vertex_count;
+        if (!child.dense()) idx.full_of = child.full_of.data();
+        return idx;
+    }
+};
+
 // -- the two things this file produces ----------------------------------------
 
 // The level above `parent`. Deterministic in the sense the header opens with:
 // the same parent gives the same corner list, byte for byte, on every platform.
 LevelTopology subdivide_topology(const LevelTopology& parent, const LevelConnectivity& conn);
+
+// The same subdivision restricted to a set of base patches: `keep[patch]` says
+// whether that patch is refined, and only its faces are emitted.
+//
+// The child's vertex set is COMPACTED to what those faces reference, and
+// `full_of` records the map back, so everything downstream -- the stencils, the
+// frames, the detail field, the chunk table -- costs the refined area.
+//
+// `keep` is indexed by the parent's patch id and must have `patch_count`
+// entries (or `face_count` at level 0, where a face IS a patch). A `keep` that
+// is all true produces exactly `subdivide_topology`'s answer, `full_of` empty,
+// and that is gate 5.2 rather than a coincidence.
+LevelTopology subdivide_topology_for_patches(const LevelTopology& parent,
+                                             const LevelConnectivity& conn,
+                                             const std::vector<char>& keep);
 
 // The child level's positions with NO detail applied — the pure subdivision
 // surface a detail coefficient is measured against.
@@ -224,6 +286,16 @@ LevelTopology subdivide_topology(const LevelTopology& parent, const LevelConnect
 // `out` is resized to the child vertex count and fully written.
 void subdivide_positions(const LevelTopology& parent, const LevelConnectivity& conn,
                          const std::vector<kernel::cfloat3>& parent_positions,
+                         std::vector<kernel::cfloat3>* out);
+
+// The same, for a level that stores only some of the layout's vertices. `out`
+// is resized to `child.count` and holds stored vertex `i`'s value at `i`.
+//
+// Each value is the one the dense call would have written at `child.full(i)` —
+// the same expression over the same parent — so a regional level and a dense
+// one agree bit for bit wherever both exist.
+void subdivide_positions(const LevelTopology& parent, const LevelConnectivity& conn,
+                         const std::vector<kernel::cfloat3>& parent_positions, ChildIndex child,
                          std::vector<kernel::cfloat3>* out);
 
 // The same rule over the child vertices in `child_vertices` and NO OTHERS.
@@ -238,6 +310,13 @@ void subdivide_positions_partial(const LevelTopology& parent, const LevelConnect
                                  const std::vector<std::uint32_t>& child_vertices,
                                  std::vector<kernel::cfloat3>* inout);
 
+// The same over a level that stores a subset. `child_vertices` are STORED ids.
+void subdivide_positions_partial(const LevelTopology& parent, const LevelConnectivity& conn,
+                                 const std::vector<kernel::cfloat3>& parent_positions,
+                                 ChildIndex child,
+                                 const std::vector<std::uint32_t>& child_vertices,
+                                 std::vector<kernel::cfloat3>* inout);
+
 // The same stencils over an ATTRIBUTE rather than a position. Used for UVs and
 // colours over their own connectivity, where a seam is a boundary and the
 // boundary rule interpolates along it instead of across it.
@@ -245,6 +324,14 @@ void subdivide_attribute(const LevelTopology& parent, const LevelConnectivity& c
                          const std::vector<kernel::cfloat2>& in, std::vector<kernel::cfloat2>* out);
 void subdivide_attribute(const LevelTopology& parent, const LevelConnectivity& conn,
                          const std::vector<kernel::cfloat3>& in, std::vector<kernel::cfloat3>* out);
+
+// The same over a level that stores only some of the layout's vertices.
+void subdivide_attribute(const LevelTopology& parent, const LevelConnectivity& conn,
+                         const std::vector<kernel::cfloat2>& in, ChildIndex child,
+                         std::vector<kernel::cfloat2>* out);
+void subdivide_attribute(const LevelTopology& parent, const LevelConnectivity& conn,
+                         const std::vector<kernel::cfloat3>& in, ChildIndex child,
+                         std::vector<kernel::cfloat3>* out);
 
 // -- local propagation --------------------------------------------------------
 
@@ -264,6 +351,16 @@ void subdivide_attribute(const LevelTopology& parent, const LevelConnectivity& c
 // runs byte for byte.
 void dirty_children(const LevelTopology& parent, const LevelConnectivity& conn,
                     const std::vector<std::uint32_t>& dirty_parents,
+                    std::vector<std::uint32_t>* out);
+
+// The same against a level that stores a subset: the answers are STORED ids,
+// and a child the level does not store is DROPPED rather than reported.
+//
+// Dropping is the correct answer and not a loss of propagation: a vertex that
+// does not exist at this level is one the host reads at the level below, where
+// the parent's own motion has already been accounted for.
+void dirty_children(const LevelTopology& parent, const LevelConnectivity& conn,
+                    const std::vector<std::uint32_t>& dirty_parents, ChildIndex child,
                     std::vector<std::uint32_t>* out);
 
 // -- crossing to and from the interchange mesh --------------------------------

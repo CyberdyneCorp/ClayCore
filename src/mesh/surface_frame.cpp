@@ -74,10 +74,13 @@ struct TangentMean {
     }
 };
 
+// `child` is the vertex in the PARENT'S LAYOUT -- what the rule is stated over
+// -- and `normal` is the child normal of that vertex, passed in rather than
+// looked up because a regional level stores its normals against its own
+// compacted numbering. Everything else here is the rule unchanged.
 SurfaceFrame child_frame_of(std::uint32_t child, const ChildLayout& layout,
                             const LevelTopology& parent, const LevelConnectivity& conn,
-                            const std::vector<SurfaceFrame>& parent_frames,
-                            const std::vector<cfloat3>& child_normals) {
+                            const std::vector<SurfaceFrame>& parent_frames, cfloat3 normal) {
     TangentMean mean;
     switch (layout.origin_of(child)) {
         case SubdivisionOrigin::VertexPoint:
@@ -96,8 +99,8 @@ SurfaceFrame child_frame_of(std::uint32_t child, const ChildLayout& layout,
             break;
         }
     }
-    const cfloat3 source_normal = safe_unit(mean.normal, child_normals[child]);
-    const cfloat3 target_normal = safe_unit(child_normals[child], source_normal);
+    const cfloat3 source_normal = safe_unit(mean.normal, normal);
+    const cfloat3 target_normal = safe_unit(normal, source_normal);
     const cfloat3 carried = rotate_shortest_arc(mean.tangent, source_normal, target_normal);
     return orthonormalize(target_normal, carried);
 }
@@ -241,7 +244,18 @@ void transport_frames(const LevelTopology& parent, const LevelConnectivity& conn
     const ChildLayout layout = ChildLayout::of(parent, conn);
     out->assign(layout.total, SurfaceFrame{});
     for (std::uint32_t c = 0; c < layout.total; ++c)
-        (*out)[c] = child_frame_of(c, layout, parent, conn, parent_frames, child_normals);
+        (*out)[c] = child_frame_of(c, layout, parent, conn, parent_frames, child_normals[c]);
+}
+
+void transport_frames(const LevelTopology& parent, const LevelConnectivity& conn,
+                      const std::vector<SurfaceFrame>& parent_frames,
+                      const std::vector<cfloat3>& child_normals, ChildIndex child,
+                      std::vector<SurfaceFrame>* out) {
+    const ChildLayout layout = ChildLayout::of(parent, conn);
+    out->assign(child.count, SurfaceFrame{});
+    for (std::uint32_t c = 0; c < child.count; ++c)
+        (*out)[c] = child_frame_of(child.full(c), layout, parent, conn, parent_frames,
+                                   child_normals[c]);
 }
 
 void transport_frames_partial(const LevelTopology& parent, const LevelConnectivity& conn,
@@ -249,10 +263,21 @@ void transport_frames_partial(const LevelTopology& parent, const LevelConnectivi
                               const std::vector<cfloat3>& child_normals,
                               const std::vector<std::uint32_t>& child_vertices,
                               std::vector<SurfaceFrame>* inout) {
+    transport_frames_partial(parent, conn, parent_frames, child_normals,
+                             ChildIndex{nullptr, ChildLayout::of(parent, conn).total},
+                             child_vertices, inout);
+}
+
+void transport_frames_partial(const LevelTopology& parent, const LevelConnectivity& conn,
+                              const std::vector<SurfaceFrame>& parent_frames,
+                              const std::vector<cfloat3>& child_normals, ChildIndex child,
+                              const std::vector<std::uint32_t>& child_vertices,
+                              std::vector<SurfaceFrame>* inout) {
     const ChildLayout layout = ChildLayout::of(parent, conn);
-    if (inout->size() < layout.total) inout->resize(layout.total, SurfaceFrame{});
+    if (inout->size() < child.count) inout->resize(child.count, SurfaceFrame{});
     for (std::uint32_t c : child_vertices)
-        (*inout)[c] = child_frame_of(c, layout, parent, conn, parent_frames, child_normals);
+        (*inout)[c] = child_frame_of(child.full(c), layout, parent, conn, parent_frames,
+                                     child_normals[c]);
 }
 
 }  // namespace mesh

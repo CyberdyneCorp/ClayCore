@@ -19,12 +19,27 @@ patches that balancing adds SHALL be chosen in a stable order derived from patch
 identity, because the mesh verbs promise bit-identical results on every run and a
 balance driven by hash-map order produces a different surface on the second one.
 
-**A transition SHALL be watertight by construction rather than by repair.** A
-fine patch's boundary vertices along a shared coarse edge SHALL be DERIVED from
-the exact subdivision of that edge rather than authored independently, so no
-T-junction can open and none has to be detected. Any transition geometry emitted
-for display or export is derived data and SHALL NOT become the authoritative
-sculpt representation.
+**A transition SHALL be watertight by construction rather than by repair**, and
+building it split that into two statements that are worth keeping apart.
+
+The first is about the STORED SURFACE and is what makes the second possible. A
+regional level SHALL evaluate the same stencils, against the same parent
+neighbourhood, that a uniformly refined hierarchy would have evaluated — so every
+vertex it stores holds the same bits, and a fine patch's boundary IS the exact
+subdivision of the shared coarse edge because it is the same arithmetic. A patch
+whose parent neighbourhood is incomplete SHALL be REFUSED rather than refined
+approximately: Catmull-Clark's border rule at an edge that is not a border is a
+different rule, and the fine side would leave the coarse side it is meant to
+meet. `refine_patches_to_level` SHALL grow each intermediate level by a patch
+ring so a graded request never meets that refusal.
+
+The second is about EXPORTING one mesh across a transition, and it is not a
+T-junction problem. A fine patch's corner vertex has taken one more subdivision
+step than the coarse neighbour's has, so the two sides are a subdivision step
+apart rather than a hairline apart, and a coarse face beside a finer patch SHALL
+be emitted as a transition polygon carrying the finer boundary vertices. Any such
+transition geometry is derived display data and SHALL NOT become the
+authoritative sculpt representation.
 
 **Adding a level SHALL NOT move the surface.** A newly refined region starts with
 zero detail, so refining is invisible until something is authored into it — which
@@ -43,6 +58,10 @@ Refinement SHALL be MONOTONIC in this change: there is no removal. Removing a
 refined region requires a decision about the detail authored there — discard,
 bake, project, or refuse — and making one silently is worse than not offering
 the operation.
+
+#### Scenario: A refined patch holds the uniform hierarchy's own numbers
+- **WHEN** a region is refined to a level and the same cage is refined uniformly to that level
+- **THEN** every patch the regional hierarchy stores at that level carries the uniform hierarchy's positions bit for bit
 
 #### Scenario: One region refines and the rest of the model does not
 - **WHEN** a region of a hierarchy is refined several levels beyond the rest

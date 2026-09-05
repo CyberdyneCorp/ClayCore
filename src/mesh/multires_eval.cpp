@@ -163,14 +163,15 @@ void full_evaluate(MultiresSurface::State& s, std::uint32_t level) {
     const LevelCache& pc = *parent.cache;
     LevelCache& c = *lev.cache;
 
-    subdivide_positions(parent.topology, pc.conn, pc.mesh.positions, &c.subdivided);
+    const ChildIndex stored = ChildIndex::of(lev.topology);
+    subdivide_positions(parent.topology, pc.conn, pc.mesh.positions, stored, &c.subdivided);
     // The S-normals exist only to build the frames, which then carry them —
     // so they go into scratch rather than into a per-level array nobody would
     // read again.
     if (s.scratch_normals.size() < lev.topology.vertex_count)
         s.scratch_normals.resize(lev.topology.vertex_count, kernel::cf3(0, 1, 0));
     level_normals(lev.topology, c.conn, c.subdivided, &s.scratch_normals);
-    transport_frames(parent.topology, pc.conn, pc.frames, s.scratch_normals, &c.frames);
+    transport_frames(parent.topology, pc.conn, pc.frames, s.scratch_normals, stored, &c.frames);
     apply_detail_all(lev);
     level_normals(lev.topology, c.conn, c.mesh.positions, &c.mesh.normals);
     s.stats.vertices_evaluated += lev.topology.vertex_count;
@@ -187,19 +188,20 @@ void partial_evaluate(MultiresSurface::State& s, std::uint32_t level) {
     LevelCache& c = *lev.cache;
 
     // The children whose SUBDIVIDED position the parent's motion reaches...
-    dirty_children(parent.topology, pc.conn, parent.pending, &s.scratch_a);
+    const ChildIndex stored = ChildIndex::of(lev.topology);
+    dirty_children(parent.topology, pc.conn, parent.pending, stored, &s.scratch_a);
     // ...and the halo around them, whose normals — and therefore frames, and
     // therefore reconstructed detail — moved even though their subdivided
     // position did not.
     expand_by_face_ring(lev.topology, c.conn, s.scratch_a, &s.scratch_mark, &s.scratch_b);
 
-    subdivide_positions_partial(parent.topology, pc.conn, pc.mesh.positions, s.scratch_a,
+    subdivide_positions_partial(parent.topology, pc.conn, pc.mesh.positions, stored, s.scratch_a,
                                 &c.subdivided);
     if (s.scratch_normals.size() < lev.topology.vertex_count)
         s.scratch_normals.resize(lev.topology.vertex_count, kernel::cf3(0, 1, 0));
     level_normals_partial(lev.topology, c.conn, c.subdivided, s.scratch_b, &s.scratch_normals);
-    transport_frames_partial(parent.topology, pc.conn, pc.frames, s.scratch_normals, s.scratch_b,
-                             &c.frames);
+    transport_frames_partial(parent.topology, pc.conn, pc.frames, s.scratch_normals, stored,
+                             s.scratch_b, &c.frames);
     apply_detail(lev, s.scratch_b);
 
     // The display normals reach one ring further again, because a vertex that
@@ -391,8 +393,14 @@ AttrLevel build_attr_level(MultiresSurface::State& s, std::uint32_t l) {
     const bool split = s.attribute_split;
     const LevelTopology& ptopo = split ? s.attr[l - 1].topology : s.levels[l - 1].topology;
     const LevelConnectivity& pconn = split ? s.attr[l - 1].conn : connectivity_of(s, l - 1);
+    // A REGIONAL LEVEL'S ATTRIBUTES ARE REGIONAL TOO, over the same patches.
+    // The two hierarchies emit faces in the same order, so the geometric
+    // level's own `patch_kept` is the right restriction for the attribute one
+    // and the face-for-face correspondence below still holds.
+    const std::vector<char>& keep = s.levels[l].patch_kept;
     if (split) {
-        a.topology = subdivide_topology(ptopo, pconn);
+        a.topology = keep.empty() ? subdivide_topology(ptopo, pconn)
+                                  : subdivide_topology_for_patches(ptopo, pconn, keep);
         a.conn = LevelConnectivity::build(a.topology);
         // The two hierarchies emit child faces in the same order — parent face,
         // then corner — so face f of one is face f of the other and the map
@@ -402,9 +410,14 @@ AttrLevel build_attr_level(MultiresSurface::State& s, std::uint32_t l) {
         const std::size_t corners = std::min(a.topology.corners.size(), gt.corners.size());
         for (std::size_t i = 0; i < corners; ++i) a.to_geom[a.topology.corners[i]] = gt.corners[i];
     }
-    if (!s.attr[l - 1].uvs.empty()) subdivide_attribute(ptopo, pconn, s.attr[l - 1].uvs, &a.uvs);
+    // Values against the attribute level's own numbering when there is one,
+    // and against the geometric level's when the attributes ride on it.
+    const ChildIndex stored =
+        ChildIndex::of(split ? a.topology : s.levels[l].topology);
+    if (!s.attr[l - 1].uvs.empty())
+        subdivide_attribute(ptopo, pconn, s.attr[l - 1].uvs, stored, &a.uvs);
     if (!s.attr[l - 1].colors.empty())
-        subdivide_attribute(ptopo, pconn, s.attr[l - 1].colors, &a.colors);
+        subdivide_attribute(ptopo, pconn, s.attr[l - 1].colors, stored, &a.colors);
     return a;
 }
 

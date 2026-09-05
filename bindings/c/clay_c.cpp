@@ -16893,6 +16893,114 @@ clay_result clay_multires_add_level(clay_multires* surface, clay_cancel_token* t
     return CLAY_OK;
 }
 
+namespace {
+
+// The caller's patch ids as a vector, refusing a null array with a nonzero
+// count rather than reading it.
+clay_result take_patches(const uint32_t* patches, size_t patch_count,
+                         std::vector<std::uint32_t>* out) {
+    if (patch_count != 0 && !patches) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null patches");
+    out->assign(patches, patches + patch_count);
+    return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_multires_add_level_for_patches(clay_multires* surface, const uint32_t* patches,
+                                                size_t patch_count, clay_cancel_token* token,
+                                                int32_t* out_error) {
+    if (out_error) *out_error = CLAY_MULTIRES_OK;
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires(surface, &s);
+    if (r != CLAY_OK) return r;
+    std::vector<std::uint32_t> ids;
+    r = take_patches(patches, patch_count, &ids);
+    if (r != CLAY_OK) return r;
+
+    mesh::MultiresError err = mesh::MultiresError::None;
+    const parallel::CancelToken* cancel = token ? &token->token : nullptr;
+    if (!s->add_level_for_patches(ids, &err, cancel)) {
+        if (out_error) *out_error = static_cast<std::int32_t>(err);
+        if (err == mesh::MultiresError::Cancelled) return CLAY_ERROR_CANCELLED;
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, mesh::multires_error_text(err));
+    }
+    return CLAY_OK;
+}
+
+clay_result clay_multires_preflight_add_level_for_patches(const clay_multires* surface,
+                                                          const uint32_t* patches,
+                                                          size_t patch_count,
+                                                          clay_multires_preflight* out_preflight) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_preflight) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_preflight");
+    std::vector<std::uint32_t> ids;
+    r = take_patches(patches, patch_count, &ids);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_preflight->struct_size;
+    clay_multires_preflight probe;
+    r = read_desc(out_preflight, kMultiresPreflightOriginal, &probe);
+    if (r != CLAY_OK) return r;
+
+    const mesh::MultiresPreflight p = s->preflight_add_level_for_patches(ids);
+    clay_multires_preflight out{};
+    out.struct_size = static_cast<std::uint32_t>(sizeof(out));
+    out.level = p.level;
+    out.vertices = p.vertices;
+    out.faces = p.faces;
+    out.topology_bytes = p.topology_bytes;
+    out.detail_bytes = p.detail_bytes;
+    out.evaluated_bytes = p.evaluated_bytes;
+    out.runtime_bytes = p.runtime_bytes;
+    out.persistent_bytes = p.persistent_bytes;
+    out.peak_bytes = p.peak_bytes;
+    out.allowed = p.allowed ? 1 : 0;
+    out.error = static_cast<std::int32_t>(p.error);
+    write_desc(out_preflight, declared, out);
+    return CLAY_OK;
+}
+
+clay_result clay_multires_refine_patches_to_level(clay_multires* surface, const uint32_t* patches,
+                                                  size_t patch_count, uint32_t target_level,
+                                                  clay_cancel_token* token, int32_t* out_error) {
+    if (out_error) *out_error = CLAY_MULTIRES_OK;
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires(surface, &s);
+    if (r != CLAY_OK) return r;
+    std::vector<std::uint32_t> ids;
+    r = take_patches(patches, patch_count, &ids);
+    if (r != CLAY_OK) return r;
+
+    mesh::MultiresError err = mesh::MultiresError::None;
+    const parallel::CancelToken* cancel = token ? &token->token : nullptr;
+    if (!s->refine_patches_to_level(ids, target_level, &err, cancel)) {
+        if (out_error) *out_error = static_cast<std::int32_t>(err);
+        if (err == mesh::MultiresError::Cancelled) return CLAY_ERROR_CANCELLED;
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, mesh::multires_error_text(err));
+    }
+    return CLAY_OK;
+}
+
+clay_result clay_multires_patch_depth(const clay_multires* surface, uint32_t patch, uint32_t level,
+                                      uint32_t* out_max_level, uint32_t* out_effective) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (out_max_level) *out_max_level = s->patch_max_level(patch);
+    if (out_effective) *out_effective = s->effective_level(patch, level);
+    return CLAY_OK;
+}
+
+clay_result clay_multires_uniform_depth(const clay_multires* surface, int32_t* out_uniform) {
+    const mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires_ro(surface, &s);
+    if (r != CLAY_OK) return r;
+    if (!out_uniform) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_uniform");
+    *out_uniform = s->uniform_depth() ? 1 : 0;
+    return CLAY_OK;
+}
+
 clay_result clay_multires_remove_highest_level(clay_multires* surface, int32_t* out_error) {
     if (out_error) *out_error = CLAY_MULTIRES_OK;
     mesh::MultiresSurface* s = nullptr;

@@ -122,6 +122,21 @@ struct MultiresLevel {
     // `pending` because a stale display normal shades wrong and changes nothing
     // about the level above, while `pending` is the opposite.
     std::vector<std::uint32_t> normals_pending;
+
+    // WHICH BASE PATCHES THIS LEVEL STORES, one entry per base patch. Empty on
+    // a level that stores all of them, which is every level `add_level` builds
+    // and every level of a hierarchy written before regional refinement
+    // existed.
+    //
+    // AUTHORITATIVE, and the only regional state there is: `full_of`, the
+    // face list, the detail sizes and the chunk table are all derived from it,
+    // and `patch_max_level` is a walk over it. Serialization writes this and
+    // replays the build rather than storing what the build produced.
+    std::vector<char> patch_kept;
+
+    bool keeps(std::uint32_t patch) const {
+        return patch_kept.empty() || (patch < patch_kept.size() && patch_kept[patch] != 0);
+    }
 };
 
 // The cage's attributes, subdivided. Rebuildable, and built only when something
@@ -210,6 +225,17 @@ struct MultiresSurface::State {
 
     std::vector<AttrLevel> attr;
 
+    // Base patches sharing a VERTEX, as CSR over patch ids. Built once, on
+    // first use, from level 0 -- which never changes shape while a hierarchy
+    // exists, because `set_base_mesh` refuses on a hierarchy carrying detail.
+    //
+    // A VERTEX ring rather than an edge ring, because the vertex rule reads
+    // every face incident to a vertex: a patch across a corner contributes to
+    // the stencil even though it shares no edge, and leaving it out is how a
+    // regional level ends up evaluating a border rule where the dense one
+    // evaluated an interior rule.
+    std::vector<std::uint32_t> patch_ring_offsets, patch_ring;
+
     // Scratch the hot path reuses rather than reallocating per stamp.
     std::vector<std::uint32_t> scratch_a, scratch_b, scratch_c;
     std::vector<kernel::cfloat3> scratch_normals;
@@ -256,6 +282,13 @@ const LevelConnectivity& connectivity_of(MultiresSurface::State& s, std::uint32_
 
 // The cage's positions gathered per geometric vertex.
 void gather_class_positions(const MultiresSurface::State& s, std::vector<kernel::cfloat3>* out);
+
+// The base patches sharing a vertex with `patch`, built on first use.
+const std::uint32_t* patch_neighbours(MultiresSurface::State& s, std::uint32_t patch,
+                                      std::size_t* count);
+
+// How many base patches this hierarchy has -- level 0's face count.
+std::uint32_t patch_total(const MultiresSurface::State& s);
 
 // -- shared with sculpt_layer_eval.cpp ----------------------------------------
 

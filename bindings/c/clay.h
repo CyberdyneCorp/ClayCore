@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 84
+#define CLAY_ABI_MINOR 85
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -7107,7 +7107,15 @@ typedef enum clay_multires_error {
      * slider between two stamps would author one gesture against two different
      * surfaces. */
     CLAY_MULTIRES_SCULPT_LAYER_STROKE_OPEN = 14,
-    CLAY_MULTIRES_CAPACITY_OVERFLOW = 15
+    CLAY_MULTIRES_CAPACITY_OVERFLOW = 15,
+    /* A patch asked to be refined that this hierarchy cannot refine exactly:
+     * it is not resident at the parent level, or a patch sharing a vertex with
+     * it is not. Refused rather than approximated -- refining there would
+     * evaluate Catmull-Clark's BORDER rule at an edge that is not a border, and
+     * the fine patch would pull away from the coarse one it meets. */
+    CLAY_MULTIRES_PATCH_NOT_REFINABLE = 16,
+    /* A refinement over no patches. A level with no faces is not a level. */
+    CLAY_MULTIRES_NO_PATCHES_REQUESTED = 17
 } clay_multires_error;
 
 /* Never NULL, for any value. */
@@ -7186,6 +7194,48 @@ clay_result clay_multires_preflight_add_level(const clay_multires* surface,
  * an artist means by "subdivide". `token` may be NULL. */
 clay_result clay_multires_add_level(clay_multires* surface, clay_cancel_token* token,
                                     int32_t* out_error);
+/* Add one level that refines ONLY these base patches (ABI 0.85.0), mirroring
+ * clay_voxel_add_level_region: outside the named patches the new level has no
+ * storage and is READ AT the patch's own effective level, so only what is
+ * STORED changes.
+ *
+ * `patches` are level-0 face ids; order does not matter and duplicates are
+ * ignored. Every vertex the level does store holds the value a uniformly
+ * refined hierarchy would have held there, bit for bit -- the stencils are
+ * evaluated against the same parent neighbourhood -- which is why a fine
+ * patch's boundary meets the coarse edge beside it exactly.
+ *
+ * CLAY_MULTIRES_PATCH_NOT_REFINABLE when a named patch, or a patch beside it,
+ * is not resident at the parent level. clay_multires_refine_patches_to_level
+ * grows the intermediate levels so that cannot arise. `token` may be NULL. */
+clay_result clay_multires_add_level_for_patches(clay_multires* surface, const uint32_t* patches,
+                                                size_t patch_count, clay_cancel_token* token,
+                                                int32_t* out_error);
+/* What that level would cost, before a byte of it is allocated. */
+clay_result clay_multires_preflight_add_level_for_patches(const clay_multires* surface,
+                                                          const uint32_t* patches,
+                                                          size_t patch_count,
+                                                          clay_multires_preflight* out_preflight);
+/* Refine `patches` all the way to `target_level`, building whatever levels are
+ * missing and GROWING each intermediate one by the rings the levels above it
+ * need. THE CALL A HOST MAKES: level `target - k` is refined over the patches
+ * grown by `k` rings, which is exactly what every level above it needs in order
+ * to evaluate against a complete parent. `token` may be NULL. */
+clay_result clay_multires_refine_patches_to_level(clay_multires* surface, const uint32_t* patches,
+                                                  size_t patch_count, uint32_t target_level,
+                                                  clay_cancel_token* token, int32_t* out_error);
+/* The deepest level that stores this base patch -- 0 for one nothing has
+ * refined, and max_level for every patch of a uniformly refined hierarchy.
+ * `out_effective` receives min(level, that), which is where a host displaying
+ * `level` reads this patch. Either output may be NULL. */
+clay_result clay_multires_patch_depth(const clay_multires* surface, uint32_t patch,
+                                      uint32_t level, uint32_t* out_max_level,
+                                      uint32_t* out_effective);
+/* Nonzero when every level refines every patch, which is what
+ * clay_multires_add_level builds and what every hierarchy written before
+ * regional refinement is. */
+clay_result clay_multires_uniform_depth(const clay_multires* surface, int32_t* out_uniform);
+
 /* Drop the highest level and the detail on it. DESTRUCTIVE; a host that wants
  * it reversible records a barrier or its own copy first. */
 clay_result clay_multires_remove_highest_level(clay_multires* surface, int32_t* out_error);

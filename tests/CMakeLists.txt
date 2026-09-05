@@ -58,6 +58,7 @@ add_executable(clay_unit_tests
   unit/test_multires.cpp
   unit/test_multires_sculpt.cpp
   unit/test_multires_dirty.cpp
+  unit/test_multires_regional.cpp
   unit/test_surface_chunks.cpp
   unit/test_chunk_transport.cpp
   unit/test_memory_trim.cpp
