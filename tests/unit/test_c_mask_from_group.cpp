@@ -51,12 +51,23 @@ clay_layer_id ball(clay_document* doc) {
     return layer;
 }
 
-clay_groups* groups_of(clay_document* doc, float cell) {
+// The groups handle, destroyed with the scope that made it -- `CDoc`'s rule
+// applied to the second handle these tests hold. It was a bare pointer and
+// leaked in every test case, which nothing said until ASan did: a leaked handle
+// is invisible to a test that passes.
+struct CGroups {
     clay_groups* g = nullptr;
-    REQUIRE(clay_document_groups(doc, cell, &g) == CLAY_OK);
-    REQUIRE(g != nullptr);
-    return g;
-}
+    CGroups(clay_document* doc, float cell) {
+        REQUIRE(clay_document_groups(doc, cell, &g) == CLAY_OK);
+        REQUIRE(g != nullptr);
+    }
+    ~CGroups() { clay_groups_destroy(g); }
+    CGroups(const CGroups&) = delete;
+    CGroups& operator=(const CGroups&) = delete;
+    // So every call site below reads exactly as it did when `g` was the raw
+    // pointer, and the ownership is the only thing that changed.
+    operator clay_groups*() const { return g; }
+};
 
 // A named region: the +x half of the ball.
 void name_half(clay_groups* g, uint16_t id) {
@@ -85,7 +96,7 @@ TEST_CASE("mask from group: the round trip is the same region") {
     // host cannot trust either of them.
     CDoc d;
     ball(d.doc);
-    clay_groups* g = groups_of(d.doc, 0.1f);
+    CGroups g(d.doc, 0.1f);
     name_half(g, 7);
 
     uint64_t before = 0;
@@ -102,7 +113,7 @@ TEST_CASE("mask from group: the round trip is the same region") {
     // Back again, into a second id on a fresh lattice.
     CDoc e;
     ball(e.doc);
-    clay_groups* g2 = groups_of(e.doc, 0.1f);
+    CGroups g2(e.doc, 0.1f);
     uint64_t claimed = 0;
     REQUIRE(clay_groups_fill_from_mask(g2, mask, 7, 0.5f, &claimed) == CLAY_OK);
     uint64_t after = 0;
@@ -131,7 +142,7 @@ TEST_CASE("mask from group: the mask agrees with the group point by point") {
     // gate is where the group said it was.
     CDoc d;
     ball(d.doc);
-    clay_groups* g = groups_of(d.doc, 0.1f);
+    CGroups g(d.doc, 0.1f);
     name_half(g, 3);
 
     clay_mask* mask = clay_mask_create(0.1f);
@@ -167,7 +178,7 @@ TEST_CASE("mask from group: zero erases rather than writing zeros") {
     // do not cost the same, and `painted_count` is what says which you have.
     CDoc d;
     ball(d.doc);
-    clay_groups* g = groups_of(d.doc, 0.1f);
+    CGroups g(d.doc, 0.1f);
     name_half(g, 5);
 
     clay_mask* mask = clay_mask_create(0.1f);
@@ -213,7 +224,7 @@ TEST_CASE("mask from group: the two cell sizes need not match") {
     // other direction.
     CDoc d;
     ball(d.doc);
-    clay_groups* g = groups_of(d.doc, 0.2f);  // coarse
+    CGroups g(d.doc, 0.2f);  // coarse
     name_half(g, 9);
 
     clay_mask* fine = clay_mask_create(0.05f);  // four times finer
@@ -242,7 +253,7 @@ TEST_CASE("mask from group: naming no group paints nothing") {
     // it can invert.
     CDoc d;
     ball(d.doc);
-    clay_groups* g = groups_of(d.doc, 0.1f);
+    CGroups g(d.doc, 0.1f);
     name_half(g, 2);
 
     clay_mask* mask = clay_mask_create(0.1f);
