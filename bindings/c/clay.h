@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 84
+#define CLAY_ABI_MINOR 85
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -4486,6 +4486,38 @@ clay_result clay_mask_bounds(const clay_mask* mask, int32_t out_min[3], int32_t 
  * refused: the cost of both calls is the box's volume in cells. */
 clay_result clay_mask_fill(clay_mask* mask, const float box_min[3], const float box_max[3],
                            float value);
+
+/* Paint the region a GROUP names (ABI 0.85.0).
+ *
+ * The other direction of clay_groups_fill_from_mask, and the half that closes
+ * the loop. Without it a group can gate a brush only through
+ * CLAY_AUTOMASK_SURFACE_GROUP — "stay in the one I started in" — and never
+ * through a mask a caller CHOSE. So "flatten this whole panel" was expressible
+ * only as a stroke that happens to begin on it, which is a different operation:
+ * an artist selects a region and then decides what to do to it.
+ *
+ * With this, a group is a SELECTION: name it, mask it, and every verb that
+ * respects a mask respects the group — freeze, invert and sculpt the rest,
+ * relax only inside it, extrude it. None of those needed a new gate; they
+ * needed the selection to reach the gate that exists.
+ *
+ * No region argument, on the same terms as clay_groups_fill_from_mask: the
+ * group's own extent drives it. A field knows where it is, and a caller-supplied
+ * box is how the two lattices get to disagree about one border. The two cell
+ * sizes need not match; cells are sampled at the MASK's centres, so a fine mask
+ * over a coarse group quantises to the group.
+ *
+ * THE BORDER IS THE GROUP'S, cell-quantised — the same border every other group
+ * operation draws, and the cost the surface-group design states up front. A
+ * mask painted this way cannot be finer than the lattice that named the region.
+ *
+ * `value` is clamped to [0,1]. ZERO ERASES: it is the value that releases a
+ * cell's storage everywhere else in this API, so a group can un-mask its own
+ * region rather than leaving explicit zeros behind. *out_cells receives how
+ * many cells changed. Naming CLAY_NO_GROUP paints nothing and is not an error —
+ * "not in a group" is not a region. */
+clay_result clay_mask_fill_from_group(clay_mask* mask, const clay_groups* groups,
+                                      uint16_t group, float value, uint64_t* out_cells);
 clay_result clay_mask_invert_within(clay_mask* mask, const float box_min[3],
                                     const float box_max[3]);
 

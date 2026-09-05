@@ -3,6 +3,8 @@
 
 #include "clay/voxel/mask.h"
 
+#include "clay/voxel/groups.h"
+
 #include "clay/bytes.h"
 
 #include <algorithm>
@@ -151,6 +153,35 @@ void MaskField::paint(VoxelCoord c, const BrushParams& p, float target) {
 }
 
 // -- region operations -------------------------------------------------------
+
+std::size_t MaskField::fill_from_group(const GroupField& groups, GroupId id, float value) {
+    if (id == kNoGroup) return 0;
+    // Driven by the GROUP's extent, mirroring fill_from_mask: a field knows
+    // where it is, and a caller-supplied region is how the two lattices get to
+    // disagree about the same border.
+    const std::optional<VoxelCoord> lo = groups.bounds_min();
+    const std::optional<VoxelCoord> hi = groups.bounds_max();
+    if (!lo || !hi) return 0;
+    const kernel::cfloat3 world_lo = groups.cell_centre(*lo);
+    const kernel::cfloat3 world_hi = groups.cell_centre(*hi);
+    const VoxelCoord c0 = cell_at(world_lo);
+    const VoxelCoord c1 = cell_at(world_hi);
+
+    const float clamped = value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
+    std::size_t painted = 0;
+    for (std::int32_t z = c0.z; z <= c1.z; ++z)
+        for (std::int32_t y = c0.y; y <= c1.y; ++y)
+            for (std::int32_t x = c0.x; x <= c1.x; ++x) {
+                const VoxelCoord c{x, y, z};
+                // Sampled at THIS field's cell centre, so a fine mask over a
+                // coarse group quantises to the group rather than misaligning.
+                if (groups.at(cell_centre(c)) != id) continue;
+                if (get(c) == clamped) continue;
+                set(c, clamped);
+                ++painted;
+            }
+    return painted;
+}
 
 void MaskField::clear() {
     touch();

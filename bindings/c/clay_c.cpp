@@ -10678,6 +10678,22 @@ clay_result read_box(const voxel::MaskField& mask, const float box_min[3],
 
 }  // namespace
 
+clay_result clay_mask_fill_from_group(clay_mask* mask, const clay_groups* groups, uint16_t group,
+                                      float value, uint64_t* out_cells) {
+    if (out_cells) *out_cells = 0;
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    const voxel::GroupField* g = group_field(groups);
+    if (!g) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null groups");
+    if (!std::isfinite(value))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "value must be finite");
+    MaskStep mask_step(mask, m);
+    const std::size_t n = m->fill_from_group(*g, group, value);
+    if (out_cells) *out_cells = static_cast<std::uint64_t>(n);
+    return CLAY_OK;
+}
+
 clay_result clay_mask_fill(clay_mask* mask, const float box_min[3], const float box_max[3],
                            float value) {
     voxel::MaskField* m = nullptr;
