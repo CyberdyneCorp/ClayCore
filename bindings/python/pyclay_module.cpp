@@ -345,6 +345,7 @@ voxel::BrushFalloff parse_falloff(const std::string& falloff) {
 // voxel types, but every brush entry point resolves a mask through here.
 struct PyMaskField;
 const voxel::MaskField* borrow_mask(nb::handle mask);
+const voxel::GroupField* borrow_group_field(nb::handle groups);
 // The field verbs take a callable rather than a mask type, so a sampled field
 // stays a leaf module. Empty when no mask was given, which costs nothing.
 field::MaskGate mask_gate_of(nb::handle mask);
@@ -1457,6 +1458,13 @@ const voxel::MaskField* borrow_mask(nb::handle mask) {
     // Borrowed for the duration of the call only, which is all a BrushParams
     // built at the call site needs.
     return &nb::cast<PyMaskField&>(mask).field();
+}
+
+// The same, for the surface groups. Borrowed for the call, as above: the
+// document owns the lattice and a mask filled from it holds no reference.
+const voxel::GroupField* borrow_group_field(nb::handle groups) {
+    if (!groups.is_valid() || groups.is_none()) return nullptr;
+    return &nb::cast<PyGroupField&>(groups).field();
 }
 
 // The gate memo belonging to this mask OBJECT. A caller that writes
@@ -9943,6 +9951,23 @@ NB_MODULE(pyclay, m) {
              "region"_a, "value"_a = 1.0f,
              "Set every cell whose centre lies in a ((lo), (hi)) world box. "
              "Filling with 0 releases the region.")
+        .def("fill_from_group",
+             [](PyMaskField& m, nb::handle groups, voxel::GroupId id, float value) {
+                 const voxel::GroupField* gf = borrow_group_field(groups);
+                 if (!gf) throw std::invalid_argument("expected a SurfaceGroups");
+                 voxel::MaskField& mf_ = m.field();
+                 PyMaskStep step_(m, mf_);
+                 return mf_.fill_from_group(*gf, id, value);
+             },
+             "groups"_a, "group"_a, "value"_a = 1.0f,
+             "Paint the region a GROUP names — the other direction of\n"
+             "SurfaceGroups.fill_from_mask, and the half that makes a group a\n"
+             "SELECTION. Without it a group could gate a brush only as 'stay in\n"
+             "the one I started in'; with it, every verb that respects a mask\n"
+             "respects the group.\n\n"
+             "No region argument: the group's own extent drives it. The two cell\n"
+             "sizes need not match, and the border you get is the GROUP's,\n"
+             "cell-quantised. Filling with 0 erases, as it does everywhere else.")
         .def("invert_within",
              [](PyMaskField& m, nb::handle region) {
                  voxel::MaskField& mf_ = m.field();

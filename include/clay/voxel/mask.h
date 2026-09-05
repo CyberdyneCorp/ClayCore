@@ -34,6 +34,11 @@
 namespace clay {
 namespace voxel {
 
+// Forward-declared rather than included: groups.h already includes THIS header
+// for `fill_from_mask`, so including it back would close a cycle.
+class GroupField;
+using GroupId = std::uint16_t;
+
 // A scalar mask on a chunked lattice. Values are stored as uint8: 256 levels
 // is more than a falloff needs and keeps a fully masked region cheap.
 class MaskField {
@@ -72,6 +77,31 @@ class MaskField {
     // over the painted region only (inverting the infinite lattice is not a
     // representable operation on a sparse field).
     void invert();
+    // Paint the region a GROUP names, which is the other direction of
+    // `GroupField::fill_from_mask` and the half that closes the loop.
+    //
+    // WHY IT BELONGS HERE. The two lattices already interoperate one way: paint
+    // a mask however you like and name the result a group. Without the reverse,
+    // a group can gate a brush only through the SurfaceGroup automask -- "stay
+    // in the one I started in" -- and never through a mask a caller CHOSE. That
+    // leaves "flatten this whole panel" expressible only as a stroke that
+    // happens to start on it, which is not the same operation.
+    //
+    // Driven by the GROUP's extent, exactly as fill_from_mask is driven by the
+    // mask's: a field knows where it is, and asking a caller for bounds is how
+    // the two lattices get to disagree.
+    //
+    // Sampled at THIS field's cell centre, so a fine mask over a coarse group
+    // quantises to the group rather than misaligning -- and the border a caller
+    // gets is the group's, cell-quantised, which is the same border every other
+    // group operation already draws.
+    //
+    // `value` is what a covered cell takes, clamped to [0,1] as `set` clamps.
+    // Zero RELEASES those cells, which makes this an eraser as well: it is the
+    // one value `set` treats as "no storage", and pretending otherwise here
+    // would leave a mask full of explicit zeros.
+    std::size_t fill_from_group(const GroupField& groups, GroupId id, float value);
+
     void clear();
     void expand(int steps = 1);    // grey dilation, 6-neighbourhood max
     void contract(int steps = 1);  // grey erosion, 6-neighbourhood min
