@@ -141,6 +141,29 @@ struct SdfPrefixPolicy {
     // is a leak on a device with a memory budget, and the safe reading of an
     // unset field is "off".
     std::size_t max_bytes = 0;
+
+    // Snap the bake's region origin DOWN to a multiple of `cell_size`.
+    //
+    // WHICH CONSUMER'S LATTICE THE PREFIX IS FOR, and the two want different
+    // ones. A seed read off the lattice it was built for IS the stored sample
+    // (3.3e-7); one read off a lattice half a cell away is an interpolation of
+    // two (a quarter of a cell, measured 0.011 at a 0.05 cell).
+    //
+    //   FALSE — the region starts at the layer's padded bounds. The Smooth
+    //   transaction's working field is that same region, so the two share a
+    //   lattice by construction. This is the default and the original.
+    //
+    //   TRUE — the origin is a multiple of the cell, which is the lattice a
+    //   BRICK refill uses: brick origins are key * dim * voxel, anchored at the
+    //   world origin. Snapping only ever moves the origin down by less than a
+    //   cell, into the padding, so no sample is lost.
+    //
+    // It is part of the cache KEY, so the two are different entries and neither
+    // is served to the other's consumer. Snapping unconditionally was tried and
+    // is wrong: it moves Smooth's prefix off Smooth's lattice, which
+    // `test_sdf_prefix_cache.cpp`'s "exact on the lattice it was built for"
+    // catches at 0.0149 against its 1e-5 gate.
+    bool align_to_lattice = false;
 };
 
 struct SdfPrefixCacheStats {
@@ -166,6 +189,7 @@ struct SdfPrefixField {
     float cell_size = 0.0f;
     float band = 0.0f;
     float padding = 0.0f;
+    bool align_to_lattice = false;
     field::FieldVolume volume;
 
     std::size_t bytes() const { return volume.bytes(); }
@@ -195,6 +219,36 @@ class SdfPrefixCache {
     const SdfPrefixField* find(const scene::Layer& layer, std::size_t prefix_roots,
                                const SdfPrefixPolicy& policy);
 
+    // The same, for a consumer that can take ANY boundary rather than the
+    // policy's exact one -- a brick refill, whose suffix simply grows.
+    //
+    // WHY THIS EXISTS. `prefix_boundary_for` is roots - keep_live_suffix_roots,
+    // so every append moves it by one: during a stroke the policy asks for a
+    // boundary the cache has never held, and a lookup by that key misses on
+    // every dab. The entry at the older boundary is still perfectly valid --
+    // roots [0, K) did not change, an append lands after them -- and a suffix
+    // compiled from K instead of K' is longer by the dabs since, which is a few
+    // items rather than the whole history. So a stroke keeps hitting.
+    //
+    // Never returns an entry whose boundary reaches `max_boundary`, because a
+    // prefix must leave a suffix for the seed to be folded onto.
+    const SdfPrefixField* find_usable(const scene::Layer& layer, std::size_t max_boundary,
+                                      const SdfPrefixPolicy& policy);
+
+    // A cheap statement that roots [0, K) cannot have changed since the digest
+    // last verified them.
+    //
+    // The digest is the safety net and stays: `find` recomputes it from what
+    // the layer holds right now, so a missed invalidation cannot produce wrong
+    // geometry. But it is O(prefix roots) -- measured 13.5 ms at 50,000 -- and
+    // a BRICK REFILL asks per frame where a Smooth transaction asks once per
+    // gesture. So a caller that holds a monotonic witness of structural change
+    // may hand it in, and the digest is then recomputed only when it moves.
+    //
+    // The witness must advance whenever ANY node in [0, K) could have changed.
+    // Passing 0 means "no witness", and the digest runs as it always did.
+    void set_structure_witness(std::uint64_t witness) { witness_ = witness; }
+
     // Build and cache the prefix for `layer` at the policy's boundary. Null
     // when the policy declines, the layer is not the document's last visible
     // SDF layer, or the bake refuses. Cancellable; a cancelled build caches
@@ -220,10 +274,15 @@ class SdfPrefixCache {
     struct Entry {
         SdfPrefixField field;
         std::list<std::uint64_t>::iterator lru;
+        // The witness value the digest last agreed with. 0 means "never
+        // verified under a witness", so the digest runs.
+        std::uint64_t verified_witness = 0;
     };
     static std::uint64_t key_of(scene::LayerId layer, std::size_t roots,
                                 const SdfPrefixPolicy& policy);
     void evict_to_budget();
+    bool verify(std::uint64_t key, const scene::Layer& layer, std::size_t prefix_roots);
+    std::uint64_t witness_ = 0;
 
     std::unordered_map<std::uint64_t, Entry> entries_;
     std::list<std::uint64_t> order_;  // front = most recently used
