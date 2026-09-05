@@ -653,8 +653,11 @@ bool MultiresSurface::refine_patches_to_level(const std::vector<std::uint32_t>& 
     // level above it evaluates its stencils against a parent that is complete
     // where it needs to be. Grown from the top down into `sets`, which makes
     // the growth one pass rather than one per level.
-    const std::uint32_t depth = target_level - static_cast<std::uint32_t>(state_->levels.size()) + 1;
-    if (static_cast<std::uint32_t>(state_->levels.size()) > target_level) return true;
+    // The guard FIRST: a hierarchy already at or past the target has nothing to
+    // build, and the subtraction below would wrap rather than say so.
+    const std::uint32_t have = static_cast<std::uint32_t>(state_->levels.size());
+    if (have > target_level) return true;
+    const std::uint32_t depth = target_level - have + 1;
 
     std::vector<std::vector<std::uint32_t>> sets(depth);
     std::vector<char> seen(patch_total(*state_), 0);

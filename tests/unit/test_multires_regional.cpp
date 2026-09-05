@@ -175,6 +175,15 @@ TEST_CASE("regional: depth is a property of a patch") {
     CHECK(s.effective_level(0, 3) == 0);
     CHECK(s.effective_level(10 * 4 + 4, 3) == 3);
     CHECK(s.effective_level(10 * 4 + 4, 1) == 1);
+
+    // Asking again for a depth the hierarchy already has is a no-op rather
+    // than four more levels, and asking for a SHALLOWER one is too — this call
+    // reaches a depth, it does not add one.
+    const std::vector<std::uint8_t> before = s.encode();
+    REQUIRE(s.refine_patches_to_level(block_patches(10, 4, 4, 2), 3));
+    REQUIRE(s.refine_patches_to_level(block_patches(10, 4, 4, 2), 1));
+    CHECK(s.max_level() == 3);
+    CHECK(s.encode() == before);
 }
 
 TEST_CASE("regional: refining with no detail does not move the surface") {
