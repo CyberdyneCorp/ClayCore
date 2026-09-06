@@ -877,6 +877,43 @@ It is cheap, it fails the day a fourth refusal is added without its id, and it
 turns "we agreed to do this" into something that does not depend on anyone
 remembering.
 
+### §12c. What was built for §12, §12a and §12b, and the two things to look at
+
+Written by the stage that closed blocker 5, because §12 had already been
+reported as done once while `clay_brick_cache_eval_requests_below` existed
+nowhere but in this file.
+
+**What is there now.** The entry point takes the same arguments as its two
+siblings plus a `clay_layer_id* out_blocking_layer`, compiles `ChunkHalf::Below`
+through the same `scoped_refill`, and refuses on one condition:
+`scene::visible_sdf_layer_above(doc, layer)` is non-zero. That predicate is a
+POSITION in the stack rather than a property of the layer — it answers for a
+hidden or non-SDF layer like any other — and it skips hidden, mesh and voxel
+layers above, because those are not in the fold and a split beneath them is
+still the whole document. The refusals that are about the layer the CALLER named
+(no such layer; a voxel or mesh layer as the seam) carry no id, and the header
+says so: the id a host does not have is the one above.
+
+**Look at this first: the setter's id has no out-parameter, so its channel is
+the message.** §12b asks for one test walking three refusals, and two of them
+have an out-parameter while `clay_document_set_layer_composition` does not and
+cannot grow one without changing a signature its callers already hold. Its
+refusal now spells `layer <id> is not an SDF layer, ...` and the test PARSES the
+id out of `clay_last_error()`. That is a channel only because something reads
+it; it is also weaker than an out-parameter, and the alternative — a
+`clay_last_blocking_layer()` accessor beside `clay_last_error()`, set by every
+refusal that knows an id — is the shape to take if a fourth refusal arrives, or
+if a reviewer would rather the rule be one mechanism than three.
+
+**And this second: `Except` and `Below` are the same compile wherever this call
+is legal.** With nothing visible and SDF above the named layer, "every layer
+except this one" and "every layer before this one" are the same set in the same
+order, so the two halves are byte-identical and NO test can tell which one the
+entry point asked for. The half is therefore held by the refusal alone: it is
+what keeps the accepted domain narrow enough for the two to coincide. A reviewer
+looking for a test that separates them will not find one, and should not read
+that as a gap.
+
 ## 13. The general form of all three blockers, and the sweep it requires
 
 Named by ClaySpaceDesktop on 2026-09-06 after reading the review findings, and it

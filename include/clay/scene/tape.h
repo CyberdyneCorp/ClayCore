@@ -456,10 +456,23 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& checkpoin
 // `first_composed_fold_layer` is the same question with the answer a refusal
 // wants: the id of the first visible SDF layer whose own composition is applied
 // and is not a hard Add, or 0 when there is none.
+//
+// `visible_sdf_layer_above` is what a caller splitting a document at `layer`
+// has to know before it may rejoin the halves: the id of the LOWEST visible SDF
+// layer above `layer` in stack order, or 0 when `layer` is the last one and the
+// split is therefore the whole document. It is a POSITION in the stack and not
+// a property of `layer` -- a hidden or non-SDF layer is a position like any
+// other -- so it answers for a layer of any kind, and 0 for one the document
+// does not hold. `below(layer)` stops at that position, so any visible SDF
+// layer above it is in the document and in neither half of the split; the id is
+// returned rather than a bool because a refusal that names the layer blocking
+// it names an action a host can offer (hide or move THAT layer), where one that
+// does not names a wall.
 const LayerComposition* layer_join_composition(const Document& doc, LayerId active);
 bool layer_join_is_hard_union(const Document& doc);
 LayerId first_composed_fold_layer(const Document& doc);
 bool document_fold_is_hard_union(const Document& doc);
+LayerId visible_sdf_layer_above(const Document& doc, LayerId layer);
 
 // -- one half of a document, for a resumable multi-layer refill --------------
 //

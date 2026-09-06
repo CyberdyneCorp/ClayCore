@@ -5426,8 +5426,13 @@ clay_result clay_document_set_layer_composition(clay_document* doc, clay_layer_i
     // positively found to be non-SDF is refused here.
     const scene::Layer* found = doc ? doc->doc.document.find_layer(layer) : nullptr;
     if (found && found->kind != scene::LayerKind::Sdf)
+        // NAMED, not merely refused. A host setting compositions across a
+        // selection gets one message per refusal and has to say which row it is
+        // about; the id is the only part of that this call knows and the caller
+        // would otherwise re-derive (design.md 12a, 12b).
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
-                    "only an SDF layer carries a composition");
+                    "layer " + std::to_string(layer) +
+                        " is not an SDF layer, and only an SDF layer carries a composition");
     scene::LayerComposition comp;
     comp.op = static_cast<scene::Op>(op);
     comp.blend.profile = static_cast<scene::BlendProfile>(blend);
@@ -14369,6 +14374,62 @@ clay_result clay_brick_cache_eval_requests_layer(
     // refill takes, asked for by name rather than by being the top layer.
     return scoped_refill(doc, layer, backend, requests, count, out_values, values_capacity,
                          out_colors_rgb, colors_capacity, ChunkHalf::Active);
+}
+
+clay_result clay_brick_cache_eval_requests_below(const clay_document* doc, clay_layer_id layer,
+                                                 const char* backend,
+                                                 const clay_brick_request* requests, size_t count,
+                                                 float* out_values, size_t values_capacity,
+                                                 float* out_colors_rgb, size_t colors_capacity,
+                                                 clay_layer_id* out_blocking_layer) {
+    // Cleared before anything can fail, so a caller that reads it after a
+    // refusal with no id to give reads 0 rather than what it passed in.
+    if (out_blocking_layer) *out_blocking_layer = 0;
+    if (doc) {
+        // Checked even for an empty batch, for the reason the excluding form
+        // states: a stale or wrong layer id is reported at the call that
+        // carries it rather than at whichever later call first has work in it.
+        const scene::Layer* seam = doc->doc.document.find_layer(layer);
+        if (!seam)
+            return fail(CLAY_ERROR_NOT_FOUND, "no layer " + std::to_string(layer) +
+                                                  " to split below: the split is taken AT a layer, "
+                                                  "and there is no such layer to take it at");
+        // A voxel or mesh layer is not in the fold at all, so "everything below
+        // it" is a position rather than a seam and there is nothing for the
+        // caller to rejoin with -- clay_document_layer_composition refuses such
+        // a layer too. Refused rather than answered, because a caller asking is
+        // naming the wrong layer, exactly as _layer refuses one.
+        if (seam->kind != scene::LayerKind::Sdf || !seam->sdf)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "layer " + std::to_string(layer) +
+                            " is not an SDF layer, so the document does not fold at it");
+        // THE ONE REFUSAL THIS FORM HAS, and it is much narrower than the
+        // excluding form's: the layers BENEATH may compose however they like,
+        // because compile_document_part folds them with their own compositions
+        // and this half is exactly the accumulator the whole-document walk
+        // holds when it reaches `layer`. What cannot be rejoined is a visible
+        // SDF layer ABOVE: it is in the document and in neither half, so no
+        // combine of the two halves is the document (design.md 12a).
+        //
+        // The id of that layer is handed back rather than only spelled in the
+        // message, because it is the difference between a host saying "hide or
+        // move THAT subtool to smooth this one live" and "not available here",
+        // and because the refusal has already computed the walk the host would
+        // otherwise repeat.
+        if (const scene::LayerId above = scene::visible_sdf_layer_above(doc->doc.document, layer)) {
+            if (out_blocking_layer) *out_blocking_layer = above;
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "layer " + std::to_string(above) +
+                            " is a visible SDF layer above layer " + std::to_string(layer) +
+                            ", so the layers below layer " + std::to_string(layer) +
+                            " folded with its own composition are not the whole document: hide or "
+                            "move layer " + std::to_string(above) + ", or split below it instead");
+        }
+    }
+    // Below is "every visible SDF layer before this one, folded as the document
+    // folds them". It stores no seed and reads none, as both siblings do.
+    return scoped_refill(doc, layer, backend, requests, count, out_values, values_capacity,
+                         out_colors_rgb, colors_capacity, ChunkHalf::Below);
 }
 
 clay_result eval_requests_impl(const clay_document* doc, const char* backend,

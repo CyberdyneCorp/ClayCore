@@ -106,6 +106,20 @@ which is never applied. Too wide keeps items a compile did not need and costs
 tape; too narrow returns a field that never existed, per brick, with no error and
 no visual tell beyond geometry that looks deliberate.
 
+AN ABSENT OPERAND IS STILL AN OPERAND, and where that diverges from what a host
+does the divergence SHALL be documented rather than left to be discovered. A
+layer that produces no value is folded against the far field wherever the
+operator reads an absent operand as a change, so a DOCUMENT-EMPTY intersecting
+layer blanks the field where a host that resolves booleans by collecting
+operands typically drops an empty one and leaves the field alone. The engine
+SHALL NOT take the host's rule: "this layer produced no value" is true both for
+a layer with no visible contributing items and for one whose chain was wholly
+CULLED out of the region being compiled, and skipping the fold in the second
+case would leave an intersecting layer's material standing in exactly the bricks
+its own geometry does not reach — per brick, with no error. The documentation
+SHALL say which route the engine takes, why it cannot take the other, and that a
+host wanting the two to agree filters empty operands itself.
+
 A document saved before layer composition existed SHALL load with every layer
 unioning, and SHALL render exactly as it did.
 
@@ -148,6 +162,10 @@ unioning, and SHALL render exactly as it did.
 #### Scenario: An old document is unchanged
 - **WHEN** a document saved before this feature is loaded
 - **THEN** every layer unions and the field is bit-identical to what that document produced before
+
+#### Scenario: An empty intersecting layer blanks the field, and the header says so
+- **WHEN** a visible SDF layer with no contributing items is set to intersect
+- **THEN** the document's field is empty, and the composition setter's documentation states that this differs from a resolved boolean that drops empty operands, and why the engine cannot follow that rule
 
 #### Scenario: A non-SDF layer refuses a composition
 - **WHEN** a composition is set on a mesh or voxel layer

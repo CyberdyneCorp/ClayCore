@@ -380,3 +380,56 @@
       bricks either way. The reach is fixed because the coverage belongs to the
       cull pad and not to the reach; the tests assert the invalidation, which is
       what the contract is about
+
+- [x] 7.5 THE THIRD REVIEW'S BLOCKER 5: design.md §12's deliverable was reported
+      as done and did not exist — `clay_brick_cache_eval_requests_below` was in
+      no header and no source file, only in design.md. Built now, as the same
+      shape as its two siblings (`ChunkHalf::Below`, which the resume split
+      already used and which no C entry point reached). Its refusal is the
+      NARROW one §12 asks for: only when the named layer is not the last visible
+      SDF layer, because the layers beneath may compose however they like —
+      `compile_document_part` folds them with their own compositions. Hidden,
+      mesh and voxel layers above do not block it, which matters because the
+      artist sees those rows. §12a's id is an out-parameter carrying the LOWEST
+      visible SDF layer above the named one, so a host says "hide or move that
+      subtool" instead of "not available here". §12 item 2 is in the
+      `_excluding` header: what to use instead, and that excluding from the
+      MIDDLE of a fold has no repair. Regression, §12 item 3: below folded with
+      the top layer's own composition equals the whole-document refill, over six
+      compositions on a document whose LOWER layers compose (a hard subtract and
+      a smooth add), bit-identical in distance AND colour, with the teeth that
+      the below half alone differs from the whole and that folding with a min
+      instead is a different field. Proved by reverting the half to
+      `ChunkHalf::Whole` (it compiles): 3,667 of 4,096 distances and every
+      colour differ on the composed arms. NOTE for a later reader: `Except` and
+      `Below` are the SAME compile wherever this call is legal — with nothing
+      above the named layer the two layer sets are identical — so the choice of
+      half is unobservable on the accepted domain and no test can separate them;
+      what the tests hold is the refusal that keeps the domain that narrow
+- [x] 7.6 §12b, the refusal rule made executable rather than agreed: one test
+      case walking every refusal in this change that has an id to give — the
+      composition setter on a non-SDF layer, `clay_document_writable_at_minor`
+      on a composed document, and `clay_brick_cache_eval_requests_below` on a
+      layer that is not the topmost visible SDF one — each asserted to return
+      its error code AND a non-zero id naming the layer actually responsible. The setter had no id at all (its
+      message said only "only an SDF layer carries a composition") and has no
+      out-parameter to grow, so its channel is the message, which now names the
+      layer and which the test PARSES rather than eyeballs. Proved by three
+      targeted reverts, each of which compiles: dropping the `*out_blocking_layer
+      = above` line leaves `blocking == 0` against the layer above; removing the
+      refusal entirely returns CLAY_OK where the test wants INVALID_ARGUMENT;
+      restoring the setter's old message leaves the parsed id at 0. The
+      `clay_document_writable_at_minor` arm is DOCUMENTATION and not evidence
+      (design.md §13d): it already returned its id, so no revert of this stage
+      moves it
+- [x] 7.7 §9's documentation duty, which was unmet in bindings/, include/, src/
+      and docs/: the absent-operand divergence is now stated beside the
+      composition setter in clay.h — that a DOCUMENT-empty operand is FOLDED
+      (an empty intersecting layer blanks the field) where a host's resolved
+      boolean skips it, that the engine cannot follow the host's rule because
+      "this layer produced no value" is also true of a layer wholly CULLED out
+      of the region being compiled, and that a host wanting the two routes to
+      agree filters empty operands itself. The behaviour itself was already
+      decided and tested ("an intersecting layer with nothing in it empties the
+      document", test_layer_fold.cpp), which is what made this a documentation
+      duty rather than a code change

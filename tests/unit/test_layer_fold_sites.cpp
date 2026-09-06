@@ -32,6 +32,7 @@
 
 #include "clay.h"
 #include "clay/kernel/tape.h"
+#include "clay_internal.h"
 #include "clay/scene/bounds.h"
 #include "clay/scene/commands.h"
 #include "clay/scene/cull_index.h"
@@ -663,13 +664,17 @@ struct AbiDoc {
     AbiDoc& operator=(const AbiDoc&) = delete;
 };
 
-void add_sphere_to(AbiDoc& doc, clay_layer_id layer, float r, float x) {
+void add_sphere(clay_document* d, clay_layer_id layer, float r, float x) {
     clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
     REQUIRE(it != nullptr);
     const float pos[3] = {x, 0.0f, 0.0f};
     REQUIRE(clay_item_set_position(it, pos) == CLAY_OK);
-    REQUIRE(clay_layer_add_item(doc.d, layer, it, nullptr) == CLAY_OK);
+    REQUIRE(clay_layer_add_item(d, layer, it, nullptr) == CLAY_OK);
     clay_item_destroy(it);
+}
+
+void add_sphere_to(AbiDoc& doc, clay_layer_id layer, float r, float x) {
+    add_sphere(doc.d, layer, r, x);
 }
 
 std::vector<clay_brick_request> equator_bricks() {
@@ -1684,3 +1689,385 @@ TEST_CASE("a gesture's reach carries the folds above its layer") {
     }
 }
 
+
+// -- 12/12a: the THIRD half, which is what a folded document leaves a preview -
+//
+// A host previewing one layer per frame takes the rest of the document once, at
+// pointer-down. While every layer unioned that was
+// `clay_brick_cache_eval_requests_excluding` composed with a `min`. Once a layer
+// composes the excluding form refuses -- the parts of a fold do not sum -- and
+// the pairing that survives is BELOW + the previewed layer, rejoined under that
+// layer's own composition. The claim is an EQUALITY over samples, not a
+// tolerance: the split is taken at a layer boundary, so the below half is
+// exactly the accumulator the whole-document walk holds when it reaches the top
+// layer.
+
+namespace {
+
+constexpr std::size_t kBrickSamples = 8 * 8 * 8;
+
+// Four SDF layers in the shape design.md 12a describes: a base, a cutter
+// BENEATH the layer being previewed, a smoothly-added form, and a top layer
+// whose composition the arms vary. The LOWER layers compose, which is the half
+// the excluding form cannot answer at all and this one has to answer exactly.
+struct BelowDoc {
+    clay_document* d = nullptr;
+    clay_layer_id base = 0, cutter = 0, form = 0, top = 0;
+
+    BelowDoc(int32_t top_op, int32_t top_blend, float top_k, float top_rounding) {
+        d = clay_document_create();
+        REQUIRE(d != nullptr);
+        REQUIRE(clay_add_sdf_layer(d, "base", &base) == CLAY_OK);
+        REQUIRE(clay_add_sdf_layer(d, "cutter", &cutter) == CLAY_OK);
+        REQUIRE(clay_add_sdf_layer(d, "form", &form) == CLAY_OK);
+        REQUIRE(clay_add_sdf_layer(d, "top", &top) == CLAY_OK);
+        add_sphere(d, base, 1.0f, 0.0f);
+        add_sphere(d, cutter, 0.5f, -0.85f);
+        add_sphere(d, form, 0.55f, 0.9f);
+        add_sphere(d, top, 0.45f, 0.55f);
+        add_sphere(d, top, 0.3f, -0.4f);
+        REQUIRE(clay_document_set_layer_composition(d, cutter, CLAY_OP_SUBTRACT, CLAY_BLEND_HARD,
+                                                    0.0f, 0.0f) == CLAY_OK);
+        REQUIRE(clay_document_set_layer_composition(d, form, CLAY_OP_ADD, CLAY_BLEND_QUADRATIC,
+                                                    0.3f, 0.0f) == CLAY_OK);
+        REQUIRE(clay_document_set_layer_composition(d, top, top_op, top_blend, top_k,
+                                                    top_rounding) == CLAY_OK);
+        // The comparison below is of FLOATS, so the whole-document arm is read
+        // with the uniform gate off: a brick it proves uniform is answered with
+        // a stand-in rather than with the field's samples, and the two scoped
+        // halves are never gated at all.
+        REQUIRE(clay_internal_set_uniform_gate(d, 0) == CLAY_OK);
+    }
+    ~BelowDoc() { clay_document_destroy(d); }
+    BelowDoc(const BelowDoc&) = delete;
+    BelowDoc& operator=(const BelowDoc&) = delete;
+};
+
+// Distance AND colour, because the combine couples them: a rejoin that got the
+// operator right and the colour wrong is still not the document's field.
+struct Field {
+    std::vector<float> d, rgb;
+};
+
+Field make_field(std::size_t bricks) {
+    Field f;
+    f.d.assign(bricks * kBrickSamples, 0.0f);
+    f.rgb.assign(bricks * kBrickSamples * 3, 0.0f);
+    return f;
+}
+
+Field whole_field(clay_document* d, const std::vector<clay_brick_request>& reqs) {
+    Field f = make_field(reqs.size());
+    REQUIRE(clay_brick_cache_eval_requests(d, nullptr, reqs.data(), reqs.size(), f.d.data(),
+                                           f.d.size(), f.rgb.data(), f.rgb.size()) == CLAY_OK);
+    return f;
+}
+
+Field below_field(clay_document* d, clay_layer_id layer,
+                  const std::vector<clay_brick_request>& reqs) {
+    Field f = make_field(reqs.size());
+    clay_layer_id blocking = 987654;
+    REQUIRE(clay_brick_cache_eval_requests_below(d, layer, nullptr, reqs.data(), reqs.size(),
+                                                 f.d.data(), f.d.size(), f.rgb.data(),
+                                                 f.rgb.size(), &blocking) == CLAY_OK);
+    CHECK(blocking == 0);  // cleared on success, so a host cannot read a stale id
+    return f;
+}
+
+Field layer_field(clay_document* d, clay_layer_id layer,
+                  const std::vector<clay_brick_request>& reqs) {
+    Field f = make_field(reqs.size());
+    REQUIRE(clay_brick_cache_eval_requests_layer(d, layer, nullptr, reqs.data(), reqs.size(),
+                                                 f.d.data(), f.d.size(), f.rgb.data(),
+                                                 f.rgb.size()) == CLAY_OK);
+    return f;
+}
+
+// What the HOST does per frame: fold the two halves it holds under the
+// composition it read back for the previewed layer. `rounding` is passed as the
+// stored value because every layer here carries an identity transform, where
+// the world rounding the tape emits is the stored one; a scaled layer would
+// need it multiplied by that layer's distance scale.
+Field host_fold(const Field& below, const Field& active, int32_t op, int32_t blend, float k,
+                float rounding) {
+    Field out = make_field(below.d.size() / kBrickSamples);
+    for (std::size_t s = 0; s < below.d.size(); ++s) {
+        kernel::CTapeValue a;
+        a.d = below.d[s];
+        a.color = cf3(below.rgb[s * 3], below.rgb[s * 3 + 1], below.rgb[s * 3 + 2]);
+        kernel::CTapeValue b;
+        b.d = active.d[s];
+        b.color = cf3(active.rgb[s * 3], active.rgb[s * 3 + 1], active.rgb[s * 3 + 2]);
+        const kernel::CTapeValue r = kernel::ctape_combine_values(a, b, op, blend, k, rounding);
+        out.d[s] = r.d;
+        out.rgb[s * 3] = r.color.x;
+        out.rgb[s * 3 + 1] = r.color.y;
+        out.rgb[s * 3 + 2] = r.color.z;
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("c abi: below + the top layer's own composition is the whole document") {
+    const std::vector<clay_brick_request> reqs = equator_bricks();
+
+    struct Arm {
+        const char* name;
+        int32_t op, blend;
+        float k, rounding;
+    };
+    for (Arm arm : {Arm{"hard add", CLAY_OP_ADD, CLAY_BLEND_HARD, 0.0f, 0.0f},
+                    Arm{"hard subtract", CLAY_OP_SUBTRACT, CLAY_BLEND_HARD, 0.0f, 0.0f},
+                    Arm{"smooth subtract", CLAY_OP_SUBTRACT, CLAY_BLEND_QUADRATIC, 0.25f, 0.0f},
+                    Arm{"smooth add", CLAY_OP_ADD, CLAY_BLEND_CUBIC, 0.3f, 0.0f},
+                    Arm{"rounded add", CLAY_OP_ADD, CLAY_BLEND_HARD, 0.0f, 0.1f},
+                    Arm{"intersect", CLAY_OP_INTERSECT, CLAY_BLEND_HARD, 0.0f, 0.0f}}) {
+        CAPTURE(arm.name);
+        BelowDoc doc(arm.op, arm.blend, arm.k, arm.rounding);
+
+        // The composition is read back through the ABI, not remembered from the
+        // setter: what a host has to fold with is what this reports.
+        int32_t op = -1, blend = -1;
+        float k = -1.0f, rounding = -1.0f;
+        REQUIRE(clay_document_layer_composition(doc.d, doc.top, &op, &blend, &k, &rounding) ==
+                CLAY_OK);
+
+        const Field whole = whole_field(doc.d, reqs);
+        const Field below = below_field(doc.d, doc.top, reqs);
+        const Field only = layer_field(doc.d, doc.top, reqs);
+        const Field rejoined = host_fold(below, only, op, blend, k, rounding);
+
+        bool near_surface = false;
+        for (float v : whole.d) near_surface = near_surface || std::fabs(v) < 0.5f;
+        REQUIRE(near_surface);  // or every comparison is two readings of "far outside"
+
+        // BIT-IDENTICAL, in distance and in colour.
+        CHECK(differing(rejoined.d, whole.d) == 0);
+        CHECK(differing(rejoined.rgb, whole.rgb) == 0);
+
+        // The teeth, without which the equality above could hold for a document
+        // whose top layer reached none of these samples.
+        CHECK(differing(below.d, whole.d) > 0);
+    }
+
+    SUBCASE("and rejoining with a min instead is a different field") {
+        // Which is the whole point: the min is what a host composed the
+        // EXCLUDING form with, and it is the fold only while the layer unions.
+        BelowDoc doc(CLAY_OP_SUBTRACT, CLAY_BLEND_HARD, 0.0f, 0.0f);
+        const Field whole = whole_field(doc.d, reqs);
+        const Field below = below_field(doc.d, doc.top, reqs);
+        const Field only = layer_field(doc.d, doc.top, reqs);
+        const Field wrong = host_fold(below, only, CLAY_OP_ADD, CLAY_BLEND_HARD, 0.0f, 0.0f);
+        CHECK(differing(wrong.d, whole.d) > 0);
+    }
+
+    SUBCASE("the lower layers' own compositions are in the below half, not lost") {
+        // The narrow refusal's whole claim: the layers beneath may compose
+        // however they like. Hiding the SUBTRACTING cutter changes the below
+        // half, so that half is folding it rather than unioning it.
+        BelowDoc doc(CLAY_OP_ADD, CLAY_BLEND_HARD, 0.0f, 0.0f);
+        const Field with_cutter = below_field(doc.d, doc.top, reqs);
+        REQUIRE(clay_document_set_layer_visible(doc.d, doc.cutter, 0) == CLAY_OK);
+        const Field without = below_field(doc.d, doc.top, reqs);
+        CHECK(differing(with_cutter.d, without.d) > 0);
+    }
+
+    SUBCASE("it stores no seed, so the whole-document refill after it is unchanged") {
+        BelowDoc doc(CLAY_OP_SUBTRACT, CLAY_BLEND_HARD, 0.0f, 0.0f);
+        const std::uint64_t before = resumed_bricks(doc.d);
+        below_field(doc.d, doc.top, reqs);
+        CHECK(resumed_bricks(doc.d) == before);
+
+        BelowDoc fresh(CLAY_OP_SUBTRACT, CLAY_BLEND_HARD, 0.0f, 0.0f);
+        CHECK(differing(whole_field(doc.d, reqs).d, whole_field(fresh.d, reqs).d) == 0);
+    }
+}
+
+TEST_CASE("c abi: below refuses only a layer that is not the last visible SDF one") {
+    const std::vector<clay_brick_request> reqs = equator_bricks();
+    Field out = make_field(reqs.size());
+    auto below = [&](clay_document* d, clay_layer_id layer, clay_layer_id* blocking) {
+        return clay_brick_cache_eval_requests_below(d, layer, nullptr, reqs.data(), reqs.size(),
+                                                    out.d.data(), out.d.size(), nullptr, 0,
+                                                    blocking);
+    };
+
+    SUBCASE("a visible SDF layer above blocks it, and the refusal hands back that layer") {
+        BelowDoc doc(CLAY_OP_SUBTRACT, CLAY_BLEND_HARD, 0.0f, 0.0f);
+        clay_layer_id detail = 0;
+        REQUIRE(clay_add_sdf_layer(doc.d, "detail", &detail) == CLAY_OK);
+        add_sphere(doc.d, detail, 0.2f, 0.2f);
+
+        clay_layer_id blocking = 987654;
+        CHECK(below(doc.d, doc.top, &blocking) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(blocking == detail);
+        const std::string why = clay_last_error() ? clay_last_error() : "";
+        CHECK(why.find(std::to_string(detail)) != std::string::npos);
+
+        // And the layer that IS the last one still answers, in the same
+        // document -- the refusal is about the position, not about the fold.
+        blocking = 987654;
+        CHECK(below(doc.d, detail, &blocking) == CLAY_OK);
+        CHECK(blocking == 0);
+    }
+
+    SUBCASE("and it is the LOWEST layer above, which is the one a host can act on") {
+        BelowDoc doc(CLAY_OP_ADD, CLAY_BLEND_HARD, 0.0f, 0.0f);
+        clay_layer_id pores = 0, detail = 0;
+        REQUIRE(clay_add_sdf_layer(doc.d, "pores", &pores) == CLAY_OK);
+        REQUIRE(clay_add_sdf_layer(doc.d, "detail", &detail) == CLAY_OK);
+        add_sphere(doc.d, pores, 0.2f, 0.2f);
+        add_sphere(doc.d, detail, 0.2f, 0.3f);
+        clay_layer_id blocking = 0;
+        CHECK(below(doc.d, doc.form, &blocking) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(blocking == doc.top);  // not `pores`, not `detail`
+    }
+
+    SUBCASE("a HIDDEN SDF layer above does not block it") {
+        // The stack the artist sees is not the stack that folds. A hidden row
+        // above the one being smoothed is not in the whole-document walk, so
+        // the split beneath it is still the whole document.
+        BelowDoc doc(CLAY_OP_SUBTRACT, CLAY_BLEND_HARD, 0.0f, 0.0f);
+        clay_layer_id detail = 0;
+        REQUIRE(clay_add_sdf_layer(doc.d, "detail", &detail) == CLAY_OK);
+        add_sphere(doc.d, detail, 0.2f, 0.2f);
+        REQUIRE(clay_document_set_layer_visible(doc.d, detail, 0) == CLAY_OK);
+        clay_layer_id blocking = 987654;
+        CHECK(below(doc.d, doc.top, &blocking) == CLAY_OK);
+        CHECK(blocking == 0);
+    }
+
+    SUBCASE("a voxel layer above does not block it either") {
+        BelowDoc doc(CLAY_OP_SUBTRACT, CLAY_BLEND_HARD, 0.0f, 0.0f);
+        clay_layer_id grid_layer = 0;
+        clay_voxel_grid* grid = nullptr;
+        REQUIRE(clay_document_add_voxel_layer(doc.d, "rasterised", 0.05f, &grid_layer, &grid) ==
+                CLAY_OK);
+        clay_layer_id blocking = 987654;
+        CHECK(below(doc.d, doc.top, &blocking) == CLAY_OK);
+        CHECK(blocking == 0);
+    }
+
+    SUBCASE("a layer with nothing beneath it answers the far field rather than refusing") {
+        // The documented trap: a host that composes unconditionally would
+        // subtract its own preview from nothing. The values say so plainly.
+        clay_document* one = clay_document_create();
+        REQUIRE(one != nullptr);
+        clay_layer_id only = 0;
+        REQUIRE(clay_add_sdf_layer(one, "only", &only) == CLAY_OK);
+        add_sphere(one, only, 1.0f, 0.0f);
+        clay_layer_id blocking = 987654;
+        CHECK(below(one, only, &blocking) == CLAY_OK);
+        CHECK(blocking == 0);
+        bool all_far = true;
+        for (float v : out.d) all_far = all_far && v > 1e6f;
+        CHECK(all_far);
+        clay_document_destroy(one);
+    }
+
+    SUBCASE("the refusals that are about the layer you named carry no id") {
+        BelowDoc doc(CLAY_OP_SUBTRACT, CLAY_BLEND_HARD, 0.0f, 0.0f);
+        clay_layer_id blocking = 987654;
+        CHECK(below(doc.d, 4242, &blocking) == CLAY_ERROR_NOT_FOUND);
+        CHECK(blocking == 0);
+
+        clay_layer_id grid_layer = 0;
+        clay_voxel_grid* grid = nullptr;
+        REQUIRE(clay_document_add_voxel_layer(doc.d, "rasterised", 0.05f, &grid_layer, &grid) ==
+                CLAY_OK);
+        blocking = 987654;
+        CHECK(below(doc.d, grid_layer, &blocking) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(blocking == 0);
+
+        blocking = 987654;
+        CHECK(below(nullptr, doc.top, &blocking) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(blocking == 0);
+    }
+
+    SUBCASE("a NULL out pointer is allowed, and the refusal still refuses") {
+        BelowDoc doc(CLAY_OP_SUBTRACT, CLAY_BLEND_HARD, 0.0f, 0.0f);
+        clay_layer_id detail = 0;
+        REQUIRE(clay_add_sdf_layer(doc.d, "detail", &detail) == CLAY_OK);
+        CHECK(below(doc.d, doc.top, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(below(doc.d, detail, nullptr) == CLAY_OK);
+    }
+}
+
+// -- 12b: the rule that a refusal knowing an id returns it, made executable ---
+
+namespace {
+
+// The blocking id a refusal spells in its MESSAGE. Two of the three refusals
+// below have an out-parameter for it; the composition setter has none and
+// cannot grow one without changing a signature its callers already hold, so its
+// channel is the text -- which is a channel only if something reads it, which
+// is what this does.
+clay_layer_id layer_named_in_last_error() {
+    const char* msg = clay_last_error();
+    if (!msg) return 0;
+    const std::string s = msg;
+    const std::string key = "layer ";
+    std::size_t at = s.find(key);
+    while (at != std::string::npos) {
+        std::size_t i = at + key.size();
+        clay_layer_id id = 0;
+        bool any = false;
+        while (i < s.size() && s[i] >= '0' && s[i] <= '9') {
+            id = id * 10 + static_cast<clay_layer_id>(s[i] - '0');
+            any = true;
+            ++i;
+        }
+        if (any) return id;
+        at = s.find(key, at + key.size());
+    }
+    return 0;
+}
+
+}  // namespace
+
+TEST_CASE("every refusal in this change that knows an id hands it back") {
+    // THE RULE, EXECUTABLE (design.md 12b). A refusal that has already computed
+    // which layer is responsible and reports only "no" makes the host walk the
+    // stack to re-derive it, and turns "hide or move Poros to smooth this layer
+    // live" into "not available here". This case fails the day a fourth refusal
+    // is added without its id, which is the whole reason it is a test and not a
+    // review note.
+    const std::vector<clay_brick_request> reqs = equator_bricks();
+
+    SUBCASE("the composition setter on a non-SDF layer names that layer") {
+        clay_document* d = clay_document_create();
+        REQUIRE(d != nullptr);
+        clay_layer_id grid_layer = 0;
+        clay_voxel_grid* grid = nullptr;
+        REQUIRE(clay_document_add_voxel_layer(d, "rasterised", 0.05f, &grid_layer, &grid) ==
+                CLAY_OK);
+        REQUIRE(grid_layer != 0);
+        CHECK(clay_document_set_layer_composition(d, grid_layer, CLAY_OP_SUBTRACT, CLAY_BLEND_HARD,
+                                                  0.0f, 0.0f) == CLAY_ERROR_INVALID_ARGUMENT);
+        const clay_layer_id blamed = layer_named_in_last_error();
+        CHECK(blamed != 0);
+        CHECK(blamed == grid_layer);
+        clay_document_destroy(d);
+    }
+
+    SUBCASE("writing at an older minor names the layer whose composition it cannot say") {
+        BelowDoc doc(CLAY_OP_ADD, CLAY_BLEND_HARD, 0.0f, 0.0f);
+        clay_layer_id blocking = 0;
+        CHECK(clay_document_writable_at_minor(doc.d, 17, &blocking) == CLAY_ERROR_UNSUPPORTED);
+        CHECK(blocking != 0);
+        CHECK(blocking == doc.cutter);  // the FIRST layer that blocks it, in stack order
+    }
+
+    SUBCASE("below on a layer that is not the topmost names the layer above it") {
+        BelowDoc doc(CLAY_OP_SUBTRACT, CLAY_BLEND_HARD, 0.0f, 0.0f);
+        Field out = make_field(reqs.size());
+        clay_layer_id blocking = 0;
+        CHECK(clay_brick_cache_eval_requests_below(doc.d, doc.form, nullptr, reqs.data(),
+                                                   reqs.size(), out.d.data(), out.d.size(),
+                                                   nullptr, 0, &blocking) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(blocking != 0);
+        CHECK(blocking == doc.top);
+    }
+}

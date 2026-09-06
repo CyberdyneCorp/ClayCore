@@ -885,6 +885,28 @@ underneath (`scene::compile_document_except`) still means what it always meant �
 the document without that layer — and is unchanged; what is deleted is the
 promise that it sums back.
 
+**The refusal names an alternative, not a wall.** The pairing that survives a
+fold is **below + the previewed layer**, and
+`clay_brick_cache_eval_requests_below` (ABI 0.86.0) is the half that was
+missing. It answers every visible SDF layer *beneath* the one you name, folded
+exactly as the document folds them — the layers below may compose however they
+like, because that half is compiled with their own compositions rather than
+unioned. Combining it with the host's live preview through the op, blend
+profile, blend radius and rounding `clay_document_layer_composition` reports for
+the previewed layer **is** the whole document's field, not an approximation of
+it; the `min` above is that same composition for the one case where the layer
+unions.
+
+It refuses only when the layer named is **not the last visible SDF layer**, and
+that refusal hands back the id of the lowest visible SDF layer above it, so a
+host can offer *"hide or move `Poros` to smooth `Forma_principal` live"* rather
+than reporting the tool unavailable. Hidden layers and mesh or voxel layers
+above do not block it: they are not in the fold. Excluding a layer from the
+*middle* of a stack still has no repair — the layers above it fold onto an
+accumulator that included it, so the two halves are not two operands of one
+combine — and reconstructing that case would need a three-way split and two
+host-side combines, which this ABI does not offer.
+
 **Neither call edits the document**, which is the other half of why they exist.
 The route a host would otherwise take — hide the layer, sample the rest, show it
 again — is three edits, and an edit taken between `clay_sdf_smooth_begin` and its

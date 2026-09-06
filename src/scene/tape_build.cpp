@@ -1565,6 +1565,23 @@ bool document_fold_is_hard_union(const Document& doc) {
     return first_composed_fold_layer(doc) == 0;
 }
 
+LayerId visible_sdf_layer_above(const Document& doc, LayerId layer) {
+    bool past = false;
+    for (const Layer& l : doc.layers) {
+        if (l.id == layer) {
+            past = true;
+            continue;
+        }
+        // The first VISIBLE SDF layer after that position, because those are
+        // the layers the fold walks and the only ones a split leaves out.
+        // Hidden, mesh and voxel layers above `layer` cost the caller nothing:
+        // they are not in the whole-document walk either, so a split taken
+        // beneath them is still the whole document.
+        if (past && l.visible && l.kind == LayerKind::Sdf && l.sdf) return l.id;
+    }
+    return 0;
+}
+
 Tape compile_document(const Document& doc, const CullRegion* cull, const CullIndex* index,
                       const CullPlan* plan) {
     Compiler c;

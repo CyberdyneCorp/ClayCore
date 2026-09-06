@@ -1325,6 +1325,30 @@ clay_result clay_document_set_layer_transform_nonuniform(clay_document* doc, cla
  * A negative radius or rounding is rejected rather than clamped, as
  * clay_set_layer_radial rejects an axis of 3.
  *
+ * AN EMPTY LAYER IS STILL AN OPERAND, and this is where a live fold and a
+ * host's own resolved boolean disagree. A layer that produces no value here is
+ * folded against the far field wherever the operator reads an absent operand as
+ * a change, so an EMPTY layer set to CLAY_OP_INTERSECT blanks the document's
+ * field rather than leaving it alone, and one set to CLAY_OP_SUBTRACT removes
+ * nothing. A host that resolves booleans by collecting operands typically drops
+ * an empty subtool before combining — "there is nothing in it to combine" — and
+ * on that route the same document keeps its geometry. Both are defensible; they
+ * are not the same document.
+ *
+ * THE ENGINE CANNOT TAKE THE HOST'S RULE, and the reason is not a preference.
+ * "This layer produced no value" is true for two different reasons and only one
+ * of them is emptiness: the layer may have no visible contributing items, or
+ * its chain may have been wholly CULLED out of the region being compiled, which
+ * a per-brick refill does constantly for a layer with content elsewhere.
+ * Skipping the fold in the second case would leave an intersecting layer's
+ * material standing in exactly the bricks its own geometry does not reach,
+ * per brick, with no error and nothing in the values to show it. So the fold is
+ * applied in both cases.
+ *
+ * A HOST THAT WANTS THE TWO ROUTES TO AGREE FILTERS EMPTY OPERANDS ITSELF —
+ * hide, or do not compose, a layer it considers empty — because "empty" is a
+ * document-level fact the host is holding and the engine is not.
+ *
  * WHAT A SOFT RADIUS COSTS A DRAG, and it is not where a host would look for
  * it. A layer whose composition carries a soft blend with a positive radius
  * classifies as GENERAL from clay_layer_placement_report, so
@@ -10152,7 +10176,34 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
  * drags, and composes the result with its live preview per frame.
  *
  * clay_document_resume_stats is untouched by this call — neither counter moves,
- * because neither a resume nor a seedable full walk happened. */
+ * because neither a resume nor a seedable full walk happened.
+ *
+ * WHEN IT REFUSES, AND WHAT TO USE INSTEAD (ABI 0.86.0). This form refuses a
+ * document where ANY applied layer composition is not a hard Add, because the
+ * two parts no longer compose back to the whole — see
+ * clay_document_set_layer_composition. That refusal has an alternative and it
+ * covers the case a live preview is usually in:
+ *
+ *   * IF THE LAYER YOU ARE PREVIEWING IS THE TOP VISIBLE SDF LAYER, use
+ *     clay_brick_cache_eval_requests_below on it instead. What comes back is
+ *     every visible SDF layer beneath it, folded exactly as the document folds
+ *     them however THEY compose, and combining that with your own preview of
+ *     the layer under the brush — through the op, blend profile, blend radius
+ *     and rounding clay_document_layer_composition reports for THAT layer — is
+ *     the whole document's field, not an approximation of it. The min this
+ *     header describes above is that same composition for the one case where
+ *     the layer unions.
+ *   * IF IT IS NOT, there is no repair, and that is a property of the fold
+ *     rather than a gap in this ABI. Excluding a layer from the MIDDLE of a
+ *     stack changes what every layer above it folds ONTO, so the two halves are
+ *     not two operands of one combine and no operator applied to them
+ *     reconstructs the document. Reconstructing that case needs a three-way
+ *     split (below, the layer, above) and two host-side combines, which this
+ *     ABI does not offer.
+ *
+ * clay_brick_cache_eval_requests_below names the layer that blocks it when the
+ * layer you asked about is not the top one, so a host can offer "hide or move
+ * <that layer>" rather than reporting that the tool is unavailable. */
 clay_result clay_brick_cache_eval_requests_excluding(
     const clay_document* doc, clay_layer_id excluded, const char* backend,
     const clay_brick_request* requests, size_t count, float* out_values, size_t values_capacity,
@@ -10232,6 +10283,74 @@ clay_result clay_brick_cache_eval_requests_layer(
     const clay_document* doc, clay_layer_id layer, const char* backend,
     const clay_brick_request* requests, size_t count, float* out_values,
     size_t values_capacity, float* out_colors_rgb, size_t colors_capacity);
+
+/* The THIRD half, and the one a folded document leaves a live preview (ABI
+ * 0.86.0): every visible SDF layer BELOW `layer`, folded exactly as the
+ * document folds them. Same arguments, same ceilings, same fixed per-brick
+ * slots at the same stride as the two forms above; brick i still occupies
+ * out_values[i * dim^3 ...].
+ *
+ * WHAT IT IS FOR. A host previewing one layer per frame wants the rest of the
+ * document once, at pointer-down. While every layer unioned,
+ * clay_brick_cache_eval_requests_excluding answered that and a min composed the
+ * two. Once a layer composes, the excluding form refuses — the parts of a fold
+ * do not sum — and this is the pairing that survives:
+ *
+ *     document = below(L)  <L's own composition>  your preview of L
+ *
+ * where L's composition is what clay_document_layer_composition reports for L —
+ * its op, blend profile, blend radius and rounding, applied in that order with
+ * below(L) as the LEFT operand. That is not an approximation: the split is
+ * taken at a layer boundary, so what comes back here is exactly the
+ * accumulator the whole-document walk holds when it reaches L.
+ *
+ * THE LAYERS BENEATH MAY COMPOSE HOWEVER THEY LIKE — a subtracting cutter, a
+ * smooth base, any stack of them — because this half folds them with their own
+ * compositions rather than unioning them. That is why this refusal is narrow
+ * where the excluding form's is broad.
+ *
+ * IT REFUSES ONLY WHEN `layer` IS NOT THE LAST VISIBLE SDF LAYER, with
+ * CLAY_ERROR_INVALID_ARGUMENT: a visible SDF layer above it is in the document
+ * and in neither half, so no combine of the two halves is the document. THE
+ * REFUSAL NAMES THE LAYER THAT BLOCKS IT — *out_blocking_layer receives the id
+ * of the LOWEST visible SDF layer above `layer` — so a host can say "hide or
+ * move <that subtool> to smooth <this one> live" instead of reporting the tool
+ * unavailable, and does not have to walk the stack to re-derive a fact this
+ * call already computed. Hidden layers and mesh or voxel layers above `layer`
+ * do NOT block it: they are not in the fold, so a split beneath them is still
+ * the whole document — which is worth knowing, because the artist sees rows
+ * above the one they are on and this call does not refuse for them.
+ *
+ * out_blocking_layer may be NULL. It is set to 0 on CLAY_OK and on every other
+ * refusal — a null document, a batch or buffer that does not check out,
+ * CLAY_ERROR_NOT_FOUND for an id the document does not hold, and
+ * CLAY_ERROR_INVALID_ARGUMENT for a mesh or voxel layer (the document does not
+ * fold at one, so there is no seam and no composition to rejoin under). Those
+ * refusals are about the layer you named, which you already have.
+ *
+ * WHAT IT DOES NOT PROMISE.
+ *
+ *   * IT IS NOT "the document without L". A layer ABOVE L is refused rather
+ *     than skipped, and this is the whole difference from the excluding form.
+ *   * A LAYER WITH NOTHING BENEATH IT is answered, not refused: the values are
+ *     the far value everywhere, and clay_document_layer_composition's value for
+ *     L is NOT applied there — the first visible SDF layer initialises the
+ *     accumulator. A host composing unconditionally would subtract its own
+ *     preview from nothing. Check for the empty half, or read
+ *     clay_document_layer_count of the visible SDF layers beneath.
+ *   * A HIDDEN SDF LAYER may be named, on the same reading
+ *     clay_brick_cache_eval_requests_layer takes: the caller named it, which
+ *     says more than the visibility flag does. What comes back is still every
+ *     visible SDF layer below that position.
+ *   * IT TAKES NO SEED AND LEAVES NONE, exactly as the two scoped forms above,
+ *     and for the same reason: a value computed for part of the document is not
+ *     a seed for the document, and storing one would be silently wrong later.
+ *     So it costs a full walk, and clay_document_resume_stats does not move. */
+clay_result clay_brick_cache_eval_requests_below(
+    const clay_document* doc, clay_layer_id layer, const char* backend,
+    const clay_brick_request* requests, size_t count, float* out_values,
+    size_t values_capacity, float* out_colors_rgb, size_t colors_capacity,
+    clay_layer_id* out_blocking_layer);
 
 /* clay_brick_cache_eval_requests with the destination on the device — the call
  * a host refilling a brick atlas actually wants. Brick i occupies
