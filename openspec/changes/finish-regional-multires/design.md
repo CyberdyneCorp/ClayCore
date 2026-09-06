@@ -221,3 +221,35 @@ against a measured peak rather than assumed.
 - **Caching beyond `LevelCache`.** The tree caches at three levels with the
   justification written into the code, including a measured regression from moving
   one scan. Nothing here removes a cache.
+
+## A host question the export half must answer, whether or not it delivers it
+
+Raised by ClaySpaceDesktop on 2026-09-06, after it checked its own code rather
+than answering from memory. It is recorded here so the export work knows what it
+must NOT become, and it is deliberately not allowed to steer the work.
+
+**Their state today.** `export_mesh` takes their combined mesh, and a hierarchy
+contributes its CAGE rather than the level it is drawn at. Their comment records
+that as a deliberate trade, not an oversight: keeping a layer's triangles in step
+with the display level would mean a wholesale geometry replacement — one engine
+undo entry per gesture, or per save — and either would put a document EDIT inside
+something a sculptor did not ask to be an edit. The route they point people at is
+the crossing that bakes a level out to a mesh, which is one step and says what it
+gives up.
+
+**Their question.** If mixed-depth export makes it possible to read a sculpted
+level's triangles WITHOUT a wholesale replacement — a read that does not become a
+document edit — then the trade above stops being a trade and becomes a thing they
+would take.
+
+**What this change owes it, which is not the feature.** The export path must be a
+READ. A path that produces a sculpted level's geometry and quietly costs an undo
+entry, bumps a revision that invalidates a host's caches, or mutates a layer's
+triangles is the same complaint arriving from this side of the wire. **State in
+the header and the spec whether the export is a read, and if any part of it is
+not, say which part and why.**
+
+They asked explicitly that this not shape the brief and it does not: the export
+half is built because the residual is real, and to be correct rather than fast,
+since no host is waiting on it. If a non-mutating read of a level falls out of
+the work anyway, that is worth telling them; nothing is to be bent to chase it.
