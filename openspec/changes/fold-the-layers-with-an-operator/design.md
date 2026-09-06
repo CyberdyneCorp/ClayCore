@@ -519,3 +519,35 @@ never ask. A save-at-minor entry point needs its own change — the blob variant
 the autosave and journal paths, and the other lossy minors all come with it — and
 the query above is the half that makes this change's decision answerable from a
 host meanwhile.
+
+## 8. SDF-only is the shape of the FEATURE, not of stage 1
+
+Asked by ClaySpaceDesktop on 2026-09-06, because the answer decides whether their
+interface explains a live boolean per OPERATION or per OPERAND, and they would
+rather write the sentence once. It is per operand, and it is durable.
+
+`run()` folds `if (!layer.visible || layer.kind != LayerKind::Sdf || !layer.sdf)
+continue;` (`src/scene/tape_build.cpp:1243`, and again at `:1281` for the part
+compile). A mesh or voxel layer contributes NOTHING to what a document evaluates
+to, and that is a standing architectural property rather than an omission: for
+mesh it is structural, since `tools/check_layering.py` withholds `mesh` from
+`clay::scene`, which is what makes "a mesh layer does not change what the
+document evaluates to" a fact about the build rather than a maintained promise.
+
+So a composition on a non-SDF layer would be **state that does nothing**, which
+the spec delta forbids in as many words: "A layer whose kind cannot enter the tape
+SHALL REFUSE a composition rather than store one that does nothing, so that a
+control a host offers is a control that acts." Widening the setter later would
+mean either lifting a representation into the tape or storing a control that lies,
+and the first is a different change entirely.
+
+**The route for the other representations is CONVERSION, not a later widening.** A
+mesh becomes a field through the mesh-to-field import and is then an ordinary SDF
+layer that can carry a composition — which is why gate 6.5 of this change is "a
+converted mesh-to-SDF layer works as a cutter" and not an afterthought. A voxel
+region becomes a field item through a captured volume. Both are existing routes.
+
+**The sentence a host can write and keep:** a subtool is live when it is a FIELD
+subtool; a mesh or grid subtool becomes live by being converted into one; and a
+resolved boolean remains first-class for operands that are not converted, rather
+than being the old way waiting to be retired.
