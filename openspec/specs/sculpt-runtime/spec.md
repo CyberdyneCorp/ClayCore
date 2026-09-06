@@ -1,7 +1,17 @@
 # sculpt-runtime Specification
 
 ## Purpose
-TBD - created by archiving change add-extreme-poly-runtime. Update Purpose after archive.
+
+Sculpting at extreme polygon counts is a memory and transport problem before it
+is a brush problem. This capability is the runtime beneath every mesh
+representation: one chunk unit shared by the sculptors, the meshers and the
+transport, chunk revisions so a host uploads what changed rather than what
+exists, memory profiles and pressure trim so a device can be asked for memory
+back, and the scaling gates that make "a dab costs what it touches" testable at
+1M-20M vertices rather than asserted.
+
+It optimises an architecture rather than compensating for a missing one, which
+is why it is specified as counts and revisions rather than as durations.
 
 ## Requirements
 

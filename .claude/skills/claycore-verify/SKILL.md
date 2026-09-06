@@ -52,7 +52,7 @@ python3 tools/check_c_abi.py              # header hygiene + ctypes FFI
 python3 tools/check_test_shards.py        # the four shards partition the suite
 python3 tools/check_gallery.py            # the nine gallery documents
 python3 tools/check_doc_latency.py
-npx -y @fission-ai/openspec@1.8.0 validate --all --strict
+npx -y @fission-ai/openspec@1.12.0 validate --all --strict
 ```
 
 Then the two slow ones: `tools/check_bench.py` (see the `claycore-bench` skill)
@@ -73,11 +73,18 @@ does.
   a real check, `parsed bindings/python/pyclay_module.cpp` is not. It also goes
   false-*red* against a stale module a different build tree happens to hold — the
   fix there is `cmake --build <dir> --target pyclay`, not a source change.
-- **OpenSpec: CI pins `@fission-ai/openspec@1.8.0`.** An older local CLI passes
-  deltas that CI rejects. 1.8.0's rule: a `## MODIFIED Requirements` block
+- **OpenSpec: CI pins `@fission-ai/openspec@1.12.0`.** Run that exact version,
+  not whatever `openspec` is on your PATH — the pin was 1.8.0 until 2026-09-06
+  and the skew hid a real failure for a day, because the STRICTER tool was the
+  one nobody's CI ran (four capabilities kept the placeholder `## Purpose` that
+  `openspec archive` writes; `release_check.py` went red locally and CI stayed
+  green). The rule that catches most people: a `## MODIFIED Requirements` block
   *replaces* the whole requirement, so the delta must repeat **every**
   `#### Scenario:` the live spec still carries. Pull them first:
   `awk '/^### Requirement: <name>/,/^### Requirement: [^X]/' openspec/specs/<cap>/spec.md`
+  1.12.0 also prints, as INFO, what an `openspec archive` WOULD refuse — a
+  MODIFIED block whose target requirement no live spec carries — which is worth
+  reading before you try the archive rather than after.
 - **`clay_bench` in `build/cpu-only` is stale by construction** — benchmarks are
   OFF in that cache. See the `claycore-bench` skill.
 - **The Swift smoke consumes the prebuilt xcframework**, not the working tree,
