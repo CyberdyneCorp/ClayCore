@@ -37,22 +37,28 @@
 # the very thing it exists to catch. This sentence used to be advice to a human;
 # `--self-test` is where both directions are proved.
 #
-# The live example: `LayerComposition` resolves on main (it landed with the
-# layer-composition change) and does not resolve on the branch this file was
-# audited from. Nobody has to remember to delete its row -- the first run after
-# that merge fails and says so.
+# The live example WENT OFF AS WRITTEN. `LayerComposition` resolved on main (it
+# landed with the layer-composition change) and not on the branch this file was
+# audited from; nobody remembered to delete its row, and the first run after
+# that merge failed and named it. Its row, and two more the mechanism caught the
+# same way, are gone.
+#
+# RE-AUDITED once a path-shaped citation stopped being resolved through the
+# filesystem. Four more rows came off, and none of them was debt anyone owed:
+# `brush/procedural_mask.h`, `brush/surface_measure.h`, `Shared/` and
+# `examples/60` all name tracked files by a suffix or a prefix rather than by a
+# root-relative path, which the old `os.path.exists` could not see and a bare
+# filename never needed. What is left is debt in one honest shape: a name in
+# another repository, in a build artefact, or promised and not yet built. Two of
+# those rows also stopped being machine-dependent -- `dist/claycore.xcframework`
+# is gitignored build output and `../../backends/cpu/` is outside the checkout,
+# so both used to resolve or not depending on whose disk the gate ran on, and
+# both now fail everywhere.
 #
 # <change>\t<span>
 
-add-claycore-bridge	brush/procedural_mask.h
-add-claycore-bridge	docs/sculpt-handoff-format.md
 add-claycore-bridge	fieldSampledMaps
-add-claycore-bridge	brush/surface_measure.h
 add-device-perf-gates	Headers/clay/kernel/
 add-device-perf-gates	dist/claycore.xcframework
 add-mobile-thread-scheduling	../../backends/cpu/
-correct-the-undo-scope	lattice_gizmo_preview
-fold-the-layers-with-an-operator	LayerComposition
-make-device-timing-position-independent	Shared/
 speed-the-metal-path	bytesNoCopy
-survive-a-crash	examples/60
