@@ -92,3 +92,327 @@ on "the document" must include the composition in what it is keyed on:
 
 Conservative first: invalidate, measure, then narrow. A missed invalidation here
 is wrong geometry that renders happily.
+
+## Decision — task 0.1, settled 2026-09-06
+
+Read against the tree, not against the proposal. Every line number below was
+re-checked; the ones design.md and proposal.md carry have drifted and are
+corrected in §4 of this section.
+
+### 1. The split: SPLIT AT THE LAST HARD BOUNDARY, which is the only boundary
+
+**Not (a), and not (b). (c) — and in this tree (c) costs exactly what (a) costs,
+because the split has exactly one seam.**
+
+§1 above argues against (b) on the grounds that "the accumulated value part-way
+down a chain is not the value the whole-document compile would have folded".
+That sentence does not describe this split. There is no part-way-down. The
+split point is fixed, in five independent places, as the LAST visible SDF layer:
+
+- `plan_resume` (`bindings/c/clay_c.cpp:1498`), loop at `:1505-1512`, keeps the
+  last visible SDF layer and sets `has_below = visible > 1` at `:1517`.
+- `plan_frontier` (`:1558`), same loop at `:1563-1568`, same `:1570`.
+- `eval_requests_impl` (`:14243-14250`), a third copy of the same loop.
+- `compile_document_part(doc, active, below=true)` is `run_part` with
+  `Part::Before` (`src/scene/tape_build.cpp:1133`), which BREAKS at `active`
+  (`:1141`) — so the `below` half is the complete accumulator `run()` holds at
+  that same point, folded by the same loop, under the same document pad.
+- `scene::last_visible_sdf_layer` (`tape_build.cpp:1262`) is the fifth copy.
+
+So the value the refill holds as `below` is not a partial accumulator. It is
+THE accumulator, at a layer boundary, and the join between it and the active
+half is one combine: the ACTIVE layer's own composition. Under a per-layer
+operator the split is therefore available exactly when that one composition is a
+hard Add — regardless of what every layer beneath it does, because `run_part`
+already folded those with their own compositions.
+
+**The gate is one predicate on one layer:**
+
+```cpp
+// scene/tape.h, beside last_visible_sdf_layer.
+// The join a caller holding two halves apart has to re-apply itself. True when
+// there is nothing beneath the active layer, or when the active layer folds
+// with a plain hard Add — the only fold `fold_layers_below` can spell.
+bool layer_join_is_hard_union(const Document& doc);
+```
+(implementation: find the last visible SDF layer and count them; true if
+`visible <= 1`, else `c.op == Op::Add && c.blend.profile == BlendProfile::Hard &&
+c.blend.k == 0.0f && c.rounding == 0.0f` for that layer alone.)
+
+A SECOND, stricter predicate is needed for one site only — `compile_document_except`,
+whose promise is about the whole stack, not about one seam:
+
+```cpp
+// True when every visible SDF layer AFTER the first folds with a plain hard
+// Add. Only Except/Only's min-composition identity needs this.
+bool document_fold_is_hard_union(const Document& doc);
+```
+
+**Why this and not (a).** (a) as §1 states it refuses the split for any document
+that uses the feature anywhere. That would cost the fast path for the most
+ordinary shape the feature creates — a cutter layer beneath a unioning layer the
+artist is sculpting into — for no correctness gain whatsoever, because the fold
+at the seam in that document is still a hard Add. (c) refuses only where the
+seam itself is composed.
+
+**Why this and not (b).** (b) would teach `fold_layers_below`
+(`bindings/c/clay_c.cpp:13263`) the four arguments. It is one line, and it is
+correct at a layer boundary for any pointwise op — but it buys three new silent
+failure modes and this change already has enough:
+
+- **The empty half.** An empty tape evaluates to `CLAY_TAPE_FAR`
+  (`include/clay/kernel/tape.h:1175`). `run()` at `tape_build.cpp:1199` does
+  `if (!layer_val) continue;` and skips the combine entirely. With a hard Add,
+  `min(below, FAR) == below` and the two agree. With a layer-level Intersect,
+  `max(below, FAR) == FAR` and they do not — two different wrong answers from
+  one document, differing only in bricks the composed layer does not reach.
+  Under (c) that question never arises in the refill: the fold that runs is the
+  one that is already there and already tested.
+- **Transitions and feathered replace cannot be folded at all.** The interpreter
+  branches on `ctape_mode_is_transition` and `ccombine_replace_feather` BEFORE
+  calling `ctape_combine_values` (`kernel/tape.h:1184-1194`), because both need
+  the sample point. `fold_layers_below` has six floats and no `p`, and
+  `ctape_combine_dist`'s forward-compatibility arm returns `a` for an unknown
+  mode (`kernel/tape.h:1063`) — the active layer discarded, silently. (Both ops
+  are refused at the setter anyway; under (b) that refusal becomes load-bearing
+  rather than merely tidy.)
+- **Two implementations of one rule.** Under (c) the refill contains no fold
+  arithmetic that the compiler does not also contain; whatever §2 decides about
+  `!layer_val` is inherited by both halves for free, because both go through
+  `run_part`/`run`. Under (b) the rule has to be written twice and can only be
+  compared by sampling.
+
+`fold_layers_below` stays byte-for-byte as it is. That is the point.
+
+**What it costs, concretely.**
+
+Unaffected — the split stays available:
+- every document with one visible SDF layer (its composition is never applied,
+  by the first-visible rule, so the predicate is trivially true);
+- every document that exists today;
+- every multi-layer document whose TOP visible SDF layer unions hard, whatever
+  the layers beneath it are set to. `A − B + C` sculpted on `C` keeps the fast
+  path.
+
+Loses the split — top visible SDF layer composed, i.e. sculpting into the cutter:
+- the append resume (#348) — `plan_resume` returns `usable = false`;
+- the frontier drag resume (#360/#362) — `plan_frontier` likewise;
+- the full path's Active/Below split — one whole-document batch instead of two
+  halves, and no seed stored.
+
+It does NOT lose anything else, because two consumers already refuse every
+multi-layer document and this change does not touch them: the #306 cold-brick
+prefix path (`prefix_source`, `clay_c.cpp:1734`, `if (has_below) return src;`)
+and the device refill's seed keep (`resume_batch_into_host`, `:12564`,
+`*keep_seeds = !doc->plan_resume(1).has_below;`).
+
+**What a benchmark shows.** Register a composed-top-layer arm beside the
+existing pair `BM_BrickRefillResumed` / `BM_BrickRefillFull`
+(`benchmarks/bench_main.cpp:1385`, `:1388`) and gate the `resumed_frac` counter
+(`:1849`) through `MAX_COUNTER` in `tools/check_bench.py:794` — the claim is a
+COUNT, so it is asserted as one. Expected: `resumed_frac` 0.0 on the composed
+arm against ~1.0 on the union arm, and per-dab cost equal to `BM_BrickRefillFull`
+— the pre-#348 cost of a stroke on a multi-layer document, restored for that one
+shape and no other. A wall-clock floor is the wrong gate here and
+`MAX_COUNTER` skips silently on absence, so the union arm needs a `FASTER_THAN`
+pair as well or the row can pass by not running.
+
+### 2. Policy at each site
+
+Detection is cheap wherever the `Document` is in hand; the table says so per row.
+
+| # | Site (verified) | Policy | Detection | Test |
+|---|---|---|---|---|
+| 1 | `include/clay/scene/tape.h:147` — `compile_document` | CHANGES. This is the definition of the fold, so it does not detect anything; it folds. Comment rewritten: visible SDF layers FOLD left to right, the first initialising and its op not applied. | none needed | the §3.3 parity fixture, plus the order gate (`A−B+C` vs `A+C−B`) |
+| 2 | `tape.h:198-206` + `tape_build.cpp:1255` — the resumable checkpoint's trailing union | `resume()` emits the ACTIVE LAYER's composition instead of `Op::Add`, still guarded by `cp.doc_have_acc`. The op is DERIVED from the `const Layer&` `resume()` already takes — it is NOT added to `TapeCheckpoint`. | `layer.composition`, already a parameter | `test_tape_prefix_reuse.cpp:167`, new subcases with a composed active layer; `require_identical(reused, full)` |
+| 3 | `tape.h:355-375` — `compile_document_part` | Both halves stay correct compiles; only the JOIN changes, and it is the active layer's composition. Header restated: the join is no longer universally a hard Add, and a caller that re-applies the join itself must refuse unless `layer_join_is_hard_union`. Engine does not refuse. | caller's, see rows 6-8 | `combine(below, only, active.composition)` equals `compile_document` over a `lattice(16)`, memcmp, with the teeth check that a union-composed pair differs |
+| 4 | `tape.h:386-405` — `compile_document_except` | NOT repairable and not repaired. With `A, B(Subtract), C` and `excluded = B`, no combine of `A+C` and `B` equals `A−B+C`: removing a middle layer changes what everything above it folds onto. The COMPILE stays valid ("the document without that layer"); the SUM promise is deleted from the header. The four callers whose contract IS the min composition REFUSE with `CLAY_ERROR_INVALID_ARGUMENT` naming the layer. | `document_fold_is_hard_union(doc)` — the strict predicate — at `clay_c.cpp:3149` (`compile_document_without`), `:14144` (`clay_brick_cache_eval_requests_excluding`, which already has a `CLAY_ERROR_NOT_FOUND` refusal to sit beside), `pyclay_module.cpp:6547` and `:6562` | `test_c_eval_excluding.cpp:83` and `:120` UPDATED, not weakened: the zero-differing-samples assertion is kept for the union arm with a comment saying it now holds only while every layer unions, and a composed arm asserts the refusal |
+| 5 | `tape_build.cpp:1362` — `compile_document_append`'s `info`/`lipschitz_bounds_gradient`/`bounds` carry-over | REFUSE: `return false` when the trailing union is not a hard Add. The comment's justification ("a hard Add is exact and adds no extent") is then true wherever the function proceeds. A refusal costs one full compile, which `tape.h:290-296` already documents as the price of not being certain. Folding `info` by hand here is possible and is deliberately not done in v1: a wrongly-true `lipschitz_bounds_gradient` feeds `prove_uniform` and stores a brick that reads surface as outside. | `last_visible_sdf_layer(doc)` is already called at `:1343` | append a composed active layer, assert the call returns false and the caller's full compile is bit-identical to the reference |
+| 6 | `bindings/c/clay_c.cpp:1498` `plan_resume` (statement at `:1545`) | `usable = false` when `has_below && !layer_join_is_hard_union(doc.document)`, inserted AFTER `:1517`. `has_below` keeps meaning "more than one visible SDF layer" — three callers probe it as a topology question and the existing comment at `:1513-1515` says it is set before any decline for exactly that reason. | the `Document` is a member | `test_c_frontier_resume.cpp:266`/`:681` shape: a composed document's plan comes back unusable |
+| 7 | `bindings/c/clay_c.cpp:1558` `plan_frontier` (statement at `:1584`) | Identical insertion after `:1570`. | same | same |
+| 8 | `bindings/c/clay_c.cpp:14250` `eval_requests_impl` | `const bool split = visible_sdf > 1 && layer_join_is_hard_union(...)` replaces `has_below` as the driver of `ChunkHalf` (`:14386`, `:14399`), the fold (`:14408`) and `store_seeds` (`:14418`). When refused: one `ChunkHalf::Whole` batch, and NO SEED STORED — the precedent is `resume_batch_into_host`'s "It stores nothing rather than something mislabelled" (`:12545-12552`). | `doc->doc.document`, in hand | a composed two-layer document's refill is sample-identical to a freshly built document's; the next batch reports `resumed_bricks == 0` |
+| 9 | `bindings/c/clay_c.cpp:13263` `fold_layers_below` | **THE SITE THAT CANNOT DETECT, and therefore must not be reachable.** It takes six floats and no document. UNCHANGED; its comment gains the precondition that it is only ever reached where the join is a hard Add. Its `rev == now` caller at `:13903` does not consult a plan at all, so the enforcement is at the STORE (row 8): a two-half seed only exists if the join was a hard Add when it was taken, and any composition change bumps `revision`, so `rev == now` cannot see a stale one. | none — by construction | the row-8 test is the proof; assert `resumed_bricks` (a count) and sample identity, never the clock |
+| 10 | `tests/unit/scene_utils.h:200` `ref_eval_document` — **the ninth site, which proposal.md's table of eight misses** | The independent reference evaluator hard-codes `ctape_combine_values(acc, lv, ccombine_add, cblend_hard, 0, 0)` between layers and applies no first-visible rule at layer level. It MUST learn the composition, copying `ref_eval_list`'s shape at `:175`. Left alone, the reference and the compiler agree only while every fixture unions — which is the exact condition under which a fold bug is invisible. | n/a (test code) | `test_scene.cpp:50` with a composed `gnarly_document` variant |
+| — | `clay_c.cpp:12564` `resume_batch_into_host`, `:1727` `prefix_source`, `:1596` `shaped_entry` | UNCHANGED. The first two already refuse every multi-layer document. `shaped_entry`'s `want_below` gate keys on presence only, which is sufficient because row 8 never stores a two-half seed for a refused document. | — | covered by row 8 |
+
+Two ops are refused at the setter and that refusal is load-bearing here rather
+than cosmetic: `Op::None` (255, groups-only — `ctape_combine_dist` would write
+it as an unknown mode and return the accumulator, discarding the layer) and both
+transitions (their parameters live in `Node::transition`, which a
+`LayerComposition` has nowhere to put; `emit_combine` would silently fall back to
+`Compiler::default_transition_` at `tape_build.cpp:389`). `op_is_known`
+(`clay_c.cpp:320`) already rejects `Op::None` and ACCEPTS the transitions, so
+`validate_item_op_blend` alone is not enough — copy `validate_group_op_blend`'s
+transition refusal (`:378`), which exists for the same reason.
+
+### 3. Invalidation
+
+**What a composition change invalidates.** It is an ordinary layer-property
+command: it goes through `apply_edit` (`clay_c.cpp:3644`), lands on plain
+`touch_region`, and must NOT be added to `command_is_structural` (`:3454`) or
+`command_frontier` (`:3490`) — a composition change moves no root ordinals, and
+marking it structural would retire every prefix seed in the document for nothing.
+Derived state:
+
+- compiled tape and cull index — free, both keyed on `revision`;
+- SDF prefix cache and the whole-layer digest — composition MUST join
+  `digest::mix_layer_head` (`src/session/layer_digest.h:212`), which enumerates
+  fields explicitly and is invisible to a new one. `SdfPrefixCache::verify` is
+  described in-file as the safety net that cannot be forgotten; a field
+  `mix_layer_head` does not see is a field the safety net does not protect;
+- brick seed store — through `revision` plus the `touch_region` bound below.
+  Composition does NOT join `ResumeKey` (`clay_c.cpp:1256`); that key
+  deliberately excludes document-wide values, and adding one strands entries
+  rather than replacing them (the comment at `:1247-1255` says so);
+- the cull pad — `Compiler::document_pad` (`tape_build.cpp:1112`) and
+  `CullIndex::refresh_pad` (`src/scene/cull_index.cpp:36`) are a MAXIMUM OVER
+  LAYERS of each layer's own sum and have no inter-layer term at all. A smooth
+  or extended layer fold drags the document's running accumulator exactly as a
+  smooth item combine drags a layer's, so the fold's support must enter as a
+  per-layer constant, following `blend_k_seam` (`bounds.cpp:1211-1215`), which is
+  the existing precedent for a LAYER-owned k reaching the pad. This is needed
+  whether or not anything is split — see §4.
+
+**The dirty bound of a composition change.** `command_influence_bound`
+(`src/scene/commands.cpp:371`) sends every layer command to
+`layer_command_bound` (`:330`), which is `layer_influence_bound(*l)` — the
+layer's OWN extent. That is the right answer for a smooth-k or rounding change
+(dilated by the fold's support) and for Subtract. It is TOO SMALL for Intersect.
+`apply_edit` already unions the bound on both sides of the apply, so a change
+`Intersect → Add` dirties the wider box too, for free. `layer_command_bound` is
+the only function in the chain that holds the `Document`, so the below-extent
+loop belongs there; `layer_influence_bound` (`bounds.cpp:1531`) takes only a
+`Layer` and must not be widened in place.
+
+**Does a subtractive or intersecting LAYER widen the influence of edits made
+INSIDE the layers beneath it? NO — and this is the answer the field evidence
+demands.** A combine is POINTWISE in its two operands: `ctape_combine_values`
+reads `a.d` and `b.d` at the sample and nothing else. An edit beneath that
+changes the accumulator at `p` changes the folded result at `p` and nowhere
+else, whatever operator sits above. The only spatial spreading a fold adds is
+the blend support of the fold itself, which is a fixed radius and is exactly
+what `group_blend_support` (`bounds.cpp:1404`) already computes for an enclosing
+group. So:
+
+> An edit inside a lower layer dirties its own influence bound, dilated by the
+> blend supports of the folds above it. Not the layer above's extent, not the
+> document.
+
+That is the direct analogue of what `node_reach_bound` (`:1443`) already does
+once per enclosing group, and it keeps the host's measured 16.8x brick-count
+growth out of the ordinary edit path entirely.
+
+**Where the cost genuinely is, and it is one arrow only.** What IS non-local is
+editing the composed layer itself, and the asymmetry is the far field, not the
+combine:
+
+- **Subtract is LOCAL.** `max(a, −b)`: far from `b`'s geometry, `−b` is a large
+  negative number and loses the max, so the result is `a`. This is why
+  `op_is_local` (`include/clay/scene/types.h:160`) excludes only Intersect and
+  the transitions, and why a subtract ITEM is culled by its own geometry. A
+  subtract LAYER is bounded by ITS OWN extent, dilated by its fold's support.
+- **Intersect is not.** `max(a, b)`: far from `b`'s geometry, `b` is a large
+  POSITIVE number and WINS the max, so the result differs from `a` everywhere
+  the accumulator has material. `bounds.cpp:1270` measures exactly this — drift
+  exactly 0 outside the layer's extent over 400,000 points, against 0.100 and
+  0.065 outside the item's own geometry. One level up, an intersect LAYER's
+  influence is the accumulated extent of the visible SDF layers BELOW it, and
+  nothing in the tree computes that today. It needs a document-level analogue of
+  `layer_influence_extent` (`:1352`), memoized the way `LayerExtentCache`
+  (`bounds.h:133-215`) memoizes the layer one and carrying the same
+  `walks()`/`keeps()` counters, because a cache that quietly stops firing here
+  reads as correct.
+- The same widening applies to `SetLayerVisibleCmd` and to a reorder
+  (`clay_document_move_layer`, `clay_c.cpp:5289`, a Remove+Add pair each bounded
+  by the moved layer's own extent). Gate 6.1 ("hide/show a subtractive layer
+  restores exact geometry") passes on the subtract case while the intersect case
+  quietly leaves stale bricks; gate 6.2 tests the geometry of a reorder and not
+  its dirty region. Both need an intersect arm.
+
+**What conservative costs here, said plainly.** For the intersect arm the
+conservative bound IS the box the host measured: 26.2x the surface bricks of the
+geometry produced at reference size, 241.2x at 10x extent, 16.8x brick-count
+growth for a 31.6x volume — 45.5 ms and 7.5 s per frame respectively. That is
+the price of setting a layer to Intersect and then touching it. It is bounded
+because it fires only for Intersect, only on that layer's own edits, and never
+on edits beneath. It is not acceptable as a steady state.
+
+**The measurement that would narrow it.** Not the bound — the REFILL REGION. The
+host's own finding is that the intersect walks a BOX and produces a BAND: the
+dirty region is the AABB and the refill visits the bricks of that VOLUME rather
+than the bricks that hold band. Intersecting the dirty region with the bricks
+that already hold band is a cache-side change that would cut the count by that
+same 26.2x/241.2x, and — if the unresolved per-brick factor turns out to be item
+overlap or brick population rather than extent as such — would also stop visiting
+the deep-interior bricks that cull nothing away, recovering part of it too. The
+host's in-flight 2x2 (dabs held at 0.18 versus scaled; cutter buried versus at
+the surface, in both scenes) is what settles which. **Nothing in this change
+depends on the outcome**, and nothing in this change should be built on a guess
+about it: this decision commits only to the box, which is correct either way, and
+names the band intersection as the follow-up. That work is not specific to layer
+composition — an intersect ITEM pays it today, at the numbers above — and it
+should be its own change.
+
+### 4. Where the tree refutes design.md
+
+House style is to say so.
+
+1. **§1's argument against (b) does not describe this split.** "The accumulated
+   value part-way down a chain" — there is no part-way-down. The split seam is
+   the last visible SDF layer, fixed in five places, and `below` is the complete
+   accumulator. Consequently **(c) is not a follow-up; it is the v1 answer, and
+   it costs one predicate on one layer rather than a loop over all of them.**
+   §1's leaning would have refused the fast path for `A − B + C` sculpted on `C`,
+   which is the ordinary shape the feature creates, for no correctness gain.
+2. **§1 attributes the smooth-drag problem to the split. It belongs to the cull
+   pad.** `document_pad` has no inter-layer term, so a smooth layer fold makes
+   per-brick tapes drop items the whole-document compile keeps — inside the band,
+   where nothing is looking — whether or not anything is split. Refusing the
+   split does not fix it and never would have. See §3.
+3. **§3's bounds table is wrong in both directions, and contradicts the sentence
+   directly beneath it** ("the item-level bound logic is the single source"):
+   - `Intersect | the intersection` is **TOO SMALL** and is precisely the
+     missing-surface failure the same section warns about. The result's MATERIAL
+     is in the intersection; the FIELD changes everywhere the left operand has
+     material, because the intersect uses the right operand's far field. The
+     item-level source says so in as many words (`bounds.cpp:1260-1270`,
+     `Nonlocality::BoundedByLayer`).
+   - `Subtract | the left operand's alone` is **looser than the item-level
+     source**, which makes a subtract LOCAL (`op_is_local`, `types.h:160`) and
+     bounds it by its own geometry dilated by rounding and blend support
+     (`geometry_bound`, `bounds.cpp:918-923`).
+
+   Corrected, from the single source: **Subtract → its own extent, dilated.
+   Intersect → the extent of the visible SDF layers BELOW it. Smooth/extended →
+   the union, dilated by `ccombine_extended_support` / `Blend::support()`.**
+4. **§5 says composition joins the key of "the brick seed store". It must not
+   join `ResumeKey`** (`clay_c.cpp:1256`), which deliberately excludes
+   document-wide values and would strand entries rather than replace them. It
+   invalidates through `revision` plus `touch_region`.
+5. **§2's "SHALL follow the item rule" needs one qualification or it inverts.**
+   The item rule at `tape_build.cpp:957` SKIPS a non-Add op with nothing beneath;
+   the spec requires the first visible layer to INITIALISE. What transfers is the
+   `if (have_acc)` guard on the combine — which `run()` at `:1200` and
+   `run_part()` at `:1166` already have — not the `continue`. Copying the
+   `continue` produces the blank screen §2 exists to prevent.
+6. **design.md never names `if (!layer_val) continue;`** (`tape_build.cpp:1199`
+   and `:1165`), and it is a second silent-wrong-field site INSIDE `run()`:
+   skipping the combine for a layer whose chain culled to nothing is right for
+   Add and Subtract and catastrophic for Intersect, where combining with nothing
+   must remove everything below. It differs per brick, so the whole-document tape
+   and the per-brick tape disagree exactly where nobody is looking. §2 must
+   decide it — `emit_empty` (`:272`) plus the combine, mirroring `seeded` at
+   `:975` — and the split inherits whatever it decides for free, which is one
+   more reason for (c) over (b).
+7. **§4 (symmetry) costs zero code, confirmed.** Mirror and radial copies are
+   emitted per-item inside `emit_item` and folded by their own seam combines
+   (`tape_build.cpp:818`, `:859`) before `compile_list` returns, so a combine
+   emitted where `:1200` sits today is already after the layer's symmetry has
+   resolved, once. It stays true only while nobody hoists the layer combine
+   earlier for a bounds or cull reason.
+8. **Line numbers and one path.** `src/scene/clay_c.cpp` does not exist — it is
+   `bindings/c/clay_c.cpp`. The `have_acc` rule is `tape_build.cpp:957`, not
+   `:876`. "A hard Add is exact and adds no extent" is `tape_build.cpp:1362`, not
+   `:1281`. The two refill statements are `clay_c.cpp:1545` and `:1584`, not
+   `:1502` and `:1541`. `compile_document_except` is `tape.h:405`, not `:390`.
+   Grep the quoted sentence, never the line number.

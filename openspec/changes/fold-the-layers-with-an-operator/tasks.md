@@ -1,9 +1,10 @@
 ## 0. Decide first
 
-- [ ] 0.1 DECIDE what the resumable multi-layer split does when the fold is not a
-      hard union — refuse, teach it the operator, or split at the last hard
-      boundary. design.md §1 leans REFUSE for v1 because it is the only option
-      that cannot be silently wrong. Settle it before any code
+- [x] 0.1 SETTLED (design.md "Decision — task 0.1"): SPLIT AT THE LAST HARD
+      BOUNDARY, which in this tree is the only boundary — the seam is always the
+      last visible SDF layer, so the split stays available whenever THAT layer's
+      composition is a hard Add, whatever the layers beneath it do, and
+      `fold_layers_below` is left unchanged
 
 ## 1. The model
 
