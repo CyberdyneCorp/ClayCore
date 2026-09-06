@@ -28,6 +28,27 @@ full, which is what a claim should have said anyway.
 KNOWN LIMITATION, and it is not fixable from here: a backticked name is a claim,
 so you cannot DISCUSS a dead symbol in a file this tool polices. Correcting a
 line means naming the wrong symbol unquoted, with a note saying why.
+
+WHEN THIS FAILS, the cause is usually one of five, in the order they occur.
+Triage before fixing: a spike is usually one refactor rather than one change's
+worth of sloppiness.
+
+  1. A FILE GREW INTO A DIRECTORY. `foo.cpp` became `foo/`, and every task
+     citing the old path went stale in one commit. This is the dominant decay
+     mode for a FILE claim and it has no symbol equivalent, because splitting a
+     module keeps its symbols and moves its path. Nobody was careless.
+  2. A SHORTHAND. The tail or head of a longer symbol, written to avoid
+     repeating it. The fix is to name the symbol in full, which is what the
+     claim should have said.
+  3. A PREFIX. The nastiest, and the reason the match is a whole word: a name
+     that is PART of a real symbol greps to something and reads as correct,
+     while a reader searching for it finds a deletion that never happened.
+  4. NOT A FILE IN THIS TREE. Either it lives in another repository, or it is a
+     name that only exists at runtime -- a default the UI offers a person, an
+     output path. Both are legitimate claims about the world and illegitimate
+     claims about this checkout; name the repository, or say it is a runtime
+     name, and leave it unquoted.
+  5. IT WAS NEVER WRITTEN. The case this tool exists for, and the rarest.
 """
 
 import pathlib
