@@ -36,7 +36,14 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SKIP_SUFFIX = (".cpp", ".h", ".py", ".md", ".json", ".clayspace", ".swift", ".sh", ".yml", ".toml")
+# A name ending in one of these is a FILE, and a file is checked as a path
+# rather than as a token: nothing in the tree's contents says
+# `tests/unit/test_layer_parity.cpp` exists, the file does. Skipping them, which
+# this tool did first, means a task can name a test file that was never written
+# and nothing says so — the claim is "this artefact exists", and an artefact is
+# a file as often as it is a symbol.
+FILE_SUFFIX = (".cpp", ".h", ".py", ".md", ".json", ".clayspace", ".swift", ".sh", ".yml", ".toml",
+               ".rs", ".txt", ".cmake", ".metal", ".cl", ".glsl", ".hpp")
 # This file is excluded from its own search. The docstring above NAMES a
 # shorthand as an example, and without the exclusion that mention satisfies the
 # claim it exists to describe — the quoting trap, arriving inside the tool that
@@ -45,10 +52,19 @@ SEARCH_ARGS = ["--exclude-dir=.git", "--exclude-dir=build", "--exclude-dir=opens
                "--exclude=check_task_symbols.py"]
 
 
+def claimed_files(text):
+    """Backticked names that end in a source suffix, as basenames."""
+    out = set()
+    for name in re.findall(r"`([A-Za-z_][A-Za-z0-9_:./-]*)`", text):
+        if name.endswith(FILE_SUFFIX):
+            out.add(name.rsplit("/", 1)[-1])
+    return out
+
+
 def claimed_symbols(text):
     out = set()
     for name in re.findall(r"`([A-Za-z_][A-Za-z0-9_:.]*)`", text):
-        if name.endswith(SKIP_SUFFIX):
+        if name.endswith(FILE_SUFFIX):
             continue
         if "_" not in name and "::" not in name:
             continue
@@ -63,8 +79,16 @@ def claimed_symbols(text):
 def main():
     missing = []
     checked = 0
+    files_on_disk = {p.name for p in ROOT.rglob("*")
+                     if p.is_file() and ".git" not in p.parts and "build" not in p.parts}
     for tasks in sorted(ROOT.glob("openspec/changes/*/tasks.md")):
-        names = claimed_symbols(tasks.read_text())
+        text = tasks.read_text()
+        for claimed in sorted(claimed_files(text)):
+            checked += 1
+            if claimed not in files_on_disk:
+                missing.append(f"{tasks.relative_to(ROOT)}: `{claimed}` is claimed as a file "
+                               f"and no file of that name is in the tree")
+        names = claimed_symbols(text)
         checked += len(names)
         for name in sorted(names):
             found = subprocess.run(["grep", "-rqIw", *SEARCH_ARGS, "--", name, str(ROOT)],
