@@ -551,3 +551,57 @@ region becomes a field item through a captured volume. Both are existing routes.
 subtool; a mesh or grid subtool becomes live by being converted into one; and a
 resolved boolean remains first-class for operands that are not converted, rather
 than being the old way waiting to be retired.
+
+## 9. An absent operand, and two gates that follow from it
+
+Two things ClaySpaceDesktop raised on 2026-09-06 against stage 2's `fold_layer`.
+Both are gates for stage 3, and both are cheap.
+
+### The divergence is real, and this side of it is not free to change
+
+Their RESOLVED boolean filters an empty subtool out of `boolean_operands`
+entirely — "because there is nothing in them to combine" — so an absent operand
+is not an operand. The live fold does the opposite: when a layer produces no
+value it emits an explicit empty and folds it, whenever
+`fold_changes_an_empty_layer` says the operator reads an absent operand as a
+change (`src/scene/tape_build.cpp:99`, which probes `ctape_combine_dist` against
+`CLAY_TAPE_FAR` at five sample distances rather than hard-coding a list of ops).
+
+**That is not a preference and it cannot follow theirs**, because `layer_val` is
+false for two different reasons and only one of them is emptiness:
+
+- the layer has no visible contributing items — genuinely empty, and
+- **the layer's chain was wholly CULLED in this compile's region**, which a
+  per-brick compile does constantly for a layer with content elsewhere.
+
+Skipping the fold in the second case would be a silent per-brick wrongness of
+exactly the kind this change exists to avoid: an intersecting layer must still
+remove material from a brick its own geometry does not reach, because the
+whole-document compile removes it there. So the fold stays.
+
+**What follows is a documentation duty, not a code change.** For a
+DOCUMENT-empty operand the two routes now disagree: a resolved boolean skips the
+operand, a live one applies it, so an empty intersecting layer blanks the field
+where the resolved path would leave it alone. The header must say so beside the
+setter, so a host that wants parity can filter empty operands itself — which is a
+host policy, and the engine cannot take it without breaking the culled case.
+
+### Gate: a converted layer as the BASE, not only as the cutter
+
+Task 6.5 gates "a converted mesh-to-SDF layer works as a cutter". The host's
+`boolean_operands` puts every representation on BOTH sides, and a mesh converted
+to a field so that something can be cut out OF it is at least as common as
+converting the cutter. Add the base case beside it: **a converted layer beneath a
+field cutter, with the fold applied to it.** If the fold treats base and cutter
+symmetrically the gate is redundant and costs one fixture; if it does not, it is
+the gate that finds it.
+
+Their crossings are first-class controls a sculptor already has — `MeshToSdf`
+(triangles onto a lattice as a volume item) and `VoxelToSdf` (occupancy read back
+as a distance field, redistanced) — so §8's "convert this subtool to make the
+boolean live" names a menu entry rather than work anyone has to build.
+
+### Gate: an empty intersecting layer, decided rather than discovered
+
+A test asserting what a DOCUMENT-empty layer set to Intersect does, so the
+divergence above is deliberate and stays that way. The test is the record.
