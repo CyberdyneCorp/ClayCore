@@ -105,7 +105,12 @@
 - [x] 5.7 `clay_multires_add_level_for_patches`,
       `clay_multires_refine_patches_to_level`,
       `clay_multires_preflight_add_level_for_patches`,
-      `clay_multires_patch_depth`, `clay_multires_uniform_depth` (ABI 0.85.0);
+      `clay_multires_patch_max_level`, `clay_multires_patch_resident`,
+      `clay_multires_uniform_depth` (ABI 0.85.0) — the line named a
+      clay_multires_patch_depth call, which is a name the tree has never
+      carried (left unquoted here on purpose: a backticked name is a CLAIM to
+      tools/check_task_symbols.py, and it caught this one on its first run);
+      caught by tools/check_task_symbols.py on its first run;
       pyclay including `topology_at`; `examples/74_regional_multires.py`
 - [x] 5.8 No level removal over a region. `remove_highest_level` drops the top
       level whatever it refines, which is the operation that already existed;
