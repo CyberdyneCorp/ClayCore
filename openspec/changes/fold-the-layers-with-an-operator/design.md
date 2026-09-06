@@ -1015,7 +1015,40 @@ Each was checkable in a minute because the other named a SYMBOL and a FILE rathe
 than describing a flow. Name the symbol even when you might be wrong about it —
 especially then, since that is what makes the correction cheap.
 
-### §13c. One function, and what the second review's blockers 2, 3 and 4 turned out to be
+### §13d. A test the fix modified is not evidence for the fix
+
+Raised by the host on 2026-09-06 while stage 2 was still uncommitted, and it is
+the sharpest thing said about this change's own test discipline.
+
+If a test asserted the too-small bound and now asserts the dilated one, it agrees
+with the new code for the same reason it agreed with the old: **it was updated
+to.** That is not an argument against updating it — it had to change. It is that
+the evidence has to come from somewhere the fix did not touch.
+
+**The question to ask of every test file this change MODIFIED, rather than
+added:**
+
+> Would this file still fail if the fix were reverted, and is the thing that
+> fails a line that existed BEFORE?
+
+- Both yes: it was a genuine regression test all along, and it caught the defect
+  the moment the defect appeared.
+- Only a line the fix added fails: the file is DOCUMENTATION of the new
+  behaviour rather than a check on it. That is fine — as long as nobody counts
+  it twice, in a report or in a review.
+
+This is the same shape as a test that asserts only what CAN be read and therefore
+passes on both sides of the change it exists to announce, arriving from the other
+direction: **a test that moves with the code it tests has the same blindness as a
+test that never moves.**
+
+**Required of the third review:** for every modified test file in this change —
+`tests/unit/test_c_undo_bound.cpp` is the one that prompted this, and it is not
+the only one — apply the question above and report which category each falls
+into. The revert proof is the instrument: flipping the fix and watching a NEW
+assertion fail says something that the modified assertion passing cannot.
+
+### §13e. One function, and what the second review's blockers 2, 3 and 4 turned out to be
 
 §13b closes by saying the fix "is not 'dilate four call sites'. It is that ONE
 function answers 'where can an edit reach in this document'". That is what is
@@ -1077,35 +1110,28 @@ the INVALIDATION (a seed in the shell the fold adds is dropped; a seed outside
 both reaches is kept — exactly one of two survives) rather than pretending to a
 stale brick that does not occur.
 
-### §13d. A test the fix modified is not evidence for the fix
+**§13d applied to this stage's two modified test files, before anyone counts
+one of them twice.**
 
-Raised by the host on 2026-09-06 while stage 2 was still uncommitted, and it is
-the sharpest thing said about this change's own test discipline.
+- `tests/unit/test_c_undo_bound.cpp` — **DOCUMENTATION, not evidence.** Its two
+  pre-existing assertions were `b.hi[0] > chi[0]` and `b.hi[0] >= chi[0] + k`,
+  with the QUERY standing in for the child's un-dilated box; they failed the
+  moment the query widened (`CHECK( 4.3 > 4.3 )`) and were re-pointed at the
+  child's own geometry. Revert the fix and neither of them fails again: they
+  assert the UNDO bound, which this stage did not narrow. Only the subcase this
+  stage ADDED — the query and the undo bound are equal — fails on a revert. So
+  the file records the new behaviour and proves nothing about it.
+- `tests/unit/test_layer_fold_sites.cpp` — **evidence, and only because nothing
+  in it was modified.** Every assertion here is in a case this stage added, and
+  each of the seven entry points was proved by a TARGETED revert that failed a
+  new assertion with a number: 1,660 / 536 / 700 / 536 changed samples outside
+  the box, and `2 == 1` surviving seeds for each of the three gestures. A file
+  that is only appended to cannot have moved with the code, which is the
+  property §13d is asking for; the older cases in it still pass untouched.
 
-If a test asserted the too-small bound and now asserts the dilated one, it agrees
-with the new code for the same reason it agreed with the old: **it was updated
-to.** That is not an argument against updating it — it had to change. It is that
-the evidence has to come from somewhere the fix did not touch.
-
-**The question to ask of every test file this change MODIFIED, rather than
-added:**
-
-> Would this file still fail if the fix were reverted, and is the thing that
-> fails a line that existed BEFORE?
-
-- Both yes: it was a genuine regression test all along, and it caught the defect
-  the moment the defect appeared.
-- Only a line the fix added fails: the file is DOCUMENTATION of the new
-  behaviour rather than a check on it. That is fine — as long as nobody counts
-  it twice, in a report or in a review.
-
-This is the same shape as a test that asserts only what CAN be read and therefore
-passes on both sides of the change it exists to announce, arriving from the other
-direction: **a test that moves with the code it tests has the same blindness as a
-test that never moves.**
-
-**Required of the third review:** for every modified test file in this change —
-`tests/unit/test_c_undo_bound.cpp` is the one that prompted this, and it is not
-the only one — apply the question above and report which category each falls
-into. The revert proof is the instrument: flipping the fix and watching a NEW
-assertion fail says something that the modified assertion passing cannot.
+The transferable half: the query's disagreement with the command path was
+VISIBLE in a test all along — `test_c_undo_bound.cpp` asserted it as a
+requirement, one level below the fold, for group blends. It read as a property
+worth having rather than as a defect, and nothing re-asked whether the two
+answers should differ at all. A test can encode the bug as the spec, and then
+updating it is the moment to say which of the two it was.

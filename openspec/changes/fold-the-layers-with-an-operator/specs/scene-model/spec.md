@@ -76,6 +76,23 @@ silent when missed: a brick outside the reported region keeps the values it has
 and is stamped with the new revision, so it is never recomputed and never
 reports anything.
 
+EVERY ROUTE THAT ANSWERS "where can an edit reach in this document" SHALL
+answer it the same way. The influence-bound QUERIES a host reads, the dirty
+calls it makes, the region an applied command invalidates, and the reach a
+GESTURE states once for a whole stroke SHALL all be the one expression: a
+box in the edited layer's field, carried up by the folds above that layer. A
+host computes its refill region from the query and hands it to the dirty call,
+so a query that reports less than the command path dirties leaves that host
+with stale geometry having asked for exactly what it was told, and the symptom
+on its side is missing surface with nothing to point at. A gesture is the same
+requirement in the one place a command bound is never derived: it states its
+reach itself, so it SHALL take the same term, and a dab issued as a stroke SHALL
+invalidate what the same dab issued as an edit invalidates.
+
+Where a bound is computed from a LAYER alone it CANNOT answer this — the folds
+above are a property of the stack — so such a function SHALL say so and name the
+document-level form instead of being widened into a second answer.
+
 A REGION-LIMITED compile SHALL answer, inside its band, what the whole-document
 compile answers. A cull region is an optimisation and not a smaller document: an
 item outside it can still steer the value inside it through the folds above that
@@ -111,6 +128,14 @@ unioning, and SHALL render exactly as it did.
 #### Scenario: An edit under a soft fold dirties what the fold moved
 - **WHEN** an item is edited inside a layer that folds smoothly, or inside a layer beneath one
 - **THEN** the dirty region covers every point whose band value changed, including those the fold's support carried outside the edited item's own reach
+
+#### Scenario: The query a host dirties by is the region the command dirties
+- **WHEN** a host reads a node's or a layer's influence bound across an edit under a smooth fold and dirties by the union
+- **THEN** that box contains every point whose band value changed, and it is the same box the applied command and the corresponding mark-dirty call use
+
+#### Scenario: A stroke invalidates what its dabs would have invalidated
+- **WHEN** a stamp stroke, a surface drag or a surface magnify runs on a layer with a smooth fold above it
+- **THEN** the one region the gesture invalidates carries the folds above that layer, so it covers what the same edits issued one at a time would have covered
 
 #### Scenario: Hiding the bottom layer dirties the layer it promotes
 - **WHEN** the bottom-most visible SDF layer is hidden, removed or reordered away, under a composed layer

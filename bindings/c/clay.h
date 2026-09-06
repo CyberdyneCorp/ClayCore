@@ -5423,7 +5423,14 @@ typedef struct clay_stamp {
  * out_nodes may be NULL to place without collecting ids; otherwise it takes up
  * to `capacity` of them and *out_count receives how many were placed, which is
  * `count` unless the layer refused. Refused for a protected layer, and for an
- * item carrying no sampled volume. */
+ * item carrying no sampled volume.
+ *
+ * The ONE invalidation covers every dab's own box carried up to the DOCUMENT's
+ * field — dilated by the LAYER FOLDS above `layer` (ABI 0.86.0), which is zero
+ * unless something composes. A stroke states its reach up front rather than
+ * deriving one per dab, so it takes that term itself; the same dab issued
+ * through an ordinary add gets it from the command path, and the two may not
+ * disagree. See clay_layer_move_surface, which says it at length. */
 clay_result clay_layer_place_stamps(clay_document* doc, clay_layer_id layer,
                                     const clay_item* stamp, const clay_stamp* stamps,
                                     size_t count, clay_node_id* out_nodes, size_t capacity,
@@ -5553,6 +5560,15 @@ typedef struct clay_move_params {
  * well — the union clay_layer_node_influence_bound reports, and what the
  * dirty-bounds contract there already promised. Only a shared edit list pays
  * that; a layer nothing instances invalidates its ball alone.
+ *
+ * And the ball is a box in the LAYER's field, so it is carried up to the
+ * DOCUMENT's the way every other bound in this ABI is (ABI 0.86.0): dilated by
+ * the sum of the blend supports of the LAYER FOLDS above this layer, which is
+ * zero unless something composes. A gesture states its own reach instead of
+ * deriving one per command, so it has to take that term itself; the same drag
+ * issued as ordinary edits gets it from the command path. This applies to
+ * clay_layer_magnify_surface and clay_layer_place_stamps for the same
+ * reason.
  *
  * *out_applied receives how many items took a warp, so a host can tell "the
  * drag reached nothing" from "the drag did nothing visible". A drag that
@@ -9319,12 +9335,44 @@ clay_result clay_voxel_build_plane_pick(const clay_voxel_grid* grid, const float
  * against a band of 0.15. clay_brick_cache_mark_dirty_nodes dirties by the same
  * union, so what a host is told and what it dirties cannot disagree. On a
  * document with no instancing the answer is unchanged. */
+/* NOTE (ABI 0.86.0, layer composition): this is DILATED BY THE LAYER FOLDS
+ * ABOVE the node's layer. Visible SDF layers fold under each layer's own
+ * clay_document_set_layer_composition now, and a SMOOTH or extended fold moves
+ * the document's surface up to its own blend support away from where its
+ * operands moved — so an edit inside a lower layer changes the DOCUMENT's field
+ * that far outside the box it changed the LAYER's field in. The term is the
+ * SUM of the supports of the folds above, because folds compose, and it is zero
+ * for a stack that unions hard, which is every document that predates the
+ * feature: their boxes are byte-identical to what they always were.
+ *
+ * The same expression answers the command path (an undo bound, an apply's
+ * dirty region) and clay_brick_cache_mark_dirty_nodes, so a host that reads a
+ * box here and dirties by it cannot be handed a box narrower than the region
+ * an edit reaches. That is the promise a host most depends on and the one that
+ * is silent when it breaks: too tight leaves visibly stale bricks at a blend
+ * seam, with nothing on the host's side to point at. */
 clay_result clay_layer_node_influence_bound(const clay_document* doc, clay_layer_id layer,
                                             clay_node_id node, float out_min[3],
                                             float out_max[3], int32_t* out_has_bounds,
                                             int32_t* out_infinite);
 /* The union over a layer's root nodes — what a first, full fill dirties. A
- * layer that shows nothing reports *out_has_bounds 0. */
+ * layer that shows nothing reports *out_has_bounds 0.
+ *
+ * Also (ABI 0.86.0) two widenings the LAYER FOLD forces, both of which
+ * clay_brick_cache_mark_dirty_layer marks by the same expression:
+ *   - the folds above this layer, summed, exactly as the node form above;
+ *   - for an INTERSECT composition and for nothing else, the accumulated extent
+ *     of the visible SDF layers BENEATH it. `max(a, b)` far from this layer's
+ *     geometry is `b`, a large positive that wins the max, so hiding, moving or
+ *     re-composing an intersecting layer changes the field everywhere the
+ *     layers under it have material. It is not a small box when it fires; it
+ *     fires only for Intersect, only for this layer's own reach, and never for
+ *     an edit made inside a layer beneath — a combine is pointwise, so an edit
+ *     below changes the folded result exactly where it changed the accumulator.
+ * A subtract, a paint and every extended mode stay bounded by this layer alone.
+ *
+ * It does NOT promise a box for an edit made inside ANOTHER layer, even one
+ * this layer folds onto: ask the node form for the layer the edit is in. */
 clay_result clay_layer_influence_bound(const clay_document* doc, clay_layer_id layer,
                                        float out_min[3], float out_max[3],
                                        int32_t* out_has_bounds, int32_t* out_infinite);
@@ -9977,7 +10025,11 @@ clay_result clay_brick_cache_mark_dirty_nodes(clay_brick_cache* cache,
                                               const clay_node_id* nodes, size_t count,
                                               size_t* out_marked);
 /* The union over a layer — what a first, full fill marks. A layer that shows
- * nothing marks nothing, which is not an error. */
+ * nothing marks nothing, which is not an error.
+ *
+ * The region is exactly what clay_layer_influence_bound reports, folds above
+ * the layer and the intersect widening included (ABI 0.86.0): one expression,
+ * so the box a host is shown and the box this marks are the same box. */
 clay_result clay_brick_cache_mark_dirty_layer(clay_brick_cache* cache,
                                               const clay_document* doc, clay_layer_id layer);
 

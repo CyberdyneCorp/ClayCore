@@ -1109,3 +1109,578 @@ TEST_CASE("an item edit is dilated by the folds it passes through") {
     }
 }
 
+
+// -- blockers 2, 3 and 4: every HOST-FACING route to "where an edit reaches" --
+//
+// design.md 13b names the exact call path a real host takes:
+//
+//     node_bound     -> Document::node_influence_bound -> clay_layer_node_influence_bound
+//     refill_region  -> BrickCache::mark_dirty         -> clay_brick_cache_mark_dirty
+//
+// so the QUERY is the surface that has to be right and the dirty call is
+// downstream of it and blameless. The first fix for the fold widened only the
+// internal command path, which left all four host-facing routes -- the two
+// influence-bound queries and the two mark_dirty calls -- reporting the
+// UN-DILATED box, and left all three GESTURE reaches un-dilated as well,
+// because a gesture states its reach itself and never passes through
+// command_influence_bound. A single stamp issued through apply_edit got the
+// widening; the same stamp issued as a stroke did not, and that is ordinary
+// sculpting.
+//
+// WHY EVERY CASE HERE COMPARES A FIELD RATHER THAN A BOX. A box that is too
+// small has nothing wrong with it to look at: it is a plausible box, and an
+// assertion against another box is an assertion against a second opinion. The
+// only statement worth holding is the one the box is FOR -- every point the
+// edit changed is inside it -- so each case samples the document either side of
+// the edit and counts the band-clamped changes that landed outside what the
+// host was handed.
+//
+// BAND-CLAMPED, which is the sense every bound in this tree is conservative in.
+// A point whose |distance| exceeds the band is not one a brick stores, so a
+// change there is not one a refill would ever serve; and a point INSIDE the
+// band is within `band` of a surface, so a box that contains the surface
+// contains the band around it once dilated by the band. That dilation is what a
+// brick cache already does for itself (BrickCache::mark_dirty), and it is
+// applied by hand here where the box is compared raw.
+
+namespace {
+
+constexpr float kFoldK = 0.15f;  // quadratic: support 4k = 0.6
+constexpr float kFoldSupport = 4.0f * kFoldK;
+
+// TWO VISIBLE SDF LAYERS, THE EDIT IN THE LOWER ONE, A SMOOTH FOLD ABOVE IT.
+//
+// `lower` is the first visible SDF layer, so its OWN composition is never
+// applied and the only fold in the document is `upper`'s -- the dilation every
+// case below is about is exactly one term, 0.6, and a failure cannot be read as
+// some other layer's.
+//
+// The two shells are placed so their fields are within the fold's support of
+// each other over a wide region: that is where a smooth fold moves the
+// document's surface at points where the LAYER's own field says nothing moved,
+// which is the whole escape.
+struct ReachDoc {
+    clay_document* d = nullptr;
+    clay_layer_id lower = 0, upper = 0;
+    clay_node_id blob = 0;
+
+    explicit ReachDoc(float blob_x = 0.95f, float k = kFoldK) {
+        d = clay_document_create();
+        REQUIRE(d != nullptr);
+        REQUIRE(clay_add_sdf_layer(d, "lower", &lower) == CLAY_OK);
+        REQUIRE(clay_add_sdf_layer(d, "upper", &upper) == CLAY_OK);
+        add(lower, 1.0f, 0.0f, nullptr);
+        add(lower, 0.35f, blob_x, &blob);
+        add(upper, 0.6f, 1.5f, nullptr);
+        REQUIRE(clay_document_set_layer_composition(d, upper, CLAY_OP_ADD,
+                                                    k > 0.0f ? CLAY_BLEND_QUADRATIC
+                                                             : CLAY_BLEND_HARD,
+                                                    k, 0.0f) == CLAY_OK);
+    }
+    ~ReachDoc() { clay_document_destroy(d); }
+    ReachDoc(const ReachDoc&) = delete;
+    ReachDoc& operator=(const ReachDoc&) = delete;
+
+    void add(clay_layer_id layer, float r, float x, clay_node_id* out) {
+        clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+        REQUIRE(it != nullptr);
+        const float pos[3] = {x, 0.0f, 0.0f};
+        REQUIRE(clay_item_set_position(it, pos) == CLAY_OK);
+        REQUIRE(clay_layer_add_item(d, layer, it, out) == CLAY_OK);
+        clay_item_destroy(it);
+    }
+};
+
+// The sample lattice: through the seam between the two layers and out past both
+// of them, fine enough that a 0.6-wide escape shell holds hundreds of points.
+std::vector<float> seam_points() {
+    std::vector<float> pts;
+    for (int i = 0; i <= 44; ++i)
+        for (int j = 0; j <= 22; ++j)
+            for (int k = 0; k <= 22; ++k) {
+                pts.push_back(-0.6f + 0.07f * static_cast<float>(i));
+                pts.push_back(-0.77f + 0.07f * static_cast<float>(j));
+                pts.push_back(-0.77f + 0.07f * static_cast<float>(k));
+            }
+    return pts;
+}
+
+std::vector<float> abi_eval(const clay_document* d, const std::vector<float>& pts) {
+    std::vector<float> out(pts.size() / 3, 0.0f);
+    REQUIRE(clay_eval_points(d, "cpu", pts.data(), out.size(), out.data(), nullptr) == CLAY_OK);
+    return out;
+}
+
+// A box as the C ABI hands one back, and the union a host takes across an edit
+// -- which is what design.md 13b says place_layer and set_object_transform do.
+struct Box {
+    float lo[3]{0, 0, 0};
+    float hi[3]{0, 0, 0};
+    bool has = false;
+    bool infinite = false;
+
+    void unite(const Box& o) {
+        infinite = infinite || o.infinite;
+        if (!o.has) return;
+        if (!has) {
+            *this = o;
+            return;
+        }
+        for (int a = 0; a < 3; ++a) {
+            lo[a] = kernel::cmin(lo[a], o.lo[a]);
+            hi[a] = kernel::cmax(hi[a], o.hi[a]);
+        }
+    }
+    bool contains(const float* p, float pad) const {
+        if (infinite) return true;
+        if (!has) return false;
+        for (int a = 0; a < 3; ++a)
+            if (p[a] < lo[a] - pad || p[a] > hi[a] + pad) return false;
+        return true;
+    }
+};
+
+Box node_query(const clay_document* d, clay_layer_id layer, clay_node_id node) {
+    Box b;
+    std::int32_t has = 0, inf = 0;
+    REQUIRE(clay_layer_node_influence_bound(d, layer, node, b.lo, b.hi, &has, &inf) == CLAY_OK);
+    b.has = has != 0;
+    b.infinite = inf != 0;
+    return b;
+}
+
+Box layer_query(const clay_document* d, clay_layer_id layer) {
+    Box b;
+    std::int32_t has = 0, inf = 0;
+    REQUIRE(clay_layer_influence_bound(d, layer, b.lo, b.hi, &has, &inf) == CLAY_OK);
+    b.has = has != 0;
+    b.infinite = inf != 0;
+    return b;
+}
+
+// How many sampled points the edit moved OUTSIDE the box, and by how much. A
+// count and a value, never a clock; `worst` is reported because a failure needs
+// to say how far past the box the field went, not only that it did.
+struct Escape {
+    int outside = 0;
+    int changed = 0;
+    float worst = 0.0f;
+};
+
+Escape escaped(const std::vector<float>& before, const std::vector<float>& after,
+               const std::vector<float>& pts, const Box& box, float pad) {
+    Escape e;
+    for (std::size_t i = 0; i < before.size(); ++i) {
+        const bool in_band = std::fabs(before[i]) <= kBand || std::fabs(after[i]) <= kBand;
+        const float delta = std::fabs(after[i] - before[i]);
+        // 1e-4 rather than 0: a quadratic smin's deviation dies quadratically
+        // into its own support, so the last hair of the shell moves by an
+        // amount no brick could store. The escapes this exists to catch are
+        // measured at 0.05, five hundred times that.
+        if (!in_band || delta <= 1e-4f) continue;
+        ++e.changed;
+        if (box.contains(&pts[i * 3], pad)) continue;
+        ++e.outside;
+        e.worst = kernel::cmax(e.worst, delta);
+    }
+    return e;
+}
+
+// A brick cache small enough that the box it marks is close to the box it was
+// given: dim 8 at 0.05 is a 0.4 brick with a 0.15 band.
+clay_brick_cache* reach_cache() {
+    clay_brick_config c;
+    std::memset(&c, 0, sizeof c);
+    c.struct_size = static_cast<std::uint32_t>(sizeof c);
+    c.dim = 8;
+    c.voxel_size = 0.05f;
+    c.band_voxels = 3;
+    clay_brick_cache* cache = clay_brick_cache_create(&c);
+    REQUIRE(cache != nullptr);
+    return cache;
+}
+
+// What a mark actually dirtied, read back as the union of the bricks it queued.
+// mark_dirty tracks keys it has not seen, so a fresh cache reports exactly the
+// region it was handed -- dilated by its own band and snapped outward to the
+// brick grid, which can only make this comparison more forgiving.
+Box marked_box(clay_brick_cache* cache) {
+    Box b;
+    std::vector<clay_brick_request> reqs(4096);
+    std::size_t remaining = 0;
+    do {
+        std::size_t count = reqs.size();
+        REQUIRE(clay_brick_cache_take_dirty(cache, reqs.data(), &count, &remaining) == CLAY_OK);
+        for (std::size_t i = 0; i < count; ++i) {
+            Box one;
+            one.has = true;
+            for (int a = 0; a < 3; ++a) {
+                one.lo[a] = reqs[i].origin[a];
+                one.hi[a] = reqs[i].origin[a] +
+                            static_cast<float>(reqs[i].dims[a]) * reqs[i].spacing;
+            }
+            b.unite(one);
+        }
+    } while (remaining > 0);
+    return b;
+}
+
+// The edit every case makes: slide the small sphere in the LOWER layer. Small
+// enough to be one dab of a stroke, and inside the layer whose value the fold
+// above drags.
+void slide_blob(ReachDoc& doc, float to_x) {
+    const float pos[3] = {to_x, 0.0f, 0.0f};
+    const float axis[3] = {0.0f, 1.0f, 0.0f};  // a NULL axis is refused, not "unrotated"
+    REQUIRE(clay_layer_set_transform(doc.d, doc.lower, doc.blob, pos, axis, 0.0f, 1.0f) ==
+            CLAY_OK);
+}
+
+}  // namespace
+
+TEST_CASE("the four host-facing bounds cover everything an edit under a fold changes") {
+    const std::vector<float> pts = seam_points();
+
+    SUBCASE("clay_layer_node_influence_bound, which is what a host dirties by") {
+        ReachDoc doc;
+        const std::vector<float> before = abi_eval(doc.d, pts);
+        Box box = node_query(doc.d, doc.lower, doc.blob);
+        slide_blob(doc, 1.05f);
+        box.unite(node_query(doc.d, doc.lower, doc.blob));  // union(before, after)
+        const std::vector<float> after = abi_eval(doc.d, pts);
+
+        const Escape e = escaped(before, after, pts, box, kBand);
+        CAPTURE(e.worst);
+        CHECK(e.changed > 100);  // teeth: the edit is visible in the band at all
+        CHECK(e.outside == 0);
+    }
+
+    SUBCASE("clay_brick_cache_mark_dirty_nodes, the documented default") {
+        ReachDoc doc;
+        clay_brick_cache* cache = reach_cache();
+        const std::vector<float> before = abi_eval(doc.d, pts);
+        REQUIRE(clay_brick_cache_mark_dirty_nodes(cache, doc.d, doc.lower, &doc.blob, 1,
+                                                  nullptr) == CLAY_OK);
+        slide_blob(doc, 1.05f);
+        REQUIRE(clay_brick_cache_mark_dirty_nodes(cache, doc.d, doc.lower, &doc.blob, 1,
+                                                  nullptr) == CLAY_OK);
+        const std::vector<float> after = abi_eval(doc.d, pts);
+        const Box box = marked_box(cache);
+        clay_brick_cache_destroy(cache);
+
+        // No pad: the cache dilated by its own band already, which is wider
+        // than the band these samples are clamped at.
+        const Escape e = escaped(before, after, pts, box, 0.0f);
+        CAPTURE(e.worst);
+        CHECK(e.changed > 100);
+        CHECK(e.outside == 0);
+    }
+
+    SUBCASE("clay_layer_influence_bound") {
+        ReachDoc doc;
+        const std::vector<float> before = abi_eval(doc.d, pts);
+        Box box = layer_query(doc.d, doc.lower);
+        slide_blob(doc, 1.05f);
+        box.unite(layer_query(doc.d, doc.lower));
+        const std::vector<float> after = abi_eval(doc.d, pts);
+
+        const Escape e = escaped(before, after, pts, box, kBand);
+        CAPTURE(e.worst);
+        CHECK(e.changed > 100);
+        CHECK(e.outside == 0);
+    }
+
+    SUBCASE("clay_brick_cache_mark_dirty_layer, which is what a first full fill marks") {
+        ReachDoc doc;
+        clay_brick_cache* cache = reach_cache();
+        const std::vector<float> before = abi_eval(doc.d, pts);
+        REQUIRE(clay_brick_cache_mark_dirty_layer(cache, doc.d, doc.lower) == CLAY_OK);
+        slide_blob(doc, 1.05f);
+        REQUIRE(clay_brick_cache_mark_dirty_layer(cache, doc.d, doc.lower) == CLAY_OK);
+        const std::vector<float> after = abi_eval(doc.d, pts);
+        const Box box = marked_box(cache);
+        clay_brick_cache_destroy(cache);
+
+        const Escape e = escaped(before, after, pts, box, 0.0f);
+        CAPTURE(e.worst);
+        CHECK(e.changed > 100);
+        CHECK(e.outside == 0);
+    }
+
+    SUBCASE("and a HARD fold pays for none of it, which every old document is") {
+        // The control, and the teeth for all four: under a hard union the same
+        // edit stays inside the un-dilated box, so what the four cases above
+        // hold is the FOLD's support and not some property of the fixture. It
+        // also pins the cost: a document that never sets a composition gets
+        // exactly the box it always got.
+        ReachDoc hard(0.95f, 0.0f);
+        const Box before_box = node_query(hard.d, hard.lower, hard.blob);
+        ReachDoc soft(0.95f, kFoldK);
+        const Box soft_box = node_query(soft.d, soft.lower, soft.blob);
+        CHECK(soft_box.hi[0] == doctest::Approx(before_box.hi[0] + kFoldSupport));
+        CHECK(soft_box.lo[0] == doctest::Approx(before_box.lo[0] - kFoldSupport));
+
+        const std::vector<float> before = abi_eval(hard.d, pts);
+        Box box = before_box;
+        slide_blob(hard, 1.05f);
+        box.unite(node_query(hard.d, hard.lower, hard.blob));
+        const std::vector<float> after = abi_eval(hard.d, pts);
+        const Escape e = escaped(before, after, pts, box, kBand);
+        // Fewer changed points than the folded cases above, and that IS the
+        // control: a hard fold spreads nothing, so the only points that move
+        // are the ones the layer's own field moved.
+        CHECK(e.changed > 50);
+        CHECK(e.outside == 0);
+    }
+}
+
+
+// -- blocker 3: the three GESTURE reaches, which is the route an artist takes -
+
+namespace {
+
+// WHY A GESTURE IS NOT ASSERTED AGAINST A BOX, AND WHAT IS ASSERTED INSTEAD.
+//
+// A gesture does not report a region. `apply_edit_in_gesture` deliberately
+// skips per-command invalidation and GestureRegion's destructor dirties `reach`
+// ONCE for the whole stroke, so the reach is visible only in what it
+// invalidated -- and its one consumer is the document's resume seed store
+// (clay_document::touch_regions). GestureRegion's own contract is the sentence
+// asserted here: "It MUST cover everything the bracket does -- a region that
+// does not is stale bricks."
+//
+// So each case below takes a seed in a brick placed in the SHELL the fold adds
+// -- outside the gesture's own ball, inside that ball dilated by the folds
+// above the layer -- and holds that the gesture dropped it. A count, from
+// clay_resume_stats, never a clock. A second brick far outside both is kept in
+// the same window, so a gesture that simply dropped everything would fail too.
+//
+// WHAT THIS DOES NOT CLAIM, because the difference matters to whoever reads a
+// failure here. It is NOT a demonstration of a stale brick, and the un-dilated
+// reach does not produce one: `touch_region_locked` compares each seed's brick
+// DILATED BY `band + pad`, and `pad` is the document cull pad -- a maximum over
+// layers of that layer's chain pad PLUS the folds above it, so it is >= the
+// fold sum this reach was missing, for EVERY document. Measured on this
+// fixture over a 504-brick window (258,048 samples): with the gesture's
+// dilation removed a drag leaves 288 seeds where the fixed one leaves 216, and
+// the refill that follows is bit-identical to a cold document's -- 0 stale
+// samples either way. So the seed store absorbed the shortfall, and it did so
+// by ACCIDENT: the coverage belongs to the cull pad, it is not what
+// GestureRegion promises, and the next consumer of a gesture's reach would not
+// have it. The invalidation is what the contract is about, so the invalidation
+// is what is measured.
+
+// The 0.4 brick grain a cache uses, so the numbers below are the ones a real
+// brick key produces.
+constexpr float kVox = 0.05f;
+constexpr int kDim = 8;
+constexpr float kBrick = kDim * kVox;  // 0.4
+
+clay_brick_request brick_at(int kx, int ky, int kz) {
+    clay_brick_request r;
+    std::memset(&r, 0, sizeof r);
+    const int key[3] = {kx, ky, kz};
+    for (int a = 0; a < 3; ++a) {
+        r.key[a] = key[a];
+        r.origin[a] = static_cast<float>(key[a]) * kBrick;
+        r.dims[a] = kDim;
+    }
+    r.spacing = kVox;
+    r.band = 3.0f * kVox;
+    return r;
+}
+
+// THE TWO PROBE BRICKS, and the arithmetic that places them, because a brick
+// chosen by eye would be a test that passes for a reason nobody wrote down.
+//
+// A seed is dropped when its brick DILATED BY band + pad intersects the reach:
+// band 0.15 and pad 0.6 (the document cull pad, which is this document's one
+// fold), so 0.75 either way. Every gesture below is aimed at (1.30, 0, 0) with
+// a ball no wider than 0.17, so its own reach is at most x in [1.13, 1.47] and
+// its fold-dilated reach is at least x in [0.58, 2.02].
+//
+//   SHELL brick key 6: x [2.40, 2.80], dilated [1.65, 3.55].
+//     1.65 > 1.47, so the gesture's OWN ball never reaches it -- it survives
+//     an un-dilated reach, which is the defect.
+//     1.65 < 2.02, so the fold-dilated reach does -- it must be dropped.
+//   CONTROL brick key 12: x [4.80, 5.20], dilated [4.05, 5.95]. Neither reach
+//     comes near it, so it must survive: a gesture that dirtied everything
+//     would pass the shell assertion and fail this one.
+constexpr int kShellKey = 6;
+constexpr int kControlKey = 12;
+
+// THREE VISIBLE SDF LAYERS: the gesture's layer, a smooth fold above it, and a
+// plain hard union above that.
+//
+// `top` is not decoration. A brick's seed is only STORED when the refill may
+// hold the two halves apart, which is when the last visible SDF layer folds
+// with a hard Add -- and it is only SERVED when the active half is not empty
+// (`had_acc`), so `top` must have geometry in each probe brick or the case
+// would pass by there being no seed to drop. Its two small spheres sit exactly
+// in the two probe bricks and nowhere near the gesture.
+struct GestureDoc {
+    clay_document* d = nullptr;
+    clay_layer_id lower = 0, mid = 0, top = 0;
+
+    GestureDoc() {
+        d = clay_document_create();
+        REQUIRE(d != nullptr);
+        REQUIRE(clay_add_sdf_layer(d, "lower", &lower) == CLAY_OK);
+        REQUIRE(clay_add_sdf_layer(d, "mid", &mid) == CLAY_OK);
+        REQUIRE(clay_add_sdf_layer(d, "top", &top) == CLAY_OK);
+        add(lower, 1.0f, 0.0f);
+        add(lower, 0.35f, 0.95f);  // its front face is at x = 1.30
+        add(mid, 0.6f, 1.5f);
+        REQUIRE(clay_document_set_layer_composition(d, mid, CLAY_OP_ADD, CLAY_BLEND_QUADRATIC,
+                                                    kFoldK, 0.0f) == CLAY_OK);
+        add(top, 0.2f, (static_cast<float>(kShellKey) + 0.5f) * kBrick);
+        add(top, 0.2f, (static_cast<float>(kControlKey) + 0.5f) * kBrick);
+    }
+    ~GestureDoc() { clay_document_destroy(d); }
+    GestureDoc(const GestureDoc&) = delete;
+    GestureDoc& operator=(const GestureDoc&) = delete;
+
+    void add(clay_layer_id layer, float r, float x) {
+        clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+        REQUIRE(it != nullptr);
+        const float pos[3] = {x, 0.0f, 0.0f};
+        REQUIRE(clay_item_set_position(it, pos) == CLAY_OK);
+        REQUIRE(clay_layer_add_item(d, layer, it, nullptr) == CLAY_OK);
+        clay_item_destroy(it);
+    }
+};
+
+std::uint64_t seed_entries(const clay_document* d) {
+    clay_resume_stats s{};
+    s.struct_size = sizeof s;
+    REQUIRE(clay_document_resume_stats(d, &s) == CLAY_OK);
+    return s.entries;
+}
+
+// Fill the two probe bricks so each holds a seed, run the gesture, and report
+// what is left. Both bricks in one call, so nothing about the order of the two
+// fills can be the difference between them.
+template <class Gesture>
+void gesture_reach_carries_the_fold(const Gesture& run) {
+    const clay_brick_request pair[2] = {brick_at(kShellKey, -1, -1),
+                                        brick_at(kControlKey, -1, -1)};
+    const std::size_t per = kDim * kDim * kDim;
+
+    auto fill = [&](GestureDoc& doc) {
+        std::vector<float> out(2 * per, 0.0f);
+        REQUIRE(clay_brick_cache_eval_requests(doc.d, nullptr, pair, 2, out.data(), out.size(),
+                                               nullptr, 0) == CLAY_OK);
+    };
+
+    GestureDoc doc;
+    fill(doc);
+    // Both bricks hold one, or the assertions below are about nothing.
+    REQUIRE(seed_entries(doc.d) == 2);
+    run(doc);
+    // EXACTLY ONE SURVIVES, which is two claims in one number: the SHELL
+    // brick's seed is gone (2 would mean the reach stopped at the layer, which
+    // is the defect) and the CONTROL brick's is not (0 would mean the gesture
+    // dirtied the document rather than a region, which would pass a
+    // one-sided assertion for the wrong reason).
+    CHECK(seed_entries(doc.d) == 1);
+}
+
+clay_move_params drag_params() {
+    clay_move_params p;
+    std::memset(&p, 0, sizeof p);
+    p.struct_size = static_cast<std::uint32_t>(sizeof p);
+    p.radius = 0.12f;
+    return p;
+}
+
+clay_magnify_params swell_params() {
+    clay_magnify_params p;
+    std::memset(&p, 0, sizeof p);
+    p.struct_size = static_cast<std::uint32_t>(sizeof p);
+    p.radius = 0.12f;
+    return p;
+}
+
+}  // namespace
+
+TEST_CASE("a gesture's reach carries the folds above its layer") {
+    // All three are aimed at the lower layer's own surface: the 0.35 blob sits
+    // at x = 0.95, so its front face is at 1.30.
+    const float centre[3] = {1.30f, 0.0f, 0.0f};
+
+    SUBCASE("clay_layer_move_surface") {
+        const float pull[3] = {0.05f, 0.0f, 0.0f};
+        const clay_move_params p = drag_params();
+        gesture_reach_carries_the_fold([&](GestureDoc& doc) {
+            std::size_t applied = 0;
+            REQUIRE(clay_layer_move_surface(doc.d, doc.lower, centre, pull, &p, &applied) ==
+                    CLAY_OK);
+            REQUIRE(applied > 0);
+        });
+    }
+
+    SUBCASE("clay_layer_magnify_surface") {
+        const clay_magnify_params p = swell_params();
+        gesture_reach_carries_the_fold([&](GestureDoc& doc) {
+            std::size_t applied = 0;
+            REQUIRE(clay_layer_magnify_surface(doc.d, doc.lower, centre, 0.35f, &p, &applied) ==
+                    CLAY_OK);
+            REQUIRE(applied > 0);
+        });
+    }
+
+    SUBCASE("clay_layer_place_stamps, which is the stroke a dab is issued in") {
+        // The blocker's own sentence: a single stamp issued through apply_edit
+        // was dilated by command_influence_bound and the SAME stamp issued as a
+        // stroke was not, because a stroke states its reach itself and never
+        // passes through it.
+        clay_document* src = clay_document_create();
+        REQUIRE(src != nullptr);
+        clay_layer_id sl = 0;
+        REQUIRE(clay_add_sdf_layer(src, "src", &sl) == CLAY_OK);
+        const float r = 0.2f;
+        clay_item* ball = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+        REQUIRE(ball != nullptr);
+        REQUIRE(clay_layer_add_item(src, sl, ball, nullptr) == CLAY_OK);
+        clay_item_destroy(ball);
+
+        const float hit[3] = {0.2f, 0.0f, 0.0f};
+        const float normal[3] = {1.0f, 0.0f, 0.0f};
+        clay_stamp_frame frame;
+        std::memset(&frame, 0, sizeof frame);
+        frame.struct_size = static_cast<std::uint32_t>(sizeof frame);
+        REQUIRE(clay_stamp_frame_from_surface(hit, normal, 0.0f, &frame) == CLAY_OK);
+        clay_volume_params vp;
+        std::memset(&vp, 0, sizeof vp);
+        vp.struct_size = static_cast<std::uint32_t>(sizeof vp);
+        vp.cell_size = 0.02f;
+        const float lo[3] = {-0.12f, -0.12f, -0.12f};
+        const float hi[3] = {0.12f, 0.12f, 0.12f};
+        clay_item* asset = nullptr;
+        REQUIRE(clay_item_stamp_from_document(src, &vp, &frame, lo, hi, &asset, nullptr) ==
+                CLAY_OK);
+        REQUIRE(asset != nullptr);
+        clay_document_destroy(src);
+
+        std::vector<clay_stamp> dabs;
+        for (int i = 0; i < 6; ++i) {
+            clay_stamp s;
+            std::memset(&s, 0, sizeof s);
+            s.position[0] = centre[0];
+            s.position[1] = -0.05f + 0.02f * static_cast<float>(i);
+            s.position[2] = 0.0f;
+            s.radius = 0.12f;
+            s.rotation[3] = 1.0f;
+            s.along = static_cast<float>(i);
+            dabs.push_back(s);
+        }
+
+        gesture_reach_carries_the_fold([&](GestureDoc& doc) {
+            std::size_t placed = 0;
+            REQUIRE(clay_layer_place_stamps(doc.d, doc.lower, asset, dabs.data(), dabs.size(),
+                                            nullptr, 0, &placed) == CLAY_OK);
+            REQUIRE(placed == dabs.size());
+        });
+        clay_item_destroy(asset);
+    }
+}
+

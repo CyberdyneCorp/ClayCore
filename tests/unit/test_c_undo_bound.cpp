@@ -191,8 +191,12 @@ TEST_CASE("a child of a blended group covers the seam without covering the group
     //
     // The group's blend spreads the child's influence past the child's own
     // box, so a bound that stopped at the child would leave a stale seam. That
-    // has always been the requirement and still is.
-    CHECK(b.hi[0] > chi[0]);
+    // has always been the requirement and still is. `child_box` is the child's
+    // own GEOMETRY -- a 0.3 sphere at x = 2.0 -- stated as a number rather than
+    // read back from clay_layer_node_influence_bound, because that query is no
+    // longer the un-dilated box: see the subcase below.
+    const float child_box = 2.0f + 0.3f;
+    CHECK(b.hi[0] > child_box);
     // It used to be met by reporting the GROUP's whole bound, which also
     // covers the anchor at the far end and everything between. The anchor is
     // not something an edit to the child can reach, and including it made the
@@ -205,13 +209,35 @@ TEST_CASE("a child of a blended group covers the seam without covering the group
     // dilation that covers it is the group's support -- which for a quadratic
     // profile is wider than k, so asserting `>= k` here is the weaker claim
     // that holds for every profile.
-    CHECK(b.hi[0] >= chi[0] + k);
+    CHECK(b.hi[0] >= child_box + k);
     // Never SMALLER than the child's own influence: a bound that is may leave
     // stale bricks, which is the failure this whole family of checks exists
     // to prevent.
     for (int a = 0; a < 3; ++a) {
         CHECK(b.lo[a] <= clo[a]);
         CHECK(b.hi[a] >= chi[a]);
+    }
+
+    SUBCASE("and the QUERY reports the same box the undo dirties") {
+        // UPDATED, not weakened (fold-the-layers-with-an-operator, blocker 2).
+        // The two assertions above used to read `b.hi[0] > chi[0]` and
+        // `b.hi[0] >= chi[0] + k`, with `chi` standing in for the child's own
+        // un-dilated box -- which encoded the query and the command path
+        // giving DIFFERENT answers to "where does this edit reach", the query
+        // stopping at the node and the undo bound carrying the group's blend.
+        //
+        // That difference is exactly what design.md 13b forbids: a host reads
+        // clay_layer_node_influence_bound and hands the result to
+        // clay_brick_cache_mark_dirty, so a query narrower than the command
+        // path leaves it dirtying a box it was told was enough. Both are
+        // scene::node_influence_bound_in_document now, so the numbers are
+        // equal, and the requirement above is asserted against the child's
+        // geometry instead of against the other answer.
+        for (int a = 0; a < 3; ++a) {
+            CHECK(clo[a] == doctest::Approx(b.lo[a]));
+            CHECK(chi[a] == doctest::Approx(b.hi[a]));
+        }
+        CHECK(chi[0] > child_box);  // the query carries the group's blend too
     }
 }
 

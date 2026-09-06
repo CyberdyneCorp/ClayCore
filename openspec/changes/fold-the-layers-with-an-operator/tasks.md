@@ -212,11 +212,13 @@
       is that it stopped firing needs the `walks()`/`keeps()` counters
       `LayerExtentCache` carries and a measurement to justify it
 - [x] 5.3 Dirty influence for a moved, re-blended or hidden cutter.
-      `layer_command_bound` — the only function in that chain holding the
-      `Document`, which is why the loop lives there and `layer_influence_bound`
-      is not widened in place — dilates by the fold's own support and, for an
-      Intersect and nothing else (`op_is_local`), unions the extent of the
-      visible SDF layers BENEATH. That covers `SetLayerVisibleCmd`, a reorder
+      `scene::layer_influence_bound_in_document` — which holds the `Document`,
+      so it can see the stack, and which is why `layer_influence_bound` is not
+      widened in place — dilates by the fold's own support and, for an Intersect
+      and nothing else (`op_is_local`), unions the extent of the visible SDF
+      layers BENEATH. `layer_command_bound` is that function plus the
+      first-visible flip, and the two host-facing layer routes are that function
+      alone (7.4). That covers `SetLayerVisibleCmd`, a reorder
       (a Remove+Add pair) and the composition command itself. An edit made
       INSIDE a lower layer is deliberately not widened: a combine is pointwise,
       so it changes the folded result exactly where it changed the accumulator.
@@ -334,3 +336,47 @@
       the sum, which reports 0.0180 / 0.0229 / 0.0268 of drift and a pad of 1.2
       where three folds need 3.6, and by reverting the first-visible exclusion,
       which charges 1.6 to a layer whose composition is never applied
+- [x] 7.4 THE SECOND REVIEW'S BLOCKERS 2, 3 AND 4: the fold widening had landed
+      on the internal command path only, so every HOST-FACING route still
+      reported the un-dilated box (design.md §13b, §13c). Closed by there being
+      ONE function rather than four agreeing ones: `scene::layer_reach_in_
+      document(doc, layer, box)` carries a box from a LAYER's field to the
+      DOCUMENT's, `node_command_bound` IS `node_influence_bound_in_document`,
+      `layer_command_bound` is `layer_influence_bound_in_document` plus the
+      first-visible flip, and the three gesture reaches take the same term where
+      they state their own region -- including `clay_layer_move_surface`, which
+      design.md §13c identifies as the one of the three a real host drives, and
+      on a drag, where too small a region tears the surface behind the pointer. `layer_influence_bound` and `node_reach_bound`
+      keep a Layer and now say in their comments why that means they cannot
+      answer the question and what to call instead.
+      Regression, all seven entry points, each asserting that the box the host
+      is handed CONTAINS every band-clamped point the edit changed — and each
+      proved by a TARGETED revert:
+        * `clay_layer_node_influence_bound` and `clay_brick_cache_mark_dirty_
+          nodes`: 1,660 and 536 changed samples outside the box, worst 0.0131
+          and 0.0064, on reverting the dilation in
+          `node_influence_bound_in_document` alone
+        * `clay_layer_influence_bound`: 700 outside, worst 0.0079, on reverting
+          that binding alone
+        * `clay_brick_cache_mark_dirty_layer`: 536 outside, worst 0.0064, on
+          reverting that binding alone
+        * the three gestures: a seed placed in the shell the fold adds survives
+          the gesture instead of being dropped — `2 == 1` — on reverting the
+          `apply_surface_gesture` dilation (the drag and the magnify) and the
+          `clay_layer_place_stamps` one (the stroke), separately
+      Also: `test_c_undo_bound.cpp`'s blended-group case UPDATED, not weakened.
+      It asserted the undo bound was strictly wider than the query, which
+      encoded the two disagreeing; the requirement is now asserted against the
+      child's own geometry and a new subcase holds them equal. Classified under
+      design.md §13d: that file is DOCUMENTATION of the new behaviour and not
+      evidence for it — reverting the fix fails only the subcase this stage
+      added, because its older lines assert the undo bound, which nothing
+      narrowed. The evidence is `test_layer_fold_sites.cpp`, which was only
+      appended to.
+      NOT reproduced as reported: blocker 3's "every dab left stale bricks". The
+      reaches genuinely carried no fold term, but their only consumer dilates
+      each seed by `band + pad` and `pad` is `document_cull_pad`, which is
+      >= the fold sum by construction — measured at 0 stale samples over 504
+      bricks either way. The reach is fixed because the coverage belongs to the
+      cull pad and not to the reach; the tests assert the invalidation, which is
+      what the contract is about

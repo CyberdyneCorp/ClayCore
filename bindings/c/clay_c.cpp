@@ -7496,6 +7496,19 @@ clay_result apply_surface_gesture(clay_document* doc, clay_layer_id layer,
                                   const GestureResolver& resolve_into,
                                   std::vector<math::Aabb> reach, size_t* out_applied) {
     const scene::Layer* lp = &l;
+    // THE CALLER'S BALLS ARE BOXES IN THIS LAYER'S FIELD, AND A LAYER'S FIELD IS
+    // NOT THE DOCUMENT'S. A smooth or extended fold above this layer moves the
+    // document's surface up to its own support further out than the layer's own
+    // change, and a gesture invalidates ONCE at its end -- so a reach that stops
+    // at the layer leaves a stale brick per dab of a stroke, silently and with
+    // no visual tell beyond geometry that looks deliberate. The same edit issued
+    // through apply_edit is dilated by command_influence_bound; a gesture states
+    // its reach itself, so it takes the dilation from the same function rather
+    // than from a second copy of it. Taken BEFORE the sharer boxes below, which
+    // come dilated already.
+    for (math::Aabb& b : reach)
+        b = scene::layer_reach_in_document(doc->doc.document, layer, b);
+
     // ... IN ONE PLACEMENT. The ball above is stated in the dragged layer's
     // frame, and an instanced edit list is placed by every layer that shares
     // it: the same nodes move under every one of those transforms, so the
@@ -7507,14 +7520,15 @@ clay_result apply_surface_gesture(clay_document* doc, clay_layer_id layer,
     //
     // Widened by each sharer's WHOLE influence bound rather than by the ball
     // mapped through its transform: mirror and radial place one ball in
-    // several spots and layer_influence_bound already accounts for all of
-    // them. Conservative, and only a shared edit list pays it -- the common
-    // layer shares with nobody and the loop finds nothing. This is the same
-    // union node_command_bound takes for the per-command path, which is why
-    // every other edit route was already right.
+    // several spots and layer_influence_bound_in_document already accounts for
+    // all of them, and for the folds above that sharer. Conservative, and only
+    // a shared edit list pays it -- the common layer shares with nobody and the
+    // loop finds nothing. This is the same union node_command_bound takes for
+    // the per-command path, which is why every other edit route was already
+    // right.
     for (const scene::Layer& other : doc->doc.document.layers) {
         if (&other == lp || other.sdf != lp->sdf) continue;
-        reach.push_back(scene::layer_influence_bound(other));
+        reach.push_back(scene::layer_influence_bound_in_document(doc->doc.document, other.id));
     }
 
     // What the drag can state about HISTORY, beside what the ball states about
@@ -9535,7 +9549,15 @@ clay_result clay_layer_place_stamps(clay_document* doc, clay_layer_id layer_id,
         // The payload is SHARED, not copied -- `n.volume` is the same
         // shared_ptr for every placement, which is what makes a detail stroke
         // affordable and what clay_document_stamp_memory reports.
-        reach.push_back(scene::item_geometry_bound(n, *layer));
+        // ... CARRIED FROM THE LAYER'S FIELD TO THE DOCUMENT'S. A dab's box is
+        // where the LAYER changes; a smooth or extended fold above this layer
+        // moves the document's surface further out than that, and this stroke
+        // dirties once for the whole gesture, so a box that is one fold too
+        // tight is a stale brick per dab with nothing to point at. The same
+        // dab issued through apply_edit is dilated by command_influence_bound;
+        // issued as a stroke it must be dilated here, by the same function.
+        reach.push_back(scene::layer_reach_in_document(doc->doc.document, layer_id,
+                                                       scene::item_geometry_bound(n, *layer)));
         placed.push_back(std::move(n));
     }
     if (placed.empty()) return CLAY_OK;
@@ -12566,8 +12588,14 @@ clay_result clay_layer_influence_bound(const clay_document* doc, clay_layer_id l
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
     const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
     if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
-    return write_influence(scene::layer_influence_bound(*layer), out_min, out_max,
-                           out_has_bounds, out_infinite);
+    // Where the LAYER reaches in this DOCUMENT, which is a different box from
+    // `scene::layer_influence_bound(*layer)`: that one takes a Layer and cannot
+    // see the folds above it or, for an intersect, the stack beneath. This is
+    // the same expression `layer_command_bound` dirties through, so what a host
+    // is told here and what an edit invalidates are one answer.
+    return write_influence(
+        scene::layer_influence_bound_in_document(doc->doc.document, layer_id), out_min, out_max,
+        out_has_bounds, out_infinite);
 }
 
 // -- dense grid evaluation ---------------------------------------------------
@@ -13341,7 +13369,10 @@ clay_result clay_brick_cache_mark_dirty_layer(clay_brick_cache* cache, const cla
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brick cache or document");
     const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
     if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
-    math::Aabb bound = scene::layer_influence_bound(*layer);
+    // The box clay_layer_influence_bound reports, from the same function: a
+    // host that dirties by what the query told it must not be told less than
+    // this call marks.
+    math::Aabb bound = scene::layer_influence_bound_in_document(doc->doc.document, layer_id);
     if (bound.empty()) return CLAY_OK;  // a layer that shows nothing marks nothing
     clay_result r = check_dirty_span(cache->cache, bound);
     if (r != CLAY_OK) return r;

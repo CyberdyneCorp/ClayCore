@@ -1605,23 +1605,62 @@ Aabb node_influence_bound_in_document(const Document& doc, const SdfContent& con
     // two-layer instance, a band-clamped value 0.103 outside the box moved,
     // against a band of 0.15 (issue #325).
     //
-    // scene::node_command_bound already unions this way for the undo path. This
-    // is the same union, shared so the query, the dirty call and the command
-    // path cannot disagree about where an edit reaches.
+    // scene::node_command_bound IS this function -- it looks the content up
+    // from a layer id and calls here -- so the query, the dirty call and the
+    // command path cannot disagree about where an edit reaches. That sentence
+    // was once true only of the union below; the fold made it false, because
+    // this reported the un-dilated box while the command path dilated. It is
+    // true again by there being one body rather than two agreeing ones.
+    //
     // Shared content is the only test, matching node_command_bound. NOT
     // layer.visible: the caller named a node and wants to know where it
     // reaches, and node_influence_bound already returns nothing for a node that
     // is itself invisible. Filtering on the LAYER here made a hidden layer
     // report no bounds where it used to report a box, which is a second
     // behaviour change and not this one.
+    //
+    // node_reach_bound rather than node_influence_bound: an edit to a node
+    // inside a blended group moves the group's result past the node's own box,
+    // and a host is asking where the EDIT lands. Then layer_reach_in_document
+    // carries it the rest of the way, from the layer's field to the
+    // document's -- the two halves of one walk, group supports then fold
+    // supports, which is why the fold term cannot sit anywhere else.
     Aabb out;
     for (const Layer& l : doc.layers) {
         if (l.sdf.get() != &content) continue;
-        const Aabb b = node_influence_bound(content, id, l, extent);
+        const Aabb b = node_reach_bound(content, id, l, extent);
         if (b.is_infinite()) return Aabb::infinite();
-        out.expand(b);
+        out.expand(layer_reach_in_document(doc, l.id, b));
     }
     return out;
+}
+
+Aabb layer_reach_in_document(const Document& doc, LayerId layer_id, const Aabb& in_layer) {
+    // Empty stays empty (nothing changed, so nothing reaches) and infinite
+    // stays infinite (dilating FLT_MAX overflows to the same claim, badly).
+    if (in_layer.empty() || in_layer.is_infinite()) return in_layer;
+    const float support = folds_from_layer_support(doc, layer_id);
+    return support > 0.0f ? in_layer.dilated(support) : in_layer;
+}
+
+Aabb layer_influence_bound_in_document(const Document& doc, LayerId layer_id,
+                                       LayerExtent* extent) {
+    const Layer* l = doc.find_layer(layer_id);
+    if (!l) return Aabb{};
+    Aabb b = layer_reach_in_document(doc, layer_id, layer_influence_bound(*l, extent));
+    if (b.is_infinite() || op_is_local(l->composition.op)) return b;
+    for (const Layer& below : doc.layers) {
+        if (below.id == l->id) break;  // only what is BENEATH it in the stack
+        if (!below.visible || below.kind != LayerKind::Sdf || !below.sdf) continue;
+        // Each one carried up by ITS OWN folds, which include this layer's:
+        // what an intersect can take away is where the ACCUMULATOR has
+        // material, and the accumulator at this seam is what the folds beneath
+        // already spread.
+        const Aabb ob = layer_reach_in_document(doc, below.id, layer_influence_bound(below));
+        if (ob.is_infinite()) return Aabb::infinite();
+        b.expand(ob);
+    }
+    return b;
 }
 
 Aabb layer_influence_bound(const Layer& layer, LayerExtent* extent) {

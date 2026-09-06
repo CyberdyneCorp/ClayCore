@@ -349,10 +349,11 @@ math::Aabb first_visible_flip_bound(const Document& doc, LayerId layer_id, Layer
     }
     if (!first || first->id != layer_id || !next) return math::Aabb{};
     if (layer_composition_is_hard_union(next->composition)) return math::Aabb{};
-    math::Aabb b = layer_influence_bound(*next, extent);
-    if (b.is_infinite() || b.empty()) return b;
-    const float support = folds_from_layer_support(doc, next->id);
-    return support > 0.0f ? b.dilated(support) : b;
+    // Where THAT layer reaches in this document, asked the one way this change
+    // has of asking it. Its intersect arm is not wasted here: an intersecting
+    // `next` stops removing material from the layer being hidden, and that
+    // layer's own box is what the arm reports.
+    return layer_influence_bound_in_document(doc, next->id, extent);
 }
 
 // The bound of a node command's target: where an edit to THAT NODE reaches,
@@ -368,102 +369,62 @@ math::Aabb first_visible_flip_bound(const Document& doc, LayerId layer_id, Layer
 // bounds are defined. A sibling's geometry is not something the edit can
 // reach, and including it made the region grow with the size of the group
 // rather than with the size of the edit.
+//
+// IT IS `node_influence_bound_in_document` AND NOTHING ELSE. That function is
+// what `clay_layer_node_influence_bound` reports and what
+// `clay_brick_cache_mark_dirty_nodes` marks, and the three answers may not
+// disagree: a host computes its refill region from the query and hands it to
+// the dirty call, so a command path that dilated where the query did not left
+// the host dirtying a box it was told was enough (design.md 13b).
 math::Aabb node_command_bound(const Document& doc, LayerId layer_id, NodeId node,
                              LayerExtent* extent) {
     const Layer* target = doc.find_layer(layer_id);
     if (!target || !target->sdf) return math::Aabb{};
-    math::Aabb bound;
-    for (const Layer& l : doc.layers) {
-        if (l.sdf != target->sdf) continue;
-        math::Aabb b = node_reach_bound(*l.sdf, node, l, extent);
-        if (b.is_infinite()) return math::Aabb::infinite();
-        // node_reach_bound stops at the LAYER ROOT, which is where the reach
-        // used to end. The folds from there up are the document's, and this is
-        // the function that holds the Document to walk them.
-        const float support = folds_from_layer_support(doc, l.id);
-        if (!b.empty() && support > 0.0f) b = b.dilated(support);
-        bound.expand(b);
-    }
-    return bound;
+    return node_influence_bound_in_document(doc, *target->sdf, node, extent);
 }
 
-// WHERE A LAYER-LEVEL COMMAND LANDS: the layer's own influence bound, and then
-// three widenings the layer FOLD forces.
+// WHERE A LAYER-LEVEL COMMAND LANDS: where that layer reaches in this document,
+// and ONE term more that only a command has.
 //
-// 1. THE FOLD'S OWN SUPPORT, AND EVERY FOLD ABOVE IT -- `folds_from_layer_
-//    support`, which is where the argument is written. A smooth or extended
-//    fold moves the result up to that far outside either operand, so a change
-//    to this layer reaches that far outside it, and again for each fold it
-//    passes through on the way up. The same dilation node_reach_bound applies
-//    once per enclosing group, one level up, through the same expression.
-//
-// 2. THE LAYERS BENEATH, FOR AN INTERSECT AND FOR NOTHING ELSE. `max(a, b)` far
-//    from this layer's geometry is `b` -- a large positive that WINS the max --
-//    so an intersecting layer changes the field everywhere the accumulator has
-//    material, not only where its own shape is. That is item_nonlocality's
-//    BoundedByLayer (measured over 400,000 points) one level up: an intersect
-//    ITEM is bounded by its LAYER's extent, and an intersect LAYER by the
-//    accumulated extent of the visible SDF layers BELOW it. `op_is_local` is
-//    the test, so subtract, paint and every extended mode stay bounded by this
-//    layer alone and pay nothing. Visibility is not consulted -- a layer being
-//    SHOWN is hidden on one side of the apply and the widening is wanted on
-//    both.
-//
-// WHAT THE INTERSECT ARM COSTS, said plainly, because it is not small: the
-// dirty box becomes the union of the layers beneath, and the host measured a
-// refill of that box at 45.5 ms and, on a fixture with ten times the extent and
-// the same item count, 7.5 s -- 26x and 241x the surface bricks of the geometry
-// it produces, because the refill walks the bricks of a VOLUME to produce a
-// BAND. It is bounded: it fires only for Intersect, only on that layer's OWN
-// commands, and never on an edit made inside a layer beneath -- a combine is
-// POINTWISE, so an edit below changes the folded result exactly where it
-// changed the accumulator and nowhere else, whatever operator sits above.
-// Narrowing it is a REFILL-REGION change (intersect the dirty region with the
-// bricks that already hold band), not a bounds change; it is not specific to
-// layer composition, since an intersect ITEM pays the same today; and it wants
-// the host's in-flight measurement before anyone picks a number. Conservative
-// first, and a bound that is too small is missing surface rather than a slow
-// frame.
+// 1 and 2 -- the fold's own support and every fold above it, and the layers
+// beneath for an INTERSECT and for nothing else -- are
+// `layer_influence_bound_in_document`, where both arguments are written and
+// where the intersect arm's cost is priced. They are not restated here because
+// a host asking `clay_layer_influence_bound` must be told the same box this
+// dirties, and two spellings of one quantity are one edit away from being two
+// quantities.
 //
 // 3. THE LAYER ABOVE THE BOTTOM ONE, when the command changes WHICH layers are
 //    visible SDF layers -- `first_visible_flip_bound`, which is where that
 //    argument is written. `changes_layer_set` says which commands those are
 //    (add, remove, hide/show, and the Remove+Add pair a reorder is), and it is
 //    passed in rather than derived because this function is handed a layer and
-//    not a command.
+//    not a command. It is the one term a QUERY cannot have: a query has no
+//    before and after side to sit between.
 //
 // NOT MEMOIZED, deliberately. The walk is O(nodes beneath) and runs twice per
 // command (apply_edit takes the bound on both sides), against a refill of the
 // box it returns -- which the same command triggers, and which measured 45.5 ms
-// on the fixture above. A cache here would be one whose only observable is that
-// it stopped firing, which is why the one memoizing the LAYER walk carries
+// on the intersect fixture. A cache here would be one whose only observable is
+// that it stopped firing, which is why the one memoizing the LAYER walk carries
 // walks()/keeps() counters; if this walk ever reaches a measurement it wants
 // that shape and those counters, not a quiet map.
 math::Aabb layer_command_bound(const Document& doc, LayerId layer_id, LayerExtent* extent,
                                bool changes_layer_set) {
-    const Layer* l = doc.find_layer(layer_id);
-    if (!l) return math::Aabb{};
     // 3. THE FIRST-VISIBLE FLIP, for the commands that can cause one. Taken
     //    first because it is the one term that is not about this layer at all.
     const math::Aabb flip =
         changes_layer_set ? first_visible_flip_bound(doc, layer_id, extent) : math::Aabb{};
     if (flip.is_infinite()) return flip;
-    math::Aabb b = layer_influence_bound(*l, extent);
+    // 1 and 2 together, from the one function that answers them --
+    // `layer_influence_bound_in_document`, which is also what
+    // `clay_layer_influence_bound` reports and what
+    // `clay_brick_cache_mark_dirty_layer` marks. Only term 3 is left here,
+    // because only a COMMAND can change which layers are visible SDF layers;
+    // a query has no side to be on.
+    math::Aabb b = layer_influence_bound_in_document(doc, layer_id, extent);
     if (b.is_infinite()) return b;
-    // The layer's own fold AND every fold above it: a change to this layer's
-    // field travels up the stack exactly as an item's does (folds_from_layer_
-    // support), and the layer's own composition is the first term of that sum.
-    const float support = folds_from_layer_support(doc, layer_id);
-    if (support > 0.0f) b = b.dilated(support);
     b.expand(flip);
-    if (op_is_local(l->composition.op)) return b;
-    for (const Layer& below : doc.layers) {
-        if (below.id == l->id) break;  // only what is BENEATH it in the stack
-        if (!below.visible || below.kind != LayerKind::Sdf || !below.sdf) continue;
-        const math::Aabb ob = layer_influence_bound(below);
-        if (ob.is_infinite()) return math::Aabb::infinite();
-        b.expand(ob);
-    }
     return b;
 }
 
