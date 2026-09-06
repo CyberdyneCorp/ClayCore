@@ -1161,15 +1161,55 @@ Their fixture is the worst arrangement for that bound and also the ordinary one:
 holds the form, with no group above it. An artist places a cutter on the form
 they are cutting; that is where placing puts it.
 
-**The open question, and it is the next thing to measure:** a moved intersect's
-FIELD changes layer-wide, but its ZERO SET only moves where surface can appear or
-disappear, which for a drag is bounded by the union of the old and new position.
-If that holds, a MOVED intersect could dirty the swept union while a
-topology-changing edit to one keeps the layer-wide bound. Unproven. What would
-kill it is a brick that holds band away from both positions and changes. A
-host-side scaling check is available and decisive from outside the engine: run
-the identical drag against a 10x scene — if the bound is layer-wide the intersect
-frame scales with the layer while the subtract control stays flat.
+**Measured 2026-09-06 on a 10x scene, and the cost is a PRODUCT of two slopes.**
+Same 12-frame drag, same fixture, both scenes holding the SAME 97 items and
+differing only in extent (radius 1.0 against sqrt10 — ~10x surface, ~31.6x
+volume):
+
+| case | refilled bricks/frame | surface bricks | refill ÷ surface | ms/frame | µs/brick |
+|---|---:|---:|---:|---:|---:|
+| reference subtract | 535 | 1,209 | 0.4x | 3.51 | 6.56 |
+| reference intersect | 5,040 | 192 | **26.2x** | 45.50 | 9.03 |
+| 10x subtract | 535 | 10,536 | 0.1x | 11.94 | 22.30 |
+| 10x intersect | 84,672 | 351 | **241.2x** | 7501.42 | 88.59 |
+
+**The intersect walks a BOX, not a band.** It refills 26x the surface bricks of
+the geometry it produces at reference size and 241x at 10x, and the ratio grows
+with radius: the dirty region is the layer's AABB and the refill visits the
+bricks of that VOLUME rather than the bricks that hold band. Brick count grows
+16.8x for a 31.6x volume.
+
+**There is a SECOND slope, and the subtract control is what proves it.** Subtract
+refills 6,424 bricks in both scenes — bit-identical, because `op_is_local` keeps
+its region on the cutter — and still costs 6.56 µs/brick at reference against
+22.30 at 10x. A brick costs ~3.4x more in a larger layer at constant item count
+AND constant brick count; the intersect shows the same effect at 9.8x. So
+164.9x = 16.8x more bricks × 9.8x per brick. The likely cause is
+items-per-brick rather than extent — a fixture that scales its dab radius with
+the model puts more overlapping items inside one 8³ × 0.05 brick, which is a
+cost the engine already prices per item — but it is unresolved, and a swept-union
+bound would address the first slope and not the second.
+
+**`resumed_bricks` is ZERO on every transform-driven refill measured**, with the
+seed store at 1.0 MiB of a 64 MiB budget, so the budget is not what switches the
+fast path off — it was never on. This is CORRECT and by design: a gizmo drag is a
+transform edit, not an append, so `forget_appends()` / `forget_resume()`
+(`bindings/c/clay_c.cpp`, `touch_regions` and its structural and frontier
+siblings) retire every seed each frame. **The resumable path is the STROKE fast
+path; a drag has no seed to resume from and never did.** The drag fast path is
+`clay_layer_placement_begin/_update/_commit`, which is a LAYER gesture — and an
+item dragged inside a layer, which is what this fixture does, has no fast path at
+all today. Worth stating plainly because two separate readings of "the resume
+stopped working" are both wrong.
+
+The open question stays open: a moved intersect's FIELD changes layer-wide, but
+its ZERO SET only moves where surface can appear or disappear, which for a drag
+is bounded by the union of the old and new position. What would kill it is a
+brick that holds band away from both positions and changes.
+
+Filed as **#471** (this) and **#472** (`clay_document_mesh_layer_revision`, the
+revision that does not move when history replaces a layer's triangles —
+re-verified on v0.84.0 before filing).
 
 **This belongs to `fold-the-layers-with-an-operator` as well as to #451**, and it
 is where that change's measurement should be taken. A layer fold that is not a
