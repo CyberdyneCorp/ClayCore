@@ -1848,6 +1848,36 @@ needs. They have that number for one hop of four (median ratio 0.9998x, 171 of
 comparison is honest; it is not yet sensitive, and those are different
 properties.
 
+### A fourth way a gate is real and unenforced: an exact assertion about a state nobody reaches
+
+The three recorded above are a gate no change triggers, a gate the wrong version
+runs, and a gate compiled but never run. The multires bit-identity gate is none
+of them, and it guarantees nothing about the case people will hit.
+
+It is not a weak assertion: it is exact, and re-measured independently at
+**0.000000000** difference at three levels. It is not a tautology: its two sides
+are genuinely independent, a regional level and a dense one. It runs on every
+change, in the right job, at the right version.
+
+**It asserts a state nobody sculpts in.** Bit-identity between a regional level
+and a dense hierarchy holds exactly while the boundary detail is zero, and that
+is the only case the fixture builds. The moment a coefficient is authored at a
+boundary vertex, `P(n) = S(n) + Frame · Detail` reconstructs it against a frame
+up to six degrees out, and the guarantee is gone — without the gate moving.
+
+**The question that finds this class is not about the assertion, it is about the
+fixture: what state does this test put the system in, and is it the state a user
+puts it in?** A test can be precise, independent, executed and current, and still
+be measuring a corner of the space nobody stands in. None of §13d, §13e or §13j
+reaches it — those ask whether the test could fail, whether its expectation is
+independent, and whether the code is executed. This asks whether the SCENARIO is
+representative, and only a person who knows what users do can answer it.
+
+Which is why it took a host to find: the consuming session's regional refinement
+turned out to be over a VOXEL GRID rather than a hierarchy — the same English
+word, a different operation — so it is not exposed today, and it said so with the
+condition attached rather than filing the row as not-applicable.
+
 ### A threshold between two measurements from ONE run is stable; one against a specification is not
 
 The generalisation of two failures on one PR, and the sharper half is the host's.
