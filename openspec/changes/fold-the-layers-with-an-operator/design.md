@@ -1135,3 +1135,37 @@ requirement, one level below the fold, for group blends. It read as a property
 worth having rather than as a defect, and nothing re-asked whether the two
 answers should differ at all. A test can encode the bug as the spec, and then
 updating it is the moment to say which of the two it was.
+
+### §13e. An expectation derived from the system under test measures consistency, not correctness
+
+The general form of two mistakes made in this change's own review cycle, stated
+by the host on 2026-09-06 after both had been fixed separately and neither had
+been recognised from inside the other.
+
+- `test_c_undo_bound.cpp` compared the undo bound against
+  `clay_layer_node_influence_bound` — one output of the bounds machinery against
+  another. It could not detect the machinery being wrong in a way that moves
+  BOTH, which is precisely what this change introduced. It looked like a check
+  and was an invariant.
+- A release note claimed a brush got stronger, citing a surface measured with a
+  PICK, in a release that changed the pick. The expected value and the thing
+  under test came from one place, so agreement was guaranteed and disagreement
+  would have been uninterpretable.
+
+**The fix is the same move in both cases: take the expectation from somewhere the
+code under test cannot reach.** Stage 2 used the child's own geometry as a
+literal (`2.0f + 0.3f`) instead of reading the query back; the host used
+`clay_eval_points`, a different instrument from the marcher. A literal and a
+second instrument are the same thing.
+
+**The test for whether comparing two outputs is legitimate** — because sometimes
+it must be — is whether **the two could ever disagree for a reason you would want
+to hear about.** Asserting that the query and the undo bound now agree is a real
+claim, because they are supposed to and a divergence is a defect worth an alarm.
+Deriving one from the other and then asserting a property of the pair was not.
+
+**Required of the third review**, alongside §13d: sweep every test this change
+adds or modifies for an expected value that comes from the system under test, and
+report each as either a legitimate invariant (the two could disagree for a reason
+worth hearing) or a tautology (they cannot). This is cheap to check and it is the
+failure that survives a green suite.
