@@ -6507,6 +6507,66 @@ def test_the_journal_needs_undo_enabled():
         doc.journal_since(0)
 
 
+def test_a_journal_from_another_snapshot_is_refused():
+    # A journal names the bytes it continues from, so replaying it onto a
+    # different document raises instead of applying cleanly and handing back a
+    # document that matches neither the snapshot nor the session.
+    doc, _, _, snapshot = _session_with_edits()
+    journal, _ = doc.journal_since(0)
+
+    other, other_layer, _, _ = _session_with_edits()
+    other_layer.add(clay.Sphere(r=0.3, position=(3, 0, 0)))
+    other_snapshot = other.to_bytes()       # a different session, different bytes
+
+    probes = np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]], dtype=np.float32)
+    wrong = clay.load_bytes(other_snapshot)
+    wrong.enable_undo()
+    before = wrong.eval(probes)
+    with pytest.raises(ValueError, match="different snapshot"):
+        wrong.replay_journal(journal)
+    assert np.allclose(wrong.eval(probes), before)    # nothing applied
+
+    # A document that was never serialized cannot be the snapshot either.
+    scratch = clay.Document()
+    scratch.add_sdf_layer("body")
+    scratch.enable_undo()
+    with pytest.raises(ValueError, match="different snapshot"):
+        scratch.replay_journal(journal)
+
+    # And onto the snapshot it WAS taken against, the same bytes replay.
+    right = clay.load_bytes(snapshot)
+    right.enable_undo()
+    assert right.replay_journal(journal)["applied"] == 3
+
+
+def test_a_barrier_is_visible_before_the_recovery_needs_it():
+    # Replay reports a barrier, but replay happens during the recovery — the
+    # one moment when "take a fresher snapshot" is useless. This is how a host
+    # learns while it still can.
+    doc, layer, blocks, snapshot = _session_with_edits()
+    assert doc.journal_barrier(0) is None
+
+    blocks.add_level()
+    blocks.drop_level()                     # detail nothing can reproduce
+    layer.add(clay.Sphere(r=0.4, position=(2, 0, 0)))
+
+    at = doc.journal_barrier(0)
+    assert at is not None
+    assert doc.journal_barrier(at + 1) is None
+
+    journal, _ = doc.journal_since(0)
+    recovered = clay.load_bytes(snapshot)
+    recovered.enable_undo()
+    result = recovered.replay_journal(journal)
+    assert result["stopped_at_barrier"]
+    assert result["applied"] == at          # up to the barrier, and no further
+    # The sphere added after it is NOT in the recovered document: replay
+    # stopped rather than skipping, so the gap is visible instead of silent.
+    probes = np.array([[2.0, 0.0, 0.0]], dtype=np.float32)
+    assert recovered.eval(probes)[0] > 0
+    assert doc.eval(probes)[0] < 0
+
+
 # -- cancelling a long operation (add-operation-cancellation) ----------------
 #
 # Three budget classes, and the third had no exit: on the reference iPad

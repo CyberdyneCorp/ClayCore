@@ -4543,13 +4543,21 @@ void clay_blob_destroy(clay_blob* blob) { delete blob; }
 
 clay_result clay_document_save(const clay_document* doc, const char* path) {
     if (!doc || !path) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or path");
-    return from_io(io::save_clayspace_file(doc->doc, path));
+    const io::IoStatus s = io::save_clayspace_file(doc->doc, path);
+    // These bytes are a snapshot the journal from here on can be paired with,
+    // whether the host meant them as a crash snapshot or as an ordinary save.
+    // Noted only on success: a failed write left no snapshot to name.
+    if (s.ok() && doc->undo) doc->undo->note_snapshot(doc->doc.document.snapshot_id);
+    return from_io(s);
 }
 
 clay_result clay_document_save_memory(const clay_document* doc, clay_blob** out_blob) {
     if (!doc || !out_blob) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out_blob");
     *out_blob = nullptr;
     *out_blob = new clay_blob{io::save_clayspace(doc->doc)};
+    // See clay_document_save: the bytes just produced are a snapshot the
+    // journal from here on continues from.
+    if (doc->undo) doc->undo->note_snapshot(doc->doc.document.snapshot_id);
     return CLAY_OK;
 }
 
@@ -4664,6 +4672,17 @@ clay_result clay_document_journal_range(const clay_document* doc, size_t* out_fi
     return CLAY_OK;
 }
 
+clay_result clay_document_journal_barrier(const clay_document* doc, size_t from,
+                                          int32_t* out_has_barrier, size_t* out_at) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
+    std::size_t at = 0;
+    const bool found = doc->undo->journal_barrier_after(from, &at);
+    if (out_has_barrier) *out_has_barrier = found ? 1 : 0;
+    if (found && out_at) *out_at = at;
+    return CLAY_OK;
+}
+
 clay_result clay_document_journal_trim(clay_document* doc, size_t upto) {
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
     if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
@@ -4683,6 +4702,16 @@ clay_result clay_document_replay_journal(clay_document* doc, const uint8_t* data
     session::History::ReplayResult result;
     const bool ok = doc->undo->replay(data, size, doc->doc.document, doc->grid_for(),
                                       doc->mesh_for(), &result, doc->mask_for());
+    // The pair was wrong and NOTHING was applied, so this returns before the
+    // invalidation below: the document is byte-identical, and saying so is the
+    // difference between "find the other snapshot" and "your document is now
+    // half a recovery".
+    if (result.snapshot_mismatch)
+        return fail(CLAY_ERROR_SNAPSHOT_MISMATCH,
+                    "this journal was taken against a different snapshot: it names " +
+                        std::to_string(result.journal_snapshot_id) + " and this document is " +
+                        std::to_string(doc->doc.document.snapshot_id) +
+                        " (0 meaning it was never saved or loaded). Nothing was applied.");
     if (out_applied) *out_applied = result.applied;
     if (out_stopped_at_barrier) *out_stopped_at_barrier = result.stopped_at_barrier ? 1 : 0;
     // Replay writes straight onto the document rather than through apply_edit,
@@ -4784,6 +4813,12 @@ clay_result clay_document_enable_undo(clay_document* doc) {
         doc->undo->set_groups_resolver([doc]() -> voxel::GroupField* {
             return doc->doc.groups ? &*doc->doc.groups : nullptr;
         });
+        // A document LOADED from bytes already knows which snapshot it is, and
+        // the journal that starts here continues from exactly that one. Without
+        // this seed the whole recovery path — load a snapshot, enable undo,
+        // journal, crash, replay — would produce a journal naming no snapshot
+        // and the pair would go unchecked (survive-a-crash 2.1).
+        doc->undo->note_snapshot(doc->doc.document.snapshot_id);
     }
     return CLAY_OK;
 }
@@ -11371,6 +11406,19 @@ clay_result clay_voxel_drop_level(clay_voxel_grid* grid) {
     if (r != CLAY_OK) return r;
     if (!g->drop_level())
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "a grid always has at least one level");
+    // A BARRIER, because nothing can reproduce this. The level's cells are
+    // gone, the steps recorded against it name coordinates at a resolution
+    // that no longer exists, and a journal replayed across it would rebuild a
+    // grid that still HAS the level — a recovery quietly missing the
+    // operation, which is the failure the barrier mechanism exists to
+    // prevent. It was the documentation's own example of one and recorded
+    // nothing until this: `record_barrier`'s only caller was the mask step,
+    // and masks-in-the-history took that one away.
+    //
+    // A standalone grid is not in a document and records nothing, exactly as
+    // it does for a sculpt step.
+    if (grid->doc && grid->doc->undo)
+        grid->doc->undo->record_barrier("dropped a voxel resolution level");
     return CLAY_OK;
 }
 

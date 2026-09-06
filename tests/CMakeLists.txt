@@ -176,6 +176,7 @@ add_executable(clay_unit_tests
   unit/test_c_memory_io.cpp
   unit/test_session_history.cpp
   unit/test_session_journal.cpp
+  unit/test_c_journal.cpp
   unit/test_cancellation.cpp
   unit/test_mask_history.cpp
   unit/test_history_budget.cpp

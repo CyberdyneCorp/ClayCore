@@ -1105,19 +1105,39 @@ shift when you trim, so a failed write is retried by asking again, and a host
 that asks below the trimmed floor gets nothing rather than a silently shorter
 history — `journal_range()` is how it finds out.
 
-#### The two rules that keep a recovery honest
+#### The three rules that keep a recovery honest
 
 **A journal this build does not understand is refused**, not partly read. A
 recovery that silently drops what it could not parse is worse than none, because
 the user cannot see the gap. Events applied before a bad one stand — replay is
 not a transaction — so replay onto a copy if you want all-or-nothing.
 
+**A journal replayed onto the wrong snapshot is refused too**, with
+`CLAY_ERROR_SNAPSHOT_MISMATCH` (a `ValueError` naming the pair, in pyclay) and
+*nothing applied*. A journal carries a hash of the bytes it continues from,
+stamped by `to_bytes` / `save` on one side and `load_bytes` / `load` on the
+other, so you get the check by writing the ordinary recovery path. The two
+refusals mean opposite things: unreadable says discard the file, mismatched says
+the file is fine and you handed it the wrong snapshot.
+
+> It names the snapshot **current at the index you asked from**, not the last
+> one you took — so serializing again to compare sizes does not repoint a
+> journal you already have. What it does *not* catch is replaying the same
+> journal twice onto the same snapshot: the indices are yours to keep. It is
+> also not a checksum, and journals written before 0.86.0 name no snapshot and
+> are never refused for the pair.
+
 **Replay stops at a barrier rather than skipping it.** A barrier is an operation
-nothing can reproduce — dropping a resolution level, removing a sculpt layer,
-or anything a host does that the engine never sees. (Mask edits *were* one, and
-are not any more.) Replay returns success with the flag set, and a host that
-sees it needs a *fresher snapshot*, not a longer journal. Continuing past it would hand back a document quietly missing that
-operation's effect.
+nothing can reproduce — dropping a voxel resolution level, or anything a host
+does that the engine never sees. (Mask edits *were* one, and are not any more.)
+Replay returns success with the flag set, and a host that sees it needs a
+*fresher snapshot*, not a longer journal. Continuing past it would hand back a
+document quietly missing that operation's effect.
+
+**Ask before you need it**: `journal_barrier(from)` (`clay_document_journal_barrier`)
+reports the first such operation in the log and where, so you re-snapshot while
+you still can. Learning it from a replay means learning it during the recovery,
+which is the one moment the answer is useless.
 
 A journal therefore carries an ordinary sculpting session end to end, mask
 edits included.

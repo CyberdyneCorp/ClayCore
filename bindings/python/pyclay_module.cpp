@@ -7158,12 +7158,20 @@ NB_MODULE(pyclay, m) {
         .def("save",
              [](const PyDocument& d, const std::string& path) {
                  check_io(io::save_clayspace_file(*d.doc, path));
+                 // These bytes are a snapshot the journal from here on can be
+                 // paired with, whether the host meant them as a crash
+                 // snapshot or as an ordinary save. check_io threw if the
+                 // write failed, so there is no failure path to guard.
+                 if (*d.undo) (*d.undo)->note_snapshot(d.doc->document.snapshot_id);
              },
              "path"_a, "Save the document as .clayspace")
         .def(
             "to_bytes",
             [](const PyDocument& d) {
                 const std::vector<std::uint8_t> bytes = io::save_clayspace(*d.doc);
+                // See `save`: the bytes just produced are a snapshot the
+                // journal from here on continues from.
+                if (*d.undo) (*d.undo)->note_snapshot(d.doc->document.snapshot_id);
                 return nb::bytes(bytes.data(), bytes.size());
             },
             "The same bytes `save` would write, without a path — for a host\n"
@@ -7333,6 +7341,13 @@ NB_MODULE(pyclay, m) {
                      (*d.undo)->set_groups_resolver([doc]() -> voxel::GroupField* {
                          return doc->groups ? &*doc->groups : nullptr;
                      });
+                     // A document loaded from bytes already knows which
+                     // snapshot it is, and the journal starting here continues
+                     // from that one. Without this seed the recovery path —
+                     // load_bytes, enable_undo, journal, crash, replay —
+                     // produces a journal naming no snapshot and the pair goes
+                     // unchecked (survive-a-crash 2.1).
+                     (*d.undo)->note_snapshot(d.doc->document.snapshot_id);
                  }
              },
              "Start recording edits. Off by default, so a document that never "
@@ -7508,6 +7523,25 @@ NB_MODULE(pyclay, m) {
             "journal_since for something below `first` yields nothing — this is\n"
             "how you find out, rather than by replaying a short history.")
         .def(
+            "journal_barrier",
+            [](const PyDocument& d, std::size_t from) -> nb::object {
+                if (!*d.undo) throw std::runtime_error("undo is not enabled on this document");
+                std::size_t at = 0;
+                if (!(*d.undo)->journal_barrier_after(from, &at)) return nb::none();
+                return nb::cast(at);
+            },
+            "from"_a = 0,
+            "The index of the first operation nothing can reproduce at or after\n"
+            "`from`, or None. THIS IS THE CALL THAT SAYS 'SNAPSHOT AGAIN'.\n\n"
+            "Replay stops at a barrier, so a host that only learns about one\n"
+            "from replay_journal learns it during the recovery — the one moment\n"
+            "the answer is useless, because the session it would have\n"
+            "re-snapshotted is gone. Ask after taking the journal.\n\n"
+            "Reads THIS document's log, not a journal blob: a recovery file\n"
+            "from a previous session is opaque, and replaying it is the only\n"
+            "way to learn what is in it. Trimming drops barriers below the\n"
+            "floor too, so ask before you trim.")
+        .def(
             "journal_trim",
             [](PyDocument& d, std::size_t upto) {
                 if (!*d.undo) throw std::runtime_error("undo is not enabled on this document");
@@ -7522,6 +7556,12 @@ NB_MODULE(pyclay, m) {
                 const bool ok = (*d.undo)->replay(
                     reinterpret_cast<const std::uint8_t*>(data.c_str()), data.size(),
                     d.doc->document, grid_for(d), mesh_for(d), &r, mask_for(d));
+                if (r.snapshot_mismatch)
+                    throw std::invalid_argument(
+                        "this journal was taken against a different snapshot: it names " +
+                        std::to_string(r.journal_snapshot_id) + " and this document is " +
+                        std::to_string(d.doc->document.snapshot_id) +
+                        " (0 meaning it was never saved or loaded). Nothing was applied.");
                 if (!ok)
                     throw std::invalid_argument(
                         "the journal could not be replayed: a version this build does not "
@@ -7541,6 +7581,13 @@ NB_MODULE(pyclay, m) {
             "a document quietly missing that operation's effect, and you could\n"
             "not see the loss. Seeing the flag means you need a fresher\n"
             "snapshot, not a longer journal.\n\n"
+            "'IS the snapshot' is CHECKED: a journal names the bytes it\n"
+            "continues from, and one replayed onto a different document raises\n"
+            "with NOTHING applied. It is a hash of the serialized bytes, so two\n"
+            "identical snapshots are interchangeable; it is not a checksum, and\n"
+            "it does not catch replaying the same journal twice — the indices\n"
+            "are what guard that. A journal from before 0.86.0 names no\n"
+            "snapshot and is never refused for the pair.\n\n"
             "A journal this build does not understand, or a truncated one, is\n"
             "REFUSED. Events applied before the bad one stand, so replay onto a\n"
             "copy if you want all-or-nothing.")
@@ -10300,7 +10347,16 @@ NB_MODULE(pyclay, m) {
             "Whether a level stores the whole lattice. True for a level added\n"
             "without a region, and for every grid written before regions existed.")
         .def(
-            "drop_level", [](PyVoxelGrid& g) { return g.grid().drop_level(); },
+            "drop_level",
+            [](PyVoxelGrid& g) {
+                if (!g.grid().drop_level()) return false;
+                // A BARRIER: see clay_voxel_drop_level. The level's cells are
+                // gone and the steps recorded against it name a resolution
+                // that no longer exists, so a journal replayed across this
+                // would hand back a grid that still has the level.
+                if (g.doc && *g.undo) (*g.undo)->record_barrier("dropped a voxel resolution level");
+                return true;
+            },
             "Drops the finest level and the detail only it held. False when\n"
             "there is only one left.")
         .def(

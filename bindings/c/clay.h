@@ -52,7 +52,22 @@ typedef enum clay_result {
      * the HOST declared before the call, and distinct from every fault code.
      * A cancelled operation leaves everything it was given exactly as it found
      * it — see clay_cancel_token. */
-    CLAY_ERROR_CANCELLED = 9
+    CLAY_ERROR_CANCELLED = 9,
+    /* A journal was paired with a snapshot it was not taken against, and
+     * clay_document_replay_journal refused it. APPENDED, so nothing compiled
+     * against an older header changes meaning.
+     *
+     * Distinct from CLAY_ERROR_INVALID_ARGUMENT, which replay uses for bytes
+     * it could not read, because the two mean opposite things to a host: an
+     * unreadable journal is a file to discard, while a mismatched one is a
+     * perfectly good file handed the wrong snapshot — the recovery is still
+     * there if the host can find the snapshot it belongs to. Retrying one is a
+     * spin; retrying the other with the right document works.
+     *
+     * It is also the ONE replay refusal that leaves the document byte-
+     * identical: the identity is in the journal's header, so nothing has been
+     * applied when it is raised. */
+    CLAY_ERROR_SNAPSHOT_MISMATCH = 10
 } clay_result;
 
 /* Library/ABI version (see c-abi spec). Compare majors at init — and while
@@ -883,6 +898,28 @@ clay_result clay_document_journal_since(const clay_document* doc, size_t from,
 clay_result clay_document_journal_range(const clay_document* doc, size_t* out_first,
                                         size_t* out_next);
 
+/* Does the log from `from` onward contain an operation nothing can reproduce,
+ * and where. *out_has_barrier is 0 or 1; *out_at receives the absolute index of
+ * the FIRST such event when there is one, and is untouched when there is not.
+ * Either out pointer may be NULL.
+ *
+ * THIS IS THE CALL THAT SAYS "SNAPSHOT AGAIN". Replay stops at a barrier, so a
+ * host that only ever learns about one from clay_document_replay_journal learns
+ * it during the recovery — the single moment when the answer is useless,
+ * because the session it would have re-snapshotted is already gone. Ask this
+ * after taking the journal; a 1 means appending can no longer reconstruct the
+ * session and the document must be snapshotted again.
+ *
+ * WHAT IT DOES NOT PROMISE. It reads THIS document's log, not a journal blob:
+ * a recovery file from a previous session is opaque here, and the only way to
+ * learn what is in one is to replay it. Trimming moves the floor, so a barrier
+ * below clay_document_journal_range's *out_first is gone from the answer as
+ * well as from the log — ask before you trim. And it is a property of the log,
+ * not of the history: undoing past a barrier is a separate question that
+ * clay_document_undo_state's depth answers. */
+clay_result clay_document_journal_barrier(const clay_document* doc, size_t from,
+                                          int32_t* out_has_barrier, size_t* out_at);
+
 /* Drop events below `upto`, once those bytes are durable. Indices do not
  * shift. */
 clay_result clay_document_journal_trim(clay_document* doc, size_t upto);
@@ -900,7 +937,48 @@ clay_result clay_document_journal_trim(clay_document* doc, size_t upto);
  *
  * A journal this build does not understand, or a truncated one, is REFUSED. The
  * events applied before the bad one stand — replay is not a transaction — so a
- * host that wants all-or-nothing replays onto a copy and keeps it on success. */
+ * host that wants all-or-nothing replays onto a copy and keeps it on success.
+ *
+ * THE PAIR IS CHECKED. A journal carries the identity of the snapshot it
+ * continues from, and one replayed onto a document that is not that snapshot is
+ * refused with CLAY_ERROR_SNAPSHOT_MISMATCH and NOTHING applied — the identity
+ * is in the header, so this is the one refusal here that leaves the document
+ * byte-identical. Without it the wrong pair replays cleanly and hands back a
+ * document matching neither the snapshot nor the session: an edit list holding
+ * what the snapshot already had twice over, voxel cells written by absolute
+ * coordinate onto a grid that never had them, and nothing on screen to say so.
+ *
+ * WHAT THE IDENTITY IS, AND WHAT IT DOES NOT PROMISE:
+ *
+ *  - It is a hash of the SERIALIZED BYTES, stamped by clay_document_save_memory
+ *    / clay_document_save (the snapshot side) and clay_document_load_memory /
+ *    clay_document_load (the recovery side). A host does nothing to get it.
+ *    Two snapshots with the same bytes are the same snapshot and are
+ *    interchangeable — which is correct, and which a per-session token would
+ *    have got wrong by refusing a pair that recovers perfectly.
+ *  - IT IS THE SNAPSHOT CURRENT AT `from`, not the last one you took. Saving
+ *    again to measure whether the journal has outgrown the document — the
+ *    re-snapshot rule this feature documents — does not repoint the journal
+ *    you already asked for: clay_document_journal_since(doc, 5, ...) names
+ *    whatever was serialized at or before index 5, however many saves have
+ *    happened since. Which also means the events are refused against the
+ *    LATER image, where they would otherwise have applied a second time.
+ *  - IT IS NOT A CHECKSUM. It does not detect a corrupted snapshot or a
+ *    corrupted journal; a mangled journal is caught by being unreadable, and a
+ *    mangled snapshot is not caught at all. It answers "is this the right
+ *    pair", nothing else.
+ *  - IT DOES NOT CATCH REPLAYING THE SAME JOURNAL TWICE onto the same
+ *    snapshot. Both replays name the right snapshot and both are accepted; the
+ *    absolute indices from clay_document_journal_since are what guard that,
+ *    and they are a host's bookkeeping.
+ *  - A DOCUMENT THAT WAS NEVER SAVED OR LOADED names no snapshot, so a journal
+ *    that names one is refused against it. That is deliberate: replaying onto
+ *    a document built from scratch cannot be the recovery it looks like.
+ *  - A JOURNAL THAT NAMES NO SNAPSHOT IS NEVER REFUSED — journals written
+ *    before 0.86.0 carry no identity, and refusing them would have turned an
+ *    upgrade into exactly the data loss this feature exists to prevent. A
+ *    journal written by 0.86.0 or later is NOT readable by an older build,
+ *    which is the safe direction and the one the version field already had. */
 clay_result clay_document_replay_journal(clay_document* doc, const uint8_t* data, size_t size,
                                          size_t* out_applied,
                                          int32_t* out_stopped_at_barrier);
@@ -4116,7 +4194,17 @@ clay_result clay_voxel_add_level(clay_voxel_grid* grid, size_t* out_level);
 clay_result clay_voxel_add_level_region(clay_voxel_grid* grid, const float min[3],
                                         const float max[3], size_t* out_level);
 /* Drops the finest level. CLAY_ERROR_INVALID_ARGUMENT when only one is left,
- * since a grid always has at least one. */
+ * since a grid always has at least one.
+ *
+ * RECORDS A BARRIER in the session history when the grid belongs to a document
+ * with undo enabled, because nothing can reproduce this: the level's cells are
+ * gone, and the steps recorded against it name coordinates at a resolution that
+ * no longer exists. So clay_document_undo_state reports a depth of 0 after one,
+ * and a journal replayed across it STOPS here rather than rebuilding a grid
+ * that still has the level. Before 0.86.0 it recorded nothing and a recovery
+ * silently kept the dropped detail — a correction rather than a new limit,
+ * since nothing could ever undo a drop. A standalone grid is in no document and
+ * records nothing. */
 clay_result clay_voxel_drop_level(clay_voxel_grid* grid);
 /* Cell size and occupied cells of ONE level, so a host can report what each
  * level of a stack costs without making it active first. */

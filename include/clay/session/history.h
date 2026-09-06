@@ -40,7 +40,9 @@
 // still sparse vertex deltas; an edit-list step is still a command inverse.
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -405,7 +407,45 @@ class History {
     // Events from `from` onward. `out_now_at` receives the index to pass next
     // time. An index past the end yields nothing and is not an error — that is
     // a host that is already up to date.
+    //
+    // The bytes carry the identity of the snapshot they continue from —
+    // `snapshot_for(from)` — so `replay` can refuse a journal paired with the
+    // wrong one. See note_snapshot below for why that is keyed on the index.
     std::vector<std::uint8_t> journal_since(std::size_t from, std::size_t* out_now_at) const;
+    // Whether an operation nothing can reproduce lies in [`from`, next), and
+    // where. This is how a host learns it must RE-SNAPSHOT while it can still
+    // take one, rather than at recovery time when the answer is useless: the
+    // barrier is already in the log, and appending to it can no longer
+    // reconstruct the session.
+    bool journal_barrier_after(std::size_t from, std::size_t* out_at) const;
+    // -- which snapshot a journal continues from (survive-a-crash 2.1) -------
+    //
+    // A binding calls this with `io::snapshot_identity` of the bytes every
+    // time the document is serialized, and once when undo is enabled on a
+    // document that was loaded from bytes. The pair recorded is
+    // (the journal index reached, the identity), and `journal_since` stamps
+    // the identity of the newest snapshot taken AT OR BEFORE the index asked
+    // for.
+    //
+    // KEYED ON THE INDEX, and that is the whole correctness argument. "The
+    // last thing this document was serialized to" is the tempting rule and it
+    // is WRONG in both directions. A host that snapshots at index 5, keeps
+    // journaling to 9 and then serializes again — to measure whether the
+    // journal has outgrown the document, which is the re-snapshot rule this
+    // feature documents — would have its `journal_since(5)` stamped with the
+    // SECOND image. Replayed onto the snapshot the host kept, that is a
+    // refusal on a pair that was correct; replayed onto the second image it is
+    // ACCEPTED and applies events 5..9 to a document that already contains
+    // them. Keyed on the index, `journal_since(5)` names the snapshot taken at
+    // 5 and the second case is the refusal it should always have been.
+    //
+    // An index with no snapshot at or before it stamps zero — a journal that
+    // names no snapshot, which replay does not refuse. Failing OPEN is the
+    // deliberate direction: a binding that forgets to call this loses a check,
+    // where failing closed would refuse recoveries that are perfectly good.
+    void note_snapshot(std::uint64_t id);
+    std::uint64_t snapshot_for(std::size_t from) const;
+
     // Drop events below `upto`, which the host calls once they are durable.
     // Indices do NOT shift: they are absolute for the life of the session, so a
     // host that trimmed and then asked for an older index is told it is gone
@@ -417,10 +457,22 @@ class History {
     // Apply a journal onto a document that IS the snapshot it was taken
     // against. Stops at the first barrier and says so, rather than continuing
     // and producing a document quietly missing that operation's effect.
+    //
+    // "IS the snapshot" is now CHECKED rather than asked for. A journal that
+    // names a snapshot (`journal_snapshot_id` non-zero) and a document that is
+    // not it are refused with `snapshot_mismatch` set and NOTHING applied —
+    // the identity is in the header, so this refusal is the one all-or-nothing
+    // refusal replay has. What it does NOT catch is the same journal replayed
+    // TWICE onto the same snapshot: both replays name the right snapshot, and
+    // the absolute indices are what guard that.
     struct ReplayResult {
         std::size_t applied = 0;
         bool stopped_at_barrier = false;
         std::string barrier;
+        // Set when the journal named a snapshot this document is not. The
+        // journal's id is reported so a host can log the pair it was handed.
+        bool snapshot_mismatch = false;
+        std::uint64_t journal_snapshot_id = 0;
     };
     bool replay(const std::uint8_t* data, std::size_t size, scene::Document& doc,
                 const GridFor& grid_for, const MeshFor& mesh_for, ReplayResult* out,
@@ -516,6 +568,11 @@ class History {
     // The absolute index of journal_[0]. Absolute so a trimmed host asking for
     // an old index is refused rather than served the wrong events.
     std::size_t journal_base_ = 0;
+    // Snapshot identity by the journal index it was taken at. Grows by one per
+    // SERIALIZATION, which is the rare operation this whole feature exists to
+    // make rarer, and is pruned by trim_journal to the one entry a lookup at
+    // the floor still needs.
+    std::map<std::size_t, std::uint64_t> snapshots_;
     std::size_t budget_ = 0;  // 0 = unbounded
     std::size_t dropped_steps_ = 0;
 
