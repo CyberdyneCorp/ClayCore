@@ -1166,7 +1166,8 @@ symmetry, or not theirs.
 |---|---|---|
 | **1** | `fold-the-layers-with-an-operator` | **A subtractive LAYER, not a subtractive item.** Their unit of "a thing an artist grabs and moves" IS the layer — a subtool is a layer — so an item-level cutter does not reach the workflow at all. What they ship instead is an honest RESOLVED boolean: each operand is sampled into a volume, the two are combined into a subtool of their own, and moving an operand afterwards does not update the result. The interface says so rather than implying otherwise, and the operands are kept so it can be re-run. Their own roadmap has said since the subtools work that the same vocabulary upgrades to a live boolean the day this lands, with no interface change |
 | **2** | A `.clayspace` does not carry a multires hierarchy | **Not the transition polygons this file ranked.** They do not export hierarchies, so `refine-one-region-of-a-hierarchy`'s export residual does not bite them. What bites is one level up: a hierarchy row is TWO objects on their side — a mesh layer holding the cage, and a `clay_multires` beside it — and because the engine reports a hierarchy's layer as a MESH layer, with no `LayerRepresentation::Multires`, their side-car file is the only thing in the world that knows a row was ever a hierarchy. Lose the side-car and the sculptor's levels are gone and the row returns as the flat cage it demonstrably is. They made the loss loud in three panels and in a diagnostics report; loud is not fixed. **The ask is either the document carrying the hierarchy, or a `LayerRepresentation` that says what the row is** |
-| **3** | `add-mesh-sculptor` off the interface thread (their #368) | The threading ask they DO have, and it is not the mobile one. `clay_mesh_sculptor_create` cannot be built off the interface thread: it is a weld and an adjacency pass, **160 ms over 296,216 triangles**, and a mesh layer has no other route to its surface because the pick after an activation is answered by `clay_mesh_sculptor_raycast`. Holding a sculptor per mesh took the repeated cost out; the FIRST weld of each mesh has nowhere to go. The call resolves its mesh through a mutable path into the document, and the ABI's only threading contract is the brick cache's. Either that contract extended to this call, or a split between an off-thread adjacency build and a cheap adopt |
+| ~~**3**~~ | ~~`add-mesh-sculptor` off the interface thread (their #368)~~ **premise already false, 2026-09-01** | The threading ask they DO have, and it is not the mobile one. `clay_mesh_sculptor_create` cannot be built off the interface thread: it is a weld and an adjacency pass, **160 ms over 296,216 triangles**, and a mesh layer has no other route to its surface because the pick after an activation is answered by `clay_mesh_sculptor_raycast`. Holding a sculptor per mesh took the repeated cost out; the FIRST weld of each mesh has nowhere to go. The call resolves its mesh through a mutable path into the document, and the ABI's only threading contract is the brick cache's. Either that contract extended to this call, or a split between an off-thread adjacency build and a cheap adopt |
+| **3b** | Reuse a mesh's adjacency across sculptors, keyed on topology revision | What actually remains of #368 once the threading half is struck. Two sculptors over one mesh each build their own adjacency, and a rebuilt layer discards it. A different ticket from the one filed, and a smaller one |
 | **4** | SDF sculpt layers (`add-sculpt-layers` 1.9) | Not blocking, and a visible asymmetry: voxel rows carry a stack of recorded passes and hierarchy rows carry one, SDF rows do not, and in their layer stack those sit next to each other. A user asks why; the answer is "the engine doesn't". Take it if it is cheap as a weighted group |
 | **5** | `add-mobile-thread-scheduling` | **Drop to P1.** They are desktop. QoS classes and sizing a pool from performance cores buy them nothing, and they are not asking for "the host owns the pool" either. The P0 was written for the iPad handoff and should say so |
 | **6** | `add-claycore-bridge`'s normal/AO map bakes | **Do not hold the roadmap for them.** They do no map bakes, bring no UV layout, and are not waiting |
@@ -1457,6 +1458,37 @@ hand-built reconstruction with identical items, spline type and blend produces
 zero of whatever this produces, so something in how the host's document type
 configures a document is the variable — and it is now diffable, because the
 file is here and a hand-built equivalent is a few lines.
+
+### The sculptor stall was fixable for five days before anyone read the header
+
+Recorded because the failure is not the engine's and not the host's, and it will
+happen again: `clay_mesh_sculptor_create` has been documented as safe off the
+interface thread since **2026-09-01** (`50a19379`), on the same footing
+`clay_brick_cache_eval_requests` documents, and the block says so in the
+imperative — *"SO ARM A SCULPTOR OFF THE INTERFACE THREAD"* — with the cost
+split out: ~116 ms adjacency and ~89 ms tree at 296k triangles.
+
+The consuming host filed a P1 against us for that 205 ms stall, ranked it third
+of seven, and an external design guide wrote a whole section proposing a
+prepare/adopt API to solve it. **Both were describing a state of the world that
+had ended five days earlier.** The host has since grepped its own vendored copy
+and found the block present in its v0.78.0 pin as well as v0.84.0 — so it was
+fixable on the older engine too.
+
+**And the half that would have been missed anyway:** the tree is built LAZILY,
+on first use, so a host that moves only `create` to a worker still pays the ~89
+ms on whichever thread reaches `clay_mesh_sculptor_raycast` first — for that host
+the interface thread, on the pick right after activation, which is where the
+freeze already was. Moving `create` alone shifts 116 ms and leaves 89 in the same
+place: a half-fix that reads as a regression later because nobody remembers it
+was 205. `clay_mesh_sculptor_refresh` on the worker is the other half and the
+block says that too.
+
+**The lesson is about where a capability is announced.** This one was announced
+in the header, which is the documentation a host integrator reliably reads — and
+the host reads it when integrating, not when a ticket it filed months earlier
+comes up. A capability that removes a host's known pain is worth telling that
+host about directly; a header is where it is FOUND, not where it is DELIVERED.
 
 ### Refusals a host cannot render — a standing rule, and three instances
 
