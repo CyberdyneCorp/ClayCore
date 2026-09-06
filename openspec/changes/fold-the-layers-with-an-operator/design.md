@@ -1169,3 +1169,26 @@ adds or modifies for an expected value that comes from the system under test, an
 report each as either a legitimate invariant (the two could disagree for a reason
 worth hearing) or a tautology (they cannot). This is cheap to check and it is the
 failure that survives a green suite.
+
+**A note beside §13e, deliberately NOT a third sweep.** A test can be sound
+within a run and unsound as a fixture for COMPARING runs, and the second use is
+invisible in the file. The host's `sdf_brushes` asserts that a brush moves the
+surface by more than 1e-3, reading both sides through one pick in one process on
+one build — legitimate by every test above, since a brush that does nothing is a
+disagreement worth hearing. It broke anyway, because the comparison that mattered
+was ACROSS a pin, and the instrument was not the same for those two runs. Nothing
+in the file says it is comparing builds, because it is not: that comparison lives
+in a person reading two runs.
+
+Anything read through a marcher, a rasteriser, a timer or a floating-point
+reduction acquires this property the moment someone compares two versions with
+it — which is what an engine upgrade is. **The defence is not a different
+assertion; it is knowing which of your tests are ALSO used as measuring devices
+across builds, and saying so where they live.** This repository has the same
+shape in `tests/device/baseline.json`, which holds entries taken at different ABI
+versions side by side.
+
+It is left as a note rather than a required sweep on the host's own argument:
+§13d and §13e are mechanical and answerable from a diff, and this one depends on
+how a test is USED rather than on what it contains. A sweep that cannot be
+answered from a diff would weaken the two that can.
