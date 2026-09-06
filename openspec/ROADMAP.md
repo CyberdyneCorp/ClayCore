@@ -1506,8 +1506,17 @@ writer and their constant are both theirs; the vendored header is ours.
 
 The practical consequence for a release: **a minor bump does not need to be
 announced to be noticed, but it does need to be announced to be UNDERSTOOD.**
-Their gate says the number moved; only the notes say a subtracting layer written
-at the older minor comes back as a union.
+Their gate says the number moved; only the notes say what moved with it.
+
+**And the example this paragraph first used was wrong, which is worth keeping.**
+It said a subtracting layer written at the older minor comes back as a union.
+That is the DEGRADE this repository rejected: `serialize_document` refuses below
+minor 18 for a document carrying any non-default composition
+(`src/scene/commands.cpp`, `layer_blocking_minor`), so the silent-different-
+sculpture case cannot occur. The sentence described the design that was
+considered and dropped, four sections after the section that dropped it. A
+rejected design is exactly the kind of claim that survives in prose: it was true
+when written, nothing re-runs it, and it reads as a fact about the format.
 
 ### The practice that catches an inert feature
 
