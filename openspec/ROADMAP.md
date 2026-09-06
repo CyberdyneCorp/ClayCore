@@ -2171,6 +2171,47 @@ Of the three majors the review confirmed, that is the one with a user behind it.
 The other two are a corrupted display normal and a silent no-op; both are real
 and neither is reachable by anyone we know of yet.
 
+### A negative repro that rules out one path, and the ceiling gate that localises it
+
+The host tried to reproduce the coarse ceiling reset and **could not**, and
+reported the failure rather than the silence. Their probe: a flat cage converted
+to a hierarchy at 0, 1 and 2 levels, six Camada dabs inside ONE gesture at the
+same place, peak measured after each.
+
+```
+levels 0: [0.01, 0.02, 0.0299, 0.0398, 0.0497, 0.0594]
+levels 1: [0.01, 0.02, 0.0299, 0.0398, 0.0497, 0.0594]
+levels 2: [0.01, 0.02, 0.0299, 0.0398, 0.0497, 0.0594]
+```
+
+**Identical at every level count including ZERO**, where there is no coarse level
+to hold a record at all. So whatever those rows show is not level-dependent and
+is not the seam: if the defect were reachable this way, 1 and 2 would have to
+diverge from 0, and they do not by a digit.
+
+**It rules out one path and nothing else, and #1 is NOT downgraded on it.** The
+defect needs something that bumps `cache_generation` MID-STROKE, and their probe
+drove segments within a gesture without ever rebinding. An absence of evidence
+from a probe that never induces the precondition is not evidence of absence.
+
+**What the rows actually show is on their side, and our own gate is what
+localises it.** Six segments, six deposits, no ceiling — the Draw-shaped curve,
+not the Layer-shaped one. `test_mesh_sculpt.cpp:1000` already gates the property
+on the plain mesh path: twelve stamps against ONE record converge with
+`layer_12 <= 0.08f + 1e-4f`, contrasted against `Draw` at identical settings
+reading `draw_12 > 0.08f * 2.0f`. So the ceiling works where the record
+persists. Their `stroke_into` calls `begin_stroke()` per SEGMENT, and that call's
+own comment says it clears the record Layer measures its ceiling against — so
+their Camada resets its ceiling once per segment rather than once per gesture,
+which makes Layer behave like Draw on a held stroke. Their defect, on a path they
+ship, and they flagged it themselves because they had described the ceiling to us
+as working without having established it.
+
+**The pattern worth keeping is the shape of the report, not the result.** A probe
+that comes back negative is worth publishing WITH the precondition it failed to
+induce, because a bare "could not reproduce" would have downgraded a real defect
+that a live host can still reach.
+
 ### The frame at a region boundary: what it costs to land it unfixed
 
 The host reviewed the regional-multires residual and asked for one thing, on the
