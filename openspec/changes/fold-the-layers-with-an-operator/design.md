@@ -1409,3 +1409,51 @@ onto one expression. Every assertion that held two of those equal is now
 comparing one thing with itself. Report each as still-meaningful (it pins a
 contract a future split could break, which is worth keeping and not worth
 counting) or as coverage that has quietly evaporated.
+
+### §13j. An identical ASSERTION COUNT after a deletion proves the code was never reached
+
+The third review's second major was found this way and the technique deserves a
+name, because it answers a question §13d and §13e cannot.
+
+Delete a live term — here `comp.rounding * layer_distance_scale(layer)` in
+`fold_layer` — rebuild, and run the whole suite. It stayed green at
+**16,464,984 assertions, the identical count**. A green suite after a deletion
+could always mean the tests are lenient about that term. **An identical COUNT
+means nothing anywhere executed differently**, so no test so much as evaluated a
+branch that reached it. That distinguishes "covered but not asserted" from "not
+reached at all", and nothing else in this file's toolkit does.
+
+It completes the set, and the three ask different questions:
+
+| | question | answerable by |
+|---|---|---|
+| §13d | could this test ever fail? | reverting the fix and running it |
+| §13e | is its expectation independent of the code? | reading the test |
+| §13j | **is this code executed at all?** | deleting it and comparing assertion COUNTS |
+
+§13j is the only one of the three with no judgement in it. A count is a number,
+the comparison is mechanical, and the answer does not depend on who reads the
+test. Use it on any term a change adds that a reviewer cannot find a case for —
+it is cheaper than arguing about whether a case exists.
+
+### §13k. The PAINT classification hole is latent for a host, not absent
+
+The third review found that a `CLAY_OP_PAINT` composition with a HARD profile and
+a positive radius classifies as SIMILARITY, because `Op::Paint` sits below the
+extended-op range and falls through both clauses of
+`composition_radius_ignores_scale`. Checked against the consuming host, and the
+distinction matters for how the fix is written:
+
+**`Combine::Paint` is in that host's vocabulary and maps to `Op::Paint` — the
+type exists and the mapping is live.** What prevents it is one line: the list its
+interface offers is the full set FILTERED to exclude Paint, because its surface
+path carries no per-vertex colour to the GPU, so a Paint stroke would change the
+field and show nothing. A sculptor cannot select it and no document it writes
+contains one.
+
+So the hole is unreachable **by a filter, not by an inability**. The day that
+renderer carries colour the filter comes off, and the op becomes reachable in the
+same commit — a change that would have no reason to ask whether this engine's
+scale predicate covers it. **Fix the predicate so any positive radius disqualifies
+regardless of profile or op**, rather than adding Paint to a list; a list is the
+thing that was already wrong.
