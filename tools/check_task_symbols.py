@@ -11,8 +11,23 @@ a structured file with a stable syntax.
 Deliberately crude, and deliberately quiet about what it cannot judge. It checks
 identifier-shaped names only (an underscore or a `::`), skips filenames, and
 splits a dotted form so `clay_document_resume_stats.resumed_bricks` is checked as
-its parts — a struct field and its function both have to exist, and neither is
+its parts -- a struct field and its function both have to exist, and neither is
 grep-able as one token.
+
+The match is a WHOLE WORD, which is the difference between this and the obvious
+version. A substring match passes a name that is merely PART of a real symbol,
+and that is the nastiest way for a claim to be wrong: a task naming
+`an_unworked_session_still_exports` when the test is
+`an_unworked_session_still_exports_every_phase` greps to something and reads as
+correct, while a reader searching for it finds a deletion that never happened.
+Whole-word matching costs one thing in exchange, measured on this tree: of 238
+claimed identifiers exactly one was a SHORTHAND -- `lattice_gizmo_preview` for
+`clay_layer_lattice_gizmo_preview` -- and the fix is to write the symbol in
+full, which is what a claim should have said anyway.
+
+KNOWN LIMITATION, and it is not fixable from here: a backticked name is a claim,
+so you cannot DISCUSS a dead symbol in a file this tool polices. Correcting a
+line means naming the wrong symbol unquoted, with a note saying why.
 """
 
 import pathlib
@@ -22,7 +37,12 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SKIP_SUFFIX = (".cpp", ".h", ".py", ".md", ".json", ".clayspace", ".swift", ".sh", ".yml", ".toml")
-SEARCH_ARGS = ["--exclude-dir=.git", "--exclude-dir=build", "--exclude-dir=openspec"]
+# This file is excluded from its own search. The docstring above NAMES a
+# shorthand as an example, and without the exclusion that mention satisfies the
+# claim it exists to describe — the quoting trap, arriving inside the tool that
+# documents the quoting trap.
+SEARCH_ARGS = ["--exclude-dir=.git", "--exclude-dir=build", "--exclude-dir=openspec",
+               "--exclude=check_task_symbols.py"]
 
 
 def claimed_symbols(text):
@@ -47,10 +67,15 @@ def main():
         names = claimed_symbols(tasks.read_text())
         checked += len(names)
         for name in sorted(names):
-            found = subprocess.run(["grep", "-rqI", *SEARCH_ARGS, "--", name, str(ROOT)],
+            found = subprocess.run(["grep", "-rqIw", *SEARCH_ARGS, "--", name, str(ROOT)],
                                    capture_output=True)
             if found.returncode != 0:
-                missing.append(f"{tasks.relative_to(ROOT)}: `{name}` is claimed and is nowhere in the tree")
+                part = subprocess.run(["grep", "-rqI", *SEARCH_ARGS, "--", name, str(ROOT)],
+                                      capture_output=True)
+                why = ("is a shorthand: it appears only INSIDE a longer symbol, so write "
+                       "that symbol in full" if part.returncode == 0
+                       else "is nowhere in the tree")
+                missing.append(f"{tasks.relative_to(ROOT)}: `{name}` is claimed and {why}")
     if missing:
         print("task-symbols: FAIL")
         for m in missing:
