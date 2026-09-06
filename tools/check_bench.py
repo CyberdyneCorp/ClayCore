@@ -771,6 +771,29 @@ MAX_RATIO = [
     # twenty-five times above it, and an estimate that started sampling
     # anything would land near 1.0.
     ("BM_VoxelRemeshEstimate256", "BM_VoxelRemeshSphere256", 0.05),
+    # A LAYER BOOLEAN COSTS WHAT THE ITEM BOOLEAN IT IS COSTS
+    # (fold-the-layers-with-an-operator, task 6.6). The same 2,000 dabs folded
+    # in `layers` chunks with a Subtract, spelled as separate LAYERS and as
+    # GROUPS inside one layer -- the same field, held sample-for-sample by
+    # tests/unit/test_layer_parity.cpp. A layer fold emits one
+    # `emit_chain_combine` per fold, which is the call a group's tail already
+    # made, so the two arms differ only in the group NODE the one-layer form
+    # carries: measured 0.376 ms against 0.488 ms at 1,000 folds and 0.369
+    # against 0.441 at 10, so the layer form is the cheaper side at 0.77-0.84x.
+    #
+    # The ceiling is 1.5 rather than something snug against 0.8, because what
+    # this catches is CATEGORICAL: a second fold, a second evaluator, or a
+    # per-layer walk of the document creeping into the loop lands well past 1,
+    # and both arms move together on a loaded runner.
+    ("BM_LayerFoldStack1000", "BM_ItemFoldStack1000", 1.5),
+    ("BM_LayerFoldStack10", "BM_ItemFoldStack10", 1.5),
+    # AND THE SLOPE, which those two cannot show. The item count is held at
+    # 2,000 across the sweep, so 1,000 layers is the same document as 10 cut
+    # into a hundred times as many chunks and must cost about the same:
+    # measured 0.376 ms against 0.369, or 1.02x. A fold that walked the layer
+    # list per layer -- the shape of mistake a document-level predicate
+    # evaluated inside the loop would make -- lands at the layer count.
+    ("BM_LayerFoldStack1000", "BM_LayerFoldStack10", 1.8),
 ]
 
 # counter gates: (bench, counter, max_value) — the named counter must be at
@@ -950,6 +973,19 @@ MAX_COUNTER = [
     # the issue's acceptance line -- a mirror can at most
     # double what a drag reaches -- and the counter is exact on every machine.
     ("BM_MoveDragMirrored1000", "warped_ratio", 2.0),
+    # ONE COMBINE PER FOLD, AND THE SAME ONE (fold-the-layers-with-an-operator,
+    # task 6.6). "There is no second evaluator" is a COUNT, so it is gated as
+    # one: the layer form and the group form of the same document compile to
+    # 3,999 instructions each, at every layer count, because a layer's fold IS
+    # the combine a group's tail emits. A second fold per layer -- the shape of
+    # a change that added a layer-level emitter beside the item one -- reads
+    # 4,998 at 1,000 folds. The ceiling sits between them.
+    #
+    # MAX_COUNTER skips a name that is absent, so these rows cannot fail by not
+    # running; the MAX_RATIO entries above name the same benchmarks and DO fail
+    # on absence, which is what keeps this honest.
+    ("BM_LayerFoldStack1000", "instrs", 4200),
+    ("BM_ItemFoldStack1000", "instrs", 4200),
 ]
 
 

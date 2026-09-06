@@ -7720,3 +7720,139 @@ def test_weld_bumps_a_layer_revision_only_when_it_changes_something():
     second = borrowed.weld()
     assert second["vertices_merged"] == 0
     assert doc.mesh_layer_revision(layer) == after
+
+
+# -- a layer's COMPOSITION (fold-the-layers-with-an-operator) -----------------
+
+
+def _cutter_doc():
+    """A base layer and a cutter above it, both spheres, overlapping."""
+    doc = clay.Document()
+    base = doc.add_sdf_layer("base")
+    base.add(clay.Sphere(r=1.0))
+    cut = doc.add_sdf_layer("cut")
+    cut.add(clay.Sphere(r=0.6).at((0.6, 0, 0)))
+    return doc, base, cut
+
+
+def test_a_layer_composes_and_the_value_round_trips():
+    doc, _base, cut = _cutter_doc()
+    op, blend, rounding = doc.layer_composition(cut.id)
+    assert op == clay.Op.ADD and blend.k == 0.0 and rounding == 0.0
+
+    doc.set_layer_composition(cut.id, op=clay.Op.SUBTRACT, blend=clay.Smooth(0.2), rounding=0.01)
+    op, blend, rounding = doc.layer_composition(cut.id)
+    assert op == clay.Op.SUBTRACT
+    assert type(blend).__name__ == "Smooth"  # the subclass is where the profile lives
+    assert blend.k == pytest.approx(0.2)
+    assert rounding == pytest.approx(0.01)
+
+    # What came out goes straight back in, unchanged.
+    doc.set_layer_composition(cut.id, op=op, blend=blend, rounding=rounding)
+    assert doc.layer_composition(cut.id)[0] == clay.Op.SUBTRACT
+
+    # And omitted arguments keep their value, which is the pyclay convention
+    # (the C setter takes the whole value; this one takes a partial update).
+    doc.set_layer_composition(cut.id, rounding=0.0)
+    assert doc.layer_composition(cut.id)[1].k == pytest.approx(0.2)
+
+
+def test_a_subtracting_layer_cuts_and_hiding_it_gives_the_geometry_back():
+    pts = np.array([[0.6, 0, 0], [-0.9, 0, 0]], dtype=np.float32)
+
+    # What hiding the cutter has to restore is the layers BENEATH it, so the
+    # baseline is a document that never carried the cutter at all -- not the
+    # same document with the cutter unioned, which is a third shape.
+    bare = clay.Document()
+    bare.add_sdf_layer("base").add(clay.Sphere(r=1.0))
+    uncut = bare.eval(pts).copy()
+
+    doc, _base, cut = _cutter_doc()
+    doc.set_layer_composition(cut.id, op=clay.Op.SUBTRACT)
+    carved = doc.eval(pts)
+    assert carved[0] > 0.0 and uncut[0] < 0.0  # the notch is there
+    assert carved[1] == pytest.approx(uncut[1])  # and the far side is not touched
+
+    doc.set_layer_visible(cut.id, False)
+    assert doc.eval(pts) == pytest.approx(uncut)  # exactly what it was cutting
+
+
+def test_layer_order_is_geometry():
+    # A - B + C against A + C - B: the same three layers, two stacks.
+    def build(cut_first):
+        doc = clay.Document()
+        a = doc.add_sdf_layer("A")
+        a.add(clay.Sphere(r=1.0))
+        if cut_first:
+            b = doc.add_sdf_layer("B")
+            b.add(clay.Sphere(r=0.6).at((0.6, 0, 0)))
+            c = doc.add_sdf_layer("C")
+            c.add(clay.Sphere(r=0.5).at((0.9, 0, 0)))
+        else:
+            c = doc.add_sdf_layer("C")
+            c.add(clay.Sphere(r=0.5).at((0.9, 0, 0)))
+            b = doc.add_sdf_layer("B")
+            b.add(clay.Sphere(r=0.6).at((0.6, 0, 0)))
+        doc.set_layer_composition(b.id, op=clay.Op.SUBTRACT)
+        return doc
+
+    pts = np.array([[0.9, 0, 0], [0.6, 0, 0], [0.0, 0, 0]], dtype=np.float32)
+    assert not np.array_equal(build(True).eval(pts), build(False).eval(pts))
+
+
+def test_a_composition_is_undoable_and_survives_a_round_trip(tmp_path):
+    doc, _base, cut = _cutter_doc()
+    doc.enable_undo()
+    pts = np.array([[0.6, 0, 0]], dtype=np.float32)
+    before = doc.eval(pts).copy()
+
+    doc.set_layer_composition(cut.id, op=clay.Op.SUBTRACT)
+    assert doc.undo() and doc.eval(pts) == pytest.approx(before)
+    assert doc.redo() and doc.layer_composition(cut.id)[0] == clay.Op.SUBTRACT
+
+    path = tmp_path / "composed.clayspace"
+    doc.save(str(path))
+    back = clay.load(str(path))
+    assert back.layer_composition(cut.id)[0] == clay.Op.SUBTRACT
+    assert back.eval(pts) == pytest.approx(doc.eval(pts))
+
+
+def test_a_layer_composition_refuses_what_it_cannot_carry():
+    doc, _base, cut = _cutter_doc()
+    # Op.INLINE is a group's children-apply-outward mode and a layer has no
+    # outer chain; a transition reads its endpoints from a node, and a layer
+    # composition carries none.
+    with pytest.raises(ValueError):
+        doc.set_layer_composition(cut.id, op=clay.Op.INLINE)
+    with pytest.raises(ValueError):
+        doc.set_layer_composition(cut.id, op=clay.Op.TRANSITION_LINEAR)
+    with pytest.raises(ValueError):
+        doc.set_layer_composition(cut.id, rounding=-1.0)
+    with pytest.raises(ValueError):
+        doc.set_layer_composition(cut.id, rounding=float("nan"))
+    with pytest.raises(ValueError):
+        doc.set_layer_composition(999, op=clay.Op.SUBTRACT)
+
+
+# The non-SDF refusal has no pytest here, and that is a gap in pyclay rather
+# than in the feature: add_voxel_layer returns a grid and add_mesh_layer returns
+# a mesh, so nothing in this binding hands back a non-SDF layer's ID and there
+# is no way to name one to set_layer_composition. The refusal itself is held at
+# both ends in tests/unit/test_layer_composition.cpp ("a voxel layer refuses a
+# composition at both ends") and it fires for pyclay too, since both entry
+# points check the kind before they build a command.
+
+
+def test_excluding_one_layer_is_refused_once_a_layer_composes():
+    # min(without(L), only(L)) is the whole document only while every layer
+    # unions, so the composed case refuses rather than answering something that
+    # no longer composes back.
+    doc, base, cut = _cutter_doc()
+    pts = np.array([[0.6, 0, 0]], dtype=np.float32)
+    doc.eval_excluding(base.id, pts)  # fine while every layer unions
+
+    doc.set_layer_composition(cut.id, op=clay.Op.SUBTRACT)
+    with pytest.raises(ValueError):
+        doc.eval_excluding(base.id, pts)
+    with pytest.raises(ValueError):
+        doc.gradients_excluding(base.id, pts)

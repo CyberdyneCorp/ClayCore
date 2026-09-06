@@ -1844,6 +1844,40 @@ void check_group_op_blend(scene::Op op, const scene::Blend& blend, float roundin
             "outer chain with their own");
 }
 
+// A LAYER's composition, under the same rules the C ABI states beside
+// clay_document_set_layer_composition. A layer boolean IS an item boolean, so
+// the operators and blends are the item ones -- but Op.INLINE names a group's
+// children-apply-outward mode and a layer has no outer chain to apply into,
+// and the transitions read their endpoints from a NODE, which a layer
+// composition has none of, so both are refused here rather than compiled
+// against defaults nobody wrote.
+void check_layer_composition(scene::Op op, const scene::Blend& blend, float rounding) {
+    if (op == scene::Op::None)
+        throw std::invalid_argument(
+            "op must be a combine operator, not Op.INLINE — that one is for add_group");
+    if (scene::op_is_transition(op))
+        throw std::invalid_argument("a layer cannot carry a transition op");
+    if (!std::isfinite(blend.k) || blend.k < 0.0f)
+        throw std::invalid_argument("blend k must be finite and >= 0");
+    if (!std::isfinite(rounding) || rounding < 0.0f)
+        throw std::invalid_argument("rounding must be finite and >= 0");
+}
+
+// The blend a composition carries, as the Python object it was set with: the
+// SUBCLASS names the profile, which is the only place Python can read it back
+// from, so what comes out of layer_composition goes straight back into
+// set_layer_composition.
+nb::object blend_object(const scene::Blend& b) {
+    switch (b.profile) {
+        case scene::BlendProfile::Quadratic: return nb::cast(PySmooth(b.k));
+        case scene::BlendProfile::Cubic: return nb::cast(PyCubic(b.k));
+        case scene::BlendProfile::Circular: return nb::cast(PyCircular(b.k));
+        case scene::BlendProfile::Chamfer: return nb::cast(PyChamfer(b.k));
+        case scene::BlendProfile::Hard: break;
+    }
+    return nb::cast(PyBlend(scene::BlendProfile::Hard, b.k));
+}
+
 // -- numpy point evaluation -----------------------------------------------------
 
 struct PointsView {
@@ -2266,8 +2300,9 @@ nb::object quad_report_dict(const mesh::QuadFit& fit, std::size_t target) {
 
 // Mesh ONE SDF layer, in world space under that layer's transform. The mesh
 // half of the scoped split a placement preview draws from; `below = false` is
-// "this layer alone", which hard-unions with the excluding half to give the
-// whole document.
+// "this layer alone", which says the same thing however the document folds it.
+// Putting it back together with the excluding half is a MINIMUM only while
+// every layer unions -- eval_excluding refuses once one composes.
 PyMesh mesh_layer_only(const PyDocument& d, scene::LayerId layer, int resolution,
                        nb::handle voxel_size, nb::handle decimate_ratio,
                        const std::string& backend_name, const std::string& mesher,
@@ -7239,6 +7274,47 @@ NB_MODULE(pyclay, m) {
                  return nb::make_tuple(l->ghost, l->locked);
              },
              "layer"_a, "A layer's (ghost, locked) flags")
+        .def("set_layer_composition",
+             [](PyDocument& d, scene::LayerId layer, nb::handle op, nb::handle blend,
+                nb::handle rounding) {
+                 const scene::Layer* found = d.doc->document.find_layer(layer);
+                 if (!found) throw std::invalid_argument("no layer with that id in this document");
+                 // A layer whose kind cannot enter the tape refuses rather than
+                 // storing a control that does nothing: a voxel grid and a mesh
+                 // are composited by their own rules and never fold here.
+                 if (found->kind != scene::LayerKind::Sdf || !found->sdf)
+                     throw std::invalid_argument(
+                         "only an SDF layer carries a composition; a voxel or mesh layer has no "
+                         "chain to fold");
+                 scene::LayerComposition c = found->composition;
+                 if (!op.is_none()) c.op = nb::cast<scene::Op>(op);
+                 if (!blend.is_none()) c.blend = nb::cast<const PyBlend&>(blend).b;
+                 if (!rounding.is_none()) c.rounding = nb::cast<float>(rounding);
+                 check_layer_composition(c.op, c.blend, c.rounding);
+                 apply_or_throw(d.doc->document,
+                                scene::Command{scene::SetLayerCompositionCmd{layer, c}},
+                                "set_layer_composition", d.undo.get());
+             },
+             "layer"_a, "op"_a = nb::none(), "blend"_a = nb::none(), "rounding"_a = nb::none(),
+             "How this layer folds into the visible SDF layers BENEATH it; omitted "
+             "arguments keep their value. The FIRST visible SDF layer initialises the "
+             "accumulator and its own operator is not applied, so a stack cannot open "
+             "with Subtract against nothing and show an empty frame. Refuses a non-SDF "
+             "layer, Op.INLINE and the transition ops.")
+        .def("layer_composition",
+             [](const PyDocument& d, scene::LayerId layer) {
+                 const scene::Layer* l = d.doc->document.find_layer(layer);
+                 if (!l) throw std::invalid_argument("no layer with that id in this document");
+                 if (l->kind != scene::LayerKind::Sdf || !l->sdf)
+                     throw std::invalid_argument(
+                         "only an SDF layer carries a composition; a voxel or mesh layer has "
+                         "none to report");
+                 return nb::make_tuple(l->composition.op, blend_object(l->composition.blend),
+                                       l->composition.rounding);
+             },
+             "layer"_a,
+             "A layer's (op, blend, rounding) fold. A non-SDF layer raises rather than "
+             "answering Op.ADD, which would read as a composition it cannot carry.")
         .def("set_layer_transform",
              [](PyDocument& d, scene::LayerId layer, nb::handle position,
                 nb::handle rotation_axis_angle, nb::handle scale) {

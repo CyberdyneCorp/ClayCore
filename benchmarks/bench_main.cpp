@@ -818,6 +818,98 @@ BENCHMARK(BM_WholeDocAppend10000)->Unit(benchmark::kMillisecond);
 void BM_WholeDocAppend50000(benchmark::State& state) { deep_doc_whole_append(state, 50000); }
 BENCHMARK(BM_WholeDocAppend50000)->Unit(benchmark::kMillisecond);
 
+// -- a LAYER boolean against the ITEM boolean it already is ------------------
+//    (fold-the-layers-with-an-operator, task 6.6)
+//
+// The claim these six rows hold is that giving a whole LAYER an operator costs
+// about what the equivalent item-level combine costs, because it IS that
+// combine: one `Compiler::emit_chain_combine` at the end of each layer's
+// chain, the same call `compile_group` makes at the end of a group's. There is
+// no second fold, no second evaluator and no second copy of the kernel math,
+// and a regression that grew one would show here as a ratio far from 1.
+//
+// THE TWO ARMS ARE THE SAME FIELD, not merely the same size. `layers` chains of
+// dabs folded with `op`, spelled as separate LAYERS and as GROUPS inside one
+// layer -- which is the one-layer equivalent of a composed layer, since an item
+// chain A, B(Subtract), C(Subtract) subtracts twice where a layer unions B with
+// C first and subtracts once. `test_layer_parity.cpp` holds that they agree in
+// distance, colour, bounds and safe step; this pair holds what they cost.
+//
+// TOTAL ITEM COUNT IS HELD CONSTANT across the sweep -- kFoldItems dabs split
+// into `layers` chunks -- so the row measures the FOLD and not the geometry.
+// Growing the items with the layers would make the 1000-layer row ten times the
+// document of the 100-layer one and the ratio would say nothing about either.
+//
+// AND THE COUNT HALF OF THE CLAIM IS NOT HERE. "One combine per fold, and the
+// same one" is a count, so it is asserted as a count, on the compiled tape, in
+// tests/unit/test_layer_gates.cpp -- 2N-1 instructions for N items at every
+// chunking, in both forms, because a layer fold does not ADD a combine: it is
+// the one the chain would have emitted anyway, with a different operator. A
+// clock cannot tell one combine from two among 2,000 items.
+constexpr int kFoldItems = 2000;
+
+scene::Document fold_stack(int layers, scene::Op op, bool as_layers) {
+    scene::Document doc;
+    const int per = kFoldItems / layers;
+    const double golden = 0.6180339887;
+    scene::Layer* one = as_layers ? nullptr : &doc.add_sdf_layer("all");
+    for (int c = 0; c < layers; ++c) {
+        scene::Layer* target = one;
+        scene::NodeId parent = scene::kNoNode;
+        if (as_layers) {
+            target = &doc.add_sdf_layer("chunk");
+            if (c > 0) target->composition.op = op;
+        } else if (c > 0) {
+            scene::Node group;
+            group.is_group = true;
+            group.op = op;
+            parent = one->sdf->insert(group);
+        }
+        for (int i = 0; i < per; ++i) {
+            const int n = c * per + i;
+            scene::Node dab;
+            dab.prim = scene::Prim::sphere(0.05f);
+            const double u = std::fmod(static_cast<double>(n + 1) * golden, 1.0);
+            const double v = (static_cast<double>(n) + 0.5) / static_cast<double>(kFoldItems);
+            const double phi = std::acos(1.0 - 2.0 * v);
+            const double th = 6.283185307 * u;
+            dab.xform.position = cf3(static_cast<float>(std::sin(phi) * std::cos(th)),
+                                     static_cast<float>(std::cos(phi)),
+                                     static_cast<float>(std::sin(phi) * std::sin(th)));
+            if (parent == scene::kNoNode)
+                target->sdf->insert(dab);
+            else
+                target->sdf->insert(dab, parent);
+        }
+    }
+    return doc;
+}
+
+void fold_stack_compile(benchmark::State& state, int layers, bool as_layers) {
+    scene::Document doc = fold_stack(layers, scene::Op::Subtract, as_layers);
+    for (auto _ : state) {
+        scene::Tape tape = scene::compile_document(doc);
+        benchmark::DoNotOptimize(tape.instrs.size());
+        state.counters["instrs"] = static_cast<double>(tape.instrs.size());
+    }
+    state.counters["folds"] = static_cast<double>(layers - 1);
+    state.counters["items"] = static_cast<double>(kFoldItems);
+}
+
+void BM_LayerFoldStack10(benchmark::State& state) { fold_stack_compile(state, 10, true); }
+BENCHMARK(BM_LayerFoldStack10)->Unit(benchmark::kMillisecond);
+void BM_LayerFoldStack100(benchmark::State& state) { fold_stack_compile(state, 100, true); }
+BENCHMARK(BM_LayerFoldStack100)->Unit(benchmark::kMillisecond);
+void BM_LayerFoldStack1000(benchmark::State& state) { fold_stack_compile(state, 1000, true); }
+BENCHMARK(BM_LayerFoldStack1000)->Unit(benchmark::kMillisecond);
+
+void BM_ItemFoldStack10(benchmark::State& state) { fold_stack_compile(state, 10, false); }
+BENCHMARK(BM_ItemFoldStack10)->Unit(benchmark::kMillisecond);
+void BM_ItemFoldStack100(benchmark::State& state) { fold_stack_compile(state, 100, false); }
+BENCHMARK(BM_ItemFoldStack100)->Unit(benchmark::kMillisecond);
+void BM_ItemFoldStack1000(benchmark::State& state) { fold_stack_compile(state, 1000, false); }
+BENCHMARK(BM_ItemFoldStack1000)->Unit(benchmark::kMillisecond);
+
 // The cull ALONE, over a dab's worth of bricks: this is the ~64 ns x item x
 // brick walk #118 says is past the interactive budget at 10k items before a
 // sample is evaluated.

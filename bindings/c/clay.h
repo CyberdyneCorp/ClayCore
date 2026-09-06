@@ -1160,7 +1160,13 @@ clay_result clay_document_remove_layer(clay_document* doc, clay_layer_id layer);
  * so it is the one edit that is a pair rather than a single command. The add
  * NAMES the layer it shares its edit list with when there is one, so a
  * reordered instance survives a journal replay still sharing rather than
- * coming back as a deep copy — see clay_document_instance_layer. */
+ * coming back as a deep copy — see clay_document_instance_layer.
+ *
+ * SINCE ABI 0.86.0 A REORDER CAN CHANGE THE SHAPE. Visible SDF layers fold
+ * under each layer's own composition, so A − B + C and A + C − B are different
+ * sculptures made of the same three layers. With every layer unioning — every
+ * document written before then — the order is still cosmetic, because a union
+ * is commutative. See clay_document_set_layer_composition. */
 clay_result clay_document_move_layer(clay_document* doc, clay_layer_id layer, int32_t index);
 /* A hidden layer contributes nothing to the field; showing it again restores
  * the original field exactly. */
@@ -1396,8 +1402,14 @@ clay_result clay_document_writable_at_minor(const clay_document* doc, uint32_t m
  * placement change that is RIGID the layer's surface afterwards is its surface
  * beforehand moved by one matrix, and for one that adds a UNIFORM scale the
  * field is the old field composed with the inverse and multiplied by the
- * factor. Layers combine by hard union, so no cross-layer term is re-solved
- * either: re-placing one layer leaves every other layer's field bit-identical.
+ * factor. Every OTHER layer's own field is bit-identical afterwards whatever
+ * this one did — a layer's transform reaches no other layer's chain. What the
+ * DOCUMENT's field does with that is the fold's business: a combine is
+ * pointwise, so the folded result changes exactly where this layer's field
+ * changed, dilated by the blend support of each fold above it. With every
+ * layer unioning, which is every document written before ABI 0.86.0, that
+ * dilation is zero and the document's field moves with the layer and nowhere
+ * else. See clay_document_set_layer_composition.
  *
  * The engine does not act on this yet — the invalidation after a layer
  * transform is exactly what it always was — but a host CAN: it already holds
@@ -1463,9 +1475,12 @@ clay_result clay_layer_placement_report(const clay_document* doc, clay_layer_id 
  * EXCLUDED and this layer ALONE — clay_brick_cache_eval_requests_excluding and
  * clay_brick_cache_eval_requests_layer, or clay_document_mesh_sdf_layer on the
  * mesh path. Draw the first where it is and the second under the gesture
- * matrix, which clay_layer_placement_preview hands back. Because layers combine
- * by hard union each surface is exact; what the preview cannot show is their
- * mutual occlusion where they overlap, and that resolves on commit.
+ * matrix, which clay_layer_placement_preview hands back. Each surface is exact
+ * on its own; what the preview cannot show is their mutual occlusion where they
+ * overlap, and that resolves on commit. THAT COMPOSITION IS A MINIMUM only
+ * while every layer unions — with a layer composition in play the excluded
+ * form refuses (see clay_eval_points_excluding), and a host previewing a drag
+ * on such a document draws the whole thing per frame instead.
  *
  * WHILE A GESTURE IS OPEN EVERY OTHER EDIT IS REFUSED with
  * CLAY_ERROR_INVALID_ARGUMENT, including edits to other layers. The gesture
@@ -2796,9 +2811,11 @@ clay_result clay_document_mesh(const clay_document* doc, const clay_mesh_params*
  * The mesh-path sibling of clay_brick_cache_eval_requests_layer, and it exists
  * for the drag case: a host previewing a layer placement draws the rest of the
  * document once and this layer once, then moves this one under the gesture
- * matrix. Layers combine by hard union, so each surface is exact on its own.
- * What a preview drawn that way does NOT show is the mutual occlusion of the
- * union where the two overlap, which resolves when the gesture commits.
+ * matrix. Each surface is exact on its own, whatever the layers fold with.
+ * What a preview drawn that way does NOT show is the mutual occlusion where the
+ * two overlap, which resolves when the gesture commits — and with a layer
+ * composition in play, how they combine at all: the pieces are still exact, but
+ * putting them back together is the document's fold and not a minimum.
  *
  * NOT clay_document_mesh_layer, which BORROWS an imported MESH layer's
  * triangles and does not run a mesher at all. The names are close because the
@@ -10092,9 +10109,14 @@ clay_result clay_brick_cache_eval_requests_excluding(
 /* The other half of the same split (ABI 0.82.0): refill from ONE layer alone,
  * ignoring every other. With clay_brick_cache_eval_requests_excluding over the
  * same layer and the same requests, the pointwise MINIMUM of the two results is
- * what the whole document would have produced — which is what "layers combine
- * by hard union" means, expressed as two values a host can hold and move
- * independently.
+ * what the whole document would have produced — the hard union between layers,
+ * expressed as two values a host can hold and move independently. THAT HOLDS
+ * ONLY WHILE EVERY LAYER UNIONS: removing a layer from the middle of a fold
+ * changes what every layer above it folds onto, so the excluding form refuses a
+ * document carrying a composition rather than answering something that no
+ * longer composes back. This form keeps its meaning under any fold — "this
+ * layer alone" says the same thing however the document folds it — but a host
+ * can no longer put the two halves together with a min.
  *
  * NEITHER SCOPED FORM SEEDS THE RESUME STORE, and that is load-bearing rather
  * than an optimisation left undone: a partial field stored as a seed would be

@@ -194,11 +194,52 @@
 
 ## 6. Gates
 
-- [ ] 6.1 Hide/show a subtractive layer restores exact geometry
-- [ ] 6.2 Order matters: A−B+C differs from A+C−B, stably across a reload
-- [ ] 6.3 Old documents load unioning and render bit-identically
-- [ ] 6.4 Undo/redo through the existing layer-property history
-- [ ] 6.5 A converted mesh-to-SDF layer works as a cutter
-- [ ] 6.6 Benchmarks at 10 / 100 / 1000 layers: a layer op costs about what the
-      equivalent item combine costs, and there is no second evaluator
-- [ ] 6.7 C ABI setter AND getter, pyclay, numbered example, version lines
+- [x] 6.1 Hide/show a subtractive layer restores exact geometry — and the half
+      the geometry cannot see. Hiding goes through a dirty REGION, and a brick
+      outside it keeps what it had and is re-stamped to the new revision, so a
+      fresh compile after the edit proves nothing about it. The gate is
+      therefore a REFILL against a document built the same way from scratch,
+      with the cutter INTERSECTING and its bricks outside its own box — and it
+      needs a third, plain unioning layer above, because a composed SEAM stores
+      no seed at all (4.5) and a decorative layer that reaches no brick leaves
+      `resumed_bricks` at zero, either of which makes the gate measure nothing.
+      Reverting 5.3's widening leaves 512 samples — one whole brick — stale
+- [x] 6.2 Order matters: A−B+C differs from A+C−B, stably across a reload — and
+      the same invalidation half, because a reorder is a Remove+Add pair each
+      bounded by the MOVED layer's own extent. Held three ways: the two stacks
+      differ, each reloads bit-identically, and moving the layer in an EXISTING
+      document is the other stack exactly. The refill arm fails by 512 samples
+      with the widening reverted
+- [x] 6.3 Old documents load unioning and render bit-identically — bytes written
+      at minor 17, which is what a pre-feature build wrote, read back with every
+      composition at its default and compiling to the SAME TAPE: instrs, params,
+      `is_exact`, Lipschitz and safe step, not merely the same answers at the
+      points sampled
+- [x] 6.4 Undo/redo through the existing layer-property history — the value and
+      the byte-level document restore landed in the model stage; what this stage
+      added is that the undone document COMPILES back, now that the compiler
+      reads the value, at both the engine level and through
+      `clay_document_undo`
+- [x] 6.5 A converted mesh-to-SDF layer works as a cutter — `mesh::to_field` in
+      its OWN layer, set to subtract, agreeing sample for sample with the same
+      volume as a subtracting item in one layer, and hiding it giving the
+      uncarved form back exactly. This is the organisation the change is for:
+      an imported mesh used to have to live in the layer it was cutting
+- [x] 6.6 Benchmarks at 10 / 100 / 1000 layers: a layer op costs about what the
+      equivalent item combine costs, and there is no second evaluator.
+      `BM_LayerFoldStack{10,100,1000}` against `BM_ItemFoldStack{10,100,1000}` —
+      the same 2,000 dabs folded in N chunks with a Subtract, as separate LAYERS
+      and as GROUPS in one layer, with the item count held CONSTANT so the row
+      measures the fold and not the geometry. 0.376 ms against 0.488 ms at 1,000
+      folds, 1.02x from 10 layers to 1,000. The "no second evaluator" half is a
+      COUNT and is gated as one: 3,999 instructions on both arms, ceiling 4,200,
+      where a second fold per layer reads 4,998
+- [x] 6.7 C ABI setter AND getter, pyclay, numbered example, version lines. The
+      C pair and the three version lines (0.86.0) landed in the model stage;
+      this stage added the pyclay mirror
+      (`Document.set_layer_composition` / `.layer_composition`, partial update
+      in, whole value out, the blend's SUBCLASS carrying the profile so what
+      comes out goes back in), the Swift smoke block, and
+      `examples/75_layer_booleans.py`, registered in `EXAMPLES`. Parity verified
+      with `--pyclay ... --require-import`, which prints "imported <path>" — the
+      bare invocation compares the parsed source against itself and cannot fail

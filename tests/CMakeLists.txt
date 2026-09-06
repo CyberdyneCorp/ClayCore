@@ -122,6 +122,7 @@ add_executable(clay_unit_tests
   unit/test_layer_fold.cpp
   unit/test_layer_fold_sites.cpp
   unit/test_layer_parity.cpp
+  unit/test_layer_gates.cpp
   unit/test_layer_protection.cpp
   unit/test_curve.cpp
   unit/test_c_curve.cpp
