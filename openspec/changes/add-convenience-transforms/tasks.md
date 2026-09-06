@@ -115,7 +115,7 @@
       placement saves as the placement it produced.
 - [x] 4.2 `python3 tools/check_c_abi.py` (header hygiene and the ctypes FFI) and
       `python3 tools/check_test_shards.py`.
-- [x] 4.3 `npx -y @fission-ai/openspec@1.8.0 validate --all --strict`.
+- [x] 4.3 `npx -y @fission-ai/openspec@1.12.0 validate --all --strict` (CI repinned from 1.8.0 on 2026-09-06).
 - [ ] 4.4 `python3 tools/release_check.py --skip-slow` before pushing.
 - [x] 4.5 `docs/05-*` gains the three; `docs/RELEASE.md` at release time. Owned
       by the reconciling change alongside 4.1, so the library reference and the
