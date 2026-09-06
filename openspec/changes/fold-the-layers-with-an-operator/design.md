@@ -1182,8 +1182,10 @@ updating it is the moment to say which of the two it was.
 
 ### §13g. An expectation derived from the system under test measures consistency, not correctness
 
-*Numbered §13e when it landed, which §13e above had already taken; renumbered here so
-the two references below name one section. Cited as §13e in the third review's handover.*
+*Landed as a second §13e, colliding with the §13e above; renumbered to the next free
+letter so the two references below name one section. It therefore sits before §13f,
+which was written later: a section keeps the letter it is given, and this document
+already interleaves its 12s and 13s. The third review's handover cites it as §13e.*
 
 The general form of two mistakes made in this change's own review cycle, stated
 by the host on 2026-09-06 after both had been fixed separately and neither had
@@ -1242,8 +1244,8 @@ answered from a diff would weaken the two that can.
 
 ### §12d. Why `_below` refuses at all, and what the blocking id does not say
 
-*Numbered §12c when it landed, which §12c above had already taken; renumbered here for
-the same reason as §13g.*
+*Landed as a second §12c, colliding with the §12c above; renumbered for the same reason
+as §13g. The handover that added it cites it as §12c.*
 
 Two questions from the host on 2026-09-06, both answerable from the code as
 committed, and one of them is a real gap.
@@ -1285,8 +1287,8 @@ combination that produces a wrong sentence in a host.
 
 ### §13f. What the fourth review's record stage changed, and the two contract errors it found
 
-The stage after the below form's (§12c). Its findings were two majors about the code, a set of
-minors, and the accuracy of this contract — which is the half worth writing down
+The stage after the below form's (§12c). Its findings were two majors about the
+code, a set of minors, and the accuracy of this contract — which is the half worth writing down
 here, because a design document that names a function the tree does not have is
 the same failure as a tasks list that ticks a box nothing did.
 

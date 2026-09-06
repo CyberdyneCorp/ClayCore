@@ -532,3 +532,72 @@
       requirement and its scenario, which the code has had since the §11 fix and
       the spec did not say; design.md gains §13f and a correction beside the
       predicate it named
+
+- [x] 7.9 THE GATE SWEEP, run whole rather than sampled: every gate CI runs
+      against this change, re-run locally on the fourth review's tree, with the
+      environmental failures separated from the real ones by reproducing them
+      rather than by recognising them.
+      GREEN, and each one was actually exercised:
+        * `cmake --preset cpu-only -DCLAY_BUILD_TESTS=ON` + build, then
+          `ctest --preset cpu-only`: 8 of 9, the ninth being pyclay_pytest,
+          below
+        * ASan + UBSan, which is the gate this change most deserved — it adds a
+          C entry point with two capacity checks and a batch ceiling:
+          `ctest --preset asan-ubsan` under
+          `systemd-run --user --scope -p MemoryMax=32G`, 8 of 8, 1,984 s, no
+          sanitizer diagnostic
+        * ThreadSanitizer, which is not on the sweep's own list and was run
+          because the same C entry point lands on the refill path the TSan job
+          exists for: `setarch -R ctest --preset tsan`, 8 of 8, 728 s, and the
+          string "ThreadSanitizer" appears nowhere in the log
+        * check_layering, check_kernel_dialect, check_test_shards (2,454 cases
+          partitioned across 4 shards, none duplicated, none unrun),
+          check_task_symbols (340 claimed identifiers, all present, this entry's
+          included),
+          check_licenses, check_doc_latency, package_kernels --verify,
+          check_swift_package, `openspec validate --all --strict` (38 passed)
+        * the EXAMPLES job, which is not release_check's and is the only gate
+          that runs `examples/75_layer_booleans.py`: the reference host session,
+          then `CLAY_EXAMPLES_FAST=1 examples/run_all.py` (76/76 in 323 s), then
+          check_gallery over what the run PRODUCED rather than over what is
+          committed — OK, and the regenerated outputs discarded afterwards as
+          the job does
+        * the pyclay suite for real: 689 passed, 1 skipped, which is what
+          exercises `Document.writable_at_minor` (7.8 above)
+        * check_binding_parity in its STRONG reading — "imported <path>", not
+          "parsed pyclay_module.cpp", which cannot fail (6.x above)
+      ENVIRONMENTAL, reproduced rather than assumed, and none of them this
+      change's:
+        * pyclay_pytest under ctest, release_check's `bindings` and `abi` rows,
+          and check_c_abi.py run bare: one cause, `GLIBCXX_3.4.31 not found`.
+          ctest and release_check shell out to `sys.executable`, which is this
+          box's anaconda, whose libstdc++ predates the one the module was built
+          against. All four pass under `/usr/bin/python3`, or with
+          `LD_PRELOAD=/lib/x86_64-linux-gnu/libstdc++.so.6` where pytest is
+          needed. Nothing in this change is in that path
+        * release_check's `device` row: "engine changed since the gate ran",
+          which is true and expected on a branch that is not a release
+        * check_bench, which could not be run honestly at all: another project's
+          gate had this box, and the load average went 1.7 -> 26 and 5.7 -> 31
+          DURING two of the runs. Three full runs failed 1, 6 and 5 rows and the
+          three sets barely intersect, which is what says interference rather
+          than a regression — a real one fails the same row every time. The
+          first run reported `BM_DeepDocRefillPlanned2000` at 6.3 ms against a
+          4 ms ceiling while measuring the 10,000-item case at 3.4 ms, i.e. the
+          same code costing twice as much on a fifth of the items. Every row any
+          run failed was re-measured under a filter: 0.470 ms, 1.38 ms,
+          0.148 ms, 6.76 ms, 0.80x and 0.12x, all inside their ceilings, slopes
+          the right way up. Every row this change ADDED passed in all three
+          loaded runs — BM_LayerFoldStack1000 at 0.65x, 0.72x and 1.06x its
+          item-fold twin against a 1.5x ceiling, the layer-count slope at 1.00x,
+          1.12x and 1.55x against 1.8x, `instrs` at 3,999 against 4,200,
+          BM_BrickRefillLayersComposed resuming nothing and
+          BM_BrickRefillLayersUnion at 0.00x it. This gate wants a quiet box and
+          did not get one; nothing about it is evidence against the change
+      CONTRACT: design.md carried two sections numbered §13e and two numbered
+      §12c, each pair a parallel session colliding with a stage that had already
+      taken the letter, and three references that no longer named one section.
+      Three handovers recorded the collision and left it as another stage's
+      text. Renumbered the later member of each pair (§13g, §12d), with a note
+      under each saying what it landed as so an older handover's citation still
+      resolves, and the three references pointed at the section they mean
