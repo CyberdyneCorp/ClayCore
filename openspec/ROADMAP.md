@@ -1395,25 +1395,32 @@ constant's doc comment, so the next person knows it was chosen against an
 artifact rather than by eye. **That is tuning around an engine bug and they say
 so**; the fix belongs here.
 
-**STANDING, corrected the same day: a finding WITHOUT a repro, not one whose repro
-is pending.** The reporter tried to cut the minimal document — the same paths
-authored directly through the ABI, no taper, uniform 0.12 radius, one through six
-tendrils, meshed at resolution 96 — and **all six counts came back zero.** It did
-not reproduce.
+**STANDING, moved twice in one afternoon and settled by a rerun: real, reproducible
+on demand in the reporter's harness, standalone repro not yet extracted.** The
+fat-tendril case reruns deterministically — 3 pinholes, incremental 3 / rebuilt 3
+/ our own mesher 3 — so the defect exists and the cull-pad exclusion above is
+against something real.
 
-The table above is real: it came out of their `visual_holes` test varying only
-the taper span, with the holes counted identically by our mesher and by two of
-their own paths. But something differs between that test and a direct
-reconstruction of it, and nobody knows what yet. Their own leading suspect is
-their harness rather than this engine — the reconstruction framed its capture on
-a bare starting form rather than on the sculpted document, so the scale and
-projection differ, and a two-pixel artifact is exactly the kind of thing that
-survives or vanishes on framing alone.
+What does NOT reproduce is a standalone reconstruction. The same paths authored
+directly through the ABI — `Item::stroke`, `set_curve_points` with
+`PointType::Spline`, `set_stroke_blend_k` at half the radius, uniform 0.12, one
+through six tendrils, meshed at resolution 96 — returns zero on every count.
+Capture framing was the leading suspect and has been ruled out: fixing it changed
+nothing. **So the difference is in how the DOCUMENT is built, not in the items,
+not in the mesher call and not in the capture.** The failing case comes from the
+host's own document type, which sets a document up before anything is drawn; the
+reconstruction starts from a bare document with a hand-added SDF layer. Two
+documents holding the same items are not the same document, and whatever the
+setup does — most likely the domain the mesher samples over at a given resolution
+— is the variable.
 
-So the cull-pad exclusion above stands on its own (it is true whatever the
-pinholes turn out to be) and the defect does not yet stand at all. **Do not spend
-on this until a document reproduces it.** If the framing turns out to be the
-cause, the honest outcome is that this row is deleted rather than downgraded.
+The repro that will arrive is the host SAVING the document its own failing test
+produces, rather than rebuilding one from parts, which is the right move once
+rebuilding from parts has been shown not to reproduce. **It will be written at
+container minor 17 and this tree is at 18; that is fine and needs no
+accommodation** — the reader takes the file's own minor from the header and
+refuses only a newer MAJOR (`src/io/clayspace.cpp`, `ForwardVersion`), which is
+what backward-open means.
 
 ### Refusals a host cannot render — a standing rule, and three instances
 
