@@ -1395,9 +1395,25 @@ constant's doc comment, so the next person knows it was chosen against an
 artifact rather than by eye. **That is tuning around an engine bug and they say
 so**; the fix belongs here.
 
-They have offered a minimal `.clayspace` and the exact control points rather than
-their whole test, which is the right shape for a repro and worth taking when this
-is picked up.
+**STANDING, corrected the same day: a finding WITHOUT a repro, not one whose repro
+is pending.** The reporter tried to cut the minimal document — the same paths
+authored directly through the ABI, no taper, uniform 0.12 radius, one through six
+tendrils, meshed at resolution 96 — and **all six counts came back zero.** It did
+not reproduce.
+
+The table above is real: it came out of their `visual_holes` test varying only
+the taper span, with the holes counted identically by our mesher and by two of
+their own paths. But something differs between that test and a direct
+reconstruction of it, and nobody knows what yet. Their own leading suspect is
+their harness rather than this engine — the reconstruction framed its capture on
+a bare starting form rather than on the sculpted document, so the scale and
+projection differ, and a two-pixel artifact is exactly the kind of thing that
+survives or vanishes on framing alone.
+
+So the cull-pad exclusion above stands on its own (it is true whatever the
+pinholes turn out to be) and the defect does not yet stand at all. **Do not spend
+on this until a document reproduces it.** If the framing turns out to be the
+cause, the honest outcome is that this row is deleted rather than downgraded.
 
 ### Refusals a host cannot render — a standing rule, and three instances
 
