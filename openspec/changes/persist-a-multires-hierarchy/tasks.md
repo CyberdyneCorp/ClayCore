@@ -39,94 +39,146 @@ to what it said when written.
 
 ## 1. Storage
 
-- [ ] 1.1 `io::ClaySpaceDoc` gains `multires_layers`, a
+- [x] 1.1 `io::ClaySpaceDoc` gains `multires_layers`, a
       `std::map<scene::LayerId, mesh::MultiresSurface>`, beside `mesh_layers`,
       with the comment stating the layering-table reason as its neighbours do
-- [ ] 1.2 Confirm `tools/check_layering.py` still passes and that nothing in
+- [x] 1.2 Confirm `tools/check_layering.py` still passes and that nothing in
       `clay::scene` can reach the new member — the test is that the rule is
       structural, not that it is followed
-- [ ] 1.3 `io::document_memory` counts hierarchies through
+- [x] 1.3 `io::document_memory` counts hierarchies through
       `MultiresSurface::memory()`, and a test asserts the total grows when a
       level is added
 
 ## 2. The chunk
 
-- [ ] 2.1 A `'MRES'` chunk: the layer id plus the bytes `encode()` produces. The
+- [x] 2.1 A `'MRES'` chunk: the layer id plus the bytes `encode()` produces. The
       container does NOT version the surface (D3) — assert that the chunk's own
       header carries no surface version field, so a later reader cannot start
       negotiating one
-- [ ] 2.2 `kClaySpaceMinor` 18 → 19, reader and writer in the same commit —
+- [x] 2.2 `kClaySpaceMinor` 18 → 19, reader and writer in the same commit —
       **both halves or neither**. #477 took 18 for a layer's composition while
       this change was in planning; the artifacts said 17 → 18 and are corrected
-- [ ] 2.3 Writing at minor 18 REFUSES a document whose hierarchy carries detail
-      above its base, and writes the bytes 18 always did for one whose
-      hierarchies are bare cages (nothing authored is lost). This REVERSES what
-      design.md first said — see D9
-- [ ] 2.4 The orphan rule, copied from `mesh_layers` (D4): the entry survives a
+- [x] 2.3 REFUTED, and there was nothing to build. Both this task and D9 assumed
+      the container could be asked to write at an older minor, by analogy with
+      `scene::serialize_document(doc, minor)`. It cannot: `save_clayspace` takes
+      no minor and always writes `kClaySpaceMinor`, and the older-minor
+      discipline in this format lives in the SCENE PAYLOAD. So there is no
+      downgrade to refuse and no `multires_blocking_minor` worth adding — it
+      would answer about a write nobody can request.
+
+      What IS true, and is worse, is recorded at the minor instead: a new chunk
+      is minor 13's mild kind, skipped by an older reader — but an older build
+      that opens a document and SAVES IT BACK drops the hierarchy. Minor 13
+      could call that the safe direction for groups ("geometry reappearing is
+      recoverable and obvious"); for a sculpt it is not. Nothing here can stop
+      an older build, so the header says so and `multires_carries_detail` is
+      what a host asks to know whether a document has anything to lose
+- [x] 2.4 The orphan rule, copied from `mesh_layers` (D4): the entry survives a
       layer removal, the writer emits only for an id that is still a mesh layer,
       the reader drops a chunk naming none
-- [ ] 2.5 Regenerate the gallery documents and run `tools/check_gallery.py`
+- [x] 2.5 Regenerate the gallery documents and run `tools/check_gallery.py`
 
 ## 3. The C ABI
 
-- [ ] 3.1 Ask whether a layer carries a hierarchy, answered without decoding one,
+- [x] 3.1 Ask whether a layer carries a hierarchy, answered without decoding one,
       and distinguishing "not a mesh layer" from "a mesh layer with none" (D6)
-- [ ] 3.2 Take a BORROWED handle for a loaded hierarchy, with
+- [x] 3.2 Take a BORROWED handle for a loaded hierarchy, with
       `clay_multires_destroy` rejecting it exactly as `clay_mask_destroy` rejects
       a borrowed mask (D5), and the header stating the lifetime beside both calls
-- [ ] 3.3 A borrowed handle onto a removed hierarchy fails
+- [x] 3.3 A borrowed handle onto a removed hierarchy fails
       `CLAY_ERROR_NOT_FOUND` rather than dangling
-- [ ] 3.4 Requesting a handle where there is none is `CLAY_ERROR_NOT_FOUND`, not
+- [x] 3.4 Requesting a handle where there is none is `CLAY_ERROR_NOT_FOUND`, not
       `INVALID_ARGUMENT` — a host walking every layer asks this legitimately
-- [ ] 3.5 Attaching to a non-mesh layer is refused; replacing an existing
+- [x] 3.5 Attaching to a non-mesh layer is refused; replacing an existing
       hierarchy is explicit rather than silent (D7)
-- [ ] 3.6 A query answering whether a layer's cage agrees with its hierarchy's
+- [x] 3.6 A query answering whether a layer's cage agrees with its hierarchy's
       base level, computed on demand and NOT stored (0.1). Counts first, then
       positions, so the common divergence is cheap to detect
-- [ ] 3.7 A query naming the first layer whose hierarchy blocks an older minor,
-      mirroring `scene::layer_blocking_minor` — a refusal a caller cannot NAME
-      is one it has to explain by guessing
-- [ ] 3.8 Header prose in house style: what these calls do NOT promise, the
+- [x] 3.7 NOT BUILT, see 2.3: there is no minor-taking save for it to answer
+      about, so it would be an entry point with no caller. The header records
+      the absence and the reason, so the next reader does not re-derive it
+- [x] 3.8 Header prose in house style: what these calls do NOT promise, the
       lifetime asymmetry, that reconciling the cage and the base is the HOST's
       (0.1), and that a hierarchy still does not reach the field
-- [ ] 3.9 ABI minor bump in the PR that adds the entry points, noted here and in
+- [x] 3.9 ABI minor bump in the PR that adds the entry points, noted here and in
       the PR body
 
 ## 4. pyclay
 
-- [ ] 4.1 The same two questions from Python, following the C ABI's ownership
+- [x] 4.1 The same two questions from Python, following the C ABI's ownership
       rather than inventing a second one
-- [ ] 4.2 `tools/check_binding_parity.py` passes with an IMPORTED module — read
+- [x] 4.2 `tools/check_binding_parity.py` passes with an IMPORTED module — read
       the line it prints, since it cannot fail when it falls back to parsing the
       source against itself
-- [ ] 4.3 A pytest round trip: save, reload, assert the level count and that
+- [x] 4.3 A pytest round trip: save, reload, assert the level count and that
       dropping the Python reference does not remove the hierarchy
 
 ## 5. Tests
 
-- [ ] 5.1 The scenarios in all four spec deltas
-- [ ] 5.2 The round trip is bit-identical per level, not merely equal in level
+- [x] 5.1 The scenarios in all four spec deltas
+- [x] 5.2 The round trip is bit-identical per level, not merely equal in level
       count — a hierarchy that reloaded as its cage would pass a count assertion
-- [ ] 5.3 A document with no hierarchy is byte-identical at minors 18 and 19, so
+- [x] 5.3 A document with no hierarchy is byte-identical at minors 18 and 19, so
       the feature costs a document that does not use it nothing
-- [ ] 5.4 Prove the round-trip test works by reverting the writer and watching it
+- [x] 5.4 Prove the round-trip test works by reverting the writer and watching it
       fail, and record that it was proved this way
 
 ## 6. Measurement
 
-- [ ] 6.1 Measure what the chunk adds to `clay_document_save` on a real
+- [x] 6.1 Measure what the chunk adds to `clay_document_save` on a real
       hierarchy, and record it. `survive-a-crash` records saves as
       whole-document and synchronous at the `sdf_consolidate` class of cost; this
       adds the largest payload in the document to that path and a host should not
       have to discover the number
-- [ ] 6.2 Record the on-disk size against level count, so a host can predict what
+- [x] 6.2 Record the on-disk size against level count, so a host can predict what
       a document will cost before it authors one
 
 ## 7. Documentation
 
-- [ ] 7.1 `docs/05-claycore-library.md` — the new entry points and the lifetime rule
-- [ ] 7.2 The release note states that writing at minor 18 is REFUSED for a
-      document whose hierarchy carries authored detail, and names the query that
-      says which layer blocked it
-- [ ] 7.3 `openspec/ROADMAP.md`: the host's rank-2 row, with what landed
+- [x] 7.1 `docs/05-claycore-library.md` — the new entry points and the lifetime rule
+- [ ] 7.2 `docs/RELEASE.md` at release time states what an OLDER build does to a
+      document carrying a hierarchy: it opens it, skips the chunk, and drops the
+      hierarchy if it saves back. Not a refusal — see 2.3 — a one-directional
+      loss this format has not had in the unsafe direction before
+- [x] 7.3 `openspec/ROADMAP.md`: the host's rank-2 row, with what landed
 - [ ] 7.4 `docs/RELEASE.md` at release time, not in this PR
+
+
+## What building it found
+
+Five things the plan had wrong, each recorded where it is load-bearing rather
+than only here.
+
+1. **There is no container downgrade to refuse** (2.3, D9). The whole refusal
+   design was an analogy with the scene minor that does not hold.
+2. **`kClaySpaceMinor` and `scene::kSceneMinor` are tied by a `static_assert`**
+   and must move together, so minor 19 moves the scene layout version with no
+   new scene field — minor 10's case, for minor 10's reason.
+3. **`MultiresSurface` is move-only**, so attaching is `clay_layer_take_multires`
+   rather than a setter taking a copy. A copying form would round trip through
+   encode/decode: on the 4-level fixture below that is 1.2 MB and a full decode
+   on a call a host reads as bookkeeping.
+4. **`clay_multires_destroy` returns `void`** where `clay_mask_destroy` returns
+   `clay_result`, so the borrowed-handle REFUSAL the mask precedent documents
+   cannot be copied. Freeing a borrowed handle is safe rather than tolerated —
+   it owns nothing — so it frees the wrapper and the header states the
+   difference.
+5. **`MemoryReport` said a document cannot walk a surface.** True of every
+   surface a host built and no longer true of one the document carries, so
+   `document_memory` walks these and the doc comment is corrected.
+
+**The measurement, and the part a host cannot guess.** A 289-vertex cage
+sculpted at its finest level:
+
+| levels | vertices at top | document bytes | save |
+|---:|---:|---:|---:|
+| none | — | 9,750 | 0.012 ms |
+| 1 | 1,601 | 44,090 | 0.053 ms |
+| 2 | 6,273 | 105,582 | 0.132 ms |
+| 3 | 24,833 | 326,870 | 0.402 ms |
+| 4 | 98,817 | 1,211,926 | 1.546 ms |
+
+**Cost follows AUTHORED DETAIL, not level count.** The same four-level hierarchy
+with nothing sculpted into it adds **128 bytes** and no measurable time, because
+the detail field is sparse. A host cannot price a document from its level count,
+and a deep hierarchy nobody has touched is nearly free to carry.
