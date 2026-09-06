@@ -716,3 +716,59 @@ sentence:** *a blend radius is an absolute distance and does not follow the
 layer's scale; a host that compensates for that turns every scale of that layer
 into an edit.* One clause more than the classification, and it is the clause that
 stops someone discovering the trade by measuring it.
+
+## 12. The excluding preview: the refusal is right, and it must not be the whole answer
+
+Raised by ClaySpaceDesktop on 2026-09-06, checked against the tree, and it
+changes stage 5's scope.
+
+**First, the reassurance they asked for.** `clay_brick_cache_eval_requests_excluding`
+(`bindings/c/clay_c.cpp:14290`) carries the SAME refusal as the document form:
+`first_composed_fold_layer` on the whole document, `CLAY_ERROR_INVALID_ARGUMENT`,
+before any work. So a composed document gives their preview an error and not a
+wrong picture. That was the failure they were worried about and it does not
+exist.
+
+**What the refusal costs them, and it is not small.** Their live Suavizar and
+Relaxar evaluate every visible SDF layer EXCEPT the one under the brush once at
+pointer-down, then compose the preview per frame with a `min`. That is exact
+today for the reason the header states — visible layers hard-union, and a union
+IS the smaller of two distances. Once any layer composes, `min` is not that
+field, so the call refuses and **live smoothing stops working on any document
+that uses this feature**. A change that adds a capability and silently removes
+one from the host's most-used tool is not a good trade.
+
+**Their proposed repair is sound, but only under a condition the refusal must
+state.** Excluding a layer from the MIDDLE of a fold cannot be repaired: layers
+above it fold onto an accumulator that included it, so the two halves are not two
+operands of one combine. But when the excluded layer is the LAST visible SDF
+layer, the halves ARE two operands of one combine — which is exactly what stage 4
+repaired for `compile_document_part`, and `scene::layer_join_composition(doc,
+active)` is already the combine they rejoin under.
+
+So the pairing that works is **Below + Active**, not Except + Active, and the
+join is the active layer's own composition, which a host can already read through
+`clay_document_layer_composition`.
+
+**The gap that makes this a stage 5 task rather than advice:** `ChunkHalf::Below`
+exists (`clay_c.cpp:4122`, used by the resume split) and **no C entry point
+exposes it**. A host can ask for one layer (`clay_brick_cache_eval_requests_layer`)
+and for everything-except-one (`_excluding`), and cannot ask for everything-below.
+
+**Required of stage 5:**
+
+1. `clay_brick_cache_eval_requests_below` — the same shape as its two siblings,
+   `ChunkHalf::Below`, refusing only when the named layer is NOT the last visible
+   SDF layer, with the message saying which layer is. That refusal is narrow: the
+   layers beneath may compose however they like, because `compile_document_part`
+   folds them with their own compositions.
+2. The header on `_excluding` says what to use instead and when — that a preview
+   of the TOP layer composes exactly with `_below` plus that layer's own
+   composition, and that excluding from the middle of a fold has no repair. A
+   refusal that names the alternative is a different thing from one that does not.
+3. A test that the two routes agree: `below` folded with the active layer's
+   composition equals the whole document, over sampled points, for a document
+   whose lower layers compose and whose top layer composes.
+
+This is the same asymmetry as the 0.1 decision, arriving at a host-facing call:
+the seam is one question, and everything below it is already answered.
