@@ -338,6 +338,18 @@ Tape compile_document_resumable(const Document& doc, TapeCheckpoint* out_checkpo
 // have paid anyway; reusing a prefix that has moved is silent and wrong, so
 // this refuses wherever it is not certain.
 //
+// AND WHEN THE FOLD AT THE SEAM IS NOT A HARD ADD (`layer_join_is_hard_union`).
+// This carries the prefix's `info`, `lipschitz_bounds_gradient` and `bounds`
+// forward untouched, on the argument that a hard Add is exact and adds no
+// extent -- so the prefix's are the whole chain's. A smooth or extended fold
+// is neither: its `info` has to go through the same `cfi_*` fold the compiler
+// applies, and its support rings `bounds`. Folding those by hand here is
+// possible and is deliberately not done: a `lipschitz_bounds_gradient` that
+// stays true when it should not feeds the uniform-brick proof, which then
+// stores a brick that reads surface as outside. A refusal costs one full
+// compile, which is the price this call already documents for not being
+// certain, and it costs it only to a document whose TOP visible layer composes.
+//
 // The result is bit-identical to compile_document(doc) — instrs, params,
 // blob, info and bounds — and carries its own fresh identity, because its
 // bytes differ from the prefix it reused. `prefix` is not modified.
@@ -395,14 +407,56 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& checkpoin
 // folded onto was itself computed under that cull. A suffix culled differently
 // from the prefix it continues is a different field, and only outside the band,
 // which is where nothing is looking.
+// -- who may hold the two halves of a fold apart -----------------------------
+//
+// Visible SDF layers FOLD, so a caller that compiles a document in parts and
+// rejoins the values itself is re-applying a combine the compiler would have
+// emitted. That is exact at a LAYER BOUNDARY and only there, and only for the
+// operator that boundary actually carries -- which is what these three answer.
+//
+// `layer_join_composition` is the combine a `compile_document_part` split
+// rejoins under: the ACTIVE layer's own composition. Null when nothing is
+// beneath `active` (the below half is empty, so there is no join to apply) or
+// when `active` is not a visible SDF layer at all.
+//
+// `layer_join_is_hard_union` says whether THAT one combine is a plain hard Add
+// -- the only fold a caller may re-apply to two values it holds apart without
+// knowing anything else about them. True for every document with at most one
+// visible SDF layer, because the first visible layer's own operator is not
+// applied and there is then no join at all. It reads the LAST visible SDF layer
+// and nothing else, because that is where every split in this tree is taken:
+// `compile_document_part(below=true)` stops at the active layer, and the C
+// ABI's refill halves are that same boundary.
+//
+// `document_fold_is_hard_union` is the STRICTER question, and it is a different
+// one: whether EVERY fold in the document is a hard Add. That is what a caller
+// needs before it may claim `compile_document_except(X)` and
+// `compile_document_part(X, below=false)` compose back to the whole document,
+// because removing a layer from the middle of a fold changes what every layer
+// above it folds onto -- see compile_document_except below.
+//
+// `first_composed_fold_layer` is the same question with the answer a refusal
+// wants: the id of the first visible SDF layer whose own composition is applied
+// and is not a hard Add, or 0 when there is none.
+const LayerComposition* layer_join_composition(const Document& doc, LayerId active);
+bool layer_join_is_hard_union(const Document& doc);
+LayerId first_composed_fold_layer(const Document& doc);
+bool document_fold_is_hard_union(const Document& doc);
+
 // -- one half of a document, for a resumable multi-layer refill --------------
 //
-// A document's visible SDF layers hard-union left to right, so a compile that
-// stops before `active` and one that emits only `active` are, together, the
-// whole document apart from that union. A caller that holds the two VALUES can
-// fold appended items into the second and union them itself, which is what a
-// brick refill does when more than one layer is visible: the layers below are
-// static across a stroke, and only the active one moves.
+// A document's visible SDF layers FOLD left to right, so a compile that stops
+// before `active` and one that emits only `active` are, together, the whole
+// document apart from ONE combine: the fold at that boundary. A caller that
+// holds the two VALUES can fold appended items into the second and rejoin them
+// itself, which is what a brick refill does when more than one layer is
+// visible: the layers below are static across a stroke, and only the active one
+// moves.
+//
+// The split is exact BECAUSE it is taken at a layer boundary. `below` is not a
+// partial accumulator that a later layer would have folded differently -- it is
+// exactly the value the whole-document walk holds when it reaches `active`,
+// compiled by the same loop under the same document pad.
 //
 // `below` true emits the visible SDF layers BEFORE `active`; false emits only
 // `active`. One half per call, because a caller that wants both wants them into
@@ -412,9 +466,21 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& checkpoin
 // compiled under a smaller pad drops items the whole-document compile keeps,
 // and then the two halves no longer sum to the whole.
 //
-// The union to fold them with is a HARD Add -- `ctape_combine_values` with the
-// Add mode and no blend -- which is what the whole-document compile emits
-// between layers. Anything else is a different field.
+// THE COMBINE TO REJOIN THEM WITH IS `active`'s OWN COMPOSITION -- the op,
+// blend profile, blend radius and rounding that layer carries, which is what
+// the whole-document compile emits at that boundary and the only thing that
+// reproduces its field. `layer_join_composition(doc, active)` is that combine,
+// and it is null when nothing is beneath `active`, where there is no join to
+// apply at all. It is a hard Add for every document that predates layer
+// composition, which is why this used to say so.
+//
+// A CALLER THAT CANNOT APPLY AN ARBITRARY COMBINE MUST REFUSE THE SPLIT rather
+// than rejoin with an Add: a rejoin with the wrong operator returns a field
+// that never existed, and reports nothing. `layer_join_is_hard_union(doc)` is
+// that test, and the C ABI's refill takes it -- a composed top layer costs that
+// document the resumable split and nothing else. This compile itself refuses
+// nothing: both halves are correct compiles whatever the fold is, and a caller
+// that applies the right combine gets the right field.
 Tape compile_document_part(const Document& doc, LayerId active, bool below,
                            const CullRegion* cull = nullptr, const CullIndex* index = nullptr);
 
@@ -429,9 +495,24 @@ Tape compile_document_part_resumable(const Document& doc, LayerId active, bool b
 // The OTHER pairing: every visible SDF layer EXCEPT `excluded`, wherever it
 // sits in the stack. `compile_document_part`'s `below` STOPS at the named layer
 // and so drops everything above it too; this one skips it and keeps walking.
-// With `compile_document_part(doc, excluded, /*below=*/false)` it sums to the
-// whole document under the same hard union — which is what a host previewing
-// one layer needs in order to draw the rest of the document beside it (#378).
+// WHAT IT NO LONGER PROMISES, and this is a deletion rather than a rewording.
+// With `compile_document_part(doc, excluded, /*below=*/false)` this used to sum
+// to the whole document under the same hard union, which is what a host
+// previewing one layer composed the two with (#378). Under a per-layer operator
+// there is NO combine of the two that reconstructs the document: with A,
+// B(Subtract), C and `excluded` = B, this compiles A+C and the other half
+// compiles B, and no operator applied to those two values is (A−B)+C. Removing
+// a layer from the MIDDLE of a fold changes what every layer above it folds
+// onto, so the two parts are not two operands of one combine any more.
+//
+// The compile itself is unchanged and still means what it says -- the document
+// without that layer -- and it is still exactly what a host wants when the
+// layer it is excluding is the one it is previewing on top. The composition
+// promise is the C ABI's to police, and `clay_eval_points_excluding`,
+// `clay_brick_cache_eval_requests_excluding` and pyclay's `eval_excluding`
+// REFUSE a document whose layers do not all hard-union, because a host that
+// composes with min() there gets a plausible picture of a field the document
+// does not have. `document_fold_is_hard_union` is the test they take.
 //
 // Culls under the WHOLE DOCUMENT's pad, exactly as the other parts do and for
 // the same reason: a part compiled under its own smaller pad drops items the

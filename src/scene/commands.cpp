@@ -342,9 +342,65 @@ math::Aabb node_command_bound(const Document& doc, LayerId layer_id, NodeId node
     return bound;
 }
 
+// WHERE A LAYER-LEVEL COMMAND LANDS: the layer's own influence bound, and then
+// two widenings its COMPOSITION forces.
+//
+// 1. THE FOLD'S OWN SUPPORT. A smooth or extended fold moves the result up to
+//    that far outside either operand, so a change to this layer reaches that
+//    far outside it. The same dilation node_reach_bound applies once per
+//    enclosing group, one level up, through the same expression.
+//
+// 2. THE LAYERS BENEATH, FOR AN INTERSECT AND FOR NOTHING ELSE. `max(a, b)` far
+//    from this layer's geometry is `b` -- a large positive that WINS the max --
+//    so an intersecting layer changes the field everywhere the accumulator has
+//    material, not only where its own shape is. That is item_nonlocality's
+//    BoundedByLayer (measured over 400,000 points) one level up: an intersect
+//    ITEM is bounded by its LAYER's extent, and an intersect LAYER by the
+//    accumulated extent of the visible SDF layers BELOW it. `op_is_local` is
+//    the test, so subtract, paint and every extended mode stay bounded by this
+//    layer alone and pay nothing. Visibility is not consulted -- a layer being
+//    SHOWN is hidden on one side of the apply and the widening is wanted on
+//    both.
+//
+// WHAT THE INTERSECT ARM COSTS, said plainly, because it is not small: the
+// dirty box becomes the union of the layers beneath, and the host measured a
+// refill of that box at 45.5 ms and, on a fixture with ten times the extent and
+// the same item count, 7.5 s -- 26x and 241x the surface bricks of the geometry
+// it produces, because the refill walks the bricks of a VOLUME to produce a
+// BAND. It is bounded: it fires only for Intersect, only on that layer's OWN
+// commands, and never on an edit made inside a layer beneath -- a combine is
+// POINTWISE, so an edit below changes the folded result exactly where it
+// changed the accumulator and nowhere else, whatever operator sits above.
+// Narrowing it is a REFILL-REGION change (intersect the dirty region with the
+// bricks that already hold band), not a bounds change; it is not specific to
+// layer composition, since an intersect ITEM pays the same today; and it wants
+// the host's in-flight measurement before anyone picks a number. Conservative
+// first, and a bound that is too small is missing surface rather than a slow
+// frame.
+//
+// NOT MEMOIZED, deliberately. The walk is O(nodes beneath) and runs twice per
+// command (apply_edit takes the bound on both sides), against a refill of the
+// box it returns -- which the same command triggers, and which measured 45.5 ms
+// on the fixture above. A cache here would be one whose only observable is that
+// it stopped firing, which is why the one memoizing the LAYER walk carries
+// walks()/keeps() counters; if this walk ever reaches a measurement it wants
+// that shape and those counters, not a quiet map.
 math::Aabb layer_command_bound(const Document& doc, LayerId layer_id, LayerExtent* extent) {
     const Layer* l = doc.find_layer(layer_id);
-    return l ? layer_influence_bound(*l, extent) : math::Aabb{};
+    if (!l) return math::Aabb{};
+    math::Aabb b = layer_influence_bound(*l, extent);
+    if (b.is_infinite()) return b;
+    const float support = layer_blend_support(*l);
+    if (support > 0.0f) b = b.dilated(support);
+    if (op_is_local(l->composition.op)) return b;
+    for (const Layer& below : doc.layers) {
+        if (below.id == l->id) break;  // only what is BENEATH it in the stack
+        if (!below.visible || below.kind != LayerKind::Sdf || !below.sdf) continue;
+        const math::Aabb ob = layer_influence_bound(below);
+        if (ob.is_infinite()) return math::Aabb::infinite();
+        b.expand(ob);
+    }
+    return b;
 }
 
 }  // namespace

@@ -1225,6 +1225,33 @@ CullPadTerms cull_pad_terms(const SdfContent& content, const Layer& layer) {
         (void)id;
         total.raise(cull_pad_terms(n, layer));
     }
+    // THE LAYER'S OWN FOLD, which is a contributor to the DOCUMENT's chain the
+    // way each of the nodes above is a contributor to this layer's.
+    //
+    // A smooth or extended fold between this layer and the accumulated field
+    // beneath it drags the result wherever the two operands come within its
+    // support of each other, so an item that a region-limited compile would
+    // drop can still steer the value inside that region -- the same failure
+    // `blend_cull_pad` was written for, one level up, and just as invisible:
+    // the disagreement is inside the band, where nothing is looking.
+    //
+    // `blend_fixed`, because it is N-INDEPENDENT: there is one fold per layer,
+    // not one per node, so no envelope narrows it and the count must not either.
+    // It rides the layer's own terms rather than a document-level slot so that
+    // both readers get it from one place -- `document_pad` (tape_build.cpp) and
+    // `CullIndex::refresh_pad` are each a maximum over layers of this, and a
+    // term added to only one of them would cull a whole-document compile
+    // differently from a per-brick one.
+    //
+    // DELIBERATELY CONSERVATIVE, and the two directions are not symmetric. This
+    // is the fold's FULL support, which is the ceiling the chain terms above are
+    // themselves clamped at (CullPadTerms::blend_total): a chain of N folds
+    // drags further than one of them does, and nothing here counts the layers.
+    // A pad that is too wide keeps items a compile did not need and costs a
+    // longer tape; one that is too narrow drops an item the field needed and
+    // costs the geometry. Zero for the hard Add every document that predates
+    // layer composition carries, so none of them pays anything for this.
+    total.blend_fixed = kernel::cmax(total.blend_fixed, layer_blend_support(layer));
     return total;
 }
 

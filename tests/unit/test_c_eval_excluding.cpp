@@ -95,7 +95,18 @@ TEST_CASE("c abi: the excluded evaluation composes with min, exactly") {
 
         // The claim the header makes to a host: min(rest, your own preview) IS
         // the whole document, not an approximation of it. Bit equality, because
-        // layers hard-union and a hard union IS the minimum.
+        // a hard union IS the minimum.
+        //
+        // KEPT, AND NARROWED (fold-the-layers-with-an-operator). This holds
+        // while EVERY layer unions, which is what every layer in this fixture
+        // does and what every document that predates layer composition does. It
+        // is not a general property of the call any more: under a per-layer
+        // operator, removing a layer from the middle of a fold changes what
+        // every layer above it folds onto, and the two parts stop being two
+        // operands of one combine. A composed document is refused by the call
+        // rather than answered -- see the case below, and
+        // test_layer_fold_sites.cpp for the field-level demonstration that no
+        // combine of the two parts reconstructs it.
         std::size_t differing = 0;
         for (std::size_t i = 0; i < whole.size(); ++i)
             if (std::min(rest[i], mine[i]) != whole[i]) ++differing;
@@ -128,8 +139,30 @@ TEST_CASE("c abi: gradients exclude the same layer the distances do") {
     REQUIRE(clay_eval_gradients_excluding(d.doc, b, nullptr, pts.data(), n, excl.data()) ==
             CLAY_OK);
     REQUIRE(clay_layer_eval_gradients(d.doc, a, nullptr, pts.data(), n, only_a.data()) == CLAY_OK);
-    // With two layers, "everything except b" IS a.
+    // With two layers, and while both union, "everything except b" IS a.
     CHECK(excl == only_a);
+}
+
+TEST_CASE("c abi: a composed document is refused rather than answered with a part") {
+    // The complement above is a promise about a HARD UNION. Once a layer folds
+    // with its own operator there is no composition for a host to perform, so
+    // the call refuses instead of handing back a part that looks composable.
+    Doc d;
+    const clay_layer_id a = sphere_layer(d.doc, "a", -0.35f, 0.5f);
+    const clay_layer_id b = sphere_layer(d.doc, "b", 0.0f, 0.45f);
+    const std::vector<float> pts = lattice(5, 0.9f);
+    std::vector<float> out(pts.size() / 3);
+
+    REQUIRE(clay_eval_points_excluding(d.doc, b, nullptr, pts.data(), out.size(), out.data(),
+                                       nullptr) == CLAY_OK);
+    REQUIRE(clay_document_set_layer_composition(d.doc, b, CLAY_OP_SUBTRACT, CLAY_BLEND_HARD, 0.0f,
+                                                0.0f) == CLAY_OK);
+    CHECK(clay_eval_points_excluding(d.doc, b, nullptr, pts.data(), out.size(), out.data(),
+                                     nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+    // ...and excluding the OTHER layer is refused too: it is the fold that
+    // cannot be taken apart, not the choice of which part to ask for.
+    CHECK(clay_eval_points_excluding(d.doc, a, nullptr, pts.data(), out.size(), out.data(),
+                                     nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
 }
 
 TEST_CASE("c abi: a stale layer id is refused, not answered with the whole document") {

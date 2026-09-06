@@ -1319,6 +1319,33 @@ clay_result clay_document_set_layer_transform_nonuniform(clay_document* doc, cla
  * A negative radius or rounding is rejected rather than clamped, as
  * clay_set_layer_radial rejects an axis of 3.
  *
+ * WHAT A SOFT RADIUS COSTS A DRAG, and it is not where a host would look for
+ * it. A layer whose composition carries a soft blend with a positive radius
+ * classifies as GENERAL from clay_layer_placement_report, so
+ * clay_layer_placement_begin/_update/_commit stop taking the cheap path for
+ * that layer -- the same answer an ITEM with a soft radius already gets, for
+ * the same reason: the radius is an absolute world distance and the layer's
+ * scale does not reach it, so a scaled layer is not a similarity of its own
+ * field. Its ROUNDING does follow the scale; only the radius does not.
+ *
+ * AND THE TRADE THAT FOLLOWS, because a host will otherwise discover it by
+ * measuring. Because the radius is absolute, the join covers the same world
+ * distance however large the subtool grows, so the cut reads as HARDENING as
+ * the layer is scaled up. A host that compensates by rewriting blend_k as the
+ * layer scales turns every scale of that layer into an EDIT -- this call is a
+ * document command, not part of a placement gesture -- and the gesture is gone
+ * for that layer with nothing to report its absence. Neither is wrong and the
+ * engine does not pick; pick knowing which one you are picking.
+ *
+ * WHAT ELSE A COMPOSED LAYER GIVES UP, all of it speed rather than results:
+ * the brick refill's resumable multi-layer split is refused when the TOP
+ * visible SDF layer is composed (a stroke into the cutter itself walks in full,
+ * as it did before that split existed -- the layers BENEATH may compose freely
+ * and keep it), and clay_eval_points_excluding /
+ * clay_brick_cache_eval_requests_excluding REFUSE a document where ANY layer's
+ * composition is applied, because the parts no longer compose back to the
+ * whole.
+ *
  * The reader takes what the setter takes, so what comes out goes straight back
  * in, and every out-pointer is optional: a call passing none of them still
  * validates the layer, which is how a host asks "is this still an SDF layer"
@@ -2310,13 +2337,29 @@ clay_result clay_layer_eval_gradients(const clay_document* doc, clay_layer_id la
  * excluded do not move while the artist drags — and composes that with its
  * live preview per frame.
  *
- * COMPOSING IS A MINIMUM, AND IT IS EXACT. Visible SDF layers hard-union, and
- * the union of two fields IS the smaller of the two distances, so
+ * COMPOSING IS A MINIMUM, AND IT IS EXACT -- WHILE EVERY LAYER UNIONS. The
+ * union of two fields IS the smaller of the two distances, so
  *
  *     min(excluding(L) , your preview of L)
  *
  * is the field the whole document would evaluate to, not an approximation of
  * it. There is no blend parameter to match and no seam to hide.
+ *
+ * A DOCUMENT THAT USES LAYER COMPOSITION IS REFUSED HERE (ABI 0.86.0), with
+ * CLAY_ERROR_INVALID_ARGUMENT naming the layer whose composition broke it, and
+ * that is a refusal rather than a narrower promise because there is no promise
+ * left to narrow. Visible SDF layers FOLD under each layer's own operator, and
+ * removing one from the MIDDLE of a fold changes what every layer above it
+ * folds onto: with A, B(subtract) and C, excluding(B) is A+C, this document is
+ * (A-B)+C, and no operator applied to A+C and B produces it. There is no
+ * composition for a host to perform, so answering would hand back a plausible
+ * picture of a field the document does not have -- which is the same class of
+ * defect the stale-id refusal below exists to prevent, and the same reason it
+ * is a refusal.
+ *
+ * A host that needs the rest of a composed document beside one layer wants the
+ * whole-document calls with that layer hidden, which is three edits and an
+ * undo entry, or clay_document_layer_composition to check first.
  *
  * NEITHER CALL EDITS THE DOCUMENT, which is the other half of why they exist.
  * The route a host would otherwise take — hide the layer, sample the rest,

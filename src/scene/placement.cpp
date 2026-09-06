@@ -45,6 +45,21 @@ PlacementChange placement_change(const math::Transform& from, cfloat3 from_axes,
 
 bool layer_scales_cleanly(const Layer& layer) {
     if (layer.kind != LayerKind::Sdf || !layer.sdf) return true;  // nothing to scale wrongly
+    // THE LAYER'S OWN FOLD FIRST, and for exactly the reason the items below
+    // are checked: a blend radius is an absolute world distance and the layer's
+    // scale does not reach it, so a layer whose items all scale cleanly but
+    // whose COMPOSITION carries a soft radius is not a similarity of its own
+    // field. Its rounding is not in this test because it IS scaled --
+    // `fold_layer` takes `comp.rounding * layer_distance_scale(layer)` -- so
+    // the asymmetry here is genuinely the radius alone.
+    //
+    // It matters more here than in the item case: this verdict feeds
+    // clay_layer_placement_begin/_update/_commit, the gesture whose whole
+    // purpose is to SKIP work, so a wrong Similarity is a picture that lags its
+    // own field rather than a recomputation that costs a little.
+    if (layer.composition.blend.profile != BlendProfile::Hard &&
+        layer.composition.blend.k > 0.0f)
+        return false;
     for (const auto& [id, n] : layer.sdf->nodes()) {
         (void)id;
         if (!n.visible) continue;

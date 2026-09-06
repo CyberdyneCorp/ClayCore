@@ -1470,6 +1470,70 @@ std::uint64_t next_compile_id() {
 
 }  // namespace
 
+namespace {
+// A composition that folds exactly as every layer folded before compositions
+// existed: min(), which is exact, associative, adds no extent and needs no
+// operand it does not have. Every clause matters -- a hard SUBTRACT is not it
+// (it is not commutative and a caller holding two values would have to know
+// which is which), and a smooth Add is not it (it is not associative, so the
+// value at a boundary is not what a caller would rejoin to).
+bool composition_is_hard_union(const LayerComposition& c) {
+    return c.op == Op::Add && c.blend.profile == BlendProfile::Hard && c.blend.k == 0.0f &&
+           c.rounding == 0.0f;
+}
+}  // namespace
+
+const LayerComposition* layer_join_composition(const Document& doc, LayerId active) {
+    const Layer* found = nullptr;
+    bool below = false;
+    for (const Layer& l : doc.layers) {
+        if (!l.visible || l.kind != LayerKind::Sdf || !l.sdf) continue;
+        if (l.id == active) {
+            found = &l;
+            break;
+        }
+        below = true;  // a visible SDF layer before it, so there is a join
+    }
+    if (!found || !below) return nullptr;
+    return &found->composition;
+}
+
+bool layer_join_is_hard_union(const Document& doc) {
+    // The LAST visible SDF layer, which is the seam every split in this tree is
+    // taken at: `compile_document_part(below=true)` stops there, and so do the
+    // C ABI's refill halves. With at most one visible SDF layer there is no
+    // join at all -- the first layer's own operator is not applied -- so the
+    // answer is yes and the fast path stays open for every single-layer
+    // document however it is composed.
+    const Layer* active = nullptr;
+    int visible = 0;
+    for (const Layer& l : doc.layers) {
+        if (!l.visible || l.kind != LayerKind::Sdf || !l.sdf) continue;
+        active = &l;
+        ++visible;
+    }
+    if (!active || visible <= 1) return true;
+    return composition_is_hard_union(active->composition);
+}
+
+LayerId first_composed_fold_layer(const Document& doc) {
+    bool have_acc = false;
+    for (const Layer& l : doc.layers) {
+        if (!l.visible || l.kind != LayerKind::Sdf || !l.sdf) continue;
+        // The FIRST visible SDF layer initialises the accumulator and its own
+        // operator is not applied, so whatever it carries cannot break a
+        // caller's composition -- skipped here for exactly that reason and not
+        // as an approximation.
+        if (have_acc && !composition_is_hard_union(l.composition)) return l.id;
+        have_acc = true;
+    }
+    return 0;
+}
+
+bool document_fold_is_hard_union(const Document& doc) {
+    return first_composed_fold_layer(doc) == 0;
+}
+
 Tape compile_document(const Document& doc, const CullRegion* cull, const CullIndex* index,
                       const CullPlan* plan) {
     Compiler c;
@@ -1536,6 +1600,14 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& cp, const
     // longer this one. Each is cheap; a wrong reuse is silent.
     const Layer* layer = last_visible_sdf_layer(doc);
     if (!layer || layer->id != cp.layer) return false;
+    // AND the fold this checkpoint sits in front of has to be a hard Add, for
+    // the carry-over three lines below: that copies the prefix's `info`,
+    // `lipschitz_bounds_gradient` and `bounds` on the argument that a hard Add
+    // is exact and adds no extent, and neither half of that survives a smooth
+    // or extended fold. Refusing costs one full compile; proceeding costs a
+    // safe step that is too large and a box the surface leaves, neither of
+    // which reports anything.
+    if (!layer_join_is_hard_union(doc)) return false;
     if (cp.instrs > prefix.instrs.size() || cp.params > prefix.params.size() ||
         cp.blob > prefix.blob.size())
         return false;
@@ -1552,8 +1624,10 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& cp, const
     c.tape.instrs.assign(prefix.instrs.begin(), prefix.instrs.begin() + (std::ptrdiff_t)cp.instrs);
     c.tape.params.assign(prefix.params.begin(), prefix.params.begin() + (std::ptrdiff_t)cp.params);
     c.tape.blob.assign(prefix.blob.begin(), prefix.blob.begin() + (std::ptrdiff_t)cp.blob);
-    // The layer union the checkpoint sits in front of folds neither of these:
-    // a hard Add is exact and adds no extent, so the prefix's are the chain's.
+    // The fold the checkpoint sits in front of folds neither of these: a hard
+    // Add is exact and adds no extent, so the prefix's are the chain's. True
+    // wherever this line is reached because the refusal above is what makes it
+    // true -- a composed seam never gets here.
     c.tape.info = prefix.info;
     c.tape.lipschitz_bounds_gradient = prefix.lipschitz_bounds_gradient;
     c.tape.bounds = prefix.bounds;

@@ -1536,6 +1536,28 @@ struct clay_document {
         // anything below can decline.
         p.active = active->id;
         p.has_below = visible > 1;
+        // THE FOLD AT THE SEAM HAS TO BE A HARD ADD, or the split is refused.
+        //
+        // The whole resumable multi-layer path holds the active layer's value
+        // and the layers beneath it apart and rejoins them in host floats
+        // (`fold_layers_below`), which takes six floats and no document and so
+        // cannot be told what the fold is. That is sound for a hard Add and for
+        // nothing else, and a rejoin with the wrong operator returns a field
+        // that never existed with nothing to report it. So the refusal lives
+        // here, once, where the Document is in hand.
+        //
+        // `usable` alone, never `has_below`: three callers probe this plan for
+        // `has_below` as a pure topology question, and a fold refusal read as
+        // "there is only one layer" would take a DIFFERENT wrong path. That is
+        // also why both are set above, before anything can decline.
+        //
+        // What it costs, exactly: a document whose TOP visible SDF layer is
+        // composed loses the append resume and takes the full walk it took
+        // before #348. Every other document keeps it -- including every
+        // document with one visible SDF layer, whatever its composition, and
+        // every multi-layer document whose top layer unions hard however the
+        // layers beneath it are composed.
+        if (p.has_below && !scene::layer_join_is_hard_union(doc.document)) return p;
         // THE APPENDS HAVE TO HAVE GONE TO THE LAYER THE SUFFIX WOULD EXTEND.
         //
         // Without this the log is trusted whatever layer it describes, and the
@@ -1560,9 +1582,10 @@ struct clay_document {
         p.checkpoint.valid = true;
         p.checkpoint.layer = active->id;
         p.checkpoint.layer_have_acc = true;
-        // FALSE even when layers sit beneath, so the suffix emits no union: the
-        // refill holds that value separately and folds it in itself, with the
-        // same hard Add the whole-document compile emits between layers.
+        // FALSE even when layers sit beneath, so the suffix emits no fold: the
+        // refill holds that value separately and rejoins it itself, with the
+        // hard Add the whole-document compile emits at that boundary -- which
+        // the refusal above is what makes true.
         p.checkpoint.doc_have_acc = false;
         p.usable = true;
         return p;
@@ -1589,6 +1612,10 @@ struct clay_document {
         if (!active) return p;
         p.active = active->id;
         p.has_below = visible > 1;
+        // The same refusal plan_resume makes, for the same reason and with the
+        // same predicate: this plan feeds the same two-half refill, and a
+        // frontier drag on a composed top layer takes the full walk instead.
+        if (p.has_below && !scene::layer_join_is_hard_union(doc.document)) return p;
         const std::vector<scene::NodeId>& roots = active->sdf->roots;
         // Boundary 0 would be an empty prefix -- no accumulator, which the
         // layer_have_acc statement below could not honestly make -- and a
@@ -1599,9 +1626,10 @@ struct clay_document {
         p.checkpoint.valid = true;
         p.checkpoint.layer = active->id;
         p.checkpoint.layer_have_acc = true;
-        // FALSE even when layers sit beneath, so the suffix emits no union: the
-        // refill holds that value separately and folds it in itself, with the
-        // same hard Add the whole-document compile emits between layers.
+        // FALSE even when layers sit beneath, so the suffix emits no fold: the
+        // refill holds that value separately and rejoins it itself, with the
+        // hard Add the whole-document compile emits at that boundary -- which
+        // the refusal above is what makes true.
         p.checkpoint.doc_have_acc = false;
         p.usable = true;
         return p;
@@ -3167,6 +3195,20 @@ clay_result compile_document_without(const clay_document* doc, clay_layer_id exc
         return fail(CLAY_ERROR_NOT_FOUND,
                     "no layer " + std::to_string(excluded) + " to exclude: excluding a layer the "
                     "document does not hold would evaluate the whole document");
+    // AND a document whose layers do not all hard-union, because there is then
+    // no composition for the caller to perform: removing a layer from the
+    // middle of a fold changes what every layer above it folds onto, so this
+    // half and the excluded layer's half are not two operands of one combine
+    // (scene/tape.h, compile_document_except). The refusal is here rather than
+    // in the compile for the same reason the stale-id one is: the COMPILE is
+    // honest -- it is the document without that layer -- and it is the caller's
+    // stated intent to compose that cannot be met.
+    if (const scene::LayerId composed = scene::first_composed_fold_layer(doc->doc.document))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "layer " + std::to_string(composed) +
+                        " composes with the layers below it, so the document without layer " +
+                        std::to_string(excluded) +
+                        " does not compose back to the whole document");
     *out = scene::compile_document_except(doc->doc.document, excluded);
     return CLAY_OK;
 }
@@ -13346,6 +13388,24 @@ namespace {
 // applied sample by sample to the two halves a resumable refill holds apart.
 // Through the kernel's own combine rather than a min written out here: the two
 // have to agree bit for bit, and one of them is the definition.
+//
+// PRECONDITION, AND IT CANNOT BE CHECKED HERE: the fold at that boundary IS a
+// hard Add. This takes six floats and no document, so it can neither detect a
+// composed layer nor apply one -- it has no sample point, which the transitions
+// and the feathered replace both need, and an unknown mode falls out of
+// `ctape_combine_dist` as the accumulator with the active layer discarded.
+//
+// It is unreachable otherwise BY CONSTRUCTION, and the enforcement is at the
+// STORE rather than at any plan: `plan_resume` and `plan_frontier` refuse the
+// split for a composed seam (`layer_join_is_hard_union`), and
+// `eval_requests_impl` both refuses it and stores no two-half seed. A seed with
+// a `below` half therefore only exists where the fold was a hard Add when it
+// was taken, and any composition change bumps `revision`, so the `rev == now`
+// caller below -- which consults no plan at all -- cannot meet a stale one.
+//
+// It also never meets an EMPTY half for that reason. An empty tape evaluates to
+// CLAY_TAPE_FAR, and `min(below, FAR) == below` agrees with the compiler's own
+// "a union with nothing is no change" while `max(below, FAR)` would not.
 void fold_layers_below(const float* below_d, const float* below_rgb, const float* active_d,
                        const float* active_rgb, std::size_t per, float* out_d, float* out_rgb) {
     for (std::size_t s = 0; s < per; ++s) {
@@ -14238,6 +14298,21 @@ clay_result clay_brick_cache_eval_requests_excluding(
         return fail(CLAY_ERROR_NOT_FOUND,
                     "no layer " + std::to_string(excluded) + " to exclude: excluding a layer the "
                     "document does not hold would evaluate the whole document");
+    // AND a document whose layers do not all hard-union, because there is then
+    // no composition for the caller to perform: removing a layer from the
+    // middle of a fold changes what every layer above it folds onto, so this
+    // half and the excluded layer's half are not two operands of one combine
+    // (scene/tape.h, compile_document_except). The refusal is here rather than
+    // in the compile for the same reason the stale-id one is: the COMPILE is
+    // honest -- it is the document without that layer -- and it is the caller's
+    // stated intent to compose that cannot be met.
+    if (const scene::LayerId composed =
+            doc ? scene::first_composed_fold_layer(doc->doc.document) : 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "layer " + std::to_string(composed) +
+                        " composes with the layers below it, so the document without layer " +
+                        std::to_string(excluded) +
+                        " does not compose back to the whole document");
     return scoped_refill(doc, excluded, backend, requests, count, out_values, values_capacity,
                          out_colors_rgb, colors_capacity, ChunkHalf::Except);
 }
@@ -14334,11 +14409,25 @@ clay_result eval_requests_impl(const clay_document* doc, const char* backend,
             ++visible_sdf;
         }
     const bool has_below = visible_sdf > 1;
+    // WHETHER THE TWO HALVES MAY BE HELD APART AT ALL. They are rejoined in
+    // host floats by `fold_layers_below`, which is a hard Add and cannot be
+    // anything else, so a composed seam takes ONE whole-document batch instead
+    // -- the same refusal plan_resume and plan_frontier make, with the same
+    // predicate, so that the full path and the resumable path cannot disagree
+    // about one document within a batch.
+    const bool split = has_below && scene::layer_join_is_hard_union(doc->doc.document);
+    // ...and then NOTHING IS STORED. A seed for a refused document would be a
+    // whole-document value in a store whose readers ask for two halves
+    // (`shaped_entry`'s want_below is a topology question), and the precedent
+    // is `resume_batch_into_host`: it stores nothing rather than something
+    // mislabelled. Not storing is also what keeps `fold_layers_below`'s
+    // `rev == now` path -- which consults no plan -- unreachable here.
+    const bool refused_split = has_below && !split;
 
     std::vector<float> act(todo_count * per);
     std::vector<float> act_rgb(want_colour ? todo_count * per * 3 : 0);
-    std::vector<float> bel(has_below ? todo_count * per : 0);
-    std::vector<float> bel_rgb(has_below && want_colour ? todo_count * per * 3 : 0);
+    std::vector<float> bel(split ? todo_count * per : 0);
+    std::vector<float> bel_rgb(split && want_colour ? todo_count * per * 3 : 0);
 
     // THE SEED A GROUP RESUME NEEDS, taken here or never.
     //
@@ -14469,9 +14558,9 @@ clay_result eval_requests_impl(const clay_document* doc, const char* backend,
                 return fail(CLAY_ERROR_BACKEND, "eval_grid_batch failed");
             return CLAY_OK;
         },
-        has_below ? ChunkHalf::Active : ChunkHalf::Whole, active_layer, take_stacks, &gated);
+        split ? ChunkHalf::Active : ChunkHalf::Whole, active_layer, take_stacks, &gated);
     if (br != CLAY_OK) return br;
-    if (has_below) {
+    if (split) {
         br = eval_requests_in_chunks(
             doc, todo, todo_count,
             [&](const eval::GridBatchQuery& bq, std::size_t base) -> clay_result {
@@ -14490,7 +14579,7 @@ clay_result eval_requests_impl(const clay_document* doc, const char* backend,
         const std::size_t slot = partial ? where[j] : j;
         float* vd = out_values + slot * per;
         float* vc = want_colour ? out_colors_rgb + slot * per * 3 : nullptr;
-        if (has_below)
+        if (split)
             fold_layers_below(
                 bel.data() + j * per, bel_rgb.empty() ? nullptr : bel_rgb.data() + j * per * 3,
                 act.data() + j * per, act_rgb.empty() ? nullptr : act_rgb.data() + j * per * 3, per,
@@ -14503,9 +14592,12 @@ clay_result eval_requests_impl(const clay_document* doc, const char* backend,
     // Kept so the NEXT dab can resume from it. The ACTIVE half is the seed a
     // suffix continues; the half beneath is what the union needs and does not
     // move while the active layer is being sculpted.
-    doc->store_seeds(todo, todo_count, act.data(), act_rgb.empty() ? nullptr : act_rgb.data(),
-                     has_below ? bel.data() : nullptr, bel_rgb.empty() ? nullptr : bel_rgb.data(),
-                     per, 0, 0.0f, stacks.data(), gated.data());
+    if (!refused_split)
+        doc->store_seeds(todo, todo_count, act.data(),
+                         act_rgb.empty() ? nullptr : act_rgb.data(),
+                         split ? bel.data() : nullptr,
+                         bel_rgb.empty() ? nullptr : bel_rgb.data(), per, 0, 0.0f, stacks.data(),
+                         gated.data());
     return CLAY_OK;
 }
 

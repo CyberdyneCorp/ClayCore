@@ -89,34 +89,108 @@
 
 ## 4. The six sites that assume a hard union
 
-- [ ] 4.1 `compile_document_resumable`'s trailing union — PARTLY DONE in the
-      fold stage, emission only: `Compiler::resume` now re-emits the ACTIVE
-      LAYER's composition through the same shared emitter instead of a
-      hard-coded `Op::Add`, derived from the `const Layer&` it already takes.
-      That was not scope creep but the alternative to leaving `run()` and
-      `resume()` emitting different fields for the same document. What is NOT
-      done: the hand-built checkpoints in `bindings/c/clay_c.cpp`, the
-      `test_tape_prefix_reuse.cpp:167` composed subcases, and the decision's
-      header restatement
-- [ ] 4.2 `compile_document_part` (`tape.h:372`)
-- [ ] 4.3 `compile_document_except` (`tape.h:390`)
-- [ ] 4.4 `tape_build.cpp:1281` — "a hard Add is exact and adds no extent"
-- [ ] 4.5 `clay_c.cpp:1502` and `:1541` — the brick refill's multi-layer fold
-- [ ] 4.6 Each DECIDED and tested, not discovered. A refill folding with the
-      wrong operator returns a field that never existed and reports nothing
+- [x] 4.1 `compile_document_resumable`'s trailing union — the fold stage landed
+      the EMISSION (`Compiler::resume` re-emits the ACTIVE LAYER's composition,
+      derived from the `const Layer&` it already takes rather than carried on
+      the checkpoint, so a hand-built checkpoint cannot assert an operator that
+      has stopped being true). This stage landed the rest: the header
+      restatement, and the composed subcases in `test_tape_prefix_reuse.cpp`
+      — a composed layer BENEATH the seam keeps the reuse and stays
+      bit-identical, a composed SEAM refuses it (see 4.4). The hand-built
+      checkpoints in `bindings/c/clay_c.cpp` needed no change: their
+      `doc_have_acc = false` statement says "the suffix emits no fold, the
+      refill rejoins it", and the refusal in `plan_resume`/`plan_frontier` is
+      what makes that statement true rather than assumed
+- [x] 4.2 `compile_document_part` — REPAIRED, not refused. Both halves stay
+      correct compiles and only the JOIN changes: it is the active layer's own
+      composition, and the split is bit-identical because it is taken at a
+      layer boundary, where `below` is exactly the accumulator the
+      whole-document walk holds. `scene::layer_join_composition` is that
+      combine, `layer_join_is_hard_union` is the test a caller that cannot
+      apply an arbitrary one takes, and the header now says both. Tested by
+      rejoining the two halves sample by sample through the kernel's own
+      combine and requiring the whole-document field back, over union, subtract,
+      intersect, smooth and extended folds, with the teeth that rejoining with
+      an Add instead is a different field
+- [x] 4.3 `compile_document_except` — NOT repairable and not repaired. The SUM
+      promise is deleted from the header (with A, B(Subtract), C and excluded =
+      B, no combine of A+C and B is (A−B)+C) and the compile keeps its own
+      meaning. The four callers whose contract IS the min composition refuse
+      with `CLAY_ERROR_INVALID_ARGUMENT` naming the layer:
+      `compile_document_without` (both eval forms),
+      `clay_brick_cache_eval_requests_excluding`, and pyclay's `eval_excluding`
+      / `gradients_excluding`. `test_c_eval_excluding.cpp` is UPDATED rather
+      than weakened — the zero-differing-samples assertion is kept, with a
+      comment saying it now holds only while every layer unions, and a new case
+      asserts the refusal
+- [x] 4.4 `compile_document_append`'s `info` / `lipschitz_bounds_gradient` /
+      `bounds` carry-over — REFUSES when the seam is not a hard Add, so the
+      comment's justification is true wherever the function proceeds. Measured
+      with the refusal removed: a smooth-union seam reuses a prefix whose
+      `bounds.min.x` is −1.5 where the whole-document compile says −3.0, because
+      the fold's ring follows the layer's extent and the appended item enlarges
+      it. A box that small is a dropped brick and a lost ray hit — missing
+      surface, not an error
+- [x] 4.5 The brick refill's multi-layer split — `plan_resume`, `plan_frontier`
+      and `eval_requests_impl` all refuse it through one predicate
+      (`layer_join_is_hard_union`), and the refused full path stores NO seed,
+      following `resume_batch_into_host`'s "nothing rather than something
+      mislabelled". `fold_layers_below` is unchanged byte for byte and its
+      comment gains the precondition and the argument for why it is unreachable
+      otherwise. `has_below` keeps meaning "more than one visible SDF layer" for
+      the three callers that probe it as topology; the refusal lives in `usable`
+      alone
+- [x] 4.6 Each DECIDED and tested. Every refusal is asserted as a COUNT
+      (`clay_document_resume_stats.resumed_bricks`, never a clock) because a
+      refused resume is bit-identical to the walk it falls back to; and every
+      field claim is checked against something that does not share the code
+      under test — a one-layer document expressing the same shape as items,
+      which takes no split at all. NOTE the one honest gap: the three refusals
+      in 4.5 are individually invisible (removing the store's leaves the plans
+      refusing, removing the plans' leaves no seed to refuse), so the count test
+      holds them as a conjunction. Reverting `eval_requests_impl`'s alone is
+      still caught, by the field
 
 ## 5. Invalidation
 
-- [ ] 5.1 Composition joins the key of the tape, the cull index, the prefix cache
-      (`layer_prefix_fingerprint`) and the brick seed store — PARTLY DONE in the
-      model stage: it joins `digest::mix_layer_head`, so both
-      `layer_prefix_fingerprint` and `layer_fingerprint` move, and it reaches
-      the tape and the cull index for free through `apply_edit`'s revision
-      bump. The brick seed store is deliberately NOT keyed on it (see the
-      decision's ResumeKey note) and needs the split refusal instead, which is
-      the fold stage's
-- [ ] 5.2 Conservative first; narrow only with a measurement
-- [ ] 5.3 Dirty influence for a moved, re-blended or hidden cutter
+- [x] 5.1 Composition joins the key of the tape, the cull index, the prefix
+      cache and the brick seed store. The digest half landed in the model stage
+      (`digest::mix_layer_head`, so `layer_prefix_fingerprint` and
+      `layer_fingerprint` both move); the tape and the cull index are keyed on
+      `revision` and follow `apply_edit` for free; the brick seed store is
+      deliberately NOT keyed on the composition (the decision's `ResumeKey`
+      note) and is protected by 4.5's split refusal instead. What this stage
+      added is THE CULL PAD, which had no inter-layer term at all: the fold's
+      own support now enters `cull_pad_terms(content, layer)` as a per-layer
+      constant, so `document_pad` and `CullIndex::refresh_pad` — a maximum over
+      layers of that, each — pick it up from one place. Without it a per-brick
+      compile under a smooth fold drops an item the whole-document compile
+      keeps: measured, 11 of 21 samples in the fixture's region differ, inside
+      the band where nothing is looking
+- [x] 5.2 Conservative first. Three places where this stage chose the wide
+      answer and said what it costs beside the code: the cull pad takes the
+      fold's FULL support rather than a chain envelope over the layer count (a
+      wider pad is a longer tape; a narrower one is wrong geometry, and the two
+      are not symmetric); an intersecting layer's dirty box is the union of the
+      layers beneath, which is the box the host measured at 45.5 ms and 7.5 s
+      and which wants a REFILL-REGION narrowing, not a bounds one; and the
+      below-extent walk is not memoized, because a cache whose only observable
+      is that it stopped firing needs the `walks()`/`keeps()` counters
+      `LayerExtentCache` carries and a measurement to justify it
+- [x] 5.3 Dirty influence for a moved, re-blended or hidden cutter.
+      `layer_command_bound` — the only function in that chain holding the
+      `Document`, which is why the loop lives there and `layer_influence_bound`
+      is not widened in place — dilates by the fold's own support and, for an
+      Intersect and nothing else (`op_is_local`), unions the extent of the
+      visible SDF layers BENEATH. That covers `SetLayerVisibleCmd`, a reorder
+      (a Remove+Add pair) and the composition command itself. An edit made
+      INSIDE a lower layer is deliberately not widened: a combine is pointwise,
+      so it changes the folded result exactly where it changed the accumulator.
+      Also here, from design.md §11: `layer_scales_cleanly` now reads the
+      layer's composition, so a soft fold classifies GENERAL and the placement
+      gesture stops skipping invalidation on a similarity that is not one — with
+      the trade (an absolute radius, or an edit per scale) stated in the header
+      beside the composition setter, where a host will actually meet it
 
 ## 6. Gates
 

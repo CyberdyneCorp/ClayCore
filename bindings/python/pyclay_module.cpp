@@ -6544,14 +6544,22 @@ NB_MODULE(pyclay, m) {
                      throw std::invalid_argument(
                          "no layer " + std::to_string(excluded) + " to exclude: excluding a "
                          "layer the document does not hold would evaluate the whole document");
+                 if (const scene::LayerId composed =
+                         scene::first_composed_fold_layer(d.doc->document))
+                     throw std::invalid_argument(
+                         "layer " + std::to_string(composed) + " composes with the layers below "
+                         "it, so the document without layer " + std::to_string(excluded) +
+                         " does not compose back to the whole document");
                  return eval_field(scene::compile_document_except(d.doc->document, excluded),
                                    points, backend, Want::Distances);
              },
              "excluded"_a, "points"_a, "backend"_a = "cpu",
              "Signed distances of every visible SDF layer EXCEPT `excluded` -> (N,) float32.\n"
-             "Layers hard-union, so np.minimum(this, your own preview of that layer) is\n"
-             "exactly what the whole document evaluates to. A layer the document does not\n"
-             "hold raises rather than evaluating everything.")
+             "While every layer unions, np.minimum(this, your own preview of that layer)\n"
+             "is exactly what the whole document evaluates to. A document where any layer\n"
+             "composes RAISES: removing a layer from the middle of a fold changes what\n"
+             "every layer above it folds onto, so there is no composition to perform. A\n"
+             "layer the document does not hold raises rather than evaluating everything.")
         .def("gradients_excluding",
              [](const PyDocument& d, scene::LayerId excluded, nb::handle points,
                 const std::string& backend) {
@@ -6559,6 +6567,12 @@ NB_MODULE(pyclay, m) {
                      throw std::invalid_argument(
                          "no layer " + std::to_string(excluded) + " to exclude: excluding a "
                          "layer the document does not hold would evaluate the whole document");
+                 if (const scene::LayerId composed =
+                         scene::first_composed_fold_layer(d.doc->document))
+                     throw std::invalid_argument(
+                         "layer " + std::to_string(composed) + " composes with the layers below "
+                         "it, so the document without layer " + std::to_string(excluded) +
+                         " does not compose back to the whole document");
                  return eval_field(scene::compile_document_except(d.doc->document, excluded),
                                    points, backend, Want::Gradients);
              },
