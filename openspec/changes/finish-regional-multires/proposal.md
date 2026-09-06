@@ -235,13 +235,47 @@ last, and for nobody treating a slip in it as a slip against a user.
 
 ## Impact
 
-- `src/mesh/surface_frame.cpp`, `src/mesh/multires_eval.cpp`,
-  `src/mesh/multires_internal.h`, `include/clay/mesh/multires.h`.
-- `src/mesh/sculpt.cpp`, `src/mesh/sculpt_kernels.cpp`, `src/mesh/automask.cpp`,
-  `src/mesh/layered_sculpt.cpp`, `src/mesh/multires_sculpt.cpp`.
-- `bindings/c/`, `bindings/python/`, `tests/`, `examples/`, `docs/09`.
+What the branch has touched, and what its plan named and it has not. Written from
+the diff rather than from the plan, because the two had already parted.
+
+- New: `include/clay/mesh/cross_level.h` and `src/mesh/cross_level.cpp` — the
+  neighbourhood a regional level does not store — and `src/mesh/multires_mixed.cpp`,
+  the mixed-depth export.
+- `src/mesh/multires_eval.cpp`, `src/mesh/multires_internal.h`,
+  `src/mesh/multires.cpp`, `include/clay/mesh/multires.h`: where the
+  neighbourhood is built, cached, re-read and priced, beside the mixed-depth
+  reads.
+- `src/mesh/multires_sculpt.cpp`, `include/clay/mesh/multires_sculpt.h`,
+  `src/mesh/sculpt.cpp`, `include/clay/mesh/sculpt.h`, `src/mesh/automask.cpp`,
+  `include/clay/mesh/automask.h`: a stamp that crosses a depth boundary, and an
+  automask that stops reading one as a border. `src/mesh/sculpt_kernels.cpp` and
+  `src/mesh/layered_sculpt.cpp` were named here and are untouched — the
+  neighbourhood is taken where the neighbours are GATHERED, and the verbs below
+  that never learn a level exists.
+- `bindings/c/clay.h`, `bindings/python/pyclay_module.cpp`,
+  `tests/unit/test_multires_regional.cpp`, `tests/unit/test_multires_sculpt.cpp`,
+  `tests/CMakeLists.txt`, `docs/09-brush-latency-and-coverage.md`.
+- `tools/check_task_symbols.py`, `tools/task_symbols_baseline.txt`, and a step in
+  the `checks` job of `.github/workflows/ci.yml`: written here rather than
+  planned, because this change's own tasks file was found citing names that were
+  not in the tree.
+- STILL UNTOUCHED, each an open task rather than a change of plan:
+  `src/mesh/surface_frame.cpp` — section 1, the frame at a boundary, the half
+  this proposal calls the one with users today and the one still unbuilt — and
+  `examples/74_regional_multires.py`, which task 6.4 owns and which still states
+  the export gap in the artist's vocabulary.
 - **No serialization change.** The transition topology is a pure function of the
   cage, the rule and the per-level patch sets, all already in a version-3 stream;
   `kSurfaceVersion` does not move and there is no format-minor bump.
-- ABI grows by the export entry point; the three version lines move to **0.87.0**
-  together, because two branches already claim 0.86.0.
+- **The ABI does not grow, and the version lines move anyway.** Task 6.1's export
+  entry point is unbuilt: the `bindings/c/clay.h` diff adds no function, only
+  comments and the version. The three lines move to **0.88.0** together for a
+  field of an entry point that already existed and now means something new —
+  `clay_multires_stamp_report.moved_vertices` counted the weld classes a stamp
+  moved at the bound level, because a stamp only ever wrote one level, and it now
+  sums the classes moved on every level a crossing stamp wrote. Same layout, same
+  type, new meaning, which is worse than a new field because nothing a host
+  compiles against tells it to look. The number is 0.88.0 and not the 0.87.0 this
+  section first carried: the branch was cut when the tree was at 0.85.0, and
+  0.86.0 and 0.87.0 have both landed on main since. 6.1 would add its entry point
+  at this same minor and not move it again.

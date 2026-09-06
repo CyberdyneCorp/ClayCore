@@ -65,8 +65,7 @@ smaller than the dense hierarchy's" were checked against each other and
 ring. A helper that answers in vertices would be describing the symptom.
 
 So the helper answers, for a vertex at a level: **the complete set of faces
-incident to it, each named by the level it lives at and its index there**, with
-the coarse-side faces included. From it:
+incident to it**, with the ones the level does not store included. From it:
 
 - `level_normals` gets a Newell normal per face, each computed at the level that
   face lives at, and sums them unweighted as it does now
@@ -77,13 +76,28 @@ the coarse-side faces included. From it:
 - `expand_by_face_ring` gets a halo that does not stop at the region rim
 - the position kernels get a vertex ring by taking the corners
 
+**CORRECTED BY WHAT LANDED: a missing face is not named by the level it lives
+at.** This section first said each face comes back "named by the level it lives
+at and its index there", which reads as though the coarse faces were handed over
+as they are. They cannot be, and the reason is the one `cross_level.h` opens
+with: a coarse neighbour has no vertex, no weld class and no face AT THIS LEVEL
+to be named at all, so a reader handed one would be summing over two depths and
+would not get the dense hierarchy's answer, which is the whole claim. What
+`CrossLevelNeighborhood` holds instead is the faces the DENSE level would have
+had here — quads, in the subdivision's own corner order — over a joined
+numbering: an id below the level's vertex count is one of its own vertices, and
+an id above it is a vertex the level does not store, carrying the pure
+subdivision of the level below. That makes a boundary reader's answer the dense
+hierarchy's answer rather than an approximation of it.
+
 **Ordering is part of the answer, not a detail.** Two sites already record that a
 neighbourhood's order is load-bearing because float addition is not associative:
 the walk's frontier and pop order, and the sorted candidate list that keeps a
-region stable across a BVH rebuild. The helper's order is therefore fixed:
-**ascending level, then the level's own face order**. That is already
-deterministic — faces are patch-major in the parent's order and `full_of` is
-ascending — so this needs no new rule, only a stated one.
+region stable across a BVH rebuild. With the faces derived rather than borrowed,
+the order that falls out is **the order the dense level would have numbered them
+in** — parent face order, then corner order — and a ring ascends in the joined
+numbering. That is already deterministic: faces are patch-major in the parent's
+order and `full_of` is ascending, so this needs no new rule, only a stated one.
 
 **Where it lives.** On the surface, beside the existing per-level structures, and
 cached in `LevelCache` like everything else derived. It is not plumbed into
@@ -156,16 +170,32 @@ a finer patch"**, not "beside a finer patch". The T-junction — the fine edge
 point sitting **0.023213101** off the coarse chord, half the corner gap — is the
 second half of the same fix, not the whole of it.
 
-### Quad-only, or the export stops being a subdivision cage
+### Quad-only where the arithmetic allows it, which is not everywhere
 
 `Mesh::quads` requires `quads.size() / 4 * 6 == indices.size()` with quad `q` at
 `indices[6q .. 6q+5]`, and `level_faces_into` already clears `quads` for any
 non-uniform face list — "because a quad list that does not describe indices is
 the lie `mesh_data.h` forbids". One 5-gon transition face therefore turns the
-whole export into a triangle soup for a DCC. Every configuration that occurs —
-1-sided (40 patches on a 2×2 region), 2-sided (up to 9), 3-sided (2), 4-sided (1,
-when a refined ring leaves the hole coarser) and corner-only — gets a **quad-only
-template**.
+whole export into a triangle soup for a DCC.
+
+**OVERRULED BY THE TREE, and by arithmetic rather than by judgement.** This
+section asked for a quad-only template per incidence pattern — 1-sided (40
+patches on a 2×2 region), 2-sided (up to 9), 3-sided (2), 4-sided (1, when a
+refined ring leaves the hole coarser) and corner-only. There is no such template
+for a split edge and there cannot be: a coarse quad with one split edge is a
+PENTAGON, and a polygon with an odd number of boundary vertices has no
+quadrangulation — four edges per quad counts every interior edge twice, so the
+boundary count must be even however many vertices are added inside. Making it
+even means splitting a second edge of that face, which its coarse neighbour must
+then carry, and so on across the model.
+
+So what the export does instead: `Mesh::quads` survives exactly while NO edge is
+split — every uniform export, and every corner-only transition, which is the one
+incidence pattern above that adds no boundary vertex — and is dropped whole
+otherwise. `level_faces_into` already makes that choice from the face list, so no
+new code decides it. Measured on the fixture: 48 patches emit more triangles than
+twice their faces (a split edge), 12 emit exactly twice and still span two levels
+(corner-only, all quads), 84 are untouched.
 
 There is **one bridging case to template**, not a family. `resolve_keep` refuses
 to refine a patch unless it and its whole vertex ring are resident one level
@@ -199,13 +229,25 @@ new field's zero meaning today's behaviour, caller-owned buffers, and
 `BUFFER_TOO_SMALL` — never `INVALID_ARGUMENT` — for a short buffer, with the
 header documenting what the call does **not** promise.
 
-### One thing a mixed export costs that a single-level one does not
+The C++ half of that landed and is gated: a refusal has a name
+(`MultiresMixedStatus`), a refused export comes back empty rather than partial,
+and the header says what the call does not promise. The descriptor rules in the
+paragraph above are owed by the C entry point of task 6.1, which is not built —
+so nothing in this ABI answers a mixed export yet, rather than answering it
+badly.
 
-`mesh_at_level` is already non-const and evaluates. A mixed-depth export forces
-levels `0 .. max` simultaneously resident, so the peak-versus-persistent argument
-that produced `preflight_add_level` applies here, and there is no preflight for an
-export today. Whether one is added is a decision left to the export stage, taken
-against a measured peak rather than assumed.
+### One thing a mixed export was expected to cost, and does not
+
+`mesh_at_level` is already non-const and evaluates. The worry recorded here was
+that a mixed-depth export forces levels `0 .. max` simultaneously resident, so
+the peak-versus-persistent argument that produced `preflight_add_level` would
+apply and an export preflight might be owed. **MEASURED AND ANSWERED: it is not.**
+`mesh_at_level` already walks every level below its own — both calls open with
+`evaluate_up_to(level)` — and the mixed export then reads the evaluated positions
+and builds no level mesh, no adjacency and no chunk table, so its resident set is
+a SUBSET rather than a superset. Gated as a byte comparison: `memory().rebuildable`
+after a mixed export is no larger than after `mesh_at_level` on the same
+hierarchy, and both are above the cold figure. No export preflight is added.
 
 ## What this change does NOT decide
 
