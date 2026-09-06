@@ -2595,7 +2595,11 @@ typedef struct clay_field_report {
     float steepest_volume;         /* largest sample Lipschitz among volume items */
     int32_t longest_deformer_chain;
     int32_t item_count;
-    int32_t advises_consolidation; /* degraded AND consolidation is the cure */
+    /* Degraded AND consolidation is the cure. What to DO with it:
+     * clay_layer_consolidation_advice turns it into a cell size, a band
+     * and the cost projected at them, so the flag does not leave a host
+     * inventing the one number clay_consolidation_params requires. */
+    int32_t advises_consolidation;
     /* Appended in ABI 0.70.0. A caller compiled against the older struct passes
      * the older struct_size and never sees these; the fields below are only
      * written when the size covers them. */
@@ -2668,6 +2672,125 @@ clay_result clay_layer_consolidation_cost(const clay_document* doc, clay_layer_i
                                           const clay_consolidation_params* params,
                                           const float region_min[3], const float region_max[3],
                                           clay_consolidation_cost* out_cost);
+
+/* Turn `advises_consolidation` into something a host can act on: at what
+ * resolution, and what it will cost.
+ *
+ * clay_layer_field_report tells a host it should bake. The next call it needs
+ * takes a clay_consolidation_params whose `cell_size` is required and > 0, and
+ * that field's own comment says why nothing here will guess it. So the engine
+ * has been telling a host to bake and then making it invent the one number it
+ * has no basis for — a constant compiled into the app, or a slider put in
+ * front of a sculptor who cannot be expected to know what consolidation means,
+ * let alone at what resolution. This fills the struct.
+ *
+ * `*out_advises` is 0/1 and is 1 only when BOTH hold: the field report advises
+ * consolidation at this same threshold, and the PROJECTED safe_step_scale in
+ * out_cost reaches it. The second half is why this is not merely a params
+ * helper. A sampled volume declares sqrt(3) times its samples' Lipschitz, so a
+ * consolidated layer's step scale is AT BEST 1/sqrt(3) = 0.577; a host whose
+ * frame budget wants 0.8 is asking for something no bake can deliver, and
+ * handing it params would trade a parametric layer for a dense volume and
+ * still miss the budget. It is told 0.
+ *
+ * NOT ADVISED MEANS ZEROED. out_params and out_cost are cleared to the
+ * struct_size the caller declared, with that struct_size preserved, rather
+ * than left untouched the way clay_layer_consolidation_state leaves its cost.
+ * The difference is what the caller does next: this hands over something it
+ * will feed to a DESTRUCTIVE call, so the failure has to be loud. cell_size ==
+ * 0 is exactly the value clay_layer_consolidation_cost and
+ * clay_layer_consolidate already refuse, so a host that never reads
+ * *out_advises gets CLAY_ERROR_INVALID_ARGUMENT and an unchanged document.
+ * There is no reading of the zeroed struct under which anything bakes.
+ *
+ * WHERE cell_size COMES FROM. The layer's own extent gives the scale and the
+ * layer's own contents give the feature, both in the LOCAL frame the bake
+ * samples in — not the world-space bounds, which compose the layer transform
+ * and would be wrong by the layer's scale, invisibly so at identity:
+ *
+ *     E    = the longest side of that box
+ *     f_i  = 4 * cell_size_i             for a node carrying samples
+ *          = the smallest axis of the node's own shape box   otherwise
+ *            (both carried into the bake's frame by the node's scale)
+ *     cell = clamp(min(f_i) / 4, E / 512, E / 32)
+ *     band = 3 * cell ; padding = band ; redistancing ON
+ *
+ * Four cells across the smallest feature: kBrickDim is 8, so that is half a
+ * brick. MEASURED, on a 0.06 dab blended onto a unit form — the surface moves
+ * 27% of the dab's radius at 2 cells, 7.0% at 4 and 1.8% at 8, for 0.32, 1.42
+ * and 5.51 MB. Four is where the curve turns.
+ *
+ * THE VOLUME ARM IS THE LOAD-BEARING ONE: (4 * c) / 4 = c, so a layer whose
+ * finest content is a volume at cell size `c` is advised `c` unchanged. That
+ * is the whole answer to "a number nobody chose" — the only degradation ever
+ * advised is CLAY_DEGRADATION_VOLUMES, and such a layer carries volumes whose
+ * resolutions somebody chose at an earlier bake. The advice hands the finest
+ * of them back, so a re-bake loses no detail already stored and gains none
+ * that was never there.
+ *
+ * A STEPPING-BOUND LIPSCHITZ WAS REJECTED as the source of the resolution, and
+ * this is the design decision most worth knowing. clay_field_report.lipschitz
+ * bounds the step a marcher may take; it does NOT bound |grad f|. An ellipsoid
+ * declares 1 and measures 1.09 near its tips, 3.6 for a needle, and taper,
+ * wrap_around and bend_curve exceed their declared factors outright. A
+ * sampling rate derived from it would look principled and be unsound exactly
+ * on the shapes that motivate a bake. The Lipschitz enters the ADVICE instead
+ * — as out_cost.sample_lipschitz, MEASURED on the samples a real bake produced
+ * — and never the resolution.
+ *
+ * WHAT IT DOES NOT PROMISE:
+ *
+ *   * NOT OPTIMAL, and not better than your own number. It knows the layer's
+ *     extent and contents; it does not know your viewport, your zoom, your
+ *     device's memory or what the artist is about to do next. A host that does
+ *     should override, and out_params is a struct you own so that it can.
+ *   * NOT STABLE. Adding one small item changes the smallest feature and
+ *     therefore the cell size. A host that means to re-bake the same box later
+ *     must STORE the params rather than re-ask.
+ *   * NOT A MEMORY BOUND. The E/512 and E/32 clamp bounds the GRID. A banded
+ *     volume stores only surface bricks, so the bytes follow surface area:
+ *     out_cost.bytes is the memory, and it is the number to refuse on.
+ *   * NOT A FIDELITY CLAIM. A bake at the advised cell size still discards
+ *     every parameter of every item it absorbs and every colour but the first.
+ *     This is about marching cost, not about what the shape will look like.
+ *     The analytic arm reads a node's own box, so a fillet finer than either
+ *     shape that made it is not seen: heavy blends are advised coarse.
+ *   * NO PINNED REGION. Derived from the layer's CURRENT bounds, so re-asking
+ *     after an advised bake advises a slightly larger box each time — a
+ *     volume's geometric bound is its whole sampled box. A host consolidating
+ *     the same region repeatedly must pin the region itself; this will not do
+ *     it for them.
+ *   * NOT CHEAP, and a NULL out_cost is NOT a fast path. *out_advises is
+ *     DEFINED by the projection, so the sampling pass happens either way. This
+ *     is not a per-frame call.
+ *
+ * It does not bake and does not change the document, and that includes an
+ * INSTANCE layer's sharing: clay_layer_consolidate severs a shared edit list
+ * before it bakes and this does not, for the same reason
+ * clay_layer_consolidation_cost does not. Asking whether a bake is ADVISABLE
+ * must never be the thing that unlinks a subtool.
+ *
+ * Refused, before any sampling: CLAY_ERROR_NOT_FOUND for a layer that is not
+ * there — "no such layer" and "not advised" are different answers;
+ * CLAY_ERROR_INVALID_ARGUMENT for a null doc, out_params or out_advises, for a
+ * struct_size below either original layout, and for advise_below_step_scale
+ * <= 0. The last deviates from clay_layer_field_report, where zero legitimately
+ * means "measure without asking for advice": every output here is defined
+ * against a threshold, so a zero would buy a full sampling pass to be told
+ * nothing.
+ *
+ * A non-SDF, protected or empty layer is NOT an error — it succeeds, advises
+ * nothing and zeroes, following clay_layer_warp_cost_get's rule that a host
+ * walking a stack of mixed kinds should not have to special-case them. On a
+ * protected layer clay_layer_consolidate refuses anyway, so advising a bake it
+ * would reject is bad advice rather than an error condition.
+ *
+ * out_cost may be NULL. Added in ABI 0.86.0. */
+clay_result clay_layer_consolidation_advice(const clay_document* doc, clay_layer_id layer,
+                                            float advise_below_step_scale,
+                                            clay_consolidation_params* out_params,
+                                            clay_consolidation_cost* out_cost,
+                                            int32_t* out_advises);
 
 /* Collapse a layer's edit list into one item carrying samples, as ONE undo
  * step whose inverse restores what it absorbed — ids, parameters, colours and

@@ -394,5 +394,112 @@ bool consolidate_region(Document& doc, LayerId layer, const math::Aabb& region,
 // there the parameters of the other items are still there to offer.
 bool consolidation_state(const Layer& layer, ConsolidationCost* out_cost = nullptr);
 
+// -- turning the advisory flag into something a host can act on -------------
+//
+// `report_layer` sets `advises_consolidation` and stops there, and a host that
+// receives the flag still cannot act: the next call it needs takes a
+// `ConsolidationParams` whose `cell_size` is required and must be > 0, and the
+// comment on that field says why nothing here will guess it. So the engine
+// tells a host it should bake and then makes it invent the one number it has
+// no basis for. The realistic answers were a constant compiled into the app or
+// a slider put in front of a sculptor who cannot be expected to know what
+// consolidation means, let alone at what resolution.
+//
+// WHAT SEPARATES THIS FROM THE GUESS THAT FIELD REFUSES. That comment is about
+// a DOCUMENT, and it is still true: a document has no scale. A LAYER WITH
+// CONTENT has exactly what the sentence grants a mesh — its own tight bounds —
+// and the only degradation ever advised is `Degradation::Volumes`, which means
+// the layer carries baked volumes whose resolutions somebody already chose.
+// The derivation hands the finest of them back unchanged. `cell_size` stays
+// required and > 0; nothing gains a default, a zero-means-guess mode or a
+// stored resolution. This fills a caller-owned struct the caller then passes,
+// edits or discards.
+//
+// THE DECLARED LIPSCHITZ IS NOT THE SOURCE, and that refutes the obvious
+// design. `FieldReport::lipschitz` is a STEPPING bound and not a bound on
+// |grad f| — `Tape::lipschitz_bounds_gradient` measures an ellipsoid's field
+// at a slope of 1.09 near its tips and 3.6 for a needle while both declare 1,
+// and taper, wrap_around and bend_curve exceed their declared factors
+// outright. A sampling rate derived from it would look principled and be
+// unsound exactly on the shapes that motivate a bake. The Lipschitz enters the
+// ADVICE instead — as the MEASURED `sample_lipschitz` of the projected bake —
+// and never the resolution.
+struct ConsolidationAdvice {
+    // Advised only when `report_layer` advises at the same threshold AND the
+    // projected `safe_step_scale` below reaches it. The second half is why
+    // this is not merely a params helper: a sampled volume declares sqrt(3)
+    // times its samples' Lipschitz, so a consolidated layer's step scale is at
+    // best 1/sqrt(3) = 0.577, and a caller whose frame budget wants 0.8 is
+    // asking for something no bake can deliver. Handing it params would trade
+    // a parametric layer for a dense volume and still miss the threshold.
+    bool advises = false;
+    // Both ZEROED when `advises` is false, rather than left carrying numbers
+    // that describe a bake nobody should do. `cell_size == 0` is exactly the
+    // value `bake_layer` and `consolidate_layer` already refuse, so a caller
+    // that ignores the verdict fails on its next call instead of baking at a
+    // resolution nobody chose.
+    ConsolidationParams params;
+    ConsolidationCost cost;
+};
+
+// The resolution alone, with no verdict and no sampling: what the layer's own
+// extent and contents say a bake of it should be sampled at.
+//
+// In the layer's LOCAL frame — the `tape.bounds` of the same `local_view` that
+// `bake_layer` compiles — never the world-space layer bounds, which compose
+// the layer transform and would be wrong by the layer's scale, invisibly so on
+// every layer at identity.
+//
+//     E    = the longest side of that box
+//     f_i  = kCellsPerFeature * cell_size_i   for a node carrying samples,
+//            the smallest axis of item_local_bounds(i)     otherwise,
+//            both carried into this frame by placed_distance_scale
+//     F    = min f_i over the visible drawable nodes
+//     cell = clamp(F / kCellsPerFeature, E / kFinestGrid, E / kCoarsestGrid)
+//     band = 3 * cell ; padding = band ; skip_redistance = false
+//
+// The extent gives the scale and the contents give the feature: a resolution
+// is right when the smallest thing that must survive it spans enough cells.
+// THE VOLUME ARM IS THE LOAD-BEARING ONE — `(K * c) / K = c`, so a layer whose
+// finest content is a volume at `c` is advised `c` unchanged, and a re-bake
+// loses no detail that is already stored and gains none that was never there.
+//
+// WHAT THE ANALYTIC ARM ASSUMES: that a node's smallest authored dimension is
+// the smallest feature it contributes. True for a primitive, false in one
+// direction for a blend — two spheres smooth-unioned at a small radius produce
+// a fillet finer than either sphere's box. The advice is conservative in the
+// wrong direction on heavy blends and is not a promise of fidelity.
+//
+// It reads the SHAPE's box and not `item_geometry_bound`, which is the box
+// culling wants: that one is dilated by rounding and blend support, and a 0.06
+// dab carrying a quadratic blend measures 0.24 there rather than 0.12, which
+// halves the cells the advice puts across it.
+//
+// `cell_size == 0` means there was nothing to derive from: not an SDF layer,
+// empty, or unbounded. It is NOT the ABI's answer to a host — that one is
+// keyed on the projection, which this does not compute.
+ConsolidationParams advised_params(const Layer& layer);
+
+// The whole recommendation: the resolution, the cost projected at it, and
+// whether the bake is advised — one function, so the verdict and the numbers
+// it is keyed on cannot drift apart.
+//
+// It COSTS A FULL SAMPLING PASS, because the verdict is defined in terms of
+// the projection. There is no cheap arm and asking for less is not offered:
+// a call that skipped the bake would answer a weaker question under the same
+// name and a caller could not tell which it got.
+//
+// It does not bake, does not change the document, and does not sever an
+// instance layer's shared edit list — `consolidate_layer` severs because it
+// replaces an edit list, and asking whether a bake is ADVISABLE must no more
+// unlink a subtool than asking what one costs does.
+//
+// Not advised, and zeroed, for: a threshold at or below 0, a threshold above
+// 1/sqrt(3) that no redistanced volume can reach, a non-SDF layer, a protected
+// layer, an empty or unbounded one, and a layer whose projected step scale
+// does not reach the threshold.
+ConsolidationAdvice consolidation_advice(const Layer& layer, float advise_below_step_scale,
+                                         const BakePointEval& point_eval = {});
+
 }  // namespace scene
 }  // namespace clay

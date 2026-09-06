@@ -6445,6 +6445,62 @@ NB_MODULE(pyclay, m) {
              "tolerance belongs to a viewport and a frame budget rather than to\n"
              "the artwork. Nothing here bakes: consolidating discards the\n"
              "parameters of what it absorbs, so it is never done unasked.")
+        .def("consolidation_advice",
+             [](const PyLayer& l, float advise_below_step_scale) {
+                 const scene::ConsolidationAdvice a = scene::consolidation_advice(
+                     l.layer(), advise_below_step_scale, eval::pooled_bake_eval());
+                 nb::dict out;
+                 out["advises"] = a.advises;
+                 if (!a.advises) {
+                     // None rather than a zeroed object: the Python form of
+                     // the C surface's zeroed descriptor, and it fails in the
+                     // same direction. `consolidate(**None)` and
+                     // `consolidate(cell=None)` both raise at the call rather
+                     // than baking something at a resolution nobody chose.
+                     out["params"] = nb::none();
+                     out["cost"] = nb::none();
+                     return out;
+                 }
+                 nb::dict params;
+                 // Keyed to `consolidate`'s own arguments, so the advice goes
+                 // straight back in as `layer.consolidate(**advice["params"])`.
+                 params["cell"] = a.params.cell_size;
+                 params["band"] = a.params.band;
+                 params["padding"] = a.params.padding;
+                 params["redistance"] = !a.params.skip_redistance;
+                 out["params"] = params;
+                 out["cost"] = cost_dict(a.cost);
+                 return out;
+             },
+             "advise_below_step_scale"_a,
+             "What to bake this layer AT, and what that will cost — the\n"
+             "recommendation `field_report`'s `advises_consolidation` leaves\n"
+             "open.\n\n"
+             "`advises` is True only when the field report advises at this same\n"
+             "threshold AND the PROJECTED `safe_step_scale` reaches it. The\n"
+             "second half is why this is not merely a helper: a sampled volume\n"
+             "declares sqrt(3) times its samples' Lipschitz, so a consolidated\n"
+             "layer's step scale is at best 1/sqrt(3) = 0.577, and a caller\n"
+             "asking for 0.8 is asking for something no bake delivers.\n\n"
+             "`params` is keyed to `consolidate`'s own arguments, so\n"
+             "`layer.consolidate(**advice[\"params\"])` is the whole round trip.\n"
+             "Both `params` and `cost` are None when nothing is advised, which\n"
+             "raises at the next call rather than baking.\n\n"
+             "`cell` comes from the layer's own extent and the finest content it\n"
+             "already holds, in the frame the bake samples: four cells across\n"
+             "the smallest feature, clamped to between E/512 and E/32 of the\n"
+             "longest side. A layer whose finest content is a volume at cell\n"
+             "size c is advised c unchanged — the only degradation ever advised\n"
+             "is \"volumes\", and such a layer carries resolutions somebody\n"
+             "already chose. The declared Lipschitz is deliberately NOT the\n"
+             "source: it bounds a marcher's STEP and not |grad f|, so a sampling\n"
+             "rate derived from it would be unsound exactly on the shapes that\n"
+             "motivate a bake.\n\n"
+             "It is NOT optimal — you know your viewport and it does not — NOT\n"
+             "stable across edits, NOT a memory bound (`cost[\"megabytes\"]` is,\n"
+             "and it is what to refuse on), and NOT cheap: it costs a full\n"
+             "sampling pass, so it is not a per-frame call. It bakes nothing,\n"
+             "changes nothing, and does not sever an instance layer's sharing.")
         .def("consolidation_cost",
              [](const PyLayer& l, float cell, nb::handle band, nb::handle padding,
                 nb::handle region, bool redistance) {

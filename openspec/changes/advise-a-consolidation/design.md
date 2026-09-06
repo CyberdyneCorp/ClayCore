@@ -234,3 +234,95 @@ bad advice, not an error condition.
   bounds, so re-asking after an advised bake advises a slightly larger box each
   time. A host consolidating the same region repeatedly must pin the region
   itself; this call will not do it for them.
+
+## What building it found
+
+Four things. Two refute this document, one refutes a task's own framing, and
+one is a measurement the design deferred to the implementer and which came back
+confirming the number it guessed.
+
+### 1. `item_geometry_bound` is the wrong box — REFUTED, and it halved the grid
+
+Section 1 spells the analytic arm as "min axis extent of
+`item_geometry_bound(i)`". That is the box CULLING wants, and it is dilated by
+the item's rounding and its blend support (`src/scene/bounds.cpp`,
+`geometry_bound`: `bound.dilated(max(round_world, 0) + combine)`). So it does
+not answer "the smallest thing this node contributes" at all — it answers "the
+smallest box outside which this node cannot matter", and on exactly the shape
+the K sweep is specified against those differ by a factor of two:
+
+| the 0.06 dab, quadratic blend k = 0.015 | min axis | advised cell |
+|---|---|---|
+| `item_geometry_bound` | 0.240 | 0.060 |
+| `item_local_bounds` (the shape) | 0.120 | 0.030 |
+
+0.060 is the K = 2 grid. The advice would have shipped claiming four cells
+across the smallest feature and delivered two — silently, because the number it
+returns looks equally plausible either way. Measured against the parametric
+field on that fixture, that is a surface moving 27.2% of the dab's radius
+rather than 7.0%.
+
+Implemented as `item_local_bounds(n) * placed_distance_scale(view, n)`: the
+shape's own box, carried into the bake's frame by the node's and the layer's
+scales. Both arms now read the same way — a length the content states, mapped
+into the frame the bake samples — where the design had one arm scaled and the
+other not. `tests/unit/test_consolidate.cpp`, "the derivation reads the SHAPE's
+box, not the box culling wants", fails at 0.06 against the old spelling.
+
+### 2. The frame has to be carried per node, not only per layer — ADDED
+
+Section 1 says "everything below is in the layer's local frame" and then writes
+`f_i = K * cell_size_i` with nothing carrying `cell_size_i` into that frame. A
+volume's cell size is stated in its own lattice, and a node transform or a
+layer `scale_axes` is part of the box `bake_tape_with` samples. Both arms
+multiply by `placed_distance_scale(local_view(layer), node)` — the conservative
+smallest-stretch factor, so the error is towards a finer grid. Measured on the
+20-item chain: at `scale_axes = (2, 0.5, 1.3)` the advice moves from 0.200 to
+0.100, halving with the layer's smallest axis rather than staying at the
+unscaled layer's number.
+
+### 3. The projection and the follow-up report are the SAME number (task 2.3)
+
+The risk section demanded this be asserted on a mirrored and a non-uniformly
+scaled layer, and said to re-key the verdict if they differed. They do not
+differ — on the 20-item chain at a 0.5 threshold, `advice.cost.safe_step_scale`
+minus the `report_layer` taken after consolidating with those exact params is
+0.0000000 in all three of identity, mirrored (`mirror_axes = X`, layer
+translated off the plane) and `scale_axes = (2, 0.5, 1.3)`. The reason is
+structural rather than lucky: `cfi_volume` is `sqrt(3) * max(sample_lipschitz,
+1)` and no transform enters it (`src/scene/tape_build.cpp`, `fold_info`). Three
+tests hold it, so a future change that folds a scale into a volume's declared
+bound breaks here rather than in a host's follow-up report.
+
+### 4. `K = 4` MEASURED, and it stands (task 1.5)
+
+A 0.06 dab blended onto a unit sphere; rays cast from the form's centre through
+the dab cap and over the bare form, bisecting both the parametric tape and the
+baked volume to their zero sets and differencing the radii. 576 rays each.
+
+| K | cell | bricks | MB | dab: max Δsurface | as % of dab radius | dab RMS | form: max Δ |
+|---|---|---|---|---|---|---|---|
+| 2 | 0.0600 | 114 | 0.32 | 0.01635 | 27.2% | 0.00520 | 0.00127 |
+| 4 | 0.0300 | 508 | 1.42 | 0.00420 | 7.0% | 0.00148 | 0.00031 |
+| 8 | 0.0150 | 1965 | 5.51 | 0.00109 | 1.8% | 0.00035 | 0.00008 |
+
+Error falls ~3.9x per doubling and memory rises ~3.9x, so no K is "free" and
+the choice is where the dab stops reading as a dab. 2 moves the feature by more
+than a quarter of its own radius, which is the shape changing. 8 buys 5.2
+points of agreement for 3.9x the bytes on a call whose whole purpose is to be
+affordable enough to accept. **4 stands, unchanged, at 7.0% and 1.42 MB.** The
+`E/512` and `E/32` clamp was not moved: no fixture built here landed outside
+it, and both ends are exercised by "the advised grid is clamped to the layer's
+own extent".
+
+### 5. pyclay cannot express the instance half of the promise
+
+The `python-bindings` delta's "asking changes nothing" scenario originally named
+the layer's "instance link". pyclay has no instance-layer API at all —
+`clay_document_instance_layer` has no Python counterpart, and there is no
+`content_source` to read — so that half of the scenario had nothing to assert
+against and the scenario now names the layer's consolidation state instead. The
+sever guarantee is tested where it is expressible, in
+`tests/unit/test_c_consolidate.cpp`: `clay_document_layer_info` reports
+`content_source` and `share_count == 2` from both ends after the advice, and
+the document's serialized bytes are unchanged across the call.

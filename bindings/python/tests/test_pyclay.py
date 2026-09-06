@@ -4342,6 +4342,104 @@ def test_the_consolidation_cost_is_knowable_before_it_is_paid():
     assert paid["megabytes"] == pytest.approx(quoted["megabytes"])
 
 
+def _absorbable_chain():
+    """Degraded by BOTH mechanisms, so a bake really is the cure."""
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    for i in range(20):
+        layer.add(clay.Sphere(0.4).at((0.25 * i - 2.5, 0, 0)), blend=clay.Smooth(0.2))
+    layer.move_surface((0.0, 0.4, 0.0), (0.0, 0.9, 0.0), radius=0.5)
+    return doc, layer
+
+
+def test_the_advice_cures_what_the_report_named():
+    """THE PROPERTY (advise-a-consolidation).
+
+    `advises_consolidation` said "bake this" and stopped, and the next call
+    needs a `cell` that is required and > 0 — so a script holding the flag had
+    to invent the one number nothing would give it. The advice fills it, and
+    baking at exactly that number lifts the layer out of the state the report
+    named.
+    """
+    doc, layer = _absorbable_chain()
+    before = layer.field_report(advise_below_step_scale=0.5)
+    assert before["advises_consolidation"] is True
+
+    advice = layer.consolidation_advice(0.5)
+    assert advice["advises"] is True
+    assert advice["params"]["cell"] > 0.0
+    assert advice["params"]["band"] == pytest.approx(3.0 * advice["params"]["cell"])
+    assert advice["params"]["padding"] == pytest.approx(advice["params"]["band"])
+    # Redistancing is what bounds the Lipschitz, so advising a skip would advise
+    # a bake that does not cure what the flag reported.
+    assert advice["params"]["redistance"] is True
+    assert advice["cost"]["megabytes"] > 0.0
+    assert advice["cost"]["safe_step_scale"] >= 0.5
+
+    # The whole round trip: the advice goes straight back in.
+    layer.consolidate(**advice["params"])
+    after = layer.field_report(advise_below_step_scale=0.5)
+    assert after["advises_consolidation"] is False
+    assert after["degradation"] == "none"
+    assert after["safe_step_scale"] >= 0.5
+    # The projection was the number, not an approximation of it.
+    assert after["safe_step_scale"] == pytest.approx(advice["cost"]["safe_step_scale"])
+
+
+def test_not_advised_is_none_rather_than_zeroes():
+    """The Python form of the C surface's zeroed descriptor, failing the same
+    way: 0.8 is above the 1/sqrt(3) = 0.577 that a redistanced volume declares
+    at best, so no bake reaches it and none is offered."""
+    doc, layer = _absorbable_chain()
+    advice = layer.consolidation_advice(0.8)
+    assert advice["advises"] is False
+    assert advice["params"] is None
+    assert advice["cost"] is None
+    with pytest.raises(TypeError):
+        layer.consolidate(**advice["params"])
+    with pytest.raises(TypeError):
+        layer.consolidate(cell=advice["params"])
+    assert layer.consolidation_state is None       # nothing was baked
+
+
+def test_a_brush_chain_is_not_advised_from_python():
+    """#387 one step further along: the report withholds the flag on a layer a
+    bake makes worse, and the advice withholds the params with it."""
+    lone, lone_layer = _ball(1.0)
+    lone_layer.move_surface((1.0, 0, 0), (0.9, 0, 0), radius=0.5)
+    assert lone_layer.field_report(advise_below_step_scale=0.5)["degradation"] == "deformers"
+    advice = lone_layer.consolidation_advice(0.5)
+    assert advice["advises"] is False
+    assert advice["params"] is None
+
+
+def test_asking_for_the_advice_changes_nothing():
+    doc, layer = _absorbable_chain()
+    before = layer.field_report(advise_below_step_scale=0.5)
+    surface = _surface_along(doc, (0, 1, 0), hi=2.0)
+
+    assert layer.consolidation_advice(0.5)["advises"] is True
+
+    after = layer.field_report(advise_below_step_scale=0.5)
+    assert after["item_count"] == before["item_count"]
+    assert after["safe_step_scale"] == pytest.approx(before["safe_step_scale"])
+    assert layer.consolidation_state is None       # nothing was baked
+    assert _surface_along(doc, (0, 1, 0), hi=2.0) == pytest.approx(surface)
+
+
+def test_the_advice_hands_back_a_volumes_own_cell_size():
+    """The whole answer to "a number nobody chose": the only degradation ever
+    advised is "volumes", and such a layer carries resolutions an earlier bake
+    already chose. The advice returns the finest of them unchanged."""
+    chained, chained_layer = _ball()
+    for n in ((1, 0, 0), (0, 1, 0)):
+        chained, chained_layer = _wrapped(_polished(chained, n, cell=0.03))
+    assert chained_layer.field_report(advise_below_step_scale=0.25)["degradation"] == "volumes"
+    advice = chained_layer.consolidation_advice(0.25)
+    assert advice["advises"] is True
+    assert advice["params"]["cell"] == pytest.approx(0.03)
+
+
 def test_consolidation_is_one_undo_step_that_restores_the_parametric_form():
     doc = clay.Document()
     doc.enable_undo()

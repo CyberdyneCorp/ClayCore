@@ -30,4 +30,4 @@ that never calls this SHALL still be required to supply one.
 
 #### Scenario: Asking changes nothing
 - **WHEN** a script asks for the advice
-- **THEN** the layer's item count, field and instance link are what they were
+- **THEN** the layer's item count, its field and its consolidation state are what they were

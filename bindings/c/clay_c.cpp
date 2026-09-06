@@ -8318,6 +8318,56 @@ clay_result clay_layer_consolidation_cost(const clay_document* doc, clay_layer_i
     return CLAY_OK;
 }
 
+clay_result clay_layer_consolidation_advice(const clay_document* doc, clay_layer_id layer_id,
+                                            float advise_below_step_scale,
+                                            clay_consolidation_params* out_params,
+                                            clay_consolidation_cost* out_cost,
+                                            int32_t* out_advises) {
+    if (!doc || !out_params || !out_advises)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document, params or verdict");
+    // Before any sampling. clay_layer_field_report lets a zero threshold mean
+    // "measure without asking for advice"; here every output is defined
+    // against the threshold, so a zero would buy a full sampling pass to be
+    // told nothing.
+    if (!(advise_below_step_scale > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "advise_below_step_scale must be > 0: every output of this call is defined "
+                    "against a threshold");
+    const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
+    // "No such layer" and "not advised" are different answers.
+    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+
+    // Both descriptors are validated and zeroed BEFORE the bake: a caller
+    // whose struct_size is wrong is refused without paying for a sampling
+    // pass, and the not-advised answer is then already written.
+    clay_consolidation_params probe;
+    clay_result r = read_desc(out_params, kConsolidationParamsOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    write_desc(out_params, out_params->struct_size, clay_consolidation_params{});
+    if (out_cost) {
+        r = begin_out_cost(out_cost);
+        if (r != CLAY_OK) return r;
+    }
+    *out_advises = 0;
+
+    // The sampling runs even when out_cost is NULL: the verdict is DEFINED by
+    // the projection, so a call that skipped it would answer a weaker question
+    // under the same name and a host could not tell which it got.
+    const scene::ConsolidationAdvice advice =
+        scene::consolidation_advice(*layer, advise_below_step_scale, eval::pooled_bake_eval());
+    if (!advice.advises) return CLAY_OK;
+
+    clay_consolidation_params filled{};
+    filled.cell_size = advice.params.cell_size;
+    filled.band = advice.params.band;
+    filled.padding = advice.params.padding;
+    filled.skip_redistance = advice.params.skip_redistance ? 1 : 0;
+    write_desc(out_params, out_params->struct_size, filled);
+    if (out_cost) write_cost(advice.cost, out_cost);
+    *out_advises = 1;
+    return CLAY_OK;
+}
+
 clay_result clay_layer_consolidate(clay_document* doc, clay_layer_id layer_id,
                                    const clay_consolidation_params* params,
                                    const float region_min[3], const float region_max[3],
