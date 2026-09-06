@@ -380,6 +380,26 @@ std::size_t MultiresSculptor::stamp_coarse(MeshBrush verb, const MeshBrushSettin
                                            const field::MaskGate& gate, SculptLayerId active_layer,
                                            MultiresDelta* record, SculptLayerDelta* layer_record) {
     std::size_t moved = 0;
+    // THE BOUND LEVEL'S SEED IS NOT A SEED DOWN HERE. `seed_class` is an index
+    // into the BOUND level's weld-class numbering and every level has its own,
+    // so forwarding it verbatim spends the coarse dab in somebody else's
+    // addressing. `MeshSculptor::accepted_seed` cannot catch it: an
+    // UNREVISIONED seed is trusted after a bounds check, which is what pyclay's
+    // `stamp` and every host built against a pre-0.86 `clay_mesh_brush_desc`
+    // send -- and on a regional hierarchy the coarse level is usually the
+    // LARGER of the two, so the stale index is essentially always in bounds.
+    // `geodesic_region` returns EMPTY when the seed is further than the radius
+    // from the centre, so the coarse side of the stroke would silently do
+    // nothing while the count came back looking whole. This is the hazard
+    // `sculpt_common.h` already documents across rebinds, and a level is a
+    // rebind.
+    //
+    // BLANKED RATHER THAN TRANSLATED: there is no map between two levels' class
+    // numberings, and the scan the seed exists to skip is what a coarse walk
+    // over a quarter of the vertices costs anyway.
+    MeshBrushSettings coarse_settings = settings;
+    coarse_settings.seed_class = kNoClass;
+    coarse_settings.seed_revision = kNoSeedRevision;
     for (CoarseLevel& c : coarse_) {
         c.written.clear();
         not_owned_.clear();
@@ -398,7 +418,7 @@ std::size_t MultiresSculptor::stamp_coarse(MeshBrush verb, const MeshBrushSettin
         sculptor.set_cross_level(&surface_.cross_level_at(c.level));
         if (automask_set_) sculptor.set_automask_inputs(automask_);
         sculptor.set_chunks(&surface_.level_chunks(c.level));
-        if (sculptor.stamp(verb, settings, gate, &c.deltas) == 0) continue;
+        if (sculptor.stamp(verb, coarse_settings, gate, &c.deltas) == 0) continue;
 
         moved += partition_coarse_write(sculptor, ChildIndex::of(surface_.topology_at(c.level + 1)),
                                         &c.written, &not_owned_);

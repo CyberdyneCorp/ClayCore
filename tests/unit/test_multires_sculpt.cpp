@@ -1774,6 +1774,81 @@ TEST_CASE("multires: a cache drop mid-stroke does not lift the coarse side's lay
     CHECK(worst_travel(pristine, dropped) <= 0.08f);
 }
 
+TEST_CASE("multires: a crossing stamp does not spend the bound level's seed on a coarse one") {
+    // A SEED IS AN INDEX, AND A LEVEL IS A NUMBERING. `seed_class` is the weld
+    // class a host's pick hit at the SCULPT level; the coarse sculptors a
+    // crossing stamp builds run over a different level with its own classes, so
+    // forwarding the settings verbatim spends the coarse dab in somebody else's
+    // addressing. Nothing downstream can catch it: an UNREVISIONED seed is
+    // trusted after a bounds check -- which is what pyclay's `stamp` sends by
+    // default and what a host built against a pre-0.86 `clay_mesh_brush_desc`
+    // sends -- and the coarse level here is no smaller than the sculpt level,
+    // so the stale index is in bounds. The dab then walks from the wrong place
+    // and `geodesic_region` hands back an empty region: the coarse side of the
+    // stroke silently does nothing.
+    //
+    // THE REVISIONED PATH PROVES NOTHING HERE, which is why this case does not
+    // take it: each throwaway coarse sculptor mints its own `seed_revision`, so
+    // a revisioned seed is rejected and the walk falls back to the scan by
+    // accident.
+    const Mesh cage = bumpy_quads(6, 1.0f);
+    MultiresSurface seeded = build_regional(cage);
+    MultiresSurface unseeded = build_regional(cage);
+
+    MeshBrushSettings settings;
+    settings.radius = 0.50f;  // anchored on the rim and reaching well past it
+    settings.strength = 0.5f;
+    {
+        const std::vector<cfloat3>& p = seeded.positions_at(3);
+        settings.center = p[nearest_vertex(p, cf3(-1.0f / 3.0f, 0.0f, 0.0f))];
+    }
+
+    // THE ANSWER, from the same stamp with no seed at all -- which is what a
+    // coarse level has to behave as though it received.
+    REQUIRE(unseeded.set_sculpt_level(3));
+    MultiresSculptor plain(unseeded);
+    plain.begin_stroke();
+    const std::size_t want = plain.stamp(MeshBrush::Draw, settings);
+    REQUIRE(plain.last_write_levels() == std::vector<std::uint32_t>{2u, 3u});
+
+    REQUIRE(seeded.set_sculpt_level(3));
+    MultiresSculptor sculptor(seeded);
+    sculptor.begin_stroke();
+    MeshBrushSettings picked = settings;
+    mesh::MeshSculptor* bound = sculptor.level_sculptor();
+    REQUIRE(bound != nullptr);
+    picked.seed_class = bound->nearest_class(settings.center);
+    REQUIRE(picked.seed_class != mesh::kNoClass);
+    // Unrevisioned, on purpose: `seed_revision` is left at its default.
+    REQUIRE(picked.seed_revision == mesh::kNoSeedRevision);
+
+    // WHY THE BOUNDS CHECK CANNOT SEE THIS. The seed is in range at the coarse
+    // level too, and it names a vertex further from the brush than the brush
+    // reaches -- which is exactly the seed that makes a geodesic walk empty.
+    const mesh::Adjacency& coarse = seeded.level_adjacency(2);
+    REQUIRE(picked.seed_class < static_cast<std::uint32_t>(coarse.class_count()));
+    std::size_t members = 0;
+    const std::uint32_t elsewhere = coarse.members(picked.seed_class, &members)[0];
+    const float away = clength(seeded.positions_at(2)[elsewhere] - settings.center);
+    MESSAGE("level-3 seed " << picked.seed_class << " names a level-2 vertex " << away
+                            << " away, radius " << settings.radius);
+    CHECK(away > settings.radius);
+
+    const std::size_t moved = sculptor.stamp(MeshBrush::Draw, picked, {});
+
+    // The seed was USED rather than rejected -- an unrevisioned one always is,
+    // and a gate that passed because the bound level threw it away would be
+    // measuring nothing.
+    CHECK(bound->stale_seeds_rejected() == 0);
+
+    // THE GATE: the coarse side was written, and written to the same place the
+    // unseeded stamp put it.
+    CHECK(sculptor.last_write_levels() == std::vector<std::uint32_t>{2u, 3u});
+    CHECK(moved == want);
+    CHECK(same_bytes(seeded.positions_at(2), unseeded.positions_at(2)));
+    CHECK(same_bytes(seeded.positions_at(3), unseeded.positions_at(3)));
+}
+
 // -- THE TWO PUBLIC ENTRY POINTS THAT WERE NOT GIVEN THE WHOLE SURFACE --------
 //
 // The cross-level neighbourhood reaches the sculpt path through
