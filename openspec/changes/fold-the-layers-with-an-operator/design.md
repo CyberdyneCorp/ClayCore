@@ -467,3 +467,55 @@ measurement that would narrow it; it does not choose conservative by omission.
 **And count matters on its own.** With the overlap effect entirely removed, the
 box walk is still 88,200 bricks at 9.15 µs — 806 ms a frame. A future fix that
 only made bricks cheaper would leave a 0.8-second frame; the region is the thing.
+
+## 7. Writing at minor 17 — REFUSE, do not degrade
+
+Raised by ClaySpaceDesktop on 2026-09-06 while the host surface was still being
+designed, and it changes what stage 5 builds.
+
+The repo rule is that a new minor must be **writable at the previous one,
+degrading to whatever that minor meant, with the notes saying exactly what the
+downgrade loses**. Every minor so far has obeyed it cheaply because the loss was
+never something an artist made — 16 → 17's own note says writing at the older
+minor costs "the payload deduplication and nothing an artist authored — a file
+that is larger and identical in content".
+
+**18 → 17 is the first minor where the degrade changes the model.** A
+subtractive layer written at 17 comes back as a union: the cutter that was
+carving a hole is a lump welded onto the form. Nothing is corrupt, nothing
+refuses, the file opens, and the sculpture is wrong in a way that looks
+deliberate. That is the empty-tape `max(below, FAR)` failure one level up and
+visible to the artist rather than buried in a brick.
+
+**The decision:**
+
+1. `serialize_document(doc, minor)` with `minor < 18` **refuses** when any SDF
+   layer carries a composition that is not the default hard union. Refusing is
+   the direction this format already fails in — records are not length-prefixed
+   precisely so an older build meeting a newer minor fails rather than misreads —
+   and it is the only direction that cannot be quietly wrong.
+2. Where every layer's composition IS the default, writing at 17 is allowed and
+   produces exactly what 17 always meant, byte for byte. So the repo rule stays
+   true for every document the older minor can actually express, and the refusal
+   covers exactly the documents it cannot. "Writable at the previous minor"
+   means *when the previous minor can say it*, not *by discarding what it
+   cannot*.
+3. **A host must be able to ask before it saves.** This change ships a query
+   across the C ABI: can this document be written at minor N without losing
+   authored intent? A host that can ask puts an honest sentence in front of a
+   person; one that cannot guesses on their behalf. `CLAY_ERROR_UNSUPPORTED` is
+   the code the refusal itself returns.
+
+**Not in this change, and recorded as a gap rather than inherited:** a C-ABI host
+cannot choose the minor it writes at all. `clay_document_save` takes a path and
+`clay_document_save_memory` takes a blob; neither takes a version, and the minor
+is a parameter on the C++ `scene::serialize_document` that does not cross the
+ABI. Three releases of upgrade notes have advised hosts to "write at the older
+minor if you exchange documents with an older build", and no C-ABI host has ever
+been able to take that advice. It cost nothing while the loss was deduplication.
+It is not free now: a host that wants an interchange copy cannot offer one, and a
+host that wants to refuse to write 17 has nothing to refuse because it could
+never ask. A save-at-minor entry point needs its own change — the blob variant,
+the autosave and journal paths, and the other lossy minors all come with it — and
+the query above is the half that makes this change's decision answerable from a
+host meanwhile.

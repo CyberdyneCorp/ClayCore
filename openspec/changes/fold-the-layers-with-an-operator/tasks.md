@@ -11,6 +11,13 @@
 - [ ] 1.1 `LayerComposition` on an SDF layer, using the EXISTING item enums
 - [ ] 1.2 Accessors, with validation: enum range, finite floats, SDF layers only
 - [ ] 1.3 A non-SDF layer REFUSES rather than storing dead state
+- [ ] 1.4 Writing at a minor below 18 REFUSES a document carrying any non-default
+      composition (design.md §7), and is allowed and byte-identical to what 17
+      meant for a document where every layer unions. Not a silent degrade: a
+      subtractive layer written as a union is a different model
+- [ ] 1.5 A query a host can call BEFORE it saves: can this document be written
+      at minor N without losing authored intent? Across the C ABI, with the
+      refusal itself returning `CLAY_ERROR_UNSUPPORTED`
 
 ## 2. The fold
 
