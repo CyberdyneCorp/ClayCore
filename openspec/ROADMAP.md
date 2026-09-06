@@ -1890,6 +1890,13 @@ direction.
 
 That leaves ours as the remaining half of the pair, and now it is the only half.
 
+**And it had been hiding the state of their default branch, not only two PRs.**
+Main itself was red on Performance for the same refusal-on-the-comparison-path.
+Worth adding to the pair: a guard on the wrong act does not merely block work
+that should proceed — it conceals whether the branch everyone builds on is
+passing, and a red main that everyone has learned to read as "the bench gate
+again" is indistinguishable from a red main that means something.
+
 ### A fourth way a gate is real and unenforced: an exact assertion about a state nobody reaches
 
 The three recorded above are a gate no change triggers, a gate the wrong version
@@ -2095,6 +2102,59 @@ settled: *"this document needs 18"* sends a sculptor hunting; *"Poros needs 18"*
 does not. The blocking layer is already an id inside the refusal path, so
 exposing it costs nothing — and a pre-check that returns less than the refusal it
 predicts is a worse interface than no pre-check.
+
+### The seed hazard the host cannot reach, and why their type is the reason
+
+Our review found `stamp_coarse` forwarding the bound level's `seed_class` into a
+coarse level's class space: an UNREVISIONED seed is trusted verbatim, the coarse
+level is larger so the stale index is always in bounds, `geodesic_region` starts
+outside its own radius and returns empty, and the coarse dab **silently does
+nothing.** pyclay's `MultiresSculptor.stamp` defaults `seed_revision` to `None`,
+so the unrevisioned mode is the DEFAULT rather than an edge case.
+
+**It cannot reach the host, and the reason is structural rather than lucky.** On
+the hierarchy path they pass no seed at all. Where they do send one, their
+`MeshSeed` carries `class` and `revision` **together in one type** — there is no
+way to express a bare class in their vocabulary, so the mode we default to is
+unreachable from there by construction.
+
+**That is the transferable part.** Our seed is two independent fields and a
+sentinel that means "trust me"; theirs is one value that cannot be halved. The
+same hazard exists in both codebases and only one of them can express it. Note
+this is not an argument for removing the unrevisioned mode here —
+`accepted_seed`'s own comment already records why that was rejected, and the
+reason still holds: silently refusing an unrevisioned seed turns every shipped
+caller's fast path into a full scan, which is a performance regression delivered
+as a correctness fix.
+
+They reached it the expensive way and named the artefact: a test module
+`the_silent_empty_dab` — a pick, a remesh under the pick, then a dab where the
+pick landed, run twice with the revision token kept and struck off. **It lives in
+their crate rather than in their tests directory because the broken state cannot
+be reached from outside**, which is the honest place for a test whose fixture is
+unreachable through the public surface.
+
+**And it sharpens our own fix.** Blanking the seed makes the coarse walk fall
+back to the centre scan — correct, and still silent. Forwarding the class with
+the BOUND level's revision instead is rejected by the coarse sculptor, because
+every `MeshSculptor` mints its own `seed_revision_` at construction
+(`src/mesh/sculpt.cpp:225` and `:228`, `next_seed_revision()`), so coarse and
+bound never share one. Rejection increments `stale_seeds_rejected_` and falls
+back to the same scan. **Same behaviour, one counter left behind** — the crossing
+becomes visible in telemetry instead of invisible, at the cost of nothing.
+
+### Layer across a depth boundary has a live host, which ranks the three majors
+
+The host ships `clay_multires_sculptor_stamp (LAYER)` as their multires verb
+today, driven through `hierarchy.surface_mut().sculptor()`. So the coarse ceiling
+reset — `bind_coarse` emptying every coarse level's stroke record on a
+generation-only rebind, while the bound level's `level_deltas_` correctly
+survives — **is a step at the seam in a brush a sculptor can pick today, on a
+representation we already offer.**
+
+Of the three majors the review confirmed, that is the one with a user behind it.
+The other two are a corrupted display normal and a silent no-op; both are real
+and neither is reachable by anyone we know of yet.
 
 ### The frame at a region boundary: what it costs to land it unfixed
 
