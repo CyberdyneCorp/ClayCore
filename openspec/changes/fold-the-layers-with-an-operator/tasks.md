@@ -502,7 +502,10 @@
           (both ABI subcases fail, the control still passes). The ITEM-level
           twin of that hole is deliberately NOT touched and says so beside the
           code: it predates layer composition and reclassifies documents that
-          carry no fold at all
+          carry no fold at all. THE OP LIST WAS ITSELF A HOLE — it left
+          `Op::Paint`, which sits numerically below the extended range and
+          spends `blend.k` as its colour falloff whatever the profile says —
+          and is replaced in 7.10 by asking nothing about the op at all
         * document_fold_is_hard_union deleted, header corrected — it had no
           caller and `include/clay/scene/tape.h` said the three excluding entry
           points took it, where all three take `first_composed_fold_layer`
@@ -514,7 +517,11 @@
           the header and beside the code, and held by a new test — a seeded
           suffix across a composed seam is bit-identical to the whole document
           on three arms, and fails on all three when the seam is forced to a
-          hard Add
+          hard Add. THAT TEST COULD NOT REACH THE CASE THE ARGUMENT IS ABOUT:
+          it passed no cull region, its cutter always had dabs, and its arms
+          were unions and subtracts, each of which independently hides a seam
+          the resume dropped. Closed in 7.10, so this entry records a promise
+          that was half held rather than one that was
         * `first_composed_fold_layer`'s document-derived flag renamed off
           `have_acc` (7.1 above)
         * `Document.writable_at_minor` in pyclay, which had the composition
@@ -601,3 +608,91 @@
       text. Renumbered the later member of each pair (§13g, §12d), with a note
       under each saying what it landed as so an older handover's citation still
       resolves, and the three references pointed at the section they mean
+
+- [x] 7.10 THE FIFTH REVIEW'S THREE MAJORS, each reproduced before it was
+      touched and each closed with a test proved by reverting the fix.
+      CODE:
+        * THE FOURTH CULL-OBSERVABLE PREDICATE (design.md §13's general form),
+          and it falsified a promise `include/clay/scene/tape.h` makes in
+          writing. `Compiler::resume` returned early on `!chain_val &&
+          cp.frames.empty()`, which skipped the seam's fold entirely — so
+          `compile_layer_suffix` silently dropped a composed fold whenever the
+          appended chain produced nothing IN THIS REGION. `chain_val` is
+          cull-dependent and was being read as a document question. Reproduced
+          on a clean build: a base sphere at the origin under a cutter whose one
+          dab sits at x = 5, compiled for a region of ±1.5 — the checkpoint
+          comes back `layer_have_acc=false doc_have_acc=true frames=0`, the
+          suffix compiles to ZERO instructions, and over a 9³ lattice the
+          seeded suffix matches the whole-document compile at 0 of 729 samples
+          for Add, 0 of 729 for Subtract and **729 of 729 for Intersect**, worst
+          3.4e37 (`CLAY_TAPE_FAR`), equal to the seed at all 729. Fixed by
+          giving the seam ONE spelling: `emit_layer_fold` is now the whole rule
+          — nothing beneath, an absent operand the operator ignores, an absent
+          operand it reads — and `fold_layer` and `resume` both call it, so the
+          early return has nothing left to decide and is gone. Scope, stated
+          plainly: NOT reachable from the shipped C ABI, because every in-tree
+          caller of `compile_layer_suffix` states `doc_have_acc = false` and
+          `plan_resume`/`plan_frontier` refuse a composed seam through
+          `layer_join_is_hard_union` first. It was a latent hole in a public C++
+          contract, one caller change from being a wrong field per brick
+        * THE FOLD'S ROUNDING SCALE had no coverage at all. Replacing
+          `comp.rounding * layer_distance_scale(layer)` in `fold_layer` with
+          `comp.rounding` and rebuilding left the whole suite green — 2,454
+          cases, 16,464,984 assertions, 0 failed, the IDENTICAL assertion count,
+          so nothing anywhere executed differently. No test in the suite
+          compiled a document with a composed layer at a non-identity scale, and
+          the only scaled-composition assertion queried `layer_blend_support`
+          and never called `compile_document`. That term is what the SIMILARITY
+          verdict rests on (§11, the spec delta, and the ABI subcase that
+          asserts the CLASSIFICATION rather than the field)
+        * A HARD-PROFILE PAINT CLASSIFIED AS A SIMILARITY, against the spec
+          delta's "a radius is a radius whatever the blend profile says".
+          `composition_radius_ignores_scale` read `profile != Hard ||
+          op_is_extended(op)`, and `Op::Paint` is 3 where the extended range
+          starts at 4, so it fell through both clauses — while
+          `layer_blend_support` reported 0.3 and `document_cull_pad` 0.3 for the
+          same layer, the engine padding for a radius the classifier said was
+          not there. Swept every op the setter accepts at a hard profile and
+          k = 0.3: Add, Subtract, Intersect and Paint all classified clean, all
+          four reporting a support of 0.3. The predicate is now `c.blend.k >
+          0.0f` and asks nothing about the op or the profile, which is the same
+          field `chain_blend_support` reads and the end of a list to keep in
+          step. Deliberately conservative for the three plain booleans, whose
+          hard-profile `k` the kernel ignores: the cost is a recomputation on a
+          scale gesture for a value that does nothing, against a picture that
+          lags its own field. This hole is THIS change's; the item-level
+          analogue stays deferred and says so beside the code
+      TESTS, each proved by reverting its own fix:
+        * `test_suffix_tape.cpp`, a NEW case — "a seeded suffix folds a composed
+          seam whose layer this region drops" — asserting the fixture
+          (`layer_have_acc` false, `doc_have_acc` true, no frames) rather than
+          assuming it, then bit-identity against the culled whole-document
+          compile on three ops, with teeth in both directions: the Intersect arm
+          must MOVE every sample off the seed and the union and subtract arms
+          must leave every one on it. Reverting the early return fails it with
+          `-73 == 0` on the memcmp and `false == true` on the teeth, Intersect
+          only. The existing composed-seam case gains two Intersect arms; those
+          pass on both sides of the fix and are coverage, not evidence (§13d)
+        * `test_layer_fold.cpp`, a NEW case — "a composed layer's rounding
+          scales with the layer" — compiling `base_and_cutter` at scale 1 and 2
+          against `ref_eval_document` over a lattice(24), on the four modes that
+          READ rb (groove, tongue, relief, incise; `ctape_combine_dist` ignores
+          the sixth argument for every other mode), with teeth that the scale
+          moves the field and that the rounding is part of what moved.
+          Reverting the multiplication passes at scale 1 and fails at scale 2 on
+          all four arms — 420, 2412, 1000 and 1000 differing components
+        * `test_layer_fold_sites.cpp`, the placement sweep widened from six
+          extended ops to EVERY op the setter accepts, each checked both with a
+          radius and without; plus two arms at `clay_layer_placement_report`,
+          where §11 asks for the regression — a hard-profile Paint and a hard
+          Add carrying a radius. Reverting the predicate fails four assertions
+          in the sweep (Add, Subtract, Intersect, Paint) and both ABI arms
+      CONTRACT: `tape.h`'s "the fold at the seam is EMITTED, not assumed"
+      paragraph gains the half that was false — that it is emitted even where
+      the cull leaves the layer with nothing in it — and says that both bullets
+      are a C++ contract with no C-ABI caller today, which is what made the hole
+      invisible. clay.h's "AN EXTENDED MODE COUNTS AS A RADIUS HERE" list, which
+      enumerated nine ops and omitted `CLAY_OP_REPLACE`, is replaced by "ANY
+      POSITIVE blend_k COUNTS AS A RADIUS HERE" plus the conservative note.
+      design.md §13f and 7.8 above are corrected where they record as settled
+      and held by a test something no test could see

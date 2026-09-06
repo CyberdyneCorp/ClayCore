@@ -89,12 +89,19 @@ PlacementChange placement_change(const math::Transform& from, kernel::cfloat3 fr
 // classified Rigid, because a rigid change scales nothing and so cannot expose
 // the difference.
 //
-// AND THE LAYER'S OWN COMPOSITION, which is a radius one level up: false for a
-// fold with a soft profile and a positive `k`, and equally for an EXTENDED fold
-// (groove, shell, incise, pipe, the reliefs) with a positive `k`, where the
-// profile is ignored and `k` is the mode's own radius or depth. The fold's
-// ROUNDING is not a term -- it is scaled with the layer, where the radius is
-// not.
+// AND THE LAYER'S OWN COMPOSITION, which is a radius one level up: false for
+// ANY positive `composition.blend.k`, whatever the op and whatever the profile.
+// A radius is a radius -- a soft profile spends it as the blend radius, an
+// extended mode (groove, shell, incise, pipe, the reliefs) as its own radius or
+// depth with the profile ignored, and a PAINT as its colour falloff with the
+// profile ignored too -- and `chain_blend_support`, which the document's cull
+// pad is built on, already reads that one field as a world distance for every
+// op. Enumerating the ops that spend it is the list this got wrong twice.
+// Conservative for a hard Add, Subtract or Intersect, whose `k` the kernel
+// ignores: they report General for a value that is doing nothing, which costs a
+// recomputation rather than a picture that lags its own field.
+// The fold's ROUNDING is not a term -- it is scaled with the layer, where the
+// radius is not.
 bool layer_scales_cleanly(const Layer& layer);
 
 // How this layer moves to a proposed placement -- `placement_change` with the

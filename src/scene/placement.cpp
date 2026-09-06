@@ -46,24 +46,47 @@ PlacementChange placement_change(const math::Transform& from, cfloat3 from_axes,
 namespace {
 
 // Does the layer's fold carry a radius in world units that the layer's scale
-// will not reach? Two ways it can, and the second is why the profile alone is
-// not the test:
+// will not reach? ANY positive `blend.k` does, whatever the profile says and
+// whatever the op is. A RADIUS IS A RADIUS.
 //
-//   * a SOFT profile with a positive `k` -- the blend radius, the item-level
-//     case one level up;
-//   * an EXTENDED mode (groove, shell, incise, pipe, the reliefs...), where
-//     `blend.k` is the mode's own radius, depth or amplitude and the PROFILE IS
-//     IGNORED (scene/types.h says so at the enumerators). A hard-profile groove
-//     with a depth of 0.1 is exactly as absolute as a quadratic blend of 0.1,
-//     and reading only the profile classified it as a similarity.
+// Neither the profile nor the op is the test, and enumerating either was how
+// this went wrong twice. `blend.k` is the one field a composition has for a
+// world-space distance, and it is spent as one three different ways:
+//
+//   * a SOFT profile spends it as the blend radius -- the item-level case one
+//     level up;
+//   * an EXTENDED mode (groove, shell, incise, pipe, the reliefs...) spends it
+//     as its own radius, depth or amplitude and IGNORES the profile entirely
+//     (scene/types.h says so at the enumerators);
+//   * PAINT spends it as the colour falloff. `ctape_combine_values` fades over
+//     `cmax(ctape_blend_support(profile, k), k)`, so a HARD-profile paint fades
+//     over exactly k -- and a predicate that read the profile, then rescued the
+//     extended range, classified that as a similarity while its colour reached
+//     an absolute 0.3 across a layer being scaled.
+//
+// AND THE ENGINE HAS ALREADY COMMITTED TO READING IT THAT WAY.
+// `chain_blend_support` -- the single definition of how far a combine reaches,
+// which `layer_blend_support`, `folds_from_layer_support` and
+// `document_cull_pad` are all built on -- is `cmax(blend.support(), blend.k)`,
+// so a fold with k = 0.3 dilates the DOCUMENT'S CULL PAD by 0.3 for every op
+// and every profile. A classifier answering "similarity" there would be a
+// second answer to a question the pad has already answered, which is the exact
+// shape of failure this change is organised against.
+//
+// WHERE THIS IS CONSERVATIVE, AND WHAT THAT COSTS. For a hard-profile Add,
+// Subtract or Intersect the kernel ignores k (`ctape_smin` with a hard profile
+// is a plain min, and the add's colour weight is its 0-or-1 select), so such a
+// layer really is a similarity of its own field and this declines it the cheap
+// placement path anyway. The cost is one recomputation on a scale gesture, for
+// a value that is doing nothing; the other direction is a picture that lags its
+// own field. Those are not symmetric, and a fourth enumeration of "which ops
+// read k" is the thing a fifth one goes on to disagree with.
 //
 // The composition's ROUNDING is not here because it IS scaled -- `fold_layer`
-// takes `comp.rounding * layer_distance_scale(layer)` -- so the asymmetry is
-// genuinely the radius alone.
-bool composition_radius_ignores_scale(const LayerComposition& c) {
-    if (!(c.blend.k > 0.0f)) return false;  // no radius, nothing to be wrong about
-    return c.blend.profile != BlendProfile::Hard || op_is_extended(c.op);
-}
+// takes `comp.rounding * layer_distance_scale(layer)`, which
+// test_layer_fold.cpp holds against the reference evaluator at a scale of 2 --
+// so the asymmetry is genuinely the radius alone.
+bool composition_radius_ignores_scale(const LayerComposition& c) { return c.blend.k > 0.0f; }
 
 }  // namespace
 
@@ -87,13 +110,13 @@ bool layer_scales_cleanly(const Layer& layer) {
         // about.
         //
         // NOT `composition_radius_ignores_scale` above, and the difference is
-        // deliberate rather than an oversight: an ITEM with an extended op and
-        // a hard profile carries the same absolute radius and takes the cheap
-        // path here. That is behaviour this change did not introduce and does
-        // not alter -- it predates layer composition, it reclassifies documents
-        // that carry no fold at all, and the v0.84.0 known limits already
-        // record the item-level asymmetry. Widening it is its own change with
-        // its own measurement.
+        // deliberate rather than an oversight: an ITEM with a hard profile and
+        // an extended op, a paint, or a positive `k` its op ignores carries the
+        // same absolute radius and takes the cheap path here. That is behaviour
+        // this change did not introduce and does not alter -- it predates layer
+        // composition, it reclassifies documents that carry no fold at all, and
+        // the v0.84.0 known limits already record the item-level asymmetry.
+        // Widening it is its own change with its own measurement.
         if (n.blend.profile != BlendProfile::Hard && n.blend.k > 0.0f) return false;
     }
     return true;

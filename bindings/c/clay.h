@@ -1358,12 +1358,23 @@ clay_result clay_document_set_layer_transform_nonuniform(clay_document* doc, cla
  * scale does not reach it, so a scaled layer is not a similarity of its own
  * field. Its ROUNDING does follow the scale; only the radius does not.
  *
- * AN EXTENDED MODE COUNTS AS A RADIUS HERE whatever its blend profile says.
- * CLAY_OP_GROOVE, _TONGUE, _PIPE, _ENGRAVE, _EMBOSS, _INSET, _SHELL, _RELIEF
- * and _INCISE read blend_k as their own radius, depth or amplitude and ignore
- * the profile entirely, so a composition set to one of them with a positive
- * blend_k classifies GENERAL even with CLAY_BLEND_HARD. It is the same absolute
- * world distance under another name.
+ * ANY POSITIVE blend_k COUNTS AS A RADIUS HERE, whatever the op is and
+ * whatever the blend profile says: a composition with blend_k > 0 classifies
+ * GENERAL, CLAY_BLEND_HARD included. Enumerating the ops that spend it would be
+ * a list to keep in step with the kernel, and it is not one list: the extended
+ * modes (CLAY_OP_GROOVE, _TONGUE, _PIPE, _ENGRAVE, _EMBOSS, _INSET, _SHELL,
+ * _REPLACE, _RELIEF, _INCISE) read blend_k as their own radius, depth or
+ * amplitude and ignore the profile entirely, and CLAY_OP_PAINT fades its colour
+ * over blend_k with a hard profile too. It is the same absolute world distance
+ * under several names, and it is the number the document's cull pad is dilated
+ * by in every case -- so the verdict and the pad read one field one way.
+ *
+ * DELIBERATELY CONSERVATIVE FOR THE THREE PLAIN BOOLEANS. CLAY_OP_ADD,
+ * _SUBTRACT and _INTERSECT with CLAY_BLEND_HARD ignore blend_k in the field, so
+ * such a layer IS a similarity of its own field and this reports GENERAL for it
+ * anyway. The cost is one recomputation on a scale gesture for a value that is
+ * doing nothing; set blend_k to 0 with a hard profile to keep the cheap path,
+ * which is what a hard fold means.
  *
  * AND THE TRADE THAT FOLLOWS, because a host will otherwise discover it by
  * measuring. Because the radius is absolute, the join covers the same world

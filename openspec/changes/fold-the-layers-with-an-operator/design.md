@@ -1342,6 +1342,14 @@ the seam is forced to a hard Add). The hard Add belongs to the CALLER that holds
 two halves apart in host floats, and so does that caller's refusal — which is
 why every in-tree caller of the suffix states `doc_have_acc = false`.
 
+**CORRECTED BY §13j: that paragraph and the test under it were both half
+true.** `resume()` emitted the seam's composition only where the appended chain
+produced a value in the region being compiled; where the cull left the layer
+with nothing, an early return skipped the seam entirely. Read the paragraph
+above as a statement of intent that the tree did not yet keep, and the test as
+one that could not have caught the gap — three conditions in its own fixture
+each hid it. See §13j.
+
 ### §13h. The revert experiment §13d asks for, run
 
 Run on an isolated worktree at `b3b51c01` with the fold dilation stubbed out —
@@ -1457,3 +1465,78 @@ same commit — a change that would have no reason to ask whether this engine's
 scale predicate covers it. **Fix the predicate so any positive radius disqualifies
 regardless of profile or op**, rather than adding Paint to a list; a list is the
 thing that was already wrong.
+
+### §13j. The fourth cull-observable predicate, and what it says about the sweep
+
+Found by the fifth review, closed by the stage after it, and it is the thing
+§13 said would need somebody looking a third time.
+
+**The defect.** `Compiler::resume` opened its stack unwind with
+
+    if (!chain_val && cp.frames.empty()) return;
+
+and `chain_val` is what `compile_list` returned for the APPENDED nodes under
+THIS COMPILE'S CULL. Where a region held none of them and the checkpoint sat at
+a root list rather than inside a group, the function returned before emitting
+the seam's fold at all — so `compile_layer_suffix` silently dropped a composed
+fold in exactly the bricks a stroke's dabs do not reach, which is most bricks of
+most dabs. It is §13's general form verbatim, and the fourth instance of it:
+a cull-dependent value read as a question about the document.
+
+The comment above that line said the return was "harmless where there are no
+frames — a root list has nothing pending". It was true when it was written and
+this change is what made it false: the layer's own fold became something
+pending. **A comment that states a precondition is only as current as the last
+person to re-derive it**, which is the same argument §13a made for typing
+`fold_layer`'s two bools, arriving at a line of prose instead of a signature.
+
+**What it falsified.** `include/clay/scene/tape.h` told a reader, in writing,
+that "the fold at the seam is EMITTED, not assumed … so a composed seam compiles
+as the composition", and §13f and tasks 7.8 recorded that as settled and held by
+a test. Measured on a clean build — a base sphere at the origin, a cutter whose
+one dab sits at x = 5, compiled for a region of ±1.5: the checkpoint comes back
+`layer_have_acc=false doc_have_acc=true frames=0`, the suffix compiles to ZERO
+instructions, and against the whole-document compile of the same document under
+the same cull it differs at 0 of 729 lattice samples for Add, 0 of 729 for
+Subtract and **729 of 729 for Intersect**, worst 3.4e37 (`CLAY_TAPE_FAR`),
+equal to the seed at all 729. That set is exactly `fold_changes_an_empty_layer`.
+
+**Not reachable from the shipped C ABI**, and saying so is part of the finding
+rather than a softening of it: every in-tree caller of `compile_layer_suffix`
+states `doc_have_acc = false`, and `plan_resume`/`plan_frontier` refuse a
+composed seam through `layer_join_is_hard_union` before that. It was a latent
+hole in a public C++ contract, one caller change from being a wrong field per
+brick — and the C ABI's own refusals are what were holding it shut, which is the
+accidental correctness §13e names.
+
+**The fix is not the condition; it is that there is one spelling of the seam.**
+Narrowing the early return to `!cp.doc_have_acc || !fold_changes_an_empty_layer(…)`
+would have worked and would have left the rule written twice — once in
+`fold_layer` and once as the negation of a return. `emit_layer_fold` is the whole
+rule now (nothing beneath; an absent operand the operator ignores; an absent
+operand it reads), `fold_layer` and `resume` both call it, and the early return
+has nothing left to decide. Two walks reach a layer seam and they cannot
+disagree about an absent operand without the fast path being a different field
+from the slow one, per brick.
+
+**Why no test could see it, which is the transferable half.** The case added at
+7.8 asserted `REQUIRE(cp.layer_have_acc)`, passed NO cull region, and carried
+only Add and Subtract arms. Each of those three independently hides the defect:
+with dabs in the layer `chain_val` is true whatever the cull does (`compile_list`
+RETURNS ITS INCOMING `have_acc`, so `chain_val` is "is there a value on the
+stack afterwards" and not "did the appended chain emit anything"); with no cull
+region nothing is ever dropped; and Add and Subtract are precisely the operators
+for which folding an absent operand is identity. **A fixture can be wrong in
+three independent ways at once and still look like the case it is named after** —
+and the name is what a reviewer reads. The new case asserts its fixture
+(`layer_have_acc` false, `doc_have_acc` true, no frames) rather than assuming
+it, which is what makes it re-readable.
+
+**What this says about §13's sweep.** The sweep was asked for and was run, and
+it missed this one. The reason is worth keeping: it looked for predicates in the
+FOLD path, and this one is in the RESUME path — a function whose job is to
+reproduce the fold rather than to decide it, and which therefore did not read as
+somewhere the fold's rules live. **The scope of "every place the fold path reads
+state a cull region can change" has to include every place that RE-EMITS the
+fold, not only the places that decide it.** The score is now two found by
+looking and three by writing things down where someone had to pass them.

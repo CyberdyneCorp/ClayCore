@@ -20,6 +20,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 #include "clay/scene/bounds.h"
@@ -294,6 +295,59 @@ TEST_CASE("two layers and one layer of two items are the same field") {
         CHECK(differing(sample(compile_document(base_and_cutter(composed(Op::Add))), pts),
                         sample(compile_document(base_and_cutter(composed(Op::Subtract))), pts)) >
               0);
+    }
+}
+
+// THE FOLD'S ROUNDING FOLLOWS THE LAYER'S SCALE, and nothing else in the suite
+// compiles a composed layer at a scale other than 1.
+//
+// `fold_layer` spells the combine's rb as `comp.rounding *
+// layer_distance_scale(layer)` -- a composition has no node, so it takes the
+// factor a GROUP's rounding takes rather than the placed one an item's takes.
+// That multiplication is what the SIMILARITY verdict rests on: `placement.cpp`
+// leaves rounding out of `composition_radius_ignores_scale` precisely because
+// the scale reaches it, so a layer carrying only rounding keeps the cheap
+// placement path. If the fold stopped scaling it, that verdict would be wrong
+// and the only thing asserting it is a CLASSIFICATION, which cannot see a
+// field.
+//
+// Held against `ref_eval_document`, which walks the document without ever
+// compiling a tape, at a scale of 1 as the control and at 2 as the claim.
+// Only the four modes that READ rb are worth arming: groove and tongue take it
+// as the channel half-width, relief and incise as the falloff width, and
+// `ctape_combine_dist` ignores the sixth argument for every other mode.
+TEST_CASE("a composed layer's rounding scales with the layer") {
+    const std::vector<cfloat3> pts = lattice(24);
+
+    for (auto arm : {std::pair{Op::Groove, 0.15f}, std::pair{Op::Tongue, 0.15f},
+                     std::pair{Op::Relief, 0.2f}, std::pair{Op::Incise, 0.2f}}) {
+        CAPTURE(static_cast<int>(arm.first));
+        const LayerComposition comp = composed(arm.first, BlendProfile::Hard, arm.second, 0.1f);
+
+        for (float scale : {1.0f, 2.0f}) {
+            CAPTURE(scale);
+            Document doc = base_and_cutter(comp);
+            doc.layers.back().xform.scale = scale;
+            CHECK(differing(sample(compile_document(doc), pts), reference(doc, pts)) == 0);
+        }
+
+        // TEETH, in two directions. The scale has to MOVE the field -- otherwise
+        // the two arms above are one arm twice...
+        Document at_one = base_and_cutter(comp);
+        Document at_two = base_and_cutter(comp);
+        at_two.layers.back().xform.scale = 2.0f;
+        CHECK(differing(sample(compile_document(at_one), pts),
+                        sample(compile_document(at_two), pts)) > 0);
+
+        // ...and the ROUNDING has to be part of what moved, or a fold that
+        // scaled everything except rb would still pass. Same document, same
+        // scale, rounding alone removed.
+        LayerComposition no_rb = comp;
+        no_rb.rounding = 0.0f;
+        Document blunt = base_and_cutter(no_rb);
+        blunt.layers.back().xform.scale = 2.0f;
+        CHECK(differing(sample(compile_document(at_two), pts),
+                        sample(compile_document(blunt), pts)) > 0);
     }
 }
 

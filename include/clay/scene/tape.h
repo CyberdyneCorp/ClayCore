@@ -427,18 +427,30 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& checkpoin
 //   * The fold at the seam is EMITTED, not assumed. Where the checkpoint says
 //     an earlier layer left a value underneath (`doc_have_acc`), the resume
 //     emits that layer's OWN composition -- the same combine `run()` emits at
-//     that boundary, read off the `const Layer&` rather than off the
-//     checkpoint -- so a composed seam compiles as the composition. Refusing
-//     it would decline a compile that is already exact.
+//     that boundary, through the same `emit_layer_fold`, read off the
+//     `const Layer&` rather than off the checkpoint -- so a composed seam
+//     compiles as the composition. Refusing it would decline a compile that is
+//     already exact.
+//   * EMITTED EVEN WHERE THE CULL LEAVES THE LAYER WITH NOTHING IN IT, which
+//     is where this went wrong once and is worth the sentence. `appended`
+//     compiling to nothing under `cull` says nothing about the document: an
+//     operator that reads an absent operand as a change -- an Intersect --
+//     must still take the material away in a region its own layer does not
+//     reach, because the whole-document compile of that region takes it away
+//     there. The resume therefore asks the same question `run()` asks
+//     (`fold_changes_an_empty_layer`) and not "did anything survive here".
 //   * The hard Add lives in the CALLER that holds the two halves apart and
 //     rejoins them in host floats (`fold_layers_below`, bindings/c), and that
 //     is where the refusal lives too (`layer_join_is_hard_union`, in the plans
 //     and in the refill). Every in-tree caller of this function states
 //     `doc_have_acc = false` for exactly that reason: the layers beneath are
-//     its own value, not this tape's.
+//     its own value, not this tape's. So the two bullets above are a C++
+//     contract with no C-ABI caller today -- which is what made the empty-layer
+//     hole invisible, and is not a reason for it to stay open.
 //
-// `test_suffix_tape.cpp` holds the second bullet as identity against a
-// whole-document compile, so the argument is a test rather than a sentence.
+// `test_suffix_tape.cpp` holds both as identity against a whole-document
+// compile -- the composed seam in full, and the composed seam over a region the
+// layer does not reach -- so the argument is a test rather than a sentence.
 //
 // THE TAPE IS NOT SELF-CONTAINED and must not be handed to a plain evaluator.
 // Its `bounds` and `info` describe the appended items only, and evaluating it

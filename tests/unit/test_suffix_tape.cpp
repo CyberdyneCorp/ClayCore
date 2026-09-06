@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "clay/eval/backend.h"
+#include "clay/math/geom.h"
 #include "clay/scene/document.h"
 #include "clay/scene/tape.h"
 
@@ -416,6 +417,8 @@ TEST_CASE("a seeded suffix emits the seam's own composition, not a hard union") 
 
     for (auto arm : {std::pair{scene::Op::Subtract, scene::BlendProfile::Quadratic},
                      std::pair{scene::Op::Add, scene::BlendProfile::Cubic},
+                     std::pair{scene::Op::Intersect, scene::BlendProfile::Cubic},
+                     std::pair{scene::Op::Intersect, scene::BlendProfile::Hard},
                      std::pair{scene::Op::Subtract, scene::BlendProfile::Hard}}) {
         CAPTURE(static_cast<int>(arm.first));
         CAPTURE(static_cast<int>(arm.second));
@@ -473,5 +476,98 @@ TEST_CASE("a seeded suffix emits the seam's own composition, not a hard union") 
                 pts);
             CHECK(std::memcmp(want.data(), unioned.data(), count * sizeof(float)) != 0);
         }
+    }
+}
+
+
+// THE SEAM WHEN THIS REGION HOLDS NONE OF THE LAYER (fold-the-layers-with-an-
+// operator; design.md 13's general form, fourth instance).
+//
+// The case above cannot reach this one and each of its three properties hides
+// it independently: its cutter always has dabs (`cp.layer_have_acc` is true),
+// it passes NO cull region (so the appended chain always compiles), and it
+// carried no operator that reads an absent operand as a change. Put all three
+// the other way round and `resume` used to return before emitting the seam at
+// all, because it asked "did anything survive HERE" -- a cull-dependent value
+// -- where the question is "what does this DOCUMENT fold at this boundary".
+//
+// The whole-document compile of the same document under the same cull emits
+// that fold (`fold_layer` -> `fold_changes_an_empty_layer`), so an intersecting
+// seam empties the region and a suffix that skipped it answered with the layers
+// beneath, unchanged. Not reachable from the shipped C ABI -- every in-tree
+// caller states `doc_have_acc = false` and the refill plans refuse a composed
+// seam first -- but `compile_layer_suffix` is a public C++ entry point whose
+// header promises the seam is EMITTED, not assumed, and this is that promise.
+TEST_CASE("a seeded suffix folds a composed seam whose layer this region drops") {
+    const std::vector<float> pts = lattice(9);
+    const std::size_t count = pts.size() / 3;
+
+    // A base at the origin and a cutter whose ONLY dab is far outside the
+    // region compiled below -- so the cutter contributes nothing HERE while
+    // being a perfectly ordinary layer with content elsewhere, which is what a
+    // per-brick refill sees constantly.
+    auto base_and_far_cutter = [](int dabs, scene::Op op) {
+        scene::Document doc;
+        scene::Layer& base = doc.add_sdf_layer("base");
+        scene::Node b;
+        b.prim = scene::Prim::sphere(1.0f);
+        base.sdf->insert(b);
+        scene::Layer& cut = doc.add_sdf_layer("cutter");
+        for (int i = 0; i < dabs; ++i) {
+            scene::Node d;
+            d.prim = scene::Prim::sphere(0.3f);
+            d.xform.position = cf3(5.0f, 0.0f, 0.0f);
+            cut.sdf->insert(d);
+        }
+        cut.composition.op = op;
+        return doc;
+    };
+
+    scene::CullRegion cull;
+    cull.region = math::Aabb{cf3(-1.5f, -1.5f, -1.5f), cf3(1.5f, 1.5f, 1.5f)};
+
+    for (scene::Op op : {scene::Op::Add, scene::Op::Subtract, scene::Op::Intersect}) {
+        CAPTURE(static_cast<int>(op));
+        scene::Document before = base_and_far_cutter(0, op);
+        scene::Document after = base_and_far_cutter(1, op);
+
+        scene::TapeCheckpoint cp;
+        scene::compile_document_resumable(before, &cp, &cull, nullptr, nullptr);
+        REQUIRE(cp.valid);
+        // The fixture, asserted rather than assumed: the cutter left NO value
+        // of its own, an earlier layer left one beneath it, and the checkpoint
+        // sits at a root list rather than inside a group. That is exactly the
+        // combination the old early return took.
+        REQUIRE_FALSE(cp.layer_have_acc);
+        REQUIRE(cp.doc_have_acc);
+        REQUIRE(cp.frames.empty());
+
+        const std::vector<scene::NodeId>& roots = after.layers[1].sdf->roots;
+        const std::vector<scene::NodeId> appended(roots.end() - 1, roots.end());
+        scene::Tape suffix;
+        REQUIRE(scene::compile_layer_suffix(cp, after, appended, &suffix, nullptr, &cull, nullptr));
+
+        // The stack the checkpoint sits on is one plane deep -- the layers
+        // BENEATH the cutter -- because the cutter itself left nothing.
+        const std::vector<float> seed =
+            eval_whole(scene::compile_document_part(before, after.layers[1].id, true, &cull), pts);
+        std::vector<float> got(count, 0.0f);
+        eval::PointQuery q;
+        q.points_xyz = pts.data();
+        q.count = count;
+        eval::PointResults r;
+        r.distances = got.data();
+        eval::eval_points_seeded(suffix, q, seed.data(), nullptr, r);
+
+        // The same document, the same region, compiled whole.
+        const std::vector<float> want = eval_whole(scene::compile_document(after, &cull), pts);
+        CHECK(std::memcmp(got.data(), want.data(), count * sizeof(float)) == 0);
+
+        // TEETH, and they are what make the union arms a claim rather than a
+        // coincidence: an INTERSECT over an absent operand is max(a, FAR) and
+        // must MOVE every sample away from the seed, while a union and a
+        // subtract over one are identity and must leave every sample on it.
+        const bool moved = std::memcmp(got.data(), seed.data(), count * sizeof(float)) != 0;
+        CHECK(moved == (op == scene::Op::Intersect));
     }
 }

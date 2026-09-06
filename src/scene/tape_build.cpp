@@ -1247,12 +1247,43 @@ struct Compiler {
     // `LayerLeftValue`, and `FirstVisibleLayer` for the same argument one level
     // up.
     //
+    // The INSTRUCTIONS are `emit_layer_fold`, which a resume also calls; what
+    // stays here is the one thing a resume cannot do, the ring on tape.bounds.
+    //
     // `have_acc` IS NOT THE FIRST-VISIBLE TEST and must not be read as one --
     // see `compile_and_fold_layer`, which is the only caller and which decides
     // first-ness from the layer LIST before anything is emitted. What is left
     // here is only "is there something on the stack to combine with", which is
     // a question about the tape and is answered by the tape.
     bool fold_layer(const Layer& layer, LayerLeftValue layer_val, bool have_acc) {
+        emit_layer_fold(layer, layer_val, have_acc);
+        // The ring the fold adds to the tape's geometric extent, which only the
+        // whole-layer walk can add: it dilates the LAYER's extent, and a resume
+        // holds the appended items' extent rather than the layer's. Not added
+        // for a chain that produced nothing -- see fold_layer_bounds.
+        if (layer_val.value && have_acc) fold_layer_bounds(layer);
+        return layer_val.value || have_acc;
+    }
+
+    // THE FOLD AT A LAYER BOUNDARY, AS INSTRUCTIONS. One spelling, because
+    // there are two walks that reach a layer seam -- the whole-document one
+    // (`fold_layer`, through run/run_part) and a RESUME re-emitting the seam
+    // its checkpoint sat in front of -- and if they disagree about an absent
+    // operand the fast path is a different field from the slow one, per brick.
+    //
+    // `layer_val` says whether the layer left a value on the stack and
+    // `have_acc` whether there is an accumulated value beneath it. Neither is
+    // the first-visible test: see `compile_and_fold_layer`, which decides
+    // first-ness from the layer LIST before anything is emitted.
+    //
+    // AN ABSENT LEFT OPERAND IS STILL AN OPERAND. `layer_val` is false for two
+    // different reasons -- the layer has nothing in it, or this compile's cull
+    // dropped all of it -- and only the first is emptiness. So the question
+    // asked is the DOCUMENT's ("does this operator read an absent operand as a
+    // change", fold_changes_an_empty_layer, answered by the kernel) and never
+    // "did anything survive here", which is design.md 13's general form.
+    void emit_layer_fold(const Layer& layer, LayerLeftValue layer_val, bool have_acc) {
+        if (!have_acc) return;  // nothing beneath to fold into
         const LayerComposition& comp = layer.composition;
         // No node, so the layer's own distance scale is the factor -- the same
         // one a group's rounding takes. (A transition op cannot get here: the
@@ -1261,25 +1292,17 @@ struct Compiler {
         // on anything the artist authored.)
         const float round_world = comp.rounding * layer_distance_scale(layer);
         if (!layer_val.value) {
-            // An empty or wholly culled chain still has to be folded when the
-            // operator reads an absent operand as a change -- see
-            // fold_changes_an_empty_layer, which is where that is decided and
-            // why a union is skipped here exactly as it always was.
-            if (have_acc && fold_changes_an_empty_layer(comp, round_world)) {
-                // The empty seed's colour never reaches the result for the ops
-                // that get here (intersect keeps the accumulator's), so white
-                // is a placeholder rather than a choice; a layer has no colour
-                // of its own to offer.
-                emit_empty(kernel::cf3(1.0f, 1.0f, 1.0f));
-                emit_chain_combine(comp.op, comp.blend, round_world);
-            }
-            return have_acc;
+            // A union is skipped here exactly as it always was -- min(a, FAR)
+            // is a -- which is what keeps every document that predates this
+            // feature byte for byte.
+            if (!fold_changes_an_empty_layer(comp, round_world)) return;
+            // The empty seed's colour never reaches the result for the ops that
+            // get here (intersect keeps the accumulator's), so white is a
+            // placeholder rather than a choice; a layer has no colour of its
+            // own to offer.
+            emit_empty(kernel::cf3(1.0f, 1.0f, 1.0f));
         }
-        if (have_acc) {
-            emit_chain_combine(comp.op, comp.blend, round_world);
-            fold_layer_bounds(layer);
-        }
-        return true;
+        emit_chain_combine(comp.op, comp.blend, round_world);
     }
 
     // WHAT THE FOLD ADDS TO THE TAPE'S GEOMETRIC EXTENT.
@@ -1477,27 +1500,32 @@ struct Compiler {
         // first dab and the slow one on every dab after it.
         checkpoint = TapeCheckpoint{tape.instrs.size(), tape.params.size(), tape.blob.size(),
                                     cp.layer, chain_val, cp.doc_have_acc, true, cp.frames};
-        // A chain that produced nothing still has whatever the seed put on it,
-        // and the combines the checkpoint sits in front of STILL have to be
-        // emitted: without them the walk answers with the innermost chain
-        // rather than the field. Harmless where there are no frames -- a root
-        // list has nothing pending, which is why returning here was right
-        // until a checkpoint could sit inside a group -- and wrong with them,
-        // by however much the group's combine moves the value.
-        //
-        // Reachable whenever a brick's cull drops every appended node, which
-        // is most bricks of most dabs.
-        if (!chain_val && cp.frames.empty()) return;
         // UNWIND THE STACK the checkpoint sat in front of: each enclosing
-        // group's combine, innermost first, then the layer union. This is
-        // compile_group's tail restated, and it has to stay that — the two
-        // produce the same bytes or the fast path is a different field.
+        // group's combine, innermost first, then the layer's own fold. This is
+        // compile_group's tail followed by run()'s, restated, and it has to
+        // stay that — the two produce the same bytes or the fast path is a
+        // different field.
+        //
+        // THERE IS NO EARLY RETURN FOR "THE APPENDED CHAIN PRODUCED NOTHING",
+        // and there was one until it was found to drop a composed seam. That
+        // state is reachable for most bricks of most dabs -- a cull region the
+        // appended items do not reach -- and it says nothing about the
+        // DOCUMENT: `chain_val` is a cull-dependent value, and the fold at the
+        // seam is a property of the document (design.md 13). An intersecting
+        // layer must still take the material away in a region its own chain
+        // does not reach, exactly as `run()` does. `emit_layer_fold` is that
+        // rule, shared, and it is what decides to emit nothing where nothing is
+        // owed -- a union over an absent operand, or nothing beneath at all.
+        //
+        // `compile_list` RETURNS ITS INCOMING have_acc, so `chain_val` is
+        // already "is there a value on the stack after the appended chain"
+        // rather than "did the appended chain emit anything"; the disjunction
+        // below is belt and braces and reads as the question it answers.
         bool have_acc = chain_val || cp.layer_have_acc;
         for (const TapeCheckpointFrame& f : cp.frames) {
             if (f.emits) emit_chain_combine(f.op, f.blend, f.rounding);
             have_acc = true;
         }
-        if (!have_acc) return;
         // ...and then the fold into the layers beneath, which is the same
         // combine run() emits at that boundary and has to stay the same one:
         // the checkpoint sits in FRONT of it, so a resume re-emits it, and
@@ -1506,9 +1534,15 @@ struct Compiler {
         // hand-built checkpoint (bindings/c/clay_c.cpp) asserts facts rather
         // than deriving them, and an asserted operator that stops being true
         // still compiles.
-        if (cp.doc_have_acc)
-            emit_chain_combine(layer.composition.op, layer.composition.blend,
-                               layer.composition.rounding * layer_distance_scale(layer));
+        //
+        // NO RING IS ADDED TO tape.bounds for this fold, unlike `fold_layer`:
+        // a suffix describes the appended items rather than the layer, so the
+        // extent the ring dilates is not in hand here. compile_document_append
+        // is unaffected -- it refuses a composed seam, and a hard Add's ring is
+        // zero -- and compile_layer_suffix promises no standalone bounds at all
+        // (tape.h). It stays the gap TapeCheckpoint's missing extent already
+        // is, one level up from the group ring compile_group leaves open.
+        emit_layer_fold(layer, LayerLeftValue{have_acc}, cp.doc_have_acc);
     }
 };
 

@@ -639,21 +639,32 @@ TEST_CASE("a layer whose composition blends softly does not scale cleanly") {
               PlacementKind::Similarity);
     }
 
-    SUBCASE("an EXTENDED fold carries a radius too, whatever its profile says") {
-        // Groove, shell, incise and the rest read `blend.k` as their own
-        // radius, depth or amplitude and IGNORE the profile (scene/types.h says
-        // so at the enumerators). So the profile alone is not the test: a
-        // hard-profile groove with a depth of 0.15 is exactly as absolute as a
-        // quadratic blend of 0.15, and the layer's scale reaches neither.
-        for (Op op : {Op::Groove, Op::Shell, Op::Incise, Op::Pipe, Op::Relief, Op::Inset}) {
+    SUBCASE("A RADIUS IS A RADIUS: every op the setter takes, hard profile") {
+        // EVERY op, rather than the extended range plus a hand-kept list. The
+        // first version of this predicate read the profile and then rescued
+        // `op_is_extended`, which left PAINT -- numerically BELOW the extended
+        // range -- falling through both clauses: a hard-profile paint with
+        // k = 0.3 fades its colour over an absolute 0.3 (ctape_combine_values
+        // takes `cmax(blend_support(profile, k), k)`) and classified as a
+        // SIMILARITY. Sweeping the whole vocabulary is what makes that a test
+        // rather than a second list to keep in step.
+        //
+        // The three plain booleans are here too, and they are the CONSERVATIVE
+        // direction rather than an accident: a hard Add, Subtract or Intersect
+        // ignores k in the field, and reports GENERAL anyway because
+        // `layer_blend_support` -- and through it the DOCUMENT'S cull pad --
+        // reads that same k as 0.3 whatever the op. One field, one reading.
+        for (Op op : {Op::Add, Op::Subtract, Op::Intersect, Op::Paint, Op::Groove, Op::Tongue,
+                      Op::Pipe, Op::Engrave, Op::Emboss, Op::Inset, Op::Shell, Op::Replace,
+                      Op::Relief, Op::Incise}) {
             CAPTURE(static_cast<int>(op));
             l.composition = composed(op, BlendProfile::Hard, 0.15f);
             CHECK_FALSE(layer_scales_cleanly(l));
+            // ...and with no radius at all there is still nothing to be wrong
+            // about, so this did not simply refuse every op.
+            l.composition = composed(op, BlendProfile::Hard, 0.0f);
+            CHECK(layer_scales_cleanly(l));
         }
-        // ...and with no radius at all there is still nothing to be wrong
-        // about, so this did not simply refuse every extended mode.
-        l.composition = composed(Op::Groove, BlendProfile::Hard, 0.0f);
-        CHECK(layer_scales_cleanly(l));
     }
 }
 
@@ -785,6 +796,30 @@ TEST_CASE("c abi: a composed layer's radius is reported to the host as GENERAL")
     SUBCASE("and so does an EXTENDED one with a hard profile") {
         REQUIRE(clay_document_set_layer_composition(d, cutter, CLAY_OP_GROOVE, CLAY_BLEND_HARD,
                                                     0.15f, 0.0f) == CLAY_OK);
+        CHECK(kind_of_a_doubling() == CLAY_PLACEMENT_GENERAL);
+    }
+
+    SUBCASE("and so does a hard-profile PAINT, which is below the extended range") {
+        // The op a predicate spelled as "soft profile OR extended" cannot see:
+        // CLAY_OP_PAINT is 3 and the extended range starts at 4, so a hard
+        // paint with a positive radius fell through both clauses and the host
+        // was told SIMILARITY. Its colour fades over exactly blend_k --
+        // `cmax(blend_support(profile, k), k)` -- so the radius is as absolute
+        // as any other, and the engine already pads the document for it.
+        REQUIRE(clay_document_set_layer_composition(d, cutter, CLAY_OP_PAINT, CLAY_BLEND_HARD,
+                                                    0.3f, 0.0f) == CLAY_OK);
+        CHECK(kind_of_a_doubling() == CLAY_PLACEMENT_GENERAL);
+    }
+
+    SUBCASE("and so does a hard boolean carrying one, because the cull pad reads it") {
+        // Conservative on purpose. A hard Add ignores blend_k in the FIELD, so
+        // this layer really is a similarity of its own field -- but
+        // `layer_blend_support` is `cmax(blend.support(), blend.k)` for every
+        // op, so 0.3 reaches `clay_document_cull_pad` and the engine is already
+        // treating it as a world radius. Two answers to one question is the
+        // failure this change exists to remove, so the verdict follows the pad.
+        REQUIRE(clay_document_set_layer_composition(d, cutter, CLAY_OP_ADD, CLAY_BLEND_HARD, 0.3f,
+                                                    0.0f) == CLAY_OK);
         CHECK(kind_of_a_doubling() == CLAY_PLACEMENT_GENERAL);
     }
 
