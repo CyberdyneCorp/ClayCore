@@ -1815,6 +1815,41 @@ needs. They have that number for one hop of four (median ratio 0.9998x, 171 of
 comparison is honest; it is not yet sensitive, and those are different
 properties.
 
+### A threshold between two measurements from ONE run is stable; one against a specification is not
+
+The generalisation of two failures on one PR, and the sharper half is the host's.
+
+`#477`'s `build+test (macos, +metal, parity)` failed a single check out of
+15,199,205: `CHECK(moved_from(one_default) == 28)`. `moved_from` counts how many
+of 2,000 samples move by more than `1e-4`, so **the integer is decided by however
+many samples sit NEAR that threshold** — a thin shell puts a handful there, and a
+platform contracting a multiply-add differently moves one across. It read 28
+under GCC and something else under AppleClang. The comment beside it said
+"asserted exactly" as though that were rigour; it was fragility with a
+justification attached.
+
+**The host's own threshold has the identical shape and survives, for a reason
+worth stealing.** Its guard asserts *fewer than 40 pixels differ*, where a
+correct implementation reads 1 and a too-small region reads 2,363 — so 40 sits
+roughly geometrically between signal and noise, with both teeth doing work. But
+the property that makes it PLATFORM-STABLE is different: **both captures come
+from the same machine in the same run, so a platform that renders differently
+cancels rather than accumulates.** Mine compared a count against a number written
+down earlier, and the two sides shared only a specification.
+
+**The rule:** a threshold between two measurements taken in one run is
+self-relative and travels; a threshold against an absolute recorded elsewhere
+does not, however carefully the absolute was measured. Where a number must be
+absolute, assert a BAND with both teeth named — what it catches at the low end
+and what at the high — and report the value seen, so a failure says by how much
+rather than only that a bound was crossed.
+
+**And the fragile surface was the TESTS, three times.** Both CI failures on that
+PR were in test code rather than in the change, and both were findable only by a
+compiler this machine does not run. A green job is evidence about the change AND
+about how much of the test suite that platform's codegen happens to agree with;
+those are different claims and a matrix reports them as one.
+
 ### Agreement across N paths rules out only what differs between them
 
 The reasoning error that produced the pinhole report, named by the host that
