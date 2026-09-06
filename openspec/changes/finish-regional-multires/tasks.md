@@ -708,3 +708,83 @@
   0.88.0. The CI job's NAME was left alone and only a step added: it is what a
   required status check is pinned to and has not moved since the file was
   scaffolded. NO TIMING WAS TAKEN
+
+### Record — running every gate this change touches
+
+- EVERY GATE THIS CHANGE TOUCHES WAS RUN AND IS GREEN. Measured at the commit
+  that retires a paid baseline row: the suite is 2430 cases and 16464008
+  assertions, 0 failed, and `ctest` is 9 of 9 — 8 before this stage registered
+  the task-symbols self-test. `check_layering.py`, `check_kernel_dialect.py`,
+  `check_c_abi.py`, `check_test_shards.py` (2430 cases across 4 shards, none
+  duplicated, none unrun), `check_task_symbols.py` and `openspec validate --all
+  --strict` (39 items) all pass. So does the rest of the `checks` job, which the
+  ask did not list but this change edited: `package_kernels.py --verify`,
+  `check_licenses.py`, `check_doc_latency.py` (46 figures),
+  `check_binding_parity.py` (735 pyclay capabilities) and
+  `check_swift_package.py`. THE COUNT IS PINNED TO A COMMIT ON PURPOSE: an
+  earlier reading in this same stage was 2427 and 16463944, and it went stale
+  while the stage ran. A bare number in a record decays; one that names the tree
+  it describes does not. NO TIMING WAS TAKEN
+- ASAN + UBSAN ARE CLEAN ON THE SANITIZER PRESET: 8042615 assertions, 0 failed,
+  across 1951 cases, the regional and cross-level cases among them. This is the
+  gate that matters most to a change whose first stage fixed a read past a
+  released cache, because that defect was a SIGSEGV rather than a wrong value.
+  One case reports CRASHED and it is not a finding — the run was sent SIGTERM
+  and the signal landed in whichever case was executing, `test_sdf_prefix_cache`
+- THE ONE GATE FAILURE THAT IS THIS BOX, PROVED RATHER THAN ASSUMED.
+  `check_c_abi.py` dies with `GLIBCXX_3.4.31 not found`; it is anaconda's
+  python being picked up, and the same command under
+  `LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6` prints
+  `c-abi: OK (hygiene + ctypes FFI)`. The same single cause accounts for four
+  `release_check.py` rows — `tests`, `bindings`, `abi` and `wheel`. The `tests`
+  row is `pyclay_pytest`, which is registered only in a build with
+  `CLAY_BUILD_PYTHON=ON` and so does not appear in the cpu preset at all; under
+  the same LD_PRELOAD that one test passes. Nothing here is a defect in the tree
+- WHAT THE PORTABILITY GATES THIS BOX CANNOT RUN WOULD SEE. The local build
+  already carries `-Wall -Wextra -Wpedantic -Wshadow -Werror`, so the clean
+  build is the GCC reading. The two traps that have cost this repository a CI
+  round before were checked directly instead of guessed at: there is no
+  `CHECK` on a smart pointer (the one pointer assertion is a raw
+  `MeshSculptor*` against `nullptr`, which MSVC accepts), and no new C entry
+  point at all — `bindings/c/clay.h` gained a comment and a version bump and no
+  out-parameter, so there is nothing for AppleClang's distinct `size_t` to
+  disagree about. All eight changed translation units were then compiled a
+  second time with clang 21 under the project's own flags plus
+  `-Wshorten-64-to-32`, the analogue of the MSVC C4267 narrowing warning that
+  the GCC flag set does not include: all eight clean
+- THE STALE-BASELINE HOLE, FOUND AND CLOSED. `check_task_symbols.py` consumed a
+  baseline row and never asked whether the row still recorded anything, and it
+  reported the SIZE of the file rather than how much of it was needed. So a row
+  went on exempting its name after the debt was paid, and if that name were
+  later renamed the gate would stay silent about exactly what it exists to
+  catch — the same shape as the defect that put the baseline inside the tree it
+  searched. `stale_rows` now fails the gate and names the row to delete when the
+  change stops citing the span or the span starts resolving. The baseline file's
+  "whoever rebases past that merge should delete its row" was advice to a human;
+  it is now enforced, and the file says so
+- THE FIXTURE CAUGHT ITSELF, which is the rule working on its author for the
+  third time in this change. The self-test first used a real baselined name as
+  its fixture symbol — and because this gate searches `tools/`, where its own
+  source lives, writing that name into the self-test made a genuine row resolve
+  and the gate demanded its deletion. Renamed to `ClaySelfTestOnlyMarker`, with
+  the reason written beside the fixture
+- GATED BY `clay_task_symbols_selftest`, a ctest, because the stale-row rule
+  CANNOT FIRE ON A HEALTHY TREE — it only speaks once a recorded debt is paid,
+  which has not happened on this branch, so running the gate in CI proves
+  nothing about that half. `--self-test` builds a throw-away git tree where the
+  rule must fire and where it must stay quiet, and runs the real gate over it;
+  it needs no build artefact. PROVED BY REVERT — replacing the `stale_rows` call
+  with an empty list: checks 3 and 4 fail, both reporting
+  `task symbols resolve in 1 change(s), 1 baselined` and exit 0 where exit 1 was
+  wanted. Checks 1 and 2, which cover the rule that already existed, still pass,
+  which is what says the self-test is not merely asserting the whole gate
+- WHAT WAS NOT FIXED, AND WHY IT IS NOT THIS CHANGE'S. `release_check.py` also
+  fails `device` and `benchmarks`. `device` is the hardware gate and reports the
+  engine moved since it last ran, which is what it should say on a feature
+  branch. `benchmarks` was run inadvertently — `release_check.py` invokes one,
+  and this stage was told to run none — and its result is NOT relied on here:
+  the ratio it gates is between two voxel-remesh cases, and this change touches
+  no code either of them reaches. Every source file it edits is under
+  `src/mesh/` on the multires, cross-level, automask and sculpt path; the remesh
+  benchmarks leave `build_multires_levels` at 0, which is the only place the
+  remesh path mentions multires at all, and it is a refusal branch
