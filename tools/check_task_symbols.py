@@ -42,6 +42,15 @@ SEARCH_DIRS = ["include", "src", "tests", "bindings", "examples", "benchmarks", 
 SEARCH_FILES = ["CMakeLists.txt", "pyproject.toml", "README.md"]
 
 BASELINE = os.path.join(ROOT, "tools", "task_symbols_baseline.txt")
+# THE GATE'S OWN SOURCE IS NOT PART OF THE TREE IT SEARCHES either, and for the
+# same reason as the baseline: it lives under `tools/`, so every Python
+# identifier written in this file -- every helper name, and every fixture name
+# `--self-test` writes as a string literal -- was a resolvable "C++ symbol"
+# resolving in exactly one file, its own. A live tasks.md had ended up citing
+# this tool's private fixture names, so renaming a fixture broke an unrelated
+# change's gate. Named relative to ROOT rather than from `__file__`, so that the
+# self-test's copy of the gate is the one excluded from the self-test's tree.
+SELF = os.path.join(ROOT, "tools", os.path.basename(os.path.abspath(__file__)))
 
 BACKTICK = re.compile(r"`([^`\n]+)`")
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_~][A-Za-z0-9_]*)*(?:\(\))?$")
@@ -101,7 +110,8 @@ def haystack() -> list[str]:
     # into the baseline resolves by its own record: the row would be redundant,
     # and — the part that matters — any OTHER change could then cite the same
     # name and pass. A debt list that grants what it records is not a debt list.
-    args.append(":(exclude)" + os.path.relpath(BASELINE, ROOT))
+    # This file is excluded on the same grounds; see SELF.
+    args += [":(exclude)" + os.path.relpath(path, ROOT) for path in (BASELINE, SELF)]
     return args
 
 
@@ -117,9 +127,8 @@ def find_symbol(name: str, dirs: list[str]) -> bool:
     Requiring ONE file to contain every component is what a class and its
     member, or a namespace and its type, actually look like on disk.
 
-    No fake name is written literally here. This file is under `tools/`, which
-    the gate searches, so a name spelled out in this docstring would resolve
-    against it -- the same self-reference the baseline exclusion exists to stop.
+    This file is excluded from the haystack (see SELF), so a name spelled out
+    in this docstring resolves only if the tree really has it.
     """
     patterns = []
     for part in name.rstrip("()").split("::"):
@@ -443,6 +452,19 @@ def self_test() -> int:
         write(tasks, "- [ ] read `nested/self_test_only_absent.cpp`\n")
         expect("an invented path under a real directory must fail", 1,
                "no such file `nested/self_test_only_absent.cpp`")
+
+        # 14. THE GATE IS NOT ITS OWN HAYSTACK. `tools/` is a search directory
+        #     and the gate's source lives there, so every identifier in it --
+        #     its helpers, and the fixture names this function writes above as
+        #     string literals -- used to be a resolvable "C++ symbol" that
+        #     resolved in exactly one file, its own. That coupled a live
+        #     tasks.md to this tool's private fixture names. The copy below
+        #     puts the real source exactly where the real source sits, and the
+        #     name cited is one that exists nowhere else in this tree.
+        shutil.copyfile(gate, os.path.join(root, "tools", "check_task_symbols.py"))
+        write(tasks, "- [ ] call `tracked_basenames`\n")
+        expect("a name that lives only in the gate's own source must fail", 1,
+               "no such symbol `tracked_basenames`")
 
         for failure in failures:
             print(failure)

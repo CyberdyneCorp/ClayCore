@@ -758,22 +758,25 @@
   went on exempting its name after the debt was paid, and if that name were
   later renamed the gate would stay silent about exactly what it exists to
   catch — the same shape as the defect that put the baseline inside the tree it
-  searched. `stale_rows` now fails the gate and names the row to delete when the
-  change stops citing the span or the span starts resolving. The baseline file's
+  searched. The gate now fails and names the row to delete when the change
+  stops citing the span or the span starts resolving. The baseline file's
   "whoever rebases past that merge should delete its row" was advice to a human;
   it is now enforced, and the file says so
 - THE FIXTURE CAUGHT ITSELF, which is the rule working on its author for the
   third time in this change. The self-test first used a real baselined name as
-  its fixture symbol — and because this gate searches `tools/`, where its own
+  its fixture symbol — and because the gate searched `tools/`, where its own
   source lives, writing that name into the self-test made a genuine row resolve
-  and the gate demanded its deletion. Renamed to `ClaySelfTestOnlyMarker`, with
-  the reason written beside the fixture
+  and the gate demanded its deletion. The fixture was renamed to one nothing
+  else cites, with the reason written beside it. That was a workaround: the
+  gate now excludes its own source from the tree it searches, exactly as it
+  already excluded its baseline, so no fixture name is a resolvable symbol any
+  more — and this note no longer has to name one to say so
 - GATED BY `clay_task_symbols_selftest`, a ctest, because the stale-row rule
   CANNOT FIRE ON A HEALTHY TREE — it only speaks once a recorded debt is paid,
   which has not happened on this branch, so running the gate in CI proves
   nothing about that half. `--self-test` builds a throw-away git tree where the
   rule must fire and where it must stay quiet, and runs the real gate over it;
-  it needs no build artefact. PROVED BY REVERT — replacing the `stale_rows` call
+  it needs no build artefact. PROVED BY REVERT — replacing the stale-row call
   with an empty list: checks 3 and 4 fail, both reporting
   `task symbols resolve in 1 change(s), 1 baselined` and exit 0 where exit 1 was
   wanted. Checks 1 and 2, which cover the rule that already existed, still pass,
