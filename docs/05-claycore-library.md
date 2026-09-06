@@ -269,6 +269,127 @@ consolidation, so setting it above `1/sqrt(3)` marks every already-consolidated
 layer permanently over budget — the collapse is refused (there is nothing left
 to collapse) but the report never comes back under.
 
+### What to bake at, and whether to bake at all (ABI 0.86.0)
+
+`clay_layer_field_report` sets `advises_consolidation` when a layer's march has
+degraded and consolidation is the cure. The next call a host needs takes a
+`clay_consolidation_params` whose `cell_size` is **required and > 0**, and that
+field's own comment says why nothing here will guess it. So the engine was
+telling a host to bake and then making it invent the one number it has no basis
+for — a constant compiled into the app, or a slider put in front of a sculptor
+who cannot be expected to know what consolidation means, let alone at what
+resolution. `clay_layer_consolidation_advice` fills the struct:
+
+```c
+clay_consolidation_params params = {sizeof params};
+clay_consolidation_cost cost = {sizeof cost};   /* may be NULL */
+int32_t advises = 0;
+clay_layer_consolidation_advice(doc, layer, 0.4f, &params, &cost, &advises);
+if (advises && cost.bytes < my_budget)
+    clay_layer_consolidate(doc, layer, &params, NULL, NULL, NULL);
+```
+
+`*out_advises` is 1 only when **both** hold: the field report advises at this
+same threshold, *and* the **projected** `safe_step_scale` in `out_cost` reaches
+it. The second half is why this is not merely a params helper. A sampled volume
+declares `sqrt(3)` times its samples' Lipschitz, so a consolidated layer's step
+scale is at best `1/sqrt(3) = 0.577`; a host whose frame budget wants 0.8 is
+asking for something no bake can deliver, and handing it params would trade a
+parametric layer for a dense volume and still miss the budget. It is told 0.
+
+**Not advised means zeroed.** `out_params` and `out_cost` are cleared to the
+`struct_size` the caller declared, with that `struct_size` preserved — unlike
+`clay_layer_consolidation_state`, which leaves its cost untouched. The
+difference is what the caller does next: this hands over something it will feed
+to a *destructive* call, so the failure has to be loud. `cell_size == 0` is
+exactly the value `clay_layer_consolidation_cost` and `clay_layer_consolidate`
+already refuse, so a host that never reads `*out_advises` gets
+`CLAY_ERROR_INVALID_ARGUMENT` and an unchanged document. There is no reading of
+the zeroed struct under which anything bakes.
+
+**Where `cell_size` comes from.** The layer's own extent gives the scale and its
+own contents give the feature, both in the **local** frame the bake samples in —
+not the world-space bounds, which compose the layer transform and would be wrong
+by the layer's scale, invisibly so at identity:
+
+```
+E    = the longest side of that box
+f_i  = 4 * cell_size_i                              for a node carrying samples
+     = the smallest axis of the node's own shape box            otherwise
+       (both carried into the bake's frame by the node's scale)
+cell = clamp(min(f_i) / 4, E / 512, E / 32)
+band = 3 * cell ; padding = band ; redistancing ON
+```
+
+Four cells across the smallest feature: `kBrickDim` is 8, so that is half a
+brick. Measured on a 0.06 dab blended onto a unit form — the surface moves 27%
+of the dab's radius at 2 cells, 7.0% at 4 and 1.8% at 8, for 0.32, 1.42 and
+5.51 MB. Four is where the curve turns. **The volume arm is the load-bearing
+one**: `(4 * c) / 4 = c`, so a layer whose finest content is a volume at cell
+size `c` is advised `c` unchanged. That is the whole answer to "a number nobody
+chose" — the only degradation ever advised is `CLAY_DEGRADATION_VOLUMES`, and
+such a layer carries volumes whose resolutions somebody chose at an earlier
+bake. The advice hands the finest of them back, so a re-bake loses no detail
+already stored and gains none that was never there.
+
+**A stepping-bound Lipschitz was rejected as the source of the resolution**, and
+this is the design decision most worth knowing. `clay_field_report.lipschitz`
+bounds the step a marcher may take; it does **not** bound `|grad f|`. An
+ellipsoid declares 1 and measures 1.09 near its tips, 3.6 for a needle, and
+`taper`, `wrap_around` and `bend_curve` exceed their declared factors outright.
+A sampling rate derived from it would look principled and be unsound exactly on
+the shapes that motivate a bake. The Lipschitz enters the *advice* instead — as
+`out_cost.sample_lipschitz`, measured on the samples a real bake produced — and
+never the resolution.
+
+**What it does not promise.**
+
+- **Not optimal, and not better than your own number.** It knows the layer's
+  extent and contents; it does not know your viewport, your zoom, your device's
+  memory or what the artist is about to do next. `out_params` is a struct you
+  own so that you can override it.
+- **Not stable.** Adding one small item changes the smallest feature and
+  therefore the cell size. A host that means to re-bake the same box later must
+  *store* the params rather than re-ask.
+- **Not a memory bound.** The `E/512`–`E/32` clamp bounds the *grid*. A banded
+  volume stores only surface bricks, so the bytes follow surface area:
+  `out_cost.bytes` is the memory, and it is the number to refuse on.
+- **Not a fidelity claim.** A bake at the advised cell size still discards every
+  parameter of every item it absorbs and every colour but the first. The
+  analytic arm reads a node's own box, so a fillet finer than either shape that
+  made it is not seen: heavy blends are advised coarse.
+- **No pinned region.** Derived from the layer's *current* bounds, so re-asking
+  after an advised bake advises a slightly larger box each time. A host
+  consolidating the same region repeatedly must pin the region itself.
+- **Not cheap, and a NULL `out_cost` is not a fast path.** `*out_advises` is
+  *defined* by the projection, so the sampling pass happens either way. This is
+  not a per-frame call.
+
+It bakes nothing and changes nothing, and that includes an instance layer's
+sharing: `clay_layer_consolidate` severs a shared edit list before it bakes and
+this does not, for the same reason `clay_layer_consolidation_cost` does not.
+Asking whether a bake is *advisable* must never be the thing that unlinks a
+subtool.
+
+Refused before any sampling: `CLAY_ERROR_NOT_FOUND` for a layer that is not
+there — "no such layer" and "not advised" are different answers — and
+`CLAY_ERROR_INVALID_ARGUMENT` for a null `doc`, `out_params` or `out_advises`,
+for a `struct_size` below either original layout, and for
+`advise_below_step_scale <= 0`. The last deviates from
+`clay_layer_field_report`, where zero legitimately means "measure without asking
+for advice": every output here is defined against a threshold, so a zero would
+buy a full sampling pass to be told nothing. A non-SDF, protected or empty layer
+is **not** an error — it succeeds, advises nothing and zeroes, following
+`clay_layer_warp_cost_get`'s rule that a host walking a stack of mixed kinds
+should not have to special-case them.
+
+**The engine still never bakes on its own**, and that is the settled answer to
+the standing question of automatic background consolidation. Consolidation is
+destructive; an engine firing it on a background thread would be mutating a
+document behind a host that may be mid-undo-group or mid-save, and deciding on
+an artist's behalf that a sphere's radius is no longer editable. This is the
+recommendation, not the action.
+
 ## 4. Operation inventory (the complete SDF vocabulary)
 
 Everything below ships in `clay::kernel` with CPU reference + per-backend parity tests. Items marked *(bound)* propagate non-exactness through the tree per principle 3.
@@ -874,6 +995,134 @@ Five consequences worth stating, because each is a question a host will ask:
 `content_source` is the following end and `share_count` is how many layers hold
 the list, so the source of a link is distinguishable from an ordinary layer.
 
+### Dropping a subtool on the floor (ABI 0.86.0)
+
+Three placements a host cannot write itself correctly:
+
+```c
+clay_layer_snap_to_ground(doc, layer, 0.0f);  /* low face of the box -> y = 0 */
+clay_layer_centre_bounds(doc, layer);         /* centre of the box -> origin  */
+clay_layer_zero_to_origin(doc, layer);        /* translation -> (0, 0, 0)     */
+```
+
+Each writes the placement's **translation and nothing else**, as one
+`clay_document_set_layer_transform_nonuniform`'s worth of change: one command,
+one undo step, one invalidation.
+
+**Why they are in the library rather than in the host.** Written outside, the
+read-modify-write goes through a pair that traps twice.
+`clay_document_layer_transform` *refuses* a layer carrying three different
+per-axis factors, so the read half cannot begin on a subtool a gizmo squashed;
+and `clay_document_set_layer_transform` *clears* the per-axis scale, so a host
+that got past the first trap by reading the uniform factor elsewhere silently
+unsquashes the model — the artist presses "snap to floor" and the shape changes.
+The correct composition is the per-axis pair with the rotation and all three
+factors carried through: four calls, one refusal and one clearing rule, for a
+menu item.
+
+**Which box they read.** `clay_layer_bounds`: the tight world-space box over all
+three representations, with no blend or chain-pad dilation — the influence bound
+would leave the model hovering by exactly that dilation. It is still not the
+silhouette, in three ways that will each produce a bug report:
+
+- a **SUBTRACT** item contributes its own box, so a layer whose lowest visible
+  item subtracts lands *that* box on the plane and the material stops higher up;
+- a **smooth blend** can bulge past it — rounding is dilated into the box, a
+  smooth union's bulge is not;
+- **hidden items are excluded**, which is the intended reading rather than a
+  limitation (the placement follows the silhouette the artist can see) and means
+  hiding the lowest item moves where the next press lands.
+
+Marching the surface for its true lowest point was the alternative: a bake or a
+raycast sweep per press, no exact answer for a smooth field either, and the
+slowest call in a transform panel. Rejected.
+
+**An instance is placed, never severed.** What instancing shares is the edit
+list; a placement is not shared. Unlike `clay_layer_consolidate`, which severs
+because a bake *replaces* an edit list, there is nothing here to sever — placing
+one instance is the gesture instancing exists for. Two instances of one edit
+list snap to the same floor independently and both land.
+
+**What they refuse**, and it differs per call:
+
+| condition | snap | centre | zero |
+|---|---|---|---|
+| no layer carries the id | `NOT_FOUND` for all three | | |
+| ghosted or locked | `INVALID_ARGUMENT`, before any bound is read | | |
+| a placement gesture is open | `INVALID_ARGUMENT`, as for every other edit | | |
+| layer holds no material | `INVALID` | `INVALID` | **accepted** |
+| layer carries a radial mode | `INVALID` | `INVALID` | **accepted** |
+| layer is unbounded | `INVALID` | `INVALID` | **accepted** |
+| `ground_y` not finite | `INVALID` | — | — |
+| box degenerate in any axis | accepted for all three | | |
+| layer hidden | accepted for all three | | |
+
+Empty is **refused rather than silently doing nothing**: a host greying the menu
+item out wants to know, and "already in place" and "there is nothing here" are
+the two states an artist most needs told apart. The code is
+`INVALID_ARGUMENT` so that `NOT_FOUND` keeps meaning "no layer carries this id"
+alone. A **radial** layer is refused because `clay_layer_bounds` carries a
+layer's mirror copies and not its radial ones, so a placement computed from that
+box would drop the original onto the plane with its copies already through it —
+a wrong answer rather than a loose one, and invisibly so. An **unbounded** layer
+is refused for the arithmetic: a plane reports faces at ±`FLT_MAX` and every
+placement derived from one overflows to an infinite position and a tape of NaNs.
+A **degenerate** box is accepted, because nothing here divides by an extent and a
+flat layer is exactly the one "drop it on the floor" is pressed on.
+
+**What they do not promise.**
+
+- **Not bit-idempotent.** Each states a *total* placement, so pressing twice is
+  the same gesture as pressing once — but the second press recomputes the box
+  from an already-moved layer, and `f + (p + (g - (f + p)))` is not `g` in
+  float. The second press lands within one rounding at the coordinate's
+  magnitude; asserting bit equality at large coordinates will be flaky.
+- **A press that moves nothing still costs an undo step.** Suppressing it needs
+  a tolerance in world units this ABI would have to name and defend, and a host
+  that cannot predict how many undos its own button cost is worse off.
+- **No delta is returned.** The change is rigid, so a host may transform its
+  drawn mesh instead of refilling — but it works the matrix out itself, by
+  reading `clay_document_layer_transform_nonuniform` before and after and
+  subtracting the two positions, which is exact because the change is a pure
+  translation.
+
+**`centre_bounds` is named for the box, and that name is deliberate.** The
+roadmap row that asked for this spelled it *centre-mass*. The engine holds no
+density, so the call's answer is identical for a hollow shell and a solid of the
+same extent. The occupancy-weighted centroid that would earn the other name is
+not merely more expensive, it is **not expressible by this signature**: a
+sampled centroid has no answer until someone names a cell size — the one
+`clay_consolidation_params` carries — and `(doc, layer)` has nowhere to put it,
+so an implementation would have to invent a resolution the answer silently
+depends on. It would also be a CPU bake per press, have no field at all for a
+mesh layer until rasterized, and move when the artist changed the layer's voxel
+size, which changes nothing about where the shape is.
+
+A **third** reading of "centre" is not this call either: moving the *pivot* to
+the content's centre without moving the content, so the gizmo stops hanging off
+the subtool. That cannot be done at layer level — keeping the content still
+while the layer's origin moves means shifting every item's local placement by
+the inverse, which is item-level work on the shared edit list and on an instance
+would move every other instance.
+
+`zero_to_origin` **reads no bounds**, which is what makes it a different call
+rather than a special case of the centring one: it is the only one an empty, a
+radial or an unbounded layer can take. It leaves the rotation and both scale
+factors exactly as they were — the full reset already exists as one
+`clay_document_set_layer_transform_nonuniform` with an identity, and a
+convenience call that quietly threw away an authored rotation would be the most
+expensive undo in the set.
+
+Layer scope is the only scope: it is what every other whole-subtool property
+already has. There is no item-level or whole-document form, and adding one later
+re-lays out nothing — but an item-level snap needs an answer this does not have,
+namely what a snap means for a selection spanning a group whose children's
+placements are relative to it. A whole-document snap is N layers inside
+`clay_document_begin_undo_group`.
+
+In pyclay: `layer.snap_to_ground(y)`, `layer.centre_bounds()`,
+`layer.zero_to_origin()`, raising where the C ABI refuses.
+
 ### History: one undo, and exactly what it covers
 
 `correct-the-undo-scope` found that the library had **three unrelated history
@@ -1105,19 +1354,39 @@ shift when you trim, so a failed write is retried by asking again, and a host
 that asks below the trimmed floor gets nothing rather than a silently shorter
 history — `journal_range()` is how it finds out.
 
-#### The two rules that keep a recovery honest
+#### The three rules that keep a recovery honest
 
 **A journal this build does not understand is refused**, not partly read. A
 recovery that silently drops what it could not parse is worse than none, because
 the user cannot see the gap. Events applied before a bad one stand — replay is
 not a transaction — so replay onto a copy if you want all-or-nothing.
 
+**A journal replayed onto the wrong snapshot is refused too**, with
+`CLAY_ERROR_SNAPSHOT_MISMATCH` (a `ValueError` naming the pair, in pyclay) and
+*nothing applied*. A journal carries a hash of the bytes it continues from,
+stamped by `to_bytes` / `save` on one side and `load_bytes` / `load` on the
+other, so you get the check by writing the ordinary recovery path. The two
+refusals mean opposite things: unreadable says discard the file, mismatched says
+the file is fine and you handed it the wrong snapshot.
+
+> It names the snapshot **current at the index you asked from**, not the last
+> one you took — so serializing again to compare sizes does not repoint a
+> journal you already have. What it does *not* catch is replaying the same
+> journal twice onto the same snapshot: the indices are yours to keep. It is
+> also not a checksum, and journals written before 0.86.0 name no snapshot and
+> are never refused for the pair.
+
 **Replay stops at a barrier rather than skipping it.** A barrier is an operation
-nothing can reproduce — dropping a resolution level, removing a sculpt layer,
-or anything a host does that the engine never sees. (Mask edits *were* one, and
-are not any more.) Replay returns success with the flag set, and a host that
-sees it needs a *fresher snapshot*, not a longer journal. Continuing past it would hand back a document quietly missing that
-operation's effect.
+nothing can reproduce — dropping a voxel resolution level, or anything a host
+does that the engine never sees. (Mask edits *were* one, and are not any more.)
+Replay returns success with the flag set, and a host that sees it needs a
+*fresher snapshot*, not a longer journal. Continuing past it would hand back a
+document quietly missing that operation's effect.
+
+**Ask before you need it**: `journal_barrier(from)` (`clay_document_journal_barrier`)
+reports the first such operation in the log and where, so you re-snapshot while
+you still can. Learning it from a replay means learning it during the recovery,
+which is the one moment the answer is useless.
 
 A journal therefore carries an ordinary sculpting session end to end, mask
 edits included.
@@ -1704,6 +1973,21 @@ doc.set_layer_visible(layer.id, False)     # exact and reversible
 doc.set_layer_transform(layer.id, position=(0, 4, 0))
 doc.move_layer(layer.id, 0)
 doc.remove_layer(layer.id)
+
+# three placements written once, on the inside: each writes the TRANSLATION and
+# nothing else, as one command and one undo step. Done outside, the read half
+# refuses a per-axis-scaled layer and the write half CLEARS the per-axis scale,
+# so "snap to floor" silently unsquashes the subtool.
+layer.snap_to_ground(0.0)   # low face of the tight world box -> y = 0
+layer.centre_bounds()       # centre of that box -> the origin
+layer.zero_to_origin()      # translation -> (0, 0, 0); rotation and scale kept
+# They raise where the C ABI refuses: an empty, radial or unbounded layer for
+# the first two — empty is refused rather than a silent no-op, because "already
+# in place" and "there is nothing here" are the two states an artist most needs
+# told apart. `zero_to_origin` reads no bounds and takes all three.
+# `centre_bounds` is named for the BOX: the engine holds no density, so the
+# occupancy-weighted centroid the name "centre-mass" implies has no answer until
+# someone names a cell size, and this signature has nowhere to put one.
 ```
 
 A **group** is a node whose children compile as one sub-expression, so an op
@@ -1982,6 +2266,24 @@ layer.field_report(advise_below_step_scale=0.25)
 # the aggregate cannot tell them apart. ADVISORY: nothing here bakes, and the
 # threshold is yours, because a tolerance for marching cost belongs to a
 # viewport and a frame budget rather than to the artwork.
+
+layer.consolidation_advice(advise_below_step_scale=0.4)   # AT WHAT, and what it costs
+# -> {'advises': bool, 'params': {...} or None, 'cost': {...} or None}
+# The recommendation `advises_consolidation` above leaves open: `field_report`
+# says a bake is the cure, and `consolidate` then requires a `cell` nothing will
+# guess. `params` is keyed to `consolidate`'s own arguments, so
+# `layer.consolidate(**advice["params"])` is the whole round trip; both `params`
+# and `cost` are None when nothing is advised, which raises at the next call
+# rather than baking at a resolution nobody chose.
+# `advises` is True only when the report advises AND the PROJECTED step scale
+# reaches the threshold — a sampled volume declares sqrt(3) times its samples'
+# Lipschitz, so 0.577 is the ceiling and asking for 0.8 gets False.
+# `cell` is four cells across the layer's smallest feature, clamped to
+# [E/512, E/32] of its longest side. The DECLARED Lipschitz is deliberately not
+# the source: it bounds a marcher's STEP, not |grad f|, so a rate derived from
+# it is unsound exactly on the shapes that motivate a bake.
+# NOT optimal, NOT stable across edits, NOT a memory bound (cost['megabytes']
+# is), and NOT cheap — a full sampling pass, so not a per-frame call.
 
 layer.consolidation_cost(cell=0.03, band=0.12)   # what it WOULD cost, no change
 # -> {'megabytes', 'brick_count', 'sample_count', 'cell_size', 'band',

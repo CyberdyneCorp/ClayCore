@@ -66,4 +66,28 @@ PlacementChange layer_placement_change(const Layer& layer, const math::Transform
     return change;
 }
 
+// -- placements computed from a layer's own content --------------------------
+
+cfloat3 ground_snap_delta(const math::Aabb& content, float ground_y) {
+    return kernel::cf3(0.0f, ground_y - content.min.y, 0.0f);
+}
+
+cfloat3 origin_centre_delta(const math::Aabb& content) {
+    const cfloat3 c = content.center();
+    return kernel::cf3(-c.x, -c.y, -c.z);
+}
+
+cfloat3 origin_translation_delta(const Layer& layer) {
+    const cfloat3 p = layer.xform.position;
+    // `x + (-x)` is exactly zero for every finite float, so the position this
+    // lands on is the origin and not something a hair off it.
+    return kernel::cf3(-p.x, -p.y, -p.z);
+}
+
+SetLayerTransformCmd translated_layer_command(const Layer& layer, cfloat3 world_delta) {
+    SetLayerTransformCmd cmd{layer.id, layer.xform, layer.scale_axes};
+    cmd.xform.position = layer.xform.position + world_delta;
+    return cmd;
+}
+
 }  // namespace clay::scene

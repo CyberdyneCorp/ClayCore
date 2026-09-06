@@ -270,6 +270,39 @@ clay_result fail(clay_result code, std::string detail) {
     return code;
 }
 
+// A host-supplied enum PARAMETER, read as an integer without ever loading it as
+// its enum type — which is what makes an out-of-range value rejectable at all.
+//
+// This is not pedantry. An unscoped C enum with no fixed underlying type has a
+// value range of the smallest bit-field that holds its enumerators: 0..3 for
+// clay_backend_op's three constants, 0..7 for clay_surface_measure's six. A
+// host is free to pass 99 — clay.h documents the answer as
+// CLAY_ERROR_INVALID_ARGUMENT — but `switch (op)` LOADS the parameter as that
+// type before any case label is compared, and that load is the undefined
+// behaviour. Under -fsanitize=enum it aborts the process, so the branch the
+// header promises was unreachable by construction. Copying the bytes out is the
+// only way to reach it. Found by the ASan+UBSan job, not by reading the code.
+//
+// The two rejected alternatives, since both look simpler than this:
+//   - Give the enums a fixed underlying type in clay.h (`enum E : int32_t`).
+//     That is C++11 and C23; clay.h must compile as C17, which check_c_abi.py
+//     holds it to, so this is not available.
+//   - Declare the parameters int32_t. ABI-identical on every supported target,
+//     but it moves the type check out of the host's own compiler, where a
+//     wrong constant is caught for free and before it ships.
+//
+// Callers range-check the result and THEN switch on the enum, so the switch
+// still loads a value the type can hold and -Wswitch still catches an
+// enumerator added with no case for it.
+template <typename E>
+std::int32_t enum_argument(const E& e) {
+    static_assert(sizeof(E) == sizeof(std::int32_t),
+                  "clay's C enums are int-sized on every supported target");
+    std::int32_t raw = 0;
+    std::memcpy(&raw, &e, sizeof raw);
+    return raw;
+}
+
 // Enum validation, and at the same time the drift guard: the switches list
 // every engine enumerator and have no default, so adding one to the scene
 // model without a clay.h entry is a -Werror compile error here.
@@ -2848,8 +2881,22 @@ eval::Status raycast_visible(eval::Backend* b, const scene::Tape& tape, const fl
 // Surface measures. FILE SCOPE, above the first extern "C" — a helper defined
 // inside that block is what broke the macOS and Windows builds in #235, and GCC
 // does not warn about it.
-clay_result to_measure(clay_surface_measure in, brush::SurfaceMeasure* out) {
-    switch (in) {
+// Takes the RAW argument, not a clay_surface_measure, and that is the whole
+// point: passing an out-of-range enum BY VALUE is already the undefined load,
+// so `to_measure(measure, &m)` aborted in the CALLER under -fsanitize=enum
+// before this function got a chance to reject anything. The range check has to
+// happen before the value crosses a call boundary. Callers pass
+// enum_argument(measure); see enum_argument for why the memcpy is needed.
+//
+// The bound names the last enumerator rather than a COUNT sentinel, because
+// adding one to a PUBLIC enum is a header change either way, and a sentinel in
+// clay.h would be a value a host could pass.
+clay_result to_measure(std::int32_t raw, brush::SurfaceMeasure* out) {
+    if (raw < CLAY_MEASURE_CURVATURE || raw > CLAY_MEASURE_THICKNESS)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown surface measure");
+    // In range, so reading it as the enum is defined; the switch keeps -Wswitch
+    // pointing at a new enumerator with no case for it.
+    switch (static_cast<clay_surface_measure>(raw)) {
         case CLAY_MEASURE_CURVATURE: *out = brush::SurfaceMeasure::Curvature; return CLAY_OK;
         case CLAY_MEASURE_CAVITY: *out = brush::SurfaceMeasure::Cavity; return CLAY_OK;
         case CLAY_MEASURE_CONVEXITY: *out = brush::SurfaceMeasure::Convexity; return CLAY_OK;
@@ -4543,13 +4590,21 @@ void clay_blob_destroy(clay_blob* blob) { delete blob; }
 
 clay_result clay_document_save(const clay_document* doc, const char* path) {
     if (!doc || !path) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or path");
-    return from_io(io::save_clayspace_file(doc->doc, path));
+    const io::IoStatus s = io::save_clayspace_file(doc->doc, path);
+    // These bytes are a snapshot the journal from here on can be paired with,
+    // whether the host meant them as a crash snapshot or as an ordinary save.
+    // Noted only on success: a failed write left no snapshot to name.
+    if (s.ok() && doc->undo) doc->undo->note_snapshot(doc->doc.document.snapshot_id);
+    return from_io(s);
 }
 
 clay_result clay_document_save_memory(const clay_document* doc, clay_blob** out_blob) {
     if (!doc || !out_blob) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out_blob");
     *out_blob = nullptr;
     *out_blob = new clay_blob{io::save_clayspace(doc->doc)};
+    // See clay_document_save: the bytes just produced are a snapshot the
+    // journal from here on continues from.
+    if (doc->undo) doc->undo->note_snapshot(doc->doc.document.snapshot_id);
     return CLAY_OK;
 }
 
@@ -4664,6 +4719,17 @@ clay_result clay_document_journal_range(const clay_document* doc, size_t* out_fi
     return CLAY_OK;
 }
 
+clay_result clay_document_journal_barrier(const clay_document* doc, size_t from,
+                                          int32_t* out_has_barrier, size_t* out_at) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
+    std::size_t at = 0;
+    const bool found = doc->undo->journal_barrier_after(from, &at);
+    if (out_has_barrier) *out_has_barrier = found ? 1 : 0;
+    if (found && out_at) *out_at = at;
+    return CLAY_OK;
+}
+
 clay_result clay_document_journal_trim(clay_document* doc, size_t upto) {
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
     if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
@@ -4683,6 +4749,16 @@ clay_result clay_document_replay_journal(clay_document* doc, const uint8_t* data
     session::History::ReplayResult result;
     const bool ok = doc->undo->replay(data, size, doc->doc.document, doc->grid_for(),
                                       doc->mesh_for(), &result, doc->mask_for());
+    // The pair was wrong and NOTHING was applied, so this returns before the
+    // invalidation below: the document is byte-identical, and saying so is the
+    // difference between "find the other snapshot" and "your document is now
+    // half a recovery".
+    if (result.snapshot_mismatch)
+        return fail(CLAY_ERROR_SNAPSHOT_MISMATCH,
+                    "this journal was taken against a different snapshot: it names " +
+                        std::to_string(result.journal_snapshot_id) + " and this document is " +
+                        std::to_string(doc->doc.document.snapshot_id) +
+                        " (0 meaning it was never saved or loaded). Nothing was applied.");
     if (out_applied) *out_applied = result.applied;
     if (out_stopped_at_barrier) *out_stopped_at_barrier = result.stopped_at_barrier ? 1 : 0;
     // Replay writes straight onto the document rather than through apply_edit,
@@ -4784,6 +4860,12 @@ clay_result clay_document_enable_undo(clay_document* doc) {
         doc->undo->set_groups_resolver([doc]() -> voxel::GroupField* {
             return doc->doc.groups ? &*doc->doc.groups : nullptr;
         });
+        // A document LOADED from bytes already knows which snapshot it is, and
+        // the journal that starts here continues from exactly that one. Without
+        // this seed the whole recovery path — load a snapshot, enable undo,
+        // journal, crash, replay — would produce a journal naming no snapshot
+        // and the pair would go unchecked (survive-a-crash 2.1).
+        doc->undo->note_snapshot(doc->doc.document.snapshot_id);
     }
     return CLAY_OK;
 }
@@ -5716,6 +5798,119 @@ clay_result clay_document_layer_transform_nonuniform(const clay_document* doc, c
         out_scale[2] = l->xform.scale * l->scale_axes.z;
     }
     return CLAY_OK;
+}
+
+// -- placements computed from a layer's own content --------------------------
+//
+// The three convenience placements. The arithmetic and the WRITE POLICY live in
+// scene::translated_layer_command, so these entry points are their refusal set
+// and their choice of box and nothing else.
+//
+// The refusals are taken in the order design.md sets, which is the order that
+// costs the least: a locked layer never pays for a bounds walk.
+
+namespace {
+
+// The document, the id and the protection flags -- everything the three share.
+//
+// The GESTURE guard is deliberately not repeated here: apply_edit already
+// refuses every edit while a placement gesture is open, including edits to
+// other layers, and a second copy of that refusal is a second wording to drift.
+// The cost of leaving it there is one bounds walk on a call that was going to
+// be refused anyway, which happens only mid-drag.
+clay_result computed_placement_layer(const clay_document* doc, clay_layer_id id,
+                                     const scene::Layer** out_layer) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* l = doc->doc.document.find_layer(id);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    if (l->protected_from_edits())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    std::string("layer ") + std::to_string(id) + " is " +
+                        (l->ghost ? "ghosted" : "locked") + " and takes no edits");
+    *out_layer = l;
+    return CLAY_OK;
+}
+
+// The box the two content-reading rules compute from, with the three states it
+// can be in that no placement can be derived from.
+//
+// THE SAME BOX clay_layer_bounds answers -- tight, all three representations,
+// no blend or chain-pad dilation. Not the influence bound: snapping a dilated
+// box to the floor leaves the model hovering by exactly that dilation.
+clay_result computed_placement_bounds(const clay_document* doc, const scene::Layer& layer,
+                                      math::Aabb* out_box) {
+    // The tight bound carries a layer's MIRROR copies and stops there; the
+    // influence path emits the radial ones and this path does not. So on a
+    // radial layer the box describes the un-arrayed item, and a placement
+    // computed from it would drop the ORIGINAL onto the floor with its copies
+    // already through it -- plausible and wrong. Refused with the mode named
+    // rather than answered, exactly as clay_layer_lattice_gizmo refuses a cage
+    // it cannot record.
+    if (layer.radial_count > 1)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "layer " + std::to_string(layer.id) + " carries a radial mode (count " +
+                        std::to_string(layer.radial_count) +
+                        "): its bounds do not cover the radial copies, so no placement "
+                        "computed from them would be right");
+    const math::Aabb box = layer_world_bounds(doc, layer);
+    if (box.empty())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "layer " + std::to_string(layer.id) +
+                        " holds no material: it has no low face and no centre");
+    // NOT in design.md's table, and found by building it. An UNBOUNDED layer --
+    // one whose lowest visible root is a plane or an infinite cylinder --
+    // answers Aabb::infinite(), whose faces are +/-FLT_MAX rather than an
+    // infinity. Every arithmetic below it overflows to an infinite position,
+    // and a layer placed at infinity compiles a tape of NaNs. A degenerate box
+    // is accepted, as the table says; an unbounded one cannot be.
+    if (!box_is_finite(box) || box.is_infinite())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "layer " + std::to_string(layer.id) +
+                        " is unbounded: a plane or an infinite cylinder has no low face and "
+                        "no centre to place");
+    *out_box = box;
+    return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_layer_snap_to_ground(clay_document* doc, clay_layer_id layer, float ground_y) {
+    const scene::Layer* l = nullptr;
+    clay_result r = computed_placement_layer(doc, layer, &l);
+    if (r != CLAY_OK) return r;
+    // Before the bounds walk, for the same reason the protection check is:
+    // a malformed argument should cost nothing.
+    if (!std::isfinite(ground_y))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "ground height must be finite");
+    math::Aabb box;
+    r = computed_placement_bounds(doc, *l, &box);
+    if (r != CLAY_OK) return r;
+    const kernel::cfloat3 delta = scene::ground_snap_delta(box, ground_y);
+    return apply_edit(doc, scene::Command{scene::translated_layer_command(*l, delta)},
+                      "layer not found");
+}
+
+clay_result clay_layer_centre_bounds(clay_document* doc, clay_layer_id layer) {
+    const scene::Layer* l = nullptr;
+    clay_result r = computed_placement_layer(doc, layer, &l);
+    if (r != CLAY_OK) return r;
+    math::Aabb box;
+    r = computed_placement_bounds(doc, *l, &box);
+    if (r != CLAY_OK) return r;
+    const kernel::cfloat3 delta = scene::origin_centre_delta(box);
+    return apply_edit(doc, scene::Command{scene::translated_layer_command(*l, delta)},
+                      "layer not found");
+}
+
+clay_result clay_layer_zero_to_origin(clay_document* doc, clay_layer_id layer) {
+    const scene::Layer* l = nullptr;
+    clay_result r = computed_placement_layer(doc, layer, &l);
+    if (r != CLAY_OK) return r;
+    // No bounds are read, which is the whole difference between this rule and
+    // the other two: an empty layer and a radial layer both take it.
+    const kernel::cfloat3 delta = scene::origin_translation_delta(*l);
+    return apply_edit(doc, scene::Command{scene::translated_layer_command(*l, delta)},
+                      "layer not found");
 }
 
 clay_result clay_set_layer_mirror(clay_document* doc, clay_layer_id layer_id, int32_t axis_x,
@@ -7937,6 +8132,13 @@ clay_result clay_backend_supports(const char* backend, clay_backend_op op,
     if (!b)
         return fail(CLAY_ERROR_NOT_FOUND, std::string("backend not registered: ") + backend);
     const eval::BackendCaps caps = b->caps();
+    // Range-check the raw argument before the switch reads it as the enum; see
+    // enum_argument. It sits AFTER the registry lookup on purpose: an unknown
+    // backend asked about an unknown op keeps answering CLAY_ERROR_NOT_FOUND,
+    // which is the precedence the shipped call already had.
+    const std::int32_t raw = enum_argument(op);
+    if (raw < CLAY_BACKEND_OP_EVAL_POINTS || raw > CLAY_BACKEND_OP_RAYCAST)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown backend operation");
     switch (op) {
         case CLAY_BACKEND_OP_EVAL_POINTS: *out_supported = caps.eval_points ? 1 : 0; return CLAY_OK;
         case CLAY_BACKEND_OP_EVAL_GRID: *out_supported = caps.eval_grid ? 1 : 0; return CLAY_OK;
@@ -8167,6 +8369,56 @@ clay_result clay_layer_consolidation_cost(const clay_document* doc, clay_layer_i
                     "nothing to consolidate: the layer is empty, unbounded, or the region "
                     "contains no surface");
     write_cost(cost, out_cost);
+    return CLAY_OK;
+}
+
+clay_result clay_layer_consolidation_advice(const clay_document* doc, clay_layer_id layer_id,
+                                            float advise_below_step_scale,
+                                            clay_consolidation_params* out_params,
+                                            clay_consolidation_cost* out_cost,
+                                            int32_t* out_advises) {
+    if (!doc || !out_params || !out_advises)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document, params or verdict");
+    // Before any sampling. clay_layer_field_report lets a zero threshold mean
+    // "measure without asking for advice"; here every output is defined
+    // against the threshold, so a zero would buy a full sampling pass to be
+    // told nothing.
+    if (!(advise_below_step_scale > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "advise_below_step_scale must be > 0: every output of this call is defined "
+                    "against a threshold");
+    const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
+    // "No such layer" and "not advised" are different answers.
+    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+
+    // Both descriptors are validated and zeroed BEFORE the bake: a caller
+    // whose struct_size is wrong is refused without paying for a sampling
+    // pass, and the not-advised answer is then already written.
+    clay_consolidation_params probe;
+    clay_result r = read_desc(out_params, kConsolidationParamsOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    write_desc(out_params, out_params->struct_size, clay_consolidation_params{});
+    if (out_cost) {
+        r = begin_out_cost(out_cost);
+        if (r != CLAY_OK) return r;
+    }
+    *out_advises = 0;
+
+    // The sampling runs even when out_cost is NULL: the verdict is DEFINED by
+    // the projection, so a call that skipped it would answer a weaker question
+    // under the same name and a host could not tell which it got.
+    const scene::ConsolidationAdvice advice =
+        scene::consolidation_advice(*layer, advise_below_step_scale, eval::pooled_bake_eval());
+    if (!advice.advises) return CLAY_OK;
+
+    clay_consolidation_params filled{};
+    filled.cell_size = advice.params.cell_size;
+    filled.band = advice.params.band;
+    filled.padding = advice.params.padding;
+    filled.skip_redistance = advice.params.skip_redistance ? 1 : 0;
+    write_desc(out_params, out_params->struct_size, filled);
+    if (out_cost) write_cost(advice.cost, out_cost);
+    *out_advises = 1;
     return CLAY_OK;
 }
 
@@ -10832,7 +11084,7 @@ clay_result clay_measure_points(const clay_document* doc, clay_surface_measure m
     clay_result r = read_measure_params(params, &settings);
     if (r != CLAY_OK) return r;
     brush::SurfaceMeasure m;
-    r = to_measure(measure, &m);
+    r = to_measure(enum_argument(measure), &m);
     if (r != CLAY_OK) return r;
 
     std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
@@ -10863,7 +11115,7 @@ clay_result clay_mask_from_surface(const clay_document* doc, clay_surface_measur
     clay_result r = read_measure_params(params, &settings);
     if (r != CLAY_OK) return r;
     brush::SurfaceMeasure m;
-    r = to_measure(measure, &m);
+    r = to_measure(enum_argument(measure), &m);
     if (r != CLAY_OK) return r;
 
     std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
@@ -11371,6 +11623,19 @@ clay_result clay_voxel_drop_level(clay_voxel_grid* grid) {
     if (r != CLAY_OK) return r;
     if (!g->drop_level())
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "a grid always has at least one level");
+    // A BARRIER, because nothing can reproduce this. The level's cells are
+    // gone, the steps recorded against it name coordinates at a resolution
+    // that no longer exists, and a journal replayed across it would rebuild a
+    // grid that still HAS the level — a recovery quietly missing the
+    // operation, which is the failure the barrier mechanism exists to
+    // prevent. It was the documentation's own example of one and recorded
+    // nothing until this: `record_barrier`'s only caller was the mask step,
+    // and masks-in-the-history took that one away.
+    //
+    // A standalone grid is not in a document and records nothing, exactly as
+    // it does for a sculpt step.
+    if (grid->doc && grid->doc->undo)
+        grid->doc->undo->record_barrier("dropped a voxel resolution level");
     return CLAY_OK;
 }
 

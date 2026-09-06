@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 85
+#define CLAY_ABI_MINOR 86
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -52,7 +52,22 @@ typedef enum clay_result {
      * the HOST declared before the call, and distinct from every fault code.
      * A cancelled operation leaves everything it was given exactly as it found
      * it — see clay_cancel_token. */
-    CLAY_ERROR_CANCELLED = 9
+    CLAY_ERROR_CANCELLED = 9,
+    /* A journal was paired with a snapshot it was not taken against, and
+     * clay_document_replay_journal refused it. APPENDED, so nothing compiled
+     * against an older header changes meaning.
+     *
+     * Distinct from CLAY_ERROR_INVALID_ARGUMENT, which replay uses for bytes
+     * it could not read, because the two mean opposite things to a host: an
+     * unreadable journal is a file to discard, while a mismatched one is a
+     * perfectly good file handed the wrong snapshot — the recovery is still
+     * there if the host can find the snapshot it belongs to. Retrying one is a
+     * spin; retrying the other with the right document works.
+     *
+     * It is also the ONE replay refusal that leaves the document byte-
+     * identical: the identity is in the journal's header, so nothing has been
+     * applied when it is raised. */
+    CLAY_ERROR_SNAPSHOT_MISMATCH = 10
 } clay_result;
 
 /* Library/ABI version (see c-abi spec). Compare majors at init — and while
@@ -883,6 +898,28 @@ clay_result clay_document_journal_since(const clay_document* doc, size_t from,
 clay_result clay_document_journal_range(const clay_document* doc, size_t* out_first,
                                         size_t* out_next);
 
+/* Does the log from `from` onward contain an operation nothing can reproduce,
+ * and where. *out_has_barrier is 0 or 1; *out_at receives the absolute index of
+ * the FIRST such event when there is one, and is untouched when there is not.
+ * Either out pointer may be NULL.
+ *
+ * THIS IS THE CALL THAT SAYS "SNAPSHOT AGAIN". Replay stops at a barrier, so a
+ * host that only ever learns about one from clay_document_replay_journal learns
+ * it during the recovery — the single moment when the answer is useless,
+ * because the session it would have re-snapshotted is already gone. Ask this
+ * after taking the journal; a 1 means appending can no longer reconstruct the
+ * session and the document must be snapshotted again.
+ *
+ * WHAT IT DOES NOT PROMISE. It reads THIS document's log, not a journal blob:
+ * a recovery file from a previous session is opaque here, and the only way to
+ * learn what is in one is to replay it. Trimming moves the floor, so a barrier
+ * below clay_document_journal_range's *out_first is gone from the answer as
+ * well as from the log — ask before you trim. And it is a property of the log,
+ * not of the history: undoing past a barrier is a separate question that
+ * clay_document_undo_state's depth answers. */
+clay_result clay_document_journal_barrier(const clay_document* doc, size_t from,
+                                          int32_t* out_has_barrier, size_t* out_at);
+
 /* Drop events below `upto`, once those bytes are durable. Indices do not
  * shift. */
 clay_result clay_document_journal_trim(clay_document* doc, size_t upto);
@@ -900,7 +937,48 @@ clay_result clay_document_journal_trim(clay_document* doc, size_t upto);
  *
  * A journal this build does not understand, or a truncated one, is REFUSED. The
  * events applied before the bad one stand — replay is not a transaction — so a
- * host that wants all-or-nothing replays onto a copy and keeps it on success. */
+ * host that wants all-or-nothing replays onto a copy and keeps it on success.
+ *
+ * THE PAIR IS CHECKED. A journal carries the identity of the snapshot it
+ * continues from, and one replayed onto a document that is not that snapshot is
+ * refused with CLAY_ERROR_SNAPSHOT_MISMATCH and NOTHING applied — the identity
+ * is in the header, so this is the one refusal here that leaves the document
+ * byte-identical. Without it the wrong pair replays cleanly and hands back a
+ * document matching neither the snapshot nor the session: an edit list holding
+ * what the snapshot already had twice over, voxel cells written by absolute
+ * coordinate onto a grid that never had them, and nothing on screen to say so.
+ *
+ * WHAT THE IDENTITY IS, AND WHAT IT DOES NOT PROMISE:
+ *
+ *  - It is a hash of the SERIALIZED BYTES, stamped by clay_document_save_memory
+ *    / clay_document_save (the snapshot side) and clay_document_load_memory /
+ *    clay_document_load (the recovery side). A host does nothing to get it.
+ *    Two snapshots with the same bytes are the same snapshot and are
+ *    interchangeable — which is correct, and which a per-session token would
+ *    have got wrong by refusing a pair that recovers perfectly.
+ *  - IT IS THE SNAPSHOT CURRENT AT `from`, not the last one you took. Saving
+ *    again to measure whether the journal has outgrown the document — the
+ *    re-snapshot rule this feature documents — does not repoint the journal
+ *    you already asked for: clay_document_journal_since(doc, 5, ...) names
+ *    whatever was serialized at or before index 5, however many saves have
+ *    happened since. Which also means the events are refused against the
+ *    LATER image, where they would otherwise have applied a second time.
+ *  - IT IS NOT A CHECKSUM. It does not detect a corrupted snapshot or a
+ *    corrupted journal; a mangled journal is caught by being unreadable, and a
+ *    mangled snapshot is not caught at all. It answers "is this the right
+ *    pair", nothing else.
+ *  - IT DOES NOT CATCH REPLAYING THE SAME JOURNAL TWICE onto the same
+ *    snapshot. Both replays name the right snapshot and both are accepted; the
+ *    absolute indices from clay_document_journal_since are what guard that,
+ *    and they are a host's bookkeeping.
+ *  - A DOCUMENT THAT WAS NEVER SAVED OR LOADED names no snapshot, so a journal
+ *    that names one is refused against it. That is deliberate: replaying onto
+ *    a document built from scratch cannot be the recovery it looks like.
+ *  - A JOURNAL THAT NAMES NO SNAPSHOT IS NEVER REFUSED — journals written
+ *    before 0.86.0 carry no identity, and refusing them would have turned an
+ *    upgrade into exactly the data loss this feature exists to prevent. A
+ *    journal written by 0.86.0 or later is NOT readable by an older build,
+ *    which is the safe direction and the one the version field already had. */
 clay_result clay_document_replay_journal(clay_document* doc, const uint8_t* data, size_t size,
                                          size_t* out_applied,
                                          int32_t* out_stopped_at_barrier);
@@ -1413,6 +1491,189 @@ clay_result clay_document_layer_transform_nonuniform(const clay_document* doc, c
                                                      float out_rotation_axis[3],
                                                      float* out_rotation_angle,
                                                      float out_scale[3]);
+/* -- three placements a host cannot write itself correctly (ABI 0.86.0) -----
+ *
+ * "Drop this subtool on the floor", "centre it", "put it back at the origin":
+ * the three menu items every sculpting host carries. They read like sugar over
+ * the calls above and they are not, because the obvious composition is a trap
+ * this header already documented in two separate places:
+ *
+ *   - clay_document_layer_transform REFUSES a layer carrying three different
+ *     per-axis factors, so the read half cannot even begin on a layer a
+ *     ZBrush-style gizmo squashed;
+ *   - clay_document_set_layer_transform CLEARS the per-axis scale, so a host
+ *     that gets past the first trap by reading the uniform factor from
+ *     somewhere else silently UNSQUASHES the subtool: the artist presses "snap
+ *     to floor" and the model changes shape.
+ *
+ * The correct composition is the per-axis pair with the rotation and all three
+ * factors carried through, which is four calls, one refusal and one clearing
+ * rule to know about, for a menu item. These are that pair, written once, on
+ * the inside. Each is ONE clay_document_set_layer_transform_nonuniform's worth
+ * of change -- one command, one undo step, one invalidation -- and each writes
+ * the placement's TRANSLATION and nothing else.
+ *
+ * WHICH BOX THEY READ, AND WHAT IT IS NOT. clay_layer_bounds: the TIGHT
+ * world-space box, all three representations, no blend or chain-pad dilation.
+ * Not the influence bound, whose dilation would leave the model hovering by
+ * exactly that dilation. The tight box is the honest choice and it is still not
+ * the silhouette, in three ways that will each produce a bug report:
+ *
+ *   - A SUBTRACT item contributes its own box. The walk expands over every
+ *     visible root regardless of op, so a layer whose lowest visible item is a
+ *     subtracting box lands THAT box on the plane and the material stops
+ *     higher up.
+ *   - A SMOOTH BLEND can bulge past it. Rounding is dilated into the box; a
+ *     smooth union's bulge is not, so a heavily blended seam near the low face
+ *     can sit slightly below the plane.
+ *   - HIDDEN ITEMS are excluded. That is the intended reading rather than a
+ *     limitation -- the placement follows the silhouette the artist can see --
+ *     and it means hiding the lowest item moves where the next press lands.
+ *
+ * Marching the surface for its true lowest point was the alternative: a bake or
+ * a raycast sweep per press, no exact answer for a smooth field either, and the
+ * slowest call in a host's transform panel. Rejected; the limitation is stated
+ * here instead.
+ *
+ * WHAT THEY DO NOT PROMISE.
+ *
+ * NOT BIT-IDEMPOTENT. Each states a TOTAL placement, so pressing one twice is
+ * the same gesture as pressing it once -- but the second press recomputes the
+ * box from an already-moved layer, and `f + (p + (g - (f + p)))` is not `g` in
+ * float. The second press lands within one rounding at the coordinate's
+ * magnitude, and a host asserting bit equality at large coordinates will find
+ * it flaky.
+ *
+ * A PRESS THAT MOVES NOTHING STILL COSTS AN UNDO STEP. Suppressing it needs a
+ * tolerance in world units, which this ABI would then have to name and defend,
+ * and a host that cannot predict how many undos its own button cost is worse
+ * off than one that pays a refill for a press that did nothing.
+ *
+ * NO DELTA IS RETURNED. The placement change is RIGID in the sense of
+ * clay_placement_kind, so the 0.82.0 guarantee applies verbatim and a host may
+ * transform its drawn mesh instead of refilling -- but it has to work out the
+ * matrix itself: read clay_document_layer_transform_nonuniform before and
+ * after and subtract the two positions, which is exact because the change is a
+ * pure translation. Rejected an out-parameter on each: three more optional
+ * pointers, three more null checks and three more tests, for a subtraction of
+ * two values the caller can already read. clay_layer_placement_report is not
+ * the answer either -- it classifies a placement the caller already knows, and
+ * the whole point of these is that the caller does not know it yet.
+ *
+ * AN INSTANCE IS PLACED, NEVER SEVERED. What instancing shares is the edit
+ * list; a placement is not shared. So these move the named layer alone, leave
+ * every other layer over the same content evaluating to exactly what it did,
+ * and leave clay_document_layer_info reporting the sharing as it was. Unlike
+ * clay_layer_consolidate, which severs because a bake REPLACES an edit list,
+ * there is nothing here to sever: placing one instance is the gesture
+ * instancing exists for, and unlinking a subtool because the artist pressed a
+ * transform button would be the worst possible way to learn the link was
+ * fragile. Two instances of one edit list snap to the same floor independently
+ * and both land.
+ *
+ * THE REFUSALS, and they differ per call:
+ *
+ *   condition                     | snap | centre | zero
+ *   ------------------------------|------|--------|------
+ *   no layer carries the id       | NOT_FOUND for all three
+ *   ghosted or locked             | INVALID_ARGUMENT, before any bound is read
+ *   a placement gesture is open   | INVALID_ARGUMENT, as for every other edit
+ *   layer holds no material       | INVALID | INVALID | ACCEPTED
+ *   layer carries a radial mode   | INVALID | INVALID | ACCEPTED
+ *   layer is UNBOUNDED            | INVALID | INVALID | ACCEPTED
+ *   ground_y not finite           | INVALID |   --   |   --
+ *   box degenerate in any axis    | ACCEPTED for all three
+ *   layer hidden                  | ACCEPTED for all three
+ *
+ * EMPTY IS REFUSED RATHER THAN A SILENT NO-OP: a host greying the menu item out
+ * wants to know, and "already in place" and "there is nothing here" are the two
+ * states an artist most needs told apart. The code is INVALID_ARGUMENT and not
+ * NOT_FOUND, so that NOT_FOUND keeps meaning "no layer carries this id" alone
+ * and a host can tell a stale id from a layer that cannot take the operation;
+ * INVALID_ARGUMENT is already this ABI's answer for the second, as a protected
+ * layer, a voxel instance source and a group asked for a primitive all show.
+ * CLAY_ERROR_UNSUPPORTED was considered and does not fit -- every use of it
+ * here is about a build, a format or a name, never about document state.
+ *
+ * A RADIAL LAYER IS REFUSED, and that is a defect this change surfaced rather
+ * than one it introduced. clay_layer_bounds carries a layer's MIRROR copies and
+ * does not carry its RADIAL ones (the influence path does, the pick path this
+ * reads does not), so a placement computed from that box would drop the
+ * ORIGINAL onto the plane with its copies already through it. Answering anyway
+ * was rejected: that is not a loose answer, it is a wrong one, and the
+ * wrongness is invisible. Widening clay_layer_bounds to emit the radial copies
+ * is the real fix and it is a separate change, because it alters what a camera
+ * framing query and the mesh rasterization region answer for every existing
+ * host. Until then the diagnostic names the radial mode.
+ *
+ * AN UNBOUNDED LAYER IS REFUSED for the arithmetic rather than for a policy: a
+ * plane or an infinite cylinder reports a box whose faces are +/-FLT_MAX, and
+ * every placement derived from one overflows to an infinite position and a tape
+ * of NaNs. A DEGENERATE box -- equal minimum and maximum in one or more axes --
+ * is accepted, because nothing here divides by an extent and a flat layer is
+ * exactly the layer a "drop it on the floor" button is most often pressed on.
+ *
+ * A HIDDEN LAYER IS ACCEPTED. The box answers from content rather than from the
+ * visibility flag, and a caller naming a layer says more than the flag does.
+ *
+ * ITEM-LEVEL VARIANTS WERE CONSIDERED AND NOT TAKEN. Layer scope is the scope
+ * every other whole-subtool property already has -- visibility, mirror, radial,
+ * protection, the placement itself -- so a host learns one scope rather than
+ * two, and the menu item these serve is a subtool menu item. Adding them later
+ * re-lays out nothing: clay_layer_selection_bounds already answers the same box
+ * for a subset of nodes and clay_layer_set_transform_nonuniform already writes
+ * a node's placement per axis. It needs one answer these do not: what a snap
+ * means for a selection spanning a group, whose children's placements are
+ * relative to it. A whole-DOCUMENT snap is not here either -- N layers is N
+ * calls inside clay_document_begin_undo_group, and a document-level call would
+ * have to decide what "the document's ground" means for hidden and ghosted
+ * layers, which the host already knows. */
+
+/* Translate the layer so the LOW FACE of its content's world box sits at
+ * `ground_y`. Y is the only axis it names; X and Z do not move. */
+clay_result clay_layer_snap_to_ground(clay_document* doc, clay_layer_id layer, float ground_y);
+
+/* Translate the layer so the CENTRE of that box sits at the world origin.
+ *
+ * NAMED FOR THE BOX, and the name is the departure from the roadmap row that
+ * spells this one "centre-mass". The engine holds no density, so this call's
+ * answer is identical for a hollow shell and for a solid of the same extent.
+ * The occupancy-weighted centroid that would earn the other name was
+ * considered and is not merely more expensive, it is NOT EXPRESSIBLE by this
+ * signature: a sampled centroid has no answer until someone names a cell size
+ * -- the one clay_consolidation_params carries -- and `(doc, layer)` has
+ * nowhere to put it, so an implementation would have to invent a resolution the
+ * answer silently depends on. It would also be a CPU bake per press, would have
+ * no field at all for a mesh layer until rasterized, and would move when the
+ * artist changed the layer's voxel size, which changes nothing about where the
+ * shape is.
+ *
+ * A THIRD READING of "centre" is NOT this call: moving the PIVOT to the
+ * content's centre WITHOUT moving the content, so the gizmo stops hanging off
+ * the subtool. That cannot be done at layer level at all -- keeping the content
+ * still while the layer's origin moves means shifting every item's local
+ * placement by the inverse, which is item-level work on the shared edit list,
+ * and on an instance would move every other instance. It belongs with the
+ * item-level arm above. */
+clay_result clay_layer_centre_bounds(clay_document* doc, clay_layer_id layer);
+
+/* Set the placement's TRANSLATION to (0, 0, 0), leaving the rotation, the
+ * uniform factor and the per-axis factors exactly as they were.
+ *
+ * "Put this subtool back where it started", not "reset this subtool's
+ * transform": the reset already exists as one
+ * clay_document_set_layer_transform_nonuniform with an identity, and a
+ * convenience call that quietly threw away a rotation the artist authored would
+ * be the most expensive undo in the set.
+ *
+ * READS NO BOUNDS, which is what makes it a different call rather than a
+ * special case of the centring one -- it is the only one an empty, a radial or
+ * an unbounded layer can take. The two coincide exactly when the content's box
+ * is already centred on the layer's origin, and differ by however far off-pivot
+ * the content was authored, which for a layer built by brush stamps around a
+ * model is usually not zero. */
+clay_result clay_layer_zero_to_origin(clay_document* doc, clay_layer_id layer);
+
 /* Symmetry. Each enabled axis reflects the layer's items through the plane
  * where that LOCAL coordinate is 0 (the layer transform moves the plane with
  * the layer), and every item participates: place a lump on one side and both
@@ -2347,7 +2608,11 @@ typedef struct clay_field_report {
     float steepest_volume;         /* largest sample Lipschitz among volume items */
     int32_t longest_deformer_chain;
     int32_t item_count;
-    int32_t advises_consolidation; /* degraded AND consolidation is the cure */
+    /* Degraded AND consolidation is the cure. What to DO with it:
+     * clay_layer_consolidation_advice turns it into a cell size, a band
+     * and the cost projected at them, so the flag does not leave a host
+     * inventing the one number clay_consolidation_params requires. */
+    int32_t advises_consolidation;
     /* Appended in ABI 0.70.0. A caller compiled against the older struct passes
      * the older struct_size and never sees these; the fields below are only
      * written when the size covers them. */
@@ -2420,6 +2685,125 @@ clay_result clay_layer_consolidation_cost(const clay_document* doc, clay_layer_i
                                           const clay_consolidation_params* params,
                                           const float region_min[3], const float region_max[3],
                                           clay_consolidation_cost* out_cost);
+
+/* Turn `advises_consolidation` into something a host can act on: at what
+ * resolution, and what it will cost.
+ *
+ * clay_layer_field_report tells a host it should bake. The next call it needs
+ * takes a clay_consolidation_params whose `cell_size` is required and > 0, and
+ * that field's own comment says why nothing here will guess it. So the engine
+ * has been telling a host to bake and then making it invent the one number it
+ * has no basis for — a constant compiled into the app, or a slider put in
+ * front of a sculptor who cannot be expected to know what consolidation means,
+ * let alone at what resolution. This fills the struct.
+ *
+ * `*out_advises` is 0/1 and is 1 only when BOTH hold: the field report advises
+ * consolidation at this same threshold, and the PROJECTED safe_step_scale in
+ * out_cost reaches it. The second half is why this is not merely a params
+ * helper. A sampled volume declares sqrt(3) times its samples' Lipschitz, so a
+ * consolidated layer's step scale is AT BEST 1/sqrt(3) = 0.577; a host whose
+ * frame budget wants 0.8 is asking for something no bake can deliver, and
+ * handing it params would trade a parametric layer for a dense volume and
+ * still miss the budget. It is told 0.
+ *
+ * NOT ADVISED MEANS ZEROED. out_params and out_cost are cleared to the
+ * struct_size the caller declared, with that struct_size preserved, rather
+ * than left untouched the way clay_layer_consolidation_state leaves its cost.
+ * The difference is what the caller does next: this hands over something it
+ * will feed to a DESTRUCTIVE call, so the failure has to be loud. cell_size ==
+ * 0 is exactly the value clay_layer_consolidation_cost and
+ * clay_layer_consolidate already refuse, so a host that never reads
+ * *out_advises gets CLAY_ERROR_INVALID_ARGUMENT and an unchanged document.
+ * There is no reading of the zeroed struct under which anything bakes.
+ *
+ * WHERE cell_size COMES FROM. The layer's own extent gives the scale and the
+ * layer's own contents give the feature, both in the LOCAL frame the bake
+ * samples in — not the world-space bounds, which compose the layer transform
+ * and would be wrong by the layer's scale, invisibly so at identity:
+ *
+ *     E    = the longest side of that box
+ *     f_i  = 4 * cell_size_i             for a node carrying samples
+ *          = the smallest axis of the node's own shape box   otherwise
+ *            (both carried into the bake's frame by the node's scale)
+ *     cell = clamp(min(f_i) / 4, E / 512, E / 32)
+ *     band = 3 * cell ; padding = band ; redistancing ON
+ *
+ * Four cells across the smallest feature: kBrickDim is 8, so that is half a
+ * brick. MEASURED, on a 0.06 dab blended onto a unit form — the surface moves
+ * 27% of the dab's radius at 2 cells, 7.0% at 4 and 1.8% at 8, for 0.32, 1.42
+ * and 5.51 MB. Four is where the curve turns.
+ *
+ * THE VOLUME ARM IS THE LOAD-BEARING ONE: (4 * c) / 4 = c, so a layer whose
+ * finest content is a volume at cell size `c` is advised `c` unchanged. That
+ * is the whole answer to "a number nobody chose" — the only degradation ever
+ * advised is CLAY_DEGRADATION_VOLUMES, and such a layer carries volumes whose
+ * resolutions somebody chose at an earlier bake. The advice hands the finest
+ * of them back, so a re-bake loses no detail already stored and gains none
+ * that was never there.
+ *
+ * A STEPPING-BOUND LIPSCHITZ WAS REJECTED as the source of the resolution, and
+ * this is the design decision most worth knowing. clay_field_report.lipschitz
+ * bounds the step a marcher may take; it does NOT bound |grad f|. An ellipsoid
+ * declares 1 and measures 1.09 near its tips, 3.6 for a needle, and taper,
+ * wrap_around and bend_curve exceed their declared factors outright. A
+ * sampling rate derived from it would look principled and be unsound exactly
+ * on the shapes that motivate a bake. The Lipschitz enters the ADVICE instead
+ * — as out_cost.sample_lipschitz, MEASURED on the samples a real bake produced
+ * — and never the resolution.
+ *
+ * WHAT IT DOES NOT PROMISE:
+ *
+ *   * NOT OPTIMAL, and not better than your own number. It knows the layer's
+ *     extent and contents; it does not know your viewport, your zoom, your
+ *     device's memory or what the artist is about to do next. A host that does
+ *     should override, and out_params is a struct you own so that it can.
+ *   * NOT STABLE. Adding one small item changes the smallest feature and
+ *     therefore the cell size. A host that means to re-bake the same box later
+ *     must STORE the params rather than re-ask.
+ *   * NOT A MEMORY BOUND. The E/512 and E/32 clamp bounds the GRID. A banded
+ *     volume stores only surface bricks, so the bytes follow surface area:
+ *     out_cost.bytes is the memory, and it is the number to refuse on.
+ *   * NOT A FIDELITY CLAIM. A bake at the advised cell size still discards
+ *     every parameter of every item it absorbs and every colour but the first.
+ *     This is about marching cost, not about what the shape will look like.
+ *     The analytic arm reads a node's own box, so a fillet finer than either
+ *     shape that made it is not seen: heavy blends are advised coarse.
+ *   * NO PINNED REGION. Derived from the layer's CURRENT bounds, so re-asking
+ *     after an advised bake advises a slightly larger box each time — a
+ *     volume's geometric bound is its whole sampled box. A host consolidating
+ *     the same region repeatedly must pin the region itself; this will not do
+ *     it for them.
+ *   * NOT CHEAP, and a NULL out_cost is NOT a fast path. *out_advises is
+ *     DEFINED by the projection, so the sampling pass happens either way. This
+ *     is not a per-frame call.
+ *
+ * It does not bake and does not change the document, and that includes an
+ * INSTANCE layer's sharing: clay_layer_consolidate severs a shared edit list
+ * before it bakes and this does not, for the same reason
+ * clay_layer_consolidation_cost does not. Asking whether a bake is ADVISABLE
+ * must never be the thing that unlinks a subtool.
+ *
+ * Refused, before any sampling: CLAY_ERROR_NOT_FOUND for a layer that is not
+ * there — "no such layer" and "not advised" are different answers;
+ * CLAY_ERROR_INVALID_ARGUMENT for a null doc, out_params or out_advises, for a
+ * struct_size below either original layout, and for advise_below_step_scale
+ * <= 0. The last deviates from clay_layer_field_report, where zero legitimately
+ * means "measure without asking for advice": every output here is defined
+ * against a threshold, so a zero would buy a full sampling pass to be told
+ * nothing.
+ *
+ * A non-SDF, protected or empty layer is NOT an error — it succeeds, advises
+ * nothing and zeroes, following clay_layer_warp_cost_get's rule that a host
+ * walking a stack of mixed kinds should not have to special-case them. On a
+ * protected layer clay_layer_consolidate refuses anyway, so advising a bake it
+ * would reject is bad advice rather than an error condition.
+ *
+ * out_cost may be NULL. Added in ABI 0.86.0. */
+clay_result clay_layer_consolidation_advice(const clay_document* doc, clay_layer_id layer,
+                                            float advise_below_step_scale,
+                                            clay_consolidation_params* out_params,
+                                            clay_consolidation_cost* out_cost,
+                                            int32_t* out_advises);
 
 /* Collapse a layer's edit list into one item carrying samples, as ONE undo
  * step whose inverse restores what it absorbed — ids, parameters, colours and
@@ -4129,7 +4513,17 @@ clay_result clay_voxel_add_level(clay_voxel_grid* grid, size_t* out_level);
 clay_result clay_voxel_add_level_region(clay_voxel_grid* grid, const float min[3],
                                         const float max[3], size_t* out_level);
 /* Drops the finest level. CLAY_ERROR_INVALID_ARGUMENT when only one is left,
- * since a grid always has at least one. */
+ * since a grid always has at least one.
+ *
+ * RECORDS A BARRIER in the session history when the grid belongs to a document
+ * with undo enabled, because nothing can reproduce this: the level's cells are
+ * gone, and the steps recorded against it name coordinates at a resolution that
+ * no longer exists. So clay_document_undo_state reports a depth of 0 after one,
+ * and a journal replayed across it STOPS here rather than rebuilding a grid
+ * that still has the level. Before 0.86.0 it recorded nothing and a recovery
+ * silently kept the dropped detail — a correction rather than a new limit,
+ * since nothing could ever undo a drop. A standalone grid is in no document and
+ * records nothing. */
 clay_result clay_voxel_drop_level(clay_voxel_grid* grid);
 /* Cell size and occupied cells of ONE level, so a host can report what each
  * level of a stack costs without making it active first. */
@@ -4801,7 +5195,16 @@ clay_result clay_measure_points(const clay_document* doc, clay_surface_measure m
  *
  * OCCLUSION and THICKNESS work here too and are far more expensive than the
  * stencil measures: a lattice of a million cells is a million hemisphere
- * samples. Prefer a coarse cell_size, and pass a token. */
+ * samples. Prefer a coarse cell_size, and pass a token.
+ *
+ * A `measure` that is not one of the six enumerators above is
+ * CLAY_ERROR_INVALID_ARGUMENT here and in clay_measure_points, and no mask is
+ * produced. That is a promise about a value the C type cannot police — an
+ * unscoped enum's range is a bit-field, not the set of its names — so a host
+ * that computes the measure rather than writing the constant gets an error
+ * code and not a mis-dispatch. It is NOT a promise about a value read from a
+ * file or a network: check what you deserialize, because a valid-but-wrong
+ * enumerator is indistinguishable from the one you meant. */
 clay_result clay_mask_from_surface(const clay_document* doc, clay_surface_measure measure,
                                    const float region_min[3], const float region_max[3],
                                    float cell_size, float band,

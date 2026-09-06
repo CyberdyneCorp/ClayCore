@@ -34,3 +34,28 @@ An operation that no history mechanism records SHALL NOT be counted as a step, a
 #### Scenario: The existing entry points keep their shape
 - **WHEN** a host compiled against the previous ABI calls undo and redo
 - **THEN** the calls have the same signatures and the same result codes, and reverse more than they used to rather than differently
+
+#### Scenario: Creating a voxel layer is an undo step
+- **GIVEN** a document with undo enabled and nothing recorded
+- **WHEN** a voxel layer is added
+- **THEN** the undo depth is one
+- **AND** undoing removes the layer from the document
+
+#### Scenario: A crossing undoes as one step
+- **GIVEN** a document with undo enabled holding a starting form
+- **WHEN** a voxel layer is created and rasterized into inside one undo group
+- **THEN** the undo depth grows by exactly one
+- **AND** a single undo removes the layer and the cells together
+- **AND** no empty layer is left in the document
+
+#### Scenario: Redo restores the layer and its cells
+- **GIVEN** a bracketed crossing that has been undone
+- **WHEN** the document is redone once
+- **THEN** the layer is present with the id it had
+- **AND** it holds the cells the rasterization produced
+
+#### Scenario: An ungrouped crossing stays two steps
+- **GIVEN** a document with undo enabled
+- **WHEN** a voxel layer is created and rasterized into without a bracket
+- **THEN** the undo depth grows by two
+- **AND** the first undo empties the layer and the second removes it

@@ -153,6 +153,8 @@ add_executable(clay_unit_tests
   unit/test_deformer_cull.cpp
   unit/test_layer_extent_cache.cpp
   unit/test_layer_placement.cpp
+  unit/test_computed_placement.cpp
+  unit/test_c_convenience_placements.cpp
   unit/test_layer_placement_gesture.cpp
   unit/test_c_extent_memo.cpp
   unit/test_relief.cpp
@@ -176,6 +178,7 @@ add_executable(clay_unit_tests
   unit/test_c_memory_io.cpp
   unit/test_session_history.cpp
   unit/test_session_journal.cpp
+  unit/test_c_journal.cpp
   unit/test_cancellation.cpp
   unit/test_mask_history.cpp
   unit/test_history_budget.cpp

@@ -16,3 +16,18 @@ A journal that could encode two of the three kinds would recover two thirds of a
 #### Scenario: A mesh step's record survives the round trip
 - **WHEN** sparse vertex deltas are encoded and decoded
 - **THEN** the decoded record reverts and re-applies a mesh exactly as the original did, and `indices` and `quads` are untouched by both
+
+### Requirement: A serialized document knows which bytes it is
+Serializing a document and loading one SHALL both record the identity of the bytes involved on the document, so a journal taken afterwards can name the snapshot it continues from and a replay can refuse a mismatched pair.
+
+The identity SHALL be derived from the serialized bytes rather than minted per session: two snapshots with the same bytes are the same snapshot, a journal taken against one replays onto the other exactly, and a per-session token would refuse a pair that recovers perfectly.
+
+It is NOT a checksum. It is not written into the file, it does not detect corruption, and it is not stable across builds that change the encoding — it answers one question about two things already in memory, and it SHALL cost a small fraction of the save that produces it rather than a comparable one.
+
+#### Scenario: A snapshot and its reload agree
+- **WHEN** a document is serialized and the same bytes are loaded back
+- **THEN** both documents carry the same identity, and a journal taken from the first replays onto the second
+
+#### Scenario: Two different documents do not
+- **WHEN** two documents with different content are serialized
+- **THEN** their identities differ, and a journal taken against one is refused against the other

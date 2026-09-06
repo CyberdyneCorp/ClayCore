@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -411,8 +412,25 @@ bool resolve_accessor(const JsonDoc& doc, const JsonNode& root, std::size_t inde
     }
 
     const JsonNode& views = doc.member(root, "bufferViews");
-    const JsonNode& v = doc.element(views, static_cast<std::size_t>(
-                                               doc.number_or(a, "bufferView", -1)));
+    // "No bufferView" was detected by casting the -1 fallback to std::size_t
+    // and letting the huge index miss, which reads correctly and is undefined:
+    // converting a negative double to an unsigned type has no defined result,
+    // -fsanitize=float-cast-overflow aborts on it, and on an ABI where the
+    // conversion saturated rather than wrapped it would have named element 0 —
+    // an accessor with NO bufferView would then have silently read the first
+    // one. A hostile file supplying "bufferView": -1 outright reaches the same
+    // cast, so the guard covers the fallback and the file equally.
+    //
+    // The upper bound is not defensive noise either: a double large enough to
+    // exceed SIZE_MAX is the same undefined conversion in the other direction,
+    // and "bufferView": 1e30 is one character of edit away in any file.
+    const double view_index = doc.number_or(a, "bufferView", -1);
+    if (!(view_index >= 0.0) ||  // written to reject NaN as well
+        view_index >= static_cast<double>(std::numeric_limits<std::size_t>::max())) {
+        *why = "accessor " + std::to_string(index) + " names no bufferView";
+        return false;
+    }
+    const JsonNode& v = doc.element(views, static_cast<std::size_t>(view_index));
     if (v.type != JsonType::Object) {
         *why = "accessor " + std::to_string(index) + " names no bufferView";
         return false;

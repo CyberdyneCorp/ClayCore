@@ -1158,6 +1158,12 @@ and `drop_level` discards one. The coarsest level is the one that was always
 there, so a grid with a single level behaves exactly as it did and serialises to
 the bytes it always did.
 
+**`drop_level` is a barrier**, on a document with undo enabled: the detail is
+gone and nothing can put it back, so undo stops there and a crash journal
+replayed across one stops there too rather than rebuilding a grid that still
+holds the level. `journal_barrier()` is how a host learns it happened in time to
+take a fresh snapshot.
+
 **Any verb here can be a valid call that changes nothing** — a sub-cell grab or
 ### DamStandard on a voxel layer: a recipe, not a verb
 
