@@ -1279,7 +1279,12 @@ REFUSE that downgrade has nothing to refuse, because it could never ask.
 rather than degrading it, stays byte-identical for documents where every layer
 unions, and ships a query so a host can ask before it saves. **The selector is
 the gap that remains** — a save-at-minor entry point, with the blob variant, the
-autosave and journal paths, and the other lossy minors in scope. Its own change.
+autosave and journal paths, and the other lossy minors in scope. Its own change,
+and the host named the reason it has to be: **an autosave writes a whole document
+on a timer and a crash journal writes one on the way down, and neither would want
+a different answer from the interactive save.** A change about interchange sees
+all three paths; one bolted to a boolean operator would be shaped by whichever
+document raised it.
 
 ### Where a host cannot draw a progress bar or cancel
 
