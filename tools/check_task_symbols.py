@@ -466,6 +466,18 @@ def self_test() -> int:
         expect("a name that lives only in the gate's own source must fail", 1,
                "no such symbol `tracked_basenames`")
 
+        # 15. A MISTYPED CHANGE NAME MUST NOT PASS. The single-change form is
+        #     the documented one, and a task list records a by-hand run of it
+        #     as evidence the change is clean -- so a typo that reads nothing
+        #     and exits 0 is evidence of nothing.
+        expect("a change name with no directory must fail", 1,
+               "no such change `dmeo`", ["dmeo"])
+
+        # 16. and the real name still works through the same path.
+        write(tasks, "- [ ] nothing cited here\n")
+        expect("a change name that exists must still be checked", 0,
+               "task symbols resolve in 1 change(s)", ["demo"])
+
         for failure in failures:
             print(failure)
         if failures:
@@ -485,6 +497,17 @@ def main() -> int:
         return 1
     wanted = sys.argv[1:]
     if wanted:
+        # A NAME NOBODY VALIDATED READS NOTHING AND PASSES. The documented
+        # single-change form is what a task list records a by-hand run of, so a
+        # typo in it used to report "task symbols resolve in 1 change(s)" and
+        # exit 0 having opened no file at all -- a clean bill of health for a
+        # change that was never looked at.
+        missing = [name for name in wanted
+                   if not os.path.isdir(os.path.join(CHANGES, name))]
+        if missing:
+            for name in missing:
+                print(f"no such change `{name}` under openspec/changes/")
+            return 1
         changes = wanted
     else:
         changes = sorted(
