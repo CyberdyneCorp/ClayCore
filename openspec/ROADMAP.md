@@ -1490,6 +1490,57 @@ the host reads it when integrating, not when a ticket it filed months earlier
 comes up. A capability that removes a host's known pain is worth telling that
 host about directly; a header is where it is FOUND, not where it is DELIVERED.
 
+### A mesh call carries ~0.65 ms of fixed cost, which dominates a small dab
+
+Measured by ClaySpaceDesktop on 2026-09-06, six dab sizes on one warm document,
+same tool and same caches, varying only the dirty set:
+
+| bricks | sync ms | µs/brick |
+|---:|---:|---:|
+| 8 | 0.951 | 118.9 |
+| 8 | 0.958 | 119.8 |
+| 8 | 0.977 | 122.2 |
+| 8 | 1.070 | 133.8 |
+| 18 | 1.551 | 86.2 |
+| 64 | 3.086 | 48.2 |
+
+Fitted: **≈0.65 ms fixed plus ≈38 µs per brick.** At eight dirty bricks — an
+ordinary small dab — **68% of the call is the fixed part.** It vanishes into the
+noise on a large edit and dominates a small one, which is the shape that makes it
+worth a row: the cost is invisible in exactly the measurements a benchmark tends
+to take.
+
+Six points rather than two, deliberately: their first estimate came from two
+measurements and gave 2.3 ms, and the curve says 0.65. **A slope inferred from
+two points was wrong twice in one day on this exchange.**
+
+**Not yet attributed, and the host cannot see which it is.** Candidates on this
+side, in the order they would be cheap to exclude: a per-call plan or cull build
+that walks the item list regardless of dirty set; mesher setup that allocates per
+call rather than per brick; a device submission or readback with a fixed cost;
+and tape work that a warm revision should have made free but has not.
+
+**The measurement that splits them is the host's and it is cheap:** hold the dab
+at eight bricks and vary the DOCUMENT size. If the fixed part grows with item
+count it is a per-call walk — plan, cull or tape. If it is flat, it is setup —
+allocation, submission, readback. That is one axis and it decides which half of
+this engine to open.
+
+### What the same measurements CONFIRMED, which is worth as much
+
+Two hypotheses the host went in expecting and the engine disproved, both measured:
+
+- **The per-brick tape does cull a far mirror image.** A brick beside the
+  original costs 1.05 µs with one tube, 1.10 with a second tube far away, and
+  1.17 with a layer mirror — so a mirrored instance is not evaluated everywhere.
+  The culling does what it claims.
+- **The remaining cost of a mirrored stroke is therefore just twice the
+  geometry** — 2x the keys, 1.7x the meshing time. Honest work rather than a
+  defect, after a while spent looking for a villain that was not there.
+
+Recorded because a negative result about our own culling, measured from outside,
+is evidence nothing in this repository can produce for itself.
+
 ### Refusals a host cannot render — a standing rule, and three instances
 
 **A refusal that knows an id should return it, and a host should never have to
