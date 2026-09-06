@@ -679,15 +679,22 @@ float node_feature(const Layer& view, const Node& n) {
 
 // The smallest thing the layer carries, in the frame `view` is expressed in.
 // Zero when nothing finite was found.
+// Walks with a cursor over a grow-only worklist rather than the obvious
+// push/pop_back stack. The answer is a MINIMUM over every visible drawable, so
+// visit order cannot change it, and this form has one property the stack does
+// not: `seen` never shrinks, which keeps gcc 13's -Wfree-nonheap-object quiet.
+// That warning fires on the pop_back-then-insert shape here — a false positive
+// (nothing in `seen` aliases the child lists being appended), but it is an
+// error under CLAY_WERROR and the honest fix is the simpler traversal rather
+// than a pragma that would outlive the compiler bug.
 float smallest_feature(const Layer& view) {
     float out = 0.0f;
-    std::vector<NodeId> pending(view.sdf->roots.rbegin(), view.sdf->roots.rend());
-    while (!pending.empty()) {
-        const NodeId id = pending.back();
-        pending.pop_back();
+    std::vector<NodeId> seen(view.sdf->roots.begin(), view.sdf->roots.end());
+    for (std::size_t i = 0; i < seen.size(); ++i) {
+        const NodeId id = seen[i];
         const Node* n = view.sdf->find(id);
         if (!n || !n->visible) continue;  // hidden subtrees reach the field nowhere
-        pending.insert(pending.end(), n->children.rbegin(), n->children.rend());
+        seen.insert(seen.end(), n->children.begin(), n->children.end());
         if (n->is_group) continue;  // a transform and a name; nothing is evaluated
         const float f = node_feature(view, *n);
         if (f > 0.0f && (out == 0.0f || f < out)) out = f;
