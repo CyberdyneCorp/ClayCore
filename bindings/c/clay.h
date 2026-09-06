@@ -1731,6 +1731,24 @@ clay_result clay_document_layer_transform_nonuniform(const clay_document* doc, c
  * the answer either -- it classifies a placement the caller already knows, and
  * the whole point of these is that the caller does not know it yet.
  *
+ * WHAT RIGID DOES NOT SAY, and it matters more since ABI 0.86.0 gave a layer a
+ * fold. RIGID is a claim about THIS LAYER'S OWN FIELD -- its surface afterwards
+ * is its surface beforehand moved by the same matrix -- and never about the
+ * document's. A plain hard union already broke that second reading:
+ * min(A, moved B) is not moved(min(A, B)), because A did not move. A host that
+ * transformed its whole drawn scene on a RIGID verdict was wrong before any
+ * operator existed; a folding layer makes the error visible rather than
+ * creating it.
+ *
+ * So the drawn geometry these let a host transform is THIS LAYER'S, and how
+ * much it must still redraw is clay_brick_cache_mark_dirty_layer's answer
+ * rather than this call's. For a pure translation -- which all three of these
+ * are -- that region is where the layer was plus where it now is, widened by
+ * any SMOOTH fold above it and, for an INTERSECT composition alone, by the
+ * extent of the visible SDF layers beneath. A subtract stays bounded by this
+ * layer. These calls read no composition and promise nothing about which one a
+ * document uses.
+ *
  * AN INSTANCE IS PLACED, NEVER SEVERED. What instancing shares is the edit
  * list; a placement is not shared. So these move the named layer alone, leave
  * every other layer over the same content evaluating to exactly what it did,
