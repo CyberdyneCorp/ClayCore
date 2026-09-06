@@ -204,9 +204,26 @@ inline CTapeValue ref_eval_document(const scene::Document& doc, cfloat3 p) {
     for (const scene::Layer& layer : doc.layers) {
         if (!layer.visible || layer.kind != scene::LayerKind::Sdf || !layer.sdf) continue;
         CTapeValue lv;
-        if (!ref_eval_list(layer.sdf->roots, *layer.sdf, layer, p, lv, false)) continue;
+        if (!ref_eval_list(layer.sdf->roots, *layer.sdf, layer, p, lv, false)) {
+            // A layer whose chain produced nothing IS the far field, and this
+            // says so directly rather than deciding which operators may be
+            // skipped: combining with FAR is already a no-op for the ones the
+            // compiler skips, and it is not for the ones it does not.
+            if (!have_acc) continue;
+            lv.d = CLAY_TAPE_FAR;
+            lv.color = kernel::cf3(1.0f, 1.0f, 1.0f);
+        }
+        // THE LAYER'S OWN COMPOSITION, and the first visible SDF layer's is not
+        // applied -- it initialises. Reading the field here rather than folding
+        // a hard Add is what keeps this evaluator independent of the compiler
+        // and still in agreement with it; a reference that unions whatever the
+        // document says agrees only while every fixture unions, which is the
+        // one condition under which a fold bug is invisible.
+        const scene::LayerComposition& comp = layer.composition;
         if (have_acc)
-            acc = ctape_combine_values(acc, lv, ccombine_add, cblend_hard, 0.0f, 0.0f);
+            acc = ctape_combine_values(acc, lv, static_cast<int>(comp.op),
+                                       static_cast<int>(comp.blend.profile), comp.blend.k,
+                                       comp.rounding * scene::layer_distance_scale(layer));
         else
             acc = lv;
         have_acc = true;

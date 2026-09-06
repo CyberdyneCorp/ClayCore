@@ -144,7 +144,33 @@ struct CullRegion {
 class CullIndex;
 class CullPlan;
 
-// Whole document: visible SDF layers chained by hard union.
+// Whole document: visible SDF layers FOLDED left to right.
+//
+// Each visible SDF layer's chain is compiled against its own fresh accumulator
+// and then combined with the accumulated field of the layers beneath it, using
+// that layer's own `LayerComposition` -- the same op, blend profile, blend
+// radius and rounding an item carries, through the same emitter and the same
+// kernel combine. A layer whose composition is the default (a hard Add, no
+// blend, no rounding) folds as a hard union, which is what every layer did
+// before compositions existed and is why a document that predates them is
+// byte-identical here.
+//
+// THE FIRST VISIBLE SDF LAYER INITIALISES THE ACCUMULATOR AND ITS OWN OPERATOR
+// IS NOT APPLIED. There is nothing beneath it to combine with, and applying one
+// anyway would make a stack that opens with Subtract or Intersect evaluate to
+// empty space with no error to say why. Item chains already work this way; this
+// is that rule one level up, not a second one.
+//
+// A layer's own symmetry -- mirror copies, radial copies -- is resolved inside
+// its chain, so it is one value by the time it folds. Combining each copy with
+// what is beneath separately would be a different field wherever the fold is
+// smooth, because a smooth combine does not associate.
+//
+// A layer whose chain produces nothing is skipped where its operator reads an
+// absent operand as no change (union, subtract) and folded against the far
+// field where it does not (intersect). Skipping the second kind would leave a
+// per-brick tape holding material the whole-document tape removes, which is a
+// wrong field and not an error.
 //
 // `index` (cull_index.h) supplies per-revision cached bounds; `plan` a
 // per-batch coarse cull, valid only with a `cull` region contained in the
@@ -197,13 +223,17 @@ Tape compile_item(const Layer& layer, const Node& item);
 //
 // WHERE A COMPILE CAN BE RESUMED FROM is not the end of the tape. `run()`
 // compiles each visible SDF layer's chain against its own fresh accumulator
-// and then folds it into the layers below with a hard union emitted AFTER
-// that chain, so with more than one visible layer the tape ends in a union
-// that an appended item has to be emitted BEFORE. The checkpoint is therefore
-// a truncation point: the tape lengths at the end of the last visible SDF
+// and then folds it into the layers below with a combine emitted AFTER that
+// chain, so with more than one visible layer the tape ends in a combine that
+// an appended item has to be emitted BEFORE. The checkpoint is therefore a
+// truncation point: the tape lengths at the end of the last visible SDF
 // layer's chain, plus the two accumulator flags needed to carry on from
 // there. Resuming copies the tape up to those lengths, compiles the appended
-// nodes onto it, and re-emits the union.
+// nodes onto it, and re-emits that combine.
+//
+// The combine is the ACTIVE LAYER's own composition and is derived from the
+// `Layer` a resume is handed, not carried on the checkpoint: a checkpoint that
+// asserted an operator would still compile after it stopped being true.
 // One GROUP the prefix ends inside, and what finishing its chain costs.
 //
 // A checkpoint used to sit only at the end of a layer's root list, where the

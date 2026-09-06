@@ -74,6 +74,38 @@ kernel::CFieldInfo swept_field_info(const Node& item) {
                              ease_max_slope(static_cast<std::uint8_t>(item.prim.params[0])));
 }
 
+// Whether folding a layer that produced NOTHING would change the field beneath
+// it. A layer's chain is empty when the layer holds no visible roots and, per
+// brick, whenever the cull dropped every one of them -- and until this feature
+// existed the answer was always "no", so the inter-layer union was simply
+// skipped there.
+//
+// It is not always no any more, and the difference is silent. An empty tape
+// evaluates to CLAY_TAPE_FAR (kernel/tape.h), so the question is exactly
+// `combine(a, FAR) == a`: min(a, FAR) and -smin(-a, FAR) are both `a`, so a
+// unioning or a subtracting layer is still identity and is still skipped --
+// which is what keeps every document that predates this feature byte for byte
+// -- but max(a, FAR) is FAR, so an INTERSECTING layer whose chain this brick
+// culled away must still take the material away. Skip it and the per-brick tape
+// keeps material the whole-document tape removes, in exactly the bricks nobody
+// is looking at.
+//
+// Asked of the kernel rather than answered by a table here. A table would be a
+// second copy of `ctape_combine_dist`'s math and would go stale the first time
+// a mode's arithmetic moved, which is the one failure mode this change is
+// organised against. Distance is the whole probe: the colour-only mode (paint)
+// weights by the same absent operand and is identity in colour for the same
+// reason its distance is.
+bool fold_changes_an_empty_layer(const LayerComposition& c, float round_world) {
+    const int mode = static_cast<int>(c.op);
+    const int profile = static_cast<int>(c.blend.profile);
+    for (float a : {-1.5f, -0.25f, 0.0f, 0.75f, 3.0f})
+        if (kernel::ctape_combine_dist(a, CLAY_TAPE_FAR, mode, profile, c.blend.k, round_world) !=
+            a)
+            return true;
+    return false;
+}
+
 struct Compiler {
     Tape tape;
     const CullRegion* cull;
@@ -384,6 +416,35 @@ struct Compiler {
             tape.params.push_back(t.r1);
             tape.params.push_back(static_cast<float>(t.ease));
         }
+    }
+
+    // THE COMBINE A CHAIN-LEVEL FOLD EMITS: the instruction and the field info
+    // it costs, in one call, because the two must not drift apart.
+    //
+    // A group's tail, a resume's stack unwind and the fold BETWEEN layers are
+    // all the same act -- a value already on the stack combined with the one
+    // just compiled -- and until this existed each of the three carried its own
+    // byte-identical copy of the info fold beside its own emit_combine. Three
+    // copies of one rule is three chances for a resumed tape to report a safe
+    // step the full compile does not, which is a marcher that oversteps a
+    // surface rather than an error anyone sees.
+    //
+    // The ITEM path deliberately does NOT route through this: its combine folds
+    // a SECOND operand's field info (the primitive's) rather than the running
+    // one against itself, and that is `fold_info`, which also has an item to
+    // read. The kernel math is single-source either way -- both end at
+    // `emit_combine` and at the same `cfi_*` combinators.
+    //
+    // `round_world` is the rounding in WORLD units. A layer composition has no
+    // node, so its factor is `layer_distance_scale(layer)`, the same one a
+    // group's rounding takes.
+    void emit_chain_combine(Op op, const Blend& blend, float round_world) {
+        emit_combine(op, blend, round_world);
+        const bool smooth = blend.profile != BlendProfile::Hard && blend.k > 0.0f;
+        if (op_is_extended(op))
+            tape.info = kernel::cfi_extended_blend(tape.info, tape.info, op_is_diagonal(op));
+        else if (smooth)
+            tape.info = kernel::cfi_smooth_blend(tape.info, tape.info);
     }
 
     Transition default_transition_{};
@@ -1078,15 +1139,9 @@ struct Compiler {
             f.rounding = group.rounding * layer_distance_scale(layer);
             checkpoint.frames.push_back(f);
         }
-        if (have_acc || seeded) {
-            emit_combine(group.op, group.blend, group.rounding * layer_distance_scale(layer));
-            bool smooth = group.blend.profile != BlendProfile::Hard && group.blend.k > 0.0f;
-            if (op_is_extended(group.op))
-                tape.info = kernel::cfi_extended_blend(tape.info, tape.info,
-                                                       op_is_diagonal(group.op));
-            else if (smooth)
-                tape.info = kernel::cfi_smooth_blend(tape.info, tape.info);
-        }
+        if (have_acc || seeded)
+            emit_chain_combine(group.op, group.blend,
+                               group.rounding * layer_distance_scale(layer));
         return true;
     }
 
@@ -1117,6 +1172,57 @@ struct Compiler {
                 if (layer.visible && layer.kind == LayerKind::Sdf && layer.sdf)
                     pad = kernel::cmax(pad, cull_pad(*layer.sdf, layer));
         return pad;
+    }
+
+    // THE FOLD BETWEEN LAYERS, shared by the whole-document walk and by every
+    // PART of one so that the two cannot produce different fields. `layer_val`
+    // says whether the layer just compiled left a value on the stack and
+    // `have_acc` whether the layers beneath it did; the return is whether one
+    // is there afterwards.
+    //
+    // THE FIRST VISIBLE SDF LAYER INITIALISES THE ACCUMULATOR AND ITS OWN
+    // OPERATOR IS NOT APPLIED -- which is the `if (have_acc)` guard below and
+    // nothing more. That is the same guard an item chain already puts on its
+    // own combine (`if (have_acc || seeded)` in compile_list), in the same
+    // place, for the same reason: with nothing beneath it there is nothing to
+    // combine WITH. Applying it anyway makes a stack that opens with Subtract
+    // or Intersect evaluate to empty space, with no error and nothing to see --
+    // which is exactly what an artist who drags their base layer to the top
+    // would get.
+    //
+    // The OTHER half of the item rule deliberately does not lift. compile_list
+    // SKIPS an item that opens a chain with a carving op (`if (!have_acc &&
+    // n->op != Op::Add && !op_creates_material(n->op)) continue;`) and seeds a
+    // material-creating one against an explicit empty. Both are right for one
+    // contribution among many in a list; both are wrong for a layer, because a
+    // layer is the whole document at that point and either would show nothing
+    // where the spec asks to show the layer itself. So the layer rule is the
+    // guard alone, and this comment is the whole of the difference.
+    bool fold_layer(const Layer& layer, bool layer_val, bool have_acc) {
+        const LayerComposition& comp = layer.composition;
+        // No node, so the layer's own distance scale is the factor -- the same
+        // one a group's rounding takes. (A transition op cannot get here: the
+        // setter refuses one, because a LayerComposition carries no Transition
+        // and emit_combine would morph on this compiler's defaults instead of
+        // on anything the artist authored.)
+        const float round_world = comp.rounding * layer_distance_scale(layer);
+        if (!layer_val) {
+            // An empty or wholly culled chain still has to be folded when the
+            // operator reads an absent operand as a change -- see
+            // fold_changes_an_empty_layer, which is where that is decided and
+            // why a union is skipped here exactly as it always was.
+            if (have_acc && fold_changes_an_empty_layer(comp, round_world)) {
+                // The empty seed's colour never reaches the result for the ops
+                // that get here (intersect keeps the accumulator's), so white
+                // is a placeholder rather than a choice; a layer has no colour
+                // of its own to offer.
+                emit_empty(kernel::cf3(1.0f, 1.0f, 1.0f));
+                emit_chain_combine(comp.op, comp.blend, round_world);
+            }
+            return have_acc;
+        }
+        if (have_acc) emit_chain_combine(comp.op, comp.blend, round_world);
+        return true;
     }
 
     // Which visible SDF layers a PART compiles. Before and Only are the two
@@ -1162,9 +1268,7 @@ struct Compiler {
                                             tape.blob.size(), layer.id, layer_val,
                                             have_acc,          true, {}};
             }
-            if (!layer_val) continue;
-            if (have_acc) emit_combine(Op::Add, Blend{}, 0.0f);  // layers union hard
-            have_acc = true;
+            have_acc = fold_layer(layer, layer_val, have_acc);
         }
     }
 
@@ -1196,9 +1300,7 @@ struct Compiler {
                                             tape.blob.size(), layer.id, layer_val,
                                             have_acc,          true, {}};
             }
-            if (!layer_val) continue;
-            if (have_acc) emit_combine(Op::Add, Blend{}, 0.0f);  // layers union hard
-            have_acc = true;
+            have_acc = fold_layer(layer, layer_val, have_acc);
         }
     }
 
@@ -1240,19 +1342,21 @@ struct Compiler {
         // produce the same bytes or the fast path is a different field.
         bool have_acc = chain_val || cp.layer_have_acc;
         for (const TapeCheckpointFrame& f : cp.frames) {
-            if (f.emits) {
-                emit_combine(f.op, f.blend, f.rounding);
-                const bool smooth = f.blend.profile != BlendProfile::Hard && f.blend.k > 0.0f;
-                if (op_is_extended(f.op))
-                    tape.info = kernel::cfi_extended_blend(tape.info, tape.info,
-                                                           op_is_diagonal(f.op));
-                else if (smooth)
-                    tape.info = kernel::cfi_smooth_blend(tape.info, tape.info);
-            }
+            if (f.emits) emit_chain_combine(f.op, f.blend, f.rounding);
             have_acc = true;
         }
         if (!have_acc) return;
-        if (cp.doc_have_acc) emit_combine(Op::Add, Blend{}, 0.0f);
+        // ...and then the fold into the layers beneath, which is the same
+        // combine run() emits at that boundary and has to stay the same one:
+        // the checkpoint sits in FRONT of it, so a resume re-emits it, and
+        // `layer` is the layer the checkpoint was taken in. Derived from the
+        // Layer rather than carried on the TapeCheckpoint deliberately -- a
+        // hand-built checkpoint (bindings/c/clay_c.cpp) asserts facts rather
+        // than deriving them, and an asserted operator that stops being true
+        // still compiles.
+        if (cp.doc_have_acc)
+            emit_chain_combine(layer.composition.op, layer.composition.blend,
+                               layer.composition.rounding * layer_distance_scale(layer));
     }
 };
 

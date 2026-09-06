@@ -1,14 +1,15 @@
 // A LAYER's COMPOSITION — the operator it folds into the layers beneath it with
 // (fold-the-layers-with-an-operator, scene-model / c-abi / file-io).
 //
-// THIS FILE COVERS THE MODEL HALF ONLY. At this stage the compiler does not
-// read the field yet: every visible SDF layer still hard-unions, so nothing
-// here asserts geometry. What it pins is that the value exists, that it is the
-// hard union until someone says otherwise, that setting it is one undoable
-// step, that a layer which cannot enter the tape refuses it with an error a
-// host can read rather than storing state nothing consults, and that it
-// survives a save at the current minor while degrading to the union at the
-// previous one.
+// THIS FILE COVERS THE MODEL HALF. What it pins is that the value exists, that
+// it is the hard union until someone says otherwise, that setting it is one
+// undoable step, that a layer which cannot enter the tape refuses it with an
+// error a host can read rather than storing state nothing consults, and that a
+// document carrying one refuses to be written at a minor that cannot say it.
+// The fold itself -- what the compiler does with the value -- is
+// test_layer_fold.cpp; the one case here that touches geometry is the
+// host-visible set-then-hide pairing, because that is the whole surface a host
+// reaches the feature through.
 //
 // The dangerous direction here is the SERIALIZATION pair. Layer records are not
 // length-prefixed, so a writer that emits the block at a minor whose reader
@@ -434,11 +435,11 @@ TEST_CASE("c abi: a composition survives a save and a load, and is undoable") {
     CHECK(op == CLAY_OP_INTERSECT);
 }
 
-TEST_CASE("c abi: setting a composition changes nothing about the field yet") {
-    // The honest statement of what this stage landed: the model carries the
-    // value and the compiler does not read it. When the fold lands this case
-    // becomes false and must be REPLACED by the parity and order gates, not
-    // deleted quietly.
+TEST_CASE("c abi: a subtractive layer cuts, and hiding it gives the geometry back") {
+    // The host-visible half of the fold. The engine-level gates live in
+    // test_layer_fold.cpp; this one is here because a host reaches the fold
+    // through these three calls and nothing else, and because it is the pairing
+    // -- set, then hide -- that makes layer order geometric.
     CDoc doc;
     clay_item_desc sphere;
     std::memset(&sphere, 0, sizeof sphere);
@@ -448,18 +449,52 @@ TEST_CASE("c abi: setting a composition changes nothing about the field yet") {
     sphere.rotation[3] = 1.0f;
     sphere.scale = 1.0f;
     REQUIRE(clay_add_item(doc.d, doc.base, &sphere, nullptr) == CLAY_OK);
-    sphere.position[0] = 0.5f;
+    sphere.position[0] = 0.7f;
     sphere.params[0] = 0.6f;
     REQUIRE(clay_add_item(doc.d, doc.cutter, &sphere, nullptr) == CLAY_OK);
 
-    const float pts[9] = {0.0f, 0.0f, 0.0f, 0.7f, 0.0f, 0.0f, 1.2f, 0.3f, 0.0f};
-    float before[3] = {0, 0, 0};
-    REQUIRE(clay_eval_points(doc.d, nullptr, pts, 3, before, nullptr) == CLAY_OK);
+    // Inside the base and inside the cutter; inside the base and well clear of
+    // it; and outside both.
+    const float pts[9] = {0.9f, 0.0f, 0.0f, -0.6f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f};
+    float unioned[3] = {0, 0, 0};
+    REQUIRE(clay_eval_points(doc.d, nullptr, pts, 3, unioned, nullptr) == CLAY_OK);
+    CHECK(unioned[0] < 0.0f);  // the union covers it
+
     REQUIRE(clay_document_set_layer_composition(doc.d, doc.cutter, CLAY_OP_SUBTRACT,
                                                 CLAY_BLEND_HARD, 0, 0) == CLAY_OK);
-    float after[3] = {0, 0, 0};
-    REQUIRE(clay_eval_points(doc.d, nullptr, pts, 3, after, nullptr) == CLAY_OK);
-    for (int i = 0; i < 3; ++i) CHECK(after[i] == before[i]);  // bit-identical
+    float cut[3] = {0, 0, 0};
+    REQUIRE(clay_eval_points(doc.d, nullptr, pts, 3, cut, nullptr) == CLAY_OK);
+    CHECK(cut[0] > 0.0f);              // ...and the cut takes it away
+    CHECK(cut[1] == unioned[1]);       // where the cutter does not reach, nothing moved
+    CHECK(cut[2] != unioned[2]);       // outside, the field is the cut one
+
+    REQUIRE(clay_document_set_layer_visible(doc.d, doc.cutter, 0) == CLAY_OK);
+    float restored[3] = {0, 0, 0};
+    REQUIRE(clay_eval_points(doc.d, nullptr, pts, 3, restored, nullptr) == CLAY_OK);
+    // The bitten point is material again. The other two probes are outside the
+    // cutter's reach, where a hard subtract was already the identity, so they
+    // are deliberately not asserted to move -- "hiding changed something" is
+    // only true where the cutter was doing something.
+    CHECK(restored[0] != cut[0]);
+    CHECK(restored[0] < 0.0f);  // material again
+
+    // The uncut geometry, bit-identical: hiding the cutter has to give back the
+    // field the base layer alone produces, not one that rounds to it.
+    CDoc base_only;
+    REQUIRE(clay_document_set_layer_visible(base_only.d, base_only.cutter, 0) == CLAY_OK);
+    std::memset(&sphere, 0, sizeof sphere);
+    sphere.struct_size = static_cast<uint32_t>(sizeof sphere);
+    sphere.prim = CLAY_PRIM_SPHERE;
+    sphere.params[0] = 1.0f;
+    sphere.rotation[3] = 1.0f;
+    sphere.scale = 1.0f;
+    REQUIRE(clay_add_item(base_only.d, base_only.base, &sphere, nullptr) == CLAY_OK);
+    float alone[3] = {0, 0, 0};
+    REQUIRE(clay_eval_points(base_only.d, nullptr, pts, 3, alone, nullptr) == CLAY_OK);
+    for (int i = 0; i < 3; ++i) {
+        CAPTURE(i);
+        CHECK(restored[i] == alone[i]);  // bit-identical, not merely close
+    }
 }
 
 TEST_CASE("c abi: a host can ask whether an older format can still say this") {

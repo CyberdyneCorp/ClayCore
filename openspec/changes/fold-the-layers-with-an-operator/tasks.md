@@ -21,12 +21,30 @@
 
 ## 2. The fold
 
-- [ ] 2.1 `run()` folds instead of unioning
-- [ ] 2.2 The first visible layer initialises and its op is NOT applied — the
-      same `have_acc` rule items already follow, not a second one
-- [ ] 2.3 One low-level combine emitter shared with the item path; the kernel
-      math stays single-source
-- [ ] 2.4 A layer's symmetry resolves before it combines, once
+- [x] 2.1 `run()` folds instead of unioning — and so does `run_part()`, which is
+      the same loop: a PART whose layers still hard-unioned internally would not
+      be the accumulator `run()` holds at that boundary, which is the one thing
+      the split depends on. Both go through one `Compiler::fold_layer`. A layer
+      whose chain produced nothing (empty, all-hidden, or culled out of a brick)
+      is skipped where its operator reads an absent operand as no change and
+      folded against the far field where it does not — an intersecting layer
+      that is skipped leaves material the whole-document tape removes, which is
+      the sharpest silent case in the whole change and was not in the audit
+- [x] 2.2 The first visible layer initialises and its op is NOT applied — the
+      same `have_acc` rule items already follow, not a second one. It is the
+      `if (have_acc)` guard on the combine and nothing else; the item rule's
+      OTHER half (skip a carving item that opens a chain, seed a
+      material-creating one) deliberately does not lift, because either would
+      show nothing where the spec asks to show the layer itself
+- [x] 2.3 One low-level combine emitter shared with the item path; the kernel
+      math stays single-source — `Compiler::emit_chain_combine`, which was
+      already duplicated byte for byte between `compile_group`'s tail and
+      `resume`'s stack unwind and would have become a third copy here
+- [x] 2.4 A layer's symmetry resolves before it combines, once — structurally
+      already true (mirror and radial copies are emitted inside `emit_item` and
+      folded into the layer's own chain long before it folds), so this cost no
+      code and is pinned by a test that breaks if the layer combine is ever
+      hoisted earlier
 
 ## 3. Correctness
 
@@ -38,7 +56,15 @@
 
 ## 4. The six sites that assume a hard union
 
-- [ ] 4.1 `compile_document_resumable`'s trailing union
+- [ ] 4.1 `compile_document_resumable`'s trailing union — PARTLY DONE in the
+      fold stage, emission only: `Compiler::resume` now re-emits the ACTIVE
+      LAYER's composition through the same shared emitter instead of a
+      hard-coded `Op::Add`, derived from the `const Layer&` it already takes.
+      That was not scope creep but the alternative to leaving `run()` and
+      `resume()` emitting different fields for the same document. What is NOT
+      done: the hand-built checkpoints in `bindings/c/clay_c.cpp`, the
+      `test_tape_prefix_reuse.cpp:167` composed subcases, and the decision's
+      header restatement
 - [ ] 4.2 `compile_document_part` (`tape.h:372`)
 - [ ] 4.3 `compile_document_except` (`tape.h:390`)
 - [ ] 4.4 `tape_build.cpp:1281` — "a hard Add is exact and adds no extent"
