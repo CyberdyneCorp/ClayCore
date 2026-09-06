@@ -20,6 +20,15 @@
 # belongs to another repository or to a build artefact, and a name a change has
 # promised and not yet built.
 #
+# RE-AUDITED once the gate learned to read a qualified name whole. Until then it
+# searched for the trailing identifier alone, so `MetalBackend::upload_tape` had
+# been struck on evidence about `upload_tape` and nothing else — the class was
+# never looked at. Every struck row and every row below was re-run against the
+# corrected matcher: all three strikes hold (`upload_tape` and `wait_for` are
+# both members of `class MetalBackend` in `backends/metal/metal_backend.cpp`),
+# and every row below still fails to resolve, so none of them is a strike this
+# gate was simply unable to see.
+#
 # A ROW IS RETIRED BY THE GATE, NOT BY GOODWILL. Every row here is re-read on
 # every run: if the change stops citing the span, or the span starts resolving,
 # the gate FAILS and names the row to delete. A debt list nobody retires stops
