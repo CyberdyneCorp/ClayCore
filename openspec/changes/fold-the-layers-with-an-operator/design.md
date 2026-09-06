@@ -1378,3 +1378,34 @@ So the dilation IS covered, by two cases in one file, and the coverage does not
 come from the file that looks like it should provide it. **Both facts are worth
 carrying: the test that reads as the regression test is not one, and the tests
 that are do not have "undo bound" in their names.**
+
+### §13i. Unifying two paths converts every assertion comparing them into a tautology
+
+Separated from §13e by the host on 2026-09-06, and the distinction decides how a
+reviewer uses each.
+
+§13e is STATIC: an assertion whose expected value is derived from the system
+under test measures consistency. You answer it by reading the test — where does
+the expectation come from.
+
+This one is not answerable that way. `test_c_undo_bound.cpp`'s subcase was SOUND
+when written: the query path and the command path were genuinely two functions,
+and requiring them to agree could have failed for a reason worth hearing.
+**Nothing in the test changed, and nothing in it could have.** The fix merged the
+two functions, and that is what made the assertion vacuous. Read at any point,
+before or after, it shows an expectation taken from a legitimately independent
+source.
+
+**So this is a trigger condition rather than a property**, and it is the kind of
+change nobody re-audits tests for: a refactor that deletes a duplicate
+implementation is not supposed to change behaviour, and it does not. It changes
+what the tests are CAPABLE OF DETECTING.
+
+**Required of the third review, and it is answerable from a diff:** *this change
+merged two code paths — which assertions compared them?* This change merged at
+least three pairs: the query and the command path for a node's reach, the query
+and the dirty call for a layer's, and `document_pad` with `CullIndex::refresh_pad`
+onto one expression. Every assertion that held two of those equal is now
+comparing one thing with itself. Report each as still-meaningful (it pins a
+contract a future split could break, which is worth keeping and not worth
+counting) or as coverage that has quietly evaporated.
