@@ -2134,14 +2134,29 @@ their crate rather than in their tests directory because the broken state cannot
 be reached from outside**, which is the honest place for a test whose fixture is
 unreachable through the public surface.
 
-**And it sharpens our own fix.** Blanking the seed makes the coarse walk fall
-back to the centre scan — correct, and still silent. Forwarding the class with
-the BOUND level's revision instead is rejected by the coarse sculptor, because
-every `MeshSculptor` mints its own `seed_revision_` at construction
-(`src/mesh/sculpt.cpp:225` and `:228`, `next_seed_revision()`), so coarse and
-bound never share one. Rejection increments `stale_seeds_rejected_` and falls
-back to the same scan. **Same behaviour, one counter left behind** — the crossing
-becomes visible in telemetry instead of invisible, at the cost of nothing.
+**Their proposed sharpening was checked and REJECTED, and the reason is worth
+more than the suggestion.** They asked whether forwarding the class with the
+BOUND level's revision would turn the silent no-op into something counted rather
+than removing the forwarding. The premise holds: every `MeshSculptor` mints its
+own `seed_revision_` at construction (`src/mesh/sculpt.cpp:225` and `:228`,
+`next_seed_revision()`), so coarse and bound never share one, and the mismatch
+would increment `stale_seeds_rejected_` and fall back to the same scan.
+
+**But that counter is not ours to spend.** `stale_seeds_rejected` is public on
+both surfaces — `clay_mesh_sculptor_stale_seeds_rejected` and pyclay's
+`MeshSculptor.stale_seeds_rejected` — and it means *the host handed us a seed
+from an old numbering*. Tripping it internally on every coarse dab by design
+would make it fire constantly for a reason no host caused, destroying the one
+signal hosts have for their own staleness bugs; `bindings/python/tests/
+test_seed_and_peaks.py` asserts it is exactly 0 and exactly 1.
+
+**And the telemetry it promises would be unreadable anyway**: the coarse
+sculptor is a throwaway destroyed with the stamp, so nobody can ever call the
+accessor on it. So the seed is BLANKED in the copy each coarse sculptor is
+given, and the shipped reason is the one that survives inspection: there is no
+map between two levels' class numberings to translate a seed with, and the scan
+the seed exists to skip is what a coarse walk over a quarter of the vertices
+costs regardless.
 
 ### Layer across a depth boundary has a live host, which ranks the three majors
 
