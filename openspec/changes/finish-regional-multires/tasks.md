@@ -838,3 +838,54 @@
   landed and are corrected where they stand: a missing face is not "named by the
   level it lives at", quad-only transition templates do not exist, and a mixed
   export owes no preflight
+- THE GATE MEASURED THE MACHINE, NOT THE TREE. `tools/check_task_symbols.py`
+  answered a slash-bearing citation with `os.path.exists` while its bare-filename
+  sibling went through `git ls-files`, and three separate defects fell out of
+  that one line. Untracked build output counted as a citation — dist/ is
+  gitignored and the packaging script writes an xcframework into it, so the
+  baseline row recording that path was told to delete itself on a machine that
+  had run the build and to come back on one that had not, and obeying either
+  broke the other; both directions were reproduced before the fix. A leading
+  `..` escaped the checkout, so a citation could be answered by whatever sat
+  beside it on disk, and one baseline row was of exactly that shape. And the
+  MORE SPECIFIC citation was the one that failed: a bare filename resolved from
+  anywhere in the tree, the same filename with its directory had to be exact
+  from the root, so the string every #include writes did not resolve while its
+  basename did — an inversion that put four rows in the baseline and pushed
+  authors toward the vaguer citation. A path-shaped span is now resolved through
+  git, as a prefix of a tracked path read from any directory boundary in it,
+  which is a tracked path, a suffix of one and a prefix of one at once:
+  `ClayCoreLink/Empty.swift` finds `bindings/swift/ClayCoreLink/Empty.swift`,
+  `docs/05` finds `docs/05-claycore-library.md`, and `scene/bounds` finds both
+  `include/clay/scene/bounds.h` and `src/scene/bounds.cpp`. Escaping ROOT is
+  refused. PROVED BY REVERT — the one line back to `os.path.exists` fails four
+  new self-test checks and leaves the fifth, an invented file under a real
+  directory, passing
+- SEVEN BASELINE ROWS RETIRED, which is the stale-row rule working on the pass
+  that wrote it. Three were paid by the merge with main and the gate named them
+  unprompted, `LayerComposition` among them — the worked example the baseline
+  file predicted in prose went off exactly as written. The other four were never
+  debt at all: they were the inversion above, real files cited by suffix or
+  prefix. Five rows remain, each a name in another repository, in a build
+  artefact, or promised and not yet built, and two of them stopped being
+  machine-dependent in the process — with the xcframework and the outside
+  directory both present on disk the gate now still reports them as debt
+- THE GATE WAS ITS OWN HAYSTACK. `haystack` excluded
+  `tools/task_symbols_baseline.txt` and nothing else while `tools/` stayed a
+  search directory, so the tool searched its own source and every Python
+  identifier in it — helpers, and the fixture names `--self-test` writes as
+  string literals — was a resolvable "C++ symbol" resolving in exactly one file.
+  This very task list had come to cite two of them, so renaming a private
+  fixture would have broken an unrelated change's gate. The source is now
+  excluded the way the baseline is, named relative to ROOT so the self-test's own
+  copy is what gets excluded from the self-test's tree, and the three citations
+  here are rewritten as prose. PROVED BY REVERT: a check that copies the real
+  source into the fixture tree and cites a name living nowhere else fails
+  without the exclusion
+- A MISTYPED CHANGE NAME BOUGHT A CLEAN BILL OF HEALTH. `main` took its argument
+  list unvalidated and `check` returns nothing when a change has no `tasks.md`,
+  so the single-change form — the documented one, and the one 6.6 above records
+  a by-hand run of — printed "task symbols resolve in 1 change(s)" and exited 0
+  having opened no file. A named change with no directory now fails. The
+  self-test is 16 checks, and every one of the six added here was shown to fail
+  with its own fix reverted
