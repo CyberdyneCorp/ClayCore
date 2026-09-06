@@ -605,3 +605,35 @@ boolean live" names a menu entry rather than work anyone has to build.
 
 A test asserting what a DOCUMENT-empty layer set to Intersect does, so the
 divergence above is deliberate and stays that way. The test is the record.
+
+## 10. The cull pad has no term for a layer-level blend k — REQUIRED before this ships
+
+Raised by stage 2's handover, recorded here because a handover is read by the
+next stage and this must be read by all of them.
+
+`Compiler::document_pad` sums the pad terms a layer's ITEMS need. A layer
+composition can now carry a smooth blend with its own `k`, and nothing adds a
+term for it. The fold is live as of stage 2, so this is a hole in the tree today
+rather than a future one, and it is the same silent class as everything else in
+this change: a per-brick culled tape that drops items the whole-document compile
+keeps returns a field that never existed, with no error and no visual tell beyond
+geometry that is subtly wrong at a brick boundary.
+
+**What is required, not optional, before this change is reviewable:**
+
+1. A pad term for the layer combine's `k` and rounding, folded into
+   `document_pad` the way an item's chain terms already fold. `cull_pad_terms`
+   is the place the tree already keeps terms UNADDED and unresolved, and
+   `blend_cull_pad`'s definition records why the chain envelope grows with the
+   contributor count — a layer fold is one more contributor to that chain, at
+   the document level.
+2. A test that FAILS without the term: a document whose layers fold with a
+   smooth k, compiled per brick against a region small enough that the naive pad
+   drops a contributing item, compared with the whole-document compile. Assert
+   band-clamped identity, which is what the culled tape already promises.
+3. Where the pad is deliberately conservative, say what it costs. A pad that is
+   too wide is a slower compile; one that is too narrow is wrong geometry. Those
+   are not symmetric and the comment should say so.
+
+A hard-union fold needs no term, which is why nothing needed one before and why
+every existing document stays exactly as fast as it was.
