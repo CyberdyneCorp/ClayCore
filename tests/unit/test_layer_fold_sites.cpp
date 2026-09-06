@@ -420,9 +420,17 @@ namespace {
 // base, with joins and cutters stacked above it. The bottom layer's own
 // composition is never applied (tape.h), so four layers carry three folds.
 Document fold_stack(int composed_folds, float k) {
+    // Literal names rather than "l" + std::to_string(i): every other fixture in
+    // this suite names its layers literally, and the concatenation was the only
+    // one -- gcc-toolset-12 in the manylinux container rejects it under
+    // -Werror=restrict, reporting a memcpy of 9223372036854775810 bytes inside
+    // char_traits.h from a value range it cannot bound through the inlined
+    // temporary. A false positive, and four fixed names are what this fixture
+    // wanted anyway.
+    static constexpr const char* kNames[4] = {"l0", "l1", "l2", "l3"};
     Document doc;
     for (int i = 0; i < 4; ++i) {
-        Layer& l = doc.add_sdf_layer("l" + std::to_string(i));
+        Layer& l = doc.add_sdf_layer(kNames[i]);
         l.sdf->insert(sphere_at(0.62f * static_cast<float>(i), 0.5f));
     }
     for (int i = 0; i < composed_folds; ++i)
