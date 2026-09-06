@@ -1,7 +1,16 @@
 # mesh-sculpt-layers Specification
 
 ## Purpose
-TBD - created by archiving change add-mesh-sculpt-layers. Update Purpose after archive.
+
+Detail on a mesh should be recordable, dialable and removable without being
+re-sculpted. This capability is the mesh answer to what voxel sculpt layers
+already are: a pass is an ADDRESSABLE CONTRIBUTION rather than a brush mode, so
+its strength can be changed after the fact and an old pass can be removed
+without discarding everything sculpted after it — which an undo stack cannot do.
+
+A layer's coefficients ARE detail coefficients, in the same transported frame at
+the same block size as the base, so a layer costs what the detail costs and the
+evaluated surface is the base plus the weighted sum of the layers.
 
 ## Requirements
 

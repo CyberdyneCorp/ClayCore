@@ -1,7 +1,17 @@
 # sdf-sculpt-transaction Specification
 
 ## Purpose
-TBD - created by archiving change add-sdf-sculpt-transaction. Update Purpose after archive.
+
+A sculpt gesture — a Smooth held down, a Move dragged — is many pointer events
+that must feel like one edit and become one undo step. This capability is the
+transaction that holds such a gesture open: the document does not move until the
+commit, the preview a host draws is exactly what the commit installs, and a
+cancel is a discard that leaves the document byte-identical.
+
+It exists so that per-event work is proportional to what the brush TOUCHES
+rather than to what the document holds, and so that a host can draw a frame from
+a gesture in flight without asking the document a question the threading rules
+forbid.
 
 ## Requirements
 
