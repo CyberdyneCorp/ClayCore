@@ -8591,7 +8591,14 @@ NB_MODULE(pyclay, m) {
             "seed_revision"_a = nb::none(), "automask"_a = nb::none(),
             "stamp_azimuth"_a = 0.0f,
             "One stamp at the surface's current sculpt level. Returns how many\n"
-            "weld classes moved.\n\n"
+            "weld classes moved, SUMMED OVER EVERY LEVEL THE STAMP WROTE: on a\n"
+            "regionally refined hierarchy the patches beside the refined region\n"
+            "have no vertex at the sculpt level, so a footprint reaching past\n"
+            "the region is written where that part of the surface lives, and\n"
+            "the count is the whole of it rather than the sculpt level's share.\n"
+            "Nothing is counted twice — every vertex of the mixed-depth surface\n"
+            "belongs to exactly one level — and a hierarchy of one depth writes\n"
+            "one level and reports what it always did.\n\n"
             "`seed_class` starts the surface walk where the finger did instead\n"
             "of scanning the level for the nearest vertex, and `seed_revision`\n"
             "is `seed_revision` READ AT THE TIME OF THE PICK. Pass both or\n"

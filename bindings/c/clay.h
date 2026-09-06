@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 85
+#define CLAY_ABI_MINOR 88
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -7420,14 +7420,34 @@ typedef struct clay_multires_stamp_report {
      * is not the only level a stamp writes: the patches beside the refined
      * region are coarser and have no vertex at this level for the brush to
      * move, so a footprint reaching past the region is written at the level
-     * that part of the surface actually lives at. `moved_vertices` counts the
-     * whole of it.
+     * that part of the surface actually lives at.
      *
      * THIS NEEDS NOTHING NEW FROM A HOST. clay_multires_dirty_blocks reports
      * BASE PATCHES rather than levels, and a stamp marks the patches it wrote
      * at whatever level it wrote them, so a host re-copying its dirty patches
      * at clay_multires_effective_level already picks the coarse write up. */
     uint32_t level;
+    /* Weld classes the stamp moved, SUMMED OVER EVERY LEVEL IT WROTE.
+     *
+     * THE MEANING CHANGED AT ABI 0.88.0 WHILE THE LAYOUT DID NOT, which is the
+     * whole reason the minor moves for it: a field that means something new
+     * under the same number is worse than a new field, because nothing a host
+     * compiles against tells it to look. Through 0.87.0 this was the count at
+     * `level` alone -- correct then, because a stamp only ever wrote one level.
+     *
+     * A host reading it as "how many of MY level's vertices moved" now reads it
+     * wrong on a regionally refined hierarchy, and there is no call in this ABI
+     * that answers the old question: the per-level write lists are C++-side
+     * (MultiresSculptor::last_write_vertices_at). What this ABI gives a host is
+     * what it needed the number for -- "did anything move, and which patches do
+     * I re-copy" -- and the second half is clay_multires_dirty_blocks, which was
+     * already per patch rather than per level.
+     *
+     * NOTHING IS COUNTED TWICE. Every vertex of the mixed-depth surface belongs
+     * to exactly one level, so a coarse class whose whole write the level above
+     * owns is put back and not counted at all. A stamp on a uniform-depth
+     * hierarchy, or one that stays inside the refined region, writes one level
+     * and reports exactly what it reported before. */
     uint64_t moved_vertices;
     uint64_t base_revision;
     uint64_t detail_revision;
