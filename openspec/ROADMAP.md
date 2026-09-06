@@ -1848,6 +1848,37 @@ needs. They have that number for one hop of four (median ratio 0.9998x, 171 of
 comparison is honest; it is not yet sensitive, and those are different
 properties.
 
+### Our bench gate has no load guard at all, and only a brief has been stopping it
+
+Found by comparing against the consuming host's, which has the opposite defect
+and is the more instructive one.
+
+**Theirs refuses, and on the wrong act.** Their CI passes `--json` to keep a
+run's figures as an artifact; their bench binary reads the presence of that flag
+as *"we are recording a baseline"*, checks the load, and exits 2 on a busy runner
+**before it ever reaches the comparison**. Two branches failed identically on
+`refusing to record a baseline: load 17.28 across 3 cores`, for a baseline nobody
+asked to record, with no comparison run. **Two acts sharing one flag, and the
+load check attached to the wrong one.** One line separates them.
+
+**Ours does not refuse at all.** `tools/check_bench.py` reads `/proc/loadavg`
+nowhere — the only mention of load in the file is a comment recording the
+conditions a threshold was once measured under. So a bench run on a loaded box
+produces numbers with no provenance and no complaint, and the only thing that
+stopped one today was a workflow brief telling a stage not to run it. **A
+discipline that lives in a prompt is not a gate**, and it held only because it
+was written down three workflows earlier.
+
+The pair is the point: a load guard on the wrong act fails loudly and blocks work
+that should proceed; no load guard at all passes quietly and records a number
+nobody can use. **The second is worse and looks better.**
+
+What a guard here should do, if one is added: refuse to RECORD, never to COMPARE
+— a comparison across two pins is the whole point of an upgrade measurement, as
+that host's own Linux baseline argues — and print the load beside every figure it
+emits, so a number carries the conditions it was taken under rather than a
+person's assurance that they checked.
+
 ### A fourth way a gate is real and unenforced: an exact assertion about a state nobody reaches
 
 The three recorded above are a gate no change triggers, a gate the wrong version
