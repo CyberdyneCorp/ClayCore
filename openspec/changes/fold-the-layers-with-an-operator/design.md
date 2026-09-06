@@ -1341,3 +1341,40 @@ is bit-identical to the whole document, three arms, failing on all three when
 the seam is forced to a hard Add). The hard Add belongs to the CALLER that holds
 two halves apart in host floats, and so does that caller's refusal — which is
 why every in-tree caller of the suffix states `doc_have_acc = false`.
+
+### §13h. The revert experiment §13d asks for, run
+
+Run on an isolated worktree at `b3b51c01` with the fold dilation stubbed out —
+`layer_reach_in_document`'s `support` forced to 0 — rebuilt and run. (The stub
+does not compile as written: removing the term leaves `doc` and `layer_id`
+unused and `-Werror=unused-parameter` rejects it, which is the reminder that a
+revert has to COMPILE before it proves anything.)
+
+**`tests/unit/test_c_undo_bound.cpp` PASSES with the fix reverted.** 10 cases,
+164 assertions, all green. So by §13d's question it is **documentation of the new
+behaviour, not evidence for it** — and the reason is §13e, arriving in a form
+neither section anticipated:
+
+> its new subcase asserts that the QUERY and the COMMAND path report the same
+> box. The fix made those two the same function. So the assertion compares one
+> output with itself, and reverting the shared term moves both sides together.
+> **It cannot fail.**
+
+That is not an argument for deleting it — it documents a contract a future change
+could break by re-splitting the two paths, which is exactly what happened once
+already. It is an argument for not counting it as coverage of the dilation.
+
+**What DOES catch the revert, in `tests/unit/test_layer_fold_sites.cpp`:**
+
+- *"an intersecting layer's commands dirty what it can take away"* — `b.min.x <
+  own.min.x`, `b.max.x > own.max.x`, and `b.max.x == Approx(own.max.x +
+  support)` all fail.
+- *"an item edit is dilated by the folds it passes through"* —
+  `changed_outside(before, after, reach, pts, &worst) == 0` fails, which is the
+  property itself rather than a proxy for it: field values change outside the
+  region the engine reported as reaching.
+
+So the dilation IS covered, by two cases in one file, and the coverage does not
+come from the file that looks like it should provide it. **Both facts are worth
+carrying: the test that reads as the regression test is not one, and the tests
+that are do not have "undo bound" in their names.**
