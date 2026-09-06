@@ -1393,6 +1393,33 @@ Deliberately NOT on this list: tool availability. The host keeps
 its vocabulary, and repeating it in the engine would let the two disagree. A rule
 about refusals is not a claim that every refusal belongs to the engine.
 
+### Three ways a gate is real and unenforced
+
+Found within one day, 2026-09-06, none of them by a gate failing — all three by
+someone asking WHICH RUNNER SEES WHAT. Worth keeping as a checklist, because the
+common defence ("we have a gate for that") is true in every one of these cases.
+
+1. **A gate no change triggers.** `examples/run_all.py`'s capability-coverage
+   check asks whether every living capability has an example or a recorded
+   reason. Archiving two changes created two capabilities and nobody adds an
+   example for a documentation commit, so it was red on main for a day. The
+   check was executable, correct, and unread.
+2. **A gate the wrong version runs.** CI pinned `@fission-ai/openspec@1.8.0`
+   while a developer's local CLI was newer, so the STRICTER tool was the one
+   nobody's CI ran — four capabilities kept the placeholder `## Purpose` that
+   `openspec archive` writes, `release_check.py` went red locally, and CI stayed
+   green. Pin bumped to 1.12.0. The consuming host had the same class inverted:
+   its CI installs `@latest`, so its enforcing version FLOATS and a green tree
+   can go red without anyone touching it.
+3. **A gate that is compiled but never run.** The host's `agent_end_to_end` is
+   built and linted by CI and never executed, under a comment saying "it is
+   still compiled and linted here, so it cannot rot unnoticed". It had rotted.
+   The worst of the three, because the comment converts an unknown into a false
+   known.
+
+The unifying question is not "is there a gate" but **"what would have to happen
+for this gate to fail, and does that ever happen here?"**
+
 ### The practice that catches an inert feature
 
 Their `clay_item_set_gate` was accepted-and-inert for four releases, exactly as
