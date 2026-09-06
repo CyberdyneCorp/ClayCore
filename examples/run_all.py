@@ -161,6 +161,15 @@ CAPABILITY_EXAMPLES = {
     # NUMBER means anything, and the numbers are taken on the reference device
     # by tests/device, not in this gallery.
     "device-gate": None,
+    # Both landed as capabilities when their changes were archived, and both are
+    # mechanisms rather than pictures: a cached tape prefix and a held gesture
+    # change what an edit COSTS and are required to change nothing about what a
+    # document evaluates to. An example would render the same image with the
+    # feature on and off, which is the property, not a demonstration of it.
+    # `clay_document_resume_stats` and the transaction's own counters are where
+    # they are observable, and the benchmarks are where they are asserted.
+    "sdf-prefix-cache": None,
+    "sdf-sculpt-transaction": None,
     "examples": None,             # this file
 }
 
