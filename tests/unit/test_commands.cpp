@@ -67,6 +67,10 @@ TEST_CASE("every command's inverse restores the document bit-identically") {
         RemoveLayerCmd{lid},
         SetLayerVisibleCmd{lid, false},
         SetLayerTransformCmd{lid, math::Transform{cf3(0, 5, 0), math::Quat::identity(), 1.0f}},
+        SetLayerMirrorCmd{lid, kMirrorX, 0.1f},
+        SetLayerRadialCmd{lid, 6, 1, 0.05f},
+        SetLayerCompositionCmd{
+            lid, LayerComposition{Op::Subtract, Blend{BlendProfile::Cubic, 0.25f}, 0.05f}},
         SetLayerNameCmd{lid, "renomeada"},
     };
 
@@ -121,6 +125,10 @@ TEST_CASE("every command serializes and deserializes losslessly") {
         RemoveLayerCmd{lid},
         SetLayerVisibleCmd{lid, false},
         SetLayerTransformCmd{lid, math::Transform{}},
+        SetLayerMirrorCmd{lid, kMirrorY, 0.2f},
+        SetLayerRadialCmd{lid, 8, 2, 0.03f},
+        SetLayerCompositionCmd{
+            lid, LayerComposition{Op::Intersect, Blend{BlendProfile::Circular, 0.4f}, 0.01f}},
         SetLayerNameCmd{lid, "renomeada"},
     };
 

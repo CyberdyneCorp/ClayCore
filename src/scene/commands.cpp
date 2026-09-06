@@ -248,6 +248,20 @@ std::optional<Command> apply_one(Document& doc, const SetLayerRadialCmd& c) {
     return Command{inverse};
 }
 
+std::optional<Command> apply_one(Document& doc, const SetLayerCompositionCmd& c) {
+    Layer* l = doc.find_layer(c.id);
+    if (!l) return std::nullopt;
+    // REFUSED rather than stored, and refused HERE rather than only at the
+    // binding: a voxel or mesh layer never enters the tape, so a composition on
+    // one is a control that does not act, and a journal replayed through this
+    // vocabulary must reject exactly what the setter rejects. nullopt is this
+    // vocabulary's "no" and it already means the document is unchanged.
+    if (l->kind != LayerKind::Sdf) return std::nullopt;
+    SetLayerCompositionCmd inverse{c.id, l->composition};
+    l->composition = c.composition;
+    return Command{inverse};
+}
+
 }  // namespace
 
 namespace {
@@ -268,6 +282,7 @@ LayerId edited_layer(const Command& cmd) {
                                std::is_same_v<C, SetLayerTransformCmd> ||
                                std::is_same_v<C, SetLayerMirrorCmd> ||
                                std::is_same_v<C, SetLayerRadialCmd> ||
+                               std::is_same_v<C, SetLayerCompositionCmd> ||
                                std::is_same_v<C, SetLayerNameCmd>)
                 return c.id;
             else
@@ -384,7 +399,8 @@ math::Aabb command_influence_bound(const Document& doc, const Command& cmd,
                                std::is_same_v<C, SetLayerVisibleCmd> ||
                                std::is_same_v<C, SetLayerTransformCmd> ||
                                std::is_same_v<C, SetLayerMirrorCmd> ||
-                               std::is_same_v<C, SetLayerRadialCmd>)
+                               std::is_same_v<C, SetLayerRadialCmd> ||
+                               std::is_same_v<C, SetLayerCompositionCmd>)
                 return layer_command_bound(doc, c.id, extent);
             else if constexpr (std::is_same_v<C, AddNodeCmd>)
                 return c.subtree.empty() ? math::Aabb{}
@@ -1061,6 +1077,22 @@ void write_layer(Writer& w, const Layer& l, LayerId content_source = 0) {
     // older stream stops before it and keeps (1, 1, 1), which is the identity
     // and what every file written before this field meant.
     if (w.minor >= 16) w.pod(l.scale_axes);
+    // From minor 18, and gated exactly as the fields above are.
+    //
+    // BELOW 18 THE BLOCK IS NOT WRITTEN AND THE READER STOPS BEFORE IT, so the
+    // layer comes back at the default composition — the unconditional hard
+    // union every file written before this field meant. That degrade is only
+    // ever reached for a layer that ALREADY unions: serialize_document refuses
+    // the whole document when any layer carries a composition an older minor
+    // cannot say, because a subtractive layer written as a union is a different
+    // sculpture rather than a plainer file. The gate stays because the union
+    // case is still a legitimate write at 17 and has to be byte-identical to
+    // what 17 always produced.
+    if (w.minor >= 18) {
+        w.pod(l.composition.op);
+        write_blend(w, l.composition.blend);
+        w.pod(l.composition.rounding);
+    }
     // From minor 15, and gated exactly as the radial fields above are. The id
     // goes out BEFORE the content flag so a reader knows, before it reaches
     // the flag, whether a content section follows it.
@@ -1115,6 +1147,13 @@ Layer read_layer(Reader& r, LayerId* out_content_source = nullptr) {
     // Appended at minor 16, on the same terms: an older stream stops before it
     // and keeps the identity triple.
     if (r.minor >= 16) l.scale_axes = r.pod<kernel::cfloat3>();
+    // Appended at minor 18, on the same terms: an older stream stops before it
+    // and keeps the default composition, which is the hard union.
+    if (r.minor >= 18) {
+        l.composition.op = r.pod<Op>();
+        l.composition.blend = read_blend(r);
+        l.composition.rounding = r.pod<float>();
+    }
     LayerId content_source = 0;
     if (r.minor >= 15) content_source = r.pod<LayerId>();
     if (out_content_source) *out_content_source = content_source;
@@ -1148,6 +1187,7 @@ enum class Tag : std::uint8_t {
     // Appended rather than slotted beside SetLayerMirror: a tag is a wire
     // value, and inserting one would renumber every tag after it.
     SetLayerRadial,
+    SetLayerComposition,
 };
 
 struct SerializeVisitor {
@@ -1285,6 +1325,17 @@ struct SerializeVisitor {
         w.pod(c.count);
         w.pod(c.axis);
         w.pod(c.k);
+    }
+    void operator()(const SetLayerCompositionCmd& c) {
+        // Ungated, as SetLayerRadial is: a whole TAG is new, so a build that
+        // predates it hits deserialize's default arm and refuses the command
+        // rather than misreading its payload. Only a field appended to a record
+        // an older build already parses needs a minor gate.
+        w.pod(Tag::SetLayerComposition);
+        w.pod(c.id);
+        w.pod(c.composition.op);
+        write_blend(w, c.composition.blend);
+        w.pod(c.composition.rounding);
     }
     void operator()(const SetLayerNameCmd& c) {
         w.pod(Tag::SetLayerName);
@@ -1472,6 +1523,15 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
             cmd = c;
             break;
         }
+        case Tag::SetLayerComposition: {
+            SetLayerCompositionCmd c;
+            c.id = r.pod<LayerId>();
+            c.composition.op = r.pod<Op>();
+            c.composition.blend = read_blend(r);
+            c.composition.rounding = r.pod<float>();
+            cmd = c;
+            break;
+        }
         case Tag::SetLayerName: {
             SetLayerNameCmd c;
             c.id = r.pod<LayerId>();
@@ -1491,7 +1551,25 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
     return cmd;
 }
 
+LayerId layer_blocking_minor(const Document& doc, std::uint16_t minor) {
+    if (minor >= 18) return 0;
+    for (const Layer& l : doc.layers) {
+        if (l.kind != LayerKind::Sdf) continue;  // a non-SDF layer carries none
+        const LayerComposition& c = l.composition;
+        if (c.op != Op::Add || c.blend.profile != BlendProfile::Hard || c.blend.k != 0.0f ||
+            c.rounding != 0.0f)
+            return l.id;
+    }
+    return 0;
+}
+
 std::vector<std::uint8_t> serialize_document(const Document& doc, std::uint16_t minor) {
+    // Refused rather than degraded: below minor 18 a subtractive layer would be
+    // written as a union, and the document that comes back is a different
+    // sculpture in a file that opens cleanly. An empty vector is never a valid
+    // stream — even a document with no layers writes its count — so a caller
+    // that ignores this gets nothing rather than something wrong.
+    if (layer_blocking_minor(doc, minor) != 0) return {};
     Writer w;
     w.minor = minor;
     w.u32(static_cast<std::uint32_t>(doc.layers.size()));

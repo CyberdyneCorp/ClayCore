@@ -183,7 +183,16 @@ inline constexpr std::uint16_t kClaySpaceMajor = 1;
 // document it can open, with every payload written once per node exactly as
 // before; what is lost is the deduplication, which costs bytes rather than
 // anything an artist authored, and is therefore the recoverable direction.
-inline constexpr std::uint16_t kClaySpaceMinor = 17;
+// Minor 18 adds a LAYER's COMPOSITION — the op it folds into the layers
+// beneath it with — and like 12, 15 and 16 it is an APPENDED scene field; see
+// scene::kSceneMinor for the block's layout. A build that predates 18
+// desynchronises on the first layer record and FAILS rather than misreading,
+// which is this format's usual direction. The DOWNGRADE is where 18 differs
+// from every minor before it: writing at 17 is allowed only for a document
+// whose layers all union, and REFUSED for one that carries a composition,
+// because a subtractive layer written as a union opens cleanly as a different
+// sculpture. scene::layer_blocking_minor is the query a caller asks first.
+inline constexpr std::uint16_t kClaySpaceMinor = 18;
 
 // The document bundle a .clayspace file holds. Voxel layer content is keyed
 // by layer id (the scene module stays voxel-agnostic by layering rule).

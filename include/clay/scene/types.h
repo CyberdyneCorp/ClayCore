@@ -205,6 +205,36 @@ struct Blend {
     }
 };
 
+// How a whole LAYER combines with the accumulated field of the visible SDF
+// layers beneath it.
+//
+// THE SAME FOUR VALUES AN ITEM STATES, and deliberately the same types: a layer
+// boolean IS the operation an item boolean already is, so it gets no second
+// enum, no second blend vocabulary and no second evaluator. `rounding` is in
+// the LAYER's own units, the way a group's is — `layer_distance_scale` is the
+// factor that maps it, since a layer-level radius has no single item to own it.
+//
+// THE DEFAULT IS THE HARD UNION. Op::Add with a hard profile, no radius and no
+// rounding is exactly what every visible SDF layer has always folded with, so a
+// document that never sets one compiles byte-identical tape and a document
+// saved before the field existed reads back meaning what it always meant.
+//
+// WHAT A LAYER MAY NOT CARRY, and why the setter refuses rather than clamps:
+//   * Op::None is the INLINE op and belongs to groups alone — a layer is not
+//     spliced into an outer chain, there is no outer chain to splice it into,
+//     and the tape would carry an unknown combine mode that the interpreter
+//     falls through as identity, discarding the layer with no error.
+//   * The two transitions read their parameters off `Node::transition`, which
+//     this has no equivalent of; one accepted here would morph on the
+//     compiler's defaults instead of the artist's. That is the refusal
+//     `validate_group_op_blend` already makes, for the same reason.
+// Both are enforced at the C ABI, where a host can read the refusal.
+struct LayerComposition {
+    Op op = Op::Add;
+    Blend blend;
+    float rounding = 0.0f;
+};
+
 inline constexpr int kMaxPrimParams = 7;
 
 struct Prim {

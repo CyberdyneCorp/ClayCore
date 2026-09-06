@@ -391,6 +391,27 @@ clay_result validate_group_op_blend(std::int32_t op, std::int32_t blend, float b
     return CLAY_OK;
 }
 
+// What a LAYER may carry, which is what a group may carry minus the inline op:
+// a layer is not spliced into an outer chain, and there is no outer chain to
+// splice it into. The transitions are refused for the group's reason —
+// `Node::transition` holds their parameters and a layer has no node, so one
+// accepted here would morph on the compiler's defaults.
+//
+// Finiteness is checked here and not in validate_blend because a LAYER-level
+// radius reaches the document's cull pad, where an infinity is not a large
+// blend but a plan with no bricks in it. The item-level rule is deliberately
+// left where it is rather than widened under this change.
+clay_result validate_layer_composition(std::int32_t op, std::int32_t blend, float blend_k,
+                                       float rounding) {
+    if (!op_is_known(op)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown combine op");
+    if (scene::op_is_transition(static_cast<scene::Op>(op)))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "a layer cannot carry a transition op");
+    if (!std::isfinite(blend_k) || !std::isfinite(rounding))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "a layer's blend radius and rounding must be finite");
+    return validate_blend(blend, blend_k, rounding);
+}
+
 bool brush_shape_is_known(std::int32_t v) {
     if (v < 0 || v > 0xff) return false;
     switch (static_cast<voxel::BrushShape>(v)) {
@@ -5345,6 +5366,71 @@ clay_result clay_document_layer_protection(const clay_document* doc, clay_layer_
     if (out_ghost) *out_ghost = l->ghost ? 1 : 0;
     if (out_locked) *out_locked = l->locked ? 1 : 0;
     return CLAY_OK;
+}
+
+clay_result clay_document_set_layer_composition(clay_document* doc, clay_layer_id layer,
+                                                int32_t op, int32_t blend, float blend_k,
+                                                float rounding) {
+    clay_result r = validate_layer_composition(op, blend, blend_k, rounding);
+    if (r != CLAY_OK) return r;
+    // Refused for the reason clay_layer_node_transform refuses a per-axis
+    // scale: a layer that cannot enter the tape cannot carry a fold, and
+    // storing one would make this a control that does not act.
+    //
+    // A MISS IS DELIBERATELY NOT REPORTED HERE. apply_edit is the one place
+    // that tells "no such layer" (CLAY_ERROR_NOT_FOUND) from "that layer is
+    // protected" (CLAY_ERROR_INVALID_ARGUMENT); reporting the miss from this
+    // pre-lookup would report a protected layer as missing. Only what was
+    // positively found to be non-SDF is refused here.
+    const scene::Layer* found = doc ? doc->doc.document.find_layer(layer) : nullptr;
+    if (found && found->kind != scene::LayerKind::Sdf)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "only an SDF layer carries a composition");
+    scene::LayerComposition comp;
+    comp.op = static_cast<scene::Op>(op);
+    comp.blend.profile = static_cast<scene::BlendProfile>(blend);
+    comp.blend.k = blend_k;
+    comp.rounding = rounding;
+    // Through the command vocabulary like every other layer edit, so the change
+    // is one undo step and a protected layer refuses it.
+    return apply_edit(doc, scene::Command{scene::SetLayerCompositionCmd{layer, comp}},
+                      "layer not found");
+}
+
+clay_result clay_document_layer_composition(const clay_document* doc, clay_layer_id layer,
+                                            int32_t* out_op, int32_t* out_blend,
+                                            float* out_blend_k, float* out_rounding) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    // Refused rather than answered with the zeroes that read as a valid hard
+    // union: a reader which cannot express what is there must not answer.
+    if (l->kind != scene::LayerKind::Sdf)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "only an SDF layer carries a composition");
+    if (out_op) *out_op = static_cast<int32_t>(l->composition.op);
+    if (out_blend) *out_blend = static_cast<int32_t>(l->composition.blend.profile);
+    if (out_blend_k) *out_blend_k = l->composition.blend.k;
+    if (out_rounding) *out_rounding = l->composition.rounding;
+    return CLAY_OK;
+}
+
+clay_result clay_document_writable_at_minor(const clay_document* doc, uint32_t minor,
+                                            clay_layer_id* out_blocking_layer) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (minor == 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "a format minor starts at 1");
+    if (out_blocking_layer) *out_blocking_layer = 0;
+    // Clamped rather than refused above this build's layout: the question is
+    // only ever about writing DOWN, and a host asking about a minor from the
+    // future is asking whether it loses anything, which it does not.
+    const std::uint16_t asked = minor > scene::kSceneMinor
+                                    ? scene::kSceneMinor
+                                    : static_cast<std::uint16_t>(minor);
+    const scene::LayerId blocking = scene::layer_blocking_minor(doc->doc.document, asked);
+    if (blocking == 0) return CLAY_OK;
+    if (out_blocking_layer) *out_blocking_layer = blocking;
+    return fail(CLAY_ERROR_UNSUPPORTED,
+                "a layer carries a composition that this format minor cannot say: writing it "
+                "there would turn a cutting layer into a unioning one");
 }
 
 // -- discovering layers ------------------------------------------------------

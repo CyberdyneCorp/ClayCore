@@ -227,6 +227,14 @@ inline void mix_layer_head(std::uint64_t& h, const scene::Layer& layer) {
     mix(h, layer.radial_count);
     mix(h, layer.radial_axis);
     mix_f(h, layer.radial_k);
+    // How the layer folds into what is beneath it. Mixed field by field, as
+    // every aggregate here is: an unmixed composition is a prefix cache and a
+    // sculpt transaction that both serve a field compiled under a different
+    // fold, with no error to say so.
+    mix(h, layer.composition.op);
+    mix(h, layer.composition.blend.profile);
+    mix_f(h, layer.composition.blend.k);
+    mix_f(h, layer.composition.rounding);
 }
 
 // The first `count` roots, and NOTHING after them.

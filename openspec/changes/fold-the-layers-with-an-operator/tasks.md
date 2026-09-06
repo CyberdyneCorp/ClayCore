@@ -8,14 +8,14 @@
 
 ## 1. The model
 
-- [ ] 1.1 `LayerComposition` on an SDF layer, using the EXISTING item enums
-- [ ] 1.2 Accessors, with validation: enum range, finite floats, SDF layers only
-- [ ] 1.3 A non-SDF layer REFUSES rather than storing dead state
-- [ ] 1.4 Writing at a minor below 18 REFUSES a document carrying any non-default
+- [x] 1.1 `LayerComposition` on an SDF layer, using the EXISTING item enums
+- [x] 1.2 Accessors, with validation: enum range, finite floats, SDF layers only
+- [x] 1.3 A non-SDF layer REFUSES rather than storing dead state
+- [x] 1.4 Writing at a minor below 18 REFUSES a document carrying any non-default
       composition (design.md §7), and is allowed and byte-identical to what 17
       meant for a document where every layer unions. Not a silent degrade: a
       subtractive layer written as a union is a different model
-- [ ] 1.5 A query a host can call BEFORE it saves: can this document be written
+- [x] 1.5 A query a host can call BEFORE it saves: can this document be written
       at minor N without losing authored intent? Across the C ABI, with the
       refusal itself returning `CLAY_ERROR_UNSUPPORTED`
 
@@ -49,7 +49,13 @@
 ## 5. Invalidation
 
 - [ ] 5.1 Composition joins the key of the tape, the cull index, the prefix cache
-      (`layer_prefix_fingerprint`) and the brick seed store
+      (`layer_prefix_fingerprint`) and the brick seed store — PARTLY DONE in the
+      model stage: it joins `digest::mix_layer_head`, so both
+      `layer_prefix_fingerprint` and `layer_fingerprint` move, and it reaches
+      the tape and the cull index for free through `apply_edit`'s revision
+      bump. The brick seed store is deliberately NOT keyed on it (see the
+      decision's ResumeKey note) and needs the split refusal instead, which is
+      the fold stage's
 - [ ] 5.2 Conservative first; narrow only with a measurement
 - [ ] 5.3 Dirty influence for a moved, re-blended or hidden cutter
 

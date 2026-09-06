@@ -191,13 +191,27 @@ struct SetLayerNameCmd {
     LayerId id = 0;
     std::string name;
 };
+// How a layer folds into the layers beneath it. A command for the reason the
+// mirror and the radial mode became ones: it is a property of the layer that
+// EVALUATION reads, so writing it straight into the record would neither
+// respect the lock nor reach the undo stack.
+//
+// REFUSED ON A NON-SDF LAYER, which no other layer command does. A voxel or a
+// mesh layer never enters the tape, so a composition on one is state nothing
+// reads — and the refusal is here, in the vocabulary, rather than only at the
+// binding, so a replayed journal cannot install what the setter rejects.
+struct SetLayerCompositionCmd {
+    LayerId id = 0;
+    LayerComposition composition;
+};
 
 using Command =
     std::variant<AddNodeCmd, RemoveNodeCmd, MoveNodeCmd, SetTransformCmd, SetPrimCmd,
                  SetColorCmd, SetOpBlendCmd, AppendStrokeCmd, TrimStrokeCmd, AddLayerCmd,
                  RemoveLayerCmd, SetLayerVisibleCmd, SetLayerTransformCmd,
                  SetLayerProtectionCmd, SetStrokePointsCmd, SetDeformersCmd,
-                 SetLayerMirrorCmd, SetLayerRadialCmd, SetArmatureCmd, SetLayerNameCmd>;
+                 SetLayerMirrorCmd, SetLayerRadialCmd, SetArmatureCmd, SetLayerNameCmd,
+                 SetLayerCompositionCmd>;
 
 // The layer a command would edit, or 0 for one that edits no existing layer
 // (adding a layer creates its target; changing protection is how a protected
@@ -340,7 +354,34 @@ LayerId content_sharer_of(const Document& doc, LayerId layer);
 // minor 16 restores the per-node shape exactly, so such a build opens the
 // document and gets what it always got. What is lost by that downgrade is the
 // deduplication and nothing else: the same volumes, once per node.
-inline constexpr std::uint16_t kSceneMinor = 17;
+//
+// Minor 18 adds a LAYER's COMPOSITION: one op byte, one blend profile byte, one
+// blend radius and one rounding, appended to the layer record and gated exactly
+// as the radial fields and the per-axis scale before them are. It is how a
+// visible SDF layer folds into the layers beneath it.
+//
+// Same shape as minors 7, 8, 11, 14, 15 and 16, so the same two directions. A
+// build that predates 18 reading an 18 document is ten bytes long on the first
+// layer record and desynchronised for every record after it, and FAILS — the
+// reader's own bounds and element-count checks reject the stream rather than
+// misread it.
+//
+// A DEPARTURE ON THE WAY DOWN, and the first one this format has made. Every
+// earlier minor is writable at the previous one, degrading to what that minor
+// meant: 14 comes back unsquashed, 15's instances come back as copies, 17
+// writes each payload once per node. None of those is a different sculpture.
+// 18 written at 17 WOULD be one — a subtractive layer comes back as a union, so
+// the cutter that was carving a hole is a lump welded onto the form, in a file
+// that opens cleanly and looks deliberate. So serialize_document REFUSES a
+// document carrying any non-default composition below minor 18 (see
+// `layer_blocking_minor`), and where every layer unions it writes exactly the
+// bytes 17 always did. "Writable at the previous minor" is read as "when the
+// previous minor can SAY it", not "by discarding what it cannot".
+//
+// The default composition IS the hard union, which is what makes "a document
+// saved before this feature loads unioning and renders as it did" true by
+// construction rather than by a migration.
+inline constexpr std::uint16_t kSceneMinor = 18;
 
 // Apply a command; returns its inverse, or nullopt if the target does not
 // exist or is protected (ghosted or locked). The document is unchanged in
@@ -362,6 +403,21 @@ std::size_t command_bytes(const Command& cmd, SharedSeen* seen = nullptr);
 std::vector<std::uint8_t> serialize(const Command& cmd);
 std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size);
 
+// The first SDF layer whose COMPOSITION `minor` cannot express, or 0 when the
+// whole document can be written at that layout with nothing an artist authored
+// dropped. A host asks this BEFORE it saves, so it can put an honest sentence
+// in front of a person instead of guessing on their behalf.
+//
+// It is a query and not a bool because a refusal a caller cannot NAME is a
+// refusal a caller has to explain by guessing.
+//
+// Every minor below 18 answers the same way, because the composition is the
+// only field so far whose absence changes the MODEL rather than the file: 14's
+// per-axis scale comes back unsquashed, 15's instances come back as copies, 16
+// the same one level up, and 17 writes each payload once per node. Every one of
+// those is smaller or plainer and none of them is a different sculpture.
+LayerId layer_blocking_minor(const Document& doc, std::uint16_t minor);
+
 // Whole-document snapshot (used by tests for bit-identity checks and by the
 // io module as the scene chunk payload).
 // `minor` is the layout to WRITE at, defaulting to the current one. Writing at
@@ -369,6 +425,22 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size);
 // and it is what makes "a minor-1 document reads as hard corners" testable
 // without manufacturing a stream by hand, which only stays correct until the
 // next field is added.
+//
+// REFUSES — returns an EMPTY vector, which is never a valid stream since even
+// an empty document writes its layer count — when `minor` cannot express what
+// this document says. Today that is exactly `layer_blocking_minor(doc, minor)`
+// being non-zero: a layer carrying a composition, written below minor 18.
+//
+// Refusing rather than degrading is a departure from every earlier minor, and
+// it is deliberate. The rule this format has followed is "writable at the
+// previous minor, degrading to whatever that minor meant", and it was cheap
+// while the loss was never something an artist made — 17 written at 16 costs
+// the payload deduplication and nothing else. 18 written at 17 would turn a
+// SUBTRACTIVE layer into a union: the cutter that was carving a hole comes
+// back as a lump welded onto the form, in a file that opens cleanly and looks
+// deliberate. So "writable at the previous minor" is read as "when the
+// previous minor can SAY it" rather than "by discarding what it cannot", and
+// where every layer unions this still writes exactly the bytes 17 always did.
 std::vector<std::uint8_t> serialize_document(const Document& doc,
                                              std::uint16_t minor = kSceneMinor);
 // `minor` is the container's minor version, so a node can gain a field without

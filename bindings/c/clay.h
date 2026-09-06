@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 85
+#define CLAY_ABI_MINOR 86
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -1273,6 +1273,93 @@ clay_result clay_document_set_layer_transform_nonuniform(clay_document* doc, cla
                                                          const float rotation_axis[3],
                                                          float rotation_angle,
                                                          const float scale[3]);
+
+/* -- a layer's COMPOSITION (ABI 0.86.0) -------------------------------------
+ *
+ * How a visible SDF layer combines with the accumulated field of the visible
+ * SDF layers BELOW it. `op` is a clay_op and `blend` a clay_blend — THE SAME
+ * FOUR VALUES clay_layer_set_op_blend takes for an item, because a layer
+ * boolean is the operation an item boolean already is and does not get a
+ * second vocabulary or a second evaluator.
+ *
+ * The default is CLAY_OP_ADD with CLAY_BLEND_HARD and zeroes, which is the
+ * unconditional hard union every document has always folded its layers with.
+ * Since both enumerators are 0, a zeroed composition IS that union: a document
+ * that never calls this evaluates exactly as it did, and one saved before the
+ * field existed loads with every layer unioning.
+ *
+ * WHAT IT DOES NOT PROMISE.
+ *
+ *   * THE FIRST VISIBLE SDF LAYER'S OPERATOR IS NOT APPLIED. It initialises
+ *     the accumulator instead. Applying one against an empty field would make
+ *     CLAY_OP_SUBTRACT and CLAY_OP_INTERSECT produce nothing at all, with no
+ *     error — which is what an artist who reordered their base layer to the
+ *     top would otherwise see. So this call stores what you set on any layer,
+ *     and the bottom-most visible SDF layer's stored value has no effect until
+ *     another visible SDF layer sits below it.
+ *   * IT IS NOT A NO-OP ON GEOMETRY the way visibility once was. Hiding a
+ *     subtracting layer restores the geometry it was cutting, and reordering
+ *     layers can change the shape. A host that treated layer order as cosmetic
+ *     has to stop.
+ *   * A NON-SDF LAYER IS REFUSED with CLAY_ERROR_INVALID_ARGUMENT, both here
+ *     and in the reader. A voxel or mesh layer never enters the tape, so a
+ *     composition on one would be a control that does not act; and the reader
+ *     refuses rather than answering CLAY_OP_ADD, because a reader that cannot
+ *     express what is there must not answer (see clay_layer_node_transform).
+ *   * CLAY_OP_INLINE IS REFUSED. It is the group op — children spliced into an
+ *     outer chain — and a layer has no outer chain.
+ *   * THE TWO TRANSITIONS ARE REFUSED, as a group refuses them and for the
+ *     same reason: they read their parameters off the node, and a layer has no
+ *     node to read them from, so one accepted here would morph on the
+ *     compiler's defaults instead of on anything the artist set.
+ *   * A NON-FINITE blend radius or rounding is refused. Elsewhere in this ABI
+ *     only the sign is checked; a layer-level radius reaches the document's
+ *     cull pad, where an infinity is not a large blend but a dropped plan.
+ *
+ * A negative radius or rounding is rejected rather than clamped, as
+ * clay_set_layer_radial rejects an axis of 3.
+ *
+ * The reader takes what the setter takes, so what comes out goes straight back
+ * in, and every out-pointer is optional: a call passing none of them still
+ * validates the layer, which is how a host asks "is this still an SDF layer"
+ * without a buffer. Reading is not editing — a ghosted, locked or hidden layer
+ * answers normally — while SETTING one on a protected layer is refused with
+ * CLAY_ERROR_INVALID_ARGUMENT like every other edit. */
+clay_result clay_document_set_layer_composition(clay_document* doc, clay_layer_id layer,
+                                                int32_t op, int32_t blend, float blend_k,
+                                                float rounding);
+clay_result clay_document_layer_composition(const clay_document* doc, clay_layer_id layer,
+                                            int32_t* out_op, int32_t* out_blend,
+                                            float* out_blend_k, float* out_rounding);
+
+/* -- can this document be written at an older format? (ABI 0.86.0) ----------
+ *
+ * Ask BEFORE you save. CLAY_OK means every layer of `doc` can be written at
+ * scene format minor `minor` with nothing an artist authored dropped;
+ * CLAY_ERROR_UNSUPPORTED means it cannot, *out_blocking_layer names the first
+ * layer that blocks it, and clay_last_error spells out why.
+ *
+ * WHY THIS EXISTS. A new format minor is normally writable at the previous one,
+ * degrading to whatever that minor meant — an unsquashed layer, an instance
+ * that comes back as a copy, a payload written once per node. None of those is
+ * a different sculpture. Minor 18's layer COMPOSITION is: written at 17, a
+ * subtracting layer comes back unioning, so the cutter that was carving a hole
+ * is a lump welded onto the form, in a file that opens cleanly and looks
+ * deliberate. The library therefore refuses that write rather than performing
+ * it, and this is how a host finds out in time to say so to a person.
+ *
+ * `minor` at or above this build's own layout is always CLAY_OK: the question
+ * is only ever about writing DOWN. A minor of 0 is CLAY_ERROR_INVALID_ARGUMENT.
+ * out_blocking_layer may be NULL, and is set to 0 on CLAY_OK.
+ *
+ * A RECORDED GAP, not an oversight: this ABI has no way to write at an older
+ * minor at all. clay_document_save takes a path and clay_document_save_memory
+ * takes a blob; neither takes a version, and the layout is a parameter on the
+ * C++ serializer that does not cross this boundary. So today the honest use of
+ * this call is "warn me that this document has become one an older build cannot
+ * open", and a save-at-minor entry point is its own change. */
+clay_result clay_document_writable_at_minor(const clay_document* doc, uint32_t minor,
+                                            clay_layer_id* out_blocking_layer);
 
 /* -- what a re-placement guarantees (ABI 0.82.0) ----------------------------
  *
