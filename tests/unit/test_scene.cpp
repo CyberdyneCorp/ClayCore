@@ -118,14 +118,28 @@ TEST_CASE("tape matches reference tree evaluation (composed gnarly scene)") {
 
     // And a narrower one, so the count above is not carried by the intersect
     // alone: default ONLY the smooth Add the instance folds with, and its own
-    // seam still moves the field. 28 rather than 2,000 because the seam is a
-    // thin shell and these are uniform samples of an 8-unit cube -- the number
-    // is small on purpose and is asserted exactly, since a fixture that drifts
-    // into folding nothing there is what this arm exists to catch (it read 0
-    // while the instance sat at its own x = 3).
+    // seam still moves the field. A few dozen rather than 2,000, because the
+    // seam is a thin shell and these are uniform samples of an 8-unit cube.
+    //
+    // A BAND rather than the exact count it first carried, and the reason is
+    // the count's own construction: `moved_from` thresholds a float difference
+    // at 1e-4, so the integer is decided by however many of 2,000 samples sit
+    // NEAR that threshold. On a thin shell a handful do, and a platform whose
+    // codegen contracts a multiply-add differently moves one of them across it.
+    // Asserted at 28 this read 28 under GCC and failed the macOS Metal job.
+    //
+    // The band keeps both teeth the exact number had. The lower one catches the
+    // fixture drifting into folding nothing there — it read 0 while the
+    // instance sat at its own x = 3, which is why this arm exists. The upper
+    // one keeps it distinguishable from the intersect arm above, which moves
+    // every sample. Neither tooth was ever about the difference between 27 and
+    // 29.
     Document one_default = clay_test::composed_gnarly_document();
     one_default.layers[2].composition = scene::LayerComposition{};
-    CHECK(moved_from(one_default) == 28);
+    const int narrow = moved_from(one_default);
+    INFO("narrow-arm moved count: " << narrow);
+    CHECK(narrow >= 10);
+    CHECK(narrow <= 100);
 }
 
 TEST_CASE("invisible items and layers are not compiled") {
