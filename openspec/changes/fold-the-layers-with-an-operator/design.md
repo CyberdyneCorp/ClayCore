@@ -828,3 +828,45 @@ A refusal that returns the code with a zero id fails the test.
 It is cheap, it fails the day a fourth refusal is added without its id, and it
 turns "we agreed to do this" into something that does not depend on anyone
 remembering.
+
+## 13. The general form of all three blockers, and the sweep it requires
+
+Named by ClaySpaceDesktop on 2026-09-06 after reading the review findings, and it
+is one sentence that covers all three:
+
+> **A culled compile is not a small whole-document compile.** Every question this
+> change asks must be asked of the DOCUMENT, not of the compile in front of it.
+
+The three instances, all correct as "what has this compile seen" and all wrong as
+"what does this document contain":
+
+| predicate | true meaning | mistaken for |
+|---|---|---|
+| `layer_val` false | empty **or wholly culled in this region** | the layer is empty |
+| `have_acc` false | nothing emitted yet **or the cull dropped everything below** | this is the first visible SDF layer |
+| `cull_pad_terms` | the terms an ITEM chain needs | the terms the document needs, fold included |
+
+The property they share is that **the cull is an optimisation and a predicate can
+observe it.** An optimisation is supposed to be invisible to results; any value
+derived from it leaks it, and the leak is visible only per brick, which is
+precisely where nobody looks.
+
+`have_acc` is the sharpest case and the diagnosis is worth keeping: it reused the
+right rule at the WRONG SCOPE. The item-level rule is correct because an item
+chain is compiled whole; the layer-level question is asked against a document a
+brick has already been allowed to forget most of. Reusing rather than inventing
+was the right instinct and it is what carried the bug.
+
+**Required, and it is a sweep rather than three fixes:** every place the fold
+path reads state a cull region can change must be found and decided, not only the
+three the reviewers named. The first was caught before it shipped, the third by
+being promoted out of a handover note, and the second by review — so the score is
+one found by looking and two by writing things down where someone had to pass
+them. A fourth would need somebody looking for the same thing a third time.
+
+**A host dependency, so a partial landing is not mistaken for their bug:**
+ClaySpaceDesktop's `place_layer` and `set_object_transform` both refill
+`union(before, after)` from bounds this engine computes. If a bound does not
+account for the folds ABOVE a layer, their refill is too small and they leave
+stale geometry with no error, having asked for exactly what they were told. Their
+refill correctness rides on the upward widening landing completely.
