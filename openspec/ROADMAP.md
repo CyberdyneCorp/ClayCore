@@ -1346,11 +1346,15 @@ worth a contract:
 **A refusal that knows an id should return it, and a host should never have to
 walk state to render a refusal.** Where it does, either the refusal is missing a
 field or the host is guessing, and those are indistinguishable until someone is
-wrong in front of an artist. Three calls in
-`fold-the-layers-with-an-operator` now hand back what blocks them — the
-composition setter names what it refused, `clay_document_writable_at_minor`
-returns the blocking layer, and `_below` returns the lowest visible SDF layer
-above the named one — which turned a coincidence into a rule worth writing down.
+wrong in front of an artist. Two calls in
+`fold-the-layers-with-an-operator` hand back what blocks them — the composition
+setter names what it refused, and `clay_document_writable_at_minor` returns the
+blocking layer. A third was specified (`clay_brick_cache_eval_requests_below`,
+returning the lowest visible SDF layer above the named one) and **an earlier
+version of this paragraph claimed it had landed when it did not exist at all**,
+which is the rule's own failure mode: a sentence in a roadmap is checked when
+somebody leans on it, and the reviewer who leaned on it is the reason this
+sentence is now accurate.
 
 Swept with the host on 2026-09-06, in descending order of how much the engine
 already knows and does not say:
