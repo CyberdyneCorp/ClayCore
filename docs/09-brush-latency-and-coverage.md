@@ -665,11 +665,46 @@ whatever level it is given and `clay_multires_dirty_blocks` reports patches
 rather than levels, so a host re-copying its dirty patches at their effective
 level already sees the coarse write.
 
-**What is not done yet.** Exporting a mixed-depth hierarchy as ONE mesh needs
-transition polygons on the coarse side of every boundary: a fine patch's corner
-vertex has taken one more subdivision step than its coarse neighbour's, so the
-two are a subdivision step apart rather than a hairline apart.
-`mesh_at_level(n)` exports the faces level `n` HAS, which is the region.
+**And the mixed-depth hierarchy exports as ONE mesh.**
+`MultiresSurface::mixed_mesh_at_level(n)` emits every base patch at
+`effective_level(patch, n)` with the transition polygons the coarse side needs,
+and `build_mixed_block(n, patch)` is the same surface one patch at a time for a
+host that uploads per patch. `mesh_at_level(n)` still exports only the faces
+level `n` HAS, which is the region — the two calls answer different questions and
+both remain.
+
+The gap it closes is a subdivision step rather than a hairline, so it is not
+something a weld tolerance reaches. On the 12x12 closed torus with its middle
+2x2 refined to level 3, the per-patch loop this document used to point a host at
+— `build_block(effective_level(patch, display), patch)`, welded at exactly zero —
+leaves **72 open edges at display 1, 168 at display 2 and 264 at display 3**,
+against 0 at display 0 where every depth agrees. The same loop over
+`build_mixed_block` leaves **0 at every one of them**, and so does the
+whole-surface export, which needs no welding at all: a vertex shared by a coarse
+and a fine patch is ONE index carrying the fine side's value, so the coarse face
+borrows the corner rather than meeting it.
+
+**What it costs and what it refuses**, because neither is free:
+
+- `Mesh::quads` survives exactly while no coarse edge is SPLIT — every
+  uniform-depth export, and a transition that meets the fine region only at
+  corners. One split edge makes a coarse quad a pentagon, a pentagon has no
+  quadrangulation, and the export drops the quad list for the whole mesh rather
+  than ship one that does not describe its indices.
+- Vertex ATTRIBUTES are refused (`MultiresMixedStatus::AttributeSplitCage`) on a
+  cage whose attribute connectivity is not its geometric one, because a split
+  cage has no face-for-face counterpart for a mixed-depth face. The refusal is
+  an empty mesh and a named status, taken before any evaluation.
+- It is a READ: no detail is written, `detail_revision` and `base_revision` do
+  not move, and nothing about it is a document edit. It does EVALUATE, so
+  `cache_generation` moves, and it does NOT promise residency — it opens with
+  `evaluate_all_up_to`, so a level a trim released comes back to answer it.
+
+**What is not done yet.** The mixed export has no C entry point: nothing in
+`clay.h` reaches it, so a host on the C ABI or on pyclay still assembles per
+patch and still meets the open-edge counts above. And the FRAME at a depth
+boundary is a separate half — this section prices the stamp that crosses one,
+not the surface frame a coarse vertex is given beside a finer region.
 
 ### The extreme-poly runtime, measured (add-extreme-poly-runtime)
 

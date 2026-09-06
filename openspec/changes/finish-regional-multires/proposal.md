@@ -254,7 +254,18 @@ the diff rather than from the plan, because the two had already parted.
   that never learn a level exists.
 - `bindings/c/clay.h`, `bindings/python/pyclay_module.cpp`,
   `tests/unit/test_multires_regional.cpp`, `tests/unit/test_multires_sculpt.cpp`,
-  `tests/CMakeLists.txt`, `docs/09-brush-latency-and-coverage.md`.
+  `tests/CMakeLists.txt`.
+- `docs/09-brush-latency-and-coverage.md`, and WHICH PARTS, because the first
+  pass over it brought one section current and left the section beside it
+  contradicting the code. Brought current: the crossing stamp, and the export
+  paragraph — which had said a mixed-depth export "is not done yet" while this
+  change shipped `mixed_mesh_at_level` and `build_mixed_block`, and now states
+  the open-edge counts the export closes, the quad and attribute limits, and
+  that it is a read that does not promise residency. NOT brought current, and
+  deliberately: the memory and cold-evaluation table above it still quotes
+  `examples/74_regional_multires.py`, which task 6.4 owns and which still states
+  the export gap in the artist's vocabulary, so the table's figures stand and its
+  source does not.
 - `tools/check_task_symbols.py`, `tools/task_symbols_baseline.txt`, and a step in
   the `checks` job of `.github/workflows/ci.yml`: written here rather than
   planned, because this change's own tasks file was found citing names that were
@@ -263,7 +274,9 @@ the diff rather than from the plan, because the two had already parted.
   `src/mesh/surface_frame.cpp` — section 1, the frame at a boundary, the half
   this proposal calls the one with users today and the one still unbuilt — and
   `examples/74_regional_multires.py`, which task 6.4 owns and which still states
-  the export gap in the artist's vocabulary.
+  the export gap in the artist's vocabulary. Neither `clay.h` nor
+  `pyclay_module.cpp` gains a mixed-export symbol, so a host on either binding
+  still assembles per patch; `docs/09` says so where a host reads it.
 - **No serialization change.** The transition topology is a pure function of the
   cage, the rule and the per-level patch sets, all already in a version-3 stream;
   `kSurfaceVersion` does not move and there is no format-minor bump.
