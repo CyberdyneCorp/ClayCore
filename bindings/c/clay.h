@@ -2101,6 +2101,19 @@ clay_result clay_layer_armature_edit(clay_document* doc, clay_layer_id layer, cl
                                      int32_t op, uint32_t target, const float value[3],
                                      float radius, int32_t mirrored);
 
+/* `xyzr` is xyz plus a radius per point, IN THE ITEM'S OWN LOCAL SPACE — the
+ * frame clay_layer_node_transform reports, not world. The points travel with
+ * the item's transform and with its layer's, so the same numbers describe a
+ * different curve after either moves.
+ *
+ * Said here because the obvious next call does not agree with it:
+ * clay_brick_cache_mark_dirty takes a WORLD box. A host computing an
+ * incremental dirty region from the control points it just set — which is what
+ * any host doing incremental refill does — has to cross the item's placement
+ * first, and gets correct behaviour without crossing it for as long as every
+ * layer and item sits at the origin unrotated. That is the trap: it works
+ * until a subtool is moved, and then the preview stops updating in a region
+ * nobody can see is wrong. */
 clay_result clay_layer_set_stroke_points(clay_document* doc, clay_layer_id layer,
                                          clay_node_id node, const float* xyzr, size_t count,
                                          const int32_t* types, const float* in_handles_xyz,
@@ -10215,6 +10228,16 @@ clay_result clay_brick_cache_evict(clay_brick_cache* cache, const int32_t key[3]
  * so dropping one would report the interior as empty. */
 clay_result clay_brick_cache_forget_empty(clay_brick_cache* cache, uint64_t* out_forgotten);
 
+/* Mark a region for refill. THE REGION IS A WORLD BOX, and does not travel with
+ * any layer or item — the brick cache is addressed in world units throughout,
+ * so a box computed in an item's own space names the wrong place the moment
+ * that item or its layer is moved or rotated.
+ *
+ * clay_layer_set_stroke_points is the call this is most often paired with and
+ * it takes the OTHER space; see the note there. Where the engine can compute
+ * the region itself, clay_brick_cache_mark_dirty_nodes and _layer are the
+ * documented default for exactly this reason: they answer in world space from
+ * the document, and a bound that is too tight leaves visibly stale bricks. */
 clay_result clay_brick_cache_mark_dirty(clay_brick_cache* cache, const float region_min[3],
                                         const float region_max[3]);
 
