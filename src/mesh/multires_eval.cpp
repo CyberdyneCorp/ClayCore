@@ -574,18 +574,8 @@ bool MultiresSurface::build_block(std::uint32_t level, std::uint32_t patch, Bloc
     return true;
 }
 
-namespace {
-
-// What a level's export should carry: each attribute the CAGE carried and the
-// caller still wants. A hierarchy over a mesh with no colours exports none, so
-// a layer's attribute set does not change under a round trip.
-struct ExportWants {
-    bool normals = false;
-    bool uvs = false;
-    bool colors = false;
-};
-
-ExportWants wants_of(const MultiresSurface::State& s, const MultiresExportOptions& options) {
+ExportWants export_wants(const MultiresSurface::State& s,
+                        const MultiresExportOptions& options) {
     const std::size_t n = s.base.positions.size();
     ExportWants w;
     w.normals = options.normals && !s.base.normals.empty();
@@ -593,6 +583,8 @@ ExportWants wants_of(const MultiresSurface::State& s, const MultiresExportOption
     w.colors = options.colors && s.base.colors.size() == n && !s.base.colors.empty();
     return w;
 }
+
+namespace {
 
 // The cage's attribute connectivity IS its geometric one, so the export is the
 // level with the subdivided attributes laid over it vertex for vertex.
@@ -639,7 +631,7 @@ Mesh MultiresSurface::mesh_at_level(std::uint32_t level, const MultiresExportOpt
     // of the model, which is worse than drawing nothing.
     if (cancel && cancel->cancelled()) return out;
 
-    const ExportWants wants = wants_of(*state_, options);
+    const ExportWants wants = export_wants(*state_, options);
     const bool need_attrs = wants.uvs || wants.colors || state_->attribute_split;
     const bool have_attrs = need_attrs ? ensure_attributes(*state_, level) : false;
 

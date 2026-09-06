@@ -235,55 +235,133 @@
 
 ## 5. Mixed-depth export — last, and no user is waiting
 
-- [ ] 5.1 DECISION: derived, not stored. `kSurfaceVersion` does NOT move and
+- [x] 5.1 DECISION: derived, not stored. `kSurfaceVersion` does NOT move and
       there is no format-minor bump — the topology is a function of the cage,
-      the rule and the per-level patch sets, all already in a version-3 stream
-- [ ] 5.2 DECISION: the shared vertex takes the FINE side's value, and every
+      the rule and the per-level patch sets, all already in a version-3 stream.
+      GATED: `encode()` is byte-identical before and after an export, and a
+      hierarchy saved, decoded and re-exported gives the same mesh
+- [x] 5.2 DECISION: the shared vertex takes the FINE side's value, and every
       coarse face incident to it adopts that value — including a corner-only
       patch with no split edge. Stopping at edge-adjacent faces relocates the
       crack one face over onto a coarse-coarse edge. The emission set is "every
-      coarse face incident to a cage vertex shared with a finer patch"
-- [ ] 5.3 DECISION: quad-only templates. `Mesh::quads` requires
-      `quads.size() / 4 * 6 == indices.size()`, and `level_faces_into` already
-      clears `quads` for any non-uniform face list, so one 5-gon turns the whole
-      export into a triangle soup. Template each incidence pattern that occurs:
-      1-sided, 2-sided, 3-sided, 4-sided, corner-only
-- [ ] 5.4 Emit for `mesh_at_level` AND for `build_block`. They are separate code
-      paths that both take a single `level`; a transition built into only one
-      leaves the other cracked
-- [ ] 5.5 Attribute values for a synthesized corner need an explicit rule.
-      `build_attr_level` maps attribute vertices to geometric ones by a
-      face-for-face correspondence between the two topologies, and a synthesized
-      face has no counterpart on either side. The machinery is already regional;
-      only the rule for a new face is missing
-- [ ] 5.6 A transition face inherits the `face_patch` of the coarse face it
-      replaces. That is the whole commitment to per-face grouping this change
-      makes — the polygroup work is a design proposal that writes no code and
-      whose unit is the triangle
+      coarse face incident to a cage vertex shared with a finer patch".
+      MEASURED: 12 of 144 patches are corner-only on the gate's fixture, and
+      they emit only quads — the ripple reaches faces with no T-junction at all
+- [x] 5.3 DECISION, AND THE ONE THE TREE OVERRULED. The plan said "quad-only
+      templates, one per incidence pattern". There is no such template and there
+      cannot be: a coarse quad with one split edge is a PENTAGON, and a polygon
+      with an odd number of boundary vertices has no quadrangulation — four
+      edges per quad counts every interior edge twice, so the boundary count
+      must be even however many vertices are added inside. Making it even means
+      splitting a second edge of that face, which its coarse neighbour must then
+      carry too, and so on across the model. So the decision taken instead:
+      `Mesh::quads` survives exactly while NO edge is split — every uniform
+      export and every corner-only transition — and is dropped whole otherwise,
+      because a quad list that does not describe `indices` is the lie
+      `mesh_data.h` forbids. `level_faces_into` already makes that choice from
+      the face list, so no new code decides it
+- [x] 5.4 Emit for the whole-surface path AND for the per-patch path.
+      `mixed_mesh_at_level` and `build_mixed_block`, and they agree: assembling
+      every patch's block and welding at exactly zero gives the same vertex
+      count as the whole-surface export at every display level (264, 472, 680).
+      CORRECTION: as NEW entry points rather than as changes to `mesh_at_level`
+      and `build_block`, which keep their meaning — a single named level — and
+      whose every existing caller and golden would otherwise move. 5.7
+      presupposes a new entry point in any case
+- [x] 5.5 Attribute values for a synthesized corner. CORRECTION: there are no
+      synthesized corners. Every emitted vertex is a vertex some level already
+      stores, so the rule is "read the channel at the level that vertex lives
+      at" and the existing `AttrLevel` answers it. What has no rule is a cage
+      that SPLITS its attributes: there the attribute hierarchy is a second
+      topology mapped face for face, and a mixed-depth face has no counterpart
+      on either side. Refused by name — `AttributeSplitCage` — and the geometry
+      comes back when the caller asks again with `uvs` and `colors` off
+- [x] 5.6 A transition face inherits the `face_patch` of the coarse face it
+      replaces. It does, through the emitted topology, and `build_mixed_block`
+      is where a caller sees it: a patch's block holds exactly the faces that
+      belong to it, transition faces included. `Mesh` has nowhere to carry a
+      per-face group, so the whole-surface export states the commitment rather
+      than transporting it — which is the whole commitment this change makes to
+      the polygroup proposal
 - [ ] 5.7 The new entry point does NOT repeat `build_block`'s shape, which
       returns true with an empty block for a non-resident patch. A descriptor
       starting with `uint32_t struct_size`, grown by appending, a new field's
       zero meaning today's behaviour, caller-owned buffers, `BUFFER_TOO_SMALL`
       for a short buffer, and a header that says what the call does NOT promise.
-      `MultiresExportOptions` has no `struct_size` today and
-      `clay_multires_copy_level_mesh` takes no options struct at all
-- [ ] 5.8 DECISION deferred to this stage with a measured peak in hand: whether a
-      mixed export needs its own preflight. `mesh_at_level` is non-const and
-      evaluates, so a mixed export forces levels 0..max simultaneously resident,
-      and the peak-versus-persistent argument behind `preflight_add_level`
-      applies. Decide against a number, not an assumption
-- [ ] 5.9 GATE: assembling the export welds to 0 boundary edges. Today,
-      assembling per-patch `clay_multires_copy_block` at
-      `clay_multires_effective_level` gives 240 boundary edges at display 3, 144
-      at display 2 and 48 at display 1, against 0 for one level everywhere
-- [ ] 5.10 GATE: the export is quad-clean — `Mesh::quads` non-empty and the
-      invariant holding — on a mixed-depth hierarchy
-- [ ] 5.11 GATE: stability under re-refinement. Refining an unrelated region
-      leaves the emitted faces of a coarse face whose vertex-ring residency did
-      not change byte-identical. Refinement is monotonic, so the transition set
-      can only shrink
-- [ ] 5.12 GATE: determinism, asked in the opposite order — the same hierarchy
-      built from a reversed patch list emits byte-identical transition faces
+      LEFT FOR 6.1, because this stage added no C symbol for those rules to
+      apply to. The half that is C++ IS done and gated: a refusal has a name
+      (`MultiresMixedStatus`), a refused export is empty rather than partial,
+      and the header states what the call does not promise — no quad list at a
+      split edge, no attributes on a split cage
+- [x] 5.8 DECISION deferred to this stage with a measured peak in hand: whether
+      a mixed export needs its own preflight. IT DOES NOT, and the reason is
+      that `mesh_at_level` already walks every level below its own — both calls
+      open with `evaluate_up_to(level)`. The mixed export then reads the
+      evaluated positions and builds no level mesh, no adjacency and no chunk
+      table, so its resident set is a SUBSET. GATED as a byte comparison:
+      `memory().rebuildable` after a mixed export is <= after `mesh_at_level` on
+      the same hierarchy, and both are above the cold figure
+- [x] 5.9 GATE: assembling the export welds to 0 boundary edges. Measured on a
+      closed torus cage, the loop `clay.h` tells a host to write today —
+      `build_block(effective_level(patch, display), patch)` per patch, welded at
+      exactly zero — leaves 72 open edges at display 1, 168 at display 2 and 264
+      at display 3, against 0 at display 0 where the depths agree. The same loop
+      over `build_mixed_block` leaves 0 at every one of them, and so does
+      `mixed_mesh_at_level`, which needs no welding at all
+- [x] 5.10 GATE: the quad list survives exactly as far as the split edges allow,
+      which is 5.3's decision rather than the "quad-clean always" the plan
+      asked for. A uniform export keeps `Mesh::quads` with the invariant
+      holding; a mixed one with a split edge carries no quad list. The three
+      patch counts that say why: 48 patches emit more triangles than twice their
+      faces (a split edge), 12 emit exactly twice and still span two levels
+      (corner-only, all quads), 84 are untouched
+- [x] 5.11 GATE: stability under re-refinement. Refining a distant region leaves
+      84 of 144 patches byte-identical — indices, vertex levels and positions —
+      while 60 change, so the count is a comparison rather than a tautology. The
+      transition beside the first region, pentagons included, is in the
+      identical half. Asked between two hierarchies rather than across a
+      mutation, because `refine_patches_to_level` builds levels rather than
+      growing the ones that exist
+- [x] 5.12 GATE: determinism, asked in the opposite order — the same hierarchy
+      built from a reversed patch list emits a byte-identical mesh
+
+### What the export stage landed, and where the tree corrected the plan
+
+- `MultiresSurface::mixed_mesh_at_level` and `MultiresSurface::build_mixed_block`
+  in `src/mesh/multires_mixed.cpp`, with `MultiresMixedStatus` and
+  `Block::vertex_levels` added to `include/clay/mesh/multires.h`. No C symbol,
+  no version-line move: 6.1 and 6.2 own those, and the predecessor stage left
+  them for the same reason
+- THERE IS NO CONFIGURATION TABLE, and the plan's 1-, 2-, 3-, 4-sided and
+  corner-only cases are not five templates but five answers to the same two
+  questions, asked of the level above each emitted face: does it store this
+  corner's vertex point, and does it store this edge's edge point? Both are
+  properties of the shared element rather than of the face asking, so two faces
+  either side of a boundary get the same answer and the mesh is watertight by
+  identity. The ripple of 5.2 is automatic rather than a case to remember,
+  because the corner is resolved through the level above and not through an "is
+  this a transition face" test
+- CORRECTION TO 5.3, and it is arithmetic rather than a judgement: quad-only
+  transition templates do not exist. See the task. The consequence is stated in
+  the header, in the spec delta and in the gate, in both directions
+- THE EXPORT IS A READ, which is the ClaySpaceDesktop question `design.md`
+  records. Gated: `detail_checksum`, `base_revision` and `detail_revision` are
+  unchanged across an export, `encode()` is byte-identical across one, and two
+  exports of the same surface are the same bytes. It does EVALUATE — the levels
+  `mesh_at_level` already evaluates — and building a level cache moves
+  `cache_generation`; the header says so rather than leaving a host to find out
+- WHAT THE GATES MEASURE, all counts or byte comparisons, on a CLOSED torus
+  cage of 144 patches with a 2x2 region refined to level 3. A closed cage on
+  purpose: "0 boundary edges" is then a statement about the export and not about
+  the cage's own rim, and the split-cage case gates the rim count (18) explicitly
+  so the one open fixture cannot pass by accident
+- PROVED BY REVERT, twice, each revert compiling, and each one isolating one of
+  the two defects the audit measured. Dropping the CORNER promotion — the
+  0.0434 gap, the larger half — fails 18 assertions across 5 cases, including
+  `open_edges == 0` at all three mixed display levels. Dropping only the EDGE
+  point — the 0.0232 T-junction — fails 12 across 5, including `open_edges == 0`
+  again and, tellingly, `mixed.quads.empty()`: with no edge split every face is
+  a quad, which is exactly 5.3's parity argument arriving from the other side
 
 ## 6. Surface, docs and versions
 

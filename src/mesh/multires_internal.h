@@ -288,6 +288,19 @@ void ensure_level_chunks(MultiresSurface::State& s, std::uint32_t level);
 // there is nothing to build, which is not a failure.
 bool ensure_attributes(MultiresSurface::State& s, std::uint32_t level);
 
+// What a level's export should carry: each attribute the CAGE carried and the
+// caller still wants. A hierarchy over a mesh with no colours exports none, so
+// a layer's attribute set does not change under a round trip.
+struct ExportWants {
+    bool normals = false;
+    bool uvs = false;
+    bool colors = false;
+
+    bool attributes() const { return uvs || colors; }
+};
+
+ExportWants export_wants(const MultiresSurface::State& s, const MultiresExportOptions& options);
+
 // The connectivity of a level, built if it is not resident.
 const LevelConnectivity& connectivity_of(MultiresSurface::State& s, std::uint32_t level);
 

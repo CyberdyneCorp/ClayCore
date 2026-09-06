@@ -124,10 +124,22 @@ no T-junction. Emitting only for faces that share an EDGE with a finer patch doe
 not remove the crack; it relocates it one face over onto a boundary between two
 coarse faces, where it presents as an unrelated defect.
 
-Emitted transition faces SHALL be QUADS. A mesh's quad list carries an invariant
-tying it to the index buffer, and the existing face emission clears the quad list
-for any non-uniform face list — so a single n-gon would degrade an entire
-subdivision-cage export to a triangle soup.
+The export SHALL keep the mesh's QUAD LIST wherever the transition allows it, and
+SHALL NOT keep a quad list that does not describe its indices. Those two are in
+tension at a split edge and the arithmetic decides between them: a coarse quad
+with one split edge is a pentagon, and a polygon with an ODD number of boundary
+vertices has no quadrangulation at all — four edges per quad counts every
+interior edge twice, so the boundary count must be even however many vertices are
+added inside. Making it even would mean splitting a second edge of that face,
+whose new vertex the neighbouring coarse face must then also carry, and so on out
+of the transition and across the model.
+
+So the guarantee is stated as a boundary rather than as an absolute: an export
+whose transitions are all CORNER-ONLY — where the finer region is met at a cage
+vertex and no coarse edge is split — SHALL be emitted as quads with the quad list
+intact, as SHALL every uniform-depth export; an export containing a split edge
+SHALL be emitted as a triangle list with no quad list, because a quad list
+describing indices that no longer exist is a lie a saved document would carry.
 
 The output SHALL be DETERMINISTIC — the same hierarchy emits the same faces in the
 same order on every run and on every platform — and STABLE under re-refinement:
@@ -151,9 +163,11 @@ partial result reported as success.
 - **WHEN** a coarse patch shares only a cage vertex, and no edge, with a finer patch
 - **THEN** it is emitted with the finer side's value at that corner, and no crack appears on its boundary with the coarse patches beside it
 
-#### Scenario: The export stays a subdivision cage
-- **WHEN** a mixed-depth hierarchy is exported
+#### Scenario: The quad list survives exactly as far as the split edges allow
+- **WHEN** a hierarchy whose depths all agree, or whose transitions are all corner-only, is exported
 - **THEN** every emitted face is a quad and the mesh's quad list describes its indices
+- **WHEN** the export contains a coarse face with a split edge
+- **THEN** that face is emitted as a pentagon and the mesh carries no quad list at all, rather than a quad list that describes triangles it does not have
 
 #### Scenario: Refining elsewhere does not disturb a transition
 - **WHEN** a region of a hierarchy is refined and an unrelated coarse face's neighbourhood residency is unchanged
