@@ -879,6 +879,35 @@ needs them, and listed so they are not mistaken for oversights:
   first `double`s in `clay.h`, because a signed volume cancels heavily and
   narrowing it at the boundary would discard the precision the engine chose.
 
+- **A smooth GROUP's reported extent omits its own blend ring.** Found and
+  measured while building `fold-the-layers-with-an-operator`, deliberately not
+  fixed there. A group's `tape.bounds` is the plain union of its children, so a
+  smooth or extended group combine bulges past the box the tape reports — the
+  same defect the layer fold had until that change added
+  `scene::chain_blend_support`, where reverting the one line left 11,618 lattice
+  samples carrying material outside the reported box (missing surface in a mesh,
+  a lost ray hit in a preview). **The reason it could not be fixed in place is
+  the interesting half:** `resume` unwinds group frames from a
+  `TapeCheckpointFrame` that carries op, blend and rounding and NO EXTENT, so a
+  ring added in `compile_group` lands in a full compile and not in a resumed one
+  — implemented, and `test_tape_prefix_reuse.cpp`'s group-append case went 0.2
+  short in x on every dab. Closing it means giving the checkpoint the subtree's
+  extent, which is a schema change to the resumable checkpoint. Pinned meanwhile
+  by a test asserting the layer form's box contains the group form's and exceeds
+  it by exactly one ring.
+
+- **Bounds NARROWED per operator, on both the item and the layer path.**
+  `fold-the-layers-with-an-operator` widens a fold's extent by its own support,
+  which is the half that can lose surface. It does NOT narrow: a subtract is
+  still bounded by the union rather than by its left operand, and an intersect by
+  the union rather than by the intersection, exactly as the ITEM path has always
+  been. Narrowing one side alone breaks that change's own parity gate — a
+  subtracting layer and a subtracting item are the same document — and narrowing
+  both changes the meshing region of every document that already carries a
+  subtract or a paint, and has to be threaded through `compile_group`'s rollback
+  and every resumable entry point that copies a prefix's bounds. Its own change,
+  with its own measurement.
+
 - **Deformers on a mesh layer.** `Deformer` has twenty-one entries and every
   one applies to an SDF item; a mesh layer takes a lattice cage and nothing
   else, so ZBrush's Deformation palette — Taper, Twist, Bend — is unreachable
