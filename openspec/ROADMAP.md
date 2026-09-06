@@ -1179,16 +1179,28 @@ with radius: the dirty region is the layer's AABB and the refill visits the
 bricks of that VOLUME rather than the bricks that hold band. Brick count grows
 16.8x for a 31.6x volume.
 
-**There is a SECOND slope, and the subtract control is what proves it.** Subtract
-refills 6,424 bricks in both scenes — bit-identical, because `op_is_local` keeps
-its region on the cutter — and still costs 6.56 µs/brick at reference against
-22.30 at 10x. A brick costs ~3.4x more in a larger layer at constant item count
-AND constant brick count; the intersect shows the same effect at 9.8x. So
-164.9x = 16.8x more bricks × 9.8x per brick. The likely cause is
-items-per-brick rather than extent — a fixture that scales its dab radius with
-the model puts more overlapping items inside one 8³ × 0.05 brick, which is a
-cost the engine already prices per item — but it is unresolved, and a swept-union
-bound would address the first slope and not the second.
+**Per-brick cost also grows — 6.56 to 22.30 µs on the subtract control, whose
+brick count is bit-identical (6,424) between the scenes — and the host qualified
+its own claim within the hour, which is why this row says less than it first
+did.** The cutter does NOT scale (fixed 0.25 x 1.6 at y=0.9) while the form does,
+so those are the same bricks in world space and not the same KIND of brick: at
+reference the cylinder straddles a surface at y=1.00, at 10x it is buried inside
+a form whose surface is 3.16 away. Deep-interior bricks cull almost nothing away;
+rim bricks cull most of the document away. So the figure is real and it does not
+isolate an extent-driven slope. Two live explanations, both about what is IN a
+brick rather than about extent: **item overlap** — the fixture's dabs scale with
+the model (0.180 → 0.569, exactly √10) against a fixed 0.16 brick edge, taking a
+dab from spanning ~2.2 bricks to ~7.1 — and **brick population**, interior against
+rim. A 2x2 (dabs held at 0.18 versus scaled, cutter buried versus placed at the
+surface in both scenes) separates them and is being run.
+
+**The asymmetry matters more than the number.** If the per-brick factor is
+overlap or population, walking a band instead of a box does not only cut the
+brick count, it stops visiting the interior bricks that cull nothing — and
+recovers part of the per-brick factor too. If it is genuinely extent-driven, a
+tighter region cuts the count and leaves the per-brick cost alone. Those lead to
+different conclusions about what a swept-union bound is worth, and the change's
+invalidation decision is written not to depend on which.
 
 **`resumed_bricks` is ZERO on every transform-driven refill measured**, with the
 seed store at 1.0 MiB of a 64 MiB budget, so the budget is not what switches the
