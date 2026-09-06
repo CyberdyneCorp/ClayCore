@@ -33,7 +33,8 @@ CHANGES = os.path.join(ROOT, "openspec", "changes")
 
 # Where a symbol may live. openspec/ is deliberately absent: a name that appears
 # only in the proposal that promises it has not been built.
-SEARCH_DIRS = ["include", "src", "tests", "bindings", "examples", "benchmarks", "tools", "docs"]
+SEARCH_DIRS = ["include", "src", "tests", "bindings", "examples", "benchmarks", "tools",
+               "docs", "backends"]
 SEARCH_FILES = ["CMakeLists.txt", "pyproject.toml", "README.md"]
 
 BASELINE = os.path.join(ROOT, "tools", "task_symbols_baseline.txt")
@@ -67,6 +68,12 @@ def is_ident(span: str) -> bool:
 def haystack() -> list[str]:
     args = [d for d in SEARCH_DIRS if os.path.isdir(os.path.join(ROOT, d))]
     args += [f for f in SEARCH_FILES if os.path.isfile(os.path.join(ROOT, f))]
+    # THE BASELINE IS NOT PART OF THE TREE IT SEARCHES. It lives under `tools/`,
+    # which is a search directory, so without this exclusion every name written
+    # into the baseline resolves by its own record: the row would be redundant,
+    # and — the part that matters — any OTHER change could then cite the same
+    # name and pass. A debt list that grants what it records is not a debt list.
+    args.append(":(exclude)" + os.path.relpath(BASELINE, ROOT))
     return args
 
 

@@ -10,6 +10,20 @@
 # change to produce this list — an owner clears their own rows by correcting the
 # name or by building the thing.
 #
+# AUDITED WHEN THE GATE WAS WIRED INTO CI, and three rows came off it. All
+# three were the same gate defect rather than debt anyone owed: `upload_tape`,
+# `MetalBackend::upload_tape` and `wait_for` live in `backends/metal/`, and
+# `backends/` was not one of the directories the gate searched. The audit
+# itself only became possible once this file stopped being part of the tree the
+# gate searches: it lives under `tools/`, so every name written here used to
+# resolve by its own record. What is left below is debt in the two honest shapes — a name that
+# belongs to another repository or to a build artefact, and a name a change has
+# promised and not yet built.
+#
+# `LayerComposition` resolves on main (it landed with the layer-composition
+# change) and does not resolve on the branch this file was audited from.
+# Whoever rebases past that merge should delete its row.
+#
 # <change>\t<span>
 
 add-claycore-bridge	brush/procedural_mask.h
@@ -22,8 +36,5 @@ add-mobile-thread-scheduling	../../backends/cpu/
 correct-the-undo-scope	lattice_gizmo_preview
 fold-the-layers-with-an-operator	LayerComposition
 make-device-timing-position-independent	Shared/
-speed-the-metal-path	MetalBackend::upload_tape
 speed-the-metal-path	bytesNoCopy
-speed-the-metal-path	upload_tape
-speed-the-metal-path	wait_for
 survive-a-crash	examples/60

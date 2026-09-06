@@ -418,9 +418,15 @@
 - THE EXPORT IS A READ, which is the ClaySpaceDesktop question `design.md`
   records. Gated: `detail_checksum`, `base_revision` and `detail_revision` are
   unchanged across an export, `encode()` is byte-identical across one, and two
-  exports of the same surface are the same bytes. It does EVALUATE — the levels
-  `mesh_at_level` already evaluates — and building a level cache moves
-  `cache_generation`; the header says so rather than leaving a host to find out
+  exports of the same surface are the same bytes. It does EVALUATE — every level
+  up to its own, because it reads each emitted vertex at the level that vertex
+  lives at — and building a level cache moves `cache_generation`; the header says
+  so rather than leaving a host to find out. IT PROMISES NO RESIDENCY: a level a
+  trim released is brought back to answer it, which the same call one line below
+  in the header does not do. What stood here said the export evaluates exactly
+  the levels `mesh_at_level` evaluates, which is the sentence the residency fix
+  removed from the header for being false; it was still in this record and is
+  corrected for the same reason
 - WHAT THE GATES MEASURE, all counts or byte comparisons, on a CLOSED torus
   cage of 144 patches with a 2x2 region refined to level 3. A closed cage on
   purpose: "0 boundary edges" is then a statement about the export and not about
@@ -440,11 +446,24 @@
       `clay_multires_block_info` and `clay_multires_copy_block` in shape. The
       cross-level helper of section 2 is internal and gets no C entry point
       unless a host asks for one
-- [ ] 6.2 VERSION LINES move together to 0.87.0 — NOT 0.86.0, which two other
-      branches already claim — in the stage that first adds an entry point.
-      `CMakeLists.txt` `project(VERSION)`, `CLAY_ABI_MAJOR` / `CLAY_ABI_MINOR` /
-      `CLAY_ABI_PATCH` in `bindings/c/clay.h`, and `version` in `pyproject.toml`.
-      A gate fails if the three disagree
+- [x] 6.2 VERSION LINES move together, and they moved for a reason this task did
+      not anticipate: not the new entry point of 6.1, which is still unbuilt,
+      but a field of an EXISTING one that means something new.
+      `clay_multires_stamp_report.moved_vertices` counted weld classes at the
+      bound level, because a stamp only ever wrote one; it now sums the classes
+      kept on every level a crossing stamp wrote. Same layout, same number, new
+      meaning — which is worse than a new field, because nothing a host compiles
+      against tells it to look. The alternative was to report the bound level
+      alone, and that is the silent failure this change exists to remove: a
+      stamp that moved only the coarse side would come back 0. So the meaning is
+      stated on the field and the minor moves with it. THE NUMBER IS 0.88.0, not
+      the 0.87.0 written here: this branch was cut when the tree was at 0.85.0,
+      0.86.0 and 0.87.0 have both landed on main since, and 0.88.0 is the next
+      free minor. `CMakeLists.txt` `project(VERSION)`, `CLAY_ABI_MAJOR` /
+      `CLAY_ABI_MINOR` / `CLAY_ABI_PATCH` in `bindings/c/clay.h`, and `version`
+      in `pyproject.toml`; `release_check.py` reads
+      `cmake=0.88.0 abi=0.88.0 wheel=0.88.0`. 6.1 adds an entry point at this
+      same minor and does not move it again
 - [ ] 6.3 `docs/09-brush-latency-and-coverage.md` states the export gap under
       "What is not done yet" and is correct today; update it to what landed
 - [ ] 6.4 `examples/74_regional_multires.py` repeats the gap in the artist's
@@ -596,3 +615,96 @@
 - THE SUITE IS 2425 cases and 16463921 assertions, green, and green again under
   the ASan+UBSan preset over `*test_multires*.cpp` (103 cases, 18216
   assertions). `ctest` is 8 of 8. NO TIMING WAS TAKEN
+
+### What the record review landed: a SHALL the code does not satisfy, a field
+### that changed meaning under an unchanged number, and a gate nothing ran
+
+- THE DELTA PROMISED A FRAME THIS CHANGE DOES NOT BUILD. It carried "A vertex's
+  frame SHALL NOT depend on which patches are resident at its level" as a
+  MODIFIED requirement, with a scenario saying the same coefficients reconstruct
+  to the same position at a boundary. Section 1 is unticked and the code does
+  not do it: `full_evaluate` and `partial_evaluate` still build the frame from
+  `level_normals`, which sums a level's OWN faces. MEASURED rather than argued,
+  on a 6x6 cage with the middle 2x2 refined to level 3, walking the resident
+  patches face by face against the dense hierarchy: 124 of 1024 emitted corners
+  carry a different frame, worst |Δnormal| 0.170116 at level 2 and 0.154028 at
+  level 3, and the DISPLAY normal — the same sum — differs at the same corners
+  by the same amounts. With identical `LocalDetail` written into every level-3
+  vertex of both, 118 of 1024 shared corners land somewhere else, worst
+  0.00570561. Level 1 differs at 0 corners, because nothing is missing there.
+  The delta now says that, states the limit and says which three pieces have to
+  land together (the complete normal, the wider halo of 2.8, and 3.7's
+  coefficient averaging). The "display normals and transported frames agree"
+  scenario in the ADDED requirement was the same promise in a second place and
+  is corrected to what IS complete: the brush's readers. Measured with a probe
+  case built for it and then deleted — it is task 1.1's gate, and 1.1 owns it
+- `moved_vertices` CHANGED MEANING UNDER AN UNCHANGED VERSION. See 6.2. Stated
+  on the field rather than beside it, and the minor moved to 0.88.0
+- A STALE SENTENCE THIS RECORD STILL CARRIED. The export-is-a-read bullet said
+  the export evaluates "the levels `mesh_at_level` already evaluates" — the
+  exact sentence the residency fix removed from `multires.h` for being false,
+  left standing here. Corrected the same way: it evaluates every level up to its
+  own and promises no residency. (Reported as a header line; the header was
+  already right, and this was the copy that was not.)
+- THE AUTOMASK ADAPTER BUILT A SECOND, BLIND TOPOLOGY.
+  `compute_automask(const Mesh&, const Adjacency&, ...)` is the overload a
+  caller holding a mesh and an adjacency reaches, and it constructed its own
+  `MeshWorkItemTopology` with no neighbourhood — so the one entry point that
+  does not go through `MeshSculptor::gather` faded every class on the rim of a
+  refined region as an open border. It now takes `cross` as a trailing default,
+  which leaves the signature every existing caller passes. GATED by "the mesh
+  adapter fades no seam when it is given the whole surface": 120 slots faded
+  blind (the 64-class rim plus the 56 inside it, at 2 boundary rings), 0 with
+  the neighbourhood, and the dense hierarchy's real outer edge faded identically
+  either way. PROVED BY REVERT — dropping `cross` from the topology it builds,
+  keeping the parameter so it compiles: `CHECK(whole == 0)` fails at 120
+- `set_defer_normals` IS NOT FORWARDED TO THE COARSE SCULPTORS, and that is
+  deliberate. Each of them exists for ONE stamp and is destroyed with it, so
+  there is no stroke to defer into and `flush_normals` cannot reach it. MEASURED
+  by forwarding it anyway: the coarse level's normals come back stale (its
+  positions are unaffected) and 0 of its chunks are marked `ChunkDirty::Normals`
+  where an immediate stamp marks 2 — a host draining the stroke would draw the
+  coarse side of the transition with the normals it had before. Said in the
+  header at `set_defer_normals` and at `stamp_coarse`, and GATED by "a crossing
+  stamp's coarse side does not depend on the host deferring", which asserts the
+  coarse normals byte for byte AND the dirty count, because a stale normal
+  nothing tells the host about is the failure. PROVED BY REVERT — adding the
+  forward: 2 assertions fail, the byte compare and `0 == 2`
+- THE TASK-SYMBOLS GATE RAN ON NOTHING. `tools/check_task_symbols.py` shipped
+  with a baseline and no CI step — this repository's own "a gate no change
+  triggers", added by the change that wrote the taxonomy down. It is now a step
+  in the `checks` job beside the other file gates, and self-tested: a tasks.md
+  line citing an invented symbol and a missing path exits 1 naming both, and the
+  tree exits 0 again with the line removed. It caught this very block twice —
+  once for the invented symbol, once for naming the baselined spans in backticks
+  — which is the rule working: cite what exists, describe what does not in prose
+- AUDITING THE BASELINE FOUND THE GATE, NOT THE DEBT. Two defects, and the first
+  hid the second. `tools/task_symbols_baseline.txt` lives under `tools/`, which
+  is one of the directories the gate searches — so every name written into it
+  resolved BY ITS OWN ROW, which made each row redundant and, worse, let any
+  other change cite a name someone else had baselined. The haystack now excludes
+  it. With that off, three rows resolved for a second reason: `backends/` was
+  not a search directory at all, so `upload_tape`, `MetalBackend::upload_tape`
+  and `wait_for` — all in `backends/metal/metal_backend.cpp` — were recorded as
+  debt nobody owed. `backends` is now searched and those three rows are gone.
+  The 12 that remain are debt in two honest shapes: a name belonging to another
+  repository or to a build artefact — the xcframework under dist, the kernel
+  header directory inside a built slice, an Xcode group, and the four bridge
+  names — and a name a change has promised and not built, the SDF layer
+  composition type and the lattice gizmo preview. The composition type resolves
+  on main and not on this branch; the baseline file says so, so whoever rebases
+  deletes that row rather than rediscovering it
+- WHAT WAS NOT CHANGED, and why. `moved_vertices` was not restored to the bound
+  level's count: a crossing stamp that moved only the coarse side would then
+  report 0, which is the silent success this whole change exists to remove, and
+  no call in the C ABI answers the old question anyway. Section 1, 2.8 and 3.7
+  are still unticked and none of them was started here — the delta now describes
+  the tree instead of describing them
+- THE SUITE IS 2427 cases and 16463944 assertions, green — 2425 and 16463921
+  before this stage's two cases. `ctest` is 8 of 8, `check_layering.py`,
+  `check_binding_parity.py` (735 pyclay capabilities), `check_task_symbols.py`
+  and `openspec validate --all --strict` (39 items) all pass, and
+  `release_check.py --skip-slow` reports the three version lines agreeing at
+  0.88.0. The CI job's NAME was left alone and only a step added: it is what a
+  required status check is pinned to and has not moved since the file was
+  scaffolded. NO TIMING WAS TAKEN
