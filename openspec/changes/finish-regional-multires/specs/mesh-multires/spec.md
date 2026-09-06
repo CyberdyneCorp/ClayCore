@@ -7,22 +7,40 @@ A world-space offset is adequate for small changes and fails at the case the fea
 
 The frame SHALL be TRANSPORTED rather than rebuilt from whichever neighbour is encountered first: a UV tangent where a valid parametrization exists, a deterministic geometric tangent otherwise, rotated by the shortest arc when the parent normal moves, with sign consistency enforced against the previous frame. An unstable frame rotates detail, and the artefact appears in a render rather than in a numeric test.
 
-**A vertex's frame SHALL NOT depend on which patches are resident at its level.**
-The frame is built by rotating the parent frame's tangent onto the child's own
-level normal, and that normal is a sum over the faces incident to the vertex — so
-where a level stores only part of the surface, the sum is one-sided and the frame
-that a coefficient is stored in differs from the one a uniformly refined
-hierarchy would have built. Measured on a region boundary, that difference
-reaches 0.104 on unit vectors, about 6 degrees.
+A vertex's frame at a region boundary DOES still depend on which patches are
+resident at its level, and this change does not remove that. The frame is built
+by rotating the parent frame's tangent onto the child's own level normal, and
+that normal is an unweighted sum over the faces incident to the vertex — so
+where a level stores only part of the surface the sum is one-sided, and the
+frame a coefficient is stored in differs from the one a uniformly refined
+hierarchy would have built. Measured on a 6x6 cage with the middle 2x2 refined
+to level 3, walking the resident patches face by face: 124 of 1024 emitted
+corners carry a different frame, worst |Δnormal| 0.170116 at level 2 and
+0.154028 at level 3 — about 10 and 9 degrees — and the DISPLAY normal, which is
+the same one-sided sum, differs at the same corners by the same amounts.
 
-This is a STORAGE requirement and not a shading one. Because a level's position is
-its subdivided parent plus the frame applied to the detail, a frame that differs
-means the same authored coefficient reconstructs to a different world offset — so
-the guarantee that a regional level holds a uniform hierarchy's numbers survives
-only while the detail at a boundary vertex is zero. The normal that builds the
-frame SHALL therefore be summed over the vertex's COMPLETE incident face set,
-including faces that live at a coarser level, and the same completeness SHALL
-apply to the incremental path a stamp takes rather than only to a full rebuild.
+The consequence is a STORAGE one rather than a shading one, and it is recorded
+here as a LIMIT rather than left for a reader to discover. Because a level's
+position is its subdivided parent plus the frame applied to the detail, a frame
+that differs means the same authored coefficient reconstructs to a different
+world offset: with identical `LocalDetail` written into every level-3 vertex of
+both hierarchies, 118 of 1024 shared corners land somewhere else, worst 0.0057
+on a cage two units across. So the guarantee that a regional level holds a
+uniform hierarchy's numbers is unconditional only while the detail at a boundary
+vertex is zero, which is the case the shipped bit-identity gate exercises.
+
+WHAT IS COMPLETE AT A BOUNDARY IS THE BRUSH'S READING OF THE SURFACE, which is a
+different set of call sites and is required as such by the neighbourhood
+requirement below: the angle-weighted per-vertex normal every displacing verb
+steers by, the normal recompute a stamp leaves behind, the averaged ring a
+smoothing verb divides by, and the border predicate boundary automasking fires
+on all take the faces a coarser level holds. The frame and the display normal
+come from the OTHER of the two normal evaluators — the unweighted sum over a
+level's own faces — which stays a second evaluator by the decision recorded
+below, and which has not been given the complete face set. Giving it one also
+widens the propagation halo that decides which vertices are re-derived at all,
+and makes averaging coefficients across a transition meaningful for the first
+time, so the three land together or not at all.
 
 Detail SHALL be authoritative in single precision. It SHALL NOT be quantized in this change: high-frequency detail is where a visible artefact appears first, and any compression waits on a measured error bound.
 
@@ -34,9 +52,11 @@ Detail SHALL be authoritative in single precision. It SHALL NOT be quantized in 
 - **WHEN** a parent surface is deformed slightly and the frames are rebuilt
 - **THEN** no frame reverses sign, and the reconstructed detail does not rotate
 
-#### Scenario: A coefficient at a region boundary means what it means densely
-- **WHEN** the same detail coefficients are written into every vertex of the top level of a regionally refined hierarchy and of a uniformly refined hierarchy over the same cage
-- **THEN** every vertex the two hierarchies share evaluates to the same position, including the vertices on the boundary of the refined region
+#### Scenario: A region boundary reconstructs densely while its detail is zero
+- **WHEN** a regionally refined hierarchy and a uniformly refined hierarchy over the same cage are evaluated with no detail authored at the boundary
+- **THEN** every vertex the two share holds the same position, bit for bit
+- **WHEN** the same non-zero detail coefficients are then written into the boundary vertices of both
+- **THEN** the two reconstruct to different positions, because the frames those coefficients are measured in differ, and that is the limit stated above rather than a defect a caller can work around
 
 ## ADDED Requirements
 
@@ -85,9 +105,11 @@ not put it there.
 - **WHEN** a vertex on the boundary of a refined region is asked for its incident faces
 - **THEN** the set is the one a uniformly refined hierarchy would report for the same vertex, counting the faces that live at the coarser level
 
-#### Scenario: A display normal at a boundary matches the uniform hierarchy's
-- **WHEN** a regionally refined hierarchy and a uniformly refined hierarchy over the same cage are evaluated to the same level
-- **THEN** the display normals and the transported frames agree at every vertex the two share, including those on the region boundary
+#### Scenario: The normal a brush steers by is complete at a boundary
+- **WHEN** a vertex on the boundary of a refined region is asked for the angle-weighted normal a displacing verb steers by, or has its normal recomputed after a stamp
+- **THEN** the sum is taken over its complete incident face set, including the faces that live at the coarser level
+- **WHEN** the same vertex's DISPLAY normal or transported frame is read instead
+- **THEN** it is still summed over the level's own faces alone, which is the limit the frame requirement records
 
 #### Scenario: A smoothing verb is not dragged inward at a seam
 - **WHEN** a smoothing stroke is applied across the boundary of a refined region, and the same stroke is applied to a uniformly refined hierarchy
