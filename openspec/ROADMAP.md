@@ -1686,6 +1686,39 @@ Two hypotheses the host went in expecting and the engine disproved, both measure
 Recorded because a negative result about our own culling, measured from outside,
 is evidence nothing in this repository can produce for itself.
 
+### Regional multires: the bit-identity gate passes because the fixture has no boundary detail
+
+Found by auditing `finish-regional-multires` against the tree, and it is a defect
+in SHIPPED code rather than in the change that found it.
+
+`refine-one-region-of-a-hierarchy` ships a gate asserting that a regional level's
+vertices are bit-identical to the dense hierarchy's, and the gate is real: the
+same stencils run against the same parent, re-measured independently at
+**0.000000000 difference at levels 1, 2 and 3.**
+
+**But normals and FRAMES are already wrong at a region boundary, before any
+transition polygon exists** — up to **0.104** (about 6 degrees) at level 1,
+0.0486 at level 2, 0.0294 at level 3 — and they differ at exactly the vertices
+whose face ring at that level is incomplete. The two predicates were checked
+against each other: zero disagreements at every level.
+
+**Why that reaches storage rather than display.** A multires surface is
+`P(n) = S(n) + Frame · Detail`. A frame that is 6 degrees off means a coefficient
+authored at a boundary vertex **reconstructs to a different world offset than the
+same coefficient on a dense hierarchy**. So the bit-identity claim holds only
+while the boundary detail is ZERO — which is the only case the shipped gate
+exercises. Sculpt at a region boundary and the guarantee is gone, silently.
+
+**This is why "no host exports hierarchies today" does not make it deferrable.**
+The consuming host's position — a hierarchy contributes its cage, the sculpted
+level is reached through a bake — means nobody meets it through export. It is
+reached by SCULPTING near a boundary, which is the ordinary use.
+
+It also inverts the residual ordering the change recorded: task 3.4, the
+cross-level neighbourhood, is not something that follows 2.3's export
+transitions. **It is the thing underneath both**, because a normal is a property
+of the neighbourhood and not of the transition polygon.
+
 ### Refusals a host cannot render — a standing rule, and three instances
 
 **A refusal that knows an id should return it, and a host should never have to
