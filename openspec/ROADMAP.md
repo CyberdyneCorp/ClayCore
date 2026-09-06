@@ -927,6 +927,33 @@ needs them, and listed so they are not mistaken for oversights:
   for it), while a mesh deformer runs FORWARDS once per vertex and inherits
   neither. It is the same math in the easier direction.
 
+- **A stroke is walked segment by segment on every sample.** Confirmed in the
+  kernel rather than inferred: `ctape_stroke_dist`
+  (`include/clay/kernel/tape.h:488`) loops `for (i; i + 1 < count; ++i)` over
+  every segment for every sample, with no early-out and no spatial structure —
+  **O(control points) per sample, unconditionally.** A mirrored stroke pays it
+  twice, because each mirror copy is its own `emit_item_instance` with its own
+  placement.
+  Measured by ClaySpaceDesktop on a live snake-hook pull, one segment of the
+  gesture, timing each step against the bricks it dirtied: mirrored, 96 bricks
+  at 0.95 ms with a 6-point curve and 96 bricks at 3.77 ms with a 39-point one —
+  **the same brick count by every measure the host controls, four times the
+  cost.** Per brick, 0.0099 → 0.0392 ms mirrored and 0.0069 → 0.0177 unmirrored.
+  Not a defect: walking the segments is the ordinary implementation and it only
+  becomes visible when a host grows ONE item to tens of points during a live
+  gesture, which a snake hook does and the primitive was not shaped for.
+  **The tractable fix is an early-out rather than a tree.** A smooth blend
+  forbids skipping a far segment outright — `csmin_quadratic` accumulates from
+  everything within `k` — but a per-segment bound is enough: a segment whose
+  bounding sphere is further than the running `d` plus `k` cannot change the
+  result, so the test is sound and costs one distance per segment. A BVH over
+  the curve is the version that flattens it entirely and is a real piece of work.
+  Not scheduled. **Recorded because a host is choosing a workaround against it**
+  — chaining several shorter stroke items instead of growing one long one, which
+  only became possible once their taper was anchored to arc length — and that
+  workaround stops being worth considering the day this lands, so its status is
+  worth their knowing either way.
+
 - **Procedural noise as a tape opcode.** `displace` is by-callable today, which
   is not portable across backends. A tape-expressible 3D noise field is the
   answer if node-style procedural detail ever becomes a goal.
