@@ -870,3 +870,34 @@ ClaySpaceDesktop's `place_layer` and `set_object_transform` both refill
 account for the folds ABOVE a layer, their refill is too small and they leave
 stale geometry with no error, having asked for exactly what they were told. Their
 refill correctness rides on the upward widening landing completely.
+
+### §13a. Two adjacent bools are one transposition apart — make the compiler hold it
+
+Raised by the host on 2026-09-06 against the fix for §13's blocker, and checked
+against the tree, where it is real rather than hypothetical:
+
+    bool fold_layer(const Layer& layer, bool layer_val, bool have_acc);
+    bool compile_and_fold_layer(const Layer& layer, bool first, bool have_acc);
+
+Two adjacent `bool`s in each, three call sites between them (`run`, `run_part`,
+and `compile_and_fold_layer` into `fold_layer`), and a transposition at any of
+them compiles silently and produces the exact defect the fix just closed — a
+composed layer initialising instead of folding, per brick, with no error.
+
+The shout-case comment above `fold_layer` is right and stays, but a comment
+protects a reader who is LOOKING. It does not protect a caller who is confident,
+and it is in the category this change has twice recorded as decaying: nothing
+re-runs it.
+
+**Required before merge:** give first-ness a distinct type — a one-field struct
+is enough (`struct FirstVisibleLayer { bool value; };`) — so a swap is a compile
+error at every call site, forever, with no test to run and nothing to remember.
+This is the asan argument applied to a signature rather than to memory: the
+change is exactly the shape where the compiler can hold an invariant a human
+otherwise keeps having to.
+
+The reviewers' second pass should answer one question about every predicate pair
+in the fold path: **could these two arguments be swapped, and would anything
+notice?** If the answer is "no, and nothing would", the comment is the whole
+defence, which this change has already proved is not enough — the first version
+of that line passed a full green gate run including asan and tsan.
