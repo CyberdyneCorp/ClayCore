@@ -637,3 +637,54 @@ geometry that is subtly wrong at a brick boundary.
 
 A hard-union fold needs no term, which is why nothing needed one before and why
 every existing document stays exactly as fast as it was.
+
+## 11. The placement classifier does not read the composition — REQUIRED, and it is live now
+
+Raised by ClaySpaceDesktop on 2026-09-06, checked against the tree, and it is a
+real defect introduced by stage 2 rather than a hypothetical.
+
+`scene::layer_scales_cleanly` (`src/scene/placement.cpp:46`) decides whether a
+uniformly scaled layer is a SIMILARITY of its own field. It walks the layer's
+ITEM nodes and returns false for any visible node with a soft blend and a
+positive `k` — "the blend radius is the term the layer's scale does not reach".
+**It does not look at `layer.composition`.** Stage 2 gave the LAYER its own
+blend, so a layer whose items are all hard but whose COMPOSITION carries a smooth
+`k` now classifies as Similarity, and takes the cheap invalidation, while its
+field changes in a way a similarity does not describe. Three callers act on that
+verdict: `layer_placement_change` (`:64`), `clay_c.cpp:5702` and
+`pyclay_module.cpp:4430`.
+
+This is the item-level asymmetry the v0.84.0 known limits already record, one
+level up: "Rounding scales with the placement and `blend.k` does not; measured at
+1.289 where a similarity says 2." And the asymmetry is genuinely only `k` here —
+`fold_layer` takes `comp.rounding * layer_distance_scale(layer)`, so the layer's
+rounding DOES follow its scale. Only the radius does not.
+
+It matters more here than in the item case, because the verdict feeds
+`clay_layer_placement_begin/_update/_commit` — the gesture that exists to SKIP
+work. A wrong Similarity there is a picture that lags its own field, not a
+recomputation that costs a little.
+
+**Required:**
+
+1. `layer_scales_cleanly` returns false when
+   `layer.composition.blend.profile != BlendProfile::Hard &&
+   layer.composition.blend.k > 0.0f`, so such a layer classifies GENERAL and
+   promises nothing — the same answer the item case gives, for the same reason.
+2. A regression test: a layer whose ITEMS all scale cleanly but whose composition
+   carries a smooth `k`, scaled uniformly, reports GENERAL from
+   `clay_layer_placement_report`. **Prove it by reverting the predicate and
+   watching it fail**, which is this repository's rule for a regression test and
+   the only way to know the test could ever have caught it.
+3. Say it in the header BESIDE the composition setter, not only in the placement
+   notes. A host reading `LayerComposition` has no reason to look under placement
+   to find out what a blend does to a drag — the host that raised this could not
+   have found it from outside, which is the argument for where the sentence goes.
+
+**Why an artist meets this on an ordinary day**, in the host's words: a blend
+radius is an absolute world distance, and whole subtools get scaled. Place a
+cutter, set a soft join, scale the cutter — the join then covers the same
+absolute distance across a bigger cutter, so the cut reads as getting harder as
+the subtool grows. That part is inherent to a radius in world units. What must
+not also happen is the gesture skipping invalidation on the strength of a
+similarity that is not one.
