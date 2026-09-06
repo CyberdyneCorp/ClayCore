@@ -1677,7 +1677,12 @@ TEST_CASE("asking for the advice changes nothing, and does not sever an instance
         scene::consolidation_advice(doc.layers.front(), 0.5f);
     REQUIRE(advice.advises);
     CHECK(doc.layers.front().sdf->roots.size() == items_before);
-    CHECK(doc.layers.back().sdf == doc.layers.front().sdf);  // still sharing
+    // .get(), not the shared_ptr itself: doctest stringifies both operands, and
+    // MSVC's std::operator<<(ostream&, const shared_ptr<T>&) then enters the
+    // overload set and hard-errors instead of dropping out. Same reason as
+    // 8bdaea32, which is why every other pointer assertion in this file is
+    // already written this way.
+    CHECK(doc.layers.back().sdf.get() == doc.layers.front().sdf.get());  // still sharing
     CHECK(doc.find_layer(source) != nullptr);
 }
 

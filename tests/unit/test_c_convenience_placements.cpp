@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>  // the braced range-for below; MSVC does not get it transitively
 #include <limits>
 
 #include "clay.h"
