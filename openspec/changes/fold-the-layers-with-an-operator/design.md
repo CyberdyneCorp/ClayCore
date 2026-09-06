@@ -239,7 +239,7 @@ Detection is cheap wherever the `Document` is in hand; the table says so per row
 | 7 | `bindings/c/clay_c.cpp:1558` `plan_frontier` (statement at `:1584`) | Identical insertion after `:1570`. | same | same |
 | 8 | `bindings/c/clay_c.cpp:14250` `eval_requests_impl` | `const bool split = visible_sdf > 1 && layer_join_is_hard_union(...)` replaces `has_below` as the driver of `ChunkHalf` (`:14386`, `:14399`), the fold (`:14408`) and `store_seeds` (`:14418`). When refused: one `ChunkHalf::Whole` batch, and NO SEED STORED — the precedent is `resume_batch_into_host`'s "It stores nothing rather than something mislabelled" (`:12545-12552`). | `doc->doc.document`, in hand | a composed two-layer document's refill is sample-identical to a freshly built document's; the next batch reports `resumed_bricks == 0` |
 | 9 | `bindings/c/clay_c.cpp:13263` `fold_layers_below` | **THE SITE THAT CANNOT DETECT, and therefore must not be reachable.** It takes six floats and no document. UNCHANGED; its comment gains the precondition that it is only ever reached where the join is a hard Add. Its `rev == now` caller at `:13903` does not consult a plan at all, so the enforcement is at the STORE (row 8): a two-half seed only exists if the join was a hard Add when it was taken, and any composition change bumps `revision`, so `rev == now` cannot see a stale one. | none — by construction | the row-8 test is the proof; assert `resumed_bricks` (a count) and sample identity, never the clock |
-| 10 | `tests/unit/scene_utils.h:200` `ref_eval_document` — **the ninth site, which proposal.md's table of eight misses** | The independent reference evaluator hard-codes `ctape_combine_values(acc, lv, ccombine_add, cblend_hard, 0, 0)` between layers and applies no first-visible rule at layer level. It MUST learn the composition, copying `ref_eval_list`'s shape at `:175`. Left alone, the reference and the compiler agree only while every fixture unions — which is the exact condition under which a fold bug is invisible. | n/a (test code) | `test_scene.cpp:50` with a composed `gnarly_document` variant |
+| 10 | `tests/unit/scene_utils.h:200` `ref_eval_document` — **the ninth site, which proposal.md's table of eight misses** | The reference evaluator hard-codes `ctape_combine_values(acc, lv, ccombine_add, cblend_hard, 0, 0)` between layers and applies no first-visible rule at layer level. It MUST learn the composition, copying `ref_eval_list`'s shape at `:175`. Left alone, the reference and the compiler agree only while every fixture unions — which is the exact condition under which a fold bug is invisible. **It is a DIFFERENTIAL and not an independent evaluator — see §13l, which struck that word and says what it is instead.** | n/a (test code) | `test_scene.cpp`, "tape matches reference tree evaluation (composed gnarly scene)", built by the record stage against `composed_gnarly_document` |
 | — | `clay_c.cpp:12564` `resume_batch_into_host`, `:1727` `prefix_source`, `:1596` `shaped_entry` | UNCHANGED. The first two already refuse every multi-layer document. `shaped_entry`'s `want_below` gate keys on presence only, which is sufficient because row 8 never stores a two-half seed for a refused document. | — | covered by row 8 |
 
 Two ops are refused at the setter and that refusal is load-bearing here rather
@@ -1285,6 +1285,36 @@ with a flag saying more follow, or all of them — and say which in the header
 either way. The current behaviour is defensible and undocumented, which is the
 combination that produces a wrong sentence in a host.
 
+**DECIDED: THE LOWEST PLUS A COUNT.** `clay_brick_cache_eval_requests_below`
+takes a second out-parameter, `out_blocking_count`, which receives how many
+visible SDF layers sit above the named one altogether; `out_blocking_layer` is
+the lowest of them, unchanged. The error detail gains "N visible SDF layers are
+above it in all" when N > 1, so a host that only echoes the message is not
+misled either. The two answer different halves and neither substitutes for the
+other: the id is the row to act on FIRST, because hiding or moving it is what
+makes progress, and the count is what decides the SENTENCE.
+
+*Why not a flag.* "More follow" is a count with information discarded and
+nothing saved — the walk that finds the second blocker is the walk that counts
+them all — and a host that wants to say how many is back where it started.
+
+*Why not all of them.* An id list on a refusal path needs a caller array, a
+capacity and a truncation rule, which is three parameters and a new failure mode
+for a message. A host that wants the names enumerates the visible SDF layers
+above the named one itself, with the rule the header states; the count is the
+one fact it cannot get without that walk, and it is exactly the fact the refusal
+had already computed. If a host later reports that it is doing that walk on
+every refusal, the list is the widening to take, and it takes it with the same
+predicate.
+
+*What it cost.* One parameter on an entry point that has never shipped —
+0.86.0 is unreleased — and one walk that already existed:
+`scene::visible_sdf_layer_above(doc, layer, &count)` counts in the same pass and
+short-circuits at the first match when nobody passes a counter, so the question
+a caller does not ask still costs what it did. A second predicate answering
+"how many are above" would have been the duplication this change is organised
+against.
+
 ### §13f. What the fourth review's record stage changed, and the two contract errors it found
 
 The stage after the below form's (§12c). Its findings were two majors about the
@@ -1342,13 +1372,13 @@ the seam is forced to a hard Add). The hard Add belongs to the CALLER that holds
 two halves apart in host floats, and so does that caller's refusal — which is
 why every in-tree caller of the suffix states `doc_have_acc = false`.
 
-**CORRECTED BY §13j: that paragraph and the test under it were both half
+**CORRECTED BY §13m: that paragraph and the test under it were both half
 true.** `resume()` emitted the seam's composition only where the appended chain
 produced a value in the region being compiled; where the cull left the layer
 with nothing, an early return skipped the seam entirely. Read the paragraph
 above as a statement of intent that the tree did not yet keep, and the test as
 one that could not have caught the gap — three conditions in its own fixture
-each hid it. See §13j.
+each hid it. See §13m.
 
 ### §13h. The revert experiment §13d asks for, run
 
@@ -1466,7 +1496,12 @@ scale predicate covers it. **Fix the predicate so any positive radius disqualifi
 regardless of profile or op**, rather than adding Paint to a list; a list is the
 thing that was already wrong.
 
-### §13j. The fourth cull-observable predicate, and what it says about the sweep
+### §13m. The fourth cull-observable predicate, and what it says about the sweep
+
+*Landed as a second §13j, colliding with the §13j above; renumbered to the next free
+letter for the same reason as §13g and §12d. The fifth review's handover and the
+commit that closed it cite it as §13j, and the two references above now name this
+section.*
 
 Found by the fifth review, closed by the stage after it, and it is the thing
 §13 said would need somebody looking a third time.
@@ -1540,3 +1575,84 @@ somewhere the fold's rules live. **The scope of "every place the fold path reads
 state a cull region can change" has to include every place that RE-EMITS the
 fold, not only the places that decide it.** The score is now two found by
 looking and three by writing things down where someone had to pass them.
+
+### §13l. The record stage's answers: the two sweeps, and a word struck from §2
+
+Written by the sixth review's record stage, which is the minors and the accuracy
+of this file. Three of them are documents claiming something the tree does not
+do, which is the failure this change has now been caught in three times, so they
+are recorded here rather than only fixed.
+
+**§13i's sweep, run: which assertions compared two paths this change merged.**
+The question is answerable from a diff and the answer is three pairs.
+
+| merged pair | assertions that compared them | verdict |
+|---|---|---|
+| the node query and the command path (`node_influence_bound_in_document`) | `test_c_undo_bound.cpp` lines 113-114 and 217-218, both PRE-EXISTING, and the subcase this change added | **evaporated as coverage, kept as a pin.** All three compare one function's output with itself now; §13h already reported the added subcase and missed the two older pairs, which is the sharper half — a pre-existing assertion can go vacuous without anybody touching it |
+| the layer query and the dirty call (`layer_influence_bound_in_document`) | none | nothing to report: no test held those two equal |
+| `document_pad` and `CullIndex::refresh_pad` | `test_layer_fold_sites.cpp`, "and the cached index reports exactly the same number" | **still meaningful.** The two are one expression over DIFFERENT inputs — the compiler's live document against the index's cached per-layer terms — so they can still disagree, and a stale cached term is exactly the failure worth hearing about |
+
+The three vacuous pairs are marked in the file as pinning a contract rather than
+providing coverage, with what a future re-split would break. Nothing is deleted:
+the two paths were genuinely two functions before this change and could be again.
+
+**And the same question asked of a test this change ADDED**, since §13i is about
+what a merge does and not only about what a merge did: the
+`SetLayerCompositionCmd`, `SetLayerMirrorCmd` and `SetLayerRadialCmd` rows added
+to "every command's inverse restores the document bit-identically" cannot fail as
+coverage of what they set. `apply_one` for a layer setter reads the old value
+into the inverse and then writes the new one, so the round trip is an assignment
+and its undo, restoring by construction whatever the field is, and both sides of
+the comparison are read through one `serialize_document`. What a row there can
+still catch — a command with no registered inverse, or an applier that writes
+nothing — is real and is not about compositions. Marked in place, kept, and not
+counted twice.
+
+**`ref_eval_document` is a DIFFERENTIAL, and "independent" is struck from §2 row
+10.** The reviewer's finding is right: the layer fold in the reference was
+derived by reading `compile_and_fold_layer`, so on the fold RULE the two agree by
+construction. Restoring independence was considered and NOT taken, for a reason
+worth stating rather than a preference:
+
+- the evaluator was never independent of the KERNEL — `ref_combine` has always
+  called `ctape_combine_values`, and the file header has always said it "reuses
+  the kernel's prim/combine dispatch". Making the LAYER fold independent while
+  the ITEM fold is shared buys an independence the document does not have one
+  level down, and would read as a promise the file cannot keep;
+- the obvious re-derivation (seed the accumulator with the far field and fold
+  unconditionally) is equal to what is there for every operator the setter
+  accepts, so it would be a second spelling with the same answers — and it has
+  its own quiet divergence, the colour of a document whose layers all produce
+  nothing, which no fixture would have caught.
+
+So the word is struck and the function says what it is: a differential over
+everything the COMPILER contributes and the reference does not have — traversal
+order, transform inversion, mirror emission, culling, checkpoints, the tape's
+stack discipline — which is most of this change, and which is why the fold's own
+cases still run through it. What it cannot catch is now written above it: a fold
+rule wrong in the same way on both sides, and a wrong `ctape_combine_values`.
+The rule's evidence is the analytic expectations in `test_layer_fold.cpp`, the
+item/layer parity fixtures in `test_layer_parity.cpp` and the C ABI gates in
+`test_layer_gates.cpp`, none of which reads this evaluator.
+
+**§2 row 10's test now exists.** It named `test_scene.cpp:50` "with a composed
+`gnarly_document` variant" and nothing was built; `test_scene.cpp` was
+unmodified by this change. A named test that does not exist is what
+`tools/check_task_symbols.py` was written for after this change reported an
+entry point as built that existed only in this file — and this one was in a
+design document, where that gate cannot see it. The case is built against
+`composed_gnarly_document`: the same whole-vocabulary fixture with a Subtract on
+the first visible layer that must NOT be applied, a smooth Subtract with a
+rounding under it, a smooth Add at the instance, and an Intersect on top whose
+box contains the body and not the instance. It asserts its own fixture and
+compares 2,000 points against the reference in distance and colour.
+
+**And the teeth found a fixture that composed nothing**, which is worth keeping
+because it is the failure a composed variant invites. The second teeth arm
+defaults ONE fold — the instance's smooth Add — and expects the field to move;
+it read 0. The instance sits at x = 3 in `gnarly_document`, further from
+everything else than any radius the fold could carry, so that layer was composed
+in name only and the whole-document count (2,000 of 2,000) was carried by the
+Intersect alone. The variant moves it to x = 1.9, where the two surfaces are
+about 0.3 apart, and the arm reads 28 — small because a seam is a thin shell in
+a uniformly sampled 8-unit cube, and asserted exactly for that reason.

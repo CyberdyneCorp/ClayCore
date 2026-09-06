@@ -14404,10 +14404,12 @@ clay_result clay_brick_cache_eval_requests_below(const clay_document* doc, clay_
                                                  const clay_brick_request* requests, size_t count,
                                                  float* out_values, size_t values_capacity,
                                                  float* out_colors_rgb, size_t colors_capacity,
-                                                 clay_layer_id* out_blocking_layer) {
+                                                 clay_layer_id* out_blocking_layer,
+                                                 uint32_t* out_blocking_count) {
     // Cleared before anything can fail, so a caller that reads it after a
     // refusal with no id to give reads 0 rather than what it passed in.
     if (out_blocking_layer) *out_blocking_layer = 0;
+    if (out_blocking_count) *out_blocking_count = 0;
     if (doc) {
         // Checked even for an empty batch, for the reason the excluding form
         // states: a stale or wrong layer id is reported at the call that
@@ -14439,14 +14441,28 @@ clay_result clay_brick_cache_eval_requests_below(const clay_document* doc, clay_
         // move THAT subtool to smooth this one live" and "not available here",
         // and because the refusal has already computed the walk the host would
         // otherwise repeat.
-        if (const scene::LayerId above = scene::visible_sdf_layer_above(doc->doc.document, layer)) {
+        //
+        // AND HOW MANY THERE ARE, because the id alone produces a sentence that
+        // is wrong by omission on a stack with two field layers above the
+        // target: the sculptor hides the one named, tries again, and is refused
+        // again naming the next. The count is the same walk's tally, so it is
+        // not a second question asked a second way.
+        std::uint32_t above_count = 0;
+        if (const scene::LayerId above =
+                scene::visible_sdf_layer_above(doc->doc.document, layer, &above_count)) {
             if (out_blocking_layer) *out_blocking_layer = above;
+            if (out_blocking_count) *out_blocking_count = above_count;
+            const std::string more =
+                above_count > 1 ? " (" + std::to_string(above_count) +
+                                      " visible SDF layers are above it in all)"
+                                : std::string();
             return fail(CLAY_ERROR_INVALID_ARGUMENT,
                         "layer " + std::to_string(above) +
                             " is a visible SDF layer above layer " + std::to_string(layer) +
                             ", so the layers below layer " + std::to_string(layer) +
                             " folded with its own composition are not the whole document: hide or "
-                            "move layer " + std::to_string(above) + ", or split below it instead");
+                            "move layer " + std::to_string(above) + ", or split below it instead" +
+                            more);
         }
     }
     // Below is "every visible SDF layer before this one, folded as the document

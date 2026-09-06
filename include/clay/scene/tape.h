@@ -513,10 +513,25 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& checkpoin
 // returned rather than a bool because a refusal that names the layer blocking
 // it names an action a host can offer (hide or move THAT layer), where one that
 // does not names a wall.
+//
+// AND HOW MANY FOLLOW, which is the half an id alone cannot say (design.md
+// §12d). Pass `out_count` and it receives how many visible SDF layers sit above
+// `layer` ALTOGETHER, of which the returned id is the lowest. The lowest is the
+// one to act on -- hiding or moving it is what makes progress -- and the count
+// is what decides the SENTENCE a host writes: "hide or move Poros" is wrong by
+// omission on a stack with two field layers above the target, and the sculptor
+// acts, tries again and is refused again naming the next one. A caller that
+// wants their names walks the stack from `layer`'s position with the rule this
+// function states; the count is the one fact it cannot get without walking, and
+// it is the fact the refusal has already computed.
+//
+// Null `out_count` STOPS AT THE FIRST match rather than counting the rest, so
+// the question a caller does not ask costs nothing.
 const LayerComposition* layer_join_composition(const Document& doc, LayerId active);
 bool layer_join_is_hard_union(const Document& doc);
 LayerId first_composed_fold_layer(const Document& doc);
-LayerId visible_sdf_layer_above(const Document& doc, LayerId layer);
+LayerId visible_sdf_layer_above(const Document& doc, LayerId layer,
+                                std::uint32_t* out_count = nullptr);
 
 // -- one half of a document, for a resumable multi-layer refill --------------
 //

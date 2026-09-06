@@ -1867,10 +1867,13 @@ Field below_field(clay_document* d, clay_layer_id layer,
                   const std::vector<clay_brick_request>& reqs) {
     Field f = make_field(reqs.size());
     clay_layer_id blocking = 987654;
+    std::uint32_t blocking_count = 987654;
     REQUIRE(clay_brick_cache_eval_requests_below(d, layer, nullptr, reqs.data(), reqs.size(),
                                                  f.d.data(), f.d.size(), f.rgb.data(),
-                                                 f.rgb.size(), &blocking) == CLAY_OK);
+                                                 f.rgb.size(), &blocking,
+                                                 &blocking_count) == CLAY_OK);
     CHECK(blocking == 0);  // cleared on success, so a host cannot read a stale id
+    CHECK(blocking_count == 0);
     return f;
 }
 
@@ -1987,10 +1990,11 @@ TEST_CASE("c abi: below + the top layer's own composition is the whole document"
 TEST_CASE("c abi: below refuses only a layer that is not the last visible SDF one") {
     const std::vector<clay_brick_request> reqs = equator_bricks();
     Field out = make_field(reqs.size());
-    auto below = [&](clay_document* d, clay_layer_id layer, clay_layer_id* blocking) {
+    auto below = [&](clay_document* d, clay_layer_id layer, clay_layer_id* blocking,
+                     std::uint32_t* blocking_count = nullptr) {
         return clay_brick_cache_eval_requests_below(d, layer, nullptr, reqs.data(), reqs.size(),
                                                     out.d.data(), out.d.size(), nullptr, 0,
-                                                    blocking);
+                                                    blocking, blocking_count);
     };
 
     SUBCASE("a visible SDF layer above blocks it, and the refusal hands back that layer") {
@@ -2020,8 +2024,39 @@ TEST_CASE("c abi: below refuses only a layer that is not the last visible SDF on
         add_sphere(doc.d, pores, 0.2f, 0.2f);
         add_sphere(doc.d, detail, 0.2f, 0.3f);
         clay_layer_id blocking = 0;
-        CHECK(below(doc.d, doc.form, &blocking) == CLAY_ERROR_INVALID_ARGUMENT);
+        std::uint32_t blocking_count = 0;
+        CHECK(below(doc.d, doc.form, &blocking, &blocking_count) == CLAY_ERROR_INVALID_ARGUMENT);
         CHECK(blocking == doc.top);  // not `pores`, not `detail`
+        // AND HOW MANY FOLLOW (design.md §12d). The id alone produces "hide or
+        // move top", the sculptor does it, and is refused again naming `pores`
+        // -- three times over on this stack. The count is what lets the host
+        // say so the first time, and it is a different number from the id
+        // rather than a restatement of it: three layers are above `form`.
+        CHECK(blocking_count == 3);
+        const std::string why = clay_last_error() ? clay_last_error() : "";
+        CHECK(why.find("3 visible SDF layers are above it in all") != std::string::npos);
+
+        // Hiding the one it named moves the answer DOWN the stack rather than
+        // clearing it, which is the behaviour the count is warning about.
+        REQUIRE(clay_document_set_layer_visible(doc.d, doc.top, 0) == CLAY_OK);
+        blocking = 0;
+        blocking_count = 0;
+        CHECK(below(doc.d, doc.form, &blocking, &blocking_count) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(blocking == pores);
+        CHECK(blocking_count == 2);  // a hidden layer is not in the fold and is not counted
+    }
+
+    SUBCASE("one layer above is one, and the message does not say how many") {
+        // The singular case has no count clause, so a host echoing the message
+        // does not read "1 visible SDF layers".
+        BelowDoc doc(CLAY_OP_SUBTRACT, CLAY_BLEND_HARD, 0.0f, 0.0f);
+        clay_layer_id blocking = 0;
+        std::uint32_t blocking_count = 0;
+        CHECK(below(doc.d, doc.form, &blocking, &blocking_count) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(blocking == doc.top);
+        CHECK(blocking_count == 1);
+        const std::string why = clay_last_error() ? clay_last_error() : "";
+        CHECK(why.find("in all") == std::string::npos);
     }
 
     SUBCASE("a HIDDEN SDF layer above does not block it") {
@@ -2165,7 +2200,7 @@ TEST_CASE("every refusal in this change that knows an id hands it back") {
         clay_layer_id blocking = 0;
         CHECK(clay_brick_cache_eval_requests_below(doc.d, doc.form, nullptr, reqs.data(),
                                                    reqs.size(), out.d.data(), out.d.size(),
-                                                   nullptr, 0, &blocking) ==
+                                                   nullptr, 0, &blocking, nullptr) ==
               CLAY_ERROR_INVALID_ARGUMENT);
         CHECK(blocking != 0);
         CHECK(blocking == doc.top);

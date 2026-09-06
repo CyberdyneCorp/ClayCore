@@ -197,6 +197,35 @@ inline bool ref_eval_list(const std::vector<scene::NodeId>& ids,
     return have_acc;
 }
 
+// WHAT THIS IS, SAID EXACTLY, because the word it used to carry was
+// "independent" and that was an overclaim (fold-the-layers-with-an-operator,
+// design.md §2 row 10).
+//
+// It is a DIFFERENTIAL, not an independent oracle. It shares with the compiler
+// everything the file header lists -- the kernel's prim and combine dispatch --
+// and, since layers gained a composition, the FOLD RULE as well: which layer is
+// first, what a layer that is not first does with an absent accumulator, and
+// that an absent layer value is the far field. Those were written from the
+// spec's statements and are spelled differently here (this folds the far field
+// unconditionally where `emit_layer_fold` asks `fold_changes_an_empty_layer`
+// and skips the identity cases), but they were derived by reading
+// `compile_and_fold_layer`, and a reader is owed that rather than a claim of
+// independence.
+//
+// WHAT IT THEREFORE CATCHES: everything the COMPILER contributes and this does
+// not have -- traversal order, transform inversion, mirror emission, culling,
+// checkpoints, the tape's stack discipline -- which is a large part of this
+// change and is why the fold's own tests still run through here. A change to
+// one side and not the other fails loudly.
+//
+// WHAT IT CANNOT CATCH, stated so nobody counts it twice: a fold rule that is
+// wrong in the same way on both sides, and a wrong `ctape_combine_values`. The
+// rule's own evidence has to come from somewhere neither reaches -- the
+// analytic expectations in test_layer_fold.cpp (an intersecting layer over
+// nothing is nothing; a subtract removes exactly the cutter), the item/layer
+// parity fixtures in test_layer_parity.cpp, which compare a document folded by
+// LAYERS against the same shape folded by ITEMS in one layer, and the C ABI
+// gates in test_layer_gates.cpp.
 inline CTapeValue ref_eval_document(const scene::Document& doc, cfloat3 p) {
     using namespace kernel;
     CTapeValue acc;
@@ -235,10 +264,12 @@ inline CTapeValue ref_eval_document(const scene::Document& doc, cfloat3 p) {
         }
         // THE LAYER'S OWN COMPOSITION, and the first visible SDF layer's is not
         // applied -- it initialises. Reading the field here rather than folding
-        // a hard Add is what keeps this evaluator independent of the compiler
-        // and still in agreement with it; a reference that unions whatever the
-        // document says agrees only while every fixture unions, which is the
-        // one condition under which a fold bug is invisible.
+        // a hard Add is what stops this evaluator agreeing with the compiler
+        // for the wrong reason: one that unions whatever the document says
+        // agrees only while every fixture unions, which is the one condition
+        // under which a fold bug is invisible. It does NOT make the two
+        // independent -- see the note above the function for what this shares
+        // with the compiler and what therefore has to be proved elsewhere.
         const float rb = lc.rounding * scene::layer_distance_scale(layer);
         if (is_first)
             acc = lv;
@@ -355,9 +386,52 @@ inline Document gnarly_document() {
     base.sdf->insert(item(Prim::box(cf3(1.5f, 0.2f, 1.5f)), cf3(0, 0, 0)));
 
     Layer* inst = doc.instance_layer(doc.layers[0].id, "body-instance");
-    
+
     inst->xform.position = cf3(3, 0, 0);
 
+    return doc;
+}
+
+// The same document with its layers FOLDED rather than unioned
+// (fold-the-layers-with-an-operator, design.md §2 row 10). `gnarly_document`
+// exercises the whole ITEM vocabulary against one inter-layer combine -- the
+// hard union every layer had before compositions existed -- so on its own it is
+// the fixture under which a fold defect is invisible.
+//
+// Every kind of fold the setter accepts appears once, and each is chosen to be
+// VISIBLE over the sampled domain rather than merely set:
+//   * the first visible layer carries a Subtract that MUST NOT BE APPLIED (it
+//     initialises), which is the rule a per-brick cull can otherwise flip;
+//   * `base`, the plinth under the body, SUBTRACTS with a smooth radius and a
+//     rounding -- so both terms of the fold are non-zero and the rounding is
+//     the one that scales with the layer;
+//   * `body-instance` unions SMOOTHLY, moved in to x = 1.9 so that there IS a
+//     seam for the radius to bulge at -- at its own x = 3 the two clusters are
+//     further apart than any radius the fold carries, and the layer would be
+//     composed in name only;
+//   * `clip`, added on top, INTERSECTS a box that contains the body and not
+//     the instance -- the operator whose far field wins, and the one that
+//     turns a skipped fold into material that should not be there.
+inline Document composed_gnarly_document() {
+    Document doc = gnarly_document();
+    doc.layers[0].composition =
+        scene::LayerComposition{Op::Subtract, Blend{BlendProfile::Quadratic, 0.2f}, 0.05f};
+    doc.layers[1].composition =
+        scene::LayerComposition{Op::Subtract, Blend{BlendProfile::Quadratic, 0.15f}, 0.04f};
+    doc.layers[2].composition =
+        scene::LayerComposition{Op::Add, Blend{BlendProfile::Chamfer, 0.5f}, 0.0f};
+
+    // The instance moves in from x = 3 to x = 1.9: at 3 the two clusters are
+    // further apart than any radius the fold could carry, so its composition
+    // would be the identity everywhere and the layer would be composed in name
+    // only. Here the two surfaces are about 0.3 apart and the smooth union has
+    // a seam to bulge at.
+    doc.layers[2].xform.position = cf3(1.9f, 0, 0);
+
+    Layer& clip = doc.add_sdf_layer("clip");
+    clip.sdf->insert(item(Prim::box(cf3(2.2f, 2.2f, 2.2f)), cf3(0, 0, 0)));
+    clip.composition =
+        scene::LayerComposition{Op::Intersect, Blend{BlendProfile::Quadratic, 0.1f}, 0.0f};
     return doc;
 }
 

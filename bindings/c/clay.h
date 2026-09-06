@@ -10220,8 +10220,15 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
  *     ABI does not offer.
  *
  * clay_brick_cache_eval_requests_below names the layer that blocks it when the
- * layer you asked about is not the top one, so a host can offer "hide or move
- * <that layer>" rather than reporting that the tool is unavailable. */
+ * layer you asked about is not the top one, and how many are above it in all,
+ * so a host can offer "hide or move <that layer>" rather than reporting that
+ * the tool is unavailable.
+ *
+ * THAT POSITION RESTRICTION IS THE OTHER FORM'S, NOT THIS ONE'S. This call
+ * refuses on the DOCUMENT and never on where the layer sits, so while every
+ * applied composition is a hard Add — every document written before ABI 0.86.0,
+ * and every document that does not use the feature — it keeps working at ANY
+ * stack position exactly as it always did. Nothing here narrowed. */
 clay_result clay_brick_cache_eval_requests_excluding(
     const clay_document* doc, clay_layer_id excluded, const char* backend,
     const clay_brick_request* requests, size_t count, float* out_values, size_t values_capacity,
@@ -10339,12 +10346,37 @@ clay_result clay_brick_cache_eval_requests_layer(
  * the whole document — which is worth knowing, because the artist sees rows
  * above the one they are on and this call does not refuse for them.
  *
- * out_blocking_layer may be NULL. It is set to 0 on CLAY_OK and on every other
- * refusal — a null document, a batch or buffer that does not check out,
- * CLAY_ERROR_NOT_FOUND for an id the document does not hold, and
- * CLAY_ERROR_INVALID_ARGUMENT for a mesh or voxel layer (the document does not
- * fold at one, so there is no seam and no composition to rejoin under). Those
- * refusals are about the layer you named, which you already have.
+ * AND HOW MANY BLOCK IT: *out_blocking_count receives the number of visible SDF
+ * layers above `layer` ALTOGETHER, of which *out_blocking_layer is the lowest.
+ * Both, rather than one or the other, because each answers a different half —
+ * the id is the row to act on FIRST (hiding or moving it is what makes
+ * progress), and the count is what decides the sentence: on a four-row stack
+ * with two field layers above the target, "hide or move <that subtool>" is
+ * wrong by omission, and a sculptor who follows it is refused again naming the
+ * next one. A host wanting every id enumerates the layers above `layer` itself
+ * with the rule stated above — visible, SDF — which is the walk the count tells
+ * it how long will be. The error detail says "N visible SDF layers are above it
+ * in all" when N > 1, so a host that reads only the message is not misled
+ * either.
+ *
+ * out_blocking_layer and out_blocking_count may each be NULL. Both are set to 0
+ * on CLAY_OK and on every other refusal — a null document, a batch or buffer
+ * that does not check out, CLAY_ERROR_NOT_FOUND for an id the document does not
+ * hold, and CLAY_ERROR_INVALID_ARGUMENT for a mesh or voxel layer (the document
+ * does not fold at one, so there is no seam and no composition to rejoin
+ * under). Those refusals are about the layer you named, which you already have.
+ *
+ * THIS RESTRICTION IS NOT A NARROWING OF clay_brick_cache_eval_requests_excluding,
+ * though read beside it it looks like one. The excluding form refuses on the
+ * DOCUMENT (any applied composition that is not a hard Add) and never on a
+ * position, so in a document where every layer unions — which is every document
+ * written before ABI 0.86.0, and every document that does not use this feature
+ * — it keeps working at ANY stack position, exactly as it always has. This form
+ * is the repair for the case the excluding form cannot serve, a composed
+ * document, and it is available at the seam alone. The reason it is the seam
+ * alone is not that a composition above is order-dependent: it is that THERE IS
+ * NO `_above` QUERY. Whatever sits above is material a host cannot obtain here,
+ * and a hard union above is just as absent as a smooth one.
  *
  * WHAT IT DOES NOT PROMISE.
  *
@@ -10368,7 +10400,7 @@ clay_result clay_brick_cache_eval_requests_below(
     const clay_document* doc, clay_layer_id layer, const char* backend,
     const clay_brick_request* requests, size_t count, float* out_values,
     size_t values_capacity, float* out_colors_rgb, size_t colors_capacity,
-    clay_layer_id* out_blocking_layer);
+    clay_layer_id* out_blocking_layer, uint32_t* out_blocking_count);
 
 /* clay_brick_cache_eval_requests with the destination on the device — the call
  * a host refilling a brick atlas actually wants. Brick i occupies

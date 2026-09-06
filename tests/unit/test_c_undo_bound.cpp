@@ -109,6 +109,18 @@ TEST_CASE("undoing a dab bounds itself, not the layer") {
     REQUIRE(b.has == 1);
     CHECK(b.infinite == 0);
     // It covers what went away...
+    //
+    // PINS A CONTRACT; NOT COVERAGE (fold-the-layers-with-an-operator,
+    // design.md §13i). `dlo`/`dhi` come from clay_layer_node_influence_bound and
+    // `b` from the undo bound, and this change MERGED those two paths onto
+    // `scene::node_influence_bound_in_document` -- so both sides move together
+    // and this pair now compares one function's output with itself. It was a
+    // real check when it was written, it is worth keeping because a future
+    // change that re-splits the query from the command path would break it
+    // (that split is exactly what this change found and closed), and it must
+    // not be counted twice as evidence that either bound is right. The bound's
+    // own evidence is test_layer_fold_sites.cpp, which asserts that the box
+    // contains every band-clamped point the edit changed.
     for (int a = 0; a < 3; ++a) {
         CHECK(b.lo[a] <= dlo[a]);
         CHECK(b.hi[a] >= dhi[a]);
@@ -213,6 +225,15 @@ TEST_CASE("a child of a blended group covers the seam without covering the group
     // Never SMALLER than the child's own influence: a bound that is may leave
     // stale bricks, which is the failure this whole family of checks exists
     // to prevent.
+    //
+    // PINS A CONTRACT; NOT COVERAGE, for the same reason as the pair in
+    // "undoing a dab bounds itself" above (design.md §13i): `clo`/`chi` are the
+    // QUERY and `b` is the command path, and this change made those one
+    // function, so the comparison cannot fail while they stay one. The
+    // requirement it used to carry -- that the bound reaches past the child's
+    // own box -- is asserted against the child's GEOMETRY two lines up
+    // (`child_box`), which is a literal the code under test cannot reach, and
+    // that is where the teeth are now.
     for (int a = 0; a < 3; ++a) {
         CHECK(b.lo[a] <= clo[a]);
         CHECK(b.hi[a] >= chi[a]);

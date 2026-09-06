@@ -1641,10 +1641,20 @@ LayerId layer_blocking_minor(const Document& doc, std::uint16_t minor) {
     if (minor >= 18) return 0;
     for (const Layer& l : doc.layers) {
         if (l.kind != LayerKind::Sdf) continue;  // a non-SDF layer carries none
-        const LayerComposition& c = l.composition;
-        if (c.op != Op::Add || c.blend.profile != BlendProfile::Hard || c.blend.k != 0.0f ||
-            c.rounding != 0.0f)
-            return l.id;
+        // "What minor 17 can say" IS `layer_composition_is_hard_union` -- the
+        // four clauses were spelled out here once and that is the duplication
+        // this change spent three review rounds removing. The predicate is the
+        // one definition of "folds exactly as every layer folded before
+        // compositions existed", and a fifth clause added to it has to reach
+        // the format writer or a document 17 cannot express is written at 17.
+        //
+        // EVERY layer, not only the ones after the first: the first visible
+        // SDF layer's composition is never APPLIED, but it is still stored,
+        // still authored, and still lost by a writer that drops it. The
+        // compiler's `first_composed_fold_layer` skips it for exactly the
+        // opposite reason -- it asks what the FOLD does, and this asks what the
+        // FILE holds.
+        if (!layer_composition_is_hard_union(l.composition)) return l.id;
     }
     return 0;
 }

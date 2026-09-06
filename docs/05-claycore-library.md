@@ -901,10 +901,21 @@ it; the `min` above is that same composition for the one case where the layer
 unions.
 
 It refuses only when the layer named is **not the last visible SDF layer**, and
-that refusal hands back the id of the lowest visible SDF layer above it, so a
-host can offer *"hide or move `Poros` to smooth `Forma_principal` live"* rather
-than reporting the tool unavailable. Hidden layers and mesh or voxel layers
-above do not block it: they are not in the fold. Excluding a layer from the
+that refusal hands back the id of the lowest visible SDF layer above it **and
+how many are above it in all**, so a host can offer *"hide or move `Poros` to
+smooth `Forma_principal` live"* rather than reporting the tool unavailable — and
+can say so once rather than after each hide, which the id alone cannot: on a
+stack with two field layers above the target, acting on the one named gets the
+sculptor refused again naming the next. The id is the row to act on first; the
+count is what decides the sentence, and a host wanting every id enumerates the
+visible SDF layers above the named one itself. Hidden layers and mesh or voxel
+layers above do not block it: they are not in the fold.
+
+That position restriction belongs to this call and is **not** a narrowing of the
+excluding form. `clay_brick_cache_eval_requests_excluding` refuses on the
+document rather than on a position, so in a document where every layer unions —
+every document written before ABI 0.86.0 — it still works at any stack position,
+exactly as it always did. Excluding a layer from the
 *middle* of a stack still has no repair — the layers above it fold onto an
 accumulator that included it, so the two halves are not two operands of one
 combine — and reconstructing that case would need a three-way split and two

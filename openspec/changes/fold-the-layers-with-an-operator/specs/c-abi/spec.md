@@ -93,6 +93,19 @@ call at all. Hidden layers, and mesh or voxel layers, above the named one SHALL
 NOT block it: they are not in the fold, so a split beneath them is still the
 whole document.
 
+THAT REFUSAL SHALL REPORT BOTH THE LOWEST BLOCKING LAYER AND HOW MANY BLOCK IT.
+The id names the row to act on first; the count is how many visible SDF layers
+sit above the named one altogether, and it is what lets a host write the sentence
+once rather than repeat it after each hide. A refusal that reported only the id
+would be wrong by omission on a stack with two field layers above the target: the
+sculptor acts on the one named, asks again, and is refused again naming the next.
+
+The position restriction SHALL NOT be read as a narrowing of the excluding form,
+and the API SHALL say so where it states the refusal. The excluding form refuses
+on the DOCUMENT rather than on a position, so for a document where every applied
+composition is a hard Add it keeps working at any stack position exactly as it
+did before this change.
+
 A layer with nothing beneath it SHALL be answered rather than refused, with the
 far field, and the API SHALL state that the named layer's own composition is not
 applied there — the first visible SDF layer initialises the accumulator — so a
@@ -115,6 +128,10 @@ field, which is a wrong answer with nothing in it to say so.
 #### Scenario: A layer that is not the topmost is refused
 - **WHEN** a host asks for the layers below a layer that has a visible SDF layer above it
 - **THEN** the call is refused with an invalid-argument error, and the refusal reports the id of the LOWEST visible SDF layer above the named one
+
+#### Scenario: The refusal says how many layers block it
+- **WHEN** more than one visible SDF layer sits above the named layer
+- **THEN** the refusal reports the lowest of them AND the total number above the named layer, so a host is not told to act on one row when several block the call
 
 #### Scenario: What is above but not in the fold does not block it
 - **WHEN** the layers above the named one are hidden SDF layers, mesh layers or voxel layers

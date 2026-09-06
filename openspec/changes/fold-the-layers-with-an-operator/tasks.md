@@ -696,3 +696,131 @@
       POSITIVE blend_k COUNTS AS A RADIUS HERE" plus the conservative note.
       design.md §13f and 7.8 above are corrected where they record as settled
       and held by a test something no test could see
+
+- [x] 7.11 THE SIXTH REVIEW'S MINORS, AND THE RECORD. No blockers and no majors
+      in that round; what it left was nine findings, and three of them are
+      documents claiming something the tree does not do — the failure this
+      change has now been caught in three times, so each is recorded in
+      design.md (§13l) rather than only fixed.
+      CODE:
+        * `layer_blocking_minor` (src/scene/commands.cpp) re-spelled
+          `layer_composition_is_hard_union`'s four clauses inline. It calls the
+          predicate now, which is the whole of what "minor 17 can say it" means,
+          and says beside the call why it asks about EVERY layer where
+          `first_composed_fold_layer` skips the first: one asks what the FOLD
+          does and the other what the FILE holds
+        * §12d's REQUIRED decision, unrecorded since the third review: when two
+          layers block `clay_brick_cache_eval_requests_below`, the refusal
+          reports THE LOWEST PLUS A COUNT. `out_blocking_count` is a second
+          out-parameter, `visible_sdf_layer_above` counts in the same walk it
+          already made (and still short-circuits at the first match when nobody
+          passes a counter, so an uncounted call costs what it did), and the
+          error detail gains "N visible SDF layers are above it in all" for
+          N > 1. Not a flag, which is a count with information discarded and
+          nothing saved; not a list, which needs a caller array, a capacity and
+          a truncation rule on a refusal path — a host wanting the names walks
+          the stack from the named layer with the rule the header states, and
+          the count is the one fact that walk cannot be avoided for. The
+          parameter costs nothing: 0.86.0 is unreleased, so no host holds the
+          old signature
+        * §12d's other required sentence, which was missing entirely: that
+          `clay_brick_cache_eval_requests_excluding` refuses on the DOCUMENT and
+          never on a position, so for a union-only document it keeps working at
+          ANY stack position and the below form's topmost restriction is not a
+          narrowing of it. In both headers, in docs/05, and in the c-abi delta
+        * `include/clay/scene/placement.h` opened with "Layers combine with a
+          hard union, so no cross-layer term has to be re-solved when one layer
+          moves" — the paragraph the whole placement contract rests on, and
+          contradicted by the paragraph this change added to the same file.
+          Rewritten to what survives: the classification is about the LAYER's
+          own field, which no fold enters; the fold's rounding follows the
+          layer's scale and its radius does not, which is why
+          `layer_scales_cleanly` reads the composition; and what a fold changes
+          is the INVALIDATION, which is `layer_reach_in_document`'s job
+      TESTS:
+        * design.md §2 row 10 named `test_scene.cpp:50` "with a composed
+          gnarly_document variant" and no such case existed —
+          `tests/unit/test_scene.cpp` was unmodified by this change. Built:
+          "tape matches reference tree evaluation (composed gnarly scene)"
+          against a new `composed_gnarly_document`, which folds the same
+          whole-vocabulary fixture with a Subtract on the first visible layer
+          that must NOT be applied, a smooth Subtract with a rounding, a smooth
+          Add at a distance and an Intersect on top. It asserts its own fixture,
+          compares 2,000 points in distance AND colour, and carries two teeth:
+          every one of the 2,000 samples moves against the same document with
+          every composition defaulted (the Intersect on top uses the clip box's
+          far field, so it changes the value wherever the accumulator has one),
+          and 28 still move when ONLY the instance's smooth Add is defaulted,
+          which is the arm that stops the count being carried by the intersect
+          alone. That arm read 0 first — the instance sits at x = 3 in
+          `gnarly_document`, further from everything else than any radius the
+          fold could carry, so the layer was composed in name only — and the
+          fixture moves it to x = 1.9 for a seam to bulge at. A composed variant
+          can be composed and still fold nothing
+        * §13i's sweep, run and reported in design.md §13l: three pairs of
+          merged paths, and the assertions that compared them. Two PRE-EXISTING
+          pairs in `tests/unit/test_c_undo_bound.cpp` (the dab case and the
+          blended-group case) now compare `node_influence_bound_in_document`
+          with itself — §13h had reported the subcase this change ADDED and
+          missed the two older ones, which is the sharper half, since a
+          pre-existing assertion can go vacuous with nobody touching it. Marked
+          in place as pinning a contract rather than providing coverage, not
+          deleted: a future re-split of the query from the command path is
+          exactly what they would catch. `document_cull_pad` against
+          `CullIndex::refresh_pad` is the one pair that stays MEANINGFUL — same
+          expression over different inputs, a fresh walk against cached terms,
+          so a stale term still fails it
+        * the `SetLayerCompositionCmd` / `SetLayerMirrorCmd` / `SetLayerRadialCmd`
+          rows this change added to "every command's inverse restores the
+          document bit-identically" are marked the same way. `apply_one` for a
+          layer setter reads the old value into the inverse and writes the new
+          one, so the round trip is an assignment and its undo and restores by
+          construction; what the rows still catch — a command with no registered
+          inverse, an applier that writes nothing — is real and is not about
+          compositions
+      CONTRACT:
+        * `ref_eval_document` is a DIFFERENTIAL and design.md §2 row 10 called
+          it independent. Struck rather than repaired, with the argument in
+          §13l: it was never independent of the KERNEL (`ref_combine` has always
+          called `ctape_combine_values`), so making the LAYER fold independent
+          while the ITEM fold is shared would promise a property the file cannot
+          keep one level down — and the obvious re-derivation is equal to what
+          is there for every operator the setter accepts, i.e. a second spelling
+          with the same answers and its own quiet divergence (the colour of a
+          document whose layers all produce nothing). What it catches and what
+          it cannot are now written above the function, with where the fold
+          rule's own evidence lives
+        * design.md gains §13l (this stage's answers); §12d gains the decision
+          it required, with why a flag and a list were both refused
+        * AND A THIRD COLLIDED SECTION LETTER, found while writing §13l: the
+          fifth review's "the fourth cull-observable predicate" landed as a
+          second §13j, on top of the assertion-count section of the same round,
+          leaving the two references that cite it ambiguous. Renumbered to §13m
+          with the landing note 7.9 established for §13g and §12d, and the two
+          references pointed at it. Three parallel stages have now taken a
+          letter someone else had; the pattern is a stage appending a section
+          without reading to the end of the file it is appending to
+      THE VERSION, and it is a merge-order hazard rather than a defect: the
+      three version lines on this branch read 0.86.0 — CMakeLists.txt's
+      `VERSION`, `CLAY_ABI_MINOR` in bindings/c/clay.h, and pyproject.toml's
+      `version` — and PR #476 claims the same minor. WHICHEVER MERGES SECOND
+      TAKES 0.87.0, and moves those three lines together (a bump split across
+      branches is what the version gate has caught twice at tag time) plus every
+      "ABI 0.86.0" annotation it wrote: 14 in bindings/c/clay.h, two in
+      docs/05-claycore-library.md, one in tests/swift/smoke.swift and the one in
+      6.7 above (counted at this commit; `grep -rn 0.86.0` is the list). The format minor is NOT part of that — `kSceneMinor` is 18
+      because this change added a layer record field, and it moves only if the
+      other branch also added one, in which case the second branch takes 19 and
+      re-reads its own reader/writer pair
+      COGNITIVE COMPLEXITY, as a number rather than a demand: `eval_requests_impl`
+      (bindings/c/clay_c.cpp) measures 149 against a backend target of 15, up
+      from 143 on main — clang-tidy's readability-function-cognitive-complexity,
+      same build database, main's copy of the file measured the same way. The +6
+      is the split gate: two `&&` predicates (`split`, `refused_split`), the
+      ternaries that replaced `has_below` at four sites, and the `if
+      (!refused_split)` around `store_seeds`. NOT SPLIT HERE, deliberately: the
+      function was already ten times the target before this change touched it,
+      its neighbour `resume_bricks` measures 183 and did not move, and a
+      refactor of either is a change to the refill path that would land in the
+      same PR as a correctness fix and be reviewed as one thing. It belongs in
+      its own change, with its own gate run

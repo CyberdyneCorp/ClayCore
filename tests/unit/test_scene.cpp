@@ -1,5 +1,8 @@
 #include <doctest/doctest.h>
 
+#include <cmath>
+#include <vector>
+
 #include "clay/scene/bounds.h"
 #include "clay/scene/tape.h"
 #include "kernel_utils.h"
@@ -59,6 +62,70 @@ TEST_CASE("tape matches reference tree evaluation (gnarly scene)") {
         CHECK(tv.d == doctest::Approx(rv.d).epsilon(1e-5));
         CHECK(clength(tv.color - rv.color) < 1e-4f);
     }
+}
+
+TEST_CASE("tape matches reference tree evaluation (composed gnarly scene)") {
+    // design.md §2 row 10's test, which was named in the table and never built.
+    // The case above it runs the whole ITEM vocabulary under ONE inter-layer
+    // combine -- the hard union -- which is the fixture under which a fold
+    // defect is invisible. This one folds the same document.
+    //
+    // WHAT IT CAN AND CANNOT SAY. `ref_eval_document` shares the fold RULE with
+    // the compiler (see the note above it), so this is a differential over
+    // everything the compiler adds and the reference does not have: traversal
+    // order, transform inversion, mirror emission, the tape's stack discipline,
+    // and the seam instructions themselves. It is not an independent oracle for
+    // the rule, and the rule's evidence is elsewhere.
+    Document doc = clay_test::composed_gnarly_document();
+
+    // THE FIXTURE, ASSERTED. A composed variant that quietly stopped composing
+    // would pass this case for the same reason the union one does.
+    REQUIRE(doc.layers.size() == 4);
+    CHECK(doc.layers[0].composition.op == Op::Subtract);  // first: never applied
+    CHECK(doc.layers[1].composition.op == Op::Subtract);
+    CHECK(doc.layers[2].composition.op == Op::Add);
+    CHECK(doc.layers[2].composition.blend.k > 0.0f);
+    CHECK(doc.layers[3].composition.op == Op::Intersect);
+
+    Tape tape = compile_document(doc);
+    REQUIRE(!tape.empty());
+    clay_test::Lcg rng(301);
+    std::vector<cfloat3> pts;
+    for (int i = 0; i < 2000; ++i) pts.push_back(rng.vec3(-4, 4));
+    for (cfloat3 p : pts) {
+        CTapeValue tv = tape.eval(p);
+        CTapeValue rv = clay_test::ref_eval_document(doc, p);
+        CHECK(tv.d == doctest::Approx(rv.d).epsilon(1e-5));
+        CHECK(clength(tv.color - rv.color) < 1e-4f);
+    }
+
+    // TEETH: the folds have to MOVE the field, or this case would pass on a
+    // compiler that ignored every composition it was given.
+    auto moved_from = [&](const Document& other) {
+        Tape t = compile_document(other);
+        int n = 0;
+        for (cfloat3 p : pts)
+            if (std::fabs(tape.eval(p).d - t.eval(p).d) > 1e-4f) ++n;
+        return n;
+    };
+
+    // Every composition back at the default. EVERY sample moves, because the
+    // Intersect on top uses the clip box's far field and so changes the value
+    // wherever the accumulator has one -- which is the whole domain.
+    Document unioned = clay_test::composed_gnarly_document();
+    for (Layer& l : unioned.layers) l.composition = scene::LayerComposition{};
+    CHECK(moved_from(unioned) == 2000);
+
+    // And a narrower one, so the count above is not carried by the intersect
+    // alone: default ONLY the smooth Add the instance folds with, and its own
+    // seam still moves the field. 28 rather than 2,000 because the seam is a
+    // thin shell and these are uniform samples of an 8-unit cube -- the number
+    // is small on purpose and is asserted exactly, since a fixture that drifts
+    // into folding nothing there is what this arm exists to catch (it read 0
+    // while the instance sat at its own x = 3).
+    Document one_default = clay_test::composed_gnarly_document();
+    one_default.layers[2].composition = scene::LayerComposition{};
+    CHECK(moved_from(one_default) == 28);
 }
 
 TEST_CASE("invisible items and layers are not compiled") {

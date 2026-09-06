@@ -67,6 +67,18 @@ TEST_CASE("every command's inverse restores the document bit-identically") {
         RemoveLayerCmd{lid},
         SetLayerVisibleCmd{lid, false},
         SetLayerTransformCmd{lid, math::Transform{cf3(0, 5, 0), math::Quat::identity(), 1.0f}},
+        // THESE THREE PIN A CONTRACT; THEY ARE NOT COVERAGE of what they set
+        // (fold-the-layers-with-an-operator, design.md §13d). `apply_one` for a
+        // layer SETTER reads the old value into the inverse and then writes the
+        // new one, so the round trip below is an assignment and its undo and
+        // restores by construction, whatever the field is; and both sides of
+        // the comparison are read through the same `serialize_document`. What a
+        // row here can still catch is a command added to the vocabulary with no
+        // inverse registered at all, or one whose applier writes nothing (the
+        // `!= before` half) -- neither of which is specific to a composition.
+        // The composition's own evidence is test_layer_composition.cpp (the
+        // value, the refusals, the format round trip) and test_layer_fold.cpp
+        // (the field it produces).
         SetLayerMirrorCmd{lid, kMirrorX, 0.1f},
         SetLayerRadialCmd{lid, 6, 1, 0.05f},
         SetLayerCompositionCmd{

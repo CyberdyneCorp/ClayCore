@@ -1620,21 +1620,26 @@ LayerId first_composed_fold_layer(const Document& doc) {
     return 0;
 }
 
-LayerId visible_sdf_layer_above(const Document& doc, LayerId layer) {
+LayerId visible_sdf_layer_above(const Document& doc, LayerId layer, std::uint32_t* out_count) {
+    if (out_count) *out_count = 0;
+    LayerId lowest = 0;
     bool past = false;
     for (const Layer& l : doc.layers) {
         if (l.id == layer) {
             past = true;
             continue;
         }
-        // The first VISIBLE SDF layer after that position, because those are
-        // the layers the fold walks and the only ones a split leaves out.
-        // Hidden, mesh and voxel layers above `layer` cost the caller nothing:
-        // they are not in the whole-document walk either, so a split taken
-        // beneath them is still the whole document.
-        if (past && l.visible && l.kind == LayerKind::Sdf && l.sdf) return l.id;
+        // The VISIBLE SDF layers after that position, because those are the
+        // layers the fold walks and the only ones a split leaves out. Hidden,
+        // mesh and voxel layers above `layer` cost the caller nothing: they are
+        // not in the whole-document walk either, so a split taken beneath them
+        // is still the whole document.
+        if (!past || !l.visible || l.kind != LayerKind::Sdf || !l.sdf) continue;
+        if (!lowest) lowest = l.id;
+        if (!out_count) return lowest;  // nobody is counting: stop at the first
+        ++*out_count;
     }
-    return 0;
+    return lowest;
 }
 
 Tape compile_document(const Document& doc, const CullRegion* cull, const CullIndex* index,
