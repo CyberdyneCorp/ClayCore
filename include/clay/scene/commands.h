@@ -381,7 +381,13 @@ LayerId content_sharer_of(const Document& doc, LayerId layer);
 // The default composition IS the hard union, which is what makes "a document
 // saved before this feature loads unioning and renders as it did" true by
 // construction rather than by a migration.
-inline constexpr std::uint16_t kSceneMinor = 18;
+// Minor 19 changes NO scene field — it moves in step with the container, whose
+// document gained an 'MRES' chunk carrying a mesh layer's multiresolution
+// hierarchy. Writing a document AT minor 18 therefore still produces exactly the
+// bytes minor 18 always did, and `layer_blocking_minor` answers for 19 exactly
+// as it answers for 18, because the composition is still the only field whose
+// absence changes the model. This is minor 10's case, for minor 10's reason.
+inline constexpr std::uint16_t kSceneMinor = 19;
 
 // Apply a command; returns its inverse, or nullopt if the target does not
 // exist or is protected (ghosted or locked). The document is unchanged in

@@ -21,18 +21,26 @@ A hierarchy SHALL live beside the document keyed by layer id, as voxel grids, ma
 - **WHEN** a document containing a hierarchy chunk is opened by a reader at the previous minor
 - **THEN** the document loads, the mesh layer holding the cage loads, and the hierarchy chunk is skipped rather than refused
 
-### Requirement: Writing at the previous minor says what it drops
-Writing a document at the minor below the hierarchy minor SHALL omit the hierarchy chunk and otherwise reproduce exactly the bytes that minor produced, and the release notes SHALL state what the downgrade loses: the levels, the detail field and the sculpt-layer stack — everything above the base cage, which is kept as an ordinary mesh layer.
+### Requirement: Writing below the hierarchy minor is refused, not degraded
+Writing a document at a minor below the hierarchy minor SHALL be REFUSED when any hierarchy it carries holds detail above its base level, and SHALL succeed — reproducing exactly the bytes that minor produced — when every hierarchy is a bare cage, because then nothing an artist authored is dropped.
+
+"Writable at the previous minor" is read as "when the previous minor can SAY it", not "by discarding what it cannot". Every earlier downgrade cost bytes or a shape a host could rebuild; a discarded hierarchy costs authored levels, and a file that opens cleanly, looks deliberate and is missing a day's sculpting is the failure that reading refuses to produce.
+
+A query SHALL name the first layer whose hierarchy blocks a given minor, or report none, so a caller can put an honest sentence in front of a person rather than guessing why a save was refused.
 
 A document that carries no hierarchy SHALL be byte-identical at both minors, so the cost of this feature to a document that does not use it is nothing.
 
-#### Scenario: Writing at the previous minor drops only the hierarchy
-- **WHEN** a document holding a hierarchy is written at the minor below the hierarchy minor
-- **THEN** the bytes are exactly what that minor produced before hierarchies existed, and reloading them yields the base cage as a mesh layer with no hierarchy
+#### Scenario: A sculpted hierarchy blocks the older minor
+- **WHEN** a document whose hierarchy carries detail above its base is written at the minor below the hierarchy minor
+- **THEN** the write is refused, nothing is produced, and the query names that hierarchy's layer
+
+#### Scenario: A bare cage does not block it
+- **WHEN** a document whose only hierarchy is a single base level with no detail is written at the older minor
+- **THEN** the write succeeds and the bytes are exactly what that minor produced before hierarchies existed
 
 #### Scenario: A document with no hierarchy is unchanged
 - **WHEN** a document carrying no hierarchy is written at the current minor and at the previous one
-- **THEN** the two files are byte-identical
+- **THEN** the two files are byte-identical, and the query names no layer
 
 ### Requirement: An orphaned hierarchy chunk is harmless
 A hierarchy entry SHALL survive the removal of the layer it names, because the inverse of a layer removal restores a `Layer` by value and cannot carry a payload — the same reason `mesh_layers` keeps its entries. The writer SHALL emit a chunk only for an id that is still a mesh layer, and the reader SHALL drop a chunk naming a layer the document does not hold.

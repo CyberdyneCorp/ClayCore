@@ -70,6 +70,7 @@ add_executable(clay_unit_tests
   unit/test_extreme_poly_exactness.cpp
   unit/test_mesh_project.cpp
   unit/test_multires_history.cpp
+  unit/test_clayspace_multires.cpp
   unit/test_multires_io.cpp
   unit/test_c_multires.cpp
   unit/test_c_surface_chunks.cpp

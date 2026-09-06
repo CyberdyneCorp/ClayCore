@@ -17,6 +17,19 @@ Associating a hierarchy with a layer that is not a mesh layer SHALL be refused, 
 - **WHEN** a hierarchy is associated with an SDF or voxel layer
 - **THEN** the association is refused and the document is unchanged
 
+### Requirement: A cage and its hierarchy's base are not reconciled
+A hierarchy holds its own copy of the base cage and the mesh layer holds triangles, and nothing SHALL force the two equal. `clay_multires_from_mesh` builds from a mesh value rather than from a layer, so the two can already diverge; carrying both in a document SHALL NOT change that, and a save SHALL NOT mutate either to agree with the other.
+
+Instead the engine SHALL answer, on demand, whether a layer's cage agrees with its hierarchy's base level. The answer SHALL be computed from the two objects in memory and SHALL NOT be stored in the document, because a stored identity is stable neither across builds that change an encoding nor across byte orders, and would report a divergence that had not happened.
+
+#### Scenario: A round trip does not reconcile
+- **WHEN** a document whose cage and hierarchy base already disagree is saved and reloaded
+- **THEN** both come back exactly as they were, and neither has been changed to match the other
+
+#### Scenario: Divergence is reportable
+- **WHEN** a layer's cage is edited while it carries a hierarchy, and the two are compared
+- **THEN** the comparison reports that they disagree, and reports agreement when the cage is untouched
+
 ### Requirement: A hierarchy is counted by document memory
 `io::document_memory` SHALL count the hierarchies a document carries, using the accounting `mesh::MultiresSurface::memory()` already reports, so that a host sizing a document sees the term that dominates it. A hierarchy is routinely the largest payload in a document, and reporting a document's memory while omitting it answers a question nobody asked.
 

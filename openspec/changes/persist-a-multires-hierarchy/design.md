@@ -99,9 +99,48 @@ largest payload a document carries, so a memory report that omits it answers a
 question nobody asked — and the budget work in `add-history-budget` already found
 one accounting that measured low by walking a stale member list.
 
+**D9. The downgrade is REFUSED, not degraded — reversing what this design first
+said.** Written before #477 landed, this file said the new minor would be
+"writable at the previous one" with the release notes stating what was lost. That
+followed the format's older rule, and #477 replaced it: `scene/commands.h:370`
+now reads *"writable at the previous minor" is read as "when the previous minor
+can SAY it", not "by discarding what it cannot"*, and `serialize_document`
+refuses rather than turning a subtractive layer into a union.
+
+The discriminator that rule uses is whether the degradation is *plainer* or a
+*different sculpture*. Dropping a hierarchy is neither, quite: the row comes back
+as its honest base cage rather than as something misrepresented. But what it
+discards is **authored** — hours of sculpted levels — which no earlier downgrade
+did (14's squash, 15's instances, 17's deduplication all cost bytes or shape a
+host can rebuild). A file that opens cleanly, looks deliberate and is missing a
+day's work is the hazard #477 named, arriving by a different door.
+
+So: writing at minor 18 is refused for a document whose hierarchy carries detail
+above its base, and allowed for one whose hierarchies are bare cages, where
+nothing authored is lost. A query names the first layer that blocked it, mirroring
+`scene::layer_blocking_minor` — a refusal a caller cannot name is one it has to
+explain by guessing.
+
+**D10. The cage and the hierarchy's base are not reconciled, and a host can ask
+whether they agree.** Task 0.1 settled this against the tree rather than by
+preference: `clay_multires_from_mesh` takes a `clay_mesh*`, not a layer, so a
+hierarchy already holds its own copy of the cage with no link back, and the two
+can already diverge. Persisting both does not create that hazard — it makes it
+observable, which is strictly better than a side-car that also could not detect
+it.
+
+The query is computed on demand from two objects already in memory and is **not
+stored**. `snapshot_identity` is the right shape and the wrong storage: it
+documents itself as stable "neither across builds that change the document
+encoding nor across byte orders", so a hash written into the file would report a
+false divergence the first time an encoding moved — a worse failure than the one
+it was added to catch.
+
 ## Risks / Trade-offs
 
-**The base cage exists twice, and the two copies can disagree.** The mesh layer
+**The base cage exists twice, and the two copies can disagree.** Settled by D10
+rather than left open — kept here because the risk does not disappear, it becomes
+detectable. The mesh layer
 holds the cage as `mesh::Mesh`; the hierarchy holds its own base level. Nothing
 today forces them equal, and after this change a save writes both. If a host
 sculpts the mesh layer directly while a hierarchy is attached, a reload restores

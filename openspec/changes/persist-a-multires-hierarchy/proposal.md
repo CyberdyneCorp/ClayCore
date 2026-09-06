@@ -34,9 +34,10 @@ a chunk, a home, and a format minor.
   and the bytes `MultiresSurface::encode()` already produces. Older readers skip
   it, which is the mild kind of format change `add-mesh-multires`' design
   anticipated in as many words.
-- `kClaySpaceMinor` 17 → 18, **writable at 17**, where writing at the older minor
-  omits the chunk and the release notes say exactly what that loses: the levels,
-  the detail field, and the sculpt-layer stack — everything above the cage.
+- `kClaySpaceMinor` 18 → 19. Writing at 18 is **refused** for a document whose
+  hierarchy carries authored detail, and writes exactly the bytes 18 did for one
+  whose hierarchies are bare cages. This follows #477's rule rather than the
+  older one — see design.md D9.
 - The orphan policy already written for `mesh_layers` applies verbatim: an entry
   survives its layer's removal so undo within a session works, the writer emits a
   chunk only for an id that is still a mesh layer, and the reader drops a chunk
