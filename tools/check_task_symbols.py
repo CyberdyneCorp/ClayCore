@@ -143,6 +143,55 @@ def tracked_basenames() -> set[str]:
     return tracked_basenames.cache
 
 
+def tracked_paths() -> list[str]:
+    """Every tracked path, root-relative. Includes openspec/ for the same reason
+    `tracked_basenames` does: a cited path is a pointer a reader follows, and
+    they follow it with the same `git ls-files` this asks."""
+    if not hasattr(tracked_paths, "cache"):
+        proc = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
+                              text=True)
+        tracked_paths.cache = [line for line in proc.stdout.splitlines() if line]
+    return tracked_paths.cache
+
+
+def path_resolves(span: str) -> bool:
+    """Does a path-shaped citation name a tracked file? ASK GIT, NOT THE DISK.
+
+    `os.path.exists` answered three different questions wrong at once:
+
+    * UNTRACKED BUILD OUTPUT COUNTED AS A CITATION. `.gitignore` lists `dist/`,
+      so `dist/claycore.xcframework` is absent in CI and present on any machine
+      that has run the packaging script. Because every baseline row is
+      re-measured on every run, that made a row's fate depend on whose machine
+      the gate ran on: one machine is told to delete the row, the other to put
+      it back, and obeying either breaks the other.
+    * A LEADING `..` ESCAPED THE CHECKOUT. Nothing normalised the join back
+      inside ROOT, so a citation could be answered by whatever happened to sit
+      beside the checkout on that machine.
+    * A MORE SPECIFIC CITATION FAILED WHERE A VAGUER ONE PASSED. A bare
+      filename went through `git ls-files` and resolved from anywhere in the
+      tree; the same filename with its directory went to the filesystem and had
+      to be exact from the root -- so the exact string every #include in this
+      tree writes did not resolve while its basename did. That inversion pushed
+      authors toward the vaguer citation, which is the opposite of the point.
+
+    One rule fixes all three: a span resolves when it is a prefix of a tracked
+    path READ FROM ANY DIRECTORY BOUNDARY IN IT. That is what "a tracked path,
+    a suffix of one, or a prefix of one" comes to, and reading a PREFIX of the
+    tail rather than the whole tail is what lets a citation name a directory
+    (`docs/05` -> `docs/05-claycore-library.md`) or a stem whose extension the
+    author did not pick (`scene/bounds` -> `include/clay/scene/bounds.h` and
+    `src/scene/bounds.cpp`, a suffix and a stem prefix at once).
+    """
+    parts = [part for part in span.split("/") if part and part != "."]
+    if not parts or ".." in parts or span.startswith("/"):
+        return False
+    needle = "/".join(parts) + ("/" if span.endswith("/") else "")
+    boundary = "/" + needle
+    return any(path.startswith(needle) or boundary in path
+               for path in tracked_paths())
+
+
 def load_baseline() -> set[tuple[str, str]]:
     if not os.path.isfile(BASELINE):
         return set()
@@ -160,7 +209,7 @@ def load_baseline() -> set[tuple[str, str]]:
 def unresolved(span: str, dirs: list[str]) -> str | None:
     """Why this span names nothing in the tree, or None when it resolves."""
     if is_path(span):
-        return None if os.path.exists(os.path.join(ROOT, span)) else f"no such file `{span}`"
+        return None if path_resolves(span) else f"no such file `{span}`"
     if is_filename(span):
         return None if span in tracked_basenames() else f"no such file `{span}`"
     if is_ident(span):
@@ -244,7 +293,10 @@ def self_test() -> int:
     import shutil
     import tempfile
 
-    root = tempfile.mkdtemp(prefix="task-symbols-selftest-")
+    # The fixture root is a SUBDIRECTORY of the scratch area, so that `..`
+    # from it names somewhere real -- which is what check 11 needs.
+    base = tempfile.mkdtemp(prefix="task-symbols-selftest-")
+    root = os.path.join(base, "repo")
     try:
         os.makedirs(os.path.join(root, "src"))
         os.makedirs(os.path.join(root, "tools"))
@@ -265,9 +317,9 @@ def self_test() -> int:
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(text)
 
-        def run_gate() -> tuple[int, str]:
+        def run_gate(args: list[str]) -> tuple[int, str]:
             env = dict(os.environ, CLAY_TASK_SYMBOLS_ROOT=root)
-            proc = subprocess.run([sys.executable, gate], cwd=root, env=env,
+            proc = subprocess.run([sys.executable, gate] + args, cwd=root, env=env,
                                   capture_output=True, text=True)
             return proc.returncode, proc.stdout + proc.stderr
 
@@ -279,12 +331,13 @@ def self_test() -> int:
         failures = []
         checks = 0
 
-        def expect(label: str, want_code: int, want_text: str) -> None:
+        def expect(label: str, want_code: int, want_text: str,
+                   args: list[str] | None = None) -> None:
             nonlocal checks
             checks += 1
             subprocess.run(["git", "add", "-A"], cwd=root, check=True,
                            stdout=subprocess.DEVNULL)
-            code, out = run_gate()
+            code, out = run_gate(args or [])
             if code != want_code or (want_text and want_text not in out):
                 failures.append(f"{label}: exit {code} (wanted {want_code}), output:\n{out}")
 
@@ -345,6 +398,52 @@ def self_test() -> int:
         expect("a bare filename that is in the tree must pass", 0,
                "task symbols resolve")
 
+        # 9. A PATH IS RESOLVED THROUGH GIT, NOT THE FILESYSTEM. Build output
+        #    is on disk and is not in the tree, so citing it is citing
+        #    something no reader can go and read -- and, since every baseline
+        #    row is re-measured on every run, letting it count made a row's
+        #    fate depend on whether the machine had run the build.
+        write(os.path.join(root, ".gitignore"), "dist/\n")
+        os.makedirs(os.path.join(root, "dist"), exist_ok=True)
+        write(os.path.join(root, "dist", "artefact.txt"), "built here, tracked nowhere\n")
+        write(tasks, "- [ ] ship `dist/artefact.txt`\n")
+        expect("untracked build output must not resolve a path", 1,
+               "no such file `dist/artefact.txt`")
+
+        # 10. A CITATION MAY NOT ESCAPE THE CHECKOUT. The file below really is
+        #     on disk beside the fixture, which is the whole point: answering
+        #     the span from there makes the gate report on its machine rather
+        #     than on the tree.
+        os.makedirs(os.path.join(base, "outside"), exist_ok=True)
+        write(os.path.join(base, "outside", "thing.cpp"), "// beside the checkout\n")
+        assert os.path.exists(os.path.join(root, "..", "outside", "thing.cpp"))
+        write(tasks, "- [ ] read `../outside/thing.cpp`\n")
+        expect("a path escaping the root must not resolve", 1,
+               "no such file `../outside/thing.cpp`")
+
+        # 11. THE INVERSION, GONE. A bare filename resolved from anywhere in
+        #     the tree while the same name WITH its directory had to be exact
+        #     from the root, so the more specific citation was the one that
+        #     failed.
+        os.makedirs(os.path.join(root, "src", "nested"), exist_ok=True)
+        write(os.path.join(root, "src", "nested", "self_test_only_leaf.cpp"), "// leaf\n")
+        write(tasks, "- [ ] read `nested/self_test_only_leaf.cpp`\n")
+        expect("a path that is a suffix of a tracked path must pass", 0,
+               "task symbols resolve")
+
+        # 12. The same span with the extension left off: a suffix of the
+        #     directories and a prefix of the stem at once, which is how a
+        #     header and its .cpp get cited together.
+        write(tasks, "- [ ] read `nested/self_test_only_leaf`\n")
+        expect("a path that is a suffix and a stem prefix must pass", 0,
+               "task symbols resolve")
+
+        # 13. AND THE PREFIX RULE IS NOT A PARDON: an invented file under a
+        #     real directory still fails.
+        write(tasks, "- [ ] read `nested/self_test_only_absent.cpp`\n")
+        expect("an invented path under a real directory must fail", 1,
+               "no such file `nested/self_test_only_absent.cpp`")
+
         for failure in failures:
             print(failure)
         if failures:
@@ -353,7 +452,7 @@ def self_test() -> int:
         print(f"task-symbols self-test: OK ({checks} checks, both directions)")
         return 0
     finally:
-        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def main() -> int:
