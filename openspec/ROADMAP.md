@@ -1407,6 +1407,15 @@ already knows and does not say:
    one — no refusal to explain, because the call succeeds and does the wrong
    thing. The host prevents the condition on every path that can create a layer.
 
+4. **A call that computed a region does not hand it back.**
+   `clay_layer_set_stroke_points` knows which part of the field it changed and
+   returns nothing, so a host that wants to dirty only that region computes it
+   again. The same family as the rule above — a call that knows a thing should
+   return it — and recorded here rather than as a row because **the one host
+   that met it says it does not need it**: its own fix dirties an explicit region
+   through `clay_brick_cache_mark_dirty`, which has shipped as long as the cache
+   has. Worth building only if a second host asks.
+
 Deliberately NOT on this list: tool availability. The host keeps
 `tool.availability(layer_state)` domain-side on purpose — the refusal belongs to
 its vocabulary, and repeating it in the engine would let the two disagree. A rule
@@ -1499,6 +1508,15 @@ common defence ("we have a gate for that") is true in every one of these cases.
    still compiled and linted here, so it cannot rot unnoticed". It had rotted.
    The worst of the three, because the comment converts an unknown into a false
    known.
+
+4. **An instrument that reports a constant.** Not a gate, but the same
+   blindness one layer down, and worth the entry because the two are usually
+   built by the same person on the same day: the consuming host's snake-hook
+   returns `dirty_bricks: 1`, hard-coded, so the per-phase profiling it shipped
+   to find exactly this class of problem records a brush touching 880 bricks as
+   touching one. **The profile built to find the cost reported it as free.**
+   Same shape as an assertion whose expected value comes from the system under
+   test, one level up: a number that cannot vary is not measuring.
 
 The unifying question is not "is there a gate" but **"what would have to happen
 for this gate to fail, and does that ever happen here?"**
