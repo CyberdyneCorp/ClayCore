@@ -21,12 +21,22 @@ A layer's own symmetry SHALL be resolved BEFORE it combines with what is beneath
 it. Combining each mirrored or radial copy separately changes the result wherever
 the blend is smooth, because a smooth combine does not associate.
 
-Bounds SHALL follow the operator rather than defaulting to the union. A subtract
-cannot create material outside its left operand and SHALL be bounded by it; an
-intersect SHALL be bounded by the intersection; and every operator SHALL use the
-bound its item-level equivalent already computes. A bound that is too small
-loses ray hits and drops bricks from a plan, and both render as missing surface
-rather than as an error.
+A fold's reported extent SHALL cover the surface the fold can produce: the
+layer's own extent dilated by the FOLD's support, taken from the same expression
+the item-level combine uses, so a smooth or extended layer join cannot bulge past
+the box the tape reports. A bound that is too small loses ray hits and drops
+bricks from a plan, and both render as missing surface rather than as an error,
+which is why this half is required rather than advisory.
+
+Bounds are NOT required to be narrowed per operator, and this is a deliberate
+limit rather than an omission. A subtract cannot create material outside its left
+operand and an intersect is contained by the intersection, so both could report
+less than the union — but the ITEM path unions for every operator too, and the
+requirement above that a layer boolean and an item boolean express the same
+document means narrowing one side alone would break it. Narrowing both changes
+the meshing region of every document that already carries a subtract or a paint,
+so it belongs to a change that can measure that. Until then a fold's extent is
+conservative in the direction that cannot lose surface.
 
 Exactness and the Lipschitz bound SHALL fold exactly as the item-level combine
 folds them, so that a document expressing a shape as two layers and a document
