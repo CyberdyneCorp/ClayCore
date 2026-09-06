@@ -596,6 +596,37 @@ MultiresSurface build_regional(const Mesh& cage) {
     return std::move(*s);
 }
 
+// The angle-weighted contribution one triangle makes to the geometric normal at
+// whichever of its corners belong to `cls`. `class_normal`'s and
+// `recompute_normals`'s shared arithmetic, written out here so the gate below
+// RE-DERIVES the answer from the mesh rather than asking the code under test
+// for it.
+cfloat3 triangle_contribution(const Mesh& m, const mesh::Adjacency& adj, std::uint32_t tri,
+                              std::uint32_t cls) {
+    const cfloat3 p[3] = {m.positions[m.indices[tri * 3]], m.positions[m.indices[tri * 3 + 1]],
+                          m.positions[m.indices[tri * 3 + 2]]};
+    const cfloat3 face = mesh::safe_normalize(ccross(p[1] - p[0], p[2] - p[0]), cf3(0, 0, 0));
+    cfloat3 sum = cf3(0, 0, 0);
+    for (int corner = 0; corner < 3; ++corner) {
+        if (adj.class_of(m.indices[tri * 3 + corner]) != cls) continue;
+        const cfloat3 u = p[(corner + 1) % 3] - p[corner], w = p[(corner + 2) % 3] - p[corner];
+        const float lu = clength(u), lw = clength(w);
+        if (lu < 1e-20f || lw < 1e-20f) continue;
+        sum = sum + face * std::acos(std::clamp(cdot(u, w) / (lu * lw), -1.0f, 1.0f));
+    }
+    return sum;
+}
+
+// The angle-weighted normal over the triangles this level STORES, and nothing
+// else — what the rim would get if the derived faces were not added.
+cfloat3 own_ring_normal(const Mesh& m, const mesh::Adjacency& adj, std::uint32_t cls) {
+    std::size_t tc = 0;
+    const std::uint32_t* tris = adj.triangles_of(cls, &tc);
+    cfloat3 sum = cf3(0, 0, 0);
+    for (std::size_t k = 0; k < tc; ++k) sum = sum + triangle_contribution(m, adj, tris[k], cls);
+    return sum;
+}
+
 // The level vertex nearest `p`, by position.
 std::uint32_t nearest_vertex(const std::vector<cfloat3>& positions, cfloat3 p) {
     std::uint32_t best = 0;
@@ -692,6 +723,71 @@ TEST_CASE("multires: a cross-level neighbour that this level stores is already i
     CHECK(inside > 0);
     CHECK(outside > 0);
     CHECK(missing == 0);
+}
+
+TEST_CASE("multires: a normal recompute completes the ring at a depth transition") {
+    // TASK 3.3 AS A VALUE, not as a call. `recompute_normals` rewrites the
+    // level's DISPLAY normals over the classes an edit touched, angle-weighted
+    // over that level's own triangles — which at the rim of a refined region is
+    // a short, one-sided fan, because the faces on the coarse side are simply
+    // absent. The derived faces are added to the same sum, on the same corners
+    // and with the same weighting.
+    //
+    // DRIVEN BY A DEFORMER rather than a stamp, so every class of the level is
+    // in the touched set at once and the gate covers the whole rim rather than
+    // whatever a brush happened to reach. What is asserted is the resulting
+    // normal, re-derived here from the mesh and the neighbourhood: the stored
+    // value has to be the COMPLETE fan and not the level's own.
+    MultiresSurface s = build_regional(bumpy_quads(6, 1.0f));
+    const mesh::CrossLevelNeighborhood& cross = s.cross_level_at(3);
+    REQUIRE_FALSE(cross.empty());
+    const mesh::Adjacency& adj = s.level_adjacency(3);
+    Mesh& m = s.level_mesh(3);
+    REQUIRE(m.normals.size() == m.positions.size());
+
+    mesh::MeshSculptor sculptor(m, adj);
+    sculptor.set_cross_level(&cross);
+    mesh::MeshDeformSettings twist;
+    twist.verb = mesh::MeshDeform::Twist;
+    twist.origin = cf3(0, -1, 0);
+    twist.axis = cf3(0, 1, 0);
+    twist.span = 4.0f;
+    twist.angle = 0.3f;
+    REQUIRE(sculptor.apply_deformer(twist) > 0);
+
+    std::size_t rim = 0, welded = 0;
+    float worst_complete = 0.0f, worst_own = 0.0f;
+    for (std::uint32_t c = 0; c < static_cast<std::uint32_t>(adj.class_count()); ++c) {
+        std::size_t mc = 0;
+        const std::uint32_t* members = adj.members(c, &mc);
+        // One member each on this cage, which is what lets the per-member
+        // accumulation below be compared against a per-class sum.
+        welded += mc != 1u ? 1u : 0u;
+        const std::uint32_t v = members[0];
+        const cfloat3 extra = cross.normal_contribution(m.positions, v);
+        // Zero away from a depth boundary, and no work there — which is also
+        // why this loop names the rim without a second predicate.
+        if (clength(extra) == 0.0f) continue;
+        ++rim;
+        const cfloat3 own = own_ring_normal(m, adj, c);
+        const cfloat3 stored = m.normals[v];
+        worst_complete = std::max(
+            worst_complete,
+            clength(stored - mesh::safe_normalize(own + extra, cf3(0, 1, 0))));
+        worst_own =
+            std::max(worst_own, clength(stored - mesh::safe_normalize(own, cf3(0, 1, 0))));
+    }
+    MESSAGE("rim classes " << rim << ", worst against the complete fan " << worst_complete
+                           << ", worst against the level's own " << worst_own);
+    // NOT VACUOUS: there is a rim, and it is the whole of it.
+    CHECK(rim == 64u);
+    CHECK(welded == 0u);
+    // A BAND WITH BOTH TEETH. The stored normal is the complete fan to within
+    // the reassociation of one float sum, and it is nowhere near the level's
+    // own — the ratio between the two is the part of this that travels.
+    CHECK(worst_complete < 1e-5f);
+    CHECK(worst_own > 1e-2f);
+    CHECK(worst_complete * 100.0f < worst_own);
 }
 
 TEST_CASE("multires: a smoothing verb is not dragged inward at a depth transition") {
@@ -1088,6 +1184,277 @@ TEST_CASE("multires: every displacement verb crosses a depth boundary") {
         // coarse side is up to 4.4 edges out.
         CHECK(crossed.worst < 0.25f * 0.0416667f);
     }
+}
+
+namespace {
+
+// A CLOSED TORUS, and the reason this file needs one beside its plane cage: the
+// plane's normals all point within a few degrees of +Y, so a reader that
+// substituted a constant for a neighbour's normal would still be reading almost
+// the right direction. On a torus a normal points every way there is.
+Mesh torus_quads(int nu, int nv) {
+    Mesh m;
+    const float kTwoPi = 6.2831853f;
+    for (int u = 0; u < nu; ++u)
+        for (int v = 0; v < nv; ++v) {
+            const float a = kTwoPi * static_cast<float>(u) / static_cast<float>(nu);
+            const float b = kTwoPi * static_cast<float>(v) / static_cast<float>(nv);
+            const float radius = 1.0f + 0.4f * std::cos(b);
+            m.positions.push_back(
+                cf3(radius * std::cos(a), 0.4f * std::sin(b), radius * std::sin(a)));
+            m.normals.push_back(
+                cf3(std::cos(b) * std::cos(a), std::sin(b), std::cos(b) * std::sin(a)));
+        }
+    const auto at = [&](int u, int v) {
+        return static_cast<std::uint32_t>(((u % nu + nu) % nu) * nv + ((v % nv + nv) % nv));
+    };
+    for (int u = 0; u < nu; ++u)
+        for (int v = 0; v < nv; ++v) {
+            const std::uint32_t a = at(u, v), b = at(u + 1, v), c = at(u + 1, v + 1),
+                                d = at(u, v + 1);
+            m.quads.insert(m.quads.end(), {a, b, c, d});
+            m.indices.insert(m.indices.end(), {a, b, c, a, c, d});
+        }
+    return m;
+}
+
+MultiresSurface build_regional_torus(const Mesh& cage, int n) {
+    MultiresError err = MultiresError::None;
+    auto s = MultiresSurface::from_mesh(cage, {}, &err);
+    REQUIRE_MESSAGE(s.has_value(), mesh::multires_error_text(err));
+    std::vector<std::uint32_t> block;
+    for (int u = 1; u <= 2; ++u)
+        for (int v = 1; v <= 2; ++v) block.push_back(static_cast<std::uint32_t>(u * n + v));
+    REQUIRE(s->refine_patches_to_level(block, 3));
+    return std::move(*s);
+}
+
+}  // namespace
+
+TEST_CASE("multires: a polish stamp reads the derived faces' OWN normals across a transition") {
+    // THE ONE VERB THAT READS A NEIGHBOUR'S NORMAL, and the only place an
+    // outside neighbour's normal is a VALUE rather than a slot.
+    // `build_neighbors` fills `nb_normals_` for Polish alone, and
+    // `append_outside_neighbors` gives an outside id the angle-weighted normal
+    // of the derived faces around it.
+    //
+    // WHY THE VALUE IS THE WHOLE OF IT HERE, and why the verb sweep above
+    // cannot see it. `polish_gate` reads those normals as an ANGLE against the
+    // vertex's own — `mean_ring_disagreement` — and closes the gate where the
+    // surface bends. A wrong normal at the rim reads as a hard edge, the gate
+    // shuts, and the rim is not polished AT ALL while the count still reports
+    // the stamp did its job. That is the same silent drop this section is
+    // about, arriving through the normals rather than through the ring.
+    //
+    // ON A TORUS, because on the plane cage every normal is within a few
+    // degrees of +Y and a substituted constant is inside the gate's own angle.
+    const int n = 12;
+    const Mesh cage = torus_quads(n, n);
+    MeshBrushSettings settings;
+    settings.radius = 0.30f;
+    settings.strength = 1.0f;
+    {
+        MultiresSurface probe = build_regional_torus(cage, n);
+        const std::vector<cfloat3>& p = probe.positions_at(3);
+        // A vertex ON the rim of the refined region, which is where a derived
+        // face is the only thing on one side.
+        const mesh::CrossLevelNeighborhood& cross = probe.cross_level_at(3);
+        REQUIRE_FALSE(cross.outside_positions.empty());
+        settings.center = p[nearest_vertex(p, cross.outside_positions[0])];
+    }
+    // TWO RADII, both anchored on the rim. A wider one reaches so far past it
+    // that a vertex is dropped for the ordinary reason a brush drops one, which
+    // would make this gate agree with itself for the wrong cause.
+    for (float radius : {0.20f, 0.30f}) {
+        settings.radius = radius;
+        const DenseField reference = DenseField::of(cage, MeshBrush::Polish, settings);
+        MultiresSurface one = build_regional_torus(cage, n);
+        MultiresSurface both = build_regional_torus(cage, n);
+        const CrossResult level_only =
+            cross_stamp(one, MeshBrush::Polish, settings, reference, false);
+        const CrossResult crossed = cross_stamp(both, MeshBrush::Polish, settings, reference, true);
+        INFO("radius " << radius << ": dropped " << level_only.dropped << " -> "
+                       << crossed.dropped << ", worst " << level_only.worst << " -> "
+                       << crossed.worst << ", peak " << crossed.peak);
+        // NOT VACUOUS: 11 and 19 vertices the uniform hierarchy polished are
+        // moved by nothing at all when the coarse side is dropped.
+        CHECK(level_only.dropped > 0);
+        // AND NOTHING IS DROPPED HERE. Substituting a constant for the outside
+        // neighbours' normals — the same list, the same length — shuts
+        // `polish_gate` at 3 and 1 of these vertices, which is what this
+        // asserts and what a length-only gate cannot.
+        CHECK(crossed.dropped == 0);
+    }
+
+}
+
+TEST_CASE("multires: a COLOUR verb keeps the ring it already had at a transition") {
+    // A VERTEX THIS LEVEL DOES NOT STORE HAS NO COLOUR TO REPORT, and there is
+    // nothing to invent one from: a multires level carries no colour attribute
+    // at all, and an outside vertex has nowhere to hold one if it did. So
+    // `append_outside_neighbors` appends NOTHING for a colour verb, and the
+    // consequence is a value: the colours a smear writes at a depth boundary
+    // are the ones it wrote before the neighbourhood existed, bit for bit.
+    //
+    // It is not merely a missing entry either. `kernel_smear` reads
+    // `nb.colors[k]` at the same index it reads `nb.positions[k]`, so appending
+    // a position without a colour reads PAST the colour array — which is what
+    // this case is really holding shut.
+    MultiresSurface s = build_regional(bumpy_quads(6, 1.0f));
+    const mesh::CrossLevelNeighborhood& cross = s.cross_level_at(3);
+    REQUIRE_FALSE(cross.empty());
+
+    Mesh painted = s.level_mesh(3);
+    painted.colors.resize(painted.positions.size());
+    for (std::size_t i = 0; i < painted.colors.size(); ++i)
+        painted.colors[i] = cf3(static_cast<float>(i % 11u) * 0.09f,
+                                static_cast<float>(i % 7u) * 0.14f, 0.3f);
+    const std::vector<cfloat3> before = painted.colors;
+    Mesh plain = painted;
+
+    MeshBrushSettings settings;
+    const std::uint32_t rim = [&] {
+        for (std::uint32_t v = 0; v < cross.vertex_count; ++v) {
+            std::size_t rc = 0;
+            const std::uint32_t* ring = cross.ring_of(v, &rc);
+            for (std::size_t i = 0; i < rc; ++i)
+                if (!cross.inside(ring[i])) return v;
+        }
+        return 0u;
+    }();
+    settings.center = painted.positions[rim];
+    settings.radius = 0.30f;
+    settings.strength = 1.0f;
+    settings.direction = cf3(1.0f, 0.0f, 0.3f);
+
+    mesh::MeshSculptor with(painted, s.level_adjacency(3));
+    with.set_cross_level(&cross);
+    const std::size_t moved = with.stamp(MeshBrush::Smear, settings);
+    mesh::MeshSculptor without(plain, s.level_adjacency(3));
+    CHECK(without.stamp(MeshBrush::Smear, settings) == moved);
+
+    // NOT VACUOUS: the smear really did write at the rim.
+    CHECK(moved > 0u);
+    std::size_t changed = 0, differ = 0;
+    for (std::size_t i = 0; i < painted.colors.size(); ++i) {
+        if (painted.colors[i].x != before[i].x || painted.colors[i].y != before[i].y ||
+            painted.colors[i].z != before[i].z)
+            ++changed;
+        if (painted.colors[i].x != plain.colors[i].x ||
+            painted.colors[i].y != plain.colors[i].y || painted.colors[i].z != plain.colors[i].z)
+            ++differ;
+    }
+    CHECK(changed > 0u);
+    CHECK(differ == 0u);
+}
+
+TEST_CASE("multires: a WELDED class counts an outside neighbour once") {
+    // THE ONE THING A WELD CLASS CHANGES about the outside neighbours, and the
+    // only place `append_outside_neighbors` looks at more than one vertex.
+    //
+    // The list is built per CLASS and the cross-level ring is asked per MEMBER,
+    // so a class holding two vertices can reach the same outside vertex twice —
+    // and the Laplacian divides by the list's length, so counting it twice
+    // weights it twice in the mean and drags the vertex toward it.
+    //
+    // WHY THE MESH IS PINCHED. `level_adjacency` welds a level's vertices at
+    // EXACTLY 0.0f, on the grounds that a level's vertices are the geometric
+    // points of the surface — so the only thing that welds is a pair that
+    // genuinely coincides, which is what a degenerate cage produces and what
+    // that exact weld exists to keep from cracking. Built here directly: two
+    // rim vertices that share outside neighbours are moved onto one point, and
+    // a sculptor over that mesh welds them the same way.
+    MultiresSurface s = build_regional(bumpy_quads(6, 1.0f));
+    const mesh::CrossLevelNeighborhood& cross = s.cross_level_at(3);
+    REQUIRE_FALSE(cross.empty());
+
+    // The outside ids a level vertex reaches, which is what two members can
+    // duplicate between them.
+    const auto outside_of = [&](std::uint32_t v) {
+        std::vector<std::uint32_t> out;
+        std::size_t rc = 0;
+        const std::uint32_t* ring = cross.ring_of(v, &rc);
+        for (std::size_t i = 0; i < rc; ++i)
+            if (!cross.inside(ring[i])) out.push_back(ring[i]);
+        return out;
+    };
+    std::uint32_t a = 0, b = 0;
+    std::size_t shared = 0;
+    for (std::uint32_t u = 0; u < cross.vertex_count && shared == 0; ++u) {
+        const std::vector<std::uint32_t> ou = outside_of(u);
+        if (ou.empty()) continue;
+        for (std::uint32_t w = u + 1; w < cross.vertex_count && shared == 0; ++w) {
+            std::size_t common = 0;
+            for (std::uint32_t id : outside_of(w))
+                if (std::find(ou.begin(), ou.end(), id) != ou.end()) ++common;
+            if (common == 0) continue;
+            a = u;
+            b = w;
+            shared = common;
+        }
+    }
+    REQUIRE(shared > 0);  // the duplicate the guard is about really exists
+
+    Mesh pinched = s.level_mesh(3);
+    pinched.positions[b] = pinched.positions[a];
+    const std::vector<cfloat3> before = pinched.positions;
+    mesh::MeshSculptor sculptor(pinched, 0.0f);
+    sculptor.set_cross_level(&cross);
+    const mesh::Adjacency& adj = sculptor.adjacency();
+    const std::uint32_t cls = adj.class_of(a);
+    REQUIRE(adj.class_of(b) == cls);
+    std::size_t mc = 0;
+    const std::uint32_t* members = adj.members(cls, &mc);
+    REQUIRE(mc == 2u);
+
+    // The neighbour list `build_neighbors` produces for this class, rebuilt
+    // here: the adjacency ring, then the outside ids of every member ONCE.
+    std::vector<cfloat3> neighbours;
+    std::size_t rc = 0;
+    const std::uint32_t* ring = adj.ring(cls, &rc);
+    for (std::size_t k = 0; k < rc; ++k) {
+        std::size_t n = 0;
+        neighbours.push_back(before[adj.members(ring[k], &n)[0]]);
+    }
+    std::vector<std::uint32_t> unique_outside;
+    std::size_t raw_outside = 0;
+    for (std::size_t k = 0; k < mc; ++k)
+        for (std::uint32_t id : outside_of(members[k])) {
+            ++raw_outside;
+            if (std::find(unique_outside.begin(), unique_outside.end(), id) ==
+                unique_outside.end())
+                unique_outside.push_back(id);
+        }
+    REQUIRE(raw_outside > unique_outside.size());  // and the list really is shorter for it
+    for (std::uint32_t id : unique_outside)
+        neighbours.push_back(cross.outside_positions[id - cross.vertex_count]);
+
+    cfloat3 sum = cf3(0, 0, 0);
+    for (const cfloat3& q : neighbours) sum = sum + q;
+    const cfloat3 mean = sum / static_cast<float>(neighbours.size());
+
+    MeshBrushSettings settings;
+    settings.center = before[a];
+    settings.radius = 0.25f;
+    settings.strength = 1.0f;
+    settings.smooth_iterations = 1;
+    REQUIRE(sculptor.stamp(MeshBrush::Smooth, settings) > 0);
+
+    // ONE SMOOTH PASS MOVES A VERTEX ALONG (mean - p) and by a fraction of it,
+    // so the DIRECTION is the part that does not depend on the falloff — and
+    // the direction is exactly what a double-counted neighbour bends.
+    const cfloat3 travelled = pinched.positions[a] - before[a];
+    const cfloat3 wanted = mean - before[a];
+    REQUIRE(clength(travelled) > 0.0f);
+    REQUIRE(clength(wanted) > 0.0f);
+    const float sine = clength(ccross(travelled, wanted)) / (clength(travelled) * clength(wanted));
+    MESSAGE("welded class " << cls << ": " << raw_outside << " outside entries, "
+                            << unique_outside.size() << " distinct, sine " << sine);
+    CHECK(sine < 1e-4f);
+    // Both members travelled together, as a weld class must.
+    CHECK(pinched.positions[b].x == pinched.positions[a].x);
+    CHECK(pinched.positions[b].y == pinched.positions[a].y);
+    CHECK(pinched.positions[b].z == pinched.positions[a].z);
 }
 
 TEST_CASE("multires: no vertex of a mixed-depth surface is written twice") {

@@ -516,3 +516,83 @@
 - NO TIMING WAS TAKEN, as with every stage before this one. The cost of paying a
   trim back is stated as a level count (`resident_levels` 1 -> 4) and not as a
   duration
+
+### What the review of that gate run landed: a crash the guard missed, and six
+### terms nothing executed
+
+- THE GUARD WAS WRITTEN AGAINST THE POINTER AND THE STATE IS A FLAG. A level
+  cache can be ALLOCATED and not evaluated: `ensure_cache` builds a level's
+  connectivity for a caller that wanted only that, leaves `subdivided`, `frames`
+  and `mesh.positions` empty, and `MultiresSurface::connectivity_at` is a public
+  call that reaches it. So a trim followed by one connectivity question leaves a
+  level whose cache is present and whose surface is not, and both readers walked
+  straight past `!cache` into an empty position array. `level_is_evaluated` is
+  now the one predicate all three sites ask — the two new guards and
+  `below_is_current`, which already tested the flag and is where the shape came
+  from. GATED as "a released level asked for its connectivity is still not
+  evaluated", on the same 144-patch torus, and PROVED BY REVERT twice: the
+  pointer test back in `evaluate_all_up_to` SIGSEGVs after 11 assertions against
+  25, and back in `cross_level_at` after 19. The export half needs the
+  connectivity asked for at every level below the target, because filling one
+  hole marks the level `pending_all` and the mark is what makes the short
+  circuit fall through and cover for the bug — that is written into the case
+- A REUSED `Block` CARRIED A STALE LEVEL ARRAY. `build_block` cleared `vertices`
+  and `indices` and not `vertex_levels`, and the emptiness of that array is the
+  statement "every vertex is at `level`" — which `block_positions` and the
+  header both tell a host to read. Invisible on a fresh block and visible on the
+  second use, so the case reuses ONE block across `build_mixed_block` and
+  `build_block`, as a host's loop does. Reverting the clear fails it twice: the
+  emptiness gate and the value gate that reads the block back through the array
+- A TERM NOTHING EXECUTES IS NOT A FIX, and the instrument is deletion: delete
+  the term, run the suite, and an IDENTICAL assertion count says no case reached
+  it. Six were found that way and all six are now reached, each proved by
+  deleting it again. Counts are the whole suite, before -> after the case:
+  - Task 3.3's cross-level contribution in `recompute_normals`: 16463619 ->
+    16463619 identical. Now "a normal recompute completes the ring at a depth
+    transition", which drives a DEFORMER so every class is touched at once and
+    re-derives the angle-weighted fan from the mesh and the neighbourhood: 64 rim
+    classes, worst 0.000000000 against the complete fan and 0.393747 against the
+    level's own. Deleting the term: 3 failed assertions
+  - The "outside positions are re-read on every access" guarantee: deleting
+    `refresh_cross_level` changed nothing. Now "the outside positions follow a
+    stroke on the level below" — a coarse stroke moves 23 of them, and what a
+    reader gets is what a hierarchy with nothing cached would build. Deleting the
+    call: 2 failed (23 -> 0 moved, and the value against the fresh build)
+  - `CrossLevelNeighborhood::face_patch` had no reader that depended on its
+    values. KEPT rather than deleted, because it is task 5.6's identity on the
+    structure that holds the derived faces, and now asserted as one: the patch is
+    the coarse parent face's, and it is always a patch this level does NOT
+    refine. Deleting the `push_back`: 1 failed
+  - Task 5.5's attribute gathering had no VALUE gate — the existing case checks
+    that `colors.size() == positions.size()`, which an export of the right number
+    of zeroes would pass. Now "an emitted vertex carries the ATTRIBUTES of the
+    level it lives at": the export's numbering is rebuilt from
+    `build_mixed_block`, checked against the positions first, and then both
+    channels are read at the level each vertex lives at. Dropping the copy: 3
+    failed
+  - `append_outside_neighbors`'s `if (colors) return;`: identical count. Now "a
+    COLOUR verb keeps the ring it already had at a transition" — a smear over a
+    coloured copy of a level mesh with the neighbourhood bound writes the same
+    bytes as one without it. Deleting the guard: 2 failed (44 classes against 42,
+    and 8 colours differing), because `kernel_smear` reads `nb.colors[k]` at the
+    index it reads `nb.positions[k]`
+  - `append_outside_neighbors`'s `std::find`: identical count. Reachable only
+    through a WELDED class, which needs two level vertices at one point — what
+    `level_adjacency`'s exact 0.0f weld exists for. Built directly: two rim
+    vertices sharing outside neighbours pinched onto one point, 8 outside entries
+    and 7 distinct. One smooth pass moves a vertex ALONG (mean - p), so the
+    direction is the part that does not depend on the falloff: sine 0.000000000
+    with the guard, 0.069843 without
+- ONE REPORTED FINDING IS NOT REAL AS STATED, and the probe is why. Deleting the
+  `want_normals` output in `append_outside_neighbors` does NOT leave the count
+  identical: it fails "every displacement verb crosses a depth boundary", because
+  a shorter `nb_normals_` desynchronises from `nb_slots_`. What IS unreached is
+  the VALUE — substituting a constant for the outside normal while keeping the
+  slot changes nothing, because on the plane cage every normal is within a few
+  degrees of +Y and `polish_gate` reads an ANGLE. Gated on a TORUS instead, where
+  a wrong normal reads as a hard edge and shuts the gate: "a polish stamp reads
+  the derived faces' OWN normals across a transition" holds `dropped == 0` at two
+  radii, and the constant drops 3 and 1
+- THE SUITE IS 2425 cases and 16463921 assertions, green, and green again under
+  the ASan+UBSan preset over `*test_multires*.cpp` (103 cases, 18216
+  assertions). `ctest` is 8 of 8. NO TIMING WAS TAKEN

@@ -499,6 +499,46 @@ TEST_CASE("regional: the complete neighbourhood is derived and rebuilds identica
     CHECK(moved == 0);
 }
 
+TEST_CASE("regional: a derived face carries the base patch of the coarse face it replaces") {
+    // TASK 5.6's IDENTITY, on the structure that holds the derived faces.
+    //
+    // `CrossLevelNeighborhood::face_patch` is the same identity
+    // `LevelTopology::face_patch` carries, so a derived face needs no second
+    // notion of where it belongs — and the two halves of that are both values:
+    // the patch is the one the COARSE parent face belongs to, and it is always a
+    // patch this level does NOT refine, since a face the level stores is not
+    // derived. Asserted rather than left as a comment beside a `push_back`.
+    const Mesh cage = grid_quads(6, 1.0f);
+    MultiresSurface s = build(cage);
+    REQUIRE(s.refine_patches_to_level(block_patches(6, 2, 2, 2), 3));
+    const mesh::CrossLevelNeighborhood& cross = s.cross_level_at(3);
+    REQUIRE_FALSE(cross.empty());
+
+    // `dense_face` is a corner index of the PARENT — the face the dense level
+    // would have numbered this child by — so inverting `face_begin` names the
+    // coarse face each derived face descends from.
+    const mesh::LevelTopology& parent = s.topology_at(2);
+    std::vector<std::uint32_t> owner(parent.corner_count(), 0u);
+    for (std::uint32_t f = 0; f < parent.face_count; ++f) {
+        const std::uint32_t begin = parent.face_begin(f), arity = parent.face_arity(f);
+        for (std::uint32_t i = 0; i < arity; ++i) owner[begin + i] = f;
+    }
+
+    REQUIRE(cross.face_patch.size() == cross.dense_face.size());
+    std::size_t wrong = 0, refined = 0;
+    for (std::uint32_t k = 0; k < cross.face_count(); ++k) {
+        REQUIRE(cross.dense_face[k] < owner.size());
+        const std::uint32_t patch = parent.patch_of(owner[cross.dense_face[k]]);
+        if (cross.face_patch[k] != patch) ++wrong;
+        if (s.effective_level(patch, 3) == 3) ++refined;
+    }
+    CHECK(cross.face_count() > 0u);
+    CHECK(wrong == 0u);
+    // A derived face is a face this level does NOT have, so the patch it names
+    // can never be one that reaches this level.
+    CHECK(refined == 0u);
+}
+
 TEST_CASE("regional: a uniform level has nothing outside it") {
     const Mesh cage = grid_quads(4, 1.0f);
     MultiresSurface s = build(cage);
@@ -906,6 +946,80 @@ TEST_CASE("regional export: a split cage is refused by name rather than exported
     CHECK(with_colour.normals.size() == with_colour.positions.size());
 }
 
+TEST_CASE("regional export: an emitted vertex carries the ATTRIBUTES of the level it lives at") {
+    // TASK 5.5 AS A VALUE. "Read the channel at the level that vertex lives at"
+    // is the whole rule, and a gate on the array SIZES cannot see it: an export
+    // that emitted the right number of zeroes would pass one. So every emitted
+    // vertex is checked against the channel of the level it came from, and the
+    // level it came from is named rather than assumed.
+    const int n = 12;
+    Mesh cage = closed_torus(n, n);
+    cage.uvs.resize(cage.positions.size());
+    cage.colors.resize(cage.positions.size());
+    for (std::size_t i = 0; i < cage.positions.size(); ++i) {
+        // Per-vertex and not constant: a constant channel survives being read
+        // from the wrong level, which would make this gate agree with the bug.
+        cage.uvs[i] = cf2(static_cast<float>(i) * 0.011f, 1.0f - static_cast<float>(i) * 0.003f);
+        cage.colors[i] = cf3(static_cast<float>(i % 7u) * 0.1f,
+                             static_cast<float>(i % 5u) * 0.2f, 0.25f);
+    }
+    MultiresSurface s = build(cage);
+    REQUIRE(s.refine_patches_to_level(torus_block(n, 1, 2, 1, 2), 3));
+
+    mesh::MultiresMixedStatus status = mesh::MultiresMixedStatus::Ok;
+    const Mesh mixed = s.mixed_mesh_at_level(3, {}, &status);
+    REQUIRE(status == mesh::MultiresMixedStatus::Ok);
+    REQUIRE(mixed.uvs.size() == mixed.positions.size());
+    REQUIRE(mixed.colors.size() == mixed.positions.size());
+
+    // WHICH LEVEL EACH EMITTED VERTEX LIVES AT. The export numbers ascending in
+    // (level, vertex id) and `build_mixed_block` names the pair per patch, so
+    // the same list rebuilt here is the export's own numbering — which the
+    // POSITION check below is what proves, before the attributes lean on it.
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> ids;
+    MultiresSurface::Block b;
+    for (std::uint32_t p = 0; p < static_cast<std::uint32_t>(n * n); ++p) {
+        REQUIRE(s.build_mixed_block(3, p, &b));
+        for (std::size_t k = 0; k < b.vertices.size(); ++k)
+            ids.emplace_back(b.vertex_levels.empty() ? b.level : b.vertex_levels[k],
+                             b.vertices[k]);
+    }
+    std::sort(ids.begin(), ids.end());
+    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+    REQUIRE(ids.size() == mixed.positions.size());
+
+    std::vector<Mesh> per_level;
+    for (std::uint32_t l = 0; l <= 3; ++l) per_level.push_back(s.mesh_at_level(l));
+
+    std::size_t pos_wrong = 0, uv_wrong = 0, colour_wrong = 0;
+    std::array<std::size_t, 4> from_level{0, 0, 0, 0};
+    std::size_t distinct_uvs = 0;
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        const Mesh& level = per_level[ids[i].first];
+        const std::uint32_t v = ids[i].second;
+        ++from_level[ids[i].first];
+        const cfloat3 p = level.positions[v];
+        if (p.x != mixed.positions[i].x || p.y != mixed.positions[i].y ||
+            p.z != mixed.positions[i].z)
+            ++pos_wrong;
+        if (level.uvs[v].x != mixed.uvs[i].x || level.uvs[v].y != mixed.uvs[i].y) ++uv_wrong;
+        if (level.colors[v].x != mixed.colors[i].x || level.colors[v].y != mixed.colors[i].y ||
+            level.colors[v].z != mixed.colors[i].z)
+            ++colour_wrong;
+        if (i == 0 || mixed.uvs[i].x != mixed.uvs[i - 1].x) ++distinct_uvs;
+    }
+    // The ordering assumption first, then the two channels on top of it.
+    CHECK(pos_wrong == 0u);
+    CHECK(uv_wrong == 0u);
+    CHECK(colour_wrong == 0u);
+    // NOT VACUOUS three times over: the export really does span two levels, and
+    // the channel really does vary — an all-zero or constant one would pass a
+    // size gate and this one too.
+    CHECK(from_level[2] > 0u);
+    CHECK(from_level[3] > 0u);
+    CHECK(distinct_uvs > 100u);
+}
+
 TEST_CASE("regional export: the export is a read") {
     // The question ClaySpaceDesktop asked of this half, answered as a gate: a
     // path that produces a sculpted level's geometry must not cost a document
@@ -1020,6 +1134,64 @@ TEST_CASE("regional export: a crossing stamp leaves the mixed-depth surface wate
     // AND THE VERTEX COUNT DID NOT MOVE, which is the other half of "no crack":
     // a seam that had opened would weld into more vertices, not fewer.
     CHECK(s.mixed_mesh_at_level(3).positions.size() == 680u);
+}
+
+TEST_CASE("regional: the outside positions follow a stroke on the level below") {
+    // THE GUARANTEE `cross_level_at` MAKES ABOUT STALENESS, and the one thing
+    // in the neighbourhood that is not fixed for the life of the cache.
+    //
+    // The topology is a function of the cage and the per-level patch sets, so
+    // it is built once. The OUTSIDE POSITIONS are the level below's, and a
+    // stroke down there moves them without this level's cache going stale —
+    // there is no revision that changes, because nothing this level stores
+    // moved. So they are re-read on every access rather than tracked, and what
+    // that has to mean in values is here: after a coarse stroke the answer is
+    // the answer a hierarchy built from scratch would give, and it is NOT the
+    // answer from before the stroke.
+    const int n = 12;
+    MultiresSurface s = build(closed_torus(n, n));
+    REQUIRE(s.refine_patches_to_level(torus_block(n, 1, 2, 1, 2), 3));
+
+    const mesh::CrossLevelNeighborhood before = s.cross_level_at(3);
+    REQUIRE_FALSE(before.empty());
+    REQUIRE_FALSE(before.outside_positions.empty());
+
+    // A stroke on the COARSE side, centred on a vertex the neighbourhood reads
+    // — an outside position IS a subdivision of level 2's points, so this is
+    // the edit that moves them and moves nothing this level stores.
+    mesh::MeshBrushSettings settings;
+    settings.radius = 0.35f;
+    settings.strength = 1.0f;
+    settings.center = before.outside_positions[0];
+    REQUIRE(s.set_sculpt_level(2));
+    mesh::MultiresSculptor sculptor(s);
+    sculptor.begin_stroke();
+    REQUIRE(sculptor.stamp(mesh::MeshBrush::Draw, settings) > 0);
+
+    // BY VALUE: `drop_all_caches` below releases the storage this refers to.
+    const mesh::CrossLevelNeighborhood after = s.cross_level_at(3);
+    // The topology did not move — nothing about the patch sets changed — so a
+    // difference here would mean the structure was rebuilt rather than re-read.
+    CHECK(after.corners == before.corners);
+    CHECK(after.dense_face == before.dense_face);
+    CHECK(after.outside_layout == before.outside_layout);
+    REQUIRE(after.outside_positions.size() == before.outside_positions.size());
+
+    std::size_t moved = 0;
+    for (std::size_t i = 0; i < after.outside_positions.size(); ++i)
+        if (after.outside_positions[i].x != before.outside_positions[i].x ||
+            after.outside_positions[i].y != before.outside_positions[i].y ||
+            after.outside_positions[i].z != before.outside_positions[i].z)
+            ++moved;
+    // NOT VACUOUS: the stroke really did reach the outside set.
+    CHECK(moved == 23u);
+
+    // AND THE VALUE, not just the movement: what a reader gets is what a
+    // hierarchy carrying this detail and nothing cached would build.
+    s.drop_all_caches();
+    const mesh::CrossLevelNeighborhood& fresh = s.cross_level_at(3);
+    CHECK(fresh.corners == before.corners);
+    CHECK(same_floats(fresh.outside_positions, after.outside_positions));
 }
 
 TEST_CASE("regional: a level released between the cage and the brush is still readable") {
