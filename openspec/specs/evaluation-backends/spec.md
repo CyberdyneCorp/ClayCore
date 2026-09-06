@@ -296,3 +296,63 @@ Only a backend bound to a caller-supplied device can serve these; a backend that
 #### Scenario: An offset slice is honoured
 - **WHEN** a transfer names a slice that does not begin at the buffer's start
 - **THEN** only that slice is touched, and bytes outside it are unchanged
+
+### Requirement: Vulkan backend (tier 3)
+The Vulkan backend SHALL run on Vulkan compute, from a stated minimum API version and a stated extension set, and SHALL implement at minimum `eval_points` and the grid evaluation that fills bricks. Capabilities it does not provide — raycast, whose sphere-tracing utilities are templated C++ that a compute shader dialect cannot compile, and device meshing where it is not implemented — SHALL report `Unsupported` so callers fall back to another backend.
+
+It SHALL pass the parity suite where registered, at the same tolerance as every other GPU backend. Its absence on any platform SHALL NOT block any other capability.
+
+Its shaders SHALL be derived from the existing single-source kernels rather than transcribed from them. If a new dialect profile is required, it SHALL be added to the dialect check that gates every push, so that a kernel change that breaks it fails in seconds rather than at release.
+
+It SHALL be built with a resident tape and reused buffers rather than uploading the tape and allocating buffers per dispatch — a cost already identified on another backend and not worth re-creating here.
+
+This backend is not part of the Apple production path: on Apple hardware Vulkan is a translation layer over Metal and cannot outperform the Metal backend it translates into.
+
+#### Scenario: Registration and fallback
+- **WHEN** the Vulkan backend is present and a caller requests a capability it does not implement
+- **THEN** it returns `Unsupported` and the caller can fall back to another registered backend
+
+#### Scenario: Parity where registered
+- **WHEN** the parity suite runs against a registered Vulkan backend on a real device
+- **THEN** every kernel agrees with the CPU scalar reference within its documented tolerance
+
+#### Scenario: A tape is uploaded once per change
+- **WHEN** a request batch is evaluated against one unchanged document
+- **THEN** the tape is uploaded once for the batch
+
+#### Scenario: Absence blocks nothing
+- **WHEN** no Vulkan runtime is present
+- **THEN** every other backend and capability behaves exactly as before
+
+### Requirement: A software runtime gates plumbing, not arithmetic
+Where the parity suite is run against a SOFTWARE Vulkan implementation, the result SHALL be described as gating the plumbing — SPIR-V validity, descriptor and buffer layout, dispatch and readback — and SHALL NOT be presented as evidence that the backend's arithmetic matches the CPU reference. A software runtime executes on the CPU, so agreement with the CPU is close to guaranteed by construction.
+
+Device parity SHALL remain a hardware-dependent check, named as such alongside the other checks that require hardware.
+
+#### Scenario: A software-runtime job says what it proves
+- **WHEN** a CI job runs the Vulkan backend against a software runtime
+- **THEN** its name and its documentation state that it gates plumbing rather than arithmetic
+
+#### Scenario: Device parity is a release check
+- **WHEN** a release touches the kernels
+- **THEN** Vulkan device parity is listed among the manual hardware-dependent checks to run
+
+### Requirement: A batch of grids is one dispatch, not one per grid
+A backend's batched grid evaluation SHALL be dispatched as a single unit of parallel work over the whole batch, rather than as one dispatch per grid.
+
+This is what a brick refill is: a dab dirties a dozen or so bricks and they are evaluated together. Looping the single-grid path over them costs a dispatch-and-join barrier per brick, and — because a brick is only eight cells across — bounds each of those barriers to eight threads however many the machine has. Measured before this requirement was met: 6.7 of 16 physical cores, with the share FALLING as the document grew.
+
+The unit of parallel work SHALL be small enough that a batch offers the pool substantially more units than the machine has threads. A grid's z-slices are not, for a brick.
+
+#### Scenario: A refill occupies the machine
+- **WHEN** a dab's worth of bricks is evaluated as one batch on a machine with many cores
+- **THEN** the work is spread across them rather than bounded by the number of slices in one brick
+
+### Requirement: Batched and single-grid evaluation are the same numbers
+A backend's batched grid evaluation SHALL produce, for each grid in the batch, exactly what its single-grid evaluation produces for that grid — bit for bit on a CPU backend, and within the backend's stated tolerance on a device backend.
+
+A batch is an optimisation of HOW the work is dispatched and never of what is computed. A brick refill and a one-off evaluation of the same region are the same question, and a host that meshes from one and picks against the other would see a seam where they disagreed. Bit-identity is required of the CPU backend rather than a tolerance because it is available: every sample is the same tape evaluated at the same point, and nothing accumulates across samples.
+
+#### Scenario: The batch matches the grids it batches
+- **WHEN** a batch of grids is evaluated, and then each of those grids is evaluated on its own
+- **THEN** every distance and every colour matches exactly on the CPU backend

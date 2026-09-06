@@ -474,17 +474,59 @@ forward-refuse).
    bound — `info.lipschitz` is a stepping bound and the two coincide for most
    tapes and not for all. From the same run, `clay_raycast_attributed` no longer
    builds a document per candidate item and costs **0.51–0.54x** of what it did
-   across four fixtures; `clay_raycast` is untouched and is the control.
+   across four fixtures; `clay_raycast` is untouched and is the control. A host
+   calling that entry point directly measured 0.100 → 0.113 → 0.055 ms across
+   v0.73.0 / v0.78.0 / v0.84.0 — 0.49x, and it also cleared a 1.133x that host
+   had recorded against v0.78.0.
+
+   **The same commit made a pick MORE ACCURATE, which is a behaviour change a
+   host can trip over.** Picking now walks the cached tape rather than
+   sphere-tracing it, and on a resting unit sphere the reported hit moved from
+   1.006707 to 1.000296 — 6.7e-3 off to 3e-4 off, about 22x. That is a better
+   result than the performance line claims and it broke two brush tests in a
+   host that asserted "every field brush moves the surface by more than 1e-3":
+   smoothing a pristine sphere now moves it 3.0e-4, correctly, where the old
+   figure was reading six thousandths of MEASUREMENT ERROR as six thousandths of
+   clay. **The brush got stronger, not weaker** — the same host's control, four
+   smoothing passes over a dab 0.037 proud, takes back 0.008360 at v0.78.0 and
+   0.010919 at v0.84.0. A host with an absolute displacement threshold
+   calibrated before this release should re-derive it against a no-op case
+   rather than widen it.
 
    **And an edit to a `CLAY_OP_INTERSECT` item stopped being quadratic** in the
    layer's intersects (issue #451). Same bounds, same invalidation, same bricks —
-   the only thing a caller can observe is that a drag on an intersect now costs
-   what a drag on a subtract costs (0.0003 ms a frame, against 0.0669 at 0.78.0
-   on the issue's 200-frame fixture). Recorded here rather than under "additive"
-   because v0.78.0's own entry is what created it: making an intersect's bound
-   finite made every caller that meets one in a loop pay O(intersects x items).
-   `clay_document_extent_stats` is the only way to see the cache fire, since the
-   bound is identical either way.
+   the only thing a caller can observe is that computing the bound for a drag on
+   an intersect now costs what computing it for a subtract costs (0.0003 ms a
+   frame, against 0.0669 at 0.78.0 on the issue's 200-frame fixture). Recorded
+   here rather than under "additive" because v0.78.0's own entry is what created
+   it: making an intersect's bound finite made every caller that meets one in a
+   loop pay O(intersects x items). `clay_document_extent_stats` is the only way
+   to see the cache fire, since the bound is identical either way.
+
+   **This is the BOUND QUERY and not the frame, and an earlier draft of this
+   entry said "a drag on an intersect now costs what a drag on a subtract
+   costs", which is not what was measured.** A host reported the difference
+   before the wording was caught: on a live boolean drag re-evaluated and
+   re-meshed every frame, an intersecting cylinder against a reference form
+   measured 57.35 ms at v0.73.0, 66.84 at v0.78.0 and 64.81 at v0.84.0 against a
+   subtracting control flat at 25.5 ms throughout — so 2.03 ms of a 9.49 ms
+   regression came back, 21%, and an intersect drag is still 2.54x its own
+   subtract control. Both figures are true because they measure different
+   things: 0.067 ms a frame was never going to account for 9.49.
+
+   **The residual is not the query, it is the REGION, and it is by design.** An
+   intersect's influence bound is the LAYER's extent — `bounds.cpp`'s
+   `Nonlocality::BoundedByLayer` — because `max(acc, item)` can take material
+   away anywhere the layer already occupies; measured drift is exactly 0 outside
+   the layer extent and 0.100 / 0.065 outside the item's own geometry, so the
+   tighter-looking bound is wrong rather than merely unproven. `node_reach_bound`
+   returns that, `node_command_bound` unions it over the layers sharing the
+   content, and a refill dirties it. A subtract is `op_is_local` and dirties its
+   own box. So a dragged intersect re-meshes the whole layer each frame and a
+   dragged subtract does not, and no bound-query fix changes that. Whether a
+   MOVED intersect could dirty only the swept union of its old and new position —
+   its field changes layer-wide, but its zero set only moves where surface can
+   appear or disappear — is open, unproven, and the next thing to measure.
 
    **0.54.1 is not such a release**: no symbol added or removed and no
    signature changed. It is a BEHAVIOUR fix to one existing verb, and the kind

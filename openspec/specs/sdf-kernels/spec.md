@@ -1121,9 +1121,16 @@ The colour SHALL be optional per volume. A volume with no colour section SHALL e
 
 Colour SHALL be interpolated at the same samples and by the same rule as the distance. A boundary between two colours gradates across a cell; reading the nearest sample instead would put a facet on a surface that does not have one.
 
-Prims other than the volume SHALL NOT pay for this. The colour output SHALL be an out-parameter the volume opcode may write and every other prim ignores, rather than a wider return type every prim constructs.
+Prims other than the volume SHALL NOT pay for this, and SHALL NOT CARRY THE PARAMETER. The colour output SHALL be an out-parameter of the volume opcode's OWN entry point, reached by dispatching on the opcode, rather than a parameter on the shared primitive-distance function that every prim is compiled with — and rather than a wider return type every prim constructs.
+
+The first wording of this requirement said only that other prims "ignore" the out-parameter, which the implementation satisfied in behaviour and broke in cost: the parameter went on the shared if-chain over every opcode, and a document of a thousand spheres — which never enters the volume branch — paid 1.14x for it (`mask_extrude`, 3281 ms to 3752 ms at `ac7460a`). "Does not pay" is a statement about cost and SHALL be read as one.
 
 The dialect SHALL remain single-source. The same header SHALL compile for CPU, CUDA, Metal, OpenCL and Vulkan, and the parity suite SHALL compare COLOUR as well as distance for a coloured volume, on every backend registered in the build.
+
+<!-- The four below are the shipping requirement's own scenarios, carried
+     across verbatim. A MODIFIED block REPLACES the whole requirement, so any
+     scenario it does not restate is dropped on archive — renaming one has the
+     same effect as deleting it. Only the last scenario is this change's. -->
 
 #### Scenario: A coloured volume evaluates its own colour
 - **WHEN** a volume carrying per-sample colour is evaluated at a point inside its sampled box
@@ -1140,6 +1147,11 @@ The dialect SHALL remain single-source. The same header SHALL compile for CPU, C
 #### Scenario: Outside the box the item's colour still applies
 - **WHEN** a coloured volume is evaluated outside its sampled box
 - **THEN** the item's constant colour is reported, since there is no sample to read
+
+#### Scenario: A document with no volume in it pays nothing
+- **GIVEN** a tape holding only analytic prims — spheres, boxes, strokes
+- **WHEN** it is evaluated over a lattice
+- **THEN** no evaluation passes or writes a colour out-parameter, and the cost is what it was before per-sample colour existed
 
 ### Requirement: Ranged twist and bend
 The kernel dialect SHALL provide twist and bend variants whose rotation is RAMPED across a caller-given span with an easing curve and HELD beyond it, so material outside the span travels rigidly rather than continuing to rotate.
@@ -1694,3 +1706,198 @@ The result SHALL remain a bound. This relaxation makes the declared step scale L
 #### Scenario: Marching by the relaxed bound is still safe
 - **WHEN** a document whose items carry disjoint brushes is marched by its declared step scale
 - **THEN** no step lands past the surface
+
+### Requirement: The kernel dialect provides a feathered replace of a sampled volume
+The combine vocabulary SHALL include a feathered replace, emitted by the tape COMPILER when a volume item carrying a feather is placed with Replace — not a public op, and never emitted for a feather of zero, so every existing tape is bit-identical. The mode SHALL crossfade the accumulated field to the volume over the feather margin just inside the sampled box, weighting by the inset into the box, and SHALL read the box, band and feather from the same volume blob header the volume primitive reads, so the two cannot disagree.
+
+The correction SHALL be clamped at the volume's band. That clamp is load-bearing twice: the declared Lipschitz stays closed-form — the operands' bound plus band times the weight's peak slope over the feather (`cfi_replace_feather`) — and per-brick culling keeps the CullRegion contract, PROVIDED the compiler widens its cull test by the same band whenever a feathered replace is present, which it SHALL do. A chain the cull emptied SHALL keep the feathered blend against the far-field seed, while a chain that is truly empty SHALL degrade to the hard replace, so a lone feathered volume shows its shape and every per-brick tape stays band-clamp bit-identical to the full one.
+
+#### Scenario: Every backend agrees on the feathered field
+- **WHEN** a document containing a feathered replace is evaluated on any registered backend
+- **THEN** the results match the shared interpreter exactly, because the mode lives in the one tape dialect every backend compiles
+
+#### Scenario: Per-brick culling stays exact under the feather
+- **WHEN** per-brick tapes of a document containing a feathered replace are compiled with a cull region and compared against the full tape inside that region
+- **THEN** band-clamped results are bit-identical, including bricks whose chains the cull emptied and documents where the volume is the only item
+
+### Requirement: The volume blob header carries the feather by its self-describing rule
+The volume blob header SHALL append the feather after the sample Lipschitz, growing the header from 12 to 13 floats under the existing rule that the header's size IS the index offset. A blob written before the field SHALL read as feather zero — the hard replace — and a reader written before the field SHALL find its section offsets exactly where they always were.
+
+#### Scenario: Round trips carry it and old blobs mean hard
+- **WHEN** a volume with a feather is taken to a blob or serialized bytes and back
+- **THEN** the feather survives; and a blob whose header predates the field reads back with feather zero and identical samples
+
+### Requirement: A brush pays for what it reaches, not for the box around it
+An operator confined to a region SHALL be able to declare that region as the shape it actually acts over, and the traversal SHALL reject whole bricks that shape cannot reach. A brush is a ball and the bricks selected for it are a box around one, which holds nearly twice the volume: measured on a dab, most of the bricks selected could not hold a sample the brush could reach, and most of the samples visited were weighed and handed back unchanged.
+
+Rejecting them is sound for the reason confining the traversal is sound at all: the operator is the identity outside its region, so a brick the region cannot reach holds nothing the pass may change. It follows that the traversal and anything preserving its input MUST narrow by the same shape, or what was preserved stops covering what is written.
+
+Deciding that a sample lies outside the region SHALL NOT cost more than the arithmetic that decides it. A weight that falls to nothing outside a radius and interpolates only across a taper SHALL answer both of the uninterpolated cases without a square root, since they are the overwhelming majority of what a brush is handed.
+
+An operator SHALL NOT read a sample it has already been given. A traversal that hands its callback the value held at a sample has handed it the value a lookup of that sample would return, and paying for the lookup as well costs once per sample.
+
+#### Scenario: A ball rewrites what the box around it would
+- **GIVEN** an operator that is the identity outside a ball
+- **WHEN** it is applied over that ball, over the box around it, and over the whole field
+- **THEN** the three produce the same volume, sample for sample
+
+#### Scenario: What was preserved still covers what was written
+- **GIVEN** an input preserved over the same ball the traversal is narrowed to
+- **WHEN** the ball is rewritten and the preserved input is read
+- **THEN** every sample reads as the field held it before the rewrite began
+
+#### Scenario: A dab's cost follows the brush and not the box
+- **GIVEN** the same brush applied at a radius small against the bricks its box spans
+- **WHEN** a stroke of dabs is applied
+- **THEN** what it costs tracks the samples the brush can reach rather than the samples its box contains
+
+### Requirement: An operator reads its input without copying the field
+An operator whose result at a sample depends on that sample's NEIGHBOURS needs the pass's input rather than its half-written output, and SHALL obtain one without duplicating the whole field. Copying it costs what the model costs — megabytes at an interactive cell to protect the few hundred kilobytes a brush touches — which puts back into a dab the very term that confining the traversal to a region took out.
+
+Preserving only the samples the pass will overwrite SHALL be sufficient, and it is sufficient for the same reason the region limit is sound: a brick the operator does not write still holds what it held, so it can answer for itself. It follows that the preserved set and the written set MUST be the same set; preserving less means reading bricks the pass is part way through, and that is a silent wrong answer rather than a refusal.
+
+Reading a preserved sample SHALL cost no more than reading it from the field would have. A stencil asks several times per sample and a dab covers tens of thousands of samples, so a lookup that is slower per tap loses more than the copy saves however much smaller it is.
+
+#### Scenario: What was preserved reads as it was
+- **GIVEN** a snapshot of a region, taken before that region is rewritten
+- **WHEN** the region is rewritten and the snapshot is read
+- **THEN** every sample it reports is the value the field held before the rewrite began — inside the region and outside it alike
+
+#### Scenario: A sample shared across the preserved boundary
+- **WHEN** a sample lying on the face between a preserved brick and one that was not preserved is read from the snapshot
+- **THEN** it reports the value that sample held before the rewrite
+
+#### Scenario: A dab costs what it moves
+- **GIVEN** the same brush applied to two volumes of the same surface, one covering far more of it
+- **WHEN** a stroke of dabs is applied to each
+- **THEN** neither the traversal, nor the bounds it re-derives, nor what it preserves to read from scales with the field rather than the brush
+
+### Requirement: Relax has an in-place form for a caller that owns its volume
+The library SHALL provide relaxing that smooths a caller's volume IN PLACE, alongside the form that copies its input and returns a new one. The two SHALL be the same arithmetic: the in-place form applied to a copy SHALL be byte-identical to the copying form, and a sequence of in-place calls SHALL be byte-identical to the same sequence of copying calls chained through each other's results.
+
+This exists for ownership, not for speed of arithmetic. A live gesture already owns a private working volume, and making it build a second complete result per dab puts a term that scales with the MODEL back into a dab that was made to scale with itself.
+
+#### Scenario: One in-place pass equals one copying pass
+- **WHEN** a volume is relaxed in place and a copy of it is relaxed through the returning form with the same settings
+- **THEN** the two serialize to the same bytes
+
+#### Scenario: A sequence in place equals the same sequence chained
+- **WHEN** two different dabs are applied in place to one volume, and the same two are applied through the returning form one after the other
+- **THEN** the two results serialize to the same bytes
+
+#### Scenario: The band narrows the same way
+- **WHEN** a volume is relaxed in place
+- **THEN** its band is what the returning form would have produced, and it is narrower than the band it started with
+
+### Requirement: Cancelling an in-place operator means whole passes
+An operator that rewrites a caller's volume in place CANNOT satisfy the "return the input unchanged" contract that a returning operator satisfies, because the caller's volume IS the working state and there is no input left to hand back.
+
+It SHALL therefore promise the strongest thing available instead: the cancellation checkpoint SHALL sit between whole passes, so a cancelled call has applied some number of complete passes and no fraction of one, and it SHALL report that a later pass was not run. There SHALL be no half-written state for a caller to inspect or discard.
+
+A band SHALL be narrowed by what the COMPLETED passes could have moved the surface, not by what all of them would have. A cancelled call that shrank the band for work it never did would understate the distance a sample-free brick reports, which is the one direction such a bound may not err in.
+
+The returning form SHALL keep its own contract unchanged: a cancelled call SHALL hand back the input.
+
+#### Scenario: A cancel before the first pass applies nothing
+- **GIVEN** a token that is already set
+- **WHEN** a multi-pass relax is run in place against it
+- **THEN** the volume is unchanged sample for sample, its band has not moved, and the call reports itself cancelled
+
+#### Scenario: The returning form still returns its input
+- **GIVEN** a token that is already set
+- **WHEN** the returning relax is run against it
+- **THEN** what comes back is the volume that went in
+
+### Requirement: A region rewrite reports what it selected
+A rewrite confined to a region SHALL be able to report what it wrote: the world box spanned by the units of storage it selected, how many it selected, and — separately — whether any stored sample actually moved.
+
+A consumer holding a preview of a volume cannot SEE a rewrite. The volume keeps its identity, its stored set and its bounds, so nothing diffable from outside says which part of it went stale, and the only safe answer without this report is "all of it" — which is exactly the term scaling with the model that a local dab exists to remove.
+
+The box and the count SHALL be GEOMETRIC: they describe what the region selected, not the samples whose values happened to differ. That is what makes them a test's quantity as well as a host's, since the same brush over the same lattice selects the same storage however much unrelated model surrounds it. Whether anything moved SHALL be reported apart from them, because a dab whose weight came out zero everywhere still selected its storage and a consumer still wants to know it has nothing to redraw.
+
+The reporting rewrite and the silent one SHALL be one walk, not two.
+
+#### Scenario: A region-limited pass reports less than the whole volume
+- **WHEN** a volume is relaxed over a region covering part of it
+- **THEN** the report names more than zero of its bricks and fewer than all of them, and the reported box does not contain a point the region excludes
+
+#### Scenario: A pass that moves nothing still reports where it acted
+- **WHEN** a region-limited pass runs at a strength of zero
+- **THEN** it reports the bricks the region selected and reports that nothing changed, and every stored sample is what it was
+
+#### Scenario: An empty volume reports nothing
+- **WHEN** a rewrite is run over a volume that stores nothing
+- **THEN** it reports an empty box, a count of zero, and that nothing changed
+
+### Requirement: A volume can be created as a lattice with nothing in it
+The library SHALL be able to create a sampled volume that carries the LATTICE of a region at a resolution — its index, its unit counts and the bounds a unit reports when it stores nothing — and no stored samples at all.
+
+It SHALL be cheap by construction: no evaluation of any field, and no allocation proportional to what a sampled volume would hold. That is what lets a caller claim its working storage without paying for the model, and fill it in as it turns out to need it.
+
+Sharing a region and a resolution with another volume SHALL mean sharing a lattice, because the lattice origin is the region's own minimum. A caller overlaying one volume onto another depends on that, and it is the difference between reading a stored sample and interpolating two.
+
+Every unit of such a volume SHALL read as storing nothing until something fills it.
+
+#### Scenario: A bare lattice evaluates nothing and stores nothing
+- **WHEN** a volume is created as a bare lattice over a region
+- **THEN** it holds no stored units, no field was evaluated, and its resolution and band are what were asked for
+
+#### Scenario: Two volumes over one region share a lattice
+- **WHEN** a bare lattice and a fully sampled volume are made over the same region at the same resolution
+- **THEN** their sample positions coincide exactly
+
+### Requirement: A region can be materialized without re-deciding what is stored
+The library SHALL be able to FORCE every unit of storage meeting a region to hold samples produced by a caller's fill, whether or not those values look near the surface, appending to the store rather than rebuilding it. Its cost SHALL be the units it adds, not the units the volume already holds.
+
+This SHALL sit beside, and not replace, the existing region resample. The two differ in who owns the sparsity question:
+
+- The resample RE-DECIDES which units store samples from the values the fill produced, which is what an operator DISPLACING a surface into units that held nothing needs. To do it, it rebuilds the whole store and re-derives the whole lattice's bounds, so it costs what a bake costs.
+- Materialization takes sparsity as GIVEN by the caller: a selected unit stores samples afterwards, full stop. It costs what a brush costs.
+
+Forcing rather than classifying is required, not merely convenient. A volume being filled in lazily has to tell "there is no surface here" apart from "nobody has asked yet", and the sentinel for the first already carries a SIGN and a distance that every other reader is entitled to believe. Overloading it with a third meaning would change every consumer of that reading and the stored-form validator besides. So stored-ness SHALL be an honest record of what has been filled in, at the cost of storing units whose samples say nothing interesting.
+
+The bounds a sample-free unit reports SHALL NOT be re-derived by materialization. Re-deriving them is a two-pass sweep over the whole lattice, and a caller materializing a region is by definition about to read INSIDE it, where the stored samples answer.
+
+Materialization SHALL report what it added and what was already there, as counts, so that a caller can state a scaling claim as a number rather than a duration.
+
+#### Scenario: Materializing brings in the region and nothing else
+- **WHEN** a region of a bare lattice is materialized
+- **THEN** the units meeting that region store samples, every other unit still stores none, and the report counts what was added
+
+#### Scenario: Materializing again brings in nothing
+- **WHEN** the same region is materialized a second time
+- **THEN** nothing is added, the units are reported as already present, and their samples are untouched
+
+#### Scenario: A unit whose samples are all past the band is still stored
+- **WHEN** a region containing no surface is materialized
+- **THEN** those units store samples, so that a later reader can tell them from units nobody has asked for
+
+#### Scenario: The cost follows the region, not the volume
+- **GIVEN** two lattices over the same region, one of them already holding far more stored units elsewhere
+- **WHEN** the same sub-region is materialized in each
+- **THEN** the number of units added is the same
+
+### Requirement: A volume can say which of its units went stale, and hand one over
+A consumer holding a copy of a sampled volume cannot see what a rewrite did: the volume keeps its identity, its stored set and its bounds. A bounding box says where to look; this says what to FETCH.
+
+The library SHALL name a unit of storage by its lattice coordinate, SHALL report the world position of that unit's first sample, and SHALL be able to read one unit's stored samples out in the order the volume's own sampling and stored form use. Reading a unit that stores nothing SHALL fail and leave the caller's buffer untouched, rather than invent values for it.
+
+A region rewrite SHALL be able to APPEND, to a caller's own list, the coordinate of every unit in which a stored sample actually MOVED — which is not every unit the region selected, and the count of those stays what it is. A consumer transporting a delta wants the units whose bytes are new; a caller sizing work wants the count. Materializing a region SHALL append to the same kind of list, because a unit brought in is new bytes to a consumer exactly as a rewritten one is.
+
+The list SHALL be the CALLER'S, so that a repeated operation reuses one rather than allocating per call, and duplicates across calls SHALL be the caller's to fold.
+
+#### Scenario: A rewrite names the units it moved
+- **WHEN** a region-limited rewrite moves samples in some of the units it selected
+- **THEN** the appended coordinates are those units, and they are fewer than the units the region selected
+
+#### Scenario: A rewrite that moves nothing names nothing
+- **WHEN** a region-limited rewrite is run at a strength that moves no sample
+- **THEN** no coordinate is appended, and the count of selected units is still reported
+
+#### Scenario: A unit reads back in the order it was written
+- **WHEN** a stored unit is read out by coordinate
+- **THEN** its samples are in the same order the volume's sampling produced them, and its reported origin places them in the world
+
+#### Scenario: An unstored unit is refused rather than invented
+- **WHEN** a unit that stores no samples is read out
+- **THEN** the read fails and the caller's buffer is untouched

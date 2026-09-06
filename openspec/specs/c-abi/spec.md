@@ -177,6 +177,8 @@ The repository SHALL gate that the C ABI reaches the capability surface the Pyth
 ### Requirement: Node and layer editing across the ABI
 The C API SHALL expose the same editing surface as the Python bindings: node transform, primitive, colour, op/blend/rounding, move and remove; layer add, remove, reorder, visibility and transform; stroke append and trim. Edits SHALL be addressed by node or layer id and SHALL return `CLAY_ERROR_NOT_FOUND` for an id the document does not hold, leaving the document unchanged.
 
+Unlike the Python bindings, which take partial updates, the C setters take the WHOLE value, because C has no idiomatic "leave this one alone" argument. That is only workable if the current value is readable, so the ABI SHALL carry a reader for each whole-value setter a host is expected to edit in place — read the current state, change what you want, pass all of it back. Colour is the one setter without a reader, and its absence SHALL be a recorded gap rather than an oversight.
+
 #### Scenario: Editing from Swift
 - **WHEN** a C consumer adds an item, keeps its node id, and later sets a new transform and a new blend on it
 - **THEN** the document evaluates identically to the same edits made through `pyclay`
@@ -188,6 +190,10 @@ The C API SHALL expose the same editing surface as the Python bindings: node tra
 #### Scenario: Editing a primitive keeps the modifiers
 - **WHEN** a node's primitive is replaced on an item carrying a deformer chain
 - **THEN** the deformer chain, repetition and profile survive the edit
+
+#### Scenario: A partial edit is read, changed and written back
+- **WHEN** a host holding only a node id wants to change its scale and nothing else
+- **THEN** it reads the transform, replaces the scale and passes the whole transform back, without having kept a copy of the position and rotation of its own
 
 ### Requirement: Undo across the ABI
 The C API SHALL expose the same opt-in undo stack as the Python bindings: enable, undo, redo, depths and grouping. Calling undo with an empty stack SHALL report that rather than failing, so a UI can drive it without tracking state itself.
@@ -432,6 +438,8 @@ An importer's guardrail SHALL be settable by a C caller, not only enforced again
 
 A null budget SHALL mean the library's defaults, and a zeroed field SHALL mean the default for that field rather than "allow nothing", since a zeroed descriptor would otherwise refuse every file.
 
+The budget SHALL also carry a file-byte ceiling, and loading a document SHALL be reachable with a budget. The document loader beneath the ABI has always taken one and the boundary offered no way to pass it, which was academic while a document held tapes and sparse grids; a document that embeds imported meshes makes the ceiling real, and a document's read ceiling is the caller's to raise. The budget-taking loader SHALL be a new entry point beside the existing one rather than a changed arity, so that no consumer has to be recompiled to keep working.
+
 #### Scenario: A tight budget is enforced
 - **WHEN** a mesh is loaded with a budget smaller than the file declares
 - **THEN** the load fails with a budget error and nothing is allocated
@@ -443,6 +451,18 @@ A null budget SHALL mean the library's defaults, and a zeroed field SHALL mean t
 #### Scenario: A zeroed field means the default
 - **WHEN** a mesh is loaded with a budget whose fields are zero
 - **THEN** it loads rather than being refused
+
+#### Scenario: A document above the caller's ceiling is refused
+- **WHEN** a document is loaded through the budget-taking entry point with a file ceiling below its size
+- **THEN** it fails with a budget error
+
+#### Scenario: The same document loads with a raised ceiling
+- **WHEN** the same document is loaded with a ceiling above its size
+- **THEN** it loads, so a document this library wrote is never permanently unopenable through the boundary
+
+#### Scenario: The existing loader is unchanged
+- **WHEN** a consumer compiled against the previous header loads a document
+- **THEN** the call has the same signature and the same behaviour it always had
 
 ### Requirement: A file extension is matched case-insensitively
 An importer SHALL match a file's extension without regard to case, because a file named `MODEL.OBJ` is an OBJ file. The Python loader has always done so; the C one did not, and refused such a file as an unknown format.
@@ -2556,3 +2576,1199 @@ refuses.
 #### Scenario: A brick refill without one layer
 - **WHEN** a consumer evaluates brick requests excluding one layer
 - **THEN** brick i occupies the same fixed slot it occupies in the whole-document form, holding what that brick would hold in a document without that layer
+
+### Requirement: A capture can be taken about a surface
+
+The ABI SHALL let a caller capture a region of a document's field in a frame it
+supplies, with the region named in THAT frame's coordinates rather than the
+world's — so a box about the origin is a patch centred on a surface hit and its
+depth is how far above and below the surface the capture reaches.
+
+It SHALL offer a helper building such a frame from what a host actually has: a
+surface hit, the normal there, and the stylus azimuth about that normal. The
+azimuth SHALL rotate the tangent, and SHALL be measured from a fixed reference
+rather than from whichever axis the normal happens to lean on least, so that one
+azimuth means one direction wherever the hit is.
+
+The frame SHALL NOT be inferred from the captured content.
+
+What comes back SHALL be an ordinary item whose transform is that frame, so
+adding it changes nothing about the document's field and moving it afterwards is
+an ordinary edit rather than a second placement mechanism.
+
+#### Scenario: A capture placed back is what was captured
+- **WHEN** a region is captured about a frame that is not axis-aligned and the item is placed into an empty document unchanged
+- **THEN** its field agrees with the source's over the captured region, within the sampling tolerance the capture declares
+
+#### Scenario: The azimuth turns the asset
+- **WHEN** two frames are built at one hit a quarter turn apart in azimuth
+- **THEN** their tangents are perpendicular, and a full turn returns the tangent it started from
+
+#### Scenario: A malformed frame is refused
+- **WHEN** a capture names a zero normal, or a region with no surface in it
+- **THEN** the call is refused and no item is produced
+
+### Requirement: A captured asset can be kept outside a document
+
+The ABI SHALL be able to write a captured asset to a self-contained form and
+read it back, carrying the payload, the frame and the asset's identity.
+
+Reading SHALL refuse a buffer that is truncated or is not one of these, rather
+than reading past its end.
+
+An asset SHALL carry an id derived from its CONTENT, so two captures that sample
+identically are recognisably the same asset. It SHALL NOT be a unique
+per-capture identifier: a host that captured the same detail twice is better
+told so than left to accumulate duplicates it cannot recognise. Nothing SHALL be
+dispatched on the id.
+
+#### Scenario: A round trip preserves the placement
+- **WHEN** a captured asset is saved on its own and loaded back
+- **THEN** the loaded item places identically to the original, and its id is the same
+
+#### Scenario: A truncated buffer is refused
+- **WHEN** a buffer that is truncated, or is not an asset at all, is read
+- **THEN** the call is refused and no item is produced
+
+### Requirement: What the assets cost is reportable apart from the placements
+
+A host SHALL be able to ask what a document's captured payloads cost, counted
+once per ASSET rather than once per placement. Summing per placement reports the
+multiplied cost that sharing exists to avoid paying, which is the wrong number
+for the decision a host makes with it.
+
+#### Scenario: Many placements of one asset cost one payload
+- **WHEN** one captured asset is placed many times in a document
+- **THEN** the report names one asset, that many placements, and the bytes of a single payload
+
+### Requirement: A resolved stroke can be placed as stamps
+
+The ABI SHALL turn the stamps a stroke resolves to — spacing, pressure, jitter,
+taper and azimuth already applied — into placements of one captured asset, as
+ONE undo step and ONE invalidation for the whole stroke.
+
+A resolved stamp's RADIUS SHALL become a uniform scale against the asset's own
+size, which is where the stroke's pressure lands. Its STRENGTH SHALL NOT
+multiply the captured distance: that scales the metric rather than the sculpt,
+moving the zero set and costing the gradient its unit length.
+
+Every placement SHALL share one payload.
+
+#### Scenario: A stroke is one undo step
+- **WHEN** a resolved stroke of many dabs is placed
+- **THEN** one undo returns the document to before the stroke, and the document holds one payload for all of them
+
+### Requirement: Mesh layers across the ABI
+The API SHALL expose mesh layers: attaching an already-loaded mesh to a document as a layer, looking one up, and asking a mesh for its bounds. Attaching SHALL take a mesh handle rather than a path, because loading already exists and already owns import policy including the budget, and because taking a handle composes with building a mesh from triangles a host generated itself.
+
+Attaching SHALL accept its own budget, tighter than the loader's defaults, since what a document may carry is a different question from what a file may decode into. It SHALL also accept an optional uniform import scale, applied to the vertices as they are stored, so unit conversion is resolved once at import rather than approximated by a layer transform.
+
+Attaching SHALL go through the same layer vocabulary every other layer creation uses, so it is undoable and serializes with the document. Looking up a layer that does not exist, or that is not a mesh layer, SHALL return a not-found error.
+
+Bounds SHALL be answered from the mesh handle, not from the layer bounds query. Layer bounds are derived from SDF shapes and the picking module may not see mesh data at all, so a bound computed there would either be empty or would require the module boundary to be widened for a query that has nowhere else to live.
+
+#### Scenario: A host imports a model and keeps it
+- **WHEN** a C consumer loads a mesh, attaches it to a document, saves and reloads
+- **THEN** the mesh layer is present with the same geometry and the same transform
+
+#### Scenario: Attaching is undoable
+- **WHEN** a mesh is attached and the edit is undone
+- **THEN** the layer is gone and the document matches what it was
+
+#### Scenario: A budget refuses an oversized attach
+- **WHEN** a mesh larger than the attach budget is attached
+- **THEN** the call fails with a budget error and the document is unchanged
+
+#### Scenario: A missing mesh layer is not found
+- **WHEN** a consumer asks for a mesh layer by a name no mesh layer carries
+- **THEN** the call returns a not-found error
+
+#### Scenario: Framing an imported model
+- **WHEN** a consumer asks a mesh handle for its bounds
+- **THEN** it receives the box enclosing the mesh's positions, which layer bounds could not report
+
+### Requirement: A mesh obtained from a document is borrowed
+A mesh obtained as a document layer SHALL be borrowed: it remains owned by the document, stays valid until the document changes it or is destroyed, and SHALL NOT be freed by the caller. Destroying a borrowed mesh handle SHALL be a no-op that leaves the document intact.
+
+It is a no-op rather than a reported refusal because the mesh destroy call returns no status, and changing its signature would break every existing consumer for a case that cannot arise today. Only handles that could not previously exist are affected. The header SHALL state this beside the existing lifetime note, as the borrowed voxel handle is documented beside its own.
+
+#### Scenario: Destroying a borrowed mesh does nothing
+- **WHEN** a consumer calls destroy on a mesh handle obtained from a document layer
+- **THEN** the document is unaffected and its geometry is still readable through a fresh lookup
+
+#### Scenario: An owned mesh is still freed
+- **WHEN** a consumer destroys a mesh it loaded or built itself
+- **THEN** it is freed exactly as before
+
+### Requirement: Exporting a document with its imported meshes is explicit
+Meshing a document SHALL continue to mean meshing its field, unchanged: it prices a dense grid from the tape's own bounds, and geometry that is not in the tape would either inflate that grid or fall outside it, and would change what an existing call returns for an existing document. Voxel layers are already outside it for the same reason.
+
+The ABI SHALL instead expose transforming a mesh and concatenating meshes, plus one call that meshes the field and appends every visible mesh layer under its layer transform. Concatenation SHALL rebase indices. An attribute present on some inputs and absent on others SHALL be dropped from the result, because no mesh may be returned whose normals, colors or uvs are non-empty and a different length than its positions; the drop SHALL be documented at the call rather than discovered afterwards.
+
+A mesh layer that is not visible SHALL be excluded from the combined export. Ghost and lock SHALL NOT change what is exported, consistent with neither flag changing what a document evaluates to.
+
+#### Scenario: Meshing a document is what it always was
+- **WHEN** a document containing mesh layers is meshed with the existing call
+- **THEN** the result is bit-identical to the same document without them
+
+#### Scenario: A sculpt exports beside its reference model
+- **WHEN** a consumer asks for the combined export of a document holding both an SDF layer and a mesh layer
+- **THEN** the result contains both, with the imported triangles placed under their layer transform and their indices rebased
+
+#### Scenario: A mismatched attribute is dropped, not truncated
+- **WHEN** a mesh carrying uvs is concatenated with one that carries none
+- **THEN** the result carries no uvs, rather than an array shorter than its positions
+
+#### Scenario: A hidden mesh layer is not exported
+- **WHEN** a mesh layer is hidden and the document is exported
+- **THEN** its triangles are absent, while ghosting or locking it changes nothing
+
+### Requirement: Groups across the ABI
+The C API SHALL let a host create a group node in a layer, give it an op and a blend as for any other node, and add children to it including nested groups. A group SHALL be identified by a node id, as every other node is, and SHALL be edited, moved, removed and undone through the entry points that already take a node id.
+
+The existing add entry points append to the layer root and have no argument that could say otherwise, so the ABI SHALL carry a parented form of each rather than requiring an add followed by a move — which would be two undo steps for one intention.
+
+This exposes behaviour the scene model already implements; it does not introduce a new evaluation concept. The addition SHALL be purely additive: no existing signature changes, no struct grows, no enumerator's value changes.
+
+#### Scenario: A sub-expression is expressible from a host
+- **WHEN** a host builds a group containing a shell and an intersecting cutter, and combines that group into a layer that already holds other geometry
+- **THEN** the intersect applies only within the group, and the group's result combines with the rest through the group's own op
+
+#### Scenario: An inline group applies to the outer chain
+- **WHEN** a group is created with the inline op and given children
+- **THEN** its children combine into the outer chain exactly as if they had been added directly
+
+#### Scenario: A group round trips
+- **WHEN** a document containing nested groups is saved and reloaded
+- **THEN** it evaluates bit-identically and reserialises to identical bytes
+
+### Requirement: A host can enumerate a group's children
+The ABI SHALL report a group's children, in order, by the size-query pattern the rest of the ABI uses: a null buffer answers with the count, a buffer of that size is filled, and a buffer that is too small reports the needed count and writes nothing. A node that is not a group SHALL be an invalid argument rather than an empty answer, since that refusal is also how a host that reloaded a document tells a group from an item.
+
+Reading is not editing, so a ghosted, locked or hidden layer SHALL answer normally.
+
+#### Scenario: Count, then fill
+- **WHEN** a host queries a group's children with a null buffer and then with a buffer of the reported size
+- **THEN** it receives the child count and then the child ids in tree order
+
+#### Scenario: An item answers that it is not a group
+- **WHEN** the query names an item
+- **THEN** it is refused as an invalid argument, and a node the layer does not hold is not found
+
+### Requirement: The inline op is groups only
+The header SHALL declare the inline op as a `clay_op` enumerator, because the value appears in saved documents and in the tape and a host that met it would otherwise be staring at an undocumented number. It SHALL be accepted on a group and refused on an item, exactly as the engine's own predicate already refuses it.
+
+An inline group reads no blend, rounding or colour, so the ABI SHALL refuse those rather than accept values that cannot take effect — an accepted blend would still dilate the group's influence bound and dirty more than the edit touches.
+
+#### Scenario: An item refuses the inline op
+- **WHEN** a host sets the inline op on an item
+- **THEN** the edit is refused and the document is unchanged
+
+#### Scenario: An inline group refuses a blend
+- **WHEN** a group is created with the inline op and a non-zero blend radius or rounding
+- **THEN** the call is refused
+
+### Requirement: A brick request batch is evaluated as a batch
+`clay_brick_cache_eval_requests` SHALL evaluate the requests it is given as one batch rather than as a serial loop on the calling thread, dividing them across the same worker pool every other batch entry point uses.
+
+The requests in a batch are independent by construction — each writes its own stride of the output buffer — so the order in which they are evaluated SHALL NOT be observable in the results.
+
+A batch SHALL share one compiled document across its requests: the per-request cull is a query against shared state, not a reason to rebuild that state per request.
+
+#### Scenario: A batch is order-independent
+- **WHEN** the same request batch is evaluated twice
+- **THEN** the output buffer is bit-identical both times, whatever order the requests were completed in
+
+#### Scenario: A dab's cost is dominated by evaluation, not by culling
+- **WHEN** a dab's worth of requests is evaluated against a 10 000-item document
+- **THEN** the time spent deciding which items each brick needs is a minority of the call
+
+#### Scenario: A single request is not made slower
+- **WHEN** a batch of one request is evaluated
+- **THEN** it costs no more than it did before this change
+
+### Requirement: A flatten can be sampled from a document
+The C ABI SHALL provide a flatten whose source is a DOCUMENT rather than an existing volume, taking the flatten parameters, the sampling parameters (cell size, band, padding) and an optional region, and returning a new volume item.
+
+Flattening a volume blends the plane with a source that is itself sampled, and the result declares a materially worse Lipschitz than flattening from an exact document does — measured at roughly 8x on the same shape, independent of the source volume's band. The surface is the same; what differs is what it costs to trace, and the engine's own raycast marches by `safe_step_scale`.
+
+So where a document exists it SHALL be reachable as the source, because the cheaper field is available for the asking and the caller currently cannot ask for it.
+
+#### Scenario: The sound path is reachable from C
+- **WHEN** a host holds a document and wants a flattened volume
+- **THEN** it can sample the flatten from that document in one call, without first baking a volume and choosing a band that its facet must not exceed
+
+#### Scenario: The document-sourced field is cheaper to march
+- **WHEN** the same flatten is taken from a document and from a volume baked from that document
+- **THEN** both place the facet in the same place, and the document-sourced result reports a materially larger `safe_step_scale`; a test holds that difference rather than asserting only that both calls succeed
+
+#### Scenario: The sampling parameters are the caller's
+- **WHEN** a document-sourced flatten is requested with a cell size of zero or less
+- **THEN** it is refused, because a document has no intrinsic scale to derive one from, exactly as `clay_item_volume_from_document` refuses it
+
+### Requirement: Binding parity names one C symbol per operation
+The binding-parity table SHALL NOT map two Python entry points with different operations onto one C symbol. Where a Python name has no C counterpart it SHALL be an explicit exemption carrying its reason, so that an asymmetry is visible in the table rather than concealed by it.
+
+`Volume.flattened` and `Volume.flattened_from` are the case that motivated this: they take different sources, take different parameters, and differ in accuracy, and mapping both to `clay_item_volume_flatten` let the gap pass the gate.
+
+#### Scenario: Two operations, two symbols
+- **WHEN** the parity table is read for `Volume.flattened` and `Volume.flattened_from`
+- **THEN** each names the C entry point that performs it, and neither stands in for the other
+
+### Requirement: A volume placement can feather into the field beneath it
+The sampling descriptor SHALL carry a feather width, appended under the versioned-descriptor pattern, honoured by every producer that takes the descriptor. A volume carrying a feather and placed with `CLAY_OP_REPLACE` SHALL crossfade over that margin: deep inside the sampled box the result is the volume's field alone, outside the box the surrounding field continues untouched, and the two blend across the feather just inside the box faces.
+
+The hard replace holds both fields live at the surface, and a bake put straight back ties with the field beneath it at every sample plane, so finite-difference normals ripple at the cell wavelength however fine the cell — the corrugation of issue #67, whose zero set is exact while its shading is not. Holding ONE field almost everywhere is what removes it, and removes the hard box edge with it.
+
+The blend's correction SHALL be clamped at the volume's band, so that the declared field slope stays closed-form (at most the operands' plus band times the weight's peak slope over the feather) and per-brick culling stays band-clamp exact. A surface the volume moved further than its band from the field beneath is therefore expressed only up to the band across the margin: the band at bake time is the knob that covers a deeper verb.
+
+A feather of zero — and any descriptor sized before the field existed — SHALL be the hard replace, byte for byte. A feathered volume placed with `CLAY_OP_REPLACE` SHALL NOT participate in the layer mirror, because the crossfade follows one sampled box; every other op ignores the feather.
+
+#### Scenario: The bake round trip converges instead of corrugating
+- **WHEN** a document region is baked with a feather of about one band and added back with `CLAY_OP_REPLACE` with no verb applied
+- **THEN** the composed field's gradient normals over the replaced surface tilt by an amount that SHRINKS as the cell shrinks, rather than sitting at a cell-independent ripple, and the zero set deviates from the source by no more than trilinear reconstruction error
+
+#### Scenario: The box edge is no longer hard
+- **WHEN** the composed field is evaluated outside the sampled box
+- **THEN** it equals the field without the volume item exactly, rather than being capped by the volume's box distance
+
+#### Scenario: Feather zero is byte-identical
+- **WHEN** the feather is zero, or the descriptor's struct_size predates the field
+- **THEN** the composed field equals `min(max(a, −b), b)` of the separately evaluated operands exactly, as it always has
+
+### Requirement: A relax can be sampled from a document
+The C ABI SHALL provide a relax whose source is a DOCUMENT rather than an existing volume, mirroring the document-sourced flatten: the same signature shape, the same sampling descriptor, the same optional-region convention, returning a new volume item.
+
+Unlike the flatten pair there is no accuracy gap to close — relax moves the surface by less than a cell per pass, and a fresh bake's cell-aligned taps ARE the document at those lattice points — so the relationship to bake-then-relax SHALL be equality inside the band, not merely resemblance. What the entry point removes is the two-call round trip, and the volume-sourced path for hosts that have a document.
+
+#### Scenario: One call equals the two it replaces
+- **WHEN** the same relax is taken from a document in one call and by baking then relaxing in two
+- **THEN** the two volumes evaluate identically inside the band; a test holds the equality exactly rather than approximately
+
+#### Scenario: The refusals are the shared ones
+- **WHEN** a document-sourced relax is requested with a cell size of zero or less, or with one of region_min/region_max without the other
+- **THEN** it is refused with `CLAY_ERROR_INVALID_ARGUMENT`, exactly as `clay_item_volume_from_document` refuses it
+
+### Requirement: A host can read a placed node's state back
+The C API SHALL report a placed node's transform, its primitive's parameters and its op, blend and rounding, completing the reading half of the four setters that write them. Until this existed the only accessor on a node reported WHICH primitive it carried and nothing else, so a host that placed a primitive, moved it with a manipulator and edited its operation afterwards had to keep those values itself — in a second file beside the document, keyed by node id, whose correctness across undo, redo and reload it also had to maintain.
+
+Each reader SHALL take the arguments its setter takes, so that what comes out goes straight back in without a conversion the caller has to get right. Every out-pointer SHALL be optional, and a call passing none of them SHALL still validate the layer and the node, which is how a host asks whether an id is still a node of that layer.
+
+The influence bound SHALL NOT be treated as an answer to any of these questions, and the header SHALL say why: it is dilated by rounding and blend support, and under a layer mirror it covers the reflection too, so an item placed at x = 0.9 in a mirrored layer reports a bound centred on the origin.
+
+Reading is not editing: a ghosted, locked or hidden layer SHALL answer normally. The addition SHALL be purely additive — no existing signature changes, no struct grows, no enumerator moves, and nothing new is stored, so no document or scene format version moves either.
+
+#### Scenario: A reloaded document reports placement without a side-car
+- **WHEN** a document whose layer is mirrored, hidden, ghosted and locked is saved with a placed primitive, reloaded, and walked by enumerating its layers, then its nodes, then asking each node which primitive it carries
+- **THEN** that node's position, rotation, scale, parameters, op, blend and rounding all read back as authored, while the influence bound of the same node reports a box centred on the origin and wider than the primitive
+
+#### Scenario: Every out-pointer is optional
+- **WHEN** a reader is called with some or all of its out-pointers null
+- **THEN** it writes only the values asked for and still refuses an id the layer does not hold
+
+### Requirement: A placed node's transform reads back as its setter takes it
+The transform query SHALL report position, a rotation axis, a rotation angle and a scale — the four values the transform setter takes. A GROUP SHALL be refused as an invalid argument, for the reason its setter refuses one: the compiler composes layer and item and nothing else, so a group holds no transform to answer with.
+
+The node stores a rotation as a quaternion, so the axis and angle SHALL be A representative of that rotation rather than the exact pair last written, and the representative SHALL be canonical: the angle SHALL come back in `[0, pi]`, with the axis flipped where that is what naming the same rotation inside that range takes.
+
+The axis SHALL always be unit length and SHALL NEVER be zero: an unrotated item SHALL read back as angle 0 about a named axis, because the transform setter refuses a zero axis and a reader whose output its own setter rejects would not be a round trip. Applying what the reader returned and reading again SHALL give the same values.
+
+#### Scenario: A placement round trips
+- **WHEN** an item is placed at a position with a non-unit rotation axis, an angle and a scale, read back, placed again with exactly what was read, and read a second time
+- **THEN** the second reading equals the first, and the axis reported is the normalized one
+
+#### Scenario: A turn past pi is named inside the range
+- **WHEN** an item is rotated by an angle greater than pi about an axis and read back
+- **THEN** the angle reported is inside `[0, pi]` about the flipped axis, and re-applying it is a fixed point
+
+#### Scenario: An unrotated item still names an axis
+- **WHEN** an item carrying no rotation is read back
+- **THEN** the angle is 0 and the axis is unit length rather than zero, so the values are accepted by the transform setter
+
+#### Scenario: A group has no transform to report
+- **WHEN** the transform query names a group
+- **THEN** it is refused as an invalid argument and nothing is written
+
+### Requirement: A placed node's parameters read back by the size-query pattern
+The parameter query SHALL follow the size-query pattern the rest of the reading surface uses, counted in FLOATS: a null buffer answers with the count, a buffer of that size is filled, and a buffer that is too small reports the needed count and writes nothing.
+
+The count SHALL be the arity of the primitive the node CURRENTLY carries, so that a caller that has just learned the primitive from the node-primitive query can size a buffer without carrying a table of arities of its own, and so that replacing a primitive changes the count as well as the values. A primitive whose payload is out of line — a stroke, an armature, a sampled volume — SHALL count zero rather than refuse, so a walk that asks every node for its parameters needs no special case for the kinds whose payload is read by a typed reader instead. A lift or a loft SHALL report its own parameters and not its profiles, exactly as its setter takes them.
+
+A group carries no primitive and SHALL be refused as an invalid argument, as the node-primitive query already refuses one.
+
+#### Scenario: Count, then fill, then set it back
+- **WHEN** a host queries a placed box's parameters with a null buffer, then with a buffer of the reported size, and passes what came back to the primitive setter
+- **THEN** it receives the parameter count, then the parameters as authored, and the setter accepts them
+
+#### Scenario: A buffer that is too small reports what it needed
+- **WHEN** the query is given a buffer shorter than the primitive's arity
+- **THEN** it reports a buffer-too-small failure with the needed count and writes nothing into the buffer
+
+#### Scenario: An out-of-line primitive counts zero
+- **WHEN** the query names a placed stroke
+- **THEN** it reports a count of zero rather than a refusal, and its points remain readable through the stroke reader
+
+### Requirement: A placed node's op and blend read back for a group as well as an item
+The op query SHALL report the op, the blend profile, the blend radius and the rounding — the four values the op/blend setter takes — and SHALL answer for a GROUP as well as for an item, because a group carries all four and its setter writes them. This makes it the one of the three readers with no group refusal, which is deliberate and SHALL be stated at the call.
+
+A group created with the inline op SHALL read back the blend, radius and rounding it was required to be created with, since an inline group consults none of them.
+
+#### Scenario: An item's operation round trips
+- **WHEN** an item's op, blend, blend radius and rounding are set and then read back
+- **THEN** all four match what was set, and passing them back to the setter is accepted
+
+#### Scenario: A group answers for its op
+- **WHEN** the op query names a group
+- **THEN** it reports the group's op, blend, radius and rounding rather than refusing
+
+### Requirement: A brick refill continues from its own previous result
+Refilling a brick SHALL evaluate only what the document gained since that brick was last refilled, when the document has gained it by APPENDING to the layer an append extends and nothing else. A refill's own output is the accumulator the edit list reached at that brick's lattice — exact, in float32 — so it is what the next refill continues from, and a dab then costs what the dab adds rather than what the document holds.
+
+The decision SHALL be taken PER BRICK, and SHALL NOT depend on whether the other bricks of the same call can be resumed, nor on their agreeing about a revision. A brick that cannot be served SHALL take the full walk without costing any other brick in the call its resume, and bricks whose seeds were stored at different revisions SHALL each be carried forward from their own.
+
+The values SHALL be identical to a full refill's, BIT FOR BIT. Continuing a fold from the value it reached runs the same instructions in the same order over the same floats, so a tolerance would admit an error that is not there to admit.
+
+A stored seed SHALL be identified by everything that decides what it describes: the brick coordinate, the lattice it was sampled on (dims and voxel size) and the BAND it was culled under. A request that differs in any of them SHALL NOT find that seed, neither to serve from nor to overwrite.
+
+COLOUR SHALL be carried the same way, and the seed SHALL carry it. What the accumulator IS decides what a seed must hold: a distance-only walk folds one float per sample and a coloured one folds a distance and a colour together, so continuing a coloured fold from a distance alone would fold every combine against black. A refill asked for colour SHALL therefore resume only from a seed that kept one, and SHALL fall back rather than invent it.
+
+MORE THAN ONE VISIBLE SDF LAYER SHALL NOT prevent resuming, and the seed SHALL keep the two accumulators apart. The layers hard-union left to right, so where an append resumes from, the field is two values — the layers beneath the active one, and the active layer's own chain — and their union cannot be taken apart again. Seeding from the union is exact only where every appended item unions hard, which a blended dab does not. The half beneath SHALL be held as its own value, carried forward untouched while the active layer is sculpted, and folded in with the same hard union a whole-document compile emits between layers.
+
+A part of a document compiled for that split SHALL cull under the WHOLE document's pad. A part compiled under its own smaller pad drops items the whole compile keeps, and the halves then no longer sum to the whole.
+
+A refill SHALL fall back to evaluating in full wherever continuing would not be exact: the appended items would be culled differently from the value being continued, so the suffix SHALL be culled against the brick exactly as a whole-document compile culls; the cull pad has moved; the lattice or the band differs from the one the seed was taken under; the brick's own previous compile of the active layer produced no accumulator; colour is asked for and the seed kept none; or the edit was not an append to the layer an append extends.
+
+Kept values SHALL be bounded IN BYTES rather than in bricks, since a brick may carry a colour and a half beneath as well as a distance, and SHALL be discarded on any edit that is not such an append.
+
+#### Scenario: A stroke's refills equal a document built fresh
+- **GIVEN** a document refilled once, then appended to and refilled again, dab after dab
+- **WHEN** each refill is compared with one from a document holding the same items and no history to resume from
+- **THEN** every sample is the same float
+
+#### Scenario: The saving follows the dab
+- **WHEN** the same dab is refilled into documents whose edit lists differ greatly in length
+- **THEN** what the refill costs is set by the dab rather than by the length
+
+#### Scenario: An edit that is not an append is not resumed
+- **WHEN** an item is removed or changed rather than appended, and the bricks are refilled
+- **THEN** the values equal a full refill's
+
+#### Scenario: Colour survives the resumed path
+- **WHEN** a refill asks for colour as well as distance, and the bricks carry seeds that kept colour
+- **THEN** the distances and the colours both equal a full refill's, bit for bit
+
+#### Scenario: A colourless seed cannot serve a coloured refill
+- **WHEN** a brick was last refilled without colour and the next refill asks for it
+- **THEN** that brick is evaluated in full, and its colours are a full refill's
+
+#### Scenario: A layer beneath is folded in rather than replayed
+- **GIVEN** two visible SDF layers, the upper one being sculpted and the lower one overlapping the bricks read
+- **WHEN** a stroke is refilled dab by dab
+- **THEN** every sample equals a full refill's, and what the refill costs is set by the dab rather than by either layer's length
+
+#### Scenario: An edit to the layer beneath is not resumed
+- **WHEN** an item is added to a layer BENEATH the one being sculpted
+- **THEN** the bricks are evaluated in full and the values equal a full refill's
+
+#### Scenario: A window that moves
+- **GIVEN** a refill has stored seeds for a row of bricks
+- **AND** one item is appended to the active layer
+- **WHEN** a refill asks for that row shifted by one brick
+- **THEN** the bricks the row still covers are answered from their seeds
+- **AND** only the newly entered brick takes the full walk
+
+#### Scenario: One brick without a seed
+- **GIVEN** a refill has stored seeds for a set of bricks
+- **AND** one item is appended to the active layer
+- **WHEN** a refill asks for those bricks plus one never asked for before
+- **THEN** the seeded bricks are still answered from their seeds
+
+#### Scenario: Bricks stamped by different dabs
+- **GIVEN** two sets of bricks whose seeds were stored at different revisions
+- **AND** the document has only been appended to since the older of them
+- **WHEN** a refill asks for both sets together
+- **THEN** each brick is carried forward from its own revision
+- **AND** every one of them is answered from its seed
+
+#### Scenario: What it resumes to is what a full walk would say
+- **GIVEN** bricks resumed across several appends from several revisions
+- **WHEN** their values are compared with a document built with the same items and never resumed
+- **THEN** they are bit-identical, not equal within a tolerance
+
+### Requirement: A per-axis scale across the ABI
+The C API SHALL let a host give a placed node and an item under construction a per-axis scale, so that the shapes a boolean workflow cuts with — a slot, an oval hole, a stretched chamfer — are expressible from a host. Until this existed every transform in the interface took ONE factor, and the primitives that carry their own extents could say a non-uniform shape at creation and never afterwards.
+
+The header SHALL state what a per-axis scale costs, because the cost is the opposite of the one a caller braces for: the field stays 1-Lipschitz so nothing gets slower and the safe step scale does not move, and what is lost is EXACTNESS — the value becomes a bound on the distance rather than the distance. A uniform value, the default included, SHALL keep the field exact.
+
+Every component SHALL be greater than zero, and the refusal SHALL be typed with the document unchanged.
+
+The per-axis scale SHALL NOT be added to the flat item descriptor. That struct is zero-filled by its own contract, so a zeroed per-axis scale would have to be read as `(1, 1, 1)` rather than as what it says; the builder is where it is composed.
+
+#### Scenario: A placed primitive is squashed
+- **WHEN** a host gives a placed unit sphere a per-axis scale of (2, 1, 1)
+- **THEN** the field's surface crosses x at 2 and y at 1
+
+#### Scenario: The builder's two scales multiply
+- **WHEN** an item is built with a uniform scale of 2 and a per-axis scale of (1.5, 1, 1) and then placed
+- **THEN** the placed node reports an effective scale of (3, 2, 2)
+
+#### Scenario: A degenerate scale is refused
+- **WHEN** any entry point taking a per-axis scale is given a zero or negative component, or a null pointer
+- **THEN** it is refused as an invalid argument and the document is unchanged
+
+### Requirement: Both transform setters write the whole transform
+This ABI does not do partial updates — its setters take the whole value because C has no idiomatic "leave this one alone" argument — so the uniform transform setter SHALL mean "this node's scale is uniform s" and SHALL collapse any per-axis scale the node carried.
+
+That SHALL be stated at the declaration rather than left to be discovered, because the alternative behaviour — quietly keeping a component the call did not name — is the kind of thing a host would only find from a wrong-looking model.
+
+Both setters SHALL be one command and one undo step, and the recorded inverse SHALL capture the per-axis scale as well as the transform, so one undo of a squash restores exactly what was there.
+
+#### Scenario: A uniform edit collapses a squash
+- **WHEN** a node carrying a per-axis scale is given a uniform transform
+- **THEN** its scale becomes uniform and the uniform reader answers again
+
+#### Scenario: One undo restores both halves
+- **WHEN** a squashed node is given a different transform and the edit is undone
+- **THEN** both its transform and its per-axis scale are exactly what they were
+
+### Requirement: The uniform transform reader refuses what it cannot express
+The transform reader that reports a single scale factor SHALL refuse a node carrying a non-uniform scale, as an invalid argument, with nothing written.
+
+One float cannot express three, and every way of pretending otherwise is a lie a host would act on: reporting the uniform factor alone describes a differently-shaped item, and a host doing read-change-write through the uniform setter would silently round the artist's squash away. This is the lesson of the reading surface that preceded it — a positional question answered by a call that could not answer it — and the rule taken from it is that a reader which cannot express what is there must not answer.
+
+A per-axis reader SHALL exist that always can, and SHALL answer for EVERY item: a node with a uniform scale s SHALL report `(s, s, s)`, so a host with one manipulator for both cases can call it alone and never branch. What it returns SHALL be what the per-axis setter takes.
+
+#### Scenario: The uniform reader refuses a squashed node
+- **WHEN** the single-factor transform reader names a node carrying a per-axis scale
+- **THEN** it is refused as an invalid argument and nothing is written
+
+#### Scenario: The per-axis reader answers for a uniform node
+- **WHEN** the per-axis reader names a node placed through the uniform setter with a scale of s
+- **THEN** it reports (s, s, s)
+
+#### Scenario: A squashed placement round trips
+- **WHEN** a squashed node is read and the values are passed straight back to the per-axis setter
+- **THEN** reading again gives the same values
+
+### Requirement: A mesh transform takes a per-axis scale
+The ABI SHALL carry a mesh transform taking a per-axis scale. A mesh is real vertices and no field, so nothing about exactness applies to it; what does apply is the NORMALS.
+
+Positions SHALL go through the matrix and normals through its INVERSE TRANSPOSE, renormalized. The uniform call may rotate a normal and stop, because a similarity leaves a direction unchanged; a squash does not, and transforming a normal as a direction leaves every one of them off the surface. A normal that was already degenerate SHALL be left as it was rather than becoming a NaN: this call moves a mesh, it does not repair one.
+
+#### Scenario: Normals follow the surface, not the rotation
+- **WHEN** a meshed sphere is transformed with a per-axis scale of (3, 1, 1)
+- **THEN** every normal is unit length and agrees with the resulting ellipsoid's gradient, which merely rotating them would not
+
+### Requirement: A host updates what changed, with buffers it owns
+The C ABI SHALL expose changed surface chunks with their revisions, and SHALL let a caller query capacity and supply its own buffers for positions, normals and indices.
+
+The ABI SHALL NOT allocate a heap object per changed chunk per frame, and SHALL NOT require a host to copy a whole surface to observe a stamp.
+
+A readback SHALL carry the revision it describes, so a host can discard a result that a later mutation has superseded.
+
+An acknowledgement call SHALL let a host drain incrementally across frames without losing a change it has not yet applied.
+
+#### Scenario: A stroke's transport follows the change
+- **WHEN** a host drains changed chunks each frame during a stroke on a large surface
+- **THEN** the bytes copied follow the changed chunks rather than the surface size
+
+#### Scenario: A stale readback is identifiable
+- **WHEN** a host applies a readback taken before a further mutation
+- **THEN** the revisions it carries let the host detect that it is stale
+
+#### Scenario: A short buffer is refused as a size, not as a fault
+- **WHEN** a host calls a chunk size query or a chunk copy with a buffer smaller than the chunk needs
+- **THEN** the call returns `CLAY_ERROR_BUFFER_TOO_SMALL`, writes nothing into the buffer, and leaves the needed count where the host can read it
+- **AND** a chunk id that names nothing returns `CLAY_ERROR_NOT_FOUND` and a malformed descriptor returns `CLAY_ERROR_INVALID_ARGUMENT`, so a host can tell a retryable condition from one that will never succeed
+
+### Requirement: A host sets a memory profile and asks for a trim
+The C ABI SHALL accept a memory profile descriptor, SHALL expose a trim call taking a pressure level and returning what was released, and SHALL report runtime memory by the same categories the document report uses.
+
+Descriptors SHALL follow the established `struct_size` pattern with bounded output fills.
+
+The ABI SHALL NOT expose an entry point that releases authoritative content as part of a trim.
+
+#### Scenario: A trim under pressure preserves the document
+- **WHEN** a host sets a constrained profile and requests a critical trim
+- **THEN** the call reports the released caches and the document's authoritative checksum is unchanged
+
+### Requirement: A host's picked seed carries the numbering it was picked in
+A pick that returns a seed for the surface walk SHALL also return the identity of the class space that seed was numbered in, and a stamp descriptor SHALL be able to carry it back.
+
+A stamp given a seed whose numbering no longer matches the surface it is spent on SHALL refuse the seed and find its own starting point, rather than trusting an index that is in bounds and meaningless. The refusal SHALL be observable through a counter, so a host can tell a refused seed from one that was taken.
+
+A caller that claims no numbering SHALL behave exactly as it did before the token existed, and an omitted field in an older caller's descriptor SHALL read as claiming nothing.
+
+Both bindings SHALL reach this: the C ABI on the pick descriptor and the brush descriptor, and pyclay on the dict a pick returns and the keyword a stamp takes.
+
+#### Scenario: A seed from a replaced numbering does not lose the dab
+- **WHEN** a host picks a seed against one class space and stamps with it against another, carrying the token
+- **THEN** the seed is refused, the counter records it, and the stamp moves the same region it would have moved with no seed at all
+
+#### Scenario: An older host is unaffected
+- **WHEN** a host compiled against the previous header sends a descriptor with no token
+- **THEN** the stamp behaves exactly as it did before the field was appended
+
+### Requirement: A host reads the peaks it tunes a profile against
+The C ABI and pyclay SHALL report the runtime's high-water marks — the largest working set, the largest gathered footprint, the deepest dirty set and the most topology operations in one stamp — and SHALL let a host restart them.
+
+They SHALL be HIGH-WATER MARKS rather than current or average values: a buffer sized to the model and reused forever allocates nothing per stamp, and only a peak that does not move between a small and a large model at the same footprint distinguishes it from a runtime whose cost follows what it touches.
+
+A host SHALL NOT have to own or keep alive any object for this to be measured, and reading the peaks SHALL fill a descriptor the caller owns.
+
+#### Scenario: A smaller stamp does not lower the mark
+- **WHEN** a wide stamp is followed by a narrow one
+- **THEN** the reported peak still describes the wide stamp, until the host resets it
+
+### Requirement: A host drives the deferred-maintenance queue
+The C ABI and pyclay SHALL expose the queue of work that is not required for correctness — the requesting of an item, the items queued, the stroke gate, and a drain — so that a host that reaches this library only through a binding can service it.
+
+The stroke gate SHALL be enforced by the binding rather than documented: a drain attempted while a stroke is open SHALL report that there is nothing to do, and SHALL NOT run anything. Requesting an item SHALL NOT be gated, because a stamp is where an item is discovered and refusing to record one would lose the request rather than defer the work.
+
+The drain SHALL be a take-then-complete pair rather than a callback: an item taken SHALL stay queued until the caller says it was done, so declining an item is expressible and does not drop it. Neither binding SHALL take a host function pointer for this.
+
+An item's kind SHALL be a declared enumerator, and a value outside the declared list SHALL be refused rather than mapped onto a default.
+
+Nothing in the queue SHALL perform the work it names; a host SHALL service an item through the ordinary entry points it already has.
+
+#### Scenario: A drain wired to the wrong callback does nothing rather than stalling
+- **WHEN** a host requests an item and attempts to drain it while a stroke is open
+- **THEN** the request is recorded, the drain reports no work, and nothing is run
+
+#### Scenario: A declined item stays queued
+- **WHEN** a host takes an item and does not complete it
+- **THEN** the item is still queued and the next take reports the same one
+
+### Requirement: A host defers normals across a drag it drives itself
+The C ABI and pyclay SHALL let a host defer normal recomputation for a sculptor across stamps it issues itself, read that setting back, and flush what is pending.
+
+The committed state SHALL be identical whether or not the deferral was used: deferring SHALL change only when the work happens.
+
+A flush SHALL be able to record into the same delta record the stamps used, so a deferred stroke's undo restores shading as well as position. Nothing SHALL flush on the host's behalf, because the library does not know where a host-driven stroke ends.
+
+#### Scenario: The final state is exact either way
+- **WHEN** a host applies the same stamp sequence twice, once deferring and flushing at the end and once not
+- **THEN** the resulting normals are identical
+
+### Requirement: A host can see what its spatial index is worth
+The C ABI and pyclay SHALL report the spatial index's measured partition quality, its leaf count, and whether the engine considers a rebuild warranted.
+
+Whether a rebuild is warranted SHALL remain the engine's measurement and SHALL NOT be an instruction: queuing one SHALL require both that measurement and the host's own declared permission, and the two SHALL be separately observable.
+
+#### Scenario: The host's permission alone withholds the job
+- **WHEN** a host asks for a rebuild to be queued with a profile that forbids index rebuilds
+- **THEN** nothing is queued, whatever the engine's measurement says
+
+### Requirement: A host can drive the layer stack across the ABI
+The C ABI SHALL expose sculpt layers by stable 64-bit identity, with add, remove, move, merge-down, bake, rename, set-active, set-strength, set-visible and set-locked, plus layer introspection carrying bytes and coverage.
+
+Names SHALL be retrieved into caller-owned buffers. The ABI SHALL NOT return pointers into engine-owned strings whose lifetime a host cannot reason about.
+
+High-detail stamping SHALL cross with a write domain and a stamp mode — alpha, height or vector displacement — with image data borrowed for the duration of the call.
+
+Changed blocks SHALL be readable into caller-owned buffers with a capacity query, alongside revisions for base, detail, layers and evaluated state, so a host updates what changed rather than copying a display-level mesh per stamp.
+
+Descriptors SHALL follow the established `struct_size` pattern with bounded output fills.
+
+#### Scenario: A layer is addressed by identity across a reorder
+- **WHEN** a host stores a layer identity, reorders the stack, and sets that layer's strength
+- **THEN** the intended layer changes
+
+#### Scenario: A pore stamp copies blocks, not the model
+- **WHEN** a host stamps detail on a large surface and drains the changed blocks
+- **THEN** the bytes copied follow the changed blocks
+
+### Requirement: The ABI reports what a layer placement would do
+A caller SHALL be able to learn how a PROPOSED layer placement classifies — rigid, similarity or general — and to obtain the matrix taking the layer's current placement to that one, as a column-major affine matrix.
+
+It SHALL be a QUERY that changes nothing, rather than an output added to the placement calls. That shape satisfies the two properties this requirement is for by construction rather than by care: the existing entry points keep their signatures untouched, and asking cannot alter the document, the invalidation or a later refill because it does not write. A caller asks with the placement it is about to set; asking afterwards is legal and answers the identity, which is true and useless.
+
+A proposed placement SHALL be refused on the same terms the placement calls refuse it, so a report cannot be obtained for a placement that could not then be set.
+
+Reporting SHALL NOT change what is invalidated. A host that ignores it SHALL see nothing different, which is what lets the report ship before the engine acts on it.
+
+#### Scenario: A rigid placement reports its matrix
+- **WHEN** a layer at the origin is placed with a rotation and a translation and the report is asked for
+- **THEN** the classification is rigid and the matrix maps the layer's previous world-space bound onto its new one
+
+#### Scenario: A general placement says so
+- **WHEN** a layer is placed with a per-axis scale and the report is asked for
+- **THEN** the classification is general
+
+#### Scenario: Asking changes nothing
+- **WHEN** one document is asked for a report many times and an otherwise identical document is not asked at all
+- **THEN** the two evaluate identically and save to the same bytes
+
+#### Scenario: A malformed placement is refused
+- **WHEN** a report is asked for with a zero rotation axis, or a scale that is not positive
+- **THEN** the call is refused, as setting that placement would be
+
+### Requirement: A layer placement can be dragged as one gesture
+The ABI SHALL offer a placement GESTURE for a layer: an opening call, any number of updates, and a closing call.
+
+While a gesture is open, an update SHALL record the placement and SHALL NOT invalidate anything and SHALL NOT recompile. The closing call SHALL apply the final placement as ONE command and perform ONE invalidation, so a drag of N frames costs one refill rather than N.
+
+The document a caller reads while a gesture is open SHALL be the document as it was when the gesture opened. The placement being dragged is the host's to draw and is not yet an edit — nothing in the document, and nothing a refill returns, SHALL reflect it before the gesture closes.
+
+Closing SHALL be undoable as one step, whatever the number of updates, so an artist takes back a drag and not a frame of it.
+
+A gesture abandoned — the document destroyed, or the gesture cancelled — SHALL leave the placement the gesture opened with. A gesture SHALL be refused on a protected layer on the same terms as the ordinary placement call, and refused at the opening call rather than at the close, so a host learns before the artist has dragged anything.
+
+An edit to the document through any other entry point while a gesture is open SHALL be refused rather than interleaved, because the gesture's whole claim is that the document did not change.
+
+#### Scenario: A drag costs one invalidation
+- **WHEN** a gesture opens on a populated SDF layer, sixty updates are applied, and the gesture closes
+- **THEN** exactly one command is recorded, exactly one invalidation is performed, and the bricks refilled across the whole gesture are those one placement would have dirtied
+
+#### Scenario: The document does not move until the drag ends
+- **WHEN** updates are applied and the document is sampled between them
+- **THEN** the values are those of the placement the gesture opened with
+
+#### Scenario: A drag is one undo step
+- **WHEN** a gesture of many updates closes and is undone
+- **THEN** the layer returns to the placement the gesture opened with in a single undo
+
+#### Scenario: An abandoned gesture leaves nothing behind
+- **WHEN** a gesture is opened, updated and cancelled
+- **THEN** the layer carries the placement it had before the gesture opened, and nothing was invalidated
+
+#### Scenario: A protected layer refuses at the open
+- **WHEN** a gesture is opened on a locked or ghosted layer
+- **THEN** the call is refused, and no gesture is open
+
+#### Scenario: An edit during a gesture is refused
+- **WHEN** an item is added to any layer while a placement gesture is open
+- **THEN** the edit is refused and the document is unchanged
+
+### Requirement: The document is evaluable with a layer excluded, or as that layer alone
+So a host can draw a placement preview without evaluating the composite, the ABI SHALL let an evaluation name a layer and ask for either the document WITHOUT it or that layer ALONE, on both the brick path and the mesh path.
+
+The two SHALL be exact complements under the document's hard union: at every point, the minimum of the two results SHALL equal what the whole document evaluates to at that point, for a document of visible SDF layers. This is the property that makes drawing them separately a decomposition rather than an approximation.
+
+Naming a layer that does not exist, or one that is not an SDF layer, SHALL be refused rather than treated as naming nothing. A HIDDEN SDF layer SHALL be accepted by name, on the same reading meshing one uses: the caller named it, which says more than the visibility flag does.
+
+#### Scenario: The two halves recompose
+- **WHEN** a document of three visible SDF layers is evaluated whole, then as "without layer 2" and "layer 2 alone" over the same lattice
+- **THEN** the pointwise minimum of the two parts equals the whole document's values
+
+#### Scenario: One layer alone ignores the others
+- **WHEN** a layer is evaluated alone and another layer is then edited
+- **THEN** re-evaluating that layer alone returns the values it returned before
+
+#### Scenario: A layer that is not there is refused
+- **WHEN** an evaluation names a layer id the document does not hold, or a voxel or mesh layer
+- **THEN** the call is refused and writes nothing
+
+### Requirement: One brush descriptor means one brush on every representation it is passed to
+Where the C ABI documents a descriptor as being shared between representations — as `clay_dynamic_sculptor_stamp` documents `clay_mesh_brush_desc` — every field of that descriptor SHALL have the same effect on every entry point that takes it, or the entry point SHALL refuse the call.
+
+An entry point SHALL NOT accept a descriptor field and ignore it. A host that sets the automask fields and observes no automask cannot distinguish "this surface had nothing to mask" from "this call does not implement it", and the descriptor's own documentation is what led the host to expect otherwise.
+
+#### Scenario: The automask fields reach the adaptive path
+- **WHEN** `clay_dynamic_sculptor_stamp` is called twice on the same surface with identical descriptors except that one sets `automask_factors` and the other sets zero
+- **THEN** the two reports differ
+
+### Requirement: A brush carries the stamp's azimuth
+`clay_mesh_brush_desc` SHALL carry the stamp's azimuth in radians, appended under the existing `struct_size` rule so that a host compiled against the previous minor is unaffected and behaves exactly as it did.
+
+Zero SHALL mean no rotation and SHALL be the default a `*_defaults` call produces, so that every existing host's stamps are unchanged bit for bit.
+
+#### Scenario: An older host is unaffected
+- **WHEN** a host compiled against the previous ABI minor passes a descriptor whose `struct_size` predates the azimuth field
+- **THEN** the call succeeds and the stamp is identical to the one that ABI minor produced
+
+### Requirement: A host can read what a sculptor's scratch costs
+The ABI SHALL expose, for the fixed, adaptive and multiresolution sculptors, the capacity of the sculptor's scratch arena, its high-water mark and its growth count, through one descriptor filled by one call per sculptor kind.
+
+It SHALL NOT expose a way to reserve, cap or tune that arena.
+
+#### Scenario: The arena statistics cross
+- **WHEN** a host queries a sculptor's arena statistics after a stroke
+- **THEN** it receives capacity, high-water and growth count, and the growth count has stopped rising over stamps of similar footprint
+
+### Requirement: A layer's placement is settable per axis
+
+The API SHALL expose a per-axis form of the whole-layer placement beside the
+existing single-factor one, taking three factors where that one takes a scalar,
+and a reader answering the three. The existing entry point SHALL keep its
+signature and its meaning.
+
+The per-axis READER SHALL answer three equal factors for a layer placed through
+the single-factor call, so a host driving one manipulator needs no branch.
+
+The single-factor READER SHALL refuse a layer carrying a non-uniform scale with
+an invalid-argument error rather than reporting one of the three, exactly as the
+node-level reader refuses a squashed node: answering any single factor would
+describe a placement the layer does not have.
+
+Every factor SHALL be required non-zero, on the same terms the single-factor
+call requires its scale positive.
+
+#### Scenario: One manipulator, no branch
+- **WHEN** a consumer reads the per-axis placement of a layer set through the single-factor call
+- **THEN** it receives three equal factors
+
+#### Scenario: The narrow reader refuses what it cannot describe
+- **WHEN** a consumer reads the single-factor placement of a layer carrying three different factors
+- **THEN** the call returns an invalid-argument error rather than one of them
+
+#### Scenario: A squashed layer picks and bounds correctly
+- **WHEN** a consumer raycasts and reads the bounds of a layer carrying a per-axis scale
+- **THEN** the hit and the box describe the squashed shape, not the unsquashed one
+
+### Requirement: A host can hold and schedule the SDF prefix cache
+
+The prefix cache that makes a cold window cost its suffix rather than the whole
+edit history SHALL be reachable through the C API. Without it a host pays the
+full walk on every window it has not touched — measured at 242 ms a dab on a
+20,000-item layer against 2.32 ms with a compatible prefix — and the acceleration
+exists only for callers who can link C++.
+
+A cache SHALL BELONG TO WHOEVER MADE IT. It SHALL NOT be owned by a document,
+implied by one, or destroyed with one: a cache is a session's policy and a
+device's memory ceiling, and neither is a property of the artwork. This is the
+rule the brick cache already states and it SHALL be the same rule, so a host does
+not learn two ownership models for two caches.
+
+Building a prefix SHALL be a call a host makes deliberately. It SHALL NOT happen
+inside the call that begins a gesture: the build is the whole layer's cost — 2.17
+seconds at 20,000 items — and a gesture begins at the moment an artist is already
+waiting. A host SHALL be able to ask where a layer's boundary would fall, and
+whether the layer is worth caching at all, without building anything.
+
+A cache SHALL be bounded in bytes by the host, and a budget of zero SHALL mean
+the cache is off rather than unbounded — an unbounded cache is a leak on a device
+with a memory ceiling, and "off" is the safe reading of a field nobody filled in.
+
+**The sampling a cache is built at and the sampling a gesture consumes it at
+SHALL NOT be settable independently.** A cached prefix is keyed on its
+resolution, so two that disagree produce no error and no acceleration — the cache
+simply never hits, which is the worst of the three outcomes because it looks like
+the feature not working rather than like a mistake. The resolution SHALL come
+from one place for both.
+
+A host SHALL be able to tell whether the cache actually served a gesture, rather
+than inferring it from a timing. Counters SHALL distinguish a window seeded from
+a cached prefix from one that fell back to evaluating the prefix itself.
+
+#### Scenario: A cached prefix makes a cold window cheap from C
+- **WHEN** a host builds a prefix for a deep layer and then begins a gesture on it through the C API with that cache
+- **THEN** the first dab into a window nothing has touched costs its suffix rather than the whole history, and the counters attribute it to the cache
+
+#### Scenario: A cache outlives nothing it should not
+- **WHEN** a host destroys a document while holding a cache it built against that document
+- **THEN** the cache remains valid and destroying it is the host's call, exactly as the brick cache behaves
+
+#### Scenario: Beginning a gesture builds nothing
+- **WHEN** a gesture begins with a cache that holds no prefix for the layer
+- **THEN** the gesture begins without baking the layer, and every window is the full walk
+
+#### Scenario: A host can ask before it pays
+- **WHEN** a host asks where a layer's prefix boundary would fall under a policy
+- **THEN** it is told, or told that the layer is not worth caching, without a prefix being built
+
+#### Scenario: A budget of zero caches nothing
+- **WHEN** a cache is given a byte budget of zero
+- **THEN** it holds nothing, rather than holding an unbounded amount
+
+#### Scenario: The gesture's resolution is the cache's resolution
+- **WHEN** a host sets a sampling resolution for a gesture and a policy for the cache
+- **THEN** the prefix is built and consumed at the same resolution, and there is no way to express two that disagree
+
+### Requirement: a brick proven uniform is classified without a walk
+
+`clay_brick_cache_eval_requests` and `clay_brick_cache_eval_requests_device`
+MAY answer a brick without evaluating its lattice when one evaluation of the
+brick's own culled tape at the lattice centre, together with that tape's
+declared Lipschitz bound, proves every sample beyond the band with the centre's
+sign. The ball SHALL be the lattice's own — its centre and its half-diagonal —
+and the bound SHALL be the brick's own culled tape's, never the whole
+document's. Only the whole-document evaluation may be so gated; the per-layer
+halves a multi-layer refill evaluates SHALL always be walked.
+
+The bound the proof reads SHALL be a bound on the field's gradient, not only
+on the step a marcher may take. A tape holding a field or deformer whose
+declared bound is not one — the underestimating primitives (ellipsoid, tri
+prism, cheap octahedron, L-norm sphere, loft, sweep, sampled volume), an
+overflowing repeat, taper, wrap_around, bend_curve — SHALL NOT be gated, on
+the full path or through a stored proof's suffix, and its bricks SHALL walk.
+The refusal is per brick: a brick whose culled tape holds no such item keeps
+the gate.
+
+What `clay_brick_cache_submit` stores for a gated brick — its state, and its
+uniform colour, read from sample dim^3/2 — SHALL be bit-identical to what it
+would have stored from the walked samples. The values written to a gated
+brick's slot SHALL every one lie beyond the band with the brick's sign and
+carry the field's own colour at sample dim^3/2; they are otherwise a stand-in,
+and the entry point documents them as such.
+
+A gated brick SHALL NOT store its stand-in values as a seed. It SHALL store the
+proof in the seed's place, and a later refill SHALL either carry that proof
+through the appended items — folding them onto the stored centre and colour
+sample values with the walk's own arithmetic, and re-proving under a bound that
+is exact for what was appended — or take the full path. A refill that resumes
+from a proof SHALL produce, after submit, the same stored brick as a refill of
+the same document from scratch.
+
+A proof SHALL count as refilled where it is made and as resumed where a later
+refill carries it, so the ratio `clay_resume_stats` documents keeps its
+meaning.
+
+#### Scenario: a fill with and without the gate stores the same bricks
+- **GIVEN** two documents holding the same worked, coloured sculpt
+- **WHEN** every brick of the model is refilled and submitted for each, one with the gate disabled
+- **THEN** every brick's state, stored halves and stored colours are identical between the two caches
+- **AND** the gated document proved at least half of the uniform bricks and no surface brick
+
+#### Scenario: a dab after a proof
+- **GIVEN** a window filled with the gate, some of whose bricks were proven uniform
+- **WHEN** an item that reaches those bricks but leaves them uniform is appended and the window is refilled
+- **THEN** every brick of the window resumes, none walks
+- **AND** the submitted cache equals one filled from scratch on a document holding the same items, with the gate enabled or disabled
+
+#### Scenario: a carve that reaches a proven brick
+- **GIVEN** the same window, warm
+- **WHEN** a subtracted item brings the surface into bricks that were proven uniform
+- **THEN** those bricks take the full path
+- **AND** the submitted cache equals one filled from scratch
+
+#### Scenario: a field whose bound is not a gradient bound is walked
+- **GIVEN** a document whose only item is a needle ellipsoid on the lattice diagonal, a tapered box, a wrapped box, or a box bent along a curve
+- **WHEN** the model is refilled with the gate enabled and again with it disabled
+- **THEN** no brick is proven, and the two caches store identical states, halves and colours
+
+#### Scenario: a proof is not carried through a suffix that is not a gradient bound
+- **GIVEN** a window whose bricks hold proofs
+- **WHEN** an ellipsoid reaching some of them is appended and the window refilled
+- **THEN** the bricks it reaches take the full path and none is proven, the rest resume, and the cache equals one filled from scratch
+
+#### Scenario: a gesture over a layer holding proofs
+- **GIVEN** a layer of many items whose whole-model cache holds proofs
+- **WHEN** its surface is dragged or magnified and the model refilled
+- **THEN** the call returns, and the cache stores what a fresh document given the same gesture stores, with the gate enabled or disabled
+
+#### Scenario: a multi-layer refill is never gated
+- **GIVEN** a document with two visible SDF layers
+- **WHEN** a window is refilled
+- **THEN** no brick is proven, and the cache equals one filled with the gate disabled
+
+#### Scenario: a device backend classifies a gated brick as the cpu does
+- **GIVEN** the same worked sculpt refilled through the cpu backend and through a device backend
+- **WHEN** the two caches are compared over the bricks the gate proved
+- **THEN** every such brick has the same state and the same uniform colour in both
+
+### Requirement: A layer reports what its accumulated warps cost
+
+A host SHALL be able to ask what the warps a layer has accumulated are charging
+it. A drag records a warp on every item it reaches and each is evaluated per
+sample for the life of the edit list, so a session of drags gets steadily dearer
+to evaluate with nothing in the document that looks like a cost — and the only
+remedy is a consolidation, which is expensive and destructive enough that a host
+needs a reason before spending one.
+
+The report SHALL distinguish what a WHOLE-DOCUMENT evaluation pays for from how
+much of that a culled compile can drop, because those are different numbers and
+a host acts on them differently: the first is what the accumulation costs a
+viewport, and the difference is what working in bricks already saves.
+
+A layer that cannot carry a warp SHALL report none rather than be refused, so
+that a host walking a stack of mixed kinds does not have to special-case them. A
+layer that does not exist SHALL be a typed not-found, because "no such layer" and
+"no warps" are different answers.
+
+The operation that records a warp SHALL say in its own documentation that the
+warp is not free once it lands, since it otherwise reads as a bounded local edit
+whose cost ends with the call.
+
+#### Scenario: A host asks before and after a drag
+- **WHEN** a layer is queried, dragged, and queried again
+- **THEN** the second answer reports the warps the drag recorded, and a further drag adds its own rather than composing with them
+
+#### Scenario: A layer that cannot carry a warp
+- **WHEN** the layer queried is not one that can hold a warp
+- **THEN** the report is zeroes rather than a refusal
+
+#### Scenario: A layer that is not there
+- **WHEN** the layer queried does not exist
+- **THEN** the call reports not-found rather than zeroes
+
+### Requirement: What an intersect's bound costs is reportable
+
+An intersect is bounded by its layer's extent, and computing that extent walks
+every visible node. A host SHALL be able to ask how much of that walking a
+document has done, because the cost is invisible from outside: the bound is the
+same whether it was computed or remembered, so nothing about the result can say,
+and a timing on a shared machine says less.
+
+The report SHALL distinguish the walks performed from the ones answered from a
+previous edit's memo, since an edit takes the bound on both of its sides and
+those two numbers are what say whether the second was saved.
+
+A document whose layers hold no intersect SHALL report nothing at all, because
+no other item needs a layer's extent.
+
+#### Scenario: A drag walks its layer once a frame
+- **WHEN** an intersecting item is dragged over many frames
+- **THEN** the walks performed are about one per frame rather than two, and the remainder are reported as answered from the memo
+
+#### Scenario: A layer with no intersect never walks
+- **WHEN** the same drag is made with a subtracting item
+- **THEN** no walks and no reuses are reported at all
+
+### Requirement: A named region can be turned into a mask
+
+The region a surface group names SHALL be paintable into a mask, so that a group
+reaches every verb a mask already gates rather than only the automask that keeps
+a brush inside the group it began on.
+
+Naming a region and deciding what to do to it are two acts, and an artist
+performs them in that order. An automask that keeps a stroke inside the group it
+started in cannot express "flatten this panel", because it requires the stroke
+to have begun there.
+
+The group's own extent SHALL drive the fill; no region argument is taken. Two
+lattices that each describe the same border are how the two come to disagree
+about it.
+
+The two lattices SHALL NOT be required to share a cell size, and the resulting
+border SHALL be the GROUP's, quantised to whichever lattice is coarser. This is
+the border every other group operation draws and SHALL NOT be represented as
+finer than it is.
+
+Painting with zero SHALL release the cells rather than record zeros in them,
+because that is what zero means everywhere else in the mask vocabulary — so a
+group can un-mask its own region.
+
+Naming no group SHALL paint nothing and SHALL NOT be an error: "not in a group"
+is not a region, and the complement of every group is a different request.
+
+#### Scenario: A group becomes a mask and back
+- **WHEN** a named region is painted into a mask and that mask is used to name a region again
+- **THEN** the same cells carry the group, cell for cell
+
+#### Scenario: The mask is where the group is
+- **WHEN** a mask filled from a group is sampled at points across the model
+- **THEN** it reads as painted exactly where the group answers with that id
+
+#### Scenario: Zero un-masks the region
+- **WHEN** a fully painted mask is filled from a group with zero
+- **THEN** the mask's painted cell count falls by the number erased, rather than the cells remaining as zeros
+
+#### Scenario: The lattices differ
+- **WHEN** the mask's cell size differs from the group lattice's
+- **THEN** the fill still agrees with the group everywhere, quantised to the coarser of the two
+
+#### Scenario: Naming nothing
+- **WHEN** the fill names "no group", or an id nothing carries
+- **THEN** nothing is painted and the call succeeds
+
+### Requirement: a resume follows the layer the appends went to
+
+A refill SHALL resume only when the appends recorded since the seed was taken
+were made to the layer whose chain the suffix would extend. Appends to any other
+layer SHALL make the plan unusable, and the refill SHALL take the full walk.
+
+NodeIds are per-layer: every layer's content numbers its nodes from 1, so
+comparing an appended id against another layer's roots can agree by coincidence.
+The layer SHALL be compared, not inferred from the ids.
+
+#### Scenario: an append to a layer beneath, whose id collides
+
+- **GIVEN** a document with two visible SDF layers
+- **AND** the layer beneath has one fewer root than the active one, so its next
+      id equals the active layer's last root
+- **AND** a refill has stored seeds for a row of bricks
+- **WHEN** an item is appended to the layer BENEATH and the row is refilled
+- **THEN** no brick is resumed
+- **AND** the values equal a document holding the same items and never resumed
+
+### Requirement: the resumable path is observable
+
+The C ABI SHALL report, per document, how many bricks refills have answered from
+a seed and how many have taken the full walk, together with the seed store's
+occupancy, its byte cost and the budget it is evicted against, through a
+versioned descriptor.
+
+The two paths are bit-identical by contract, so no output of a refill can
+distinguish them; without these counts a fast path that stops firing is
+indistinguishable from one that works.
+
+#### Scenario: reading the counts
+
+- **WHEN** a host calls `clay_document_resume_stats` with `struct_size` set
+- **THEN** it receives cumulative `resumed_bricks` and `refilled_bricks` counts
+- **AND** the counts never reset, so an interval is read as their difference
+
+#### Scenario: a seed is a performance cache only
+
+- **WHEN** every stored seed is dropped
+- **THEN** later refills produce the same geometry, taking longer to do it
+
+### Requirement: a seed serves only the band it was taken under
+
+A brick's tape is culled against the brick dilated by the request's band, so a
+narrower band drops items a wider one keeps. A refill SHALL NOT serve a request
+from a seed taken under a different band, in either direction, and SHALL take
+the full walk instead.
+
+The values a differing band changes are not confined to distances the band
+would clamp: measured on a dim-8, 0.05 cache, a seed taken at a 0.15 band and
+served to a 0.6-band request was wrong at 9 of 512 samples, worst 0.105 — two
+voxels — at a true distance of 0.354, well inside the band asked for and so a
+sample a submit stores rather than clamps.
+
+#### Scenario: a wider band than the seed was taken under
+
+- **GIVEN** a document holding an item outside a narrow band's cull region and
+      inside a wider one's
+- **AND** a refill has stored a seed for a brick at the narrow band
+- **AND** one item is appended to the active layer
+- **WHEN** that brick is refilled at the wider band
+- **THEN** it is not resumed
+- **AND** its values are bit-identical to a document holding the same items and
+      never resumed
+
+#### Scenario: a narrower band than the seed was taken under
+
+- **GIVEN** a refill has stored a seed for a brick at a wide band
+- **AND** one item is appended to the active layer
+- **WHEN** that brick is refilled at a narrower band
+- **THEN** it is not resumed
+- **AND** its values are those of the narrower band's own culled tape
+
+#### Scenario: the same band still resumes
+
+- **GIVEN** a refill has stored a seed for a brick
+- **AND** one item is appended to the active layer
+- **WHEN** that brick is refilled at the band its seed was taken under
+- **THEN** it is answered from its seed
+
+### Requirement: two caches over one document keep their own seeds
+
+A brick coordinate is unique only within a lattice, so caches of different dims
+or voxel sizes over one document name the same coordinate. Their seeds SHALL be
+held separately: a refill by one SHALL NOT evict or overwrite what the other
+stored, and both SHALL go on resuming while a stroke asks them in turn.
+
+#### Scenario: a coarse and a fine cache alternating
+
+- **GIVEN** a coarse cache and a fine cache covering one brick coordinate over
+      one document
+- **AND** both have been refilled once, so both hold a seed
+- **WHEN** an item is appended and both are refilled, repeatedly
+- **THEN** the seed store holds an entry for each
+- **AND** every refill after the first is answered from a seed
+- **AND** each cache's values are those of a document that never resumed
+
+### Requirement: A refill may be given a prefix to seed cold bricks from
+
+A brick that has been refilled before carries a seed and evaluates only what the
+document gained since. A brick that has NOT SHALL be able to start from a cached
+prefix of its layer's history rather than from nothing, evaluating only the roots
+after that prefix.
+
+The prefix cache SHALL be the CALLER'S, not the document's, on the same terms as
+every other cache in this ABI: a document holding a pointer to memory the host
+can free is a hazard this ABI refuses.
+
+Passing no cache SHALL produce byte-identical results at byte-identical cost to
+the refill that takes none, so a host that has not opted in cannot be affected.
+
+The seeded result SHALL be stored as an ordinary seed, so a second touch of the
+same window takes the existing warm path rather than this one.
+
+A caller SHALL be able to learn how many bricks the prefix actually served. A
+cache that covers nothing produces correct output and no acceleration, and
+without a count those are indistinguishable — which is the whole failure mode of
+this feature.
+
+The prefix SHALL NOT be built by the refill. A build is a bake, and paying for
+one inside a refill puts the cost back on the frame the feature exists to
+protect.
+
+#### Scenario: A seeded refill is the walk's answer
+- **WHEN** a window with no seed is refilled with a prefix cache, and the same window is refilled on a fresh document with none
+- **THEN** the two agree within the band to the sampling tolerance the prefix declares
+
+#### Scenario: Not opting in costs nothing
+- **WHEN** the seeded refill is called with no cache
+- **THEN** its results are byte-identical to the refill that takes no cache, and no brick is reported as seeded
+
+#### Scenario: The count says whether it worked
+- **WHEN** a refill is given a cache that covers the requested windows
+- **THEN** it reports how many bricks the prefix served, and that count is greater than zero
+
+### Requirement: A prefix is built for the lattice its consumer reads
+
+A cached prefix SHALL record which lattice it was built for, and a consumer SHALL
+receive only a prefix built for its own.
+
+A seed read on the lattice it was built for is the stored sample; one read half a
+cell away is an interpolation of two, which is a different field by about a
+quarter of a cell. The two consumers this ABI has read different lattices — a
+smoothing transaction reads the layer's own region, a brick refill reads a grid
+anchored at the world origin — so one prefix cannot serve both and SHALL NOT be
+offered to both.
+
+#### Scenario: Each consumer gets its own
+- **WHEN** a prefix is built for a refill and another for a smoothing transaction, at the same resolution
+- **THEN** they are separate entries, and neither is returned to the other's consumer
+
+#### Scenario: A refill's seed is exact
+- **WHEN** a refill is seeded from a prefix built for refills
+- **THEN** the seeded values agree with the full walk to floating-point rounding rather than to a fraction of a cell
+
+### Requirement: A host can take a Smooth preview one brick at a time
+The existing preview call copies the WHOLE working volume, which is right for a host joining a gesture mid-stroke or rebuilding a lost preview and wrong for a per-frame loop: a dab moves a ball of bricks and the host re-uploads the model. The ABI SHALL additionally hand over exactly the bricks whose bytes are new — the ones a dab brought in, and the ones its relax moved.
+
+It SHALL be the two-call size-query shape the ABI already uses for draining dirty work: one call reports what is waiting without taking it, and one takes it into buffers the CALLER owns. The first SHALL take nothing and change nothing, so a host may call it every frame to decide whether to bother. The whole-volume copy SHALL keep working, because a simple host must not have to implement patching to draw anything at all.
+
+Each brick SHALL be described by its lattice key, the world position of its first sample, the spacing between samples, the number of samples per axis including the halo, and where its samples begin in the sample buffer. Samples SHALL be laid out back to back in the order the ABI's other volume calls use. The per-brick record SHALL be an ARRAY ELEMENT and SHALL therefore carry no size field, exactly as the ABI's other array elements do: a caller receives hundreds of them and reads them rather than filling them in.
+
+#### Scenario: A dab's bricks can be drained into caller buffers
+- **WHEN** a dab is applied and the delta is asked about and then taken into buffers of the reported size
+- **THEN** the counts match what was reported, every brick names its key, origin, spacing and sample count, and the samples are laid out at the offsets the records give
+
+#### Scenario: Nothing waiting is reported as nothing
+- **WHEN** the delta is asked about before any update
+- **THEN** it reports no bricks, no generation and no bounds
+
+### Requirement: A short delta buffer takes nothing
+Taking the delta is what CLEARS it, so a partial drain would strand bricks that nothing reports a second time.
+
+When either buffer is too small, the call SHALL take NOTHING, SHALL report the buffer-too-small error, and SHALL write into the out-counts what it needs — so a caller grows its buffers and asks again from a state it has not damaged. The delta SHALL still be waiting afterwards, whole.
+
+#### Scenario: A short buffer leaves the delta intact
+- **WHEN** a take is attempted with buffers smaller than what was reported
+- **THEN** it fails with the buffer-too-small error, the out-counts say what is needed, and asking again reports exactly the same bricks still waiting
+
+#### Scenario: The grown buffer takes all of it
+- **WHEN** the buffers are grown to the reported size and the take is repeated
+- **THEN** it succeeds, and nothing is waiting afterwards
+
+### Requirement: The preview delta accumulates, deduplicates and carries a generation
+The delta SHALL accumulate across updates until it is taken, so that a host which skips a frame loses nothing, and a host which reads twice is told the same thing twice.
+
+It SHALL be deduplicated by BRICK. A dab brings a brick in and then relaxes it, so the same coordinate arrives twice by construction, and a host uploading it twice would be paying for the bookkeeping this exists to save.
+
+A generation SHALL be reported that advances on every update which CHANGED the preview and on nothing else — not on an update that moved nothing, and not on taking. Taking clears the delta and not the generation, because the generation names the state the caller now HOLDS rather than what is waiting. That is how a host tells a duplicate read from a skipped frame and drops an upload it began against an older state.
+
+The payload SHALL follow the BRUSH and not the model: the same dab on a layer holding far more items SHALL hand over the same number of bricks.
+
+#### Scenario: The same dab twice is reported once
+- **WHEN** the same dab is applied twice without the delta being taken
+- **THEN** the brick count is what one dab produced, and the generation has advanced twice
+
+#### Scenario: The payload does not grow with the document
+- **GIVEN** two layers alike where the brush is, one of them with hundreds of items far out of its reach
+- **WHEN** the same dab is applied to each
+- **THEN** the delta hands over the same number of bricks for both
+
+### Requirement: A spent Smooth transaction refuses its delta rather than dangling
+After a commit or a cancel the working field is released, so a delta read would describe something the host can no longer draw.
+
+Both delta calls SHALL refuse a transaction that is no longer live, with the ABI's invalid-argument error, on the same terms every other call on that handle refuses it. The handle SHALL still be destroyable, and destroying it SHALL still be safe.
+
+#### Scenario: The delta is refused after a cancel
+- **WHEN** a transaction is updated, cancelled, and then asked for its delta
+- **THEN** both delta calls fail with the invalid-argument error, and destroying the handle still succeeds
