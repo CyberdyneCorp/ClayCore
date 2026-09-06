@@ -788,3 +788,50 @@
   `src/mesh/` on the multires, cross-level, automask and sculpt path; the remesh
   benchmarks leave `build_multires_levels` at 0, which is the only place the
   remesh path mentions multires at all, and it is a refusal branch
+
+### Record — four minors, three of them in the gates this stage had just written
+
+- THE GATE ADVERTISED QUALIFIED NAMES AND READ NONE OF THE QUALIFICATION.
+  `check_task_symbols.py` searched for the trailing identifier alone, so an
+  invented class in front of a real member resolved off the member. That is
+  load-bearing for the audit recorded above: `MetalBackend::upload_tape` was
+  struck from `tools/task_symbols_baseline.txt` on the grounds that adding
+  `backends/` made it resolve, and the only evidence gathered was about
+  `upload_tape`. A qualified name now needs ONE file to hold every component as a
+  word — what a class and its member look like on disk, where a literal search
+  for the joined span would find nothing. RE-AUDITED against it: all three
+  strikes hold, all twelve remaining rows still fail to resolve, and repo-wide
+  every qualified span and every bare filename in all 18 in-flight changes
+  resolves, so the stricter matcher records no new debt
+- AND A BACKTICKED BARE FILENAME WAS CHECKED BY NEITHER BRANCH — no "/" for the
+  path shape, a "." the identifier shape forbids — so nine citations in this
+  file alone were skipped in silence, which is the one thing a gate must never
+  do. Checked now as a basename anywhere in the tracked tree, recognised by an
+  extension this repository uses so that a version number and a struct field are
+  not mistaken for files. BOTH PROVED BY REVERT, one per property: restoring the
+  trailing-identifier search fails self-test check 5 alone, dropping the filename
+  branch fails check 7 alone, and the self-test is 8 checks
+- `CrossLevelNeighborhood::bytes()` WAS EXECUTED AND NOTHING ASSERTED ON IT.
+  `LevelCache::byte_split` prices the neighbourhood into `runtime_index`, and
+  deleting that term left the whole suite green with an identical assertion
+  count: the cases that build a non-empty neighbourhood and then read `memory()`
+  assert `resident_levels` only, and the two that check byte figures run on
+  uniform hierarchies where the neighbourhood is empty. GATED in
+  `test_multires_regional.cpp` on a regionally refined cage with a brush bound
+  and a stamp taken, then `drop_all_caches` and a read back — which is both what
+  a host acting on this report does and what makes the measurement ONE term: a
+  crossing stamp writes the coarse side too and builds the neighbourhood of every
+  level it writes. The figure compared against is counted from the CSR arrays
+  `build_cross_level` filled, at their sizes, so it is a floor the code under
+  test did not compute: 8944 bytes against a measured 10704. PROVED BY REVERT —
+  the revert compiles and fails this case alone, runtime row flat at 84832
+- THE PROPOSAL'S IMPACT DESCRIBED A DIFFERENT CHANGE. It had the ABI growing by
+  an export entry point and the version lines moving to 0.87.0 "because two
+  branches already claim 0.86.0"; 6.1 is unbuilt, the `clay.h` diff adds no
+  function, and the lines are at 0.88.0 for the reason 6.2 records. Its file list
+  named three files this branch never touched — `surface_frame.cpp` among them,
+  which is section 1 and still owed — and none of the ones the work landed in.
+  Rewritten from the diff. Three claims in `design.md` were overruled by what
+  landed and are corrected where they stand: a missing face is not "named by the
+  level it lives at", quad-only transition templates do not exist, and a mixed
+  export owes no preflight
