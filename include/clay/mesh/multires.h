@@ -507,10 +507,17 @@ class MultiresSurface {
     //
     // IT IS A READ. It writes no detail, bumps neither `detail_revision` nor
     // `base_revision`, and creates nothing a host would have to record as an
-    // edit. It does EVALUATE -- exactly the levels `mesh_at_level(level)`
-    // evaluates, since that call walks every level below its own -- and
-    // building a level cache moves `cache_generation`, which is the one
-    // observable a caller must expect from it.
+    // edit. It does EVALUATE, and building a level cache moves
+    // `cache_generation`, which is the one observable a caller must expect
+    // from it.
+    //
+    // WHAT IT DOES NOT PROMISE IS RESIDENCY. It reads each emitted vertex at
+    // the level that vertex lives at, so every level up to `level` has to BE
+    // there -- and a level released by `drop_intermediate_caches` (or by the
+    // residency policy that calls it) is brought back to answer, which
+    // `mesh_at_level` at the same level does not do. A host that trims between
+    // exports pays for the levels below again; one that exports and then trims
+    // does not.
     //
     // NORMALS are computed over the assembled mesh's own faces, because a
     // vertex on the seam has incident faces from both sides and neither level's
@@ -564,6 +571,15 @@ class MultiresSurface {
     // Derived: it lives in the level's cache, it is released with everything
     // else derived, and rebuilding it produces the same bytes. Nothing about it
     // is serialized.
+    //
+    // ITS OUTSIDE VERTICES BELONG TO THE LEVEL BELOW, which a trim may have
+    // released -- `drop_intermediate_caches` releases exactly the levels
+    // between the cage and the ones in use. A level that stores every patch
+    // answers empty without reading the level below at all, so a uniform
+    // hierarchy pays nothing; a regionally refined one brings the level below
+    // back, because the outside positions are re-read from it on every access
+    // and neither a stale copy nor an empty answer is distinguishable from a
+    // current one by the readers.
     const CrossLevelNeighborhood& cross_level_at(std::uint32_t level);
 
     // How many GEOMETRIC vertices the cage has — its weld classes, which is what

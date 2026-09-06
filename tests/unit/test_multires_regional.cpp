@@ -985,3 +985,61 @@ TEST_CASE("regional export: a crossing stamp leaves the mixed-depth surface wate
     // a seam that had opened would weld into more vertices, not fewer.
     CHECK(s.mixed_mesh_at_level(3).positions.size() == 680u);
 }
+
+TEST_CASE("regional: a level released between the cage and the brush is still readable") {
+    // WHAT `evaluate_up_to` DOES NOT PROMISE, and what reading a level BELOW the
+    // one it was asked for therefore costs.
+    //
+    // It brings the level it was ASKED for up to date and no other, on purpose:
+    // `drop_intermediate_caches` releases everything between the cage and the
+    // levels in use without marking anything pending, so the short circuit walks
+    // past them and a release STAYS released. Both readers this change adds look
+    // below their own level — the cross-level neighbourhood subdivides its
+    // outside vertices from the parent, and the mixed-depth export reads each
+    // emitted vertex at the level that vertex lives at — and both read a
+    // released cache through a null pointer. The sanitizer preset is what says
+    // it out loud, on the EXISTING case "the levels between the cage and the
+    // brush can be released and stay released": `runtime error: member access
+    // within null pointer of type 'struct LevelCache'`. An unsanitized build
+    // segfaults inside `subdivide_positions`.
+    //
+    // The two halves are trimmed separately below so that each one is exercised
+    // against a released parent on its own.
+    const int n = 12;
+    MultiresSurface s = build(closed_torus(n, n));
+    REQUIRE(s.refine_patches_to_level(torus_block(n, 1, 2, 1, 2), 3));
+    REQUIRE(s.set_sculpt_level(3));
+    REQUIRE(s.set_display_level(3));
+
+    const mesh::CrossLevelNeighborhood before = s.cross_level_at(3);
+    REQUIRE_FALSE(before.empty());
+    const Mesh whole = s.mixed_mesh_at_level(3);
+    REQUIRE(whole.positions.size() == 680u);
+
+    // THE EXPORT, with the levels it emits from released. It has no choice but
+    // to ask for them back — a vertex emitted at level 2 is read out of level 2
+    // — and what it is not allowed to do is answer differently for having been
+    // asked after a release.
+    s.drop_intermediate_caches();
+    REQUIRE(s.memory().resident_levels == 1);
+    const Mesh again = s.mixed_mesh_at_level(3);
+    CHECK(same_mesh(whole, again));
+    CHECK(open_edges(again.indices) == 0u);
+    CHECK(s.memory().resident_levels == 4);
+
+    // THE NEIGHBOURHOOD, with its parent released. Same bits, and the same
+    // answer about the cost: the outside positions are re-read from the level
+    // below on every access, so that level has to be there. A UNIFORM hierarchy
+    // pays nothing for this — it stores every patch and says so without reading
+    // the level below at all — which is what keeps the trim gate in
+    // `test_multires_dirty.cpp` at one resident level.
+    s.drop_intermediate_caches();
+    REQUIRE(s.memory().resident_levels == 1);
+    const mesh::CrossLevelNeighborhood& after = s.cross_level_at(3);
+    CHECK_FALSE(after.empty());
+    CHECK(after.corners == before.corners);
+    CHECK(after.dense_face == before.dense_face);
+    CHECK(after.outside_layout == before.outside_layout);
+    CHECK(same_floats(after.outside_positions, before.outside_positions));
+    CHECK(s.memory().resident_levels == 4);
+}

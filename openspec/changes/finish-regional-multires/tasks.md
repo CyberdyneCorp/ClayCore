@@ -455,5 +455,64 @@
       examples — no host loop — and the one host we can check does not export
       hierarchies at all. The frame and neighbourhood half is storage and does
       have users today
-- [ ] 6.6 `python3 tools/check_task_symbols.py` and the OpenSpec strict
-      validation both pass on this change before it is opened
+- [x] 6.6 `python3 tools/check_task_symbols.py` and the OpenSpec strict
+      validation both pass on this change before it is opened — and so does
+      every other gate CI runs against it, listed in the block below. 6.1 will
+      add a C symbol and must re-run them; nothing here excuses that
+
+### What the gate run landed
+
+- WHAT THE GATES FOUND, and only the sanitizer job could have found it: both
+  readers this change adds look at a level BELOW the one they were asked for,
+  and `evaluate_up_to` does not promise that level is resident. It guarantees
+  the cache of the level it was ASKED for and no other, on purpose —
+  `drop_intermediate_caches` releases everything between the cage and the
+  levels in use without marking anything pending, so the short circuit walks
+  past them and a release STAYS released, which is the whole point of the trim.
+  So `cross_level_at`, whose outside vertices are subdivided from the parent,
+  and `mixed_mesh_at_level`, which reads each emitted vertex at the level that
+  vertex lives at, both read a released cache through a null pointer. The
+  ASan+UBSan preset reports `member access within null pointer of type 'struct
+  LevelCache'` in the EXISTING case "the levels between the cage and the brush
+  can be released and stay released"; an unsanitized build segfaults
+- THE FIX IS TWO ANSWERS, not one, because the two readers differ in what they
+  can do without. `cross_level_at` can answer a level that stores every child of
+  every face of its parent without reading the parent at all — which is every
+  level of a uniform hierarchy, so a trim there still holds — and
+  `level_is_self_contained` in `cross_level.h` now names that rule once for both
+  this caller and `build_cross_level` rather than leaving a second copy of it.
+  Any other level brings the level below back, and deliberately: the outside
+  positions are the parent's, a stroke down there moves them without this
+  level's cache going stale, and the re-read on the way past is the whole reason
+  they are not tracked — so handing back the last copy would be an answer a
+  reader cannot tell from a current one, and handing back an empty
+  neighbourhood would read as "no depth boundary here". The export has no
+  cheaper case at all — a vertex emitted at level 2 is read out of level 2 — so
+  it asks for the storage back through a new `evaluate_all_up_to`, whose comment
+  says why `evaluate_up_to` is not it
+- GATED as one case, "a level released between the cage and the brush is still
+  readable", on a 144-patch closed torus with a 2x2 region at level 3. The two
+  halves are trimmed SEPARATELY so each is exercised against a released parent
+  on its own: the export after a trim answers the same mesh with 0 open edges,
+  and the neighbourhood after a second trim is the same `corners`, `dense_face`,
+  `outside_layout` and `outside_positions` bits. What it costs is asserted
+  rather than left implied — `resident_levels` goes 1 -> 4 at each of them. The
+  uniform half of the claim needs no new case: "the levels between the cage and
+  the brush can be released and stay released" in `test_multires_dirty.cpp` is
+  the gate that a uniform hierarchy still holds its trim at one resident level,
+  and it is the case the sanitizer reported the null access on
+- PROVED BY REVERT, twice, each revert compiling and each isolating one reader.
+  Dropping the released-parent test in `cross_level_at` alone: SIGSEGV after 11
+  assertions — the whole export half passes, and the crash lands on the first
+  `cross_level_at` past a trim. Dropping only `evaluate_all_up_to` in the
+  export, with the other fix left in: SIGSEGV after 7, at the export instead.
+  The tree was restored from a saved patch after each and the suite re-run green
+  (94 cases, 17877 assertions)
+- THE HEADERS SAY WHAT THIS COSTS. `mixed_mesh_at_level` claimed it evaluated
+  "exactly the levels `mesh_at_level(level)` evaluates", which stopped being
+  true the moment a trim was in the picture; it now states that residency is not
+  something it promises and that a host trimming between exports pays for the
+  levels below again. `cross_level_at` says the same about its outside vertices
+- NO TIMING WAS TAKEN, as with every stage before this one. The cost of paying a
+  trim back is stated as a level count (`resident_levels` 1 -> 4) and not as a
+  duration

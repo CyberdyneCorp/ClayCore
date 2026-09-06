@@ -293,7 +293,11 @@ Mesh MultiresSurface::mixed_mesh_at_level(std::uint32_t level,
     if (s.attribute_split && wants.attributes())
         return refuse(MultiresMixedStatus::AttributeSplitCage);
 
-    evaluate_up_to(s, level);
+    // EVERY level, not just this one: a mixed-depth export reads each emitted
+    // vertex at the level that vertex lives at, so a level released by a trim
+    // has to come back before it can be read. `mesh_at_level` needs only its
+    // own and asks for only its own.
+    evaluate_all_up_to(s, level);
     // A cancelled export returns an EMPTY mesh rather than a partial one, for
     // the reason `mesh_at_level` gives: a caller that ignored the cancel and
     // drew the result would draw a fraction of the model.

@@ -275,6 +275,17 @@ void expand_by_face_ring(const LevelTopology& topology, const LevelConnectivity&
 // edits since the last call actually require.
 void evaluate_up_to(MultiresSurface::State& s, std::uint32_t level);
 
+// The same, plus the guarantee `evaluate_up_to` deliberately does NOT give: that
+// every level at or below `level` has its cache, not just `level` itself.
+//
+// A trim (`drop_intermediate_caches`, and the residency policy that calls it)
+// releases the levels between the cage and the one being worked on without
+// marking anything pending, and `evaluate_up_to` then short-circuits past them —
+// which is what makes a release STAY released for a caller that reads its own
+// level and nothing else. A caller that reads a vertex AT a lower level, as the
+// mixed-depth export does by construction, has to ask for that storage back.
+void evaluate_all_up_to(MultiresSurface::State& s, std::uint32_t level);
+
 // Note that these level vertices changed, for the host's changed-block drain.
 void mark_patches(MultiresSurface::State& s, std::uint32_t level,
                   const std::vector<std::uint32_t>& vertices);

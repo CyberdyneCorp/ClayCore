@@ -177,6 +177,10 @@ std::size_t CrossLevelNeighborhood::bytes() const {
            v32(face_patch) + v32(face_offsets) + v32(faces) + v32(ring_offsets) + v32(ring);
 }
 
+bool level_is_self_contained(const LevelTopology& child, const std::vector<char>& keep) {
+    return keep.empty() || child.dense();
+}
+
 CrossLevelNeighborhood build_cross_level(const LevelTopology& parent,
                                          const LevelConnectivity& parent_conn,
                                          const std::vector<cfloat3>& parent_positions,
@@ -186,7 +190,7 @@ CrossLevelNeighborhood build_cross_level(const LevelTopology& parent,
     out.vertex_count = child.vertex_count;
     // A level that stores every patch has a complete connectivity of its own,
     // so there is nothing outside it and no indirection to pay for saying so.
-    if (keep.empty() || child.dense()) return out;
+    if (level_is_self_contained(child, keep)) return out;
 
     const ChildLayout layout = ChildLayout::of(parent, parent_conn);
     const ChildIndex stored = ChildIndex::of(child);

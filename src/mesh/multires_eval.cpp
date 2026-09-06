@@ -344,6 +344,19 @@ void evaluate_up_to(MultiresSurface::State& s, std::uint32_t level) {
     }
 }
 
+void evaluate_all_up_to(MultiresSurface::State& s, std::uint32_t level) {
+    if (s.levels.empty()) return;
+    const std::uint32_t target = std::min(level, static_cast<std::uint32_t>(s.levels.size() - 1));
+    // A missing cache is what `below_is_current` does not test for below the
+    // target, so asking for that level directly is what forces the walk: it
+    // fails the test on its own cache and rebuilds from the cage. Bit for bit
+    // the same surface — every input to a level is still here, which is the
+    // property `drop_all_caches` already rests on.
+    for (std::uint32_t l = 0; l <= target; ++l)
+        if (!s.levels[l].cache) evaluate_up_to(s, l);
+    evaluate_up_to(s, target);
+}
+
 // -- attributes ---------------------------------------------------------------
 
 namespace {
@@ -517,8 +530,32 @@ const CrossLevelNeighborhood& MultiresSurface::cross_level_at(std::uint32_t leve
     // The parent's evaluated positions are what the outside vertices are
     // subdivided from, so the walk up has to have happened.
     evaluate_up_to(s, level);
-    const MultiresLevel& parent = s.levels[level - 1];
     LevelCache& c = *s.levels[level].cache;
+    // THE LEVEL BELOW IS NOT ALWAYS RESIDENT. `evaluate_up_to` guarantees the
+    // cache of the level it was ASKED for and no other, on purpose: when
+    // nothing below has moved it short-circuits, which is the whole of what
+    // makes `drop_intermediate_caches` stay dropped. So the parent's
+    // connectivity and positions — which every outside vertex is subdivided
+    // from — can be gone, and reading them through a released cache is the
+    // undefined behaviour a sanitizer build catches here.
+    //
+    // A level that stores every child of every face of its parent has nothing
+    // outside it and can say so without the parent at all — which is every
+    // level of a uniform hierarchy, and why a trim there still holds.
+    //
+    // Anything else has to bring the parent back. Not for the topology, which
+    // is fixed for the life of the cache, but for the OUTSIDE POSITIONS: they
+    // belong to the level below, a stroke down there moves them without this
+    // level's cache going stale, and the re-read on the way past is what keeps
+    // them honest. Handing back what was last read would be an answer a reader
+    // cannot tell from a current one, and handing back an empty neighbourhood
+    // would read as "no depth boundary here".
+    if (!s.levels[level - 1].cache) {
+        if (level_is_self_contained(s.levels[level].topology, s.levels[level].patch_kept))
+            return kEmpty;
+        evaluate_up_to(s, level - 1);
+    }
+    const MultiresLevel& parent = s.levels[level - 1];
     if (!c.cross) {
         c.cross = std::make_unique<CrossLevelNeighborhood>(
             build_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,

@@ -180,6 +180,18 @@ struct CrossLevelNeighborhood {
     }
 };
 
+// Whether a level stores every child of every face of its parent — so there is
+// nothing outside it and `build_cross_level` answers empty without reading the
+// parent at all.
+//
+// It is a property of the CHILD alone, and that is the whole reason it is named
+// here rather than left inside `build_cross_level`: a caller holding a level
+// whose parent's cache has been released (`drop_intermediate_caches` releases
+// exactly the levels between the cage and the one being worked on) has to know
+// whether it must pay that trim back before it can ask. On a uniform hierarchy
+// it never does.
+bool level_is_self_contained(const LevelTopology& child, const std::vector<char>& keep);
+
 // The neighbourhood of the level `child` describes, whose parent is `parent`.
 //
 // `keep` is the child level's `patch_kept`: one entry per base patch, and EMPTY
