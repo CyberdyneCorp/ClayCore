@@ -260,8 +260,9 @@ point of these calls is that the caller does not know it yet.
 
 ### Layer scope, and what item-level would cost later
 
-Item-level variants are deliberately not in this change. Layer scope is the
-scope every other whole-subtool property already has — visibility, mirror,
+Item-level variants are deliberately not in this change, and that is a decision
+taken rather than an omission. Layer scope is the scope every other whole-subtool
+property already has — visibility, mirror,
 radial, protection, the placement itself — so a host learns one scope rather
 than two, and the menu item these serve is a subtool menu item.
 
@@ -285,18 +286,113 @@ it.
   properties of `clay_layer_bounds`, which is why the header states them beside
   the call rather than leaving the first reporter to find them.
 
-## What building it should check
+## What building it found
 
-To be filled in by the implementing PR, and expected to refute something here —
-these are the three claims most likely to be wrong:
+The three claims this file asked the implementation to check, and what happened
+to each — plus two the file did not think to ask.
 
-1. That `position` is truly outermost for every representation, mesh layers
-   included (`layer_world_bounds` composes `scene::layer_matrix` for voxel and
-   mesh; the SDF arm goes through `pick::layer_bounds`, which composes it per
-   node). A test on all three that a snap moves the box by exactly the delta.
-2. That no existing test asserts `clay_layer_bounds` on a radial layer — if one
-   does, the refusal may be narrower than stated or the gap may already be
-   closed somewhere this reading missed.
-3. That the second application of a snap really does land within one ulp rather
-   than accumulating. If it drifts, the scenario's tolerance is wrong and the
-   arithmetic needs restating, not the tolerance loosening.
+### 1. `position` IS outermost for every representation. Confirmed.
+
+A snap moves the box by exactly the delta on an SDF, a voxel and a mesh layer
+alike, each carrying a rotation AND a per-axis scale
+(`tests/unit/test_c_convenience_placements.cpp`, "all three representations take
+one rule"). No arm needed a case of its own, and no frame conversion appeared
+anywhere: the whole write is `position += delta`.
+
+### 2. No existing test asserts `clay_layer_bounds` on a radial layer. Confirmed.
+
+The refusal is exactly as wide as stated, and the gap is exactly where the
+reading said it was: `src/scene/bounds.cpp`'s `geometry_bound` emits the
+`radial_count - 1` rotated copies, `src/pick/pick.cpp`'s `node_shape_bounds`
+carries the mirror copies and stops. Nothing else had to move.
+
+### 3. The idempotence tolerance was stated against the WRONG magnitude. REFUTED.
+
+The scenario said "one rounding at the coordinate's magnitude", and the obvious
+reading of that — one ulp at the coordinate the layer ends up at — is wrong, and
+wrong by about sixty-fold. Measured: a layer at y = 2048 snapped to y = 0.25
+twice moves 7.27e-06 on the second press, against an ulp of 1.19e-07 at the
+resulting coordinate.
+
+The reason is that a snap from far away lands the layer NEAR the named plane, so
+the result is small while the arithmetic that produced it ran at 2048, where an
+ulp is 2.44e-04. The error is set by the magnitude of the box the FIRST press
+read, not by where the layer ended up, and the two differ by however far the
+layer had to travel. The spec scenario now says so, and the test asserts a third
+press moves no further than the second — the property that makes this a bound
+rather than a step. The arithmetic did not need restating; the sentence did.
+
+### 4. An UNBOUNDED layer was not in the refusal table, and had to be. NEW.
+
+The table has a row for a DEGENERATE box and none for an infinite one, and the
+omission is not harmless. `scene::prim_local_bounds` answers `Aabb::infinite()`
+for a plane and for an infinite cylinder, and that box's faces are `±FLT_MAX`
+rather than an infinity — so nothing in the arithmetic raises, nothing reports a
+domain error, and the placement computed from it overflows to an infinite
+position. The layer is then at infinity and its tape evaluates to NaN
+everywhere.
+
+Both bounds-reading calls now refuse it with `CLAY_ERROR_INVALID_ARGUMENT`, on
+the same footing as the empty layer: the box cannot describe a low face or a
+centre. `zero_to_origin` still accepts it, since it reads nothing. The C ABI
+already had the vocabulary for this (`box_is_finite`, used by the invalidation
+path, and `Aabb::is_infinite`) which is what made it a two-line addition rather
+than a redesign — but no row of the table pointed at it, and deleting the check
+makes the test place a plane at 3.4e38.
+
+### 5. Composing the PUBLIC per-axis pair would not have been bit-exact. REFUTED.
+
+"Decisions" above says the placement is "read with
+`clay_document_layer_transform_nonuniform` [...] written with
+`clay_document_set_layer_transform_nonuniform`", carried through
+"bit-identically". Reading the two implementations says otherwise, in both
+halves:
+
+- The reader hands the rotation back as an AXIS AND AN ANGLE, through a
+  normalization and an `atan2`; the setter rebuilds a quaternion from them
+  through `Quat::from_axis_angle`. A round trip through that pair is not the
+  identity on the bits, and the spec scenario asks for the rotation back "bit
+  for bit".
+- The per-axis reader answers the PRODUCT of `xform.scale` and `scale_axes` —
+  deliberately, so one manipulator never branches — and the setter stores what
+  it is given into `scale_axes` with `xform.scale` at 1. The composed map is the
+  same, but the layer's own record is not, so a layer that had been placed
+  through the uniform setter would come out of a snap with its factor moved.
+
+So the write policy lives one level down instead, in
+`scene::translated_layer_command`, which takes the `scene::Layer` and copies the
+quaternion, the uniform factor and the per-axis triple across untouched. That is
+also what lets pyclay share it — see the next item.
+
+### 6. There IS a change to `src/`, and there had to be. REFUTED.
+
+`proposal.md` and task 1.1 both say "No change to `src/`". That holds for the
+BOUND and the COMMAND, which neither moved nor grew — but not for the write
+policy, because pyclay does not go through the C ABI. It includes the engine
+headers directly and applies `scene::Command`s itself, so a policy stated only
+inside `clay_c.cpp` would have been stated twice, in two languages, which is
+precisely what task 1.2 says must not happen.
+
+The four functions therefore live in `scene` — `ground_snap_delta`,
+`origin_centre_delta`, `origin_translation_delta` and
+`translated_layer_command`, in `include/clay/scene/placement.h` and
+`src/scene/placement.cpp`. `scene` is the right module by `check_layering.py`:
+they need `math` and the command vocabulary and nothing else, and `io` (the only
+other module that sees the whole document bundle) may not include `pick`.
+
+What stays at the binding level is which BOX to read, because that genuinely
+differs: the C ABI composes the SDF, voxel and mesh arms through
+`layer_world_bounds`, while pyclay's `Layer` only ever wraps an SDF layer and
+reads `pick::layer_bounds`, the same box its own `bounds` answers. Those are the
+same box wherever both are defined.
+
+### 7. A hidden ITEM cannot be exercised across the C ABI. NEW, and minor.
+
+Task 2.6 asks for a case showing that hiding the lowest root moves where the
+next snap lands. There is no C entry point for a NODE's visibility — the ABI has
+`clay_document_set_layer_visible` and nothing below it — so that case is
+asserted in `tests/unit/test_computed_placement.cpp`, against
+`pick::layer_bounds` and `scene::translated_layer_command` directly. The
+SUBTRACT-item case is pinned in the same file for the same reason: it is a
+property of the bound, and the header states it because the first host to meet
+it will file a bug.

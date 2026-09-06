@@ -20,9 +20,12 @@ impossible or silently destructive on exactly those layers.
 
 Each SHALL state a TOTAL placement rather than an increment, so applying one
 twice is the same gesture as applying it once. Idempotence SHALL be stated to
-within the rounding of one addition at the box's magnitude rather than bit for
-bit, because the second application recomputes the bound from an already-moved
-layer.
+within the rounding of one addition at the magnitude of the bound the FIRST
+application read, rather than bit for bit, because the second application
+recomputes the bound from an already-moved layer. The magnitude that bounds the
+error is the one the arithmetic RAN at and not the one the layer ends up at: a
+snap from far away lands the layer near the named plane, so a tolerance derived
+from the resulting coordinate is too tight by the ratio between them.
 
 The centring call SHALL be named for the box it reads and SHALL NOT be named
 for a centre of mass. The engine holds no density, and the call's answer is
@@ -61,7 +64,8 @@ the change is a pure translation.
 
 #### Scenario: Applying it twice is applying it once
 - **WHEN** a snap is applied twice in succession
-- **THEN** the second application moves the layer by no more than one rounding at the coordinate's magnitude
+- **THEN** the second application moves the layer by no more than one rounding at the magnitude of the bound the first application read
+- **AND** a third application moves it no further than the second did, so the difference is a bound rather than a step
 
 ### Requirement: A convenience placement refuses what its bound cannot describe
 
@@ -94,6 +98,13 @@ looking.
 
 A ground height that is not finite SHALL be refused.
 
+An UNBOUNDED bound SHALL be refused by the two calls that read bounds. A layer
+whose lowest visible content is a plane or an infinite cylinder reports a box
+whose faces are the largest representable float rather than an infinity, so
+nothing in the arithmetic raises: the placement derived from one overflows to an
+infinite position and the layer compiles a field of NaNs. The call that reads no
+bounds SHALL accept such a layer.
+
 A degenerate bound — equal minimum and maximum in one or more axes — SHALL be
 ACCEPTED. These placements only translate and nothing divides by an extent, so
 a planar layer, a single-cell voxel grid and a single-vertex mesh each have a
@@ -118,6 +129,12 @@ open, on the same terms as every other edit.
 #### Scenario: A protected layer refuses before it costs anything
 - **WHEN** a locked or ghosted layer takes any of the three
 - **THEN** the call is refused and the layer's placement is unchanged
+
+#### Scenario: An unbounded layer is refused rather than sent to infinity
+- **GIVEN** a layer whose visible content includes an unbounded primitive
+- **WHEN** it is snapped or centred
+- **THEN** the call is refused and its placement is unchanged
+- **AND** returning its placement to the origin succeeds
 
 #### Scenario: A flat layer is placed, not refused
 - **GIVEN** a layer whose content is degenerate in one axis

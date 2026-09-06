@@ -1807,6 +1807,50 @@ struct PyLayer {
     }
 };
 
+// A convenience placement's refusals, in the order the C ABI takes them so the
+// two bindings answer with the same reason for the same layer. Protection FIRST
+// and before any bound is walked, which is a cost rule as much as a message
+// one: a locked layer never pays for a walk it will not use. apply_or_throw
+// would also refuse it, at the end, with the same wording — this is the same
+// check moved earlier, not a second policy. The open-gesture guard stays with
+// apply_or_throw, since a gesture is a document state rather than a layer one.
+void refuse_if_protected(const scene::Layer& layer, const char* what) {
+    if (layer.protected_from_edits())
+        throw std::invalid_argument(std::string(what) + ": layer " + std::to_string(layer.id) +
+                                    " is " + (layer.ghost ? "ghosted" : "locked") +
+                                    " and takes no edits");
+}
+
+// The box the two content-reading convenience placements compute from, with
+// the three states no placement can be derived from. The C ABI states the same
+// three beside clay_layer_snap_to_ground and refuses them with
+// CLAY_ERROR_INVALID_ARGUMENT; here they raise, following the surrounding
+// bindings.
+math::Aabb computed_placement_box(const scene::Layer& layer, const char* what) {
+    // The tight bound carries a layer's MIRROR copies and stops there, so on a
+    // radial layer it describes the un-arrayed item and any placement computed
+    // from it drops the ORIGINAL onto the plane with its copies already through
+    // it. Refused with the mode named rather than answered plausibly and
+    // wrongly; widening pick::layer_bounds is its own change.
+    if (layer.radial_count > 1)
+        throw std::invalid_argument(std::string(what) + ": layer " + std::to_string(layer.id) +
+                                    " carries a radial mode (count " +
+                                    std::to_string(layer.radial_count) +
+                                    "): its bounds do not cover the radial copies");
+    const math::Aabb box = pick::layer_bounds(layer);
+    if (box.empty())
+        throw std::invalid_argument(std::string(what) + ": layer " + std::to_string(layer.id) +
+                                    " holds no material: it has no low face and no centre");
+    // An unbounded layer — one whose lowest visible root is a plane or an
+    // infinite cylinder — answers a box whose faces are ±FLT_MAX, and every
+    // placement derived from one overflows to an infinite position and a tape
+    // of NaNs. A DEGENERATE box is accepted: nothing here divides by an extent.
+    if (box.is_infinite())
+        throw std::invalid_argument(std::string(what) + ": layer " + std::to_string(layer.id) +
+                                    " is unbounded: a plane has no low face to place");
+    return box;
+}
+
 // The one insertion path for Layer.add and Layer.add_group alike: an
 // AddNodeCmd with a reserved id (replay preserves ids) so an enabled undo stack
 // records the add like every other edit. Regression: a direct insert let adds
@@ -6305,6 +6349,61 @@ NB_MODULE(pyclay, m) {
                                        nb::make_tuple(b.max.x, b.max.y, b.max.z));
              },
              "nodes"_a, "Tight bounds of the given node ids — for zoom-to-selection")
+        // -- placements computed from the layer's own content --------------
+        //
+        // The C ABI's clay_layer_snap_to_ground / _centre_bounds /
+        // _zero_to_origin, on the same rules and with the same refusals — and
+        // through the same scene:: core, so the two bindings cannot drift about
+        // WHICH placement fields a computed placement writes.
+        //
+        // The box is the one `bounds` above answers, which for a PyLayer is
+        // always the SDF arm: this class only ever wraps a layer created by
+        // add_sdf_layer, so pick::layer_bounds and the C ABI's three-way
+        // composition are the same box here.
+        .def("snap_to_ground",
+             [](PyLayer& l, float ground_y) {
+                 refuse_if_protected(l.layer(), "snap_to_ground");
+                 if (!std::isfinite(ground_y))
+                     throw std::invalid_argument("snap_to_ground: ground height must be finite");
+                 const math::Aabb box = computed_placement_box(l.layer(), "snap_to_ground");
+                 apply_or_throw(l.doc->document,
+                                scene::Command{scene::translated_layer_command(
+                                    l.layer(), scene::ground_snap_delta(box, ground_y))},
+                                "snap_to_ground", l.undo.get());
+             },
+             "ground_y"_a,
+             "Translate the layer so the LOW FACE of its content's world box sits at\n"
+             "`ground_y`. Y alone; X and Z do not move. One undoable step, and the\n"
+             "rotation and both scales are carried through — which is the reason this\n"
+             "exists rather than being composed from set_layer_transform, whose\n"
+             "single-factor form clears a layer's per-axis scale.\n\n"
+             "Raises on a layer holding no material, a layer carrying a radial mode\n"
+             "(its bounds do not cover the radial copies), an unbounded layer, a\n"
+             "ghosted or locked layer, and a ground height that is not finite. A\n"
+             "refusal leaves the document unchanged.")
+        .def("centre_bounds",
+             [](PyLayer& l) {
+                 refuse_if_protected(l.layer(), "centre_bounds");
+                 const math::Aabb box = computed_placement_box(l.layer(), "centre_bounds");
+                 apply_or_throw(l.doc->document,
+                                scene::Command{scene::translated_layer_command(
+                                    l.layer(), scene::origin_centre_delta(box))},
+                                "centre_bounds", l.undo.get());
+             },
+             "Translate the layer so the CENTRE of its content's world box sits at the\n"
+             "world origin. Named for the BOX: this engine holds no density, so the\n"
+             "answer is identical for a hollow shell and a solid of the same extent.\n"
+             "Same refusals as snap_to_ground.")
+        .def("zero_to_origin",
+             [](PyLayer& l) {
+                 apply_or_throw(l.doc->document,
+                                scene::Command{scene::translated_layer_command(
+                                    l.layer(), scene::origin_translation_delta(l.layer()))},
+                                "zero_to_origin", l.undo.get());
+             },
+             "Set the placement's TRANSLATION to (0, 0, 0), leaving the rotation and\n"
+             "both scales alone. Reads no bounds, so an empty, radial or unbounded\n"
+             "layer takes it where the other two refuse.")
         .def("safe_step_scale", [](const PyLayer& l) {
             return scene::compile_layer(l.layer()).safe_step_scale();
         })

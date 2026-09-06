@@ -86,8 +86,12 @@ copies `clay_layer_bounds` does not cover.
   — the library and ABI minor move 0.85.0 -> 0.86.0 in the implementing PR
   (`CMakeLists.txt`, `bindings/c/clay.h`, `pyproject.toml`, which must agree).
 - **Code**: `bindings/c/clay.h`, `bindings/c/clay_c.cpp`,
-  `bindings/python/pyclay_module.cpp`. No change to `src/`: the bound and the
-  command both already exist and neither moves.
+  `bindings/python/pyclay_module.cpp`, plus four small functions in
+  `include/clay/scene/placement.h` and `src/scene/placement.cpp`. The bound and
+  the command both already exist and neither moves — but pyclay does not go
+  through the C ABI, so the policy about WHICH placement fields a computed
+  placement writes has to live below both bindings or be written twice. See
+  "What building it found" in `design.md`.
 - **Format**: none. `kSceneMinor` does not move — a convenience placement saves
   as the placement it produced, which every existing minor already stores.
 - **Tests**: the squashed-layer round trip (the defect the change exists for),

@@ -5753,6 +5753,119 @@ clay_result clay_document_layer_transform_nonuniform(const clay_document* doc, c
     return CLAY_OK;
 }
 
+// -- placements computed from a layer's own content --------------------------
+//
+// The three convenience placements. The arithmetic and the WRITE POLICY live in
+// scene::translated_layer_command, so these entry points are their refusal set
+// and their choice of box and nothing else.
+//
+// The refusals are taken in the order design.md sets, which is the order that
+// costs the least: a locked layer never pays for a bounds walk.
+
+namespace {
+
+// The document, the id and the protection flags -- everything the three share.
+//
+// The GESTURE guard is deliberately not repeated here: apply_edit already
+// refuses every edit while a placement gesture is open, including edits to
+// other layers, and a second copy of that refusal is a second wording to drift.
+// The cost of leaving it there is one bounds walk on a call that was going to
+// be refused anyway, which happens only mid-drag.
+clay_result computed_placement_layer(const clay_document* doc, clay_layer_id id,
+                                     const scene::Layer** out_layer) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* l = doc->doc.document.find_layer(id);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    if (l->protected_from_edits())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    std::string("layer ") + std::to_string(id) + " is " +
+                        (l->ghost ? "ghosted" : "locked") + " and takes no edits");
+    *out_layer = l;
+    return CLAY_OK;
+}
+
+// The box the two content-reading rules compute from, with the three states it
+// can be in that no placement can be derived from.
+//
+// THE SAME BOX clay_layer_bounds answers -- tight, all three representations,
+// no blend or chain-pad dilation. Not the influence bound: snapping a dilated
+// box to the floor leaves the model hovering by exactly that dilation.
+clay_result computed_placement_bounds(const clay_document* doc, const scene::Layer& layer,
+                                      math::Aabb* out_box) {
+    // The tight bound carries a layer's MIRROR copies and stops there; the
+    // influence path emits the radial ones and this path does not. So on a
+    // radial layer the box describes the un-arrayed item, and a placement
+    // computed from it would drop the ORIGINAL onto the floor with its copies
+    // already through it -- plausible and wrong. Refused with the mode named
+    // rather than answered, exactly as clay_layer_lattice_gizmo refuses a cage
+    // it cannot record.
+    if (layer.radial_count > 1)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "layer " + std::to_string(layer.id) + " carries a radial mode (count " +
+                        std::to_string(layer.radial_count) +
+                        "): its bounds do not cover the radial copies, so no placement "
+                        "computed from them would be right");
+    const math::Aabb box = layer_world_bounds(doc, layer);
+    if (box.empty())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "layer " + std::to_string(layer.id) +
+                        " holds no material: it has no low face and no centre");
+    // NOT in design.md's table, and found by building it. An UNBOUNDED layer --
+    // one whose lowest visible root is a plane or an infinite cylinder --
+    // answers Aabb::infinite(), whose faces are +/-FLT_MAX rather than an
+    // infinity. Every arithmetic below it overflows to an infinite position,
+    // and a layer placed at infinity compiles a tape of NaNs. A degenerate box
+    // is accepted, as the table says; an unbounded one cannot be.
+    if (!box_is_finite(box) || box.is_infinite())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "layer " + std::to_string(layer.id) +
+                        " is unbounded: a plane or an infinite cylinder has no low face and "
+                        "no centre to place");
+    *out_box = box;
+    return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_layer_snap_to_ground(clay_document* doc, clay_layer_id layer, float ground_y) {
+    const scene::Layer* l = nullptr;
+    clay_result r = computed_placement_layer(doc, layer, &l);
+    if (r != CLAY_OK) return r;
+    // Before the bounds walk, for the same reason the protection check is:
+    // a malformed argument should cost nothing.
+    if (!std::isfinite(ground_y))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "ground height must be finite");
+    math::Aabb box;
+    r = computed_placement_bounds(doc, *l, &box);
+    if (r != CLAY_OK) return r;
+    const kernel::cfloat3 delta = scene::ground_snap_delta(box, ground_y);
+    return apply_edit(doc, scene::Command{scene::translated_layer_command(*l, delta)},
+                      "layer not found");
+}
+
+clay_result clay_layer_centre_bounds(clay_document* doc, clay_layer_id layer) {
+    const scene::Layer* l = nullptr;
+    clay_result r = computed_placement_layer(doc, layer, &l);
+    if (r != CLAY_OK) return r;
+    math::Aabb box;
+    r = computed_placement_bounds(doc, *l, &box);
+    if (r != CLAY_OK) return r;
+    const kernel::cfloat3 delta = scene::origin_centre_delta(box);
+    return apply_edit(doc, scene::Command{scene::translated_layer_command(*l, delta)},
+                      "layer not found");
+}
+
+clay_result clay_layer_zero_to_origin(clay_document* doc, clay_layer_id layer) {
+    const scene::Layer* l = nullptr;
+    clay_result r = computed_placement_layer(doc, layer, &l);
+    if (r != CLAY_OK) return r;
+    // No bounds are read, which is the whole difference between this rule and
+    // the other two: an empty layer and a radial layer both take it.
+    const kernel::cfloat3 delta = scene::origin_translation_delta(*l);
+    return apply_edit(doc, scene::Command{scene::translated_layer_command(*l, delta)},
+                      "layer not found");
+}
+
 clay_result clay_set_layer_mirror(clay_document* doc, clay_layer_id layer_id, int32_t axis_x,
                                   int32_t axis_y, int32_t axis_z, float mirror_k) {
     // Through the command vocabulary like every other layer edit: writing the

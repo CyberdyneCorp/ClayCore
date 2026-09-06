@@ -1491,6 +1491,189 @@ clay_result clay_document_layer_transform_nonuniform(const clay_document* doc, c
                                                      float out_rotation_axis[3],
                                                      float* out_rotation_angle,
                                                      float out_scale[3]);
+/* -- three placements a host cannot write itself correctly (ABI 0.86.0) -----
+ *
+ * "Drop this subtool on the floor", "centre it", "put it back at the origin":
+ * the three menu items every sculpting host carries. They read like sugar over
+ * the calls above and they are not, because the obvious composition is a trap
+ * this header already documented in two separate places:
+ *
+ *   - clay_document_layer_transform REFUSES a layer carrying three different
+ *     per-axis factors, so the read half cannot even begin on a layer a
+ *     ZBrush-style gizmo squashed;
+ *   - clay_document_set_layer_transform CLEARS the per-axis scale, so a host
+ *     that gets past the first trap by reading the uniform factor from
+ *     somewhere else silently UNSQUASHES the subtool: the artist presses "snap
+ *     to floor" and the model changes shape.
+ *
+ * The correct composition is the per-axis pair with the rotation and all three
+ * factors carried through, which is four calls, one refusal and one clearing
+ * rule to know about, for a menu item. These are that pair, written once, on
+ * the inside. Each is ONE clay_document_set_layer_transform_nonuniform's worth
+ * of change -- one command, one undo step, one invalidation -- and each writes
+ * the placement's TRANSLATION and nothing else.
+ *
+ * WHICH BOX THEY READ, AND WHAT IT IS NOT. clay_layer_bounds: the TIGHT
+ * world-space box, all three representations, no blend or chain-pad dilation.
+ * Not the influence bound, whose dilation would leave the model hovering by
+ * exactly that dilation. The tight box is the honest choice and it is still not
+ * the silhouette, in three ways that will each produce a bug report:
+ *
+ *   - A SUBTRACT item contributes its own box. The walk expands over every
+ *     visible root regardless of op, so a layer whose lowest visible item is a
+ *     subtracting box lands THAT box on the plane and the material stops
+ *     higher up.
+ *   - A SMOOTH BLEND can bulge past it. Rounding is dilated into the box; a
+ *     smooth union's bulge is not, so a heavily blended seam near the low face
+ *     can sit slightly below the plane.
+ *   - HIDDEN ITEMS are excluded. That is the intended reading rather than a
+ *     limitation -- the placement follows the silhouette the artist can see --
+ *     and it means hiding the lowest item moves where the next press lands.
+ *
+ * Marching the surface for its true lowest point was the alternative: a bake or
+ * a raycast sweep per press, no exact answer for a smooth field either, and the
+ * slowest call in a host's transform panel. Rejected; the limitation is stated
+ * here instead.
+ *
+ * WHAT THEY DO NOT PROMISE.
+ *
+ * NOT BIT-IDEMPOTENT. Each states a TOTAL placement, so pressing one twice is
+ * the same gesture as pressing it once -- but the second press recomputes the
+ * box from an already-moved layer, and `f + (p + (g - (f + p)))` is not `g` in
+ * float. The second press lands within one rounding at the coordinate's
+ * magnitude, and a host asserting bit equality at large coordinates will find
+ * it flaky.
+ *
+ * A PRESS THAT MOVES NOTHING STILL COSTS AN UNDO STEP. Suppressing it needs a
+ * tolerance in world units, which this ABI would then have to name and defend,
+ * and a host that cannot predict how many undos its own button cost is worse
+ * off than one that pays a refill for a press that did nothing.
+ *
+ * NO DELTA IS RETURNED. The placement change is RIGID in the sense of
+ * clay_placement_kind, so the 0.82.0 guarantee applies verbatim and a host may
+ * transform its drawn mesh instead of refilling -- but it has to work out the
+ * matrix itself: read clay_document_layer_transform_nonuniform before and
+ * after and subtract the two positions, which is exact because the change is a
+ * pure translation. Rejected an out-parameter on each: three more optional
+ * pointers, three more null checks and three more tests, for a subtraction of
+ * two values the caller can already read. clay_layer_placement_report is not
+ * the answer either -- it classifies a placement the caller already knows, and
+ * the whole point of these is that the caller does not know it yet.
+ *
+ * AN INSTANCE IS PLACED, NEVER SEVERED. What instancing shares is the edit
+ * list; a placement is not shared. So these move the named layer alone, leave
+ * every other layer over the same content evaluating to exactly what it did,
+ * and leave clay_document_layer_info reporting the sharing as it was. Unlike
+ * clay_layer_consolidate, which severs because a bake REPLACES an edit list,
+ * there is nothing here to sever: placing one instance is the gesture
+ * instancing exists for, and unlinking a subtool because the artist pressed a
+ * transform button would be the worst possible way to learn the link was
+ * fragile. Two instances of one edit list snap to the same floor independently
+ * and both land.
+ *
+ * THE REFUSALS, and they differ per call:
+ *
+ *   condition                     | snap | centre | zero
+ *   ------------------------------|------|--------|------
+ *   no layer carries the id       | NOT_FOUND for all three
+ *   ghosted or locked             | INVALID_ARGUMENT, before any bound is read
+ *   a placement gesture is open   | INVALID_ARGUMENT, as for every other edit
+ *   layer holds no material       | INVALID | INVALID | ACCEPTED
+ *   layer carries a radial mode   | INVALID | INVALID | ACCEPTED
+ *   layer is UNBOUNDED            | INVALID | INVALID | ACCEPTED
+ *   ground_y not finite           | INVALID |   --   |   --
+ *   box degenerate in any axis    | ACCEPTED for all three
+ *   layer hidden                  | ACCEPTED for all three
+ *
+ * EMPTY IS REFUSED RATHER THAN A SILENT NO-OP: a host greying the menu item out
+ * wants to know, and "already in place" and "there is nothing here" are the two
+ * states an artist most needs told apart. The code is INVALID_ARGUMENT and not
+ * NOT_FOUND, so that NOT_FOUND keeps meaning "no layer carries this id" alone
+ * and a host can tell a stale id from a layer that cannot take the operation;
+ * INVALID_ARGUMENT is already this ABI's answer for the second, as a protected
+ * layer, a voxel instance source and a group asked for a primitive all show.
+ * CLAY_ERROR_UNSUPPORTED was considered and does not fit -- every use of it
+ * here is about a build, a format or a name, never about document state.
+ *
+ * A RADIAL LAYER IS REFUSED, and that is a defect this change surfaced rather
+ * than one it introduced. clay_layer_bounds carries a layer's MIRROR copies and
+ * does not carry its RADIAL ones (the influence path does, the pick path this
+ * reads does not), so a placement computed from that box would drop the
+ * ORIGINAL onto the plane with its copies already through it. Answering anyway
+ * was rejected: that is not a loose answer, it is a wrong one, and the
+ * wrongness is invisible. Widening clay_layer_bounds to emit the radial copies
+ * is the real fix and it is a separate change, because it alters what a camera
+ * framing query and the mesh rasterization region answer for every existing
+ * host. Until then the diagnostic names the radial mode.
+ *
+ * AN UNBOUNDED LAYER IS REFUSED for the arithmetic rather than for a policy: a
+ * plane or an infinite cylinder reports a box whose faces are +/-FLT_MAX, and
+ * every placement derived from one overflows to an infinite position and a tape
+ * of NaNs. A DEGENERATE box -- equal minimum and maximum in one or more axes --
+ * is accepted, because nothing here divides by an extent and a flat layer is
+ * exactly the layer a "drop it on the floor" button is most often pressed on.
+ *
+ * A HIDDEN LAYER IS ACCEPTED. The box answers from content rather than from the
+ * visibility flag, and a caller naming a layer says more than the flag does.
+ *
+ * ITEM-LEVEL VARIANTS WERE CONSIDERED AND NOT TAKEN. Layer scope is the scope
+ * every other whole-subtool property already has -- visibility, mirror, radial,
+ * protection, the placement itself -- so a host learns one scope rather than
+ * two, and the menu item these serve is a subtool menu item. Adding them later
+ * re-lays out nothing: clay_layer_selection_bounds already answers the same box
+ * for a subset of nodes and clay_layer_set_transform_nonuniform already writes
+ * a node's placement per axis. It needs one answer these do not: what a snap
+ * means for a selection spanning a group, whose children's placements are
+ * relative to it. A whole-DOCUMENT snap is not here either -- N layers is N
+ * calls inside clay_document_begin_undo_group, and a document-level call would
+ * have to decide what "the document's ground" means for hidden and ghosted
+ * layers, which the host already knows. */
+
+/* Translate the layer so the LOW FACE of its content's world box sits at
+ * `ground_y`. Y is the only axis it names; X and Z do not move. */
+clay_result clay_layer_snap_to_ground(clay_document* doc, clay_layer_id layer, float ground_y);
+
+/* Translate the layer so the CENTRE of that box sits at the world origin.
+ *
+ * NAMED FOR THE BOX, and the name is the departure from the roadmap row that
+ * spells this one "centre-mass". The engine holds no density, so this call's
+ * answer is identical for a hollow shell and for a solid of the same extent.
+ * The occupancy-weighted centroid that would earn the other name was
+ * considered and is not merely more expensive, it is NOT EXPRESSIBLE by this
+ * signature: a sampled centroid has no answer until someone names a cell size
+ * -- the one clay_consolidation_params carries -- and `(doc, layer)` has
+ * nowhere to put it, so an implementation would have to invent a resolution the
+ * answer silently depends on. It would also be a CPU bake per press, would have
+ * no field at all for a mesh layer until rasterized, and would move when the
+ * artist changed the layer's voxel size, which changes nothing about where the
+ * shape is.
+ *
+ * A THIRD READING of "centre" is NOT this call: moving the PIVOT to the
+ * content's centre WITHOUT moving the content, so the gizmo stops hanging off
+ * the subtool. That cannot be done at layer level at all -- keeping the content
+ * still while the layer's origin moves means shifting every item's local
+ * placement by the inverse, which is item-level work on the shared edit list,
+ * and on an instance would move every other instance. It belongs with the
+ * item-level arm above. */
+clay_result clay_layer_centre_bounds(clay_document* doc, clay_layer_id layer);
+
+/* Set the placement's TRANSLATION to (0, 0, 0), leaving the rotation, the
+ * uniform factor and the per-axis factors exactly as they were.
+ *
+ * "Put this subtool back where it started", not "reset this subtool's
+ * transform": the reset already exists as one
+ * clay_document_set_layer_transform_nonuniform with an identity, and a
+ * convenience call that quietly threw away a rotation the artist authored would
+ * be the most expensive undo in the set.
+ *
+ * READS NO BOUNDS, which is what makes it a different call rather than a
+ * special case of the centring one -- it is the only one an empty, a radial or
+ * an unbounded layer can take. The two coincide exactly when the content's box
+ * is already centred on the layer's origin, and differ by however far off-pivot
+ * the content was authored, which for a layer built by brush stamps around a
+ * model is usually not zero. */
+clay_result clay_layer_zero_to_origin(clay_document* doc, clay_layer_id layer);
+
 /* Symmetry. Each enabled axis reflects the layer's items through the plane
  * where that LOCAL coordinate is 0 (the layer transform moves the plane with
  * the layer), and every item participates: place a lump on one side and both
