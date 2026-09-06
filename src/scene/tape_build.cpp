@@ -1217,27 +1217,14 @@ struct Compiler {
     // THE FOLD BETWEEN LAYERS, shared by the whole-document walk and by every
     // PART of one so that the two cannot produce different fields. `layer_val`
     // says whether the layer just compiled left a value on the stack and
-    // `have_acc` whether the layers beneath it did; the return is whether one
-    // is there afterwards.
+    // `have_acc` whether there is an accumulated value beneath it on the stack;
+    // the return is whether one is there afterwards.
     //
-    // THE FIRST VISIBLE SDF LAYER INITIALISES THE ACCUMULATOR AND ITS OWN
-    // OPERATOR IS NOT APPLIED -- which is the `if (have_acc)` guard below and
-    // nothing more. That is the same guard an item chain already puts on its
-    // own combine (`if (have_acc || seeded)` in compile_list), in the same
-    // place, for the same reason: with nothing beneath it there is nothing to
-    // combine WITH. Applying it anyway makes a stack that opens with Subtract
-    // or Intersect evaluate to empty space, with no error and nothing to see --
-    // which is exactly what an artist who drags their base layer to the top
-    // would get.
-    //
-    // The OTHER half of the item rule deliberately does not lift. compile_list
-    // SKIPS an item that opens a chain with a carving op (`if (!have_acc &&
-    // n->op != Op::Add && !op_creates_material(n->op)) continue;`) and seeds a
-    // material-creating one against an explicit empty. Both are right for one
-    // contribution among many in a list; both are wrong for a layer, because a
-    // layer is the whole document at that point and either would show nothing
-    // where the spec asks to show the layer itself. So the layer rule is the
-    // guard alone, and this comment is the whole of the difference.
+    // `have_acc` IS NOT THE FIRST-VISIBLE TEST and must not be read as one --
+    // see `compile_and_fold_layer`, which is the only caller and which decides
+    // first-ness from the layer LIST before anything is emitted. What is left
+    // here is only "is there something on the stack to combine with", which is
+    // a question about the tape and is answered by the tape.
     bool fold_layer(const Layer& layer, bool layer_val, bool have_acc) {
         const LayerComposition& comp = layer.composition;
         // No node, so the layer's own distance scale is the factor -- the same
@@ -1313,6 +1300,78 @@ struct Compiler {
         tape.bounds.expand(layer_extent_.dilated(support));
     }
 
+    // ONE VISIBLE SDF LAYER: its chain, its checkpoint and its fold. The whole
+    // walk and every PART of one go through here, because the two have to emit
+    // the same bytes at the same layer boundary or a split is a different
+    // field.
+    //
+    // THE FIRST VISIBLE SDF LAYER INITIALISES THE ACCUMULATOR AND ITS OWN
+    // OPERATOR IS NOT APPLIED, and `first` -- decided by the caller from the
+    // layer LIST, before a single instruction is emitted -- is that rule. It is
+    // deliberately NOT the accumulator flag, and this is the sharpest silent
+    // failure the whole change has:
+    //
+    //   `have_acc` is a per-compile, CULL-DEPENDENT value. A brick whose cull
+    //   drops every item of every layer beneath a composed layer arrives here
+    //   with `have_acc` false, and reading first-ness from it would promote
+    //   that layer to the initialiser FOR THAT BRICK ALONE -- a subtracting
+    //   cutter renders as material, an intersecting one stops cutting, in one
+    //   brick and not its neighbour, with no error, no counter and nothing to
+    //   see but geometry that is subtly wrong. Which layer is first is a
+    //   property of the DOCUMENT (which layers are visible SDF layers), so it
+    //   is answered from the document and the cull cannot reach it.
+    //
+    // WHAT A LAYER THAT IS NOT FIRST DOES WITH AN ABSENT ACCUMULATOR is the
+    // item rule verbatim, so that the two forms of one shape stay one shape:
+    // `compile_list` SKIPS a carving node that opens a chain and `compile_group`
+    // SEEDS a material-creating one against an explicit empty. Both lift here
+    // unchanged, and folding against the far field is what they mean --
+    // `max(FAR, b)` is FAR, so an intersecting layer over nothing is nothing,
+    // which is the same answer the whole-document tape gives in that region
+    // (`op_creates_material` states the same argument for items). A union takes
+    // neither branch, `min(FAR, b) == b`, which is why a document that predates
+    // compositions still emits byte for byte what it always did.
+    bool compile_and_fold_layer(const Layer& layer, bool first, bool have_acc) {
+        const LayerComposition& comp = layer.composition;
+        bool seeded = false;
+        if (!first && !have_acc && comp.op != Op::Add) {
+            // Nothing beneath and an operator that cannot make material out of
+            // nothing: the layer contributes nothing here. Its chain is not
+            // compiled at all, exactly as compile_list drops such an item,
+            // which also keeps its geometry out of tape.bounds -- the fold
+            // removes it from the field, so the march must not look for it.
+            if (!op_creates_material(comp.op)) return false;
+            emit_empty(kernel::cf3(1.0f, 1.0f, 1.0f));
+            seeded = true;
+        }
+        // Each layer's root list IS a tail chain -- an append to it lands at its
+        // end -- so the walk starts on the tail path and compile_list narrows it
+        // to the last member from there.
+        on_tail_path_ = true;
+        tail_checkpoint_taken_ = false;
+        layer_extent_ = math::Aabb{};
+        const bool layer_val = compile_list(layer.sdf->roots, *layer.sdf, layer, false);
+        on_tail_path_ = false;
+        // The seeded empty IS an accumulator: the fold below combines with it,
+        // and a resume re-emits that same fold from `doc_have_acc`.
+        const bool acc = have_acc || seeded;
+        if (tail_checkpoint_taken_) {
+            // A tail GROUP took the position, deeper than this. Its frames
+            // describe everything between there and here; only what the group
+            // could not know is filled in.
+            checkpoint.layer = layer.id;
+            checkpoint.doc_have_acc = acc;
+            checkpoint.valid = true;
+        } else {
+            // Recorded even when the chain emitted nothing: appending to an
+            // empty last layer is resumable too, with layer_have_acc false.
+            checkpoint = TapeCheckpoint{tape.instrs.size(), tape.params.size(), tape.blob.size(),
+                                        layer.id,           layer_val,          acc,
+                                        true,               {}};
+        }
+        return fold_layer(layer, layer_val, acc);
+    }
+
     // Which visible SDF layers a PART compiles. Before and Only are the two
     // halves of the split a brick refill takes; Except is the other pairing —
     // Except and Only also sum to the whole, and it is the one a host wants
@@ -1327,6 +1386,13 @@ struct Compiler {
     void run_part(const Document& doc, const CullRegion* cull_region, LayerId stop, Part part) {
         begin_cull(cull_region, document_pad(doc, cull_region));
         bool have_acc = false;
+        // First among the layers THIS PART selects, which is what makes a part
+        // a document in its own right: `Only` is the layer alone, so its
+        // operator is not applied and the value is the one a caller folds
+        // forward; `Except` is the document without that layer, so whichever
+        // layer opens the remainder initialises it. `Before` is a prefix, so
+        // its first layer is the document's first either way.
+        bool first = true;
         for (const Layer& layer : doc.layers) {
             if (!layer.visible || layer.kind != LayerKind::Sdf || !layer.sdf) continue;
             // Before STOPS at the named layer, so everything above it goes too.
@@ -1340,57 +1406,23 @@ struct Compiler {
             } else if (layer.id == stop) {
                 continue;
             }
-            on_tail_path_ = true;
-            tail_checkpoint_taken_ = false;
-            layer_extent_ = math::Aabb{};
-            const bool layer_val = compile_list(layer.sdf->roots, *layer.sdf, layer, false);
-            on_tail_path_ = false;
-            // The same record run() makes, so a PART is resumable on the same
-            // terms as a whole: a refill stores the stack where this checkpoint
-            // sits, and the active half is the half a suffix continues.
-            if (tail_checkpoint_taken_) {
-                checkpoint.layer = layer.id;
-                checkpoint.doc_have_acc = have_acc;
-                checkpoint.valid = true;
-            } else {
-                checkpoint = TapeCheckpoint{tape.instrs.size(), tape.params.size(),
-                                            tape.blob.size(), layer.id, layer_val,
-                                            have_acc,          true, {}};
-            }
-            have_acc = fold_layer(layer, layer_val, have_acc);
+            // The same body run() uses, so a PART is resumable on the same
+            // terms as a whole and emits the same bytes at the same boundary.
+            have_acc = compile_and_fold_layer(layer, first, have_acc);
+            first = false;
         }
     }
 
     void run(const Document& doc, const CullRegion* cull_region) {
-        float pad = 0.0f;
-        pad = document_pad(doc, cull_region);
-        begin_cull(cull_region, pad);
+        begin_cull(cull_region, document_pad(doc, cull_region));
         bool have_acc = false;
+        // The document's own first visible SDF layer, read off the layer list
+        // and never off the accumulator -- see compile_and_fold_layer.
+        bool first = true;
         for (const Layer& layer : doc.layers) {
             if (!layer.visible || layer.kind != LayerKind::Sdf || !layer.sdf) continue;
-            // Each layer's root list IS a tail chain — an append to it lands at
-            // its end — so the walk starts on the tail path and compile_list
-            // narrows it to the last member from there.
-            on_tail_path_ = true;
-            tail_checkpoint_taken_ = false;
-            layer_extent_ = math::Aabb{};
-            bool layer_val = compile_list(layer.sdf->roots, *layer.sdf, layer, false);
-            on_tail_path_ = false;
-            if (tail_checkpoint_taken_) {
-                // A tail GROUP took the position, deeper than this. Its frames
-                // describe everything between there and here; only what the
-                // group could not know is filled in.
-                checkpoint.layer = layer.id;
-                checkpoint.doc_have_acc = have_acc;
-                checkpoint.valid = true;
-            } else {
-                // Recorded even when the chain emitted nothing: appending to an
-                // empty last layer is resumable too, with layer_have_acc false.
-                checkpoint = TapeCheckpoint{tape.instrs.size(), tape.params.size(),
-                                            tape.blob.size(), layer.id, layer_val,
-                                            have_acc,          true, {}};
-            }
-            have_acc = fold_layer(layer, layer_val, have_acc);
+            have_acc = compile_and_fold_layer(layer, first, have_acc);
+            first = false;
         }
     }
 
@@ -1470,19 +1502,6 @@ std::uint64_t next_compile_id() {
 
 }  // namespace
 
-namespace {
-// A composition that folds exactly as every layer folded before compositions
-// existed: min(), which is exact, associative, adds no extent and needs no
-// operand it does not have. Every clause matters -- a hard SUBTRACT is not it
-// (it is not commutative and a caller holding two values would have to know
-// which is which), and a smooth Add is not it (it is not associative, so the
-// value at a boundary is not what a caller would rejoin to).
-bool composition_is_hard_union(const LayerComposition& c) {
-    return c.op == Op::Add && c.blend.profile == BlendProfile::Hard && c.blend.k == 0.0f &&
-           c.rounding == 0.0f;
-}
-}  // namespace
-
 const LayerComposition* layer_join_composition(const Document& doc, LayerId active) {
     const Layer* found = nullptr;
     bool below = false;
@@ -1513,7 +1532,7 @@ bool layer_join_is_hard_union(const Document& doc) {
         ++visible;
     }
     if (!active || visible <= 1) return true;
-    return composition_is_hard_union(active->composition);
+    return layer_composition_is_hard_union(active->composition);
 }
 
 LayerId first_composed_fold_layer(const Document& doc) {
@@ -1524,7 +1543,7 @@ LayerId first_composed_fold_layer(const Document& doc) {
         // operator is not applied, so whatever it carries cannot break a
         // caller's composition -- skipped here for exactly that reason and not
         // as an approximation.
-        if (have_acc && !composition_is_hard_union(l.composition)) return l.id;
+        if (have_acc && !layer_composition_is_hard_union(l.composition)) return l.id;
         have_acc = true;
     }
     return 0;

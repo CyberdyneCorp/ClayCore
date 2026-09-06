@@ -776,3 +776,193 @@ TEST_CASE("c abi: excluding a layer is refused once any layer composes") {
               CLAY_OK);
     }
 }
+
+// -- 5.3, the half that was missing: the reach a fold gives an edit -----------
+
+namespace {
+
+// EVERY POINT THE COMMAND CHANGED, AGAINST THE BOX THE COMMAND CLAIMS.
+//
+// This is the invariant apply_edit rests on and it is the only one that
+// matters: a brick outside `bound` keeps the seed it already holds AND has its
+// revision advanced, so the next refill answers it from the stale seed through
+// the rev == now path. A sample that moved outside the box is a brick that will
+// never be recomputed and will never report anything.
+//
+// BAND-CLAMPED, because that is what a brick stores. A difference far outside
+// the narrow band is not something any consumer can see; a difference inside it
+// is exactly the surface moving.
+//
+// AND THE BOX IS DILATED BY THE BAND, because a brick is refilled when its own
+// box INTERSECTS the dirty region, not when its samples are inside it: a sample
+// within a band of the region sits in a brick that touches it. Without this the
+// check would fail on a plain unioning document, where hiding a layer moves the
+// band a hair outside that layer's geometry box -- which is why the control
+// subcases below run the same measurement over a document that unions.
+constexpr float kBand = 0.1f;
+
+int changed_outside(const Document& before, const Document& after, const math::Aabb& bound,
+                    const std::vector<cfloat3>& pts, float* worst = nullptr) {
+    const Tape a = compile_document(before);
+    const Tape b = compile_document(after);
+    const math::Aabb box = bound.empty() ? bound : bound.dilated(kBand);
+    int n = 0;
+    if (worst) *worst = 0.0f;
+    for (cfloat3 p : pts) {
+        const float da = kernel::cclamp(a.eval(p).d, -kBand, kBand);
+        const float db = kernel::cclamp(b.eval(p).d, -kBand, kBand);
+        if (da == db) continue;
+        if (box.contains(p)) continue;
+        ++n;
+        if (worst) *worst = kernel::cmax(*worst, std::fabs(da - db));
+    }
+    return n;
+}
+
+// The bound apply_edit actually uses: command_influence_bound on BOTH sides of
+// the apply, unioned. Neither side alone is the answer -- an add's layer is not
+// there before and a removal's is not there after -- which is the contract
+// command_influence_bound states and apply_edit follows.
+math::Aabb reach_of(const Document& before, const Document& after, const Command& cmd) {
+    math::Aabb b = command_influence_bound(before, cmd);
+    b.expand(command_influence_bound(after, cmd));
+    return b;
+}
+
+// The document a command produces.
+//
+// ONLY FOR LAYER-LEVEL COMMANDS. Copying a Document shares its SdfContent by
+// shared_ptr, so a command that edits an ITEM edits both copies and every
+// comparison is then against itself -- silently passing. The item cases below
+// build their two documents from scratch for that reason, which also makes them
+// independent of whether `apply` did what it said.
+Document applied(const Document& doc, const Command& cmd) {
+    Document after = doc;
+    REQUIRE(apply(after, cmd).has_value());
+    return after;
+}
+
+}  // namespace
+
+TEST_CASE("hiding the bottom layer dirties the layer it stops being folded into") {
+    // THE FIRST-VISIBLE FLIP. The first visible SDF layer initialises the
+    // accumulator and its own operator is not applied, so hiding, removing,
+    // adding or reordering the BOTTOM layer turns the layer above it from
+    // folded into initialising -- and a subtractive cutter that was taking
+    // material away comes back as the base shape, solid, over its OWN whole
+    // extent. The edited layer's box is nowhere near it.
+    Document doc;
+    Layer& base = doc.add_sdf_layer("base");
+    base.sdf->insert(sphere_at(0.0f, 1.0f));
+    const LayerId base_id = base.id;
+    Layer& cutter = doc.add_sdf_layer("cutter");
+    cutter.sdf->insert(sphere_at(1.3f, 0.5f));
+    cutter.composition = composed(Op::Subtract);
+
+    const std::vector<cfloat3> pts = lattice(24);
+    const Command hide{SetLayerVisibleCmd{base_id, false}};
+    const Document hidden = applied(doc, hide);
+    const math::Aabb reach = reach_of(doc, hidden, hide);
+    float worst = 0.0f;
+    CHECK(changed_outside(doc, hidden, reach, pts, &worst) == 0);
+    CHECK(worst == 0.0f);
+
+    SUBCASE("and the flip really does change the field out there") {
+        // The teeth, twice over: the point moves, and it moves OUTSIDE the box
+        // the base layer alone would have named -- so the widening is what is
+        // being tested and not an accident of the fixture.
+        const cfloat3 p = cf3(1.6f, 0.0f, 0.0f);
+        const float lit = compile_document(doc).eval(p).d;
+        const float dark = compile_document(hidden).eval(p).d;
+        CHECK(lit > 0.0f);   // the cutter is carving here, so there is no material
+        CHECK(dark < 0.0f);  // ...and with the base gone it IS the material
+        CHECK_FALSE(layer_influence_bound(*doc.find_layer(base_id)).contains(p));
+        CHECK(reach.contains(p));
+    }
+
+    SUBCASE("removing it and adding it back name the same region") {
+        const Command remove{RemoveLayerCmd{base_id}};
+        const Document without = applied(doc, remove);
+        CHECK(changed_outside(doc, without, reach_of(doc, without, remove), pts) == 0);
+        // ...and back, which with the removal is the reorder gate's Remove+Add
+        // pair: each half has to name the flip on its own side.
+        AddLayerCmd add;
+        add.layer = *doc.find_layer(base_id);
+        add.index = 0;
+        const Command re{add};
+        const Document restored = applied(without, re);
+        CHECK(changed_outside(without, restored, reach_of(without, restored, re), pts) == 0);
+    }
+
+    SUBCASE("a unioning layer above needs none of it, so nothing that unions pays") {
+        Document plain = doc;
+        plain.layers.back().composition = LayerComposition{};
+        const math::Aabb b = command_influence_bound(plain, hide);
+        const math::Aabb own = layer_influence_bound(*plain.find_layer(base_id));
+        CHECK(b.min.x == doctest::Approx(own.min.x));
+        CHECK(b.max.x == doctest::Approx(own.max.x));
+    }
+}
+
+TEST_CASE("an item edit is dilated by the folds it passes through") {
+    // A combine is POINTWISE, so an edit beneath a carving layer changes the
+    // document exactly where it changed the accumulator -- but a SMOOTH fold is
+    // not pointwise: it moves the result up to its own support away from where
+    // its operands moved. That is the dilation node_reach_bound applies once per
+    // enclosing GROUP, one level up; node_reach_bound stops at the layer root
+    // because it holds a Layer and not a Document, so this is the term only
+    // node_command_bound can add.
+    //
+    // This is ORDINARY SCULPTING. Every dab into a document with one soft fold
+    // leaves stale bricks without it -- both a dab into the folding layer and a
+    // dab into the layer beneath it, which is why both are measured here.
+    const std::vector<cfloat3> pts = lattice(32);
+
+    // Built from scratch on each side rather than copied and edited: a Document
+    // copy shares its SdfContent, so an item edit through `apply` would move
+    // both sides at once and the comparison would pass by being against itself.
+    auto build = [](float low_r, float high_r, float k) {
+        Document d;
+        d.add_sdf_layer("low").sdf->insert(sphere_at(-0.7f, low_r));
+        Layer& h = d.add_sdf_layer("high");
+        h.sdf->insert(sphere_at(0.7f, high_r));
+        h.composition = composed(Op::Add, BlendProfile::Quadratic, k);
+        return d;
+    };
+
+    for (bool edit_below : {false, true}) {
+        CAPTURE(edit_below);
+        const Document before = build(0.5f, 0.5f, 0.15f);
+        const Document after =
+            edit_below ? build(0.58f, 0.5f, 0.15f) : build(0.5f, 0.58f, 0.15f);
+        const Layer& target = edit_below ? before.layers.front() : before.layers.back();
+        const Command grow{SetPrimCmd{target.id, target.sdf->roots.back(), Prim::sphere(0.58f)}};
+
+        const math::Aabb reach = reach_of(before, after, grow);
+        float worst = 0.0f;
+        CHECK(changed_outside(before, after, reach, pts, &worst) == 0);
+        CHECK(worst == 0.0f);
+
+        SUBCASE("and the fold's support is exactly what the box was missing") {
+            // The revert, measured rather than described: the same box without
+            // the layer fold's dilation is what `node_reach_bound` alone
+            // reports, and the field leaves it.
+            const float support = layer_blend_support(before.layers.back());
+            REQUIRE(support == doctest::Approx(0.6f));
+            CHECK(changed_outside(before, after, reach.dilated(-support), pts) > 0);
+        }
+
+        SUBCASE("and a HARD fold pays none of it") {
+            // The control. Under a hard union the same edit stays inside the
+            // un-dilated box, so the leak above is the fold's support and not
+            // the fixture's geometry -- and every document that predates layer
+            // composition is this one.
+            const Document hb = build(0.5f, 0.5f, 0.0f);
+            const Document ha = edit_below ? build(0.58f, 0.5f, 0.0f) : build(0.5f, 0.58f, 0.0f);
+            const Layer& t = edit_below ? hb.layers.front() : hb.layers.back();
+            const Command g{SetPrimCmd{t.id, t.sdf->roots.back(), Prim::sphere(0.58f)}};
+            CHECK(layer_blend_support(hb.layers.back()) == 0.0f);
+            CHECK(changed_outside(hb, ha, reach_of(hb, ha, g), pts) == 0);
+        }
+    }
+}

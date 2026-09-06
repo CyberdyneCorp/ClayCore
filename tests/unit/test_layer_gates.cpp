@@ -301,6 +301,120 @@ TEST_CASE("gate: a refill sees a cutter hidden, outside the cutter's own box") {
     }
 }
 
+TEST_CASE("gate: a refill sees the BOTTOM layer hidden, outside that layer's box") {
+    // THE OTHER HALF OF 6.1, and the one the gate above cannot see. There the
+    // CUTTER is hidden; here the layer BENEATH it is -- which changes the field
+    // by a different mechanism entirely.
+    //
+    // The first visible SDF layer initialises the accumulator and ITS OWN
+    // OPERATOR IS NOT APPLIED, so hiding the bottom layer PROMOTES the cutter
+    // to the initialiser: a cutter that was taking material away becomes the
+    // shape itself. The base here is r 0.5 and the cutter r 1.6, so that
+    // promotion changes the field out to x = 1.6 while the dirty region taken
+    // from the base's own extent stops at 0.5. Bricks past it keep their seeds
+    // AND have their revision advanced, so the next refill answers them from a
+    // `below` half computed for a document that no longer exists. Measured with
+    // the widening reverted: bricks 2, 3 and 4 come back resumed and unchanged,
+    // where a fresh document moves all three by 0.1.
+    //
+    // THE TOP LAYER IS LOAD-BEARING TWICE OVER, and both halves were found by
+    // measuring rather than by reasoning. It has to UNION, because a composed
+    // seam stores no seed at all (task 4.5) and there would be nothing stale to
+    // catch. And it has to be WIDE -- r 1.5, reaching every brick -- because
+    // the promotion only ever turns empty space into material, and a brick that
+    // held nothing before the edit is not answered from a lattice seed at all:
+    // with a small top layer the outer bricks were empty, were refilled from
+    // scratch, and the gate passed with the fix reverted.
+    const std::vector<clay_brick_request> reqs = axis_bricks(5);  // x in [0, 2)
+
+    struct Doc {
+        clay_document* d = nullptr;
+        clay_layer_id base = 0, cutter = 0, top = 0;
+        ~Doc() { clay_document_destroy(d); }
+    };
+
+    auto build = [&](Doc& doc, int32_t op, int32_t base_visible) {
+        doc.d = clay_document_create();
+        REQUIRE(doc.d != nullptr);
+        REQUIRE(clay_add_sdf_layer(doc.d, "base", &doc.base) == CLAY_OK);
+        add_sphere(doc.d, doc.base, 0.5f, 0.0f);
+        REQUIRE(clay_add_sdf_layer(doc.d, "cutter", &doc.cutter) == CLAY_OK);
+        add_sphere(doc.d, doc.cutter, 1.6f, 0.0f);
+        REQUIRE(clay_document_set_layer_composition(doc.d, doc.cutter, op, CLAY_BLEND_HARD, 0.0f,
+                                                    0.0f) == CLAY_OK);
+        REQUIRE(clay_add_sdf_layer(doc.d, "top", &doc.top) == CLAY_OK);
+        add_sphere(doc.d, doc.top, 1.5f, 0.0f);
+        if (!base_visible)
+            REQUIRE(clay_document_set_layer_visible(doc.d, doc.base, 0) == CLAY_OK);
+    };
+
+    for (int32_t op : {CLAY_OP_INTERSECT, CLAY_OP_SUBTRACT}) {
+        CAPTURE(op);
+        Doc doc;
+        build(doc, op, 1);
+        const std::vector<float> lit = refill(doc.d, reqs);
+        REQUIRE(clay_document_set_layer_visible(doc.d, doc.base, 0) == CLAY_OK);
+        const std::vector<float> after_hiding = refill(doc.d, reqs);
+
+        Doc from_scratch;
+        build(from_scratch, op, 0);
+        CHECK(differing(after_hiding, refill(from_scratch.d, reqs)) == 0);
+        CHECK(differing(after_hiding, lit) > 0);  // hiding it did something
+    }
+
+    SUBCASE("and a reorder that moves it off the bottom is the same flip") {
+        // 6.2's invalidation half for the case its own gate cannot reach: a
+        // reorder is a Remove+Add pair, each bounded by the MOVED layer's own
+        // extent, so moving the BOTTOM layer up promotes the cutter exactly as
+        // hiding it does -- and the moved layer's box is the same 0.5 that does
+        // not reach the bricks the promotion changes.
+        Doc doc;
+        build(doc, CLAY_OP_SUBTRACT, 1);
+        const std::vector<float> before = refill(doc.d, reqs);
+        REQUIRE(clay_document_move_layer(doc.d, doc.base, 2) == CLAY_OK);  // to the top
+        const std::vector<float> moved = refill(doc.d, reqs);
+
+        // The same stack built in that order from scratch, which takes no
+        // reorder and so shares none of the path under test.
+        clay_document* fresh = clay_document_create();
+        REQUIRE(fresh != nullptr);
+        clay_layer_id cutter = 0, top = 0, base = 0;
+        REQUIRE(clay_add_sdf_layer(fresh, "cutter", &cutter) == CLAY_OK);
+        add_sphere(fresh, cutter, 1.6f, 0.0f);
+        REQUIRE(clay_document_set_layer_composition(fresh, cutter, CLAY_OP_SUBTRACT,
+                                                    CLAY_BLEND_HARD, 0.0f, 0.0f) == CLAY_OK);
+        REQUIRE(clay_add_sdf_layer(fresh, "top", &top) == CLAY_OK);
+        add_sphere(fresh, top, 1.5f, 0.0f);
+        REQUIRE(clay_add_sdf_layer(fresh, "base", &base) == CLAY_OK);
+        add_sphere(fresh, base, 0.5f, 0.0f);
+        CHECK(differing(moved, refill(fresh, reqs)) == 0);
+        CHECK(differing(moved, before) > 0);  // the move changed the field
+        clay_document_destroy(fresh);
+    }
+
+    SUBCASE("and the change really is outside the base layer's own box") {
+        // The teeth. Without this the case above could be passing on a fixture
+        // where the base reaches every brick it is compared over, which is the
+        // arrangement in which the un-widened region is accidentally right.
+        Doc doc;
+        build(doc, CLAY_OP_INTERSECT, 1);
+        float lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};
+        int32_t bounded = 0;
+        REQUIRE(clay_layer_bounds(doc.d, doc.base, lo, hi, &bounded) == CLAY_OK);
+        REQUIRE(bounded == 1);
+        CHECK(hi[0] < 0.6f);
+        const std::vector<float> lit = refill(doc.d, reqs);
+        REQUIRE(clay_document_set_layer_visible(doc.d, doc.base, 0) == CLAY_OK);
+        const std::vector<float> hidden = refill(doc.d, reqs);
+        const std::size_t per = kDim * kDim * kDim;
+        int outside_differs = 0;
+        for (std::size_t b = 2; b < reqs.size(); ++b)  // bricks from x = 0.8 out
+            for (std::size_t s = 0; s < per; ++s)
+                if (lit[b * per + s] != hidden[b * per + s]) ++outside_differs;
+        CHECK(outside_differs > 0);
+    }
+}
+
 // -- 6.2 order matters, and survives a reload --------------------------------
 
 namespace {
@@ -703,3 +817,4 @@ TEST_CASE("gate: a layer fold emits the combine a group fold emits, and no more"
         // could not land on it at three different chunkings.
     }
 }
+

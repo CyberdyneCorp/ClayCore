@@ -174,6 +174,15 @@ class CullPlan;
 // empty space with no error to say why. Item chains already work this way; this
 // is that rule one level up, not a second one.
 //
+// WHICH LAYER IS FIRST IS A PROPERTY OF THE DOCUMENT -- of the visible SDF
+// layer LIST -- and never of what survived a cull. A per-brick tape decides it
+// from the same list the whole-document tape does, so a brick that culls away
+// everything beneath a composed layer still applies that layer's operator,
+// against the far field. Deciding it from the per-compile accumulator instead
+// would promote a cutter to the initialiser in one brick and not its
+// neighbour: a subtract that renders as material, an intersect that stops
+// cutting, and no error anywhere to say so.
+//
 // A layer's own symmetry -- mirror copies, radial copies -- is resolved inside
 // its chain, so it is one value by the time it folds. Combining each copy with
 // what is beneath separately would be a different field wherever the fold is
@@ -184,6 +193,15 @@ class CullPlan;
 // field where it does not (intersect). Skipping the second kind would leave a
 // per-brick tape holding material the whole-document tape removes, which is a
 // wrong field and not an error.
+//
+// The MIRROR of that, for a layer that is not the first and whose accumulator
+// is absent -- every layer beneath it empty, hidden or culled out of this
+// brick -- is the item rule verbatim: a union takes the layer as it is, a
+// carving operator drops it (over nothing, a subtract and an intersect ARE
+// nothing), and a material-creating one (Shell, Replace) folds against an
+// explicit empty. That is what `compile_list` and `compile_group` already do
+// with an item that opens a chain, which is what keeps a subtracting LAYER and
+// a subtracting ITEM the same document.
 //
 // `index` (cull_index.h) supplies per-revision cached bounds; `plan` a
 // per-batch coarse cull, valid only with a `cull` region contained in the

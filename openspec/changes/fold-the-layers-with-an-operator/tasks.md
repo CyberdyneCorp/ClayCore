@@ -30,12 +30,25 @@
       folded against the far field where it does not — an intersecting layer
       that is skipped leaves material the whole-document tape removes, which is
       the sharpest silent case in the whole change and was not in the audit
-- [x] 2.2 The first visible layer initialises and its op is NOT applied — the
-      same `have_acc` rule items already follow, not a second one. It is the
-      `if (have_acc)` guard on the combine and nothing else; the item rule's
-      OTHER half (skip a carving item that opens a chain, seed a
-      material-creating one) deliberately does not lift, because either would
-      show nothing where the spec asks to show the layer itself
+- [x] 2.2 The first visible layer initialises and its op is NOT applied — and
+      WHICH layer that is comes from the document's visible SDF layer LIST, not
+      from the compile's accumulator flag. Reading it off `have_acc` was a
+      silent wrong field: a brick whose cull drops every item beneath a composed
+      layer arrives with `have_acc` false, and the layer was then promoted to
+      the initialiser FOR THAT BRICK — an intersecting cutter returning a solid
+      sphere where the document has nothing (512/512 samples, no error, both
+      through `compile_document(&cull)` and through
+      `clay_brick_cache_eval_requests`). `Compiler::compile_and_fold_layer`
+      takes `first` from the walk's own layer selection, which makes a PART a
+      document in its own right as well (`Only` is the layer alone, `Except` is
+      the document without it). The item rule's OTHER half DOES lift, but only
+      for a layer that is not the first: with the accumulator absent a carving
+      operator drops the layer, a material-creating one (Shell, Replace) folds
+      against an explicit empty, and a union takes the layer as it is — verbatim
+      what `compile_list` and `compile_group` do with an item that opens a
+      chain, which is what keeps a subtracting LAYER and a subtracting ITEM the
+      same document. `clay_test::ref_eval_document` needed the same correction:
+      an independent evaluator that repeats the defect agrees with it
 - [x] 2.3 One low-level combine emitter shared with the item path; the kernel
       math stays single-source — `Compiler::emit_chain_combine`, which was
       already duplicated byte for byte between `compile_group`'s tail and
@@ -191,9 +204,38 @@
       gesture stops skipping invalidation on a similarity that is not one — with
       the trade (an absolute radius, or an edit per scale) stated in the header
       beside the composition setter, where a host will actually meet it
+- [x] 5.4 THE TWO REACHES THAT WERE MISSING, both silent and both now measured
+      by comparing every changed sample against the box the command reports.
+      (a) EVERY FOLD ABOVE, not only the layer's own: an edit is carried up the
+      stack through each fold it passes, so `node_command_bound` and
+      `layer_command_bound` both dilate by `folds_from_layer_support` — the sum
+      of the layer's own fold support and every fold above it, which is
+      `node_reach_bound`'s per-group dilation one level up, where
+      `node_reach_bound` stops because it holds a Layer and not a Document.
+      5.3's "an edit inside a lower layer is deliberately not widened" was right
+      only for a HARD combine; measured with it reverted, an ordinary dab under
+      one soft fold leaves band-relevant samples changed outside the reported
+      box. (b) THE FIRST-VISIBLE FLIP: adding, removing, hiding or showing the
+      bottom-most visible SDF layer — and the Remove+Add pair a reorder is —
+      turns the layer above it from folded into initialising, so a subtractive
+      cutter comes back as the base shape over its OWN whole extent.
+      `first_visible_flip_bound` covers it, for a composed next layer only,
+      since promoting a hard union differs only where the edited layer had
+      material. Measured with it reverted: a refill answers three whole bricks
+      from a `below` half computed for a document that no longer exists
 
 ## 6. Gates
 
+- [x] 6.1b Hide/reorder the BOTTOM layer, which the gate below does not reach:
+      hiding the CUTTER and hiding the layer BENEATH it change the field by
+      different mechanisms, and only the second one moves the first-visible
+      rule. The fixture had to be measured rather than reasoned about twice
+      over — the top layer must UNION (a composed seam stores no seed) and must
+      be WIDE enough to reach the outer bricks, because the promotion only ever
+      turns empty space into material and a brick that held nothing before the
+      edit is not answered from a lattice seed at all. With the widening
+      reverted, three bricks come back resumed and unchanged where a document
+      built that way from scratch moves all three
 - [x] 6.1 Hide/show a subtractive layer restores exact geometry — and the half
       the geometry cannot see. Hiding goes through a dirty REGION, and a brick
       outside it keeps what it had and is re-stamped to the new revision, so a

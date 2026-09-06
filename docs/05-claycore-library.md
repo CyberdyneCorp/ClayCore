@@ -654,11 +654,24 @@ distance, colour, bounds and safe step, sample for sample.
 **The first visible layer's operator is not applied.** `Subtract(empty, A)` and
 `Intersect(empty, A)` are the two ways a stack opens with nothing on screen and
 no error, and an artist who drags their base layer to the top would meet both.
-This is the `have_acc` rule items have always followed, one level up — the
-`if (have_acc)` guard on the combine and nothing else. The item rule's OTHER
-half does **not** lift: an item that opens a chain with a carve is SKIPPED, and a
-layer that opens a stack with one INITIALISES, because skipping is the empty
-frame this rule exists to prevent.
+The item rule's OTHER half does **not** lift for that first layer: an item that
+opens a chain with a carve is SKIPPED, and a layer that opens a stack with one
+INITIALISES, because skipping is the empty frame this rule exists to prevent.
+
+**Which layer is first is a property of the DOCUMENT.** It is read off the
+visible SDF layer list and never off the accumulator a particular compile
+happens to hold. A per-brick tape can drop every item of every layer beneath a
+composed one — that is what culling is for — and a compiler that decided
+first-ness from its own accumulator would then stop applying that layer's
+operator for that brick alone: an intersecting cutter returning a solid sphere
+where the document has nothing, a subtracting one rendering as a lump, in one
+brick and not its neighbour, with no error and no counter. For a layer that is
+not the document's first the item rule DOES lift, in full: with the accumulator
+absent a carving operator drops the layer (over nothing, a subtract and an
+intersect *are* nothing), `Shell` and `Replace` fold against an explicit empty,
+and a union takes the layer as it is — verbatim what `compile_list` and
+`compile_group` do with an item that opens a chain, which is what keeps a
+subtracting LAYER and a subtracting ITEM the same document.
 
 **An empty layer is not always a no-op.** A layer whose chain produced nothing —
 empty, all hidden, or culled out of one brick — is skipped where its operator
@@ -697,10 +710,28 @@ outside its left operand — and for an **intersect** it is unioned with the ext
 of the visible SDF layers BENEATH, because `max(acc, item)` takes material away
 everywhere the accumulator has any. The same widening covers hiding an
 intersecting layer and reordering one, both of which the naive box gets wrong in
-the direction that leaves stale bricks. An edit made INSIDE a lower layer is
-deliberately NOT widened: a combine is pointwise, so it changes the folded result
-exactly where it changed the accumulator, dilated only by the blend supports of
-the folds above it.
+the direction that leaves stale bricks.
+
+An edit made INSIDE a layer is not widened by the OPERATORS above it — a combine
+is pointwise, so it changes the folded result exactly where it changed the
+accumulator — but it IS dilated by their **supports**: a smooth or extended fold
+moves its result up to its own support away from where its operands moved, so an
+item edit's reach is its own bound dilated by the fold its layer enters through
+and by every fold above that, summed (`folds_from_layer_support`). It is the
+dilation `node_reach_bound` already applies once per enclosing GROUP, one level
+up, and it has to live in `node_command_bound` because that is the function
+holding the Document. Without it an ordinary dab into a document with one soft
+fold leaves band-relevant samples changed outside the box the command reported.
+
+And a command that changes **which layers are visible SDF layers** — add,
+remove, hide, show, and the remove-and-add pair `clay_document_move_layer` is —
+can move the first-visible rule onto the layer above it, which is a change over
+that layer's OWN whole extent rather than over the edited layer's. Hiding the
+base under a subtractive cutter promotes the cutter to the initialiser and it
+comes back as material everywhere its shape is. `first_visible_flip_bound`
+covers that, and only for a composed layer above, since promoting a hard union
+from `min(acc, M)` to `M` differs only where `acc` had material — which is the
+edited layer's own box, already in the region.
 
 That intersect box is the conservative answer and it is expensive: the host
 measured an intersecting item's live drag refilling **26.2x** the surface bricks

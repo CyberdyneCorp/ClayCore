@@ -235,6 +235,22 @@ struct LayerComposition {
     float rounding = 0.0f;
 };
 
+// A composition that folds exactly as every layer folded before compositions
+// existed: min(), which is exact, associative, adds no extent and needs no
+// operand it does not have. Every clause matters -- a hard SUBTRACT is not it
+// (it is not commutative and a caller holding two values would have to know
+// which is which), and a smooth Add is not it (it is not associative, so the
+// value at a boundary is not what a caller would rejoin to).
+//
+// ONE SPELLING, deliberately: the compiler asks it to decide whether a split
+// may be taken and the command bounds ask it to decide whether a dirty region
+// has to widen. Two copies of it would be one edit away from a refill that
+// splits under a fold the bound did not widen for, which is silent.
+inline bool layer_composition_is_hard_union(const LayerComposition& c) {
+    return c.op == Op::Add && c.blend.profile == BlendProfile::Hard && c.blend.k == 0.0f &&
+           c.rounding == 0.0f;
+}
+
 inline constexpr int kMaxPrimParams = 7;
 
 struct Prim {

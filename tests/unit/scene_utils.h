@@ -201,15 +201,35 @@ inline CTapeValue ref_eval_document(const scene::Document& doc, cfloat3 p) {
     using namespace kernel;
     CTapeValue acc;
     bool have_acc = false;
+    // FIRST IS A PROPERTY OF THE LAYER LIST, not of what the layers beneath
+    // happened to produce. Reading it off `have_acc` is exactly the defect this
+    // evaluator exists to catch in the compiler, so it must not repeat it: a
+    // document whose lower layers are empty would then show an intersecting
+    // layer whole, and agree with a compiler that did the same.
+    bool first = true;
     for (const scene::Layer& layer : doc.layers) {
         if (!layer.visible || layer.kind != scene::LayerKind::Sdf || !layer.sdf) continue;
+        const bool is_first = first;
+        first = false;
+        const scene::LayerComposition& lc = layer.composition;
+        // An absent accumulator under a layer that is not the first: the item
+        // rule, which is what compile_and_fold_layer lifts (a carving operator
+        // over nothing is nothing; Shell and Replace fold against the far
+        // field; a union is the layer itself).
+        if (!is_first && !have_acc && lc.op != scene::Op::Add &&
+            !scene::op_creates_material(lc.op))
+            continue;
         CTapeValue lv;
         if (!ref_eval_list(layer.sdf->roots, *layer.sdf, layer, p, lv, false)) {
             // A layer whose chain produced nothing IS the far field, and this
             // says so directly rather than deciding which operators may be
             // skipped: combining with FAR is already a no-op for the ones the
             // compiler skips, and it is not for the ones it does not.
-            if (!have_acc) continue;
+            //
+            // With nothing on either side there is nothing to fold at all --
+            // unless the operator makes material out of the far field (Shell,
+            // Replace), which the seed below hands it.
+            if (!have_acc && !(!is_first && scene::op_creates_material(lc.op))) continue;
             lv.d = CLAY_TAPE_FAR;
             lv.color = kernel::cf3(1.0f, 1.0f, 1.0f);
         }
@@ -219,11 +239,16 @@ inline CTapeValue ref_eval_document(const scene::Document& doc, cfloat3 p) {
         // and still in agreement with it; a reference that unions whatever the
         // document says agrees only while every fixture unions, which is the
         // one condition under which a fold bug is invisible.
-        const scene::LayerComposition& comp = layer.composition;
-        if (have_acc)
-            acc = ctape_combine_values(acc, lv, static_cast<int>(comp.op),
-                                       static_cast<int>(comp.blend.profile), comp.blend.k,
-                                       comp.rounding * scene::layer_distance_scale(layer));
+        const float rb = lc.rounding * scene::layer_distance_scale(layer);
+        if (is_first)
+            acc = lv;
+        else if (have_acc)
+            acc = ctape_combine_values(acc, lv, static_cast<int>(lc.op),
+                                       static_cast<int>(lc.blend.profile), lc.blend.k, rb);
+        else if (lc.op != scene::Op::Add)
+            // Shell or Replace over an absent accumulator: the far field is the
+            // left operand, exactly as ref_eval_list seeds one for an item.
+            acc = ref_combine(nullptr, kernel::cf3(1.0f, 1.0f, 1.0f), lv, lc.op, lc.blend, rb);
         else
             acc = lv;
         have_acc = true;

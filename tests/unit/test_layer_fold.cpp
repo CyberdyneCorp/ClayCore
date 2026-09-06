@@ -438,3 +438,123 @@ TEST_CASE("an intersecting layer culled out of a brick still takes the material 
               kernel::cclamp(culled.eval(cf3(0, 0, 0)).d, -band, band));
     }
 }
+
+TEST_CASE("a brick that culls the layers BENEATH still applies the layer above") {
+    // THE MIRROR OF THE ONE ABOVE, and the one that was missing. There the
+    // COMPOSED layer was culled away; here everything BENEATH it is, which is
+    // the ordinary case for a cutter that sits away from the base -- and it is
+    // the sharper of the two, because "which layer is first" is a property of
+    // the DOCUMENT and a per-compile accumulator flag is not.
+    //
+    // Deciding first-ness from that flag promotes the composed layer to the
+    // initialiser FOR THAT BRICK ONLY: its operator is silently not applied and
+    // the brick returns a field the document does not have -- an intersecting
+    // cutter renders as a solid sphere, a subtracting one as a lump. No error,
+    // no counter, one brick different from its neighbour.
+    for (Op op : {Op::Intersect, Op::Subtract}) {
+        CAPTURE(static_cast<int>(op));
+        Document doc;
+        Layer& base = doc.add_sdf_layer("base");
+        base.sdf->insert(sphere_at(0.0f, 1.0f, cf3(0.8f, 0.2f, 0.2f)));
+        Layer& clip = doc.add_sdf_layer("clip");
+        clip.sdf->insert(sphere_at(3.0f, 0.5f, cf3(0.2f, 0.8f, 0.2f)));
+        clip.composition = composed(op);
+
+        // A brick over the clip layer's own sphere, far enough from the base
+        // that the base is culled out of it entirely.
+        const CullRegion cull{math::Aabb{cf3(2.7f, -0.3f, -0.3f), cf3(3.3f, 0.3f, 0.3f)}};
+        const Tape full = compile_document(doc);
+        const Tape culled = compile_document(doc, &cull);
+
+        // Neither disjoint sphere survives an intersect and a subtract cannot
+        // create material, so the whole document is empty here -- and the
+        // per-brick tape has to say the same thing.
+        int solid_full = 0, solid_culled = 0;
+        clay_test::Lcg rng(9182);
+        for (int i = 0; i < 512; ++i) {
+            const cfloat3 p = cf3(3.0f, 0.0f, 0.0f) + rng.vec3(-0.3f, 0.3f);
+            if (full.eval(p).d < 0.0f) ++solid_full;
+            if (culled.eval(p).d < 0.0f) ++solid_culled;
+        }
+        CHECK(solid_full == 0);
+        CHECK(solid_culled == 0);
+
+        SUBCASE("and the clip layer's own sphere really is solid there on its own") {
+            // Teeth: without the fold this region IS material, so the two
+            // counts above are zero because the operator was applied and not
+            // because the fixture put nothing there.
+            Document alone;
+            alone.add_sdf_layer("clip").sdf->insert(sphere_at(3.0f, 0.5f, cf3(0, 1, 0)));
+            const Tape t = compile_document(alone, &cull);
+            CHECK(t.eval(cf3(3.0f, 0.0f, 0.0f)).d < 0.0f);
+        }
+    }
+}
+
+TEST_CASE("the band a culled brick reports matches the whole document, three layers deep") {
+    // The variant that keeps the refill SPLIT enabled: a plain unioning layer
+    // on top means `layer_join_is_hard_union` is true, so the two halves are
+    // compiled and stored -- and a `below` half that promoted the intersecting
+    // middle layer to initialiser would be stored as a seed and answered from
+    // for as long as the revision stands.
+    Document doc;
+    Layer& base = doc.add_sdf_layer("base");
+    base.sdf->insert(sphere_at(0.0f, 1.0f, cf3(0.8f, 0.2f, 0.2f)));
+    Layer& clip = doc.add_sdf_layer("clip");
+    clip.sdf->insert(sphere_at(2.6f, 0.7f, cf3(0.2f, 0.8f, 0.2f)));
+    clip.composition = composed(Op::Intersect);
+    Layer& top = doc.add_sdf_layer("top");
+    top.sdf->insert(sphere_at(3.4f, 0.4f, cf3(0.2f, 0.2f, 0.8f)));
+
+    const Tape full = compile_document(doc);
+    const CullRegion cull{math::Aabb{cf3(2.9f, -0.4f, -0.4f), cf3(3.7f, 0.4f, 0.4f)}};
+    const Tape culled = compile_document(doc, &cull);
+
+    // Band-clamped identity inside the region, which is the cull's contract.
+    const float band = 0.1f;
+    int differing_band = 0;
+    clay_test::Lcg rng(5150);
+    for (int i = 0; i < 800; ++i) {
+        const cfloat3 p = cf3(3.3f, 0.0f, 0.0f) + rng.vec3(-0.4f, 0.4f);
+        if (kernel::cclamp(full.eval(p).d, -band, band) !=
+            kernel::cclamp(culled.eval(p).d, -band, band))
+            ++differing_band;
+    }
+    CHECK(differing_band == 0);
+    CHECK(layer_join_is_hard_union(doc));  // the split really is available here
+}
+
+TEST_CASE("an empty layer beneath is still the layer that opens the stack") {
+    // The uncull'd statement of the same rule, and the one that pins WHICH
+    // definition of "first" this compiler uses: the first visible SDF LAYER,
+    // whether or not its chain produced anything. An empty base layer under an
+    // intersecting one leaves the document empty -- exactly as an item chain
+    // that opens with an intersecting item does, which is what keeps the two
+    // forms of one shape one shape.
+    //
+    // It has to be a rule the CULL cannot reach, and "the layer produced a
+    // value" is not one: a brick decides that for itself. This is the price of
+    // that, stated where it can be seen rather than discovered.
+    const std::vector<cfloat3> pts = lattice(12);
+    Document doc;
+    Layer& base = doc.add_sdf_layer("base");  // visible, SDF, and empty
+    REQUIRE(base.sdf->roots.empty());
+    Layer& clip = doc.add_sdf_layer("clip");
+    clip.sdf->insert(sphere_at(0.0f, 1.0f, cf3(0.2f, 0.8f, 0.2f)));
+    clip.composition = composed(Op::Intersect);
+
+    const Tape t = compile_document(doc);
+    for (cfloat3 p : pts) CHECK(t.eval(p).d > 1e6f);
+    // The independent evaluator has to have reached the same rule from the
+    // same document, or a fold bug is invisible wherever the fixtures union.
+    CHECK(differing(sample(t, pts), reference(doc, pts)) == 0);
+
+    SUBCASE("and the same layer unions onto it as itself") {
+        Document d;
+        d.add_sdf_layer("base");
+        d.add_sdf_layer("clip").sdf->insert(sphere_at(0.0f, 1.0f, cf3(0.2f, 0.8f, 0.2f)));
+        const Tape got = compile_document(d);
+        CHECK(got.eval(cf3(0, 0, 0)).d == doctest::Approx(-1.0f));
+        CHECK(differing(sample(got, pts), reference(d, pts)) == 0);
+    }
+}

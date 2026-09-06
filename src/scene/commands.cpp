@@ -315,6 +315,81 @@ std::optional<Command> apply(Document& doc, const Command& cmd) {
 
 namespace {
 
+// HOW FAR A CHANGE TO ONE LAYER'S OWN FIELD TRAVELS THROUGH THE STACK ABOVE IT:
+// the support of the fold that layer enters through, plus the support of every
+// fold above it.
+//
+// A combine is POINTWISE -- `ctape_combine_values` reads a.d and b.d at the
+// sample and nothing else -- so a change to a layer's value at p changes the
+// document's value at p, whatever operator sits above, and an intersecting or
+// subtracting layer overhead widens NOTHING. What is not pointwise is a SMOOTH
+// or EXTENDED fold: it moves the result up to its own support away from where
+// its operands changed. That is the same inequality node_reach_bound applies
+// once per enclosing GROUP inside a layer, through the same expression, and
+// this is it one level up -- where node_reach_bound stops, because it holds a
+// Layer and not a Document.
+//
+// SUMMED rather than maxed because they compose: the second fold sees a field
+// that already differs over the first's dilated box and can move its own result
+// that much further again. There is one term per visible SDF layer, and a hard
+// union contributes zero -- so a document that predates compositions dilates by
+// nothing here and pays for none of this.
+//
+// A hidden layer's own fold is not applied and adds nothing, but the folds
+// ABOVE a hidden layer still are: the walk starts at `layer_id` whether or not
+// it is visible, which is what the hidden side of a SetLayerVisibleCmd needs.
+float folds_from_layer_support(const Document& doc, LayerId layer_id) {
+    float total = 0.0f;
+    bool at_or_above = false;
+    for (const Layer& l : doc.layers) {
+        if (l.id == layer_id) at_or_above = true;
+        if (!at_or_above) continue;
+        if (!l.visible || l.kind != LayerKind::Sdf || !l.sdf) continue;
+        total += layer_blend_support(l);
+    }
+    return total;
+}
+
+// WHAT A COMMAND THAT CHANGES THE VISIBLE SDF LAYER LIST COSTS BEYOND THE LAYER
+// IT NAMES: the first visible SDF layer initialises the accumulator and ITS OWN
+// OPERATOR IS NOT APPLIED (tape.h), so adding, removing, hiding or showing the
+// bottom-most one -- and a reorder, which is a Remove and an Add -- turns the
+// layer above it from folded into initialising. A subtractive cutter that was
+// taking material away becomes the base shape and renders AS MATERIAL, over its
+// own whole extent, which is nowhere near the box the edited layer occupies.
+// Left out, those bricks keep their seeds and are re-stamped to the new
+// revision: stale geometry, no error.
+//
+// Only the layer directly above the first one can flip. Every other layer keeps
+// exactly the layers beneath it that it had, and a fold is pointwise in them.
+//
+// And only a COMPOSED one costs anything: promoting a hard union from
+// `min(acc, M)` to `M` differs only where `acc` had material, and `acc` there is
+// the edited layer, whose own extent is already in the box.
+//
+// Taken on whichever side of the apply the edited layer IS the first visible
+// SDF layer -- hiding it flips on the before side, showing it on the after side
+// -- which is why apply_edit unions the two and neither alone is an answer.
+math::Aabb first_visible_flip_bound(const Document& doc, LayerId layer_id, LayerExtent* extent) {
+    const Layer* first = nullptr;
+    const Layer* next = nullptr;
+    for (const Layer& l : doc.layers) {
+        if (!l.visible || l.kind != LayerKind::Sdf || !l.sdf) continue;
+        if (!first) {
+            first = &l;
+            continue;
+        }
+        next = &l;
+        break;
+    }
+    if (!first || first->id != layer_id || !next) return math::Aabb{};
+    if (layer_composition_is_hard_union(next->composition)) return math::Aabb{};
+    math::Aabb b = layer_influence_bound(*next, extent);
+    if (b.is_infinite() || b.empty()) return b;
+    const float support = folds_from_layer_support(doc, next->id);
+    return support > 0.0f ? b.dilated(support) : b;
+}
+
 // The bound of a node command's target: where an edit to THAT NODE reaches,
 // unioned over every layer sharing the content. Empty when the layer, the
 // content or the node is not there — which is the honest answer on the side of
@@ -335,20 +410,27 @@ math::Aabb node_command_bound(const Document& doc, LayerId layer_id, NodeId node
     math::Aabb bound;
     for (const Layer& l : doc.layers) {
         if (l.sdf != target->sdf) continue;
-        const math::Aabb b = node_reach_bound(*l.sdf, node, l, extent);
+        math::Aabb b = node_reach_bound(*l.sdf, node, l, extent);
         if (b.is_infinite()) return math::Aabb::infinite();
+        // node_reach_bound stops at the LAYER ROOT, which is where the reach
+        // used to end. The folds from there up are the document's, and this is
+        // the function that holds the Document to walk them.
+        const float support = folds_from_layer_support(doc, l.id);
+        if (!b.empty() && support > 0.0f) b = b.dilated(support);
         bound.expand(b);
     }
     return bound;
 }
 
 // WHERE A LAYER-LEVEL COMMAND LANDS: the layer's own influence bound, and then
-// two widenings its COMPOSITION forces.
+// three widenings the layer FOLD forces.
 //
-// 1. THE FOLD'S OWN SUPPORT. A smooth or extended fold moves the result up to
-//    that far outside either operand, so a change to this layer reaches that
-//    far outside it. The same dilation node_reach_bound applies once per
-//    enclosing group, one level up, through the same expression.
+// 1. THE FOLD'S OWN SUPPORT, AND EVERY FOLD ABOVE IT -- `folds_from_layer_
+//    support`, which is where the argument is written. A smooth or extended
+//    fold moves the result up to that far outside either operand, so a change
+//    to this layer reaches that far outside it, and again for each fold it
+//    passes through on the way up. The same dilation node_reach_bound applies
+//    once per enclosing group, one level up, through the same expression.
 //
 // 2. THE LAYERS BENEATH, FOR AN INTERSECT AND FOR NOTHING ELSE. `max(a, b)` far
 //    from this layer's geometry is `b` -- a large positive that WINS the max --
@@ -378,6 +460,13 @@ math::Aabb node_command_bound(const Document& doc, LayerId layer_id, NodeId node
 // first, and a bound that is too small is missing surface rather than a slow
 // frame.
 //
+// 3. THE LAYER ABOVE THE BOTTOM ONE, when the command changes WHICH layers are
+//    visible SDF layers -- `first_visible_flip_bound`, which is where that
+//    argument is written. `changes_layer_set` says which commands those are
+//    (add, remove, hide/show, and the Remove+Add pair a reorder is), and it is
+//    passed in rather than derived because this function is handed a layer and
+//    not a command.
+//
 // NOT MEMOIZED, deliberately. The walk is O(nodes beneath) and runs twice per
 // command (apply_edit takes the bound on both sides), against a refill of the
 // box it returns -- which the same command triggers, and which measured 45.5 ms
@@ -385,13 +474,23 @@ math::Aabb node_command_bound(const Document& doc, LayerId layer_id, NodeId node
 // it stopped firing, which is why the one memoizing the LAYER walk carries
 // walks()/keeps() counters; if this walk ever reaches a measurement it wants
 // that shape and those counters, not a quiet map.
-math::Aabb layer_command_bound(const Document& doc, LayerId layer_id, LayerExtent* extent) {
+math::Aabb layer_command_bound(const Document& doc, LayerId layer_id, LayerExtent* extent,
+                               bool changes_layer_set) {
     const Layer* l = doc.find_layer(layer_id);
     if (!l) return math::Aabb{};
+    // 3. THE FIRST-VISIBLE FLIP, for the commands that can cause one. Taken
+    //    first because it is the one term that is not about this layer at all.
+    const math::Aabb flip =
+        changes_layer_set ? first_visible_flip_bound(doc, layer_id, extent) : math::Aabb{};
+    if (flip.is_infinite()) return flip;
     math::Aabb b = layer_influence_bound(*l, extent);
     if (b.is_infinite()) return b;
-    const float support = layer_blend_support(*l);
+    // The layer's own fold AND every fold above it: a change to this layer's
+    // field travels up the stack exactly as an item's does (folds_from_layer_
+    // support), and the layer's own composition is the first term of that sum.
+    const float support = folds_from_layer_support(doc, layer_id);
     if (support > 0.0f) b = b.dilated(support);
+    b.expand(flip);
     if (op_is_local(l->composition.op)) return b;
     for (const Layer& below : doc.layers) {
         if (below.id == l->id) break;  // only what is BENEATH it in the stack
@@ -449,15 +548,20 @@ math::Aabb command_influence_bound(const Document& doc, const Command& cmd,
             if constexpr (std::is_same_v<C, SetLayerNameCmd> ||
                           std::is_same_v<C, SetLayerProtectionCmd>)
                 return math::Aabb{};
+            // The three that change WHICH layers are visible SDF layers, and so
+            // can move the first-visible rule onto another layer. A reorder is
+            // a RemoveLayerCmd and an AddLayerCmd, so it is covered by being
+            // both of them.
             else if constexpr (std::is_same_v<C, AddLayerCmd>)
-                return layer_command_bound(doc, c.layer.id, extent);
+                return layer_command_bound(doc, c.layer.id, extent, /*changes_layer_set=*/true);
             else if constexpr (std::is_same_v<C, RemoveLayerCmd> ||
-                               std::is_same_v<C, SetLayerVisibleCmd> ||
-                               std::is_same_v<C, SetLayerTransformCmd> ||
+                               std::is_same_v<C, SetLayerVisibleCmd>)
+                return layer_command_bound(doc, c.id, extent, /*changes_layer_set=*/true);
+            else if constexpr (std::is_same_v<C, SetLayerTransformCmd> ||
                                std::is_same_v<C, SetLayerMirrorCmd> ||
                                std::is_same_v<C, SetLayerRadialCmd> ||
                                std::is_same_v<C, SetLayerCompositionCmd>)
-                return layer_command_bound(doc, c.id, extent);
+                return layer_command_bound(doc, c.id, extent, /*changes_layer_set=*/false);
             else if constexpr (std::is_same_v<C, AddNodeCmd>)
                 return c.subtree.empty() ? math::Aabb{}
                                          : node_command_bound(doc, c.layer, c.subtree.front().id,
