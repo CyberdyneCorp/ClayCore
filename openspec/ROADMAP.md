@@ -1324,6 +1324,21 @@ a different answer from the interactive save.** A change about interchange sees
 all three paths; one bolted to a boolean operator would be shaped by whichever
 document raised it.
 
+**And it carries a coupling it must not miss.** `serialize_document` expresses
+its refusal as an EMPTY VECTOR. `clay_document_save` reaches it through
+`io::save_clayspace`, which calls `serialize_document` with the default minor —
+always the current one — so **the refusal is unreachable across the C ABI today,
+for exactly the reason above: a host cannot choose the minor.** The two gaps
+cancel.
+
+The day the selector lands they stop cancelling. A host calls it with 17, the
+refusal returns emptiness, and unless the entry point translates emptiness into a
+RESULT CODE the caller gets `CLAY_OK` and a file that is not its document — every
+layer of the host behaving correctly, the sculptor told the save succeeded. **A
+refusal expressed as emptiness cannot survive a result-code boundary, because
+emptiness is not a result code.** So the selector owes a distinct code for "this
+document cannot be written at that minor", in the same commit as the selector.
+
 ### Where a host cannot draw a progress bar or cancel
 
 `add-operation-cancellation` shipped the token and the poll, and twelve of their

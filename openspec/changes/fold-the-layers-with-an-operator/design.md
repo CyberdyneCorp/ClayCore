@@ -1180,7 +1180,10 @@ worth having rather than as a defect, and nothing re-asked whether the two
 answers should differ at all. A test can encode the bug as the spec, and then
 updating it is the moment to say which of the two it was.
 
-### §13e. An expectation derived from the system under test measures consistency, not correctness
+### §13g. An expectation derived from the system under test measures consistency, not correctness
+
+*Numbered §13e when it landed, which §13e above had already taken; renumbered here so
+the two references below name one section. Cited as §13e in the third review's handover.*
 
 The general form of two mistakes made in this change's own review cycle, stated
 by the host on 2026-09-06 after both had been fixed separately and neither had
@@ -1214,7 +1217,7 @@ report each as either a legitimate invariant (the two could disagree for a reaso
 worth hearing) or a tautology (they cannot). This is cheap to check and it is the
 failure that survives a green suite.
 
-**A note beside §13e, deliberately NOT a third sweep.** A test can be sound
+**A note beside §13g, deliberately NOT a third sweep.** A test can be sound
 within a run and unsound as a fixture for COMPARING runs, and the second use is
 invisible in the file. The host's `sdf_brushes` asserts that a brush moves the
 surface by more than 1e-3, reading both sides through one pick in one process on
@@ -1233,11 +1236,14 @@ shape in `tests/device/baseline.json`, which holds entries taken at different AB
 versions side by side.
 
 It is left as a note rather than a required sweep on the host's own argument:
-§13d and §13e are mechanical and answerable from a diff, and this one depends on
+§13d and §13g are mechanical and answerable from a diff, and this one depends on
 how a test is USED rather than on what it contains. A sweep that cannot be
 answered from a diff would weaken the two that can.
 
-### §12c. Why `_below` refuses at all, and what the blocking id does not say
+### §12d. Why `_below` refuses at all, and what the blocking id does not say
+
+*Numbered §12c when it landed, which §12c above had already taken; renumbered here for
+the same reason as §13g.*
 
 Two questions from the host on 2026-09-06, both answerable from the code as
 committed, and one of them is a real gap.
@@ -1279,7 +1285,7 @@ combination that produces a wrong sentence in a host.
 
 ### §13f. What the fourth review's record stage changed, and the two contract errors it found
 
-The stage after §13e's. Its findings were two majors about the code, a set of
+The stage after the below form's (§12c). Its findings were two majors about the code, a set of
 minors, and the accuracy of this contract — which is the half worth writing down
 here, because a design document that names a function the tree does not have is
 the same failure as a tasks list that ticks a box nothing did.
