@@ -824,3 +824,71 @@
       refactor of either is a change to the refill path that would land in the
       same PR as a correctness fix and be reviewed as one thing. It belongs in
       its own change, with its own gate run
+
+- [x] 7.12 THE GATE SWEEP RE-RUN on the sixth review's tree — b4925d0b and
+      c0db1354 on top of the tree 7.9 swept — because both of those commits
+      moved the fold path (`emit_layer_fold` is a new function that `run` and
+      `resume` both call) and one of them grew a written-through out-parameter
+      on a C entry point. 7.9's run predates both, so it says nothing about
+      either. Nothing failed and nothing was fixed; this entry is the record
+      that the sweep happened and what it covered.
+      GREEN, each actually exercised rather than recognised:
+        * `cmake --preset cpu-only -DCLAY_BUILD_TESTS=ON` + build: no warning
+          under `CLAY_WERROR=ON`; `ctest --preset cpu-only`: 8 of 9, the ninth
+          being pyclay_pytest, below
+        * the whole unit suite unsharded, for the §13j instrument: 2,457 cases /
+          16,469,151 assertions / 0 failed. 7.10 recorded 2,454 / 16,464,984 on
+          the tree before c0db1354, so that commit's three cases carry 4,167
+          assertions — the count moved, which is the half §13j reads
+        * ASan + UBSan, which is the gate the out-parameter deserves —
+          `out_blocking_count` is a caller pointer this change writes through:
+          `ctest --preset asan-ubsan` under
+          `systemd-run --user --scope -p MemoryMax=32G`, 8 of 8, and neither
+          "AddressSanitizer", "UndefinedBehaviorSanitizer", "runtime error" nor
+          "LeakSanitizer" appears anywhere in the log
+        * ThreadSanitizer, run for the same reason 7.9 ran it — the C entry
+          point sits on the refill path: `setarch -R ctest --preset tsan`, 8 of
+          8, and the string "ThreadSanitizer" appears nowhere in the log
+        * check_layering, check_kernel_dialect, check_test_shards (2,457 cases
+          partitioned across 4 shards, none duplicated, none unrun),
+          check_task_symbols (371 claimed identifiers, all present),
+          check_licenses, check_doc_latency (46 quoted figures),
+          check_swift_package, package_kernels --verify (15 headers
+          byte-identical), `openspec validate --all --strict` (38 passed, 0
+          failed)
+        * the EXAMPLES job whole, which is the only gate that runs
+          `examples/75_layer_booleans.py`: the reference host session (24
+          sequencing entry points), then `CLAY_EXAMPLES_FAST=1
+          examples/run_all.py` — 76/76 — then check_gallery over what the run
+          PRODUCED rather than over what is committed (OK; 177 renders and 12
+          binary containers differ in bytes, which is the float output the gate
+          is designed not to read), then `git checkout -- examples/output` as
+          the job's last step does
+        * the pyclay suite for real: 689 passed, 1 skipped
+        * check_binding_parity in its STRONG reading — "imported
+          build/release/bindings/python/pyclay.abi3.so", 738 capabilities, 34
+          exempt — and check_c_abi's ctypes FFI arm, not its hygiene arm alone
+        * `release_check.py --skip-slow`: every row PASS except `device`, below
+      ENVIRONMENTAL, reproduced rather than assumed, and unchanged from 7.9:
+        * pyclay_pytest under ctest, release_check's `tests`, `bindings` and
+          `abi` rows, and check_c_abi.py run bare: ONE cause,
+          `GLIBCXX_3.4.31 not found`. ctest and release_check shell out to
+          `sys.executable`, which is this box's anaconda, whose libstdc++
+          predates the one the module was built against. Re-run whole under
+          `LD_PRELOAD=/lib/x86_64-linux-gnu/libstdc++.so.6`, release_check goes
+          13 of 14 with `tests` at 100% (9 of 9) — so all four were the same
+          library and none of them is in this change's path
+        * release_check's `device` row: "engine changed since the gate ran at
+          02355f4cd". True and expected on a branch that is not a release, and
+          PRE-EXISTING rather than this change's — `device_relevant_changes`
+          between that commit and MAIN is already 16 paths, against 29 here, so
+          the row fails on main too
+        * the Swift smoke skips: "Apple platforms only"
+      NOT RUN, and said rather than skipped quietly: `check_bench.py`. Another
+      project shares this box and a timing taken now would be worthless — 7.9's
+      own run is the record of what that costs, three runs failing 1, 6 and 5
+      barely-intersecting rows under load. The benchmark rows this change added
+      were exercised there and nothing since has touched the benchmark files.
+      `run_device_bench.sh` likewise needs an attached iPad and is the `device`
+      row above. The durations quoted in this entry are descriptive, not
+      measurements: nothing here asserts a clock
