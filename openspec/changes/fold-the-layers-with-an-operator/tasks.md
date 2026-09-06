@@ -173,18 +173,39 @@
       `revision` and follow `apply_edit` for free; the brick seed store is
       deliberately NOT keyed on the composition (the decision's `ResumeKey`
       note) and is protected by 4.5's split refusal instead. What this stage
-      added is THE CULL PAD, which had no inter-layer term at all: the fold's
-      own support now enters `cull_pad_terms(content, layer)` as a per-layer
-      constant, so `document_pad` and `CullIndex::refresh_pad` — a maximum over
-      layers of that, each — pick it up from one place. Without it a per-brick
+      added is THE CULL PAD, which had no inter-layer term at all. The term is
+      NOT a per-layer constant: a fold drags the items of every layer BENEATH
+      it, and a stack of folds composes, so what the pad carries is
+      `folds_from_layer_support` — the SUM of the folds above a layer, charged
+      to that layer — resolved in `scene::document_cull_pad` and in
+      `CullIndex::refresh_pad`, which are the two readers a compile picks
+      between and which a test now holds equal. Without any term a per-brick
       compile under a smooth fold drops an item the whole-document compile
-      keeps: measured, 11 of 21 samples in the fixture's region differ, inside
-      the band where nothing is looking
-- [x] 5.2 Conservative first. Three places where this stage chose the wide
-      answer and said what it costs beside the code: the cull pad takes the
-      fold's FULL support rather than a chain envelope over the layer count (a
-      wider pad is a longer tape; a narrower one is wrong geometry, and the two
-      are not symmetric); an intersecting layer's dirty box is the union of the
+      keeps: deleting it leaves `differing()` at 21 of the 84 values sampled in
+      the single-fold fixture's region (the distance at every one of its 21
+      points), inside the band where nothing is looking. With the term MAXED
+      rather than summed — the first form of this fix — a document of N folds
+      was padded for one of them: 0.0180 of band drift at two composed folds and
+      0.0268 at three, measured by the sweep in 5.2
+- [x] 5.2 Conservative first — and the cull pad's fold term was NOT one of the
+      places where that was true. It took the fold's full support per layer and
+      then MAXED over the layers, which is not a conservative narrowing of the
+      sum but a different and smaller number: a chain of N folds drags further
+      than one of them does, and the max counted one. Corrected to the sum
+      (`folds_from_layer_support`, which the change already spelled 250 lines
+      away for the dirty-region half and which says why they compose), and the
+      only conservative choice left in the pad is the one that direction: the
+      fold's FULL support rather than a chain envelope over the layer count.
+      Measured by a 240-region sweep over four spheres 0.62 apart with the top N
+      folds composed — worst band drift 0.0180 at two folds (k = 0.3) and 0.0268
+      at three (k = 0.45) under the max, 0 under the sum, and 0 in both for the
+      all-hard baseline; dilating each region by a further 2k took the two-fold
+      row to 0, which is how the pad was told apart from the fold. A wider pad
+      is a longer tape; a narrower one is wrong geometry, and the two are not
+      symmetric — which is why the FIRST visible layer's own composition, never
+      applied, is not a term either. Two places where this stage did choose the
+      wide answer and said what it costs beside the code:
+      an intersecting layer's dirty box is the union of the
       layers beneath, which is the box the host measured at 45.5 ms and 7.5 s
       and which wants a REFILL-REGION narrowing, not a bounds one; and the
       below-extent walk is not memoized, because a cache whose only observable
@@ -295,4 +316,21 @@
       `error: cannot convert 'bool' to 'FirstVisibleLayer'`, then reverting
 - [ ] 7.2 The sweep design.md §13 requires: every remaining place the fold path
       reads state a cull region can change, found rather than fixed one at a
-      time. Three are closed; the sweep itself is the reviewers' second pass
+      time. Four are closed — the three §13 tabulates plus 7.3 below, which is
+      the `cull_pad_terms` row of that same table and was found by looking for
+      it rather than by writing it down; the sweep itself is the reviewers'
+      second pass
+- [x] 7.3 THE FOURTH cull-observable predicate: the pad answered "what does ONE
+      LAYER'S CHAIN need" where the question is "what does the DOCUMENT need,
+      fold included" (design.md §10a). The fold term rode the layer that OWNED
+      the fold and both readers max over layers, so a document of N composed
+      folds was padded for one. Now `folds_from_layer_support` — the SUM of the
+      folds above a layer, charged to that layer, moved into `scene/bounds` as
+      the one definition the dirty-region half already used — plus
+      `scene::document_cull_pad`, with `CullIndex::refresh_pad` the same
+      expression over cached terms and a test holding the two equal.
+      Regression: a 240-region sweep at one, two and three composed folds, band-
+      clamped identity against the whole-document compile; proved by reverting
+      the sum, which reports 0.0180 / 0.0229 / 0.0268 of drift and a pad of 1.2
+      where three folds need 3.6, and by reverting the first-visible exclusion,
+      which charges 1.6 to a layer whose composition is never applied

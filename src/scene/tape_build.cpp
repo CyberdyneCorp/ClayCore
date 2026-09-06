@@ -1214,14 +1214,16 @@ struct Compiler {
     // PART of a document must still cull under it: a tape for one layer that
     // used only that layer's pad would drop items the whole-document compile
     // keeps, and the two halves of a split would no longer sum to the whole.
+    //
+    // Both arms are the same expression -- a maximum over the visible SDF
+    // layers of that layer's own chain pad plus the SUM of the folds above it
+    // (scene::document_cull_pad; CullIndex::refresh_pad over cached terms).
+    // The part compiles are why the sum is over the DOCUMENT's folds and not
+    // over the part's: a part that padded for its own folds alone would cull
+    // differently from the whole it has to add up to.
     float document_pad(const Document& doc, const CullRegion* cull_region) const {
-        float pad = 0.0f;
-        if (cull_region && index) return index->cull_pad();
-        if (cull_region)
-            for (const Layer& layer : doc.layers)
-                if (layer.visible && layer.kind == LayerKind::Sdf && layer.sdf)
-                    pad = kernel::cmax(pad, cull_pad(*layer.sdf, layer));
-        return pad;
+        if (!cull_region) return 0.0f;
+        return index ? index->cull_pad() : document_cull_pad(doc);
     }
 
     // THE FOLD BETWEEN LAYERS, shared by the whole-document walk and by every
@@ -1701,12 +1703,7 @@ bool compile_layer_suffix(const TapeCheckpoint& cp, const Document& doc,
     // folds onto -- computed under the whole-document cull -- would be
     // continued under a different one.
     float pad = 0.0f;
-    if (cull && index)
-        pad = index->cull_pad();
-    else if (cull)
-        for (const Layer& l : doc.layers)
-            if (l.visible && l.kind == LayerKind::Sdf && l.sdf)
-                pad = kernel::cmax(pad, cull_pad(*l.sdf, l));
+    if (cull) pad = index ? index->cull_pad() : document_cull_pad(doc);
     // No prefix copy, and no prefix `info` or `bounds` either: what this
     // describes is the appended items, which is what its consumer wants to cull
     // against. The header says so, because a tape that cannot stand alone is
@@ -1734,12 +1731,7 @@ bool compile_layer_prefix(const Document& doc, std::size_t count, Tape* out,
     // suffix will be folded onto, and prefix and suffix culled under two
     // different pads are two different fields.
     float pad = 0.0f;
-    if (cull && index)
-        pad = index->cull_pad();
-    else if (cull)
-        for (const Layer& l : doc.layers)
-            if (l.visible && l.kind == LayerKind::Sdf && l.sdf)
-                pad = kernel::cmax(pad, cull_pad(*l.sdf, l));
+    if (cull) pad = index ? index->cull_pad() : document_cull_pad(doc);
     c.begin_cull(cull, pad);
     std::vector<NodeId> prefix(roots.begin(), roots.begin() + static_cast<std::ptrdiff_t>(count));
     c.compile_list(prefix, *layer->sdf, *layer, false);
@@ -1780,6 +1772,12 @@ Tape compile_document_except(const Document& doc, LayerId excluded, const CullRe
     return std::move(c.tape);
 }
 
+// The LAYER's own pad and not the document's, because no fold is emitted here:
+// this compiles one layer's chain against a fresh accumulator, so nothing drags
+// its value further and there is no document to ask. A caller that folds this
+// tape with another one is holding two operands of a combine the engine did not
+// make, and the pad each half was culled under is part of what that costs
+// (tape.h, compile_document_part).
 Tape compile_layer(const Layer& layer, const CullRegion* cull) {
     Compiler c;
     bool usable = layer.visible && layer.kind == LayerKind::Sdf && layer.sdf;

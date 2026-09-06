@@ -443,6 +443,37 @@ float group_blend_support(const Node& group, const Layer& layer);
 // carries, which is what keeps their bounds byte-identical.
 float layer_blend_support(const Layer& layer);
 
+// The support of every fold a layer's own value passes through on the way to
+// the DOCUMENT's value: the layer's own composition and every visible SDF
+// layer's composition above it, SUMMED -- they compose, so the second fold can
+// move a result the first already moved that much further again. Zero for a
+// stack that unions hard, which is every document that predates compositions.
+//
+// The first visible SDF layer's composition is not a term: it is never applied
+// (tape.h). The walk starts at `layer_id` whether or not that layer is itself
+// visible, so the hidden side of a visibility change still gets the folds above
+// it.
+//
+// Used both for WHERE AN EDIT LANDS (scene/commands.cpp) and for HOW FAR A CULL
+// MUST REACH (document_cull_pad): they are the same inequality asked in two
+// directions, and one definition is why they cannot drift apart.
+float folds_from_layer_support(const Document& doc, LayerId layer_id);
+
+// The pad the whole document compiles under, from the document alone: a MAXIMUM
+// over visible SDF layers of `cull_pad` for that layer plus
+// `folds_from_layer_support` of it.
+//
+// The fold term belongs HERE rather than in `cull_pad_terms` because a fold
+// drags the layers BENEATH it, which is the layer that owns it and every one
+// under it -- a per-layer walk cannot see that, and a document-wide maximum
+// over per-layer terms would pad an N-fold stack for one fold.
+//
+// `CullIndex::cull_pad()` is the same number over cached per-layer terms; a
+// compile takes whichever it has. Where a pad is wider than a compile needed it
+// keeps items and costs tape; where it is narrower it drops an item the field
+// needed and costs the geometry, silently. Those are not symmetric.
+float document_cull_pad(const Document& doc);
+
 // Where an edit to `id` can change the layer's field: node_influence_bound,
 // dilated once per enclosing group by that group's blend support, up to the
 // root.

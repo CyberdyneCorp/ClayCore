@@ -33,11 +33,26 @@ CullIndex::CullIndex(const Document& doc) : doc_(&doc) {
 // append log and forces the rebuild. Within an index's life the layer's
 // symmetry is constant; appends only grow `nodes`, and both factors of the
 // product only rise, keeping the raise-only append contract exact.
+//
+// PLUS THE FOLDS ABOVE EACH LAYER, which is the term no per-layer walk can
+// produce: a smooth layer composition drags the value of every layer beneath
+// it, and a stack of them composes, so the items of the bottom layer need the
+// SUM of the folds above them. Read live from the document for the same reason
+// the multiplicity is — SetLayerCompositionCmd is not an AddNodeCmd either, so
+// a composition cannot change between an index's build and its appends — and it
+// is O(layers) per layer, on a list a document has tens of, not thousands.
+//
+// This IS scene::document_cull_pad, over terms already gathered instead of over
+// a fresh walk, and the two are held equal by test rather than by comment
+// (test_layer_fold_sites.cpp): the compiler takes whichever it has, so a term in
+// one of them alone would cull a brick refill differently from the
+// whole-document compile it is supposed to agree with.
 void CullIndex::refresh_pad() {
     pad_ = 0.0f;
     for (const LayerPad& p : pads_)
         pad_ = kernel::cmax(pad_,
-                            p.terms.total(p.nodes * layer_symmetry_multiplicity(*p.layer)));
+                            p.terms.total(p.nodes * layer_symmetry_multiplicity(*p.layer)) +
+                                folds_from_layer_support(*doc_, p.layer->id));
 }
 
 namespace {

@@ -638,6 +638,54 @@ geometry that is subtly wrong at a brick boundary.
 A hard-union fold needs no term, which is why nothing needed one before and why
 every existing document stays exactly as fast as it was.
 
+### §10a. The term is a SUM over the stack, and it is not the layer's own
+
+Written after §13's sweep found it, and it corrects requirement 1 above rather
+than merely satisfying it.
+
+Requirement 1 said the term folds into `document_pad` "the way an item's chain
+terms already fold", and named `cull_pad_terms` as the place to keep it. The
+first implementation did exactly that: `cull_pad_terms(content, layer)` raised
+`blend_fixed` by that LAYER's own `layer_blend_support`, and both readers —
+`document_pad` and `CullIndex::refresh_pad` — are a MAXIMUM OVER LAYERS. That is
+wrong twice, and only the maximum hid the second one:
+
+- **A max where the quantity is a SUM.** The drag an item passes through is
+  every fold ABOVE it, and folds compose — the second one sees a field that
+  already differs over the first's dilated box and can move its own result that
+  much further again. The change already spelled this out for the dirty region
+  (`folds_from_layer_support`, `src/scene/commands.cpp`), so the pad took the
+  smaller of this change's own two answers to one question.
+- **Charged to the layer that OWNS the fold**, while the items that need it are
+  in the layers below. Under a document-wide maximum that misattribution is
+  invisible, so fixing the sum without fixing the attribution would have moved
+  the error rather than closed it.
+
+Measured, four spheres r = 0.5 at x = 0, 0.62, 1.24, 1.86 with the top N folds
+set to a quadratic k, swept over 240 regions of 0.06 each dilated by a 0.1 band,
+comparing a culled compile with the whole-document one inside the band: worst
+drift 0 at one composed fold — which is the only shape the original test
+exercised — 0.0180 at two (k = 0.3), 0.0229 and 0.0268 at three (k = 0.3, 0.45),
+and 0 for the all-hard baseline. Dilating each region by a further 2k took the
+two-fold row to 0 and the three-fold row to 0.0049, which is what identified the
+PAD rather than the fold, and showed the shortfall scaling with the fold COUNT.
+
+**What is there now.** `folds_from_layer_support(doc, layer)` moves to
+`scene/bounds.{h,cpp}` as the one definition of the quantity, and
+`scene::document_cull_pad(doc)` is a maximum over visible SDF layers of that
+layer's own `cull_pad` PLUS its fold sum. `cull_pad_terms` carries no fold term
+at all: it answers what one layer's ITEM CHAIN needs, and a fold is not a
+property of the layer that owns it. `CullIndex::refresh_pad` is the same
+expression over cached terms, and the two are now held equal by a test rather
+than by a comment, because a compile takes whichever it has.
+
+**And the first visible SDF layer's own composition is not a term**, because it
+is never applied. Counting it was safe and not free: over-wide keeps items a
+compile did not need and costs a longer tape, too narrow drops an item the field
+needed and costs the geometry — the directions are not symmetric, which is
+exactly why the merely-slow one is still not taken when the exact term is in
+hand.
+
 ## 11. The placement classifier does not read the composition — REQUIRED, and it is live now
 
 Raised by ClaySpaceDesktop on 2026-09-06, checked against the tree, and it is a

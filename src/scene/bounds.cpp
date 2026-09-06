@@ -1225,33 +1225,24 @@ CullPadTerms cull_pad_terms(const SdfContent& content, const Layer& layer) {
         (void)id;
         total.raise(cull_pad_terms(n, layer));
     }
-    // THE LAYER'S OWN FOLD, which is a contributor to the DOCUMENT's chain the
-    // way each of the nodes above is a contributor to this layer's.
+    // NO TERM FOR THE LAYER'S OWN FOLD HERE, and that is the whole point of
+    // this function's scope: these are the terms ONE layer's ITEM CHAIN needs.
     //
-    // A smooth or extended fold between this layer and the accumulated field
-    // beneath it drags the result wherever the two operands come within its
-    // support of each other, so an item that a region-limited compile would
-    // drop can still steer the value inside that region -- the same failure
-    // `blend_cull_pad` was written for, one level up, and just as invisible:
-    // the disagreement is inside the band, where nothing is looking.
+    // A fold is not a property of the layer that owns it. It drags the value of
+    // every layer BENEATH it as well -- the items that need the pad are down
+    // there -- and the drags of a stack of folds COMPOSE, so what an item needs
+    // is the SUM of the folds it passes through on the way up, not the largest
+    // of them. `folds_from_layer_support` is that sum and `document_cull_pad`
+    // is where it meets these terms, once, for both readers.
     //
-    // `blend_fixed`, because it is N-INDEPENDENT: there is one fold per layer,
-    // not one per node, so no envelope narrows it and the count must not either.
-    // It rides the layer's own terms rather than a document-level slot so that
-    // both readers get it from one place -- `document_pad` (tape_build.cpp) and
-    // `CullIndex::refresh_pad` are each a maximum over layers of this, and a
-    // term added to only one of them would cull a whole-document compile
-    // differently from a per-brick one.
-    //
-    // DELIBERATELY CONSERVATIVE, and the two directions are not symmetric. This
-    // is the fold's FULL support, which is the ceiling the chain terms above are
-    // themselves clamped at (CullPadTerms::blend_total): a chain of N folds
-    // drags further than one of them does, and nothing here counts the layers.
-    // A pad that is too wide keeps items a compile did not need and costs a
-    // longer tape; one that is too narrow drops an item the field needed and
-    // costs the geometry. Zero for the hard Add every document that predates
-    // layer composition carries, so none of them pays anything for this.
-    total.blend_fixed = kernel::cmax(total.blend_fixed, layer_blend_support(layer));
+    // Attributing a fold to its owning layer here would be wrong twice over,
+    // and only the document-wide maximum ever hid it: the term would land on
+    // the layer that needs it least, and a document of N composed folds would
+    // be padded for exactly one of them. Measured on four spheres 0.62 apart
+    // with the top folds set to a quadratic k: 0.0180 of band drift at two
+    // composed folds and 0.0268 at three, against 0 at one (tests/unit/
+    // test_layer_fold_sites.cpp, "the cull pad sums the folds above a layer
+    // rather than taking the largest").
     return total;
 }
 
@@ -1455,6 +1446,75 @@ float group_blend_support(const Node& group, const Layer& layer) {
 float layer_blend_support(const Layer& layer) {
     return chain_blend_support(layer.composition.op, layer.composition.blend,
                                layer.composition.rounding * layer_distance_scale(layer));
+}
+
+// HOW FAR A CHANGE TO ONE LAYER'S OWN FIELD TRAVELS THROUGH THE STACK ABOVE IT:
+// the support of the fold that layer enters through, plus the support of every
+// fold above it.
+//
+// A combine is POINTWISE -- `ctape_combine_values` reads a.d and b.d at the
+// sample and nothing else -- so a change to a layer's value at p changes the
+// document's value at p, whatever operator sits above, and an intersecting or
+// subtracting layer overhead widens NOTHING. What is not pointwise is a SMOOTH
+// or EXTENDED fold: it moves the result up to its own support away from where
+// its operands changed. That is the same inequality node_reach_bound applies
+// once per enclosing GROUP inside a layer, through the same expression, and
+// this is it one level up -- where node_reach_bound stops, because it holds a
+// Layer and not a Document.
+//
+// SUMMED rather than maxed because they compose: the second fold sees a field
+// that already differs over the first's dilated box and can move its own result
+// that much further again. There is one term per visible SDF layer, and a hard
+// union contributes zero -- so a document that predates compositions dilates by
+// nothing here and pays for none of this.
+//
+// THE FIRST VISIBLE SDF LAYER'S OWN COMPOSITION IS NOT APPLIED (tape.h,
+// compile_and_fold_layer), so it is not a term. Counting it anyway would be
+// safe and is not free: over-wide keeps items a compile did not need and costs
+// a longer tape, too narrow drops an item the field needed and costs the
+// geometry -- so the two directions are not symmetric, and the one that is
+// merely slow is still not the one to take when the exact term is in hand.
+//
+// A hidden layer's own fold is not applied and adds nothing, but the folds
+// ABOVE a hidden layer still are: the walk starts at `layer_id` whether or not
+// it is visible, which is what the hidden side of a SetLayerVisibleCmd needs.
+float folds_from_layer_support(const Document& doc, LayerId layer_id) {
+    float total = 0.0f;
+    bool at_or_above = false;
+    bool have_first = false;
+    for (const Layer& l : doc.layers) {
+        if (l.id == layer_id) at_or_above = true;
+        if (!l.visible || l.kind != LayerKind::Sdf || !l.sdf) continue;
+        const bool first = !have_first;
+        have_first = true;
+        if (!at_or_above || first) continue;
+        total += layer_blend_support(l);
+    }
+    return total;
+}
+
+// THE PAD THE WHOLE DOCUMENT COMPILES UNDER: a maximum over the visible SDF
+// layers of what each one's items need, which is that layer's own chain pad
+// PLUS the folds its value passes through above it.
+//
+// A maximum of sums and never a sum of maxima, exactly as `cull_pad` is for one
+// layer: the pad is a single dilation of one region, so it has to cover the
+// worst layer rather than the total of all of them.
+//
+// The fold sum is the term a per-layer walk cannot produce -- it is a property
+// of the STACK, and `cull_pad_terms` holds a layer. `CullIndex::refresh_pad` is
+// this same expression over cached terms, and the two are held equal by a test
+// rather than by this sentence (test_layer_fold_sites.cpp), because a term in
+// one of them only would cull a brick refill differently from a whole-document
+// compile.
+float document_cull_pad(const Document& doc) {
+    float pad = 0.0f;
+    for (const Layer& layer : doc.layers) {
+        if (!layer.visible || layer.kind != LayerKind::Sdf || !layer.sdf) continue;
+        pad = kernel::cmax(pad,
+                           cull_pad(*layer.sdf, layer) + folds_from_layer_support(doc, layer.id));
+    }
+    return pad;
 }
 
 Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& layer,

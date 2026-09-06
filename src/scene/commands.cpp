@@ -315,41 +315,6 @@ std::optional<Command> apply(Document& doc, const Command& cmd) {
 
 namespace {
 
-// HOW FAR A CHANGE TO ONE LAYER'S OWN FIELD TRAVELS THROUGH THE STACK ABOVE IT:
-// the support of the fold that layer enters through, plus the support of every
-// fold above it.
-//
-// A combine is POINTWISE -- `ctape_combine_values` reads a.d and b.d at the
-// sample and nothing else -- so a change to a layer's value at p changes the
-// document's value at p, whatever operator sits above, and an intersecting or
-// subtracting layer overhead widens NOTHING. What is not pointwise is a SMOOTH
-// or EXTENDED fold: it moves the result up to its own support away from where
-// its operands changed. That is the same inequality node_reach_bound applies
-// once per enclosing GROUP inside a layer, through the same expression, and
-// this is it one level up -- where node_reach_bound stops, because it holds a
-// Layer and not a Document.
-//
-// SUMMED rather than maxed because they compose: the second fold sees a field
-// that already differs over the first's dilated box and can move its own result
-// that much further again. There is one term per visible SDF layer, and a hard
-// union contributes zero -- so a document that predates compositions dilates by
-// nothing here and pays for none of this.
-//
-// A hidden layer's own fold is not applied and adds nothing, but the folds
-// ABOVE a hidden layer still are: the walk starts at `layer_id` whether or not
-// it is visible, which is what the hidden side of a SetLayerVisibleCmd needs.
-float folds_from_layer_support(const Document& doc, LayerId layer_id) {
-    float total = 0.0f;
-    bool at_or_above = false;
-    for (const Layer& l : doc.layers) {
-        if (l.id == layer_id) at_or_above = true;
-        if (!at_or_above) continue;
-        if (!l.visible || l.kind != LayerKind::Sdf || !l.sdf) continue;
-        total += layer_blend_support(l);
-    }
-    return total;
-}
-
 // WHAT A COMMAND THAT CHANGES THE VISIBLE SDF LAYER LIST COSTS BEYOND THE LAYER
 // IT NAMES: the first visible SDF layer initialises the accumulator and ITS OWN
 // OPERATOR IS NOT APPLIED (tape.h), so adding, removing, hiding or showing the

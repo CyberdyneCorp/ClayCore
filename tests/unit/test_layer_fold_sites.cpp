@@ -400,12 +400,154 @@ TEST_CASE("a smooth layer fold pads the document's cull") {
     }
 
     SUBCASE("a hard fold still pads nothing, so nothing that unions pays") {
+        // Asserted at the DOCUMENT level, which is where the fold's term lives:
+        // `cull_pad` is one layer's own chain and has never carried one, since
+        // a fold drags the layers BENEATH it rather than the one that owns it
+        // (bounds.cpp, cull_pad_terms).
         Document hard = doc;
         hard.layers.back().composition = LayerComposition{};
-        CHECK(cull_pad(*hard.layers.back().sdf, hard.layers.back()) ==
-              cull_pad(*hard.layers.front().sdf, hard.layers.front()));
+        CHECK(document_cull_pad(hard) == 0.0f);
+        CHECK(document_cull_pad(doc) > 0.0f);
     }
 }
+
+// -- 5.1 and the pad SUMS the folds above a layer -----------------------------
+
+namespace {
+
+// Four layers, one hard sphere each, 0.62 apart so no two layers' own boxes
+// overlap: every disagreement the sweep below finds arrived through a FOLD and
+// not through geometry a region already contained.
+//
+// `composed_folds` counts from the TOP, which is the shape an artist makes -- a
+// base, with joins and cutters stacked above it. The bottom layer's own
+// composition is never applied (tape.h), so four layers carry three folds.
+Document fold_stack(int composed_folds, float k) {
+    Document doc;
+    for (int i = 0; i < 4; ++i) {
+        Layer& l = doc.add_sdf_layer("l" + std::to_string(i));
+        l.sdf->insert(sphere_at(0.62f * static_cast<float>(i), 0.5f));
+    }
+    for (int i = 0; i < composed_folds; ++i)
+        doc.layers[static_cast<std::size_t>(3 - i)].composition =
+            composed(Op::Add, BlendProfile::Quadratic, k);
+    return doc;
+}
+
+// The worst band-clamped disagreement between a REGION-LIMITED compile and the
+// whole-document one, swept over 240 small regions crossing the whole stack.
+//
+// This is the shape a brick refill has, and it is the only shape that finds
+// this class of bug: one narrow region at a time, each dilated by its own band
+// exactly as a brick's CullRegion is, sampled INSIDE the band, which is where
+// the culled tape's promise applies. One wide region keeps every item and
+// agrees with everything.
+//
+// `extra` is diagnostic rather than asserted: widening the region by hand is
+// what separates "the pad is too narrow" from "the fold is wrong", since a
+// wrong fold does not improve when the compile is handed more to look at.
+float sweep_worst(const Document& doc, float band, float extra = 0.0f) {
+    const CullIndex index(doc);
+    const Tape whole = compile_document(doc);
+    float worst = 0.0f;
+    for (int i = 0; i < 240; ++i) {
+        const float x0 = -1.2f + 3.8f * static_cast<float>(i) / 240.0f;
+        const math::Aabb r{cf3(x0, -0.03f, -0.03f), cf3(x0 + 0.06f, 0.03f, 0.03f)};
+        CullRegion cull;
+        cull.region = r.dilated(band + extra);
+        const Tape culled = compile_document(doc, &cull, &index);
+        for (int s = 0; s < 7; ++s) {
+            const cfloat3 p = cf3(x0 + 0.06f * static_cast<float>(s) / 6.0f, 0.0f, 0.0f);
+            const float a = whole.eval(p).d;
+            const float b = culled.eval(p).d;
+            if (std::fabs(a) <= band || std::fabs(b) <= band)
+                worst = kernel::cmax(worst, std::fabs(a - b));
+        }
+    }
+    return worst;
+}
+
+}  // namespace
+
+TEST_CASE("the cull pad sums the folds above a layer rather than taking the largest") {
+    // THE FOURTH CULL-OBSERVABLE PREDICATE (design.md 13). `cull_pad_terms`
+    // answers what ONE layer's item chain needs, and both readers of the
+    // document's pad are a MAXIMUM over layers of it -- so a document of N
+    // composed folds was padded for one of them, while the drag an item at the
+    // bottom of the stack passes through is the SUM of every fold above it.
+    //
+    // Measured on this fixture before the terms were summed: worst band drift 0
+    // at one composed fold -- which is all the case above ever exercised --
+    // 0.0180 at two with k = 0.3, and 0.0229 / 0.0268 at three with k = 0.3 /
+    // 0.45. The all-hard row was 0, so the sweep invents nothing of its own.
+    // Dilating every region by a further 2k took the two-fold row to 0 and the
+    // three-fold row to 0.0049: the shortfall scales with the fold COUNT, which
+    // is what identified the pad rather than the fold.
+    const float band = 0.1f;
+
+    SUBCASE("a stack that unions hard is identical, so the sweep has no false positives") {
+        for (float k : {0.15f, 0.3f, 0.45f}) CHECK(sweep_worst(fold_stack(0, k), band) == 0.0f);
+    }
+
+    SUBCASE("and so is one, two or three composed folds") {
+        for (int folds = 1; folds <= 3; ++folds)
+            for (float k : {0.15f, 0.3f, 0.45f})
+                CHECK(sweep_worst(fold_stack(folds, k), band) == 0.0f);
+    }
+
+    SUBCASE("because the pad grows with the NUMBER of folds") {
+        // The teeth, and the one assertion that separates a sum from a maximum:
+        // under a maximum these three numbers are equal. A value, not a clock.
+        const float one = document_cull_pad(fold_stack(1, 0.3f));
+        const float two = document_cull_pad(fold_stack(2, 0.3f));
+        const float three = document_cull_pad(fold_stack(3, 0.3f));
+        CHECK(document_cull_pad(fold_stack(0, 0.3f)) == 0.0f);
+        CHECK(one > 0.0f);
+        CHECK(two == doctest::Approx(2.0f * one));  // exactly one term per fold
+        CHECK(three == doctest::Approx(3.0f * one));
+    }
+
+    SUBCASE("and it is charged to the layers BENEATH each fold, which are the ones that need it") {
+        // Attribution. A fold drags the items underneath it, so the term rises
+        // going DOWN the stack. While it rode the layer that OWNED the fold
+        // only the document-wide maximum hid the misattribution, and fixing the
+        // sum without fixing the attribution would have moved the error rather
+        // than closed it.
+        const Document doc = fold_stack(3, 0.3f);
+        const float bottom = folds_from_layer_support(doc, doc.layers.front().id);
+        const float top = folds_from_layer_support(doc, doc.layers.back().id);
+        CHECK(top > 0.0f);
+        CHECK(bottom == doctest::Approx(3.0f * top));
+    }
+
+    SUBCASE("and the first visible layer's own composition is not a term") {
+        // It is never applied (tape.h), so counting it pads the whole document
+        // for a fold that does not exist. Over-wide is the cheap direction and
+        // still not free -- it keeps items a compile did not need and costs
+        // tape -- and the exact answer is in hand here.
+        Document doc = fold_stack(0, 0.0f);
+        doc.layers.front().composition = composed(Op::Subtract, BlendProfile::Quadratic, 0.4f);
+        CHECK(folds_from_layer_support(doc, doc.layers.front().id) == 0.0f);
+        CHECK(document_cull_pad(doc) == 0.0f);
+        // And it IS a term for every layer that is not the first one.
+        doc.layers[1].composition = composed(Op::Subtract, BlendProfile::Quadratic, 0.4f);
+        CHECK(folds_from_layer_support(doc, doc.layers.front().id) > 0.0f);
+        CHECK(folds_from_layer_support(doc, doc.layers[1].id) ==
+              folds_from_layer_support(doc, doc.layers.front().id));
+    }
+
+    SUBCASE("and the cached index reports exactly the same number") {
+        // The pad's two readers, held equal by a test rather than by a comment:
+        // a compile takes whichever it has (Compiler::document_pad), so a term
+        // in one of them alone would cull a brick refill differently from the
+        // whole-document compile it is supposed to agree with.
+        for (int folds = 0; folds <= 3; ++folds) {
+            const Document doc = fold_stack(folds, 0.3f);
+            CHECK(CullIndex(doc).cull_pad() == document_cull_pad(doc));  // exact, not approx
+        }
+    }
+}
+
 
 // -- 5.3 the dirty region a composed layer's own commands name ----------------
 
@@ -966,3 +1108,4 @@ TEST_CASE("an item edit is dilated by the folds it passes through") {
         }
     }
 }
+

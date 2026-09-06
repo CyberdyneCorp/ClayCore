@@ -76,6 +76,19 @@ silent when missed: a brick outside the reported region keeps the values it has
 and is stamped with the new revision, so it is never recomputed and never
 reports anything.
 
+A REGION-LIMITED compile SHALL answer, inside its band, what the whole-document
+compile answers. A cull region is an optimisation and not a smaller document: an
+item outside it can still steer the value inside it through the folds above that
+item's layer. So the pad a culled compile dilates its region by SHALL include the
+supports of the folds a layer's value passes through on its way to the document's
+value — the same quantity the dirty region above carries, asked in the other
+direction. SUMMED rather than maxed, because a stack of folds composes; charged
+to the layers BENEATH each fold, because those hold the items a region would
+otherwise drop; and not counting the first visible SDF layer's own composition,
+which is never applied. Too wide keeps items a compile did not need and costs
+tape; too narrow returns a field that never existed, per brick, with no error and
+no visual tell beyond geometry that looks deliberate.
+
 A document saved before layer composition existed SHALL load with every layer
 unioning, and SHALL render exactly as it did.
 
