@@ -49,10 +49,43 @@
 ## 3. Correctness
 
 - [ ] 3.1 Bounds PER OPERATOR, from the item-level logic — subtract is bounded by
-      its left operand, intersect by the intersection
-- [ ] 3.2 Exactness and Lipschitz fold as the item combine folds them
-- [ ] 3.3 THE PARITY FIXTURE: two layers vs one layer of two items, over many
-      points, in distance, colour, bounds and safe step
+      its left operand, intersect by the intersection. HALF DONE, and the half
+      that was done is the half that can lose surface. `fold_layer_bounds` now
+      dilates the layer's extent by the fold's OWN support, through
+      `scene::chain_blend_support` — one expression, which `group_blend_support`
+      and the new `layer_blend_support` both call and which the item path
+      already applies inside `geometry_bound`. That closes the case a bound can
+      be too SMALL: a smooth or extended fold bulges past the union of both
+      operands, and until this the layer fold reported the plain union (proved
+      by reverting it — 11,618 lattice samples then carry material outside
+      tape.bounds). The NARROWING rows of design.md §3 are deliberately NOT
+      taken and the reason is written beside the code: the item path unions for
+      every operator too, and the parity gate in 3.3 is that a subtracting LAYER
+      and a subtracting ITEM are the same document — narrowing one side alone
+      breaks it, and narrowing both changes the meshing region of every document
+      that already carries a subtract or a paint AND has to be threaded through
+      compile_group's rollback and every resumable entry point that copies a
+      prefix's bounds. Being wider than necessary costs a larger march; being
+      narrower than the surface costs the surface. It belongs in its own change,
+      with its own measurement
+- [x] 3.2 Exactness and Lipschitz fold as the item combine folds them — the
+      shared `emit_chain_combine` was folding EVERY extended mode through
+      `cfi_extended_blend`, which against a field info and itself is
+      `{false, L}`: it charged a Relief nothing at all, where the item path has
+      always spelled it `cfi_relief`, the term's own gradient. Reverted, the
+      layer form reports L = 1 against 2.8 and `check_conservative_steps` walks
+      through the surface. The same defect lived one level down in
+      `compile_group`, which shares the emitter and had no test at all; it now
+      has one
+- [x] 3.3 THE PARITY FIXTURE: two layers vs one layer of two items, over many
+      points, in distance, colour, bounds and safe step — `test_layer_parity.cpp`,
+      in both forms: one item per layer against one layer of two items (the
+      spec's own scenario, where the two tapes are the same tape byte for byte)
+      and several items per layer against one layer holding a GROUP, which is
+      the only correct one-layer equivalent of a composed layer of several. Union,
+      smooth union, chamfered union, subtract, smooth subtract, intersect, smooth
+      intersect, paint, groove, shell and incise, each against the hard-union arm
+      so a fold that ignored the composition could not pass
 
 ## 4. The six sites that assume a hard union
 

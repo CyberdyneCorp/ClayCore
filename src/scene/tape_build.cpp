@@ -440,6 +440,19 @@ struct Compiler {
     // group's rounding takes.
     void emit_chain_combine(Op op, const Blend& blend, float round_world) {
         emit_combine(op, blend, round_world);
+        if (op == Op::Relief || op == Op::Incise) {
+            // NOT cfi_extended_blend, which would charge a relief nothing at
+            // all: cfi_extended_blend of a field info against ITSELF is
+            // {false, L}, and relief does not blend two fields -- it offsets
+            // the accumulated one by an amplitude over a falloff, so what it
+            // costs is that term's own gradient, |k| * 1.5 / width. The item
+            // path spells exactly this (fold_info's Relief arm) and a chain
+            // combine that spelled it as a blend would report a safe step the
+            // item form does not, which is a marcher stepping through the
+            // relief it just carved.
+            tape.info = kernel::cfi_relief(tape.info, blend.k, round_world);
+            return;
+        }
         const bool smooth = blend.profile != BlendProfile::Hard && blend.k > 0.0f;
         if (op_is_extended(op))
             tape.info = kernel::cfi_extended_blend(tape.info, tape.info, op_is_diagonal(op));
@@ -448,6 +461,17 @@ struct Compiler {
     }
 
     Transition default_transition_{};
+
+    // The geometric extent of the LAYER being compiled: the same union
+    // `tape.bounds` collects, restarted at every layer, so that the fold
+    // between layers can dilate by its own combine's support the way an item's
+    // geometry bound already carries its own. Groups need no part in it -- a
+    // group's children expand it themselves, which is exactly how they reach
+    // tape.bounds, rolled-back subtrees included.
+    //
+    // Written by compile_list; reset and read only by run()/run_part(), so
+    // every other entry point leaves it alone and none of them looks.
+    math::Aabb layer_extent_{};
 
     // The gated item's own reach, set immediately before fold_info by the
     // caller that already computed it, so the bound is not recomputed and
@@ -1033,6 +1057,11 @@ struct Compiler {
                 // tape.bounds is the geometric extent meshing and raycast
                 // clipping use — never infinite, even for non-local ops
                 tape.bounds.expand(geometry);
+                // ...and the same union restricted to the layer being
+                // compiled, which is what the fold between layers dilates by
+                // its own combine's support. Only run()/run_part() read it,
+                // and both reset it per layer.
+                layer_extent_.expand(geometry);
                 bool seeded = !have_acc && n->op != Op::Add;
                 if (seeded) emit_empty(n->color);
                 emit_item(*n, layer);
@@ -1142,6 +1171,17 @@ struct Compiler {
         if (have_acc || seeded)
             emit_chain_combine(group.op, group.blend,
                                group.rounding * layer_distance_scale(layer));
+        // A GROUP does NOT add its combine's own ring to tape.bounds, and this
+        // is where it would go. It is a real gap -- a smooth group bulges past
+        // the union of its children exactly as a smooth layer fold bulges past
+        // the union of the layers beneath it -- and it predates layer
+        // composition, so it is not this change's to close: `resume` unwinds
+        // these frames from a TapeCheckpointFrame carrying op, blend and
+        // rounding and NO extent, so a ring added here lands in a full compile
+        // and not in a resumed one, and compile_document_append's
+        // require-identical goes 0.2 short in x on the first group append.
+        // Closing it means giving the checkpoint the subtree's extent, which
+        // is the resumable-checkpoint schema and not a bounds question.
         return true;
     }
 
@@ -1221,8 +1261,56 @@ struct Compiler {
             }
             return have_acc;
         }
-        if (have_acc) emit_chain_combine(comp.op, comp.blend, round_world);
+        if (have_acc) {
+            emit_chain_combine(comp.op, comp.blend, round_world);
+            fold_layer_bounds(layer);
+        }
         return true;
+    }
+
+    // WHAT THE FOLD ADDS TO THE TAPE'S GEOMETRIC EXTENT.
+    //
+    // tape.bounds is what meshing marches and what a raycast clips against, so
+    // the only failure that matters here is a bound too SMALL -- it renders as
+    // missing surface rather than as an error. A combine can put the result's
+    // surface outside BOTH operands' boxes, by up to its own support: a smooth
+    // union bulges outward where the two fields come within the blend of each
+    // other, and an extended mode deviates within the support kernel/tape.h
+    // documents for it. Until layers could carry a combine at all, the fold
+    // between them was a hard Add, whose support is zero, and so the union of
+    // the item bounds was the whole answer.
+    //
+    // The ring goes on the LAYER's own extent and not on the accumulated box,
+    // because that is exactly where the item path puts it: `geometry_bound`
+    // dilates the item by `rounding + chain_blend_support` and unions THAT into
+    // tape.bounds, leaving what is already accumulated alone. The two forms of
+    // one shape -- two layers, or one layer of two items -- have to produce the
+    // same box, and they only do while both spell the dilation the same way.
+    //
+    // WHAT IS DELIBERATELY NOT DONE HERE, and it is design.md 3's narrowing.
+    // `Subtract` cannot create material outside its left operand and
+    // `Intersect` is confined to the intersection, so both could take a box
+    // strictly smaller than this union. Neither is taken, for one reason: the
+    // item path does not take it either, and the parity this change stands on
+    // is that a subtracting LAYER and a subtracting ITEM produce the same
+    // document. Narrowing one side alone breaks that; narrowing both is a
+    // change to the meshing region of every document that already carries a
+    // subtract or a paint, and it has to be threaded through compile_group's
+    // rollback and through every resumable entry point that copies a prefix's
+    // bounds -- the same wall the group ring above runs into, measured, not
+    // guessed. It belongs in its own change with its own measurement. Being
+    // wider than necessary costs a larger march; being narrower than the
+    // surface costs the surface.
+    //
+    // Not called for a layer whose chain produced nothing: the extent is empty
+    // there and dilating an empty box leaves it empty. An INTERSECT against an
+    // empty layer empties the document and could shrink the box to nothing --
+    // deliberately not taken, for the same reason as the rest of the
+    // narrowing, and it is the harmless direction.
+    void fold_layer_bounds(const Layer& layer) {
+        const float support = layer_blend_support(layer);
+        if (support <= 0.0f) return;  // a hard fold adds no extent
+        tape.bounds.expand(layer_extent_.dilated(support));
     }
 
     // Which visible SDF layers a PART compiles. Before and Only are the two
@@ -1254,6 +1342,7 @@ struct Compiler {
             }
             on_tail_path_ = true;
             tail_checkpoint_taken_ = false;
+            layer_extent_ = math::Aabb{};
             const bool layer_val = compile_list(layer.sdf->roots, *layer.sdf, layer, false);
             on_tail_path_ = false;
             // The same record run() makes, so a PART is resumable on the same
@@ -1284,6 +1373,7 @@ struct Compiler {
             // narrows it to the last member from there.
             on_tail_path_ = true;
             tail_checkpoint_taken_ = false;
+            layer_extent_ = math::Aabb{};
             bool layer_val = compile_list(layer.sdf->roots, *layer.sdf, layer, false);
             on_tail_path_ = false;
             if (tail_checkpoint_taken_) {

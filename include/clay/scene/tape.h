@@ -43,7 +43,20 @@ struct Tape {
     // another's prefix. The cull applies: a brick whose region no such item
     // reaches compiles a tape without it, and keeps the flag.
     bool lipschitz_bounds_gradient = true;
-    math::Aabb bounds;  // union of item influence bounds (raycast clipping)
+    // Union of the item geometry bounds, each already dilated by its own
+    // rounding and combine support, and then -- where a visible SDF layer folds
+    // into the ones beneath it with a composition of its own -- that layer's
+    // extent dilated once more by THAT combine's support. What meshing marches
+    // and what a raycast clips against; never infinite, even for a non-local
+    // op. A hard fold has zero support and adds nothing, so a document that
+    // predates layer composition keeps exactly the box it had.
+    //
+    // Conservative in one direction only. It is not narrowed per operator: a
+    // subtract cannot create material outside its left operand and an intersect
+    // is confined to the intersection, but the item path unions for both too
+    // and the two forms of one shape have to report the same box. See
+    // Compiler::fold_layer_bounds.
+    math::Aabb bounds;
 
     // Content identity for backend upload caching. compile_document and
     // compile_layer stamp each tape they return with a process-unique nonzero

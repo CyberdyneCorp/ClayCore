@@ -414,11 +414,34 @@ float cull_pad(const SdfContent& content, const Layer& layer);
 math::Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& layer,
                                 LayerExtent* extent = nullptr);
 
+// How far a CHAIN-LEVEL combine spreads a change in one of its operands, in
+// world units. THE one expression for that quantity: an extended mode reaches
+// its documented support (kernel/tape.h ccombine_extended_support), everything
+// else reaches the wider of the blend profile's support and k — because a HARD
+// profile has zero support, and support alone dilated a Paint by nothing while
+// its colour reached out to k.
+//
+// Op/Blend/world-rounding rather than a node, so that a GROUP's fields and a
+// LAYER's composition reach it without either growing its own copy. The item
+// path applies the same expression inside geometry_bound, on top of the
+// item's own rounding.
+float chain_blend_support(Op op, const Blend& blend, float round_world);
+
 // How far a GROUP's combine spreads a change in one of its operands. Shared by
 // node_influence_bound, which applies it to the union of the children, and
 // node_reach_bound, which applies it to one child — two spellings of the same
 // quantity would be one refactor away from disagreeing.
 float group_blend_support(const Node& group, const Layer& layer);
+
+// How far a LAYER's composition spreads a change in one of ITS operands: the
+// same quantity one level up, for the fold between a layer and the accumulated
+// field of the visible SDF layers beneath it. A layer composition carries no
+// node, so its rounding converts through `layer_distance_scale` — the factor a
+// GROUP's rounding takes, not the placed one an item's takes.
+//
+// Zero for the hard Add every document that predates layer composition
+// carries, which is what keeps their bounds byte-identical.
+float layer_blend_support(const Layer& layer);
 
 // Where an edit to `id` can change the layer's field: node_influence_bound,
 // dilated once per enclosing group by that group's blend support, up to the

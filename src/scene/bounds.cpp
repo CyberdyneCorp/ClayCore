@@ -1402,23 +1402,32 @@ Aabb item_own_influence_bound(const Node& item, const Layer& layer) {
     return geometry_bound(item, layer, /*with_copies=*/false);
 }
 
-float group_blend_support(const Node& group, const Layer& layer) {
-    // Extended-op groups: the subtree field is not rounded, so rb comes
-    // straight from the group's rounding scaled into world units.
+float chain_blend_support(Op op, const Blend& blend, float round_world) {
+    // Extended modes: the operand field is not rounded, so rb comes straight
+    // from the combine's own rounding in world units.
     // Otherwise cmax(support, k), exactly as the item path above: paint fades
     // over max(profile support, k), and a HARD profile has zero support — so
-    // support alone dilated a Paint group by nothing while its colour reached
-    // out to k.
+    // support alone dilated a Paint by nothing while its colour reached out
+    // to k.
     //
     // Lifted out of node_influence_bound so the ancestor walk below can apply
     // the SAME expression to one child that the group path applies to the
-    // union of them. Two spellings of "how far a group's blend reaches" would
-    // be one refactor away from disagreeing, and the walk is only sound
-    // because it is the same number.
-    return op_is_extended(group.op)
-               ? kernel::ccombine_extended_support(static_cast<int>(group.op), group.blend.k,
-                                                   group.rounding * layer_distance_scale(layer))
-               : kernel::cmax(group.blend.support(), group.blend.k);
+    // union of them, and then generalised past the node so a LAYER's
+    // composition reaches it too. Two spellings of "how far a combine
+    // reaches" would be one refactor away from disagreeing, and both walks are
+    // only sound because it is the same number.
+    return op_is_extended(op) ? kernel::ccombine_extended_support(static_cast<int>(op), blend.k,
+                                                                 round_world)
+                              : kernel::cmax(blend.support(), blend.k);
+}
+
+float group_blend_support(const Node& group, const Layer& layer) {
+    return chain_blend_support(group.op, group.blend, group.rounding * layer_distance_scale(layer));
+}
+
+float layer_blend_support(const Layer& layer) {
+    return chain_blend_support(layer.composition.op, layer.composition.blend,
+                               layer.composition.rounding * layer_distance_scale(layer));
 }
 
 Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& layer,
