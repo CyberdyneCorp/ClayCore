@@ -2171,6 +2171,42 @@ Of the three majors the review confirmed, that is the one with a user behind it.
 The other two are a corrupted display normal and a silent no-op; both are real
 and neither is reachable by anyone we know of yet.
 
+### A fixture whose normals all point the same way hides a wrong normal
+
+The clearest instance yet of the fixture class, and it arrived by a route worth
+recording: a reviewer's finding that was WRONG AS STATED, with a real defect
+underneath it that only reproducing the probe could find.
+
+The claim was that `append_outside_neighbors`'s `want_normals` output is never
+executed. It is: deleting it makes `nb_normals_` shorter than `nb_slots_` and
+fails an existing case at `CHECK(crossed.dropped == 0)`. **The SLOT is gated.**
+
+**What is ungated is the VALUE.** Substituting a constant `cf3(0, 1, 0)` for the
+outside normal, keeping the list the same length, leaves the whole suite
+identical at 16,463,873 assertions and 0 failed. The reason is the fixture and
+not the code: `bumpy_quads` is a plane cage whose normals all sit within a few
+degrees of +Y, and `polish_gate` reads an ANGLE
+(`mean_ring_disagreement`) — so a constant normal sits comfortably inside the
+gate's own tolerance. **Every value in the fixture is nearly the constant the
+bug substitutes.**
+
+The repair was the fixture, not the assertion: the new case runs on a TORUS,
+where a wrong outside normal reads as a hard edge, `polish_gate` shuts, and the
+rim is silently not polished at all. Proved by substituting the constant again —
+`crossed.dropped` reads 3 at radius 0.20 and 1 at radius 0.30 against 0.
+
+**Two things to carry forward.** First, this is the same shape as the
+bit-identity gate passing on zero boundary detail, arrived at independently:
+*a fixture in which the quantity under test is degenerate proves nothing about
+the quantity.* The question to ask a comparison gate is what value would have to
+be non-zero — or non-uniform — for the assertion to be a real claim.
+
+Second, the reviewer was wrong and the finding was still worth its cost. The fix
+agent reproduced the probe rather than arguing from the code, found the claim
+did not hold, and found the real gap one level down. **A wrong finding that is
+reproduced rather than dismissed is a cheap way to be right about something
+else.**
+
 ### A negative repro that rules out one path, and the ceiling gate that localises it
 
 The host tried to reproduce the coarse ceiling reset and **could not**, and
