@@ -605,3 +605,45 @@ TEST_CASE("glb: mutating a valid file never reads out of bounds") {
     CHECK(ok + refused > 0);
     MESSAGE("mutations accepted: " << ok << ", refused: " << refused);
 }
+
+TEST_CASE("glb: an accessor's bufferView is validated before it is converted") {
+    // "No bufferView" used to be detected by casting the -1 fallback to
+    // std::size_t and letting the resulting huge index miss the array. The
+    // ANSWER was right; the conversion was undefined, and under
+    // -fsanitize=float-cast-overflow it aborts the process — which is how the
+    // ASan+UBSan job found it, through "glb: mutating a valid file never reads
+    // out of bounds" above rather than through any named case. That fuzz case
+    // is the other half of this regression: revert the guard in
+    // src/io/gltf.cpp and both turn into SIGABRT.
+    //
+    // Named here as well because the fuzz case reaches this by accident. It
+    // flips bytes until something lands on the accessor, so it proves the file
+    // is refused without ever saying WHICH file, and a future edit that stopped
+    // producing an absent bufferView would silently stop covering this.
+    std::vector<std::uint8_t> bin;
+    for (int i = 0; i < 9; ++i) put_f32(&bin, 0.0f);
+    const std::string head =
+        "{\"asset\":{\"version\":\"2.0\"},"
+        "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],\"nodes\":[{\"mesh\":0}],"
+        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0}}]}],"
+        "\"buffers\":[{\"byteLength\":36}],"
+        "\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36}],"
+        "\"accessors\":[{\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"";
+
+    // Absent, negative, and far past any array: the three shapes that reach the
+    // conversion. 1e30 is the overflow in the other direction and is one
+    // character of edit away in any real file.
+    for (const char* tail : {"}]}", ",\"bufferView\":-1}]}", ",\"bufferView\":1e30}]}",
+                             ",\"bufferView\":7}]}"}) {
+        const std::vector<std::uint8_t> glb = hand_built_glb(head + tail, bin);
+        mesh::Mesh out;
+        CHECK_FALSE(io::load_glb(glb.data(), glb.size(), &out).ok());
+    }
+
+    // ...and the same file WITH a real bufferView still loads, so the guard did
+    // not simply reject every accessor.
+    const std::vector<std::uint8_t> glb = hand_built_glb(head + ",\"bufferView\":0}]}", bin);
+    mesh::Mesh out;
+    REQUIRE(io::load_glb(glb.data(), glb.size(), &out).ok());
+    CHECK(out.positions.size() == 3);
+}

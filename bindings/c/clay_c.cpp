@@ -270,6 +270,39 @@ clay_result fail(clay_result code, std::string detail) {
     return code;
 }
 
+// A host-supplied enum PARAMETER, read as an integer without ever loading it as
+// its enum type — which is what makes an out-of-range value rejectable at all.
+//
+// This is not pedantry. An unscoped C enum with no fixed underlying type has a
+// value range of the smallest bit-field that holds its enumerators: 0..3 for
+// clay_backend_op's three constants, 0..7 for clay_surface_measure's six. A
+// host is free to pass 99 — clay.h documents the answer as
+// CLAY_ERROR_INVALID_ARGUMENT — but `switch (op)` LOADS the parameter as that
+// type before any case label is compared, and that load is the undefined
+// behaviour. Under -fsanitize=enum it aborts the process, so the branch the
+// header promises was unreachable by construction. Copying the bytes out is the
+// only way to reach it. Found by the ASan+UBSan job, not by reading the code.
+//
+// The two rejected alternatives, since both look simpler than this:
+//   - Give the enums a fixed underlying type in clay.h (`enum E : int32_t`).
+//     That is C++11 and C23; clay.h must compile as C17, which check_c_abi.py
+//     holds it to, so this is not available.
+//   - Declare the parameters int32_t. ABI-identical on every supported target,
+//     but it moves the type check out of the host's own compiler, where a
+//     wrong constant is caught for free and before it ships.
+//
+// Callers range-check the result and THEN switch on the enum, so the switch
+// still loads a value the type can hold and -Wswitch still catches an
+// enumerator added with no case for it.
+template <typename E>
+std::int32_t enum_argument(const E& e) {
+    static_assert(sizeof(E) == sizeof(std::int32_t),
+                  "clay's C enums are int-sized on every supported target");
+    std::int32_t raw = 0;
+    std::memcpy(&raw, &e, sizeof raw);
+    return raw;
+}
+
 // Enum validation, and at the same time the drift guard: the switches list
 // every engine enumerator and have no default, so adding one to the scene
 // model without a clay.h entry is a -Werror compile error here.
@@ -2848,8 +2881,22 @@ eval::Status raycast_visible(eval::Backend* b, const scene::Tape& tape, const fl
 // Surface measures. FILE SCOPE, above the first extern "C" — a helper defined
 // inside that block is what broke the macOS and Windows builds in #235, and GCC
 // does not warn about it.
-clay_result to_measure(clay_surface_measure in, brush::SurfaceMeasure* out) {
-    switch (in) {
+// Takes the RAW argument, not a clay_surface_measure, and that is the whole
+// point: passing an out-of-range enum BY VALUE is already the undefined load,
+// so `to_measure(measure, &m)` aborted in the CALLER under -fsanitize=enum
+// before this function got a chance to reject anything. The range check has to
+// happen before the value crosses a call boundary. Callers pass
+// enum_argument(measure); see enum_argument for why the memcpy is needed.
+//
+// The bound names the last enumerator rather than a COUNT sentinel, because
+// adding one to a PUBLIC enum is a header change either way, and a sentinel in
+// clay.h would be a value a host could pass.
+clay_result to_measure(std::int32_t raw, brush::SurfaceMeasure* out) {
+    if (raw < CLAY_MEASURE_CURVATURE || raw > CLAY_MEASURE_THICKNESS)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown surface measure");
+    // In range, so reading it as the enum is defined; the switch keeps -Wswitch
+    // pointing at a new enumerator with no case for it.
+    switch (static_cast<clay_surface_measure>(raw)) {
         case CLAY_MEASURE_CURVATURE: *out = brush::SurfaceMeasure::Curvature; return CLAY_OK;
         case CLAY_MEASURE_CAVITY: *out = brush::SurfaceMeasure::Cavity; return CLAY_OK;
         case CLAY_MEASURE_CONVEXITY: *out = brush::SurfaceMeasure::Convexity; return CLAY_OK;
@@ -8085,6 +8132,13 @@ clay_result clay_backend_supports(const char* backend, clay_backend_op op,
     if (!b)
         return fail(CLAY_ERROR_NOT_FOUND, std::string("backend not registered: ") + backend);
     const eval::BackendCaps caps = b->caps();
+    // Range-check the raw argument before the switch reads it as the enum; see
+    // enum_argument. It sits AFTER the registry lookup on purpose: an unknown
+    // backend asked about an unknown op keeps answering CLAY_ERROR_NOT_FOUND,
+    // which is the precedence the shipped call already had.
+    const std::int32_t raw = enum_argument(op);
+    if (raw < CLAY_BACKEND_OP_EVAL_POINTS || raw > CLAY_BACKEND_OP_RAYCAST)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown backend operation");
     switch (op) {
         case CLAY_BACKEND_OP_EVAL_POINTS: *out_supported = caps.eval_points ? 1 : 0; return CLAY_OK;
         case CLAY_BACKEND_OP_EVAL_GRID: *out_supported = caps.eval_grid ? 1 : 0; return CLAY_OK;
@@ -11030,7 +11084,7 @@ clay_result clay_measure_points(const clay_document* doc, clay_surface_measure m
     clay_result r = read_measure_params(params, &settings);
     if (r != CLAY_OK) return r;
     brush::SurfaceMeasure m;
-    r = to_measure(measure, &m);
+    r = to_measure(enum_argument(measure), &m);
     if (r != CLAY_OK) return r;
 
     std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
@@ -11061,7 +11115,7 @@ clay_result clay_mask_from_surface(const clay_document* doc, clay_surface_measur
     clay_result r = read_measure_params(params, &settings);
     if (r != CLAY_OK) return r;
     brush::SurfaceMeasure m;
-    r = to_measure(measure, &m);
+    r = to_measure(enum_argument(measure), &m);
     if (r != CLAY_OK) return r;
 
     std::shared_ptr<const scene::Tape> tape_ref = doc->tape();

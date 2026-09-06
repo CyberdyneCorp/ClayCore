@@ -5182,7 +5182,16 @@ clay_result clay_measure_points(const clay_document* doc, clay_surface_measure m
  *
  * OCCLUSION and THICKNESS work here too and are far more expensive than the
  * stencil measures: a lattice of a million cells is a million hemisphere
- * samples. Prefer a coarse cell_size, and pass a token. */
+ * samples. Prefer a coarse cell_size, and pass a token.
+ *
+ * A `measure` that is not one of the six enumerators above is
+ * CLAY_ERROR_INVALID_ARGUMENT here and in clay_measure_points, and no mask is
+ * produced. That is a promise about a value the C type cannot police — an
+ * unscoped enum's range is a bit-field, not the set of its names — so a host
+ * that computes the measure rather than writing the constant gets an error
+ * code and not a mis-dispatch. It is NOT a promise about a value read from a
+ * file or a network: check what you deserialize, because a valid-but-wrong
+ * enumerator is indistinguishable from the one you meant. */
 clay_result clay_mask_from_surface(const clay_document* doc, clay_surface_measure measure,
                                    const float region_min[3], const float region_max[3],
                                    float cell_size, float band,

@@ -245,3 +245,49 @@ TEST_CASE("c abi: an unbounded region is refused rather than walked forever") {
                                  &mask, nullptr) != CLAY_OK);
     CHECK(mask == nullptr);
 }
+
+// A `measure` outside the enumerators is CLAY_ERROR_INVALID_ARGUMENT, and the
+// point of the case is that it RETURNS one.
+//
+// clay.h has always documented an unknown measure as INVALID_ARGUMENT, and
+// to_measure has always had the branch that says so, but the branch was
+// unreachable: the switch above it loads the parameter as clay_surface_measure,
+// an unscoped enum whose value range is 0..7 for six enumerators, so a host's
+// 99 is undefined behaviour before any case is compared. Under
+// -fsanitize=enum the process aborts there. The sibling call
+// clay_backend_supports had the identical defect and the identical never-taken
+// branch; "backend queries refuse what they cannot answer" in
+// test_backend_partial.cpp is that half of the regression, and it is what the
+// ASan+UBSan job caught. Reverting the enum_argument range-checks in
+// bindings/c/clay_c.cpp turns both of these from a failed CHECK into a SIGABRT.
+//
+// 99 rather than 6: 6 is one past the last enumerator and still INSIDE the
+// bit-field range the type can hold, so it exercises the range check without
+// exercising the load. Both are worth having and 99 is the one that crashed.
+TEST_CASE("c abi: a measure that is not one of the six is refused, not undefined") {
+    Doc doc(0.5f);
+    const float pt[3] = {0.5f, 0.0f, 0.0f};
+    const float lo[3] = {-1.0f, -1.0f, -1.0f};
+    const float hi[3] = {1.0f, 1.0f, 1.0f};
+    float v = 0.0f;
+
+    // The cast is written AT the call rather than into a named variable, and
+    // that is load-bearing rather than terse: reading a
+    // `clay_surface_measure m = static_cast<clay_surface_measure>(99)` back out
+    // is itself an out-of-range enum load, so the test would abort in the test
+    // and prove nothing about the library. A prvalue argument is never loaded.
+    for (const std::int32_t bad : {99, 6, -1}) {
+        CHECK(clay_measure_points(doc.d, static_cast<clay_surface_measure>(bad), pt, 1, nullptr,
+                                  &v, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+
+        clay_mask* mask = nullptr;
+        CHECK(clay_mask_from_surface(doc.d, static_cast<clay_surface_measure>(bad), lo, hi, 0.1f,
+                                     0.0f, nullptr, &mask, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(mask == nullptr);
+    }
+
+    // ...and a real measure still works, so the range check did not simply
+    // reject everything.
+    CHECK(clay_measure_points(doc.d, CLAY_MEASURE_CURVATURE, pt, 1, nullptr, &v, nullptr) ==
+          CLAY_OK);
+}
