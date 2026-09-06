@@ -1,7 +1,17 @@
 # sdf-prefix-cache Specification
 
 ## Purpose
-TBD - created by archiving change add-sdf-prefix-cache. Update Purpose after archive.
+
+A held gesture and a per-brick refill both evaluate the same unchanging bottom
+of an edit list over and over. This capability lets that bottom be compiled and
+kept — a PREFIX of the tape, keyed by what it describes — so an edit costs what
+the edit adds rather than what the document holds.
+
+Its whole contract is that it changes COST and never RESULT: a cached prefix and
+a full walk agree bit for bit, a cache that is dropped changes nothing but the
+time, and every path that could not prove exactness takes the full walk instead
+of guessing. It is observable only through counters, because no output of a
+refill can distinguish the two.
 
 ## Requirements
 
