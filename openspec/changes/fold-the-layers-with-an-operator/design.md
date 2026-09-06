@@ -1014,3 +1014,98 @@ the stamp stroke was the exposed one (it is `place_stamps`, which nobody calls).
 Each was checkable in a minute because the other named a SYMBOL and a FILE rather
 than describing a flow. Name the symbol even when you might be wrong about it —
 especially then, since that is what makes the correction cheap.
+
+### §13c. One function, and what the second review's blockers 2, 3 and 4 turned out to be
+
+§13b closes by saying the fix "is not 'dilate four call sites'. It is that ONE
+function answers 'where can an edit reach in this document'". That is what is
+there now, and this section records the shape of it and the one finding that
+does not match the report it came from.
+
+**The one function is `scene::layer_reach_in_document(doc, layer_id, in_layer)`**
+(`include/clay/scene/bounds.h`): a box the caller knows the LAYER's field cannot
+change outside of, carried to the box the DOCUMENT's field cannot change outside
+of. It is the only place `folds_from_layer_support` is applied to a bound.
+Everything goes through it:
+
+| route | how it reaches the term |
+|---|---|
+| `clay_layer_node_influence_bound` | `node_influence_bound_in_document` |
+| `clay_brick_cache_mark_dirty_nodes` | the same function |
+| `scene::node_command_bound` | IS that function now — it looks the content up from a layer id and calls it |
+| `clay_layer_influence_bound` | `layer_influence_bound_in_document` |
+| `clay_brick_cache_mark_dirty_layer` | the same function |
+| `scene::layer_command_bound` | that function plus `first_visible_flip_bound`, the one term only a command has |
+| `first_visible_flip_bound` | `layer_influence_bound_in_document` for the promoted layer |
+| the stamp stroke, the surface drag, the surface magnify | `layer_reach_in_document` on each stated reach; the drag's instanced-sharer boxes come from `layer_influence_bound_in_document` |
+
+Two consequences worth stating rather than discovering:
+
+1. **The node query is `node_reach_bound` now, not `node_influence_bound`.** The
+   query used to stop at the node's own box while the command path dilated by
+   each enclosing GROUP's blend support — a pre-existing instance of exactly the
+   disagreement §13b forbids, one level below the fold. `test_c_undo_bound.cpp`
+   encoded it: its "a child of a blended group covers the seam" case asserted
+   the undo bound was strictly WIDER than the query. That case is updated, not
+   weakened — the requirement is now asserted against the child's own geometry,
+   and a new subcase holds the query and the undo bound EQUAL, which is the
+   property this change needs.
+2. **`layer_influence_bound` is not widened in place** and now says in its own
+   comment why it cannot be: it takes a `Layer`, and the folds above are a
+   property of the stack. `node_reach_bound` carries the same sentence.
+
+**Blocker 3 is real as a contract violation and its stated consequence is not
+reachable. Both halves matter.** The three gesture reaches genuinely carried no
+fold term, and `GestureRegion`'s own contract is "It MUST cover everything the
+bracket does — a region that does not is stale bricks". But a gesture's reach
+has exactly one consumer, `clay_document::touch_regions`, and
+`touch_region_locked` compares each seed's brick DILATED BY `band + pad`, where
+`pad` is the document cull pad — a maximum over layers of that layer's chain pad
+PLUS the folds above it, so `pad >= folds_from_layer_support(edited layer)` for
+every document, by construction. The shortfall was inside the pad.
+
+Measured, on a three-layer fixture over a 504-brick window (258,048 samples):
+with the gesture's dilation removed a drag leaves 288 seeds where the fixed one
+leaves 216, and the refill that follows is bit-identical to a cold document's —
+0 stale samples, worst 0.0, either way. So "every dab left stale bricks" did not
+happen, and the reason it did not is a number owned by the CULL PAD rather than
+by the reach. That is the accidental kind of correctness this change exists to
+remove: the coverage is not what `GestureRegion` promises, it would not survive
+a second consumer of a gesture's reach, and it depends on stage 1's own fix
+having landed first. The reaches are dilated, and the regression tests assert
+the INVALIDATION (a seed in the shell the fold adds is dropped; a seed outside
+both reaches is kept — exactly one of two survives) rather than pretending to a
+stale brick that does not occur.
+
+### §13d. A test the fix modified is not evidence for the fix
+
+Raised by the host on 2026-09-06 while stage 2 was still uncommitted, and it is
+the sharpest thing said about this change's own test discipline.
+
+If a test asserted the too-small bound and now asserts the dilated one, it agrees
+with the new code for the same reason it agreed with the old: **it was updated
+to.** That is not an argument against updating it — it had to change. It is that
+the evidence has to come from somewhere the fix did not touch.
+
+**The question to ask of every test file this change MODIFIED, rather than
+added:**
+
+> Would this file still fail if the fix were reverted, and is the thing that
+> fails a line that existed BEFORE?
+
+- Both yes: it was a genuine regression test all along, and it caught the defect
+  the moment the defect appeared.
+- Only a line the fix added fails: the file is DOCUMENTATION of the new
+  behaviour rather than a check on it. That is fine — as long as nobody counts
+  it twice, in a report or in a review.
+
+This is the same shape as a test that asserts only what CAN be read and therefore
+passes on both sides of the change it exists to announce, arriving from the other
+direction: **a test that moves with the code it tests has the same blindness as a
+test that never moves.**
+
+**Required of the third review:** for every modified test file in this change —
+`tests/unit/test_c_undo_bound.cpp` is the one that prompted this, and it is not
+the only one — apply the question above and report which category each falls
+into. The revert proof is the instrument: flipping the fix and watching a NEW
+assertion fail says something that the modified assertion passing cannot.
