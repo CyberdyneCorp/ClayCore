@@ -895,6 +895,15 @@ needs them, and listed so they are not mistaken for oversights:
   extent, which is a schema change to the resumable checkpoint. Pinned meanwhile
   by a test asserting the layer form's box contains the group form's and exceeds
   it by exactly one ring.
+  **Latent rather than live for the one host we can check:** ClaySpaceDesktop
+  creates no item groups at all — `clay_layer_add_group` and
+  `clay_layer_add_item_in_group` have no wrapper and no call site anywhere in its
+  workspace, so every item it adds goes to the layer root. The path it WOULD have
+  come down is its own: `place_layer` refills the union of a layer's extent either
+  side of a move, so an extent missing a blend ring leaves surface unmeshed where
+  the old form stood. That is why the layer fold's widening landing first is the
+  right order — the correctness half arrives before the feature that would expose
+  it.
 
 - **Bounds NARROWED per operator, on both the item and the layer path.**
   `fold-the-layers-with-an-operator` widens a fold's extent by its own support,
