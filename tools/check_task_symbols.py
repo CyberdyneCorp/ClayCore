@@ -28,7 +28,10 @@ import re
 import subprocess
 import sys
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Overridable so `--self-test` can drive this gate end to end over a synthetic
+# tree. Nothing in the repository sets it; the self-test sets it and nobody else.
+ROOT = (os.environ.get("CLAY_TASK_SYMBOLS_ROOT")
+        or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CHANGES = os.path.join(ROOT, "openspec", "changes")
 
 # Where a symbol may live. openspec/ is deliberately absent: a name that appears
@@ -100,7 +103,18 @@ def load_baseline() -> set[tuple[str, str]]:
     return out
 
 
-def check(change: str, dirs: list[str], baseline: set[tuple[str, str]]) -> list[str]:
+def resolves(span: str, dirs: list[str]) -> bool:
+    """Does this span name something that is actually in the tree right now?"""
+    if is_path(span):
+        return os.path.exists(os.path.join(ROOT, span))
+    if is_ident(span):
+        return find_symbol(span, dirs)
+    # Neither shape: the gate never had an opinion on it, so it cannot be debt.
+    return True
+
+
+def check(change: str, dirs: list[str], baseline: set[tuple[str, str]],
+          used: set[tuple[str, str]], paid: set[tuple[str, str]]) -> list[str]:
     path = os.path.join(CHANGES, change, "tasks.md")
     if not os.path.isfile(path):
         return []
@@ -109,7 +123,16 @@ def check(change: str, dirs: list[str], baseline: set[tuple[str, str]]) -> list[
         for lineno, line in enumerate(handle, 1):
             for span in BACKTICK.findall(line):
                 span = span.strip()
-                if (change, span) in baseline:
+                key = (change, span)
+                if key in baseline:
+                    # A BASELINED ROW IS STILL MEASURED, it is just not fatal.
+                    # Recording that the row was reached, and whether the name
+                    # has since appeared, is what lets `stale_rows` retire it --
+                    # without this the row exempts the name forever and the
+                    # debt list stops describing the tree.
+                    used.add(key)
+                    if resolves(span, dirs):
+                        paid.add(key)
                     continue
                 if is_path(span):
                     if not os.path.exists(os.path.join(ROOT, span)):
@@ -120,7 +143,131 @@ def check(change: str, dirs: list[str], baseline: set[tuple[str, str]]) -> list[
     return failures
 
 
+def stale_rows(baseline: set[tuple[str, str]], used: set[tuple[str, str]],
+               paid: set[tuple[str, str]], checked: list[str]) -> list[str]:
+    """Baseline rows that no longer record anything, and must be deleted.
+
+    A DEBT LIST NOBODY RETIRES STOPS BEING A DEBT LIST. Each row exempts one
+    name in one change; once the name is built, or the change stops citing it,
+    the row goes on exempting it silently -- so if that name is later renamed or
+    deleted, the gate stays quiet about the very thing it exists to catch. This
+    is the same shape as the defect that put the baseline inside the tree it
+    searched: a record that grants what it records, and that nothing re-reads.
+
+    The file used to carry "whoever rebases past that merge should delete its
+    row" as a note to a human. This is that sentence, enforced.
+    """
+    out = []
+    for change, span in sorted(baseline):
+        # A row for a change that is not in this run was never consulted, so it
+        # cannot be judged. Only a change that WAS read can retire its rows.
+        if change not in checked:
+            continue
+        key = (change, span)
+        if key not in used:
+            out.append(f"task_symbols_baseline.txt: {change} no longer cites `{span}`"
+                       " -- delete the row")
+        elif key in paid:
+            out.append(f"task_symbols_baseline.txt: `{span}` now resolves for {change}"
+                       " -- delete the row")
+    return out
+
+
+def self_test() -> int:
+    """Drive the real gate over a synthetic tree, both directions.
+
+    A gate that is only ever run against a passing tree has never been shown to
+    fail, and the stale-row rule in particular is invisible until a debt is
+    paid -- which on this branch has not happened yet. So it is exercised here
+    against a tree built to make it fire, and this runs as a ctest so the claim
+    does not decay into a comment.
+    """
+    import shutil
+    import tempfile
+
+    root = tempfile.mkdtemp(prefix="task-symbols-selftest-")
+    try:
+        os.makedirs(os.path.join(root, "src"))
+        os.makedirs(os.path.join(root, "tools"))
+        tasks_dir = os.path.join(root, "openspec", "changes", "demo")
+        os.makedirs(tasks_dir)
+        # THE GATE IS NOT COPIED INTO THE TREE IT SEARCHES. `tools/` is a
+        # search directory, so a copy here would contain the very names this
+        # function writes, and every one of them would resolve against the
+        # self-test's own source -- the same self-reference the baseline
+        # exclusion exists to stop. The real gate runs, pointed at this tree.
+        gate = os.path.abspath(__file__)
+
+        src = os.path.join(root, "src", "thing.cpp")
+        tasks = os.path.join(tasks_dir, "tasks.md")
+        baseline = os.path.join(root, "tools", "task_symbols_baseline.txt")
+
+        def write(path: str, text: str) -> None:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(text)
+
+        def run_gate() -> tuple[int, str]:
+            env = dict(os.environ, CLAY_TASK_SYMBOLS_ROOT=root)
+            proc = subprocess.run([sys.executable, gate], cwd=root, env=env,
+                                  capture_output=True, text=True)
+            return proc.returncode, proc.stdout + proc.stderr
+
+        for cmd in (["git", "init", "-q"],
+                    ["git", "config", "user.email", "t@t"],
+                    ["git", "config", "user.name", "t"]):
+            subprocess.run(cmd, cwd=root, check=True, stdout=subprocess.DEVNULL)
+
+        failures = []
+
+        def expect(label: str, want_code: int, want_text: str) -> None:
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True,
+                           stdout=subprocess.DEVNULL)
+            code, out = run_gate()
+            if code != want_code or (want_text and want_text not in out):
+                failures.append(f"{label}: exit {code} (wanted {want_code}), output:\n{out}")
+
+        # THE FIXTURE NAME MUST BE ONE NOTHING ELSE CITES. This file lives in
+        # `tools/`, which the gate searches, so every symbol named literally
+        # below is a real name in the real tree. Using a name that a real
+        # baseline row records would make that row look paid off and retire it
+        # -- which is exactly what happened when this fixture was first written
+        # with a name a change had genuinely baselined.
+        #
+        # 1. The ORIGINAL rule: a cited name that is nowhere in the tree fails.
+        write(src, "int unrelated() { return 0; }\n")
+        write(tasks, "- [ ] build `ClaySelfTestOnlyMarker`\n")
+        write(baseline, "# empty\n")
+        expect("an unresolvable cited name must fail", 1, "no such symbol")
+
+        # 2. Baselined, and still unbuilt: the row is doing its job, gate passes.
+        write(baseline, "demo\tClaySelfTestOnlyMarker\n")
+        expect("a baselined name that is still unbuilt must pass", 0, "1 baselined")
+
+        # 3. THE FIX. The name gets built, so the row is now paid off and must
+        #    be retired rather than left to exempt the name forever.
+        write(src, "struct ClaySelfTestOnlyMarker { int x; };\n")
+        expect("a baselined name that now resolves must fail", 1, "now resolves")
+
+        # 4. THE OTHER HALF. The change stops citing the name, so the row
+        #    records nothing at all.
+        write(src, "int unrelated() { return 0; }\n")
+        write(tasks, "- [ ] build something else entirely\n")
+        expect("a baselined row nothing cites must fail", 1, "no longer cites")
+
+        for failure in failures:
+            print(failure)
+        if failures:
+            print(f"\ntask-symbols self-test: {len(failures)} of 4 checks failed")
+            return 1
+        print("task-symbols self-test: OK (4 checks, both directions)")
+        return 0
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main() -> int:
+    if "--self-test" in sys.argv[1:]:
+        return self_test()
     if not os.path.isdir(CHANGES):
         print("no openspec/changes directory")
         return 1
@@ -134,14 +281,21 @@ def main() -> int:
         )
     dirs = haystack()
     baseline = load_baseline()
+    used: set[tuple[str, str]] = set()
+    paid: set[tuple[str, str]] = set()
     failures = []
     for change in changes:
-        failures += check(change, dirs, baseline)
-    for failure in failures:
+        failures += check(change, dirs, baseline, used, paid)
+    stale = stale_rows(baseline, used, paid, changes)
+    for failure in failures + stale:
         print(failure)
     checked = len(changes)
-    if failures:
-        print(f"\n{len(failures)} unresolved name(s) across {checked} change(s)")
+    if failures or stale:
+        if failures:
+            print(f"\n{len(failures)} unresolved name(s) across {checked} change(s)")
+        if stale:
+            print(f"{len(stale)} stale baseline row(s): the debt is paid, so the record"
+                  " must not keep granting it")
         return 1
     print(f"task symbols resolve in {checked} change(s)"
           + (f", {len(baseline)} baselined" if baseline else ""))

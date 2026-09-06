@@ -20,9 +20,18 @@
 # belongs to another repository or to a build artefact, and a name a change has
 # promised and not yet built.
 #
-# `LayerComposition` resolves on main (it landed with the layer-composition
-# change) and does not resolve on the branch this file was audited from.
-# Whoever rebases past that merge should delete its row.
+# A ROW IS RETIRED BY THE GATE, NOT BY GOODWILL. Every row here is re-read on
+# every run: if the change stops citing the span, or the span starts resolving,
+# the gate FAILS and names the row to delete. A debt list nobody retires stops
+# describing the tree and goes on quietly exempting a name long after the debt
+# is paid -- so if that name is later renamed away, the gate stays silent about
+# the very thing it exists to catch. This sentence used to be advice to a human;
+# `--self-test` is where both directions are proved.
+#
+# The live example: `LayerComposition` resolves on main (it landed with the
+# layer-composition change) and does not resolve on the branch this file was
+# audited from. Nobody has to remember to delete its row -- the first run after
+# that merge fails and says so.
 #
 # <change>\t<span>
 
