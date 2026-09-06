@@ -22,7 +22,7 @@ Last reconciled against `3dcoat_study/MISSING_FEATURES.md` and
 caught five items this file had dropped. Every ClayCore-owned row in their
 catalogue is now represented here or in the deferred list below.
 
-## Where the engine is (2026-09-06, v0.86.0)
+## Where the engine is (2026-09-06, v0.87.0)
 
 21 capabilities, 205 archived changes, 19 still open. Complete enough that the
 gaps below are about *sculpting affordances*, not about the field engine — and
@@ -1879,6 +1879,17 @@ that host's own Linux baseline argues — and print the load beside every figure
 emits, so a number carries the conditions it was taken under rather than a
 person's assurance that they checked.
 
+**Their half is now fixed, and the fix names the distinction rather than moving
+the check.** `refuses_a_busy_run(comparing, busy, allow_busy)` — refuse to
+RECORD, never to COMPARE — with four unit tests and, separately, an end-to-end
+run of both paths with the threshold forced. Their own reason for doing both is
+the one worth keeping: **the unit tests say the rule is right, and only the run
+says it is wired to anything.** A rule that is correct and unreachable is the
+same gate failure as a fixture nobody stands in, arriving from the other
+direction.
+
+That leaves ours as the remaining half of the pair, and now it is the only half.
+
 ### A fourth way a gate is real and unenforced: an exact assertion about a state nobody reaches
 
 The three recorded above are a gate no change triggers, a gate the wrong version
@@ -2045,6 +2056,70 @@ They have offered a per-pin list of "calls we do not make and why" — 29 entry
 points long for v0.84.0 — and a real session trace for `reference/host_loop.py`,
 which covers the sequence and not the hours. Both are worth more than another
 synthetic fixture, and neither costs this repository anything to accept.
+
+### The host cannot evaluate the fold, because main is untagged
+
+The consuming host is pinned at **v0.84.0**. The fold is on main at 0.87.0 with
+no tag, so they cannot pin it, cannot call it, and declined to say whether it
+fits — **"arriving, not evaluated"** — on the explicit ground that reading a
+header is what produced two of their wrong answers today.
+
+That is the right call and it has a cost we should name: **until a tag exists,
+every answer we get back about the fold is a header reading, which is the class
+of answer both sides have now been burned by.** The unblock is a release cut, not
+a code change, and it is the cheapest open item on this list.
+
+What they could say without calling it is that the SHAPE is right — per-operand
+composition, a resolved boolean still first-class for operands nobody converts,
+and a refusal carrying a blocking id **and** a count. Those were the three things
+they asked for and all three are in. Fit is still unknown.
+
+### The format pre-check should name the layer, not return a boolean
+
+Recorded above: a C-ABI host cannot choose the format minor it writes. The host
+has now said what it actually wants from a pre-check, and it is narrower and more
+specific than "check before you write".
+
+**Their save is four lines** — build a C string, call `clay_document_save`, check
+the result. A refusal comes back as an engine error and reaches the sculptor as
+text, which is **correct and late**: they have already chosen a filename and
+pressed save. What a `clay_document_writable_at_minor` buys is the ability to say
+so **while the document is being built** — to grey the older-format option, or to
+name which subtool is the reason, before anyone commits to a path.
+
+So it is **wanted, not needed**: the safety is already ours, in the refusal. It
+should not hold anything up, and it should not be sold as a correctness fix.
+
+**But a boolean is the wrong return.** Their argument is the one `_below` already
+settled: *"this document needs 18"* sends a sculptor hunting; *"Poros needs 18"*
+does not. The blocking layer is already an id inside the refusal path, so
+exposing it costs nothing — and a pre-check that returns less than the refusal it
+predicts is a worse interface than no pre-check.
+
+### The frame at a region boundary: what it costs to land it unfixed
+
+The host reviewed the regional-multires residual and asked for one thing, on the
+row that is theirs: **if the boundary frame is fixable inside the change, fix it
+there.** The reason is our own correction to them — nobody meets this through
+export, they meet it by sculpting near a boundary — so a change that lands
+regional refinement with frames up to six degrees out at boundary vertices ships
+a feature whose guarantee holds only where nobody works.
+
+**They checked that it does not reach them rather than assuming it.** Their
+`LayerOperation::RefineRegion` refines a **voxel grid**, not a hierarchy — the
+same English word, a different operation — and they call
+`clay_multires_add_level` for whole levels only, never a regional variant. So
+this is not a blocker on their account.
+
+**The condition they attached is the part to honour:** if it lands unfixed, the
+row must say what it COSTS, rather than being a follow-up nobody reads. Sections
+1.1-1.5 of `finish-regional-multires` are that work — the frame, the halo and
+coefficient smoothing — and they are deliberately unticked, with the spec delta
+rewritten to describe the tree instead of promising them. The cost, stated: a
+coefficient authored at a boundary vertex reconstructs against a frame up to
+0.170116 |dnormal| out (124 of 1024 emitted corners on the measured fixture), so
+bit-identity with a dense hierarchy holds unconditionally only while boundary
+detail is zero.
 
 ## Deliberately not doing
 
