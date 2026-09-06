@@ -236,18 +236,49 @@ paragraph above are owed by the C entry point of task 6.1, which is not built �
 so nothing in this ABI answers a mixed export yet, rather than answering it
 badly.
 
-### One thing a mixed export was expected to cost, and does not
+### What a mixed export costs a host that is short of memory
 
 `mesh_at_level` is already non-const and evaluates. The worry recorded here was
 that a mixed-depth export forces levels `0 .. max` simultaneously resident, so
 the peak-versus-persistent argument that produced `preflight_add_level` would
-apply and an export preflight might be owed. **MEASURED AND ANSWERED: it is not.**
-`mesh_at_level` already walks every level below its own — both calls open with
-`evaluate_up_to(level)` — and the mixed export then reads the evaluated positions
-and builds no level mesh, no adjacency and no chunk table, so its resident set is
-a SUBSET rather than a superset. Gated as a byte comparison: `memory().rebuildable`
-after a mixed export is no larger than after `mesh_at_level` on the same
-hierarchy, and both are above the cold figure. No export preflight is added.
+apply and an export preflight might be owed. **MEASURED, AND THE ANSWER IS TWO
+NUMBERS RATHER THAN ONE**, because the two calls do not ask for the same thing.
+
+On a hierarchy nobody has trimmed, the mixed export is the CHEAPER of the two:
+both walk the levels below, and the mixed export then reads the evaluated
+positions and builds no level mesh, no adjacency and no chunk table, so
+`memory().rebuildable` after it is no larger than after `mesh_at_level` on the
+same hierarchy, and both are above the cold figure. That is gated as a byte
+comparison.
+
+On a TRIMMED hierarchy it is the more expensive one, and the difference is not
+an implementation detail that could be tuned away — it is the definition of the
+call. `mesh_at_level` opens with `evaluate_up_to(level)`, which brings the level
+it was ASKED for up to date and deliberately promises nothing about the ones
+below: `below_is_current` short-circuits when nothing under the target has
+moved, and that short circuit is exactly what makes a release by
+`drop_intermediate_caches` STAY released. The mixed export cannot use it. It
+reads each emitted vertex AT THE LEVEL THAT VERTEX LIVES AT, so it opens with
+`evaluate_all_up_to(level)` instead — the guarantee `evaluate_up_to` does not
+give — and a level a trim released has to come back before it can be read. So on
+a profile with `max_resident_levels <= 2`, where the residency policy trims after
+every level change, `mesh_at_level(3)` leaves levels 1..2 released and
+`mixed_mesh_at_level(3)` rebuilds them: the resident footprint after the mixed
+export is strictly LARGER. That is gated too, as the same byte comparison run on
+a constrained profile.
+
+**No export preflight is added even so**, and the reason is what the second
+number is made of rather than how big it is: every byte the mixed export brings
+back is a byte the hierarchy already had before the trim, at levels the surface
+already declares and already prices in `memory()`. `preflight_add_level` exists
+for the peak of building a level that does not exist yet, which is a figure a
+host cannot read off the surface. A host that trims to two levels and then asks
+for a mixed export is asking to hold what it just released, and `memory()` before
+the trim is the number that says how much. What is owed instead is that the call
+SAY so rather than let a host read "export" as "free", and it does: the
+`WHAT IT DOES NOT PROMISE IS RESIDENCY` paragraph on `mixed_mesh_at_level` in
+`multires.h` states it, and `evaluate_all_up_to` in `multires_internal.h` states
+it against `evaluate_up_to` where the difference lives.
 
 ## What this change does NOT decide
 

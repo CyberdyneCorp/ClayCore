@@ -29,6 +29,7 @@
 #include <map>
 #include <vector>
 
+#include "clay/memory/budget.h"
 #include "clay/mesh/multires.h"
 #include "clay/mesh/multires_sculpt.h"
 
@@ -1140,18 +1141,24 @@ TEST_CASE("regional export: the transition is derived, so the stream never learn
 }
 
 TEST_CASE("regional export: a mixed export costs no more resident memory than a single-level one") {
-    // TASK 5.8, DECIDED AGAINST A NUMBER RATHER THAN AN ASSUMPTION: does a
-    // mixed-depth export need its own preflight?
+    // TASK 5.8, HALF ONE, ON A HIERARCHY NOBODY HAS TRIMMED: does a mixed-depth
+    // export need its own preflight?
     //
     // The worry is real in shape — a mixed export reads several levels at once,
     // so it forces levels 0..n simultaneously resident, and that is the
-    // peak-versus-persistent argument `preflight_add_level` exists for. It does
-    // not apply here, and the reason is that `mesh_at_level` ALREADY walks
-    // every level below its own: `evaluate_up_to(level)` is the first thing
-    // both calls do. The mixed export then reads the evaluated positions
-    // directly and builds no level mesh, no adjacency and no chunk table, so
-    // its resident set is a SUBSET of the one the existing export leaves
-    // behind. No preflight is added, and this is the measurement that says so.
+    // peak-versus-persistent argument `preflight_add_level` exists for. Here it
+    // does not bite: both calls walk the levels below on a cold hierarchy, and
+    // the mixed export then reads the evaluated positions directly and builds no
+    // level mesh, no adjacency and no chunk table, so its resident set is a
+    // SUBSET of the one the existing export leaves behind.
+    //
+    // WHAT THIS CASE MUST NOT BE READ AS is a claim that the mixed export is
+    // cheaper in general. It is not, and it is not because of how the two calls
+    // OPEN: `mesh_at_level` opens with `evaluate_up_to`, the mixed export with
+    // `evaluate_all_up_to`, and those differ exactly over a released level. The
+    // case below — "a trimmed hierarchy pays the mixed export back its levels"
+    // — is the other half, and it is the one that fails if anyone restores the
+    // subset claim as an absolute.
     const int n = 12;
     const std::vector<std::uint32_t> region = torus_block(n, 1, 2, 1, 2);
     MultiresSurface single = build(closed_torus(n, n));
@@ -1172,6 +1179,79 @@ TEST_CASE("regional export: a mixed export costs no more resident memory than a 
     // NOT VACUOUS: exporting did make the surface bigger, so "no more than" is
     // a comparison of two real numbers rather than of two zeros.
     CHECK(after_mixed.rebuildable > cold.rebuildable);
+}
+
+TEST_CASE("regional export: a trimmed hierarchy pays the mixed export back its levels") {
+    // TASK 5.8, HALF TWO, AND THE HALF THAT WAS ASSERTED WITHOUT BEING
+    // MEASURED. The case above is true and its REASON was not: it read "both
+    // calls open with `evaluate_up_to(level)`", and `mixed_mesh_at_level` opens
+    // with `evaluate_all_up_to` instead — added for exactly this — because it
+    // reads each emitted vertex AT THE LEVEL THAT VERTEX LIVES AT.
+    //
+    // The two are indistinguishable until something releases a level, which is
+    // why the untrimmed case cannot see the difference. `evaluate_up_to`
+    // short-circuits through `below_is_current` when nothing under the target
+    // has moved, and that short circuit is what makes a release STAY released.
+    // So on a host profile that trims — `max_resident_levels <= 2`, where the
+    // residency policy calls `drop_intermediate_caches` on every level change —
+    // the single-level export leaves the released levels released and the mixed
+    // export brings them all back. Its resident footprint is then strictly
+    // LARGER: the superset the design once said could not happen.
+    //
+    // THIS IS THE ASSERTION THAT FAILS IF THE SUBSET CLAIM IS RESTORED. An
+    // export written to open with `evaluate_up_to` would leave both surfaces at
+    // one resident level and both figures equal, and every `<=` above would
+    // still pass.
+    const int n = 12;
+    const std::vector<std::uint32_t> region = torus_block(n, 1, 2, 1, 2);
+    memory::SculptMemoryProfile constrained;
+    constrained.memory_class = memory::MemoryClass::Constrained;
+    constrained.max_resident_levels = 2;
+
+    const auto trimmed_at_three = [&](MultiresSurface* s) {
+        REQUIRE(s->refine_patches_to_level(region, 3));
+        REQUIRE(s->set_sculpt_level(3));
+        REQUIRE(s->set_display_level(3));
+        s->set_memory_profile(constrained);
+        // The trim really happened, and it left the level being worked on: the
+        // starting point of both halves is one resident level, not four.
+        REQUIRE(s->memory().resident_levels == 1u);
+    };
+
+    MultiresSurface single = build(closed_torus(n, n));
+    MultiresSurface mixed = build(closed_torus(n, n));
+    trimmed_at_three(&single);
+    trimmed_at_three(&mixed);
+    const mesh::MultiresMemory trimmed = mixed.memory();
+    REQUIRE(single.memory().rebuildable == trimmed.rebuildable);
+
+    const Mesh from_level = single.mesh_at_level(3);
+    const Mesh from_mixed = mixed.mixed_mesh_at_level(3);
+    REQUIRE_FALSE(from_level.positions.empty());
+    REQUIRE_FALSE(from_mixed.positions.empty());
+    // The exports themselves agree on the fine region, so the memory difference
+    // below is about WHAT WAS KEPT and not about one of them doing less work.
+    CHECK(from_mixed.positions.size() == 680u);
+
+    const mesh::MultiresMemory after_single = single.memory();
+    const mesh::MultiresMemory after_mixed = mixed.memory();
+    // `mesh_at_level` asked for its own level and got it: the release held.
+    CHECK(after_single.resident_levels == 1u);
+    CHECK(after_single.rebuildable == trimmed.rebuildable);
+    CHECK(after_single.evaluated == trimmed.evaluated);
+    // The mixed export asked for every level and got them back.
+    CHECK(after_mixed.resident_levels == 4u);
+    CHECK(after_mixed.rebuildable > after_single.rebuildable);
+    // AGAINST `evaluated` AND NOT ONLY `resident_levels`, because a cache is not
+    // a surface: `ensure_cache` allocates one and builds a level's connectivity
+    // with its positions still empty, so a count of caches reads 4 for a level
+    // that was never evaluated. `evaluated` is the subdivided positions, frames
+    // and normals — the bytes a reader of a lower level actually needs.
+    CHECK(after_mixed.evaluated > after_single.evaluated);
+    // AND THE HIERARCHY IS NOT BIGGER FOR IT, which is why no preflight is
+    // owed: what came back is rebuildable bytes at levels the surface already
+    // declares, not authored detail.
+    CHECK(after_mixed.authoritative == after_single.authoritative);
 }
 
 TEST_CASE("regional export: a crossing stamp leaves the mixed-depth surface watertight") {

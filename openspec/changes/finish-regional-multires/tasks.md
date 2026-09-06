@@ -365,13 +365,21 @@
       and the header states what the call does not promise — no quad list at a
       split edge, no attributes on a split cage
 - [x] 5.8 DECISION deferred to this stage with a measured peak in hand: whether
-      a mixed export needs its own preflight. IT DOES NOT, and the reason is
-      that `mesh_at_level` already walks every level below its own — both calls
-      open with `evaluate_up_to(level)`. The mixed export then reads the
-      evaluated positions and builds no level mesh, no adjacency and no chunk
-      table, so its resident set is a SUBSET. GATED as a byte comparison:
-      `memory().rebuildable` after a mixed export is <= after `mesh_at_level` on
-      the same hierarchy, and both are above the cold figure
+      a mixed export needs its own preflight. IT DOES NOT — but not because the
+      export is uniformly cheaper, which is what this tick said before it was
+      measured on a trimmed hierarchy. The two calls do not open the same way:
+      `mesh_at_level` opens with `evaluate_up_to(level)`, which promises nothing
+      about the levels below and short-circuits past a release, and the mixed
+      export opens with `evaluate_all_up_to(level)` because it reads each emitted
+      vertex at the level that vertex lives at. GATED as a byte comparison at
+      both ends of that: on an untrimmed hierarchy `memory().rebuildable` after a
+      mixed export is <= after `mesh_at_level` (it builds no level mesh, no
+      adjacency and no chunk table), and both are above the cold figure; on a
+      constrained profile that trims to two resident levels it is strictly
+      LARGER, because the export brings back what the trim released. No preflight
+      even so: those are bytes the hierarchy already had and already prices in
+      `memory()`, unlike the peak of a level that does not exist yet, and the
+      header states the residency cost where a host reads it
 - [x] 5.9 GATE: assembling the export welds to 0 boundary edges. Measured on a
       closed torus cage, the loop `clay.h` tells a host to write today —
       `build_block(effective_level(patch, display), patch)` per patch, welded at
