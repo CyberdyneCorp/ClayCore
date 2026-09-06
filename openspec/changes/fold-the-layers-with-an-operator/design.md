@@ -901,3 +901,33 @@ in the fold path: **could these two arguments be swapped, and would anything
 notice?** If the answer is "no, and nothing would", the comment is the whole
 defence, which this change has already proved is not enough — the first version
 of that line passed a full green gate run including asan and tsan.
+
+### §13b. The exact call path a real host takes, confirmed
+
+Confirmed by ClaySpaceDesktop on 2026-09-06, against its own source rather than
+from memory, and it narrows §13's closing paragraph from a warning to two
+symbols:
+
+    node_bound      -> Document::node_influence_bound -> clay_layer_node_influence_bound
+    refill_region   -> BrickCache::mark_dirty         -> clay_brick_cache_mark_dirty
+
+`place_layer` and `set_object_transform` compute `union(before, after)` from
+`clay_layer_node_influence_bound` — the reader that the first fix left reporting
+the UN-DILATED box — and hand the result to `clay_brick_cache_mark_dirty`, which
+takes the region it is given and cannot correct it. So the query is the surface
+that has to be right; the dirty call is downstream of the mistake and blameless.
+
+**This is why the query and the command path may not disagree.** A host that
+dirties by what it was told leaves stale geometry having asked for exactly the
+right thing, and the symptom on its side is missing surface with nothing to point
+at — the host's own note says its first instinct would have been to look at its
+mesh layer rather than at a bound the engine handed back. `clay.h` already
+promises this of `mark_dirty_nodes`: "the region is the single most likely thing
+to get silently wrong and a bound that is too tight leaves visibly stale bricks
+at a blend seam."
+
+So the fix for blockers 2, 3 and 4 is not "dilate four call sites". It is that
+**one function answers "where can an edit reach in this document", and the query,
+the dirty calls, the command path and the gesture reaches all go through it** —
+which is what `node_influence_bound_in_document`'s own comment already claims and
+this change made false.
