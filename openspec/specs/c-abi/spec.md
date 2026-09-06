@@ -8,9 +8,7 @@ exception in a signature — so that Swift, C# or Rust can consume it without a
 shim. The versioned descriptor convention is what lets the surface GROW without
 breaking a host compiled against an older header: a caller declares the layout
 it knows, and a field appended later keeps its documented default.
-
 ## Requirements
-
 ### Requirement: Flat versioned C API
 `bindings/c/clay.h` SHALL expose documents, layers, edit commands, evaluation, brick access, meshing, picking, and file I/O through a flat C API: opaque handles, integer error codes, caller-owned buffers, no C++ types and no exceptions crossing the boundary. The header SHALL carry an ABI version triple queryable at runtime (`clay_version()`), and the ABI SHALL follow SemVer: from 1.0 breaking changes only on major, and below 1.0 under SemVer's 0.x rule a minor bump MAY break the ABI. A break below 1.0 SHALL be stated in the header, the proposal and the release notes, and SHALL be detectable rather than silent: a call made in the older layout SHALL be rejected with an error code, never read as if it were the newer one.
 
@@ -111,6 +109,11 @@ The API SHALL expose voxel grids through an opaque handle: palette management, s
 
 Ownership SHALL be explicit: a grid created standalone is owned by the caller and destroyed with an explicit destroy call, while a grid obtained as a document layer is borrowed, remains owned by the document, and SHALL NOT be destroyed by the caller. Destroying a borrowed handle SHALL return an error rather than corrupting the document.
 
+A handle borrowed from a layer whose creation has been undone SHALL NOT be used:
+the layer is absent from the document and the ABI's own lookup reports it as not
+found. The cells are retained so that a redo restores them, not for a caller to
+reach while the layer is gone.
+
 #### Scenario: Voxel sculpting from C
 - **WHEN** a C consumer creates a grid, adds palette entries, stamps a sphere brush, runs a sculpting verb, and greedy-meshes the result
 - **THEN** the mesh matches the same sequence performed through `pyclay`
@@ -136,6 +139,11 @@ Ownership SHALL be explicit: a grid created standalone is owned by the caller an
 #### Scenario: A region with a non-finite bound is refused
 - **WHEN** rasterization is asked for a region whose bounds contain a NaN or an infinity
 - **THEN** the call returns an invalid-argument error and the grid is unchanged
+
+#### Scenario: A borrowed grid outlives an undone creation
+- **GIVEN** a voxel layer whose creation has been undone
+- **WHEN** the document is asked for that layer by name
+- **THEN** the lookup reports it as not found
 
 ### Requirement: Picking and evaluation parity
 The API SHALL expose gradients, field colours, batch raycast, safe step scale, surface snapping, layer bounds, selection bounds, voxel cell/face picking, build-plane picking, and raycast that attributes the hit to a layer and node. Mesh generation SHALL allow selecting the mesher, with the experimental one reachable only behind its explicit flag.
@@ -190,7 +198,28 @@ The C API SHALL expose the same editing surface as the Python bindings: node tra
 - **THEN** the deformer chain, repetition and profile survive the edit
 
 ### Requirement: Undo across the ABI
-The C API SHALL expose the same opt-in undo stack as the Python bindings: enable, undo, redo, depths and grouping. Calling undo with an empty stack SHALL report that rather than failing, so a UI can drive it without tracking state itself.
+
+The C API SHALL expose the same opt-in undo stack as the Python bindings:
+enable, undo, redo, depths and grouping. Calling undo with an empty stack SHALL
+report that rather than failing, so a UI can drive it without tracking state
+itself.
+
+EVERY layer creation the ABI exposes SHALL record its inverse.
+`clay_add_sdf_layer` and `clay_document_add_mesh_layer` already applied
+`AddLayerCmd`; `clay_document_add_voxel_layer` SHALL do the same rather than
+mutating the document directly, so that a conversion into a new voxel layer is
+reversible as a whole rather than in the half that happened to record.
+
+Undoing a voxel or mesh layer's creation SHALL remove the layer and SHALL retain
+its payload, so that a redo restores the layer with its content and the same id.
+The payload SHALL NOT be reachable through the ABI while the layer is absent.
+
+An explicit `clay_document_begin_undo_group` / `clay_document_end_undo_group`
+bracket SHALL be ONE step across every representation it spans — edit list,
+voxel grid, mask and mesh — and not one step per representation. A bracket that
+produced a single step SHALL be unchanged by the grouping, and a bracket
+containing an operation that nothing records SHALL leave that operation as its
+own step, so that an undo is never offered across a barrier.
 
 #### Scenario: Undo from Swift
 - **WHEN** a C consumer enables undo, edits, and undoes
@@ -199,6 +228,31 @@ The C API SHALL expose the same opt-in undo stack as the Python bindings: enable
 #### Scenario: Empty stack is not an error
 - **WHEN** undo is called on a document with nothing to undo
 - **THEN** the call reports that nothing was undone without returning a failure code
+
+#### Scenario: Creating a voxel layer is an undo step
+- **GIVEN** a document with undo enabled and nothing recorded
+- **WHEN** a voxel layer is added
+- **THEN** the undo depth is one
+- **AND** undoing removes the layer from the document
+
+#### Scenario: A crossing undoes as one step
+- **GIVEN** a document with undo enabled holding a starting form
+- **WHEN** a voxel layer is created and rasterized into inside one undo group
+- **THEN** the undo depth grows by exactly one
+- **AND** a single undo removes the layer and the cells together
+- **AND** no empty layer is left in the document
+
+#### Scenario: Redo restores the layer and its cells
+- **GIVEN** a bracketed crossing that has been undone
+- **WHEN** the document is redone once
+- **THEN** the layer is present with the id it had
+- **AND** it holds the cells the rasterization produced
+
+#### Scenario: An ungrouped crossing stays two steps
+- **GIVEN** a document with undo enabled
+- **WHEN** a voxel layer is created and rasterized into without a bracket
+- **THEN** the undo depth grows by two
+- **AND** the first undo empties the layer and the second removes it
 
 ### Requirement: wrap_around across the ABI
 `clay_deform` SHALL include a wrap enumerator taking `x0` and `x1`, so a C consumer composes the same wrapped item the Python bindings do.
@@ -2556,3 +2610,566 @@ refuses.
 #### Scenario: A brick refill without one layer
 - **WHEN** a consumer evaluates brick requests excluding one layer
 - **THEN** brick i occupies the same fixed slot it occupies in the whole-document form, holding what that brick would hold in a document without that layer
+
+### Requirement: A brick refill continues from its own previous result
+Refilling a brick SHALL evaluate only what the document gained since that brick was last refilled, when the document has gained it by APPENDING to the layer an append extends and nothing else. A refill's own output is the accumulator the edit list reached at that brick's lattice — exact, in float32 — so it is what the next refill continues from, and a dab then costs what the dab adds rather than what the document holds.
+
+The values SHALL be identical to a full refill's, BIT FOR BIT. Continuing a fold from the value it reached runs the same instructions in the same order over the same floats, so a tolerance would admit an error that is not there to admit.
+
+COLOUR SHALL be carried the same way, and the seed SHALL carry it. What the accumulator IS decides what a seed must hold: a distance-only walk folds one float per sample and a coloured one folds a distance and a colour together, so continuing a coloured fold from a distance alone would fold every combine against black. A refill asked for colour SHALL therefore resume only from a seed that kept one, and SHALL fall back rather than invent it.
+
+MORE THAN ONE VISIBLE SDF LAYER SHALL NOT prevent resuming, and the seed SHALL keep the two accumulators apart. The layers hard-union left to right, so where an append resumes from, the field is two values — the layers beneath the active one, and the active layer's own chain — and their union cannot be taken apart again. Seeding from the union is exact only where every appended item unions hard, which a blended dab does not. The half beneath SHALL be held as its own value, carried forward untouched while the active layer is sculpted, and folded in with the same hard union a whole-document compile emits between layers.
+
+A part of a document compiled for that split SHALL cull under the WHOLE document's pad. A part compiled under its own smaller pad drops items the whole compile keeps, and the halves then no longer sum to the whole.
+
+A refill SHALL fall back to evaluating in full wherever continuing would not be exact: the appended items would be culled differently from the value being continued; the cull pad has moved; the brick's own previous compile of the active layer produced no accumulator; colour is asked for and the seed kept none; or the edit was not an append to the layer an append extends.
+
+Kept values SHALL be bounded IN BYTES rather than in bricks, since a brick may carry a colour and a half beneath as well as a distance, and SHALL be discarded on any edit that is not such an append.
+
+#### Scenario: A stroke's refills equal a document built fresh
+- **GIVEN** a document refilled once, then appended to and refilled again, dab after dab
+- **WHEN** each refill is compared with one from a document holding the same items and no history to resume from
+- **THEN** every sample is the same float
+
+#### Scenario: A layer beneath is folded in rather than replayed
+- **GIVEN** two visible SDF layers, the upper one being sculpted and the lower one overlapping the bricks read
+- **WHEN** a stroke is refilled dab by dab
+- **THEN** every sample equals a full refill's, and what the refill costs is set by the dab rather than by either layer's length
+
+#### Scenario: An edit to the layer beneath is not resumed
+- **WHEN** an item is added to a layer BENEATH the one being sculpted
+- **THEN** the bricks are evaluated in full and the values equal a full refill's
+
+#### Scenario: Colour survives the resumed path
+- **WHEN** a refill asks for colour as well as distance, and the bricks carry seeds that kept colour
+- **THEN** the distances and the colours both equal a full refill's, bit for bit
+
+#### Scenario: An edit that is not an append is not resumed
+- **WHEN** an item is removed or changed rather than appended, and the bricks are refilled
+- **THEN** the values equal a full refill's
+
+#### Scenario: A colourless seed cannot serve a coloured refill
+- **WHEN** a brick was last refilled without colour and the next refill asks for it
+- **THEN** that brick is evaluated in full, and its colours are a full refill's
+
+#### Scenario: The saving follows the dab
+- **WHEN** the same dab is refilled into documents whose edit lists differ greatly in length
+- **THEN** what the refill costs is set by the dab rather than by the length
+
+#### Scenario: Colour takes the full path
+- **WHEN** a refill asks for colour as well as distance
+- **THEN** the values and colours equal a full refill's
+
+### Requirement: a brick refill resumes per brick
+
+Refilling a brick SHALL evaluate only what the document gained since that
+brick's seed was taken, whenever that can be proven exact for THAT BRICK. The
+decision SHALL NOT depend on whether the other bricks of the same call can be
+resumed, nor on their agreeing about a revision.
+
+A stored seed SHALL be identified by everything that decides what it describes:
+the brick coordinate, the lattice it was sampled on (dims and voxel size) and
+the BAND it was culled under. A request that differs in any of them SHALL NOT
+find that seed, neither to serve from nor to overwrite.
+
+A brick that cannot be served — no seed, a lattice or band the seed does not
+match, a cull pad that has moved, a prefix that produced no accumulator, or a
+document change that is not an append — SHALL take the full walk, and SHALL do
+so without costing any other brick in the call its resume.
+
+#### Scenario: a window that moves
+
+- **GIVEN** a refill has stored seeds for a row of bricks
+- **AND** one item is appended to the active layer
+- **WHEN** a refill asks for that row shifted by one brick
+- **THEN** the bricks the row still covers are answered from their seeds
+- **AND** only the newly entered brick takes the full walk
+
+#### Scenario: one brick without a seed
+
+- **GIVEN** a refill has stored seeds for a set of bricks
+- **AND** one item is appended to the active layer
+- **WHEN** a refill asks for those bricks plus one never asked for before
+- **THEN** the seeded bricks are still answered from their seeds
+
+#### Scenario: bricks stamped by different dabs
+
+- **GIVEN** two sets of bricks whose seeds were stored at different revisions
+- **AND** the document has only been appended to since the older of them
+- **WHEN** a refill asks for both sets together
+- **THEN** each brick is carried forward from its own revision
+- **AND** every one of them is answered from its seed
+
+#### Scenario: what it resumes to is what a full walk would say
+
+- **GIVEN** bricks resumed across several appends from several revisions
+- **WHEN** their values are compared with a document built with the same items
+      and never resumed
+- **THEN** they are bit-identical, not equal within a tolerance
+
+### Requirement: a resume follows the layer the appends went to
+
+A refill SHALL resume only when the appends recorded since the seed was taken
+were made to the layer whose chain the suffix would extend. Appends to any other
+layer SHALL make the plan unusable, and the refill SHALL take the full walk.
+
+NodeIds are per-layer: every layer's content numbers its nodes from 1, so
+comparing an appended id against another layer's roots can agree by coincidence.
+The layer SHALL be compared, not inferred from the ids.
+
+#### Scenario: an append to a layer beneath, whose id collides
+
+- **GIVEN** a document with two visible SDF layers
+- **AND** the layer beneath has one fewer root than the active one, so its next
+      id equals the active layer's last root
+- **AND** a refill has stored seeds for a row of bricks
+- **WHEN** an item is appended to the layer BENEATH and the row is refilled
+- **THEN** no brick is resumed
+- **AND** the values equal a document holding the same items and never resumed
+
+### Requirement: the resumable path is observable
+
+The C ABI SHALL report, per document, how many bricks refills have answered from
+a seed and how many have taken the full walk, together with the seed store's
+occupancy, its byte cost and the budget it is evicted against, through a
+versioned descriptor.
+
+The two paths are bit-identical by contract, so no output of a refill can
+distinguish them; without these counts a fast path that stops firing is
+indistinguishable from one that works.
+
+#### Scenario: reading the counts
+
+- **WHEN** a host calls `clay_document_resume_stats` with `struct_size` set
+- **THEN** it receives cumulative `resumed_bricks` and `refilled_bricks` counts
+- **AND** the counts never reset, so an interval is read as their difference
+
+#### Scenario: a seed is a performance cache only
+
+- **WHEN** every stored seed is dropped
+- **THEN** later refills produce the same geometry, taking longer to do it
+
+### Requirement: a seed serves only the band it was taken under
+
+A brick's tape is culled against the brick dilated by the request's band, so a
+narrower band drops items a wider one keeps. A refill SHALL NOT serve a request
+from a seed taken under a different band, in either direction, and SHALL take
+the full walk instead.
+
+The values a differing band changes are not confined to distances the band
+would clamp: measured on a dim-8, 0.05 cache, a seed taken at a 0.15 band and
+served to a 0.6-band request was wrong at 9 of 512 samples, worst 0.105 — two
+voxels — at a true distance of 0.354, well inside the band asked for and so a
+sample a submit stores rather than clamps.
+
+#### Scenario: a wider band than the seed was taken under
+
+- **GIVEN** a document holding an item outside a narrow band's cull region and
+      inside a wider one's
+- **AND** a refill has stored a seed for a brick at the narrow band
+- **AND** one item is appended to the active layer
+- **WHEN** that brick is refilled at the wider band
+- **THEN** it is not resumed
+- **AND** its values are bit-identical to a document holding the same items and
+      never resumed
+
+#### Scenario: a narrower band than the seed was taken under
+
+- **GIVEN** a refill has stored a seed for a brick at a wide band
+- **AND** one item is appended to the active layer
+- **WHEN** that brick is refilled at a narrower band
+- **THEN** it is not resumed
+- **AND** its values are those of the narrower band's own culled tape
+
+#### Scenario: the same band still resumes
+
+- **GIVEN** a refill has stored a seed for a brick
+- **AND** one item is appended to the active layer
+- **WHEN** that brick is refilled at the band its seed was taken under
+- **THEN** it is answered from its seed
+
+### Requirement: two caches over one document keep their own seeds
+
+A brick coordinate is unique only within a lattice, so caches of different dims
+or voxel sizes over one document name the same coordinate. Their seeds SHALL be
+held separately: a refill by one SHALL NOT evict or overwrite what the other
+stored, and both SHALL go on resuming while a stroke asks them in turn.
+
+#### Scenario: a coarse and a fine cache alternating
+
+- **GIVEN** a coarse cache and a fine cache covering one brick coordinate over
+      one document
+- **AND** both have been refilled once, so both hold a seed
+- **WHEN** an item is appended and both are refilled, repeatedly
+- **THEN** the seed store holds an entry for each
+- **AND** every refill after the first is answered from a seed
+- **AND** each cache's values are those of a document that never resumed
+
+### Requirement: A named region can be turned into a mask
+
+The region a surface group names SHALL be paintable into a mask, so that a group
+reaches every verb a mask already gates rather than only the automask that keeps
+a brush inside the group it began on.
+
+Naming a region and deciding what to do to it are two acts, and an artist
+performs them in that order. An automask that keeps a stroke inside the group it
+started in cannot express "flatten this panel", because it requires the stroke
+to have begun there.
+
+The group's own extent SHALL drive the fill; no region argument is taken. Two
+lattices that each describe the same border are how the two come to disagree
+about it.
+
+The two lattices SHALL NOT be required to share a cell size, and the resulting
+border SHALL be the GROUP's, quantised to whichever lattice is coarser. This is
+the border every other group operation draws and SHALL NOT be represented as
+finer than it is.
+
+Painting with zero SHALL release the cells rather than record zeros in them,
+because that is what zero means everywhere else in the mask vocabulary — so a
+group can un-mask its own region.
+
+Naming no group SHALL paint nothing and SHALL NOT be an error: "not in a group"
+is not a region, and the complement of every group is a different request.
+
+#### Scenario: A group becomes a mask and back
+- **WHEN** a named region is painted into a mask and that mask is used to name a region again
+- **THEN** the same cells carry the group, cell for cell
+
+#### Scenario: The mask is where the group is
+- **WHEN** a mask filled from a group is sampled at points across the model
+- **THEN** it reads as painted exactly where the group answers with that id
+
+#### Scenario: Zero un-masks the region
+- **WHEN** a fully painted mask is filled from a group with zero
+- **THEN** the mask's painted cell count falls by the number erased, rather than the cells remaining as zeros
+
+#### Scenario: The lattices differ
+- **WHEN** the mask's cell size differs from the group lattice's
+- **THEN** the fill still agrees with the group everywhere, quantised to the coarser of the two
+
+#### Scenario: Naming nothing
+- **WHEN** the fill names "no group", or an id nothing carries
+- **THEN** nothing is painted and the call succeeds
+
+### Requirement: A brick request batch is evaluated as a batch
+`clay_brick_cache_eval_requests` SHALL evaluate the requests it is given as one batch rather than as a serial loop on the calling thread, dividing them across the same worker pool every other batch entry point uses.
+
+The requests in a batch are independent by construction — each writes its own stride of the output buffer — so the order in which they are evaluated SHALL NOT be observable in the results.
+
+A batch SHALL share one compiled document across its requests: the per-request cull is a query against shared state, not a reason to rebuild that state per request.
+
+#### Scenario: A batch is order-independent
+- **WHEN** the same request batch is evaluated twice
+- **THEN** the output buffer is bit-identical both times, whatever order the requests were completed in
+
+#### Scenario: A dab's cost is dominated by evaluation, not by culling
+- **WHEN** a dab's worth of requests is evaluated against a 10 000-item document
+- **THEN** the time spent deciding which items each brick needs is a minority of the call
+
+#### Scenario: A single request is not made slower
+- **WHEN** a batch of one request is evaluated
+- **THEN** it costs no more than it did before this change
+
+### Requirement: A refill may be given a prefix to seed cold bricks from
+
+A brick that has been refilled before carries a seed and evaluates only what the
+document gained since. A brick that has NOT SHALL be able to start from a cached
+prefix of its layer's history rather than from nothing, evaluating only the roots
+after that prefix.
+
+The prefix cache SHALL be the CALLER'S, not the document's, on the same terms as
+every other cache in this ABI: a document holding a pointer to memory the host
+can free is a hazard this ABI refuses.
+
+Passing no cache SHALL produce byte-identical results at byte-identical cost to
+the refill that takes none, so a host that has not opted in cannot be affected.
+
+The seeded result SHALL be stored as an ordinary seed, so a second touch of the
+same window takes the existing warm path rather than this one.
+
+A caller SHALL be able to learn how many bricks the prefix actually served. A
+cache that covers nothing produces correct output and no acceleration, and
+without a count those are indistinguishable — which is the whole failure mode of
+this feature.
+
+The prefix SHALL NOT be built by the refill. A build is a bake, and paying for
+one inside a refill puts the cost back on the frame the feature exists to
+protect.
+
+#### Scenario: A seeded refill is the walk's answer
+- **WHEN** a window with no seed is refilled with a prefix cache, and the same window is refilled on a fresh document with none
+- **THEN** the two agree within the band to the sampling tolerance the prefix declares
+
+#### Scenario: Not opting in costs nothing
+- **WHEN** the seeded refill is called with no cache
+- **THEN** its results are byte-identical to the refill that takes no cache, and no brick is reported as seeded
+
+#### Scenario: The count says whether it worked
+- **WHEN** a refill is given a cache that covers the requested windows
+- **THEN** it reports how many bricks the prefix served, and that count is greater than zero
+
+### Requirement: A prefix is built for the lattice its consumer reads
+
+A cached prefix SHALL record which lattice it was built for, and a consumer SHALL
+receive only a prefix built for its own.
+
+A seed read on the lattice it was built for is the stored sample; one read half a
+cell away is an interpolation of two, which is a different field by about a
+quarter of a cell. The two consumers this ABI has read different lattices — a
+smoothing transaction reads the layer's own region, a brick refill reads a grid
+anchored at the world origin — so one prefix cannot serve both and SHALL NOT be
+offered to both.
+
+#### Scenario: Each consumer gets its own
+- **WHEN** a prefix is built for a refill and another for a smoothing transaction, at the same resolution
+- **THEN** they are separate entries, and neither is returned to the other's consumer
+
+#### Scenario: A refill's seed is exact
+- **WHEN** a refill is seeded from a prefix built for refills
+- **THEN** the seeded values agree with the full walk to floating-point rounding rather than to a fraction of a cell
+
+### Requirement: A capture can be taken about a surface
+
+The ABI SHALL let a caller capture a region of a document's field in a frame it
+supplies, with the region named in THAT frame's coordinates rather than the
+world's — so a box about the origin is a patch centred on a surface hit and its
+depth is how far above and below the surface the capture reaches.
+
+It SHALL offer a helper building such a frame from what a host actually has: a
+surface hit, the normal there, and the stylus azimuth about that normal. The
+azimuth SHALL rotate the tangent, and SHALL be measured from a fixed reference
+rather than from whichever axis the normal happens to lean on least, so that one
+azimuth means one direction wherever the hit is.
+
+The frame SHALL NOT be inferred from the captured content.
+
+What comes back SHALL be an ordinary item whose transform is that frame, so
+adding it changes nothing about the document's field and moving it afterwards is
+an ordinary edit rather than a second placement mechanism.
+
+#### Scenario: A capture placed back is what was captured
+- **WHEN** a region is captured about a frame that is not axis-aligned and the item is placed into an empty document unchanged
+- **THEN** its field agrees with the source's over the captured region, within the sampling tolerance the capture declares
+
+#### Scenario: The azimuth turns the asset
+- **WHEN** two frames are built at one hit a quarter turn apart in azimuth
+- **THEN** their tangents are perpendicular, and a full turn returns the tangent it started from
+
+#### Scenario: A malformed frame is refused
+- **WHEN** a capture names a zero normal, or a region with no surface in it
+- **THEN** the call is refused and no item is produced
+
+### Requirement: A captured asset can be kept outside a document
+
+The ABI SHALL be able to write a captured asset to a self-contained form and
+read it back, carrying the payload, the frame and the asset's identity.
+
+Reading SHALL refuse a buffer that is truncated or is not one of these, rather
+than reading past its end.
+
+An asset SHALL carry an id derived from its CONTENT, so two captures that sample
+identically are recognisably the same asset. It SHALL NOT be a unique
+per-capture identifier: a host that captured the same detail twice is better
+told so than left to accumulate duplicates it cannot recognise. Nothing SHALL be
+dispatched on the id.
+
+#### Scenario: A round trip preserves the placement
+- **WHEN** a captured asset is saved on its own and loaded back
+- **THEN** the loaded item places identically to the original, and its id is the same
+
+#### Scenario: A truncated buffer is refused
+- **WHEN** a buffer that is truncated, or is not an asset at all, is read
+- **THEN** the call is refused and no item is produced
+
+### Requirement: What the assets cost is reportable apart from the placements
+
+A host SHALL be able to ask what a document's captured payloads cost, counted
+once per ASSET rather than once per placement. Summing per placement reports the
+multiplied cost that sharing exists to avoid paying, which is the wrong number
+for the decision a host makes with it.
+
+#### Scenario: Many placements of one asset cost one payload
+- **WHEN** one captured asset is placed many times in a document
+- **THEN** the report names one asset, that many placements, and the bytes of a single payload
+
+### Requirement: A resolved stroke can be placed as stamps
+
+The ABI SHALL turn the stamps a stroke resolves to — spacing, pressure, jitter,
+taper and azimuth already applied — into placements of one captured asset, as
+ONE undo step and ONE invalidation for the whole stroke.
+
+A resolved stamp's RADIUS SHALL become a uniform scale against the asset's own
+size, which is where the stroke's pressure lands. Its STRENGTH SHALL NOT
+multiply the captured distance: that scales the metric rather than the sculpt,
+moving the zero set and costing the gradient its unit length.
+
+Every placement SHALL share one payload.
+
+#### Scenario: A stroke is one undo step
+- **WHEN** a resolved stroke of many dabs is placed
+- **THEN** one undo returns the document to before the stroke, and the document holds one payload for all of them
+
+### Requirement: The ABI reports what a layer placement would do
+A caller SHALL be able to learn how a PROPOSED layer placement classifies — rigid, similarity or general — and to obtain the matrix taking the layer's current placement to that one, as a column-major affine matrix.
+
+It SHALL be a QUERY that changes nothing, rather than an output added to the placement calls. That shape satisfies the two properties this requirement is for by construction rather than by care: the existing entry points keep their signatures untouched, and asking cannot alter the document, the invalidation or a later refill because it does not write. A caller asks with the placement it is about to set; asking afterwards is legal and answers the identity, which is true and useless.
+
+A proposed placement SHALL be refused on the same terms the placement calls refuse it, so a report cannot be obtained for a placement that could not then be set.
+
+Reporting SHALL NOT change what is invalidated. A host that ignores it SHALL see nothing different, which is what lets the report ship before the engine acts on it.
+
+#### Scenario: A rigid placement reports its matrix
+- **WHEN** a layer at the origin is placed with a rotation and a translation and the report is asked for
+- **THEN** the classification is rigid and the matrix maps the layer's previous world-space bound onto its new one
+
+#### Scenario: A general placement says so
+- **WHEN** a layer is placed with a per-axis scale and the report is asked for
+- **THEN** the classification is general
+
+#### Scenario: Asking changes nothing
+- **WHEN** one document is asked for a report many times and an otherwise identical document is not asked at all
+- **THEN** the two evaluate identically and save to the same bytes
+
+#### Scenario: A malformed placement is refused
+- **WHEN** a report is asked for with a zero rotation axis, or a scale that is not positive
+- **THEN** the call is refused, as setting that placement would be
+
+### Requirement: A layer placement can be dragged as one gesture
+The ABI SHALL offer a placement GESTURE for a layer: an opening call, any number of updates, and a closing call.
+
+While a gesture is open, an update SHALL record the placement and SHALL NOT invalidate anything and SHALL NOT recompile. The closing call SHALL apply the final placement as ONE command and perform ONE invalidation, so a drag of N frames costs one refill rather than N.
+
+The document a caller reads while a gesture is open SHALL be the document as it was when the gesture opened. The placement being dragged is the host's to draw and is not yet an edit — nothing in the document, and nothing a refill returns, SHALL reflect it before the gesture closes.
+
+Closing SHALL be undoable as one step, whatever the number of updates, so an artist takes back a drag and not a frame of it.
+
+A gesture abandoned — the document destroyed, or the gesture cancelled — SHALL leave the placement the gesture opened with. A gesture SHALL be refused on a protected layer on the same terms as the ordinary placement call, and refused at the opening call rather than at the close, so a host learns before the artist has dragged anything.
+
+An edit to the document through any other entry point while a gesture is open SHALL be refused rather than interleaved, because the gesture's whole claim is that the document did not change.
+
+#### Scenario: A drag costs one invalidation
+- **WHEN** a gesture opens on a populated SDF layer, sixty updates are applied, and the gesture closes
+- **THEN** exactly one command is recorded, exactly one invalidation is performed, and the bricks refilled across the whole gesture are those one placement would have dirtied
+
+#### Scenario: The document does not move until the drag ends
+- **WHEN** updates are applied and the document is sampled between them
+- **THEN** the values are those of the placement the gesture opened with
+
+#### Scenario: A drag is one undo step
+- **WHEN** a gesture of many updates closes and is undone
+- **THEN** the layer returns to the placement the gesture opened with in a single undo
+
+#### Scenario: An abandoned gesture leaves nothing behind
+- **WHEN** a gesture is opened, updated and cancelled
+- **THEN** the layer carries the placement it had before the gesture opened, and nothing was invalidated
+
+#### Scenario: A protected layer refuses at the open
+- **WHEN** a gesture is opened on a locked or ghosted layer
+- **THEN** the call is refused, and no gesture is open
+
+#### Scenario: An edit during a gesture is refused
+- **WHEN** an item is added to any layer while a placement gesture is open
+- **THEN** the edit is refused and the document is unchanged
+
+### Requirement: The document is evaluable with a layer excluded, or as that layer alone
+So a host can draw a placement preview without evaluating the composite, the ABI SHALL let an evaluation name a layer and ask for either the document WITHOUT it or that layer ALONE, on both the brick path and the mesh path.
+
+The two SHALL be exact complements under the document's hard union: at every point, the minimum of the two results SHALL equal what the whole document evaluates to at that point, for a document of visible SDF layers. This is the property that makes drawing them separately a decomposition rather than an approximation.
+
+Naming a layer that does not exist, or one that is not an SDF layer, SHALL be refused rather than treated as naming nothing. A HIDDEN SDF layer SHALL be accepted by name, on the same reading meshing one uses: the caller named it, which says more than the visibility flag does.
+
+#### Scenario: The two halves recompose
+- **WHEN** a document of three visible SDF layers is evaluated whole, then as "without layer 2" and "layer 2 alone" over the same lattice
+- **THEN** the pointwise minimum of the two parts equals the whole document's values
+
+#### Scenario: One layer alone ignores the others
+- **WHEN** a layer is evaluated alone and another layer is then edited
+- **THEN** re-evaluating that layer alone returns the values it returned before
+
+#### Scenario: A layer that is not there is refused
+- **WHEN** an evaluation names a layer id the document does not hold, or a voxel or mesh layer
+- **THEN** the call is refused and writes nothing
+
+### Requirement: a brick proven uniform is classified without a walk
+
+`clay_brick_cache_eval_requests` and `clay_brick_cache_eval_requests_device`
+MAY answer a brick without evaluating its lattice when one evaluation of the
+brick's own culled tape at the lattice centre, together with that tape's
+declared Lipschitz bound, proves every sample beyond the band with the centre's
+sign. The ball SHALL be the lattice's own — its centre and its half-diagonal —
+and the bound SHALL be the brick's own culled tape's, never the whole
+document's. Only the whole-document evaluation may be so gated; the per-layer
+halves a multi-layer refill evaluates SHALL always be walked.
+
+The bound the proof reads SHALL be a bound on the field's gradient, not only
+on the step a marcher may take. A tape holding a field or deformer whose
+declared bound is not one — the underestimating primitives (ellipsoid, tri
+prism, cheap octahedron, L-norm sphere, loft, sweep, sampled volume), an
+overflowing repeat, taper, wrap_around, bend_curve — SHALL NOT be gated, on
+the full path or through a stored proof's suffix, and its bricks SHALL walk.
+The refusal is per brick: a brick whose culled tape holds no such item keeps
+the gate.
+
+What `clay_brick_cache_submit` stores for a gated brick — its state, and its
+uniform colour, read from sample dim^3/2 — SHALL be bit-identical to what it
+would have stored from the walked samples. The values written to a gated
+brick's slot SHALL every one lie beyond the band with the brick's sign and
+carry the field's own colour at sample dim^3/2; they are otherwise a stand-in,
+and the entry point documents them as such.
+
+A gated brick SHALL NOT store its stand-in values as a seed. It SHALL store the
+proof in the seed's place, and a later refill SHALL either carry that proof
+through the appended items — folding them onto the stored centre and colour
+sample values with the walk's own arithmetic, and re-proving under a bound that
+is exact for what was appended — or take the full path. A refill that resumes
+from a proof SHALL produce, after submit, the same stored brick as a refill of
+the same document from scratch.
+
+A proof SHALL count as refilled where it is made and as resumed where a later
+refill carries it, so the ratio `clay_resume_stats` documents keeps its
+meaning.
+
+#### Scenario: a fill with and without the gate stores the same bricks
+- **GIVEN** two documents holding the same worked, coloured sculpt
+- **WHEN** every brick of the model is refilled and submitted for each, one with the gate disabled
+- **THEN** every brick's state, stored halves and stored colours are identical between the two caches
+- **AND** the gated document proved at least half of the uniform bricks and no surface brick
+
+#### Scenario: a dab after a proof
+- **GIVEN** a window filled with the gate, some of whose bricks were proven uniform
+- **WHEN** an item that reaches those bricks but leaves them uniform is appended and the window is refilled
+- **THEN** every brick of the window resumes, none walks
+- **AND** the submitted cache equals one filled from scratch on a document holding the same items, with the gate enabled or disabled
+
+#### Scenario: a carve that reaches a proven brick
+- **GIVEN** the same window, warm
+- **WHEN** a subtracted item brings the surface into bricks that were proven uniform
+- **THEN** those bricks take the full path
+- **AND** the submitted cache equals one filled from scratch
+
+#### Scenario: a field whose bound is not a gradient bound is walked
+- **GIVEN** a document whose only item is a needle ellipsoid on the lattice diagonal, a tapered box, a wrapped box, or a box bent along a curve
+- **WHEN** the model is refilled with the gate enabled and again with it disabled
+- **THEN** no brick is proven, and the two caches store identical states, halves and colours
+
+#### Scenario: a proof is not carried through a suffix that is not a gradient bound
+- **GIVEN** a window whose bricks hold proofs
+- **WHEN** an ellipsoid reaching some of them is appended and the window refilled
+- **THEN** the bricks it reaches take the full path and none is proven, the rest resume, and the cache equals one filled from scratch
+
+#### Scenario: a gesture over a layer holding proofs
+- **GIVEN** a layer of many items whose whole-model cache holds proofs
+- **WHEN** its surface is dragged or magnified and the model refilled
+- **THEN** the call returns, and the cache stores what a fresh document given the same gesture stores, with the gate enabled or disabled
+
+#### Scenario: a multi-layer refill is never gated
+- **GIVEN** a document with two visible SDF layers
+- **WHEN** a window is refilled
+- **THEN** no brick is proven, and the cache equals one filled with the gate disabled
+
+#### Scenario: a device backend classifies a gated brick as the cpu does
+- **GIVEN** the same worked sculpt refilled through the cpu backend and through a device backend
+- **WHEN** the two caches are compared over the bricks the gate proved
+- **THEN** every such brick has the same state and the same uniform colour in both
+

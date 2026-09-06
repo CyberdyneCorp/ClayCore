@@ -10,9 +10,7 @@ and the parity gates are written in, which is why its coverage is held EQUAL to
 the C ABI's rather than allowed to be a convenience subset —
 `check_binding_parity` fails on a capability reachable from one and not the
 other.
-
 ## Requirements
-
 ### Requirement: pyclay module
 The library SHALL ship a nanobind extension module `pyclay` exposing: document/layer construction (`Document`, `add_sdf_layer`, `add_voxel_layer`), the full edit vocabulary (primitives, ops, blends, transforms, deformers, mirrors, strokes) with Pythonic parameter names, field evaluation (`eval`, `gradients`), meshing with resolution/decimation/backend selection, mesh predicates (`is_watertight()` etc.), and save/load of `.clayspace` plus mesh export (OBJ/FBX/PLY/glTF).
 
@@ -869,3 +867,25 @@ pyclay SHALL expose `Layer.magnify_surface` and `Layer.magnify_surface_preview` 
 #### Scenario: Repeated merges do not stack
 - **WHEN** the same patch is merged six times
 - **THEN** the item count is what it was after the first
+
+### Requirement: Undo covers every reachable edit
+
+With undo enabled, every editing entry point SHALL record its own inverse, so
+that no reachable edit escapes undo.
+
+`Document.add_voxel_layer` SHALL apply `AddLayerCmd` like `add_sdf_layer` and
+`add_mesh_layer`, rather than inserting into the document directly. It was the
+one creation that did not, which made the claim above false wherever a host
+converted into a new voxel layer.
+
+#### Scenario: Creating a voxel layer is undoable
+- **GIVEN** a document with undo enabled
+- **WHEN** a voxel layer is added and the document is undone
+- **THEN** the layer is gone
+- **AND** redoing brings it back with the same voxel size
+
+#### Scenario: A crossing is one undo step
+- **GIVEN** a document with undo enabled
+- **WHEN** a voxel layer is created and rasterized into inside one undo group
+- **THEN** a single undo removes the layer and its cells together
+

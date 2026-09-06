@@ -40,3 +40,15 @@ Kept values SHALL be bounded IN BYTES rather than in bricks, since a brick may c
 #### Scenario: An edit that is not an append is not resumed
 - **WHEN** an item is removed or changed rather than appended, and the bricks are refilled
 - **THEN** the values equal a full refill's
+
+#### Scenario: A colourless seed cannot serve a coloured refill
+- **WHEN** a brick was last refilled without colour and the next refill asks for it
+- **THEN** that brick is evaluated in full, and its colours are a full refill's
+
+#### Scenario: The saving follows the dab
+- **WHEN** the same dab is refilled into documents whose edit lists differ greatly in length
+- **THEN** what the refill costs is set by the dab rather than by the length
+
+#### Scenario: Colour takes the full path
+- **WHEN** a refill asks for colour as well as distance
+- **THEN** the values and colours equal a full refill's

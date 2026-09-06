@@ -9,9 +9,7 @@ to, and the one undo history that reverses every representation through it.
 The layer between the arithmetic below and everything that consumes it. A
 document is the only thing a host, a file, a binding and a renderer all agree
 about, so what it is has to be stated in one place rather than assumed in five.
-
 ## Requirements
-
 ### Requirement: Document structure
 `clay::scene` SHALL model a document as a list of layers, each `voxel` or `sdf` kind, with per-layer transform, visibility, resolution, and material. SDF layers SHALL hold an ordered edit list where each item applies to the combined result of all preceding items. Groups SHALL nest to depth ≥ 4 and carry group ops (including None). Layer instancing SHALL share content by reference such that editing the source updates all instances.
 
@@ -74,9 +72,27 @@ The scene module SHALL compile an edit list into a flat postfix tape: opcode str
 ### Requirement: Per-brick tape culling
 For brick evaluation the compiler SHALL emit per-brick tapes containing only the items whose influence bound intersects that brick (the Dreams design), preserving evaluation semantics exactly.
 
+Deciding which items those are SHALL NOT require visiting every item in the document. The compiler SHALL consult a spatial index over item influence bounds, so that the cost of culling one brick scales with the number of items NEAR that brick rather than with the size of the document.
+
+The index SHALL be derived from the same definition of reach the compiler already uses — `item_influence_bound`, and `item_influence_is_local` for whether an item has a bound at all — so that no second notion of what an item touches can go stale against the first. An item that is not local SHALL be emitted unconditionally rather than placed in the index.
+
+The index SHALL be owned by, and invalidated with, the compiled tape it culls for, so that a document mutation cannot leave the index and the tape disagreeing about the same document.
+
 #### Scenario: Culled tape matches full tape
 - **WHEN** a brick is evaluated with its culled tape and with the full scene tape
 - **THEN** the brick data is bit-identical, and the culled tape length is ≤ the full tape length
+
+#### Scenario: Culling cost does not follow document size
+- **WHEN** the same brick is culled from a document of 100 items and from a document of 10 000 items with the same local density
+- **THEN** the time to produce the culled tape does not grow in proportion to the item count
+
+#### Scenario: A non-local item is never culled away
+- **WHEN** a document contains an item whose influence is unbounded and a brick that its geometry does not come near
+- **THEN** that item is present in the brick's culled tape, and the brick data is bit-identical to the full-tape result
+
+#### Scenario: An edit is visible to the next cull
+- **WHEN** an item is added, moved or removed and a brick is culled immediately afterwards
+- **THEN** the culled tape reflects the edit, exactly as a full recompile would
 
 ### Requirement: Undo command vocabulary
 Every document mutation SHALL be expressed as a serializable command with a computable inverse: add/remove/reorder item, set parameter, voxel-span edit, layer add/remove/reorder/retransform, group/ungroup. The in-memory undo stack and the document file format SHALL share this single command vocabulary. Consecutive commands from one stroke SHALL be coalescable into a single undo step. Item state carried by commands SHALL include any deformer chain, so deformed documents round-trip.
@@ -1095,3 +1111,215 @@ An entry a plan supplies SHALL be visible, so the per-brick cull need not check:
 #### Scenario: The saving is in the rejects
 - **WHEN** a dab's bricks are compiled over a batch survivor list far larger than any one brick keeps
 - **THEN** what a rejected survivor costs is the cached test alone
+
+### Requirement: A layer's extent can be kept across an edit
+
+An intersect is bounded by its layer's extent, and computing that extent walks
+every visible item in the layer. A consumer that edits a layer repeatedly SHALL
+be able to keep that extent across edits rather than recompute it per edit,
+without the kept extent ever differing from a freshly computed one.
+
+The kept form SHALL be exact rather than conservative. In particular the extent
+SHALL shrink when the edit shrinks it: a form that can only be widened is not
+the extent, and an extent that is too LARGE is merely slow while one built by
+widening a stale union is too SMALL — which is under-invalidation, and renders
+as stale geometry rather than as an error.
+
+It SHALL remain cheap for the item being edited repeatedly even when that item
+determines how far the extent reaches, because the item a host drags across a
+form is typically a boolean operand large enough to extend past it. A form that
+is cheap only for items lying strictly inside the extent does not satisfy this,
+having no effect on the case it exists for.
+
+Being told that an item changed SHALL NOT itself compute anything. A layer
+holding no intersect never has its extent asked for, and such layers are the
+common case; work done at the moment of the edit is therefore paid by layers
+that never benefit from it.
+
+The kept extent SHALL be abandoned for any change it cannot account for,
+including adding, removing or reparenting an item, any change made to the layer
+itself, and any mutation reaching the layer outside the command vocabulary.
+
+Whether a given command is confined to a single item SHALL be decided in one
+place, so that a component keeping an extent and a test checking one cannot
+disagree about a command, and a command added later is classified rather than
+assumed harmless.
+
+#### Scenario: A drag walks the layer once
+- **WHEN** one item is edited over many consecutive frames
+- **THEN** the layer is walked on the first of them and not on the others, and the extent equals a freshly computed one on every frame
+
+#### Scenario: The dragged item sticks out of the form
+- **GIVEN** the edited item extends past the rest of the layer on some face
+- **WHEN** it is dragged over many frames
+- **THEN** the layer is still walked only once
+
+#### Scenario: The edit makes the extent smaller
+- **WHEN** the edited item is moved back inside the others, or made smaller
+- **THEN** the extent shrinks to match a freshly computed one
+
+#### Scenario: A layer nobody asks about is not walked
+- **WHEN** a layer holding no intersect is edited over many frames
+- **THEN** its extent is never computed
+
+#### Scenario: A change the kept form cannot account for
+- **WHEN** an item is added or removed, or the layer's own transform, mirror or radial setting changes
+- **THEN** the next extent is computed by walking rather than kept
+
+### Requirement: One undo order spans every representation
+
+The session history SHALL order steps across the SDF edit list, voxel grids,
+masks and mesh layers, so that undo reverses what happened most recently
+whichever representation produced it.
+
+An explicit group SHALL bundle arbitrary STEPS, of any representation, into one
+step — not merely the scene commands inside it. The wrapped command stack
+already collapses the commands of a bracket into one entry; a bracket SHALL do
+the same for the kinds that stack cannot see, so that one gesture a host
+bracketed is one undo however many representations it touched.
+
+A step folded from a bracket SHALL apply its parts backwards on undo and
+forwards on redo, and SHALL be all-or-nothing: if any part refuses, the parts
+already applied SHALL be restored and the step SHALL remain on the stack.
+
+An operation nothing records SHALL NOT be folded into a group. It stays its own
+step, so that the horizon a host draws from it is not crossed by an undo.
+
+#### Scenario: A group holds a command and a voxel pass
+- **GIVEN** a history with undo enabled
+- **WHEN** a bracket contains one scene command and one voxel step
+- **THEN** the undo depth is one
+- **AND** one undo reverses both
+
+#### Scenario: A group of commands alone is unchanged
+- **GIVEN** a history with undo enabled
+- **WHEN** a bracket contains only scene commands
+- **THEN** it records exactly one step, as it did before groups spanned kinds
+
+#### Scenario: A barrier in a group is not swallowed
+- **GIVEN** a history with undo enabled
+- **WHEN** a bracket contains a voxel step and an operation nothing records
+- **THEN** the unrecordable operation is still its own step
+- **AND** the undo depth stops at it
+
+#### Scenario: A part that refuses leaves the step unapplied
+- **GIVEN** a folded group whose voxel part names a layer that cannot be resolved
+- **WHEN** the step is undone
+- **THEN** the undo is refused
+- **AND** the scene part it had already reversed is restored
+
+### Requirement: A captured region of the field is a reusable asset
+
+A finite region of a document's field SHALL be capturable as a self-contained
+signed-field asset that can be placed into an SDF layer many times. A capture
+SHALL be a sampled field rather than a copy of the edit items that produced it:
+a captured subtree carries identity dependencies on nodes that may be edited or
+deleted, an evaluation cost that grows with what it captured, and no bounded
+serialized form, and none of those is true of samples.
+
+A placement SHALL be an ORDINARY EDIT ITEM — editable, transformable, undoable,
+and combinable with the same ops and blends every other item has. The feature is
+non-destructive because of that and not in addition to it.
+
+**Placing an asset SHALL NOT copy its samples.** A document with a thousand
+placements of one asset SHALL hold one copy of that asset's payload, and the
+per-placement cost SHALL be a transform and a reference. Anything else makes a
+detail brush unusable at the scale a detail brush is for.
+
+A capture SHALL be taken in a frame the caller supplies, and the asset SHALL
+record it, so the same asset placed at a new orientation is the shape that was
+captured. The frame SHALL NOT be inferred from the captured content: an
+orientation derived from the samples changes when the region moves, so
+re-capturing the same detail would produce an asset that no longer agrees with
+the placements already made from it.
+
+Scale SHALL be uniform where the field's exactness contract requires it, and a
+scale the contract cannot honour SHALL be refused rather than accepted with a
+field that quietly reports the wrong distance — a marcher stepping on a wrong
+bound misses surface, which is visible as holes rather than as an error.
+
+Intensity SHALL NOT be expressed by multiplying the captured distance. That
+scales the metric rather than the sculpt, so the result is a field whose zero set
+has moved and whose gradient no longer has unit length; scale, the combine op and
+the blend are the controls that mean what an artist expects.
+
+#### Scenario: An asset reloaded on its own is the asset that was saved
+- **WHEN** a captured asset is written to its standalone form and read back
+- **THEN** the two place identically, and the field they contribute agrees at every point
+
+#### Scenario: A placed asset reproduces what was captured
+- **WHEN** a region is captured and the asset is placed back at the transform it was captured from
+- **THEN** the field it contributes agrees with the source over that region within the sampling tolerance the capture declares
+
+#### Scenario: A thousand placements hold one payload
+- **WHEN** one asset is placed many times in a document
+- **THEN** the document's authoritative bytes grow by a per-placement reference and not by the asset's samples, and saving and reloading preserves that
+
+#### Scenario: A placement is an ordinary item
+- **WHEN** an asset has been placed
+- **THEN** it can be moved, re-combined, hidden and undone exactly as any other item, and one gesture that places several is one undo step
+
+#### Scenario: A scaled placement is still safe to march
+- **WHEN** a placed asset carries a non-uniform scale and the field is sampled outside its surface
+- **THEN** stepping from any such point by the distance the field reports does not cross the surface
+
+#### Scenario: An asset outlives what produced it
+- **WHEN** the items a region was captured from are edited or deleted
+- **THEN** every placement of the asset is unaffected, because the asset holds samples rather than a reference to those items
+
+### Requirement: A layer placement carries a classification
+A layer's transform SHALL be classified by what it does to the layer's field, and the classification SHALL be part of what the scene model reports about a placement rather than something a caller re-derives:
+
+- **RIGID** — a rotation and a translation, unit scale.
+- **SIMILARITY** — a rotation, a translation and a uniform positive scale.
+- **GENERAL** — anything else, which in this scene model means a per-axis layer scale.
+
+RIGID SHALL be the subset of SIMILARITY whose scale factor is exactly 1, so a caller that handles similarity handles both.
+
+The classification SHALL be made on the CHANGE from one placement to another rather than on either placement alone: a layer already carrying a uniform scale of 2 that goes to 3 has moved by a similarity of 1.5, and asking whether a placement "is" a similarity answers about the wrong thing.
+
+A SIMILARITY SHALL additionally require that every distance term in the layer scales with the layer. It does not in general: a layer's uniform scale multiplies an item's ROUNDING and does not multiply its BLEND RADIUS. A layer holding a smooth combine with a non-zero radius therefore SHALL classify a scale change as GENERAL, because its field after the scale is not the field before it multiplied by anything.
+
+#### Scenario: A translate and a rotate are rigid
+- **WHEN** a layer is placed with a translation, a rotation, or both, at unit scale
+- **THEN** the placement classifies RIGID
+
+#### Scenario: A uniform scale is a similarity
+- **WHEN** a layer is placed with a uniform positive scale beside any rotation and translation
+- **THEN** the placement classifies SIMILARITY and reports the scale factor
+
+#### Scenario: A per-axis scale is general
+- **WHEN** a layer carries a scale whose components differ
+- **THEN** the placement classifies GENERAL
+
+#### Scenario: A scale on a blending layer is general
+- **WHEN** a layer whose items carry a smooth combine with a non-zero radius is placed with a uniform scale
+- **THEN** the placement classifies GENERAL, and the same layer moved rigidly still classifies RIGID
+
+### Requirement: A similarity placement moves a layer's field and nothing else
+For a layer whose placement classifies RIGID or SIMILARITY, re-placing that layer SHALL change its contribution to the document only by that placement. Writing `M` for the matrix taking the old placement to the new one and `s` for its uniform scale factor:
+
+- the layer's field afterwards SHALL equal its field beforehand composed with `M⁻¹` and multiplied by `s`, in exact arithmetic. Implementations compose the placement into each item's transform, which ROUNDS, so a consumer comparing two evaluations SHALL expect agreement to within that rounding rather than bit equality — except where the composition happens to be exact, where the agreement SHALL be bitwise;
+- the layer's surface afterwards SHALL be its surface beforehand mapped through `M`;
+- no other layer's contribution SHALL change, because layers combine by hard union at the document level.
+
+This SHALL hold for the SDF representation and is what makes a preview drawn under `M` exact for that layer's own surface rather than an approximation of it. It SHALL NOT be claimed for a GENERAL placement: a per-axis scale changes the field's Lipschitz behaviour, exactly as a per-axis item scale already does.
+
+What the guarantee does NOT cover is the mutual occlusion of the hard union while the moved layer overlaps another: two surfaces each exactly placed still interpenetrate where the union would have resolved them. A consumer relying on this SHALL be told that limit.
+
+#### Scenario: A rigid placement moves the surface exactly
+- **WHEN** an SDF layer is meshed, then placed with a rotation and a translation, then meshed again
+- **THEN** the second mesh equals the first mapped through the placement matrix, to the tolerance the mesher's own lattice alignment allows, and the field values agree at points mapped through the matrix — bitwise where composing the placement into the items' transforms is exact, and otherwise to within that composition's rounding
+
+#### Scenario: A uniform scale scales distances
+- **WHEN** an SDF layer is placed with a uniform scale factor `s`
+- **THEN** the field at a point equals `s` times the previous field at that point mapped back through the placement
+
+#### Scenario: Another layer is untouched
+- **WHEN** one SDF layer of a multi-layer document is re-placed rigidly
+- **THEN** the other layers' fields are bit-identical at every sampled point, and the document's field differs only where the moved layer's contribution wins the hard union
+
+#### Scenario: A per-axis scale claims nothing
+- **WHEN** a layer is placed with a per-axis scale
+- **THEN** the placement classifies GENERAL and the field guarantee above is not asserted for it
+

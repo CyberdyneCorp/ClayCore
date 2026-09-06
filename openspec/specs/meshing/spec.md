@@ -10,9 +10,7 @@ Beside it are the preview, quad and dual-contouring meshers, decimation,
 validation, attribute transfer and the sculpting a mesh accepts once it exists.
 `mesh::Mesh` — flat arrays every producer and consumer shares — is defined here,
 which is why this capability is also where its invariants are written down.
-
 ## Requirements
-
 ### Requirement: Default mesher with watertight guarantee
 `clay::mesh` SHALL provide a default cell-marching mesher whose output is watertight and 2-manifold by construction, running only over surface-crossing bricks. v1 implements this with marching tetrahedra (Freudenthal 6-tet decomposition with globally consistent face diagonals — no ambiguous configurations exist, so the guarantee is structural); a table-based marching cubes with asymptotic-decider ambiguity resolution MAY replace it later as a triangle-count optimization provided the same guarantees hold. The CPU implementation is the golden reference; GPU implementations (Metal/CUDA) SHALL match its topology invariants (watertight, manifold, Euler characteristic on golden scenes) though not bit-identical vertex positions.
 
@@ -1074,3 +1072,23 @@ The result SHALL be deterministic: the same mesh and tolerance produce the same 
 #### Scenario: A clean mesh is untouched
 - **WHEN** a mesh with nothing to merge is welded
 - **THEN** the report says nothing merged and nothing collapsed, and the positions and indices are byte-identical to the input
+
+### Requirement: One SDF layer can be meshed on its own
+The mesher SHALL be able to mesh a single named SDF layer, producing that layer's surface in world space under that layer's own transform, with the same mesher selection, voxel sizing and attribute behaviour as meshing the whole document.
+
+This is meshing THE FIELD of one layer and is a different call from borrowing an imported mesh layer's triangles, which returns geometry the library did not produce. Naming a layer that is not an SDF layer SHALL be refused rather than falling back to the borrow.
+
+A hidden layer SHALL be meshable by name: the caller named it, which is a stronger statement than the visibility flag, and refusing would make "mesh this layer" depend on a flag the caller can see for itself.
+
+#### Scenario: A single-layer document meshes the same either way
+- **WHEN** a document holding one visible SDF layer is meshed whole and then by name, at the same parameters
+- **THEN** the two meshes are identical
+
+#### Scenario: A layer meshes under its own transform
+- **WHEN** an SDF layer is placed away from the origin and meshed by name
+- **THEN** its vertices are in world space, and re-placing the layer rigidly and meshing again gives the previous vertices mapped through the placement matrix
+
+#### Scenario: A non-SDF layer is refused
+- **WHEN** a voxel or mesh layer is named
+- **THEN** the call is refused and no mesh is produced
+

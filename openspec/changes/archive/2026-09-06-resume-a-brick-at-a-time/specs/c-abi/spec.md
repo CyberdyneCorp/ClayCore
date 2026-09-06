@@ -1,6 +1,6 @@
 # c-abi
 
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: a brick refill resumes per brick
 
@@ -63,8 +63,6 @@ The layer SHALL be compared, not inferred from the ids.
 - **WHEN** an item is appended to the layer BENEATH and the row is refilled
 - **THEN** no brick is resumed
 - **AND** the values equal a document holding the same items and never resumed
-
-## ADDED Requirements
 
 ### Requirement: the resumable path is observable
 
