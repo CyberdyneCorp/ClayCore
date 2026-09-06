@@ -106,6 +106,7 @@ EXAMPLES = [
     "72_layer_drag",
     "73_field_stamps",
     "74_regional_multires",
+    "75_layer_booleans",
 ]
 
 
@@ -119,7 +120,7 @@ EXAMPLES = [
 # the record rather than an omission nobody noticed.
 CAPABILITY_EXAMPLES = {
     "sdf-kernels": "01_primitives",  # plus 16_loft and 17_swept for the lifts
-    "scene-model": "10_editing",
+    "scene-model": "10_editing",  # plus 75_layer_booleans for a layer's own boolean
     "brick-cache": None,          # an internal cache; its effect is meshing speed, not a picture
     "evaluation-backends": None,  # the same field on four devices — a parity test, not a render
     # plus 19_mesh_import for the reverse direction, 44_quad_export for quads,

@@ -270,6 +270,39 @@ clay_result fail(clay_result code, std::string detail) {
     return code;
 }
 
+// A host-supplied enum PARAMETER, read as an integer without ever loading it as
+// its enum type — which is what makes an out-of-range value rejectable at all.
+//
+// This is not pedantry. An unscoped C enum with no fixed underlying type has a
+// value range of the smallest bit-field that holds its enumerators: 0..3 for
+// clay_backend_op's three constants, 0..7 for clay_surface_measure's six. A
+// host is free to pass 99 — clay.h documents the answer as
+// CLAY_ERROR_INVALID_ARGUMENT — but `switch (op)` LOADS the parameter as that
+// type before any case label is compared, and that load is the undefined
+// behaviour. Under -fsanitize=enum it aborts the process, so the branch the
+// header promises was unreachable by construction. Copying the bytes out is the
+// only way to reach it. Found by the ASan+UBSan job, not by reading the code.
+//
+// The two rejected alternatives, since both look simpler than this:
+//   - Give the enums a fixed underlying type in clay.h (`enum E : int32_t`).
+//     That is C++11 and C23; clay.h must compile as C17, which check_c_abi.py
+//     holds it to, so this is not available.
+//   - Declare the parameters int32_t. ABI-identical on every supported target,
+//     but it moves the type check out of the host's own compiler, where a
+//     wrong constant is caught for free and before it ships.
+//
+// Callers range-check the result and THEN switch on the enum, so the switch
+// still loads a value the type can hold and -Wswitch still catches an
+// enumerator added with no case for it.
+template <typename E>
+std::int32_t enum_argument(const E& e) {
+    static_assert(sizeof(E) == sizeof(std::int32_t),
+                  "clay's C enums are int-sized on every supported target");
+    std::int32_t raw = 0;
+    std::memcpy(&raw, &e, sizeof raw);
+    return raw;
+}
+
 // Enum validation, and at the same time the drift guard: the switches list
 // every engine enumerator and have no default, so adding one to the scene
 // model without a clay.h entry is a -Werror compile error here.
@@ -389,6 +422,27 @@ clay_result validate_group_op_blend(std::int32_t op, std::int32_t blend, float b
                     "an inline group reads no blend or rounding: its children combine into "
                     "the outer chain with their own");
     return CLAY_OK;
+}
+
+// What a LAYER may carry, which is what a group may carry minus the inline op:
+// a layer is not spliced into an outer chain, and there is no outer chain to
+// splice it into. The transitions are refused for the group's reason —
+// `Node::transition` holds their parameters and a layer has no node, so one
+// accepted here would morph on the compiler's defaults.
+//
+// Finiteness is checked here and not in validate_blend because a LAYER-level
+// radius reaches the document's cull pad, where an infinity is not a large
+// blend but a plan with no bricks in it. The item-level rule is deliberately
+// left where it is rather than widened under this change.
+clay_result validate_layer_composition(std::int32_t op, std::int32_t blend, float blend_k,
+                                       float rounding) {
+    if (!op_is_known(op)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown combine op");
+    if (scene::op_is_transition(static_cast<scene::Op>(op)))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "a layer cannot carry a transition op");
+    if (!std::isfinite(blend_k) || !std::isfinite(rounding))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "a layer's blend radius and rounding must be finite");
+    return validate_blend(blend, blend_k, rounding);
 }
 
 bool brush_shape_is_known(std::int32_t v) {
@@ -1515,6 +1569,28 @@ struct clay_document {
         // anything below can decline.
         p.active = active->id;
         p.has_below = visible > 1;
+        // THE FOLD AT THE SEAM HAS TO BE A HARD ADD, or the split is refused.
+        //
+        // The whole resumable multi-layer path holds the active layer's value
+        // and the layers beneath it apart and rejoins them in host floats
+        // (`fold_layers_below`), which takes six floats and no document and so
+        // cannot be told what the fold is. That is sound for a hard Add and for
+        // nothing else, and a rejoin with the wrong operator returns a field
+        // that never existed with nothing to report it. So the refusal lives
+        // here, once, where the Document is in hand.
+        //
+        // `usable` alone, never `has_below`: three callers probe this plan for
+        // `has_below` as a pure topology question, and a fold refusal read as
+        // "there is only one layer" would take a DIFFERENT wrong path. That is
+        // also why both are set above, before anything can decline.
+        //
+        // What it costs, exactly: a document whose TOP visible SDF layer is
+        // composed loses the append resume and takes the full walk it took
+        // before #348. Every other document keeps it -- including every
+        // document with one visible SDF layer, whatever its composition, and
+        // every multi-layer document whose top layer unions hard however the
+        // layers beneath it are composed.
+        if (p.has_below && !scene::layer_join_is_hard_union(doc.document)) return p;
         // THE APPENDS HAVE TO HAVE GONE TO THE LAYER THE SUFFIX WOULD EXTEND.
         //
         // Without this the log is trusted whatever layer it describes, and the
@@ -1539,9 +1615,10 @@ struct clay_document {
         p.checkpoint.valid = true;
         p.checkpoint.layer = active->id;
         p.checkpoint.layer_have_acc = true;
-        // FALSE even when layers sit beneath, so the suffix emits no union: the
-        // refill holds that value separately and folds it in itself, with the
-        // same hard Add the whole-document compile emits between layers.
+        // FALSE even when layers sit beneath, so the suffix emits no fold: the
+        // refill holds that value separately and rejoins it itself, with the
+        // hard Add the whole-document compile emits at that boundary -- which
+        // the refusal above is what makes true.
         p.checkpoint.doc_have_acc = false;
         p.usable = true;
         return p;
@@ -1568,6 +1645,10 @@ struct clay_document {
         if (!active) return p;
         p.active = active->id;
         p.has_below = visible > 1;
+        // The same refusal plan_resume makes, for the same reason and with the
+        // same predicate: this plan feeds the same two-half refill, and a
+        // frontier drag on a composed top layer takes the full walk instead.
+        if (p.has_below && !scene::layer_join_is_hard_union(doc.document)) return p;
         const std::vector<scene::NodeId>& roots = active->sdf->roots;
         // Boundary 0 would be an empty prefix -- no accumulator, which the
         // layer_have_acc statement below could not honestly make -- and a
@@ -1578,9 +1659,10 @@ struct clay_document {
         p.checkpoint.valid = true;
         p.checkpoint.layer = active->id;
         p.checkpoint.layer_have_acc = true;
-        // FALSE even when layers sit beneath, so the suffix emits no union: the
-        // refill holds that value separately and folds it in itself, with the
-        // same hard Add the whole-document compile emits between layers.
+        // FALSE even when layers sit beneath, so the suffix emits no fold: the
+        // refill holds that value separately and rejoins it itself, with the
+        // hard Add the whole-document compile emits at that boundary -- which
+        // the refusal above is what makes true.
         p.checkpoint.doc_have_acc = false;
         p.usable = true;
         return p;
@@ -2848,8 +2930,22 @@ eval::Status raycast_visible(eval::Backend* b, const scene::Tape& tape, const fl
 // Surface measures. FILE SCOPE, above the first extern "C" — a helper defined
 // inside that block is what broke the macOS and Windows builds in #235, and GCC
 // does not warn about it.
-clay_result to_measure(clay_surface_measure in, brush::SurfaceMeasure* out) {
-    switch (in) {
+// Takes the RAW argument, not a clay_surface_measure, and that is the whole
+// point: passing an out-of-range enum BY VALUE is already the undefined load,
+// so `to_measure(measure, &m)` aborted in the CALLER under -fsanitize=enum
+// before this function got a chance to reject anything. The range check has to
+// happen before the value crosses a call boundary. Callers pass
+// enum_argument(measure); see enum_argument for why the memcpy is needed.
+//
+// The bound names the last enumerator rather than a COUNT sentinel, because
+// adding one to a PUBLIC enum is a header change either way, and a sentinel in
+// clay.h would be a value a host could pass.
+clay_result to_measure(std::int32_t raw, brush::SurfaceMeasure* out) {
+    if (raw < CLAY_MEASURE_CURVATURE || raw > CLAY_MEASURE_THICKNESS)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown surface measure");
+    // In range, so reading it as the enum is defined; the switch keeps -Wswitch
+    // pointing at a new enumerator with no case for it.
+    switch (static_cast<clay_surface_measure>(raw)) {
         case CLAY_MEASURE_CURVATURE: *out = brush::SurfaceMeasure::Curvature; return CLAY_OK;
         case CLAY_MEASURE_CAVITY: *out = brush::SurfaceMeasure::Cavity; return CLAY_OK;
         case CLAY_MEASURE_CONVEXITY: *out = brush::SurfaceMeasure::Convexity; return CLAY_OK;
@@ -3146,6 +3242,20 @@ clay_result compile_document_without(const clay_document* doc, clay_layer_id exc
         return fail(CLAY_ERROR_NOT_FOUND,
                     "no layer " + std::to_string(excluded) + " to exclude: excluding a layer the "
                     "document does not hold would evaluate the whole document");
+    // AND a document whose layers do not all hard-union, because there is then
+    // no composition for the caller to perform: removing a layer from the
+    // middle of a fold changes what every layer above it folds onto, so this
+    // half and the excluded layer's half are not two operands of one combine
+    // (scene/tape.h, compile_document_except). The refusal is here rather than
+    // in the compile for the same reason the stale-id one is: the COMPILE is
+    // honest -- it is the document without that layer -- and it is the caller's
+    // stated intent to compose that cannot be met.
+    if (const scene::LayerId composed = scene::first_composed_fold_layer(doc->doc.document))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "layer " + std::to_string(composed) +
+                        " composes with the layers below it, so the document without layer " +
+                        std::to_string(excluded) +
+                        " does not compose back to the whole document");
     *out = scene::compile_document_except(doc->doc.document, excluded);
     return CLAY_OK;
 }
@@ -4543,13 +4653,21 @@ void clay_blob_destroy(clay_blob* blob) { delete blob; }
 
 clay_result clay_document_save(const clay_document* doc, const char* path) {
     if (!doc || !path) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or path");
-    return from_io(io::save_clayspace_file(doc->doc, path));
+    const io::IoStatus s = io::save_clayspace_file(doc->doc, path);
+    // These bytes are a snapshot the journal from here on can be paired with,
+    // whether the host meant them as a crash snapshot or as an ordinary save.
+    // Noted only on success: a failed write left no snapshot to name.
+    if (s.ok() && doc->undo) doc->undo->note_snapshot(doc->doc.document.snapshot_id);
+    return from_io(s);
 }
 
 clay_result clay_document_save_memory(const clay_document* doc, clay_blob** out_blob) {
     if (!doc || !out_blob) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out_blob");
     *out_blob = nullptr;
     *out_blob = new clay_blob{io::save_clayspace(doc->doc)};
+    // See clay_document_save: the bytes just produced are a snapshot the
+    // journal from here on continues from.
+    if (doc->undo) doc->undo->note_snapshot(doc->doc.document.snapshot_id);
     return CLAY_OK;
 }
 
@@ -4664,6 +4782,17 @@ clay_result clay_document_journal_range(const clay_document* doc, size_t* out_fi
     return CLAY_OK;
 }
 
+clay_result clay_document_journal_barrier(const clay_document* doc, size_t from,
+                                          int32_t* out_has_barrier, size_t* out_at) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
+    std::size_t at = 0;
+    const bool found = doc->undo->journal_barrier_after(from, &at);
+    if (out_has_barrier) *out_has_barrier = found ? 1 : 0;
+    if (found && out_at) *out_at = at;
+    return CLAY_OK;
+}
+
 clay_result clay_document_journal_trim(clay_document* doc, size_t upto) {
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
     if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
@@ -4683,6 +4812,16 @@ clay_result clay_document_replay_journal(clay_document* doc, const uint8_t* data
     session::History::ReplayResult result;
     const bool ok = doc->undo->replay(data, size, doc->doc.document, doc->grid_for(),
                                       doc->mesh_for(), &result, doc->mask_for());
+    // The pair was wrong and NOTHING was applied, so this returns before the
+    // invalidation below: the document is byte-identical, and saying so is the
+    // difference between "find the other snapshot" and "your document is now
+    // half a recovery".
+    if (result.snapshot_mismatch)
+        return fail(CLAY_ERROR_SNAPSHOT_MISMATCH,
+                    "this journal was taken against a different snapshot: it names " +
+                        std::to_string(result.journal_snapshot_id) + " and this document is " +
+                        std::to_string(doc->doc.document.snapshot_id) +
+                        " (0 meaning it was never saved or loaded). Nothing was applied.");
     if (out_applied) *out_applied = result.applied;
     if (out_stopped_at_barrier) *out_stopped_at_barrier = result.stopped_at_barrier ? 1 : 0;
     // Replay writes straight onto the document rather than through apply_edit,
@@ -4784,6 +4923,12 @@ clay_result clay_document_enable_undo(clay_document* doc) {
         doc->undo->set_groups_resolver([doc]() -> voxel::GroupField* {
             return doc->doc.groups ? &*doc->doc.groups : nullptr;
         });
+        // A document LOADED from bytes already knows which snapshot it is, and
+        // the journal that starts here continues from exactly that one. Without
+        // this seed the whole recovery path — load a snapshot, enable undo,
+        // journal, crash, replay — would produce a journal naming no snapshot
+        // and the pair would go unchecked (survive-a-crash 2.1).
+        doc->undo->note_snapshot(doc->doc.document.snapshot_id);
     }
     return CLAY_OK;
 }
@@ -5347,6 +5492,76 @@ clay_result clay_document_layer_protection(const clay_document* doc, clay_layer_
     return CLAY_OK;
 }
 
+clay_result clay_document_set_layer_composition(clay_document* doc, clay_layer_id layer,
+                                                int32_t op, int32_t blend, float blend_k,
+                                                float rounding) {
+    clay_result r = validate_layer_composition(op, blend, blend_k, rounding);
+    if (r != CLAY_OK) return r;
+    // Refused for the reason clay_layer_node_transform refuses a per-axis
+    // scale: a layer that cannot enter the tape cannot carry a fold, and
+    // storing one would make this a control that does not act.
+    //
+    // A MISS IS DELIBERATELY NOT REPORTED HERE. apply_edit is the one place
+    // that tells "no such layer" (CLAY_ERROR_NOT_FOUND) from "that layer is
+    // protected" (CLAY_ERROR_INVALID_ARGUMENT); reporting the miss from this
+    // pre-lookup would report a protected layer as missing. Only what was
+    // positively found to be non-SDF is refused here.
+    const scene::Layer* found = doc ? doc->doc.document.find_layer(layer) : nullptr;
+    if (found && found->kind != scene::LayerKind::Sdf)
+        // NAMED, not merely refused. A host setting compositions across a
+        // selection gets one message per refusal and has to say which row it is
+        // about; the id is the only part of that this call knows and the caller
+        // would otherwise re-derive (design.md 12a, 12b).
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "layer " + std::to_string(layer) +
+                        " is not an SDF layer, and only an SDF layer carries a composition");
+    scene::LayerComposition comp;
+    comp.op = static_cast<scene::Op>(op);
+    comp.blend.profile = static_cast<scene::BlendProfile>(blend);
+    comp.blend.k = blend_k;
+    comp.rounding = rounding;
+    // Through the command vocabulary like every other layer edit, so the change
+    // is one undo step and a protected layer refuses it.
+    return apply_edit(doc, scene::Command{scene::SetLayerCompositionCmd{layer, comp}},
+                      "layer not found");
+}
+
+clay_result clay_document_layer_composition(const clay_document* doc, clay_layer_id layer,
+                                            int32_t* out_op, int32_t* out_blend,
+                                            float* out_blend_k, float* out_rounding) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    // Refused rather than answered with the zeroes that read as a valid hard
+    // union: a reader which cannot express what is there must not answer.
+    if (l->kind != scene::LayerKind::Sdf)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "only an SDF layer carries a composition");
+    if (out_op) *out_op = static_cast<int32_t>(l->composition.op);
+    if (out_blend) *out_blend = static_cast<int32_t>(l->composition.blend.profile);
+    if (out_blend_k) *out_blend_k = l->composition.blend.k;
+    if (out_rounding) *out_rounding = l->composition.rounding;
+    return CLAY_OK;
+}
+
+clay_result clay_document_writable_at_minor(const clay_document* doc, uint32_t minor,
+                                            clay_layer_id* out_blocking_layer) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (minor == 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "a format minor starts at 1");
+    if (out_blocking_layer) *out_blocking_layer = 0;
+    // Clamped rather than refused above this build's layout: the question is
+    // only ever about writing DOWN, and a host asking about a minor from the
+    // future is asking whether it loses anything, which it does not.
+    const std::uint16_t asked = minor > scene::kSceneMinor
+                                    ? scene::kSceneMinor
+                                    : static_cast<std::uint16_t>(minor);
+    const scene::LayerId blocking = scene::layer_blocking_minor(doc->doc.document, asked);
+    if (blocking == 0) return CLAY_OK;
+    if (out_blocking_layer) *out_blocking_layer = blocking;
+    return fail(CLAY_ERROR_UNSUPPORTED,
+                "a layer carries a composition that this format minor cannot say: writing it "
+                "there would turn a cutting layer into a unioning one");
+}
+
 // -- discovering layers ------------------------------------------------------
 
 clay_result clay_document_layer_count(const clay_document* doc, size_t* out_count) {
@@ -5716,6 +5931,119 @@ clay_result clay_document_layer_transform_nonuniform(const clay_document* doc, c
         out_scale[2] = l->xform.scale * l->scale_axes.z;
     }
     return CLAY_OK;
+}
+
+// -- placements computed from a layer's own content --------------------------
+//
+// The three convenience placements. The arithmetic and the WRITE POLICY live in
+// scene::translated_layer_command, so these entry points are their refusal set
+// and their choice of box and nothing else.
+//
+// The refusals are taken in the order design.md sets, which is the order that
+// costs the least: a locked layer never pays for a bounds walk.
+
+namespace {
+
+// The document, the id and the protection flags -- everything the three share.
+//
+// The GESTURE guard is deliberately not repeated here: apply_edit already
+// refuses every edit while a placement gesture is open, including edits to
+// other layers, and a second copy of that refusal is a second wording to drift.
+// The cost of leaving it there is one bounds walk on a call that was going to
+// be refused anyway, which happens only mid-drag.
+clay_result computed_placement_layer(const clay_document* doc, clay_layer_id id,
+                                     const scene::Layer** out_layer) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* l = doc->doc.document.find_layer(id);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    if (l->protected_from_edits())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    std::string("layer ") + std::to_string(id) + " is " +
+                        (l->ghost ? "ghosted" : "locked") + " and takes no edits");
+    *out_layer = l;
+    return CLAY_OK;
+}
+
+// The box the two content-reading rules compute from, with the three states it
+// can be in that no placement can be derived from.
+//
+// THE SAME BOX clay_layer_bounds answers -- tight, all three representations,
+// no blend or chain-pad dilation. Not the influence bound: snapping a dilated
+// box to the floor leaves the model hovering by exactly that dilation.
+clay_result computed_placement_bounds(const clay_document* doc, const scene::Layer& layer,
+                                      math::Aabb* out_box) {
+    // The tight bound carries a layer's MIRROR copies and stops there; the
+    // influence path emits the radial ones and this path does not. So on a
+    // radial layer the box describes the un-arrayed item, and a placement
+    // computed from it would drop the ORIGINAL onto the floor with its copies
+    // already through it -- plausible and wrong. Refused with the mode named
+    // rather than answered, exactly as clay_layer_lattice_gizmo refuses a cage
+    // it cannot record.
+    if (layer.radial_count > 1)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "layer " + std::to_string(layer.id) + " carries a radial mode (count " +
+                        std::to_string(layer.radial_count) +
+                        "): its bounds do not cover the radial copies, so no placement "
+                        "computed from them would be right");
+    const math::Aabb box = layer_world_bounds(doc, layer);
+    if (box.empty())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "layer " + std::to_string(layer.id) +
+                        " holds no material: it has no low face and no centre");
+    // NOT in design.md's table, and found by building it. An UNBOUNDED layer --
+    // one whose lowest visible root is a plane or an infinite cylinder --
+    // answers Aabb::infinite(), whose faces are +/-FLT_MAX rather than an
+    // infinity. Every arithmetic below it overflows to an infinite position,
+    // and a layer placed at infinity compiles a tape of NaNs. A degenerate box
+    // is accepted, as the table says; an unbounded one cannot be.
+    if (!box_is_finite(box) || box.is_infinite())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "layer " + std::to_string(layer.id) +
+                        " is unbounded: a plane or an infinite cylinder has no low face and "
+                        "no centre to place");
+    *out_box = box;
+    return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_layer_snap_to_ground(clay_document* doc, clay_layer_id layer, float ground_y) {
+    const scene::Layer* l = nullptr;
+    clay_result r = computed_placement_layer(doc, layer, &l);
+    if (r != CLAY_OK) return r;
+    // Before the bounds walk, for the same reason the protection check is:
+    // a malformed argument should cost nothing.
+    if (!std::isfinite(ground_y))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "ground height must be finite");
+    math::Aabb box;
+    r = computed_placement_bounds(doc, *l, &box);
+    if (r != CLAY_OK) return r;
+    const kernel::cfloat3 delta = scene::ground_snap_delta(box, ground_y);
+    return apply_edit(doc, scene::Command{scene::translated_layer_command(*l, delta)},
+                      "layer not found");
+}
+
+clay_result clay_layer_centre_bounds(clay_document* doc, clay_layer_id layer) {
+    const scene::Layer* l = nullptr;
+    clay_result r = computed_placement_layer(doc, layer, &l);
+    if (r != CLAY_OK) return r;
+    math::Aabb box;
+    r = computed_placement_bounds(doc, *l, &box);
+    if (r != CLAY_OK) return r;
+    const kernel::cfloat3 delta = scene::origin_centre_delta(box);
+    return apply_edit(doc, scene::Command{scene::translated_layer_command(*l, delta)},
+                      "layer not found");
+}
+
+clay_result clay_layer_zero_to_origin(clay_document* doc, clay_layer_id layer) {
+    const scene::Layer* l = nullptr;
+    clay_result r = computed_placement_layer(doc, layer, &l);
+    if (r != CLAY_OK) return r;
+    // No bounds are read, which is the whole difference between this rule and
+    // the other two: an empty layer and a radial layer both take it.
+    const kernel::cfloat3 delta = scene::origin_translation_delta(*l);
+    return apply_edit(doc, scene::Command{scene::translated_layer_command(*l, delta)},
+                      "layer not found");
 }
 
 clay_result clay_set_layer_mirror(clay_document* doc, clay_layer_id layer_id, int32_t axis_x,
@@ -7368,6 +7696,19 @@ clay_result apply_surface_gesture(clay_document* doc, clay_layer_id layer,
                                   const GestureResolver& resolve_into,
                                   std::vector<math::Aabb> reach, size_t* out_applied) {
     const scene::Layer* lp = &l;
+    // THE CALLER'S BALLS ARE BOXES IN THIS LAYER'S FIELD, AND A LAYER'S FIELD IS
+    // NOT THE DOCUMENT'S. A smooth or extended fold above this layer moves the
+    // document's surface up to its own support further out than the layer's own
+    // change, and a gesture invalidates ONCE at its end -- so a reach that stops
+    // at the layer leaves a stale brick per dab of a stroke, silently and with
+    // no visual tell beyond geometry that looks deliberate. The same edit issued
+    // through apply_edit is dilated by command_influence_bound; a gesture states
+    // its reach itself, so it takes the dilation from the same function rather
+    // than from a second copy of it. Taken BEFORE the sharer boxes below, which
+    // come dilated already.
+    for (math::Aabb& b : reach)
+        b = scene::layer_reach_in_document(doc->doc.document, layer, b);
+
     // ... IN ONE PLACEMENT. The ball above is stated in the dragged layer's
     // frame, and an instanced edit list is placed by every layer that shares
     // it: the same nodes move under every one of those transforms, so the
@@ -7379,14 +7720,15 @@ clay_result apply_surface_gesture(clay_document* doc, clay_layer_id layer,
     //
     // Widened by each sharer's WHOLE influence bound rather than by the ball
     // mapped through its transform: mirror and radial place one ball in
-    // several spots and layer_influence_bound already accounts for all of
-    // them. Conservative, and only a shared edit list pays it -- the common
-    // layer shares with nobody and the loop finds nothing. This is the same
-    // union node_command_bound takes for the per-command path, which is why
-    // every other edit route was already right.
+    // several spots and layer_influence_bound_in_document already accounts for
+    // all of them, and for the folds above that sharer. Conservative, and only
+    // a shared edit list pays it -- the common layer shares with nobody and the
+    // loop finds nothing. This is the same union node_command_bound takes for
+    // the per-command path, which is why every other edit route was already
+    // right.
     for (const scene::Layer& other : doc->doc.document.layers) {
         if (&other == lp || other.sdf != lp->sdf) continue;
-        reach.push_back(scene::layer_influence_bound(other));
+        reach.push_back(scene::layer_influence_bound_in_document(doc->doc.document, other.id));
     }
 
     // What the drag can state about HISTORY, beside what the ball states about
@@ -7937,6 +8279,13 @@ clay_result clay_backend_supports(const char* backend, clay_backend_op op,
     if (!b)
         return fail(CLAY_ERROR_NOT_FOUND, std::string("backend not registered: ") + backend);
     const eval::BackendCaps caps = b->caps();
+    // Range-check the raw argument before the switch reads it as the enum; see
+    // enum_argument. It sits AFTER the registry lookup on purpose: an unknown
+    // backend asked about an unknown op keeps answering CLAY_ERROR_NOT_FOUND,
+    // which is the precedence the shipped call already had.
+    const std::int32_t raw = enum_argument(op);
+    if (raw < CLAY_BACKEND_OP_EVAL_POINTS || raw > CLAY_BACKEND_OP_RAYCAST)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown backend operation");
     switch (op) {
         case CLAY_BACKEND_OP_EVAL_POINTS: *out_supported = caps.eval_points ? 1 : 0; return CLAY_OK;
         case CLAY_BACKEND_OP_EVAL_GRID: *out_supported = caps.eval_grid ? 1 : 0; return CLAY_OK;
@@ -8167,6 +8516,56 @@ clay_result clay_layer_consolidation_cost(const clay_document* doc, clay_layer_i
                     "nothing to consolidate: the layer is empty, unbounded, or the region "
                     "contains no surface");
     write_cost(cost, out_cost);
+    return CLAY_OK;
+}
+
+clay_result clay_layer_consolidation_advice(const clay_document* doc, clay_layer_id layer_id,
+                                            float advise_below_step_scale,
+                                            clay_consolidation_params* out_params,
+                                            clay_consolidation_cost* out_cost,
+                                            int32_t* out_advises) {
+    if (!doc || !out_params || !out_advises)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document, params or verdict");
+    // Before any sampling. clay_layer_field_report lets a zero threshold mean
+    // "measure without asking for advice"; here every output is defined
+    // against the threshold, so a zero would buy a full sampling pass to be
+    // told nothing.
+    if (!(advise_below_step_scale > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "advise_below_step_scale must be > 0: every output of this call is defined "
+                    "against a threshold");
+    const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
+    // "No such layer" and "not advised" are different answers.
+    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+
+    // Both descriptors are validated and zeroed BEFORE the bake: a caller
+    // whose struct_size is wrong is refused without paying for a sampling
+    // pass, and the not-advised answer is then already written.
+    clay_consolidation_params probe;
+    clay_result r = read_desc(out_params, kConsolidationParamsOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    write_desc(out_params, out_params->struct_size, clay_consolidation_params{});
+    if (out_cost) {
+        r = begin_out_cost(out_cost);
+        if (r != CLAY_OK) return r;
+    }
+    *out_advises = 0;
+
+    // The sampling runs even when out_cost is NULL: the verdict is DEFINED by
+    // the projection, so a call that skipped it would answer a weaker question
+    // under the same name and a host could not tell which it got.
+    const scene::ConsolidationAdvice advice =
+        scene::consolidation_advice(*layer, advise_below_step_scale, eval::pooled_bake_eval());
+    if (!advice.advises) return CLAY_OK;
+
+    clay_consolidation_params filled{};
+    filled.cell_size = advice.params.cell_size;
+    filled.band = advice.params.band;
+    filled.padding = advice.params.padding;
+    filled.skip_redistance = advice.params.skip_redistance ? 1 : 0;
+    write_desc(out_params, out_params->struct_size, filled);
+    if (out_cost) write_cost(advice.cost, out_cost);
+    *out_advises = 1;
     return CLAY_OK;
 }
 
@@ -9407,7 +9806,15 @@ clay_result clay_layer_place_stamps(clay_document* doc, clay_layer_id layer_id,
         // The payload is SHARED, not copied -- `n.volume` is the same
         // shared_ptr for every placement, which is what makes a detail stroke
         // affordable and what clay_document_stamp_memory reports.
-        reach.push_back(scene::item_geometry_bound(n, *layer));
+        // ... CARRIED FROM THE LAYER'S FIELD TO THE DOCUMENT'S. A dab's box is
+        // where the LAYER changes; a smooth or extended fold above this layer
+        // moves the document's surface further out than that, and this stroke
+        // dirties once for the whole gesture, so a box that is one fold too
+        // tight is a stale brick per dab with nothing to point at. The same
+        // dab issued through apply_edit is dilated by command_influence_bound;
+        // issued as a stroke it must be dilated here, by the same function.
+        reach.push_back(scene::layer_reach_in_document(doc->doc.document, layer_id,
+                                                       scene::item_geometry_bound(n, *layer)));
         placed.push_back(std::move(n));
     }
     if (placed.empty()) return CLAY_OK;
@@ -10832,7 +11239,7 @@ clay_result clay_measure_points(const clay_document* doc, clay_surface_measure m
     clay_result r = read_measure_params(params, &settings);
     if (r != CLAY_OK) return r;
     brush::SurfaceMeasure m;
-    r = to_measure(measure, &m);
+    r = to_measure(enum_argument(measure), &m);
     if (r != CLAY_OK) return r;
 
     std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
@@ -10863,7 +11270,7 @@ clay_result clay_mask_from_surface(const clay_document* doc, clay_surface_measur
     clay_result r = read_measure_params(params, &settings);
     if (r != CLAY_OK) return r;
     brush::SurfaceMeasure m;
-    r = to_measure(measure, &m);
+    r = to_measure(enum_argument(measure), &m);
     if (r != CLAY_OK) return r;
 
     std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
@@ -11371,6 +11778,19 @@ clay_result clay_voxel_drop_level(clay_voxel_grid* grid) {
     if (r != CLAY_OK) return r;
     if (!g->drop_level())
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "a grid always has at least one level");
+    // A BARRIER, because nothing can reproduce this. The level's cells are
+    // gone, the steps recorded against it name coordinates at a resolution
+    // that no longer exists, and a journal replayed across it would rebuild a
+    // grid that still HAS the level — a recovery quietly missing the
+    // operation, which is the failure the barrier mechanism exists to
+    // prevent. It was the documentation's own example of one and recorded
+    // nothing until this: `record_barrier`'s only caller was the mask step,
+    // and masks-in-the-history took that one away.
+    //
+    // A standalone grid is not in a document and records nothing, exactly as
+    // it does for a sculpt step.
+    if (grid->doc && grid->doc->undo)
+        grid->doc->undo->record_barrier("dropped a voxel resolution level");
     return CLAY_OK;
 }
 
@@ -12438,8 +12858,14 @@ clay_result clay_layer_influence_bound(const clay_document* doc, clay_layer_id l
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
     const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
     if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
-    return write_influence(scene::layer_influence_bound(*layer), out_min, out_max,
-                           out_has_bounds, out_infinite);
+    // Where the LAYER reaches in this DOCUMENT, which is a different box from
+    // `scene::layer_influence_bound(*layer)`: that one takes a Layer and cannot
+    // see the folds above it or, for an intersect, the stack beneath. This is
+    // the same expression `layer_command_bound` dirties through, so what a host
+    // is told here and what an edit invalidates are one answer.
+    return write_influence(
+        scene::layer_influence_bound_in_document(doc->doc.document, layer_id), out_min, out_max,
+        out_has_bounds, out_infinite);
 }
 
 // -- dense grid evaluation ---------------------------------------------------
@@ -13213,7 +13639,10 @@ clay_result clay_brick_cache_mark_dirty_layer(clay_brick_cache* cache, const cla
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brick cache or document");
     const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
     if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
-    math::Aabb bound = scene::layer_influence_bound(*layer);
+    // The box clay_layer_influence_bound reports, from the same function: a
+    // host that dirties by what the query told it must not be told less than
+    // this call marks.
+    math::Aabb bound = scene::layer_influence_bound_in_document(doc->doc.document, layer_id);
     if (bound.empty()) return CLAY_OK;  // a layer that shows nothing marks nothing
     clay_result r = check_dirty_span(cache->cache, bound);
     if (r != CLAY_OK) return r;
@@ -13260,6 +13689,47 @@ namespace {
 // applied sample by sample to the two halves a resumable refill holds apart.
 // Through the kernel's own combine rather than a min written out here: the two
 // have to agree bit for bit, and one of them is the definition.
+//
+// PRECONDITION, AND IT CANNOT BE CHECKED HERE: the fold at that boundary IS a
+// hard Add. This takes six floats and no document, so it can neither detect a
+// composed layer nor apply one -- it has no sample point, which the transitions
+// and the feathered replace both need, and an unknown mode falls out of
+// `ctape_combine_dist` as the accumulator with the active layer discarded.
+//
+// It is unreachable otherwise BY CONSTRUCTION, and the construction is the
+// STORE. `plan_resume` and `plan_frontier` refuse the split for a composed seam
+// (`layer_join_is_hard_union`), and `eval_requests_impl` refuses it too -- but
+// the load-bearing half of that last one is that it then stores NO TWO-HALF
+// SEED, so a seed with a `below` half exists only where the fold was a hard Add
+// when it was taken.
+//
+// THE REVISION IS NOT WHAT PROTECTS THE `rev == now` CALLER BELOW, and reading
+// it that way is backwards. That caller consults no plan, so no plan's refusal
+// reaches it -- and a composition change does not retire the seeds it cannot
+// reach. It is an ordinary region invalidation: `touch_region_locked` KEEPS a
+// seed whose brick the change cannot touch and carries it forward to the NEW
+// revision (the comment at that caller says exactly that), so `rev == now` is
+// reachable straight after a composition change, holding a seed taken under the
+// old fold. What keeps the hard Add exact there is the invalidation's BOX and
+// not its revision: a brick whose seed survives is one the composed layer's own
+// field cannot reach, so the active half is empty in it, and folding an absent
+// operand is identity for the operators that get here. Measured rather than
+// assumed, the way `fold_changes_an_empty_layer` asks the same question of the
+// kernel: over all fourteen composition ops at five accumulator distances, both
+// blend profiles and k in {0, 0.2}, INTERSECT is the only one for which
+// `ctape_combine_dist(a, FAR, ...)` is not `a`. And Intersect is exactly what
+// `op_is_local` names, so `layer_influence_bound_in_document` widens that
+// command's box to the extent of the layers beneath -- no seed survives where
+// it would matter.
+//
+// Which is a load nobody would guess that box is carrying: narrow it, or add an
+// op whose empty operand changes the result without adding it to `op_is_local`,
+// and this precondition goes with it -- silently, because a wrong rejoin here
+// returns a plausible field per brick and no counter moves.
+//
+// It also never meets an EMPTY half, by the same construction. An empty tape evaluates to
+// CLAY_TAPE_FAR, and `min(below, FAR) == below` agrees with the compiler's own
+// "a union with nothing is no change" while `max(below, FAR)` would not.
 void fold_layers_below(const float* below_d, const float* below_rgb, const float* active_d,
                        const float* active_rgb, std::size_t per, float* out_d, float* out_rgb) {
     for (std::size_t s = 0; s < per; ++s) {
@@ -14152,6 +14622,21 @@ clay_result clay_brick_cache_eval_requests_excluding(
         return fail(CLAY_ERROR_NOT_FOUND,
                     "no layer " + std::to_string(excluded) + " to exclude: excluding a layer the "
                     "document does not hold would evaluate the whole document");
+    // AND a document whose layers do not all hard-union, because there is then
+    // no composition for the caller to perform: removing a layer from the
+    // middle of a fold changes what every layer above it folds onto, so this
+    // half and the excluded layer's half are not two operands of one combine
+    // (scene/tape.h, compile_document_except). The refusal is here rather than
+    // in the compile for the same reason the stale-id one is: the COMPILE is
+    // honest -- it is the document without that layer -- and it is the caller's
+    // stated intent to compose that cannot be met.
+    if (const scene::LayerId composed =
+            doc ? scene::first_composed_fold_layer(doc->doc.document) : 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "layer " + std::to_string(composed) +
+                        " composes with the layers below it, so the document without layer " +
+                        std::to_string(excluded) +
+                        " does not compose back to the whole document");
     return scoped_refill(doc, excluded, backend, requests, count, out_values, values_capacity,
                          out_colors_rgb, colors_capacity, ChunkHalf::Except);
 }
@@ -14177,6 +14662,78 @@ clay_result clay_brick_cache_eval_requests_layer(
     // refill takes, asked for by name rather than by being the top layer.
     return scoped_refill(doc, layer, backend, requests, count, out_values, values_capacity,
                          out_colors_rgb, colors_capacity, ChunkHalf::Active);
+}
+
+clay_result clay_brick_cache_eval_requests_below(const clay_document* doc, clay_layer_id layer,
+                                                 const char* backend,
+                                                 const clay_brick_request* requests, size_t count,
+                                                 float* out_values, size_t values_capacity,
+                                                 float* out_colors_rgb, size_t colors_capacity,
+                                                 clay_layer_id* out_blocking_layer,
+                                                 uint32_t* out_blocking_count) {
+    // Cleared before anything can fail, so a caller that reads it after a
+    // refusal with no id to give reads 0 rather than what it passed in.
+    if (out_blocking_layer) *out_blocking_layer = 0;
+    if (out_blocking_count) *out_blocking_count = 0;
+    if (doc) {
+        // Checked even for an empty batch, for the reason the excluding form
+        // states: a stale or wrong layer id is reported at the call that
+        // carries it rather than at whichever later call first has work in it.
+        const scene::Layer* seam = doc->doc.document.find_layer(layer);
+        if (!seam)
+            return fail(CLAY_ERROR_NOT_FOUND, "no layer " + std::to_string(layer) +
+                                                  " to split below: the split is taken AT a layer, "
+                                                  "and there is no such layer to take it at");
+        // A voxel or mesh layer is not in the fold at all, so "everything below
+        // it" is a position rather than a seam and there is nothing for the
+        // caller to rejoin with -- clay_document_layer_composition refuses such
+        // a layer too. Refused rather than answered, because a caller asking is
+        // naming the wrong layer, exactly as _layer refuses one.
+        if (seam->kind != scene::LayerKind::Sdf || !seam->sdf)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "layer " + std::to_string(layer) +
+                            " is not an SDF layer, so the document does not fold at it");
+        // THE ONE REFUSAL THIS FORM HAS, and it is much narrower than the
+        // excluding form's: the layers BENEATH may compose however they like,
+        // because compile_document_part folds them with their own compositions
+        // and this half is exactly the accumulator the whole-document walk
+        // holds when it reaches `layer`. What cannot be rejoined is a visible
+        // SDF layer ABOVE: it is in the document and in neither half, so no
+        // combine of the two halves is the document (design.md 12a).
+        //
+        // The id of that layer is handed back rather than only spelled in the
+        // message, because it is the difference between a host saying "hide or
+        // move THAT subtool to smooth this one live" and "not available here",
+        // and because the refusal has already computed the walk the host would
+        // otherwise repeat.
+        //
+        // AND HOW MANY THERE ARE, because the id alone produces a sentence that
+        // is wrong by omission on a stack with two field layers above the
+        // target: the sculptor hides the one named, tries again, and is refused
+        // again naming the next. The count is the same walk's tally, so it is
+        // not a second question asked a second way.
+        std::uint32_t above_count = 0;
+        if (const scene::LayerId above =
+                scene::visible_sdf_layer_above(doc->doc.document, layer, &above_count)) {
+            if (out_blocking_layer) *out_blocking_layer = above;
+            if (out_blocking_count) *out_blocking_count = above_count;
+            const std::string more =
+                above_count > 1 ? " (" + std::to_string(above_count) +
+                                      " visible SDF layers are above it in all)"
+                                : std::string();
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "layer " + std::to_string(above) +
+                            " is a visible SDF layer above layer " + std::to_string(layer) +
+                            ", so the layers below layer " + std::to_string(layer) +
+                            " folded with its own composition are not the whole document: hide or "
+                            "move layer " + std::to_string(above) + ", or split below it instead" +
+                            more);
+        }
+    }
+    // Below is "every visible SDF layer before this one, folded as the document
+    // folds them". It stores no seed and reads none, as both siblings do.
+    return scoped_refill(doc, layer, backend, requests, count, out_values, values_capacity,
+                         out_colors_rgb, colors_capacity, ChunkHalf::Below);
 }
 
 clay_result eval_requests_impl(const clay_document* doc, const char* backend,
@@ -14248,11 +14805,28 @@ clay_result eval_requests_impl(const clay_document* doc, const char* backend,
             ++visible_sdf;
         }
     const bool has_below = visible_sdf > 1;
+    // WHETHER THE TWO HALVES MAY BE HELD APART AT ALL. They are rejoined in
+    // host floats by `fold_layers_below`, which is a hard Add and cannot be
+    // anything else, so a composed seam takes ONE whole-document batch instead
+    // -- the same refusal plan_resume and plan_frontier make, with the same
+    // predicate, so that the full path and the resumable path cannot disagree
+    // about one document within a batch.
+    const bool split = has_below && scene::layer_join_is_hard_union(doc->doc.document);
+    // ...and then NOTHING IS STORED. A seed for a refused document would be a
+    // whole-document value in a store whose readers ask for two halves
+    // (`shaped_entry`'s want_below is a topology question), and the precedent
+    // is `resume_batch_into_host`: it stores nothing rather than something
+    // mislabelled. Not storing is also what keeps `fold_layers_below`'s
+    // `rev == now` path -- which consults no plan, and which a later
+    // composition change does NOT retire, because a region invalidation carries
+    // an unreachable brick's seed forward to the new revision -- unreachable
+    // here.
+    const bool refused_split = has_below && !split;
 
     std::vector<float> act(todo_count * per);
     std::vector<float> act_rgb(want_colour ? todo_count * per * 3 : 0);
-    std::vector<float> bel(has_below ? todo_count * per : 0);
-    std::vector<float> bel_rgb(has_below && want_colour ? todo_count * per * 3 : 0);
+    std::vector<float> bel(split ? todo_count * per : 0);
+    std::vector<float> bel_rgb(split && want_colour ? todo_count * per * 3 : 0);
 
     // THE SEED A GROUP RESUME NEEDS, taken here or never.
     //
@@ -14383,9 +14957,9 @@ clay_result eval_requests_impl(const clay_document* doc, const char* backend,
                 return fail(CLAY_ERROR_BACKEND, "eval_grid_batch failed");
             return CLAY_OK;
         },
-        has_below ? ChunkHalf::Active : ChunkHalf::Whole, active_layer, take_stacks, &gated);
+        split ? ChunkHalf::Active : ChunkHalf::Whole, active_layer, take_stacks, &gated);
     if (br != CLAY_OK) return br;
-    if (has_below) {
+    if (split) {
         br = eval_requests_in_chunks(
             doc, todo, todo_count,
             [&](const eval::GridBatchQuery& bq, std::size_t base) -> clay_result {
@@ -14404,7 +14978,7 @@ clay_result eval_requests_impl(const clay_document* doc, const char* backend,
         const std::size_t slot = partial ? where[j] : j;
         float* vd = out_values + slot * per;
         float* vc = want_colour ? out_colors_rgb + slot * per * 3 : nullptr;
-        if (has_below)
+        if (split)
             fold_layers_below(
                 bel.data() + j * per, bel_rgb.empty() ? nullptr : bel_rgb.data() + j * per * 3,
                 act.data() + j * per, act_rgb.empty() ? nullptr : act_rgb.data() + j * per * 3, per,
@@ -14417,9 +14991,12 @@ clay_result eval_requests_impl(const clay_document* doc, const char* backend,
     // Kept so the NEXT dab can resume from it. The ACTIVE half is the seed a
     // suffix continues; the half beneath is what the union needs and does not
     // move while the active layer is being sculpted.
-    doc->store_seeds(todo, todo_count, act.data(), act_rgb.empty() ? nullptr : act_rgb.data(),
-                     has_below ? bel.data() : nullptr, bel_rgb.empty() ? nullptr : bel_rgb.data(),
-                     per, 0, 0.0f, stacks.data(), gated.data());
+    if (!refused_split)
+        doc->store_seeds(todo, todo_count, act.data(),
+                         act_rgb.empty() ? nullptr : act_rgb.data(),
+                         split ? bel.data() : nullptr,
+                         bel_rgb.empty() ? nullptr : bel_rgb.data(), per, 0, 0.0f, stacks.data(),
+                         gated.data());
     return CLAY_OK;
 }
 

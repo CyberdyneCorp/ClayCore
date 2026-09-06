@@ -263,6 +263,17 @@ struct Layer {
     std::uint16_t radial_count = 0;  // 0/1 = off, else copies INCLUDING the original
     std::uint8_t radial_axis = 1;    // 0/1/2 — Y by default, as Repeat::radial arrays
     float radial_k = 0.0f;           // seam smoothing between neighbouring copies
+    // How this layer combines with the accumulated field of the visible SDF
+    // layers BELOW it. Defaults to the hard union every document has always
+    // folded with, so an untouched layer changes nothing.
+    //
+    // It lives on the LAYER RECORD and not on the shared content, which is what
+    // makes two instance layers of one edit list able to compose differently —
+    // the same reason the transform and the symmetry live here.
+    //
+    // MEANINGFUL ONLY FOR LayerKind::Sdf. A voxel or mesh layer refuses the
+    // command that sets it rather than storing a value nothing reads.
+    LayerComposition composition;
     std::shared_ptr<SdfContent> sdf;  // shared between instances
     // Voxel and mesh content live beside the document, keyed by layer id (see
     // io::ClaySpaceDoc): the layering table withholds both modules from
@@ -368,6 +379,33 @@ class Document {
     //
     // Runtime only: never serialized, and meaningless across documents.
     std::uint64_t content_serial = 1;
+
+    // WHICH BYTES THIS DOCUMENT WAS LAST WRITTEN TO OR READ FROM, so a crash
+    // journal can name the snapshot it continues from (survive-a-crash 2.1).
+    //
+    // A hash of the serialized bytes -- FNV-1a 64, `io::snapshot_identity` --
+    // set by `io::save_clayspace` and `io::load_clayspace`. Zero means this
+    // document has never been serialized either way and therefore names no
+    // snapshot; a journal taken from it names none either, and replay has
+    // nothing to compare.
+    //
+    // WHY THE CONTENT AND NOT A SESSION TOKEN. Two snapshots with the same
+    // bytes ARE the same snapshot: a journal taken against one replays onto
+    // the other exactly, and a random per-session token would refuse a pair
+    // that recovers perfectly. The content is permissive exactly where that is
+    // safe and strict everywhere else.
+    //
+    // `mutable` because `save_clayspace` takes the document by const reference
+    // and cannot stop doing so -- `clay_document_save_memory` takes a
+    // `const clay_document*` and changing that would break every compiled
+    // host. Recording which bytes were produced is a fact about the
+    // SERIALIZATION, not about the model: nothing reads it during a save, and
+    // two threads saving one document write the same value, because
+    // `save_clayspace` is deterministic.
+    //
+    // Runtime only: never serialized, and copied with the document, because a
+    // copy of a snapshot IS that snapshot.
+    mutable std::uint64_t snapshot_id = 0;
 
     Layer& add_sdf_layer(std::string name) {
         Layer l;

@@ -26,9 +26,15 @@
 
 ## 2. Decide
 
-- [ ] 2.1 DECIDE and record: does the journal carry the snapshot's identity so a
-      replay can refuse a mismatched pair? A hash turns a silently-wrong
-      recovery into a refusal
+- [x] 2.1 DECIDED: YES, and it carried code. A 64-bit hash of the snapshot
+      bytes, stamped by save and load so a host gets the check without asking,
+      keyed on the JOURNAL INDEX rather than "the last save" — otherwise a
+      re-save taken to size the journal repoints a journal already taken, which
+      refuses a correct pair and ACCEPTS a double-apply. A mismatch is
+      `CLAY_ERROR_SNAPSHOT_MISMATCH` with nothing applied. Byte-at-a-time
+      FNV-1a measured 90% on top of every save (1.36 ms against a 1.52 ms save
+      on 1.13 MB); word-wise is 15%. Journal format 2, and version 1 is still
+      read, so an upgrade cannot discard the recovery file a crash just left
 - [x] 2.2 DECIDED: peek, with absolute indices and an explicit `trim`. A
       failed write is retried by asking again; indices do NOT shift on trim, so
       a host that asks below the floor is told it is gone rather than handed
@@ -56,7 +62,18 @@
 
 ## 4. Prove it
 
-- [ ] 4.1 The scenarios in both spec deltas
+- [x] 4.1 The scenarios in both spec deltas, at the grain each one names:
+      `tests/unit/test_session_journal.cpp` for the log, and a new
+      `tests/unit/test_c_journal.cpp` for the six c-abi scenarios, which go
+      through save_memory / load_memory / replay because the pairing and the
+      typed refusal do not exist below the boundary. IT CARRIED CODE TWICE: the
+      identity from 2.1, and the barrier, which had lost its last caller when
+      masks became ordinary steps — no host-reachable operation recorded one,
+      so `clay_voxel_drop_level` (the documentation's own example) rebuilt a
+      grid that still had the level, silently. It records a barrier now, and
+      `clay_document_journal_barrier` is how a host learns while it can still
+      take a snapshot rather than during the recovery. Reverting each fix fails
+      its test
 - [x] 4.2 The test this change is for: snapshot, edit across all three
       representations, journal, replay onto a fresh document, and assert it
       evaluates identically and holds the same cells and vertices
@@ -68,12 +85,18 @@
 
 ## 5. Reach it and say it
 
-- [x] 5.1 ABI minor bump and `docs/RELEASE.md`
+- [x] 5.1 ABI minor bump and `docs/RELEASE.md`. 2.1 and 4.1 landed AFTER that
+      bump and grow the ABI again — one entry point
+      (`clay_document_journal_barrier`), one appended result code
+      (`CLAY_ERROR_SNAPSHOT_MISMATCH = 10`) and journal format 2 — so they ride
+      this branch's 0.85.0 -> 0.86.0 transition, which a later agent owns
 - [x] 5.2 A section in `docs/05-claycore-library.md` beside the history one,
       saying plainly what a host owns: the file, the flush, the re-snapshot
       interval, and what to do with a leftover recovery file
 - [x] 5.3 A numbered example that kills and recovers a session
-- [x] 5.4 `openspec/ROADMAP.md` — recorded in the 2026-08-23/24 findings table
+- [x] 5.4 `openspec/ROADMAP.md` — recorded in the 2026-08-23/24 findings table,
+      and extended by "Pairing a journal with its snapshot — landed 2026-09-06
+      (ABI 0.86.0)" beneath it, with the `survive-a-crash` row pointing at it
 
 ## 6. What building it changed
 
@@ -93,3 +116,20 @@
       bindings records one now — 11 entry points in C, 11 in pyclay — and
       `PyMaskField` gained the history reference `PyVoxelGrid` already had,
       which is the same binding asymmetry twice
+
+- [x] 6.3 THE BARRIER LOST ITS LAST CALLER, and 4.1's tests are what found it.
+      6.2 wired `record_barrier` up through the mask mutators; masks became
+      ordinary steps a release later and correctly took those calls away, and
+      nothing replaced them. So no host-reachable operation recorded a barrier
+      at all, and `clay_voxel_drop_level` — the example the header and
+      `docs/05` both name — journaled nothing: a replay across one rebuilt a
+      grid that still held the dropped level, plus every edit after it, with
+      no flag and no refusal. The same claim, aspirational for the second time,
+      from the opposite direction
+
+- [x] 6.4 A HOST COULD NOT ASK WHETHER ITS JOURNAL STILL SUFFICED. Rule 1 of
+      the design's two — take the journal, learn a barrier is in it,
+      re-snapshot before you need the recovery — had no entry point. The only
+      report was `out_stopped_at_barrier`, which arrives during the recovery:
+      the one moment when "you need a fresher snapshot" is useless, because the
+      session that would have been snapshotted is already gone

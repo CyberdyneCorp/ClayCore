@@ -1807,6 +1807,50 @@ struct PyLayer {
     }
 };
 
+// A convenience placement's refusals, in the order the C ABI takes them so the
+// two bindings answer with the same reason for the same layer. Protection FIRST
+// and before any bound is walked, which is a cost rule as much as a message
+// one: a locked layer never pays for a walk it will not use. apply_or_throw
+// would also refuse it, at the end, with the same wording — this is the same
+// check moved earlier, not a second policy. The open-gesture guard stays with
+// apply_or_throw, since a gesture is a document state rather than a layer one.
+void refuse_if_protected(const scene::Layer& layer, const char* what) {
+    if (layer.protected_from_edits())
+        throw std::invalid_argument(std::string(what) + ": layer " + std::to_string(layer.id) +
+                                    " is " + (layer.ghost ? "ghosted" : "locked") +
+                                    " and takes no edits");
+}
+
+// The box the two content-reading convenience placements compute from, with
+// the three states no placement can be derived from. The C ABI states the same
+// three beside clay_layer_snap_to_ground and refuses them with
+// CLAY_ERROR_INVALID_ARGUMENT; here they raise, following the surrounding
+// bindings.
+math::Aabb computed_placement_box(const scene::Layer& layer, const char* what) {
+    // The tight bound carries a layer's MIRROR copies and stops there, so on a
+    // radial layer it describes the un-arrayed item and any placement computed
+    // from it drops the ORIGINAL onto the plane with its copies already through
+    // it. Refused with the mode named rather than answered plausibly and
+    // wrongly; widening pick::layer_bounds is its own change.
+    if (layer.radial_count > 1)
+        throw std::invalid_argument(std::string(what) + ": layer " + std::to_string(layer.id) +
+                                    " carries a radial mode (count " +
+                                    std::to_string(layer.radial_count) +
+                                    "): its bounds do not cover the radial copies");
+    const math::Aabb box = pick::layer_bounds(layer);
+    if (box.empty())
+        throw std::invalid_argument(std::string(what) + ": layer " + std::to_string(layer.id) +
+                                    " holds no material: it has no low face and no centre");
+    // An unbounded layer — one whose lowest visible root is a plane or an
+    // infinite cylinder — answers a box whose faces are ±FLT_MAX, and every
+    // placement derived from one overflows to an infinite position and a tape
+    // of NaNs. A DEGENERATE box is accepted: nothing here divides by an extent.
+    if (box.is_infinite())
+        throw std::invalid_argument(std::string(what) + ": layer " + std::to_string(layer.id) +
+                                    " is unbounded: a plane has no low face to place");
+    return box;
+}
+
 // The one insertion path for Layer.add and Layer.add_group alike: an
 // AddNodeCmd with a reserved id (replay preserves ids) so an enabled undo stack
 // records the add like every other edit. Regression: a direct insert let adds
@@ -1842,6 +1886,40 @@ void check_group_op_blend(scene::Op op, const scene::Blend& blend, float roundin
         throw std::invalid_argument(
             "an inline group reads no blend or rounding: its children combine into the "
             "outer chain with their own");
+}
+
+// A LAYER's composition, under the same rules the C ABI states beside
+// clay_document_set_layer_composition. A layer boolean IS an item boolean, so
+// the operators and blends are the item ones -- but Op.INLINE names a group's
+// children-apply-outward mode and a layer has no outer chain to apply into,
+// and the transitions read their endpoints from a NODE, which a layer
+// composition has none of, so both are refused here rather than compiled
+// against defaults nobody wrote.
+void check_layer_composition(scene::Op op, const scene::Blend& blend, float rounding) {
+    if (op == scene::Op::None)
+        throw std::invalid_argument(
+            "op must be a combine operator, not Op.INLINE — that one is for add_group");
+    if (scene::op_is_transition(op))
+        throw std::invalid_argument("a layer cannot carry a transition op");
+    if (!std::isfinite(blend.k) || blend.k < 0.0f)
+        throw std::invalid_argument("blend k must be finite and >= 0");
+    if (!std::isfinite(rounding) || rounding < 0.0f)
+        throw std::invalid_argument("rounding must be finite and >= 0");
+}
+
+// The blend a composition carries, as the Python object it was set with: the
+// SUBCLASS names the profile, which is the only place Python can read it back
+// from, so what comes out of layer_composition goes straight back into
+// set_layer_composition.
+nb::object blend_object(const scene::Blend& b) {
+    switch (b.profile) {
+        case scene::BlendProfile::Quadratic: return nb::cast(PySmooth(b.k));
+        case scene::BlendProfile::Cubic: return nb::cast(PyCubic(b.k));
+        case scene::BlendProfile::Circular: return nb::cast(PyCircular(b.k));
+        case scene::BlendProfile::Chamfer: return nb::cast(PyChamfer(b.k));
+        case scene::BlendProfile::Hard: break;
+    }
+    return nb::cast(PyBlend(scene::BlendProfile::Hard, b.k));
 }
 
 // -- numpy point evaluation -----------------------------------------------------
@@ -2266,8 +2344,9 @@ nb::object quad_report_dict(const mesh::QuadFit& fit, std::size_t target) {
 
 // Mesh ONE SDF layer, in world space under that layer's transform. The mesh
 // half of the scoped split a placement preview draws from; `below = false` is
-// "this layer alone", which hard-unions with the excluding half to give the
-// whole document.
+// "this layer alone", which says the same thing however the document folds it.
+// Putting it back together with the excluding half is a MINIMUM only while
+// every layer unions -- eval_excluding refuses once one composes.
 PyMesh mesh_layer_only(const PyDocument& d, scene::LayerId layer, int resolution,
                        nb::handle voxel_size, nb::handle decimate_ratio,
                        const std::string& backend_name, const std::string& mesher,
@@ -6305,6 +6384,61 @@ NB_MODULE(pyclay, m) {
                                        nb::make_tuple(b.max.x, b.max.y, b.max.z));
              },
              "nodes"_a, "Tight bounds of the given node ids — for zoom-to-selection")
+        // -- placements computed from the layer's own content --------------
+        //
+        // The C ABI's clay_layer_snap_to_ground / _centre_bounds /
+        // _zero_to_origin, on the same rules and with the same refusals — and
+        // through the same scene:: core, so the two bindings cannot drift about
+        // WHICH placement fields a computed placement writes.
+        //
+        // The box is the one `bounds` above answers, which for a PyLayer is
+        // always the SDF arm: this class only ever wraps a layer created by
+        // add_sdf_layer, so pick::layer_bounds and the C ABI's three-way
+        // composition are the same box here.
+        .def("snap_to_ground",
+             [](PyLayer& l, float ground_y) {
+                 refuse_if_protected(l.layer(), "snap_to_ground");
+                 if (!std::isfinite(ground_y))
+                     throw std::invalid_argument("snap_to_ground: ground height must be finite");
+                 const math::Aabb box = computed_placement_box(l.layer(), "snap_to_ground");
+                 apply_or_throw(l.doc->document,
+                                scene::Command{scene::translated_layer_command(
+                                    l.layer(), scene::ground_snap_delta(box, ground_y))},
+                                "snap_to_ground", l.undo.get());
+             },
+             "ground_y"_a,
+             "Translate the layer so the LOW FACE of its content's world box sits at\n"
+             "`ground_y`. Y alone; X and Z do not move. One undoable step, and the\n"
+             "rotation and both scales are carried through — which is the reason this\n"
+             "exists rather than being composed from set_layer_transform, whose\n"
+             "single-factor form clears a layer's per-axis scale.\n\n"
+             "Raises on a layer holding no material, a layer carrying a radial mode\n"
+             "(its bounds do not cover the radial copies), an unbounded layer, a\n"
+             "ghosted or locked layer, and a ground height that is not finite. A\n"
+             "refusal leaves the document unchanged.")
+        .def("centre_bounds",
+             [](PyLayer& l) {
+                 refuse_if_protected(l.layer(), "centre_bounds");
+                 const math::Aabb box = computed_placement_box(l.layer(), "centre_bounds");
+                 apply_or_throw(l.doc->document,
+                                scene::Command{scene::translated_layer_command(
+                                    l.layer(), scene::origin_centre_delta(box))},
+                                "centre_bounds", l.undo.get());
+             },
+             "Translate the layer so the CENTRE of its content's world box sits at the\n"
+             "world origin. Named for the BOX: this engine holds no density, so the\n"
+             "answer is identical for a hollow shell and a solid of the same extent.\n"
+             "Same refusals as snap_to_ground.")
+        .def("zero_to_origin",
+             [](PyLayer& l) {
+                 apply_or_throw(l.doc->document,
+                                scene::Command{scene::translated_layer_command(
+                                    l.layer(), scene::origin_translation_delta(l.layer()))},
+                                "zero_to_origin", l.undo.get());
+             },
+             "Set the placement's TRANSLATION to (0, 0, 0), leaving the rotation and\n"
+             "both scales alone. Reads no bounds, so an empty, radial or unbounded\n"
+             "layer takes it where the other two refuse.")
         .def("safe_step_scale", [](const PyLayer& l) {
             return scene::compile_layer(l.layer()).safe_step_scale();
         })
@@ -6346,6 +6480,62 @@ NB_MODULE(pyclay, m) {
              "tolerance belongs to a viewport and a frame budget rather than to\n"
              "the artwork. Nothing here bakes: consolidating discards the\n"
              "parameters of what it absorbs, so it is never done unasked.")
+        .def("consolidation_advice",
+             [](const PyLayer& l, float advise_below_step_scale) {
+                 const scene::ConsolidationAdvice a = scene::consolidation_advice(
+                     l.layer(), advise_below_step_scale, eval::pooled_bake_eval());
+                 nb::dict out;
+                 out["advises"] = a.advises;
+                 if (!a.advises) {
+                     // None rather than a zeroed object: the Python form of
+                     // the C surface's zeroed descriptor, and it fails in the
+                     // same direction. `consolidate(**None)` and
+                     // `consolidate(cell=None)` both raise at the call rather
+                     // than baking something at a resolution nobody chose.
+                     out["params"] = nb::none();
+                     out["cost"] = nb::none();
+                     return out;
+                 }
+                 nb::dict params;
+                 // Keyed to `consolidate`'s own arguments, so the advice goes
+                 // straight back in as `layer.consolidate(**advice["params"])`.
+                 params["cell"] = a.params.cell_size;
+                 params["band"] = a.params.band;
+                 params["padding"] = a.params.padding;
+                 params["redistance"] = !a.params.skip_redistance;
+                 out["params"] = params;
+                 out["cost"] = cost_dict(a.cost);
+                 return out;
+             },
+             "advise_below_step_scale"_a,
+             "What to bake this layer AT, and what that will cost — the\n"
+             "recommendation `field_report`'s `advises_consolidation` leaves\n"
+             "open.\n\n"
+             "`advises` is True only when the field report advises at this same\n"
+             "threshold AND the PROJECTED `safe_step_scale` reaches it. The\n"
+             "second half is why this is not merely a helper: a sampled volume\n"
+             "declares sqrt(3) times its samples' Lipschitz, so a consolidated\n"
+             "layer's step scale is at best 1/sqrt(3) = 0.577, and a caller\n"
+             "asking for 0.8 is asking for something no bake delivers.\n\n"
+             "`params` is keyed to `consolidate`'s own arguments, so\n"
+             "`layer.consolidate(**advice[\"params\"])` is the whole round trip.\n"
+             "Both `params` and `cost` are None when nothing is advised, which\n"
+             "raises at the next call rather than baking.\n\n"
+             "`cell` comes from the layer's own extent and the finest content it\n"
+             "already holds, in the frame the bake samples: four cells across\n"
+             "the smallest feature, clamped to between E/512 and E/32 of the\n"
+             "longest side. A layer whose finest content is a volume at cell\n"
+             "size c is advised c unchanged — the only degradation ever advised\n"
+             "is \"volumes\", and such a layer carries resolutions somebody\n"
+             "already chose. The declared Lipschitz is deliberately NOT the\n"
+             "source: it bounds a marcher's STEP and not |grad f|, so a sampling\n"
+             "rate derived from it would be unsound exactly on the shapes that\n"
+             "motivate a bake.\n\n"
+             "It is NOT optimal — you know your viewport and it does not — NOT\n"
+             "stable across edits, NOT a memory bound (`cost[\"megabytes\"]` is,\n"
+             "and it is what to refuse on), and NOT cheap: it costs a full\n"
+             "sampling pass, so it is not a per-frame call. It bakes nothing,\n"
+             "changes nothing, and does not sever an instance layer's sharing.")
         .def("consolidation_cost",
              [](const PyLayer& l, float cell, nb::handle band, nb::handle padding,
                 nb::handle region, bool redistance) {
@@ -6544,14 +6734,22 @@ NB_MODULE(pyclay, m) {
                      throw std::invalid_argument(
                          "no layer " + std::to_string(excluded) + " to exclude: excluding a "
                          "layer the document does not hold would evaluate the whole document");
+                 if (const scene::LayerId composed =
+                         scene::first_composed_fold_layer(d.doc->document))
+                     throw std::invalid_argument(
+                         "layer " + std::to_string(composed) + " composes with the layers below "
+                         "it, so the document without layer " + std::to_string(excluded) +
+                         " does not compose back to the whole document");
                  return eval_field(scene::compile_document_except(d.doc->document, excluded),
                                    points, backend, Want::Distances);
              },
              "excluded"_a, "points"_a, "backend"_a = "cpu",
              "Signed distances of every visible SDF layer EXCEPT `excluded` -> (N,) float32.\n"
-             "Layers hard-union, so np.minimum(this, your own preview of that layer) is\n"
-             "exactly what the whole document evaluates to. A layer the document does not\n"
-             "hold raises rather than evaluating everything.")
+             "While every layer unions, np.minimum(this, your own preview of that layer)\n"
+             "is exactly what the whole document evaluates to. A document where any layer\n"
+             "composes RAISES: removing a layer from the middle of a fold changes what\n"
+             "every layer above it folds onto, so there is no composition to perform. A\n"
+             "layer the document does not hold raises rather than evaluating everything.")
         .def("gradients_excluding",
              [](const PyDocument& d, scene::LayerId excluded, nb::handle points,
                 const std::string& backend) {
@@ -6559,6 +6757,12 @@ NB_MODULE(pyclay, m) {
                      throw std::invalid_argument(
                          "no layer " + std::to_string(excluded) + " to exclude: excluding a "
                          "layer the document does not hold would evaluate the whole document");
+                 if (const scene::LayerId composed =
+                         scene::first_composed_fold_layer(d.doc->document))
+                     throw std::invalid_argument(
+                         "layer " + std::to_string(composed) + " composes with the layers below "
+                         "it, so the document without layer " + std::to_string(excluded) +
+                         " does not compose back to the whole document");
                  return eval_field(scene::compile_document_except(d.doc->document, excluded),
                                    points, backend, Want::Gradients);
              },
@@ -7158,12 +7362,20 @@ NB_MODULE(pyclay, m) {
         .def("save",
              [](const PyDocument& d, const std::string& path) {
                  check_io(io::save_clayspace_file(*d.doc, path));
+                 // These bytes are a snapshot the journal from here on can be
+                 // paired with, whether the host meant them as a crash
+                 // snapshot or as an ordinary save. check_io threw if the
+                 // write failed, so there is no failure path to guard.
+                 if (*d.undo) (*d.undo)->note_snapshot(d.doc->document.snapshot_id);
              },
              "path"_a, "Save the document as .clayspace")
         .def(
             "to_bytes",
             [](const PyDocument& d) {
                 const std::vector<std::uint8_t> bytes = io::save_clayspace(*d.doc);
+                // See `save`: the bytes just produced are a snapshot the
+                // journal from here on continues from.
+                if (*d.undo) (*d.undo)->note_snapshot(d.doc->document.snapshot_id);
                 return nb::bytes(bytes.data(), bytes.size());
             },
             "The same bytes `save` would write, without a path — for a host\n"
@@ -7225,6 +7437,72 @@ NB_MODULE(pyclay, m) {
                  return nb::make_tuple(l->ghost, l->locked);
              },
              "layer"_a, "A layer's (ghost, locked) flags")
+        .def("set_layer_composition",
+             [](PyDocument& d, scene::LayerId layer, nb::handle op, nb::handle blend,
+                nb::handle rounding) {
+                 const scene::Layer* found = d.doc->document.find_layer(layer);
+                 if (!found) throw std::invalid_argument("no layer with that id in this document");
+                 // A layer whose kind cannot enter the tape refuses rather than
+                 // storing a control that does nothing: a voxel grid and a mesh
+                 // are composited by their own rules and never fold here.
+                 if (found->kind != scene::LayerKind::Sdf || !found->sdf)
+                     throw std::invalid_argument(
+                         "only an SDF layer carries a composition; a voxel or mesh layer has no "
+                         "chain to fold");
+                 scene::LayerComposition c = found->composition;
+                 if (!op.is_none()) c.op = nb::cast<scene::Op>(op);
+                 if (!blend.is_none()) c.blend = nb::cast<const PyBlend&>(blend).b;
+                 if (!rounding.is_none()) c.rounding = nb::cast<float>(rounding);
+                 check_layer_composition(c.op, c.blend, c.rounding);
+                 apply_or_throw(d.doc->document,
+                                scene::Command{scene::SetLayerCompositionCmd{layer, c}},
+                                "set_layer_composition", d.undo.get());
+             },
+             "layer"_a, "op"_a = nb::none(), "blend"_a = nb::none(), "rounding"_a = nb::none(),
+             "How this layer folds into the visible SDF layers BENEATH it; omitted "
+             "arguments keep their value. The FIRST visible SDF layer initialises the "
+             "accumulator and its own operator is not applied, so a stack cannot open "
+             "with Subtract against nothing and show an empty frame. Refuses a non-SDF "
+             "layer, Op.INLINE and the transition ops.")
+        .def("layer_composition",
+             [](const PyDocument& d, scene::LayerId layer) {
+                 const scene::Layer* l = d.doc->document.find_layer(layer);
+                 if (!l) throw std::invalid_argument("no layer with that id in this document");
+                 if (l->kind != scene::LayerKind::Sdf || !l->sdf)
+                     throw std::invalid_argument(
+                         "only an SDF layer carries a composition; a voxel or mesh layer has "
+                         "none to report");
+                 return nb::make_tuple(l->composition.op, blend_object(l->composition.blend),
+                                       l->composition.rounding);
+             },
+             "layer"_a,
+             "A layer's (op, blend, rounding) fold. A non-SDF layer raises rather than "
+             "answering Op.ADD, which would read as a composition it cannot carry.")
+        .def("writable_at_minor",
+             [](const PyDocument& d, unsigned minor) {
+                 if (minor == 0) throw std::invalid_argument("a format minor starts at 1");
+                 // Clamped rather than refused above this build's layout, as
+                 // the C form clamps: the question is only ever about writing
+                 // DOWN, and a minor from the future loses nothing.
+                 const std::uint16_t asked =
+                     minor > scene::kSceneMinor ? scene::kSceneMinor
+                                                : static_cast<std::uint16_t>(minor);
+                 const scene::LayerId blocking =
+                     scene::layer_blocking_minor(d.doc->document, asked);
+                 return nb::make_tuple(blocking == 0, blocking);
+             },
+             "minor"_a,
+             "Can this document be written at scene format minor `minor`? Returns\n"
+             "(ok, blocking_layer): (True, 0) when every layer can be said at that\n"
+             "layout, and (False, layer_id) naming the FIRST layer that cannot --\n"
+             "which today means a layer carrying a non-default composition below\n"
+             "minor 18. Ask BEFORE saving: writing a subtracting layer at 17 would\n"
+             "bring it back as a union, so the cutter that carved a hole returns as\n"
+             "a lump welded on, in a file that opens cleanly and looks deliberate.\n"
+             "A minor above this build's is clamped to it rather than refused. The\n"
+             "id is returned rather than only a flag so a host can say WHICH subtool\n"
+             "to change instead of making the artist find it. Mirrors\n"
+             "clay_document_writable_at_minor.")
         .def("set_layer_transform",
              [](PyDocument& d, scene::LayerId layer, nb::handle position,
                 nb::handle rotation_axis_angle, nb::handle scale) {
@@ -7333,6 +7611,13 @@ NB_MODULE(pyclay, m) {
                      (*d.undo)->set_groups_resolver([doc]() -> voxel::GroupField* {
                          return doc->groups ? &*doc->groups : nullptr;
                      });
+                     // A document loaded from bytes already knows which
+                     // snapshot it is, and the journal starting here continues
+                     // from that one. Without this seed the recovery path —
+                     // load_bytes, enable_undo, journal, crash, replay —
+                     // produces a journal naming no snapshot and the pair goes
+                     // unchecked (survive-a-crash 2.1).
+                     (*d.undo)->note_snapshot(d.doc->document.snapshot_id);
                  }
              },
              "Start recording edits. Off by default, so a document that never "
@@ -7508,6 +7793,25 @@ NB_MODULE(pyclay, m) {
             "journal_since for something below `first` yields nothing — this is\n"
             "how you find out, rather than by replaying a short history.")
         .def(
+            "journal_barrier",
+            [](const PyDocument& d, std::size_t from) -> nb::object {
+                if (!*d.undo) throw std::runtime_error("undo is not enabled on this document");
+                std::size_t at = 0;
+                if (!(*d.undo)->journal_barrier_after(from, &at)) return nb::none();
+                return nb::cast(at);
+            },
+            "from"_a = 0,
+            "The index of the first operation nothing can reproduce at or after\n"
+            "`from`, or None. THIS IS THE CALL THAT SAYS 'SNAPSHOT AGAIN'.\n\n"
+            "Replay stops at a barrier, so a host that only learns about one\n"
+            "from replay_journal learns it during the recovery — the one moment\n"
+            "the answer is useless, because the session it would have\n"
+            "re-snapshotted is gone. Ask after taking the journal.\n\n"
+            "Reads THIS document's log, not a journal blob: a recovery file\n"
+            "from a previous session is opaque, and replaying it is the only\n"
+            "way to learn what is in it. Trimming drops barriers below the\n"
+            "floor too, so ask before you trim.")
+        .def(
             "journal_trim",
             [](PyDocument& d, std::size_t upto) {
                 if (!*d.undo) throw std::runtime_error("undo is not enabled on this document");
@@ -7522,6 +7826,12 @@ NB_MODULE(pyclay, m) {
                 const bool ok = (*d.undo)->replay(
                     reinterpret_cast<const std::uint8_t*>(data.c_str()), data.size(),
                     d.doc->document, grid_for(d), mesh_for(d), &r, mask_for(d));
+                if (r.snapshot_mismatch)
+                    throw std::invalid_argument(
+                        "this journal was taken against a different snapshot: it names " +
+                        std::to_string(r.journal_snapshot_id) + " and this document is " +
+                        std::to_string(d.doc->document.snapshot_id) +
+                        " (0 meaning it was never saved or loaded). Nothing was applied.");
                 if (!ok)
                     throw std::invalid_argument(
                         "the journal could not be replayed: a version this build does not "
@@ -7541,6 +7851,13 @@ NB_MODULE(pyclay, m) {
             "a document quietly missing that operation's effect, and you could\n"
             "not see the loss. Seeing the flag means you need a fresher\n"
             "snapshot, not a longer journal.\n\n"
+            "'IS the snapshot' is CHECKED: a journal names the bytes it\n"
+            "continues from, and one replayed onto a different document raises\n"
+            "with NOTHING applied. It is a hash of the serialized bytes, so two\n"
+            "identical snapshots are interchangeable; it is not a checksum, and\n"
+            "it does not catch replaying the same journal twice — the indices\n"
+            "are what guard that. A journal from before 0.86.0 names no\n"
+            "snapshot and is never refused for the pair.\n\n"
             "A journal this build does not understand, or a truncated one, is\n"
             "REFUSED. Events applied before the bad one stand, so replay onto a\n"
             "copy if you want all-or-nothing.")
@@ -10307,7 +10624,16 @@ NB_MODULE(pyclay, m) {
             "Whether a level stores the whole lattice. True for a level added\n"
             "without a region, and for every grid written before regions existed.")
         .def(
-            "drop_level", [](PyVoxelGrid& g) { return g.grid().drop_level(); },
+            "drop_level",
+            [](PyVoxelGrid& g) {
+                if (!g.grid().drop_level()) return false;
+                // A BARRIER: see clay_voxel_drop_level. The level's cells are
+                // gone and the steps recorded against it name a resolution
+                // that no longer exists, so a journal replayed across this
+                // would hand back a grid that still has the level.
+                if (g.doc && *g.undo) (*g.undo)->record_barrier("dropped a voxel resolution level");
+                return true;
+            },
             "Drops the finest level and the detail only it held. False when\n"
             "there is only one left.")
         .def(

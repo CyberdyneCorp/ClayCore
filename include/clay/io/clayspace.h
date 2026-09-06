@@ -183,7 +183,16 @@ inline constexpr std::uint16_t kClaySpaceMajor = 1;
 // document it can open, with every payload written once per node exactly as
 // before; what is lost is the deduplication, which costs bytes rather than
 // anything an artist authored, and is therefore the recoverable direction.
-inline constexpr std::uint16_t kClaySpaceMinor = 17;
+// Minor 18 adds a LAYER's COMPOSITION — the op it folds into the layers
+// beneath it with — and like 12, 15 and 16 it is an APPENDED scene field; see
+// scene::kSceneMinor for the block's layout. A build that predates 18
+// desynchronises on the first layer record and FAILS rather than misreading,
+// which is this format's usual direction. The DOWNGRADE is where 18 differs
+// from every minor before it: writing at 17 is allowed only for a document
+// whose layers all union, and REFUSED for one that carries a composition,
+// because a subtractive layer written as a union opens cleanly as a different
+// sculpture. scene::layer_blocking_minor is the query a caller asks first.
+inline constexpr std::uint16_t kClaySpaceMinor = 18;
 
 // The document bundle a .clayspace file holds. Voxel layer content is keyed
 // by layer id (the scene module stays voxel-agnostic by layering rule).
@@ -221,6 +230,22 @@ struct ClaySpaceDoc {
     std::vector<std::uint8_t> thumbnail_png;      // optional passthrough
     std::vector<std::uint8_t> camera_bookmarks;   // optional passthrough
 };
+
+// WHICH SNAPSHOT IS THIS (survive-a-crash 2.1).
+//
+// A 64-bit hash of the serialized bytes, and nothing more: what a crash
+// journal needs is "this is not the snapshot I was taken against", and the
+// cost of a false MATCH is a wrong recovery that a full compare would have to
+// hold the whole snapshot in memory to avoid. Every serializing entry point
+// stamps it into `scene::Document::snapshot_id`, so a host gets the pairing
+// without asking for it — see `History::journal_since`.
+//
+// NOT a checksum: it is not written into the file, it does not detect
+// corruption on disk, and it is stable neither across builds that change the
+// document encoding nor across byte orders. It answers one question, about two
+// things already in memory. Costs 0.24 ms on a 1.13 MB snapshot, against the
+// 1.52 ms the save producing those bytes costs.
+std::uint64_t snapshot_identity(const std::uint8_t* data, std::size_t size);
 
 std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc);
 IoStatus load_clayspace(const std::uint8_t* data, std::size_t size, ClaySpaceDoc* out);

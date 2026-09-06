@@ -1225,6 +1225,24 @@ CullPadTerms cull_pad_terms(const SdfContent& content, const Layer& layer) {
         (void)id;
         total.raise(cull_pad_terms(n, layer));
     }
+    // NO TERM FOR THE LAYER'S OWN FOLD HERE, and that is the whole point of
+    // this function's scope: these are the terms ONE layer's ITEM CHAIN needs.
+    //
+    // A fold is not a property of the layer that owns it. It drags the value of
+    // every layer BENEATH it as well -- the items that need the pad are down
+    // there -- and the drags of a stack of folds COMPOSE, so what an item needs
+    // is the SUM of the folds it passes through on the way up, not the largest
+    // of them. `folds_from_layer_support` is that sum and `document_cull_pad`
+    // is where it meets these terms, once, for both readers.
+    //
+    // Attributing a fold to its owning layer here would be wrong twice over,
+    // and only the document-wide maximum ever hid it: the term would land on
+    // the layer that needs it least, and a document of N composed folds would
+    // be padded for exactly one of them. Measured on four spheres 0.62 apart
+    // with the top folds set to a quadratic k: 0.0180 of band drift at two
+    // composed folds and 0.0268 at three, against 0 at one (tests/unit/
+    // test_layer_fold_sites.cpp, "the cull pad sums the folds above a layer
+    // rather than taking the largest").
     return total;
 }
 
@@ -1402,23 +1420,101 @@ Aabb item_own_influence_bound(const Node& item, const Layer& layer) {
     return geometry_bound(item, layer, /*with_copies=*/false);
 }
 
-float group_blend_support(const Node& group, const Layer& layer) {
-    // Extended-op groups: the subtree field is not rounded, so rb comes
-    // straight from the group's rounding scaled into world units.
+float chain_blend_support(Op op, const Blend& blend, float round_world) {
+    // Extended modes: the operand field is not rounded, so rb comes straight
+    // from the combine's own rounding in world units.
     // Otherwise cmax(support, k), exactly as the item path above: paint fades
     // over max(profile support, k), and a HARD profile has zero support — so
-    // support alone dilated a Paint group by nothing while its colour reached
-    // out to k.
+    // support alone dilated a Paint by nothing while its colour reached out
+    // to k.
     //
     // Lifted out of node_influence_bound so the ancestor walk below can apply
     // the SAME expression to one child that the group path applies to the
-    // union of them. Two spellings of "how far a group's blend reaches" would
-    // be one refactor away from disagreeing, and the walk is only sound
-    // because it is the same number.
-    return op_is_extended(group.op)
-               ? kernel::ccombine_extended_support(static_cast<int>(group.op), group.blend.k,
-                                                   group.rounding * layer_distance_scale(layer))
-               : kernel::cmax(group.blend.support(), group.blend.k);
+    // union of them, and then generalised past the node so a LAYER's
+    // composition reaches it too. Two spellings of "how far a combine
+    // reaches" would be one refactor away from disagreeing, and both walks are
+    // only sound because it is the same number.
+    return op_is_extended(op) ? kernel::ccombine_extended_support(static_cast<int>(op), blend.k,
+                                                                 round_world)
+                              : kernel::cmax(blend.support(), blend.k);
+}
+
+float group_blend_support(const Node& group, const Layer& layer) {
+    return chain_blend_support(group.op, group.blend, group.rounding * layer_distance_scale(layer));
+}
+
+float layer_blend_support(const Layer& layer) {
+    return chain_blend_support(layer.composition.op, layer.composition.blend,
+                               layer.composition.rounding * layer_distance_scale(layer));
+}
+
+// HOW FAR A CHANGE TO ONE LAYER'S OWN FIELD TRAVELS THROUGH THE STACK ABOVE IT:
+// the support of the fold that layer enters through, plus the support of every
+// fold above it.
+//
+// A combine is POINTWISE -- `ctape_combine_values` reads a.d and b.d at the
+// sample and nothing else -- so a change to a layer's value at p changes the
+// document's value at p, whatever operator sits above, and an intersecting or
+// subtracting layer overhead widens NOTHING. What is not pointwise is a SMOOTH
+// or EXTENDED fold: it moves the result up to its own support away from where
+// its operands changed. That is the same inequality node_reach_bound applies
+// once per enclosing GROUP inside a layer, through the same expression, and
+// this is it one level up -- where node_reach_bound stops, because it holds a
+// Layer and not a Document.
+//
+// SUMMED rather than maxed because they compose: the second fold sees a field
+// that already differs over the first's dilated box and can move its own result
+// that much further again. There is one term per visible SDF layer, and a hard
+// union contributes zero -- so a document that predates compositions dilates by
+// nothing here and pays for none of this.
+//
+// THE FIRST VISIBLE SDF LAYER'S OWN COMPOSITION IS NOT APPLIED (tape.h,
+// compile_and_fold_layer), so it is not a term. Counting it anyway would be
+// safe and is not free: over-wide keeps items a compile did not need and costs
+// a longer tape, too narrow drops an item the field needed and costs the
+// geometry -- so the two directions are not symmetric, and the one that is
+// merely slow is still not the one to take when the exact term is in hand.
+//
+// A hidden layer's own fold is not applied and adds nothing, but the folds
+// ABOVE a hidden layer still are: the walk starts at `layer_id` whether or not
+// it is visible, which is what the hidden side of a SetLayerVisibleCmd needs.
+float folds_from_layer_support(const Document& doc, LayerId layer_id) {
+    float total = 0.0f;
+    bool at_or_above = false;
+    bool have_first = false;
+    for (const Layer& l : doc.layers) {
+        if (l.id == layer_id) at_or_above = true;
+        if (!l.visible || l.kind != LayerKind::Sdf || !l.sdf) continue;
+        const bool first = !have_first;
+        have_first = true;
+        if (!at_or_above || first) continue;
+        total += layer_blend_support(l);
+    }
+    return total;
+}
+
+// THE PAD THE WHOLE DOCUMENT COMPILES UNDER: a maximum over the visible SDF
+// layers of what each one's items need, which is that layer's own chain pad
+// PLUS the folds its value passes through above it.
+//
+// A maximum of sums and never a sum of maxima, exactly as `cull_pad` is for one
+// layer: the pad is a single dilation of one region, so it has to cover the
+// worst layer rather than the total of all of them.
+//
+// The fold sum is the term a per-layer walk cannot produce -- it is a property
+// of the STACK, and `cull_pad_terms` holds a layer. `CullIndex::refresh_pad` is
+// this same expression over cached terms, and the two are held equal by a test
+// rather than by this sentence (test_layer_fold_sites.cpp), because a term in
+// one of them only would cull a brick refill differently from a whole-document
+// compile.
+float document_cull_pad(const Document& doc) {
+    float pad = 0.0f;
+    for (const Layer& layer : doc.layers) {
+        if (!layer.visible || layer.kind != LayerKind::Sdf || !layer.sdf) continue;
+        pad = kernel::cmax(pad,
+                           cull_pad(*layer.sdf, layer) + folds_from_layer_support(doc, layer.id));
+    }
+    return pad;
 }
 
 Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& layer,
@@ -1509,23 +1605,62 @@ Aabb node_influence_bound_in_document(const Document& doc, const SdfContent& con
     // two-layer instance, a band-clamped value 0.103 outside the box moved,
     // against a band of 0.15 (issue #325).
     //
-    // scene::node_command_bound already unions this way for the undo path. This
-    // is the same union, shared so the query, the dirty call and the command
-    // path cannot disagree about where an edit reaches.
+    // scene::node_command_bound IS this function -- it looks the content up
+    // from a layer id and calls here -- so the query, the dirty call and the
+    // command path cannot disagree about where an edit reaches. That sentence
+    // was once true only of the union below; the fold made it false, because
+    // this reported the un-dilated box while the command path dilated. It is
+    // true again by there being one body rather than two agreeing ones.
+    //
     // Shared content is the only test, matching node_command_bound. NOT
     // layer.visible: the caller named a node and wants to know where it
     // reaches, and node_influence_bound already returns nothing for a node that
     // is itself invisible. Filtering on the LAYER here made a hidden layer
     // report no bounds where it used to report a box, which is a second
     // behaviour change and not this one.
+    //
+    // node_reach_bound rather than node_influence_bound: an edit to a node
+    // inside a blended group moves the group's result past the node's own box,
+    // and a host is asking where the EDIT lands. Then layer_reach_in_document
+    // carries it the rest of the way, from the layer's field to the
+    // document's -- the two halves of one walk, group supports then fold
+    // supports, which is why the fold term cannot sit anywhere else.
     Aabb out;
     for (const Layer& l : doc.layers) {
         if (l.sdf.get() != &content) continue;
-        const Aabb b = node_influence_bound(content, id, l, extent);
+        const Aabb b = node_reach_bound(content, id, l, extent);
         if (b.is_infinite()) return Aabb::infinite();
-        out.expand(b);
+        out.expand(layer_reach_in_document(doc, l.id, b));
     }
     return out;
+}
+
+Aabb layer_reach_in_document(const Document& doc, LayerId layer_id, const Aabb& in_layer) {
+    // Empty stays empty (nothing changed, so nothing reaches) and infinite
+    // stays infinite (dilating FLT_MAX overflows to the same claim, badly).
+    if (in_layer.empty() || in_layer.is_infinite()) return in_layer;
+    const float support = folds_from_layer_support(doc, layer_id);
+    return support > 0.0f ? in_layer.dilated(support) : in_layer;
+}
+
+Aabb layer_influence_bound_in_document(const Document& doc, LayerId layer_id,
+                                       LayerExtent* extent) {
+    const Layer* l = doc.find_layer(layer_id);
+    if (!l) return Aabb{};
+    Aabb b = layer_reach_in_document(doc, layer_id, layer_influence_bound(*l, extent));
+    if (b.is_infinite() || op_is_local(l->composition.op)) return b;
+    for (const Layer& below : doc.layers) {
+        if (below.id == l->id) break;  // only what is BENEATH it in the stack
+        if (!below.visible || below.kind != LayerKind::Sdf || !below.sdf) continue;
+        // Each one carried up by ITS OWN folds, which include this layer's:
+        // what an intersect can take away is where the ACCUMULATOR has
+        // material, and the accumulator at this seam is what the folds beneath
+        // already spread.
+        const Aabb ob = layer_reach_in_document(doc, below.id, layer_influence_bound(below));
+        if (ob.is_infinite()) return Aabb::infinite();
+        b.expand(ob);
+    }
+    return b;
 }
 
 Aabb layer_influence_bound(const Layer& layer, LayerExtent* extent) {

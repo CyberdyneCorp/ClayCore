@@ -414,11 +414,65 @@ float cull_pad(const SdfContent& content, const Layer& layer);
 math::Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& layer,
                                 LayerExtent* extent = nullptr);
 
+// How far a CHAIN-LEVEL combine spreads a change in one of its operands, in
+// world units. THE one expression for that quantity: an extended mode reaches
+// its documented support (kernel/tape.h ccombine_extended_support), everything
+// else reaches the wider of the blend profile's support and k — because a HARD
+// profile has zero support, and support alone dilated a Paint by nothing while
+// its colour reached out to k.
+//
+// Op/Blend/world-rounding rather than a node, so that a GROUP's fields and a
+// LAYER's composition reach it without either growing its own copy. The item
+// path applies the same expression inside geometry_bound, on top of the
+// item's own rounding.
+float chain_blend_support(Op op, const Blend& blend, float round_world);
+
 // How far a GROUP's combine spreads a change in one of its operands. Shared by
 // node_influence_bound, which applies it to the union of the children, and
 // node_reach_bound, which applies it to one child — two spellings of the same
 // quantity would be one refactor away from disagreeing.
 float group_blend_support(const Node& group, const Layer& layer);
+
+// How far a LAYER's composition spreads a change in one of ITS operands: the
+// same quantity one level up, for the fold between a layer and the accumulated
+// field of the visible SDF layers beneath it. A layer composition carries no
+// node, so its rounding converts through `layer_distance_scale` — the factor a
+// GROUP's rounding takes, not the placed one an item's takes.
+//
+// Zero for the hard Add every document that predates layer composition
+// carries, which is what keeps their bounds byte-identical.
+float layer_blend_support(const Layer& layer);
+
+// The support of every fold a layer's own value passes through on the way to
+// the DOCUMENT's value: the layer's own composition and every visible SDF
+// layer's composition above it, SUMMED -- they compose, so the second fold can
+// move a result the first already moved that much further again. Zero for a
+// stack that unions hard, which is every document that predates compositions.
+//
+// The first visible SDF layer's composition is not a term: it is never applied
+// (tape.h). The walk starts at `layer_id` whether or not that layer is itself
+// visible, so the hidden side of a visibility change still gets the folds above
+// it.
+//
+// Used both for WHERE AN EDIT LANDS (scene/commands.cpp) and for HOW FAR A CULL
+// MUST REACH (document_cull_pad): they are the same inequality asked in two
+// directions, and one definition is why they cannot drift apart.
+float folds_from_layer_support(const Document& doc, LayerId layer_id);
+
+// The pad the whole document compiles under, from the document alone: a MAXIMUM
+// over visible SDF layers of `cull_pad` for that layer plus
+// `folds_from_layer_support` of it.
+//
+// The fold term belongs HERE rather than in `cull_pad_terms` because a fold
+// drags the layers BENEATH it, which is the layer that owns it and every one
+// under it -- a per-layer walk cannot see that, and a document-wide maximum
+// over per-layer terms would pad an N-fold stack for one fold.
+//
+// `CullIndex::cull_pad()` is the same number over cached per-layer terms; a
+// compile takes whichever it has. Where a pad is wider than a compile needed it
+// keeps items and costs tape; where it is narrower it drops an item the field
+// needed and costs the geometry, silently. Those are not symmetric.
+float document_cull_pad(const Document& doc);
 
 // Where an edit to `id` can change the layer's field: node_influence_bound,
 // dilated once per enclosing group by that group's blend support, up to the
@@ -432,19 +486,78 @@ float group_blend_support(const Node& group, const Layer& layer);
 //
 // Infinite when the node is non-local or any group above it is; empty when the
 // node, or any group above it, is hidden or absent.
+//
+// IT STOPS AT THE LAYER ROOT, and it has to: it takes a Layer, and how far a
+// change to that layer's value travels through the DOCUMENT is a property of
+// the stack above it, which a Layer cannot see. Anything reporting a region to
+// a host, or dirtying one, wants node_influence_bound_in_document -- this walk
+// carried the rest of the way by layer_reach_in_document.
 math::Aabb node_reach_bound(const SdfContent& content, NodeId id, const Layer& layer,
                             LayerExtent* extent = nullptr);
 
-// Whole-layer bound (union of root node bounds).
+// WHERE A CHANGE TO ONE LAYER'S FIELD LANDS IN THE DOCUMENT'S. `in_layer` is a
+// box the caller knows the LAYER's own field cannot change outside of; the
+// answer is the box the DOCUMENT's field cannot change outside of, which is
+// that one dilated by every fold it passes through on the way up
+// (folds_from_layer_support).
+//
+// THE ONE DEFINITION OF THAT DILATION. Every route a host can take to "where
+// can an edit reach" goes through this function -- the two influence-bound
+// queries, the two mark_dirty calls, the command path and the gesture reaches
+// -- because those answers may not disagree: a host dirties by what the query
+// told it (clay.h, mark_dirty_nodes), so a query that is one fold too tight is
+// stale bricks at a blend seam with nothing on the host's side to point at.
+//
+// A combine is POINTWISE, so nothing about the layers a fold sits between
+// widens this beyond the fold's own support -- see folds_from_layer_support,
+// where the argument is written. Empty in, empty out; infinite in, infinite
+// out; and a stack that unions hard dilates by nothing, which is every document
+// that predates layer composition.
+math::Aabb layer_reach_in_document(const Document& doc, LayerId layer_id,
+                                   const math::Aabb& in_layer);
+
 // The box outside which this node cannot change the DOCUMENT's field: the union
 // over every visible layer sharing its content, since an instanced layer
 // compiles the same node again under its own transform. Prefer this to
 // node_influence_bound wherever a Document is in scope and the answer is going
 // to a host as a region to dirty (issue #325).
+//
+// Per sharing layer this is node_reach_bound -- the node's own bound dilated
+// once per enclosing GROUP -- carried the rest of the way up by
+// layer_reach_in_document. `scene::node_command_bound` IS this function, so the
+// query a host asks and the region the command path dirties are one expression
+// and cannot drift.
 math::Aabb node_influence_bound_in_document(const Document& doc, const SdfContent& content,
                                             NodeId id, LayerExtent* extent = nullptr);
 
+// Whole-layer bound (union of root node bounds), IN THE LAYER'S OWN FIELD. It
+// takes a Layer and not a Document, so it cannot answer where a change to this
+// layer reaches the DOCUMENT: the folds above it are a property of the stack
+// and a Layer cannot see them. A caller that holds a Document and is reporting
+// a region to a host wants layer_influence_bound_in_document instead; this
+// remains the right answer for anything asking what the layer itself occupies.
 math::Aabb layer_influence_bound(const Layer& layer, LayerExtent* extent = nullptr);
+
+// The box outside which a LAYER cannot change the document's field: its own
+// influence bound carried up by layer_reach_in_document, and -- for an
+// INTERSECT and for nothing else -- the accumulated extent of the visible SDF
+// layers beneath it.
+//
+// The intersect arm is item_nonlocality's BoundedByLayer one level up.
+// `max(a, b)` far from this layer's geometry is `b`, a large positive that WINS
+// the max, so hiding, moving or re-composing an intersecting layer changes the
+// field everywhere the accumulator had material. `op_is_local` is the test, so
+// subtract, paint and every extended mode stay bounded by this layer alone and
+// pay nothing. Visibility of the named layer is not consulted: it is hidden on
+// one side of a show/hide and the widening is wanted on both.
+//
+// It is not small when it fires -- the host measured a refill of that box at
+// 45.5 ms, and 7.5 s on a fixture with ten times the extent -- and it fires
+// only for Intersect and only on that layer's own reach, never on an edit made
+// inside a layer beneath. Narrowing it is a refill-region change, not a bounds
+// change (see scene/commands.cpp, layer_command_bound).
+math::Aabb layer_influence_bound_in_document(const Document& doc, LayerId layer_id,
+                                             LayerExtent* extent = nullptr);
 
 }  // namespace scene
 }  // namespace clay

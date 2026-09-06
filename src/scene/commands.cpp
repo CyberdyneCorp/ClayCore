@@ -248,6 +248,20 @@ std::optional<Command> apply_one(Document& doc, const SetLayerRadialCmd& c) {
     return Command{inverse};
 }
 
+std::optional<Command> apply_one(Document& doc, const SetLayerCompositionCmd& c) {
+    Layer* l = doc.find_layer(c.id);
+    if (!l) return std::nullopt;
+    // REFUSED rather than stored, and refused HERE rather than only at the
+    // binding: a voxel or mesh layer never enters the tape, so a composition on
+    // one is a control that does not act, and a journal replayed through this
+    // vocabulary must reject exactly what the setter rejects. nullopt is this
+    // vocabulary's "no" and it already means the document is unchanged.
+    if (l->kind != LayerKind::Sdf) return std::nullopt;
+    SetLayerCompositionCmd inverse{c.id, l->composition};
+    l->composition = c.composition;
+    return Command{inverse};
+}
+
 }  // namespace
 
 namespace {
@@ -268,6 +282,7 @@ LayerId edited_layer(const Command& cmd) {
                                std::is_same_v<C, SetLayerTransformCmd> ||
                                std::is_same_v<C, SetLayerMirrorCmd> ||
                                std::is_same_v<C, SetLayerRadialCmd> ||
+                               std::is_same_v<C, SetLayerCompositionCmd> ||
                                std::is_same_v<C, SetLayerNameCmd>)
                 return c.id;
             else
@@ -300,6 +315,47 @@ std::optional<Command> apply(Document& doc, const Command& cmd) {
 
 namespace {
 
+// WHAT A COMMAND THAT CHANGES THE VISIBLE SDF LAYER LIST COSTS BEYOND THE LAYER
+// IT NAMES: the first visible SDF layer initialises the accumulator and ITS OWN
+// OPERATOR IS NOT APPLIED (tape.h), so adding, removing, hiding or showing the
+// bottom-most one -- and a reorder, which is a Remove and an Add -- turns the
+// layer above it from folded into initialising. A subtractive cutter that was
+// taking material away becomes the base shape and renders AS MATERIAL, over its
+// own whole extent, which is nowhere near the box the edited layer occupies.
+// Left out, those bricks keep their seeds and are re-stamped to the new
+// revision: stale geometry, no error.
+//
+// Only the layer directly above the first one can flip. Every other layer keeps
+// exactly the layers beneath it that it had, and a fold is pointwise in them.
+//
+// And only a COMPOSED one costs anything: promoting a hard union from
+// `min(acc, M)` to `M` differs only where `acc` had material, and `acc` there is
+// the edited layer, whose own extent is already in the box.
+//
+// Taken on whichever side of the apply the edited layer IS the first visible
+// SDF layer -- hiding it flips on the before side, showing it on the after side
+// -- which is why apply_edit unions the two and neither alone is an answer.
+math::Aabb first_visible_flip_bound(const Document& doc, LayerId layer_id, LayerExtent* extent) {
+    const Layer* first = nullptr;
+    const Layer* next = nullptr;
+    for (const Layer& l : doc.layers) {
+        if (!l.visible || l.kind != LayerKind::Sdf || !l.sdf) continue;
+        if (!first) {
+            first = &l;
+            continue;
+        }
+        next = &l;
+        break;
+    }
+    if (!first || first->id != layer_id || !next) return math::Aabb{};
+    if (layer_composition_is_hard_union(next->composition)) return math::Aabb{};
+    // Where THAT layer reaches in this document, asked the one way this change
+    // has of asking it. Its intersect arm is not wasted here: an intersecting
+    // `next` stops removing material from the layer being hidden, and that
+    // layer's own box is what the arm reports.
+    return layer_influence_bound_in_document(doc, next->id, extent);
+}
+
 // The bound of a node command's target: where an edit to THAT NODE reaches,
 // unioned over every layer sharing the content. Empty when the layer, the
 // content or the node is not there — which is the honest answer on the side of
@@ -313,23 +369,63 @@ namespace {
 // bounds are defined. A sibling's geometry is not something the edit can
 // reach, and including it made the region grow with the size of the group
 // rather than with the size of the edit.
+//
+// IT IS `node_influence_bound_in_document` AND NOTHING ELSE. That function is
+// what `clay_layer_node_influence_bound` reports and what
+// `clay_brick_cache_mark_dirty_nodes` marks, and the three answers may not
+// disagree: a host computes its refill region from the query and hands it to
+// the dirty call, so a command path that dilated where the query did not left
+// the host dirtying a box it was told was enough (design.md 13b).
 math::Aabb node_command_bound(const Document& doc, LayerId layer_id, NodeId node,
                              LayerExtent* extent) {
     const Layer* target = doc.find_layer(layer_id);
     if (!target || !target->sdf) return math::Aabb{};
-    math::Aabb bound;
-    for (const Layer& l : doc.layers) {
-        if (l.sdf != target->sdf) continue;
-        const math::Aabb b = node_reach_bound(*l.sdf, node, l, extent);
-        if (b.is_infinite()) return math::Aabb::infinite();
-        bound.expand(b);
-    }
-    return bound;
+    return node_influence_bound_in_document(doc, *target->sdf, node, extent);
 }
 
-math::Aabb layer_command_bound(const Document& doc, LayerId layer_id, LayerExtent* extent) {
-    const Layer* l = doc.find_layer(layer_id);
-    return l ? layer_influence_bound(*l, extent) : math::Aabb{};
+// WHERE A LAYER-LEVEL COMMAND LANDS: where that layer reaches in this document,
+// and ONE term more that only a command has.
+//
+// 1 and 2 -- the fold's own support and every fold above it, and the layers
+// beneath for an INTERSECT and for nothing else -- are
+// `layer_influence_bound_in_document`, where both arguments are written and
+// where the intersect arm's cost is priced. They are not restated here because
+// a host asking `clay_layer_influence_bound` must be told the same box this
+// dirties, and two spellings of one quantity are one edit away from being two
+// quantities.
+//
+// 3. THE LAYER ABOVE THE BOTTOM ONE, when the command changes WHICH layers are
+//    visible SDF layers -- `first_visible_flip_bound`, which is where that
+//    argument is written. `changes_layer_set` says which commands those are
+//    (add, remove, hide/show, and the Remove+Add pair a reorder is), and it is
+//    passed in rather than derived because this function is handed a layer and
+//    not a command. It is the one term a QUERY cannot have: a query has no
+//    before and after side to sit between.
+//
+// NOT MEMOIZED, deliberately. The walk is O(nodes beneath) and runs twice per
+// command (apply_edit takes the bound on both sides), against a refill of the
+// box it returns -- which the same command triggers, and which measured 45.5 ms
+// on the intersect fixture. A cache here would be one whose only observable is
+// that it stopped firing, which is why the one memoizing the LAYER walk carries
+// walks()/keeps() counters; if this walk ever reaches a measurement it wants
+// that shape and those counters, not a quiet map.
+math::Aabb layer_command_bound(const Document& doc, LayerId layer_id, LayerExtent* extent,
+                               bool changes_layer_set) {
+    // 3. THE FIRST-VISIBLE FLIP, for the commands that can cause one. Taken
+    //    first because it is the one term that is not about this layer at all.
+    const math::Aabb flip =
+        changes_layer_set ? first_visible_flip_bound(doc, layer_id, extent) : math::Aabb{};
+    if (flip.is_infinite()) return flip;
+    // 1 and 2 together, from the one function that answers them --
+    // `layer_influence_bound_in_document`, which is also what
+    // `clay_layer_influence_bound` reports and what
+    // `clay_brick_cache_mark_dirty_layer` marks. Only term 3 is left here,
+    // because only a COMMAND can change which layers are visible SDF layers;
+    // a query has no side to be on.
+    math::Aabb b = layer_influence_bound_in_document(doc, layer_id, extent);
+    if (b.is_infinite()) return b;
+    b.expand(flip);
+    return b;
 }
 
 }  // namespace
@@ -378,14 +474,20 @@ math::Aabb command_influence_bound(const Document& doc, const Command& cmd,
             if constexpr (std::is_same_v<C, SetLayerNameCmd> ||
                           std::is_same_v<C, SetLayerProtectionCmd>)
                 return math::Aabb{};
+            // The three that change WHICH layers are visible SDF layers, and so
+            // can move the first-visible rule onto another layer. A reorder is
+            // a RemoveLayerCmd and an AddLayerCmd, so it is covered by being
+            // both of them.
             else if constexpr (std::is_same_v<C, AddLayerCmd>)
-                return layer_command_bound(doc, c.layer.id, extent);
+                return layer_command_bound(doc, c.layer.id, extent, /*changes_layer_set=*/true);
             else if constexpr (std::is_same_v<C, RemoveLayerCmd> ||
-                               std::is_same_v<C, SetLayerVisibleCmd> ||
-                               std::is_same_v<C, SetLayerTransformCmd> ||
+                               std::is_same_v<C, SetLayerVisibleCmd>)
+                return layer_command_bound(doc, c.id, extent, /*changes_layer_set=*/true);
+            else if constexpr (std::is_same_v<C, SetLayerTransformCmd> ||
                                std::is_same_v<C, SetLayerMirrorCmd> ||
-                               std::is_same_v<C, SetLayerRadialCmd>)
-                return layer_command_bound(doc, c.id, extent);
+                               std::is_same_v<C, SetLayerRadialCmd> ||
+                               std::is_same_v<C, SetLayerCompositionCmd>)
+                return layer_command_bound(doc, c.id, extent, /*changes_layer_set=*/false);
             else if constexpr (std::is_same_v<C, AddNodeCmd>)
                 return c.subtree.empty() ? math::Aabb{}
                                          : node_command_bound(doc, c.layer, c.subtree.front().id,
@@ -1061,6 +1163,22 @@ void write_layer(Writer& w, const Layer& l, LayerId content_source = 0) {
     // older stream stops before it and keeps (1, 1, 1), which is the identity
     // and what every file written before this field meant.
     if (w.minor >= 16) w.pod(l.scale_axes);
+    // From minor 18, and gated exactly as the fields above are.
+    //
+    // BELOW 18 THE BLOCK IS NOT WRITTEN AND THE READER STOPS BEFORE IT, so the
+    // layer comes back at the default composition — the unconditional hard
+    // union every file written before this field meant. That degrade is only
+    // ever reached for a layer that ALREADY unions: serialize_document refuses
+    // the whole document when any layer carries a composition an older minor
+    // cannot say, because a subtractive layer written as a union is a different
+    // sculpture rather than a plainer file. The gate stays because the union
+    // case is still a legitimate write at 17 and has to be byte-identical to
+    // what 17 always produced.
+    if (w.minor >= 18) {
+        w.pod(l.composition.op);
+        write_blend(w, l.composition.blend);
+        w.pod(l.composition.rounding);
+    }
     // From minor 15, and gated exactly as the radial fields above are. The id
     // goes out BEFORE the content flag so a reader knows, before it reaches
     // the flag, whether a content section follows it.
@@ -1115,6 +1233,13 @@ Layer read_layer(Reader& r, LayerId* out_content_source = nullptr) {
     // Appended at minor 16, on the same terms: an older stream stops before it
     // and keeps the identity triple.
     if (r.minor >= 16) l.scale_axes = r.pod<kernel::cfloat3>();
+    // Appended at minor 18, on the same terms: an older stream stops before it
+    // and keeps the default composition, which is the hard union.
+    if (r.minor >= 18) {
+        l.composition.op = r.pod<Op>();
+        l.composition.blend = read_blend(r);
+        l.composition.rounding = r.pod<float>();
+    }
     LayerId content_source = 0;
     if (r.minor >= 15) content_source = r.pod<LayerId>();
     if (out_content_source) *out_content_source = content_source;
@@ -1148,6 +1273,7 @@ enum class Tag : std::uint8_t {
     // Appended rather than slotted beside SetLayerMirror: a tag is a wire
     // value, and inserting one would renumber every tag after it.
     SetLayerRadial,
+    SetLayerComposition,
 };
 
 struct SerializeVisitor {
@@ -1285,6 +1411,17 @@ struct SerializeVisitor {
         w.pod(c.count);
         w.pod(c.axis);
         w.pod(c.k);
+    }
+    void operator()(const SetLayerCompositionCmd& c) {
+        // Ungated, as SetLayerRadial is: a whole TAG is new, so a build that
+        // predates it hits deserialize's default arm and refuses the command
+        // rather than misreading its payload. Only a field appended to a record
+        // an older build already parses needs a minor gate.
+        w.pod(Tag::SetLayerComposition);
+        w.pod(c.id);
+        w.pod(c.composition.op);
+        write_blend(w, c.composition.blend);
+        w.pod(c.composition.rounding);
     }
     void operator()(const SetLayerNameCmd& c) {
         w.pod(Tag::SetLayerName);
@@ -1472,6 +1609,15 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
             cmd = c;
             break;
         }
+        case Tag::SetLayerComposition: {
+            SetLayerCompositionCmd c;
+            c.id = r.pod<LayerId>();
+            c.composition.op = r.pod<Op>();
+            c.composition.blend = read_blend(r);
+            c.composition.rounding = r.pod<float>();
+            cmd = c;
+            break;
+        }
         case Tag::SetLayerName: {
             SetLayerNameCmd c;
             c.id = r.pod<LayerId>();
@@ -1491,7 +1637,35 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
     return cmd;
 }
 
+LayerId layer_blocking_minor(const Document& doc, std::uint16_t minor) {
+    if (minor >= 18) return 0;
+    for (const Layer& l : doc.layers) {
+        if (l.kind != LayerKind::Sdf) continue;  // a non-SDF layer carries none
+        // "What minor 17 can say" IS `layer_composition_is_hard_union` -- the
+        // four clauses were spelled out here once and that is the duplication
+        // this change spent three review rounds removing. The predicate is the
+        // one definition of "folds exactly as every layer folded before
+        // compositions existed", and a fifth clause added to it has to reach
+        // the format writer or a document 17 cannot express is written at 17.
+        //
+        // EVERY layer, not only the ones after the first: the first visible
+        // SDF layer's composition is never APPLIED, but it is still stored,
+        // still authored, and still lost by a writer that drops it. The
+        // compiler's `first_composed_fold_layer` skips it for exactly the
+        // opposite reason -- it asks what the FOLD does, and this asks what the
+        // FILE holds.
+        if (!layer_composition_is_hard_union(l.composition)) return l.id;
+    }
+    return 0;
+}
+
 std::vector<std::uint8_t> serialize_document(const Document& doc, std::uint16_t minor) {
+    // Refused rather than degraded: below minor 18 a subtractive layer would be
+    // written as a union, and the document that comes back is a different
+    // sculpture in a file that opens cleanly. An empty vector is never a valid
+    // stream — even a document with no layers writes its count — so a caller
+    // that ignores this gets nothing rather than something wrong.
+    if (layer_blocking_minor(doc, minor) != 0) return {};
     Writer w;
     w.minor = minor;
     w.u32(static_cast<std::uint32_t>(doc.layers.size()));

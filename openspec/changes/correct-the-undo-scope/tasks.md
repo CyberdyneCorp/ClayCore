@@ -44,7 +44,9 @@ is a decision rather than an oversight:
       requires a versioned preset schema
 - [x] 3.4 *Every destructive operation is preview-committed and undoable,
       including hide* — **NOT satisfied, and not fixable by writing it down.**
-      Preview exists per-operation (`move_surface_preview`,
-      `lattice_gizmo_preview`) rather than as a protocol, and the destructive
+      Preview exists per-operation (`clay_layer_move_surface_preview`,
+      `clay_layer_lattice_gizmo_preview`) rather than as a protocol — named in
+      full because a shorthand is not a claim tools/check_task_symbols.py can
+      check, and it caught these two — and the destructive
       voxel and mesh operations are outside undo entirely per 1.2. Recorded in
       the ROADMAP as a gap

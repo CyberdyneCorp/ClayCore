@@ -269,6 +269,127 @@ consolidation, so setting it above `1/sqrt(3)` marks every already-consolidated
 layer permanently over budget — the collapse is refused (there is nothing left
 to collapse) but the report never comes back under.
 
+### What to bake at, and whether to bake at all (ABI 0.86.0)
+
+`clay_layer_field_report` sets `advises_consolidation` when a layer's march has
+degraded and consolidation is the cure. The next call a host needs takes a
+`clay_consolidation_params` whose `cell_size` is **required and > 0**, and that
+field's own comment says why nothing here will guess it. So the engine was
+telling a host to bake and then making it invent the one number it has no basis
+for — a constant compiled into the app, or a slider put in front of a sculptor
+who cannot be expected to know what consolidation means, let alone at what
+resolution. `clay_layer_consolidation_advice` fills the struct:
+
+```c
+clay_consolidation_params params = {sizeof params};
+clay_consolidation_cost cost = {sizeof cost};   /* may be NULL */
+int32_t advises = 0;
+clay_layer_consolidation_advice(doc, layer, 0.4f, &params, &cost, &advises);
+if (advises && cost.bytes < my_budget)
+    clay_layer_consolidate(doc, layer, &params, NULL, NULL, NULL);
+```
+
+`*out_advises` is 1 only when **both** hold: the field report advises at this
+same threshold, *and* the **projected** `safe_step_scale` in `out_cost` reaches
+it. The second half is why this is not merely a params helper. A sampled volume
+declares `sqrt(3)` times its samples' Lipschitz, so a consolidated layer's step
+scale is at best `1/sqrt(3) = 0.577`; a host whose frame budget wants 0.8 is
+asking for something no bake can deliver, and handing it params would trade a
+parametric layer for a dense volume and still miss the budget. It is told 0.
+
+**Not advised means zeroed.** `out_params` and `out_cost` are cleared to the
+`struct_size` the caller declared, with that `struct_size` preserved — unlike
+`clay_layer_consolidation_state`, which leaves its cost untouched. The
+difference is what the caller does next: this hands over something it will feed
+to a *destructive* call, so the failure has to be loud. `cell_size == 0` is
+exactly the value `clay_layer_consolidation_cost` and `clay_layer_consolidate`
+already refuse, so a host that never reads `*out_advises` gets
+`CLAY_ERROR_INVALID_ARGUMENT` and an unchanged document. There is no reading of
+the zeroed struct under which anything bakes.
+
+**Where `cell_size` comes from.** The layer's own extent gives the scale and its
+own contents give the feature, both in the **local** frame the bake samples in —
+not the world-space bounds, which compose the layer transform and would be wrong
+by the layer's scale, invisibly so at identity:
+
+```
+E    = the longest side of that box
+f_i  = 4 * cell_size_i                              for a node carrying samples
+     = the smallest axis of the node's own shape box            otherwise
+       (both carried into the bake's frame by the node's scale)
+cell = clamp(min(f_i) / 4, E / 512, E / 32)
+band = 3 * cell ; padding = band ; redistancing ON
+```
+
+Four cells across the smallest feature: `kBrickDim` is 8, so that is half a
+brick. Measured on a 0.06 dab blended onto a unit form — the surface moves 27%
+of the dab's radius at 2 cells, 7.0% at 4 and 1.8% at 8, for 0.32, 1.42 and
+5.51 MB. Four is where the curve turns. **The volume arm is the load-bearing
+one**: `(4 * c) / 4 = c`, so a layer whose finest content is a volume at cell
+size `c` is advised `c` unchanged. That is the whole answer to "a number nobody
+chose" — the only degradation ever advised is `CLAY_DEGRADATION_VOLUMES`, and
+such a layer carries volumes whose resolutions somebody chose at an earlier
+bake. The advice hands the finest of them back, so a re-bake loses no detail
+already stored and gains none that was never there.
+
+**A stepping-bound Lipschitz was rejected as the source of the resolution**, and
+this is the design decision most worth knowing. `clay_field_report.lipschitz`
+bounds the step a marcher may take; it does **not** bound `|grad f|`. An
+ellipsoid declares 1 and measures 1.09 near its tips, 3.6 for a needle, and
+`taper`, `wrap_around` and `bend_curve` exceed their declared factors outright.
+A sampling rate derived from it would look principled and be unsound exactly on
+the shapes that motivate a bake. The Lipschitz enters the *advice* instead — as
+`out_cost.sample_lipschitz`, measured on the samples a real bake produced — and
+never the resolution.
+
+**What it does not promise.**
+
+- **Not optimal, and not better than your own number.** It knows the layer's
+  extent and contents; it does not know your viewport, your zoom, your device's
+  memory or what the artist is about to do next. `out_params` is a struct you
+  own so that you can override it.
+- **Not stable.** Adding one small item changes the smallest feature and
+  therefore the cell size. A host that means to re-bake the same box later must
+  *store* the params rather than re-ask.
+- **Not a memory bound.** The `E/512`–`E/32` clamp bounds the *grid*. A banded
+  volume stores only surface bricks, so the bytes follow surface area:
+  `out_cost.bytes` is the memory, and it is the number to refuse on.
+- **Not a fidelity claim.** A bake at the advised cell size still discards every
+  parameter of every item it absorbs and every colour but the first. The
+  analytic arm reads a node's own box, so a fillet finer than either shape that
+  made it is not seen: heavy blends are advised coarse.
+- **No pinned region.** Derived from the layer's *current* bounds, so re-asking
+  after an advised bake advises a slightly larger box each time. A host
+  consolidating the same region repeatedly must pin the region itself.
+- **Not cheap, and a NULL `out_cost` is not a fast path.** `*out_advises` is
+  *defined* by the projection, so the sampling pass happens either way. This is
+  not a per-frame call.
+
+It bakes nothing and changes nothing, and that includes an instance layer's
+sharing: `clay_layer_consolidate` severs a shared edit list before it bakes and
+this does not, for the same reason `clay_layer_consolidation_cost` does not.
+Asking whether a bake is *advisable* must never be the thing that unlinks a
+subtool.
+
+Refused before any sampling: `CLAY_ERROR_NOT_FOUND` for a layer that is not
+there — "no such layer" and "not advised" are different answers — and
+`CLAY_ERROR_INVALID_ARGUMENT` for a null `doc`, `out_params` or `out_advises`,
+for a `struct_size` below either original layout, and for
+`advise_below_step_scale <= 0`. The last deviates from
+`clay_layer_field_report`, where zero legitimately means "measure without asking
+for advice": every output here is defined against a threshold, so a zero would
+buy a full sampling pass to be told nothing. A non-SDF, protected or empty layer
+is **not** an error — it succeeds, advises nothing and zeroes, following
+`clay_layer_warp_cost_get`'s rule that a host walking a stack of mixed kinds
+should not have to special-case them.
+
+**The engine still never bakes on its own**, and that is the settled answer to
+the standing question of automatic background consolidation. Consolidation is
+destructive; an engine firing it on a background thread would be mutating a
+document behind a host that may be mid-undo-group or mid-save, and deciding on
+an artist's behalf that a sphere's radius is no longer editable. This is the
+recommendation, not the action.
+
 ## 4. Operation inventory (the complete SDF vocabulary)
 
 Everything below ships in `clay::kernel` with CPU reference + per-backend parity tests. Items marked *(bound)* propagate non-exactness through the tree per principle 3.
@@ -433,9 +554,9 @@ serves Metal and Vulkan, and OpenCL is not in `eval::DeviceApi` — so a caller
 cannot obtain a `clay_device` for them and the question does not arise.
 
 The seed is kept only where this path can say what it means: with **more than
-one visible SDF layer** a seed is two values — the active layer's and the hard
-union of everything beneath it — and this path evaluates the document whole, so
-what it could store is neither half. It stores nothing rather than something
+one visible SDF layer** a seed is two values — the active layer's and the
+accumulated field of everything beneath it — and this path evaluates the
+document whole, so what it could store is neither half. It stores nothing rather than something
 mislabelled, and multi-layer documents take the full walk here. The host-memory
 form keeps the two halves apart and resumes them fine.
 
@@ -491,10 +612,10 @@ seen, which fails harder than the `Unsupported` it must already handle.
 
 The document tree the app and specs already define, owned here so every consumer agrees:
 
-- **Layers** (`voxel` | `sdf`), each with transform, visibility, resolution, material; SDF layers hold the **ordered edit list** — items apply to the combined preceding result; groups (nesting ≥ 4) carry group ops incl. None; layer instancing with shared content.
+- **Layers** (`voxel` | `sdf`), each with transform, visibility, resolution, material; SDF layers hold the **ordered edit list** — items apply to the combined preceding result; groups (nesting ≥ 4) carry group ops incl. None; layer instancing with shared content. An SDF layer also carries a **composition** — op, blend profile, blend radius, rounding, the same four an item carries — and the visible SDF layers FOLD under it rather than unioning (see *A layer that cuts the layers below it*).
 - **Influence bounds** computed per item/group (AABB ⊕ blend ⊕ rounding), used for brick dirtying, culling, and the locality guarantee (distant edits leave existing bricks bit-identical — regression-tested).
 - **Tape compiler**: edit list → flat tape; per-brick tape culling (only edits whose influence bound touches a brick appear in its tape — the Dreams design).
-- **Cull index** (`scene/cull_index.h`): per-revision cache of everything the per-brick cull consults — item geometry bounds (splines tessellated once, not per brick), group influence bounds, the cull pad — the feathered replace's band plus the DRAG a smooth chain needs beyond it (#282): per profile `min(support, k · envelope(N))`, the envelope rising with `log2` of the layer's effective contributor count (nodes times their mirror and radial copies, each a leaf the tape folds through a seam blend) and the layer's seam `k` folded as its own term capped at what the item maxima alone would set, so the pad reaches the support only past ~800 quadratic contributors and is never wider than the pre-#335 `max(support, k)` (#335). Because it depends on the counts, the index keeps RAW per-profile maxima and resolves the envelope at read time — folding per node would freeze each node's `N` and leave an appended index below a fresh build. A **hard** blend drags nothing however its `k` reads, since its smin is a step and the running value is a plain `min()`, so it contributes nothing to that pad (#335); `Paint` and the extended modes do drag, because their colour fade and their channel both read `k`. A node's OWN bound keeps its `max(support, k)` dilation either way — in a mixed chain that is margin for the drag its smooth neighbours apply, and taking it away measured 540 → 10,105 band-clamped disagreements where narrowing the pad alone measures 540 → 540 — plus a per-batch **coarse cull plan**: one test of every chain against the union of a batch's brick regions yields survivor lists carrying the cached bounds, so each per-brick compile walks only the items near the batch instead of the whole document. Non-local items always survive; chains holding a feathered volume replace are never pruned (the feathered/hard replace choice reads what the cull dropped from that chain). Pure acceleration: the emitted tapes are byte-identical to the unindexed compile, regression-tested on an adversarial corpus (mirrors, groups, deformers, feathered volumes, non-local layers). The C ABI keys the index on the document revision, exactly as the cached whole-document tape — and, exactly as that tape, an APPEND extends the cached index rather than rebuilding it. A **brick refill resumes** on the same terms: `clay_brick_cache_eval_requests` keeps its own float32 results as per-brick seeds, and a brick carrying one evaluates the appended items onto it instead of the whole surviving edit list over every sample — **7.13 ms to 0.13 ms at 20,000 items**, bit-for-bit identical, carrying **colour** too — the seed keeps the colour the prefix reached, because a coloured walk folds a `CTapeValue` and continuing from the distance alone would fold every combine against black (8.12 ms to 0.15 ms at 20,000 items with colour requested) — and falling back in full wherever continuing would not be exact (the cull pad moved, the brick's own prefix produced no accumulator, the seed kept no colour when one is asked for, or the edit was not an append to the layer an append extends). **More than one visible SDF layer is no longer a refusal**: the layers hard-union, so the seed keeps the half BENEATH the active layer as its own value — static while that layer is sculpted — and the refill applies the union itself with the same hard Add the whole-document compile emits, through the kernel's own combine. 16.41 ms to 0.17 ms at 40,000 items across two layers. `scene::compile_document_part` emits one side of that split, both sides culling under the whole document's pad, since a part compiled under a smaller pad drops items the whole compile keeps.. Bounded at 64 MB — bytes rather than bricks, since a coloured brick carries four times the floats — and evicted **least recently USED** (#346). The order is refreshed wherever a seed is used: handed out to answer a refill, rewritten by the resumed path, re-stored by the full one. Evicting by FIRST STORAGE, which is what it did, is exactly backwards for a stroke — the working set is stored at the first dab and rewritten by every dab after, so it sat nearest the front and a store under pressure dropped precisely the bricks the next dab was about to ask for, keeping ground the brush crossed once and left. Not reachable at 64 MB for a dim-8 distance-only cache (2,048 B a brick, so 32,768 of them), but a dim-16 coloured one is 64 KiB a brick, or about 1,000, which a large model does reach. The order holds ONE place per stored seed and no others: a region invalidation removes an entry's place with the entry, where it used to leave it behind — the order's own memory is not counted against the budget, so those grew outside the ceiling without bound, and a brick discarded and stored again was given a second place. The bytes counted are what the entries HOLD rather than what they are using, since a refill carrying no colour empties an entry's colour buffer without releasing it. Two carve-outs on the ceiling: the most recently used seed is kept whatever the budget says, since a budget below one brick would otherwise drop what the caller just stored, and the resumed path's rewrite is the one store that does not evict, so a stroke adding colour to entries that had none can sit above the budget until the next full refill trims it. An edit that is not an append no longer drops the lot: a seed is the value of that brick's CULLED tape, so an item whose influence misses the brick's cull region was dropped from it anyway and the seed survives, carried to the new revision. `command_influence_bound` supplies the reach, taken on BOTH sides of the apply and unioned — one side is not an answer, since an add's node is not there before and a removal's is not there after. Undoing an item no brick can reach went **20.79 ms to 2.64 ms** at 50,000 items. An edit whose reach is not known still drops everything, which stays the default. **A GESTURE STATES ITS REACH ONCE** (#358). Deriving the region per command is right for a single edit and wrong for a gesture that issues one command per node it touches: `clay_layer_move_surface` issues 257 over a 1,000-item document, and paying two `command_influence_bound` calls and a seed-store walk for each of them cost that path **1.34x** for four releases — over the device gate's tolerance, under its noise floor, so nothing failed. A drag can state its region exactly and in O(1): the warp's weight is zero outside `radius` of the centre, and a point with zero weight is not moved, so no sample outside that ball can evaluate differently. That is cheaper AND tighter than the derived union of 257 whole item bounds. `GestureRegion` invalidates once for the bracket, on the failure path too, since a gesture that applied three commands and then refused has still changed the document; a caller that cannot state its reach keeps the derived one, which is always correct. 0.134 ms → 0.097 ms, back to the pre-regression figure. **PER BRICK, not per batch** (#342). The gate used to require every brick of a call to carry a seed at one shared revision, and nothing re-stamps a seed but the refill that writes it — `touch_appended` leaves the store alone and a refill re-stamps only the bricks it filled — so a dirty window that MOVES always mixes the ground the last dab covered with ground it had not, and one disagreeing brick sent all of them down the full walk. The fast path fired only while the brush stood still. Each brick is now carried forward from its own revision, with one plan memoized per distinct revision (a moving window holds one or two) and unservable bricks falling into the miss gather alone: a four-brick window sliding one brick every third dab went **4.60 ms to 0.15 ms** per dab at 20,000 items, and its worst dab — the hitch as the brush crosses a brick plane — **19.50 ms to 1.36 ms**. A plan is also refused when the appends went to a layer OTHER than the one the suffix would extend: NodeIds are per-layer, every layer numbering from 1, so `compile_layer_suffix`'s tail check could agree by coincidence and fold the active layer's own last node on twice while the dab actually made was never evaluated (0.49 in distance, ten cells, silently). **The resumed loop no longer holds the document cache mutex while it evaluates** (#348). It used to compile AND evaluate every brick under the one lock it takes to read the seeds — serial, where the full path it replaces hands the batch to `eval_grid_batch` and spreads every row of every brick over the pool, and blocking `clay_eval_points` on another thread for the duration, since `cache_mutex_` guards the tape cache, the cull index and the append log too. The lock was held because `seed_for` hands out a raw pointer into the seed store and a concurrent refill may rewrite or evict the entry under it, so the seed is COPIED OUT under the lock instead — into the buffer the evaluation writes its answer to, which in the single-layer case is the caller's own output slot and so costs one `memcpy` and no second pass: `eval_points_seeded` reads a block's seed into its stack before it writes that block's result, so a seeded walk may run in place (#306's open question 7, answered). Compile and evaluate then run with the lock down; it is retaken to store what the bricks reached, with the revision re-checked exactly as `store_seeds` re-checks it. On a 24-thread desktop at 5,000 items, the lock beyond the cull-index copy it has to pay under it either way went **65.8 µs to 10.0 µs** for 48 bricks at a sixteen-dab suffix, **19.4 µs to 2.4 µs** at 12 bricks, and **22.4 µs to 6.8 µs** for 48 bricks at a one-dab suffix; the copy costs about **0.05 µs a brick**, inside the noise even at one brick. The deferred phase goes over `clay::parallel::ThreadPool` only when it is worth a dispatch, which is a narrower window than it looks: an empty `parallel_for` over 48 units costs 16–19 µs there, so 48 bricks at a sixteen-dab suffix is 66 µs of work and goes **66 µs serial to 31 µs pooled**, while 12 bricks of the same suffix is 21 µs and would go the wrong way, to 25. The gate is therefore a count of SAMPLE-INSTRUCTIONS — samples times appended items, so it needs no restating for another lattice or a longer suffix — set at 262,144, about three times the dispatch; below it the walk stays serial, off the lock either way. The gate is calibrated CONCURRENTLY as well, since letting several host threads refill at once is the point of coming off the lock and `ThreadPool` holds one job slot — a dispatch from a second thread replaces the advertised job, degrading toward serial rather than deadlocking. Measured at 48 bricks and a sixteen-dab suffix with 1 to 12 threads each refilling the same window, pooled stays **0.77–0.92x** the serial branch throughout, so the constant holds under concurrency; and the fan-out clay.h actually recommends — one batch of requests split across threads — puts every slice under the gate by itself, so nothing dispatches and the collision cannot arise. What is left under that lock is mostly the per-revision cull index, which the call copies to extend and which stays there, because the cache is what the lock is for. Nothing about a refill's answer depends on any of it: a new case races three refill threads and three `clay_eval_points` threads over one document and checks every window bit-for-bit against a document that never resumed, clean under `asan-ubsan` and under ThreadSanitizer — and with the copy reverted so the raw pointer stays live across the unlock, TSan reports the race the copy exists to prevent while the values still agree — the mutant's assertions pass and doctest reports SUCCESS. A sanitizer rather than a value check is therefore the only thing that can guard it, so ThreadSanitizer is a `tsan` preset and a per-pull-request CI job rather than something someone remembers to run; the whole suite is clean under it. The run needs ASLR off (`setarch -R`), or TSan aborts on an unexpected mapping before a test executes. Because the two paths are bit-identical by contract, nothing about a refill's output can say which produced it — `clay_document_resume_stats` reports cumulative `resumed_bricks` / `refilled_bricks` and the seed store's occupancy, which is what makes a fast path that stops firing visible rather than merely slow. **A seed is keyed by what it describes**, not merely by where it sits (#349): the brick coordinate, the LATTICE (dims and voxel size) and the BAND. A brick's tape is culled against `request_brick_box(req).dilated(band)`, so a narrower band drops items a wider one keeps and a seed taken under one band continued from a different field — a 0.15-band seed serving a 0.6-band request measured 9 of 512 samples wrong, worst 0.105 (two voxels), at a true distance of 0.354 that is well inside the band asked for and so a sample a submit stores rather than clamps. The cull PAD is the other term of that dilation and stays a gate rather than a key: it is a document-global maximum that moves under a single cache, where the band and the lattice are fixed properties of the cache that asked. Keying on the lattice also stops two caches over one document — a viewport and a mesher sharing a brick coordinate — from evicting each other's seeds on every call: `shaped_entry` refused the mismatched entry so the answers stayed right, but `store_seed` overwrote it and `resumed_bricks` sat at zero for both. All three caches read ONE append log, each taking its own tail of it. A stroke bumps the revision per stamp, and a rebuild walks every node recomputing bounds that did not move: **2.42 ms at 50,000 items against 0.13 ms to extend**, of which 94% was bounds. `CullIndex::append` refuses wherever it cannot be sure the document changed only by that append, so being wrong costs a rebuild rather than a wrong cull, and the index it produces is the one a rebuild gives — per-brick tapes byte-identical, held in `test_cull_index.cpp` over the adversarial corpus. **Extending it costs the dab, not the document** (#347). What was left once the rebuild was gone was an append that still walked the document twice: `CullIndex::append` re-walked the touched layer's flat node map to recompute the cull pad, and the ABI deep-copied the cached index to protect a reader that might be holding it against a plan — 0.054 ms and 0.043 ms at 20,000 items, together 79% of a 0.123 ms resumed dab. The pad is now kept as its two terms PER LAYER and raised from the appended subtree alone, including the children of a group the build never descends into: per layer a maximum of sums and a sum of maxima are the same number, which is what makes that exact rather than merely safe — one global pair of maxima would report a pad larger than a fresh build's. An append that cannot see the layer's node map grow by exactly the subtree it names refuses, so the pad can never be left BELOW what a rebuild reports, which is the direction that loses items a brick needed. And the copy is taken only when someone IS holding the index: every reader takes its handle under the cache mutex and holds it while it reads, so a use count of one under that mutex means no snapshot exists and the append extends the cached index in place. That decision is `scene::append_cached`, a free function rather than a branch inside the ABI's cache, so both halves of it are asserted directly — a stroke's consecutive appends extend one index with no copy taken, and an append made while a holder exists leaves the holder's pad and entries exactly as they were. An append at 20,000 items went **0.0542 ms → 0.000258 ms** and stopped scaling with the document — 1.00x against the same append on a document a tenth the size, where it was 11.9x, gated as a ratio in `tools/check_bench.py` — and the whole resumed dab behind it went **0.1233 ms → 0.00299 ms** with the same bricks resumed (medians of 7, load average 1.07 → 1.02 across both runs). The index carries its own append log rather than sharing the tape's, which is single-consumer by construction, and `clay_brick_cache_eval_requests` / `_device`, `clay_eval_grid`, `clay_tape_export` and the brick-mesh attribute pass all compile through it.
+- **Cull index** (`scene/cull_index.h`): per-revision cache of everything the per-brick cull consults — item geometry bounds (splines tessellated once, not per brick), group influence bounds, the cull pad — the feathered replace's band plus the DRAG a smooth chain needs beyond it (#282): per profile `min(support, k · envelope(N))`, the envelope rising with `log2` of the layer's effective contributor count (nodes times their mirror and radial copies, each a leaf the tape folds through a seam blend) and the layer's seam `k` folded as its own term capped at what the item maxima alone would set, so the pad reaches the support only past ~800 quadratic contributors and is never wider than the pre-#335 `max(support, k)` (#335). Because it depends on the counts, the index keeps RAW per-profile maxima and resolves the envelope at read time — folding per node would freeze each node's `N` and leave an appended index below a fresh build. A **hard** blend drags nothing however its `k` reads, since its smin is a step and the running value is a plain `min()`, so it contributes nothing to that pad (#335); `Paint` and the extended modes do drag, because their colour fade and their channel both read `k`. A node's OWN bound keeps its `max(support, k)` dilation either way — in a mixed chain that is margin for the drag its smooth neighbours apply, and taking it away measured 540 → 10,105 band-clamped disagreements where narrowing the pad alone measures 540 → 540 — plus a per-batch **coarse cull plan**: one test of every chain against the union of a batch's brick regions yields survivor lists carrying the cached bounds, so each per-brick compile walks only the items near the batch instead of the whole document. Non-local items always survive; chains holding a feathered volume replace are never pruned (the feathered/hard replace choice reads what the cull dropped from that chain). Pure acceleration: the emitted tapes are byte-identical to the unindexed compile, regression-tested on an adversarial corpus (mirrors, groups, deformers, feathered volumes, non-local layers). The C ABI keys the index on the document revision, exactly as the cached whole-document tape — and, exactly as that tape, an APPEND extends the cached index rather than rebuilding it. A **brick refill resumes** on the same terms: `clay_brick_cache_eval_requests` keeps its own float32 results as per-brick seeds, and a brick carrying one evaluates the appended items onto it instead of the whole surviving edit list over every sample — **7.13 ms to 0.13 ms at 20,000 items**, bit-for-bit identical, carrying **colour** too — the seed keeps the colour the prefix reached, because a coloured walk folds a `CTapeValue` and continuing from the distance alone would fold every combine against black (8.12 ms to 0.15 ms at 20,000 items with colour requested) — and falling back in full wherever continuing would not be exact (the cull pad moved, the brick's own prefix produced no accumulator, the seed kept no colour when one is asked for, or the edit was not an append to the layer an append extends). **More than one visible SDF layer is no longer a refusal**: the seed keeps the half BENEATH the active layer as its own value — static while that layer is sculpted — and the refill applies the fold itself, through the kernel's own combine. That split is available while the SEAM it is taken at — the last visible SDF layer — folds with a plain hard Add, which is every document written before layer composition existed and every document whose top layer unions; a composed seam refuses the split and stores no seed, because the refill holds six floats and no document and cannot be told which operator to rejoin them with (`scene::layer_join_is_hard_union`). 16.41 ms to 0.17 ms at 40,000 items across two layers. `scene::compile_document_part` emits one side of that split, both sides culling under the whole document's pad, since a part compiled under a smaller pad drops items the whole compile keeps.. Bounded at 64 MB — bytes rather than bricks, since a coloured brick carries four times the floats — and evicted **least recently USED** (#346). The order is refreshed wherever a seed is used: handed out to answer a refill, rewritten by the resumed path, re-stored by the full one. Evicting by FIRST STORAGE, which is what it did, is exactly backwards for a stroke — the working set is stored at the first dab and rewritten by every dab after, so it sat nearest the front and a store under pressure dropped precisely the bricks the next dab was about to ask for, keeping ground the brush crossed once and left. Not reachable at 64 MB for a dim-8 distance-only cache (2,048 B a brick, so 32,768 of them), but a dim-16 coloured one is 64 KiB a brick, or about 1,000, which a large model does reach. The order holds ONE place per stored seed and no others: a region invalidation removes an entry's place with the entry, where it used to leave it behind — the order's own memory is not counted against the budget, so those grew outside the ceiling without bound, and a brick discarded and stored again was given a second place. The bytes counted are what the entries HOLD rather than what they are using, since a refill carrying no colour empties an entry's colour buffer without releasing it. Two carve-outs on the ceiling: the most recently used seed is kept whatever the budget says, since a budget below one brick would otherwise drop what the caller just stored, and the resumed path's rewrite is the one store that does not evict, so a stroke adding colour to entries that had none can sit above the budget until the next full refill trims it. An edit that is not an append no longer drops the lot: a seed is the value of that brick's CULLED tape, so an item whose influence misses the brick's cull region was dropped from it anyway and the seed survives, carried to the new revision. `command_influence_bound` supplies the reach, taken on BOTH sides of the apply and unioned — one side is not an answer, since an add's node is not there before and a removal's is not there after. Undoing an item no brick can reach went **20.79 ms to 2.64 ms** at 50,000 items. An edit whose reach is not known still drops everything, which stays the default. **A GESTURE STATES ITS REACH ONCE** (#358). Deriving the region per command is right for a single edit and wrong for a gesture that issues one command per node it touches: `clay_layer_move_surface` issues 257 over a 1,000-item document, and paying two `command_influence_bound` calls and a seed-store walk for each of them cost that path **1.34x** for four releases — over the device gate's tolerance, under its noise floor, so nothing failed. A drag can state its region exactly and in O(1): the warp's weight is zero outside `radius` of the centre, and a point with zero weight is not moved, so no sample outside that ball can evaluate differently. That is cheaper AND tighter than the derived union of 257 whole item bounds. `GestureRegion` invalidates once for the bracket, on the failure path too, since a gesture that applied three commands and then refused has still changed the document; a caller that cannot state its reach keeps the derived one, which is always correct. 0.134 ms → 0.097 ms, back to the pre-regression figure. **PER BRICK, not per batch** (#342). The gate used to require every brick of a call to carry a seed at one shared revision, and nothing re-stamps a seed but the refill that writes it — `touch_appended` leaves the store alone and a refill re-stamps only the bricks it filled — so a dirty window that MOVES always mixes the ground the last dab covered with ground it had not, and one disagreeing brick sent all of them down the full walk. The fast path fired only while the brush stood still. Each brick is now carried forward from its own revision, with one plan memoized per distinct revision (a moving window holds one or two) and unservable bricks falling into the miss gather alone: a four-brick window sliding one brick every third dab went **4.60 ms to 0.15 ms** per dab at 20,000 items, and its worst dab — the hitch as the brush crosses a brick plane — **19.50 ms to 1.36 ms**. A plan is also refused when the appends went to a layer OTHER than the one the suffix would extend: NodeIds are per-layer, every layer numbering from 1, so `compile_layer_suffix`'s tail check could agree by coincidence and fold the active layer's own last node on twice while the dab actually made was never evaluated (0.49 in distance, ten cells, silently). **The resumed loop no longer holds the document cache mutex while it evaluates** (#348). It used to compile AND evaluate every brick under the one lock it takes to read the seeds — serial, where the full path it replaces hands the batch to `eval_grid_batch` and spreads every row of every brick over the pool, and blocking `clay_eval_points` on another thread for the duration, since `cache_mutex_` guards the tape cache, the cull index and the append log too. The lock was held because `seed_for` hands out a raw pointer into the seed store and a concurrent refill may rewrite or evict the entry under it, so the seed is COPIED OUT under the lock instead — into the buffer the evaluation writes its answer to, which in the single-layer case is the caller's own output slot and so costs one `memcpy` and no second pass: `eval_points_seeded` reads a block's seed into its stack before it writes that block's result, so a seeded walk may run in place (#306's open question 7, answered). Compile and evaluate then run with the lock down; it is retaken to store what the bricks reached, with the revision re-checked exactly as `store_seeds` re-checks it. On a 24-thread desktop at 5,000 items, the lock beyond the cull-index copy it has to pay under it either way went **65.8 µs to 10.0 µs** for 48 bricks at a sixteen-dab suffix, **19.4 µs to 2.4 µs** at 12 bricks, and **22.4 µs to 6.8 µs** for 48 bricks at a one-dab suffix; the copy costs about **0.05 µs a brick**, inside the noise even at one brick. The deferred phase goes over `clay::parallel::ThreadPool` only when it is worth a dispatch, which is a narrower window than it looks: an empty `parallel_for` over 48 units costs 16–19 µs there, so 48 bricks at a sixteen-dab suffix is 66 µs of work and goes **66 µs serial to 31 µs pooled**, while 12 bricks of the same suffix is 21 µs and would go the wrong way, to 25. The gate is therefore a count of SAMPLE-INSTRUCTIONS — samples times appended items, so it needs no restating for another lattice or a longer suffix — set at 262,144, about three times the dispatch; below it the walk stays serial, off the lock either way. The gate is calibrated CONCURRENTLY as well, since letting several host threads refill at once is the point of coming off the lock and `ThreadPool` holds one job slot — a dispatch from a second thread replaces the advertised job, degrading toward serial rather than deadlocking. Measured at 48 bricks and a sixteen-dab suffix with 1 to 12 threads each refilling the same window, pooled stays **0.77–0.92x** the serial branch throughout, so the constant holds under concurrency; and the fan-out clay.h actually recommends — one batch of requests split across threads — puts every slice under the gate by itself, so nothing dispatches and the collision cannot arise. What is left under that lock is mostly the per-revision cull index, which the call copies to extend and which stays there, because the cache is what the lock is for. Nothing about a refill's answer depends on any of it: a new case races three refill threads and three `clay_eval_points` threads over one document and checks every window bit-for-bit against a document that never resumed, clean under `asan-ubsan` and under ThreadSanitizer — and with the copy reverted so the raw pointer stays live across the unlock, TSan reports the race the copy exists to prevent while the values still agree — the mutant's assertions pass and doctest reports SUCCESS. A sanitizer rather than a value check is therefore the only thing that can guard it, so ThreadSanitizer is a `tsan` preset and a per-pull-request CI job rather than something someone remembers to run; the whole suite is clean under it. The run needs ASLR off (`setarch -R`), or TSan aborts on an unexpected mapping before a test executes. Because the two paths are bit-identical by contract, nothing about a refill's output can say which produced it — `clay_document_resume_stats` reports cumulative `resumed_bricks` / `refilled_bricks` and the seed store's occupancy, which is what makes a fast path that stops firing visible rather than merely slow. **A seed is keyed by what it describes**, not merely by where it sits (#349): the brick coordinate, the LATTICE (dims and voxel size) and the BAND. A brick's tape is culled against `request_brick_box(req).dilated(band)`, so a narrower band drops items a wider one keeps and a seed taken under one band continued from a different field — a 0.15-band seed serving a 0.6-band request measured 9 of 512 samples wrong, worst 0.105 (two voxels), at a true distance of 0.354 that is well inside the band asked for and so a sample a submit stores rather than clamps. The cull PAD is the other term of that dilation and stays a gate rather than a key: it is a document-global maximum that moves under a single cache, where the band and the lattice are fixed properties of the cache that asked. Keying on the lattice also stops two caches over one document — a viewport and a mesher sharing a brick coordinate — from evicting each other's seeds on every call: `shaped_entry` refused the mismatched entry so the answers stayed right, but `store_seed` overwrote it and `resumed_bricks` sat at zero for both. All three caches read ONE append log, each taking its own tail of it. A stroke bumps the revision per stamp, and a rebuild walks every node recomputing bounds that did not move: **2.42 ms at 50,000 items against 0.13 ms to extend**, of which 94% was bounds. `CullIndex::append` refuses wherever it cannot be sure the document changed only by that append, so being wrong costs a rebuild rather than a wrong cull, and the index it produces is the one a rebuild gives — per-brick tapes byte-identical, held in `test_cull_index.cpp` over the adversarial corpus. **Extending it costs the dab, not the document** (#347). What was left once the rebuild was gone was an append that still walked the document twice: `CullIndex::append` re-walked the touched layer's flat node map to recompute the cull pad, and the ABI deep-copied the cached index to protect a reader that might be holding it against a plan — 0.054 ms and 0.043 ms at 20,000 items, together 79% of a 0.123 ms resumed dab. The pad is now kept as its two terms PER LAYER and raised from the appended subtree alone, including the children of a group the build never descends into: per layer a maximum of sums and a sum of maxima are the same number, which is what makes that exact rather than merely safe — one global pair of maxima would report a pad larger than a fresh build's. An append that cannot see the layer's node map grow by exactly the subtree it names refuses, so the pad can never be left BELOW what a rebuild reports, which is the direction that loses items a brick needed. And the copy is taken only when someone IS holding the index: every reader takes its handle under the cache mutex and holds it while it reads, so a use count of one under that mutex means no snapshot exists and the append extends the cached index in place. That decision is `scene::append_cached`, a free function rather than a branch inside the ABI's cache, so both halves of it are asserted directly — a stroke's consecutive appends extend one index with no copy taken, and an append made while a holder exists leaves the holder's pad and entries exactly as they were. An append at 20,000 items went **0.0542 ms → 0.000258 ms** and stopped scaling with the document — 1.00x against the same append on a document a tenth the size, where it was 11.9x, gated as a ratio in `tools/check_bench.py` — and the whole resumed dab behind it went **0.1233 ms → 0.00299 ms** with the same bricks resumed (medians of 7, load average 1.07 → 1.02 across both runs). The index carries its own append log rather than sharing the tape's, which is single-consumer by construction, and `clay_brick_cache_eval_requests` / `_device`, `clay_eval_grid`, `clay_tape_export` and the brick-mesh attribute pass all compile through it.
 - **Undo command vocabulary**: every mutation is a serializable command with an inverse (add/remove/reorder item, set-param, voxel-span edit, layer ops). The in-memory undo stack and the document file share this one vocabulary — one serialization story, tiny undo steps, stroke-level coalescing.
 
 `clay::brick`: sparse virtual grid of 8³/16³ bricks, fp16 narrow band (±3 voxels), dirty-set tracking, async-friendly (evaluation requests are plain data; the app owns threading/queues via the backend), LOD mip bricks for far view.
@@ -627,6 +748,143 @@ every class. The warm dab — the same window, one appended dab later — goes
 **0.52 → 0.25 ms at 400 and 0.44 → 0.17 ms at 1,500**, because a brick carried
 forward as a proof skips the 512-point seeded walk a lattice seed still runs.
 
+### A layer that cuts the layers below it
+
+A layer used to be organisation and nothing else. Visible SDF layers hard-unioned
+into the ones beneath them, unconditionally, so an artist who wanted one shape to
+cut another had to put both in the SAME layer — and then could no longer hide the
+cutter, reorder it, transform it or lock it as a thing. `scene::LayerComposition`
+gives an SDF layer the four values an item already carries — **op, blend profile,
+blend radius, rounding** — and the document compile stops unioning and **folds**:
+the first visible SDF layer initialises the accumulator, and every later one
+combines with what is below it. `A − B + C` is a stack, hiding a subtractive
+layer restores the uncut geometry, and layer order is geometry.
+
+**A layer boolean IS the item boolean.** The same `scene::Op` and
+`scene::BlendProfile`, the same `Compiler::emit_chain_combine` a group's tail
+already emitted, the same `kernel::ctape_combine_values` at run time. No second
+vocabulary, no second evaluator, no second copy of the kernel math — and no
+second cost: the same 2,000 dabs folded as 1,000 layers and as 1,000 groups
+inside one layer compile to **3,999 instructions each**, at **0.376 ms against
+0.488 ms**, and 1,000 layers costs 1.02x what 10 does over the same items
+(`BM_LayerFoldStack*` / `BM_ItemFoldStack*`, gated as ratios and as an
+instruction count in `tools/check_bench.py`). A document expressing a shape as
+two layers and a document expressing it as one layer of the same items agree in
+distance, colour, bounds and safe step, sample for sample.
+
+**The first visible layer's operator is not applied.** `Subtract(empty, A)` and
+`Intersect(empty, A)` are the two ways a stack opens with nothing on screen and
+no error, and an artist who drags their base layer to the top would meet both.
+The item rule's OTHER half does **not** lift for that first layer: an item that
+opens a chain with a carve is SKIPPED, and a layer that opens a stack with one
+INITIALISES, because skipping is the empty frame this rule exists to prevent.
+
+**Which layer is first is a property of the DOCUMENT.** It is read off the
+visible SDF layer list and never off the accumulator a particular compile
+happens to hold. A per-brick tape can drop every item of every layer beneath a
+composed one — that is what culling is for — and a compiler that decided
+first-ness from its own accumulator would then stop applying that layer's
+operator for that brick alone: an intersecting cutter returning a solid sphere
+where the document has nothing, a subtracting one rendering as a lump, in one
+brick and not its neighbour, with no error and no counter. For a layer that is
+not the document's first the item rule DOES lift, in full: with the accumulator
+absent a carving operator drops the layer (over nothing, a subtract and an
+intersect *are* nothing), `Shell` and `Replace` fold against an explicit empty,
+and a union takes the layer as it is — verbatim what `compile_list` and
+`compile_group` do with an item that opens a chain, which is what keeps a
+subtracting LAYER and a subtracting ITEM the same document.
+
+**An empty layer is not always a no-op.** A layer whose chain produced nothing —
+empty, all hidden, or culled out of one brick — is skipped where its operator
+reads an absent operand as no change, and folded against the far field where it
+does not. Union and subtract are identity there; **intersect is not**, and an
+intersecting layer that was skipped leaves material the whole-document tape
+removes. That disagreement is per-brick, so it appears only inside bricks the
+intersecting layer does not reach and only in the culled path. The predicate
+probes `ctape_combine_dist` rather than tabulating the answer, so a mode whose
+math moves cannot leave a stale table behind.
+
+**Symmetry resolves first.** Mirror and radial copies are emitted per item and
+folded into the layer's own chain long before the layer folds, so a layer
+combines **once**, with the shape its symmetry made. Combining each copy
+separately would change the result wherever the blend is smooth, because a
+smooth combine does not associate.
+
+**Bounds and the cull pad follow the fold.** A smooth or extended fold bulges
+past the union of both operands, so the layer's extent enters `tape.bounds`
+dilated by the fold's OWN support — `scene::chain_blend_support`, the single
+expression `group_blend_support` and the item path already use. Without it 11,618
+lattice samples in the fixture carry material outside the box the tape reports,
+which is a dropped brick and a lost ray hit rather than an error. The same
+support enters `cull_pad_terms` as a per-layer constant, so `document_pad` and
+`CullIndex::refresh_pad` — a maximum over layers of that, each — pick up the
+inter-layer term they had no slot for; without it 11 of 21 samples in the
+fixture's region differ between a per-brick compile and the whole-document one,
+inside the band where nothing is looking. Exactness and the Lipschitz bound fold
+as the item combine folds them, `cfi_relief` included.
+
+**What a composition costs, and where.** A composition change is an ordinary
+layer-property command: one undo step, no structural bump, no retired prefix
+seeds. Its dirty region is the layer's own extent dilated by the fold's support
+— which is right for a subtract, because a subtract cannot create material
+outside its left operand — and for an **intersect** it is unioned with the extent
+of the visible SDF layers BENEATH, because `max(acc, item)` takes material away
+everywhere the accumulator has any. The same widening covers hiding an
+intersecting layer and reordering one, both of which the naive box gets wrong in
+the direction that leaves stale bricks.
+
+An edit made INSIDE a layer is not widened by the OPERATORS above it — a combine
+is pointwise, so it changes the folded result exactly where it changed the
+accumulator — but it IS dilated by their **supports**: a smooth or extended fold
+moves its result up to its own support away from where its operands moved, so an
+item edit's reach is its own bound dilated by the fold its layer enters through
+and by every fold above that, summed (`folds_from_layer_support`). It is the
+dilation `node_reach_bound` already applies once per enclosing GROUP, one level
+up, and it has to live in `node_command_bound` because that is the function
+holding the Document. Without it an ordinary dab into a document with one soft
+fold leaves band-relevant samples changed outside the box the command reported.
+
+And a command that changes **which layers are visible SDF layers** — add,
+remove, hide, show, and the remove-and-add pair `clay_document_move_layer` is —
+can move the first-visible rule onto the layer above it, which is a change over
+that layer's OWN whole extent rather than over the edited layer's. Hiding the
+base under a subtractive cutter promotes the cutter to the initialiser and it
+comes back as material everywhere its shape is. `first_visible_flip_bound`
+covers that, and only for a composed layer above, since promoting a hard union
+from `min(acc, M)` to `M` differs only where `acc` had material — which is the
+edited layer's own box, already in the region.
+
+That intersect box is the conservative answer and it is expensive: the host
+measured an intersecting item's live drag refilling **26.2x** the surface bricks
+of the geometry it produces at reference size and **241.2x** at ten times the
+extent — 45.5 ms and 7.5 s a frame. The intersect walks a BOX and produces a
+BAND, and the narrowing that fixes it is a refill-REGION change rather than a
+bounds one; it is not specific to layer composition, since an intersect item pays
+the same numbers today.
+
+**What it refuses.** `CLAY_OP_INLINE` is a group's children-apply-outward mode
+and a layer has no outer chain to apply into; the two transitions read their
+endpoints from a node, and a composition carries none. Both are refused at the
+setter rather than compiled against defaults nobody wrote. A **non-SDF layer**
+refuses at both ends — set and read — rather than storing a control that does
+nothing or answering `CLAY_OP_ADD`, which a host would read as a fold the layer
+cannot carry.
+
+**Old documents are unchanged, by construction rather than by migration.** The
+default composition is `Add` / `Hard` / `k = 0` / `rounding = 0`, which is the
+hard union every layer has always folded with, and `CLAY_OP_ADD` and
+`CLAY_BLEND_HARD` are both zero — so an all-zero composition IS the old
+behaviour. A document written before the feature loads with every layer unioning
+and compiles to the same tape, byte for byte. Going the other way is a
+**refusal**, not a degrade: scene minor 18 is the first layout that can say a
+composition, and writing a composed document at 17 would bring a cutter back as a
+lump welded on, in a file that opens cleanly and looks deliberate.
+`clay_document_writable_at_minor` is how a host asks before it saves, and it
+names the layer that blocks. pyclay has the same question as
+`Document.writable_at_minor(minor)`, which answers `(ok, blocking_layer)` — the
+id rather than only a flag, so a script can say which subtool to change instead
+of leaving a person to find it.
+
 ### An intersect is bounded by its layer
 
 `item_influence_bound` reported `Everything` for any op that is not local, and
@@ -732,13 +990,57 @@ ask for **every visible SDF layer except one**. `clay_eval_points_excluding`,
 are that question; `Document.eval_excluding` and `.gradients_excluding` are the
 pyclay half.
 
-**Composing is a minimum, and it is exact.** Visible SDF layers hard-union, and
-the union of two fields IS the smaller of the two distances, so
+**Composing is a minimum, and it is exact — while every layer unions.** The
+union of two fields IS the smaller of the two distances, so
 `min(excluding(L), your own preview of L)` is the field the whole document would
 evaluate to — not an approximation of it. There is no blend parameter to match
 and no seam to hide. A host takes the excluded evaluation **once at
 pointer-down**, because the layers it excluded do not move while the artist
 drags, and composes it with the live preview per frame.
+
+That identity is a property of the UNION and it does not survive a layer
+composition. With A, B(subtract) and C, and B excluded, the rest is `A + C` and
+the part is `B`, and no combine of those two values is `(A − B) + C`: removing a
+layer from the middle of a fold changes what every layer above it folds onto.
+So the three excluding entry points and pyclay's `eval_excluding` /
+`gradients_excluding` **refuse** with `CLAY_ERROR_INVALID_ARGUMENT` as soon as
+any applied fold is not a hard Add, naming the layer that composes. The compile
+underneath (`scene::compile_document_except`) still means what it always meant —
+the document without that layer — and is unchanged; what is deleted is the
+promise that it sums back.
+
+**The refusal names an alternative, not a wall.** The pairing that survives a
+fold is **below + the previewed layer**, and
+`clay_brick_cache_eval_requests_below` (ABI 0.86.0) is the half that was
+missing. It answers every visible SDF layer *beneath* the one you name, folded
+exactly as the document folds them — the layers below may compose however they
+like, because that half is compiled with their own compositions rather than
+unioned. Combining it with the host's live preview through the op, blend
+profile, blend radius and rounding `clay_document_layer_composition` reports for
+the previewed layer **is** the whole document's field, not an approximation of
+it; the `min` above is that same composition for the one case where the layer
+unions.
+
+It refuses only when the layer named is **not the last visible SDF layer**, and
+that refusal hands back the id of the lowest visible SDF layer above it **and
+how many are above it in all**, so a host can offer *"hide or move `Poros` to
+smooth `Forma_principal` live"* rather than reporting the tool unavailable — and
+can say so once rather than after each hide, which the id alone cannot: on a
+stack with two field layers above the target, acting on the one named gets the
+sculptor refused again naming the next. The id is the row to act on first; the
+count is what decides the sentence, and a host wanting every id enumerates the
+visible SDF layers above the named one itself. Hidden layers and mesh or voxel
+layers above do not block it: they are not in the fold.
+
+That position restriction belongs to this call and is **not** a narrowing of the
+excluding form. `clay_brick_cache_eval_requests_excluding` refuses on the
+document rather than on a position, so in a document where every layer unions —
+every document written before ABI 0.86.0 — it still works at any stack position,
+exactly as it always did. Excluding a layer from the
+*middle* of a stack still has no repair — the layers above it fold onto an
+accumulator that included it, so the two halves are not two operands of one
+combine — and reconstructing that case would need a three-way split and two
+host-side combines, which this ABI does not offer.
 
 **Neither call edits the document**, which is the other half of why they exist.
 The route a host would otherwise take — hide the layer, sample the rest, show it
@@ -873,6 +1175,134 @@ Five consequences worth stating, because each is a question a host will ask:
 `clay_document_layer_info` is also how a subtool panel draws the link at all:
 `content_source` is the following end and `share_count` is how many layers hold
 the list, so the source of a link is distinguishable from an ordinary layer.
+
+### Dropping a subtool on the floor (ABI 0.86.0)
+
+Three placements a host cannot write itself correctly:
+
+```c
+clay_layer_snap_to_ground(doc, layer, 0.0f);  /* low face of the box -> y = 0 */
+clay_layer_centre_bounds(doc, layer);         /* centre of the box -> origin  */
+clay_layer_zero_to_origin(doc, layer);        /* translation -> (0, 0, 0)     */
+```
+
+Each writes the placement's **translation and nothing else**, as one
+`clay_document_set_layer_transform_nonuniform`'s worth of change: one command,
+one undo step, one invalidation.
+
+**Why they are in the library rather than in the host.** Written outside, the
+read-modify-write goes through a pair that traps twice.
+`clay_document_layer_transform` *refuses* a layer carrying three different
+per-axis factors, so the read half cannot begin on a subtool a gizmo squashed;
+and `clay_document_set_layer_transform` *clears* the per-axis scale, so a host
+that got past the first trap by reading the uniform factor elsewhere silently
+unsquashes the model — the artist presses "snap to floor" and the shape changes.
+The correct composition is the per-axis pair with the rotation and all three
+factors carried through: four calls, one refusal and one clearing rule, for a
+menu item.
+
+**Which box they read.** `clay_layer_bounds`: the tight world-space box over all
+three representations, with no blend or chain-pad dilation — the influence bound
+would leave the model hovering by exactly that dilation. It is still not the
+silhouette, in three ways that will each produce a bug report:
+
+- a **SUBTRACT** item contributes its own box, so a layer whose lowest visible
+  item subtracts lands *that* box on the plane and the material stops higher up;
+- a **smooth blend** can bulge past it — rounding is dilated into the box, a
+  smooth union's bulge is not;
+- **hidden items are excluded**, which is the intended reading rather than a
+  limitation (the placement follows the silhouette the artist can see) and means
+  hiding the lowest item moves where the next press lands.
+
+Marching the surface for its true lowest point was the alternative: a bake or a
+raycast sweep per press, no exact answer for a smooth field either, and the
+slowest call in a transform panel. Rejected.
+
+**An instance is placed, never severed.** What instancing shares is the edit
+list; a placement is not shared. Unlike `clay_layer_consolidate`, which severs
+because a bake *replaces* an edit list, there is nothing here to sever — placing
+one instance is the gesture instancing exists for. Two instances of one edit
+list snap to the same floor independently and both land.
+
+**What they refuse**, and it differs per call:
+
+| condition | snap | centre | zero |
+|---|---|---|---|
+| no layer carries the id | `NOT_FOUND` for all three | | |
+| ghosted or locked | `INVALID_ARGUMENT`, before any bound is read | | |
+| a placement gesture is open | `INVALID_ARGUMENT`, as for every other edit | | |
+| layer holds no material | `INVALID` | `INVALID` | **accepted** |
+| layer carries a radial mode | `INVALID` | `INVALID` | **accepted** |
+| layer is unbounded | `INVALID` | `INVALID` | **accepted** |
+| `ground_y` not finite | `INVALID` | — | — |
+| box degenerate in any axis | accepted for all three | | |
+| layer hidden | accepted for all three | | |
+
+Empty is **refused rather than silently doing nothing**: a host greying the menu
+item out wants to know, and "already in place" and "there is nothing here" are
+the two states an artist most needs told apart. The code is
+`INVALID_ARGUMENT` so that `NOT_FOUND` keeps meaning "no layer carries this id"
+alone. A **radial** layer is refused because `clay_layer_bounds` carries a
+layer's mirror copies and not its radial ones, so a placement computed from that
+box would drop the original onto the plane with its copies already through it —
+a wrong answer rather than a loose one, and invisibly so. An **unbounded** layer
+is refused for the arithmetic: a plane reports faces at ±`FLT_MAX` and every
+placement derived from one overflows to an infinite position and a tape of NaNs.
+A **degenerate** box is accepted, because nothing here divides by an extent and a
+flat layer is exactly the one "drop it on the floor" is pressed on.
+
+**What they do not promise.**
+
+- **Not bit-idempotent.** Each states a *total* placement, so pressing twice is
+  the same gesture as pressing once — but the second press recomputes the box
+  from an already-moved layer, and `f + (p + (g - (f + p)))` is not `g` in
+  float. The second press lands within one rounding at the coordinate's
+  magnitude; asserting bit equality at large coordinates will be flaky.
+- **A press that moves nothing still costs an undo step.** Suppressing it needs
+  a tolerance in world units this ABI would have to name and defend, and a host
+  that cannot predict how many undos its own button cost is worse off.
+- **No delta is returned.** The change is rigid, so a host may transform its
+  drawn mesh instead of refilling — but it works the matrix out itself, by
+  reading `clay_document_layer_transform_nonuniform` before and after and
+  subtracting the two positions, which is exact because the change is a pure
+  translation.
+
+**`centre_bounds` is named for the box, and that name is deliberate.** The
+roadmap row that asked for this spelled it *centre-mass*. The engine holds no
+density, so the call's answer is identical for a hollow shell and a solid of the
+same extent. The occupancy-weighted centroid that would earn the other name is
+not merely more expensive, it is **not expressible by this signature**: a
+sampled centroid has no answer until someone names a cell size — the one
+`clay_consolidation_params` carries — and `(doc, layer)` has nowhere to put it,
+so an implementation would have to invent a resolution the answer silently
+depends on. It would also be a CPU bake per press, have no field at all for a
+mesh layer until rasterized, and move when the artist changed the layer's voxel
+size, which changes nothing about where the shape is.
+
+A **third** reading of "centre" is not this call either: moving the *pivot* to
+the content's centre without moving the content, so the gizmo stops hanging off
+the subtool. That cannot be done at layer level — keeping the content still
+while the layer's origin moves means shifting every item's local placement by
+the inverse, which is item-level work on the shared edit list and on an instance
+would move every other instance.
+
+`zero_to_origin` **reads no bounds**, which is what makes it a different call
+rather than a special case of the centring one: it is the only one an empty, a
+radial or an unbounded layer can take. It leaves the rotation and both scale
+factors exactly as they were — the full reset already exists as one
+`clay_document_set_layer_transform_nonuniform` with an identity, and a
+convenience call that quietly threw away an authored rotation would be the most
+expensive undo in the set.
+
+Layer scope is the only scope: it is what every other whole-subtool property
+already has. There is no item-level or whole-document form, and adding one later
+re-lays out nothing — but an item-level snap needs an answer this does not have,
+namely what a snap means for a selection spanning a group whose children's
+placements are relative to it. A whole-document snap is N layers inside
+`clay_document_begin_undo_group`.
+
+In pyclay: `layer.snap_to_ground(y)`, `layer.centre_bounds()`,
+`layer.zero_to_origin()`, raising where the C ABI refuses.
 
 ### History: one undo, and exactly what it covers
 
@@ -1105,19 +1535,39 @@ shift when you trim, so a failed write is retried by asking again, and a host
 that asks below the trimmed floor gets nothing rather than a silently shorter
 history — `journal_range()` is how it finds out.
 
-#### The two rules that keep a recovery honest
+#### The three rules that keep a recovery honest
 
 **A journal this build does not understand is refused**, not partly read. A
 recovery that silently drops what it could not parse is worse than none, because
 the user cannot see the gap. Events applied before a bad one stand — replay is
 not a transaction — so replay onto a copy if you want all-or-nothing.
 
+**A journal replayed onto the wrong snapshot is refused too**, with
+`CLAY_ERROR_SNAPSHOT_MISMATCH` (a `ValueError` naming the pair, in pyclay) and
+*nothing applied*. A journal carries a hash of the bytes it continues from,
+stamped by `to_bytes` / `save` on one side and `load_bytes` / `load` on the
+other, so you get the check by writing the ordinary recovery path. The two
+refusals mean opposite things: unreadable says discard the file, mismatched says
+the file is fine and you handed it the wrong snapshot.
+
+> It names the snapshot **current at the index you asked from**, not the last
+> one you took — so serializing again to compare sizes does not repoint a
+> journal you already have. What it does *not* catch is replaying the same
+> journal twice onto the same snapshot: the indices are yours to keep. It is
+> also not a checksum, and journals written before 0.86.0 name no snapshot and
+> are never refused for the pair.
+
 **Replay stops at a barrier rather than skipping it.** A barrier is an operation
-nothing can reproduce — dropping a resolution level, removing a sculpt layer,
-or anything a host does that the engine never sees. (Mask edits *were* one, and
-are not any more.) Replay returns success with the flag set, and a host that
-sees it needs a *fresher snapshot*, not a longer journal. Continuing past it would hand back a document quietly missing that
-operation's effect.
+nothing can reproduce — dropping a voxel resolution level, or anything a host
+does that the engine never sees. (Mask edits *were* one, and are not any more.)
+Replay returns success with the flag set, and a host that sees it needs a
+*fresher snapshot*, not a longer journal. Continuing past it would hand back a
+document quietly missing that operation's effect.
+
+**Ask before you need it**: `journal_barrier(from)` (`clay_document_journal_barrier`)
+reports the first such operation in the log and where, so you re-snapshot while
+you still can. Learning it from a replay means learning it during the recovery,
+which is the one moment the answer is useless.
 
 A journal therefore carries an ordinary sculpting session end to end, mask
 edits included.
@@ -1704,6 +2154,21 @@ doc.set_layer_visible(layer.id, False)     # exact and reversible
 doc.set_layer_transform(layer.id, position=(0, 4, 0))
 doc.move_layer(layer.id, 0)
 doc.remove_layer(layer.id)
+
+# three placements written once, on the inside: each writes the TRANSLATION and
+# nothing else, as one command and one undo step. Done outside, the read half
+# refuses a per-axis-scaled layer and the write half CLEARS the per-axis scale,
+# so "snap to floor" silently unsquashes the subtool.
+layer.snap_to_ground(0.0)   # low face of the tight world box -> y = 0
+layer.centre_bounds()       # centre of that box -> the origin
+layer.zero_to_origin()      # translation -> (0, 0, 0); rotation and scale kept
+# They raise where the C ABI refuses: an empty, radial or unbounded layer for
+# the first two — empty is refused rather than a silent no-op, because "already
+# in place" and "there is nothing here" are the two states an artist most needs
+# told apart. `zero_to_origin` reads no bounds and takes all three.
+# `centre_bounds` is named for the BOX: the engine holds no density, so the
+# occupancy-weighted centroid the name "centre-mass" implies has no answer until
+# someone names a cell size, and this signature has nowhere to put one.
 ```
 
 A **group** is a node whose children compile as one sub-expression, so an op
@@ -1767,6 +2232,18 @@ body.add(clay.Icosahedron(r=0.4), blend=clay.Smooth(0.1))
 # extended combine modes
 body.add(clay.Box(size=(0.6, 0.6, 3.0), position=(0.7, 0, 0)),
          op=clay.Op.GROOVE, blend=clay.Smooth(0.12), rounding=0.05)
+
+# a whole LAYER's boolean: how it folds into the visible SDF layers beneath it.
+# Omitted arguments keep their value, and the reader hands back what the setter
+# takes, so a host can show the current fold rather than guess it.
+cutter = doc.add_sdf_layer("cutter")
+cutter.add(clay.Sphere(r=0.6, position=(0.7, 0, 0)))
+doc.set_layer_composition(cutter.id, op=clay.Op.SUBTRACT, blend=clay.Smooth(0.1))
+op, blend, rounding = doc.layer_composition(cutter.id)
+doc.set_layer_visible(cutter.id, False)   # gives the uncut geometry back exactly
+# ask BEFORE saving for an older build: minor 17 cannot say a composition, and
+# writing one there would bring the cutter back as a lump welded on
+ok, blocking = doc.writable_at_minor(17)  # (False, cutter.id) once it composes
 
 # voxels: standalone grids or document layers
 blocks = doc.add_voxel_layer("blocks", voxel_size=0.1)
@@ -1982,6 +2459,24 @@ layer.field_report(advise_below_step_scale=0.25)
 # the aggregate cannot tell them apart. ADVISORY: nothing here bakes, and the
 # threshold is yours, because a tolerance for marching cost belongs to a
 # viewport and a frame budget rather than to the artwork.
+
+layer.consolidation_advice(advise_below_step_scale=0.4)   # AT WHAT, and what it costs
+# -> {'advises': bool, 'params': {...} or None, 'cost': {...} or None}
+# The recommendation `advises_consolidation` above leaves open: `field_report`
+# says a bake is the cure, and `consolidate` then requires a `cell` nothing will
+# guess. `params` is keyed to `consolidate`'s own arguments, so
+# `layer.consolidate(**advice["params"])` is the whole round trip; both `params`
+# and `cost` are None when nothing is advised, which raises at the next call
+# rather than baking at a resolution nobody chose.
+# `advises` is True only when the report advises AND the PROJECTED step scale
+# reaches the threshold — a sampled volume declares sqrt(3) times its samples'
+# Lipschitz, so 0.577 is the ceiling and asking for 0.8 gets False.
+# `cell` is four cells across the layer's smallest feature, clamped to
+# [E/512, E/32] of its longest side. The DECLARED Lipschitz is deliberately not
+# the source: it bounds a marcher's STEP, not |grad f|, so a rate derived from
+# it is unsound exactly on the shapes that motivate a bake.
+# NOT optimal, NOT stable across edits, NOT a memory bound (cost['megabytes']
+# is), and NOT cheap — a full sampling pass, so not a per-frame call.
 
 layer.consolidation_cost(cell=0.03, band=0.12)   # what it WOULD cost, no change
 # -> {'megabytes', 'brick_count', 'sample_count', 'cell_size', 'band',

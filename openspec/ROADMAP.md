@@ -22,9 +22,9 @@ Last reconciled against `3dcoat_study/MISSING_FEATURES.md` and
 caught five items this file had dropped. Every ClayCore-owned row in their
 catalogue is now represented here or in the deferred list below.
 
-## Where the engine is (2026-09-06, v0.85.0)
+## Where the engine is (2026-09-06, v0.86.0)
 
-21 capabilities, 205 archived changes, 17 still open. Complete enough that the
+21 capabilities, 205 archived changes, 19 still open. Complete enough that the
 gaps below are about *sculpting affordances*, not about the field engine — and
 as of the 2026-09-06 reconciliation below, about what a HOST can reach rather
 than about what the engine can do.
@@ -34,6 +34,41 @@ written from the engine's side. `## What the host actually needs — 2026-09-06`
 near the end is ClaySpaceDesktop's, taken from a working application pinned to
 v0.84.0, and it disagrees with the ordering above it in three places. Where they
 disagree, theirs is the one with a shipping product behind it.
+
+### Why this file went stale, and what fixes it
+
+**The batch above — 205 archived, up from 119 — is the fix applied late.** The
+changes had shipped and read 0 open tasks for weeks; none had been archived. A
+complete change sitting in `openspec/changes/` is indistinguishable from an
+in-flight one, so `openspec/specs/` described a library several ABI minors
+behind the one in the tree, and every reader downstream of it read the same lag:
+**eight of the twelve rows in "Real gaps, verified absent" below were presenting
+shipped capabilities as gaps**, three Phase 4 rows named delivered work as
+pending, and issue #243 was rewritten *twice* re-deriving work that had already
+landed.
+
+The failure was not that the work was undocumented — each change carried its own
+proposal, design and tasks the whole time. **Archiving is what makes finished
+legible**, and the rule it wants is: a change that reads 0 open tasks and has
+shipped gets archived by the PR that finishes it, not in a later sweep.
+
+**And the sweep proved its own point by happening twice.** Two branches
+reconciled the same backlog on the same day without either knowing: this one
+archived fourteen of the changes with their four stale deltas repaired, and
+`chore/reconcile-roadmap-and-archive` archived those fourteen among a wider
+eighty-six and landed first. Thirteen of the fourteen were duplicate work
+thrown away at the merge, and the one that was not —
+`record-the-layer-a-crossing-creates` — is still open here because the other
+sweep left it so. That is the same defect one level up: an unarchived change is
+invisible as *finished*, and an unfinished reconciliation is invisible as *in
+progress*. Two lessons from the discarded batch are worth keeping anyway,
+because they will recur: archive in **dependency order** rather than list order
+(the resume chain has to go refill → colour → layers → per-brick → seed key,
+because each modifies the requirement the one before it wrote), and expect
+deltas that were never refreshed against their own base to abort the archive —
+four of the fourteen named blocks `MODIFIED` against requirements no living spec
+carries, or dropped scenarios their base still had, which a validator that
+treats `MODIFIED` as a whole-requirement replacement would have deleted.
 
 The older snapshot below is kept because its corrections are still
 load-bearing. The bullets are the 2026-08-07 (v0.22.1) snapshot with corrections
@@ -630,12 +665,19 @@ The rest is the host seam — gaps hosts actually hit, each from an issue:
 
 ## Phase 4 — parametric and scatter
 
-`add-lattice-deformer` (FFD) · `add-surface-scatter` (instances sampled on an
-isosurface) · `add-blend-profile-curves` (user-defined bevel cross-section,
-against their 2026 custom profiles) · `add-convenience-transforms`
-(snap-to-ground, centre-mass, zero-to-origin as single ABI calls) ·
-`add-field-stamps` (capture a region's field as a reusable brush — the VDM
-analog, and a differentiator rather than a parity item).
+**Reconciled 2026-09-06: three of the five had been delivered and this list
+still named them as work.** Two of those three should never have stayed on it —
+the lattice and the field stamps shipped changes ago — which is the same
+archive-discipline failure the "Real gaps" table records below. Struck rows keep
+their text and name what delivered them.
+
+| Change | State |
+|---|---|
+| ~~`add-lattice-deformer` (FFD)~~ | **Delivered, on both representations.** `clay_item_add_lattice` places a cage over an item and `clay_layer_add_lattice` over a layer's node; `clay_layer_lattice_gizmo` / `_preview` drive it as a gesture; and the mesh side is the `clay_mesh_lattice_*` family — `_divisions`, `_set_offset`, `_offset`, `_rest`, `_position`, `_is_identity`, `_displacement` — with `clay_mesh_sculptor_lattice` applying it. **The row's own word "FFD" is where the header now routes**: an SDF deformer is an *inverse* point map and forward FFD has no closed-form inverse, so `clay.h` tells a caller wanting forward FFD with no approximation to use the mesh-layer lattice instead. That routing is the delivered answer, not a gap in it |
+| `add-surface-scatter` (instances sampled on an isosurface) | **Still open, and now unblocked.** The instancing half it depended on landed (`instance-a-layer`), so scatter no longer has to duplicate geometry; nothing yet samples an isosurface for placements |
+| `add-blend-profile-curves` (user-defined bevel cross-section, against their 2026 custom profiles) | **Still open.** `clay_profile` names the closed 2D profiles a *lift* primitive carries; a blend's cross-section is not authorable — `blend_k` is a radius and the extended modes ignore the profile outright |
+| ~~`add-convenience-transforms` (snap-to-ground, centre-mass, zero-to-origin as single ABI calls)~~ | **Landed 2026-09-06 (ABI 0.86.0).** `clay_layer_snap_to_ground`, `clay_layer_centre_bounds`, `clay_layer_zero_to_origin`. **The middle name is a correction to this row, not a typo:** the engine holds no density, so an occupancy-weighted centroid is not merely more expensive, it is not expressible by `(doc, layer)` — a sampled centroid has no answer until someone names a cell size, and the call would silently depend on a resolution it invented. It centres the tight world BOX and is named for it |
+| ~~`add-field-stamps` (capture a region's field as a reusable brush — the VDM analog, and a differentiator rather than a parity item)~~ | **Delivered as `stamp-a-captured-field` (ABI 0.83.0), archived 2026-09-05.** `clay_item_stamp_from_document` captures, `clay_item_stamp_save_memory` / `_load_memory` persist, `clay_item_stamp_content_id` identifies, `clay_stamp_frame_from_surface` orients one against a hit and its stylus azimuth, and `clay_layer_place_stamps` plants one at every stamp a resolved stroke produced |
 
 ## Phase 5 — the surface tier, proposed 2026-08-29
 
@@ -879,6 +921,44 @@ needs them, and listed so they are not mistaken for oversights:
   first `double`s in `clay.h`, because a signed volume cancels heavily and
   narrowing it at the boundary would discard the precision the engine chose.
 
+- **A smooth GROUP's reported extent omits its own blend ring.** Found and
+  measured while building `fold-the-layers-with-an-operator`, deliberately not
+  fixed there. A group's `tape.bounds` is the plain union of its children, so a
+  smooth or extended group combine bulges past the box the tape reports — the
+  same defect the layer fold had until that change added
+  `scene::chain_blend_support`, where reverting the one line left 11,618 lattice
+  samples carrying material outside the reported box (missing surface in a mesh,
+  a lost ray hit in a preview). **The reason it could not be fixed in place is
+  the interesting half:** `resume` unwinds group frames from a
+  `TapeCheckpointFrame` that carries op, blend and rounding and NO EXTENT, so a
+  ring added in `compile_group` lands in a full compile and not in a resumed one
+  — implemented, and `test_tape_prefix_reuse.cpp`'s group-append case went 0.2
+  short in x on every dab. Closing it means giving the checkpoint the subtree's
+  extent, which is a schema change to the resumable checkpoint. Pinned meanwhile
+  by a test asserting the layer form's box contains the group form's and exceeds
+  it by exactly one ring.
+  **Latent rather than live for the one host we can check:** ClaySpaceDesktop
+  creates no item groups at all — `clay_layer_add_group` and
+  `clay_layer_add_item_in_group` have no wrapper and no call site anywhere in its
+  workspace, so every item it adds goes to the layer root. The path it WOULD have
+  come down is its own: `place_layer` refills the union of a layer's extent either
+  side of a move, so an extent missing a blend ring leaves surface unmeshed where
+  the old form stood. That is why the layer fold's widening landing first is the
+  right order — the correctness half arrives before the feature that would expose
+  it.
+
+- **Bounds NARROWED per operator, on both the item and the layer path.**
+  `fold-the-layers-with-an-operator` widens a fold's extent by its own support,
+  which is the half that can lose surface. It does NOT narrow: a subtract is
+  still bounded by the union rather than by its left operand, and an intersect by
+  the union rather than by the intersection, exactly as the ITEM path has always
+  been. Narrowing one side alone breaks that change's own parity gate — a
+  subtracting layer and a subtracting item are the same document — and narrowing
+  both changes the meshing region of every document that already carries a
+  subtract or a paint, and has to be threaded through `compile_group`'s rollback
+  and every resumable entry point that copies a prefix's bounds. Its own change,
+  with its own measurement.
+
 - **Deformers on a mesh layer.** `Deformer` has twenty-one entries and every
   one applies to an SDF item; a mesh layer takes a lattice cage and nothing
   else, so ZBrush's Deformation palette — Taper, Twist, Bend — is unreachable
@@ -888,6 +968,33 @@ needs them, and listed so they are not mistaken for oversights:
   has no closed-form inverse (the SDF lattice accepts ~1.5% error and a 4³ cap
   for it), while a mesh deformer runs FORWARDS once per vertex and inherits
   neither. It is the same math in the easier direction.
+
+- **A stroke is walked segment by segment on every sample.** Confirmed in the
+  kernel rather than inferred: `ctape_stroke_dist`
+  (`include/clay/kernel/tape.h:488`) loops `for (i; i + 1 < count; ++i)` over
+  every segment for every sample, with no early-out and no spatial structure —
+  **O(control points) per sample, unconditionally.** A mirrored stroke pays it
+  twice, because each mirror copy is its own `emit_item_instance` with its own
+  placement.
+  Measured by ClaySpaceDesktop on a live snake-hook pull, one segment of the
+  gesture, timing each step against the bricks it dirtied: mirrored, 96 bricks
+  at 0.95 ms with a 6-point curve and 96 bricks at 3.77 ms with a 39-point one —
+  **the same brick count by every measure the host controls, four times the
+  cost.** Per brick, 0.0099 → 0.0392 ms mirrored and 0.0069 → 0.0177 unmirrored.
+  Not a defect: walking the segments is the ordinary implementation and it only
+  becomes visible when a host grows ONE item to tens of points during a live
+  gesture, which a snake hook does and the primitive was not shaped for.
+  **The tractable fix is an early-out rather than a tree.** A smooth blend
+  forbids skipping a far segment outright — `csmin_quadratic` accumulates from
+  everything within `k` — but a per-segment bound is enough: a segment whose
+  bounding sphere is further than the running `d` plus `k` cannot change the
+  result, so the test is sound and costs one distance per segment. A BVH over
+  the curve is the version that flattens it entirely and is a real piece of work.
+  Not scheduled. **Recorded because a host is choosing a workaround against it**
+  — chaining several shorter stroke items instead of growing one long one, which
+  only became possible once their taper was anchored to arc length — and that
+  workaround stops being worth considering the day this lands, so its status is
+  worth their knowing either way.
 
 - **Procedural noise as a tape opcode.** `displace` is by-callable today, which
   is not portable across backends. A tape-expressible 3D noise field is the
@@ -969,33 +1076,85 @@ work harder to justify by benchmark and no less necessary.
 
 Each was checked by searching the public surface, not inferred.
 
+**Reconciled 2026-09-06, and eight of the twelve rows had shipped.** Each was
+re-checked against the tree rather than against this file, because the file was
+the thing that had gone wrong: the changes that closed them had been sitting
+complete-but-unarchived, so `openspec/specs/` still described a library several
+ABI minors behind the one in the tree and every reader downstream of it —
+this table and the issue tracker alike — kept re-deriving finished work. The
+struck rows below name what shipped them. Four rows survive whole — morph
+target, generic named attributes, voxels beyond 256³ and surface conform — plus
+the SCATTER half of the instancing row; each of the five was confirmed absent
+from `bindings/c/clay.h` and `include/` on the same pass that struck the others.
+Radial symmetry was already struck before this reconciliation and is left as it
+was.
+
 | Gap | What is actually there | Severity |
 |---|---|---|
-| **Surface groups / PolyGroups / Face Sets** | Nothing, on any representation. Visibility is per LAYER; a layer holds exactly ONE mask (`clay_document_add_mask` "replaces any mask the layer already had"), so N named regions cannot even be emulated with N masks; scene groups group edit-list NODES, not surface | **Highest.** It is the substrate procedural masks, extract, and per-region anything all attach to. Scoped: `add-surface-groups` |
-| **Partial visibility** | Layer-only. "Hide the armour" requires the armour to have been authored as its own layer, decided before the artist knew | Same change — it is the same primitive |
-| **Unbounded undo history** | `std::vector<Entry> undo_` with **no cap, no byte accounting, no eviction, no query**. The only control is `enable_undo`, which is a light switch. And the expensive entries are counter-intuitive: the stack stores INVERSES, so removing an item records a whole `Node` (440 bytes plus its deformer chain) while adding one records 8 bytes | **High, and now urgent** — an iPad at 120 Hz for hours, on an OS that does not warn twice. Scoped: `add-history-budget` |
-| **Procedural masks** — cavity, curvature, normal, thickness, AO | Mask verbs are paint, fill, expand, contract, smooth, invert, `to_field`. Nothing derives a mask from the surface | High, and cheap on a field representation — curvature is a gradient the engine already computes. Next to scope |
+| ~~**Surface groups / PolyGroups / Face Sets**~~ **shipped** | ~~Nothing, on any representation. Visibility is per LAYER; a layer holds exactly ONE mask (`clay_document_add_mask` "replaces any mask the layer already had"), so N named regions cannot even be emulated with N masks; scene groups group edit-list NODES, not surface~~ **`add-surface-groups` (landed 2026-08-24) built the primitive as a world-space `clay_groups` lattice — `clay_groups_fill` / `_at` / `_reassign` / `_grow` / `_shrink` / `_border` / `_ids` / `_cell_count`, a `'GRUP'` chunk and undo — and `mask-a-named-region` (ABI 0.85.0) closed the loop with `clay_mask_fill_from_group` beside the existing `clay_groups_fill_from_mask`, so a group is a SELECTION every mask-respecting verb already honours.** | ~~Highest~~ **Closed.** One thing the row did not anticipate is still open and is now a design proposal rather than a gap: the lattice quantises a group BORDER, so the border is not an edge set. `native-mesh-polygroups` answers the nine locking questions and deliberately writes no code |
+| ~~**Partial visibility**~~ **shipped** | ~~Layer-only. "Hide the armour" requires the armour to have been authored as its own layer, decided before the artist knew~~ **Same change, as predicted: `clay_groups_set_visible` / `_isolate` / `_show_all` / `_invert_visibility` / `_any_hidden` / `_point_hidden`. Hiding filters the produced MESH rather than the field, so it is exactly reversible and cannot change what the document evaluates to** | Same change — it was the same primitive |
+| ~~**Unbounded undo history**~~ **shipped** | ~~`std::vector<Entry> undo_` with **no cap, no byte accounting, no eviction, no query**. The only control is `enable_undo`, which is a light switch. And the expensive entries are counter-intuitive: the stack stores INVERSES, so removing an item records a whole `Node` (440 bytes plus its deformer chain) while adding one records 8 bytes~~ **`add-history-budget` (landed 2026-08-24): `clay_document_set_history_budget`, `clay_history_bytes` and an on-demand trim with a horizon a host can show. The counter-intuitive costing was confirmed rather than corrected, and `roll-up-document-memory` then found `node_bytes` six members behind the type it walks — so the budget had been measuring LOW, and lowest on exactly the documents where it matters** | ~~High, and now urgent~~ **Closed** |
+| ~~**Procedural masks** — cavity, curvature, normal, thickness, AO~~ **shipped** | ~~Mask verbs are paint, fill, expand, contract, smooth, invert, `to_field`. Nothing derives a mask from the surface~~ **`clay_mask_from_surface` over `clay_surface_measure`, reachable through `add-claycore-bridge`. The mask is one CALLER of the per-point measure rather than a second implementation, so a cavity mask and a baked map cannot disagree about the same surface. It repeated `add-surface-groups`' mistake first: curvature, cavity, convexity and normal-direction shipped in C++ with tests, no C entry point and no pyclay** | ~~High~~ **Closed** |
 | **Morph target** | Absent as a named feature, and **closer than it was**: a base deformation layer at level 0 of a multiresolution hierarchy is a stored, dialable, blendable set of vertex offsets against a rest pose, which is most of what a morph target is minus the naming and the multi-target blend. The word still appears only in `mesh_io.h`, as a glTF feature deliberately not imported | Medium; the remaining work is a vocabulary over `add-mesh-sculpt-layers` rather than new storage |
-| **Stroke input completeness** | `clay_stroke_sample` is position, pressure, tilt. No **azimuth**, no velocity, no timestamp | Medium — azimuth is what makes a directional or rake brush possible at all, and it is five floats to add before hosts depend on the current layout |
+| ~~**Stroke input completeness**~~ **shipped** | ~~`clay_stroke_sample` is position, pressure, tilt. No **azimuth**, no velocity, no timestamp~~ **A SECOND entry point rather than a widened one: `clay_stroke_resolve` takes a FLAT `count*5` float array, so repacking in place would have changed the stride under every compiled host. `clay_stroke_sample_full` carries azimuth, velocity and a `double` timestamp, `clay_stroke_resolve_full` consumes it, and the older call is sugar over it. pyclay needed neither, because a numpy array carries its own shape** | ~~Medium~~ **Closed.** Azimuth was the one that unlocked a capability rather than refining one: tilt says how far the stylus leans, azimuth which way, and `clay_stamp_frame_from_surface` now rotates the tangent about the normal by it |
 | ~~**Radial symmetry**~~ | Three mirror planes, no radial — and the two were asymmetric in DESIGN, not just in coverage: the mirror is a layer mode with a seam blend and a per-item opt-out, while radial existed only as `Repeat::radial`, a per-item modifier a stroke cannot reach. Scoped and built: `add-radial-symmetry`, issue #256 | Medium |
-| **Instancing / scatter** | Absent. Phase 4 already names `add-surface-scatter`; the review is right that scatter without instancing duplicates geometry | Medium |
+| ~~**Instancing**~~ **shipped** / **surface scatter** still absent | ~~Absent. Phase 4 already names `add-surface-scatter`; the review is right that scatter without instancing duplicates geometry~~ **The instancing half landed as `instance-a-layer` (`.clayspace` minor 15) with `bound-an-edit-across-instances` behind it: `clay_document_instance_layer` is a second layer over the same edit list, so a duplicated subtool costs a layer record. Shared is the edit list and ONLY the edit list; `clay_layer_node_influence_bound` reports the union over every sharer so a host does not leave nine of them stale. The review's premise is therefore satisfied — scatter no longer has to duplicate geometry.** `add-surface-scatter` itself is still absent: nothing samples an isosurface for placements | Medium, and now unblocked rather than blocked |
 | **Generic named attributes** | `colors`, `uvs`, `normals` and nothing else. A host cannot carry `material_id` or a custom channel through the engine | Medium. The review is right to separate this from PBR: allowing an app to carry channels is not the same as rendering them, and only the second is a declared non-goal |
-| **Voxel beyond 256³** | Real: a grid's `dims` product must be ≤ `CLAY_MAX_BATCH`, which is 256³ exactly. The spec's "at least 256³" reads as a floor and is also the ceiling | Medium — already recorded under "Deferred, but recorded", now with the number that makes it concrete |
-| **Local remesh** | Absent, and topology-changing sculpting ~~is~~ **was** a declared non-goal. **The review's half-agreement is the right one**: the non-goal is about not building dyntopo, and it does not answer what happens when a mesh-layer snakehook stretches triangles past usefulness. That is a recovery operation, not a sculpting mode — **and the decision taken 2026-08-29 was that a recovery operation is not enough**, because the same local split/collapse/flip that repairs a stretch is the whole of Dyntopo minus the policy that drives it. Scoped as `add-dynamic-topology`, Phase 5 | ~~Medium; needs a decision before a proposal~~ **P0 of Phase 5** |
+| **Voxel beyond 256³** | Real, and re-verified 2026-09-06: `CLAY_MAX_BATCH` is still `16777216 /* 1 << 24 */`, which is 256³ exactly, so a grid's `dims` product must be ≤ that. The spec's "at least 256³" reads as a floor and is also the ceiling | Medium — already recorded under "Deferred, but recorded", now with the number that makes it concrete |
+| ~~**Local remesh**~~ **shipped** | ~~Absent, and topology-changing sculpting was a declared non-goal.~~ **Decided 2026-08-29 and built: `add-dynamic-topology`, archived 2026-09-02, with `add-voxel-remesher` and `remesh-through-the-document` beside it. The decision the row was waiting for is the one that held — a recovery operation is NOT enough, because the same local split/collapse/flip that repairs a stretch is the whole of Dyntopo minus the policy that drives it, so it was scoped as the sculpting mode rather than as a repair bolted to the fixed-topology layer** | ~~Medium; needs a decision before a proposal~~ ~~P0 of Phase 5~~ **Closed** |
 | **Surface conform / shrinkwrap** | Absent | Low-medium |
 
 ### Misframed, or a decision before an implementation
 
-- **#15, automatic background consolidation.** The engine deliberately never
-  bakes on its own: `clay_layer_field_report` reports the step scale and what
-  costs it, and the host decides. The review wants that automatic, and it is
-  the right instinct — *the sculptor cannot be expected to know what
-  "consolidate" means*. But consolidation is destructive and undoable, so an
-  engine that fires it on a background thread is mutating a document behind a
-  host that may be mid-undo-group or mid-save. **The answer is probably a
-  recommendation the host can act on with one call, not an autonomous action**,
-  and the difference is a design decision worth writing down rather than a
-  feature to build.
+- **#15, automatic background consolidation. SETTLED 2026-09-06, and built as
+  the recommendation rather than the action** — `advise-a-consolidation`,
+  `clay_layer_consolidation_advice` (ABI 0.86.0), `Layer.consolidation_advice`
+  in pyclay.
+
+  **The reasoning this bullet carried is unchanged, and it is why the decision
+  went against the review.** The engine deliberately never bakes on its own: consolidation is destructive, it discards
+  the parameters of everything it absorbs, and an engine firing it on a
+  background thread mutates a document behind a host that may be mid-undo-group
+  or mid-save. An engine deciding on an artist's behalf that a sphere's radius
+  is no longer editable would be making the wrong person pay.
+
+  What was genuinely missing was the other half, and the bullet above named it
+  without naming the cost: `clay_layer_field_report` told a host it *should*
+  bake, and the next call it needs takes a `clay_consolidation_params` whose
+  `cell_size` is required and `> 0`, with that field's own comment saying why
+  nothing will guess it. So the engine was telling a host to bake and then
+  making it invent the one number it has no basis for — a constant compiled into
+  the app, or a slider put in front of the sculptor the review correctly said
+  cannot be expected to know what consolidate means. `clay_layer_consolidation_advice`
+  fills the struct, and the design is worth two lines here because it refutes
+  the obvious implementation twice:
+
+  - **It is not merely a params helper.** `*out_advises` is 1 only when the
+    field report advises at the caller's threshold AND the *projected*
+    `safe_step_scale` reaches it. A sampled volume declares `sqrt(3)` times its
+    samples' Lipschitz, so a consolidated layer's step scale is at best
+    `1/sqrt(3) = 0.577`; a host whose frame budget wants 0.8 is asking for
+    something no bake can deliver, and handing it params would trade a
+    parametric layer for a dense volume and still miss the budget. It is told 0,
+    and NOT ADVISED MEANS ZEROED, so a host that ignores the flag gets
+    `CLAY_ERROR_INVALID_ARGUMENT` from the destructive call rather than a bake
+    at a resolution nobody chose.
+  - **The declared Lipschitz was rejected as the source of the resolution**, and
+    this is the finding worth carrying forward. `clay_field_report.lipschitz`
+    bounds the step a marcher may take; it does NOT bound `|grad f|`. An
+    ellipsoid declares 1 and measures 1.09 near its tips, 3.6 for a needle, and
+    `taper`, `wrap_around` and `bend_curve` exceed their declared factors
+    outright — so a sampling rate derived from it would look principled and be
+    unsound exactly on the shapes that motivate a bake. The cell size comes from
+    the layer's own extent and its finest content instead — four cells across
+    the smallest feature, clamped to `[E/512, E/32]`, measured on a 0.06 dab
+    where the surface moves 27% of the dab's radius at 2 cells, 7.0% at 4 and
+    1.8% at 8 — and the Lipschitz enters the *advice* as `sample_lipschitz`,
+    measured on the samples a real bake produced.
+
+  Still open, deliberately: a REGION-scoped advice. This advises a whole layer,
+  and `clay_layer_consolidate_region` is what a sculptor working one area
+  actually reaches for — the advice has no way to say "at this box".
 
 - **#14, a general Preview → Commit protocol.** Preview exists per operation —
   `move_surface_preview`, `lattice_gizmo_preview`,
@@ -1033,9 +1192,60 @@ work were still pending.
 | `unify-the-undo-history` | Three history mechanisms and no step spanning two. Closed by a `session` module above scene/voxel/mesh, because `check_layering.py` forbids `scene` from seeing the other two. **The finding worth carrying forward:** `voxel::MaskField` was a FOURTH representation — twenty mutating ABI entry points, zero command variants — which the audit that counted three did not count. Masks record now. |
 | `report-mesh-quality` | The validator measured watertightness and manifoldness and threw the numbers away at the ABI. A host could learn a mesh was bad and not why. |
 | `serialize-without-a-file` | Save and load through memory rather than a path. An iPad host holding a document in a `Data` had to write a temporary file to save it. |
-| `survive-a-crash` | Snapshot plus an append-only journal. **The headline was wrong and measurement corrected it:** "a journal is cheaper than re-saving" is false for voxel-heavy edits — the journal is raw 14 B/cell while the document RLE- and palette-compresses. Measured 507 B against 3595 B for three ordinary edits (7.1x cheaper) and 7189 B against 590 B for one big fill (12x WORSE). The rule became "re-snapshot when the journal grows past the snapshot", which is the opposite advice in the case that matters. |
+| `survive-a-crash` | Snapshot plus an append-only journal. **The headline was wrong and measurement corrected it:** "a journal is cheaper than re-saving" is false for voxel-heavy edits — the journal is raw 14 B/cell while the document RLE- and palette-compresses. Measured 507 B against 3595 B for three ordinary edits (7.1x cheaper) and 7189 B against 590 B for one big fill (12x WORSE). The rule became "re-snapshot when the journal grows past the snapshot", which is the opposite advice in the case that matters. **Finished 2026-09-06 with the pairing check and the barrier's missing caller — see below.** |
 | `roll-up-document-memory` | iOS asks what a document costs and every subsystem accounted for itself while **nothing rolled up**. The breakdown is the feature, not the total: under pressure a host needs to know WHICH PART, since that decides what it may release. **It also found a real defect:** `node_bytes` was six members behind the type it walks — it missed the armature binding, three profile arrays, a lattice cage, and both `shared_ptr<FieldVolume>` members, typically the largest thing a node owns by two orders of magnitude. So `add-history-budget` had been measuring LOW, and lowest on exactly the documents where a budget matters. |
 | `add-sculpt-handoff-export` | See the Phase 3 table above. |
+
+#### Pairing a journal with its snapshot — landed 2026-09-06 (ABI 0.86.0)
+
+**The journal carries the snapshot's identity, and a mismatched pair is a typed
+refusal with nothing applied.** What was at stake is that without the check the
+wrong pair does not fail, it *succeeds*: commands name layer ids, two sessions
+of the same shape allocate the same ones, so an `AddNodeCmd` applies happily to
+a document that already holds that work, and voxel events are written by
+absolute cell coordinate onto a grid that never had them. The test measures it —
+replaying onto the wrong snapshot left the SDF layer holding **two nodes where
+the snapshot had one**, silently.
+
+- **Computed over the serialized bytes** (`io::snapshot_identity`), stamped by
+  `io::save_clayspace` / `io::load_clayspace` so a host gets it by writing the
+  ordinary recovery path. Content, not a session token: two snapshots with the
+  same bytes *are* the same snapshot, and a token would refuse a pair that
+  recovers perfectly.
+- **Keyed on the journal INDEX, not "the last thing serialized" — the first
+  design was wrong here.** The documented rule is *re-snapshot when the journal
+  grows past the snapshot*, and a host sizing that comparison by serializing
+  again would have had a journal it already took repointed: refused against the
+  snapshot it kept, and **accepted against the second image, where the events
+  apply twice**. `journal_since(from)` now names the newest snapshot at or
+  before `from`.
+- **An empty segment names no snapshot** — found by an existing pyclay test
+  going red: asking below the trimmed floor turned a documented no-op into
+  "wrong snapshot".
+- **Mismatch returns `CLAY_ERROR_SNAPSHOT_MISMATCH` (= 10, appended)**, distinct
+  from `CLAY_ERROR_INVALID_ARGUMENT` because they mean opposite things to a host
+  (discard the file vs. find the right snapshot), and it is the **only
+  all-or-nothing refusal replay has** — the identity is in the header.
+- **One-directional**: journal format 1 → 2, and version 1 is still read as
+  "names no snapshot". Refusing it would have made the first launch after an
+  upgrade discard exactly the recovery file a crash just left.
+- **Cost, measured**: byte-at-a-time FNV-1a is 1.36 ms on a 1.13 MB snapshot
+  against the 1.52 ms save that produced it — **90% on top of every save**, paid
+  by hosts that never journal. Word-wise: **0.24 ms, 15%**. That is what shipped.
+- **Stated as not-promised in `clay.h`**: it does not catch replaying the same
+  journal twice (the indices do), it is not a checksum, and a never-serialized
+  document names no snapshot.
+
+**It carried code twice, and the second time was a defect this change surfaced
+rather than one it introduced.** Implementing the `c-abi` scenarios found the
+**barrier had lost its last caller**: `record_barrier`'s only caller was the
+mask step, and masks-in-the-history correctly removed it — so no host-reachable
+operation recorded a barrier, and `clay_voxel_drop_level` (the header's and
+`docs/05`'s own example) journaled nothing. A replay across one rebuilt a grid
+that still held the dropped level *plus every edit after it*, with no flag. It
+records one now in both bindings. And rule 1 of the design ("taking the journal
+tells the host") had no entry point at all — `clay_document_journal_barrier` /
+`Document.journal_barrier` were added for it.
 
 **One thing worth generalising from all of it.** Three capabilities in a row —
 surface groups, procedural masks, and the first half of the memory work — were
@@ -1067,8 +1277,8 @@ moves are the ones already shipped.
 | **P1** | SDF sculpt layers (`add-sculpt-layers` 1.9) | Unblocked by scene groups landing. The host confirms it is an ASYMMETRY rather than a blocker: voxel rows carry a stack of passes and hierarchy rows carry one, SDF rows carry none, and those sit next to each other in a layer stack. Worth taking if it is cheap as a weighted group; it is not worth taking ahead of a layer operator |
 | ~~**P1**~~ | ~~Stroke input: azimuth, velocity, timestamp~~ **landed 2026-08-24** | And the row was right that it was cheapest now: `clay_stroke_resolve` takes a FLAT count*5 float array, so widening the packing in place would have changed the stride under every compiled host — a second entry point taking a real struct array instead, with the older call as sugar. pyclay needed neither, because a numpy array carries its own shape. **Azimuth is the one that unlocks a capability rather than refining one**: tilt says how far the stylus leans, azimuth says which way, and without it a rake or chisel brush is not expressible at all |
 | ~~**P1**~~ | ~~`add-field-stamps`~~ **landed 2026-09-05 as `stamp-a-captured-field`** | The review was right that this is a differentiator rather than parity. It was also the row this file called "the highest-value unstarted item" for a week after it shipped, which is the failure mode a roadmap has: three of its four pillars already existed, so the change was an oriented capture frame, an asset identity with a standalone form, a placement helper on `calpha_frame` and stroke integration — Phase 6 row 1, and smaller than the guide describing it |
-| **P2** | Morph targets · generic attributes · instancing · ~~radial symmetry~~ (`add-radial-symmetry`, landed) · conform | Real, none blocking |
-| **Decide, do not build** | auto-consolidation · preview/commit protocol · representation policy · ~~local remesh~~ **decided 2026-08-29, Phase 5** · >256³ voxels | Each needs a written decision before it needs a proposal. Local remesh got one: it is now the second row of Phase 5 rather than a recovery operation bolted to the fixed-topology layer |
+| **P2** | Morph targets · generic attributes · ~~instancing~~ (`instance-a-layer`, landed) · ~~radial symmetry~~ (`add-radial-symmetry`, landed) · conform | Real, none blocking |
+| **Decide, do not build** | ~~auto-consolidation~~ **decided AND built 2026-09-06, as advice** · preview/commit protocol · representation policy · ~~local remesh~~ **decided 2026-08-29, Phase 5** · >256³ voxels | Each needs a written decision before it needs a proposal. Two now have one. Local remesh's made it the second row of Phase 5 rather than a recovery operation bolted to the fixed-topology layer; auto-consolidation's held the engine to never baking unasked and shipped the recommendation instead — `advise-a-consolidation`, `clay_layer_consolidation_advice`. Note which way that decision cuts: the decision was to keep the autonomy OUT, and what the change added was the number a host could not otherwise invent |
 
 The review's closing criterion is worth adopting verbatim, because it is
 testable and nothing here currently tests it end to end:
@@ -1101,7 +1311,8 @@ symmetry, or not theirs.
 |---|---|---|
 | **1** | `fold-the-layers-with-an-operator` | **A subtractive LAYER, not a subtractive item.** Their unit of "a thing an artist grabs and moves" IS the layer — a subtool is a layer — so an item-level cutter does not reach the workflow at all. What they ship instead is an honest RESOLVED boolean: each operand is sampled into a volume, the two are combined into a subtool of their own, and moving an operand afterwards does not update the result. The interface says so rather than implying otherwise, and the operands are kept so it can be re-run. Their own roadmap has said since the subtools work that the same vocabulary upgrades to a live boolean the day this lands, with no interface change |
 | **2** | A `.clayspace` does not carry a multires hierarchy | **Not the transition polygons this file ranked.** They do not export hierarchies, so `refine-one-region-of-a-hierarchy`'s export residual does not bite them. What bites is one level up: a hierarchy row is TWO objects on their side — a mesh layer holding the cage, and a `clay_multires` beside it — and because the engine reports a hierarchy's layer as a MESH layer, with no `LayerRepresentation::Multires`, their side-car file is the only thing in the world that knows a row was ever a hierarchy. Lose the side-car and the sculptor's levels are gone and the row returns as the flat cage it demonstrably is. They made the loss loud in three panels and in a diagnostics report; loud is not fixed. **The ask is either the document carrying the hierarchy, or a `LayerRepresentation` that says what the row is** |
-| **3** | `add-mesh-sculptor` off the interface thread (their #368) | The threading ask they DO have, and it is not the mobile one. `clay_mesh_sculptor_create` cannot be built off the interface thread: it is a weld and an adjacency pass, **160 ms over 296,216 triangles**, and a mesh layer has no other route to its surface because the pick after an activation is answered by `clay_mesh_sculptor_raycast`. Holding a sculptor per mesh took the repeated cost out; the FIRST weld of each mesh has nowhere to go. The call resolves its mesh through a mutable path into the document, and the ABI's only threading contract is the brick cache's. Either that contract extended to this call, or a split between an off-thread adjacency build and a cheap adopt |
+| ~~**3**~~ | ~~`add-mesh-sculptor` off the interface thread (their #368)~~ **premise already false, 2026-09-01** | The threading ask they DO have, and it is not the mobile one. `clay_mesh_sculptor_create` cannot be built off the interface thread: it is a weld and an adjacency pass, **160 ms over 296,216 triangles**, and a mesh layer has no other route to its surface because the pick after an activation is answered by `clay_mesh_sculptor_raycast`. Holding a sculptor per mesh took the repeated cost out; the FIRST weld of each mesh has nowhere to go. The call resolves its mesh through a mutable path into the document, and the ABI's only threading contract is the brick cache's. Either that contract extended to this call, or a split between an off-thread adjacency build and a cheap adopt |
+| **3b** | Reuse a mesh's adjacency across sculptors, keyed on topology revision | What actually remains of #368 once the threading half is struck. Two sculptors over one mesh each build their own adjacency, and a rebuilt layer discards it. A different ticket from the one filed, and a smaller one |
 | **4** | SDF sculpt layers (`add-sculpt-layers` 1.9) | Not blocking, and a visible asymmetry: voxel rows carry a stack of recorded passes and hierarchy rows carry one, SDF rows do not, and in their layer stack those sit next to each other. A user asks why; the answer is "the engine doesn't". Take it if it is cheap as a weighted group |
 | **5** | `add-mobile-thread-scheduling` | **Drop to P1.** They are desktop. QoS classes and sizing a pool from performance cores buy them nothing, and they are not asking for "the host owns the pool" either. The P0 was written for the iPad handoff and should say so |
 | **6** | `add-claycore-bridge`'s normal/AO map bakes | **Do not hold the roadmap for them.** They do no map bakes, bring no UV layout, and are not waiting |
@@ -1161,15 +1372,73 @@ Their fixture is the worst arrangement for that bound and also the ordinary one:
 holds the form, with no group above it. An artist places a cutter on the form
 they are cutting; that is where placing puts it.
 
-**The open question, and it is the next thing to measure:** a moved intersect's
-FIELD changes layer-wide, but its ZERO SET only moves where surface can appear or
-disappear, which for a drag is bounded by the union of the old and new position.
-If that holds, a MOVED intersect could dirty the swept union while a
-topology-changing edit to one keeps the layer-wide bound. Unproven. What would
-kill it is a brick that holds band away from both positions and changes. A
-host-side scaling check is available and decisive from outside the engine: run
-the identical drag against a 10x scene — if the bound is layer-wide the intersect
-frame scales with the layer while the subtract control stays flat.
+**Measured 2026-09-06 on a 10x scene, and the cost is a PRODUCT of two slopes.**
+Same 12-frame drag, same fixture, both scenes holding the SAME 97 items and
+differing only in extent (radius 1.0 against sqrt10 — ~10x surface, ~31.6x
+volume):
+
+| case | refilled bricks/frame | surface bricks | refill ÷ surface | ms/frame | µs/brick |
+|---|---:|---:|---:|---:|---:|
+| reference subtract | 535 | 1,209 | 0.4x | 3.51 | 6.56 |
+| reference intersect | 5,040 | 192 | **26.2x** | 45.50 | 9.03 |
+| 10x subtract | 535 | 10,536 | 0.1x | 11.94 | 22.30 |
+| 10x intersect | 84,672 | 351 | **241.2x** | 7501.42 | 88.59 |
+
+**The intersect walks a BOX, not a band.** It refills 26x the surface bricks of
+the geometry it produces at reference size and 241x at 10x, and the ratio grows
+with radius: the dirty region is the layer's AABB and the refill visits the
+bricks of that VOLUME rather than the bricks that hold band. Brick count grows
+16.8x for a 31.6x volume.
+
+**Per-brick cost also grows, and a 2x2 settled what it is: NOT extent.** The
+first reading — a second, extent-driven slope — was retracted by the host that
+found it, within the hour, because its subtract control had a confound: the
+cutter does not scale while the form does, so the same 6,424 bricks are
+near-surface in one scene and deep interior in the other. The matrix that
+separates the three variables (radius, dab size, cutter placement), intersect
+rows, µs per brick:
+
+| variable | held | varied | result |
+|---|---|---|---|
+| **Extent** | dab 0.18, cutter on the surface | r=1 → r=√10 | 9.95 → **9.15 µs**, 0.92x — FLAT |
+| **Item overlap** | r=√10, cutter on the surface | dab 0.18 → 0.569 | 9.15 → **114.21 µs**, 12.5x |
+| **Brick population** | r=√10, dab 0.18, brick count pinned at 741 | cutter on the surface → buried | 13.01 → **57.79 µs**, 4.4x |
+
+**A larger document does not make a brick cost more.** The whole per-brick story
+is what is IN the brick: how many items overlap it (a fixture whose dabs scale
+√10 against a fixed 0.16 brick edge takes a dab from spanning ~2.2 bricks to
+~7.1) and whether it is a rim brick that culls the document away or an interior
+brick that culls nothing.
+
+**So box-versus-band is the whole story, in two factors rather than one.** On the
+realistic configuration — r=√10, dabs as the fixture builds them, cutter on the
+surface so nothing is confounded — the intersect costs 779x its subtract control:
+136x in brick COUNT and 5.7x in per-brick cost. A tighter region reaches both,
+because the bricks a band walk stops visiting are precisely the expensive ones.
+**And count matters on its own:** with the overlap effect entirely removed, 88,200
+bricks at 9.15 µs is still 806 ms a frame, so a fix that only made bricks cheaper
+would leave a 0.8-second frame.
+
+**`resumed_bricks` is ZERO on every transform-driven refill measured**, with the
+seed store at 1.0 MiB of a 64 MiB budget, so the budget is not what switches the
+fast path off — it was never on. This is CORRECT and by design: a gizmo drag is a
+transform edit, not an append, so `forget_appends()` / `forget_resume()`
+(`bindings/c/clay_c.cpp`, `touch_regions` and its structural and frontier
+siblings) retire every seed each frame. **The resumable path is the STROKE fast
+path; a drag has no seed to resume from and never did.** The drag fast path is
+`clay_layer_placement_begin/_update/_commit`, which is a LAYER gesture — and an
+item dragged inside a layer, which is what this fixture does, has no fast path at
+all today. Worth stating plainly because two separate readings of "the resume
+stopped working" are both wrong.
+
+The open question stays open: a moved intersect's FIELD changes layer-wide, but
+its ZERO SET only moves where surface can appear or disappear, which for a drag
+is bounded by the union of the old and new position. What would kill it is a
+brick that holds band away from both positions and changes.
+
+Filed as **#471** (this) and **#472** (`clay_document_mesh_layer_revision`, the
+revision that does not move when history replaces a layer's triangles —
+re-verified on v0.84.0 before filing).
 
 **This belongs to `fold-the-layers-with-an-operator` as well as to #451**, and it
 is where that change's measurement should be taken. A layer fold that is not a
@@ -1199,6 +1468,50 @@ poses per item.
   vertices is the host's, or a subtool is drawn in one place and sculpted in
   another.
 
+### A C-ABI host cannot choose the format minor it writes
+
+`clay_document_save` takes a path and `clay_document_save_memory` takes a blob.
+Neither takes a version, and no other save path does either: the minor is a
+parameter on the C++ `scene::serialize_document` and does not cross the ABI.
+**Three releases of upgrade notes have told hosts to "write at the older minor if
+you exchange documents with an older build", and no C-ABI host has ever been able
+to take that advice** — the host records it beside its own `FORMAT` constant for
+15, 16 and 17.
+
+It cost nothing while every downgrade lost only what no artist authored; 16 → 17
+loses payload deduplication and nothing else. **Minor 18 is where it stops being
+free**, because a subtractive layer written at 17 comes back as a union — a
+cutter returning as a lump welded to the form, in a file that opens cleanly. So a
+host that wants an interchange copy cannot offer one, and a host that wants to
+REFUSE that downgrade has nothing to refuse, because it could never ask.
+
+`fold-the-layers-with-an-operator` settles the half that is its own (design.md
+§7): writing below 18 refuses a document carrying any non-default composition
+rather than degrading it, stays byte-identical for documents where every layer
+unions, and ships a query so a host can ask before it saves. **The selector is
+the gap that remains** — a save-at-minor entry point, with the blob variant, the
+autosave and journal paths, and the other lossy minors in scope. Its own change,
+and the host named the reason it has to be: **an autosave writes a whole document
+on a timer and a crash journal writes one on the way down, and neither would want
+a different answer from the interactive save.** A change about interchange sees
+all three paths; one bolted to a boolean operator would be shaped by whichever
+document raised it.
+
+**And it carries a coupling it must not miss.** `serialize_document` expresses
+its refusal as an EMPTY VECTOR. `clay_document_save` reaches it through
+`io::save_clayspace`, which calls `serialize_document` with the default minor —
+always the current one — so **the refusal is unreachable across the C ABI today,
+for exactly the reason above: a host cannot choose the minor.** The two gaps
+cancel.
+
+The day the selector lands they stop cancelling. A host calls it with 17, the
+refusal returns emptiness, and unless the entry point translates emptiness into a
+RESULT CODE the caller gets `CLAY_OK` and a file that is not its document — every
+layer of the host behaving correctly, the sculptor told the save succeeded. **A
+refusal expressed as emptiness cannot survive a result-code boundary, because
+emptiness is not a result code.** So the selector owes a distinct code for "this
+document cannot be written at that minor", in the same commit as the selector.
+
 ### Where a host cannot draw a progress bar or cancel
 
 `add-operation-cancellation` shipped the token and the poll, and twelve of their
@@ -1215,6 +1528,379 @@ worth a contract:
 - **Undo: 87 ms alone, 203 ms after a released solo** on a three-subtool
   document, and every millisecond of the difference is a hop paying a whole-layer
   refill.
+
+### A fat swept-curve stroke meshes with pinholes
+
+Reported 2026-09-06 by ClaySpaceDesktop, found by accident while fixing an
+unrelated brush, and **it reproduces through `clay_document_mesh` on the same
+document** — three independent paths (their incremental patching, their full
+rebuild, and our own mesher) count the same holes, which is what says it is ours.
+
+Six snake-hook tendrils on a sphere, background pixels enclosed by surface, with
+the gesture, the brush, the path, the `PointType::Spline` and the stroke blend k
+all fixed and only the tendril's RADIUS PROFILE varying:
+
+| taper span | tip radius | pinholes |
+|---:|---:|---:|
+| 100 (no taper, uniformly fat) | 0.120 | 3 |
+| 8 | 0.066 | 2 |
+| 5 | 0.050 | 0 |
+| 3 | 0.050 | 0 |
+
+Monotonic in thickness, and the fat cases are 3.3 to 6 voxels across on a 0.02
+grid — **the opposite end from a thin-feature-below-the-grid problem.** Two
+pixels in one place at 1280x800, so a small artifact rather than a broken
+surface.
+
+**One hypothesis ruled out already, and it was the first place today would have
+looked:** it is not the cull pad. `clay_document_mesh` meshes `doc->tape()`, the
+whole-document tape, with no cull region — so no per-brick culling is involved
+and the shortfall class this change spent the day on cannot be it. That leaves
+the swept-curve field itself or the mesher's crossing detection, most plausibly
+where a fat sweep's consecutive segment spheres overlap heavily under a smooth
+blend.
+
+**Latent for a long time, and hidden by a bug on the host's side:** their old
+taper made every tendril thinner than the failing range by accident, so fixing
+that defect uncovered this one. They have tuned their taper span to 5 to stay
+inside the range that meshes cleanly and written the measurement into the
+constant's doc comment, so the next person knows it was chosen against an
+artifact rather than by eye. **That is tuning around an engine bug and they say
+so**; the fix belongs here.
+
+**STANDING, and the repro now exists and has been run HERE: the mesh has no
+holes in it.** `/tmp/claycore-swept-curve-pinhole.clayspace`, 4154 bytes,
+container minor 17, six fat tendrils on the starting sphere — produced through
+the host's real brush at a taper span of 100, saved, and re-opened on a build
+carrying none of that brush code, which is the check that makes it a document
+rather than a process.
+
+Loaded through pyclay on this tree and meshed at the resolution the host used,
+and at two more:
+
+| resolution | V | F | Euler | watertight | 2-manifold | slivers (area < 1e-9) |
+|---:|---:|---:|---:|:---:|:---:|---:|
+| 96 | 75,640 | 151,276 | **2** | yes | yes | 150 |
+| 128 | 134,716 | 269,428 | **2** | yes | yes | 343 |
+| 192 | 303,562 | 607,120 | **2** | yes | yes | 1,342 |
+
+**Euler characteristic 2 is a topological sphere.** No tunnel, no handle, no
+boundary — a pinhole you can see through would drop it by two and does not. The
+mesh is watertight and 2-manifold at every resolution tried, so **whatever the
+host counts as background pixels enclosed by surface, it is not a hole in the
+surface this engine produces.**
+
+What that leaves, in the order I would look: geometry thin enough to fall
+between samples in a rasteriser (the sliver count grows with resolution, and
+`min_area` is 7.6e-12 at 96 and 1.3e-13 at 192 — triangles far below a pixel),
+the host's own render path, or its pixel-counting heuristic. **The cull pad was
+already excluded** — `clay_document_mesh` takes the whole-document tape with no
+cull region.
+
+The finding that survives regardless is the one the host drew before the file
+existed: **two documents holding the same items are not the same document.** A
+hand-built reconstruction with identical items, spline type and blend produces
+zero of whatever this produces, so something in how the host's document type
+configures a document is the variable — and it is now diffable, because the
+file is here and a hand-built equivalent is a few lines.
+
+### The sculptor stall was fixable for five days before anyone read the header
+
+Recorded because the failure is not the engine's and not the host's, and it will
+happen again: `clay_mesh_sculptor_create` has been documented as safe off the
+interface thread since **2026-09-01** (`50a19379`), on the same footing
+`clay_brick_cache_eval_requests` documents, and the block says so in the
+imperative — *"SO ARM A SCULPTOR OFF THE INTERFACE THREAD"* — with the cost
+split out: ~116 ms adjacency and ~89 ms tree at 296k triangles.
+
+The consuming host filed a P1 against us for that 205 ms stall, ranked it third
+of seven, and an external design guide wrote a whole section proposing a
+prepare/adopt API to solve it. **Both were describing a state of the world that
+had ended five days earlier.** The host has since grepped its own vendored copy
+and found the block present in its v0.78.0 pin as well as v0.84.0 — so it was
+fixable on the older engine too.
+
+**And the half that would have been missed anyway:** the tree is built LAZILY,
+on first use, so a host that moves only `create` to a worker still pays the ~89
+ms on whichever thread reaches `clay_mesh_sculptor_raycast` first — for that host
+the interface thread, on the pick right after activation, which is where the
+freeze already was. Moving `create` alone shifts 116 ms and leaves 89 in the same
+place: a half-fix that reads as a regression later because nobody remembers it
+was 205. `clay_mesh_sculptor_refresh` on the worker is the other half and the
+block says that too.
+
+**The lesson is about where a capability is announced.** This one was announced
+in the header, which is the documentation a host integrator reliably reads — and
+the host reads it when integrating, not when a ticket it filed months earlier
+comes up. A capability that removes a host's known pain is worth telling that
+host about directly; a header is where it is FOUND, not where it is DELIVERED.
+
+### A mesh call carries ~0.65 ms of fixed cost, which dominates a small dab
+
+Measured by ClaySpaceDesktop on 2026-09-06, six dab sizes on one warm document,
+same tool and same caches, varying only the dirty set:
+
+| bricks | sync ms | µs/brick |
+|---:|---:|---:|
+| 8 | 0.951 | 118.9 |
+| 8 | 0.958 | 119.8 |
+| 8 | 0.977 | 122.2 |
+| 8 | 1.070 | 133.8 |
+| 18 | 1.551 | 86.2 |
+| 64 | 3.086 | 48.2 |
+
+Fitted: **≈0.65 ms fixed plus ≈38 µs per brick.** At eight dirty bricks — an
+ordinary small dab — **68% of the call is the fixed part.** It vanishes into the
+noise on a large edit and dominates a small one, which is the shape that makes it
+worth a row: the cost is invisible in exactly the measurements a benchmark tends
+to take.
+
+Six points rather than two, deliberately: their first estimate came from two
+measurements and gave 2.3 ms, and the curve says 0.65. **A slope inferred from
+two points was wrong twice in one day on this exchange.**
+
+**Not yet attributed, and the host cannot see which it is.** Candidates on this
+side, in the order they would be cheap to exclude: a per-call plan or cull build
+that walks the item list regardless of dirty set; mesher setup that allocates per
+call rather than per brick; a device submission or readback with a fixed cost;
+and tape work that a warm revision should have made free but has not.
+
+**The measurement that splits them is the host's and it is cheap:** hold the dab
+at eight bricks and vary the DOCUMENT size. If the fixed part grows with item
+count it is a per-call walk — plan, cull or tape. If it is flat, it is setup —
+allocation, submission, readback. That is one axis and it decides which half of
+this engine to open.
+
+### What the same measurements CONFIRMED, which is worth as much
+
+Two hypotheses the host went in expecting and the engine disproved, both measured:
+
+- **The per-brick tape does cull a far mirror image.** A brick beside the
+  original costs 1.05 µs with one tube, 1.10 with a second tube far away, and
+  1.17 with a layer mirror — so a mirrored instance is not evaluated everywhere.
+  The culling does what it claims.
+- **The remaining cost of a mirrored stroke is therefore just twice the
+  geometry** — 2x the keys, 1.7x the meshing time. Honest work rather than a
+  defect, after a while spent looking for a villain that was not there.
+
+Recorded because a negative result about our own culling, measured from outside,
+is evidence nothing in this repository can produce for itself.
+
+### Refusals a host cannot render — a standing rule, and three instances
+
+**A refusal that knows an id should return it, and a host should never have to
+walk state to render a refusal.** Where it does, either the refusal is missing a
+field or the host is guessing, and those are indistinguishable until someone is
+wrong in front of an artist. Two calls in
+`fold-the-layers-with-an-operator` hand back what blocks them — the composition
+setter names what it refused, and `clay_document_writable_at_minor` returns the
+blocking layer. A third was specified (`clay_brick_cache_eval_requests_below`,
+returning the lowest visible SDF layer above the named one) and **an earlier
+version of this paragraph claimed it had landed when it did not exist at all**,
+which is the rule's own failure mode: a sentence in a roadmap is checked when
+somebody leans on it, and the reviewer who leaned on it is the reason this
+sentence is now accurate.
+
+Swept with the host on 2026-09-06, in descending order of how much the engine
+already knows and does not say:
+
+1. **The brick cache's refusal on a dirty region does not say WHY.** A host
+   refilling the union of a layer transform's old and new bounds gets a generic
+   error: it cannot branch on the cause, cannot name the limit or the region, and
+   cannot offer the artist either of the two controls that would resolve it (the
+   scale, or the cell size). The engine knew the region it refused, the budget it
+   measured against, and whether the limit was memory, brick count or extent.
+   **Severity corrected 2026-09-06 by the host that raised it**, which is worth
+   recording because the correction went against its own case: an earlier version
+   of this row said a host was telling an artist something false. It is not —
+   their `ModelError::Engine` carries the engine's own `clay_last_error` string
+   and displays it unchanged, so a person sees OUR words, accurate if terse, and
+   the mistaken inference lived only in one of their code comments. **So this is
+   a vagueness problem, not a wrongness one, and it is ordered accordingly.**
+   `voxel_remesh_result_code` remains the shape to copy — eight typed statuses
+   mapped to distinct codes, with a comment saying one generic failure would make
+   a host guess between them — because a status a host can BRANCH on beats a
+   string it can only display, and "N cells against a budget of M" is a better
+   sentence than prose either side writes.
+2. **The boolean budget is computed twice.** The host predicts a sampled
+   boolean's cost itself, reads `clay_brick_cache_stats.memory_budget`, takes the
+   tighter of that and its own ceiling, and refuses BEFORE calling the engine so
+   the artist gets a number rather than a wait. That is preemption rather than
+   inference and it is the right shape — but it is the engine's arithmetic
+   restated, and if the two ever disagree the artist meets a refusal nobody
+   predicted or waits for one that was preventable. A "would this fit" query in
+   the shape of `clay_document_writable_at_minor` collapses it to one source of
+   truth. Low priority, recorded for the class.
+3. **The sibling rule: a call that cannot fail on an ambiguity should take an id
+   rather than a name.** `clay_document_voxel_layer` takes a string, so two
+   layers sharing a name shadow each other's grid and a stroke lands on the wrong
+   one — no refusal to explain, because the call succeeds and does the wrong
+   thing. The host prevents the condition on every path that can create a layer.
+
+4. **A call that computed a region does not hand it back.**
+   `clay_layer_set_stroke_points` knows which part of the field it changed and
+   returns nothing, so a host that wants to dirty only that region computes it
+   again. The same family as the rule above — a call that knows a thing should
+   return it — and recorded here rather than as a row because **the one host
+   that met it says it does not need it**: its own fix dirties an explicit region
+   through `clay_brick_cache_mark_dirty`, which has shipped as long as the cache
+   has. Worth building only if a second host asks.
+
+Deliberately NOT on this list: tool availability. The host keeps
+`tool.availability(layer_state)` domain-side on purpose — the refusal belongs to
+its vocabulary, and repeating it in the engine would let the two disagree. A rule
+about refusals is not a claim that every refusal belongs to the engine.
+
+### The device baseline declares one instrument for entries taken with several
+
+`tests/device/baseline.json` carries a single file-level `abiVersion` — `0.56.0`
+today — over 74 budget entries, none of which carries its own. The tree is at
+0.86.0, and `add-device-transform-cases` already records that five of those
+entries were measured at ABI 0.60.0 beside the rest. **So the file states one
+provenance for figures that do not share one, and nothing can see it**: a
+per-entry ABI is not a field, so no reader can announce the mismatch and no gate
+can refuse on it.
+
+`release_check.py` does refuse at the release path — it diffs the recorded
+`claycoreCommit` against HEAD and fails the `device` row when the engine has
+moved — which is the "refuse to compare" resolution and correct where it sits.
+What it does not do, and cannot, is say anything about a baseline whose own
+entries were taken with different instruments.
+
+**A third resolution exists and is cheaper than the one this repository planned.**
+The consuming host's Linux bench baseline declares its engine version AND
+revision and prints, above every comparison table: *the baseline was recorded
+against engine X and this run is engine Y; every change below is that difference
+plus whatever else moved.* It deliberately does not refuse, on the argument that
+a comparison across two pins is the whole point of an upgrade measurement and
+refusing leaves the question the gate is best placed to answer with no
+instrument. Their macOS baseline takes the refuse route instead, and carries a
+`note` saying why.
+
+So the class has three resolutions rather than two: **eliminate the mixture**
+(re-run everything, which is what this repository's open task proposes),
+**refuse to compare**, or **declare the instrument per entry and announce the
+mismatch at read time.** The third is the only one that survives the next pin
+move — re-running makes a file correct until someone splices again, declaring
+makes it correct about what it is permanently. If `baseline.json`'s entries
+carried the ABI they were taken at, the gate could print that sentence and the
+re-run would not be owed.
+
+**Do the per-entry field FIRST, and do not let the red row argue for it.** The
+`device` row is failing on this repository's working branch right now, and
+adopting "announce" would make it green — which is a bad reason to adopt a design
+even when the design is right. The test before touching that row: **would you
+still make this change if the row were passing?** If the red is doing the
+arguing, it is suppression wearing a rationale.
+
+The distinction that keeps both mechanisms is that they answer different
+questions, and the `device` row is currently answering the wrong one.
+`claycoreCommit` against HEAD is not "are these figures comparable", it is "was
+this file recorded against this engine" — and the answer is no, and will be no
+after every pin move, forever. That is a condition permanent by construction
+rather than a gate catching something. Meanwhile the real comparability question
+— do these 74 entries agree with EACH OTHER — has no field to be red about.
+
+So the ordering is: **add the per-entry `abiVersion`, which creates the thing
+that can disagree; then decide what the row should do with a disagreement.** In
+the other order a red is removed and nothing that could ever be red again is
+added. That second decision belongs to whoever owns the gate, not to a branch
+that would benefit from it.
+
+**The honest limit, stated by the host about its own design:** an announcement is
+QUALITATIVE. A reader is told "plus whatever else moved" and not how much, so it
+cannot say whether four pins of drift have eaten the tolerance a real regression
+needs. They have that number for one hop of four (median ratio 0.9998x, 171 of
+178 figures inside their own run-to-run spread) and none for the others. The
+comparison is honest; it is not yet sensitive, and those are different
+properties.
+
+### Agreement across N paths rules out only what differs between them
+
+The reasoning error that produced the pinhole report, named by the host that
+made it, and worth keeping because it reads as rigour: `visual_holes` counted
+holes three ways — an incrementally patched mesh, a full rebuild, and
+`clay_document_mesh` — and its comment said *"if both show them, they are the
+engine's"*. Three pictures. **One rasteriser.**
+
+Agreement across the three ruled out the per-key store and everything else that
+differed between them, and said nothing whatsoever about what they shared. The
+shared component was the one at fault: a watertight, genus-zero surface with
+triangles orders of magnitude below a pixel renders with specks of background
+through it, and every path rendered it the same way.
+
+**The check is one question: what do these paths have IN COMMON, and is it in the
+set I think I have excluded?** Redundancy across paths that share a stage is not
+redundancy over that stage — it is the same measurement taken three times. This
+is the same shape as an assertion whose expected value comes from the system
+under test (`fold-the-layers-with-an-operator` §13e), one level up: there the two
+sides of a comparison share an origin, here the three arms of a corroboration do.
+
+### Three ways a gate is real and unenforced
+
+Found within one day, 2026-09-06, none of them by a gate failing — all three by
+someone asking WHICH RUNNER SEES WHAT. Worth keeping as a checklist, because the
+common defence ("we have a gate for that") is true in every one of these cases.
+
+1. **A gate no change triggers.** `examples/run_all.py`'s capability-coverage
+   check asks whether every living capability has an example or a recorded
+   reason. Archiving two changes created two capabilities and nobody adds an
+   example for a documentation commit, so it was red on main for a day. The
+   check was executable, correct, and unread.
+2. **A gate the wrong version runs.** CI pinned `@fission-ai/openspec@1.8.0`
+   while a developer's local CLI was newer, so the STRICTER tool was the one
+   nobody's CI ran — four capabilities kept the placeholder `## Purpose` that
+   `openspec archive` writes, `release_check.py` went red locally, and CI stayed
+   green. Pin bumped to 1.12.0. The consuming host had the same class inverted:
+   its CI installs `@latest`, so its enforcing version FLOATS and a green tree
+   can go red without anyone touching it.
+3. **A gate that is compiled but never run.** The host's `agent_end_to_end` is
+   built and linted by CI and never executed, under a comment saying "it is
+   still compiled and linted here, so it cannot rot unnoticed". It had rotted.
+   The worst of the three, because the comment converts an unknown into a false
+   known.
+
+4. **An instrument that reports a constant.** Not a gate, but the same
+   blindness one layer down, and worth the entry because the two are usually
+   built by the same person on the same day: the consuming host's snake-hook
+   returns `dirty_bricks: 1`, hard-coded, so the per-phase profiling it shipped
+   to find exactly this class of problem records a brush touching 880 bricks as
+   touching one. **The profile built to find the cost reported it as free.**
+   Same shape as an assertion whose expected value comes from the system under
+   test, one level up: a number that cannot vary is not measuring.
+
+The unifying question is not "is there a gate" but **"what would have to happen
+for this gate to fail, and does that ever happen here?"**
+
+### A format bump is detected downstream without us saying so
+
+Worth knowing before the next minor moves: ClaySpaceDesktop's own test suite
+parses `kClaySpaceMinor` out of `include/clay/io/clayspace.h` and `kSceneMinor`
+out of `include/clay/scene/commands.h` **in its vendored copy of this tree** and
+asserts both against its own format constant. So a pin move that carries a new
+minor fails their build with "the pin moved and the constant did not", before
+anyone reads a release note. It also asserts the two minors against each other,
+which is this repository's own static assertion that the container and the scene
+payload travel together — checked from outside, where a change to one of them
+cannot also change the check.
+
+That is the good case of the rule in `fold-the-layers-with-an-operator`'s §13e:
+the expected value comes from somewhere the code under test cannot reach. Their
+writer and their constant are both theirs; the vendored header is ours.
+
+The practical consequence for a release: **a minor bump does not need to be
+announced to be noticed, but it does need to be announced to be UNDERSTOOD.**
+Their gate says the number moved; only the notes say what moved with it.
+
+**And the example this paragraph first used was wrong, which is worth keeping.**
+It said a subtracting layer written at the older minor comes back as a union.
+That is the DEGRADE this repository rejected: `serialize_document` refuses below
+minor 18 for a document carrying any non-default composition
+(`src/scene/commands.cpp`, `layer_blocking_minor`), so the silent-different-
+sculpture case cannot occur. The sentence described the design that was
+considered and dropped, four sections after the section that dropped it. A
+rejected design is exactly the kind of claim that survives in prose: it was true
+when written, nothing re-runs it, and it reads as a fact about the format.
 
 ### The practice that catches an inert feature
 

@@ -640,23 +640,38 @@ const std::string& History::next_barrier() const {
 //
 // Layout, little-endian:
 //
-//   u32 magic 'CJRN'   u16 version   u16 reserved   u32 event_count
+//   u32 magic 'CJRN'   u16 version   u16 reserved
+//   u64 snapshot_id                                  (version 2 and later)
+//   u32 event_count
 //   per event:  u8 kind   u8 step_kind   u32 layer   u32 payload_bytes   payload
 //
 // Versioned so a build that does not understand a journal REFUSES it. A
 // recovery that silently drops what it could not read is the failure this
 // whole feature exists to prevent, and it is worse than no recovery because
 // the user cannot see what is missing.
+//
+// VERSION 2 ADDED THE SNAPSHOT IDENTITY (survive-a-crash 2.1) and version 1 is
+// STILL READ, as a journal that names no snapshot. Refusing it would have made
+// an upgrade lose exactly the recovery file the feature exists to keep: a
+// crash under the older build followed by a launch of the newer one. The other
+// direction is unchanged and is the safe one — an older build meeting a
+// version 2 journal refuses it rather than reading the id as an event count.
 namespace {
 
 constexpr std::uint32_t kJournalMagic = 0x4E524A43u;  // 'CJRN'
-constexpr std::uint16_t kJournalVersion = 1;
+constexpr std::uint16_t kJournalVersion = 2;
+constexpr std::uint16_t kJournalVersionOldest = 1;
 
 void put_u32(std::vector<std::uint8_t>& out, std::uint32_t v) {
     out.push_back(static_cast<std::uint8_t>(v));
     out.push_back(static_cast<std::uint8_t>(v >> 8));
     out.push_back(static_cast<std::uint8_t>(v >> 16));
     out.push_back(static_cast<std::uint8_t>(v >> 24));
+}
+
+void put_u64(std::vector<std::uint8_t>& out, std::uint64_t v) {
+    put_u32(out, static_cast<std::uint32_t>(v));
+    put_u32(out, static_cast<std::uint32_t>(v >> 32));
 }
 
 void put_bytes(std::vector<std::uint8_t>& out, const std::vector<std::uint8_t>& b) {
@@ -682,6 +697,11 @@ struct Reader {
                                 (static_cast<std::uint32_t>(data[at + 3]) << 24);
         at += 4;
         return v;
+    }
+    std::uint64_t u64() {
+        const std::uint64_t lo = u32();
+        const std::uint64_t hi = u32();
+        return lo | (hi << 32);
     }
     const std::uint8_t* block(std::uint32_t n) {
         if (at + n > size) { ok = false; return nullptr; }
@@ -758,9 +778,29 @@ bool decode_cells(const std::uint8_t* data, std::size_t size,
 
 }  // namespace
 
-std::vector<std::uint8_t> History::journal_since(std::size_t from, std::size_t* out_now_at) const {
+void History::note_snapshot(std::uint64_t id) {
+    if (id == 0) return;  // a document that has never been serialized
+    snapshots_[journal_next()] = id;
+}
+
+std::uint64_t History::snapshot_for(std::size_t from) const {
+    // The newest snapshot taken AT OR BEFORE `from`: a journal segment
+    // starting at 7 with snapshots at 5 and 9 continues from the one at 5,
+    // through whatever segments the host wrote in between.
+    auto it = snapshots_.upper_bound(from);
+    if (it == snapshots_.begin()) return 0;
+    return std::prev(it)->second;
+}
+
+std::vector<std::uint8_t> History::journal_since(std::size_t from,
+                                                 std::size_t* out_now_at) const {
     const std::size_t next = journal_next();
     if (out_now_at) *out_now_at = next;
+
+    // Below the base is a host asking for events that were trimmed. Answering
+    // with what remains would silently hand back a shorter history than was
+    // asked for, so it yields nothing and the caller sees journal_first() moved.
+    const bool empty = from < journal_base_ || from >= next;
 
     std::vector<std::uint8_t> out;
     put_u32(out, kJournalMagic);
@@ -768,11 +808,19 @@ std::vector<std::uint8_t> History::journal_since(std::size_t from, std::size_t* 
     out.push_back(static_cast<std::uint8_t>(kJournalVersion >> 8));
     out.push_back(0);
     out.push_back(0);
+    // WHICH SNAPSHOT THIS CONTINUES FROM. Zero when nothing was serialized at
+    // or before `from`, which is a segment with no snapshot to be paired with
+    // and so nothing to check.
+    //
+    // AN EMPTY SEGMENT NAMES NO SNAPSHOT EITHER, and that is a decision rather
+    // than a shortcut. A host that asks below the trimmed floor gets one, and
+    // an empty journal cannot misapply anything to any document — so refusing
+    // it protects nothing and answers "you asked below the floor" with "wrong
+    // snapshot", which is the wrong diagnosis of a situation the ABI already
+    // documents an answer for.
+    put_u64(out, empty ? 0 : snapshot_for(from));
 
-    // Below the base is a host asking for events that were trimmed. Answering
-    // with what remains would silently hand back a shorter history than was
-    // asked for, so it yields nothing and the caller sees journal_first() moved.
-    if (from < journal_base_ || from >= next) {
+    if (empty) {
         put_u32(out, 0);
         return out;
     }
@@ -831,11 +879,27 @@ std::vector<std::uint8_t> History::journal_since(std::size_t from, std::size_t* 
     return out;
 }
 
+bool History::journal_barrier_after(std::size_t from, std::size_t* out_at) const {
+    const std::size_t begin = from <= journal_base_ ? 0 : from - journal_base_;
+    for (std::size_t i = begin; i < journal_.size(); ++i) {
+        if (journal_[i].kind != JournalEvent::Kind::Barrier) continue;
+        if (out_at) *out_at = journal_base_ + i;
+        return true;
+    }
+    return false;
+}
+
 void History::trim_journal(std::size_t upto) {
     if (upto <= journal_base_) return;
     const std::size_t drop = std::min(upto - journal_base_, journal_.size());
     journal_.erase(journal_.begin(), journal_.begin() + static_cast<std::ptrdiff_t>(drop));
     journal_base_ += drop;
+    // Keep the newest snapshot at or below the new floor — a lookup at the
+    // floor still needs it — and drop the ones older than that, which nothing
+    // can ask for any more. Without this the table would be the one part of a
+    // trimmed journal that still grew for the life of the session.
+    auto it = snapshots_.upper_bound(journal_base_);
+    if (it != snapshots_.begin()) snapshots_.erase(snapshots_.begin(), std::prev(it));
 }
 
 bool History::replay(const std::uint8_t* data, std::size_t size, scene::Document& doc,
@@ -852,7 +916,27 @@ bool History::replay(const std::uint8_t* data, std::size_t size, scene::Document
     r.u8();
     // Refused rather than partially interpreted. A recovery that silently drops
     // what it could not read is worse than none: the user cannot see the gap.
-    if (!r.ok || version != kJournalVersion) return false;
+    if (!r.ok || version < kJournalVersionOldest || version > kJournalVersion) return false;
+    // A version 1 journal carries no identity and names no snapshot.
+    const std::uint64_t stamped = version >= 2 ? r.u64() : 0;
+    if (!r.ok) return false;
+    result.journal_snapshot_id = stamped;
+    // THE PAIR, CHECKED BEFORE ANYTHING IS APPLIED. A journal that names a
+    // snapshot this document is not would replay cleanly and hand back a
+    // document that matches neither the snapshot nor the session — an edit
+    // list that duplicates what the snapshot already holds, voxel cells
+    // written by absolute coordinate onto a grid that never had them. One
+    // comparison turns that into a refusal, and it is the only refusal here
+    // that leaves the document untouched.
+    //
+    // ONE-DIRECTIONAL on purpose: a journal that names NO snapshot is not
+    // refused, because a build older than this one wrote none, and refusing
+    // those would turn an upgrade into the data loss this feature prevents.
+    if (stamped != 0 && stamped != doc.snapshot_id) {
+        result.snapshot_mismatch = true;
+        if (out) *out = result;
+        return false;
+    }
     const std::uint32_t count = r.u32();
     if (!r.ok) return false;
 
@@ -1168,6 +1252,12 @@ History::Bytes History::bytes() const {
     for (const Step& s : steps_) out.undo += step_bytes(s);
     for (const Step& s : redo_) out.redo += step_bytes(s);
     for (const JournalEvent& e : journal_) out.journal += event_bytes(e);
+    // The snapshot table is part of the journal's machinery, so it is counted
+    // where the journal is rather than being the one part of the history that
+    // grows unreported. It is small by construction — one entry per
+    // serialization, pruned on trim — and counted anyway, because the omission
+    // roll-up-document-memory found six of started the same way.
+    out.journal += snapshots_.size() * (sizeof(std::size_t) + sizeof(std::uint64_t));
     // The command stack under the Scene steps, which the steps themselves do
     // not carry — and which is where a session of DELETES hides its cost.
     out.undo += commands_.undo_bytes();
@@ -1226,6 +1316,7 @@ void History::clear() {
     redo_.clear();
     journal_.clear();
     journal_base_ = 0;
+    snapshots_.clear();
     dropped_steps_ = 0;
     open_cells_.clear();
     voxel_open_ = false;

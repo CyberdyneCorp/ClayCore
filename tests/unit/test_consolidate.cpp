@@ -1441,3 +1441,261 @@ TEST_CASE("region merge: a protected layer is refused before it is sampled") {
                                           params_at(0.02f, 0.08f)));
     CHECK(root_count(doc) == 3);
 }
+
+// -- the advice a host can act on (advise-a-consolidation) -------------------
+//
+// `advises_consolidation` said "bake this" and stopped. The next call takes a
+// `ConsolidationParams` whose `cell_size` is required and > 0, so a host
+// holding the flag still had to invent the one number nothing would give it.
+// These hold the derivation to what it claims and the verdict to the
+// projection it is keyed on.
+
+namespace {
+
+// The 20-item chain the #387 cases use: degraded by BOTH mechanisms, so the
+// bake really is the cure and the advice really should fire.
+scene::Document absorbable_chain() {
+    scene::Document doc;
+    scene::Layer& layer = doc.add_sdf_layer("l");
+    for (int i = 0; i < 20; ++i) {
+        scene::Node n;
+        n.prim = scene::Prim::sphere(0.4f);
+        n.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.2f};
+        n.xform.position = cf3(0.25f * static_cast<float>(i) - 2.5f, 0, 0);
+        layer.sdf->insert(n);
+    }
+    layer.sdf->find_mut(layer.sdf->roots.front())
+        ->deformers.push_back(scene::Deformer::grab(cf3(0, 0.4f, 0), 0.5f, cf3(0, 0.9f, 0)));
+    return doc;
+}
+
+}  // namespace
+
+TEST_CASE("the advised params lift the layer out of the state that reported it") {
+    // THE PROPERTY. Everything else here is a detail of how the number is
+    // reached; this is the claim the call exists to make true.
+    scene::Document doc = absorbable_chain();
+    const float threshold = 0.5f;
+    const scene::FieldReport before = scene::report_layer(doc.layers.front(), threshold);
+    REQUIRE(before.advises_consolidation);
+    REQUIRE(before.safe_step_scale < threshold);
+
+    const scene::ConsolidationAdvice advice =
+        scene::consolidation_advice(doc.layers.front(), threshold);
+    REQUIRE(advice.advises);
+    REQUIRE(advice.params.cell_size > 0.0f);
+    CHECK(advice.params.band == doctest::Approx(3.0f * advice.params.cell_size));
+    CHECK(advice.params.padding == doctest::Approx(advice.params.band));
+    CHECK_FALSE(advice.params.skip_redistance);  // redistancing IS the cure
+    CHECK(advice.cost.brick_count > 0);
+    CHECK(advice.cost.bytes > 0);
+
+    REQUIRE(scene::consolidate_layer(doc, doc.layers.front().id, advice.params));
+    const scene::FieldReport after = scene::report_layer(doc.layers.front(), threshold);
+    CHECK_FALSE(after.advises_consolidation);
+    CHECK(after.degradation == scene::Degradation::None);
+    CHECK(after.safe_step_scale >= threshold);
+    // ...and the projection was not an approximation of it. Measured equal to
+    // the last bit on this fixture, on a MIRRORED one and on a NON-UNIFORMLY
+    // SCALED one (the two cases below), which is what lets the verdict be keyed
+    // on a number the host will re-check with a report of its own.
+    CHECK(after.safe_step_scale == doctest::Approx(advice.cost.safe_step_scale));
+}
+
+TEST_CASE("the projection equals what the layer reports after the bake — mirrored") {
+    scene::Document doc = absorbable_chain();
+    scene::Layer& layer = doc.layers.front();
+    layer.mirror_axes = 1;
+    layer.xform.position = cf3(0.7f, 0, 0);
+    for (scene::NodeId id : layer.sdf->roots) layer.sdf->find_mut(id)->mirror = true;
+
+    const float threshold = 0.5f;
+    const scene::ConsolidationAdvice advice = scene::consolidation_advice(layer, threshold);
+    REQUIRE(advice.advises);
+    REQUIRE(scene::consolidate_layer(doc, doc.layers.front().id, advice.params));
+    const scene::FieldReport after = scene::report_layer(doc.layers.front(), threshold);
+    CHECK(after.safe_step_scale == doctest::Approx(advice.cost.safe_step_scale));
+    CHECK(after.safe_step_scale >= threshold);
+}
+
+TEST_CASE("the projection equals what the layer reports after the bake — non-uniform scale") {
+    // The case the design flagged as the risk: the bake works in the LOCAL
+    // frame, so a layer-level scale could compose something the projection does
+    // not see. It does not — the volume declares sqrt(3) * its samples'
+    // Lipschitz and no scale enters that — but the advice would have promised
+    // something the host's follow-up report contradicted if it did.
+    scene::Document doc = absorbable_chain();
+    scene::Layer& layer = doc.layers.front();
+    layer.scale_axes = cf3(2.0f, 0.5f, 1.3f);
+
+    const float threshold = 0.5f;
+    const scene::ConsolidationAdvice advice = scene::consolidation_advice(layer, threshold);
+    REQUIRE(advice.advises);
+    // The frame is carried through the derivation: the layer's smallest axis
+    // scale halves every authored length in the bake's frame, so the advised
+    // cell halves with it rather than staying at the unscaled layer's number.
+    const scene::ConsolidationAdvice plain =
+        scene::consolidation_advice(absorbable_chain().layers.front(), threshold);
+    CHECK(advice.params.cell_size == doctest::Approx(0.5f * plain.params.cell_size));
+
+    REQUIRE(scene::consolidate_layer(doc, doc.layers.front().id, advice.params));
+    const scene::FieldReport after = scene::report_layer(doc.layers.front(), threshold);
+    CHECK(after.safe_step_scale == doctest::Approx(advice.cost.safe_step_scale));
+}
+
+TEST_CASE("a layer whose finest content is a volume is advised that volume's own cell size") {
+    // The whole answer to "a number nobody chose": the only degradation ever
+    // advised is Volumes, and such a layer carries resolutions an earlier bake
+    // already chose. (K * c) / K = c, so the finest of them comes back
+    // unchanged and a re-bake loses no detail that is already stored.
+    scene::Document doc;
+    scene::Layer& layer = doc.add_sdf_layer("l");
+    scene::Node n;
+    n.prim = scene::Prim::volume();
+    n.volume = std::make_shared<const FieldVolume>(FieldVolume::sample(
+        [](kernel::cfloat3 p) { return (kernel::clength(p) - 0.6f) * 9.0f; },
+        math::Aabb{cf3(-1, -1, -1), cf3(1, 1, 1)}, 0.03f, 0.15f));
+    layer.sdf->insert(n);
+
+    const scene::ConsolidationParams advised = scene::advised_params(layer);
+    CHECK(advised.cell_size == doctest::Approx(0.03f));
+}
+
+TEST_CASE("the derivation reads the SHAPE's box, not the box culling wants") {
+    // What building this refuted. `item_geometry_bound` is dilated by rounding
+    // and blend support, so a 0.06 dab carrying a quadratic blend measures 0.24
+    // there rather than 0.12 — and the advice came out at 0.060, which is TWO
+    // cells across the dab rather than four. Measured on that fixture the two
+    // grids move the dab's surface by 27.2% and 7.0% of its radius.
+    scene::Document doc;
+    scene::Layer& layer = doc.add_sdf_layer("l");
+    scene::Node form;
+    form.prim = scene::Prim::sphere(1.0f);
+    layer.sdf->insert(form);
+    scene::Node dab;
+    dab.prim = scene::Prim::sphere(0.06f);
+    dab.xform.position = cf3(0, 1.0f, 0);
+    dab.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.015f};
+    layer.sdf->insert(dab);
+
+    CHECK(scene::advised_params(layer).cell_size == doctest::Approx(0.03f));
+}
+
+TEST_CASE("the advised grid is clamped to the layer's own extent") {
+    // A hair of a feature on a large form would otherwise advise a grid whose
+    // sampling pass alone is unaffordable. The clamp bounds the GRID and not
+    // the memory — the bytes follow surface area and are quoted separately.
+    scene::Document doc;
+    scene::Layer& layer = doc.add_sdf_layer("l");
+    scene::Node form;
+    form.prim = scene::Prim::sphere(1.0f);
+    layer.sdf->insert(form);
+    scene::Node speck;
+    speck.prim = scene::Prim::sphere(0.0005f);
+    speck.xform.position = cf3(0, 1.0f, 0);
+    layer.sdf->insert(speck);
+
+    const scene::ConsolidationParams advised = scene::advised_params(layer);
+    const scene::Tape tape = scene::compile_layer(layer);
+    const kernel::cfloat3 e = tape.bounds.extent();
+    const float extent = std::max({e.x, e.y, e.z});
+    CHECK(advised.cell_size == doctest::Approx(extent / 512.0f));
+    // ...and the other end: one big ball advises no coarser than E/32.
+    scene::Document big = sphere_document(1.0f);
+    const scene::ConsolidationParams coarse = scene::advised_params(big.layers.front());
+    const scene::Tape big_tape = scene::compile_layer(big.layers.front());
+    const kernel::cfloat3 be = big_tape.bounds.extent();
+    CHECK(coarse.cell_size ==
+          doctest::Approx(std::max({be.x, be.y, be.z}) / 32.0f));
+}
+
+TEST_CASE("a threshold no redistanced volume can reach is not advised") {
+    // A sampled volume declares sqrt(3) times its samples' Lipschitz, so the
+    // best a bake can offer is 1/sqrt(3) = 0.577. Asking for 0.8 is asking for
+    // something no bake delivers, and handing over params would trade a
+    // parametric layer for a dense one and still miss the budget.
+    scene::Document doc = absorbable_chain();
+    const scene::ConsolidationAdvice advice =
+        scene::consolidation_advice(doc.layers.front(), 0.8f);
+    CHECK_FALSE(advice.advises);
+    CHECK(advice.params.cell_size == 0.0f);  // refusable by the next call
+    CHECK(advice.cost.brick_count == 0);
+}
+
+TEST_CASE("a deformer-degraded layer is not advised, one step past #387") {
+    // The report already says Deformers and withholds the flag; the advice
+    // withholds the params, so there is nothing to pass on by accident.
+    scene::Document doc = sphere_document(1.0f);
+    scene::Layer& layer = doc.layers.front();
+    layer.sdf->find_mut(layer.sdf->roots.front())
+        ->deformers.push_back(scene::Deformer::grab(cf3(1.0f, 0, 0), 0.5f, cf3(0.9f, 0, 0)));
+    const scene::FieldReport r = scene::report_layer(layer, 0.5f);
+    REQUIRE(r.degradation == scene::Degradation::Deformers);
+
+    const scene::ConsolidationAdvice advice = scene::consolidation_advice(layer, 0.5f);
+    CHECK_FALSE(advice.advises);
+    CHECK(advice.params.cell_size == 0.0f);
+    CHECK(advice.cost.cell_size == 0.0f);
+}
+
+TEST_CASE("a protected, a non-SDF and a threshold-less layer are answers, not errors") {
+    // A host walking a stack of mixed kinds should not special-case them, and
+    // on a protected layer `consolidate_layer` refuses anyway — advising a bake
+    // it would reject is bad advice rather than an error condition.
+    scene::Document doc = absorbable_chain();
+    scene::Layer& layer = doc.layers.front();
+    REQUIRE(scene::consolidation_advice(layer, 0.5f).advises);
+
+    layer.locked = true;
+    CHECK_FALSE(scene::consolidation_advice(layer, 0.5f).advises);
+    layer.locked = false;
+    layer.ghost = true;
+    CHECK_FALSE(scene::consolidation_advice(layer, 0.5f).advises);
+    layer.ghost = false;
+
+    // Without a threshold there is nothing to answer: every output is defined
+    // against one, so a zero would buy a full sampling pass to be told nothing.
+    CHECK_FALSE(scene::consolidation_advice(layer, 0.0f).advises);
+
+    scene::Document empty;
+    scene::Layer& blank = empty.add_sdf_layer("blank");
+    CHECK_FALSE(scene::consolidation_advice(blank, 0.5f).advises);
+    CHECK(scene::advised_params(blank).cell_size == 0.0f);
+}
+
+TEST_CASE("asking for the advice changes nothing, and does not sever an instance") {
+    scene::Document doc = absorbable_chain();
+    const scene::LayerId source = doc.layers.front().id;
+    scene::Layer follower;
+    follower.id = 77;
+    follower.name = "bolt";
+    follower.sdf = doc.layers.front().sdf;  // shared, as instance_layer shares it
+    doc.layers.push_back(follower);
+
+    const std::size_t items_before = doc.layers.front().sdf->roots.size();
+    const scene::ConsolidationAdvice advice =
+        scene::consolidation_advice(doc.layers.front(), 0.5f);
+    REQUIRE(advice.advises);
+    CHECK(doc.layers.front().sdf->roots.size() == items_before);
+    // .get(), not the shared_ptr itself: doctest stringifies both operands, and
+    // MSVC's std::operator<<(ostream&, const shared_ptr<T>&) then enters the
+    // overload set and hard-errors instead of dropping out. Same reason as
+    // 8bdaea32, which is why every other pointer assertion in this file is
+    // already written this way.
+    CHECK(doc.layers.back().sdf.get() == doc.layers.front().sdf.get());  // still sharing
+    CHECK(doc.find_layer(source) != nullptr);
+}
+
+TEST_CASE("the advised params quote the same bill when fed back to the cost query") {
+    scene::Document doc = absorbable_chain();
+    const scene::ConsolidationAdvice advice =
+        scene::consolidation_advice(doc.layers.front(), 0.5f);
+    REQUIRE(advice.advises);
+
+    scene::ConsolidationCost again;
+    REQUIRE(scene::bake_layer(doc.layers.front(), advice.params, &again));
+    CHECK(again.brick_count == advice.cost.brick_count);
+    CHECK(again.bytes == advice.cost.bytes);
+    CHECK(again.cell_size == doctest::Approx(advice.cost.cell_size));
+    CHECK(again.safe_step_scale == doctest::Approx(advice.cost.safe_step_scale));
+}

@@ -74,6 +74,60 @@ kernel::CFieldInfo swept_field_info(const Node& item) {
                              ease_max_slope(static_cast<std::uint8_t>(item.prim.params[0])));
 }
 
+// Whether folding a layer that produced NOTHING would change the field beneath
+// it. A layer's chain is empty when the layer holds no visible roots and, per
+// brick, whenever the cull dropped every one of them -- and until this feature
+// existed the answer was always "no", so the inter-layer union was simply
+// skipped there.
+//
+// It is not always no any more, and the difference is silent. An empty tape
+// evaluates to CLAY_TAPE_FAR (kernel/tape.h), so the question is exactly
+// `combine(a, FAR) == a`: min(a, FAR) and -smin(-a, FAR) are both `a`, so a
+// unioning or a subtracting layer is still identity and is still skipped --
+// which is what keeps every document that predates this feature byte for byte
+// -- but max(a, FAR) is FAR, so an INTERSECTING layer whose chain this brick
+// culled away must still take the material away. Skip it and the per-brick tape
+// keeps material the whole-document tape removes, in exactly the bricks nobody
+// is looking at.
+//
+// Asked of the kernel rather than answered by a table here. A table would be a
+// second copy of `ctape_combine_dist`'s math and would go stale the first time
+// a mode's arithmetic moved, which is the one failure mode this change is
+// organised against. Distance is the whole probe: the colour-only mode (paint)
+// weights by the same absent operand and is identity in colour for the same
+// reason its distance is.
+// Is this the document's first visible SDF layer? A TYPE rather than a bool,
+// because `compile_and_fold_layer` takes this beside `have_acc` and the two are
+// one transposition apart at every call site -- which is exactly the defect
+// this change already shipped once, when first-ness was READ OFF `have_acc`
+// (see that function's comment). A comment protects a reader who is looking; a
+// distinct type protects a caller who is confident, and costs one line.
+struct FirstVisibleLayer {
+    bool value;
+};
+
+// Did this layer's own chain leave a value on the stack? A TYPE for the same
+// reason, one level down: `fold_layer` takes this beside `have_acc` -- "is
+// there something BENEATH it to combine with" -- and the two are one
+// transposition apart at the call. Swapped, a layer with a value and nothing
+// beneath it emits a combine against an empty stack, and one with an
+// accumulator and no value of its own does not emit the fold the document
+// needs; both compile, and both are per-brick wrongness with no error
+// (design.md 13a, which asked for this on the sibling pair as well).
+struct LayerLeftValue {
+    bool value;
+};
+
+bool fold_changes_an_empty_layer(const LayerComposition& c, float round_world) {
+    const int mode = static_cast<int>(c.op);
+    const int profile = static_cast<int>(c.blend.profile);
+    for (float a : {-1.5f, -0.25f, 0.0f, 0.75f, 3.0f})
+        if (kernel::ctape_combine_dist(a, CLAY_TAPE_FAR, mode, profile, c.blend.k, round_world) !=
+            a)
+            return true;
+    return false;
+}
+
 struct Compiler {
     Tape tape;
     const CullRegion* cull;
@@ -386,7 +440,60 @@ struct Compiler {
         }
     }
 
+    // THE COMBINE A CHAIN-LEVEL FOLD EMITS: the instruction and the field info
+    // it costs, in one call, because the two must not drift apart.
+    //
+    // A group's tail, a resume's stack unwind and the fold BETWEEN layers are
+    // all the same act -- a value already on the stack combined with the one
+    // just compiled -- and until this existed each of the three carried its own
+    // byte-identical copy of the info fold beside its own emit_combine. Three
+    // copies of one rule is three chances for a resumed tape to report a safe
+    // step the full compile does not, which is a marcher that oversteps a
+    // surface rather than an error anyone sees.
+    //
+    // The ITEM path deliberately does NOT route through this: its combine folds
+    // a SECOND operand's field info (the primitive's) rather than the running
+    // one against itself, and that is `fold_info`, which also has an item to
+    // read. The kernel math is single-source either way -- both end at
+    // `emit_combine` and at the same `cfi_*` combinators.
+    //
+    // `round_world` is the rounding in WORLD units. A layer composition has no
+    // node, so its factor is `layer_distance_scale(layer)`, the same one a
+    // group's rounding takes.
+    void emit_chain_combine(Op op, const Blend& blend, float round_world) {
+        emit_combine(op, blend, round_world);
+        if (op == Op::Relief || op == Op::Incise) {
+            // NOT cfi_extended_blend, which would charge a relief nothing at
+            // all: cfi_extended_blend of a field info against ITSELF is
+            // {false, L}, and relief does not blend two fields -- it offsets
+            // the accumulated one by an amplitude over a falloff, so what it
+            // costs is that term's own gradient, |k| * 1.5 / width. The item
+            // path spells exactly this (fold_info's Relief arm) and a chain
+            // combine that spelled it as a blend would report a safe step the
+            // item form does not, which is a marcher stepping through the
+            // relief it just carved.
+            tape.info = kernel::cfi_relief(tape.info, blend.k, round_world);
+            return;
+        }
+        const bool smooth = blend.profile != BlendProfile::Hard && blend.k > 0.0f;
+        if (op_is_extended(op))
+            tape.info = kernel::cfi_extended_blend(tape.info, tape.info, op_is_diagonal(op));
+        else if (smooth)
+            tape.info = kernel::cfi_smooth_blend(tape.info, tape.info);
+    }
+
     Transition default_transition_{};
+
+    // The geometric extent of the LAYER being compiled: the same union
+    // `tape.bounds` collects, restarted at every layer, so that the fold
+    // between layers can dilate by its own combine's support the way an item's
+    // geometry bound already carries its own. Groups need no part in it -- a
+    // group's children expand it themselves, which is exactly how they reach
+    // tape.bounds, rolled-back subtrees included.
+    //
+    // Written by compile_list; reset and read only by run()/run_part(), so
+    // every other entry point leaves it alone and none of them looks.
+    math::Aabb layer_extent_{};
 
     // The gated item's own reach, set immediately before fold_info by the
     // caller that already computed it, so the bound is not recomputed and
@@ -972,6 +1079,11 @@ struct Compiler {
                 // tape.bounds is the geometric extent meshing and raycast
                 // clipping use — never infinite, even for non-local ops
                 tape.bounds.expand(geometry);
+                // ...and the same union restricted to the layer being
+                // compiled, which is what the fold between layers dilates by
+                // its own combine's support. Only run()/run_part() read it,
+                // and both reset it per layer.
+                layer_extent_.expand(geometry);
                 bool seeded = !have_acc && n->op != Op::Add;
                 if (seeded) emit_empty(n->color);
                 emit_item(*n, layer);
@@ -1078,15 +1190,20 @@ struct Compiler {
             f.rounding = group.rounding * layer_distance_scale(layer);
             checkpoint.frames.push_back(f);
         }
-        if (have_acc || seeded) {
-            emit_combine(group.op, group.blend, group.rounding * layer_distance_scale(layer));
-            bool smooth = group.blend.profile != BlendProfile::Hard && group.blend.k > 0.0f;
-            if (op_is_extended(group.op))
-                tape.info = kernel::cfi_extended_blend(tape.info, tape.info,
-                                                       op_is_diagonal(group.op));
-            else if (smooth)
-                tape.info = kernel::cfi_smooth_blend(tape.info, tape.info);
-        }
+        if (have_acc || seeded)
+            emit_chain_combine(group.op, group.blend,
+                               group.rounding * layer_distance_scale(layer));
+        // A GROUP does NOT add its combine's own ring to tape.bounds, and this
+        // is where it would go. It is a real gap -- a smooth group bulges past
+        // the union of its children exactly as a smooth layer fold bulges past
+        // the union of the layers beneath it -- and it predates layer
+        // composition, so it is not this change's to close: `resume` unwinds
+        // these frames from a TapeCheckpointFrame carrying op, blend and
+        // rounding and NO extent, so a ring added here lands in a full compile
+        // and not in a resumed one, and compile_document_append's
+        // require-identical goes 0.2 short in x on the first group append.
+        // Closing it means giving the checkpoint the subtree's extent, which
+        // is the resumable-checkpoint schema and not a bounds question.
         return true;
     }
 
@@ -1109,14 +1226,203 @@ struct Compiler {
     // PART of a document must still cull under it: a tape for one layer that
     // used only that layer's pad would drop items the whole-document compile
     // keeps, and the two halves of a split would no longer sum to the whole.
+    //
+    // Both arms are the same expression -- a maximum over the visible SDF
+    // layers of that layer's own chain pad plus the SUM of the folds above it
+    // (scene::document_cull_pad; CullIndex::refresh_pad over cached terms).
+    // The part compiles are why the sum is over the DOCUMENT's folds and not
+    // over the part's: a part that padded for its own folds alone would cull
+    // differently from the whole it has to add up to.
     float document_pad(const Document& doc, const CullRegion* cull_region) const {
-        float pad = 0.0f;
-        if (cull_region && index) return index->cull_pad();
-        if (cull_region)
-            for (const Layer& layer : doc.layers)
-                if (layer.visible && layer.kind == LayerKind::Sdf && layer.sdf)
-                    pad = kernel::cmax(pad, cull_pad(*layer.sdf, layer));
-        return pad;
+        if (!cull_region) return 0.0f;
+        return index ? index->cull_pad() : document_cull_pad(doc);
+    }
+
+    // THE FOLD BETWEEN LAYERS, shared by the whole-document walk and by every
+    // PART of one so that the two cannot produce different fields. `layer_val`
+    // says whether the layer just compiled left a value on the stack and
+    // `have_acc` whether there is an accumulated value beneath it on the stack;
+    // the return is whether one is there afterwards. `layer_val` carries a type
+    // so that the two cannot be transposed at the call site -- see
+    // `LayerLeftValue`, and `FirstVisibleLayer` for the same argument one level
+    // up.
+    //
+    // The INSTRUCTIONS are `emit_layer_fold`, which a resume also calls; what
+    // stays here is the one thing a resume cannot do, the ring on tape.bounds.
+    //
+    // `have_acc` IS NOT THE FIRST-VISIBLE TEST and must not be read as one --
+    // see `compile_and_fold_layer`, which is the only caller and which decides
+    // first-ness from the layer LIST before anything is emitted. What is left
+    // here is only "is there something on the stack to combine with", which is
+    // a question about the tape and is answered by the tape.
+    bool fold_layer(const Layer& layer, LayerLeftValue layer_val, bool have_acc) {
+        emit_layer_fold(layer, layer_val, have_acc);
+        // The ring the fold adds to the tape's geometric extent, which only the
+        // whole-layer walk can add: it dilates the LAYER's extent, and a resume
+        // holds the appended items' extent rather than the layer's. Not added
+        // for a chain that produced nothing -- see fold_layer_bounds.
+        if (layer_val.value && have_acc) fold_layer_bounds(layer);
+        return layer_val.value || have_acc;
+    }
+
+    // THE FOLD AT A LAYER BOUNDARY, AS INSTRUCTIONS. One spelling, because
+    // there are two walks that reach a layer seam -- the whole-document one
+    // (`fold_layer`, through run/run_part) and a RESUME re-emitting the seam
+    // its checkpoint sat in front of -- and if they disagree about an absent
+    // operand the fast path is a different field from the slow one, per brick.
+    //
+    // `layer_val` says whether the layer left a value on the stack and
+    // `have_acc` whether there is an accumulated value beneath it. Neither is
+    // the first-visible test: see `compile_and_fold_layer`, which decides
+    // first-ness from the layer LIST before anything is emitted.
+    //
+    // AN ABSENT LEFT OPERAND IS STILL AN OPERAND. `layer_val` is false for two
+    // different reasons -- the layer has nothing in it, or this compile's cull
+    // dropped all of it -- and only the first is emptiness. So the question
+    // asked is the DOCUMENT's ("does this operator read an absent operand as a
+    // change", fold_changes_an_empty_layer, answered by the kernel) and never
+    // "did anything survive here", which is design.md 13's general form.
+    void emit_layer_fold(const Layer& layer, LayerLeftValue layer_val, bool have_acc) {
+        if (!have_acc) return;  // nothing beneath to fold into
+        const LayerComposition& comp = layer.composition;
+        // No node, so the layer's own distance scale is the factor -- the same
+        // one a group's rounding takes. (A transition op cannot get here: the
+        // setter refuses one, because a LayerComposition carries no Transition
+        // and emit_combine would morph on this compiler's defaults instead of
+        // on anything the artist authored.)
+        const float round_world = comp.rounding * layer_distance_scale(layer);
+        if (!layer_val.value) {
+            // A union is skipped here exactly as it always was -- min(a, FAR)
+            // is a -- which is what keeps every document that predates this
+            // feature byte for byte.
+            if (!fold_changes_an_empty_layer(comp, round_world)) return;
+            // The empty seed's colour never reaches the result for the ops that
+            // get here (intersect keeps the accumulator's), so white is a
+            // placeholder rather than a choice; a layer has no colour of its
+            // own to offer.
+            emit_empty(kernel::cf3(1.0f, 1.0f, 1.0f));
+        }
+        emit_chain_combine(comp.op, comp.blend, round_world);
+    }
+
+    // WHAT THE FOLD ADDS TO THE TAPE'S GEOMETRIC EXTENT.
+    //
+    // tape.bounds is what meshing marches and what a raycast clips against, so
+    // the only failure that matters here is a bound too SMALL -- it renders as
+    // missing surface rather than as an error. A combine can put the result's
+    // surface outside BOTH operands' boxes, by up to its own support: a smooth
+    // union bulges outward where the two fields come within the blend of each
+    // other, and an extended mode deviates within the support kernel/tape.h
+    // documents for it. Until layers could carry a combine at all, the fold
+    // between them was a hard Add, whose support is zero, and so the union of
+    // the item bounds was the whole answer.
+    //
+    // The ring goes on the LAYER's own extent and not on the accumulated box,
+    // because that is exactly where the item path puts it: `geometry_bound`
+    // dilates the item by `rounding + chain_blend_support` and unions THAT into
+    // tape.bounds, leaving what is already accumulated alone. The two forms of
+    // one shape -- two layers, or one layer of two items -- have to produce the
+    // same box, and they only do while both spell the dilation the same way.
+    //
+    // WHAT IS DELIBERATELY NOT DONE HERE, and it is design.md 3's narrowing.
+    // `Subtract` cannot create material outside its left operand and
+    // `Intersect` is confined to the intersection, so both could take a box
+    // strictly smaller than this union. Neither is taken, for one reason: the
+    // item path does not take it either, and the parity this change stands on
+    // is that a subtracting LAYER and a subtracting ITEM produce the same
+    // document. Narrowing one side alone breaks that; narrowing both is a
+    // change to the meshing region of every document that already carries a
+    // subtract or a paint, and it has to be threaded through compile_group's
+    // rollback and through every resumable entry point that copies a prefix's
+    // bounds -- the same wall the group ring above runs into, measured, not
+    // guessed. It belongs in its own change with its own measurement. Being
+    // wider than necessary costs a larger march; being narrower than the
+    // surface costs the surface.
+    //
+    // Not called for a layer whose chain produced nothing: the extent is empty
+    // there and dilating an empty box leaves it empty. An INTERSECT against an
+    // empty layer empties the document and could shrink the box to nothing --
+    // deliberately not taken, for the same reason as the rest of the
+    // narrowing, and it is the harmless direction.
+    void fold_layer_bounds(const Layer& layer) {
+        const float support = layer_blend_support(layer);
+        if (support <= 0.0f) return;  // a hard fold adds no extent
+        tape.bounds.expand(layer_extent_.dilated(support));
+    }
+
+    // ONE VISIBLE SDF LAYER: its chain, its checkpoint and its fold. The whole
+    // walk and every PART of one go through here, because the two have to emit
+    // the same bytes at the same layer boundary or a split is a different
+    // field.
+    //
+    // THE FIRST VISIBLE SDF LAYER INITIALISES THE ACCUMULATOR AND ITS OWN
+    // OPERATOR IS NOT APPLIED, and `first` -- decided by the caller from the
+    // layer LIST, before a single instruction is emitted -- is that rule. It is
+    // deliberately NOT the accumulator flag, and this is the sharpest silent
+    // failure the whole change has:
+    //
+    //   `have_acc` is a per-compile, CULL-DEPENDENT value. A brick whose cull
+    //   drops every item of every layer beneath a composed layer arrives here
+    //   with `have_acc` false, and reading first-ness from it would promote
+    //   that layer to the initialiser FOR THAT BRICK ALONE -- a subtracting
+    //   cutter renders as material, an intersecting one stops cutting, in one
+    //   brick and not its neighbour, with no error, no counter and nothing to
+    //   see but geometry that is subtly wrong. Which layer is first is a
+    //   property of the DOCUMENT (which layers are visible SDF layers), so it
+    //   is answered from the document and the cull cannot reach it.
+    //
+    // WHAT A LAYER THAT IS NOT FIRST DOES WITH AN ABSENT ACCUMULATOR is the
+    // item rule verbatim, so that the two forms of one shape stay one shape:
+    // `compile_list` SKIPS a carving node that opens a chain and `compile_group`
+    // SEEDS a material-creating one against an explicit empty. Both lift here
+    // unchanged, and folding against the far field is what they mean --
+    // `max(FAR, b)` is FAR, so an intersecting layer over nothing is nothing,
+    // which is the same answer the whole-document tape gives in that region
+    // (`op_creates_material` states the same argument for items). A union takes
+    // neither branch, `min(FAR, b) == b`, which is why a document that predates
+    // compositions still emits byte for byte what it always did.
+    bool compile_and_fold_layer(const Layer& layer, FirstVisibleLayer first, bool have_acc) {
+        const LayerComposition& comp = layer.composition;
+        bool seeded = false;
+        if (!first.value && !have_acc && comp.op != Op::Add) {
+            // Nothing beneath and an operator that cannot make material out of
+            // nothing: the layer contributes nothing here. Its chain is not
+            // compiled at all, exactly as compile_list drops such an item,
+            // which also keeps its geometry out of tape.bounds -- the fold
+            // removes it from the field, so the march must not look for it.
+            if (!op_creates_material(comp.op)) return false;
+            emit_empty(kernel::cf3(1.0f, 1.0f, 1.0f));
+            seeded = true;
+        }
+        // Each layer's root list IS a tail chain -- an append to it lands at its
+        // end -- so the walk starts on the tail path and compile_list narrows it
+        // to the last member from there.
+        on_tail_path_ = true;
+        tail_checkpoint_taken_ = false;
+        layer_extent_ = math::Aabb{};
+        // TYPED at the point it is produced rather than wrapped at the call
+        // below, so that transposing the two arguments of `fold_layer` is a
+        // compile error with no brace to move along with them.
+        const LayerLeftValue layer_val{compile_list(layer.sdf->roots, *layer.sdf, layer, false)};
+        on_tail_path_ = false;
+        // The seeded empty IS an accumulator: the fold below combines with it,
+        // and a resume re-emits that same fold from `doc_have_acc`.
+        const bool acc = have_acc || seeded;
+        if (tail_checkpoint_taken_) {
+            // A tail GROUP took the position, deeper than this. Its frames
+            // describe everything between there and here; only what the group
+            // could not know is filled in.
+            checkpoint.layer = layer.id;
+            checkpoint.doc_have_acc = acc;
+            checkpoint.valid = true;
+        } else {
+            // Recorded even when the chain emitted nothing: appending to an
+            // empty last layer is resumable too, with layer_have_acc false.
+            checkpoint = TapeCheckpoint{tape.instrs.size(), tape.params.size(), tape.blob.size(),
+                                        layer.id,           layer_val.value,    acc,
+                                        true,               {}};
+        }
+        return fold_layer(layer, layer_val, acc);
     }
 
     // Which visible SDF layers a PART compiles. Before and Only are the two
@@ -1133,6 +1439,13 @@ struct Compiler {
     void run_part(const Document& doc, const CullRegion* cull_region, LayerId stop, Part part) {
         begin_cull(cull_region, document_pad(doc, cull_region));
         bool have_acc = false;
+        // First among the layers THIS PART selects, which is what makes a part
+        // a document in its own right: `Only` is the layer alone, so its
+        // operator is not applied and the value is the one a caller folds
+        // forward; `Except` is the document without that layer, so whichever
+        // layer opens the remainder initialises it. `Before` is a prefix, so
+        // its first layer is the document's first either way.
+        FirstVisibleLayer first{true};
         for (const Layer& layer : doc.layers) {
             if (!layer.visible || layer.kind != LayerKind::Sdf || !layer.sdf) continue;
             // Before STOPS at the named layer, so everything above it goes too.
@@ -1146,59 +1459,23 @@ struct Compiler {
             } else if (layer.id == stop) {
                 continue;
             }
-            on_tail_path_ = true;
-            tail_checkpoint_taken_ = false;
-            const bool layer_val = compile_list(layer.sdf->roots, *layer.sdf, layer, false);
-            on_tail_path_ = false;
-            // The same record run() makes, so a PART is resumable on the same
-            // terms as a whole: a refill stores the stack where this checkpoint
-            // sits, and the active half is the half a suffix continues.
-            if (tail_checkpoint_taken_) {
-                checkpoint.layer = layer.id;
-                checkpoint.doc_have_acc = have_acc;
-                checkpoint.valid = true;
-            } else {
-                checkpoint = TapeCheckpoint{tape.instrs.size(), tape.params.size(),
-                                            tape.blob.size(), layer.id, layer_val,
-                                            have_acc,          true, {}};
-            }
-            if (!layer_val) continue;
-            if (have_acc) emit_combine(Op::Add, Blend{}, 0.0f);  // layers union hard
-            have_acc = true;
+            // The same body run() uses, so a PART is resumable on the same
+            // terms as a whole and emits the same bytes at the same boundary.
+            have_acc = compile_and_fold_layer(layer, first, have_acc);
+            first = FirstVisibleLayer{false};
         }
     }
 
     void run(const Document& doc, const CullRegion* cull_region) {
-        float pad = 0.0f;
-        pad = document_pad(doc, cull_region);
-        begin_cull(cull_region, pad);
+        begin_cull(cull_region, document_pad(doc, cull_region));
         bool have_acc = false;
+        // The document's own first visible SDF layer, read off the layer list
+        // and never off the accumulator -- see compile_and_fold_layer.
+        FirstVisibleLayer first{true};
         for (const Layer& layer : doc.layers) {
             if (!layer.visible || layer.kind != LayerKind::Sdf || !layer.sdf) continue;
-            // Each layer's root list IS a tail chain — an append to it lands at
-            // its end — so the walk starts on the tail path and compile_list
-            // narrows it to the last member from there.
-            on_tail_path_ = true;
-            tail_checkpoint_taken_ = false;
-            bool layer_val = compile_list(layer.sdf->roots, *layer.sdf, layer, false);
-            on_tail_path_ = false;
-            if (tail_checkpoint_taken_) {
-                // A tail GROUP took the position, deeper than this. Its frames
-                // describe everything between there and here; only what the
-                // group could not know is filled in.
-                checkpoint.layer = layer.id;
-                checkpoint.doc_have_acc = have_acc;
-                checkpoint.valid = true;
-            } else {
-                // Recorded even when the chain emitted nothing: appending to an
-                // empty last layer is resumable too, with layer_have_acc false.
-                checkpoint = TapeCheckpoint{tape.instrs.size(), tape.params.size(),
-                                            tape.blob.size(), layer.id, layer_val,
-                                            have_acc,          true, {}};
-            }
-            if (!layer_val) continue;
-            if (have_acc) emit_combine(Op::Add, Blend{}, 0.0f);  // layers union hard
-            have_acc = true;
+            have_acc = compile_and_fold_layer(layer, first, have_acc);
+            first = FirstVisibleLayer{false};
         }
     }
 
@@ -1223,36 +1500,49 @@ struct Compiler {
         // first dab and the slow one on every dab after it.
         checkpoint = TapeCheckpoint{tape.instrs.size(), tape.params.size(), tape.blob.size(),
                                     cp.layer, chain_val, cp.doc_have_acc, true, cp.frames};
-        // A chain that produced nothing still has whatever the seed put on it,
-        // and the combines the checkpoint sits in front of STILL have to be
-        // emitted: without them the walk answers with the innermost chain
-        // rather than the field. Harmless where there are no frames -- a root
-        // list has nothing pending, which is why returning here was right
-        // until a checkpoint could sit inside a group -- and wrong with them,
-        // by however much the group's combine moves the value.
-        //
-        // Reachable whenever a brick's cull drops every appended node, which
-        // is most bricks of most dabs.
-        if (!chain_val && cp.frames.empty()) return;
         // UNWIND THE STACK the checkpoint sat in front of: each enclosing
-        // group's combine, innermost first, then the layer union. This is
-        // compile_group's tail restated, and it has to stay that — the two
-        // produce the same bytes or the fast path is a different field.
+        // group's combine, innermost first, then the layer's own fold. This is
+        // compile_group's tail followed by run()'s, restated, and it has to
+        // stay that — the two produce the same bytes or the fast path is a
+        // different field.
+        //
+        // THERE IS NO EARLY RETURN FOR "THE APPENDED CHAIN PRODUCED NOTHING",
+        // and there was one until it was found to drop a composed seam. That
+        // state is reachable for most bricks of most dabs -- a cull region the
+        // appended items do not reach -- and it says nothing about the
+        // DOCUMENT: `chain_val` is a cull-dependent value, and the fold at the
+        // seam is a property of the document (design.md 13). An intersecting
+        // layer must still take the material away in a region its own chain
+        // does not reach, exactly as `run()` does. `emit_layer_fold` is that
+        // rule, shared, and it is what decides to emit nothing where nothing is
+        // owed -- a union over an absent operand, or nothing beneath at all.
+        //
+        // `compile_list` RETURNS ITS INCOMING have_acc, so `chain_val` is
+        // already "is there a value on the stack after the appended chain"
+        // rather than "did the appended chain emit anything"; the disjunction
+        // below is belt and braces and reads as the question it answers.
         bool have_acc = chain_val || cp.layer_have_acc;
         for (const TapeCheckpointFrame& f : cp.frames) {
-            if (f.emits) {
-                emit_combine(f.op, f.blend, f.rounding);
-                const bool smooth = f.blend.profile != BlendProfile::Hard && f.blend.k > 0.0f;
-                if (op_is_extended(f.op))
-                    tape.info = kernel::cfi_extended_blend(tape.info, tape.info,
-                                                           op_is_diagonal(f.op));
-                else if (smooth)
-                    tape.info = kernel::cfi_smooth_blend(tape.info, tape.info);
-            }
+            if (f.emits) emit_chain_combine(f.op, f.blend, f.rounding);
             have_acc = true;
         }
-        if (!have_acc) return;
-        if (cp.doc_have_acc) emit_combine(Op::Add, Blend{}, 0.0f);
+        // ...and then the fold into the layers beneath, which is the same
+        // combine run() emits at that boundary and has to stay the same one:
+        // the checkpoint sits in FRONT of it, so a resume re-emits it, and
+        // `layer` is the layer the checkpoint was taken in. Derived from the
+        // Layer rather than carried on the TapeCheckpoint deliberately -- a
+        // hand-built checkpoint (bindings/c/clay_c.cpp) asserts facts rather
+        // than deriving them, and an asserted operator that stops being true
+        // still compiles.
+        //
+        // NO RING IS ADDED TO tape.bounds for this fold, unlike `fold_layer`:
+        // a suffix describes the appended items rather than the layer, so the
+        // extent the ring dilates is not in hand here. compile_document_append
+        // is unaffected -- it refuses a composed seam, and a hard Add's ring is
+        // zero -- and compile_layer_suffix promises no standalone bounds at all
+        // (tape.h). It stays the gap TapeCheckpoint's missing extent already
+        // is, one level up from the group ring compile_group leaves open.
+        emit_layer_fold(layer, LayerLeftValue{have_acc}, cp.doc_have_acc);
     }
 };
 
@@ -1275,6 +1565,82 @@ std::uint64_t next_compile_id() {
 }
 
 }  // namespace
+
+const LayerComposition* layer_join_composition(const Document& doc, LayerId active) {
+    const Layer* found = nullptr;
+    bool below = false;
+    for (const Layer& l : doc.layers) {
+        if (!l.visible || l.kind != LayerKind::Sdf || !l.sdf) continue;
+        if (l.id == active) {
+            found = &l;
+            break;
+        }
+        below = true;  // a visible SDF layer before it, so there is a join
+    }
+    if (!found || !below) return nullptr;
+    return &found->composition;
+}
+
+bool layer_join_is_hard_union(const Document& doc) {
+    // The LAST visible SDF layer, which is the seam every split in this tree is
+    // taken at: `compile_document_part(below=true)` stops there, and so do the
+    // C ABI's refill halves. With at most one visible SDF layer there is no
+    // join at all -- the first layer's own operator is not applied -- so the
+    // answer is yes and the fast path stays open for every single-layer
+    // document however it is composed.
+    const Layer* active = nullptr;
+    int visible = 0;
+    for (const Layer& l : doc.layers) {
+        if (!l.visible || l.kind != LayerKind::Sdf || !l.sdf) continue;
+        active = &l;
+        ++visible;
+    }
+    if (!active || visible <= 1) return true;
+    return layer_composition_is_hard_union(active->composition);
+}
+
+LayerId first_composed_fold_layer(const Document& doc) {
+    // NOT `have_acc`. This walks the LAYER LIST and nothing else, so what it
+    // tracks is "a visible SDF layer has already been passed" -- a property of
+    // the document, true or false the same way for every brick. The compiler's
+    // `have_acc` is the per-compile, cull-dependent question (is a value on
+    // the stack), and reading one as the other is the defect this change
+    // shipped once already (`compile_and_fold_layer`). Same value here, so the
+    // function was right; the name was the one that had been bitten.
+    bool passed_a_layer = false;
+    for (const Layer& l : doc.layers) {
+        if (!l.visible || l.kind != LayerKind::Sdf || !l.sdf) continue;
+        // The FIRST visible SDF layer initialises the accumulator and its own
+        // operator is not applied, so whatever it carries cannot break a
+        // caller's composition -- skipped here for exactly that reason and not
+        // as an approximation.
+        if (passed_a_layer && !layer_composition_is_hard_union(l.composition)) return l.id;
+        passed_a_layer = true;
+    }
+    return 0;
+}
+
+LayerId visible_sdf_layer_above(const Document& doc, LayerId layer, std::uint32_t* out_count) {
+    if (out_count) *out_count = 0;
+    LayerId lowest = 0;
+    bool past = false;
+    for (const Layer& l : doc.layers) {
+        if (l.id == layer) {
+            past = true;
+            continue;
+        }
+        // The VISIBLE SDF layers after that position, because those are the
+        // layers the fold walks and the only ones a split leaves out. Hidden,
+        // mesh and voxel layers above `layer` cost the caller nothing: they are
+        // not in the whole-document walk either, so a split taken beneath them
+        // is still the whole document.
+        if (!past || !l.visible || l.kind != LayerKind::Sdf || !l.sdf) continue;
+        if (!lowest) lowest = l.id;
+        if (!out_count) return lowest;  // nobody is counting: stop at the first
+        ++*out_count;
+    }
+    return lowest;
+}
 
 Tape compile_document(const Document& doc, const CullRegion* cull, const CullIndex* index,
                       const CullPlan* plan) {
@@ -1342,6 +1708,14 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& cp, const
     // longer this one. Each is cheap; a wrong reuse is silent.
     const Layer* layer = last_visible_sdf_layer(doc);
     if (!layer || layer->id != cp.layer) return false;
+    // AND the fold this checkpoint sits in front of has to be a hard Add, for
+    // the carry-over three lines below: that copies the prefix's `info`,
+    // `lipschitz_bounds_gradient` and `bounds` on the argument that a hard Add
+    // is exact and adds no extent, and neither half of that survives a smooth
+    // or extended fold. Refusing costs one full compile; proceeding costs a
+    // safe step that is too large and a box the surface leaves, neither of
+    // which reports anything.
+    if (!layer_join_is_hard_union(doc)) return false;
     if (cp.instrs > prefix.instrs.size() || cp.params > prefix.params.size() ||
         cp.blob > prefix.blob.size())
         return false;
@@ -1358,8 +1732,10 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& cp, const
     c.tape.instrs.assign(prefix.instrs.begin(), prefix.instrs.begin() + (std::ptrdiff_t)cp.instrs);
     c.tape.params.assign(prefix.params.begin(), prefix.params.begin() + (std::ptrdiff_t)cp.params);
     c.tape.blob.assign(prefix.blob.begin(), prefix.blob.begin() + (std::ptrdiff_t)cp.blob);
-    // The layer union the checkpoint sits in front of folds neither of these:
-    // a hard Add is exact and adds no extent, so the prefix's are the chain's.
+    // The fold the checkpoint sits in front of folds neither of these: a hard
+    // Add is exact and adds no extent, so the prefix's are the chain's. True
+    // wherever this line is reached because the refusal above is what makes it
+    // true -- a composed seam never gets here.
     c.tape.info = prefix.info;
     c.tape.lipschitz_bounds_gradient = prefix.lipschitz_bounds_gradient;
     c.tape.bounds = prefix.bounds;
@@ -1388,7 +1764,13 @@ bool compile_layer_suffix(const TapeCheckpoint& cp, const Document& doc,
                           const CullIndex* index) {
     if (!out || !cp.valid || appended.empty()) return false;
     // The same claims `compile_document_append` checks, minus the ones about
-    // the prefix's bytes -- there are none here to be out of range.
+    // the prefix's bytes -- there are none here to be out of range -- and minus
+    // its refusal of a composed seam, which this does not need: nothing is
+    // carried over to be wrong (no prefix `info`, `lipschitz_bounds_gradient`
+    // or `bounds`), and `resume` EMITS the seam's own composition rather than
+    // assuming a hard Add. The header states the argument in full; the hard Add
+    // belongs to the caller that rejoins two halves itself, and so does that
+    // caller's refusal.
     const Layer* layer = last_visible_sdf_layer(doc);
     if (!layer || layer->id != cp.layer) return false;
     // The chain the checkpoint ends in, which is a group's children when the
@@ -1404,12 +1786,7 @@ bool compile_layer_suffix(const TapeCheckpoint& cp, const Document& doc,
     // folds onto -- computed under the whole-document cull -- would be
     // continued under a different one.
     float pad = 0.0f;
-    if (cull && index)
-        pad = index->cull_pad();
-    else if (cull)
-        for (const Layer& l : doc.layers)
-            if (l.visible && l.kind == LayerKind::Sdf && l.sdf)
-                pad = kernel::cmax(pad, cull_pad(*l.sdf, l));
+    if (cull) pad = index ? index->cull_pad() : document_cull_pad(doc);
     // No prefix copy, and no prefix `info` or `bounds` either: what this
     // describes is the appended items, which is what its consumer wants to cull
     // against. The header says so, because a tape that cannot stand alone is
@@ -1437,12 +1814,7 @@ bool compile_layer_prefix(const Document& doc, std::size_t count, Tape* out,
     // suffix will be folded onto, and prefix and suffix culled under two
     // different pads are two different fields.
     float pad = 0.0f;
-    if (cull && index)
-        pad = index->cull_pad();
-    else if (cull)
-        for (const Layer& l : doc.layers)
-            if (l.visible && l.kind == LayerKind::Sdf && l.sdf)
-                pad = kernel::cmax(pad, cull_pad(*l.sdf, l));
+    if (cull) pad = index ? index->cull_pad() : document_cull_pad(doc);
     c.begin_cull(cull, pad);
     std::vector<NodeId> prefix(roots.begin(), roots.begin() + static_cast<std::ptrdiff_t>(count));
     c.compile_list(prefix, *layer->sdf, *layer, false);
@@ -1483,6 +1855,12 @@ Tape compile_document_except(const Document& doc, LayerId excluded, const CullRe
     return std::move(c.tape);
 }
 
+// The LAYER's own pad and not the document's, because no fold is emitted here:
+// this compiles one layer's chain against a fresh accumulator, so nothing drags
+// its value further and there is no document to ask. A caller that folds this
+// tape with another one is holding two operands of a combine the engine did not
+// make, and the pad each half was culled under is part of what that costs
+// (tape.h, compile_document_part).
 Tape compile_layer(const Layer& layer, const CullRegion* cull) {
     Compiler c;
     bool usable = layer.visible && layer.kind == LayerKind::Sdf && layer.sdf;
