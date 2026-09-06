@@ -1355,18 +1355,24 @@ above the named one — which turned a coincidence into a rule worth writing dow
 Swept with the host on 2026-09-06, in descending order of how much the engine
 already knows and does not say:
 
-1. **The brick cache's refusal on a dirty region does not say why, and the host's
-   guess can be WRONG rather than merely vague.** Their `place_layer` writes a
-   layer transform, refills the union of the old and new bounds, and on a refusal
-   puts the transform back with a message that says the subtool was scaled past
-   what the cache can hold. They do not know that: the path returns a generic
-   error and the cause is inferred from context — it was a scale, so it was
-   probably too big. The engine knew the region it refused, the budget it
-   measured against, and whether the limit was memory, brick count or extent. An
-   artist could have been told "too large at this cell size, N cells against a
-   budget of M", which names two controls they have. `voxel_remesh_result_code`
-   is the shape to copy: eight typed statuses mapped to distinct codes, with a
-   comment saying one generic failure would make a host guess between them.
+1. **The brick cache's refusal on a dirty region does not say WHY.** A host
+   refilling the union of a layer transform's old and new bounds gets a generic
+   error: it cannot branch on the cause, cannot name the limit or the region, and
+   cannot offer the artist either of the two controls that would resolve it (the
+   scale, or the cell size). The engine knew the region it refused, the budget it
+   measured against, and whether the limit was memory, brick count or extent.
+   **Severity corrected 2026-09-06 by the host that raised it**, which is worth
+   recording because the correction went against its own case: an earlier version
+   of this row said a host was telling an artist something false. It is not —
+   their `ModelError::Engine` carries the engine's own `clay_last_error` string
+   and displays it unchanged, so a person sees OUR words, accurate if terse, and
+   the mistaken inference lived only in one of their code comments. **So this is
+   a vagueness problem, not a wrongness one, and it is ordered accordingly.**
+   `voxel_remesh_result_code` remains the shape to copy — eight typed statuses
+   mapped to distinct codes, with a comment saying one generic failure would make
+   a host guess between them — because a status a host can BRANCH on beats a
+   string it can only display, and "N cells against a budget of M" is a better
+   sentence than prose either side writes.
 2. **The boolean budget is computed twice.** The host predicts a sampled
    boolean's cost itself, reads `clay_brick_cache_stats.memory_budget`, takes the
    tighter of that and its own ceiling, and refuses BEFORE calling the engine so
