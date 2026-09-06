@@ -1432,6 +1432,27 @@ makes it correct about what it is permanently. If `baseline.json`'s entries
 carried the ABI they were taken at, the gate could print that sentence and the
 re-run would not be owed.
 
+**Do the per-entry field FIRST, and do not let the red row argue for it.** The
+`device` row is failing on this repository's working branch right now, and
+adopting "announce" would make it green — which is a bad reason to adopt a design
+even when the design is right. The test before touching that row: **would you
+still make this change if the row were passing?** If the red is doing the
+arguing, it is suppression wearing a rationale.
+
+The distinction that keeps both mechanisms is that they answer different
+questions, and the `device` row is currently answering the wrong one.
+`claycoreCommit` against HEAD is not "are these figures comparable", it is "was
+this file recorded against this engine" — and the answer is no, and will be no
+after every pin move, forever. That is a condition permanent by construction
+rather than a gate catching something. Meanwhile the real comparability question
+— do these 74 entries agree with EACH OTHER — has no field to be red about.
+
+So the ordering is: **add the per-entry `abiVersion`, which creates the thing
+that can disagree; then decide what the row should do with a disagreement.** In
+the other order a red is removed and nothing that could ever be red again is
+added. That second decision belongs to whoever owns the gate, not to a branch
+that would benefit from it.
+
 **The honest limit, stated by the host about its own design:** an announcement is
 QUALITATIVE. A reader is told "plus whatever else moved" and not how much, so it
 cannot say whether four pins of drift have eaten the tolerance a real regression
