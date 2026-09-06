@@ -2207,6 +2207,55 @@ did not hold, and found the real gap one level down. **A wrong finding that is
 reproduced rather than dismissed is a cheap way to be right about something
 else.**
 
+### A suppression list is evidence about the checker, and the host has nowhere to write one
+
+Our task-symbols gate went from **12 baseline rows to 5** when the resolver was
+fixed. Seven of the twelve were never debt: they were the tool's own defect
+written down as though somebody owed it. The cause was a single line — a
+path-shaped citation answered by `os.path.exists` rather than by `git ls-files`
+— and it produced three failures that looked unrelated: gitignored build output
+counting as resolved, a `..` citation answered by whatever sat beside the
+checkout, and an inversion in which a MORE specific citation fails while a vaguer
+one passes.
+
+**The inversion is what made it undetectable from inside.** `scene/bounds`
+resolving while `ClayCoreLink/Empty.swift` does not is backwards from the way
+anyone would test a path resolver, so it survives the obvious check — and each
+failure it caused was parked in the baseline as debt, which is the one place
+nobody re-reads.
+
+**The host cannot have this problem, and not by foresight.** They grepped their
+gates for an allowlist, a baseline, a waiver, a known-failures file — anything a
+violation could be parked in — and there is nothing. The only allowlist in their
+`check_layering.py` is `UNSAFE_ALLOWED = {"claycore-sys", "claycore"}`, which is
+a RULE (two crates may hold `unsafe`), not a list of tolerated exceptions. So a
+gate that is wrong there cannot record its wrongness as debt: it fails, somebody
+has to look, and **the only place the pressure can go is into the tool.**
+
+**The rule, and it generalises past gates:** any accumulated list of accepted
+exceptions is a record of two things at once — what the code owes, and what the
+checker gets wrong — and nobody reads it as both. Twelve rows down to five, seven
+of which were never debt, is the number to put in front of anyone proposing a
+baseline file as the way to adopt a strict check gradually. **Their property was
+obtained by never building the mechanism**, which is the argument for not
+building one later rather than for tearing ours out today.
+
+### The host's Camada measurement, and a decision they declined to route around
+
+Their diagnosis of their own per-segment `begin_stroke` held up under
+measurement: **mesh Camada converges (1.010 -> 1.036 over six dabs) and hierarchy
+Camada is a straight line (0.010 -> 0.059)**, which is our Draw shape, and
+`begin_stroke()` appears exactly once in their codebase — per segment, in the
+hierarchy path only. Our own gate's ratio (draw past layer by more than three
+times) is what they will check the fix against.
+
+**They have not fixed it, deliberately.** It is a confirmed defect on a shipped
+brush and the fix changes how a tool behaves on a representation people are
+using, so they put it to their user once with the measurements and the one-line
+cause, and stopped. Recorded here because the reasoning is worth keeping: *a peer
+asking twice is not a reason to schedule someone else's product decision.* We
+asked twice; the right answer to the second ask was no.
+
 ### A negative repro that rules out one path, and the ceiling gate that localises it
 
 The host tried to reproduce the coarse ceiling reset and **could not**, and
