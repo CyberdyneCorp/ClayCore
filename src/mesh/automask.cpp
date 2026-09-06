@@ -217,8 +217,8 @@ void compute_automask(const WorkItemTopology& topology, const SculptWorkset& wor
 void compute_automask(const Mesh& mesh, const Adjacency& adjacency, const SculptWorkset& workset,
                       const AutomaskSettings& settings, const AutomaskInputs& inputs,
                       kernel::cfloat3 reference_normal, std::uint32_t seed_class,
-                      BrushScratchArena& arena, float* out) {
-    const MeshWorkItemTopology topology(mesh, adjacency, workset);
+                      BrushScratchArena& arena, float* out, const CrossLevelNeighborhood* cross) {
+    const MeshWorkItemTopology topology(mesh, adjacency, workset, cross);
     // A weld class becomes a workset slot HERE, because `workset.slot` is the
     // adapter's array and the neutral core never indexes it.
     ConnectivitySeed seed;

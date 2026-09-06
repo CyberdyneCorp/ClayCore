@@ -160,10 +160,19 @@ void compute_automask(const WorkItemTopology& topology, const SculptWorkset& wor
 // THE FIXED MESH'S ADAPTER, kept under the signature it always had so a caller
 // holding a mesh and an adjacency does not have to build a topology to ask.
 // `seed_class` is a weld class and is resolved to a workset slot here.
+//
+// `cross` IS THE SAME NEIGHBOURHOOD `MeshSculptor` BINDS, and it is a parameter
+// here rather than a null the adapter hard-codes because the topology this
+// builds is otherwise a SECOND one, blind where the sculptor's is not: a caller
+// holding one level of a regional hierarchy would get every class on the rim of
+// the refined region faded as an open border, which is the defect
+// `is_boundary_class` takes a neighbourhood to avoid. Default null is an
+// ordinary mesh and is what every existing caller passes by omission.
 void compute_automask(const Mesh& mesh, const Adjacency& adjacency, const SculptWorkset& workset,
                       const AutomaskSettings& settings, const AutomaskInputs& inputs,
                       kernel::cfloat3 reference_normal, std::uint32_t seed_class,
-                      BrushScratchArena& arena, float* out);
+                      BrushScratchArena& arena, float* out,
+                      const CrossLevelNeighborhood* cross = nullptr);
 
 // The fixed mesh's `WorkItemTopology`: a ring is the adjacency's ring, and an
 // open border is a ring neighbour sharing exactly one triangle.

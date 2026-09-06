@@ -368,6 +368,12 @@ std::size_t MultiresSculptor::stamp_coarse(MeshBrush verb, const MeshBrushSettin
         // memory that buys. The chunk table is handed over for the same reason
         // the bound level's is: without it an unseeded dab resolves its anchor
         // by scanning the level.
+        //
+        // `set_defer_normals` IS NOT FORWARDED, and the header says why: a
+        // sculptor that lives for one stamp has no stroke to defer into, and a
+        // deferred set dies unflushed with it. The telemetry blocks are not
+        // forwarded either -- a peak reported here would be a second arena's
+        // and not the bound level's, which `arena()` already says it reports.
         Mesh& mesh = surface_.level_mesh(c.level);
         MeshSculptor sculptor(mesh, surface_.level_adjacency(c.level));
         sculptor.set_cross_level(&surface_.cross_level_at(c.level));

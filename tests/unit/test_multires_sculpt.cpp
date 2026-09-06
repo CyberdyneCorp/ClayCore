@@ -1597,3 +1597,163 @@ TEST_CASE("multires: a crossing stamp survives a cache drop under it") {
     CHECK(sculptor.stamp(MeshBrush::Draw, settings) > 0);
     CHECK(sculptor.last_write_levels() == std::vector<std::uint32_t>{2u, 3u});
 }
+
+// -- THE TWO PUBLIC ENTRY POINTS THAT WERE NOT GIVEN THE WHOLE SURFACE --------
+//
+// The cross-level neighbourhood reaches the sculpt path through
+// `MeshSculptor::set_cross_level`, and both cases below cover a way IN to the
+// same machinery that the sculptor's own bind does not pass through: the
+// automask adapter a caller reaches with a mesh and an adjacency in hand, and
+// the coarse sculptors a crossing stamp builds for itself.
+
+namespace {
+
+// Every weld class of a level as one workset, weights at 1 and nothing masked --
+// the shape `compute_automask`'s adapter overload documents, built by hand
+// because the point is to call THAT overload rather than the one the sculptor's
+// gather reaches through `compose_workset`.
+mesh::SculptWorkset whole_level_workset(MultiresSurface& s, std::uint32_t level) {
+    const mesh::Adjacency& adj = s.level_adjacency(level);
+    const Mesh& mesh = s.level_mesh(level);
+    mesh::SculptWorkset w;
+    w.slot.assign(adj.class_count(), mesh::kNoClass);
+    for (std::uint32_t c = 0; c < static_cast<std::uint32_t>(adj.class_count()); ++c) {
+        std::size_t members = 0;
+        const std::uint32_t* member = adj.members(c, &members);
+        w.slot[c] = static_cast<std::uint32_t>(w.items.size());
+        w.items.push_back(mesh::WorkItemId::weld_class(c));
+        w.weights.push_back(1.0f);
+        w.positions.push_back(mesh.positions[member[0]]);
+        w.normals.push_back(cf3(0, 1, 0));
+    }
+    return w;
+}
+
+// How many slots the boundary factor faded, through the MESH ADAPTER overload.
+std::size_t faded_by_boundary(MultiresSurface& s, std::uint32_t level,
+                              const mesh::CrossLevelNeighborhood* cross) {
+    const mesh::SculptWorkset w = whole_level_workset(s, level);
+    mesh::AutomaskSettings settings;
+    settings.factors = static_cast<std::uint32_t>(mesh::AutomaskFactor::Boundary);
+    settings.boundary_rings = 2;
+    mesh::BrushScratchArena arena;
+    std::vector<float> out(w.size(), 1.0f);
+    mesh::compute_automask(s.level_mesh(level), s.level_adjacency(level), w, settings, {},
+                           cf3(0, 1, 0), mesh::kNoClass, arena, out.data(), cross);
+    std::size_t faded = 0;
+    for (float f : out)
+        if (f < 1.0f) ++faded;
+    return faded;
+}
+
+}  // namespace
+
+TEST_CASE("regional automask: the mesh adapter fades no seam when it is given the whole surface") {
+    // THE ADAPTER IS A SECOND TOPOLOGY. `MeshSculptor::gather` builds a
+    // `MeshWorkItemTopology` and hands it the neighbourhood; this overload
+    // builds one of its own for a caller holding a mesh and an adjacency, and
+    // until it took `cross` too that second one was blind exactly where the
+    // first is not.
+    const Mesh cage = bumpy_quads(6, 1.0f);
+    MultiresSurface part = build_regional(cage);
+    const mesh::CrossLevelNeighborhood& cross = part.cross_level_at(3);
+
+    // Level 3 of this hierarchy is the 2x2 refined block and nothing else, so
+    // EVERY class the level's own connectivity calls a border is the rim of the
+    // refined region — an internal seam in the middle of a 6x6 cage, which the
+    // artist did not put there and cannot see. The block is 17x17 vertices and
+    // its rim is the 64 classes "a depth transition is not a border of the
+    // model" counts; two boundary rings fade that rim and the ring inside it,
+    // 64 + 56 = 120.
+    const std::size_t blind = faded_by_boundary(part, 3, nullptr);
+    const std::size_t whole = faded_by_boundary(part, 3, &cross);
+    MESSAGE("adapter faded " << blind << " slots blind, " << whole << " with the neighbourhood");
+    CHECK(blind == 120);
+    CHECK(whole == 0);
+
+    // AND THE MODEL'S REAL BORDER IS STILL FADED, which is the half that says
+    // the fix is not "switch the factor off". A uniformly refined hierarchy over
+    // the same open cage has an EMPTY neighbourhood, so passing it and passing
+    // null must give the same answer, and that answer must not be zero.
+    MultiresSurface dense = build(cage, 3);
+    const mesh::CrossLevelNeighborhood& none = dense.cross_level_at(3);
+    REQUIRE(none.empty());
+    const std::size_t edge_blind = faded_by_boundary(dense, 3, nullptr);
+    const std::size_t edge_whole = faded_by_boundary(dense, 3, &none);
+    CHECK(edge_blind == edge_whole);
+    CHECK(edge_blind > 0);
+}
+
+namespace {
+
+// What a crossing stamp left on the COARSE level: its normals, and how many of
+// that level's chunks were told their normals changed.
+struct CoarseAfterStamp {
+    std::size_t moved = 0;
+    std::size_t normals_marked = 0;
+    std::vector<cfloat3> normals;
+    std::vector<cfloat3> positions;
+};
+
+CoarseAfterStamp crossing_stamp_with_defer(const Mesh& cage, bool defer) {
+    MultiresSurface s = build_regional(cage);
+    REQUIRE(s.set_sculpt_level(3));
+    MeshBrushSettings settings;
+    {
+        const std::vector<cfloat3>& p = s.positions_at(3);
+        settings.center = p[nearest_vertex(p, cf3(-1.0f / 3.0f, 0.0f, 0.0f))];
+    }
+    settings.radius = 0.50f;  // anchored on the rim and reaching well past it
+    settings.strength = 0.5f;
+
+    mesh::ChunkTable& coarse = s.level_chunks(2);
+    std::vector<std::uint64_t> before(coarse.slot_count(), 0);
+    for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(coarse.slot_count()); ++i)
+        if (const mesh::SurfaceChunk* c = coarse.chunk(i)) before[i] = c->revisions.normals;
+
+    MultiresSculptor sculptor(s);
+    sculptor.set_defer_normals(defer);
+    sculptor.begin_stroke();
+    CoarseAfterStamp out;
+    out.moved = sculptor.stamp(MeshBrush::Draw, settings);
+    // What a host that deferred does at the end of the stroke, and a no-op for
+    // one that did not.
+    sculptor.flush_normals();
+
+    const mesh::ChunkTable& after = s.level_chunks(2);
+    for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(before.size()); ++i)
+        if (const mesh::SurfaceChunk* c = after.chunk(i))
+            if (c->revisions.normals != before[i]) ++out.normals_marked;
+    out.normals = s.level_mesh(2).normals;
+    out.positions = s.level_mesh(2).positions;
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("multires: a crossing stamp's coarse side does not depend on the host deferring") {
+    // `set_defer_normals` PROMISES THAT DEFERRING CHANGES NOTHING about the
+    // final surface, and a crossing stamp is where that promise had a way to
+    // break: the coarse sculptors are built inside one stamp and destroyed with
+    // it, so a deferred set handed to one would die unflushed — `flush_normals`
+    // reaches the BOUND level's sculptor and nothing else. Forwarding
+    // `set_defer_normals` into `stamp_coarse` is what this gates against: it
+    // leaves the coarse normals stale and marks 0 of the coarse level's chunks
+    // instead of 2, so a host draining the stroke draws the coarse side of the
+    // transition with the normals it had before the stroke.
+    const Mesh cage = bumpy_quads(6, 1.0f);
+    const CoarseAfterStamp now = crossing_stamp_with_defer(cage, false);
+    const CoarseAfterStamp later = crossing_stamp_with_defer(cage, true);
+
+    // NOT VACUOUS: the stamp crossed, and it moved the coarse level.
+    CHECK(now.moved == 264);
+    CHECK(later.moved == now.moved);
+    CHECK(now.normals_marked == 2);
+
+    // THE PROMISE, in bytes and in the dirty set both — a stale normal that
+    // nothing tells the host about is the failure, so neither half alone is the
+    // gate.
+    CHECK(same_bytes(now.normals, later.normals));
+    CHECK(same_bytes(now.positions, later.positions));
+    CHECK(later.normals_marked == now.normals_marked);
+}

@@ -248,6 +248,18 @@ class MultiresSculptor {
     // recompute to the end of it. Forwarded to whichever level sculptor is
     // bound, because deferring is a property of the STROKE rather than of the
     // level it lands on. Deferring changes nothing about the final surface.
+    //
+    // NOT FORWARDED TO THE COARSE SCULPTORS a crossing stamp runs, and that is
+    // deliberate rather than an omission. Each of those exists for ONE stamp
+    // and is destroyed with it -- see `CoarseLevel` for why -- so there is no
+    // stroke for them to defer into, and `flush_normals` below cannot reach a
+    // sculptor that no longer exists. Measured by forwarding it anyway: a
+    // deferred crossing stamp then leaves the coarse level's normals stale
+    // (its positions are unaffected) and marks 0 of its chunks
+    // `ChunkDirty::Normals` where an immediate one marks 2, so a host draining
+    // the stroke draws the coarse side of the transition with the normals it
+    // had before. "Deferring changes nothing about the final surface" is a
+    // promise this class keeps by paying the coarse side's recompute per stamp.
     void set_defer_normals(bool defer);
     bool defer_normals() const { return defer_normals_; }
     void flush_normals();
