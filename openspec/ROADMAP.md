@@ -1341,6 +1341,52 @@ worth a contract:
   document, and every millisecond of the difference is a hop paying a whole-layer
   refill.
 
+### Refusals a host cannot render — a standing rule, and three instances
+
+**A refusal that knows an id should return it, and a host should never have to
+walk state to render a refusal.** Where it does, either the refusal is missing a
+field or the host is guessing, and those are indistinguishable until someone is
+wrong in front of an artist. Three calls in
+`fold-the-layers-with-an-operator` now hand back what blocks them — the
+composition setter names what it refused, `clay_document_writable_at_minor`
+returns the blocking layer, and `_below` returns the lowest visible SDF layer
+above the named one — which turned a coincidence into a rule worth writing down.
+
+Swept with the host on 2026-09-06, in descending order of how much the engine
+already knows and does not say:
+
+1. **The brick cache's refusal on a dirty region does not say why, and the host's
+   guess can be WRONG rather than merely vague.** Their `place_layer` writes a
+   layer transform, refills the union of the old and new bounds, and on a refusal
+   puts the transform back with a message that says the subtool was scaled past
+   what the cache can hold. They do not know that: the path returns a generic
+   error and the cause is inferred from context — it was a scale, so it was
+   probably too big. The engine knew the region it refused, the budget it
+   measured against, and whether the limit was memory, brick count or extent. An
+   artist could have been told "too large at this cell size, N cells against a
+   budget of M", which names two controls they have. `voxel_remesh_result_code`
+   is the shape to copy: eight typed statuses mapped to distinct codes, with a
+   comment saying one generic failure would make a host guess between them.
+2. **The boolean budget is computed twice.** The host predicts a sampled
+   boolean's cost itself, reads `clay_brick_cache_stats.memory_budget`, takes the
+   tighter of that and its own ceiling, and refuses BEFORE calling the engine so
+   the artist gets a number rather than a wait. That is preemption rather than
+   inference and it is the right shape — but it is the engine's arithmetic
+   restated, and if the two ever disagree the artist meets a refusal nobody
+   predicted or waits for one that was preventable. A "would this fit" query in
+   the shape of `clay_document_writable_at_minor` collapses it to one source of
+   truth. Low priority, recorded for the class.
+3. **The sibling rule: a call that cannot fail on an ambiguity should take an id
+   rather than a name.** `clay_document_voxel_layer` takes a string, so two
+   layers sharing a name shadow each other's grid and a stroke lands on the wrong
+   one — no refusal to explain, because the call succeeds and does the wrong
+   thing. The host prevents the condition on every path that can create a layer.
+
+Deliberately NOT on this list: tool availability. The host keeps
+`tool.availability(layer_state)` domain-side on purpose — the refusal belongs to
+its vocabulary, and repeating it in the engine would let the two disagree. A rule
+about refusals is not a claim that every refusal belongs to the engine.
+
 ### The practice that catches an inert feature
 
 Their `clay_item_set_gate` was accepted-and-inert for four releases, exactly as
