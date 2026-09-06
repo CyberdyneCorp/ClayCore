@@ -1488,6 +1488,27 @@ common defence ("we have a gate for that") is true in every one of these cases.
 The unifying question is not "is there a gate" but **"what would have to happen
 for this gate to fail, and does that ever happen here?"**
 
+### A format bump is detected downstream without us saying so
+
+Worth knowing before the next minor moves: ClaySpaceDesktop's own test suite
+parses `kClaySpaceMinor` out of `include/clay/io/clayspace.h` and `kSceneMinor`
+out of `include/clay/scene/commands.h` **in its vendored copy of this tree** and
+asserts both against its own format constant. So a pin move that carries a new
+minor fails their build with "the pin moved and the constant did not", before
+anyone reads a release note. It also asserts the two minors against each other,
+which is this repository's own static assertion that the container and the scene
+payload travel together — checked from outside, where a change to one of them
+cannot also change the check.
+
+That is the good case of the rule in `fold-the-layers-with-an-operator`'s §13e:
+the expected value comes from somewhere the code under test cannot reach. Their
+writer and their constant are both theirs; the vendored header is ours.
+
+The practical consequence for a release: **a minor bump does not need to be
+announced to be noticed, but it does need to be announced to be UNDERSTOOD.**
+Their gate says the number moved; only the notes say a subtracting layer written
+at the older minor comes back as a union.
+
 ### The practice that catches an inert feature
 
 Their `clay_item_set_gate` was accepted-and-inert for four releases, exactly as
