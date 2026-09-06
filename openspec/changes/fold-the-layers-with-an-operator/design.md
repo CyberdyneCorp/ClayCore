@@ -772,3 +772,41 @@ and for everything-except-one (`_excluding`), and cannot ask for everything-belo
 
 This is the same asymmetry as the 0.1 decision, arriving at a host-facing call:
 the seam is one question, and everything below it is already answered.
+
+### §12a. The active layer is often NOT the top, and the refusal must name what blocks it
+
+Corrected by the host on 2026-09-06, against its own reference fixture rather
+than against an intuition. Their `visual_shell` stack is four rows —
+`Detalhes_secundarios`, `Poros`, `Forma_principal`, `Base` — and the ACTIVE layer
+is `Forma_principal`, third of four. The excluded layer is whatever the sculptor
+clicked; nothing constrains it to the top. A sculptor blocks out a form, adds
+pores and fine detail above it, and goes back down to smooth the form underneath.
+So "the layer under the brush is usually the top" is wrong, and §12's condition
+bites in the ordinary case rather than in a corner.
+
+**Two things narrow it, and neither changes the rule.** The condition is the last
+visible **SDF** layer, so mesh, voxel and hierarchy subtools above the active one
+do not disqualify it and neither do hidden ones — a stack whose upper rows are a
+carried mesh and a rasterised grid still qualifies while looking to the artist as
+though something is above. And a document where nothing composes is unaffected
+entirely.
+
+**What does NOT narrow it, checked rather than assumed:** "every layer above is a
+plain union" is not sufficient. With `⊕` the active layer's fold and `U` the
+union of the layers above, the document is `(below ⊕ active) ∪ U`, and neither
+`_excluding` nor `_below` alone can produce that — `_excluding` gives
+`below ∪ U`, and `(below ∪ U) ⊕ active` is a different field for any `⊕` that is
+not itself a union. Repairing that case needs a THREE-way split (below, active,
+above) and a host composing twice. Recorded as the widening this could take if
+the fallthrough measures large enough to want it; not this change.
+
+**Required, and it is the third time this medicine applies:** `_below`'s refusal
+SHALL hand back the id of the layer that blocks it — the lowest visible SDF layer
+above the named one — exactly as `clay_document_writable_at_minor` returns its
+blocking layer and as the composition setter names what it refused. The host's
+subtool rows are engine layers, so an id becomes a row a person can select, and
+the sentence becomes *"hide or move Poros to smooth Forma_principal live"* rather
+than *"live smoothing is not available here"*. One names an action; the other
+names a wall. It matters more here than in the `writable_at_minor` case: a
+document has one format and a stack has many layers, so without the id the host
+walks the stack to re-derive a fact the refusal already computed.
