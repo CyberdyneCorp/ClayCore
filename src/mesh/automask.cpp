@@ -31,6 +31,21 @@ int shared_triangles(const Mesh& mesh, const Adjacency& adj, std::uint32_t a, st
     return shared;
 }
 
+// The derived faces' half of the same count: how many faces this level does not
+// store have both classes among their corners. Zero everywhere except the rim of
+// a refined region, and zero at the model's own border, which is what keeps the
+// answer there true.
+int shared_derived(const Adjacency& adj, const CrossLevelNeighborhood& cross, std::uint32_t a,
+                   std::uint32_t b) {
+    std::size_t na = 0, nb = 0;
+    const std::uint32_t* ma = adj.members(a, &na);
+    const std::uint32_t* mb = adj.members(b, &nb);
+    int shared = 0;
+    for (std::size_t i = 0; i < na; ++i)
+        for (std::size_t j = 0; j < nb; ++j) shared += cross.shared_triangles(ma[i], mb[j]);
+    return shared;
+}
+
 // The two-sided fade every gate in this file uses: full strength up to `at`,
 // zero at twice it, smoothstepped between. A gate that steps from 1 to 0 leaves
 // a bead of protected vertices beside a fully worked one, which polish already
@@ -120,11 +135,16 @@ void apply_connectivity(const WorkItemTopology& topology, std::size_t count,
 
 }  // namespace
 
-bool is_boundary_class(const Mesh& mesh, const Adjacency& adjacency, std::uint32_t cls) {
+bool is_boundary_class(const Mesh& mesh, const Adjacency& adjacency, std::uint32_t cls,
+                       const CrossLevelNeighborhood* cross) {
     std::size_t n = 0;
     const std::uint32_t* ring = adjacency.ring(cls, &n);
-    for (std::size_t i = 0; i < n; ++i)
-        if (shared_triangles(mesh, adjacency, cls, ring[i]) < 2) return true;
+    for (std::size_t i = 0; i < n; ++i) {
+        int shared = shared_triangles(mesh, adjacency, cls, ring[i]);
+        if (shared < 2 && cross && !cross->empty())
+            shared += shared_derived(adjacency, *cross, cls, ring[i]);
+        if (shared < 2) return true;
+    }
     return false;
 }
 
@@ -147,7 +167,7 @@ void MeshWorkItemTopology::ring_slots(std::uint32_t slot,
 }
 
 bool MeshWorkItemTopology::on_open_border(std::uint32_t slot) const {
-    return is_boundary_class(mesh_, adjacency_, workset_.items[slot].as_weld_class());
+    return is_boundary_class(mesh_, adjacency_, workset_.items[slot].as_weld_class(), cross_);
 }
 
 // -- the neutral core ---------------------------------------------------------

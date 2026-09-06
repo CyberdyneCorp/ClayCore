@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "clay/mesh/adjacency.h"
+#include "clay/mesh/cross_level.h"
 #include "clay/mesh/detail_field.h"
 #include "clay/mesh/multires.h"
 #include "clay/mesh/sculpt_layer.h"
@@ -47,6 +48,16 @@ struct LevelCache {
     bool faces_built = false;
     std::unique_ptr<Adjacency> adjacency;
     bool evaluated = false;
+
+    // The faces the COMPLETE neighbourhood of this level's vertices has and
+    // this level does not store -- empty on a level that stores every patch.
+    //
+    // IN THE CACHE like everything else derived, so `drop_all_caches` and
+    // `drop_intermediate_caches` already release it and `cache_generation`
+    // already moves when they do. Its topology is a function of the cage, the
+    // rule and the per-level patch sets; only its outside POSITIONS follow the
+    // level below, and those are re-read rather than rebuilt.
+    std::unique_ptr<CrossLevelNeighborhood> cross;
 
     // The level's chunks, and the face -> chunk map that marks them.
     //

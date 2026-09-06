@@ -58,6 +58,7 @@
 
 #include "clay/kernel/shim.h"
 #include "clay/mesh/adjacency.h"
+#include "clay/mesh/cross_level.h"
 #include "clay/mesh/detail_field.h"
 #include "clay/mesh/mesh_data.h"
 #include "clay/mesh/project.h"
@@ -427,6 +428,20 @@ class MultiresSurface {
     // until `absorb_level_edit` is told.
     Mesh& level_mesh(std::uint32_t level);
     const Adjacency& level_adjacency(std::uint32_t level);
+
+    // THE COMPLETE SURFACE NEIGHBOURHOOD of this level's vertices: the faces a
+    // uniformly refined hierarchy would have put around them that this level
+    // does not store, because their base patches are coarser here.
+    //
+    // Empty on a level that stores every patch, which is every level of a
+    // uniform hierarchy — so a reader that adds it in pays nothing and changes
+    // nothing away from a depth boundary. See `cross_level.h` for what is in it
+    // and why it is one materialized answer rather than one callback.
+    //
+    // Derived: it lives in the level's cache, it is released with everything
+    // else derived, and rebuilding it produces the same bytes. Nothing about it
+    // is serialized.
+    const CrossLevelNeighborhood& cross_level_at(std::uint32_t level);
 
     // How many GEOMETRIC vertices the cage has — its weld classes, which is what
     // a level-0 vertex index means everywhere in this API. Not the same as

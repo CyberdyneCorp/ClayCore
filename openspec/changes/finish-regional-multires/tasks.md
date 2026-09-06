@@ -60,67 +60,72 @@
 
 ## 2. One cross-level topology helper
 
-- [ ] 2.1 DECISION, taken in `design.md` and recorded here: NOT one
+- [x] 2.1 DECISION, taken in `design.md` and recorded here: NOT one
       `for_each_surface_neighbor(vertex, callback)`. One topology helper with
       several readers, because `smooth_targets` re-reads the same materialized
       CSR up to `kMaxSmoothIterations` times per stamp and a callback would
       re-walk per pass, and because a neighbour is nine different payloads over
       three topologies. `build_neighbors` already made this call and wrote the
       reason down
-- [ ] 2.2 DECISION: the helper answers in FACES, not vertices. Every reader that
+- [x] 2.2 DECISION: the helper answers in FACES, not vertices. Every reader that
       is wrong at a transition is a face or corner walk — `level_normals`,
       `class_normal`, `recompute_normals`, `expand_by_face_ring`,
       `is_boundary_class` — and a vertex ring falls out of the corners. Task 0.1
       measured that the defect IS the incomplete face ring
-- [ ] 2.3 Build it over `LevelTopology` and `LevelConnectivity`, keyed on
+- [x] 2.3 Build it over `LevelTopology` and `LevelConnectivity`, keyed on
       (level, vertex), returning every incident face named by the level it lives
       at. Seed it from `patch_neighbours` and `effective_level`, which already
       answer "which patches touch this one" and "at which level do I read that
       one"; `ChildIndex` already answers "does the fine level hold the child of
       this coarse vertex"
-- [ ] 2.4 DECISION: the order is ascending level, then the level's own face
+- [x] 2.4 DECISION: the order is ascending level, then the level's own face
       order. Deterministic for free — faces are patch-major in the parent's
       order and `full_of` is ascending — but it must be STATED, because two
       sites already record that neighbourhood order is load-bearing (float
       addition is not associative)
-- [ ] 2.5 Cache it in `LevelCache` and nowhere else, so
+- [x] 2.5 Cache it in `LevelCache` and nowhere else, so
       `drop_intermediate_caches` and `drop_all_caches` already release it.
       `cache_generation` must move on RELEASE as well as on create, or a host
       holding a pointer never rebinds
-- [ ] 2.6 GATE: the helper's answer at a boundary vertex equals the dense
+- [x] 2.6 GATE: the helper's answer at a boundary vertex equals the dense
       hierarchy's incident-face set, as a count and as a set. Today 64 of 289
       level-3 vertices have a smaller face ring than the dense hierarchy's
-- [ ] 2.7 GATE: the cached helper rebuilds bit-identically after
+- [x] 2.7 GATE: the cached helper rebuilds bit-identically after
       `drop_all_caches`, and `cache_generation` differs across the drop
 - [ ] 2.8 `expand_by_face_ring` uses it, so the propagation halo no longer stops
       at the region rim. This is the walk that exists precisely because a vertex
-      whose position did not move still has a changed normal, frame and detail
+      whose position did not move still has a changed normal, frame and detail.
+      LEFT FOR SECTION 1, deliberately: the halo decides which vertices have
+      their normals and frames redone, and while that normal is still summed
+      over the level's own faces alone a wider halo writes the same numbers to
+      the same vertices and no test can see it. It becomes observable in the
+      same change that makes the normal complete
 
 ## 3. The brush-side readers, kept separate
 
-- [ ] 3.1 DECISION: two normal evaluators stay two. `class_normal` is
+- [x] 3.1 DECISION: two normal evaluators stay two. `class_normal` is
       angle-weighted over triangles and shades the brush; `level_normals` is an
       unweighted Newell sum over faces and shades the display and builds the
       frames. One traversal cannot serve both without changing one of their
       results, and the header for the first records why area weighting was
       rejected
-- [ ] 3.2 `class_normal` reads the complete ring, which fixes
+- [x] 3.2 `class_normal` reads the complete ring, which fixes
       `normal_of_item` (and therefore every verb with a per-vertex direction:
       relax, inflate, pinch, crease, nudge and the normal-angle automask) and
       `automask_reference` in one place
-- [ ] 3.3 `recompute_normals` reads it too, and keeps accumulating only into
+- [x] 3.3 `recompute_normals` reads it too, and keeps accumulating only into
       corners whose class matches — that is what preserves a hard edge and must
       not be relaxed to make a transition work
-- [ ] 3.4 `is_boundary_class` stops reading a transition as a border. GATE:
+- [x] 3.4 `is_boundary_class` stops reading a transition as a border. GATE:
       today all 64 transition classes on the fixture report true and NONE is on
       the cage's own outer edge; after the fix the count of transition classes
       reporting true is 0 and the count on the real border is unchanged.
       `on_open_border` is the hook; the model's actual border still reports true
-- [ ] 3.5 GATE the visible consequence, not just the predicate: with
+- [x] 3.5 GATE the visible consequence, not just the predicate: with
       `AutomaskFactor::Boundary` and 2 rings the regional stamp moves 47 classes
       against 58 without it, while the identical dense stamp stays at 107.
       Assert the class COUNT
-- [ ] 3.6 `laplacian_pass` divides by the ring size AS FOUND, which is short and
+- [x] 3.6 `laplacian_pass` divides by the ring size AS FOUND, which is short and
       one-sided at the rim. Give it the complete ring through
       `MeshWorkItemTopology::ring_slots` and `build_neighbors` rather than a
       special case inside the kernel — there is no branch to fix, the neighbour
@@ -130,11 +135,74 @@
       `LocalDetail` coefficients raw and `form_shift` (under `smooth_form`)
       averages `S(n)`. Averaging coefficients across a transition is doubly
       wrong while the two sides' frames differ, so 3.7 lands AFTER section 1
-- [ ] 3.8 Leave `refit_bvh` alone. It walks only the triangles this level has,
+- [x] 3.8 Leave `refit_bvh` alone. It walks only the triangles this level has,
       which is correct at a transition; listed so nobody "fixes" it
-- [ ] 3.9 `euclidean_region` has no ring to hook into — it scans every class of
+- [x] 3.9 `euclidean_region` has no ring to hook into — it scans every class of
       the level. Whatever reaches it does so through the CANDIDATE SET, not
       through a neighbour reader. `geodesic_region` is the one with a frontier
+
+### What the traversal stage landed, and where the tree corrected the plan
+
+- The helper is `CrossLevelNeighborhood` in `include/clay/mesh/cross_level.h`,
+  built by `build_cross_level` and reached through
+  `MultiresSurface::cross_level_at`. `MultiresSculptor` hands it to the level
+  sculptor with `MeshSculptor::set_cross_level`, and it is refreshed on EVERY
+  bind rather than only on a rebuild: its outside positions are the level
+  below's, and a stroke down there moves them without this level's binding
+  going stale
+- CORRECTION TO 2.3 AND 2.4. A face the level does not store is not a face of
+  the COARSER level, and naming it one would have made every reader wrong: a
+  coarse face's own Newell normal is not the sum of the two child normals a
+  boundary vertex actually has. What is missing at a boundary is a face of THIS
+  level that this level does not store, so the helper names each one by the
+  index the DENSE level would have given it, and its corners by a joined
+  numbering that runs past the level's own vertex count. The order that follows
+  is this level's own dense face order — parent face, then corner — which is
+  deterministic for the reason 2.4 gives
+- CORRECTION TO 2.3. It is seeded from the parent's own face list and the
+  level's `patch_kept` rather than from `patch_neighbours` and
+  `effective_level`. Those two answer at PATCH granularity and the join needed
+  is per vertex; `ChildIndex` already answers "does this level hold the child of
+  that parent element", which is the whole of it
+- A corner the level does not store is positioned by `subdivide_positions`
+  itself, through a `ChildIndex` over exactly those layout ids — the same call
+  the level's own vertices came out of, so a boundary value is the dense
+  hierarchy's bits and not a second copy of the four rules. It is the surface
+  with NO DETAIL on it, which is the only answer there is: a vertex the level
+  does not store has nowhere to hold a coefficient
+- 2.5 was ALREADY TRUE on the release side. `release_generation` already moves
+  `cache_generation` when a drop released anything, so the transition set
+  inherited it by living in `LevelCache`. Gated anyway in 2.7, because the
+  file's own record says what happened the one time only the create side bumped
+- 3.6 landed through `build_neighbors` and NOT through `ring_slots`, and the
+  reason is measured rather than assumed: a cross-level neighbour that this
+  level STORES is already an adjacency ring neighbour, so the only thing a depth
+  boundary adds is a vertex outside the level — which is never in a workset and
+  so never a `ring_slots` answer. `test_multires_sculpt.cpp` gates that count at
+  0 rather than leaving it as an argument
+- 3.9 CONFIRMED and unchanged: `euclidean_region` scans the level's own classes,
+  and a vertex the level does not store can never be a candidate because nothing
+  can write to it. There was nothing to reach it with
+- A `MeshSculptor::write` that also marked the corners of the derived faces was
+  written and then DELETED. The set it adds — the two edge points either side of
+  a concave corner of the refined region — is real and measured (1 pair on an
+  L-shaped region, 0 on a square block), but a stamp's normal-refresh set is the
+  union over every class it moved and already covered it: the count of re-shaded
+  vertices was 67 with the walk and 67 without. An identical count after
+  deleting a term is the proof the term is never reached
+- WHAT THE GATES MEASURE, all of them counts or byte comparisons on a 6x6 cage
+  with the middle 2x2 refined to level 3. The complete face set at every one of
+  289 level-3 vertices equals the uniform hierarchy's, where the level's own
+  connectivity is short at 64 of them. All 64 rim classes report
+  `is_boundary_class`, none on the cage's own edge, and 0 do afterwards while
+  the uniform hierarchy's 192 real border classes are unchanged. A Smooth stamp
+  on the rim leaves 11 shared vertices up to 0.0185 from where the uniform
+  hierarchy leaves them — 44% of the 0.0417 level-3 edge spacing — against 3 at
+  3.0e-08, which is float rounding. With boundary automasking on, 71 classes
+  move instead of 82 before, and 82 after
+- PROVED BY REVERT, twice, each revert compiling. Dropping the derived-face
+  emission fails 10 assertions across 7 cases; dropping only the derived term in
+  `is_boundary_class` fails exactly the two that are about a border
 
 ## 4. Brushes across a transition (the predecessor's 5.3)
 

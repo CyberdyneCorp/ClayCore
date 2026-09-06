@@ -22,7 +22,10 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
+#include <map>
 #include <vector>
 
 #include "clay/mesh/multires.h"
@@ -352,4 +355,159 @@ TEST_CASE("regional: detail authored on a refined patch stays local to it") {
     // level it is stored on, and the cage two levels down never hears about it.
     CHECK(same_bits(patch_corners(plain, 1, far_patch), patch_corners(bumped, 1, far_patch)));
     CHECK(same_bits(patch_corners(plain, 1, near_patch), patch_corners(bumped, 1, near_patch)));
+}
+
+// -- the complete neighbourhood across a depth boundary -----------------------
+//
+// A regional level's own connectivity ends at the region rim, so every walk
+// built on it sees an open border where the surface in fact continues one level
+// down. `MultiresSurface::cross_level_at` is the faces that walk is missing, and
+// these are the gates on it: at a boundary vertex the complete answer is the
+// UNIFORM hierarchy's answer, as a count and as a set.
+
+namespace {
+
+// The complete incident-face set of one level vertex, as face CENTROIDS.
+//
+// Centroids rather than face ids, and for the same reason `patch_corners`
+// compares positions: a regional level numbers its vertices compactly, so the
+// same point on the surface has a different id in the two hierarchies. A face
+// is the same four points in the same corner order in both, so its centroid is
+// the same bits.
+std::vector<cfloat3> incident_faces(MultiresSurface& s, std::uint32_t level, std::uint32_t v,
+                                    bool complete) {
+    const mesh::CrossLevelNeighborhood& x = s.cross_level_at(level);
+    const mesh::LevelTopology& t = s.topology_at(level);
+    const mesh::LevelConnectivity& conn = s.connectivity_at(level);
+    const std::vector<cfloat3>& p = s.positions_at(level);
+    std::vector<cfloat3> out;
+    std::size_t n = 0;
+    const std::uint32_t* faces = conn.faces_of(v, &n);
+    for (std::size_t i = 0; i < n; ++i) {
+        std::uint32_t arity = 0;
+        const std::uint32_t* c = t.face(faces[i], &arity);
+        cfloat3 sum = p[c[0]];
+        for (std::uint32_t k = 1; k < arity; ++k) sum = sum + p[c[k]];
+        out.push_back(sum / static_cast<float>(arity));
+    }
+    if (complete && !x.empty()) {
+        std::size_t m = 0;
+        const std::uint32_t* derived = x.faces_of(v, &m);
+        for (std::size_t i = 0; i < m; ++i) {
+            const std::uint32_t* c = x.face_corners(derived[i]);
+            cfloat3 sum = x.position(p, c[0]);
+            for (int k = 1; k < 4; ++k) sum = sum + x.position(p, c[k]);
+            out.push_back(sum / 4.0f);
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const cfloat3& a, const cfloat3& b) {
+        if (a.x != b.x) return a.x < b.x;
+        if (a.y != b.y) return a.y < b.y;
+        return a.z < b.z;
+    });
+    return out;
+}
+
+// Two face sets, bit for bit. `cfloat3` carries no equality operator, and a
+// tolerance here would be the tolerance welding this feature refuses.
+bool same_faces(const std::vector<cfloat3>& a, const std::vector<cfloat3>& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        if (a[i].x != b[i].x || a[i].y != b[i].y || a[i].z != b[i].z) return false;
+    return true;
+}
+
+// Which dense vertex holds each of these positions. Exact keys, because the two
+// hierarchies agree bit for bit wherever both store a point — which is the
+// claim the first gate in this file makes.
+std::map<std::array<float, 3>, std::uint32_t> vertex_by_position(MultiresSurface& s,
+                                                                 std::uint32_t level) {
+    std::map<std::array<float, 3>, std::uint32_t> out;
+    const std::vector<cfloat3>& p = s.positions_at(level);
+    for (std::uint32_t v = 0; v < static_cast<std::uint32_t>(p.size()); ++v)
+        out[{p[v].x, p[v].y, p[v].z}] = v;
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("regional: a boundary vertex has the neighbourhood a uniform hierarchy gives it") {
+    const Mesh cage = grid_quads(6, 1.0f);
+    MultiresSurface dense = build(cage);
+    MultiresSurface part = build(cage);
+    for (int l = 0; l < 3; ++l) REQUIRE(dense.add_level());
+    REQUIRE(part.refine_patches_to_level(block_patches(6, 2, 2, 2), 3));
+
+    const std::map<std::array<float, 3>, std::uint32_t> dense_of = vertex_by_position(dense, 3);
+    const std::uint32_t count = part.topology_at(3).vertex_count;
+    CHECK(count == 289);
+
+    std::size_t matched = 0, short_ring = 0, complete_differs = 0;
+    for (std::uint32_t v = 0; v < count; ++v) {
+        const cfloat3 at = part.positions_at(3)[v];
+        const auto it = dense_of.find({at.x, at.y, at.z});
+        REQUIRE(it != dense_of.end());
+        ++matched;
+        const std::vector<cfloat3> reference = incident_faces(dense, 3, it->second, true);
+        if (!same_faces(incident_faces(part, 3, v, false), reference)) ++short_ring;
+        if (!same_faces(incident_faces(part, 3, v, true), reference)) ++complete_differs;
+    }
+    CHECK(matched == 289);
+    // WHAT THE LEVEL'S OWN CONNECTIVITY REPORTS, and the size of the problem:
+    // 64 of 289 — 22% — because a small refined region is proportionally more
+    // boundary than a large one. A gate built on a big region under-reports.
+    CHECK(short_ring == 64);
+    // ...and what the complete neighbourhood reports, which is the uniform
+    // hierarchy's own face set, as a count and as a set.
+    CHECK(complete_differs == 0);
+}
+
+TEST_CASE("regional: the complete neighbourhood is derived and rebuilds identically") {
+    const Mesh cage = grid_quads(6, 1.0f);
+    MultiresSurface s = build(cage);
+    REQUIRE(s.refine_patches_to_level(block_patches(6, 2, 2, 2), 3));
+
+    const mesh::CrossLevelNeighborhood before = s.cross_level_at(3);
+    CHECK_FALSE(before.empty());
+    CHECK(before.vertex_count == 289);
+    const std::uint64_t generation = s.cache_generation();
+
+    s.drop_all_caches();
+    // Released, so a host holding a pointer into the cache rebinds rather than
+    // reading storage that is gone. The transition set is in the cache with
+    // everything else derived, so it inherits that for free.
+    CHECK(s.cache_generation() != generation);
+
+    const mesh::CrossLevelNeighborhood after = s.cross_level_at(3);
+    CHECK(after.corners == before.corners);
+    CHECK(after.dense_face == before.dense_face);
+    CHECK(after.face_patch == before.face_patch);
+    CHECK(after.outside_layout == before.outside_layout);
+    CHECK(after.face_offsets == before.face_offsets);
+    CHECK(after.faces == before.faces);
+    CHECK(after.ring_offsets == before.ring_offsets);
+    CHECK(after.ring == before.ring);
+    REQUIRE(after.outside_positions.size() == before.outside_positions.size());
+    std::size_t moved = 0;
+    for (std::size_t i = 0; i < after.outside_positions.size(); ++i)
+        if (after.outside_positions[i].x != before.outside_positions[i].x ||
+            after.outside_positions[i].y != before.outside_positions[i].y ||
+            after.outside_positions[i].z != before.outside_positions[i].z)
+            ++moved;
+    CHECK(moved == 0);
+}
+
+TEST_CASE("regional: a uniform level has nothing outside it") {
+    const Mesh cage = grid_quads(4, 1.0f);
+    MultiresSurface s = build(cage);
+    for (int l = 0; l < 3; ++l) REQUIRE(s.add_level());
+    // THE PARITY ARGUMENT, as a construction rather than a comparison: away
+    // from a depth boundary there is nothing to add, so every reader takes
+    // exactly the path it took before this change and cannot produce a
+    // different number.
+    for (std::uint32_t l = 0; l <= 3; ++l) {
+        INFO("level " << l);
+        CHECK(s.cross_level_at(l).empty());
+        CHECK(s.cross_level_at(l).face_count() == 0);
+    }
 }

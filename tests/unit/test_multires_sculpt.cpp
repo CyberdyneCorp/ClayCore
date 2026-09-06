@@ -9,11 +9,15 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <map>
 #include <vector>
 
 #include "clay/brush/stroke.h"
+#include "clay/mesh/automask.h"
 #include "clay/mesh/multires_sculpt.h"
 #include "clay/mesh/sculpt.h"
 
@@ -510,4 +514,375 @@ TEST_CASE("a seed from another level is refused rather than spent on an empty re
         CHECK(sculptor.stamp(MeshBrush::Draw, settings) > 0);
         CHECK(sculptor.level_sculptor()->stale_seeds_rejected() == 0);
     }
+}
+
+// -- sculpting across a depth boundary ---------------------------------------
+//
+// A regional level stores the faces of the patches it refines and nothing else,
+// so every walk the brush makes over it — the geodesic frontier, the Laplacian's
+// ring, the angle-weighted normal, the boundary automask's shared-triangle count
+// — reads the rim of the refined region as an open border of the model. Nothing
+// refuses and nothing picks a wrong neighbour: the coarse neighbour has no
+// vertex, no weld class and no triangle at this level, so the damage is
+// truncation and one-sidedness and it is silent.
+//
+// `MultiresSurface::cross_level_at` gives those neighbours an identity. These
+// gates are the difference it makes, measured by binding the SAME sculptor with
+// and without it — which is also the parity gate, because away from a boundary
+// the two are the same bytes.
+
+namespace {
+
+// The verbs a per-vertex normal steers, and the one that averages a ring. Both
+// read a neighbourhood the level does not hold at a depth boundary, and one
+// stamp of each is what says so in positions.
+std::size_t stamp_level(MultiresSurface& s, std::uint32_t level, MeshBrush verb, cfloat3 center,
+                        float radius, bool complete) {
+    const mesh::CrossLevelNeighborhood& cross = s.cross_level_at(level);
+    mesh::MeshSculptor sculptor(s.level_mesh(level), s.level_adjacency(level));
+    if (complete) sculptor.set_cross_level(&cross);
+    MeshBrushSettings settings;
+    settings.center = center;
+    settings.radius = radius;
+    settings.strength = 1.0f;
+    return sculptor.stamp(verb, settings);
+}
+
+// The 6x6 cage the regional gates use, bumped so that smoothing has something
+// to do: a flat plane is already smooth and every verb on it is a no-op.
+Mesh bumpy_quads(int n, float half) {
+    Mesh m;
+    const float step = 2.0f * half / static_cast<float>(n);
+    for (int z = 0; z <= n; ++z)
+        for (int x = 0; x <= n; ++x)
+            m.positions.push_back(cf3(-half + step * static_cast<float>(x),
+                                      0.15f * static_cast<float>((x * 7 + z * 3) % 5),
+                                      -half + step * static_cast<float>(z)));
+    const std::uint32_t stride = static_cast<std::uint32_t>(n + 1);
+    for (int z = 0; z < n; ++z)
+        for (int x = 0; x < n; ++x) {
+            const std::uint32_t a =
+                static_cast<std::uint32_t>(z) * stride + static_cast<std::uint32_t>(x);
+            const std::uint32_t b = a + 1, c = a + stride + 1, d = a + stride;
+            m.quads.insert(m.quads.end(), {a, b, c, d});
+            m.indices.insert(m.indices.end(), {a, b, c, a, c, d});
+        }
+    return m;
+}
+
+// The same cage refined over an L of three patches, which leaves the fourth
+// cell of the block coarse and so gives the refined region a CONCAVE corner.
+// The 2x2 block has none, and several things at a depth boundary only exist at
+// one.
+MultiresSurface build_regional_L(const Mesh& cage) {
+    MultiresError err = MultiresError::None;
+    auto s = MultiresSurface::from_mesh(cage, {}, &err);
+    REQUIRE_MESSAGE(s.has_value(), mesh::multires_error_text(err));
+    const std::vector<std::uint32_t> ell = {2u * 6u + 2u, 2u * 6u + 3u, 3u * 6u + 2u};
+    REQUIRE(s->refine_patches_to_level(ell, 3));
+    return std::move(*s);
+}
+
+MultiresSurface build_regional(const Mesh& cage) {
+    MultiresError err = MultiresError::None;
+    auto s = MultiresSurface::from_mesh(cage, {}, &err);
+    REQUIRE_MESSAGE(s.has_value(), mesh::multires_error_text(err));
+    // The middle 2x2 of a 6x6 cage to level 3, which grades the levels below it
+    // out to the rings their stencils need.
+    std::vector<std::uint32_t> block;
+    for (int z = 2; z < 4; ++z)
+        for (int x = 2; x < 4; ++x) block.push_back(static_cast<std::uint32_t>(z * 6 + x));
+    REQUIRE(s->refine_patches_to_level(block, 3));
+    return std::move(*s);
+}
+
+// The level vertex nearest `p`, by position.
+std::uint32_t nearest_vertex(const std::vector<cfloat3>& positions, cfloat3 p) {
+    std::uint32_t best = 0;
+    float best_d = 1e30f;
+    for (std::uint32_t v = 0; v < static_cast<std::uint32_t>(positions.size()); ++v) {
+        const float d = clength(positions[v] - p);
+        if (d < best_d) {
+            best_d = d;
+            best = v;
+        }
+    }
+    return best;
+}
+
+// One Smooth stamp over a level's own mesh, driven by a `MeshSculptor` exactly
+// as `MultiresSculptor::bind` drives one — so the test can bind the same stamp
+// with the cross-level neighbourhood and without it.
+std::size_t smooth_level(MultiresSurface& s, std::uint32_t level, cfloat3 center, float radius,
+                         bool complete, const mesh::AutomaskSettings* automask) {
+    const mesh::CrossLevelNeighborhood& cross = s.cross_level_at(level);
+    mesh::MeshSculptor sculptor(s.level_mesh(level), s.level_adjacency(level));
+    if (complete) sculptor.set_cross_level(&cross);
+    MeshBrushSettings settings;
+    settings.center = center;
+    settings.radius = radius;
+    settings.strength = 1.0f;
+    if (automask) settings.automask = *automask;
+    return sculptor.stamp(MeshBrush::Smooth, settings);
+}
+
+}  // namespace
+
+TEST_CASE("multires: a depth transition is not a border of the model") {
+    MultiresSurface part = build_regional(bumpy_quads(6, 1.0f));
+    const mesh::CrossLevelNeighborhood& cross = part.cross_level_at(3);
+    const Mesh& m = part.level_mesh(3);
+    const mesh::Adjacency& adj = part.level_adjacency(3);
+
+    std::size_t as_border = 0, still_border = 0;
+    for (std::uint32_t c = 0; c < static_cast<std::uint32_t>(adj.class_count()); ++c) {
+        if (mesh::is_boundary_class(m, adj, c, nullptr)) ++as_border;
+        if (mesh::is_boundary_class(m, adj, c, &cross)) ++still_border;
+    }
+    // THE WHOLE RIM OF THE REFINED REGION, and none of it is on the cage's own
+    // outer edge: the 2x2 block is in the middle of a 6x6 cage, so every one of
+    // these is an internal seam the artist cannot see and did not put there.
+    CHECK(as_border == 64);
+    CHECK(still_border == 0);
+
+    // ...and the model's ACTUAL border still reports true, because there is no
+    // derived face on the other side of that one. A uniformly refined hierarchy
+    // has an empty neighbourhood, so this is also the parity case.
+    MultiresSurface dense = build(bumpy_quads(6, 1.0f), 3);
+    const mesh::CrossLevelNeighborhood& none = dense.cross_level_at(3);
+    CHECK(none.empty());
+    const Mesh& dm = dense.level_mesh(3);
+    const mesh::Adjacency& dadj = dense.level_adjacency(3);
+    std::size_t edge = 0, edge_with = 0;
+    for (std::uint32_t c = 0; c < static_cast<std::uint32_t>(dadj.class_count()); ++c) {
+        if (mesh::is_boundary_class(dm, dadj, c, nullptr)) ++edge;
+        if (mesh::is_boundary_class(dm, dadj, c, &none)) ++edge_with;
+    }
+    CHECK(edge == 192);  // the perimeter of a 49 x 49 grid of vertices
+    CHECK(edge_with == edge);
+}
+
+TEST_CASE("multires: a cross-level neighbour that this level stores is already in its ring") {
+    // WHY `ring_slots` AND THE ADJACENCY RING ARE LEFT ALONE. A derived face's
+    // two stored corners are a vertex point and an edge point of the same coarse
+    // corner, and the refined face on the other side of that edge already joins
+    // them — so the only neighbour a depth boundary ADDS is one this level does
+    // not store. Asserted rather than argued, because `build_neighbors` relies
+    // on it to append without de-duplicating against the ring.
+    MultiresSurface part = build_regional(bumpy_quads(6, 1.0f));
+    const mesh::CrossLevelNeighborhood& cross = part.cross_level_at(3);
+    const mesh::Adjacency& adj = part.level_adjacency(3);
+
+    std::size_t inside = 0, missing = 0, outside = 0;
+    for (std::uint32_t v = 0; v < cross.vertex_count; ++v) {
+        std::size_t rc = 0;
+        const std::uint32_t* ring = cross.ring_of(v, &rc);
+        std::size_t ac = 0;
+        const std::uint32_t* own = adj.ring(adj.class_of(v), &ac);
+        for (std::size_t i = 0; i < rc; ++i) {
+            if (!cross.inside(ring[i])) {
+                ++outside;
+                continue;
+            }
+            ++inside;
+            const std::uint32_t cls = adj.class_of(ring[i]);
+            if (!std::binary_search(own, own + ac, cls)) ++missing;
+        }
+    }
+    CHECK(inside > 0);
+    CHECK(outside > 0);
+    CHECK(missing == 0);
+}
+
+TEST_CASE("multires: a smoothing verb is not dragged inward at a depth transition") {
+    const Mesh cage = bumpy_quads(6, 1.0f);
+    MultiresSurface dense = build(cage, 3);
+    MultiresSurface with = build_regional(cage);
+    MultiresSurface without = build_regional(cage);
+
+    // Anchored ON the rim of the refined region — the case the level's own
+    // connectivity cannot see. The 2x2 block covers [-1/3, 1/3]; the vertex
+    // nearest (-1/3, ., 0) is on its western edge.
+    const std::vector<cfloat3> before = with.positions_at(3);
+    const std::uint32_t seed = nearest_vertex(before, cf3(-1.0f / 3.0f, 0.0f, 0.0f));
+    const cfloat3 center = before[seed];
+    const float radius = 0.25f;
+
+    std::map<std::array<float, 3>, std::uint32_t> dense_of;
+    {
+        const std::vector<cfloat3>& p = dense.positions_at(3);
+        for (std::uint32_t v = 0; v < static_cast<std::uint32_t>(p.size()); ++v)
+            dense_of[{p[v].x, p[v].y, p[v].z}] = v;
+    }
+
+    const std::size_t dense_moved = smooth_level(dense, 3, center, radius, true, nullptr);
+    const std::size_t with_moved = smooth_level(with, 3, center, radius, true, nullptr);
+    const std::size_t without_moved = smooth_level(without, 3, center, radius, false, nullptr);
+    // The stamp reaches further on a uniformly refined hierarchy simply because
+    // there is more of it to reach: the coarse side has no class at this level
+    // to move, which is task 4's subject and not this one's.
+    CHECK(dense_moved == 107);
+    CHECK(with_moved == without_moved);
+
+    // WHERE THE SHARED VERTICES FINISH. `laplacian_pass` divides by the ring
+    // size AS FOUND, so at the rim the mean is taken over a short one-sided ring
+    // and the border is pulled into the refined region.
+    const auto differs = [&](MultiresSurface& s) {
+        const std::vector<cfloat3>& after = s.level_mesh(3).positions;
+        const std::vector<cfloat3>& reference = dense.level_mesh(3).positions;
+        std::size_t n = 0;
+        float worst = 0.0f;
+        for (std::uint32_t v = 0; v < static_cast<std::uint32_t>(after.size()); ++v) {
+            const auto it = dense_of.find({before[v].x, before[v].y, before[v].z});
+            if (it == dense_of.end()) continue;
+            const cfloat3 d = after[v] - reference[it->second];
+            if (d.x != 0.0f || d.y != 0.0f || d.z != 0.0f) ++n;
+            worst = std::max(worst, clength(d));
+        }
+        MESSAGE("shared vertices finishing elsewhere: " << n << ", worst " << worst);
+        return n;
+    };
+    // 11 of them without the complete neighbourhood, the worst 0.0185 out of
+    // place — about 44% of the level-3 edge spacing of 0.0417, a subdivision
+    // step rather than a hairline. With it, 3 differ and the worst is 3.0e-08:
+    // float rounding, because the same neighbours are summed in a different
+    // order. Assert the COUNT; the distance is in the message beside it.
+    CHECK(differs(without) == 11);
+    CHECK(differs(with) == 3);
+
+    // THE VISIBLE CONSEQUENCE, not just the predicate. With boundary automasking
+    // on, the brush fades at a seam the artist cannot see: 71 classes move
+    // instead of 82, on a stamp nowhere near the model's own edge. With the
+    // complete neighbourhood the automask finds no border and the stamp is the
+    // one it would have been with the factor off.
+    MultiresSurface am_with = build_regional(cage);
+    MultiresSurface am_without = build_regional(cage);
+    mesh::AutomaskSettings automask;
+    automask.factors = static_cast<std::uint32_t>(mesh::AutomaskFactor::Boundary);
+    automask.boundary_rings = 2;
+    CHECK(smooth_level(am_without, 3, center, radius, false, &automask) == 71);
+    CHECK(smooth_level(am_with, 3, center, radius, true, &automask) == with_moved);
+}
+
+TEST_CASE("multires: a stamp away from a transition is bit-identical either way") {
+    const Mesh cage = bumpy_quads(6, 1.0f);
+    MultiresSurface with = build_regional(cage);
+    MultiresSurface without = build_regional(cage);
+
+    // THE PARITY GATE. The centre of the refined block is four level-3 rings
+    // from the nearest boundary, so a stamp there reaches nothing the level does
+    // not store and the complete neighbourhood must change nothing at all.
+    const std::vector<cfloat3> before = with.positions_at(3);
+    const cfloat3 center = before[nearest_vertex(before, cf3(0, 0, 0))];
+    const std::size_t a = smooth_level(with, 3, center, 0.08f, true, nullptr);
+    const std::size_t b = smooth_level(without, 3, center, 0.08f, false, nullptr);
+    CHECK(a == b);
+    CHECK(a > 0);
+    CHECK(same_bytes(with.level_mesh(3).positions, without.level_mesh(3).positions));
+}
+
+TEST_CASE("multires: relax and a normal-steered verb agree with the uniform hierarchy at a seam") {
+    // RELAX takes the smoothed target and projects it onto the tangent plane of
+    // the vertex's OWN normal, and INFLATE displaces straight along that normal
+    // — so between them they exercise both halves of what a depth boundary
+    // breaks: the averaged ring and the angle-weighted normal. Neither has a
+    // branch on a level; both read the neighbourhood the level does not hold.
+    const Mesh cage = bumpy_quads(6, 1.0f);
+    for (MeshBrush verb : {MeshBrush::Relax, MeshBrush::Inflate}) {
+        MultiresSurface dense = build(cage, 3);
+        MultiresSurface with = build_regional(cage);
+        MultiresSurface without = build_regional(cage);
+
+        const std::vector<cfloat3> before = with.positions_at(3);
+        const std::uint32_t seed = nearest_vertex(before, cf3(-1.0f / 3.0f, 0.0f, 0.0f));
+        const cfloat3 center = before[seed];
+
+        std::map<std::array<float, 3>, std::uint32_t> dense_of;
+        {
+            const std::vector<cfloat3>& p = dense.positions_at(3);
+            for (std::uint32_t v = 0; v < static_cast<std::uint32_t>(p.size()); ++v)
+                dense_of[{p[v].x, p[v].y, p[v].z}] = v;
+        }
+        stamp_level(dense, 3, verb, center, 0.25f, true);
+        stamp_level(with, 3, verb, center, 0.25f, true);
+        stamp_level(without, 3, verb, center, 0.25f, false);
+
+        const auto worst_of = [&](MultiresSurface& s) {
+            const std::vector<cfloat3>& after = s.level_mesh(3).positions;
+            const std::vector<cfloat3>& reference = dense.level_mesh(3).positions;
+            float worst = 0.0f;
+            for (std::uint32_t v = 0; v < static_cast<std::uint32_t>(after.size()); ++v) {
+                const auto it = dense_of.find({before[v].x, before[v].y, before[v].z});
+                if (it == dense_of.end()) continue;
+                worst = std::max(worst, clength(after[v] - reference[it->second]));
+            }
+            return worst;
+        };
+        const float open = worst_of(without), closed = worst_of(with);
+        INFO("verb " << static_cast<int>(verb) << ": open " << open << ", closed " << closed);
+        // A subdivision step out of place against float rounding. The level-3
+        // edge spacing on this cage is 0.0417, so `open` is a fraction of an
+        // edge and `closed` is the last bits of a float sum.
+        CHECK(open > 1e-3f);
+        CHECK(closed < 1e-6f);
+    }
+}
+
+TEST_CASE("multires: a uniform hierarchy sculpts exactly as it did") {
+    // THE OTHER HALF OF THE PARITY ARGUMENT. A level that stores every patch has
+    // an EMPTY neighbourhood, so every reader takes the path it took before this
+    // existed and cannot produce a different number — asserted here as bytes
+    // rather than left to the construction.
+    const Mesh cage = bumpy_quads(6, 1.0f);
+    MultiresSurface with = build(cage, 3);
+    MultiresSurface without = build(cage, 3);
+    CHECK(with.cross_level_at(3).empty());
+
+    const std::vector<cfloat3> before = with.positions_at(3);
+    const cfloat3 center = before[nearest_vertex(before, cf3(-1.0f / 3.0f, 0.0f, 0.0f))];
+    for (MeshBrush verb : {MeshBrush::Smooth, MeshBrush::Relax, MeshBrush::Inflate}) {
+        const std::size_t a = stamp_level(with, 3, verb, center, 0.25f, true);
+        const std::size_t b = stamp_level(without, 3, verb, center, 0.25f, false);
+        INFO("verb " << static_cast<int>(verb));
+        CHECK(a == b);
+        CHECK(a > 0);
+        CHECK(same_bytes(with.level_mesh(3).positions, without.level_mesh(3).positions));
+    }
+}
+
+TEST_CASE("multires: a derived face can join two vertices no ring walk reaches") {
+    // RECORDED FOR THE STAGE THAT TOUCHES THE PROPAGATION HALO, because it is
+    // the one place a cross-level FACE says more than a cross-level RING does. A
+    // normal is invalidated by every corner of every incident face; a ring is
+    // the four edges of a quad plus the diagonal its triangulation adds. The
+    // OTHER diagonal — the two edge points either side of a coarse corner —
+    // exists only where the refined region turns a CONCAVE corner, which a
+    // square block never does and an L-shaped one does exactly once.
+    //
+    // Nothing here acts on it. A stamp's normal-refresh set is the union over
+    // every class it moved, and on both fixtures that union already covers the
+    // pair — measured by removing the extra walk and watching the count of
+    // re-shaded vertices stay at 67. An extra term with no test is a term to
+    // delete, so the walk was deleted and this is what it would have found.
+    const Mesh cage = bumpy_quads(6, 1.0f);
+    const auto unreachable_pairs = [](MultiresSurface& s) {
+        const mesh::CrossLevelNeighborhood& cross = s.cross_level_at(3);
+        const mesh::Adjacency& adj = s.level_adjacency(3);
+        std::size_t n = 0;
+        for (std::uint32_t f = 0; f < cross.face_count(); ++f) {
+            const std::uint32_t* q = cross.face_corners(f);
+            for (int a = 0; a < 4; ++a)
+                for (int b = a + 1; b < 4; ++b) {
+                    if (!cross.inside(q[a]) || !cross.inside(q[b])) continue;
+                    std::size_t rc = 0;
+                    const std::uint32_t* ring = adj.ring(adj.class_of(q[a]), &rc);
+                    if (!std::binary_search(ring, ring + rc, adj.class_of(q[b]))) ++n;
+                }
+        }
+        return n;
+    };
+    MultiresSurface block = build_regional(cage);
+    MultiresSurface ell = build_regional_L(cage);
+    CHECK(unreachable_pairs(block) == 0);
+    CHECK(unreachable_pairs(ell) == 1);
 }

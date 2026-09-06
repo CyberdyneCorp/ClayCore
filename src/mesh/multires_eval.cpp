@@ -510,6 +510,31 @@ const Adjacency& MultiresSurface::level_adjacency(std::uint32_t level) {
     return *c.adjacency;
 }
 
+const CrossLevelNeighborhood& MultiresSurface::cross_level_at(std::uint32_t level) {
+    static const CrossLevelNeighborhood kEmpty;
+    if (!state_ || !state_->level_ok(level) || level == 0) return kEmpty;
+    MultiresSurface::State& s = *state_;
+    // The parent's evaluated positions are what the outside vertices are
+    // subdivided from, so the walk up has to have happened.
+    evaluate_up_to(s, level);
+    const MultiresLevel& parent = s.levels[level - 1];
+    LevelCache& c = *s.levels[level].cache;
+    if (!c.cross) {
+        c.cross = std::make_unique<CrossLevelNeighborhood>(
+            build_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
+                              s.levels[level].topology, s.levels[level].patch_kept));
+        return *c.cross;
+    }
+    // The topology is fixed for the life of the cache; the outside POSITIONS
+    // are the level below's, and a stroke down there moves them without this
+    // level's cache going stale. Re-read on the way past rather than tracked,
+    // because tracking them would be a fourth revision counter guarding a walk
+    // over the region rim.
+    refresh_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
+                        c.cross.get());
+    return *c.cross;
+}
+
 bool MultiresSurface::build_block(std::uint32_t level, std::uint32_t patch, Block* out) {
     if (!out || !state_ || !state_->level_ok(level)) return false;
     const LevelTopology& t = state_->levels[level].topology;

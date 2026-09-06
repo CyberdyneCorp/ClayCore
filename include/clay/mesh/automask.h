@@ -34,6 +34,7 @@
 
 #include "clay/kernel/shim.h"
 #include "clay/mesh/brush_arena.h"
+#include "clay/mesh/cross_level.h"
 #include "clay/mesh/work_item.h"
 
 namespace clay {
@@ -173,9 +174,13 @@ void compute_automask(const Mesh& mesh, const Adjacency& adjacency, const Sculpt
 // own.
 class MeshWorkItemTopology final : public WorkItemTopology {
    public:
+    // `cross` is the faces this mesh's own level does not store — null for an
+    // ordinary mesh, and the reason `on_open_border` can tell a depth
+    // transition from the model's actual edge.
     MeshWorkItemTopology(const Mesh& mesh, const Adjacency& adjacency,
-                         const SculptWorkset& workset)
-        : mesh_(mesh), adjacency_(adjacency), workset_(workset) {}
+                         const SculptWorkset& workset,
+                         const CrossLevelNeighborhood* cross = nullptr)
+        : mesh_(mesh), adjacency_(adjacency), workset_(workset), cross_(cross) {}
 
     void ring_slots(std::uint32_t slot, ScratchVector<std::uint32_t>* out) const override;
     bool on_open_border(std::uint32_t slot) const override;
@@ -184,12 +189,22 @@ class MeshWorkItemTopology final : public WorkItemTopology {
     const Mesh& mesh_;
     const Adjacency& adjacency_;
     const SculptWorkset& workset_;
+    const CrossLevelNeighborhood* cross_ = nullptr;
 };
 
 // Whether a class sits on an open border: it has a ring neighbour with which it
 // shares exactly one triangle. Exposed because the boundary gate is not the
 // only thing that wants to know.
-bool is_boundary_class(const Mesh& mesh, const Adjacency& adjacency, std::uint32_t cls);
+//
+// `cross`, for one level of a regional multires hierarchy, supplies the faces
+// that level does not store. WITHOUT IT A DEPTH TRANSITION READS AS A BORDER:
+// every class on the rim of a refined region has a ring edge with one triangle,
+// so boundary automasking fades a seam the artist did not put there and cannot
+// see — measured at all 64 transition classes of a fixture, none of them on the
+// cage's own outer edge. With it the model's real border still reports true,
+// because there is no derived face on the other side of that one.
+bool is_boundary_class(const Mesh& mesh, const Adjacency& adjacency, std::uint32_t cls,
+                       const CrossLevelNeighborhood* cross = nullptr);
 
 }  // namespace mesh
 }  // namespace clay

@@ -157,16 +157,27 @@ void MultiresSculptor::bind() {
     // pressure while a sculptor existed: the level's `Mesh` is inside the cache,
     // so a stale `MeshSculptor` would hold a reference into storage that is
     // gone.
-    if (sculptor_ && bound_level_ == level && bound_generation_ == generation) return;
+    if (sculptor_ && bound_level_ == level && bound_generation_ == generation) {
+        // THE ONE THING THAT IS RE-READ ON A BINDING THAT IS STILL GOOD. The
+        // faces this level does not store are positioned by the level BELOW,
+        // and a stroke down there moves them without invalidating anything up
+        // here — so the pointer is refreshed every time rather than only when
+        // the sculptor is rebuilt.
+        sculptor_->set_cross_level(&surface_.cross_level_at(level));
+        return;
+    }
     if (bound_level_ != level) level_deltas_.clear();
 
     Mesh& mesh = surface_.level_mesh(level);
     const Adjacency& adjacency = surface_.level_adjacency(level);
     sculptor_ = std::make_unique<MeshSculptor>(mesh, adjacency);
     bound_level_ = level;
-    // Read AFTER the two calls above: either of them may have built a cache and
-    // moved the generation on.
-    bound_generation_ = surface_.cache_generation();
+    // THE SURFACE THIS LEVEL IS PART OF, which for a regionally refined
+    // hierarchy is more than the level holds. Without it every walk inside the
+    // sculptor reads the rim of the refined region as an open border of the
+    // model; with it there is no level anywhere in the brush path, because the
+    // neighbours it was missing simply have an identity. See `cross_level.h`.
+    sculptor_->set_cross_level(&surface_.cross_level_at(level));
     if (automask_set_) sculptor_->set_automask_inputs(automask_);
     sculptor_->set_defer_normals(defer_normals_);
     sculptor_->set_telemetry(telemetry_);
@@ -182,6 +193,9 @@ void MultiresSculptor::bind() {
     // Rebound with the sculptor, so a level or generation change cannot leave a
     // table describing a different mesh in the hands of a live sculptor.
     sculptor_->set_chunks(&surface_.level_chunks(level));
+    // Read AFTER every call above: any of them may have built a cache and moved
+    // the generation on.
+    bound_generation_ = surface_.cache_generation();
 }
 
 void build_multires_workset(const MeshSculptor& level_sculptor, std::uint32_t level,
