@@ -416,3 +416,54 @@ House style is to say so.
    `:1281`. The two refill statements are `clay_c.cpp:1545` and `:1584`, not
    `:1502` and `:1541`. `compile_document_except` is `tape.h:405`, not `:390`.
    Grep the quoted sentence, never the line number.
+
+## 6. What a layer-wide dirty region would cost, measured
+
+The invalidation policy in §5 says "conservative first, then narrow". This
+section is the number that says how conservative is too conservative, measured
+by ClaySpaceDesktop on 2026-09-06 against an intersect ITEM — which is the same
+shape this change gives a LAYER, one level up.
+
+A 12-frame drag of an intersecting cylinder over one SDF layer of 97 items,
+against a subtracting control on the identical fixture and frame path, in two
+scenes differing only in extent. Refill per frame, cutter placed on the surface
+in both so nothing is confounded:
+
+| | refill ms | bricks/frame | µs/brick |
+|---|---:|---:|---:|
+| subtract (`op_is_local`) | 14.78 | 741 | 19.9 |
+| intersect (`BoundedByLayer`) | 11,512.38 | 100,800 | 114.2 |
+| ratio | **779x** | **136x** | **5.7x** |
+
+The 779x is a product of two factors and both are properties of WHICH BRICKS GET
+VISITED:
+
+- **Count, 136x.** An intersect's dirty region is the layer's AABB and the refill
+  walks the bricks of that VOLUME rather than the bricks that hold band. It
+  refills 26.2x the surface bricks of the geometry it produces at reference size
+  and 241.2x at 10x, and the ratio grows with radius.
+- **Population, 5.7x.** A box walk visits interior bricks, where nothing culls
+  the document away and every tape is long; a band walk visits rim bricks, where
+  most of it culls out. Measured directly at 4.4x with the brick count pinned at
+  741 by construction, varying only whether the cutter is buried or on the
+  surface.
+
+**There is no extent-driven per-brick cost.** Holding the dab at 0.18 and the
+cutter on the surface, a brick costs 9.95 µs at r=1 and 9.15 µs at r=√10 — 0.92x,
+flat. The per-brick growth in the first measurement was item overlap (a fixture
+whose dabs scale √10 against a fixed 0.16 brick edge: 12.5x) plus brick
+population (4.4x). A first reading of a second, extent-driven engine slope was
+retracted by the host that found it once its own control was shown to be
+confounded.
+
+**What this requires of this change.** A composition change is a layer-property
+edit; it must not be given a region that scales with the layer when a tighter one
+is correct. And an edit made INSIDE a layer beneath a subtractive or intersecting
+layer must not inherit the composed layer's whole extent by default, because that
+is exactly the 779x above, arriving one level up and on every frame of a drag.
+Where this change chooses to be conservative, §5 says what it costs and names the
+measurement that would narrow it; it does not choose conservative by omission.
+
+**And count matters on its own.** With the overlap effect entirely removed, the
+box walk is still 88,200 bricks at 9.15 µs — 806 ms a frame. A future fix that
+only made bricks cheaper would leave a 0.8-second frame; the region is the thing.
