@@ -9,9 +9,13 @@ to, and the one undo history that reverses every representation through it.
 The layer between the arithmetic below and everything that consumes it. A
 document is the only thing a host, a file, a binding and a renderer all agree
 about, so what it is has to be stated in one place rather than assumed in five.
+
 ## Requirements
+
 ### Requirement: Document structure
-`clay::scene` SHALL model a document as a list of layers, each `voxel` or `sdf` kind, with per-layer transform, visibility, resolution, and material. SDF layers SHALL hold an ordered edit list where each item applies to the combined result of all preceding items. Groups SHALL nest to depth ≥ 4 and carry group ops (including None). Layer instancing SHALL share content by reference such that editing the source updates all instances.
+`clay::scene` SHALL model a document as a list of layers, each `voxel`, `sdf` or `mesh` kind, with per-layer transform, visibility, resolution, and material. SDF layers SHALL hold an ordered edit list where each item applies to the combined result of all preceding items. Groups SHALL nest to depth ≥ 4 and carry group ops (including None). Layer instancing SHALL share content by reference such that editing the source updates all instances.
+
+A `mesh` layer carries imported geometry for display and re-export and is not evaluated; it is not an operand and SHALL NOT be instanced.
 
 #### Scenario: Order matters
 - **WHEN** an edit list [add sphere, subtract box] is reordered to [subtract box, add sphere]
@@ -20,6 +24,10 @@ about, so what it is has to be stated in one place rather than assumed in five.
 #### Scenario: Instance follows source
 - **WHEN** a layer is instanced twice and an edit item is added to the source layer
 - **THEN** both instances evaluate with the new item without duplicating stored content
+
+#### Scenario: A mesh layer is not an operand
+- **WHEN** a mesh layer is instanced
+- **THEN** the call is refused, as it already is for a voxel layer
 
 ### Requirement: Influence bounds
 Every edit item and group SHALL expose a conservative influence bound: its shape AABB dilated by blend radius and rounding. The bound SHALL be conservative in the narrow-band sense that all evaluated storage relies on: outside the bound (dilated by the band width), band-clamped field values are unaffected by the item. (Raw far-field values may legitimately shift when a smooth-blend operand changes — smin deviates wherever |a−b| is inside the support width — which is why the guarantee, like brick storage, is stated band-clamped.)
@@ -95,7 +103,7 @@ The index SHALL be owned by, and invalidated with, the compiled tape it culls fo
 - **THEN** the culled tape reflects the edit, exactly as a full recompile would
 
 ### Requirement: Undo command vocabulary
-Every document mutation SHALL be expressed as a serializable command with a computable inverse: add/remove/reorder item, set parameter, voxel-span edit, layer add/remove/reorder/retransform, group/ungroup. The in-memory undo stack and the document file format SHALL share this single command vocabulary. Consecutive commands from one stroke SHALL be coalescable into a single undo step. Item state carried by commands SHALL include any deformer chain, so deformed documents round-trip.
+Every document mutation SHALL be expressed as a serializable command with a computable inverse: add/remove/reorder item, set parameter, voxel-span edit, layer add/remove/reorder/retransform. Grouping is not a command of its own: a group is a node, so creating one is an add, deleting one is a remove that carries the whole subtree back, and grouping N existing siblings is N reparents bracketed into a single undo step. The in-memory undo stack and the document file format SHALL share this single command vocabulary. Consecutive commands from one stroke SHALL be coalescable into a single undo step. Item state carried by commands SHALL include any deformer chain, so deformed documents round-trip.
 
 The undo stack SHALL be reachable from the bindings, so a host application uses the engine's undo rather than reimplementing one over a second vocabulary that could disagree with what a saved document records.
 
@@ -114,6 +122,10 @@ The undo stack SHALL be reachable from the bindings, so a host application uses 
 #### Scenario: A host application undoes through the engine
 - **WHEN** a binding performs an edit on a document with undo enabled and then undoes it
 - **THEN** the document serializes bit-identically to its state before the edit
+
+#### Scenario: An edit to a group undoes exactly
+- **WHEN** a group's op is changed, a child is added to it, it is reparented, or the whole group is removed, on a document with undo enabled
+- **THEN** one undo restores the document to bit-identical bytes
 
 ### Requirement: Non-local combine modes report infinite influence
 A combine mode whose weight is non-zero arbitrarily far from both operands SHALL report an infinite influence bound, so per-brick culling never drops it. Transition morphs are such modes: the linear weight is non-zero over a half-space and the radial weight past a radius. This preserves the blend-locality guarantee by refusing to claim locality that does not exist, rather than by silently corrupting culled bricks.
@@ -467,11 +479,24 @@ The volume's colour SHALL take precedence over the node's where a sample carries
 
 `Op::Paint` SHALL continue to override both. It is the operator whose whole purpose is to set colour, and a volume that ignored it would make painting over a consolidated layer impossible.
 
-Consolidated output is therefore NOT byte-identical to what this build produced before. The bit-identity gate that guards consolidation SHALL be re-baselined deliberately, in the same change, with the reason recorded — a silent re-baseline of a gate that exists to catch silent change would be the worst possible way to ship this.
+Consolidation SHALL NOT fill a colour channel when the absorbed set cannot produce more than one colour. Filling it is a second evaluation of the tape at every surviving sample, and where every absorbed node carries the same colour the result is that one colour repeated — which the node's own colour already reports, by the rule above. The absorbed set can produce more than one colour when two or more distinct node colours appear in it, or when any absorbed node is a volume whose samples carry colour of their own; a volume with a colour channel has one node colour and many sample colours, so a test on node colours alone SHALL NOT be the whole condition.
+
+The decision SHALL be made from the absorbed set rather than from the samples, so that a layer which does not need the pass never pays it.
 
 #### Scenario: A two-colour layer consolidates to a two-colour volume
-- **WHEN** a layer holding a red item and a blue item is consolidated and the result is evaluated at points inside each
+- **GIVEN** a layer holding a red item and a blue item
+- **WHEN** the layer is consolidated and the result is sampled inside each item
 - **THEN** the reported colours are red and blue, not one colour for both
+
+#### Scenario: A one-colour layer consolidates without a colour channel
+- **GIVEN** a layer whose items all carry the same colour
+- **WHEN** the layer is consolidated
+- **THEN** the resulting volume has no colour channel, the resulting node carries that colour, and sampling anywhere reports it
+
+#### Scenario: A coloured volume is re-consolidated
+- **GIVEN** a layer holding one item, itself a volume whose samples carry two colours
+- **WHEN** the layer is consolidated again
+- **THEN** the colour pass is taken and both colours survive, even though the absorbed set holds a single node colour
 
 #### Scenario: Painting over a consolidated volume still works
 - **WHEN** a Paint operation is applied over a consolidated coloured volume
@@ -1112,102 +1137,6 @@ An entry a plan supplies SHALL be visible, so the per-brick cull need not check:
 - **WHEN** a dab's bricks are compiled over a batch survivor list far larger than any one brick keeps
 - **THEN** what a rejected survivor costs is the cached test alone
 
-### Requirement: A layer's extent can be kept across an edit
-
-An intersect is bounded by its layer's extent, and computing that extent walks
-every visible item in the layer. A consumer that edits a layer repeatedly SHALL
-be able to keep that extent across edits rather than recompute it per edit,
-without the kept extent ever differing from a freshly computed one.
-
-The kept form SHALL be exact rather than conservative. In particular the extent
-SHALL shrink when the edit shrinks it: a form that can only be widened is not
-the extent, and an extent that is too LARGE is merely slow while one built by
-widening a stale union is too SMALL — which is under-invalidation, and renders
-as stale geometry rather than as an error.
-
-It SHALL remain cheap for the item being edited repeatedly even when that item
-determines how far the extent reaches, because the item a host drags across a
-form is typically a boolean operand large enough to extend past it. A form that
-is cheap only for items lying strictly inside the extent does not satisfy this,
-having no effect on the case it exists for.
-
-Being told that an item changed SHALL NOT itself compute anything. A layer
-holding no intersect never has its extent asked for, and such layers are the
-common case; work done at the moment of the edit is therefore paid by layers
-that never benefit from it.
-
-The kept extent SHALL be abandoned for any change it cannot account for,
-including adding, removing or reparenting an item, any change made to the layer
-itself, and any mutation reaching the layer outside the command vocabulary.
-
-Whether a given command is confined to a single item SHALL be decided in one
-place, so that a component keeping an extent and a test checking one cannot
-disagree about a command, and a command added later is classified rather than
-assumed harmless.
-
-#### Scenario: A drag walks the layer once
-- **WHEN** one item is edited over many consecutive frames
-- **THEN** the layer is walked on the first of them and not on the others, and the extent equals a freshly computed one on every frame
-
-#### Scenario: The dragged item sticks out of the form
-- **GIVEN** the edited item extends past the rest of the layer on some face
-- **WHEN** it is dragged over many frames
-- **THEN** the layer is still walked only once
-
-#### Scenario: The edit makes the extent smaller
-- **WHEN** the edited item is moved back inside the others, or made smaller
-- **THEN** the extent shrinks to match a freshly computed one
-
-#### Scenario: A layer nobody asks about is not walked
-- **WHEN** a layer holding no intersect is edited over many frames
-- **THEN** its extent is never computed
-
-#### Scenario: A change the kept form cannot account for
-- **WHEN** an item is added or removed, or the layer's own transform, mirror or radial setting changes
-- **THEN** the next extent is computed by walking rather than kept
-
-### Requirement: One undo order spans every representation
-
-The session history SHALL order steps across the SDF edit list, voxel grids,
-masks and mesh layers, so that undo reverses what happened most recently
-whichever representation produced it.
-
-An explicit group SHALL bundle arbitrary STEPS, of any representation, into one
-step — not merely the scene commands inside it. The wrapped command stack
-already collapses the commands of a bracket into one entry; a bracket SHALL do
-the same for the kinds that stack cannot see, so that one gesture a host
-bracketed is one undo however many representations it touched.
-
-A step folded from a bracket SHALL apply its parts backwards on undo and
-forwards on redo, and SHALL be all-or-nothing: if any part refuses, the parts
-already applied SHALL be restored and the step SHALL remain on the stack.
-
-An operation nothing records SHALL NOT be folded into a group. It stays its own
-step, so that the horizon a host draws from it is not crossed by an undo.
-
-#### Scenario: A group holds a command and a voxel pass
-- **GIVEN** a history with undo enabled
-- **WHEN** a bracket contains one scene command and one voxel step
-- **THEN** the undo depth is one
-- **AND** one undo reverses both
-
-#### Scenario: A group of commands alone is unchanged
-- **GIVEN** a history with undo enabled
-- **WHEN** a bracket contains only scene commands
-- **THEN** it records exactly one step, as it did before groups spanned kinds
-
-#### Scenario: A barrier in a group is not swallowed
-- **GIVEN** a history with undo enabled
-- **WHEN** a bracket contains a voxel step and an operation nothing records
-- **THEN** the unrecordable operation is still its own step
-- **AND** the undo depth stops at it
-
-#### Scenario: A part that refuses leaves the step unapplied
-- **GIVEN** a folded group whose voxel part names a layer that cannot be resolved
-- **WHEN** the step is undone
-- **THEN** the undo is refused
-- **AND** the scene part it had already reversed is restored
-
 ### Requirement: A captured region of the field is a reusable asset
 
 A finite region of a document's field SHALL be capturable as a self-contained
@@ -1267,6 +1196,257 @@ the blend are the controls that mean what an artist expects.
 - **WHEN** the items a region was captured from are edited or deleted
 - **THEN** every placement of the asset is unaffected, because the asset holds samples rather than a reference to those items
 
+### Requirement: A layer may be an imported mesh
+A layer SHALL optionally be of `mesh` kind, carrying one imported mesh stored beside the document and keyed by layer id rather than inside the evaluated document. Its geometry SHALL be exactly what the importer returned — no welding, reordering, renormalizing or reindexing on the way in — so that what a document carries is what was imported.
+
+Its presence SHALL NOT change what the document evaluates to. A mesh layer SHALL NOT be compiled into a tape, SHALL NOT participate in any blend, and SHALL NOT contribute to influence bounds or per-brick culling. Keeping the geometry out of the evaluated document makes that structural rather than a property to be maintained, as it already is for masks and voxel grids.
+
+A mesh layer SHALL carry the same layer properties as any other: name, order, transform, visibility, ghost and lock. Creating and removing one SHALL go through the command vocabulary, so both are undoable and both serialize with the document.
+
+#### Scenario: Evaluation is unchanged by a mesh layer
+- **WHEN** a mesh layer is added to a document and the document is evaluated
+- **THEN** the field is bit-identical to the same document without the mesh layer, and every compiled tape is unchanged
+
+#### Scenario: The mesh is carried, not resampled
+- **WHEN** a mesh is attached to a document and read back
+- **THEN** its positions, normals, colors, uvs and indices are the arrays the importer produced, element for element
+
+#### Scenario: Adding a mesh layer is undoable
+- **WHEN** a mesh layer is added and the edit is undone
+- **THEN** the layer is gone and the document matches what it was
+
+#### Scenario: Removing a mesh layer does not discard its geometry
+- **WHEN** a mesh layer is removed and the removal is undone
+- **THEN** the layer returns carrying the same mesh, because the payload is keyed by layer id and is never erased on removal
+
+### Requirement: A mesh layer's transform is applied by whoever consumes it
+A mesh layer's vertices SHALL be stored in the space the importer produced, and its `Layer` transform SHALL be applied by whatever reads or exports the mesh rather than baked into the stored geometry. This is the rule voxel content already lives under; a mesh layer states it rather than inheriting it silently.
+
+The transform SHALL be the existing layer transform, edited through the existing command, so that moving a mesh layer is undoable, serializes with the document, and is refused on a locked layer exactly as any other layer edit is.
+
+Unit and axis conversion SHALL be resolved at import by baking a uniform scale into the vertices, as the FBX importer already does when it normalizes to metres. Non-uniform scale is not expressible in a layer transform and SHALL NOT be approximated.
+
+#### Scenario: The stored mesh does not move
+- **WHEN** a mesh layer's transform is changed
+- **THEN** the stored vertices are unchanged, and an export of that layer places them under the new transform
+
+#### Scenario: A locked mesh layer refuses the edit
+- **WHEN** a mesh layer is locked and its transform is set
+- **THEN** the edit is refused, as it is for any other locked layer
+
+### Requirement: A group is a sub-expression
+A group's children SHALL compile against a fresh accumulator and combine with the chain outside the group as one value, through the group's own op, blend and rounding. An op inside a group therefore SHALL NOT reach anything outside it.
+
+A group SHALL have no transform of its own: the compiler composes `layer.xform * item.xform` and nothing else, so a transform on a group would change nothing. The bindings SHALL refuse to record one rather than accept an edit that is undoable and saved but inert. For the same reason a group's rounding SHALL scale by the layer's scale alone, where an item's scales by the layer's and its own.
+
+A group SHALL NOT carry a transition op: the compiler emits no transition parameters for a group, so one would morph on defaults the node never stated.
+
+#### Scenario: An intersect stays inside its group
+- **WHEN** a group holds a shell and a cutter combined with intersect, and the layer already holds other geometry
+- **THEN** the intersect trims the shell only, and the group's result combines with the rest through the group's own op
+
+#### Scenario: A group's transform is refused rather than ignored
+- **WHEN** a host sets a transform on a group
+- **THEN** the edit is refused and the document is unchanged
+
+### Requirement: An inline group is its children, exactly
+A group carrying the inline op SHALL compile its children against the OUTER accumulator, so the field is bit-identical to the same children added directly in the same order. Its own blend, rounding and colour are never read, and the bindings SHALL refuse them rather than accept values that cannot take effect.
+
+#### Scenario: Inline and flat agree bit for bit
+- **WHEN** the same ordered edits are compiled once under an inline group and once at the layer root
+- **THEN** the two fields are identical at every sampled point, not merely close
+
+### Requirement: A group with nothing to combine emits nothing
+A group whose op carves (subtract, intersect, the extended modes other than the material-creating ones) and that has no accumulated value beneath it SHALL emit no instructions, as a carving item in the same position does. A group whose children all turn out to be invisible or culled SHALL likewise emit nothing: any partial emission SHALL be rolled back, so the tape is identical to one compiled without the group at all.
+
+#### Scenario: A carving group first in a chain
+- **WHEN** a subtract group is the first node in a layer
+- **THEN** the field is the empty field, not a hole in it
+
+#### Scenario: A group whose subtree compiled to nothing
+- **WHEN** a group's children are all hidden or culled
+- **THEN** the compiled tape and the evaluated field are identical to the document without that group
+
+### Requirement: A node cannot become its own descendant
+Reparenting SHALL refuse to move a node into its own subtree, and SHALL leave the tree untouched when it refuses. A move that closed such a cycle would detach the subtree from the root list, so it would stop evaluating, be dropped by the next save (serialization walks from the roots) and be unreachable by removal.
+
+#### Scenario: A group moved under its own descendant
+- **WHEN** a group is moved into one of its own children or grandchildren
+- **THEN** the move fails, the node keeps its parent and index, and the subtree still evaluates
+
+### Requirement: A group's influence bound covers its own combine
+A group's influence bound SHALL be the union of its children's bounds dilated by what the group's own combine reaches — for an extended op its documented support, and otherwise the greater of the blend profile's support and the blend radius, which is what the item path already uses. A hard profile supports zero distance while a paint combine still fades over the radius, so the profile's support alone is not conservative.
+
+#### Scenario: A paint group with a hard profile
+- **WHEN** a group combines with paint, a hard profile and a non-zero radius
+- **THEN** its influence bound is dilated by at least that radius
+
+### Requirement: A warp is authored in the space the deformer chain runs in
+An item's deformer chain runs on the point AFTER the whole inverse has been applied — the per-axis scale included, because it is innermost. Any tool that authors a deformer from world-space input SHALL therefore map its input through that same whole inverse, and not through the placed frame alone.
+
+Composing only the layer and node transforms SHALL NOT be treated as the item's frame. It was the whole story before an item could carry a per-axis scale and is not one now: a world point on the surface of an item stretched by a factor maps, under the placed frame alone, to a local point that far outside the primitive, and a falloff authored there reaches nothing.
+
+A drag on the surface of a stretched item SHALL produce the same local warp as the same drag on the corresponding point of the unstretched one, since the local geometry is identical and only the frame differs.
+
+#### Scenario: A drag reaches a stretched item's surface
+- **WHEN** an item scaled by a factor on one axis is dragged at the world point where its surface now sits
+- **THEN** the surface moves, where before the tool produced a warp that reached no part of the item
+
+#### Scenario: Stretched and unstretched drag identically
+- **WHEN** the same drag is applied to a stretched item and to the unstretched one, each at its own corresponding surface point
+- **THEN** both produce the same local grab centre and the same resulting field value at the dragged point
+
+### Requirement: A scalar falloff under a non-uniform frame never over-reaches
+A grab carries ONE radius, and a non-uniform frame maps the caller's world-space sphere to a local ellipsoid, so no scalar radius is exact. The radius SHALL be divided by the LARGEST scale factor, so that every world-space reach is at most the radius the caller named.
+
+The direction SHALL be documented at the call as a choice, not left as arithmetic: the opposite division is equally arithmetic and takes geometry the caller did not enclose. Under-reach is recoverable by dragging again; over-reach is not, and it is the same conservatism the non-uniform distance operator applies when it multiplies by the smallest factor.
+
+#### Scenario: A drag stays inside what was circled
+- **WHEN** an item stretched by a factor of four is dragged with a given radius
+- **THEN** the widest world-space reach of the resulting falloff does not exceed that radius, and geometry outside it is unchanged
+
+### Requirement: An item carries a per-axis scale
+A placed item SHALL carry a per-axis scale in addition to the uniform one its transform already holds, so that a primitive whose extents differ per axis — a squashed capsule, a squashed cylinder, a box stretched on one axis — is expressible after placement and not only at creation.
+
+The two scales SHALL MULTIPLY rather than replace one another: the transform's factor stays the uniform similarity factor and the per-axis scale modulates it, so setting either leaves the other where it was and the order they are set in does not matter.
+
+The per-axis scale SHALL be applied INNERMOST — in the item's own local frame, inside its rotation and position — so that the composed map is `layer transform * item transform * per-axis scale`.
+
+It SHALL NOT be a field of the transform type. That type is a SIMILARITY, and its algebra is closed because of it: the product of two is another and the inverse exists in closed form. A non-uniform scale does not commute with rotation, so widening the transform would make every composition in the engine a general matrix and take the exactness bookkeeping with it. Innermost and node-local, it composes as one matrix multiply at the places that build a matrix from an item.
+
+Every component SHALL be greater than zero. A zero collapses the item onto a plane and has no inverse; a negative component mirrors it, which the layer mirror already expresses and which would flip the winding of a boolean without saying so.
+
+#### Scenario: A primitive is stretched after it is placed
+- **WHEN** a unit sphere is placed and given a per-axis scale of (2, 1, 1)
+- **THEN** its surface crosses x at 2 and y at 1, and its geometry bound reports the same extents
+
+#### Scenario: The two scales multiply
+- **WHEN** an item is given a uniform scale of 2 and a per-axis scale of (1.5, 1, 1)
+- **THEN** its effective scale is (3, 2, 2), whichever order the two were set in
+
+#### Scenario: A degenerate scale is refused
+- **WHEN** a per-axis scale with a zero or negative component is set
+- **THEN** the edit is refused and the item is unchanged
+
+### Requirement: A non-uniform scale costs exactness and not step size
+Evaluating a per-axis scale SHALL divide the sample point by the three factors and multiply the resulting distance by the SMALLEST of them, which never overestimates the true distance.
+
+The field SHALL therefore remain 1-Lipschitz, and the reported Lipschitz bound and safe step scale SHALL NOT move: a marcher takes the steps it always did and nothing gets slower. What the field SHALL lose is exactness — the value becomes a BOUND on the distance rather than the distance, short by at most the ratio of the largest factor to the smallest — and that loss SHALL be recorded in the compiled field's classification so a consumer that reads the value AS a distance can tell.
+
+A per-axis scale whose components are all equal SHALL be treated as the similarity it is: the field stays exact, and it SHALL compile to tape identical to the uniform scale of the same factor. The default SHALL be `(1, 1, 1)`, so a document that never sets one SHALL compile to exactly the tape it compiled to before this existed.
+
+#### Scenario: The reported value never overestimates
+- **WHEN** the field of a squashed primitive is sampled from outside and a full step is taken along the inward ray by the reported value
+- **THEN** the step never lands inside the surface
+
+#### Scenario: Exactness goes and the step scale stays
+- **WHEN** an item is given a non-uniform scale
+- **THEN** the compiled field reports that it is no longer exact, while its Lipschitz bound and safe step scale are unchanged from the uniform case
+
+#### Scenario: A uniform per-axis scale changes nothing
+- **WHEN** an item is given a per-axis scale of (s, s, s)
+- **THEN** the field stays exact and evaluates identically to the same item under a uniform scale of s
+
+### Requirement: Every copy of an item is scaled with it
+A layer's mirror and radial copies of an item, the sampled box of a feathered replace, and the gate that protects an item SHALL all compose the item's per-axis scale exactly as the item's own record does.
+
+A copy that missed it would be a differently-shaped reflection of the same item; a gate that missed it would protect a region the surface no longer occupies. The bounds used for culling and for selection SHALL compose it for the same reason — a bound tight around the shape the item no longer is would let the cull drop something on screen.
+
+#### Scenario: A mirrored squash is squashed on both sides
+- **WHEN** a squashed item is placed in a mirrored layer
+- **THEN** both copies have the same shape
+
+### Requirement: Rounding follows the factor the distance follows
+An item's rounding is authored in its own local units and converted to world units by the compiler. Under a per-axis scale that conversion factor SHALL be the uniform scale times the SMALLEST per-axis component — the same factor the compiled field multiplies the item's local distance by — and NOT the uniform scale alone.
+
+The bound computed for culling and for selection SHALL use that same factor, so the dilation the bound applies and the dilation the field applies agree. They are separate code paths and agreeing is not automatic; an item whose bound dilated by more than its field does costs cull precision, and one that dilated by less drops geometry that is on screen.
+
+#### Scenario: Rounding and its bound use one factor
+- **WHEN** an item carrying a rounding is given a per-axis scale
+- **THEN** the world-space rounding and the bound's dilation are both computed from the uniform scale times the smallest per-axis component
+
+### Requirement: Undo brackets nest
+Opening an undo group inside an already-open one SHALL NOT start a second step. Nested brackets SHALL collapse into the outermost one, and the step SHALL close when the outermost bracket closes.
+
+Without this an entry point that groups its own work cannot be called from inside a caller's group without splitting one gesture into two undos — and the case is ordinary rather than exotic: consolidation brackets its own sever-and-install, and a sculpt gesture that commits a stroke and then consolidates it must be one thing for the artist to undo, in one step they can see the far side of.
+
+An unbalanced close SHALL be ignored rather than corrupt the stack: the next command SHALL open its own step as it would have. An outermost bracket that recorded nothing SHALL still record nothing, including when it contained only empty inner brackets.
+
+#### Scenario: An inner bracket does not open a step
+- **WHEN** commands are recorded inside a bracket that itself contains a bracket
+- **THEN** the stack has gained exactly one step, one undo restores the document to before the outermost bracket, and one redo restores it to after
+
+#### Scenario: An unbalanced close is ignored
+- **WHEN** a group is closed that was never opened, or closed once more than it was opened
+- **THEN** the stack is intact and the next command opens its own step
+
+#### Scenario: Empty brackets record nothing
+- **WHEN** a bracket containing only another empty bracket is opened and closed
+- **THEN** the stack has gained nothing
+
+### Requirement: An already-computed volume can be installed as a layer's content
+Consolidation is two things sold together — sample the layer's field into a volume, then replace the layer's edit list with that volume — and the second SHALL be reachable on its own.
+
+A caller that already holds a volume for a layer SHALL be able to install it as that layer's single item without the layer being sampled again. The installer SHALL be the same code the collapsed form runs, so everything the collapsed form guarantees holds here: shared instance content is severed first so that baking one subtool does not collapse its duplicates; the removals and the add are ONE undo step whose inverse restores the absorbed items with their ids, parameters, colours and deformers; a protected layer is refused; the layer's own transform is left where it was authored; and the first absorbed item's colour survives onto the volume.
+
+The installer SHALL NOT check that the volume is a plausible bake of that layer. It cannot — a volume is a volume — and the caller owns that claim.
+
+#### Scenario: Installing a volume is what consolidating installs
+- **GIVEN** two identical documents
+- **WHEN** one is consolidated and the other has the volume of its own bake installed with the same parameters
+- **THEN** the two documents serialize to the same bytes, and both report the layer as consolidated
+
+#### Scenario: Installing a volume is one undoable step
+- **WHEN** a volume is installed on a layer with an undo stack
+- **THEN** the stack has gained one entry, undoing restores the layer's items exactly, and redoing restores the volume
+
+#### Scenario: Installing a volume severs shared content and refuses a protected layer
+- **WHEN** a volume is installed on a layer whose edit list is shared with another
+- **THEN** the other layer's items are untouched, and one undo restores both the absorbed items and the sharing
+- **AND WHEN** installation is attempted on a locked layer, a ghosted layer or an unknown layer
+- **THEN** it is refused and the document is unchanged
+
+### Requirement: The roll-up covers the surface representations
+The document memory roll-up SHALL account for adaptive surfaces, multiresolution hierarchies and sculpt layers, each split into authoritative content and rebuildable cache, alongside the categories it already reports.
+
+A category that is missing from the roll-up is invisible to a host answering a memory warning, and the roll-up already found one such omission — a node accounting six members behind the type it walked, missing exactly the largest things a node owns.
+
+The roll-up SHALL be checked against the types it walks by a test that fails when a new member is added without being accounted, rather than by review.
+
+#### Scenario: A new surface category is accounted
+- **WHEN** a document holding every surface representation is measured
+- **THEN** each representation contributes to the report, and the sum of the categories equals the reported total
+
+#### Scenario: An unaccounted member fails the build
+- **WHEN** a member is added to an accounted type without being included in its byte count
+- **THEN** the accounting test fails
+
+### Requirement: Layer content and layer properties are both reversible
+The one undo history SHALL reverse both a stroke written into a sculpt layer and a change to a layer's properties — rename, strength, visibility, order, lock, add, remove, merge and bake.
+
+Property changes are small and fully describable, so they SHALL be recorded as reversible steps rather than as barriers. An operation that genuinely destroys information SHALL still be a barrier, and SHALL name what it destroyed for a host to show.
+
+Content and property payloads SHALL be separate step kinds or separately tagged, so that undo memory is measurable and journal replay can validate each.
+
+The history SHALL reach the layer stack through a resolver supplied by the owner above it, as the existing kinds do.
+
+#### Scenario: A slider undoes
+- **WHEN** a layer's strength is changed and undone
+- **THEN** the previous strength is restored and the evaluated surface matches what it showed before
+
+#### Scenario: A stroke into a layer undoes without touching the stack
+- **WHEN** a stroke written into a layer is undone
+- **THEN** the layer's detail is restored and its name, order, strength and visibility are unchanged
+
+### Requirement: A document reports what layers cost, separately from caches
+The memory roll-up SHALL report sculpt-layer content separately from the evaluated caches derived from it, and SHALL report it as authoritative.
+
+An evaluated stack cache is rebuildable and may be released under pressure. Layer content is the artist's work and SHALL NEVER be reported as rebuildable, nor released to satisfy a budget.
+
+#### Scenario: A trim never costs a layer
+- **WHEN** every rebuildable cache is released under pressure
+- **THEN** the sculpt-layer content bytes are unchanged and the evaluated surface reconstructs identically
+
 ### Requirement: A layer placement carries a classification
 A layer's transform SHALL be classified by what it does to the layer's field, and the classification SHALL be part of what the scene model reports about a placement rather than something a caller re-derives:
 
@@ -1323,3 +1503,300 @@ What the guarantee does NOT cover is the mutual occlusion of the hard union whil
 - **WHEN** a layer is placed with a per-axis scale
 - **THEN** the placement classifies GENERAL and the field guarantee above is not asserted for it
 
+### Requirement: A layer carries a per-axis scale
+
+A layer SHALL carry three scale factors beside its transform, composed
+innermost in the layer's own frame — before its rotation and translation — so
+that an item's world map is
+`layer.xform · diag(layer.scale_axes) · node.xform · diag(node.scale_axes)`.
+The layer transform's uniform factor SHALL remain the similarity scale and the
+three axes SHALL modulate it, so a triple of ones is the identity.
+
+A layer whose three factors are equal SHALL behave exactly as one carrying the
+uniform factor alone, and SHALL compile to bit-identical tape.
+
+A non-uniform layer scale SHALL be reported through the field's exactness, not
+through its Lipschitz bound: the evaluated distance SHALL be multiplied by the
+product of the smallest component of each per-axis scale in the composition,
+which never overestimates the true distance, and the safe step scale SHALL NOT
+move.
+
+Bounds, influence bounds and picking SHALL honour the three factors. A world
+radius mapped into a squashed frame SHALL be divided by the LARGEST component,
+so a gesture never reaches outside the region it named.
+
+#### Scenario: Three equal factors are the uniform layer
+- **WHEN** a layer's per-axis scale is set to three equal factors
+- **THEN** the compiled tape is byte-identical to the same layer carrying that factor as its uniform scale
+
+#### Scenario: A squashed layer squashes its items
+- **WHEN** a layer holding a unit sphere is scaled 3x on one axis
+- **THEN** the field's zero set is an ellipsoid three units along that axis and one along the others, and the layer's reported bounds contain it
+
+#### Scenario: The field stays marchable
+- **WHEN** a layer carries a non-uniform scale
+- **THEN** the tape reports itself inexact and its safe step scale is unchanged from the uniform case
+
+#### Scenario: A drag on a squashed layer reaches its surface
+- **WHEN** a surface drag is applied at a point on a layer-squashed item's surface
+- **THEN** the surface moves there, and the falloff never reaches outside the radius the gesture named
+
+### Requirement: A lattice cage refuses a frame it cannot describe
+
+The transformed-lattice deformer carries its item-to-cage placement as a rigid
+transform with a uniform scale. The map a cage actually needs is
+`cage.placement⁻¹ · layer.xform · diag(layer.scale_axes) · node.xform ·
+diag(node.scale_axes)`, which is a general affine map whenever either per-axis
+scale is non-uniform — not a similarity, and not a similarity composed with one
+diagonal either.
+
+Until that record is widened, a lattice gizmo over a per-axis-scaled layer SHALL
+be REFUSED rather than placed through a record that cannot hold its map. A cage
+placed through one would warp the item in a space it does not occupy, silently
+and with no error, which is worse than either the refusal or the absent feature.
+
+The refusal SHALL name the layer's scale as the reason, so a host can offer the
+uniform gizmo instead of reporting a failure it cannot explain.
+
+A cage over a layer carrying no per-axis scale SHALL behave exactly as before.
+
+#### Scenario: A gizmo over a squashed layer is refused
+- **WHEN** a lattice gizmo is applied to a layer carrying a non-uniform scale
+- **THEN** it produces no warps and reports that the layer's per-axis scale is why
+
+#### Scenario: An unsquashed cage is unchanged
+- **WHEN** a lattice gizmo is applied to a layer carrying no per-axis scale
+- **THEN** the warps are the ones it produced before
+
+### Requirement: A culled compile narrows a sampled volume
+
+A tape compiled against a cull region SHALL carry only the part of a sampled
+volume that region can read. A volume's influence bound is its whole box, so the
+item cull cannot drop one and nothing else narrowed it: a tape for a single
+brick carried the entire payload, which made every operation that compiles per
+brick — meshing with gradient normals above all — cost the size of the volume
+once per brick rather than the size of the brick.
+
+The narrowing SHALL be exact inside the region, on the same terms the cull
+already promises. A cropped volume necessarily answers differently OUTSIDE its
+crop, because the evaluator clamps a query onto the sampled box; that is what a
+culled tape already does with the items it drops, and it is why a caller may
+only evaluate a culled tape inside the region it was culled to.
+
+**The volume's sample lattice SHALL NOT move.** A narrowed volume keeps the
+origin and the brick grid of the volume it came from, because the evaluator
+locates a sample by arithmetic on that origin and moving it changes the
+interpolation weights — which makes the narrowed field agree with the whole one
+to within rounding rather than exactly, and the difference is invisible until
+something compares bytes.
+
+Where a region reaches every stored brick, or none, the whole volume SHALL be
+emitted rather than a narrowed copy: narrowing to nothing is a different field,
+and narrowing to everything is a copy for no gain.
+
+#### Scenario: A brick's tape carries a brick's worth of samples
+- **WHEN** a tape is compiled against a region the size of one brick, over a document holding a large sampled volume
+- **THEN** the payload it carries is a small multiple of one brick's samples rather than the whole volume's
+
+#### Scenario: The narrowed tape answers exactly
+- **WHEN** a culled tape over a sampled volume is evaluated inside its region, within the band
+- **THEN** every value equals what the whole document's tape returns, exactly rather than approximately, including under a placement that rotates, moves and scales the item
+
+#### Scenario: Colour survives the narrowing
+- **WHEN** the volume carries a colour lattice
+- **THEN** the narrowed tape returns the same colours as the whole one inside the region, because a narrowing that compacted samples without compacting colours would shade correct geometry from the wrong brick
+
+#### Scenario: A whole-document compile is untouched
+- **WHEN** a document holding a sampled volume is compiled with no cull region
+- **THEN** the whole volume is emitted, since there is no region to narrow to
+
+### Requirement: A culled compile drops a warp its region cannot reach
+
+A tape compiled against a cull region SHALL NOT carry a domain warp whose
+support that region cannot reach. Such a warp is the IDENTITY over the region,
+so carrying it is work done for samples it cannot affect — measured at 3.20x the
+cost of the same samples with no warps at all, for twelve grabs none of which
+reached them.
+
+The dropping SHALL be sound along the CHAIN and not merely per warp. Warps apply
+in authoring order, so a warp is the identity over the region only if every warp
+before it was: a warp that is kept may move a point, and the region each
+subsequent warp is tested against SHALL therefore be widened by the most that
+warp can move one.
+
+Only a warp with FINITE SUPPORT may be dropped. A warp whose weight merely
+decays, or clamps, reaches everywhere and SHALL always be carried.
+
+A compile with no cull region SHALL carry every warp: there is no region to test
+against, and that compile is the one a whole-document evaluation and a host
+upload use.
+
+This SHALL NOT change the field. Inside the region the culled tape SHALL return
+exactly what the whole document's tape returns, because a dropped warp was the
+identity there.
+
+#### Scenario: A region no warp reaches carries none
+- **WHEN** a tape is compiled against a region outside every warp's support
+- **THEN** it carries no warps, and evaluates to exactly what the whole document's tape does over that region
+
+#### Scenario: A region a warp reaches keeps it
+- **WHEN** the region is within a warp's support
+- **THEN** that warp is carried, and the field is unchanged
+
+#### Scenario: A warp is judged after the warps before it have moved the point
+- **WHEN** a warp that the region reaches displaces points toward a second warp the region alone does not reach
+- **THEN** the second warp is carried too, and the field is unchanged
+
+### Requirement: A document says when a command has changed it
+
+A document SHALL carry a serial that advances whenever a command changes it, so
+that a consumer can tell the document before an edit from the document after
+one.
+
+It SHALL advance where commands are APPLIED rather than where a binding
+invalidates its caches. Those are different moments: a binding invalidates once
+an edit is finished, which is after both sides of that edit have been examined,
+so a consumer keyed on the later moment cannot distinguish them and will answer
+a question about the new document with the old one's geometry. A bound derived
+that way is too small, and a bound that is too small is under-invalidation —
+which renders as stale geometry rather than as an error.
+
+It SHALL advance for every command-based mutation without those mutations being
+enumerated, so that undo, redo and a replayed journal are covered by
+construction and a command added later cannot be forgotten.
+
+It SHALL NOT advance for a command that was refused, since such a command leaves
+the document unchanged.
+
+A mutation made outside the command vocabulary does not reach that point, and
+the component owning such a path SHALL advance the serial where it already
+declares its caches stale.
+
+#### Scenario: The two sides of an edit are distinguishable
+- **WHEN** a value derived from the document is taken before a command is applied and again after it
+- **THEN** the serial differs between the two, so a cache keyed on it cannot answer the second with the first
+
+#### Scenario: Undo is covered without being named
+- **WHEN** a document is changed and then undone
+- **THEN** the serial advances for the undo as it did for the edit, because both apply a command
+
+#### Scenario: A refused command changes nothing
+- **WHEN** a command is refused, for instance against a protected layer
+- **THEN** the serial does not advance
+
+### Requirement: A layer's extent can be kept across an edit
+
+An intersect is bounded by its layer's extent, and computing that extent walks
+every visible item in the layer. A consumer that edits a layer repeatedly SHALL
+be able to keep that extent across edits rather than recompute it per edit,
+without the kept extent ever differing from a freshly computed one.
+
+The kept form SHALL be exact rather than conservative. In particular the extent
+SHALL shrink when the edit shrinks it: a form that can only be widened is not
+the extent, and an extent that is too LARGE is merely slow while one built by
+widening a stale union is too SMALL — which is under-invalidation, and renders
+as stale geometry rather than as an error.
+
+It SHALL remain cheap for the item being edited repeatedly even when that item
+determines how far the extent reaches, because the item a host drags across a
+form is typically a boolean operand large enough to extend past it. A form that
+is cheap only for items lying strictly inside the extent does not satisfy this,
+having no effect on the case it exists for.
+
+Being told that an item changed SHALL NOT itself compute anything. A layer
+holding no intersect never has its extent asked for, and such layers are the
+common case; work done at the moment of the edit is therefore paid by layers
+that never benefit from it.
+
+The kept extent SHALL be abandoned for any change it cannot account for,
+including adding, removing or reparenting an item, any change made to the layer
+itself, and any mutation reaching the layer outside the command vocabulary.
+
+Whether a given command is confined to a single item SHALL be decided in one
+place, so that a component keeping an extent and a test checking one cannot
+disagree about a command, and a command added later is classified rather than
+assumed harmless.
+
+#### Scenario: A drag walks the layer once
+- **WHEN** one item is edited over many consecutive frames
+- **THEN** the layer is walked on the first of them and not on the others, and the extent equals a freshly computed one on every frame
+
+#### Scenario: The dragged item sticks out of the form
+- **GIVEN** the edited item extends past the rest of the layer on some face
+- **WHEN** it is dragged over many frames
+- **THEN** the layer is still walked only once
+
+#### Scenario: The edit makes the extent smaller
+- **WHEN** the edited item is moved back inside the others, or made smaller
+- **THEN** the extent shrinks to match a freshly computed one
+
+#### Scenario: A layer nobody asks about is not walked
+- **WHEN** a layer holding no intersect is edited over many frames
+- **THEN** its extent is never computed
+
+#### Scenario: A change the kept form cannot account for
+- **WHEN** an item is added or removed, or the layer's own transform, mirror or radial setting changes
+- **THEN** the next extent is computed by walking rather than kept
+
+### Requirement: A chain of finite-support brushes is charged for what can meet
+
+An item's declared Lipschitz bound SHALL be derived from the deformers that can
+act together at one point, and SHALL NOT grow with the number of deformers that
+cannot.
+
+A brush with finite support is the identity outside its own region. Two such
+brushes contribute a compounded factor only where both are non-identity for one
+evaluation, which requires that a point inside the first can still be inside the
+second when the second sees it. What carries it there is the travel of the links
+BETWEEN them; the travel of the chain as a whole SHALL NOT be used, because it
+grows with every brush added and so makes every pair look reachable on a
+sufficiently worked model.
+
+Reachability SHALL NOT be closed transitively for this purpose. Three brushes
+where the first meets the second and the second meets the third, but the first
+and third do not, have no point at which all three act — and a bound that
+multiplies all three charges a compounding that cannot happen. Along a stroke
+that is every brush on the model.
+
+The result SHALL remain an upper bound: every deformer acting at a point
+contains that point, so any set that acts together lies within the reach of each
+of its members.
+
+#### Scenario: A walked stroke does not compound along its length
+- **WHEN** brushes are placed along a surface so that each overlaps only its neighbours
+- **THEN** the bound does not grow in proportion to how many were placed
+
+#### Scenario: Brushes on one spot still compound
+- **WHEN** brushes are placed on top of one another
+- **THEN** each additional one makes the bound larger, because they genuinely do stack
+
+#### Scenario: The relaxed bound is still a bound
+- **WHEN** the field of a chain of spread brushes is marched by the declared step
+- **THEN** no step crosses the surface
+
+### Requirement: An already-compiled tape can be baked into a volume
+Sampling a layer's field into a volume is two things: compiling the layer into a tape in the layer's own frame, and sampling that tape. The second SHALL be reachable on its own, for a caller that holds a tape belonging to no layer — a PREFIX of a layer's edit list is exactly such a tape.
+
+It SHALL be the same code the layer form runs: the same sampling, the same post-process, the same colour pass, the same measured steepness. A volume produced this way SHALL be one a consolidation could have produced, so that there is ONE definition of what a baked volume is rather than two that agree today.
+
+The caller SHALL owe the two things a tape cannot state for itself, and the interface SHALL make both explicit rather than guess:
+
+- THE FRAME. A layer bake compiles a local view — the layer visible and its own transform identity — because sampling the world-space field and then putting the result back under the layer applies the transform twice. A caller compiling its own tape owes the same convention.
+- WHETHER COLOUR IS CARRIED. The compiler folds colour into instructions, so by the time a tape exists the question "can this produce more than one colour" can no longer be asked of it. The rule that answers it for a layer SHALL stay reachable, because it is the rule any caller has to apply to get the same bytes — and passing the wrong answer produces different BYTES, not a slower path.
+
+The tape SHALL be borrowed rather than owned, and SHALL outlive the call. Refusals SHALL be the layer form's refusals — no resolution, nothing to sample — and a cancelled bake SHALL discard rather than return a partial volume.
+
+#### Scenario: Baking a tape reproduces baking its layer
+- **GIVEN** a layer, and the tape compiled from it under the frame convention above
+- **WHEN** each is baked with the same parameters and the same colour answer
+- **THEN** the two volumes serialize to the same bytes
+
+#### Scenario: The colour answer is the caller's, and it changes the bytes
+- **WHEN** a tape from a one-colour layer and a tape from a many-colour layer are each baked with the colour answer their layers give
+- **THEN** each volume carries a colour channel exactly when its layer's bake does, and each matches its layer's bake byte for byte
+
+#### Scenario: A tape bake refuses what a layer bake refuses
+- **WHEN** a bake is attempted with no resolution, or on a tape with nothing to sample
+- **THEN** it produces nothing
+- **AND WHEN** a bake is cancelled through its token
+- **THEN** it produces nothing rather than a partial volume

@@ -10,7 +10,9 @@ Beside it are the preview, quad and dual-contouring meshers, decimation,
 validation, attribute transfer and the sculpting a mesh accepts once it exists.
 `mesh::Mesh` — flat arrays every producer and consumer shares — is defined here,
 which is why this capability is also where its invariants are written down.
+
 ## Requirements
+
 ### Requirement: Default mesher with watertight guarantee
 `clay::mesh` SHALL provide a default cell-marching mesher whose output is watertight and 2-manifold by construction, running only over surface-crossing bricks. v1 implements this with marching tetrahedra (Freudenthal 6-tet decomposition with globally consistent face diagonals — no ambiguous configurations exist, so the guarantee is structural); a table-based marching cubes with asymptotic-decider ambiguity resolution MAY replace it later as a triangle-count optimization provided the same guarantees hold. The CPU implementation is the golden reference; GPU implementations (Metal/CUDA) SHALL match its topology invariants (watertight, manifold, Euler characteristic on golden scenes) though not bit-identical vertex positions.
 
@@ -1073,6 +1075,35 @@ The result SHALL be deterministic: the same mesh and tolerance produce the same 
 - **WHEN** a mesh with nothing to merge is welded
 - **THEN** the report says nothing merged and nothing collapsed, and the positions and indices are byte-identical to the input
 
+### Requirement: Brick meshing marches in parallel and welds serially
+Meshing a set of bricks SHALL march them concurrently and SHALL weld the result through a single builder.
+
+The welding SHALL NOT be sharded per brick. One builder serves every brick so that a lattice edge shared by two of them yields ONE vertex, which is what makes the sparse set watertight at brick seams; per-brick vertex maps concatenated afterwards would duplicate every seam vertex and open the mesh along every brick boundary.
+
+The parallel phase SHALL record what each brick would emit rather than building mesh state, and a serial phase SHALL replay those recordings through the single builder in key order.
+
+The result SHALL be BYTE-IDENTICAL to the serial path — the same vertex array, the same index array and the same per-brick ranges — because the builder receives the same calls in the same order. This SHALL hold as a construction rather than as a tolerance.
+
+Repeated calls for one lattice edge SHALL dedup exactly as they did when the march made them directly.
+
+The per-brick ranges SHALL continue to partition the mesh, which the subset path depends on.
+
+#### Scenario: The mesh does not change
+- **WHEN** the same brick set is meshed before and after
+- **THEN** the vertices, indices and ranges are byte-identical
+
+#### Scenario: The seams are still welded
+- **WHEN** a multi-brick set is meshed
+- **THEN** the result is watertight, manifold and oriented, and the ranges sum to the whole mesh
+
+#### Scenario: Repeated runs agree
+- **WHEN** the same brick set is meshed many times
+- **THEN** every run is byte-identical to every other, so no result depends on which thread reached a brick first
+
+#### Scenario: Meshing from inside a pooled loop
+- **WHEN** a caller that is already inside a parallel dispatch meshes bricks
+- **THEN** the nested dispatch runs inline and produces the same mesh as a direct call
+
 ### Requirement: One SDF layer can be meshed on its own
 The mesher SHALL be able to mesh a single named SDF layer, producing that layer's surface in world space under that layer's own transform, with the same mesher selection, voxel sizing and attribute behaviour as meshing the whole document.
 
@@ -1092,3 +1123,113 @@ A hidden layer SHALL be meshable by name: the caller named it, which is a strong
 - **WHEN** a voxel or mesh layer is named
 - **THEN** the call is refused and no mesh is produced
 
+### Requirement: Work under a brush is addressed by a representation-neutral identity
+The brush workset SHALL address the work one stamp touches by a neutral 64-bit work-item identity rather than by any one representation's vertex numbering, and every sculptor SHALL fill the SAME workset type.
+
+The width SHALL be 64 bits because that is what the representations already need: an adaptive surface's vertex handle carries a slot AND a generation, and a hierarchy addresses a vertex as a level and an index. A narrower identity cannot carry either without losing the part that makes a stale handle detectable.
+
+Each representation SHALL supply an adapter that walks its own surface and fills the neutral workset — the fixed mesh's weld-class walk, the adaptive surface's half-edge walk, the hierarchy's delegation to its bound level. The WALK is representation-specific and SHALL stay so. The COMPOSITION that follows it — the weight's factors in their one fixed order, the drop of a zero-weight entry, the automask, the resolution of the stamp's average normal, centroid and plane — SHALL exist once and name no representation.
+
+A sculptor SHALL NOT keep a private set of parallel arrays that duplicates the workset. Everything composed into the weight reaches every sculptor by construction when there is one workset, and reaches only the sculptors somebody remembered when there are three.
+
+#### Scenario: Three representations, one workset type
+- **WHEN** the fixed, adaptive and multiresolution sculptors each gather a stamp
+- **THEN** each has filled the shared workset type, and the composition step that produced their weights is the same function
+
+#### Scenario: The neutral composition names no representation
+- **WHEN** the composition step is compiled against a translation unit that includes no mesh, adjacency, adaptive-surface or hierarchy header
+- **THEN** it compiles
+
+### Requirement: A stamp's transient storage comes from a per-sculptor arena
+Each sculptor SHALL own a scratch arena serving the storage one stamp needs and discards: the affected-item list, temporary normals, the surface traversal's frontier, alpha samples, automask weights, topology candidates and dirty patch lists. The arena SHALL allocate by bumping a pointer, SHALL reset by returning that pointer without freeing, and SHALL keep a capacity that tracks the largest recent footprint.
+
+The arena SHALL be a member of the sculptor and SHALL NOT be a process-global mutable object. Several sculptors are live at once — a multiresolution sculptor OWNS a fixed one, and a document holds several mesh layers — and a shared arena would make one stamp's scratch depend on what another was doing, and would be a data race the first time a host stamped two layers on two threads.
+
+The arena SHALL refuse, at compile time, any type whose destructor must run. Reset is a pointer store rather than a walk, so a type that owns memory would leak once per stamp at pointer rates.
+
+After warm-up, an ordinary stamp on a stable-topology surface SHALL perform no heap allocation ON ANY REPRESENTATION and WITH AUTOMASKING ENABLED. Growth on first encountering a larger footprint is permitted; steady repeated local sculpting is not. The arena SHALL also report its high-water mark and how many times it has grown, so that scratch which grows every stamp and is never reset — which allocates nothing after warm-up and consumes memory without bound — is visible as a failure rather than as a pass.
+
+#### Scenario: A warm automasked stamp allocates nothing
+- **WHEN** a stroke of many stamps of similar footprint runs with the boundary, connectivity and normal-angle automask factors enabled, after the first stamp has warmed the arena
+- **THEN** the instrumented allocation count for the subsequent stamps is zero
+
+#### Scenario: A warm adaptive stamp allocates nothing
+- **WHEN** the same stroke runs on an adaptive surface with topology changes disabled, so the surface is stable
+- **THEN** the instrumented allocation count for the subsequent stamps is zero
+
+#### Scenario: The arena converges
+- **WHEN** a stroke of many stamps of similar footprint runs
+- **THEN** the arena's growth count stops increasing, and its high-water mark stops rising
+
+### Requirement: A brush stamp has an oriented frame on the surface
+The library SHALL build, once per stamp, an orthonormal frame on the surface — an origin, a normal, a tangent, a bitangent and the rotation that oriented them — from the stamp's placement, the surface normal under it, and an azimuth or an explicit rotation the caller supplied.
+
+That frame SHALL be what a stamp's (u, v) is measured in, and the SAME frame SHALL serve the alpha, the rake, the chisel, the clay strips and any other directional verb, on every representation. A directional brush that needs a frame of its own is evidence the shared frame is missing something, and the shared frame is what SHALL be extended.
+
+A zero azimuth SHALL produce the unrotated basis without evaluating the rotation. This is a correctness rule and not an optimisation: multiplying by an exact 1 and adding an exact 0 is not the identity for a negative-zero component, and the resulting sign flip is visible in a bilinear alpha sample at a texel boundary.
+
+An explicit rotation SHALL replace the azimuth rather than composing with it, so that a caller who supplies one gets exactly what they supplied.
+
+#### Scenario: A zero azimuth changes nothing
+- **WHEN** a stamp frame is built with no azimuth and again with an azimuth of zero
+- **THEN** the two frames are byte-identical
+
+#### Scenario: One frame, three representations
+- **WHEN** the same stamp with the same alpha and the same azimuth is applied to a fixed mesh, an adaptive surface and a hierarchy at the same place with the same surface normal
+- **THEN** the three frames are byte-identical
+
+### Requirement: Brush semantics agree across representations where they are mathematically required to
+Where two representations hold the same vertices at the same positions, a stamp that reads no surface-derived estimator SHALL produce byte-identical results on both. "Reads no estimator" is the precise condition: a verb given an explicit direction, a Euclidean footprint and no normal-dependent factor depends only on the shared weight composition and the shared kernel, and any difference between two representations is therefore a difference in the runtime around them.
+
+Where two representations legitimately differ, the difference SHALL be NAMED and SHALL be asserted as a difference rather than left unstated. The vertex-normal estimators differ by construction — the fixed mesh's is angle-weighted and reaches `acos`, the adaptive surface averages the face normals it already caches — so every verb that reads a normal differs, and a gate that only checked for agreement would be satisfied by two representations that had become equally wrong.
+
+A factor that is topological rather than geometric — a connectivity flood, a boundary-ring spread — SHALL agree EXACTLY across representations holding the same topology, because such a factor is set-valued and no float ordering can reach it.
+
+#### Scenario: A normal-free stamp is byte-identical across representations
+- **WHEN** a grab with an explicit direction, a Euclidean footprint and no automask is applied to a fixed mesh and to an adaptive surface built from that same mesh with topology changes disabled
+- **THEN** the resulting positions are byte-identical
+
+#### Scenario: A named difference still differs
+- **WHEN** a draw is applied to the same two representations
+- **THEN** the results differ, by no more than the stated bound, and the test asserts the difference rather than an equality
+
+#### Scenario: A topological automask agrees exactly
+- **WHEN** the boundary and connectivity automask factors are evaluated over the same topology on two representations
+- **THEN** the resulting per-vertex factors are equal
+
+### Requirement: An imported mesh's field is affordable to query
+
+Distance and inside/outside queries against an imported mesh SHALL be answered
+through a hierarchy that SUMMARIZES distant geometry rather than by consulting
+every triangle, so that a mesh with ten times the triangles does not cost ten
+times the work to query. Without it an ordinary import is unusable.
+
+**This SHALL be gated on WORK DONE rather than on time taken.** The property is
+that the walk stops at a distant node and answers for its whole subtree, which
+is a count of nodes visited and triangles tested — a number identical on every
+machine. Asserted as a ratio of wall clocks it becomes a claim about the
+scheduler instead: both sides of such a comparison run in well under a
+millisecond, one preemption inside the smaller side inflates the ratio, and the
+gate has twice failed on one platform with the hierarchy unchanged and once on a
+change that provably could not affect it.
+
+The instrumentation SHALL cost nothing when nothing is measuring. A query path
+that picking and meshing depend on SHALL NOT carry a permanent charge so that a
+test can read a counter.
+
+The gate SHALL be proven against its own regression: with summarizing disabled,
+the same measurement SHALL rise to approximately the ratio of the triangle
+counts, so that a gate which had stopped testing anything is visible as a gate
+that no longer fails when it should.
+
+#### Scenario: A denser mesh does not cost proportionally more
+- **WHEN** the same sweep of queries runs against a mesh and against one with an order of magnitude more triangles
+- **THEN** the work the walk performs grows by far less than the triangle count does
+
+#### Scenario: The gate fails when summarizing is off
+- **WHEN** the same comparison is made with summarizing disabled
+- **THEN** the work ratio rises to approximately the triangle ratio, and the gate's bound is exceeded
+
+#### Scenario: Measuring is free when nobody measures
+- **WHEN** queries run with no counter attached
+- **THEN** they cost what they cost without the instrumentation present

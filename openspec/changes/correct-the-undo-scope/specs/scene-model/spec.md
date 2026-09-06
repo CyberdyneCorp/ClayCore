@@ -35,6 +35,10 @@ A host SHALL be able to discover this from the specification rather than from be
 - **WHEN** undo is enabled, a voxel layer is edited, and the undo depth is read before and after
 - **THEN** the depth is unchanged, and undo does not restore the edited cells
 
+#### Scenario: An edit to a group undoes exactly
+- **WHEN** a group's op is changed, a child is added to it, it is reparented, or the whole group is removed, on a document with undo enabled
+- **THEN** one undo restores the document to bit-identical bytes
+
 ## ADDED Requirements
 
 ### Requirement: Protection refuses reordering, not only editing

@@ -22,44 +22,58 @@ Last reconciled against `3dcoat_study/MISSING_FEATURES.md` and
 caught five items this file had dropped. Every ClayCore-owned row in their
 catalogue is now represented here or in the deferred list below.
 
-## Why this file went stale, and what fixes it (2026-09-06)
+## Where the engine is (2026-09-06, v0.86.0)
 
-**Fourteen completed changes were archived in this PR, and they are the reason
-the reconciliation below was needed at all.** All fourteen read 0 open tasks and
-all fourteen had shipped; none had been archived. `openspec/specs/` therefore
-described a library several ABI minors behind the one in the tree, and every
-reader downstream of it read the same lag: **eight of the twelve rows in "Real
-gaps, verified absent" were presenting shipped capabilities as gaps**, three
-Phase 4 rows named delivered work as pending, and issue #243 was rewritten
-*twice* re-deriving work that had already landed.
+21 capabilities, 205 archived changes, 19 still open. Complete enough that the
+gaps below are about *sculpting affordances*, not about the field engine — and
+as of the 2026-09-06 reconciliation below, about what a HOST can reach rather
+than about what the engine can do.
+
+**Read the host's ranking before this file's own.** Every phase table here was
+written from the engine's side. `## What the host actually needs — 2026-09-06`
+near the end is ClaySpaceDesktop's, taken from a working application pinned to
+v0.84.0, and it disagrees with the ordering above it in three places. Where they
+disagree, theirs is the one with a shipping product behind it.
+
+### Why this file went stale, and what fixes it
+
+**The batch above — 205 archived, up from 119 — is the fix applied late.** The
+changes had shipped and read 0 open tasks for weeks; none had been archived. A
+complete change sitting in `openspec/changes/` is indistinguishable from an
+in-flight one, so `openspec/specs/` described a library several ABI minors
+behind the one in the tree, and every reader downstream of it read the same lag:
+**eight of the twelve rows in "Real gaps, verified absent" below were presenting
+shipped capabilities as gaps**, three Phase 4 rows named delivered work as
+pending, and issue #243 was rewritten *twice* re-deriving work that had already
+landed.
 
 The failure was not that the work was undocumented — each change carried its own
-proposal, design and tasks the whole time. It was that a complete change sitting
-in `openspec/changes/` is indistinguishable from an in-flight one, so nothing
-downstream can tell finished from planned without reading the code. **Archiving
-is what makes the distinction legible**, and it is the fix: a change that reads 0
-open tasks and has shipped gets archived in the PR that finishes it, not in a
-later sweep. Archiving in a batch is what this PR had to do; it is not the
-process working.
+proposal, design and tasks the whole time. **Archiving is what makes finished
+legible**, and the rule it wants is: a change that reads 0 open tasks and has
+shipped gets archived by the PR that finishes it, not in a later sweep.
 
-Two smaller lessons from doing the batch, worth keeping because they will recur:
-archive in **dependency order** rather than list order (the resume chain has to
-go refill → colour → layers → per-brick → seed key, because each modifies the
-requirement the one before it wrote), and expect deltas that were never
-refreshed against their own base to abort the archive — four of the fourteen
-named blocks `MODIFIED` against requirements no living spec carries, or dropped
-scenarios their base still had, which under openspec 1.8.0 would have deleted
-them.
+**And the sweep proved its own point by happening twice.** Two branches
+reconciled the same backlog on the same day without either knowing: this one
+archived fourteen of the changes with their four stale deltas repaired, and
+`chore/reconcile-roadmap-and-archive` archived those fourteen among a wider
+eighty-six and landed first. Thirteen of the fourteen were duplicate work
+thrown away at the merge, and the one that was not —
+`record-the-layer-a-crossing-creates` — is still open here because the other
+sweep left it so. That is the same defect one level up: an unarchived change is
+invisible as *finished*, and an unfinished reconciliation is invisible as *in
+progress*. Two lessons from the discarded batch are worth keeping anyway,
+because they will recur: archive in **dependency order** rather than list order
+(the resume chain has to go refill → colour → layers → per-brick → seed key,
+because each modifies the requirement the one before it wrote), and expect
+deltas that were never refreshed against their own base to abort the archive —
+four of the fourteen named blocks `MODIFIED` against requirements no living spec
+carries, or dropped scenarios their base still had, which a validator that
+treats `MODIFIED` as a whole-requirement replacement would have deleted.
 
-## Where the engine is (2026-08-25, v0.52.0)
-
-~~14 capabilities, 119 archived changes.~~ **17 capabilities and 176 archived
-changes as of 2026-09-06 (ABI 0.86.0), which is the size of the lag this file
-had accumulated: the count above was written at v0.52.0 and 57 changes have been
-archived since, 14 of them in the reconciling PR itself.** Complete enough that
-the gaps below are about *sculpting affordances*, not about the field engine. The bullets below
-are the 2026-08-07 (v0.22.1) snapshot with corrections kept in place; what
-landed between v0.22.1 and v0.30.0 is summarised at the end of this section:
+The older snapshot below is kept because its corrections are still
+load-bearing. The bullets are the 2026-08-07 (v0.22.1) snapshot with corrections
+kept in place; what landed between v0.22.1 and v0.30.0 is summarised at the end
+of this section:
 
 - 30 primitives + stroke/curve chains, **16 combine ops**, 5 blend profiles,
   grid/radial repetition, mirror with blended seam. Every kernel capability is
@@ -662,8 +676,8 @@ their text and name what delivered them.
 | ~~`add-lattice-deformer` (FFD)~~ | **Delivered, on both representations.** `clay_item_add_lattice` places a cage over an item and `clay_layer_add_lattice` over a layer's node; `clay_layer_lattice_gizmo` / `_preview` drive it as a gesture; and the mesh side is the `clay_mesh_lattice_*` family — `_divisions`, `_set_offset`, `_offset`, `_rest`, `_position`, `_is_identity`, `_displacement` — with `clay_mesh_sculptor_lattice` applying it. **The row's own word "FFD" is where the header now routes**: an SDF deformer is an *inverse* point map and forward FFD has no closed-form inverse, so `clay.h` tells a caller wanting forward FFD with no approximation to use the mesh-layer lattice instead. That routing is the delivered answer, not a gap in it |
 | `add-surface-scatter` (instances sampled on an isosurface) | **Still open, and now unblocked.** The instancing half it depended on landed (`instance-a-layer`), so scatter no longer has to duplicate geometry; nothing yet samples an isosurface for placements |
 | `add-blend-profile-curves` (user-defined bevel cross-section, against their 2026 custom profiles) | **Still open.** `clay_profile` names the closed 2D profiles a *lift* primitive carries; a blend's cross-section is not authorable — `blend_k` is a radius and the extended modes ignore the profile outright |
-| ~~`add-convenience-transforms` (snap-to-ground, centre-mass, zero-to-origin as single ABI calls)~~ | **Landed in this PR (ABI 0.86.0).** `clay_layer_snap_to_ground`, `clay_layer_centre_bounds`, `clay_layer_zero_to_origin`. **The middle name is a correction to this row, not a typo:** the engine holds no density, so an occupancy-weighted centroid is not merely more expensive, it is not expressible by `(doc, layer)` — a sampled centroid has no answer until someone names a cell size, and the call would silently depend on a resolution it invented. It centres the tight world BOX and is named for it |
-| ~~`add-field-stamps` (capture a region's field as a reusable brush — the VDM analog, and a differentiator rather than a parity item)~~ | **Delivered as `stamp-a-captured-field` (ABI 0.83.0), archived 2026-09-06.** `clay_item_stamp_from_document` captures, `clay_item_stamp_save_memory` / `_load_memory` persist, `clay_item_stamp_content_id` identifies, `clay_stamp_frame_from_surface` orients one against a hit and its stylus azimuth, and `clay_layer_place_stamps` plants one at every stamp a resolved stroke produced |
+| ~~`add-convenience-transforms` (snap-to-ground, centre-mass, zero-to-origin as single ABI calls)~~ | **Landed 2026-09-06 (ABI 0.86.0).** `clay_layer_snap_to_ground`, `clay_layer_centre_bounds`, `clay_layer_zero_to_origin`. **The middle name is a correction to this row, not a typo:** the engine holds no density, so an occupancy-weighted centroid is not merely more expensive, it is not expressible by `(doc, layer)` — a sampled centroid has no answer until someone names a cell size, and the call would silently depend on a resolution it invented. It centres the tight world BOX and is named for it |
+| ~~`add-field-stamps` (capture a region's field as a reusable brush — the VDM analog, and a differentiator rather than a parity item)~~ | **Delivered as `stamp-a-captured-field` (ABI 0.83.0), archived 2026-09-05.** `clay_item_stamp_from_document` captures, `clay_item_stamp_save_memory` / `_load_memory` persist, `clay_item_stamp_content_id` identifies, `clay_stamp_frame_from_surface` orients one against a hit and its stylus azimuth, and `clay_layer_place_stamps` plants one at every stamp a resolved stroke produced |
 
 ## Phase 5 — the surface tier, proposed 2026-08-29
 
@@ -810,9 +824,9 @@ Three changes raised by `ClayCore_Field_Stamps_Regional_Multires_Layer_Boolean_I
 
 | Order | Change | Why here |
 |---|---|---|
-| 1 | `stamp-a-captured-field` | **Smaller than the guide describes**, because three of its four pillars already exist: `PrimType::Volume` compiles through the tape, the Node holds a volume by `shared_ptr` so "a thousand uses of one 4 MB asset must not consume ~4 GB" is already true, and `clay_item_volume_from_document` already captures a finite world region with redistance. What is missing is an ORIENTED capture frame (today's region is world-axis-aligned), an asset IDENTITY with a standalone form, a placement helper on `calpha_frame`, and stroke integration. First because it is the smallest and touches nothing the other two need |
-| 2 | `refine-one-region-of-a-hierarchy` | The gap `add-mesh-multires` recorded in its own row. Depth becomes a property of a base patch, with 2:1 balance in stable patch-id order, transitions watertight by construction rather than by repair, and refinement monotonic in v1 — removal needs a policy for the detail authored there, and picking one silently is worse than not offering it. Reuses the extreme-poly chunk identity; adds no second table |
-| 3 | `fold-the-layers-with-an-operator` | Last, and the audit sharpened the reason. The inter-layer hard union is not one line in `compile_document`: it is **eight sites**, including `compile_document_part`'s "the union to fold them with is a HARD Add … anything else is a different field" and the brick refill's own multi-layer fold in `clay_c.cpp`. A layer fold that is not a hard Add breaks the multi-layer resume unless each is taught the operator, and the failure is SILENT — a refill folding wrongly returns a field that never existed. The change decides what each site does before writing any of them, and leans toward REFUSING the split on a non-union fold because it is the only option that cannot be quietly wrong |
+| 1 | `stamp-a-captured-field` **landed 2026-09-05** | **Smaller than the guide describes**, because three of its four pillars already exist: `PrimType::Volume` compiles through the tape, the Node holds a volume by `shared_ptr` so "a thousand uses of one 4 MB asset must not consume ~4 GB" is already true, and `clay_item_volume_from_document` already captures a finite world region with redistance. What is missing is an ORIENTED capture frame (today's region is world-axis-aligned), an asset IDENTITY with a standalone form, a placement helper on `calpha_frame`, and stroke integration. First because it is the smallest and touches nothing the other two need |
+| 2 | `refine-one-region-of-a-hierarchy` **landed 2026-09-05, three residuals named** | Transition polygons for EXPORT are not built, cross-level neighbours are absent so smooth/relax/normals are gated across a transition, and brushes across a transition wait on both. **The host does not need any of the three** — it exports no hierarchies — and names a different multires gap as its rank 2: a `.clayspace` carries no hierarchy and the engine reports a hierarchy's layer as a MESH layer, so a host's side-car is the only record that a row ever was one. See the host section. Originally: the gap `add-mesh-multires` recorded in its own row. Depth becomes a property of a base patch, with 2:1 balance in stable patch-id order, transitions watertight by construction rather than by repair, and refinement monotonic in v1 — removal needs a policy for the detail authored there, and picking one silently is worse than not offering it. Reuses the extreme-poly chunk identity; adds no second table |
+| 3 | `fold-the-layers-with-an-operator` **not started (0/27) — now P0** | **Ordered last here and first by the host, and the host wins.** It is the only open row that changes what an application built on this engine can ship: a subtool IS a layer there, so a subtractive item does not reach the workflow and what ships instead is a resolved boolean that stops tracking its operands. Also where the intersect-drag measurement belongs — `BoundedByLayer` poses per item exactly the question a non-union layer fold poses per layer. Last, and the audit sharpened the reason. The inter-layer hard union is not one line in `compile_document`: it is **eight sites**, including `compile_document_part`'s "the union to fold them with is a HARD Add … anything else is a different field" and the brick refill's own multi-layer fold in `clay_c.cpp`. A layer fold that is not a hard Add breaks the multi-layer resume unless each is taught the operator, and the failure is SILENT — a refill folding wrongly returns a field that never existed. The change decides what each site does before writing any of them, and leans toward REFUSING the split on a non-union fold because it is the only option that cannot be quietly wrong |
 
 ## Deferred, but recorded
 
@@ -1182,7 +1196,8 @@ moves are the ones already shipped.
 
 | | Item | Why here |
 |---|---|---|
-| **P0** | `add-mobile-thread-scheduling` | The handoff is now, and the pool declares no QoS class on the one platform where that decides whether the UI thread wins |
+| **P0** | `fold-the-layers-with-an-operator` | **Raised to P0 on 2026-09-06 by the host that consumes this engine, and it is the only open row that changes what they can ship.** A subtool IS a layer there, so a subtractive ITEM does not reach the workflow; what they ship instead is a resolved boolean that stops tracking its operands the moment one moves. Still 0/27 and still gated on its own decision task 0.1. See the host section for where its measurement belongs |
+| ~~**P0**~~ **P1** | `add-mobile-thread-scheduling` | **Demoted 2026-09-06 at the host's request.** The handoff is now and the pool still declares no QoS class, but the P0 was written for the iPad and the desktop host says QoS classes and performance-core sizing buy it nothing. It stays open for the mobile reason and stops blocking a desktop release. **The threading ask that replaced it is `add-mesh-sculptor-off-thread`**: `clay_mesh_sculptor_create` is a weld and an adjacency pass, 160 ms over 296,216 triangles, on the interface thread, with no other route to a mesh layer's surface — see the host section below |
 | ~~**P0**~~ | ~~`add-history-budget`~~ **landed 2026-08-24** | Unbounded allocation in a multi-hour session on an OS that kills for memory. Bytes, a budget, on-demand trim, and a horizon a host can show. **What building it found:** the expensive entries are the inverses of REMOVALS, since the stack stores inverses — deleting an item records a whole node while adding one records an id, so a session of deletes and a session of adds cost very differently and nothing told the host which it was in |
 | ~~**P0**~~ | ~~`add-surface-groups`~~ **landed 2026-08-24** | The largest genuinely-absent workflow primitive. **Landed TWICE, and the first time did not count**: the lattice, `isolate` and the visibility flags shipped with tests and were reachable from no host at all — no C entry point, no pyclay, no serialisation, and the mesher never asked, so hiding a group hid nothing. The second half is what made it a workflow: grow/shrink/border, a `'GRUP'` chunk, undo, both bindings, and geometry that actually disappears. Hiding filters the produced MESH rather than the field, so it is exactly reversible and cannot change what the document evaluates to |
 | ~~**P0**~~ | ~~A version tag~~ **caught up 2026-08-25 (v0.52.0)** | The oldest row on this list, closed twice: v0.49.0 took the ten-minor backlog and v0.52.0 takes the three that landed after it. **What both bumps found is the same defect, and it is worth a gate rather than a habit:** the minor is bumped in `CMakeLists.txt` by the feature that grows the ABI, and `clay.h` and `pyproject.toml` are left behind — v0.49.0 shipped from a tree whose header and wheel said 0.48.0, and v0.52.0 from one where both said 0.49.0 against a CMake at 0.52.0. `release_check.py`'s `version` row is the only thing that catches it, and it catches it at tag time rather than at merge time |
@@ -1194,9 +1209,9 @@ moves are the ones already shipped.
 **Re-read 2026-09-02 against a fixture that grows in EXTENT, and the earlier measurement was taken on the wrong axis.** Every SDF benchmark fixture — `sculpted_sphere`, `pole_dense_sphere`, `deep_sphere`, `spread_sculpt` — grows a unit sphere's DENSITY, so a dab's cull region keeps the same FRACTION of the model and survives a flat 28.3% of the items at 2 000, 10 000 and 50 000 alike. There `plan` is ~3% of a dab's cull and the per-brick compiles over its survivors are the other 97%, so the fastest imaginable broad phase wins 3% — which is how a 590x query landed inside a 2.4x slower operation. On dabs at a FIXED SPACING over a growing sheet, survivors stay at 36 and `plan` is 89% of the cull at 50 000. `BM_CullPlanLocal{10000,50000}` (`pack-the-cull-scan`) is that axis, and it is the row a broad phase has to flatten; the density rows cannot show one either way. **The BUILD-TO-PLAN argument above survives intact** and is now the harder of the two: `append` (`append-the-cull-index`) already pays the build per edit, and a prototype of the dynamic tree this row would need adds +0.140 ms to the `append_cached` copy at 50 000 against a query saving of 0.137 ms — so the copy alone can eat the whole win, and the guide's "measure this separately" is the decision, not a footnote. Two more numbers from that prototype, both against its own guide: unbalanced insertion of a fixed-spacing sheet gives height 450 at 50 000 (build 107 ms), so the rotations are not optional; and even balanced, building by repeated insertion costs 7.9 ms against the 2.6 ms full `CullIndex` build it would replace, so a bulk builder belongs in the first PR rather than a later one. **`pack-the-cull-scan` landed the cheap half meanwhile** — folding the constant clauses out of the survive test and packing the boxes it reads — for 5.3x on `plan` at 50 000, which lowers the constant and leaves this row's slope exactly where it was.
 
 **Re-decided 2026-09-02 after that landed, and the answer is NO on the extent axis too.** Lowering the constant by 5.3x took most of what a broad phase was left to win. On the extent fixture with a 24-brick dab, `plan` is now 0.027 ms at 50 000, 0.102 at 200 000 and 0.272 at 500 000, against a whole-dab cull of 0.098 / 0.171 / 0.343 ms — so a query that answered instantly would save a quarter of a millisecond at half a million items, and the prototype's copy tax alone (+0.140 ms at 50 000, +0.905 at 200 000, both against `append_cached`'s copying branch) exceeds the saving at every size measured. The row is not blocked on engineering; it is blocked on there being nothing left to win. **Where the time actually went is the DENSITY axis, and no spatial index reaches it**: the same 24-brick dab at 50 000 items spends 15.0 ms in the per-brick compiles and 0.43 ms in the plan, because 21 633 items genuinely survive the batch cull and 9 634 genuinely reach one 8³ brick. `reject-a-brick-without-the-node` takes 1.7 ms of that by deciding the per-brick cull from the cached entry instead of the node behind it; the remaining 11.7 ms is real emission, and shrinking it is a blend-radius, LOD or consolidation question rather than a culling one |
-| **P1** | SDF sculpt layers (`add-sculpt-layers` 1.9) | Unblocked by scene groups landing |
+| **P1** | SDF sculpt layers (`add-sculpt-layers` 1.9) | Unblocked by scene groups landing. The host confirms it is an ASYMMETRY rather than a blocker: voxel rows carry a stack of passes and hierarchy rows carry one, SDF rows carry none, and those sit next to each other in a layer stack. Worth taking if it is cheap as a weighted group; it is not worth taking ahead of a layer operator |
 | ~~**P1**~~ | ~~Stroke input: azimuth, velocity, timestamp~~ **landed 2026-08-24** | And the row was right that it was cheapest now: `clay_stroke_resolve` takes a FLAT count*5 float array, so widening the packing in place would have changed the stride under every compiled host — a second entry point taking a real struct array instead, with the older call as sugar. pyclay needed neither, because a numpy array carries its own shape. **Azimuth is the one that unlocks a capability rather than refining one**: tilt says how far the stylus leans, azimuth says which way, and without it a rake or chisel brush is not expressible at all |
-| ~~**P1**~~ | ~~`add-field-stamps`~~ **landed as `stamp-a-captured-field`, ABI 0.83.0** | The review is right that this is a differentiator rather than parity, and right that a captured field can carry more than displacement. ~~Now the highest-value unstarted item~~ — **it was not unstarted when this said so.** The change had shipped and sat unarchived, which is exactly the failure this reconciliation is about; see the Phase 4 table for the surface it landed |
+| ~~**P1**~~ | ~~`add-field-stamps`~~ **landed 2026-09-05 as `stamp-a-captured-field`** | The review was right that this is a differentiator rather than parity. It was also the row this file called "the highest-value unstarted item" for a week after it shipped, which is the failure mode a roadmap has: three of its four pillars already existed, so the change was an oriented capture frame, an asset identity with a standalone form, a placement helper on `calpha_frame` and stroke integration — Phase 6 row 1, and smaller than the guide describing it |
 | **P2** | Morph targets · generic attributes · ~~instancing~~ (`instance-a-layer`, landed) · ~~radial symmetry~~ (`add-radial-symmetry`, landed) · conform | Real, none blocking |
 | **Decide, do not build** | ~~auto-consolidation~~ **decided AND built 2026-09-06, as advice** · preview/commit protocol · representation policy · ~~local remesh~~ **decided 2026-08-29, Phase 5** · >256³ voxels | Each needs a written decision before it needs a proposal. Two now have one. Local remesh's made it the second row of Phase 5 rather than a recovery operation bolted to the fixed-topology layer; auto-consolidation's held the engine to never baking unasked and shipped the recommendation instead — `advise-a-consolidation`, `clay_layer_consolidation_advice`. Note which way that decision cuts: the decision was to keep the autonomy OUT, and what the change added was the number a host could not otherwise invent |
 
@@ -1211,6 +1226,155 @@ testable and nothing here currently tests it end to end:
 `reference/host_loop.py` is the beginning of that test. It covers the sequence.
 It does not yet cover the **hours**, and `add-history-budget` is the first
 reason to believe the hours are where it would fail.
+
+## What the host actually needs — 2026-09-06
+
+Everything above this line was written from the engine's side. This section is
+ClaySpaceDesktop's, collected on 2026-09-06 from the session that maintains it,
+against a pin at v0.84.0 with its full suite green (2235 tests) and 29 of the
+engine's newly added entry points called by nothing. It is the first ranking in
+this file that comes from an application rather than from a study, and it moves
+three rows.
+
+**Their one-sentence verdict:** `fold-the-layers-with-an-operator` (#321) is the
+only open row that changes what they can ship. Everything else is latency,
+symmetry, or not theirs.
+
+### The ranking, and what each row costs them
+
+| | Row | What the host says |
+|---|---|---|
+| **1** | `fold-the-layers-with-an-operator` | **A subtractive LAYER, not a subtractive item.** Their unit of "a thing an artist grabs and moves" IS the layer — a subtool is a layer — so an item-level cutter does not reach the workflow at all. What they ship instead is an honest RESOLVED boolean: each operand is sampled into a volume, the two are combined into a subtool of their own, and moving an operand afterwards does not update the result. The interface says so rather than implying otherwise, and the operands are kept so it can be re-run. Their own roadmap has said since the subtools work that the same vocabulary upgrades to a live boolean the day this lands, with no interface change |
+| **2** | A `.clayspace` does not carry a multires hierarchy | **Not the transition polygons this file ranked.** They do not export hierarchies, so `refine-one-region-of-a-hierarchy`'s export residual does not bite them. What bites is one level up: a hierarchy row is TWO objects on their side — a mesh layer holding the cage, and a `clay_multires` beside it — and because the engine reports a hierarchy's layer as a MESH layer, with no `LayerRepresentation::Multires`, their side-car file is the only thing in the world that knows a row was ever a hierarchy. Lose the side-car and the sculptor's levels are gone and the row returns as the flat cage it demonstrably is. They made the loss loud in three panels and in a diagnostics report; loud is not fixed. **The ask is either the document carrying the hierarchy, or a `LayerRepresentation` that says what the row is** |
+| **3** | `add-mesh-sculptor` off the interface thread (their #368) | The threading ask they DO have, and it is not the mobile one. `clay_mesh_sculptor_create` cannot be built off the interface thread: it is a weld and an adjacency pass, **160 ms over 296,216 triangles**, and a mesh layer has no other route to its surface because the pick after an activation is answered by `clay_mesh_sculptor_raycast`. Holding a sculptor per mesh took the repeated cost out; the FIRST weld of each mesh has nowhere to go. The call resolves its mesh through a mutable path into the document, and the ABI's only threading contract is the brick cache's. Either that contract extended to this call, or a split between an off-thread adjacency build and a cheap adopt |
+| **4** | SDF sculpt layers (`add-sculpt-layers` 1.9) | Not blocking, and a visible asymmetry: voxel rows carry a stack of recorded passes and hierarchy rows carry one, SDF rows do not, and in their layer stack those sit next to each other. A user asks why; the answer is "the engine doesn't". Take it if it is cheap as a weighted group |
+| **5** | `add-mobile-thread-scheduling` | **Drop to P1.** They are desktop. QoS classes and sizing a pool from performance cores buy them nothing, and they are not asking for "the host owns the pool" either. The P0 was written for the iPad handoff and should say so |
+| **6** | `add-claycore-bridge`'s normal/AO map bakes | **Do not hold the roadmap for them.** They do no map bakes, bring no UV layout, and are not waiting |
+| **7** | `native-mesh-polygroups` | Not theirs to ask for. Their own design record says polygroups are absent from ClayCore by deliberate decision and they planned around it. Build it for someone else's reasons |
+
+### Claimed done here, not reachable there
+
+The gate this file has relied on for "shipped reachable from no host" is a host
+telling us. It told us three things.
+
+- **Automask is unexercised.** They send `Automask::default()` and offer none of
+  the five factors, so the capability whose absence this file recorded twice
+  (surface groups, procedural masks) is confirmed inert from the one host you
+  would expect to use it. Two of its factors — cavity and surface-group — do not
+  cross the ABI at all, which v0.84.0's notes already say.
+- **`clay_document_mesh_layer_revision` does not move when history replaces a
+  layer's triangles**, which is the one moment it exists for. Measured on 0.73.0:
+  a layer attached at revision 1 and rebuilt to revision 2 comes back to its
+  original 119,100 triangles under undo and to the rebuilt 37,752 under redo,
+  **at revision 2 throughout**. A sculptor who rebuilds, undoes and keeps working
+  gets a refused stroke on the next dab. They hold the gap as a failing-when-fixed
+  equality in their own suite and work around it by recording the engine depth
+  each rebuild sits at
+- **#451's residual**, below.
+
+### #451 is 21% recovered, not closed, and the residual is `BoundedByLayer`
+
+Measured on their `object` bench group, cuda backend, 1280x800, four runs, on a
+QUIETER box than the campaign that filed it (0.14 load per core against 0.30 with
+a runaway process):
+
+| | v0.73.0 | v0.78.0 | v0.84.0 |
+|---|---|---|---|
+| subtracting (the control) | 25.49 ms | 25.82 ms | 25.46 ms |
+| intersecting | 57.35 ms | 66.84 ms | 64.81 ms |
+| ratio | 2.25x | 2.59x | 2.54x |
+
+2.03 ms of a 9.49 ms regression came back. The control is flat across all three
+pins, which is what makes the row readable.
+
+**The fix was real and the fixture still regresses, and both are true because
+they measure different things.** #454/#459/#461 fixed the layer extent BOUND
+QUERY — 0.0669 ms a frame to 0.0003, 200 layer walks to 2 — and a fix worth
+0.067 ms was never going to account for 9.49. The residual is the REGION, and it
+is in `src/scene/bounds.cpp:1270`: an intersect item's influence bound is
+`Nonlocality::BoundedByLayer`, the whole layer's extent, because `max(acc, item)`
+can take material away anywhere the layer already occupies. `node_reach_bound`
+returns that, `node_command_bound` unions it over the layers sharing the content,
+and a refill dirties it. A subtract is `op_is_local` and dirties its own box. So
+a dragged intersect re-evaluates and re-meshes the whole layer every frame and a
+dragged subtract does not.
+
+Their fixture is the worst arrangement for that bound and also the ordinary one:
+`Scene::Reference` is ONE SDF layer holding a sphere plus 96 stamps, and
+`place_object` routes a placed cutter to the ACTIVE layer, so the cylinder
+(r=0.25, h=1.6, `CLAY_OP_INTERSECT`) sits at the root of the very layer that
+holds the form, with no group above it. An artist places a cutter on the form
+they are cutting; that is where placing puts it.
+
+**The open question, and it is the next thing to measure:** a moved intersect's
+FIELD changes layer-wide, but its ZERO SET only moves where surface can appear or
+disappear, which for a drag is bounded by the union of the old and new position.
+If that holds, a MOVED intersect could dirty the swept union while a
+topology-changing edit to one keeps the layer-wide bound. Unproven. What would
+kill it is a brick that holds band away from both positions and changes. A
+host-side scaling check is available and decisive from outside the engine: run
+the identical drag against a 10x scene — if the bound is layer-wide the intersect
+frame scales with the layer while the subtract control stays flat.
+
+**This belongs to `fold-the-layers-with-an-operator` as well as to #451**, and it
+is where that change's measurement should be taken. A layer fold that is not a
+hard union puts every layer through the same question an intersect item already
+poses per item.
+
+### Readers, names and transforms — the small ABI gaps a host works around
+
+- **A colour reader is still absent.** `#317` gave them
+  `clay_layer_node_transform`, `_transform_nonuniform`, `_params` and
+  `_op_blend`, and their `objects` sidecar table is being deleted as a
+  workaround for a limitation that no longer exists — **minus the colour
+  column**, which stays because `clay_layer_set_color` is write-only. This is
+  the fourth setter without a reader and the one still open (`read-a-placed-node`
+  named it and deliberately did not build it).
+- **A voxel grid is reachable only by name.** `clay_document_voxel_layer` takes a
+  string, so two layers sharing a name shadow each other's grid and a stroke
+  lands on the wrong one. Harmless with one grid; a scene of subtools is exactly
+  where two layers come to share a name. They derive a unique default name on
+  every path that can create one, because a collision made AFTER the fact
+  shadows a grid just as surely.
+- **A carried mesh layer's transform is not applied to its triangles.** A layer
+  transform is composed for a mesh exactly as for a field, but a carried mesh's
+  triangles are the engine's own vertex arrays and the tape evaluates nothing for
+  that layer — measured, a mesh subtool moved five units along X drew its first
+  vertex where it drew it before. Every crossing between world space and those
+  vertices is the host's, or a subtool is drawn in one place and sculpted in
+  another.
+
+### Where a host cannot draw a progress bar or cancel
+
+`add-operation-cancellation` shipped the token and the poll, and twelve of their
+commands still hold the interface thread behind a busy cursor with no fraction
+and no cancel: Undo, Redo, New, Open, OpenRecent, Save, SaveAs, RunImport,
+InsertMesh, RunExport, CopySubtool, RunBoolean. Their job model already carries
+`Progress { label, fraction: Option<f32> }` where `None` means "the job cannot
+say"; for these twelve it is not a job at all, it is one blocking call. Two are
+worth a contract:
+
+- **CopySubtool: 4.3 s** on the reference form, the whole of which is the
+  sampling an INSTANCE LAYER would not do — instance layers are specified with no
+  constructor (their #364). Four seconds with a cursor and no way out.
+- **Undo: 87 ms alone, 203 ms after a released solo** on a three-subtool
+  document, and every millisecond of the difference is a hop paying a whole-layer
+  refill.
+
+### The practice that catches an inert feature
+
+Their `clay_item_set_gate` was accepted-and-inert for four releases, exactly as
+this file's note promised it would be, and what caught the fix was a host test
+**written to FAIL the day the engine honoured the call**. It fired on the 0.73.0
+pin and is now turned around to hold the protection. The counter-example is worth
+as much: a test that asserted only what CAN be read, and never that a reader was
+absent, passed happily on both sides of the change that added the readers and
+announced nothing. **A tripwire that cannot fail is worth knowing about.**
+
+They have offered a per-pin list of "calls we do not make and why" — 29 entry
+points long for v0.84.0 — and a real session trace for `reference/host_loop.py`,
+which covers the sequence and not the hours. Both are worth more than another
+synthetic fixture, and neither costs this repository anything to accept.
 
 ## Deliberately not doing
 

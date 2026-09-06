@@ -9,7 +9,9 @@ layer, and the item where that can be determined — plus surface snapping, the
 build plane, bounds and frustum queries, and raycasting a mesh layer directly
 because a mesh layer never enters a tape. Protection is honoured here rather
 than by the caller: a ghosted layer is not picked.
+
 ## Requirements
+
 ### Requirement: Scene raycast with attribution
 `clay::pick` SHALL raycast against the scene using either the analytic tape or the brick cache (whichever the caller marks as fresher) and return hit position, normal, and attribution (layer id, and item id where determinable).
 
@@ -187,4 +189,3 @@ The sphere trace SHALL be kept as the reference the walk is held to, under a nam
 - **GIVEN** a cache filled over a worked sculpt
 - **WHEN** hundreds of rays are cast with both — from a sphere around the model aimed near it, from inside the model's box including inside Surface bricks and inside the solid, and axis-aligned along lattice and brick faces
 - **THEN** every ray hits or misses the same way, every hit's *t* is within a twentieth of a voxel of the reference, and every crossing's normal is within 26° of the reference and faces the ray
-

@@ -41,7 +41,3 @@ Kept values SHALL be bounded IN BYTES rather than in bricks, since a coloured br
 #### Scenario: An edit that is not an append is not resumed
 - **WHEN** an item is removed or changed rather than appended, and the bricks are refilled
 - **THEN** the values equal a full refill's
-
-#### Scenario: Colour takes the full path
-- **WHEN** a refill asks for colour as well as distance
-- **THEN** the values and colours equal a full refill's

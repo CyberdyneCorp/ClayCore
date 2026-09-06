@@ -75,6 +75,14 @@ A working field is LOCAL and a layer is not, so the commit is an assembly rather
 - **WHEN** a Move transaction is updated
 - **THEN** every affected item in the preview carries one warp from the drag, and the same items in the document carry none
 
+#### Scenario: The live sequence equals the standalone sequence
+- **WHEN** a Smooth transaction is updated with a sequence of dabs
+- **THEN** its working volume is byte-identical to the same dabs applied one after another through the standalone relax
+
+#### Scenario: The committed item is the previewed volume
+- **WHEN** a Smooth transaction is committed
+- **THEN** the layer's single item holds bytes identical to the volume the transaction was previewing
+
 ## ADDED Requirements
 
 ### Requirement: A gesture that changed nothing installs nothing

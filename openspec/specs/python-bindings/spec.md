@@ -10,7 +10,9 @@ and the parity gates are written in, which is why its coverage is held EQUAL to
 the C ABI's rather than allowed to be a convenience subset —
 `check_binding_parity` fails on a capability reachable from one and not the
 other.
+
 ## Requirements
+
 ### Requirement: pyclay module
 The library SHALL ship a nanobind extension module `pyclay` exposing: document/layer construction (`Document`, `add_sdf_layer`, `add_voxel_layer`), the full edit vocabulary (primitives, ops, blends, transforms, deformers, mirrors, strokes) with Pythonic parameter names, field evaluation (`eval`, `gradients`), meshing with resolution/decimation/backend selection, mesh predicates (`is_watertight()` etc.), and save/load of `.clayspace` plus mesh export (OBJ/FBX/PLY/glTF).
 
@@ -868,24 +870,90 @@ pyclay SHALL expose `Layer.magnify_surface` and `Layer.magnify_surface_preview` 
 - **WHEN** the same patch is merged six times
 - **THEN** the item count is what it was after the first
 
-### Requirement: Undo covers every reachable edit
+### Requirement: Mesh layers from Python
+The module SHALL expose attaching a loaded mesh to a document as a layer, listing and fetching mesh layers, the mesh's bounds, and the combined export that appends every visible mesh layer to the meshed field. A fetched mesh SHALL be borrowed from the document and SHALL expose its buffers through the module's existing numpy exchange rather than a copy per read.
 
-With undo enabled, every editing entry point SHALL record its own inverse, so
-that no reachable edit escapes undo.
+The surface SHALL land in the same change as the C one. The binding parity gate walks `pyclay` and demands a C counterpart or a recorded exemption, and it is one-way, so a Python-only surface would be caught while a C-only surface would not.
 
-`Document.add_voxel_layer` SHALL apply `AddLayerCmd` like `add_sdf_layer` and
-`add_mesh_layer`, rather than inserting into the document directly. It was the
-one creation that did not, which made the claim above false wherever a host
-converted into a new voxel layer.
+#### Scenario: A script imports a model and keeps it
+- **WHEN** a script loads a mesh, attaches it to a document, saves and reloads
+- **THEN** the mesh layer is back with the same arrays
 
-#### Scenario: Creating a voxel layer is undoable
-- **GIVEN** a document with undo enabled
-- **WHEN** a voxel layer is added and the document is undone
-- **THEN** the layer is gone
-- **AND** redoing brings it back with the same voxel size
+#### Scenario: The buffers are numpy views
+- **WHEN** a script reads a document mesh layer's positions and indices
+- **THEN** it gets numpy arrays over the engine's own memory, with no per-read copy
 
-#### Scenario: A crossing is one undo step
-- **GIVEN** a document with undo enabled
-- **WHEN** a voxel layer is created and rasterized into inside one undo group
-- **THEN** a single undo removes the layer and its cells together
+#### Scenario: Parity holds both ways
+- **WHEN** the same sequence — attach, transform, export — is run through `pyclay` and through the C ABI
+- **THEN** the exported meshes are identical, and the parity gate reports no unexempted Python-only entry point
 
+### Requirement: Groups in pyclay
+`pyclay` SHALL expose the group surface with the same semantics as the C ABI, so that `check_binding_parity` reports no capability without a C counterpart.
+
+The name SHALL NOT collide with undo grouping, which is a different concept already spelled `begin_undo_group` / `end_undo_group`.
+
+Placing an edit inside a group SHALL be an argument on the existing add rather than a second add: pyclay takes keyword arguments, and a second entry point would be a second way to say the same thing.
+
+#### Scenario: Both bindings agree
+- **WHEN** the same grouped construction is built through the C ABI and through pyclay
+- **THEN** the two documents evaluate identically
+
+#### Scenario: Children read back
+- **WHEN** a script asks a layer for a group's children
+- **THEN** it receives the child ids in order, and asking an item is a `ValueError`
+
+#### Scenario: The refusals are the C ABI's refusals
+- **WHEN** a script gives a group a transition op, gives an inline group a blend or rounding, sets a transform on a group, or moves a node into its own subtree
+- **THEN** each is a `ValueError` and the document is unchanged
+
+### Requirement: scale= takes one number or three
+Every place the Python bindings accept a placement scale SHALL accept either one number, meaning a uniform scale as it always did, or a sequence of three, meaning a per-axis one. Python can carry both in a single argument where C needs a second entry point, so the bindings SHALL NOT grow a parallel set of calls.
+
+A component that is not greater than zero, and a sequence that is not of length three, SHALL be refused.
+
+Because these bindings take PARTIAL updates — unlike the C ABI, whose setters take the whole transform — a call that says nothing about scale SHALL leave BOTH halves of an item's scale where they were. Moving a squashed item must not un-squash it.
+
+#### Scenario: One number still means what it meant
+- **WHEN** an item is placed with a scalar scale
+- **THEN** it evaluates identically to the same item placed with three equal numbers, and both keep the field exact
+
+#### Scenario: Three numbers squash the item
+- **WHEN** a unit sphere is placed with scale=(2, 1, 1)
+- **THEN** its bounds and its field report a surface crossing x at 2 and y at 1
+
+#### Scenario: A partial update leaves a squash alone
+- **WHEN** a squashed node is retransformed with a position and no scale
+- **THEN** it moves and stays squashed
+
+### Requirement: The layer stack is reachable from Python
+`pyclay` SHALL expose the sculpt layer stack, its property operations, the stroke transaction and the high-detail stamp modes, so the binding-parity gate passes rather than recording an exemption.
+
+A stroke transaction SHALL be available as a context manager, following the voxel sculpt layer's precedent — it is the only form that cannot leave a surface recording when a stroke loop raises.
+
+Image inputs SHALL be numpy arrays borrowed for the call.
+
+#### Scenario: Parity holds
+- **WHEN** `tools/check_binding_parity.py` runs after this change
+- **THEN** every sculpt-layer capability reachable from the C ABI is reachable from `pyclay`
+
+#### Scenario: A raising stroke loop leaves nothing recording
+- **WHEN** an exception is raised inside a stroke-transaction context manager
+- **THEN** the transaction is cancelled and the layer is unchanged
+
+### Requirement: The Python adaptive sculptor exposes the whole brush
+`DynamicSculptor.stamp` SHALL accept the automask settings, and the adaptive sculptor SHALL accept the cavity and surface-group estimators, so that every factor the fixed sculptor honours is reachable from Python on the adaptive surface too.
+
+Today the adaptive stamp takes no automask argument at all, so the divergence between the representations is not merely unfixed in Python — it is unreachable, and no example or script could have demonstrated it.
+
+#### Scenario: An automasked adaptive stamp is expressible
+- **WHEN** a script stamps an adaptive surface with an automask setting
+- **THEN** the binding accepts it and the resulting moved count differs from the same stamp without it
+
+### Requirement: A sculptor's scratch cost is readable from Python
+Every sculptor exposed to Python SHALL report its scratch arena's capacity, high-water mark and growth count, under one member name shared by all three, mapping to the corresponding C call.
+
+This is what lets an example assert the allocation discipline against the shipped wheel. The allocation gate replaces `operator new` for a test binary and cannot be shipped to a host, so without a reportable arena the claim "a warm stamp allocates nothing" is only ever provable inside the test suite.
+
+#### Scenario: The gallery can assert the discipline
+- **WHEN** an example runs a stroke and reads the arena's growth count before and after its warm-up
+- **THEN** the count stops rising, and the example fails loudly if it does not

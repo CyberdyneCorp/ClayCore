@@ -9,7 +9,9 @@ re-evaluates the bricks it touched rather than the model. The LOD mips, the
 plain-data async request shape and the deterministic memory ceiling are all the
 same requirement seen from different sides: the cost of looking at a model must
 follow what changed, and must be bounded.
+
 ## Requirements
+
 ### Requirement: Sparse brick storage
 `clay::brick` SHALL store the evaluated field as a sparse virtual grid of bricks (8³ or 16³, configurable per document resolution) holding fp16 distance values in a narrow band of ±3 voxels around the surface. Bricks entirely inside or outside SHALL be represented implicitly (sign-only), not allocated.
 
@@ -214,6 +216,87 @@ A voxel level and a brick mip are separate mechanisms for separate representatio
 - **WHEN** a voxel grid's active level changes
 - **THEN** every tracked brick keeps its generation and nothing is resubmitted
 
+### Requirement: A refill can be scoped to a layer or to its complement
+The batched brick evaluation SHALL accept a layer scope: the whole document (what it does today and the default), the document with one named layer excluded, or that named layer alone.
+
+A scoped refill SHALL produce the same lattice, the same band clamping and the same brick classification rules as the unscoped one — it evaluates a different field, not a different way. Its results SHALL be storable and readable by the same calls, at the same strides.
+
+A scoped result SHALL NOT be used as a seed for a refill at any other scope. A seed is the value of a culled tape and two scopes compile different tapes, so a scoped result served as an unscoped seed is a partial field answered as a whole one — wrong, with nothing in the result to indicate it.
+
+A scoped refill SHALL therefore STORE NO SEED at all, rather than storing one under a scope-aware key. Storing nothing is the stronger of the two: it cannot be defeated by a key that forgets a dimension, and the cost is only that a scoped refill is always a full walk, which is what a preview drawn once per gesture wants anyway.
+
+#### Scenario: A scoped refill matches an unscoped one on a one-layer document
+- **WHEN** a document holding one visible SDF layer is refilled unscoped, and then scoped to that layer alone
+- **THEN** the two results are bit-identical
+
+#### Scenario: A scope change does not resume from the wrong seed
+- **WHEN** the same bricks are refilled scoped to a layer, then refilled unscoped with no edit between
+- **THEN** the unscoped results equal a cold unscoped refill's
+
+#### Scenario: The excluded layer contributes nothing
+- **WHEN** bricks are refilled with a layer excluded, and that layer is then edited
+- **THEN** refilling with it excluded again returns the values it returned before
+
+### Requirement: The cull pad a seed is keyed by is piecewise constant
+
+A stored brick value is only reusable under the cull pad it was computed with,
+and that gate SHALL remain exact: a value continued from a differently culled
+tape is a different field, not a rounding difference.
+
+Because the gate is exact, the pad SHALL NOT change on every append. It SHALL
+be piecewise constant in the node count, changing only at a bounded number of
+stated steps across the range where its underlying fit varies. Adding one node
+to a document SHALL leave the pad unchanged except when that node crosses a
+step.
+
+Where the pad is quantised to achieve this, it SHALL be rounded so that the
+value used is never SMALLER than the fit it replaces. A larger pad keeps more
+items in a brick's culled tape, and the band-clamped result cannot be changed by
+keeping an item that could not have changed it — so rounding up is conservative
+in the sense every bound in this engine is stated in, while rounding down would
+not be.
+
+A step boundary SHALL cost what a pad change costs — one full refill of the
+bricks it reaches — and that is correct, because at a step the pad really did
+change. What SHALL NOT happen is paying that on every dab.
+
+#### Scenario: An append does not move the pad
+- **GIVEN** a document whose node count sits between a pair of steps
+- **WHEN** a node is appended
+- **THEN** the cull pad is unchanged, and a brick refilled before the append is answered from its stored value rather than walked again
+
+#### Scenario: A stroke keeps the resume across the whole range
+- **WHEN** a stroke of equal dabs is added to smooth-blended documents spanning the range over which the pad's fit varies
+- **THEN** the bricks answered from a stored value per dab do not fall to zero at any document size
+
+#### Scenario: The quantised pad is never smaller than the fit
+- **WHEN** the pad is resolved at any node count
+- **THEN** the value used is greater than or equal to the unquantised fit at that node count
+
+#### Scenario: Band-clamped results are unchanged
+- **WHEN** a document is evaluated per brick under the quantised pad and under the unquantised fit
+- **THEN** the band-clamped values are identical
+
+#### Scenario: A step costs one refill, not one per dab
+- **WHEN** a stroke crosses a step boundary
+- **THEN** the bricks it reaches are walked again once, and the dabs on either side of the step are answered from stored values
+
+### Requirement: The cache keeps the bound of its surface bricks
+The cache SHALL answer the union of its Surface bricks' boxes — exactly the fold of `brick_bounds` over `surface_bricks()`, and empty when there is no Surface brick — without enumerating them. The brick raycast needs that box before its first step and runs once per Pencil event, and on a whole-model cache enumerating every surface key per ray cost more than the march it preceded.
+
+The bound SHALL be maintained by the mutations, never by the query: a submit that produces a Surface brick widens it, and a Surface brick leaving that state — a submit that reclassifies it uniform, an eviction, a trim — SHALL leave the bound equal to the fold before the mutating call returns, refolding from the map when the brick could have decided a face and doing nothing when it could not. A single trim SHALL refold at most once however many bricks it drops.
+
+A const query SHALL NOT write the bound. The cache is read from many threads at once — the batched brick raycast fans its rays across the worker pool against a const cache — and a lazily refolded field behind a const accessor is a data race whatever value it holds. Every const query stays a pure read; the fold is paid on the mutating side.
+
+#### Scenario: The bound equals the fold after every mutation
+- **GIVEN** a cache filled over a sculpt
+- **WHEN** an interior brick is evicted, a face brick is evicted, the cache is trimmed with and without a focus, empty bricks are forgotten, a brick is refilled from a shape that reclassifies it uniform and back to surface, every brick is evicted one at a time, and the whole cache is refilled
+- **THEN** after each step the bound equals the fold over `surface_bricks()` on all six fields, to exact float equality, and is empty once no Surface brick remains
+
+#### Scenario: A ray does not walk the map
+- **WHEN** a ray is cast against a whole-model cache
+- **THEN** the domain it marches inside is read from the kept bound, and no per-ray enumeration of the surface bricks takes place
+
 ### Requirement: A cold brick may start from a prefix only where the prefix stores it
 
 A brick with no resident seed MAY be started from a cached prefix of its layer's
@@ -251,41 +334,3 @@ offered the best one the cache holds, and SHALL evaluate the roots after it.
 #### Scenario: A stroke keeps hitting
 - **WHEN** items are appended to a layer after its prefix was built, and a cold window is then refilled
 - **THEN** the prefix still serves it, and the result includes the appended items
-
-### Requirement: A refill can be scoped to a layer or to its complement
-The batched brick evaluation SHALL accept a layer scope: the whole document (what it does today and the default), the document with one named layer excluded, or that named layer alone.
-
-A scoped refill SHALL produce the same lattice, the same band clamping and the same brick classification rules as the unscoped one — it evaluates a different field, not a different way. Its results SHALL be storable and readable by the same calls, at the same strides.
-
-A scoped result SHALL NOT be used as a seed for a refill at any other scope. A seed is the value of a culled tape and two scopes compile different tapes, so a scoped result served as an unscoped seed is a partial field answered as a whole one — wrong, with nothing in the result to indicate it.
-
-A scoped refill SHALL therefore STORE NO SEED at all, rather than storing one under a scope-aware key. Storing nothing is the stronger of the two: it cannot be defeated by a key that forgets a dimension, and the cost is only that a scoped refill is always a full walk, which is what a preview drawn once per gesture wants anyway.
-
-#### Scenario: A scoped refill matches an unscoped one on a one-layer document
-- **WHEN** a document holding one visible SDF layer is refilled unscoped, and then scoped to that layer alone
-- **THEN** the two results are bit-identical
-
-#### Scenario: A scope change does not resume from the wrong seed
-- **WHEN** the same bricks are refilled scoped to a layer, then refilled unscoped with no edit between
-- **THEN** the unscoped results equal a cold unscoped refill's
-
-#### Scenario: The excluded layer contributes nothing
-- **WHEN** bricks are refilled with a layer excluded, and that layer is then edited
-- **THEN** refilling with it excluded again returns the values it returned before
-
-### Requirement: The cache keeps the bound of its surface bricks
-The cache SHALL answer the union of its Surface bricks' boxes — exactly the fold of `brick_bounds` over `surface_bricks()`, and empty when there is no Surface brick — without enumerating them. The brick raycast needs that box before its first step and runs once per Pencil event, and on a whole-model cache enumerating every surface key per ray cost more than the march it preceded.
-
-The bound SHALL be maintained by the mutations, never by the query: a submit that produces a Surface brick widens it, and a Surface brick leaving that state — a submit that reclassifies it uniform, an eviction, a trim — SHALL leave the bound equal to the fold before the mutating call returns, refolding from the map when the brick could have decided a face and doing nothing when it could not. A single trim SHALL refold at most once however many bricks it drops.
-
-A const query SHALL NOT write the bound. The cache is read from many threads at once — the batched brick raycast fans its rays across the worker pool against a const cache — and a lazily refolded field behind a const accessor is a data race whatever value it holds. Every const query stays a pure read; the fold is paid on the mutating side.
-
-#### Scenario: The bound equals the fold after every mutation
-- **GIVEN** a cache filled over a sculpt
-- **WHEN** an interior brick is evicted, a face brick is evicted, the cache is trimmed with and without a focus, empty bricks are forgotten, a brick is refilled from a shape that reclassifies it uniform and back to surface, every brick is evicted one at a time, and the whole cache is refilled
-- **THEN** after each step the bound equals the fold over `surface_bricks()` on all six fields, to exact float equality, and is empty once no Surface brick remains
-
-#### Scenario: A ray does not walk the map
-- **WHEN** a ray is cast against a whole-model cache
-- **THEN** the domain it marches inside is read from the kept bound, and no per-ray enumeration of the surface bricks takes place
-

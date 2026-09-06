@@ -94,11 +94,9 @@
       saying plainly what a host owns: the file, the flush, the re-snapshot
       interval, and what to do with a leftover recovery file
 - [x] 5.3 A numbered example that kills and recovers a session
-- [x] 5.4 `openspec/ROADMAP.md` — text handed to whoever owns the ROADMAP edit
-      in this PR, so two agents do not conflict over one file. Applied as
-      "Pairing a journal with its snapshot — landed 2026-09-06 (ABI 0.86.0)"
-      under "What landed 2026-08-23 to 2026-08-24", with the `survive-a-crash`
-      row above it pointing at it
+- [x] 5.4 `openspec/ROADMAP.md` — recorded in the 2026-08-23/24 findings table,
+      and extended by "Pairing a journal with its snapshot — landed 2026-09-06
+      (ABI 0.86.0)" beneath it, with the `survive-a-crash` row pointing at it
 
 ## 6. What building it changed
 

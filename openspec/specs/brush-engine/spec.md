@@ -11,7 +11,9 @@ applies in its own vocabulary.
 Apart from the representations it drives, and that separation is the point: a
 gesture must mean the same thing on a voxel layer, an SDF layer, a mask and a
 mesh, and it can only do that if "what the gesture was" is decided in one place.
+
 ## Requirements
+
 ### Requirement: Strokes resolve to stamps
 The module SHALL resolve a sequence of stroke samples — position, pressure, tilt and a monotone path parameter — into an ordered list of stamps, each carrying a position, radius, strength and orientation. Resolution SHALL be pure: it SHALL NOT read or modify a document.
 
@@ -611,6 +613,123 @@ Resolving SHALL be pure, and a caller SHALL be able to learn which nodes a magni
 - **WHEN** a magnify is previewed and then applied over the same region
 - **THEN** the preview names the same nodes, and the document is unchanged until the apply
 
+### Requirement: A drag resolves in two halves
+Resolving a world drag into per-item warps SHALL be separable into the half that does not depend on how far the drag has gone and the half that does.
+
+A drag holds its anchor and its radius fixed for the whole gesture and grows only its displacement. Everything that follows from the anchor and the radius — which items the drag reaches, where its centre lands in each item's own frame, what its radius becomes there — SHALL therefore be resolvable ONCE, and turning that into a warp for a given displacement SHALL then cost no scene access at all. Without the split, a live drag walks the whole edit list once per pointer event to rediscover an answer that cannot have changed.
+
+The two halves composed SHALL be BIT-identical to resolving the drag in one step, for every item, for every displacement, including under a transformed layer, a rotated item, a per-axis scale, a non-default falloff, the front-only gate and items nested in groups. A preview whose commit differs in the last bits is a preview of something else, so the prepared form SHALL keep the terms the one-step form divides and rotates by rather than pre-inverted equivalents — a reciprocal multiplied is not a division.
+
+Preparation SHALL be able to report what it walked — the nodes visited and, of those, the items the drag can reach — so that the property "the traversal is paid once" is testable as a counter rather than as a duration.
+
+The refusals SHALL be unchanged by the split: a non-positive radius and a layer with no edit list SHALL prepare nothing, and an item the drag cannot reach SHALL receive no warp.
+
+#### Scenario: Prepared and resolved is the same warp
+- **WHEN** a drag is prepared once and resolved for each of several displacements
+- **THEN** each resolved warp names the same node and carries the same deformer, bit for bit, as resolving that drag in one step
+
+#### Scenario: The traversal happens once
+- **GIVEN** a layer holding thousands of items of which a drag reaches two
+- **WHEN** the drag is prepared and then resolved
+- **THEN** preparation reports having visited every node and reached two, and resolving visits neither
+
+#### Scenario: A radius that is not a drag prepares nothing
+- **WHEN** a drag is prepared with a non-positive radius
+- **THEN** nothing is prepared
+
+### Requirement: The chain ordering rule applies to a chain a caller holds
+The rule that places a drag's warp at the FRONT of an item's chain, and replaces a leading warp from the same drag rather than stacking another beside it, SHALL be expressible against a deformer chain held by value as well as against a node in the document.
+
+A live gesture must hold the pre-stroke chain by value, because the node in the document is the one thing it has promised not to touch. Both forms SHALL be the same rule — the node form SHALL be the chain form applied to that node's chain — so a caller cannot get the ordering subtly wrong by holding its own copy.
+
+#### Scenario: The two forms agree
+- **WHEN** the ordering rule is applied to a node and to a copy of that node's chain, with the same warp
+- **THEN** the two chains are identical deformer for deformer
+
+#### Scenario: The coalescing rule travels with it
+- **WHEN** the rule is applied twice with the same drag's warp to a chain held by value
+- **THEN** the chain does not grow the second time
+
+### Requirement: Every part of a brush reaches every representation that offers the verb
+Where a representation offers a verb, it SHALL honour EVERY factor of the brush that composes into the per-vertex weight — the falloff, the path taper, the freeze, the alpha, and the automask — and SHALL apply them in the one fixed order the composition rule states.
+
+A representation that cannot honour a factor SHALL decline the verb, the way an adaptive surface declines Layer because half the vertices under the brush at the end of a stroke did not exist at its start. It SHALL NOT accept the brush and silently drop the factor. A brush setting that is accepted and ignored is worse than one that is refused: an artist who enables a gate and sees the surface move anyway has no way to tell a disabled gate from a gate that decided not to fire.
+
+This requirement is written because the library did the ignored thing. The adaptive sculptor took a brush carrying automask settings, composed four of the five factors and dropped the fifth, on a path whose own C ABI documentation states that the descriptor is "the same descriptor the fixed path takes, so a host carries one brush model across both representations".
+
+#### Scenario: An automask reaches the adaptive surface
+- **WHEN** a stamp with the normal-angle automask enabled is applied to an adaptive surface across a fold
+- **THEN** it moves fewer vertices than the same stamp with the automask disabled, and the vertices it declines to move are the ones facing away from the brush
+
+#### Scenario: A factor that cannot be honoured is refused, not dropped
+- **WHEN** a brush carries a factor a representation cannot compute
+- **THEN** the call is refused with a reason, and no stamp is applied
+
+### Requirement: The estimators a mesh module cannot compute are set once per stroke on every sculptor
+The callbacks a mesh module structurally cannot compute for itself — the cavity measure, which is a field's Laplacian, and the surface-group field, which is a world lattice — SHALL be settable on EVERY sculptor that offers the automask, with the same signature, and SHALL be set once per STROKE rather than per stamp.
+
+Per stroke is not a preference. They hold callable objects, and copying those per dab is an allocation per dab, which the allocation discipline forbids.
+
+A sculptor that composes another — a multiresolution sculptor over a level sculptor — SHALL forward them, including to a level bound after they were set, so that changing the sculpt level mid-stroke does not silently drop them.
+
+#### Scenario: Every sculptor takes the estimators
+- **WHEN** a host sets the cavity and group estimators on the fixed, adaptive and multiresolution sculptors
+- **THEN** all three accept them through the same call, and a stamp on each applies the cavity and surface-group factors
+
+A STROKE RESOLVER THAT DRIVES A SCULPTOR SHALL WIRE THEM, and where no such
+resolver exists for a representation the change SHALL say so rather than leave
+the gap unnamed. `brush::apply_to_mesh` and `brush::apply_to_multires` wire
+them from `MeshStrokeOptions`; there is no `brush::apply_to_dynamic`, so an
+adaptive stroke is driven by the host calling `DynamicSculptor::stamp` directly,
+and it is the host that calls `set_automask_inputs` — which it now can, and
+before this change could not. Adding an adaptive stroke resolver is a larger
+piece of work than this change is: it owns spacing, drag re-anchoring, the
+snakehook anchor and the remesh schedule around every dab, none of which is
+about the automask. What this change is responsible for is that the estimators
+have somewhere to go on all three sculptors, and they do.
+
+#### Scenario: Setting them allocates nothing per dab
+- **WHEN** a stroke of many stamps runs after the estimators were set once
+- **THEN** no stamp allocates on their behalf
+
+#### Scenario: The adaptive path has no stroke resolver of its own
+- **WHEN** a host drives an adaptive surface
+- **THEN** it sets the estimators on the sculptor itself, with the same call the fixed sculptor takes, because there is no `brush::apply_to_dynamic` to do it on the host's behalf
+
+### Requirement: A directional brush family is a preset over the shared frame
+Rake, chisel, clay strips, a directional scratch and a rotated alpha SHALL be expressible as axis values over the shared stamp frame, and SHALL NOT require a frame, a sampler or a code path of their own.
+
+The stamp's azimuth SHALL be part of the brush's settings, so that a stroke resolver which knows the direction of travel can orient the stamp without any verb knowing that it did.
+
+The azimuth SHALL be carried by the brush preset format, at a schema version, as part of the brush's identity rather than of where a stamp landed. Nothing resolves an azimuth from a stroke's direction of travel yet, so a preset is the only place an artist can put one, and a library that dropped it would give a turned brush back unturned — the failure a version number exists to prevent. A record written by an earlier schema SHALL still load, taking the unrotated default it was in fact saved with.
+
+#### Scenario: A directional family needs no engine path
+- **WHEN** a directional preset is applied
+- **THEN** it resolves to an azimuth on the shared stamp frame over an existing kernel, and no kernel exists whose only caller is that family
+
+#### Scenario: A turned brush stays turned across the format
+- **WHEN** a preset carrying a non-default azimuth is serialized and read back
+- **THEN** it reports the same azimuth, and a preset carrying the default reports an exact positive zero
+
+#### Scenario: A record from the earlier schema still loads
+- **WHEN** a preset record written before the azimuth was carried is read
+- **THEN** it loads with the unrotated default rather than being refused, while a record that is also truncated is still refused
+
+### Requirement: A host can budget the memory a stroke's scratch will ask for
+The library SHALL report, per sculptor, the capacity its scratch arena currently holds, the largest it has ever held, and how many times it has grown.
+
+The reason is the same one the hierarchy's preflight gives: the device this library targets kills an application for memory rather than warning it twice, so a host that can see what a stroke's scratch costs can budget for it, and a host that cannot is guessing.
+
+The library SHALL NOT expose a tuning knob for that arena — no reserve, no cap, no growth factor. Each would be a number a host tunes against one device and is then wrong about after a footprint change, and the arena already sizes itself from the largest footprint it has actually seen, which is the measurement such a knob would be guessing at.
+
+#### Scenario: The scratch cost is reportable
+- **WHEN** a host queries a sculptor after a stroke
+- **THEN** it receives the arena's capacity, high-water mark and growth count
+
+#### Scenario: There is nothing to tune
+- **WHEN** a host looks for a way to preallocate or cap the arena
+- **THEN** the API offers none, and the arena's capacity follows the footprints it has been given
+
 ### Requirement: A stroke does not re-find an anchor it already has
 
 A geodesic region is grown from an ANCHOR class, and finding that anchor without
@@ -647,4 +766,3 @@ masked stroke.
 #### Scenario: An anchor out of reach is discarded, not spent
 - **WHEN** a dab lands further from the carried anchor than the brush radius
 - **THEN** the anchor is discarded and the dab moves the vertices it would have moved with no anchor at all, rather than moving nothing
-
