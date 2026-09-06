@@ -30,6 +30,19 @@ LevelCache& ensure_cache(MultiresSurface::State& s, std::uint32_t level) {
     return *lev.cache;
 }
 
+// Does this level hold a cache with a SURFACE in it?
+//
+// Not the same question as "does it hold a cache". `ensure_cache` allocates one
+// and builds the level's connectivity for a caller that wanted only that —
+// `connectivity_of`, which `MultiresSurface::connectivity_at` exposes — and
+// leaves `subdivided`, `frames` and `mesh.positions` empty behind an
+// `evaluated` flag that is still false. Every reader of a level's POSITIONS has
+// to ask this one, because a released level whose connectivity was asked for
+// since is indistinguishable from an evaluated one by the pointer alone.
+bool level_is_evaluated(const MultiresSurface::State& s, std::uint32_t level) {
+    return s.levels[level].cache && s.levels[level].cache->evaluated;
+}
+
 // P(n) = S(n) + Frame(n) * Detail(n), for these vertices. The one place the
 // model in `multires.h` is actually written down in code.
 //
@@ -289,7 +302,7 @@ namespace {
 // exact cost the short circuit exists to avoid. `evaluate_up_to` drains them
 // directly instead, which is why they are not tested here.
 bool below_is_current(const MultiresSurface::State& s, std::uint32_t target) {
-    if (!s.levels[target].cache || !s.levels[target].cache->evaluated) return false;
+    if (!level_is_evaluated(s, target)) return false;
     // A COMPOSITION CHANGE IS PENDING WORK. Without this a strength change on a
     // hierarchy nobody has edited since is silently swallowed: nothing is
     // pending, every cache says it is evaluated, and the dial does nothing.
@@ -352,8 +365,16 @@ void evaluate_all_up_to(MultiresSurface::State& s, std::uint32_t level) {
     // fails the test on its own cache and rebuilds from the cage. Bit for bit
     // the same surface — every input to a level is still here, which is the
     // property `drop_all_caches` already rests on.
+    //
+    // AN ALLOCATED CACHE IS NOT AN EVALUATED ONE, and the two are one predicate
+    // here rather than two cases. `ensure_cache` builds a level's connectivity
+    // and nothing else — `connectivity_at` is a public call that reaches it, so
+    // a host that asks a released level for its connectivity leaves the cache
+    // holding a `conn` and an EMPTY position array. Testing only the pointer
+    // walks past exactly that level, and the reader downstream indexes an empty
+    // vector. `below_is_current` tests the flag for the same reason.
     for (std::uint32_t l = 0; l <= target; ++l)
-        if (!s.levels[l].cache) evaluate_up_to(s, l);
+        if (!level_is_evaluated(s, l)) evaluate_up_to(s, l);
     evaluate_up_to(s, target);
 }
 
@@ -550,7 +571,12 @@ const CrossLevelNeighborhood& MultiresSurface::cross_level_at(std::uint32_t leve
     // them honest. Handing back what was last read would be an answer a reader
     // cannot tell from a current one, and handing back an empty neighbourhood
     // would read as "no depth boundary here".
-    if (!s.levels[level - 1].cache) {
+    //
+    // AND AN ALLOCATED CACHE IS NOT AN EVALUATED ONE: `ensure_cache` builds a
+    // level's connectivity and leaves its positions empty, which `connectivity_at`
+    // reaches from outside on a level a trim released. So the test is the flag
+    // and not the pointer.
+    if (!level_is_evaluated(s, level - 1)) {
         if (level_is_self_contained(s.levels[level].topology, s.levels[level].patch_kept))
             return kEmpty;
         evaluate_up_to(s, level - 1);
@@ -581,6 +607,13 @@ bool MultiresSurface::build_block(std::uint32_t level, std::uint32_t patch, Bloc
     out->patch = patch;
     out->level = level;
     out->vertices.clear();
+    // CLEARED LIKE THE OTHER TWO, and for a reason a fresh block never shows:
+    // a single-level block says every vertex is at `level` by leaving this
+    // EMPTY, so a block reused after `build_mixed_block` would otherwise carry
+    // the last patch's levels beside this patch's vertices — a host reading the
+    // pair, as `Block`'s own comment tells it to, would read the wrong level's
+    // positions and, where the arrays are different lengths, read off the end.
+    out->vertex_levels.clear();
     out->indices.clear();
     // Two passes over the patch's faces rather than a hash map: the first
     // collects the vertices and sorts them, the second rewrites the corners

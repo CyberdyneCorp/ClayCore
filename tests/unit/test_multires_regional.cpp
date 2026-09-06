@@ -758,6 +758,42 @@ TEST_CASE("regional export: quads survive exactly as far as the split edges allo
     CHECK(untouched == 84u);
 }
 
+TEST_CASE("regional export: a REUSED block does not carry the last block's levels") {
+    // WHY A REUSED BLOCK AND NOT A FRESH ONE. `Block::vertex_levels` is EMPTY
+    // on a single-level block, and that emptiness is the statement "every
+    // vertex is at `level`" — which is exactly what `block_positions` above,
+    // and `Block`'s own comment, tell a host to read. `build_block` clears
+    // `vertices` and `indices`, so a fresh block is right by construction and a
+    // bug here is invisible on a first use. A host loops ONE block over its
+    // patches, and the mixed loop and the single-level loop share it.
+    const int n = 12;
+    MultiresSurface s = build(closed_torus(n, n));
+    REQUIRE(s.refine_patches_to_level(torus_block(n, 1, 2, 1, 2), 3));
+
+    MultiresSurface::Block b;
+    REQUIRE(s.build_mixed_block(3, 1, &b));
+    REQUIRE_FALSE(b.vertex_levels.empty());  // patch 1 is a transition patch
+    const std::uint32_t coarse = b.level;
+
+    // THE SAME BLOCK, handed straight to the single-level call.
+    REQUIRE(s.build_block(coarse, 1, &b));
+    CHECK(b.vertex_levels.empty());
+    REQUIRE_FALSE(b.vertices.empty());
+    // A VALUE GATE, not just a size one: read the block the way a host reads
+    // it, through the level array, and it has to be this level's own points.
+    std::vector<cfloat3> expect;
+    for (std::uint32_t v : b.vertices) expect.push_back(s.positions_at(coarse)[v]);
+    CHECK(same_floats(block_positions(s, b), expect));
+
+    // And it is the same answer a block that had never been used gives, which
+    // is the half a fresh-block test can see and the half that already passed.
+    MultiresSurface::Block fresh;
+    REQUIRE(s.build_block(coarse, 1, &fresh));
+    CHECK(fresh.vertices == b.vertices);
+    CHECK(fresh.indices == b.indices);
+    CHECK(fresh.vertex_levels.empty());
+}
+
 TEST_CASE("regional export: asking in the other order exports the same bytes") {
     // Determinism needs no new rule here — the levels are built in ascending
     // patch order and `full_of` is ascending, so the export's own numbering
@@ -1035,6 +1071,69 @@ TEST_CASE("regional: a level released between the cage and the brush is still re
     // `test_multires_dirty.cpp` at one resident level.
     s.drop_intermediate_caches();
     REQUIRE(s.memory().resident_levels == 1);
+    const mesh::CrossLevelNeighborhood& after = s.cross_level_at(3);
+    CHECK_FALSE(after.empty());
+    CHECK(after.corners == before.corners);
+    CHECK(after.dense_face == before.dense_face);
+    CHECK(after.outside_layout == before.outside_layout);
+    CHECK(same_floats(after.outside_positions, before.outside_positions));
+    CHECK(s.memory().resident_levels == 4);
+}
+
+TEST_CASE("regional: a released level asked for its connectivity is still not evaluated") {
+    // THE STATE THE POINTER TEST CANNOT SEE, and the reason the guard above is
+    // written against the FLAG rather than against `cache`.
+    //
+    // `ensure_cache` allocates a level cache and builds that level's
+    // connectivity for a caller that wanted only that, leaving `subdivided`,
+    // `frames` and `mesh.positions` empty behind an `evaluated` flag that is
+    // still false. `MultiresSurface::connectivity_at` is a PUBLIC call that
+    // reaches it, and a host asking a released level which faces meet at a
+    // vertex — a picker, a topology query, the chunk bookkeeping — is asking
+    // exactly that. So a trim followed by one such question leaves a level
+    // whose cache is present and whose surface is not, and both readers this
+    // change adds walk straight past a `!cache` test into an EMPTY position
+    // array: `resident_levels` says 2, and the export and the neighbourhood
+    // both index `mesh.positions[v]` on a vector of size 0.
+    //
+    // The two halves are trimmed separately below, as in the case above, so
+    // each reader meets the unevaluated cache on its own.
+    const int n = 12;
+    MultiresSurface s = build(closed_torus(n, n));
+    REQUIRE(s.refine_patches_to_level(torus_block(n, 1, 2, 1, 2), 3));
+    REQUIRE(s.set_sculpt_level(3));
+    REQUIRE(s.set_display_level(3));
+
+    const mesh::CrossLevelNeighborhood before = s.cross_level_at(3);
+    REQUIRE_FALSE(before.empty());
+    const Mesh whole = s.mixed_mesh_at_level(3);
+    REQUIRE(whole.positions.size() == 680u);
+
+    // THE EXPORT, against levels 0..2 that hold a connectivity and no surface.
+    // Every level, because one hole with a hole under it is not the case: the
+    // walk that fills the lower one marks it `pending_all`, and the mark is
+    // what makes the short circuit above fall through and cover for the bug. It
+    // is when the ONLY thing wrong with a level is its own flag that nothing
+    // above notices, and asking a trimmed hierarchy for its connectivity is how
+    // a host arrives there.
+    s.drop_intermediate_caches();
+    REQUIRE(s.memory().resident_levels == 1);
+    for (std::uint32_t l = 0; l < 3; ++l)
+        REQUIRE(s.connectivity_at(l).corner_edge.size() == s.topology_at(l).corners.size());
+    REQUIRE(s.memory().resident_levels == 4);  // all present, and three NOT evaluated
+    const Mesh again = s.mixed_mesh_at_level(3);
+    CHECK(same_mesh(whole, again));
+    CHECK(open_edges(again.indices) == 0u);
+    CHECK(s.memory().resident_levels == 4);
+
+    // THE NEIGHBOURHOOD, against the same state. Its outside vertices are
+    // subdivided from level 2's positions, so an empty array there is not a
+    // degraded answer, it is a read off the end of one.
+    s.drop_intermediate_caches();
+    REQUIRE(s.memory().resident_levels == 1);
+    for (std::uint32_t l = 0; l < 3; ++l)
+        REQUIRE(s.connectivity_at(l).corner_edge.size() == s.topology_at(l).corners.size());
+    REQUIRE(s.memory().resident_levels == 4);
     const mesh::CrossLevelNeighborhood& after = s.cross_level_at(3);
     CHECK_FALSE(after.empty());
     CHECK(after.corners == before.corners);

@@ -411,6 +411,12 @@ class MultiresSurface {
     // that are.
 
     const LevelTopology& topology_at(std::uint32_t level) const;
+    // WHAT THIS ONE DOES NOT EVALUATE: anything. A level's connectivity is a
+    // function of its topology alone, so asking a level that was released for
+    // it BUILDS THE CACHE AND LEAVES THE SURFACE OUT OF IT — the positions, the
+    // subdivision and the frames all stay empty. The level then holds a cache
+    // and no surface, which counts in `MultiresMemory::resident_levels` and is
+    // not something another reader may take for an evaluated level.
     const LevelConnectivity& connectivity_at(std::uint32_t level);
 
     // P(n): the level as the artist sees it.
@@ -455,6 +461,10 @@ class MultiresSurface {
         // coarse patch's block there carries the FINE side's value at a shared
         // cage vertex, and the fine point on a split edge, and both of those
         // live one level up. See `build_mixed_block`.
+        //
+        // BOTH CALLS CLEAR IT, so one `Block` reused across the two loops — the
+        // way a host reuses one across its patches — never carries the last
+        // block's levels beside this block's vertices.
         std::vector<std::uint32_t> vertex_levels;
     };
     bool build_block(std::uint32_t level, std::uint32_t patch, Block* out);
