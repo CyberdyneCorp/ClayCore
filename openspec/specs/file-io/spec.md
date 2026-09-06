@@ -13,7 +13,7 @@ does not control.
 ## Requirements
 
 ### Requirement: Document format (.clayspace)
-`clay::io` SHALL read and write the `.clayspace` single-file binary chunked container: versioned chunks for scene commands (the undo command vocabulary), palettes, voxel grids (palette+RLE compressed), thumbnails (PNG), and camera bookmarks. Readers SHALL open any older format version (backward-open) and SHALL refuse newer major versions with a clear error (forward-refuse), never crashing or partially loading. The format lives entirely in claycore so Python and CI read/write projects without the app.
+`clay::io` SHALL read and write the `.clayspace` single-file binary chunked container: versioned chunks for scene commands (the undo command vocabulary), palettes, voxel grids (palette+RLE compressed), imported meshes, thumbnails (PNG), and camera bookmarks. Readers SHALL open any older format version (backward-open) and SHALL refuse newer major versions with a clear error (forward-refuse), never crashing or partially loading. The format lives entirely in claycore so Python and CI read/write projects without the app.
 
 #### Scenario: Round trip
 - **WHEN** any golden-corpus document is saved and reloaded
@@ -451,3 +451,194 @@ A decoder SHALL reject counts and depths whose reconstruction would exceed its o
 #### Scenario: A hostile depth is refused before allocation
 - **WHEN** a stream declares a depth whose subdivision of its base would exceed the reader's ceiling
 - **THEN** the load fails with a typed error and allocates nothing
+
+### Requirement: A mesh layer's geometry is stored in the document
+The `.clayspace` container SHALL carry a mesh chunk per mesh layer, keyed by layer id, holding the decoded triangles rather than a reference to the file they came from. A reference would make the document's bytes depend on a file outside the container and on the importer's version, so the same document would yield different geometry after that file was edited and would fail to open once it was gone — which is not a container the round-trip requirement can be stated over.
+
+The chunk SHALL declare its vertex count, its index count and which of normals, colors and uvs are present, and SHALL store the arrays uncompressed. Geometry SHALL be written exactly as it is held, so the round trip is an identity rather than a re-derivation.
+
+The source path and the import parameters MAY be recorded as advisory provenance. They SHALL NOT be consulted when loading, and a document whose recorded path no longer resolves SHALL load unaffected.
+
+#### Scenario: A mesh round trips byte for byte
+- **WHEN** a document containing mesh layers is saved and reloaded
+- **THEN** every mesh's positions, normals, colors, uvs and indices are identical, and saving again produces identical bytes
+
+#### Scenario: The source file is not needed
+- **WHEN** a document is reloaded after the file its mesh was imported from has been deleted or edited
+- **THEN** it loads with the geometry it was saved with
+
+#### Scenario: A mesh with no attributes stays that way
+- **WHEN** a mesh carrying only positions and indices is saved and reloaded
+- **THEN** its normals, colors and uvs are still empty rather than filled in with defaults
+
+### Requirement: A mesh chunk's declared counts are checked before anything is allocated
+The mesh reader SHALL validate a chunk against the bytes actually present before allocating for it: the vertex count SHALL be bounded by what the remaining bytes could hold given the attributes the chunk declares, the index count SHALL be bounded by the remaining bytes and SHALL be a multiple of three, and every index SHALL be less than the vertex count.
+
+The index bound is not optional. A document's meshes are handed to a host as borrowed contiguous buffers, so an index outside the vertex array in a file the library did not write becomes an out-of-bounds read in the host.
+
+A chunk that fails any of these checks SHALL be refused as malformed, and the library builds without exceptions, so the refusal SHALL be a status rather than a termination.
+
+#### Scenario: An over-declared vertex count is refused
+- **WHEN** a mesh chunk declares more vertices than its remaining bytes could hold
+- **THEN** it is refused before any array is allocated
+
+#### Scenario: An index outside the vertex array is refused
+- **WHEN** a mesh chunk carries an index greater than or equal to its vertex count
+- **THEN** the document is refused as malformed rather than loaded with a buffer a host would read past
+
+#### Scenario: An index count that is not a multiple of three is refused
+- **WHEN** a mesh chunk declares an index count that does not describe whole triangles
+- **THEN** it is refused as malformed
+
+#### Scenario: A well-formed mesh still loads
+- **WHEN** a document written by this library containing mesh layers is loaded
+- **THEN** it loads unchanged
+
+### Requirement: A mesh chunk and its layer stay matched
+A document SHALL write a mesh chunk only for a layer id that exists as a mesh-kind layer, and SHALL drop on load any mesh chunk whose layer id names no mesh layer. Geometry SHALL NOT be discarded when a layer is removed, because the inverse of a layer removal restores the layer by value and cannot carry the payload; the save and load filtering is what keeps an orphaned entry harmless.
+
+#### Scenario: An orphaned payload is not written
+- **WHEN** a mesh layer is removed and the document is saved
+- **THEN** no mesh chunk is written for it, and the file carries no geometry for a layer it does not contain
+
+#### Scenario: An unmatched chunk is dropped
+- **WHEN** a document carrying a mesh chunk whose layer id names no mesh layer is loaded
+- **THEN** the chunk is discarded and the document loads
+
+#### Scenario: Removal is still undoable within a session
+- **WHEN** a mesh layer is removed and the removal is undone before saving
+- **THEN** the layer returns carrying the same geometry
+
+### Requirement: A reader that predates mesh layers skips them
+The container's major version SHALL NOT change: a mesh chunk is a new chunk type and unknown chunks are already skipped. The container minor and the scene minor SHALL both advance, because the layer record's kind byte gains a value, and the two are bound by a static assertion so they move together.
+
+A reader written before mesh layers existed SHALL open such a document, skip the mesh chunks, and ignore any layer whose kind it does not recognise, exactly as it already ignores a layer that is not SDF. That reader SHALL lose the mesh layers if it saves the document again, and the format notes SHALL say so, as they already do for the losses earlier minors carry.
+
+#### Scenario: An older reader opens a newer document
+- **WHEN** a document containing mesh layers is opened by a reader written against the previous minor
+- **THEN** it opens, the SDF and voxel layers are unchanged, and no mesh chunk is misread as something else
+
+#### Scenario: A newer reader opens an older document
+- **WHEN** a document written before mesh layers existed is loaded
+- **THEN** it loads with no mesh layers and is otherwise exactly what it was
+
+#### Scenario: No forward refusal
+- **WHEN** a document containing mesh layers is opened
+- **THEN** the major version is unchanged, so nothing is refused on version grounds
+
+### Requirement: The per-axis scale is a gated appended field
+The node record SHALL carry an item's per-axis scale from scene minor 14, appended after the fields the record already held rather than placed beside the transform, so that a build predating the field reads exactly the bytes it always did.
+
+Writing a document AT minor 13 or below SHALL omit it, and the item SHALL then degrade to its UNIFORM scale — a squashed cylinder comes back round rather than missing. That is the recoverable direction and the one an older build can evaluate, and it SHALL be documented at the constant rather than left to be discovered.
+
+Reading a document written at minor 13 or below SHALL leave the per-axis scale at its default of `(1, 1, 1)`, which is exactly what those documents already meant, so an older file's field is unchanged rather than reinterpreted.
+
+The transform COMMAND SHALL carry the same three floats under the same gate, because that command carries the whole transform and a journal written at an older minor must replay on a build that predates the field as the uniform transform it always was.
+
+#### Scenario: A squash round trips
+- **WHEN** a document containing an item with a per-axis scale is serialized and read back
+- **THEN** the scale is exactly what was written, and reserializing produces identical bytes
+
+#### Scenario: An older minor drops it and keeps everything else
+- **WHEN** the same document is serialized at minor 13
+- **THEN** the bytes are identical to those of the same document with no per-axis scale, and reading them back gives an item with the default per-axis scale and its uniform scale intact
+
+### Requirement: A sculpt layer stack is serialized with its surface
+A sculpt layer stack SHALL serialize inside the multiresolution surface's versioned format — per layer: identity, name, kind, visibility, lock, strength, per-level detail blocks and any mask — and SHALL NOT be written into the flat mesh stream, whose readers expect interchange arrays.
+
+Layer identities SHALL survive a save and a load, because a host, a journal and an undo step all hold them.
+
+The layer kind SHALL be versioned from the first release, so that a later procedural layer does not require a format break.
+
+The format SHALL remain BACKWARD-OPEN: a reader predating the stack SHALL open the document with the surface it can read rather than failing, and SHALL NOT silently present a partially composited surface as the whole one.
+
+#### Scenario: A stack round-trips
+- **WHEN** a surface carrying several layers with different strengths and visibilities is saved and reloaded
+- **THEN** every layer's identity, properties and detail are restored, and the evaluated surface is identical
+
+#### Scenario: An older reader does not misrepresent the surface
+- **WHEN** a reader predating the stack opens a document containing one
+- **THEN** it either reports that it cannot present the surface or presents it flattened, and does not present a partial composite as complete
+
+### Requirement: A layer stack chunk is refused on its own terms, before it is reserved from
+The stack chunk SHALL apply the same ceilings the surface stream around it applies to the same two numbers — a level count and a per-level vertex count. Both are numbers the layer decoder RESERVES FROM, and the surface's cross-check of a decoded stack against the hierarchy it rebuilt runs only after the layer decoder has returned. Where no such cross-check exists at all — a journal's structural undo record carries a whole stack snapshot and is not required to name the surface it was taken against — the decoder's own ceilings are the only refusal there is.
+
+A stack's per-level invalidation index SHALL NOT be reserved from a declared level size. It is a cache read only while the level is partially stale, and a freshly decoded stack is wholly stale, so it SHALL be sized where it is first consulted.
+
+A layer's per-level fields SHALL describe the stack's levels and SHALL share the stack's blocking. Block `b` naming the same vertices in a layer's coefficients, in its mask and in the level's composed field is what makes a strength change cost the layer's coverage rather than the surface, and the invalidation path hands a field's block numbers to the stack's index without translating them — so a stream pairing two blockings SHALL be refused rather than silently unsharing that index.
+
+An unknown layer kind SHALL be refused rather than skipped. A strength outside `[0,1]`, including one that is not a number, SHALL be refused. Two layers answering to one identity, an identity at or above the serialized counter that mints the next one, and an active identity the stream does not carry SHALL each be refused.
+
+#### Scenario: A hostile chunk costs its bytes rather than what it declares
+- **WHEN** a stack chunk of under a hundred bytes declares the deepest hierarchy this build accepts, at the finest blocking the format allows, carrying no layers
+- **THEN** it decodes, and the memory it reserves is proportional to the chunk rather than to the levels it names
+
+#### Scenario: A journal snapshot naming an impossible hierarchy changes nothing
+- **WHEN** a structural undo record whose stack snapshot declares a level larger than any level can be, or more levels than this build reconstructs, is replayed
+- **THEN** the replay refuses, and the stack it was applied to is unchanged
+
+#### Scenario: A stream pairing two blockings is refused
+- **WHEN** a stack declaring one block size carries a layer whose coefficients or mask declare another
+- **THEN** the stream is refused, rather than loading a stack whose invalidation would mark blocks the level does not have
+
+### Requirement: The layer scale and the cage map are versioned
+
+The scene and container minors SHALL move together for the layer's per-axis
+scale and the lattice cage's affine map, and both fields SHALL be gated on the
+writer's minor exactly as the radial fields and the shared-content id are: a
+stream written at an older minor SHALL NOT carry fields that minor's reader will
+not consume.
+
+A stream written before this minor SHALL load with the layer scale at
+(1, 1, 1) and the cage map at the rigid placement it recorded — both of which
+are what those files always meant — rather than failing.
+
+#### Scenario: An older document loads unchanged
+- **WHEN** a document written at the previous minor is read
+- **THEN** every layer carries a per-axis scale of ones, every transformed lattice carries the map its rigid placement described, and the document evaluates to what it evaluated to before
+
+#### Scenario: A squashed layer round-trips
+- **WHEN** a document holding a per-axis-scaled layer is written and read back
+- **THEN** the three factors return exactly and the reloaded document evaluates bit-identically
+
+#### Scenario: An older writer does not emit the new fields
+- **WHEN** a document is written at a minor below this one
+- **THEN** neither field is emitted and a reader at that minor consumes the stream without desynchronising
+
+### Requirement: A payload several items share is stored once
+
+Where several items hold ONE sampled payload — a sampled volume, or the mask
+that gates an item — the document SHALL store it once and every holder SHALL
+name it. Storing a copy per item makes a document that instances one asset grow
+with the number of instances rather than with what it contains, which is the
+difference between a reusable asset and one that can be used a handful of times.
+
+**A reload SHALL preserve the sharing.** Deduplicating on write and rebuilding a
+separate payload per item on read saves space in the file and restores the
+duplication in memory, and the next save writes the copies again — so the two
+halves are one requirement and not two.
+
+The name a holder uses SHALL be unambiguous across the whole document. An
+identifier that is only unique within a layer names a different item in another
+layer, and the document model numbers each layer's items from one.
+
+Sharing SHALL be identity, not equality: two payloads with equal contents that
+were built separately are two payloads, exactly as two identical edit lists are.
+Deduplicating by content would make the file's structure depend on a comparison
+of megabytes and would silently merge two assets an artist may edit apart.
+
+A document written for an older reader SHALL fall back to storing a payload per
+item, so that reader opens it and gets what it always got. What such a downgrade
+costs SHALL be size alone, never content.
+
+#### Scenario: One asset placed many times
+- **WHEN** a document places one captured payload many times and is saved
+- **THEN** its size grows by a small record per placement rather than by the payload, and the payload appears once
+
+#### Scenario: The sharing survives a reload
+- **WHEN** such a document is loaded and saved again
+- **THEN** every placement still refers to one payload, and the second file is the same size as the first
+
+#### Scenario: An older reader still opens it
+- **WHEN** the document is written for a reader that predates shared payloads
+- **THEN** each item carries its own copy, the reader opens it, and the field every item contributes is unchanged

@@ -96,7 +96,7 @@
 - [x] 5.5 `examples/61_stopping_a_long_operation.py` cancels the 4403 ms verb
       and asserts the document is byte-identical, that a cancel reads
       differently from a geometric refusal, and that a token is reusable
-- [ ] 5.6 `openspec/ROADMAP.md`: this row does not exist in it yet
+- [x] 5.6 `openspec/ROADMAP.md`: the row is there — "Revised priorities", P1, landed 2026-08-24 — and the twelve host commands that still block without a fraction or a cancel are recorded in "What the host actually needs — 2026-09-06"
 
 ## 6. What building it changed
 

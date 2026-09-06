@@ -73,7 +73,7 @@
       saying plainly what a host owns: the file, the flush, the re-snapshot
       interval, and what to do with a leftover recovery file
 - [x] 5.3 A numbered example that kills and recovers a session
-- [ ] 5.4 `openspec/ROADMAP.md`
+- [x] 5.4 `openspec/ROADMAP.md` — recorded in the 2026-08-23/24 findings table
 
 ## 6. What building it changed
 
