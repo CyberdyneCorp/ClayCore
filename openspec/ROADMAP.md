@@ -1356,6 +1356,49 @@ worth a contract:
   document, and every millisecond of the difference is a hop paying a whole-layer
   refill.
 
+### A fat swept-curve stroke meshes with pinholes
+
+Reported 2026-09-06 by ClaySpaceDesktop, found by accident while fixing an
+unrelated brush, and **it reproduces through `clay_document_mesh` on the same
+document** — three independent paths (their incremental patching, their full
+rebuild, and our own mesher) count the same holes, which is what says it is ours.
+
+Six snake-hook tendrils on a sphere, background pixels enclosed by surface, with
+the gesture, the brush, the path, the `PointType::Spline` and the stroke blend k
+all fixed and only the tendril's RADIUS PROFILE varying:
+
+| taper span | tip radius | pinholes |
+|---:|---:|---:|
+| 100 (no taper, uniformly fat) | 0.120 | 3 |
+| 8 | 0.066 | 2 |
+| 5 | 0.050 | 0 |
+| 3 | 0.050 | 0 |
+
+Monotonic in thickness, and the fat cases are 3.3 to 6 voxels across on a 0.02
+grid — **the opposite end from a thin-feature-below-the-grid problem.** Two
+pixels in one place at 1280x800, so a small artifact rather than a broken
+surface.
+
+**One hypothesis ruled out already, and it was the first place today would have
+looked:** it is not the cull pad. `clay_document_mesh` meshes `doc->tape()`, the
+whole-document tape, with no cull region — so no per-brick culling is involved
+and the shortfall class this change spent the day on cannot be it. That leaves
+the swept-curve field itself or the mesher's crossing detection, most plausibly
+where a fat sweep's consecutive segment spheres overlap heavily under a smooth
+blend.
+
+**Latent for a long time, and hidden by a bug on the host's side:** their old
+taper made every tendril thinner than the failing range by accident, so fixing
+that defect uncovered this one. They have tuned their taper span to 5 to stay
+inside the range that meshes cleanly and written the measurement into the
+constant's doc comment, so the next person knows it was chosen against an
+artifact rather than by eye. **That is tuning around an engine bug and they say
+so**; the fix belongs here.
+
+They have offered a minimal `.clayspace` and the exact control points rather than
+their whole test, which is the right shape for a repro and worth taking when this
+is picked up.
+
 ### Refusals a host cannot render — a standing rule, and three instances
 
 **A refusal that knows an id should return it, and a host should never have to
