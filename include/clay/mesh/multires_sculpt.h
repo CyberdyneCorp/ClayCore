@@ -320,7 +320,9 @@ class MultiresSculptor {
     void bind();
     // The levels below the bound one that OWN vertices of the mixed-depth
     // surface: the ones a stamp reaching past the refined region has to write.
-    void bind_coarse(std::uint32_t level);
+    // `keep_records` carries each level's `VertexDeltas` over to the rebuilt
+    // list, which a rebind that only changed the CACHE GENERATION must do.
+    void bind_coarse(std::uint32_t level, bool keep_records);
     // One stamp on each of them, coarsest first. Returns the classes it moved.
     std::size_t stamp_coarse(MeshBrush verb, const MeshBrushSettings& settings,
                              const field::MaskGate& gate, SculptLayerId active_layer,
@@ -349,7 +351,9 @@ class MultiresSculptor {
     // instead. What survives is the RECORD, because `MeshBrush::Layer` measures
     // its ceiling from where the STROKE found the surface and a coarse level
     // under a crossing stroke has that question to answer about its own
-    // vertices.
+    // vertices. It outlives a cache drop taken mid-stroke for that reason --
+    // see `bind_coarse` -- and is emptied only by `begin_stroke` and by a
+    // change of sculpt level.
     struct CoarseLevel {
         std::uint32_t level = 0;
         VertexDeltas deltas;
@@ -371,7 +375,9 @@ class MultiresSculptor {
     VertexDeltas level_deltas_;
     std::vector<std::uint32_t> touched_;
     // Ascending in level, and only the levels that own a vertex the bound level
-    // does not. Rebuilt with the level sculptor, for the same reasons.
+    // does not. Rebuilt with the level sculptor, for the same reasons -- but a
+    // rebind that changed only the CACHE GENERATION carries each level's record
+    // across, exactly as `level_deltas_` above survives one.
     std::vector<CoarseLevel> coarse_;
     std::vector<std::uint32_t> write_levels_;
     // The positions the brush asked for at the bound level, kept across the

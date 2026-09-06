@@ -1598,6 +1598,76 @@ TEST_CASE("multires: a crossing stamp survives a cache drop under it") {
     CHECK(sculptor.last_write_levels() == std::vector<std::uint32_t>{2u, 3u});
 }
 
+namespace {
+
+// The furthest any vertex of `now` stands from where it stood in `was`.
+float worst_travel(const std::vector<cfloat3>& was, const std::vector<cfloat3>& now) {
+    REQUIRE(was.size() == now.size());
+    float worst = 0.0f;
+    for (std::size_t i = 0; i < was.size(); ++i) worst = std::max(worst, clength(now[i] - was[i]));
+    return worst;
+}
+
+// A two-dab `Layer` stroke anchored on the rim, with the caches optionally
+// released BETWEEN the dabs -- the host reclaiming memory in the middle of a
+// gesture, which is the one thing that moves the cache generation without
+// moving the sculpt level. Returns the coarse level the stroke crossed onto.
+std::vector<cfloat3> layer_stroke_across_drop(const Mesh& cage, bool drop) {
+    MultiresSurface s = build_regional(cage);
+    REQUIRE(s.set_sculpt_level(3));
+    MeshBrushSettings settings;
+    {
+        const std::vector<cfloat3>& p = s.positions_at(3);
+        settings.center = p[nearest_vertex(p, cf3(-1.0f / 3.0f, 0.0f, 0.0f))];
+    }
+    settings.radius = 0.50f;  // anchored on the rim and reaching well past it
+    settings.strength = 1.0f;
+    settings.layer_height = 0.08f;
+
+    MultiresSculptor sculptor(s);
+    sculptor.begin_stroke();
+    REQUIRE(sculptor.stamp(MeshBrush::Layer, settings) > 0);
+    if (drop) {
+        const std::uint64_t before = s.cache_generation();
+        s.drop_all_caches();
+        REQUIRE(s.cache_generation() != before);
+    }
+    REQUIRE(sculptor.stamp(MeshBrush::Layer, settings) > 0);
+    return s.positions_at(2);
+}
+
+}  // namespace
+
+TEST_CASE("multires: a cache drop mid-stroke does not lift the coarse side's layer ceiling") {
+    // WHAT THE COARSE RECORD IS FOR. `MeshBrush::Layer` measures its ceiling
+    // from where the STROKE found the surface, per vertex, and the coarse
+    // level's `VertexDeltas` is where that answer lives for the vertices beside
+    // the refined region. A rebind that emptied it -- and `bind` rebinds on ANY
+    // cache-generation change, not only on a level change -- resets those
+    // origins to the surface as it stands MID-STROKE, so the coarse side
+    // deposits its whole ceiling a second time while the bound level correctly
+    // holds at it. A step at the seam that appears only when the host is short
+    // of memory.
+    const Mesh cage = bumpy_quads(6, 1.0f);
+    MultiresSurface untouched = build_regional(cage);
+    const std::vector<cfloat3> pristine = untouched.positions_at(2);
+
+    const std::vector<cfloat3> kept = layer_stroke_across_drop(cage, false);
+    const std::vector<cfloat3> dropped = layer_stroke_across_drop(cage, true);
+
+    // NOT VACUOUS, and this is the half that makes the ceiling the instrument:
+    // the stroke really reached the coarse level, and two dabs of it settled
+    // WITHIN `layer_height` rather than at twice it.
+    const float settled = worst_travel(pristine, kept);
+    MESSAGE("two dabs settled " << settled << " on the coarse level, ceiling 0.08");
+    CHECK(settled > 0.01f);
+    CHECK(settled <= 0.08f);
+
+    // THE GATE. The drop is invisible to the gesture, in bytes.
+    CHECK(same_bytes(kept, dropped));
+    CHECK(worst_travel(pristine, dropped) <= 0.08f);
+}
+
 // -- THE TWO PUBLIC ENTRY POINTS THAT WERE NOT GIVEN THE WHOLE SURFACE --------
 //
 // The cross-level neighbourhood reaches the sculpt path through

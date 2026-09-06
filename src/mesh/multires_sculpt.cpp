@@ -173,7 +173,13 @@ void MultiresSculptor::bind() {
         sculptor_->set_cross_level(&surface_.cross_level_at(level));
         return;
     }
-    if (bound_level_ != level) level_deltas_.clear();
+    // THE ONE THING A GENERATION-ONLY REBIND KEEPS. `MeshBrush::Layer` measures
+    // its ceiling from where the STROKE found the surface, so the records have
+    // to outlive a cache drop the host made under memory pressure; only a LEVEL
+    // change makes them meaningless, because they are indexed by a numbering
+    // that changed with it.
+    const bool same_level = bound_level_ == level;
+    if (!same_level) level_deltas_.clear();
 
     Mesh& mesh = surface_.level_mesh(level);
     const Adjacency& adjacency = surface_.level_adjacency(level);
@@ -204,13 +210,24 @@ void MultiresSculptor::bind() {
     // refined hierarchy the patches beside the refined region have no vertex
     // here at all, so a stamp reaching past the region has to write them where
     // they live. See `stamp`.
-    bind_coarse(level);
+    bind_coarse(level, same_level);
     // Read AFTER every call above: any of them may have built a cache and moved
     // the generation on.
     bound_generation_ = surface_.cache_generation();
 }
 
-void MultiresSculptor::bind_coarse(std::uint32_t level) {
+void MultiresSculptor::bind_coarse(std::uint32_t level, bool keep_records) {
+    // THE SAME ASYMMETRY THE BOUND LEVEL'S RECORD KEEPS, and for the same
+    // reason. The list itself is rebuilt every time -- it is derived from the
+    // topology, and rebuilding it is what makes a rebind safe -- but a
+    // generation-only rebind is a cache drop under a live stroke, and a coarse
+    // level that lost its record would answer "where did the stroke find this
+    // vertex" with the surface as it stands MID-STROKE. `MeshBrush::Layer`
+    // would then deposit its whole ceiling again on the coarse side while the
+    // bound level correctly held at it, which is a step at the seam that
+    // appears only when the host is short of memory.
+    std::vector<CoarseLevel> previous;
+    if (keep_records) previous.swap(coarse_);
     coarse_.clear();
     for (std::uint32_t k = 0; k < level; ++k) {
         // THE OWNERSHIP RULE, and it is one line because the level above
@@ -221,6 +238,8 @@ void MultiresSculptor::bind_coarse(std::uint32_t level) {
         if (surface_.topology_at(k + 1).dense()) continue;
         CoarseLevel c;
         c.level = k;
+        for (CoarseLevel& was : previous)
+            if (was.level == k) c.deltas = std::move(was.deltas);
         coarse_.push_back(std::move(c));
     }
 }
