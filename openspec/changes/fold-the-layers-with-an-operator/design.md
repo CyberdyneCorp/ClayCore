@@ -1229,3 +1229,43 @@ It is left as a note rather than a required sweep on the host's own argument:
 §13d and §13e are mechanical and answerable from a diff, and this one depends on
 how a test is USED rather than on what it contains. A sweep that cannot be
 answered from a diff would weaken the two that can.
+
+### §12c. Why `_below` refuses at all, and what the blocking id does not say
+
+Two questions from the host on 2026-09-06, both answerable from the code as
+committed, and one of them is a real gap.
+
+**Q: under a hard union, `_excluding` works at ANY stack position — so is
+`_below`'s topmost requirement a limit that is not there?**
+
+No, and the reason is not the one the header implies. It is not that composition
+above is order-dependent; it is that **there is no `_above` query.** `_below`
+answers "every visible SDF layer before this one, folded as the document folds
+them". A host holding that plus its own preview of the target can rebuild the
+document only when nothing visible sits above — because whatever is above is
+material it cannot obtain, and that is true whether the layers above union or
+compose. A hard union above is just as absent.
+
+**Nothing is lost for the union case, which is the half that matters to a host
+shipping today.** `_excluding` refuses on `first_composed_fold_layer`, so a
+document where every layer unions never meets that refusal and keeps working at
+any stack position, exactly as it does now. `_below` is the repair for the case
+`_excluding` cannot serve — a composed document — and is not a narrowing of it.
+**The header must say that**, because read beside `_excluding` the restriction
+looks like one.
+
+**Q: when two layers above block, which does `out_blocking_layer` name?**
+
+`scene::visible_sdf_layer_above` (`src/scene/tape_build.cpp:1589`) returns the
+FIRST visible SDF layer after the target's position — the lowest — and nothing in
+the signature or the message says whether others follow. Hidden, mesh and voxel
+layers above are correctly skipped, since they are not in the fold walk either.
+
+**That gap is real and it is the host's to feel:** their sentence is *"hide or
+move `Poros` to smooth `Forma_principal` live"*, and on a four-row stack with two
+field layers above the target it is wrong by omission — the sculptor acts, tries
+again, and is refused again naming the next one. **Required of the third review:**
+decide whether the refusal reports the lowest blocker plus a count, or the lowest
+with a flag saying more follow, or all of them — and say which in the header
+either way. The current behaviour is defensible and undocumented, which is the
+combination that produces a wrong sentence in a host.
