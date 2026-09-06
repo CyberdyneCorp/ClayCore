@@ -810,3 +810,21 @@ than *"live smoothing is not available here"*. One names an action; the other
 names a wall. It matters more here than in the `writable_at_minor` case: a
 document has one format and a stack has many layers, so without the id the host
 walks the stack to re-derive a fact the refusal already computed.
+
+### §12b. Make the refusal rule executable, not a review note
+
+The rule this change produced — a refusal that knows an id returns it — is
+currently three separate implementations and a sentence in the roadmap. A
+sentence is checked when someone leans on it; a test is checked every run. So the
+rule gets a test rather than a reviewer:
+
+**Required:** one test case walking every refusal in this change that has an id
+to give — the composition setter on a non-SDF layer, `clay_document_writable_at_minor`
+on a document with a composed layer, and `clay_brick_cache_eval_requests_below`
+on a layer that is not the topmost visible SDF one — asserting each returns the
+error code AND a non-zero blocking id that names the layer actually responsible.
+A refusal that returns the code with a zero id fails the test.
+
+It is cheap, it fails the day a fourth refusal is added without its id, and it
+turns "we agreed to do this" into something that does not depend on anyone
+remembering.
