@@ -1587,6 +1587,27 @@ needs. They have that number for one hop of four (median ratio 0.9998x, 171 of
 comparison is honest; it is not yet sensitive, and those are different
 properties.
 
+### Agreement across N paths rules out only what differs between them
+
+The reasoning error that produced the pinhole report, named by the host that
+made it, and worth keeping because it reads as rigour: `visual_holes` counted
+holes three ways — an incrementally patched mesh, a full rebuild, and
+`clay_document_mesh` — and its comment said *"if both show them, they are the
+engine's"*. Three pictures. **One rasteriser.**
+
+Agreement across the three ruled out the per-key store and everything else that
+differed between them, and said nothing whatsoever about what they shared. The
+shared component was the one at fault: a watertight, genus-zero surface with
+triangles orders of magnitude below a pixel renders with specks of background
+through it, and every path rendered it the same way.
+
+**The check is one question: what do these paths have IN COMMON, and is it in the
+set I think I have excluded?** Redundancy across paths that share a stage is not
+redundancy over that stage — it is the same measurement taken three times. This
+is the same shape as an assertion whose expected value comes from the system
+under test (`fold-the-layers-with-an-operator` §13e), one level up: there the two
+sides of a comparison share an origin, here the three arms of a corroboration do.
+
 ### Three ways a gate is real and unenforced
 
 Found within one day, 2026-09-06, none of them by a gate failing — all three by
