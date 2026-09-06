@@ -57,7 +57,9 @@
 #include <cstdint>
 
 #include "clay/kernel/shim.h"
+#include "clay/math/geom.h"
 #include "clay/math/transform.h"
+#include "clay/scene/commands.h"
 #include "clay/scene/document.h"
 
 namespace clay::scene {
@@ -127,5 +129,67 @@ bool layer_scales_cleanly(const Layer& layer);
 // a host should act on.
 PlacementChange layer_placement_change(const Layer& layer, const math::Transform& to,
                                        kernel::cfloat3 to_axes);
+
+// -- placements computed from a layer's own content --------------------------
+//
+// "Drop this subtool on the floor", "centre it", "put it back at the origin":
+// three menu items every sculpting host carries, and three placements a host
+// cannot compose correctly out of the layer transform pair. The single-factor
+// reader REFUSES a layer carrying three different per-axis factors and the
+// single-factor setter CLEARS them, so the obvious read-modify-write is either
+// impossible or silently unsquashes the subtool. The correct composition is the
+// per-axis pair, and this is that pair written once, on the inside.
+//
+// WHY THE ARITHMETIC IS THREE LINES AND HAS NO CASE ANALYSIS. A layer's world
+// map is `layer.xform.matrix() * scale_matrix(layer.scale_axes)`, with the
+// per-axis scale INNERMOST and `xform.position` applied last, so adding a
+// world-space delta to `position` translates the layer's world content by
+// exactly that delta -- whatever rotation and whatever squash the layer
+// carries. No frame conversion, no branch on squashed vs unsquashed, and the
+// same write serves all three rules.
+//
+// THESE TAKE A BOX RATHER THAN READING ONE. Which box is the caller's decision
+// and it differs by binding: the C ABI composes the SDF, voxel and mesh arms
+// (`layer_world_bounds`), while `pick::layer_bounds` answers the SDF arm alone
+// -- and `scene` may not include `pick` or `voxel` by the layering rule anyway.
+// What must NOT differ between bindings is which placement fields a computed
+// placement writes, which is what `translated_layer_command` is: one policy,
+// stated once, so the three rules and the two bindings cannot drift.
+
+// Where the low face of `content` has to move to sit at `ground_y`. Y alone;
+// the other two components are 0, so the box does not slide sideways.
+kernel::cfloat3 ground_snap_delta(const math::Aabb& content, float ground_y);
+
+// Where the centre of `content` has to move to sit at the world origin.
+//
+// The centre of the BOX, which is not a centre of mass: this engine holds no
+// density, and a hollow shell and a solid of the same extent centre
+// identically. An occupancy-weighted centroid would need a cell size named
+// before it had an answer at all, and the answer would then move when an
+// artist changed the layer's voxel size, which changes nothing about where the
+// shape is.
+kernel::cfloat3 origin_centre_delta(const math::Aabb& content);
+
+// Where the layer has to move for its placement's TRANSLATION to be zero.
+// Reads no content, which is why it is the one rule an empty layer can take.
+kernel::cfloat3 origin_translation_delta(const Layer& layer);
+
+// The ONE write a computed placement makes: `world_delta` added to
+// `xform.position` and nothing else touched.
+//
+// The rotation, the uniform factor and the per-axis triple are carried through
+// BIT FOR BIT, which is why this takes the Layer rather than composing the C
+// reader and setter as the change's design.md first proposed. That round trip
+// is not bit-exact in either half: the reader hands back an axis and an angle
+// through `atan2` and the setter rebuilds a quaternion through `sin`/`cos`, and
+// the per-axis reader answers the PRODUCT of the two scales, so the setter
+// would fold `xform.scale` into `scale_axes` and change what the layer's own
+// record says while leaving the composed map alone.
+//
+// ONE command, because `SetLayerTransformCmd` already carries the transform and
+// the per-axis scale together -- one undo step whose inverse is the previous
+// placement, and one invalidation. It is returned rather than applied so the
+// caller can refuse first and pay for no bound it will not use.
+SetLayerTransformCmd translated_layer_command(const Layer& layer, kernel::cfloat3 world_delta);
 
 }  // namespace clay::scene

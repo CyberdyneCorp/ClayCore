@@ -327,7 +327,8 @@
       COUNT and is gated as one: 3,999 instructions on both arms, ceiling 4,200,
       where a second fold per layer reads 4,998
 - [x] 6.7 C ABI setter AND getter, pyclay, numbered example, version lines. The
-      C pair and the three version lines (0.86.0) landed in the model stage;
+      C pair and the three version lines (0.87.0, taken after #476 merged
+      first with 0.86.0) landed in the model stage;
       this stage added the pyclay mirror
       (`Document.set_layer_composition` / `.layer_composition`, partial update
       in, whole value out, the blend's SUBCLASS carrying the profile so what
@@ -721,7 +722,7 @@
           a truncation rule on a refusal path — a host wanting the names walks
           the stack from the named layer with the rule the header states, and
           the count is the one fact that walk cannot be avoided for. The
-          parameter costs nothing: 0.86.0 is unreleased, so no host holds the
+          parameter costs nothing: 0.87.0 is unreleased, so no host holds the
           old signature
         * §12d's other required sentence, which was missing entirely: that
           `clay_brick_cache_eval_requests_excluding` refuses on the DOCUMENT and
@@ -801,29 +802,12 @@
           letter someone else had; the pattern is a stage appending a section
           without reading to the end of the file it is appending to
       THE VERSION, and it is a merge-order hazard rather than a defect: the
-      three version lines on this branch read 0.86.0 — CMakeLists.txt's
-      `VERSION`, `CLAY_ABI_MINOR` in bindings/c/clay.h, and pyproject.toml's
-      `version` — and PR #476 claims the same minor. WHICHEVER MERGES SECOND
-      TAKES 0.87.0, and moves those three lines together (a bump split across
-      branches is what the version gate has caught twice at tag time) plus every
-      "ABI 0.86.0" annotation it wrote: 14 in bindings/c/clay.h, two in
-      docs/05-claycore-library.md, one in tests/swift/smoke.swift and the one in
-      6.7 above (counted at this commit; `grep -rn 0.86.0` is the list). The format minor is NOT part of that — `kSceneMinor` is 18
-      because this change added a layer record field, and it moves only if the
-      other branch also added one, in which case the second branch takes 19 and
-      re-reads its own reader/writer pair
-      COGNITIVE COMPLEXITY, as a number rather than a demand: `eval_requests_impl`
-      (bindings/c/clay_c.cpp) measures 149 against a backend target of 15, up
-      from 143 on main — clang-tidy's readability-function-cognitive-complexity,
-      same build database, main's copy of the file measured the same way. The +6
-      is the split gate: two `&&` predicates (`split`, `refused_split`), the
-      ternaries that replaced `has_below` at four sites, and the `if
-      (!refused_split)` around `store_seeds`. NOT SPLIT HERE, deliberately: the
-      function was already ten times the target before this change touched it,
-      its neighbour `resume_bricks` measures 183 and did not move, and a
-      refactor of either is a change to the refill path that would land in the
-      same PR as a correctness fix and be reviewed as one thing. It belongs in
-      its own change, with its own gate run
+      three version lines on this branch read 0.87.0 — CMakeLists.txt's
+      `VERSION`, `CLAY_ABI_MINOR` in bindings/c/clay.h and pyproject.toml's
+      `version`. RESOLVED: PR #476 merged first and took 0.86.0, so this branch
+      took the next number, as the rule says. The bump was made on the merge
+      commit that brought main in, not before it, so the branch's own history
+      still reads 0.86.0 up to that point and the tree does not
 
 - [x] 7.12 THE GATE SWEEP RE-RUN on the sixth review's tree — b4925d0b and
       c0db1354 on top of the tree 7.9 swept — because both of those commits

@@ -4342,6 +4342,104 @@ def test_the_consolidation_cost_is_knowable_before_it_is_paid():
     assert paid["megabytes"] == pytest.approx(quoted["megabytes"])
 
 
+def _absorbable_chain():
+    """Degraded by BOTH mechanisms, so a bake really is the cure."""
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    for i in range(20):
+        layer.add(clay.Sphere(0.4).at((0.25 * i - 2.5, 0, 0)), blend=clay.Smooth(0.2))
+    layer.move_surface((0.0, 0.4, 0.0), (0.0, 0.9, 0.0), radius=0.5)
+    return doc, layer
+
+
+def test_the_advice_cures_what_the_report_named():
+    """THE PROPERTY (advise-a-consolidation).
+
+    `advises_consolidation` said "bake this" and stopped, and the next call
+    needs a `cell` that is required and > 0 — so a script holding the flag had
+    to invent the one number nothing would give it. The advice fills it, and
+    baking at exactly that number lifts the layer out of the state the report
+    named.
+    """
+    doc, layer = _absorbable_chain()
+    before = layer.field_report(advise_below_step_scale=0.5)
+    assert before["advises_consolidation"] is True
+
+    advice = layer.consolidation_advice(0.5)
+    assert advice["advises"] is True
+    assert advice["params"]["cell"] > 0.0
+    assert advice["params"]["band"] == pytest.approx(3.0 * advice["params"]["cell"])
+    assert advice["params"]["padding"] == pytest.approx(advice["params"]["band"])
+    # Redistancing is what bounds the Lipschitz, so advising a skip would advise
+    # a bake that does not cure what the flag reported.
+    assert advice["params"]["redistance"] is True
+    assert advice["cost"]["megabytes"] > 0.0
+    assert advice["cost"]["safe_step_scale"] >= 0.5
+
+    # The whole round trip: the advice goes straight back in.
+    layer.consolidate(**advice["params"])
+    after = layer.field_report(advise_below_step_scale=0.5)
+    assert after["advises_consolidation"] is False
+    assert after["degradation"] == "none"
+    assert after["safe_step_scale"] >= 0.5
+    # The projection was the number, not an approximation of it.
+    assert after["safe_step_scale"] == pytest.approx(advice["cost"]["safe_step_scale"])
+
+
+def test_not_advised_is_none_rather_than_zeroes():
+    """The Python form of the C surface's zeroed descriptor, failing the same
+    way: 0.8 is above the 1/sqrt(3) = 0.577 that a redistanced volume declares
+    at best, so no bake reaches it and none is offered."""
+    doc, layer = _absorbable_chain()
+    advice = layer.consolidation_advice(0.8)
+    assert advice["advises"] is False
+    assert advice["params"] is None
+    assert advice["cost"] is None
+    with pytest.raises(TypeError):
+        layer.consolidate(**advice["params"])
+    with pytest.raises(TypeError):
+        layer.consolidate(cell=advice["params"])
+    assert layer.consolidation_state is None       # nothing was baked
+
+
+def test_a_brush_chain_is_not_advised_from_python():
+    """#387 one step further along: the report withholds the flag on a layer a
+    bake makes worse, and the advice withholds the params with it."""
+    lone, lone_layer = _ball(1.0)
+    lone_layer.move_surface((1.0, 0, 0), (0.9, 0, 0), radius=0.5)
+    assert lone_layer.field_report(advise_below_step_scale=0.5)["degradation"] == "deformers"
+    advice = lone_layer.consolidation_advice(0.5)
+    assert advice["advises"] is False
+    assert advice["params"] is None
+
+
+def test_asking_for_the_advice_changes_nothing():
+    doc, layer = _absorbable_chain()
+    before = layer.field_report(advise_below_step_scale=0.5)
+    surface = _surface_along(doc, (0, 1, 0), hi=2.0)
+
+    assert layer.consolidation_advice(0.5)["advises"] is True
+
+    after = layer.field_report(advise_below_step_scale=0.5)
+    assert after["item_count"] == before["item_count"]
+    assert after["safe_step_scale"] == pytest.approx(before["safe_step_scale"])
+    assert layer.consolidation_state is None       # nothing was baked
+    assert _surface_along(doc, (0, 1, 0), hi=2.0) == pytest.approx(surface)
+
+
+def test_the_advice_hands_back_a_volumes_own_cell_size():
+    """The whole answer to "a number nobody chose": the only degradation ever
+    advised is "volumes", and such a layer carries resolutions an earlier bake
+    already chose. The advice returns the finest of them unchanged."""
+    chained, chained_layer = _ball()
+    for n in ((1, 0, 0), (0, 1, 0)):
+        chained, chained_layer = _wrapped(_polished(chained, n, cell=0.03))
+    assert chained_layer.field_report(advise_below_step_scale=0.25)["degradation"] == "volumes"
+    advice = chained_layer.consolidation_advice(0.25)
+    assert advice["advises"] is True
+    assert advice["params"]["cell"] == pytest.approx(0.03)
+
+
 def test_consolidation_is_one_undo_step_that_restores_the_parametric_form():
     doc = clay.Document()
     doc.enable_undo()
@@ -6507,6 +6605,66 @@ def test_the_journal_needs_undo_enabled():
         doc.journal_since(0)
 
 
+def test_a_journal_from_another_snapshot_is_refused():
+    # A journal names the bytes it continues from, so replaying it onto a
+    # different document raises instead of applying cleanly and handing back a
+    # document that matches neither the snapshot nor the session.
+    doc, _, _, snapshot = _session_with_edits()
+    journal, _ = doc.journal_since(0)
+
+    other, other_layer, _, _ = _session_with_edits()
+    other_layer.add(clay.Sphere(r=0.3, position=(3, 0, 0)))
+    other_snapshot = other.to_bytes()       # a different session, different bytes
+
+    probes = np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]], dtype=np.float32)
+    wrong = clay.load_bytes(other_snapshot)
+    wrong.enable_undo()
+    before = wrong.eval(probes)
+    with pytest.raises(ValueError, match="different snapshot"):
+        wrong.replay_journal(journal)
+    assert np.allclose(wrong.eval(probes), before)    # nothing applied
+
+    # A document that was never serialized cannot be the snapshot either.
+    scratch = clay.Document()
+    scratch.add_sdf_layer("body")
+    scratch.enable_undo()
+    with pytest.raises(ValueError, match="different snapshot"):
+        scratch.replay_journal(journal)
+
+    # And onto the snapshot it WAS taken against, the same bytes replay.
+    right = clay.load_bytes(snapshot)
+    right.enable_undo()
+    assert right.replay_journal(journal)["applied"] == 3
+
+
+def test_a_barrier_is_visible_before_the_recovery_needs_it():
+    # Replay reports a barrier, but replay happens during the recovery — the
+    # one moment when "take a fresher snapshot" is useless. This is how a host
+    # learns while it still can.
+    doc, layer, blocks, snapshot = _session_with_edits()
+    assert doc.journal_barrier(0) is None
+
+    blocks.add_level()
+    blocks.drop_level()                     # detail nothing can reproduce
+    layer.add(clay.Sphere(r=0.4, position=(2, 0, 0)))
+
+    at = doc.journal_barrier(0)
+    assert at is not None
+    assert doc.journal_barrier(at + 1) is None
+
+    journal, _ = doc.journal_since(0)
+    recovered = clay.load_bytes(snapshot)
+    recovered.enable_undo()
+    result = recovered.replay_journal(journal)
+    assert result["stopped_at_barrier"]
+    assert result["applied"] == at          # up to the barrier, and no further
+    # The sphere added after it is NOT in the recovered document: replay
+    # stopped rather than skipping, so the gap is visible instead of silent.
+    probes = np.array([[2.0, 0.0, 0.0]], dtype=np.float32)
+    assert recovered.eval(probes)[0] > 0
+    assert doc.eval(probes)[0] < 0
+
+
 # -- cancelling a long operation (add-operation-cancellation) ----------------
 #
 # Three budget classes, and the third had no exit: on the reference iPad
@@ -7885,3 +8043,120 @@ def test_excluding_one_layer_is_refused_once_a_layer_composes():
         doc.eval_excluding(base.id, pts)
     with pytest.raises(ValueError):
         doc.gradients_excluding(base.id, pts)
+
+
+# -- the three convenience placements (add-convenience-transforms) -----------
+#
+# The same rules and the same refusals the C ABI gives them, reached from
+# Python. What is NOT asserted here is the squashed-layer case the change
+# exists for: pyclay has no per-axis LAYER transform to set one with, so that
+# case lives in tests/unit/test_c_convenience_placements.cpp where the surface
+# that can express it is.
+
+
+def _snap_layer(name="corpo", r=1.0, position=(2.0, 7.0, -3.0)):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer(name)
+    layer.add(clay.Sphere(r=r))
+    doc.set_layer_transform(layer.id, position=position)
+    return doc, layer
+
+
+def test_snap_to_ground_puts_the_low_face_on_the_plane():
+    doc, layer = _snap_layer()
+    (_, y0, _), _ = layer.bounds()
+    assert y0 == pytest.approx(6.0)
+
+    layer.snap_to_ground(-4.0)
+    (x1, y1, z1), (_, _, z2) = layer.bounds()
+    assert y1 == pytest.approx(-4.0)
+    # Y alone: the other two axes do not slide.
+    assert x1 == pytest.approx(1.0)
+    assert z2 == pytest.approx(-2.0)
+
+
+def test_centre_bounds_puts_the_box_centre_on_the_origin():
+    doc, layer = _snap_layer()
+    layer.centre_bounds()
+    lo, hi = layer.bounds()
+    for a, b in zip(lo, hi):
+        assert (a + b) * 0.5 == pytest.approx(0.0)
+
+
+def test_zero_to_origin_reads_no_bounds_and_keeps_the_rotation():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("corpo")
+    layer.add(clay.Sphere(r=1.0))
+    doc.set_layer_transform(layer.id, position=(5.0, -2.0, 3.0),
+                            rotation_axis_angle=((0, 0, 1), 0.6), scale=2.0)
+    report = doc.placement_report(layer.id, position=(5.0, -2.0, 3.0),
+                                  rotation_axis_angle=((0, 0, 1), 0.6), scale=2.0)
+    assert report["kind"] == "rigid"  # the placement it already carries
+
+    layer.zero_to_origin()
+    # The rotation and the scale are untouched, which is what makes this "put
+    # the subtool back" rather than "reset the subtool".
+    after = doc.placement_report(layer.id, position=(0.0, 0.0, 0.0),
+                                 rotation_axis_angle=((0, 0, 1), 0.6), scale=2.0)
+    assert after["kind"] == "rigid"
+    assert after["scale"] == pytest.approx(1.0)
+    lo, hi = layer.bounds()
+    assert (lo[1] + hi[1]) * 0.5 == pytest.approx(0.0)
+
+
+def test_a_refusal_raises_and_leaves_the_document_alone():
+    doc = clay.Document()
+    empty = doc.add_sdf_layer("vazia")
+    doc.set_layer_transform(empty.id, position=(1.0, 2.0, 3.0))
+    assert empty.bounds() is None
+    with pytest.raises(ValueError, match="no material"):
+        empty.snap_to_ground(0.0)
+    with pytest.raises(ValueError, match="no material"):
+        empty.centre_bounds()
+    # ... and the rule that reads no bounds takes it.
+    empty.zero_to_origin()
+
+    doc2, layer = _snap_layer()
+    layer.radial(6, axis="y")
+    with pytest.raises(ValueError, match="radial"):
+        layer.snap_to_ground(0.0)
+    with pytest.raises(ValueError, match="radial"):
+        layer.centre_bounds()
+    layer.zero_to_origin()
+
+    doc3, protegida = _snap_layer()
+    doc3.set_layer_protection(protegida.id, locked=True)
+    for call in (lambda: protegida.snap_to_ground(0.0), protegida.centre_bounds,
+                 protegida.zero_to_origin):
+        with pytest.raises(ValueError, match="locked"):
+            call()
+
+    doc4, sem_chao = _snap_layer()
+    with pytest.raises(ValueError, match="finite"):
+        sem_chao.snap_to_ground(float("inf"))
+    with pytest.raises(ValueError, match="finite"):
+        sem_chao.snap_to_ground(float("nan"))
+
+
+def test_an_unbounded_layer_is_refused():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("chao")
+    layer.add(clay.Plane(normal=(0, 1, 0), offset=0.0))
+    with pytest.raises(ValueError, match="unbounded"):
+        layer.snap_to_ground(-1.0)
+    with pytest.raises(ValueError, match="unbounded"):
+        layer.centre_bounds()
+    layer.zero_to_origin()
+
+
+def test_one_convenience_placement_is_one_undo_step():
+    doc, layer = _snap_layer()
+    doc.enable_undo()
+    before = layer.bounds()
+    layer.centre_bounds()
+    assert layer.bounds() != before
+    assert doc.undo_depth == 1
+    assert doc.undo() is True
+    assert layer.bounds() == before
+    assert doc.redo() is True
+    assert layer.bounds() != before

@@ -147,6 +147,49 @@ void drop_unmatched_mesh_chunks(ClaySpaceDoc* out) {
 
 }  // namespace
 
+std::uint64_t snapshot_identity(const std::uint8_t* data, std::size_t size) {
+    // EIGHT BYTES AT A TIME, and that is a measurement rather than a
+    // preference. The obvious implementation is the byte-at-a-time FNV-1a
+    // session/layer_digest.h uses, and on a 1.13 MB snapshot (5 000 items and
+    // a 32^3 fill) it costs 1.36 ms against the 1.52 ms save that produced
+    // those bytes — 90% ON TOP OF EVERY SAVE, paid by every host including the
+    // ones that never journal. Over 64-bit words the same idea runs at 4.7
+    // GB/s against 0.83, which is 0.24 ms and 15% of the save.
+    //
+    // The length is folded in at the start so a truncated snapshot cannot hash
+    // like the whole one, and the murmur3 finalizer is what makes a word's
+    // worth of change reach every output bit — FNV's per-byte multiply does
+    // that job in the byte-at-a-time form and nothing does it in this one.
+    //
+    // Byte order is NOT normalised: a recovery pair is produced and consumed
+    // on one machine, has never been portable, and paying a per-byte assembly
+    // to make an id travel would give back the whole win above.
+    constexpr std::uint64_t kPrime = 1099511628211ull;
+    std::uint64_t h = 1469598103934665603ull ^ (size * 0x9e3779b97f4a7c15ull);
+    const auto finalize = [](std::uint64_t x) {
+        x ^= x >> 33;
+        x *= 0xff51afd7ed558ccdull;
+        x ^= x >> 33;
+        x *= 0xc4ceb9fe1a85ec53ull;
+        x ^= x >> 33;
+        return x;
+    };
+    std::size_t i = 0;
+    for (; i + 8 <= size; i += 8) {
+        std::uint64_t w = 0;
+        std::memcpy(&w, data + i, 8);
+        h = (h ^ finalize(w)) * kPrime;
+    }
+    std::uint64_t tail = 0;
+    for (std::size_t k = 0; i + k < size; ++k)
+        tail |= static_cast<std::uint64_t>(data[i + k]) << (8 * k);
+    h = (h ^ finalize(tail)) * kPrime;
+    // Zero MEANS "names no snapshot", so the one hash that would be read as
+    // absence is nudged. One value in 2^64 loses a little distinctness; the
+    // alternative is a snapshot that silently opts out of the check.
+    return h == 0 ? 1ull : h;
+}
+
 std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc) {
     std::vector<std::uint8_t> out;
     put_u32(out, kMagic);
@@ -187,6 +230,12 @@ std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc) {
     if (doc.groups && !doc.groups->empty()) put_chunk(out, kGroups, doc.groups->serialize());
     if (!doc.thumbnail_png.empty()) put_chunk(out, kThumb, doc.thumbnail_png);
     if (!doc.camera_bookmarks.empty()) put_chunk(out, kCamera, doc.camera_bookmarks);
+    // The document now knows which bytes it was last written to, so a journal
+    // taken after this names THIS snapshot (survive-a-crash 2.1). Stamped here
+    // rather than in each binding because a save path that forgot to stamp
+    // would leave the journal naming an older snapshot, and the host would get
+    // a refusal on a pair that was in fact correct.
+    doc.document.snapshot_id = snapshot_identity(out.data(), out.size());
     return out;
 }
 
@@ -262,6 +311,11 @@ IoStatus load_clayspace(const std::uint8_t* data, std::size_t size, ClaySpaceDoc
     // have been read yet.
     drop_unmatched_mesh_chunks(&result);
     drop_unmatched_voxel_chunks(&result);
+    // The other half of the pairing: a document loaded from a snapshot knows
+    // which one it is, so replay can refuse a journal taken against a
+    // different one. Set only on success — a document that failed to load is
+    // not a snapshot of anything.
+    result.document.snapshot_id = snapshot_identity(data, size);
     *out = std::move(result);
     return IoStatus::success();
 }

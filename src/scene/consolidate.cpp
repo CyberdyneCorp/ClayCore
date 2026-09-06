@@ -627,6 +627,151 @@ bool consolidate_layer(Document& doc, LayerId layer_id, const ConsolidationParam
     return replace_layer_with_volume(doc, layer_id, std::move(*volume), undo, nullptr);
 }
 
+// -- the advice ---------------------------------------------------------------
+
+namespace {
+
+// Cells across the smallest feature the layer carries. kBrickDim is 8, so four
+// puts that feature across half a brick. MEASURED rather than assumed: see
+// design.md's "what building it found" for the sweep of 2, 4 and 8 against the
+// parametric field and what it settled.
+constexpr float kCellsPerFeature = 4.0f;
+// The GRID is clamped, not the memory. A banded volume stores only surface
+// bricks, so the byte count follows surface area and is not predictable from
+// either bound — which is why the advice quotes `bytes` at the number it
+// advises and expects a host to refuse on that rather than on the clamp. These
+// only have to keep the sampling pass itself affordable.
+constexpr float kFinestGrid = 512.0f;
+constexpr float kCoarsestGrid = 32.0f;
+
+// The best safe step scale any consolidated layer can declare. A sampled
+// volume declares sqrt(3) times its samples' Lipschitz (cfi_volume) and a
+// redistanced volume's samples measure ~1, so 1/sqrt(3) is the ceiling. A
+// caller asking for more is asking for something no bake delivers, and it is
+// cased here rather than left to fall out of the projection so that the answer
+// costs nothing instead of a full sampling pass.
+constexpr float kBestConsolidatedStepScale = 0.5773503f;
+
+// What one drawable node contributes as a feature, in the frame `view` is
+// expressed in. Zero when it contributes none.
+float node_feature(const Layer& view, const Node& n) {
+    // A volume states its own resolution, so hand it back: (K * c) / K = c is
+    // the whole answer to "a number nobody chose". Carried into this frame,
+    // because the node's and the layer's scales are part of the box the bake
+    // samples — a volume under a half-scale node is half as fine here as it is
+    // in its own lattice. `placed_distance_scale` is the conservative
+    // (smallest-stretch) factor, so it errs towards a finer grid.
+    if (is_volume_item(n) && n.volume->sample_count() > 0)
+        return kCellsPerFeature * n.volume->cell_size() * placed_distance_scale(view, n);
+
+    // Otherwise the SHAPE's own extent, carried by the same factor. NOT
+    // `item_geometry_bound`, which the design named and which building this
+    // refuted: that box is dilated by rounding and blend support, so a 0.06
+    // dab carrying a quadratic blend measures 0.24 there rather than 0.12 and
+    // the advice came out at HALF the cells it meant to put across it —
+    // measured on the K sweep's own fixture, 0.060 where the shape says 0.030,
+    // which moves the dab's surface by 27% of its radius rather than 7%.
+    const math::Aabb b = item_local_bounds(n);
+    if (b.empty() || b.is_infinite()) return 0.0f;
+    const kernel::cfloat3 e = b.extent();
+    return std::min({e.x, e.y, e.z}) * placed_distance_scale(view, n);
+}
+
+// The smallest thing the layer carries, in the frame `view` is expressed in.
+// Zero when nothing finite was found.
+// Walks with a cursor over a grow-only worklist rather than the obvious
+// push/pop_back stack. The answer is a MINIMUM over every visible drawable, so
+// visit order cannot change it, and this form has one property the stack does
+// not: `seen` never shrinks, which keeps gcc 13's -Wfree-nonheap-object quiet.
+// That warning fires on the pop_back-then-insert shape here — a false positive
+// (nothing in `seen` aliases the child lists being appended), but it is an
+// error under CLAY_WERROR and the honest fix is the simpler traversal rather
+// than a pragma that would outlive the compiler bug.
+float smallest_feature(const Layer& view) {
+    float out = 0.0f;
+    std::vector<NodeId> seen(view.sdf->roots.begin(), view.sdf->roots.end());
+    for (std::size_t i = 0; i < seen.size(); ++i) {
+        const NodeId id = seen[i];
+        const Node* n = view.sdf->find(id);
+        if (!n || !n->visible) continue;  // hidden subtrees reach the field nowhere
+        seen.insert(seen.end(), n->children.begin(), n->children.end());
+        if (n->is_group) continue;  // a transform and a name; nothing is evaluated
+        const float f = node_feature(view, *n);
+        if (f > 0.0f && (out == 0.0f || f < out)) out = f;
+    }
+    return out;
+}
+
+}  // namespace
+
+ConsolidationParams advised_params(const Layer& layer) {
+    ConsolidationParams out;  // cell_size == 0: nothing to derive from
+    if (layer.kind != LayerKind::Sdf || !layer.sdf) return out;
+
+    // The LOCAL frame, which is the one the bake samples. Deriving from
+    // `layer_bounds` would compose the layer transform and advise a cell size
+    // wrong by the layer's scale — and right on every layer at identity, so
+    // the mistake would not show up until a host scaled a subtool.
+    const Layer view = local_view(layer);
+    const Tape tape = compile_layer(view);
+    if (tape.empty() || tape.bounds.empty() || tape.bounds.is_infinite()) return out;
+    const kernel::cfloat3 span = tape.bounds.extent();
+    const float extent = std::max({span.x, span.y, span.z});
+    if (!(extent > 0.0f)) return out;
+
+    // No finite feature anywhere resolves to the coarsest grid rather than to
+    // a refusal: the layer has an extent, so it has a bake, and the clamp is
+    // the honest answer for a shape that declares no size of its own.
+    float feature = smallest_feature(view);
+    if (!(feature > 0.0f)) feature = extent;
+
+    const float cell = std::clamp(feature / kCellsPerFeature, extent / kFinestGrid,
+                                  extent / kCoarsestGrid);
+    out.cell_size = cell;
+    // Spelled out rather than left as the zeros that mean the same thing
+    // today: a host that STORES the advice and re-bakes a week later must get
+    // the same box, and a cost measured at 3 * cell beside params reading 0
+    // describes two different bakes.
+    out.band = 3.0f * cell;
+    out.padding = out.band;
+    // Not a default carried through — the point. Redistancing is what bounds
+    // the Lipschitz, so advising a skip would advise a bake that does not cure
+    // what the flag reported.
+    out.skip_redistance = false;
+    return out;
+}
+
+ConsolidationAdvice consolidation_advice(const Layer& layer, float advise_below_step_scale,
+                                         const BakePointEval& point_eval) {
+    ConsolidationAdvice out;
+    if (!(advise_below_step_scale > 0.0f)) return out;
+    if (advise_below_step_scale > kBestConsolidatedStepScale) return out;
+    if (layer.kind != LayerKind::Sdf || !layer.sdf) return out;
+    // Advising a bake that `consolidate_layer` will refuse is bad advice
+    // rather than an error: a host walking a stack of mixed kinds gets "not
+    // advised" for all of them and special-cases none.
+    if (layer.protected_from_edits()) return out;
+    if (!report_layer(layer, advise_below_step_scale).advises_consolidation) return out;
+
+    const ConsolidationParams params = advised_params(layer);
+    if (!(params.cell_size > 0.0f)) return out;
+
+    ConsolidationCost cost;
+    if (!bake_layer(layer, params, &cost, point_eval)) return out;
+    // The verdict follows the NUMBER, not only the mechanism (#387 one step
+    // on). A projection that does not reach the caller's threshold is the
+    // honest answer for every shape that produces it — an already-consolidated
+    // layer whose samples are still steep, contents that resample no better
+    // than they evaluate, a redistance that cannot recover the shape — and it
+    // is the same answer for all of them.
+    if (cost.safe_step_scale < advise_below_step_scale) return out;
+
+    out.advises = true;
+    out.params = params;
+    out.cost = cost;
+    return out;
+}
+
 bool consolidation_state(const Layer& layer, ConsolidationCost* out_cost) {
     if (!layer.sdf || layer.sdf->roots.size() != 1) return false;
     const Node* n = layer.sdf->find(layer.sdf->roots.front());

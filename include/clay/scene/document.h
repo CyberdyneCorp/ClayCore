@@ -380,6 +380,33 @@ class Document {
     // Runtime only: never serialized, and meaningless across documents.
     std::uint64_t content_serial = 1;
 
+    // WHICH BYTES THIS DOCUMENT WAS LAST WRITTEN TO OR READ FROM, so a crash
+    // journal can name the snapshot it continues from (survive-a-crash 2.1).
+    //
+    // A hash of the serialized bytes -- FNV-1a 64, `io::snapshot_identity` --
+    // set by `io::save_clayspace` and `io::load_clayspace`. Zero means this
+    // document has never been serialized either way and therefore names no
+    // snapshot; a journal taken from it names none either, and replay has
+    // nothing to compare.
+    //
+    // WHY THE CONTENT AND NOT A SESSION TOKEN. Two snapshots with the same
+    // bytes ARE the same snapshot: a journal taken against one replays onto
+    // the other exactly, and a random per-session token would refuse a pair
+    // that recovers perfectly. The content is permissive exactly where that is
+    // safe and strict everywhere else.
+    //
+    // `mutable` because `save_clayspace` takes the document by const reference
+    // and cannot stop doing so -- `clay_document_save_memory` takes a
+    // `const clay_document*` and changing that would break every compiled
+    // host. Recording which bytes were produced is a fact about the
+    // SERIALIZATION, not about the model: nothing reads it during a save, and
+    // two threads saving one document write the same value, because
+    // `save_clayspace` is deterministic.
+    //
+    // Runtime only: never serialized, and copied with the document, because a
+    // copy of a snapshot IS that snapshot.
+    mutable std::uint64_t snapshot_id = 0;
+
     Layer& add_sdf_layer(std::string name) {
         Layer l;
         l.id = next_layer_id_++;

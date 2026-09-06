@@ -487,11 +487,28 @@ forward-refuse).
    host that asserted "every field brush moves the surface by more than 1e-3":
    smoothing a pristine sphere now moves it 3.0e-4, correctly, where the old
    figure was reading six thousandths of MEASUREMENT ERROR as six thousandths of
-   clay. **The brush got stronger, not weaker** — the same host's control, four
-   smoothing passes over a dab 0.037 proud, takes back 0.008360 at v0.78.0 and
-   0.010919 at v0.84.0. A host with an absolute displacement threshold
-   calibrated before this release should re-derive it against a no-op case
-   rather than widen it.
+   clay.
+
+   **The BRUSH did not change, and an earlier draft of this entry said it had.**
+   That draft cited a host's control — four smoothing passes taking back
+   0.008360 at v0.78.0 and 0.010919 at v0.84.0 — as evidence the brush got
+   stronger while the ruler got finer. Both figures are PICK readings, so the
+   control measured the thing that changed. Re-measured by that host with
+   `clay_eval_points`, a direct field read with no marcher and no epsilon, over
+   2,197 points on both pins: **the field deltas agree to the last digit** —
+   0.0400000 for one stroke and 0.1198471 for four dabs, on v0.78.0 and on
+   v0.84.0 alike, with all 2,197 points moving on both. The brush is
+   bit-identical across the release.
+
+   **What the fixture actually demonstrates is the size of the change to
+   picking, and it is a better advertisement than a stronger brush would have
+   been:** one stroke moves the field by 0.04, and the old pick reported the
+   surface as unmoved — `1.0350003` before and `1.0350003` after, exactly. The
+   new pick reports 0.0022205. An instrument that returns bit-identical readings
+   across a four-hundredths field change is not measuring a weak effect; it is
+   quantising. A host with an absolute displacement threshold calibrated before
+   this release should re-derive it against a no-op case rather than widen it,
+   and should be sure the case is read with a field query rather than a pick.
 
    **And an edit to a `CLAY_OP_INTERSECT` item stopped being quadratic** in the
    layer's intersects (issue #451). Same bounds, same invalidation, same bricks —
