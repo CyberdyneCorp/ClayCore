@@ -554,6 +554,80 @@ TEST_CASE("regional: a uniform level has nothing outside it") {
     }
 }
 
+TEST_CASE("regional: the memory report carries the cross-level neighbourhood") {
+    // THE NEIGHBOURHOOD IS REBUILDABLE STORAGE, and a host reads `memory()` to
+    // decide what to release. `byte_split` prices it into `runtime_index`
+    // beside the connectivity and the level meshes, and until this case nothing
+    // depended on that term: every case that builds a non-empty neighbourhood
+    // and then reads the report looks at `resident_levels`, and the two that
+    // check byte figures run on uniform hierarchies, where there is nothing
+    // outside a level and the neighbourhood is empty. Dropping the term left
+    // the suite green with the same assertion count.
+    const Mesh cage = grid_quads(6, 1.0f);
+    MultiresSurface s = build(cage);
+    REQUIRE(s.refine_patches_to_level(block_patches(6, 2, 2, 2), 3));
+
+    // A BRUSH BOUND AND A STAMP TAKEN, because that is the state a report is
+    // read in: binding asks for the neighbourhood of the sculpt level itself,
+    // so levels 0..3 are resident and evaluated and level 3's neighbourhood is
+    // already built and already priced.
+    mesh::MeshBrushSettings settings;
+    settings.radius = 0.35f;
+    settings.strength = 1.0f;
+    settings.center = s.positions_at(3)[0];
+    REQUIRE(s.set_sculpt_level(3));
+    mesh::MultiresSculptor sculptor(s);
+    sculptor.begin_stroke();
+    REQUIRE(sculptor.stamp(mesh::MeshBrush::Draw, settings) > 0);
+    REQUIRE_FALSE(s.cross_level_at(3).empty());
+
+    // THEN THE HOST ACTS ON THE REPORT, which is the whole reason the row
+    // exists: `drop_all_caches` releases every neighbourhood along with
+    // everything else derived, and reading the level back brings the levels
+    // home resident and evaluated with no neighbourhood among them. A stroke
+    // that crosses a depth boundary writes the coarse side too and builds the
+    // neighbourhood of the levels it writes, so this is also what makes the
+    // measurement below a measurement of one term rather than of whichever
+    // levels the stamp happened to reach.
+    s.drop_all_caches();
+    s.positions_at(3);
+    const mesh::MultiresMemory before = s.memory();
+    // Nothing else is allocated on the way: every level this reads is already
+    // resident and evaluated, so the difference between the two reports is the
+    // term under test and nothing besides.
+    const mesh::CrossLevelNeighborhood& cross = s.cross_level_at(3);
+    REQUIRE_FALSE(cross.empty());
+    const mesh::MultiresMemory after = s.memory();
+
+    // WHAT IT SHOULD WEIGH, COUNTED FROM THE ARRAYS `build_cross_level` FILLED
+    // rather than from `bytes()` — an expectation the checked code computes
+    // proves nothing. Sizes rather than capacities, so this is a floor: these
+    // vectors are grown rather than reserved and hold at least what is in them.
+    const std::size_t u32 = sizeof(std::uint32_t), f3 = sizeof(cfloat3);
+    const std::size_t floor_bytes =
+        cross.outside_layout.size() * u32 + cross.outside_positions.size() * f3 +
+        cross.corners.size() * u32 + cross.dense_face.size() * u32 +
+        cross.face_patch.size() * u32 + cross.face_offsets.size() * u32 +
+        cross.faces.size() * u32 + cross.ring_offsets.size() * u32 + cross.ring.size() * u32;
+    // NOT A ZERO QUANTITY: a gate that passed because the neighbourhood was
+    // empty would be the defect it exists to catch, in the shape it was found.
+    REQUIRE(cross.face_count() > 0u);
+    REQUIRE(floor_bytes > 4096u);
+
+    INFO("runtime_index " << before.runtime_index << " -> " << after.runtime_index
+                          << ", neighbourhood floor " << floor_bytes);
+    CHECK(after.runtime_index >= before.runtime_index + floor_bytes);
+
+    // AND IT IS THE RUNTIME ROW THAT MOVED. A host answering a memory warning
+    // acts on the categories separately, so a neighbourhood priced into the
+    // wrong one — or into the total alone — is a report it cannot act on.
+    CHECK(after.evaluated == before.evaluated);
+    CHECK(after.chunk_index == before.chunk_index);
+    CHECK(after.authoritative == before.authoritative);
+    CHECK(after.rebuildable - before.rebuildable == after.runtime_index - before.runtime_index);
+    CHECK(after.total - before.total == after.runtime_index - before.runtime_index);
+}
+
 // -- the mixed-depth export ---------------------------------------------------
 //
 // The residual `refine-one-region-of-a-hierarchy` left as task 2.3, and the
