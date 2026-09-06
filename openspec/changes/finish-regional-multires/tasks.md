@@ -393,7 +393,14 @@
       holding; a mixed one with a split edge carries no quad list. The three
       patch counts that say why: 48 patches emit more triangles than twice their
       faces (a split edge), 12 emit exactly twice and still span two levels
-      (corner-only, all quads), 84 are untouched
+      (corner-only, all quads), 84 are untouched. AND THE MIDDLE OF THE SPEC'S
+      BOUNDARY, which those two ends did not reach: a WHOLE export that is
+      mixed-depth and corner-only still keeps its quad list. Gated on the only
+      cage shape that can be one — two quad grids joined at a single cage vertex,
+      one half refined, since on an edge-connected cage a split-edge-free refined
+      set is closed under edge adjacency and therefore uniform — at 20 quads, 40
+      triangles and 33 vertices rather than 34, the missing one being the coarse
+      face borrowing the fine side's corner
 - [x] 5.11 GATE: stability under re-refinement. Refining a distant region leaves
       84 of 144 patches byte-identical — indices, vertex levels and positions —
       while 60 change, so the count is a comparison rather than a tautology. The

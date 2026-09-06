@@ -873,6 +873,101 @@ TEST_CASE("regional export: quads survive exactly as far as the split edges allo
     CHECK(untouched == 84u);
 }
 
+namespace {
+
+// TWO 2x2 QUAD GRIDS THAT MEET AT EXACTLY ONE CAGE VERTEX, and the only shape
+// of cage on which a whole mixed-depth export can be corner-only.
+//
+// On any edge-connected cage it is impossible, and that is closure rather than
+// a limit of the refinement API: a coarse patch sharing an EDGE with a refined
+// one has that edge split, so an export with no split edge anywhere needs the
+// refined set to be closed under edge adjacency — which on an edge-connected
+// cage means every patch or none, and that is a uniform export rather than a
+// mixed one. Joining the two halves at a vertex alone is what leaves a real
+// depth boundary with no edge across it.
+//
+// Patches 0..3 are the coarse grid, cells (-2,-2) to (-1,-1); patches 4..7 are
+// the fine one, cells (0,0) to (1,1). Patch 3 is the coarse cell whose corner
+// IS the shared vertex.
+Mesh corner_joined_grids() {
+    Mesh m;
+    std::map<std::pair<int, int>, std::uint32_t> at;
+    const auto vert = [&](int x, int z) {
+        const auto found = at.find({x, z});
+        if (found != at.end()) return found->second;
+        const std::uint32_t id = static_cast<std::uint32_t>(m.positions.size());
+        m.positions.push_back(cf3(static_cast<float>(x), 0.0f, static_cast<float>(z)));
+        at.emplace(std::make_pair(x, z), id);
+        return id;
+    };
+    const auto cell = [&](int x, int z) {
+        const std::uint32_t a = vert(x, z), b = vert(x + 1, z), c = vert(x + 1, z + 1),
+                            d = vert(x, z + 1);
+        m.quads.insert(m.quads.end(), {a, b, c, d});
+        m.indices.insert(m.indices.end(), {a, b, c, a, c, d});
+    };
+    for (int z = -2; z < 0; ++z)
+        for (int x = -2; x < 0; ++x) cell(x, z);
+    for (int z = 0; z < 2; ++z)
+        for (int x = 0; x < 2; ++x) cell(x, z);
+    return m;
+}
+
+}  // namespace
+
+TEST_CASE("regional export: a corner-only mixed export keeps its quad list") {
+    // THE MIDDLE OF THE GUARANTEE, which the case above does not reach. It
+    // covers the two ends the mixed path shares with the single-level one — a
+    // UNIFORM export keeps quads, a MIXED export WITH split edges drops them —
+    // and the spec states a third: an export whose transitions are all
+    // CORNER-ONLY keeps them too. Nothing built that one, so a change that
+    // dropped `Mesh::quads` for any export spanning more than one level would
+    // have passed every assertion in this file.
+    //
+    // The counts below are derived from the cage rather than read off a run.
+    MultiresSurface s = build(corner_joined_grids());
+    REQUIRE(s.topology_at(0).face_count == 8u);
+    REQUIRE(s.refine_patches_to_level({4u, 5u, 6u, 7u}, 1));
+
+    // IT IS GENUINELY MIXED-DEPTH: the two halves are emitted from different
+    // levels, which is what the uniform case cannot say.
+    for (std::uint32_t p = 0; p < 4u; ++p) CHECK(s.effective_level(p, 1) == 0u);
+    for (std::uint32_t p = 4u; p < 8u; ++p) CHECK(s.effective_level(p, 1) == 1u);
+
+    mesh::MultiresMixedStatus status = mesh::MultiresMixedStatus::NotBuilt;
+    const Mesh mixed = s.mixed_mesh_at_level(1, {}, &status);
+    REQUIRE(status == mesh::MultiresMixedStatus::Ok);
+
+    // THE QUAD LIST SURVIVES, with the invariant `mesh_data.h` states: 4 coarse
+    // faces plus 4 patches subdivided once (4 faces each) is 20 quads, and 20
+    // quads is 40 triangles.
+    CHECK_FALSE(mixed.quads.empty());
+    CHECK(mixed.quads.size() == 80u);
+    CHECK(mixed.indices.size() == 120u);
+    CHECK(mixed.quads.size() / 4u * 6u == mixed.indices.size());
+
+    // AND THE TRANSITION IS REAL RATHER THAN ABSENT, which is the difference
+    // between this fixture and two unrelated meshes in one file. 33 vertices,
+    // not 34: the fine half's level-1 grid is 5x5 = 25, the coarse half's is
+    // 3x3 = 9, and the shared corner is ONE of them because the coarse face
+    // borrows the fine side's vertex point rather than keeping its own.
+    CHECK(mixed.positions.size() == 33u);
+
+    // NO EDGE IS SPLIT, said as triangles rather than as an absence: patch 3
+    // is the coarse cell at the join, it spans two levels, and it still emits
+    // exactly two triangles for its one face. A split edge would make it three.
+    MultiresSurface::Block corner;
+    REQUIRE(s.build_mixed_block(1, 3u, &corner));
+    CHECK(corner.level == 0u);
+    CHECK_FALSE(corner.vertex_levels.empty());
+    CHECK(corner.indices.size() == 2u * 3u * patch_face_count(s, 0u, 3u));
+
+    // The open edges are the two grids' own rims and nothing else — 8 around a
+    // 2x2 grid of quads, 16 around the fine half's 4x4 — so the corner join
+    // opened nothing.
+    CHECK(open_edges(mixed.indices) == 24u);
+}
+
 TEST_CASE("regional export: a REUSED block does not carry the last block's levels") {
     // WHY A REUSED BLOCK AND NOT A FRESH ONE. `Block::vertex_levels` is EMPTY
     // on a single-level block, and that emptiness is the statement "every

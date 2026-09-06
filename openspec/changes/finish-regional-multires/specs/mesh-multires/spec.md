@@ -230,6 +230,19 @@ intact, as SHALL every uniform-depth export; an export containing a split edge
 SHALL be emitted as a triangle list with no quad list, because a quad list
 describing indices that no longer exist is a lie a saved document would carry.
 
+WHICH CAGES REACH THE CORNER-ONLY CASE, so the middle of that boundary is a
+gated branch rather than a sentence no fixture can stand on. A coarse patch
+sharing an EDGE with a refined one has that edge split, so a whole export with no
+split edge anywhere requires the refined set to be closed under edge adjacency —
+which on an edge-connected cage means every patch or none, and that is the
+uniform case. The corner-only case is therefore reached only where two parts of
+the cage meet at a VERTEX without sharing an edge, and it is gated on exactly
+that: two quad grids joined at one cage vertex, one half refined, whose export
+keeps its quad list and whose coarse face at the join still emits two triangles
+for its one face. Per-patch, the case is commoner than that — a corner-only
+patch beside an ordinary refined block is one that shares only a cage vertex
+with it — and the per-patch counts are gated too.
+
 The output SHALL be DETERMINISTIC — the same hierarchy emits the same faces in the
 same order on every run and on every platform — and STABLE under re-refinement:
 refining an unrelated region SHALL leave the emitted faces of a coarse face whose
