@@ -403,6 +403,18 @@ std::size_t MultiresSculptor::stamp_coarse(MeshBrush verb, const MeshBrushSettin
         moved += partition_coarse_write(sculptor, ChildIndex::of(surface_.topology_at(c.level + 1)),
                                         &c.written, &not_owned_);
         surface_.restore_level_positions(c.level, not_owned_);
+        // AND THE BOUNDS THE SAME CALL GOT WRONG. This sculptor recomputed the
+        // normals and refit the chunk bounds of everything it wrote before the
+        // partition existed, both from the DISPLACED positions -- it has to,
+        // because it does not defer, and the note on `set_defer_normals` says
+        // why it must not. `restore_level_positions` puts the positions back
+        // and re-derives the normals the hierarchy owns; the bounds are this
+        // table's, so they are refit here, by the same call, over the same
+        // write region. A chunk whose box no longer contains its own vertices
+        // makes `nearest_class` through the chunk index miss on the next dab --
+        // the hazard `absorb_level_edit` writes down.
+        if (!not_owned_.empty())
+            sculptor.publish_chunks(/*normals_changed=*/true, /*attributes_changed=*/false);
         if (c.written.empty()) continue;
         note_before(c.level, c.written, c.deltas, active_layer, record, layer_record);
         surface_.absorb_level_edit(c.level, c.written);

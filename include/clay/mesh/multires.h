@@ -745,6 +745,13 @@ class MultiresSurface {
     // cached mesh back to what the STORED coefficients reconstruct to, keeping
     // nothing.
     //
+    // THE DISPLAY NORMALS TRAVEL WITH THEM, and that is part of "keeping
+    // nothing" rather than a courtesy. Whatever moved the level's mesh
+    // recomputed its normals from the DISPLACED positions -- `MeshSculptor`
+    // does it inside the write it was asked for -- so restoring the positions
+    // alone would leave the caller's edit alive in the shading. The recompute
+    // is queued the way `absorb_level_edit` queues its own and drained with it.
+    //
     // For a caller that moved a level's mesh and then decided part of the move
     // was not its to keep. `absorb_level_edit` already does this internally when
     // it refuses a locked layer, for the same reason: the brush moves the mesh

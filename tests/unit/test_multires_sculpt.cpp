@@ -1600,6 +1600,112 @@ TEST_CASE("multires: a crossing stamp survives a cache drop under it") {
 
 namespace {
 
+// EVERYTHING A HOST READS OFF A LEVEL, not only its positions: the shading it
+// draws with, and the boxes it culls and picks against.
+struct LevelState {
+    std::vector<cfloat3> positions;
+    std::vector<cfloat3> normals;
+    std::vector<math::Aabb> bounds;
+    // Per chunk, and NOT part of what has to match -- it is how the gate below
+    // knows the coarse sculptor really wrote this level before the restore put
+    // it back.
+    std::vector<std::uint64_t> revisions;
+};
+
+LevelState level_state(MultiresSurface& s, std::uint32_t level) {
+    LevelState out;
+    out.positions = s.positions_at(level);
+    out.normals = s.level_mesh(level).normals;
+    const mesh::ChunkTable& chunks = s.chunks_at(level);
+    for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(chunks.slot_count()); ++i)
+        if (const mesh::SurfaceChunk* c = chunks.chunk(i)) {
+            out.bounds.push_back(c->bounds);
+            out.revisions.push_back(c->revision);
+        }
+    return out;
+}
+
+bool same_bounds(const std::vector<math::Aabb>& a, const std::vector<math::Aabb>& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        if (!same_bytes({a[i].min, a[i].max}, {b[i].min, b[i].max})) return false;
+    return true;
+}
+
+// How many chunks the stamp told the host to re-upload.
+std::size_t marked_chunks(const LevelState& now, const LevelState& never) {
+    REQUIRE(now.revisions.size() == never.revisions.size());
+    std::size_t marked = 0;
+    for (std::size_t i = 0; i < now.revisions.size(); ++i)
+        if (now.revisions[i] != never.revisions[i]) ++marked;
+    return marked;
+}
+
+}  // namespace
+
+TEST_CASE("multires: a coarse stamp that owns nothing leaves the coarse level untouched") {
+    // WHAT A RESTORE HAS TO PUT BACK. The coarse sculptor a crossing stamp
+    // builds does not defer, so it recomputes the normals over its write region
+    // and its ring and refits the chunk bounds it wrote — both from the
+    // DISPLACED positions — before anything knows which of those vertices the
+    // level above owns. `restore_level_positions` then puts the not-owned ones
+    // back, and for a long time it put back only the POSITIONS: the brush's
+    // write survived in the shading and in the boxes, and a chunk whose box no
+    // longer contains its own vertices is one `nearest_class` can miss on the
+    // next dab.
+    //
+    // The subcase where every touched coarse class is owned above is the clean
+    // instrument: nothing at all is absorbed there, so the whole of a coarse
+    // level must come back byte-identical to one that was never stamped.
+    const Mesh cage = bumpy_quads(6, 1.0f);
+    MultiresSurface with = build_regional(cage);
+    MultiresSurface without = build_regional(cage);
+
+    MeshBrushSettings settings;
+    settings.radius = 0.08f;
+    settings.strength = 0.5f;
+    {
+        const std::vector<cfloat3>& p = with.positions_at(3);
+        settings.center = p[nearest_vertex(p, cf3(0, 0, 0))];
+    }
+    // The boxes both hierarchies start from, read before the stamp so that the
+    // partition is built from an evaluated level rather than repaired later.
+    for (std::uint32_t level = 0; level <= 2; ++level) {
+        with.chunks_at(level);
+        without.chunks_at(level);
+    }
+
+    with.set_sculpt_level(3);
+    MultiresSculptor sculptor(with);
+    sculptor.begin_stroke();
+    CHECK(sculptor.stamp(MeshBrush::Draw, settings) > 0);
+    // Nothing below the sculpt level was absorbed — this is that subcase.
+    CHECK(sculptor.last_write_levels() == std::vector<std::uint32_t>{3u});
+
+    std::size_t reached = 0;
+    for (std::uint32_t level = 0; level <= 2; ++level) {
+        CAPTURE(level);
+        const LevelState now = level_state(with, level);
+        const LevelState never = level_state(without, level);
+        // The level has shading and boxes to get wrong in the first place.
+        REQUIRE(now.normals.size() == now.positions.size());
+        REQUIRE(!now.normals.empty());
+        REQUIRE(!now.bounds.empty());
+        reached += marked_chunks(now, never);
+        CHECK(same_bytes(now.positions, never.positions));
+        CHECK(same_bytes(now.normals, never.normals));
+        CHECK(same_bounds(now.bounds, never.bounds));
+    }
+    // NOT VACUOUS. A coarse sculptor that had reached nothing would restore
+    // nothing and pass the three gates above without them measuring anything;
+    // the chunks it marked are the evidence that it moved this hierarchy's
+    // coarse levels and then put them back.
+    MESSAGE("the coarse pass marked " << reached << " chunks it then restored");
+    CHECK(reached > 0);
+}
+
+namespace {
+
 // The furthest any vertex of `now` stands from where it stood in `was`.
 float worst_travel(const std::vector<cfloat3>& was, const std::vector<cfloat3>& now) {
     REQUIRE(was.size() == now.size());

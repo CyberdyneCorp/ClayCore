@@ -740,9 +740,20 @@ void restore_positions(MultiresSurface::State& s, std::uint32_t level,
             c.mesh.positions[v] = s.base.positions[s.class_members[s.class_offsets[v]]];
         }
         if (rest) apply_base_layers(s, &vertices);
+        // AND THE DISPLAY NORMALS OVER THEM, which at level 0 travel with the
+        // base frames -- exactly what `absorb_base_edit` queues for the write
+        // this is the refusal of.
+        s.base_frames_dirty.insert(s.base_frames_dirty.end(), vertices.begin(), vertices.end());
         return;
     }
     apply_detail(lev, vertices);
+    // AND THE DISPLAY NORMALS, for the reason `absorb_level_edit` queues them
+    // over what it absorbs. The caller moved this level's mesh, and whatever
+    // recomputed its normals did so from the DISPLACED positions; putting the
+    // positions back and leaving those normals is keeping something, which is
+    // the one thing this call promises not to do. Drained over the region and
+    // its face ring by `drain_normals_pending`.
+    lev.normals_pending.insert(lev.normals_pending.end(), vertices.begin(), vertices.end());
 }
 
 // Is the write the caller is about to make refused because the layer it would
