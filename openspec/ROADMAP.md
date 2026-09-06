@@ -1257,6 +1257,30 @@ poses per item.
   vertices is the host's, or a subtool is drawn in one place and sculpted in
   another.
 
+### A C-ABI host cannot choose the format minor it writes
+
+`clay_document_save` takes a path and `clay_document_save_memory` takes a blob.
+Neither takes a version, and no other save path does either: the minor is a
+parameter on the C++ `scene::serialize_document` and does not cross the ABI.
+**Three releases of upgrade notes have told hosts to "write at the older minor if
+you exchange documents with an older build", and no C-ABI host has ever been able
+to take that advice** — the host records it beside its own `FORMAT` constant for
+15, 16 and 17.
+
+It cost nothing while every downgrade lost only what no artist authored; 16 → 17
+loses payload deduplication and nothing else. **Minor 18 is where it stops being
+free**, because a subtractive layer written at 17 comes back as a union — a
+cutter returning as a lump welded to the form, in a file that opens cleanly. So a
+host that wants an interchange copy cannot offer one, and a host that wants to
+REFUSE that downgrade has nothing to refuse, because it could never ask.
+
+`fold-the-layers-with-an-operator` settles the half that is its own (design.md
+§7): writing below 18 refuses a document carrying any non-default composition
+rather than degrading it, stays byte-identical for documents where every layer
+unions, and ships a query so a host can ask before it saves. **The selector is
+the gap that remains** — a save-at-minor entry point, with the blob variant, the
+autosave and journal paths, and the other lossy minors in scope. Its own change.
+
 ### Where a host cannot draw a progress bar or cancel
 
 `add-operation-cancellation` shipped the token and the poll, and twelve of their
