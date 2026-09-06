@@ -7843,6 +7843,35 @@ def test_a_layer_composition_refuses_what_it_cannot_carry():
 # points check the kind before they build a command.
 
 
+def test_writable_at_minor_names_the_layer_that_blocks_an_older_save():
+    # The question a host asks BEFORE it saves for an older build. Writing a
+    # composed document at minor 17 would bring the cutter back as a union --
+    # a different sculpture in a file that opens cleanly -- so the writer
+    # refuses, and this is how a host finds that out in time to say which
+    # subtool is responsible.
+    #
+    # In pyclay because pyclay is the surface every example and the gallery go
+    # through: examples/75_layer_booleans.py produces exactly this document,
+    # and until now only the C ABI could ask the question about it.
+    doc, _base, cut = _cutter_doc()
+    ok, blocking = doc.writable_at_minor(17)
+    assert ok and blocking == 0  # a hard-unioning document says what 17 can say
+
+    doc.set_layer_composition(cut.id, op=clay.Op.SUBTRACT)
+    ok, blocking = doc.writable_at_minor(17)
+    assert not ok
+    assert blocking == cut.id  # the layer to hide or flatten, not just "no"
+
+    # The current minor can say it, and so can any minor above this build's --
+    # the question is only ever about writing DOWN, so a future one is clamped
+    # rather than refused.
+    assert doc.writable_at_minor(18) == (True, 0)
+    assert doc.writable_at_minor(999) == (True, 0)
+
+    with pytest.raises(ValueError):
+        doc.writable_at_minor(0)  # a format minor starts at 1
+
+
 def test_excluding_one_layer_is_refused_once_a_layer_composes():
     # min(without(L), only(L)) is the whole document only while every layer
     # unions, so the composed case refuses rather than answering something that

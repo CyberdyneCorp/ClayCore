@@ -7315,6 +7315,31 @@ NB_MODULE(pyclay, m) {
              "layer"_a,
              "A layer's (op, blend, rounding) fold. A non-SDF layer raises rather than "
              "answering Op.ADD, which would read as a composition it cannot carry.")
+        .def("writable_at_minor",
+             [](const PyDocument& d, unsigned minor) {
+                 if (minor == 0) throw std::invalid_argument("a format minor starts at 1");
+                 // Clamped rather than refused above this build's layout, as
+                 // the C form clamps: the question is only ever about writing
+                 // DOWN, and a minor from the future loses nothing.
+                 const std::uint16_t asked =
+                     minor > scene::kSceneMinor ? scene::kSceneMinor
+                                                : static_cast<std::uint16_t>(minor);
+                 const scene::LayerId blocking =
+                     scene::layer_blocking_minor(d.doc->document, asked);
+                 return nb::make_tuple(blocking == 0, blocking);
+             },
+             "minor"_a,
+             "Can this document be written at scene format minor `minor`? Returns\n"
+             "(ok, blocking_layer): (True, 0) when every layer can be said at that\n"
+             "layout, and (False, layer_id) naming the FIRST layer that cannot --\n"
+             "which today means a layer carrying a non-default composition below\n"
+             "minor 18. Ask BEFORE saving: writing a subtracting layer at 17 would\n"
+             "bring it back as a union, so the cutter that carved a hole returns as\n"
+             "a lump welded on, in a file that opens cleanly and looks deliberate.\n"
+             "A minor above this build's is clamped to it rather than refused. The\n"
+             "id is returned rather than only a flag so a host can say WHICH subtool\n"
+             "to change instead of making the artist find it. Mirrors\n"
+             "clay_document_writable_at_minor.")
         .def("set_layer_transform",
              [](PyDocument& d, scene::LayerId layer, nb::handle position,
                 nb::handle rotation_axis_angle, nb::handle scale) {

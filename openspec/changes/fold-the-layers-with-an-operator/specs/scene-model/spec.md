@@ -120,6 +120,18 @@ its own geometry does not reach — per brick, with no error. The documentation
 SHALL say which route the engine takes, why it cannot take the other, and that a
 host wanting the two to agree filters empty operands itself.
 
+A LAYER'S FOLD RADIUS IS AN ABSOLUTE WORLD DISTANCE, and a scale of that layer
+SHALL NOT be classified as a similarity of its own field while it carries one.
+The blend radius does not follow the layer's transform — the fold's ROUNDING
+does — so a layer whose items all scale cleanly but whose composition carries a
+radius SHALL classify as GENERAL, at the host-facing report and not only in the
+predicate behind it, because the verdict feeds a placement gesture whose whole
+purpose is to skip work: a wrong similarity there is a picture that lags its own
+field rather than a recomputation that costs a little. A radius is a radius
+whatever the blend profile says: an EXTENDED fold reads the radius field as its
+own depth or amplitude and ignores the profile entirely, so it SHALL be counted
+too.
+
 A document saved before layer composition existed SHALL load with every layer
 unioning, and SHALL render exactly as it did.
 
@@ -166,6 +178,10 @@ unioning, and SHALL render exactly as it did.
 #### Scenario: An empty intersecting layer blanks the field, and the header says so
 - **WHEN** a visible SDF layer with no contributing items is set to intersect
 - **THEN** the document's field is empty, and the composition setter's documentation states that this differs from a resolved boolean that drops empty operands, and why the engine cannot follow that rule
+
+#### Scenario: Scaling a layer that folds softly is not a similarity
+- **WHEN** a host asks what a uniform scale of a layer would be, for a layer whose items are all hard but whose composition carries a blend radius, or an extended fold with a hard profile and a positive radius
+- **THEN** the report says GENERAL rather than SIMILARITY, and it says SIMILARITY again for the same layer folding hard or carrying only rounding
 
 #### Scenario: A non-SDF layer refuses a composition
 - **WHEN** a composition is set on a mesh or voxel layer

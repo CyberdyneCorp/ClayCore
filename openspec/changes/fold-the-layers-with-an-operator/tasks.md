@@ -4,7 +4,20 @@
       BOUNDARY, which in this tree is the only boundary — the seam is always the
       last visible SDF layer, so the split stays available whenever THAT layer's
       composition is a hard Add, whatever the layers beneath it do, and
-      `fold_layers_below` is left unchanged
+      `fold_layers_below` is left unchanged.
+      PRICED, which the decision said it would be and which was missing until
+      the record stage: `BM_BrickRefillLayersUnion` and
+      `BM_BrickRefillLayersComposed` are the same two-layer 5,000-item document
+      and the same stroke, differing only in the top layer's composition —
+      0.009 ms against 7.96 ms, which is the pre-#348 walk restored for that one
+      shape. The claim is the REFUSAL and a refusal is invisible in the values,
+      so it is gated as a count: `resumed_frac` 0.0 on the composed arm (ceiling
+      0.0) and `refilled_frac` 0.0 on the union arm (ceiling 0.05), with a
+      MAX_RATIO pair naming both rows so they cannot pass by not running —
+      MAX_COUNTER skips an absent benchmark. Proved by deleting the three
+      `layer_join_is_hard_union` refusals: the composed arm resumes everything
+      (`resumed_frac=1.000 above ceiling 0.000`) and the ratio row fails at
+      0.92x
 
 ## 1. The model
 
@@ -150,7 +163,9 @@
       following `resume_batch_into_host`'s "nothing rather than something
       mislabelled". `fold_layers_below` is unchanged byte for byte and its
       comment gains the precondition and the argument for why it is unreachable
-      otherwise. `has_below` keeps meaning "more than one visible SDF layer" for
+      otherwise — an ARGUMENT that was itself backwards when first written (it
+      credited the revision bump, which a region invalidation carries a
+      surviving seed straight past) and is corrected in 7.8. `has_below` keeps meaning "more than one visible SDF layer" for
       the three callers that probe it as topology; the refusal lives in `usable`
       alone
 - [x] 4.6 Each DECIDED and tested. Every refusal is asserted as a COUNT
@@ -226,7 +241,10 @@
       layer's composition, so a soft fold classifies GENERAL and the placement
       gesture stops skipping invalidation on a similarity that is not one — with
       the trade (an absolute radius, or an edit per scale) stated in the header
-      beside the composition setter, where a host will actually meet it
+      beside the composition setter, where a host will actually meet it. That
+      first form read only the blend PROFILE and so still classified an extended
+      fold's radius as clean, and its regression sat at the predicate rather
+      than at the ABI the requirement names; both are closed in 7.8
 - [x] 5.4 THE TWO REACHES THAT WERE MISSING, both silent and both now measured
       by comparing every changed sample against the box the command reports.
       (a) EVERY FOLD ABOVE, not only the layer's own: an edit is carried up the
@@ -289,7 +307,16 @@
       its OWN layer, set to subtract, agreeing sample for sample with the same
       volume as a subtracting item in one layer, and hiding it giving the
       uncarved form back exactly. This is the organisation the change is for:
-      an imported mesh used to have to live in the layer it was cutting
+      an imported mesh used to have to live in the layer it was cutting.
+      AND AS THE BASE (design.md §9's second gate, added by the record stage):
+      the same volume UNDERNEATH a field cutter, which is the other side the
+      host's `boolean_operands` puts every representation on. Hard subtract and
+      SMOOTH subtract, each against the one-layer item form, plus the teeth that
+      the cut is real and that the converted layer's own composition is not
+      applied when it is the first visible one. The fold turns out to treat base
+      and cutter symmetrically, so the gate is the redundant one §9 allowed for
+      — but it is not vacuous: dropping the fold's blend from
+      `emit_chain_combine` moves 592 of its samples
 - [x] 6.6 Benchmarks at 10 / 100 / 1000 layers: a layer op costs about what the
       equivalent item combine costs, and there is no second evaluator.
       `BM_LayerFoldStack{10,100,1000}` against `BM_ItemFoldStack{10,100,1000}` —
@@ -315,13 +342,30 @@
       `FirstVisibleLayer` in tape_build.cpp's anonymous namespace, the local at
       both call sites is that type, and a transposition is a compile error —
       proved by swapping the arguments at one site and reading
-      `error: cannot convert 'bool' to 'FirstVisibleLayer'`, then reverting
-- [ ] 7.2 The sweep design.md §13 requires: every remaining place the fold path
-      reads state a cull region can change, found rather than fixed one at a
-      time. Four are closed — the three §13 tabulates plus 7.3 below, which is
-      the `cull_pad_terms` row of that same table and was found by looking for
-      it rather than by writing it down; the sweep itself is the reviewers'
-      second pass
+      `error: cannot convert 'bool' to 'FirstVisibleLayer'`, then reverting.
+      AND THE SIBLING PAIR, which §13a's closing question asks about and which
+      the first pass left as two adjacent bools: `fold_layer(layer, layer_val,
+      have_acc)` now takes `LayerLeftValue`, typed at the point the value is
+      PRODUCED rather than wrapped at the call, so a transposition has no brace
+      to move with it. Proved the same way: `fold_layer(layer, acc, layer_val)`
+      is `error: cannot convert 'const bool' to 'LayerLeftValue'`, then
+      reverted. The two remaining bools in that path are named for what they
+      are: `first_composed_fold_layer`'s document-derived flag was called
+      `have_acc`, which is the per-compile cull-dependent quantity it is not,
+      and is now `passed_a_layer`
+- [x] 7.2 THE SWEEP design.md §13 requires, RUN — and it is what found 7.3.
+      Retitled from "the sweep itself is the reviewers' second pass", which
+      delegated the requirement rather than meeting it and which the record was
+      wrong to leave standing: the sweep was performed, over every place the
+      fold path reads state a cull region can change, and it returned a fourth
+      predicate nobody had written down — the cull pad, which answered what one
+      LAYER'S CHAIN needs where the question is what the DOCUMENT needs. That is
+      7.3, and it was a live defect rather than a hypothetical. Five sites are
+      now closed: the three §13 tabulates, the pad, and the host-facing bounds
+      of 7.4, which is the same question asked from outside. What remains open
+      is not a sweep but the reviews: §13's own closing note says a fourth of
+      anything needs somebody looking for the same thing a third time, and each
+      review round since has found one
 - [x] 7.3 THE FOURTH cull-observable predicate: the pad answered "what does ONE
       LAYER'S CHAIN need" where the question is "what does the DOCUMENT need,
       fold included" (design.md §10a). The fold term rode the layer that OWNED
@@ -433,3 +477,58 @@
       decided and tested ("an intersecting layer with nothing in it empties the
       document", test_layer_fold.cpp), which is what made this a documentation
       duty rather than a code change
+
+- [x] 7.8 THE FOURTH REVIEW'S RECORD STAGE, which is the two majors, the minors
+      and the accuracy of this file (design.md §13f).
+      CODE:
+        * `fold_layer(layer, layer_val, have_acc)` was the sibling pair §13a
+          asks about and the first pass left as two adjacent bools —
+          `LayerLeftValue` now, typed where the value is PRODUCED so a
+          transposition has no brace to move with it. Proved by swapping the
+          arguments and reading `error: cannot convert 'const bool' to
+          'LayerLeftValue'`, then reverting
+        * §9's SECOND GATE, which was missing: a converted mesh as the BASE
+          under a field cutter, not only as the cutter (6.5 above)
+        * `layer_scales_cleanly` refused only a soft PROFILE with a radius, so
+          an EXTENDED composition — groove, shell, incise, pipe, the reliefs,
+          which read `blend.k` as their own radius and ignore the profile —
+          classified as a SIMILARITY with an absolute radius the scale does not
+          reach, and clay.h promised otherwise. Fixed, documented at the setter
+          and in placement.h, and the regression is at
+          `clay_layer_placement_report` where §11 asked for it rather than one
+          level below at the predicate: proved by reverting the extended term
+          (six ops classify clean again, and the ABI reports SIMILARITY where
+          GENERAL is required) and by reverting the composition term entirely
+          (both ABI subcases fail, the control still passes). The ITEM-level
+          twin of that hole is deliberately NOT touched and says so beside the
+          code: it predates layer composition and reclassifies documents that
+          carry no fold at all
+        * document_fold_is_hard_union deleted, header corrected — it had no
+          caller and `include/clay/scene/tape.h` said the three excluding entry
+          points took it, where all three take `first_composed_fold_layer`
+          (design.md §13f, item 1). Named unquoted here because the name is a
+          deletion and not a claim, which is what check_task_symbols asks for
+        * `fold_layers_below`'s `rev == now` comment stated the opposite of what
+          the code does. Corrected at both ends (§13f, item 2)
+        * `compile_layer_suffix`'s missing seam refusal: the ARGUMENT stated in
+          the header and beside the code, and held by a new test — a seeded
+          suffix across a composed seam is bit-identical to the whole document
+          on three arms, and fails on all three when the seam is forced to a
+          hard Add
+        * `first_composed_fold_layer`'s document-derived flag renamed off
+          `have_acc` (7.1 above)
+        * `Document.writable_at_minor` in pyclay, which had the composition
+          setter/getter pair but not the query that decides whether the document
+          they produce can be saved for an older build. pyclay is the surface
+          every example and the gallery go through, and
+          `examples/75_layer_booleans.py` builds exactly the document that
+          cannot be written at 17. Returns `(ok, blocking_layer)` so the id
+          survives the crossing; parity gate re-run with `--pyclay`
+        * task 0.1's pricing benchmark, which design.md described and which did
+          not exist (0.1 above)
+      CONTRACT: 7.2 retitled from delegating its sweep to the review to
+      recording that the sweep ran and what it found; 0.1, 6.5 and 7.1 extended
+      with what this stage added; the scene-model delta gains the placement
+      requirement and its scenario, which the code has had since the §11 fix and
+      the spec did not say; design.md gains §13f and a correction beside the
+      predicate it named

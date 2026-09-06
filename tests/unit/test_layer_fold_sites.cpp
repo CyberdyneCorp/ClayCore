@@ -144,7 +144,6 @@ TEST_CASE("the join predicates: the seam is one question, every fold another") {
 
     SUBCASE("a document that unions throughout answers yes to both") {
         CHECK(layer_join_is_hard_union(doc));
-        CHECK(document_fold_is_hard_union(doc));
         CHECK(first_composed_fold_layer(doc) == 0);
         // The join at the seam is the LAST layer's composition, and it is
         // applied, so there is one to report.
@@ -156,21 +155,18 @@ TEST_CASE("the join predicates: the seam is one question, every fold another") {
     SUBCASE("a composed layer in the MIDDLE keeps the seam and loses the sum") {
         doc.find_layer(b)->composition = composed(Op::Subtract);
         CHECK(layer_join_is_hard_union(doc));  // the split is taken at `c`, which unions
-        CHECK_FALSE(document_fold_is_hard_union(doc));
         CHECK(first_composed_fold_layer(doc) == b);
     }
 
     SUBCASE("a composed layer at the TOP loses both") {
         doc.find_layer(c)->composition = composed(Op::Subtract);
         CHECK_FALSE(layer_join_is_hard_union(doc));
-        CHECK_FALSE(document_fold_is_hard_union(doc));
         CHECK(first_composed_fold_layer(doc) == c);
     }
 
     SUBCASE("the FIRST visible layer's composition is not applied, so it breaks nothing") {
         doc.find_layer(a)->composition = composed(Op::Intersect, BlendProfile::Cubic, 0.4f);
         CHECK(layer_join_is_hard_union(doc));
-        CHECK(document_fold_is_hard_union(doc));
         CHECK(first_composed_fold_layer(doc) == 0);
     }
 
@@ -179,7 +175,7 @@ TEST_CASE("the join predicates: the seam is one question, every fold another") {
         doc.find_layer(a)->visible = false;
         doc.find_layer(b)->composition = composed(Op::Subtract);
         // `b` is now the first VISIBLE layer, so its operator is not applied.
-        CHECK(document_fold_is_hard_union(doc));
+        CHECK(first_composed_fold_layer(doc) == 0);
         doc.find_layer(c)->visible = false;
         // ...and with `c` gone the seam is `b`, which is still the first.
         CHECK(layer_join_is_hard_union(doc));
@@ -191,7 +187,7 @@ TEST_CASE("the join predicates: the seam is one question, every fold another") {
         only.sdf->insert(sphere_at(0.0f, 1.0f));
         only.composition = composed(Op::Intersect, BlendProfile::Quadratic, 0.3f, 0.1f);
         CHECK(layer_join_is_hard_union(one));
-        CHECK(document_fold_is_hard_union(one));
+        CHECK(first_composed_fold_layer(one) == 0);
         CHECK(layer_join_composition(one, only.id) == nullptr);
     }
 
@@ -642,6 +638,23 @@ TEST_CASE("a layer whose composition blends softly does not scale cleanly") {
         CHECK(layer_placement_change(l, to, cf3(1.0f, 1.0f, 1.0f)).kind ==
               PlacementKind::Similarity);
     }
+
+    SUBCASE("an EXTENDED fold carries a radius too, whatever its profile says") {
+        // Groove, shell, incise and the rest read `blend.k` as their own
+        // radius, depth or amplitude and IGNORE the profile (scene/types.h says
+        // so at the enumerators). So the profile alone is not the test: a
+        // hard-profile groove with a depth of 0.15 is exactly as absolute as a
+        // quadratic blend of 0.15, and the layer's scale reaches neither.
+        for (Op op : {Op::Groove, Op::Shell, Op::Incise, Op::Pipe, Op::Relief, Op::Inset}) {
+            CAPTURE(static_cast<int>(op));
+            l.composition = composed(op, BlendProfile::Hard, 0.15f);
+            CHECK_FALSE(layer_scales_cleanly(l));
+        }
+        // ...and with no radius at all there is still nothing to be wrong
+        // about, so this did not simply refuse every extended mode.
+        l.composition = composed(Op::Groove, BlendProfile::Hard, 0.0f);
+        CHECK(layer_scales_cleanly(l));
+    }
 }
 
 // -- 4.5 the brick refill's multi-layer split, across the C ABI ---------------
@@ -731,6 +744,58 @@ void build_stroke(AbiDoc& doc, int dabs, int op) {
 }
 
 }  // namespace
+
+// The same verdict WHERE A HOST MEETS IT. design.md 11 asks for the regression
+// test at `clay_layer_placement_report`, not one level below it: the classifier
+// is internal, and what a host acts on is the report -- the call that decides
+// whether clay_layer_placement_begin/_update/_commit may skip a refill. A test
+// that only held `layer_scales_cleanly` would keep passing if the report ever
+// stopped consulting it.
+TEST_CASE("c abi: a composed layer's radius is reported to the host as GENERAL") {
+    clay_document* d = clay_document_create();
+    REQUIRE(d != nullptr);
+    clay_layer_id base = 0, cutter = 0;
+    REQUIRE(clay_add_sdf_layer(d, "base", &base) == CLAY_OK);
+    REQUIRE(clay_add_sdf_layer(d, "cutter", &cutter) == CLAY_OK);
+    add_sphere(d, base, 1.0f, 0.0f);
+    add_sphere(d, cutter, 0.5f, 0.6f);  // hard items: nothing but the fold can be wrong
+
+    const float pos[3] = {0.0f, 0.0f, 0.0f};
+    const float axis[3] = {0.0f, 1.0f, 0.0f};
+    auto kind_of_a_doubling = [&]() {
+        clay_placement_report rep;
+        std::memset(&rep, 0, sizeof rep);
+        rep.struct_size = static_cast<std::uint32_t>(sizeof rep);
+        REQUIRE(clay_layer_placement_report(d, cutter, pos, axis, 0.0f, 2.0f, nullptr, &rep) ==
+                CLAY_OK);
+        return rep.kind;
+    };
+
+    // The control, and it is what makes the rest a claim rather than a
+    // tautology: a hard-unioning layer of hard items IS a similarity of its own
+    // field, so the cheap path is available and this call says so.
+    CHECK(kind_of_a_doubling() == CLAY_PLACEMENT_SIMILARITY);
+
+    SUBCASE("a soft fold radius takes the cheap path away") {
+        REQUIRE(clay_document_set_layer_composition(d, cutter, CLAY_OP_SUBTRACT,
+                                                    CLAY_BLEND_QUADRATIC, 0.2f, 0.0f) == CLAY_OK);
+        CHECK(kind_of_a_doubling() == CLAY_PLACEMENT_GENERAL);
+    }
+
+    SUBCASE("and so does an EXTENDED one with a hard profile") {
+        REQUIRE(clay_document_set_layer_composition(d, cutter, CLAY_OP_GROOVE, CLAY_BLEND_HARD,
+                                                    0.15f, 0.0f) == CLAY_OK);
+        CHECK(kind_of_a_doubling() == CLAY_PLACEMENT_GENERAL);
+    }
+
+    SUBCASE("the fold's ROUNDING does follow the scale, so it keeps the cheap path") {
+        REQUIRE(clay_document_set_layer_composition(d, cutter, CLAY_OP_SUBTRACT, CLAY_BLEND_HARD,
+                                                    0.0f, 0.2f) == CLAY_OK);
+        CHECK(kind_of_a_doubling() == CLAY_PLACEMENT_SIMILARITY);
+    }
+
+    clay_document_destroy(d);
+}
 
 TEST_CASE("refill: a composed top layer refuses the split and still answers the field") {
     const std::vector<clay_brick_request> reqs = equator_bricks();

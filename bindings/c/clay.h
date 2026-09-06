@@ -1358,6 +1358,13 @@ clay_result clay_document_set_layer_transform_nonuniform(clay_document* doc, cla
  * scale does not reach it, so a scaled layer is not a similarity of its own
  * field. Its ROUNDING does follow the scale; only the radius does not.
  *
+ * AN EXTENDED MODE COUNTS AS A RADIUS HERE whatever its blend profile says.
+ * CLAY_OP_GROOVE, _TONGUE, _PIPE, _ENGRAVE, _EMBOSS, _INSET, _SHELL, _RELIEF
+ * and _INCISE read blend_k as their own radius, depth or amplitude and ignore
+ * the profile entirely, so a composition set to one of them with a positive
+ * blend_k classifies GENERAL even with CLAY_BLEND_HARD. It is the same absolute
+ * world distance under another name.
+ *
  * AND THE TRADE THAT FOLLOWS, because a host will otherwise discover it by
  * measuring. Because the radius is absolute, the join covers the same world
  * distance however large the subtool grows, so the cut reads as HARDENING as

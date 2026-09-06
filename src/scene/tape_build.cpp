@@ -106,6 +106,18 @@ struct FirstVisibleLayer {
     bool value;
 };
 
+// Did this layer's own chain leave a value on the stack? A TYPE for the same
+// reason, one level down: `fold_layer` takes this beside `have_acc` -- "is
+// there something BENEATH it to combine with" -- and the two are one
+// transposition apart at the call. Swapped, a layer with a value and nothing
+// beneath it emits a combine against an empty stack, and one with an
+// accumulator and no value of its own does not emit the fold the document
+// needs; both compile, and both are per-brick wrongness with no error
+// (design.md 13a, which asked for this on the sibling pair as well).
+struct LayerLeftValue {
+    bool value;
+};
+
 bool fold_changes_an_empty_layer(const LayerComposition& c, float round_world) {
     const int mode = static_cast<int>(c.op);
     const int profile = static_cast<int>(c.blend.profile);
@@ -1230,14 +1242,17 @@ struct Compiler {
     // PART of one so that the two cannot produce different fields. `layer_val`
     // says whether the layer just compiled left a value on the stack and
     // `have_acc` whether there is an accumulated value beneath it on the stack;
-    // the return is whether one is there afterwards.
+    // the return is whether one is there afterwards. `layer_val` carries a type
+    // so that the two cannot be transposed at the call site -- see
+    // `LayerLeftValue`, and `FirstVisibleLayer` for the same argument one level
+    // up.
     //
     // `have_acc` IS NOT THE FIRST-VISIBLE TEST and must not be read as one --
     // see `compile_and_fold_layer`, which is the only caller and which decides
     // first-ness from the layer LIST before anything is emitted. What is left
     // here is only "is there something on the stack to combine with", which is
     // a question about the tape and is answered by the tape.
-    bool fold_layer(const Layer& layer, bool layer_val, bool have_acc) {
+    bool fold_layer(const Layer& layer, LayerLeftValue layer_val, bool have_acc) {
         const LayerComposition& comp = layer.composition;
         // No node, so the layer's own distance scale is the factor -- the same
         // one a group's rounding takes. (A transition op cannot get here: the
@@ -1245,7 +1260,7 @@ struct Compiler {
         // and emit_combine would morph on this compiler's defaults instead of
         // on anything the artist authored.)
         const float round_world = comp.rounding * layer_distance_scale(layer);
-        if (!layer_val) {
+        if (!layer_val.value) {
             // An empty or wholly culled chain still has to be folded when the
             // operator reads an absent operand as a change -- see
             // fold_changes_an_empty_layer, which is where that is decided and
@@ -1362,7 +1377,10 @@ struct Compiler {
         on_tail_path_ = true;
         tail_checkpoint_taken_ = false;
         layer_extent_ = math::Aabb{};
-        const bool layer_val = compile_list(layer.sdf->roots, *layer.sdf, layer, false);
+        // TYPED at the point it is produced rather than wrapped at the call
+        // below, so that transposing the two arguments of `fold_layer` is a
+        // compile error with no brace to move along with them.
+        const LayerLeftValue layer_val{compile_list(layer.sdf->roots, *layer.sdf, layer, false)};
         on_tail_path_ = false;
         // The seeded empty IS an accumulator: the fold below combines with it,
         // and a resume re-emits that same fold from `doc_have_acc`.
@@ -1378,7 +1396,7 @@ struct Compiler {
             // Recorded even when the chain emitted nothing: appending to an
             // empty last layer is resumable too, with layer_have_acc false.
             checkpoint = TapeCheckpoint{tape.instrs.size(), tape.params.size(), tape.blob.size(),
-                                        layer.id,           layer_val,          acc,
+                                        layer.id,           layer_val.value,    acc,
                                         true,               {}};
         }
         return fold_layer(layer, layer_val, acc);
@@ -1548,21 +1566,24 @@ bool layer_join_is_hard_union(const Document& doc) {
 }
 
 LayerId first_composed_fold_layer(const Document& doc) {
-    bool have_acc = false;
+    // NOT `have_acc`. This walks the LAYER LIST and nothing else, so what it
+    // tracks is "a visible SDF layer has already been passed" -- a property of
+    // the document, true or false the same way for every brick. The compiler's
+    // `have_acc` is the per-compile, cull-dependent question (is a value on
+    // the stack), and reading one as the other is the defect this change
+    // shipped once already (`compile_and_fold_layer`). Same value here, so the
+    // function was right; the name was the one that had been bitten.
+    bool passed_a_layer = false;
     for (const Layer& l : doc.layers) {
         if (!l.visible || l.kind != LayerKind::Sdf || !l.sdf) continue;
         // The FIRST visible SDF layer initialises the accumulator and its own
         // operator is not applied, so whatever it carries cannot break a
         // caller's composition -- skipped here for exactly that reason and not
         // as an approximation.
-        if (have_acc && !layer_composition_is_hard_union(l.composition)) return l.id;
-        have_acc = true;
+        if (passed_a_layer && !layer_composition_is_hard_union(l.composition)) return l.id;
+        passed_a_layer = true;
     }
     return 0;
-}
-
-bool document_fold_is_hard_union(const Document& doc) {
-    return first_composed_fold_layer(doc) == 0;
 }
 
 LayerId visible_sdf_layer_above(const Document& doc, LayerId layer) {
@@ -1704,7 +1725,13 @@ bool compile_layer_suffix(const TapeCheckpoint& cp, const Document& doc,
                           const CullIndex* index) {
     if (!out || !cp.valid || appended.empty()) return false;
     // The same claims `compile_document_append` checks, minus the ones about
-    // the prefix's bytes -- there are none here to be out of range.
+    // the prefix's bytes -- there are none here to be out of range -- and minus
+    // its refusal of a composed seam, which this does not need: nothing is
+    // carried over to be wrong (no prefix `info`, `lipschitz_bounds_gradient`
+    // or `bounds`), and `resume` EMITS the seam's own composition rather than
+    // assuming a hard Add. The header states the argument in full; the hard Add
+    // belongs to the caller that rejoins two halves itself, and so does that
+    // caller's refusal.
     const Layer* layer = last_visible_sdf_layer(doc);
     if (!layer || layer->id != cp.layer) return false;
     // The chain the checkpoint ends in, which is a group's children when the

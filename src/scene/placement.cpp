@@ -43,29 +43,57 @@ PlacementChange placement_change(const math::Transform& from, cfloat3 from_axes,
     return out;
 }
 
+namespace {
+
+// Does the layer's fold carry a radius in world units that the layer's scale
+// will not reach? Two ways it can, and the second is why the profile alone is
+// not the test:
+//
+//   * a SOFT profile with a positive `k` -- the blend radius, the item-level
+//     case one level up;
+//   * an EXTENDED mode (groove, shell, incise, pipe, the reliefs...), where
+//     `blend.k` is the mode's own radius, depth or amplitude and the PROFILE IS
+//     IGNORED (scene/types.h says so at the enumerators). A hard-profile groove
+//     with a depth of 0.1 is exactly as absolute as a quadratic blend of 0.1,
+//     and reading only the profile classified it as a similarity.
+//
+// The composition's ROUNDING is not here because it IS scaled -- `fold_layer`
+// takes `comp.rounding * layer_distance_scale(layer)` -- so the asymmetry is
+// genuinely the radius alone.
+bool composition_radius_ignores_scale(const LayerComposition& c) {
+    if (!(c.blend.k > 0.0f)) return false;  // no radius, nothing to be wrong about
+    return c.blend.profile != BlendProfile::Hard || op_is_extended(c.op);
+}
+
+}  // namespace
+
 bool layer_scales_cleanly(const Layer& layer) {
     if (layer.kind != LayerKind::Sdf || !layer.sdf) return true;  // nothing to scale wrongly
     // THE LAYER'S OWN FOLD FIRST, and for exactly the reason the items below
-    // are checked: a blend radius is an absolute world distance and the layer's
+    // are checked: a fold radius is an absolute world distance and the layer's
     // scale does not reach it, so a layer whose items all scale cleanly but
-    // whose COMPOSITION carries a soft radius is not a similarity of its own
-    // field. Its rounding is not in this test because it IS scaled --
-    // `fold_layer` takes `comp.rounding * layer_distance_scale(layer)` -- so
-    // the asymmetry here is genuinely the radius alone.
+    // whose COMPOSITION carries one is not a similarity of its own field.
     //
     // It matters more here than in the item case: this verdict feeds
     // clay_layer_placement_begin/_update/_commit, the gesture whose whole
     // purpose is to SKIP work, so a wrong Similarity is a picture that lags its
     // own field rather than a recomputation that costs a little.
-    if (layer.composition.blend.profile != BlendProfile::Hard &&
-        layer.composition.blend.k > 0.0f)
-        return false;
+    if (composition_radius_ignores_scale(layer.composition)) return false;
     for (const auto& [id, n] : layer.sdf->nodes()) {
         (void)id;
         if (!n.visible) continue;
         // The blend radius is the term the layer's scale does not reach. A hard
         // combine, or a smooth one with no radius, has nothing to be wrong
         // about.
+        //
+        // NOT `composition_radius_ignores_scale` above, and the difference is
+        // deliberate rather than an oversight: an ITEM with an extended op and
+        // a hard profile carries the same absolute radius and takes the cheap
+        // path here. That is behaviour this change did not introduce and does
+        // not alter -- it predates layer composition, it reclassifies documents
+        // that carry no fold at all, and the v0.84.0 known limits already
+        // record the item-level asymmetry. Widening it is its own change with
+        // its own measurement.
         if (n.blend.profile != BlendProfile::Hard && n.blend.k > 0.0f) return false;
     }
     return true;

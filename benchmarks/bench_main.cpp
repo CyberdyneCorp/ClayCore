@@ -1471,6 +1471,99 @@ void refill_stroke(benchmark::State& state, bool prime) {
     state.counters["history"] = static_cast<double>(kRefillHistory);
     clay_document_destroy(d);
 }
+
+// WHAT A LAYER BOOLEAN COSTS THE REFILL, priced rather than asserted
+// (fold-the-layers-with-an-operator, task 0.1).
+//
+// The resumable multi-layer split holds the ACTIVE layer's value and the layers
+// beneath it apart and rejoins them in host floats with a hard Add
+// (`fold_layers_below`), which takes six floats and cannot be told what the
+// fold is. So a document whose TOP visible SDF layer composes REFUSES the split
+// -- `plan_resume`, `plan_frontier` and the full path's Active/Below halves,
+// all on `layer_join_is_hard_union` -- and a stroke into that layer walks the
+// whole document per brick, as every multi-layer stroke did before #348.
+//
+// These two arms are the same document twice, differing only in the top
+// layer's composition, so what separates them is the refusal and nothing else.
+// THE CLAIM IS A COUNT: `resumed_frac` is 0.0 on the composed arm and ~1.0 on
+// the union one, and tools/check_bench.py gates both -- a wall clock cannot
+// tell "the split was refused" from "this machine is busy", and the fallback is
+// meant to be slower, so a ceiling on the composed arm's TIME would be a gate
+// on the wrong thing.
+clay_document* abi_sculpt_layers(int nodes, int op, int blend, float k) {
+    clay_document* d = clay_document_create();
+    clay_layer_id base = 0, top = 0;
+    clay_add_sdf_layer(d, "base", &base);
+    clay_add_sdf_layer(d, "top", &top);
+    auto add = [&](clay_layer_id l, float r, float x, float y, float z) {
+        clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+        const float p[3] = {x, y, z};
+        clay_item_set_position(it, p);
+        clay_layer_add_item(d, l, it, nullptr);
+        clay_item_destroy(it);
+    };
+    // The body is the layer BENEATH; every dab is on the layer above it, which
+    // is the layer a stroke appends to and the one carrying the composition.
+    add(base, 1.0f, 0, 0, 0);
+    for (int i = 1; i < nodes; ++i) {
+        const double z = 1.0 - 2.0 * (i + 0.5) / nodes;
+        const double r = std::sqrt(std::max(0.0, 1.0 - z * z));
+        const double th = 2.399963 * i;
+        const double a = r * std::cos(th), b = r * std::sin(th);
+        add(top, 0.05f, static_cast<float>(std::sqrt(std::max(0.0, 1.0 - a * a - b * b))),
+            static_cast<float>(a), static_cast<float>(b));
+    }
+    clay_document_set_layer_composition(d, top, op, blend, k, 0.0f);
+    return d;
+}
+
+void refill_stroke_layers(benchmark::State& state, int op, int blend, float k) {
+    clay_document* d = abi_sculpt_layers(kRefillHistory, op, blend, k);
+    const std::vector<clay_brick_request> reqs = pole_requests();
+    const std::size_t per = 8 * 8 * 8;
+    std::vector<float> out(static_cast<std::size_t>(kRefillBricks) * per);
+    // Primed on BOTH arms: the composed arm is refused its split at the store
+    // as well, so priming it stores nothing and the counter below reads what
+    // the loop did rather than what the fixture was left in.
+    clay_brick_cache_eval_requests(d, nullptr, reqs.data(), kRefillBricks, out.data(), out.size(),
+                                   nullptr, 0);
+    clay_resume_stats before{};
+    before.struct_size = sizeof before;
+    clay_document_resume_stats(d, &before);
+
+    clay_layer_id top = 0;
+    clay_document_layer_at(d, 1, &top);
+    float y = 0.0f;
+    for (auto _ : state) {
+        state.PauseTiming();
+        const float r = 0.05f;
+        clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+        const float p[3] = {0.98f, y, -0.1f};
+        y += 0.001f;
+        clay_item_set_position(it, p);
+        clay_layer_add_item(d, top, it, nullptr);
+        clay_item_destroy(it);
+        state.ResumeTiming();
+        clay_brick_cache_eval_requests(d, nullptr, reqs.data(), kRefillBricks, out.data(),
+                                       out.size(), nullptr, 0);
+    }
+    clay_resume_stats rs{};
+    rs.struct_size = sizeof rs;
+    clay_document_resume_stats(d, &rs);
+    const double resumed = static_cast<double>(rs.resumed_bricks - before.resumed_bricks);
+    const double refilled = static_cast<double>(rs.refilled_bricks - before.refilled_bricks);
+    const double served = resumed + refilled;
+    if (served == 0) state.SkipWithError("no brick was served; nothing is being measured");
+    state.counters["history"] = static_cast<double>(kRefillHistory);
+    // The gated pair. Which of the two is the ceiling depends on the arm: the
+    // union arm must not START WALKING (refilled_frac ~ 0) and the composed arm
+    // must not silently keep the split it is supposed to have been refused
+    // (resumed_frac == 0). Both are ratios of counts, so they say the same
+    // thing on any machine.
+    state.counters["resumed_frac"] = served > 0 ? resumed / served : 0.0;
+    state.counters["refilled_frac"] = served > 0 ? refilled / served : 1.0;
+    clay_document_destroy(d);
+}
 }  // namespace
 
 void BM_BrickRefillResumed(benchmark::State& state) { refill_stroke(state, true); }
@@ -1478,6 +1571,20 @@ BENCHMARK(BM_BrickRefillResumed)->Unit(benchmark::kMillisecond);
 
 void BM_BrickRefillFull(benchmark::State& state) { refill_stroke(state, false); }
 BENCHMARK(BM_BrickRefillFull)->Unit(benchmark::kMillisecond);
+
+// The same stroke on a two-layer document whose top layer HARD-UNIONS: the
+// split is available, and every brick of the primed window resumes.
+void BM_BrickRefillLayersUnion(benchmark::State& state) {
+    refill_stroke_layers(state, CLAY_OP_ADD, CLAY_BLEND_HARD, 0.0f);
+}
+BENCHMARK(BM_BrickRefillLayersUnion)->Unit(benchmark::kMillisecond);
+
+// ...and the same document with a SMOOTH SUBTRACT on that top layer, which is
+// the shape that loses the split. Same items, same bricks, same stroke.
+void BM_BrickRefillLayersComposed(benchmark::State& state) {
+    refill_stroke_layers(state, CLAY_OP_SUBTRACT, CLAY_BLEND_QUADRATIC, 0.08f);
+}
+BENCHMARK(BM_BrickRefillLayersComposed)->Unit(benchmark::kMillisecond);
 
 // A DAB'S WORTH OF DIRTY BRICKS ON A SCULPTED SURFACE, cold, through the
 // library refill: the case the uniform-brick gate exists for. A dab dirties

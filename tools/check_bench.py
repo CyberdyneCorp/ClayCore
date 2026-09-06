@@ -794,6 +794,14 @@ MAX_RATIO = [
     # list per layer -- the shape of mistake a document-level predicate
     # evaluated inside the loop would make -- lands at the layer count.
     ("BM_LayerFoldStack1000", "BM_LayerFoldStack10", 1.8),
+    # And the presence half of the two counter rows above: MAX_COUNTER SKIPS a
+    # benchmark that is absent, so a row deleted from bench_main.cpp would pass
+    # by not running. This one fails on absence, and it holds the direction as
+    # well -- the arm that keeps the split cannot be slower than the arm that
+    # loses it. Measured 0.001x; the ceiling is far above that because the
+    # failure is categorical (a union arm that stopped resuming lands at ~1x),
+    # and a tight ratio on a 0.009 ms row would flake on a shared runner.
+    ("BM_BrickRefillLayersUnion", "BM_BrickRefillLayersComposed", 0.5),
 ]
 
 # counter gates: (bench, counter, max_value) — the named counter must be at
@@ -986,6 +994,21 @@ MAX_COUNTER = [
     # on absence, which is what keeps this honest.
     ("BM_LayerFoldStack1000", "instrs", 4200),
     ("BM_ItemFoldStack1000", "instrs", 4200),
+    # WHAT A LAYER BOOLEAN COSTS THE BRICK REFILL
+    # (fold-the-layers-with-an-operator, task 0.1). The resumable multi-layer
+    # split rejoins its two halves with a hard Add in host floats, so a document
+    # whose TOP visible SDF layer composes is REFUSED that split and its stroke
+    # walks the whole document per brick -- 0.009 ms against 7.96 ms on the same
+    # 5,000-item fixture, which is the pre-#348 cost restored for that one shape.
+    #
+    # The claim is the REFUSAL, and a refusal is invisible in the values: both
+    # arms answer the same field. So it is gated as the count that separates
+    # them. The composed arm must resume NOTHING -- a split quietly kept there
+    # is a hard Add applied to a smooth fold, which returns a plausible field
+    # per brick and reports nothing -- and the union arm must not lose the split
+    # it still has.
+    ("BM_BrickRefillLayersComposed", "resumed_frac", 0.0),
+    ("BM_BrickRefillLayersUnion", "refilled_frac", 0.05),
 ]
 
 

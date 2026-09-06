@@ -759,7 +759,10 @@ and compiles to the same tape, byte for byte. Going the other way is a
 composition, and writing a composed document at 17 would bring a cutter back as a
 lump welded on, in a file that opens cleanly and looks deliberate.
 `clay_document_writable_at_minor` is how a host asks before it saves, and it
-names the layer that blocks.
+names the layer that blocks. pyclay has the same question as
+`Document.writable_at_minor(minor)`, which answers `(ok, blocking_layer)` — the
+id rather than only a flag, so a script can say which subtool to change instead
+of leaving a person to find it.
 
 ### An intersect is bounded by its layer
 
@@ -1943,6 +1946,9 @@ cutter.add(clay.Sphere(r=0.6, position=(0.7, 0, 0)))
 doc.set_layer_composition(cutter.id, op=clay.Op.SUBTRACT, blend=clay.Smooth(0.1))
 op, blend, rounding = doc.layer_composition(cutter.id)
 doc.set_layer_visible(cutter.id, False)   # gives the uncut geometry back exactly
+# ask BEFORE saving for an older build: minor 17 cannot say a composition, and
+# writing one there would bring the cutter back as a lump welded on
+ok, blocking = doc.writable_at_minor(17)  # (False, cutter.id) once it composes
 
 # voxels: standalone grids or document layers
 blocks = doc.add_voxel_layer("blocks", voxel_size=0.1)

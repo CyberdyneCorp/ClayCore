@@ -13431,15 +13431,38 @@ namespace {
 // and the feathered replace both need, and an unknown mode falls out of
 // `ctape_combine_dist` as the accumulator with the active layer discarded.
 //
-// It is unreachable otherwise BY CONSTRUCTION, and the enforcement is at the
-// STORE rather than at any plan: `plan_resume` and `plan_frontier` refuse the
-// split for a composed seam (`layer_join_is_hard_union`), and
-// `eval_requests_impl` both refuses it and stores no two-half seed. A seed with
-// a `below` half therefore only exists where the fold was a hard Add when it
-// was taken, and any composition change bumps `revision`, so the `rev == now`
-// caller below -- which consults no plan at all -- cannot meet a stale one.
+// It is unreachable otherwise BY CONSTRUCTION, and the construction is the
+// STORE. `plan_resume` and `plan_frontier` refuse the split for a composed seam
+// (`layer_join_is_hard_union`), and `eval_requests_impl` refuses it too -- but
+// the load-bearing half of that last one is that it then stores NO TWO-HALF
+// SEED, so a seed with a `below` half exists only where the fold was a hard Add
+// when it was taken.
 //
-// It also never meets an EMPTY half for that reason. An empty tape evaluates to
+// THE REVISION IS NOT WHAT PROTECTS THE `rev == now` CALLER BELOW, and reading
+// it that way is backwards. That caller consults no plan, so no plan's refusal
+// reaches it -- and a composition change does not retire the seeds it cannot
+// reach. It is an ordinary region invalidation: `touch_region_locked` KEEPS a
+// seed whose brick the change cannot touch and carries it forward to the NEW
+// revision (the comment at that caller says exactly that), so `rev == now` is
+// reachable straight after a composition change, holding a seed taken under the
+// old fold. What keeps the hard Add exact there is the invalidation's BOX and
+// not its revision: a brick whose seed survives is one the composed layer's own
+// field cannot reach, so the active half is empty in it, and folding an absent
+// operand is identity for the operators that get here. Measured rather than
+// assumed, the way `fold_changes_an_empty_layer` asks the same question of the
+// kernel: over all fourteen composition ops at five accumulator distances, both
+// blend profiles and k in {0, 0.2}, INTERSECT is the only one for which
+// `ctape_combine_dist(a, FAR, ...)` is not `a`. And Intersect is exactly what
+// `op_is_local` names, so `layer_influence_bound_in_document` widens that
+// command's box to the extent of the layers beneath -- no seed survives where
+// it would matter.
+//
+// Which is a load nobody would guess that box is carrying: narrow it, or add an
+// op whose empty operand changes the result without adding it to `op_is_local`,
+// and this precondition goes with it -- silently, because a wrong rejoin here
+// returns a plausible field per brick and no counter moves.
+//
+// It also never meets an EMPTY half, by the same construction. An empty tape evaluates to
 // CLAY_TAPE_FAR, and `min(below, FAR) == below` agrees with the compiler's own
 // "a union with nothing is no change" while `max(below, FAR)` would not.
 void fold_layers_below(const float* below_d, const float* below_rgb, const float* active_d,
@@ -14513,7 +14536,10 @@ clay_result eval_requests_impl(const clay_document* doc, const char* backend,
     // (`shaped_entry`'s want_below is a topology question), and the precedent
     // is `resume_batch_into_host`: it stores nothing rather than something
     // mislabelled. Not storing is also what keeps `fold_layers_below`'s
-    // `rev == now` path -- which consults no plan -- unreachable here.
+    // `rev == now` path -- which consults no plan, and which a later
+    // composition change does NOT retire, because a region invalidation carries
+    // an unreachable brick's seed forward to the new revision -- unreachable
+    // here.
     const bool refused_split = has_below && !split;
 
     std::vector<float> act(todo_count * per);

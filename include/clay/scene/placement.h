@@ -88,6 +88,13 @@ PlacementChange placement_change(const math::Transform& from, kernel::cfloat3 fr
 // cleanly may be classified as a Similarity; one that does not may still be
 // classified Rigid, because a rigid change scales nothing and so cannot expose
 // the difference.
+//
+// AND THE LAYER'S OWN COMPOSITION, which is a radius one level up: false for a
+// fold with a soft profile and a positive `k`, and equally for an EXTENDED fold
+// (groove, shell, incise, pipe, the reliefs) with a positive `k`, where the
+// profile is ignored and `k` is the mode's own radius or depth. The fold's
+// ROUNDING is not a term -- it is scaled with the layer, where the radius is
+// not.
 bool layer_scales_cleanly(const Layer& layer);
 
 // How this layer moves to a proposed placement -- `placement_change` with the

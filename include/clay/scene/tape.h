@@ -414,6 +414,32 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& checkpoin
 // layer gone or no longer the last visible SDF layer, or `appended` not
 // actually the tail of its roots. A caller that is refused evaluates in full.
 //
+// AND NOT ON A COMPOSED SEAM, which is the one refusal `compile_document_append`
+// has that this does not. Stated here rather than left to be noticed, because
+// the two are otherwise the same compile:
+//
+//   * That one REFUSES because it carries the prefix's `info`,
+//     `lipschitz_bounds_gradient` and `bounds` forward untouched, on the
+//     argument that a hard Add is exact and adds no extent. This copies no
+//     prefix and none of those three -- what it writes describes the appended
+//     items alone, which the paragraph below is about -- so the carry-over the
+//     refusal protects does not happen here and there is nothing to be wrong.
+//   * The fold at the seam is EMITTED, not assumed. Where the checkpoint says
+//     an earlier layer left a value underneath (`doc_have_acc`), the resume
+//     emits that layer's OWN composition -- the same combine `run()` emits at
+//     that boundary, read off the `const Layer&` rather than off the
+//     checkpoint -- so a composed seam compiles as the composition. Refusing
+//     it would decline a compile that is already exact.
+//   * The hard Add lives in the CALLER that holds the two halves apart and
+//     rejoins them in host floats (`fold_layers_below`, bindings/c), and that
+//     is where the refusal lives too (`layer_join_is_hard_union`, in the plans
+//     and in the refill). Every in-tree caller of this function states
+//     `doc_have_acc = false` for exactly that reason: the layers beneath are
+//     its own value, not this tape's.
+//
+// `test_suffix_tape.cpp` holds the second bullet as identity against a
+// whole-document compile, so the argument is a test rather than a sentence.
+//
 // THE TAPE IS NOT SELF-CONTAINED and must not be handed to a plain evaluator.
 // Its `bounds` and `info` describe the appended items only, and evaluating it
 // with an empty stack yields the suffix against empty space rather than against
@@ -446,16 +472,23 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& checkpoin
 // `compile_document_part(below=true)` stops at the active layer, and the C
 // ABI's refill halves are that same boundary.
 //
-// `document_fold_is_hard_union` is the STRICTER question, and it is a different
+// `first_composed_fold_layer` is the STRICTER question, and it is a different
 // one: whether EVERY fold in the document is a hard Add. That is what a caller
 // needs before it may claim `compile_document_except(X)` and
 // `compile_document_part(X, below=false)` compose back to the whole document,
 // because removing a layer from the middle of a fold changes what every layer
-// above it folds onto -- see compile_document_except below.
+// above it folds onto -- see compile_document_except below. It answers with an
+// ID rather than a bool -- the first visible SDF layer whose own composition is
+// applied and is not a hard Add, 0 when there is none -- because every caller
+// of it is a REFUSAL, and a refusal that has computed which layer is
+// responsible has to hand that id back or the host re-walks the stack to
+// rediscover it.
 //
-// `first_composed_fold_layer` is the same question with the answer a refusal
-// wants: the id of the first visible SDF layer whose own composition is applied
-// and is not a hard Add, or 0 when there is none.
+// There is deliberately no bool form. There was one (`document_fold_is_hard_union`,
+// `first_composed_fold_layer(doc) == 0`), it had no caller outside its own
+// tests, and the header claimed the three excluding entry points took it when
+// all three take the id. A second spelling of one predicate is what this change
+// is organised against, and the bool is the spelling that cannot name the layer.
 //
 // `visible_sdf_layer_above` is what a caller splitting a document at `layer`
 // has to know before it may rejoin the halves: the id of the LOWEST visible SDF
@@ -471,7 +504,6 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& checkpoin
 const LayerComposition* layer_join_composition(const Document& doc, LayerId active);
 bool layer_join_is_hard_union(const Document& doc);
 LayerId first_composed_fold_layer(const Document& doc);
-bool document_fold_is_hard_union(const Document& doc);
 LayerId visible_sdf_layer_above(const Document& doc, LayerId layer);
 
 // -- one half of a document, for a resumable multi-layer refill --------------
@@ -543,7 +575,8 @@ Tape compile_document_part_resumable(const Document& doc, LayerId active, bool b
 // `clay_brick_cache_eval_requests_excluding` and pyclay's `eval_excluding`
 // REFUSE a document whose layers do not all hard-union, because a host that
 // composes with min() there gets a plausible picture of a field the document
-// does not have. `document_fold_is_hard_union` is the test they take.
+// does not have. `first_composed_fold_layer` is the test they take, and its
+// non-zero answer is the layer each of those refusals names.
 //
 // Culls under the WHOLE DOCUMENT's pad, exactly as the other parts do and for
 // the same reason: a part compiled under its own smaller pad drops items the

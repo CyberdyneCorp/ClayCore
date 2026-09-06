@@ -148,6 +148,13 @@ whose promise is about the whole stack, not about one seam:
 bool document_fold_is_hard_union(const Document& doc);
 ```
 
+**SHIPPED AS AN ID, AND THE BOOL IS GONE — see §13f.** Every caller of that
+predicate turned out to be a refusal, and §12b requires a refusal that has
+computed which layer is responsible to hand the id back, so what the three
+excluding entry points take is `first_composed_fold_layer(doc)`. The bool form
+was written, kept, never called outside its own tests, and described in
+`tape.h` as the thing those entry points took; it is deleted.
+
 **Why this and not (a).** (a) as §1 states it refuses the split for any document
 that uses the feature anywhere. That would cost the fast path for the most
 ordinary shape the feature creates — a cutter layer beneath a unioning layer the
@@ -1269,3 +1276,60 @@ decide whether the refusal reports the lowest blocker plus a count, or the lowes
 with a flag saying more follow, or all of them — and say which in the header
 either way. The current behaviour is defensible and undocumented, which is the
 combination that produces a wrong sentence in a host.
+
+### §13f. What the fourth review's record stage changed, and the two contract errors it found
+
+The stage after §13e's. Its findings were two majors about the code, a set of
+minors, and the accuracy of this contract — which is the half worth writing down
+here, because a design document that names a function the tree does not have is
+the same failure as a tasks list that ticks a box nothing did.
+
+**The two contract errors.**
+
+1. **`document_fold_is_hard_union` did not exist as this document describes it.**
+   It existed as a bool wrapper with no caller outside its own tests, while
+   `include/clay/scene/tape.h` told a reader that the three excluding entry
+   points took it — they take `first_composed_fold_layer`, whose non-zero answer
+   is the layer each refusal names. Deleted rather than re-documented: a second
+   spelling of one predicate is what this change is organised against, and the
+   bool is the spelling that cannot name a layer. The six assertions that used
+   it now spell the same question with the id form, which four of them already
+   asserted on the next line.
+
+2. **Row 9 of §2's table has the `rev == now` argument backwards**, and so did
+   the comment in the tree it came from. It says a composition change bumps
+   `revision`, so the shortcut cannot meet a stale two-half seed. But a
+   composition change is an ordinary REGION invalidation, and
+   `touch_region_locked` KEEPS a seed whose brick the edit cannot reach and
+   carries it forward to the NEW revision — the comment at the shortcut itself
+   says exactly that. So `rev == now` IS reachable straight after a composition
+   change, holding a seed taken under the old fold. What makes the hard-Add
+   rejoin still exact there is the invalidation's BOX: a surviving brick is one
+   the composed layer's field cannot reach, so the active half is empty in it and
+   folding an absent operand is identity for the operators that reach the
+   shortcut — and for the one where it is not, an Intersect, which empties the
+   field everywhere the accumulator has material,
+   `layer_influence_bound_in_document` widens that command's box to the extent of
+   the layers beneath. The precondition is being held up by a bound nobody would
+   guess is holding it, which is now written beside both.
+
+**The two majors.** `fold_layer`'s two adjacent bools are one type now
+(`LayerLeftValue`, typed where the value is produced so a transposition has no
+brace to move with it — §13a asked this of every predicate pair in the fold
+path, and the first pass typed only `compile_and_fold_layer`), and §9's second
+gate is built: a converted mesh as the BASE, under a field cutter, hard and
+smooth, against the one-layer item form. The fold treats base and cutter
+symmetrically, so it is the redundant gate §9 allowed for — but not a vacuous
+one: dropping the fold's blend moves 592 of its samples.
+
+**And the one thing the minors turned up that nobody had asked about.**
+`compile_layer_suffix` has no seam refusal where its sibling
+`compile_document_append` gained one, and the reason is not an oversight: it
+copies no prefix `info`, `lipschitz_bounds_gradient` or `bounds`, which is what
+that refusal protects, and `resume()` EMITS the seam's own composition rather
+than assuming a hard Add. That was an argument in a comment until this stage;
+it is a test now (`test_suffix_tape.cpp`, a seeded suffix across a composed seam
+is bit-identical to the whole document, three arms, failing on all three when
+the seam is forced to a hard Add). The hard Add belongs to the CALLER that holds
+two halves apart in host floats, and so does that caller's refusal — which is
+why every in-tree caller of the suffix states `doc_have_acc = false`.

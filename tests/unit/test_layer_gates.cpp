@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "clay.h"
@@ -745,6 +746,106 @@ TEST_CASE("gate: an imported mesh, in its own layer, cuts the layers beneath it"
         scene::Document hidden = layered;
         hidden.layers[1].visible = false;
         CHECK(differing(sample(hidden, pts), sample(without, pts)) == 0);
+    }
+}
+
+// -- 6.5, the other side: a converted mesh as the BASE ------------------------
+
+TEST_CASE("gate: an imported mesh, in its own layer, is cut BY the layers above it") {
+    // design.md 9 asks for this beside the cutter case, and the reason is the
+    // host's: `boolean_operands` puts every representation on BOTH sides, and
+    // converting a mesh so that something can be cut out OF it is at least as
+    // common as converting the cutter. The fold reads its two operands from the
+    // same stack, so if it treats them symmetrically this gate is redundant and
+    // costs one fixture; if it does not -- a volume accumulator that a smooth
+    // fold reads differently from a primitive one, say -- this is the gate that
+    // finds it, and nothing else in the suite puts a sampled volume UNDERNEATH
+    // a composed layer.
+    const std::optional<field::FieldVolume> volume =
+        mesh::to_field(sphere_mesh(0.7f, 24), {0.03f, 0.14f, 0.0f, 2.0f});
+    REQUIRE(volume.has_value());
+    const auto shared = std::make_shared<field::FieldVolume>(*volume);
+
+    auto imported = [&](float x) {
+        scene::Node n;
+        n.prim = scene::Prim::volume();
+        n.volume = shared;
+        n.xform.position = cf3(x, 0.0f, 0.0f);
+        n.color = cf3(0.1f, 0.7f, 0.4f);
+        return n;
+    };
+
+    // The cutter is an ORDINARY item this time, and the imported mesh is what
+    // it cuts: the mirror image of the case above.
+    auto two_layers = [&](scene::LayerComposition comp) {
+        scene::Document doc;
+        scene::Layer& base = doc.add_sdf_layer("imported");
+        base.sdf->insert(imported(0.0f));
+        scene::Layer& cut = doc.add_sdf_layer("cutter");
+        cut.sdf->insert(sphere_at(0.6f, 0.45f, cf3(0.8f, 0.4f, 0.1f)));
+        cut.composition = comp;
+        return doc;
+    };
+
+    // The same shape the old way: both in one layer, the ITEM carrying the op.
+    auto one_layer = [&](scene::Op op, BlendProfile profile, float k) {
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("l");
+        l.sdf->insert(imported(0.0f));
+        scene::Node cut = sphere_at(0.6f, 0.45f, cf3(0.8f, 0.4f, 0.1f));
+        cut.op = op;
+        cut.blend = scene::Blend{profile, k};
+        l.sdf->insert(std::move(cut));
+        return doc;
+    };
+
+    const std::vector<cfloat3> pts = lattice(16, 1.4f);
+
+    SUBCASE("a hard subtract off a converted base is the item form, bit for bit") {
+        CHECK(differing(sample(two_layers(composed(scene::Op::Subtract)), pts),
+                        sample(one_layer(scene::Op::Subtract, BlendProfile::Hard, 0.0f), pts)) ==
+              0);
+    }
+
+    SUBCASE("and so is a SMOOTH one, which is where an asymmetry would show") {
+        // The accumulator here is a sampled narrow-band volume rather than a
+        // primitive, and a smooth combine reads both operands' distances. A
+        // fold that treated the base differently from the cutter -- rounding
+        // only one side, or folding the volume's clamped band as if it were a
+        // true distance -- differs from the item form here and nowhere in the
+        // cutter case above.
+        const scene::LayerComposition comp =
+            composed(scene::Op::Subtract, BlendProfile::Quadratic, 0.18f);
+        CHECK(differing(sample(two_layers(comp), pts),
+                        sample(one_layer(scene::Op::Subtract, BlendProfile::Quadratic, 0.18f),
+                               pts)) == 0);
+    }
+
+    SUBCASE("and the cut is real: it takes material out of the imported mesh") {
+        const scene::Document layered = two_layers(composed(scene::Op::Subtract));
+        scene::Document uncut = layered;
+        uncut.layers[1].visible = false;
+        CHECK(differing(sample(layered, pts), sample(uncut, pts)) > 0);
+
+        // Inside the imported shell and inside the cutter: solid before the
+        // fold, open after. Inside the volume's BAND for the reason the cutter
+        // case states -- away from its surface a narrow band clamps, and a
+        // probe there measures the import rather than the fold.
+        const cfloat3 inside_both = cf3(0.62f, 0.0f, 0.0f);
+        CHECK(scene::compile_document(uncut).eval(inside_both).d < 0.0f);
+        CHECK(scene::compile_document(layered).eval(inside_both).d > 0.0f);
+    }
+
+    SUBCASE("and the converted layer is the FIRST visible one, so its own op is not applied") {
+        // The base carries a Subtract of its own. It initialises the
+        // accumulator, so the document is the same as if it carried nothing --
+        // the rule that stops a reordered base layer emptying the screen, held
+        // here on a converted layer because that is the layer a host is most
+        // likely to reorder.
+        scene::Document doc = two_layers(composed(scene::Op::Subtract));
+        scene::Document with_op = doc;
+        with_op.layers[0].composition = composed(scene::Op::Subtract);
+        CHECK(differing(sample(doc, pts), sample(with_op, pts)) == 0);
     }
 }
 
