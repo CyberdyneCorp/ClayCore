@@ -688,3 +688,31 @@ absolute distance across a bigger cutter, so the cut reads as getting harder as
 the subtool grows. That part is inherent to a radius in world units. What must
 not also happen is the gesture skipping invalidation on the strength of a
 similarity that is not one.
+
+### §11a. The header must state the TRADE, not only the classification
+
+Raised by the host on 2026-09-06 and checked: a composition change is a document
+command (`SetLayerCompositionCmd`, stage 1), while `clay_layer_placement_*` is a
+gesture whose premise is that the document does not move until the commit. So a
+host cannot have both halves of what it will assume it has:
+
+- **An absolute radius** — what a blend `k` is, in the layer's units — keeps the
+  drag cheap, and the join covers the same world distance however large the
+  subtool grows, so the cut reads as hardening with size.
+- **A radius scaled to compensate** keeps the join proportional at every size,
+  and makes scaling that layer an EDIT rather than a placement, because writing
+  the composition is a command. The gesture is gone for that layer, and nothing
+  reports its absence.
+
+Neither is wrong and the engine does not pick. But a host reading
+`LayerComposition` has every reason to assume it can have both — the blend is on
+the composition, the scale is on the transform, and the interaction lives in a
+third file. A header that says only "a soft `k` classifies GENERAL" teaches a
+host that it is slow and not why, and the obvious fix (scale the radius to
+compensate) silently removes the gesture.
+
+**Required beside the composition setter, in addition to the classification
+sentence:** *a blend radius is an absolute distance and does not follow the
+layer's scale; a host that compensates for that turns every scale of that layer
+into an edit.* One clause more than the classification, and it is the clause that
+stops someone discovering the trade by measuring it.
