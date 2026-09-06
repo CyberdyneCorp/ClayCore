@@ -1397,6 +1397,49 @@ Deliberately NOT on this list: tool availability. The host keeps
 its vocabulary, and repeating it in the engine would let the two disagree. A rule
 about refusals is not a claim that every refusal belongs to the engine.
 
+### The device baseline declares one instrument for entries taken with several
+
+`tests/device/baseline.json` carries a single file-level `abiVersion` — `0.56.0`
+today — over 74 budget entries, none of which carries its own. The tree is at
+0.86.0, and `add-device-transform-cases` already records that five of those
+entries were measured at ABI 0.60.0 beside the rest. **So the file states one
+provenance for figures that do not share one, and nothing can see it**: a
+per-entry ABI is not a field, so no reader can announce the mismatch and no gate
+can refuse on it.
+
+`release_check.py` does refuse at the release path — it diffs the recorded
+`claycoreCommit` against HEAD and fails the `device` row when the engine has
+moved — which is the "refuse to compare" resolution and correct where it sits.
+What it does not do, and cannot, is say anything about a baseline whose own
+entries were taken with different instruments.
+
+**A third resolution exists and is cheaper than the one this repository planned.**
+The consuming host's Linux bench baseline declares its engine version AND
+revision and prints, above every comparison table: *the baseline was recorded
+against engine X and this run is engine Y; every change below is that difference
+plus whatever else moved.* It deliberately does not refuse, on the argument that
+a comparison across two pins is the whole point of an upgrade measurement and
+refusing leaves the question the gate is best placed to answer with no
+instrument. Their macOS baseline takes the refuse route instead, and carries a
+`note` saying why.
+
+So the class has three resolutions rather than two: **eliminate the mixture**
+(re-run everything, which is what this repository's open task proposes),
+**refuse to compare**, or **declare the instrument per entry and announce the
+mismatch at read time.** The third is the only one that survives the next pin
+move — re-running makes a file correct until someone splices again, declaring
+makes it correct about what it is permanently. If `baseline.json`'s entries
+carried the ABI they were taken at, the gate could print that sentence and the
+re-run would not be owed.
+
+**The honest limit, stated by the host about its own design:** an announcement is
+QUALITATIVE. A reader is told "plus whatever else moved" and not how much, so it
+cannot say whether four pins of drift have eaten the tolerance a real regression
+needs. They have that number for one hop of four (median ratio 0.9998x, 171 of
+178 figures inside their own run-to-run spread) and none for the others. The
+comparison is honest; it is not yet sensitive, and those are different
+properties.
+
 ### Three ways a gate is real and unenforced
 
 Found within one day, 2026-09-06, none of them by a gate failing — all three by
