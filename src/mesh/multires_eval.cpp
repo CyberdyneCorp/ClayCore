@@ -871,6 +871,26 @@ void MultiresSurface::absorb_level_edit(std::uint32_t level,
     ++state_->evaluated_revision;
 }
 
+void MultiresSurface::restore_level_positions(std::uint32_t level,
+                                              const std::vector<std::uint32_t>& vertices) {
+    if (!state_ || !state_->level_ok(level) || vertices.empty()) return;
+    // EVALUATED FIRST, for the same reason `absorb_level_edit` evaluates first:
+    // "what the stored coefficients reconstruct to" is a statement about
+    // `subdivided` and `frames`, and a level whose parent has moved does not
+    // have those yet.
+    evaluate_up_to(*state_, level);
+    // FILTERED, because `restore_positions` indexes the caches directly: it is
+    // reached from `absorb_level_edit`, which has already dropped the
+    // out-of-range ids, and this entry point has not.
+    const std::uint32_t count =
+        level == 0 ? state_->class_count : state_->levels[level].topology.vertex_count;
+    std::vector<std::uint32_t> in_range;
+    in_range.reserve(vertices.size());
+    for (std::uint32_t v : vertices)
+        if (v < count) in_range.push_back(v);
+    if (!in_range.empty()) restore_positions(*state_, level, in_range);
+}
+
 void MultiresSurface::set_detail(std::uint32_t level, std::uint32_t vertex,
                                  const LocalDetail& value) {
     if (!state_ || !state_->level_ok(level) || level == 0) return;

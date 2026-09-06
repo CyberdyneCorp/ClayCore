@@ -715,6 +715,21 @@ class MultiresSurface {
     // has moved a cache.
     void absorb_level_edit(std::uint32_t level, const std::vector<std::uint32_t>& vertices);
 
+    // THE OTHER HALF OF THAT ONE WRITE PATH: put these vertices of the level's
+    // cached mesh back to what the STORED coefficients reconstruct to, keeping
+    // nothing.
+    //
+    // For a caller that moved a level's mesh and then decided part of the move
+    // was not its to keep. `absorb_level_edit` already does this internally when
+    // it refuses a locked layer, for the same reason: the brush moves the mesh
+    // before the hierarchy is told about it, so declining to record a vertex
+    // without putting it back leaves a cached surface no stored coefficient
+    // reconstructs -- a moved cache, which is the one thing this API refuses to
+    // leave lying around.
+    //
+    // A no-op for a vertex out of range, and for an empty list.
+    void restore_level_positions(std::uint32_t level, const std::vector<std::uint32_t>& vertices);
+
     // Write one vertex's detail directly, in coefficients. What undo replays
     // and what a detail-erasing verb writes.
     void set_detail(std::uint32_t level, std::uint32_t vertex, const LocalDetail& value);

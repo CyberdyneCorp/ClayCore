@@ -168,6 +168,46 @@ class MultiresSculptor {
     //     before and after, which is what an undo of a layered gesture needs.
     //     `record` accumulates the base's, as it always has. A gesture writes
     //     one or the other, never both, because the active layer is one thing.
+    //
+    // A STAMP THAT CROSSES A DEPTH BOUNDARY WRITES SEVERAL LEVELS, and the
+    // count returned is the whole of it. On a regionally refined hierarchy the
+    // surface under the brush is not all at the sculpt level: the patches the
+    // artist refined are, and the ones beside them are one or more levels
+    // coarser, with no vertex at the sculpt level for the brush to move. Before
+    // this, a stamp reaching past the refined region deposited the full falloff
+    // at the rim and nothing at all beyond it -- a step in the displacement
+    // rather than a fade, and a silent one: the count came back looking like a
+    // stamp that had done its whole job.
+    //
+    // WHICH LEVEL A VERTEX IS WRITTEN AT is not a new rule. It is exactly the
+    // partition `mixed_mesh_at_level` emits: a vertex belongs to the level that
+    // surface carries it at, which is its own level unless the level above
+    // holds its vertex point -- in which case that finer vertex is the one the
+    // artist is looking at, and the one the brush moves. Every vertex of the
+    // mixed-depth surface therefore belongs to exactly ONE level, which is what
+    // makes a doubled contribution at the seam structurally impossible rather
+    // than something a tolerance has to catch.
+    //
+    // COARSEST FIRST, AND THE BOUND LEVEL WRITTEN AS ABSOLUTE POSITIONS. A
+    // coarse write moves `S(n)` under the finer levels beside it, so a fine
+    // level absorbed BEFORE it keeps a coefficient that then reconstructs to
+    // the position the brush asked for PLUS that ripple. Measured on a 6x6 cage
+    // with the middle 2x2 refined to level 3, one Draw stamp of radius 0.50
+    // anchored on the rim, against the same stamp on a uniformly refined
+    // hierarchy: writing the fine level first finishes 0.106460609 away,
+    // writing one level and dropping the rest finishes 0.182510689 away, and
+    // this order finishes 0.005068991 away.
+    //
+    // WHAT IT COSTS, in counts rather than a clock, because a clock here would
+    // measure the box: one region walk per level below the sculpt level that
+    // owns any vertex, over a disc of the same radius on a surface with a
+    // quarter of the vertices per level down. Measured on the fixture above
+    // with a radius of 0.30, the walk finds 113 classes at level 3, 37 at level
+    // 2 and 12 at level 1 -- 43% of the sculpt level's walk for both coarse
+    // levels together, and the tail of that series is bounded rather than
+    // proportional to the depth. A uniform-depth hierarchy owns nothing below
+    // its top level, takes none of these walks, and is byte-identical to what
+    // it was before this existed.
     std::size_t stamp(MeshBrush verb, const MeshBrushSettings& settings,
                       const field::MaskGate& gate = {}, MultiresDelta* record = nullptr,
                       SculptLayerDelta* layer_record = nullptr);
@@ -238,7 +278,20 @@ class MultiresSculptor {
 
     // The level vertices the last stamp actually moved. Not the workset: the
     // rim of a falloff and a fully masked vertex are gathered and never move.
+    //
+    // THE BOUND LEVEL'S, and it keeps that meaning: a stamp that crossed a
+    // depth boundary also wrote coarser levels, and a caller reading this as
+    // "everything that moved" was reading it that way before there was anything
+    // else to read. The two calls below are the whole answer.
     const std::vector<std::uint32_t>& last_write_vertices() const { return touched_; }
+
+    // Every level the last stamp wrote, ASCENDING -- the coarse ones it reached
+    // past the refined region, then the bound level. One entry for a stamp that
+    // stayed inside the region, and one for every stamp on a uniform-depth
+    // hierarchy.
+    const std::vector<std::uint32_t>& last_write_levels() const { return write_levels_; }
+    // That level's vertices, or empty for a level the last stamp did not write.
+    const std::vector<std::uint32_t>& last_write_vertices_at(std::uint32_t level) const;
 
     // The last stamp's workset, at the HIERARCHY's addressing — see
     // `build_multires_workset`. Empty before the first stamp.
@@ -253,6 +306,43 @@ class MultiresSculptor {
 
    private:
     void bind();
+    // The levels below the bound one that OWN vertices of the mixed-depth
+    // surface: the ones a stamp reaching past the refined region has to write.
+    void bind_coarse(std::uint32_t level);
+    // One stamp on each of them, coarsest first. Returns the classes it moved.
+    std::size_t stamp_coarse(MeshBrush verb, const MeshBrushSettings& settings,
+                             const field::MaskGate& gate, SculptLayerId active_layer,
+                             MultiresDelta* record, SculptLayerDelta* layer_record);
+    // The values the hierarchy is about to overwrite, captured while the fields
+    // still hold them.
+    void note_before(std::uint32_t level, const std::vector<std::uint32_t>& vertices,
+                     const VertexDeltas& deltas, SculptLayerId active_layer, MultiresDelta* record,
+                     SculptLayerDelta* layer_record);
+    void note_layer_before(std::uint32_t level, const std::vector<std::uint32_t>& vertices,
+                           SculptLayerId active_layer, SculptLayerDelta* layer_record);
+    void sync_after(SculptLayerId active_layer, MultiresDelta* record,
+                    SculptLayerDelta* layer_record);
+    // The bound level's write list and the positions the brush asked for at it.
+    void capture_fine_targets();
+
+    // A level below the bound one, carrying only what has to survive between
+    // the stamps of a stroke.
+    //
+    // THE `MeshSculptor` DOES NOT, and the trade is stated rather than assumed.
+    // It takes its `Adjacency` BY VALUE, so keeping one per level below would
+    // hold a second copy of every intermediate level's adjacency for the life
+    // of the session — against `drop_intermediate_caches`, which exists because
+    // those levels are exactly what a deep hierarchy can afford to release. It
+    // is built for the stamp and dropped with it, which costs that copy per dab
+    // instead. What survives is the RECORD, because `MeshBrush::Layer` measures
+    // its ceiling from where the STROKE found the surface and a coarse level
+    // under a crossing stroke has that question to answer about its own
+    // vertices.
+    struct CoarseLevel {
+        std::uint32_t level = 0;
+        VertexDeltas deltas;
+        std::vector<std::uint32_t> written;
+    };
 
     MultiresSurface& surface_;
     std::unique_ptr<MeshSculptor> sculptor_;
@@ -268,6 +358,16 @@ class MultiresSculptor {
     // a stroke at level 0 so the FIRST before survives.
     VertexDeltas level_deltas_;
     std::vector<std::uint32_t> touched_;
+    // Ascending in level, and only the levels that own a vertex the bound level
+    // does not. Rebuilt with the level sculptor, for the same reasons.
+    std::vector<CoarseLevel> coarse_;
+    std::vector<std::uint32_t> write_levels_;
+    // The positions the brush asked for at the bound level, kept across the
+    // coarse writes because those re-evaluate the level above them.
+    std::vector<kernel::cfloat3> fine_targets_;
+    // The vertices a coarse stamp moved that the level above owns, and that go
+    // back where they were rather than into a coefficient.
+    std::vector<std::uint32_t> not_owned_;
     // Kept as a member rather than built on demand, for the reason every other
     // per-stamp buffer here is one: a stroke allocates on its first stamp only.
     SculptWorkset workset_;

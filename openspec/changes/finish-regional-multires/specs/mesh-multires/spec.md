@@ -101,6 +101,73 @@ not put it there.
 - **WHEN** the same neighbourhood is requested twice, on any platform
 - **THEN** the neighbours come back in the same order, and any sum taken over them is bit-identical
 
+### Requirement: A brush stroke crosses a depth boundary
+
+A stamp whose footprint reaches past the region a level refines SHALL write the
+part of that footprint that lies on the coarse side, at the level that side
+actually lives at, and SHALL NOT deposit its full falloff at the region rim and
+nothing beyond it.
+
+The surface an artist is looking at on a regionally refined hierarchy is not all
+at one level: the patches they refined are at the sculpt level and the patches
+beside them are one or more levels coarser, with no vertex at the sculpt level
+for a brush to move. A stamp confined to the sculpt level therefore stops dead at
+the rim with the falloff still near full — a STEP in the displacement rather than
+a fade — and reports the same count it would have reported had it done its whole
+job. Measured on a small refined region with a stamp anchored on its rim, up to
+46 vertices of the emitted surface are moved by the same stamp on a uniformly
+refined hierarchy and by nothing at all here, and the surface finishes up to 4.4
+times the fine level's edge spacing from where the uniform hierarchy leaves it.
+
+WHICH LEVEL A VERTEX IS WRITTEN AT SHALL be the level the mixed-depth surface
+carries it at, and SHALL NOT be a second rule: a vertex belongs to its own level
+unless the level above holds its vertex point, in which case the finer vertex is
+the one the artist is looking at and the one the brush moves. Every vertex of that
+surface therefore belongs to exactly ONE level, which is what makes a DOUBLED
+contribution at the seam impossible by construction rather than something a
+tolerance has to catch.
+
+The levels SHALL be written COARSEST FIRST, and the finer levels SHALL be written
+as absolute positions rather than as displacements accumulated before them. A
+coarse write moves the subdivided surface underneath the finer levels beside it,
+so a finer level whose coefficient was stored BEFORE that write reconstructs to
+the position the brush asked for plus that ripple. Measured, that ordering error
+is 21 times the residual of the correct order.
+
+What remains after that SHALL be understood as the coarse level's own resolution
+and not as a seam: a level cannot represent a displacement finer than its own
+spacing, so a stroke crossing a boundary finishes near, not at, the answer a
+uniformly refined hierarchy gives — measured within a quarter of the fine level's
+edge spacing for every displacement verb.
+
+A hierarchy whose levels all refine every patch owns nothing below its top level
+and SHALL take none of this: its stamps SHALL be byte-identical to what they were
+before a crossing stamp existed.
+
+#### Scenario: A stamp reaching past a refined region moves the coarse side
+- **WHEN** a stamp is anchored on the rim of a refined region with a radius that reaches past it
+- **THEN** every vertex of the emitted surface that the same stamp moves on a uniformly refined hierarchy is moved here too, rather than a subset of them
+
+#### Scenario: No vertex is written twice
+- **WHEN** a stamp writes both a coarse level and the level above it
+- **THEN** no vertex appears in both write lists, and no displacement is applied to the seam twice
+
+#### Scenario: The coarse side is written before the fine one
+- **WHEN** a stamp crosses a depth boundary
+- **THEN** the surface finishes where it finishes on a uniformly refined hierarchy, rather than at that position plus the coarse write's own effect on the level above
+
+#### Scenario: A crossing stamp leaves the surface watertight
+- **WHEN** a stamp that moved both sides of a depth boundary is followed by a mixed-depth export
+- **THEN** the export still has no open edge, because the shared vertex the coarse face borrows is the one the stamp moved
+
+#### Scenario: A crossing gesture is one undo step
+- **WHEN** a stamp that wrote two levels is recorded and then reverted
+- **THEN** both levels come back byte for byte, and the record names both of them
+
+#### Scenario: A hierarchy of one depth is unaffected
+- **WHEN** a stamp is made on a hierarchy whose levels all refine every patch, or inside a refined region and nowhere near its rim
+- **THEN** exactly one level is written, and the result is byte-identical to a stamp made on that level's own mesh and absorbed into it
+
 ### Requirement: A mixed-depth hierarchy exports as one watertight mesh
 
 A hierarchy whose patches carry different depths SHALL be exportable as ONE mesh

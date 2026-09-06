@@ -206,32 +206,103 @@
 
 ## 4. Brushes across a transition (the predecessor's 5.3)
 
-- [ ] 4.1 DECISION to take with a measurement in hand, not before: whether a
+- [x] 4.1 DECISION to take with a measurement in hand, not before: whether a
       stamp that crosses a transition writes into TWO levels or is clamped to
-      one. `MultiresSculptor::stamp` expands its write region into level-local
-      vertex ids and hands them to `absorb_level_edit`; there is no
-      representation for "and these vertices one level down also moved". Two
-      lists absorbed into two levels, with two frames and two detail fields, is
-      the real shape
-- [ ] 4.2 `build_multires_workset` already tags each item with a level, so the
+      one. TAKEN, AND IT IS TWO — three, where the grading makes it three — and
+      the measurement is what took it. One Draw stamp anchored on the rim of the
+      middle 2x2 of a 6x6 cage refined to level 3, against the same stamp on a
+      uniformly refined hierarchy, over the mixed-depth surface an artist is
+      actually looking at:
+
+      | radius | clamped to one level | written across levels |
+      |---|---:|---:|
+      | 0.25 | 5 vertices never move, worst 0.029781371 | 0, worst 0.001621436 |
+      | 0.35 | 17 never move, worst 0.090758100 | 0, worst 0.003878876 |
+      | 0.50 | 46 never move, worst 0.182510689 | 0, worst 0.005068991 |
+
+      The level-3 edge spacing here is 0.0417, so the clamped column is up to 4.4
+      EDGES out — a step in the displacement rather than a fade — and the written
+      column is a tenth of one edge. Clamping was the honest alternative and the
+      measurement refused it: what a clamped stamp leaves is not a rounding
+      error, it is the whole coarse half of the footprint
+- [x] 4.2 `build_multires_workset` already tags each item with a level, so the
       vocabulary exists. A cross-level workset extends it rather than replacing
-      it
-- [ ] 4.3 Any (level, vertex) pair that outlives a stamp carries the revision
-      discipline `ConnectivitySeed` and `seed_revision` already have.
-      `MultiresSculptor::bind` renumbers every weld class on a level change AND
-      on a `cache_generation` change, and a regional level's numbering is
-      compacted to what it stores
-- [ ] 4.4 GATE: the same stroke across a transition and on a dense hierarchy
-      finish in the same place where the levels agree. Today, a `MeshBrush`
-      Smooth anchored on a transition vertex moves 107 classes densely and 58
-      regionally, and 11 shared vertices finish up to 0.0255854 apart — about
-      60% of the level-3 edge spacing
-- [ ] 4.5 No fixture in `tests/unit/test_multires_sculpt.cpp` is mixed-depth
-      today — every one uses uniform `add_level` — so the suite is silent on
-      transitions by construction rather than by luck. Add the mixed-depth
-      fixture there and SIZE it by the transition fraction: 64 of 289 level-3
-      vertices, 22%, because a small refined region has proportionally more
-      boundary. A large refined region under-reports every effect above
+      it. LANDED AS A PARTITION RATHER THAN A WIDER WORKSET, and the correction
+      is recorded below: the write list is per level, and which level owns a
+      vertex is a question the EXPORT already answers
+- [x] 4.3 Any (level, vertex) pair that outlives a stamp carries the revision
+      discipline `ConnectivitySeed` and `seed_revision` already have. Nothing
+      here outlives a stamp: `last_write_vertices_at` is read after one and
+      cleared by the next, and the list of levels that own vertices is rebuilt
+      by `bind` on a level change AND on a cache-generation change, with the
+      coarse `MeshSculptor` built for the stamp and dropped with it rather than
+      held. GATED: a `drop_all_caches` between two stamps of one stroke moves
+      the generation and the second stamp still writes both levels
+- [x] 4.4 GATE: the same stroke across a transition and on a dense hierarchy
+      finish in the same place where the levels agree. Asked as a RATIO rather
+      than against a threshold, because the number that matters is the
+      improvement: 18x, 23x and 36x closer at the three radii above, and the
+      residual is 2% of the stamp's own peak displacement against 73% for the
+      clamped stamp. Where the levels do NOT agree the residual is the coarse
+      level's own spacing and is stated as such
+- [x] 4.5 No fixture in `tests/unit/test_multires_sculpt.cpp` is mixed-depth
+      today. It is now — `build_regional`, the one the section-2 gates already
+      use, sized as this task asks: the middle 2x2 of a 6x6 cage, where 64 of
+      289 level-3 vertices (22%) are on the rim, because a SMALL refined region
+      has proportionally more boundary and a large one under-reports every
+      number above
+
+### What the brushes stage landed, and where the tree corrected the plan
+
+- `MultiresSculptor::stamp` writes every level the footprint reaches, coarsest
+  first, with the bound level written LAST as absolute positions. No new type
+  and no new entry point: `stamp_coarse`, `bind_coarse`, `note_before` and
+  `partition_coarse_write` in `src/mesh/multires_sculpt.cpp`, plus
+  `MultiresSurface::restore_level_positions` — the other half of "the ONE write
+  path", for a caller that moved a level's mesh and decided part of the move was
+  not its to keep
+- CORRECTION TO 4.2, AND IT MOVED WORK OUT. The plan called for a cross-level
+  WORKSET. There is none, because the question a wider workset would have had to
+  answer is one the export stage already answered: which level does the
+  mixed-depth surface carry this vertex at? The answer is `ChildIndex::of(level
+  above).stored(v) == kNoVertex`, one line, and it is the SAME predicate
+  `mixed_mesh_at_level` emits its vertices with. So the two write lists are a
+  partition of that surface by construction, and "no doubled contribution at the
+  seam" is a property of the representation rather than a tolerance. The export
+  half, which no host is waiting for, turns out to have a user: the brush
+- ORDERING IS THE WHOLE ARITHMETIC, and it was measured rather than reasoned. A
+  coarse write moves S(n) under the finer levels beside it, so a fine level
+  absorbed FIRST keeps a coefficient that reconstructs to the asked-for position
+  plus that ripple. Fine-first finishes 0.106460609 from the uniform hierarchy's
+  answer at radius 0.50; coarsest-first with the fine level written as an
+  absolute target finishes 0.005068991 from it — 21x — and clamping to one level
+  finishes 0.182510689 from it
+- WHAT IS NOT WRITTEN, and it is deliberate: a coarse vertex the level ABOVE
+  carries is put back where it was rather than absorbed. The consequence is that
+  the coarse form under the refined region does not follow the stroke, which is
+  the honest reading of a regional hierarchy — the stroke lives at the sculpt
+  level there, and an artist who wants it in the coarse form sculpts the coarse
+  level. Absorbing those too was tried and measured: it leaks into level-3
+  vertices outside the footprint, which the fine write list cannot compensate
+- NO NEW ENTRY POINT, AND THE VERSION LINES DO NOT MOVE for this stage. A host's
+  redraw path already works: `absorb_level_edit` marks BASE PATCHES dirty at
+  whatever level it is given, and `clay_multires_dirty_blocks` reports patches
+  rather than levels, so a host re-copying its dirty patches at their effective
+  level sees the coarse write with no ABI change at all.
+  `clay_multires_stamp_report.moved_vertices` now counts the whole stamp and
+  `.level` still names the level the brush was bound to. The two new C++
+  accessors — `last_write_levels` and `last_write_vertices_at` — get no C mirror
+  until a host asks for one
+- COMPLEXITY: `stamp` was 35 before this change and is 13 after it, with every
+  new function at or below 10 (`note_before` 10, `partition_coarse_write` 9,
+  `stamp_coarse` 7, `restore_level_positions` 7)
+- PROVED BY REVERT, twice, each revert compiling, each one isolating one
+  decision. Dropping the coarse write — every moved coarse vertex treated as the
+  level above's — fails 39 assertions across 6 cases, including every
+  `dropped == 0` gate, both write-list gates and the undo gate. Reverting ONLY
+  the ordering — the bound level absorbed before the coarse passes — fails 9
+  assertions across 2 cases and, tellingly, NOT one `dropped == 0`: nothing is
+  dropped by the wrong order, it is counted twice
 
 ## 5. Mixed-depth export — last, and no user is waiting
 

@@ -624,6 +624,47 @@ patch ring, and `add_level_for_patches` REFUSES
 neighbourhood is missing — where it did, Catmull-Clark's border rule would
 apply at an edge that is not a border.
 
+**A stroke crosses the boundary of the refined region.** The surface an artist
+is looking at here is not all at one level — the patches they refined are at the
+sculpt level, the patches beside them are one or more levels coarser and have no
+vertex at the sculpt level for a brush to move. So a stamp writes every level its
+footprint reaches, at the level that part of the surface actually lives at, and
+it writes them COARSEST FIRST with the sculpt level written last as absolute
+positions.
+
+Both halves of that are measured rather than asserted. One Draw stamp anchored on
+the rim of a refined region (the middle 2x2 of a 6x6 cage taken to level 3, where
+the level-3 edge spacing is 0.0417), against the same stamp on a uniformly
+refined hierarchy, compared over the mixed-depth surface a host draws:
+
+| radius | vertices left unmoved | worst error, clamped to one level | worst error, written across levels |
+|---:|---:|---:|---:|
+| 0.25 | 5 → 0 | 0.029781371 | 0.001621436 |
+| 0.35 | 17 → 0 | 0.090758100 | 0.003878876 |
+| 0.50 | 46 → 0 | 0.182510689 | 0.005068991 |
+
+The left-hand column is up to **4.4 level-3 edges** out — the deposit stopping
+dead at the rim with the falloff still near full, which is a step in the
+displacement rather than a fade — and the right-hand one is a tenth of an edge.
+All fourteen displacement verbs cross, and the worst of them (Clay) finishes 7%
+of an edge from the uniform hierarchy's answer.
+
+**No vertex is written twice, and that is structural rather than a tolerance.** A
+vertex belongs to the level the mixed-depth surface carries it at — its own,
+unless the level above holds its vertex point — which is the same partition
+`mixed_mesh_at_level` emits, asked through the same `ChildIndex`. The ordering is
+the other half: a coarse write moves the subdivided surface underneath the finer
+levels beside it, so a fine level absorbed BEFORE it keeps a coefficient that
+reconstructs to the asked-for position **plus** that ripple — 0.106460609 at
+radius 0.50, twenty-one times the residual of the correct order. A hierarchy
+whose levels all refine every patch owns nothing below its top level, takes none
+of this, and stamps byte-identically to what it did before.
+
+A host needs no new call for it: `absorb_level_edit` marks BASE PATCHES dirty at
+whatever level it is given and `clay_multires_dirty_blocks` reports patches
+rather than levels, so a host re-copying its dirty patches at their effective
+level already sees the coarse write.
+
 **What is not done yet.** Exporting a mixed-depth hierarchy as ONE mesh needs
 transition polygons on the coarse side of every boundary: a fine patch's corner
 vertex has taken one more subdivision step than its coarse neighbour's, so the

@@ -886,3 +886,347 @@ TEST_CASE("multires: a derived face can join two vertices no ring walk reaches")
     CHECK(unreachable_pairs(block) == 0);
     CHECK(unreachable_pairs(ell) == 1);
 }
+
+// -- brushes ACROSS a depth boundary -----------------------------------------
+//
+// The cases above are about a stamp whose vertices this level all STORES: they
+// close the neighbourhood so a rim vertex is averaged and shaded the way the
+// uniform hierarchy averages and shades it. These are about the other half —
+// the part of the brush's footprint that has no vertex at this level at all,
+// because the patches beside the refined region are coarser.
+//
+// The fixture is the one above and it is sized deliberately: the middle 2x2 of
+// a 6x6 cage, where 64 of the 289 level-3 vertices — 22% — are on the rim.
+// A SMALL refined region has proportionally MORE boundary, which is the
+// opposite of the intuition that a transition is a rare edge case, so a gate
+// built on a large refined region under-reports every number here.
+
+namespace {
+
+// The displacement a stamp on a UNIFORMLY refined hierarchy produced, sampled
+// wherever the mixed-depth surface has a vertex.
+//
+// By NEAREST, and it has to be: the coarse side of a mixed-depth surface is at
+// level 2, so its vertices are not level-3 vertices and no exact match exists
+// for them. The level-3 spacing on this cage is 0.0417 and the level-2 spacing
+// 0.0833, so "nearest" is never ambiguous.
+struct DenseField {
+    std::vector<cfloat3> before, displacement;
+
+    static DenseField of(const Mesh& cage, MeshBrush verb, const MeshBrushSettings& settings) {
+        MultiresSurface dense = build(cage, 3);
+        DenseField f;
+        f.before = dense.positions_at(3);
+        dense.set_sculpt_level(3);
+        MultiresSculptor sculptor(dense);
+        sculptor.begin_stroke();
+        sculptor.stamp(verb, settings);
+        const std::vector<cfloat3>& after = dense.positions_at(3);
+        f.displacement.resize(after.size());
+        for (std::size_t i = 0; i < after.size(); ++i) f.displacement[i] = after[i] - f.before[i];
+        return f;
+    }
+
+    cfloat3 at(cfloat3 p) const {
+        std::size_t best = 0;
+        float best_d = 1e30f;
+        for (std::size_t i = 0; i < before.size(); ++i) {
+            const float d = clength(before[i] - p);
+            if (d < best_d) {
+                best_d = d;
+                best = i;
+            }
+        }
+        return displacement[best];
+    }
+};
+
+// The pre-cross-level algorithm, kept as the parity reference: one stamp on one
+// level's own mesh, absorbed into that level and nothing else.
+std::size_t stamp_one_level(MultiresSurface& s, std::uint32_t level, MeshBrush verb,
+                            const MeshBrushSettings& settings) {
+    Mesh& mesh = s.level_mesh(level);
+    mesh::MeshSculptor sculptor(mesh, s.level_adjacency(level));
+    sculptor.set_cross_level(&s.cross_level_at(level));
+    const std::size_t moved = sculptor.stamp(verb, settings);
+    std::vector<std::uint32_t> touched;
+    for (mesh::WorkItemId item : sculptor.write_region()) {
+        std::size_t members = 0;
+        const std::uint32_t* member =
+            s.level_adjacency(level).members(item.as_weld_class(), &members);
+        for (std::size_t i = 0; i < members; ++i) touched.push_back(member[i]);
+    }
+    s.absorb_level_edit(level, touched);
+    return moved;
+}
+
+struct CrossResult {
+    std::size_t dropped = 0;  // the reference moved it and this stamp did not, at all
+    float worst = 0.0f;       // the furthest this stamp finished from the reference
+    float peak = 0.0f;        // the reference's own largest displacement
+};
+
+// What one stamp on the regional hierarchy did, against what the same stamp on
+// the uniform one did, over the MIXED-DEPTH surface — which is the surface a
+// host draws and the one an artist is looking at when the brush crosses.
+CrossResult cross_stamp(MultiresSurface& s, MeshBrush verb, const MeshBrushSettings& settings,
+                        const DenseField& reference, bool cross) {
+    const Mesh before = s.mixed_mesh_at_level(3);
+    s.set_sculpt_level(3);
+    if (cross) {
+        MultiresSculptor sculptor(s);
+        sculptor.begin_stroke();
+        sculptor.stamp(verb, settings);
+    } else {
+        stamp_one_level(s, 3, verb, settings);
+    }
+    const Mesh after = s.mixed_mesh_at_level(3);
+    REQUIRE(after.positions.size() == before.positions.size());
+
+    CrossResult r;
+    for (std::size_t i = 0; i < before.positions.size(); ++i) {
+        const cfloat3 want = reference.at(before.positions[i]);
+        const cfloat3 got = after.positions[i] - before.positions[i];
+        r.peak = std::max(r.peak, clength(want));
+        r.worst = std::max(r.worst, clength(got - want));
+        if (clength(want) > 1e-6f && clength(got) <= 1e-7f) ++r.dropped;
+    }
+    return r;
+}
+
+}  // namespace
+
+TEST_CASE("multires: a stamp crossing a depth boundary writes the coarse side too") {
+    const Mesh cage = bumpy_quads(6, 1.0f);
+    MeshBrushSettings settings;
+    settings.strength = 0.5f;
+    {
+        MultiresSurface probe = build_regional(cage);
+        const std::vector<cfloat3>& p = probe.positions_at(3);
+        settings.center = p[nearest_vertex(p, cf3(-1.0f / 3.0f, 0.0f, 0.0f))];
+    }
+
+    // WIDENING THE BRUSH IS WIDENING THE DEFECT, which is why the radius is
+    // swept rather than picked: the further past the rim the footprint reaches,
+    // the more of it had nowhere to go. Anchored ON the rim in every case.
+    for (float radius : {0.25f, 0.35f, 0.50f}) {
+        settings.radius = radius;
+        const DenseField reference = DenseField::of(cage, MeshBrush::Draw, settings);
+
+        MultiresSurface one = build_regional(cage);
+        MultiresSurface both = build_regional(cage);
+        const CrossResult level_only =
+            cross_stamp(one, MeshBrush::Draw, settings, reference, false);
+        const CrossResult crossed = cross_stamp(both, MeshBrush::Draw, settings, reference, true);
+
+        INFO("radius " << radius << ": dropped " << level_only.dropped << " -> " << crossed.dropped
+                       << ", worst " << level_only.worst << " -> " << crossed.worst
+                       << ", against a peak of " << crossed.peak);
+        // THE SILENT DROP. 5, 17 and 46 vertices of the surface an artist is
+        // looking at are moved by the uniform hierarchy's stamp and by nothing
+        // at all here — and the count that came back said the stamp had done
+        // its whole job. Assert the COUNT.
+        CHECK(level_only.dropped > 0);
+        CHECK(crossed.dropped == 0);
+        // AND HOW FAR THE SURFACE FINISHES FROM THE UNIFORM HIERARCHY'S ANSWER,
+        // asked as a RATIO rather than against a threshold, because the number
+        // that matters is the improvement and not a tolerance nobody stated:
+        // 0.029781371 -> 0.001621436, 0.090758100 -> 0.003878876 and
+        // 0.182510689 -> 0.005068991, which is 18x, 23x and 36x closer. The
+        // level-3 edge spacing here is 0.0417, so the left-hand column is up to
+        // 4.4 edges out and the right-hand one is a tenth of one.
+        CHECK(crossed.worst * 5.0f < level_only.worst);
+        // What is left is the REGION NORMAL, not the seam: `Draw` deposits
+        // along the region's AVERAGED normal, and the region on a mixed-depth
+        // surface is not the same set of vertices as the region on a uniform
+        // one. 2% of the stamp's own peak displacement, against 73% for
+        // dropping the coarse side.
+        CHECK(crossed.worst < 0.05f * crossed.peak);
+        CHECK(level_only.worst > 0.05f * crossed.peak);
+    }
+}
+
+TEST_CASE("multires: every displacement verb crosses a depth boundary") {
+    // ONE VERB IS NOT A GATE HERE. The three things a depth boundary breaks are
+    // the averaged ring, the per-vertex normal and the region's own plane, and
+    // the vocabulary splits over them: Smooth and Relax average, Inflate and
+    // Crease steer per vertex, Flatten and Scrape fit a plane, Grab and
+    // Snakehook carry a rigid delta, Layer measures a ceiling. All of them
+    // reach past the rim, and none of them has a branch on a level.
+    const Mesh cage = bumpy_quads(6, 1.0f);
+    MeshBrushSettings settings;
+    settings.radius = 0.30f;
+    settings.strength = 0.5f;
+    settings.direction = cf3(0.02f, 0.03f, 0.0f);
+    {
+        MultiresSurface probe = build_regional(cage);
+        const std::vector<cfloat3>& p = probe.positions_at(3);
+        settings.center = p[nearest_vertex(p, cf3(-1.0f / 3.0f, 0.0f, 0.0f))];
+    }
+    for (MeshBrush verb : {MeshBrush::Draw, MeshBrush::Inflate, MeshBrush::Smooth, MeshBrush::Grab,
+                           MeshBrush::Flatten, MeshBrush::Clay, MeshBrush::Relax, MeshBrush::Pinch,
+                           MeshBrush::Crease, MeshBrush::Nudge, MeshBrush::Layer, MeshBrush::Polish,
+                           MeshBrush::Snakehook, MeshBrush::Scrape}) {
+        const DenseField reference = DenseField::of(cage, verb, settings);
+        MultiresSurface one = build_regional(cage);
+        MultiresSurface both = build_regional(cage);
+        const CrossResult level_only = cross_stamp(one, verb, settings, reference, false);
+        const CrossResult crossed = cross_stamp(both, verb, settings, reference, true);
+        INFO("verb " << static_cast<int>(verb) << ": dropped " << level_only.dropped << " -> "
+                     << crossed.dropped << ", worst " << level_only.worst << " -> "
+                     << crossed.worst);
+        // NOT A RATIO HERE, because a smoothing verb's own displacement on this
+        // cage is a thousandth of a unit and every ratio taken against it is
+        // unflattering for a reason that is not a defect: level 2 smooths at
+        // level 2's wavelength, and no write at that level can reproduce a
+        // level-3 average. What must hold is the same two things — nothing is
+        // dropped, and the surface does not STEP.
+        CHECK(level_only.dropped > 0);
+        CHECK(crossed.dropped == 0);
+        // A quarter of the level-3 edge spacing of 0.0417. The worst of the
+        // fourteen is Clay at 0.002927452, which is 7% of an edge; dropping the
+        // coarse side is up to 4.4 edges out.
+        CHECK(crossed.worst < 0.25f * 0.0416667f);
+    }
+}
+
+TEST_CASE("multires: no vertex of a mixed-depth surface is written twice") {
+    // THE SEAM CANNOT DOUBLE-COUNT, and it is structural rather than a tolerance
+    // to tune. A vertex belongs to the level the mixed-depth surface carries it
+    // at — its own, unless the level above holds its vertex point — so the two
+    // write lists are a PARTITION and the same displacement cannot land in both.
+    const Mesh cage = bumpy_quads(6, 1.0f);
+    MultiresSurface s = build_regional(cage);
+    MeshBrushSettings settings;
+    settings.radius = 0.50f;
+    settings.strength = 0.5f;
+    const std::vector<cfloat3>& p = s.positions_at(3);
+    settings.center = p[nearest_vertex(p, cf3(-1.0f / 3.0f, 0.0f, 0.0f))];
+
+    s.set_sculpt_level(3);
+    MultiresSculptor sculptor(s);
+    sculptor.begin_stroke();
+    const std::size_t moved = sculptor.stamp(MeshBrush::Draw, settings);
+
+    // Two levels: the one the artist chose, and the one the patches beside the
+    // refined region actually live at.
+    CHECK(sculptor.last_write_levels() == std::vector<std::uint32_t>{2u, 3u});
+    const std::vector<std::uint32_t>& coarse = sculptor.last_write_vertices_at(2);
+    const std::vector<std::uint32_t>& fine = sculptor.last_write_vertices_at(3);
+    CHECK(coarse.size() == 46);
+    CHECK(fine.size() == 218);
+    CHECK(moved == 264);
+    // `last_write_vertices()` keeps its meaning: the BOUND level's list.
+    CHECK(sculptor.last_write_vertices() == fine);
+    CHECK(sculptor.last_write_vertices_at(1).empty());
+
+    // NOT ONE of the level-2 vertices written has a level-3 vertex point, so
+    // none of them is a vertex the level-3 list also moved.
+    const mesh::ChildIndex above = mesh::ChildIndex::of(s.topology_at(3));
+    std::size_t also_above = 0;
+    for (std::uint32_t v : coarse)
+        if (above.stored(v) != mesh::kNoVertex) ++also_above;
+    CHECK(also_above == 0);
+}
+
+TEST_CASE("multires: a crossing gesture undoes across both levels") {
+    // THE RECORD ALREADY SPANS LEVELS — `MultiresDelta` is keyed on (level,
+    // vertex) and always was — so what this checks is that the crossing stamp
+    // fills it that way rather than recording the level it was bound to and
+    // leaving the coarse write unreversible.
+    const Mesh cage = bumpy_quads(6, 1.0f);
+    MultiresSurface s = build_regional(cage);
+    const std::vector<cfloat3> level3 = s.positions_at(3);
+    const std::vector<cfloat3> level2 = s.positions_at(2);
+    MeshBrushSettings settings;
+    settings.radius = 0.50f;
+    settings.strength = 0.5f;
+    settings.center = level3[nearest_vertex(level3, cf3(-1.0f / 3.0f, 0.0f, 0.0f))];
+
+    s.set_sculpt_level(3);
+    MultiresSculptor sculptor(s);
+    sculptor.begin_stroke();
+    MultiresDelta record;
+    CHECK(sculptor.stamp(MeshBrush::Draw, settings, {}, &record) > 0);
+    CHECK(record.levels() == std::vector<std::uint32_t>{2u, 3u});
+    CHECK_FALSE(same_bytes(s.positions_at(3), level3));
+    CHECK_FALSE(same_bytes(s.positions_at(2), level2));
+
+    REQUIRE(record.revert(s));
+    CHECK(same_bytes(s.positions_at(3), level3));
+    CHECK(same_bytes(s.positions_at(2), level2));
+    REQUIRE(record.apply(s));
+    CHECK_FALSE(same_bytes(s.positions_at(2), level2));
+}
+
+TEST_CASE("multires: a stamp with nothing on the coarse side writes one level") {
+    // THE PARITY GATE FOR THIS HALF, and it is the one that says the coarse pass
+    // costs a hierarchy nothing where it has nothing to do. Two cases, both
+    // asserted as BYTES against the algorithm this replaced — one stamp on one
+    // level's own mesh, absorbed into that level and nothing else.
+    const Mesh cage = bumpy_quads(6, 1.0f);
+    MeshBrushSettings settings;
+    settings.radius = 0.08f;
+    settings.strength = 0.5f;
+
+    SUBCASE("a uniform hierarchy owns nothing below its top level") {
+        MultiresSurface with = build(cage, 3);
+        MultiresSurface without = build(cage, 3);
+        const std::vector<cfloat3>& p = with.positions_at(3);
+        settings.center = p[nearest_vertex(p, cf3(-1.0f / 3.0f, 0.0f, 0.0f))];
+        with.set_sculpt_level(3);
+        MultiresSculptor sculptor(with);
+        sculptor.begin_stroke();
+        const std::size_t a = sculptor.stamp(MeshBrush::Draw, settings);
+        const std::size_t b = stamp_one_level(without, 3, MeshBrush::Draw, settings);
+        CHECK(a == b);
+        CHECK(a > 0);
+        CHECK(sculptor.last_write_levels() == std::vector<std::uint32_t>{3u});
+        CHECK(same_bytes(with.positions_at(3), without.positions_at(3)));
+    }
+
+    SUBCASE("a stamp inside the refined region reaches no coarse vertex") {
+        MultiresSurface with = build_regional(cage);
+        MultiresSurface without = build_regional(cage);
+        const std::vector<cfloat3>& p = with.positions_at(3);
+        settings.center = p[nearest_vertex(p, cf3(0, 0, 0))];
+        with.set_sculpt_level(3);
+        MultiresSculptor sculptor(with);
+        sculptor.begin_stroke();
+        const std::size_t a = sculptor.stamp(MeshBrush::Draw, settings);
+        const std::size_t b = stamp_one_level(without, 3, MeshBrush::Draw, settings);
+        CHECK(a == b);
+        CHECK(a > 0);
+        // The coarse pass RAN — the levels below are regional, so it always
+        // does — and found nothing this level does not already carry.
+        CHECK(sculptor.last_write_levels() == std::vector<std::uint32_t>{3u});
+        CHECK(same_bytes(with.positions_at(3), without.positions_at(3)));
+        CHECK(same_bytes(with.positions_at(2), without.positions_at(2)));
+    }
+}
+
+TEST_CASE("multires: a crossing stamp survives a cache drop under it") {
+    // THE STALENESS DISCIPLINE, extended to the levels a crossing stamp writes.
+    // `bind` rebuilds on a cache-generation change because the level's mesh
+    // lives in the cache; the list of levels that OWN vertices is rebuilt with
+    // it, and a drop between two stamps of one stroke must not leave the coarse
+    // side unwritten.
+    const Mesh cage = bumpy_quads(6, 1.0f);
+    MultiresSurface s = build_regional(cage);
+    MeshBrushSettings settings;
+    settings.radius = 0.50f;
+    settings.strength = 0.25f;
+    const std::vector<cfloat3>& p = s.positions_at(3);
+    settings.center = p[nearest_vertex(p, cf3(-1.0f / 3.0f, 0.0f, 0.0f))];
+
+    s.set_sculpt_level(3);
+    MultiresSculptor sculptor(s);
+    sculptor.begin_stroke();
+    CHECK(sculptor.stamp(MeshBrush::Draw, settings) > 0);
+    CHECK(sculptor.last_write_levels() == std::vector<std::uint32_t>{2u, 3u});
+    const std::uint64_t before = s.cache_generation();
+    s.drop_all_caches();
+    CHECK(s.cache_generation() != before);
+    CHECK(sculptor.stamp(MeshBrush::Draw, settings) > 0);
+    CHECK(sculptor.last_write_levels() == std::vector<std::uint32_t>{2u, 3u});
+}

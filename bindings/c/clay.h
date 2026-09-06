@@ -7416,7 +7416,18 @@ clay_result clay_multires_project(clay_multires* surface, const clay_mesh* refer
 
 typedef struct clay_multires_stamp_report {
     uint32_t struct_size; /* = sizeof(clay_multires_stamp_report); required */
-    uint32_t level;       /* the level the stamp was made on */
+    /* The level the brush was BOUND to, which on a regionally refined hierarchy
+     * is not the only level a stamp writes: the patches beside the refined
+     * region are coarser and have no vertex at this level for the brush to
+     * move, so a footprint reaching past the region is written at the level
+     * that part of the surface actually lives at. `moved_vertices` counts the
+     * whole of it.
+     *
+     * THIS NEEDS NOTHING NEW FROM A HOST. clay_multires_dirty_blocks reports
+     * BASE PATCHES rather than levels, and a stamp marks the patches it wrote
+     * at whatever level it wrote them, so a host re-copying its dirty patches
+     * at clay_multires_effective_level already picks the coarse write up. */
+    uint32_t level;
     uint64_t moved_vertices;
     uint64_t base_revision;
     uint64_t detail_revision;

@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "clay/mesh/multires.h"
+#include "clay/mesh/multires_sculpt.h"
 
 using namespace clay;
 using namespace clay::kernel;
@@ -947,4 +948,40 @@ TEST_CASE("regional export: a mixed export costs no more resident memory than a 
     // NOT VACUOUS: exporting did make the surface bigger, so "no more than" is
     // a comparison of two real numbers rather than of two zeros.
     CHECK(after_mixed.rebuildable > cold.rebuildable);
+}
+
+TEST_CASE("regional export: a crossing stamp leaves the mixed-depth surface watertight") {
+    // A CRACK IS ONE OF THE THREE THINGS A BRUSH ACROSS A TRANSITION MUST NOT
+    // PRODUCE, and the export above closes it by IDENTITY: a shared cage vertex
+    // is one index carrying the fine side's value. What that leaves to check is
+    // that a stamp moving BOTH sides keeps the identity — that the fine vertex
+    // the coarse face borrows its corner from moved once, carrying the coarse
+    // face with it, rather than moving on one side of the seam and not the
+    // other.
+    //
+    // On the closed cage, so "0 boundary edges" is a statement about the export
+    // and not about a rim the cage itself has.
+    const int n = 12;
+    MultiresSurface s = build(closed_torus(n, n));
+    MultiresError err = MultiresError::None;
+    REQUIRE(s.refine_patches_to_level(torus_block(n, 1, 2, 1, 2), 3, &err));
+    CHECK(open_edges(s.mixed_mesh_at_level(3).indices) == 0u);
+
+    mesh::MeshBrushSettings settings;
+    settings.radius = 0.45f;
+    settings.strength = 0.5f;
+    settings.center = s.positions_at(3)[0];
+
+    REQUIRE(s.set_sculpt_level(3));
+    mesh::MultiresSculptor sculptor(s);
+    sculptor.begin_stroke();
+    CHECK(sculptor.stamp(mesh::MeshBrush::Draw, settings) > 0);
+    // It really did cross: the coarse patches beside the refined region were
+    // written at the level they live at, not at the one the brush was bound to.
+    CHECK(sculptor.last_write_levels().size() > 1u);
+    CHECK(open_edges(s.mixed_mesh_at_level(3).indices) == 0u);
+
+    // AND THE VERTEX COUNT DID NOT MOVE, which is the other half of "no crack":
+    // a seam that had opened would weld into more vertices, not fewer.
+    CHECK(s.mixed_mesh_at_level(3).positions.size() == 680u);
 }
