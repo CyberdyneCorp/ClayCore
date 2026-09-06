@@ -979,3 +979,38 @@ So the fix for blockers 2, 3 and 4 is not "dilate four call sites". It is that
 the dirty calls, the command path and the gesture reaches all go through it** —
 which is what `node_influence_bound_in_document`'s own comment already claims and
 this change made false.
+
+### §13c. Which of the three gesture reaches a real host actually drives
+
+Established 2026-09-06 by reading both trees rather than reasoning about them,
+and it reorders blocker 3 rather than widening it.
+
+The three `GestureRegion` reaches that bypass `command_influence_bound` belong to
+`clay_layer_place_stamps` (`bindings/c/clay_c.cpp:9488`),
+`clay_layer_move_surface` (`:7613`) and `clay_layer_magnify_surface` (`:7745`).
+Against the one host we can check:
+
+| entry point | driven? |
+|---|---|
+| `clay_layer_place_stamps` | **no caller anywhere** — one of the 29 entry points v0.84.0 added that this host calls none of |
+| `clay_layer_move_surface` / `_preview` | **yes** — wrapped in its `sculpt.rs` and driven by its Mover tool, which is a sculptor pulling the surface with the pointer |
+| `clay_layer_magnify_surface` / `_preview` | wrapped by neither and called by nobody |
+
+**And the stroke path was never broken.** `clay_layer_apply_stroke` (`:7989`)
+applies each stroke node through `apply_edit` (`:8024`) inside an undo group, so
+every field dab already routes through `command_influence_bound` and inherited
+the first fix. The asymmetry blocker 3 names is real and it is between
+PLACE-STAMPS and apply-edit, not between strokes and apply-edit.
+
+So the live exposure is **one tool, on a drag** — where a region that is too
+small shows as the surface tearing behind the pointer rather than as a stale
+patch found later. All three reaches still get fixed; this says which one has a
+user behind it today, and it is the one whose symptom is continuous.
+
+**Method note, because it is the transferable part.** Both sides of this were
+asserted before they were checked and both assertions were wrong: the host said
+its stroke path carried every dab (it takes the fixed route), and this file said
+the stamp stroke was the exposed one (it is `place_stamps`, which nobody calls).
+Each was checkable in a minute because the other named a SYMBOL and a FILE rather
+than describing a flow. Name the symbol even when you might be wrong about it —
+especially then, since that is what makes the correction cheap.
