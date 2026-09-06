@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 86
+#define CLAY_ABI_MINOR 87
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -1238,7 +1238,13 @@ clay_result clay_document_remove_layer(clay_document* doc, clay_layer_id layer);
  * so it is the one edit that is a pair rather than a single command. The add
  * NAMES the layer it shares its edit list with when there is one, so a
  * reordered instance survives a journal replay still sharing rather than
- * coming back as a deep copy — see clay_document_instance_layer. */
+ * coming back as a deep copy — see clay_document_instance_layer.
+ *
+ * SINCE ABI 0.86.0 A REORDER CAN CHANGE THE SHAPE. Visible SDF layers fold
+ * under each layer's own composition, so A − B + C and A + C − B are different
+ * sculptures made of the same three layers. With every layer unioning — every
+ * document written before then — the order is still cosmetic, because a union
+ * is commutative. See clay_document_set_layer_composition. */
 clay_result clay_document_move_layer(clay_document* doc, clay_layer_id layer, int32_t index);
 /* A hidden layer contributes nothing to the field; showing it again restores
  * the original field exactly. */
@@ -1352,6 +1358,162 @@ clay_result clay_document_set_layer_transform_nonuniform(clay_document* doc, cla
                                                          float rotation_angle,
                                                          const float scale[3]);
 
+/* -- a layer's COMPOSITION (ABI 0.86.0) -------------------------------------
+ *
+ * How a visible SDF layer combines with the accumulated field of the visible
+ * SDF layers BELOW it. `op` is a clay_op and `blend` a clay_blend — THE SAME
+ * FOUR VALUES clay_layer_set_op_blend takes for an item, because a layer
+ * boolean is the operation an item boolean already is and does not get a
+ * second vocabulary or a second evaluator.
+ *
+ * The default is CLAY_OP_ADD with CLAY_BLEND_HARD and zeroes, which is the
+ * unconditional hard union every document has always folded its layers with.
+ * Since both enumerators are 0, a zeroed composition IS that union: a document
+ * that never calls this evaluates exactly as it did, and one saved before the
+ * field existed loads with every layer unioning.
+ *
+ * WHAT IT DOES NOT PROMISE.
+ *
+ *   * THE FIRST VISIBLE SDF LAYER'S OPERATOR IS NOT APPLIED. It initialises
+ *     the accumulator instead. Applying one against an empty field would make
+ *     CLAY_OP_SUBTRACT and CLAY_OP_INTERSECT produce nothing at all, with no
+ *     error — which is what an artist who reordered their base layer to the
+ *     top would otherwise see. So this call stores what you set on any layer,
+ *     and the bottom-most visible SDF layer's stored value has no effect until
+ *     another visible SDF layer sits below it.
+ *   * IT IS NOT A NO-OP ON GEOMETRY the way visibility once was. Hiding a
+ *     subtracting layer restores the geometry it was cutting, and reordering
+ *     layers can change the shape. A host that treated layer order as cosmetic
+ *     has to stop.
+ *   * A NON-SDF LAYER IS REFUSED with CLAY_ERROR_INVALID_ARGUMENT, both here
+ *     and in the reader. A voxel or mesh layer never enters the tape, so a
+ *     composition on one would be a control that does not act; and the reader
+ *     refuses rather than answering CLAY_OP_ADD, because a reader that cannot
+ *     express what is there must not answer (see clay_layer_node_transform).
+ *   * CLAY_OP_INLINE IS REFUSED. It is the group op — children spliced into an
+ *     outer chain — and a layer has no outer chain.
+ *   * THE TWO TRANSITIONS ARE REFUSED, as a group refuses them and for the
+ *     same reason: they read their parameters off the node, and a layer has no
+ *     node to read them from, so one accepted here would morph on the
+ *     compiler's defaults instead of on anything the artist set.
+ *   * A NON-FINITE blend radius or rounding is refused. Elsewhere in this ABI
+ *     only the sign is checked; a layer-level radius reaches the document's
+ *     cull pad, where an infinity is not a large blend but a dropped plan.
+ *
+ * A negative radius or rounding is rejected rather than clamped, as
+ * clay_set_layer_radial rejects an axis of 3.
+ *
+ * AN EMPTY LAYER IS STILL AN OPERAND, and this is where a live fold and a
+ * host's own resolved boolean disagree. A layer that produces no value here is
+ * folded against the far field wherever the operator reads an absent operand as
+ * a change, so an EMPTY layer set to CLAY_OP_INTERSECT blanks the document's
+ * field rather than leaving it alone, and one set to CLAY_OP_SUBTRACT removes
+ * nothing. A host that resolves booleans by collecting operands typically drops
+ * an empty subtool before combining — "there is nothing in it to combine" — and
+ * on that route the same document keeps its geometry. Both are defensible; they
+ * are not the same document.
+ *
+ * THE ENGINE CANNOT TAKE THE HOST'S RULE, and the reason is not a preference.
+ * "This layer produced no value" is true for two different reasons and only one
+ * of them is emptiness: the layer may have no visible contributing items, or
+ * its chain may have been wholly CULLED out of the region being compiled, which
+ * a per-brick refill does constantly for a layer with content elsewhere.
+ * Skipping the fold in the second case would leave an intersecting layer's
+ * material standing in exactly the bricks its own geometry does not reach,
+ * per brick, with no error and nothing in the values to show it. So the fold is
+ * applied in both cases.
+ *
+ * A HOST THAT WANTS THE TWO ROUTES TO AGREE FILTERS EMPTY OPERANDS ITSELF —
+ * hide, or do not compose, a layer it considers empty — because "empty" is a
+ * document-level fact the host is holding and the engine is not.
+ *
+ * WHAT A SOFT RADIUS COSTS A DRAG, and it is not where a host would look for
+ * it. A layer whose composition carries a soft blend with a positive radius
+ * classifies as GENERAL from clay_layer_placement_report, so
+ * clay_layer_placement_begin/_update/_commit stop taking the cheap path for
+ * that layer -- the same answer an ITEM with a soft radius already gets, for
+ * the same reason: the radius is an absolute world distance and the layer's
+ * scale does not reach it, so a scaled layer is not a similarity of its own
+ * field. Its ROUNDING does follow the scale; only the radius does not.
+ *
+ * ANY POSITIVE blend_k COUNTS AS A RADIUS HERE, whatever the op is and
+ * whatever the blend profile says: a composition with blend_k > 0 classifies
+ * GENERAL, CLAY_BLEND_HARD included. Enumerating the ops that spend it would be
+ * a list to keep in step with the kernel, and it is not one list: the extended
+ * modes (CLAY_OP_GROOVE, _TONGUE, _PIPE, _ENGRAVE, _EMBOSS, _INSET, _SHELL,
+ * _REPLACE, _RELIEF, _INCISE) read blend_k as their own radius, depth or
+ * amplitude and ignore the profile entirely, and CLAY_OP_PAINT fades its colour
+ * over blend_k with a hard profile too. It is the same absolute world distance
+ * under several names, and it is the number the document's cull pad is dilated
+ * by in every case -- so the verdict and the pad read one field one way.
+ *
+ * DELIBERATELY CONSERVATIVE FOR THE THREE PLAIN BOOLEANS. CLAY_OP_ADD,
+ * _SUBTRACT and _INTERSECT with CLAY_BLEND_HARD ignore blend_k in the field, so
+ * such a layer IS a similarity of its own field and this reports GENERAL for it
+ * anyway. The cost is one recomputation on a scale gesture for a value that is
+ * doing nothing; set blend_k to 0 with a hard profile to keep the cheap path,
+ * which is what a hard fold means.
+ *
+ * AND THE TRADE THAT FOLLOWS, because a host will otherwise discover it by
+ * measuring. Because the radius is absolute, the join covers the same world
+ * distance however large the subtool grows, so the cut reads as HARDENING as
+ * the layer is scaled up. A host that compensates by rewriting blend_k as the
+ * layer scales turns every scale of that layer into an EDIT -- this call is a
+ * document command, not part of a placement gesture -- and the gesture is gone
+ * for that layer with nothing to report its absence. Neither is wrong and the
+ * engine does not pick; pick knowing which one you are picking.
+ *
+ * WHAT ELSE A COMPOSED LAYER GIVES UP, all of it speed rather than results:
+ * the brick refill's resumable multi-layer split is refused when the TOP
+ * visible SDF layer is composed (a stroke into the cutter itself walks in full,
+ * as it did before that split existed -- the layers BENEATH may compose freely
+ * and keep it), and clay_eval_points_excluding /
+ * clay_brick_cache_eval_requests_excluding REFUSE a document where ANY layer's
+ * composition is applied, because the parts no longer compose back to the
+ * whole.
+ *
+ * The reader takes what the setter takes, so what comes out goes straight back
+ * in, and every out-pointer is optional: a call passing none of them still
+ * validates the layer, which is how a host asks "is this still an SDF layer"
+ * without a buffer. Reading is not editing — a ghosted, locked or hidden layer
+ * answers normally — while SETTING one on a protected layer is refused with
+ * CLAY_ERROR_INVALID_ARGUMENT like every other edit. */
+clay_result clay_document_set_layer_composition(clay_document* doc, clay_layer_id layer,
+                                                int32_t op, int32_t blend, float blend_k,
+                                                float rounding);
+clay_result clay_document_layer_composition(const clay_document* doc, clay_layer_id layer,
+                                            int32_t* out_op, int32_t* out_blend,
+                                            float* out_blend_k, float* out_rounding);
+
+/* -- can this document be written at an older format? (ABI 0.86.0) ----------
+ *
+ * Ask BEFORE you save. CLAY_OK means every layer of `doc` can be written at
+ * scene format minor `minor` with nothing an artist authored dropped;
+ * CLAY_ERROR_UNSUPPORTED means it cannot, *out_blocking_layer names the first
+ * layer that blocks it, and clay_last_error spells out why.
+ *
+ * WHY THIS EXISTS. A new format minor is normally writable at the previous one,
+ * degrading to whatever that minor meant — an unsquashed layer, an instance
+ * that comes back as a copy, a payload written once per node. None of those is
+ * a different sculpture. Minor 18's layer COMPOSITION is: written at 17, a
+ * subtracting layer comes back unioning, so the cutter that was carving a hole
+ * is a lump welded onto the form, in a file that opens cleanly and looks
+ * deliberate. The library therefore refuses that write rather than performing
+ * it, and this is how a host finds out in time to say so to a person.
+ *
+ * `minor` at or above this build's own layout is always CLAY_OK: the question
+ * is only ever about writing DOWN. A minor of 0 is CLAY_ERROR_INVALID_ARGUMENT.
+ * out_blocking_layer may be NULL, and is set to 0 on CLAY_OK.
+ *
+ * A RECORDED GAP, not an oversight: this ABI has no way to write at an older
+ * minor at all. clay_document_save takes a path and clay_document_save_memory
+ * takes a blob; neither takes a version, and the layout is a parameter on the
+ * C++ serializer that does not cross this boundary. So today the honest use of
+ * this call is "warn me that this document has become one an older build cannot
+ * open", and a save-at-minor entry point is its own change. */
+clay_result clay_document_writable_at_minor(const clay_document* doc, uint32_t minor,
+                                            clay_layer_id* out_blocking_layer);
+
 /* -- what a re-placement guarantees (ABI 0.82.0) ----------------------------
  *
  * Moving or rotating a whole layer changes no shape. A layer's transform
@@ -1360,8 +1522,14 @@ clay_result clay_document_set_layer_transform_nonuniform(clay_document* doc, cla
  * placement change that is RIGID the layer's surface afterwards is its surface
  * beforehand moved by one matrix, and for one that adds a UNIFORM scale the
  * field is the old field composed with the inverse and multiplied by the
- * factor. Layers combine by hard union, so no cross-layer term is re-solved
- * either: re-placing one layer leaves every other layer's field bit-identical.
+ * factor. Every OTHER layer's own field is bit-identical afterwards whatever
+ * this one did — a layer's transform reaches no other layer's chain. What the
+ * DOCUMENT's field does with that is the fold's business: a combine is
+ * pointwise, so the folded result changes exactly where this layer's field
+ * changed, dilated by the blend support of each fold above it. With every
+ * layer unioning, which is every document written before ABI 0.86.0, that
+ * dilation is zero and the document's field moves with the layer and nowhere
+ * else. See clay_document_set_layer_composition.
  *
  * The engine does not act on this yet — the invalidation after a layer
  * transform is exactly what it always was — but a host CAN: it already holds
@@ -1427,9 +1595,12 @@ clay_result clay_layer_placement_report(const clay_document* doc, clay_layer_id 
  * EXCLUDED and this layer ALONE — clay_brick_cache_eval_requests_excluding and
  * clay_brick_cache_eval_requests_layer, or clay_document_mesh_sdf_layer on the
  * mesh path. Draw the first where it is and the second under the gesture
- * matrix, which clay_layer_placement_preview hands back. Because layers combine
- * by hard union each surface is exact; what the preview cannot show is their
- * mutual occlusion where they overlap, and that resolves on commit.
+ * matrix, which clay_layer_placement_preview hands back. Each surface is exact
+ * on its own; what the preview cannot show is their mutual occlusion where they
+ * overlap, and that resolves on commit. THAT COMPOSITION IS A MINIMUM only
+ * while every layer unions — with a layer composition in play the excluded
+ * form refuses (see clay_eval_points_excluding), and a host previewing a drag
+ * on such a document draws the whole thing per frame instead.
  *
  * WHILE A GESTURE IS OPEN EVERY OTHER EDIT IS REFUSED with
  * CLAY_ERROR_INVALID_ARGUMENT, including edits to other layers. The gesture
@@ -2497,13 +2668,29 @@ clay_result clay_layer_eval_gradients(const clay_document* doc, clay_layer_id la
  * excluded do not move while the artist drags — and composes that with its
  * live preview per frame.
  *
- * COMPOSING IS A MINIMUM, AND IT IS EXACT. Visible SDF layers hard-union, and
- * the union of two fields IS the smaller of the two distances, so
+ * COMPOSING IS A MINIMUM, AND IT IS EXACT -- WHILE EVERY LAYER UNIONS. The
+ * union of two fields IS the smaller of the two distances, so
  *
  *     min(excluding(L) , your preview of L)
  *
  * is the field the whole document would evaluate to, not an approximation of
  * it. There is no blend parameter to match and no seam to hide.
+ *
+ * A DOCUMENT THAT USES LAYER COMPOSITION IS REFUSED HERE (ABI 0.86.0), with
+ * CLAY_ERROR_INVALID_ARGUMENT naming the layer whose composition broke it, and
+ * that is a refusal rather than a narrower promise because there is no promise
+ * left to narrow. Visible SDF layers FOLD under each layer's own operator, and
+ * removing one from the MIDDLE of a fold changes what every layer above it
+ * folds onto: with A, B(subtract) and C, excluding(B) is A+C, this document is
+ * (A-B)+C, and no operator applied to A+C and B produces it. There is no
+ * composition for a host to perform, so answering would hand back a plausible
+ * picture of a field the document does not have -- which is the same class of
+ * defect the stale-id refusal below exists to prevent, and the same reason it
+ * is a refusal.
+ *
+ * A host that needs the rest of a composed document beside one layer wants the
+ * whole-document calls with that layer hidden, which is three edits and an
+ * undo entry, or clay_document_layer_composition to check first.
  *
  * NEITHER CALL EDITS THE DOCUMENT, which is the other half of why they exist.
  * The route a host would otherwise take — hide the layer, sample the rest,
@@ -3063,9 +3250,11 @@ clay_result clay_document_mesh(const clay_document* doc, const clay_mesh_params*
  * The mesh-path sibling of clay_brick_cache_eval_requests_layer, and it exists
  * for the drag case: a host previewing a layer placement draws the rest of the
  * document once and this layer once, then moves this one under the gesture
- * matrix. Layers combine by hard union, so each surface is exact on its own.
- * What a preview drawn that way does NOT show is the mutual occlusion of the
- * union where the two overlap, which resolves when the gesture commits.
+ * matrix. Each surface is exact on its own, whatever the layers fold with.
+ * What a preview drawn that way does NOT show is the mutual occlusion where the
+ * two overlap, which resolves when the gesture commits — and with a layer
+ * composition in play, how they combine at all: the pieces are still exact, but
+ * putting them back together is the document's fold and not a minimum.
  *
  * NOT clay_document_mesh_layer, which BORROWS an imported MESH layer's
  * triangles and does not run a mesher at all. The names are close because the
@@ -5692,7 +5881,14 @@ typedef struct clay_stamp {
  * out_nodes may be NULL to place without collecting ids; otherwise it takes up
  * to `capacity` of them and *out_count receives how many were placed, which is
  * `count` unless the layer refused. Refused for a protected layer, and for an
- * item carrying no sampled volume. */
+ * item carrying no sampled volume.
+ *
+ * The ONE invalidation covers every dab's own box carried up to the DOCUMENT's
+ * field — dilated by the LAYER FOLDS above `layer` (ABI 0.86.0), which is zero
+ * unless something composes. A stroke states its reach up front rather than
+ * deriving one per dab, so it takes that term itself; the same dab issued
+ * through an ordinary add gets it from the command path, and the two may not
+ * disagree. See clay_layer_move_surface, which says it at length. */
 clay_result clay_layer_place_stamps(clay_document* doc, clay_layer_id layer,
                                     const clay_item* stamp, const clay_stamp* stamps,
                                     size_t count, clay_node_id* out_nodes, size_t capacity,
@@ -5822,6 +6018,15 @@ typedef struct clay_move_params {
  * well — the union clay_layer_node_influence_bound reports, and what the
  * dirty-bounds contract there already promised. Only a shared edit list pays
  * that; a layer nothing instances invalidates its ball alone.
+ *
+ * And the ball is a box in the LAYER's field, so it is carried up to the
+ * DOCUMENT's the way every other bound in this ABI is (ABI 0.86.0): dilated by
+ * the sum of the blend supports of the LAYER FOLDS above this layer, which is
+ * zero unless something composes. A gesture states its own reach instead of
+ * deriving one per command, so it has to take that term itself; the same drag
+ * issued as ordinary edits gets it from the command path. This applies to
+ * clay_layer_magnify_surface and clay_layer_place_stamps for the same
+ * reason.
  *
  * *out_applied receives how many items took a warp, so a host can tell "the
  * drag reached nothing" from "the drag did nothing visible". A drag that
@@ -9588,12 +9793,44 @@ clay_result clay_voxel_build_plane_pick(const clay_voxel_grid* grid, const float
  * against a band of 0.15. clay_brick_cache_mark_dirty_nodes dirties by the same
  * union, so what a host is told and what it dirties cannot disagree. On a
  * document with no instancing the answer is unchanged. */
+/* NOTE (ABI 0.86.0, layer composition): this is DILATED BY THE LAYER FOLDS
+ * ABOVE the node's layer. Visible SDF layers fold under each layer's own
+ * clay_document_set_layer_composition now, and a SMOOTH or extended fold moves
+ * the document's surface up to its own blend support away from where its
+ * operands moved — so an edit inside a lower layer changes the DOCUMENT's field
+ * that far outside the box it changed the LAYER's field in. The term is the
+ * SUM of the supports of the folds above, because folds compose, and it is zero
+ * for a stack that unions hard, which is every document that predates the
+ * feature: their boxes are byte-identical to what they always were.
+ *
+ * The same expression answers the command path (an undo bound, an apply's
+ * dirty region) and clay_brick_cache_mark_dirty_nodes, so a host that reads a
+ * box here and dirties by it cannot be handed a box narrower than the region
+ * an edit reaches. That is the promise a host most depends on and the one that
+ * is silent when it breaks: too tight leaves visibly stale bricks at a blend
+ * seam, with nothing on the host's side to point at. */
 clay_result clay_layer_node_influence_bound(const clay_document* doc, clay_layer_id layer,
                                             clay_node_id node, float out_min[3],
                                             float out_max[3], int32_t* out_has_bounds,
                                             int32_t* out_infinite);
 /* The union over a layer's root nodes — what a first, full fill dirties. A
- * layer that shows nothing reports *out_has_bounds 0. */
+ * layer that shows nothing reports *out_has_bounds 0.
+ *
+ * Also (ABI 0.86.0) two widenings the LAYER FOLD forces, both of which
+ * clay_brick_cache_mark_dirty_layer marks by the same expression:
+ *   - the folds above this layer, summed, exactly as the node form above;
+ *   - for an INTERSECT composition and for nothing else, the accumulated extent
+ *     of the visible SDF layers BENEATH it. `max(a, b)` far from this layer's
+ *     geometry is `b`, a large positive that wins the max, so hiding, moving or
+ *     re-composing an intersecting layer changes the field everywhere the
+ *     layers under it have material. It is not a small box when it fires; it
+ *     fires only for Intersect, only for this layer's own reach, and never for
+ *     an edit made inside a layer beneath — a combine is pointwise, so an edit
+ *     below changes the folded result exactly where it changed the accumulator.
+ * A subtract, a paint and every extended mode stay bounded by this layer alone.
+ *
+ * It does NOT promise a box for an edit made inside ANOTHER layer, even one
+ * this layer folds onto: ask the node form for the layer the edit is in. */
 clay_result clay_layer_influence_bound(const clay_document* doc, clay_layer_id layer,
                                        float out_min[3], float out_max[3],
                                        int32_t* out_has_bounds, int32_t* out_infinite);
@@ -10256,7 +10493,11 @@ clay_result clay_brick_cache_mark_dirty_nodes(clay_brick_cache* cache,
                                               const clay_node_id* nodes, size_t count,
                                               size_t* out_marked);
 /* The union over a layer — what a first, full fill marks. A layer that shows
- * nothing marks nothing, which is not an error. */
+ * nothing marks nothing, which is not an error.
+ *
+ * The region is exactly what clay_layer_influence_bound reports, folds above
+ * the layer and the intersect widening included (ABI 0.86.0): one expression,
+ * so the box a host is shown and the box this marks are the same box. */
 clay_result clay_brick_cache_mark_dirty_layer(clay_brick_cache* cache,
                                               const clay_document* doc, clay_layer_id layer);
 
@@ -10379,7 +10620,41 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
  * drags, and composes the result with its live preview per frame.
  *
  * clay_document_resume_stats is untouched by this call — neither counter moves,
- * because neither a resume nor a seedable full walk happened. */
+ * because neither a resume nor a seedable full walk happened.
+ *
+ * WHEN IT REFUSES, AND WHAT TO USE INSTEAD (ABI 0.86.0). This form refuses a
+ * document where ANY applied layer composition is not a hard Add, because the
+ * two parts no longer compose back to the whole — see
+ * clay_document_set_layer_composition. That refusal has an alternative and it
+ * covers the case a live preview is usually in:
+ *
+ *   * IF THE LAYER YOU ARE PREVIEWING IS THE TOP VISIBLE SDF LAYER, use
+ *     clay_brick_cache_eval_requests_below on it instead. What comes back is
+ *     every visible SDF layer beneath it, folded exactly as the document folds
+ *     them however THEY compose, and combining that with your own preview of
+ *     the layer under the brush — through the op, blend profile, blend radius
+ *     and rounding clay_document_layer_composition reports for THAT layer — is
+ *     the whole document's field, not an approximation of it. The min this
+ *     header describes above is that same composition for the one case where
+ *     the layer unions.
+ *   * IF IT IS NOT, there is no repair, and that is a property of the fold
+ *     rather than a gap in this ABI. Excluding a layer from the MIDDLE of a
+ *     stack changes what every layer above it folds ONTO, so the two halves are
+ *     not two operands of one combine and no operator applied to them
+ *     reconstructs the document. Reconstructing that case needs a three-way
+ *     split (below, the layer, above) and two host-side combines, which this
+ *     ABI does not offer.
+ *
+ * clay_brick_cache_eval_requests_below names the layer that blocks it when the
+ * layer you asked about is not the top one, and how many are above it in all,
+ * so a host can offer "hide or move <that layer>" rather than reporting that
+ * the tool is unavailable.
+ *
+ * THAT POSITION RESTRICTION IS THE OTHER FORM'S, NOT THIS ONE'S. This call
+ * refuses on the DOCUMENT and never on where the layer sits, so while every
+ * applied composition is a hard Add — every document written before ABI 0.86.0,
+ * and every document that does not use the feature — it keeps working at ANY
+ * stack position exactly as it always did. Nothing here narrowed. */
 clay_result clay_brick_cache_eval_requests_excluding(
     const clay_document* doc, clay_layer_id excluded, const char* backend,
     const clay_brick_request* requests, size_t count, float* out_values, size_t values_capacity,
@@ -10388,9 +10663,14 @@ clay_result clay_brick_cache_eval_requests_excluding(
 /* The other half of the same split (ABI 0.82.0): refill from ONE layer alone,
  * ignoring every other. With clay_brick_cache_eval_requests_excluding over the
  * same layer and the same requests, the pointwise MINIMUM of the two results is
- * what the whole document would have produced — which is what "layers combine
- * by hard union" means, expressed as two values a host can hold and move
- * independently.
+ * what the whole document would have produced — the hard union between layers,
+ * expressed as two values a host can hold and move independently. THAT HOLDS
+ * ONLY WHILE EVERY LAYER UNIONS: removing a layer from the middle of a fold
+ * changes what every layer above it folds onto, so the excluding form refuses a
+ * document carrying a composition rather than answering something that no
+ * longer composes back. This form keeps its meaning under any fold — "this
+ * layer alone" says the same thing however the document folds it — but a host
+ * can no longer put the two halves together with a min.
  *
  * NEITHER SCOPED FORM SEEDS THE RESUME STORE, and that is load-bearing rather
  * than an optimisation left undone: a partial field stored as a seed would be
@@ -10454,6 +10734,99 @@ clay_result clay_brick_cache_eval_requests_layer(
     const clay_document* doc, clay_layer_id layer, const char* backend,
     const clay_brick_request* requests, size_t count, float* out_values,
     size_t values_capacity, float* out_colors_rgb, size_t colors_capacity);
+
+/* The THIRD half, and the one a folded document leaves a live preview (ABI
+ * 0.86.0): every visible SDF layer BELOW `layer`, folded exactly as the
+ * document folds them. Same arguments, same ceilings, same fixed per-brick
+ * slots at the same stride as the two forms above; brick i still occupies
+ * out_values[i * dim^3 ...].
+ *
+ * WHAT IT IS FOR. A host previewing one layer per frame wants the rest of the
+ * document once, at pointer-down. While every layer unioned,
+ * clay_brick_cache_eval_requests_excluding answered that and a min composed the
+ * two. Once a layer composes, the excluding form refuses — the parts of a fold
+ * do not sum — and this is the pairing that survives:
+ *
+ *     document = below(L)  <L's own composition>  your preview of L
+ *
+ * where L's composition is what clay_document_layer_composition reports for L —
+ * its op, blend profile, blend radius and rounding, applied in that order with
+ * below(L) as the LEFT operand. That is not an approximation: the split is
+ * taken at a layer boundary, so what comes back here is exactly the
+ * accumulator the whole-document walk holds when it reaches L.
+ *
+ * THE LAYERS BENEATH MAY COMPOSE HOWEVER THEY LIKE — a subtracting cutter, a
+ * smooth base, any stack of them — because this half folds them with their own
+ * compositions rather than unioning them. That is why this refusal is narrow
+ * where the excluding form's is broad.
+ *
+ * IT REFUSES ONLY WHEN `layer` IS NOT THE LAST VISIBLE SDF LAYER, with
+ * CLAY_ERROR_INVALID_ARGUMENT: a visible SDF layer above it is in the document
+ * and in neither half, so no combine of the two halves is the document. THE
+ * REFUSAL NAMES THE LAYER THAT BLOCKS IT — *out_blocking_layer receives the id
+ * of the LOWEST visible SDF layer above `layer` — so a host can say "hide or
+ * move <that subtool> to smooth <this one> live" instead of reporting the tool
+ * unavailable, and does not have to walk the stack to re-derive a fact this
+ * call already computed. Hidden layers and mesh or voxel layers above `layer`
+ * do NOT block it: they are not in the fold, so a split beneath them is still
+ * the whole document — which is worth knowing, because the artist sees rows
+ * above the one they are on and this call does not refuse for them.
+ *
+ * AND HOW MANY BLOCK IT: *out_blocking_count receives the number of visible SDF
+ * layers above `layer` ALTOGETHER, of which *out_blocking_layer is the lowest.
+ * Both, rather than one or the other, because each answers a different half —
+ * the id is the row to act on FIRST (hiding or moving it is what makes
+ * progress), and the count is what decides the sentence: on a four-row stack
+ * with two field layers above the target, "hide or move <that subtool>" is
+ * wrong by omission, and a sculptor who follows it is refused again naming the
+ * next one. A host wanting every id enumerates the layers above `layer` itself
+ * with the rule stated above — visible, SDF — which is the walk the count tells
+ * it how long will be. The error detail says "N visible SDF layers are above it
+ * in all" when N > 1, so a host that reads only the message is not misled
+ * either.
+ *
+ * out_blocking_layer and out_blocking_count may each be NULL. Both are set to 0
+ * on CLAY_OK and on every other refusal — a null document, a batch or buffer
+ * that does not check out, CLAY_ERROR_NOT_FOUND for an id the document does not
+ * hold, and CLAY_ERROR_INVALID_ARGUMENT for a mesh or voxel layer (the document
+ * does not fold at one, so there is no seam and no composition to rejoin
+ * under). Those refusals are about the layer you named, which you already have.
+ *
+ * THIS RESTRICTION IS NOT A NARROWING OF clay_brick_cache_eval_requests_excluding,
+ * though read beside it it looks like one. The excluding form refuses on the
+ * DOCUMENT (any applied composition that is not a hard Add) and never on a
+ * position, so in a document where every layer unions — which is every document
+ * written before ABI 0.86.0, and every document that does not use this feature
+ * — it keeps working at ANY stack position, exactly as it always has. This form
+ * is the repair for the case the excluding form cannot serve, a composed
+ * document, and it is available at the seam alone. The reason it is the seam
+ * alone is not that a composition above is order-dependent: it is that THERE IS
+ * NO `_above` QUERY. Whatever sits above is material a host cannot obtain here,
+ * and a hard union above is just as absent as a smooth one.
+ *
+ * WHAT IT DOES NOT PROMISE.
+ *
+ *   * IT IS NOT "the document without L". A layer ABOVE L is refused rather
+ *     than skipped, and this is the whole difference from the excluding form.
+ *   * A LAYER WITH NOTHING BENEATH IT is answered, not refused: the values are
+ *     the far value everywhere, and clay_document_layer_composition's value for
+ *     L is NOT applied there — the first visible SDF layer initialises the
+ *     accumulator. A host composing unconditionally would subtract its own
+ *     preview from nothing. Check for the empty half, or read
+ *     clay_document_layer_count of the visible SDF layers beneath.
+ *   * A HIDDEN SDF LAYER may be named, on the same reading
+ *     clay_brick_cache_eval_requests_layer takes: the caller named it, which
+ *     says more than the visibility flag does. What comes back is still every
+ *     visible SDF layer below that position.
+ *   * IT TAKES NO SEED AND LEAVES NONE, exactly as the two scoped forms above,
+ *     and for the same reason: a value computed for part of the document is not
+ *     a seed for the document, and storing one would be silently wrong later.
+ *     So it costs a full walk, and clay_document_resume_stats does not move. */
+clay_result clay_brick_cache_eval_requests_below(
+    const clay_document* doc, clay_layer_id layer, const char* backend,
+    const clay_brick_request* requests, size_t count, float* out_values,
+    size_t values_capacity, float* out_colors_rgb, size_t colors_capacity,
+    clay_layer_id* out_blocking_layer, uint32_t* out_blocking_count);
 
 /* clay_brick_cache_eval_requests with the destination on the device — the call
  * a host refilling a brick atlas actually wants. Brick i occupies

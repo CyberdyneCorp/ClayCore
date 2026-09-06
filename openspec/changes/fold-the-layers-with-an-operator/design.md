@@ -92,3 +92,1567 @@ on "the document" must include the composition in what it is keyed on:
 
 Conservative first: invalidate, measure, then narrow. A missed invalidation here
 is wrong geometry that renders happily.
+
+## Decision — task 0.1, settled 2026-09-06
+
+Read against the tree, not against the proposal. Every line number below was
+re-checked; the ones design.md and proposal.md carry have drifted and are
+corrected in §4 of this section.
+
+### 1. The split: SPLIT AT THE LAST HARD BOUNDARY, which is the only boundary
+
+**Not (a), and not (b). (c) — and in this tree (c) costs exactly what (a) costs,
+because the split has exactly one seam.**
+
+§1 above argues against (b) on the grounds that "the accumulated value part-way
+down a chain is not the value the whole-document compile would have folded".
+That sentence does not describe this split. There is no part-way-down. The
+split point is fixed, in five independent places, as the LAST visible SDF layer:
+
+- `plan_resume` (`bindings/c/clay_c.cpp:1498`), loop at `:1505-1512`, keeps the
+  last visible SDF layer and sets `has_below = visible > 1` at `:1517`.
+- `plan_frontier` (`:1558`), same loop at `:1563-1568`, same `:1570`.
+- `eval_requests_impl` (`:14243-14250`), a third copy of the same loop.
+- `compile_document_part(doc, active, below=true)` is `run_part` with
+  `Part::Before` (`src/scene/tape_build.cpp:1133`), which BREAKS at `active`
+  (`:1141`) — so the `below` half is the complete accumulator `run()` holds at
+  that same point, folded by the same loop, under the same document pad.
+- `scene::last_visible_sdf_layer` (`tape_build.cpp:1262`) is the fifth copy.
+
+So the value the refill holds as `below` is not a partial accumulator. It is
+THE accumulator, at a layer boundary, and the join between it and the active
+half is one combine: the ACTIVE layer's own composition. Under a per-layer
+operator the split is therefore available exactly when that one composition is a
+hard Add — regardless of what every layer beneath it does, because `run_part`
+already folded those with their own compositions.
+
+**The gate is one predicate on one layer:**
+
+```cpp
+// scene/tape.h, beside last_visible_sdf_layer.
+// The join a caller holding two halves apart has to re-apply itself. True when
+// there is nothing beneath the active layer, or when the active layer folds
+// with a plain hard Add — the only fold `fold_layers_below` can spell.
+bool layer_join_is_hard_union(const Document& doc);
+```
+(implementation: find the last visible SDF layer and count them; true if
+`visible <= 1`, else `c.op == Op::Add && c.blend.profile == BlendProfile::Hard &&
+c.blend.k == 0.0f && c.rounding == 0.0f` for that layer alone.)
+
+A SECOND, stricter predicate is needed for one site only — `compile_document_except`,
+whose promise is about the whole stack, not about one seam:
+
+```cpp
+// True when every visible SDF layer AFTER the first folds with a plain hard
+// Add. Only Except/Only's min-composition identity needs this.
+bool document_fold_is_hard_union(const Document& doc);
+```
+
+**SHIPPED AS AN ID, AND THE BOOL IS GONE — see §13f.** Every caller of that
+predicate turned out to be a refusal, and §12b requires a refusal that has
+computed which layer is responsible to hand the id back, so what the three
+excluding entry points take is `first_composed_fold_layer(doc)`. The bool form
+was written, kept, never called outside its own tests, and described in
+`tape.h` as the thing those entry points took; it is deleted.
+
+**Why this and not (a).** (a) as §1 states it refuses the split for any document
+that uses the feature anywhere. That would cost the fast path for the most
+ordinary shape the feature creates — a cutter layer beneath a unioning layer the
+artist is sculpting into — for no correctness gain whatsoever, because the fold
+at the seam in that document is still a hard Add. (c) refuses only where the
+seam itself is composed.
+
+**Why this and not (b).** (b) would teach `fold_layers_below`
+(`bindings/c/clay_c.cpp:13263`) the four arguments. It is one line, and it is
+correct at a layer boundary for any pointwise op — but it buys three new silent
+failure modes and this change already has enough:
+
+- **The empty half.** An empty tape evaluates to `CLAY_TAPE_FAR`
+  (`include/clay/kernel/tape.h:1175`). `run()` at `tape_build.cpp:1199` does
+  `if (!layer_val) continue;` and skips the combine entirely. With a hard Add,
+  `min(below, FAR) == below` and the two agree. With a layer-level Intersect,
+  `max(below, FAR) == FAR` and they do not — two different wrong answers from
+  one document, differing only in bricks the composed layer does not reach.
+  Under (c) that question never arises in the refill: the fold that runs is the
+  one that is already there and already tested.
+- **Transitions and feathered replace cannot be folded at all.** The interpreter
+  branches on `ctape_mode_is_transition` and `ccombine_replace_feather` BEFORE
+  calling `ctape_combine_values` (`kernel/tape.h:1184-1194`), because both need
+  the sample point. `fold_layers_below` has six floats and no `p`, and
+  `ctape_combine_dist`'s forward-compatibility arm returns `a` for an unknown
+  mode (`kernel/tape.h:1063`) — the active layer discarded, silently. (Both ops
+  are refused at the setter anyway; under (b) that refusal becomes load-bearing
+  rather than merely tidy.)
+- **Two implementations of one rule.** Under (c) the refill contains no fold
+  arithmetic that the compiler does not also contain; whatever §2 decides about
+  `!layer_val` is inherited by both halves for free, because both go through
+  `run_part`/`run`. Under (b) the rule has to be written twice and can only be
+  compared by sampling.
+
+`fold_layers_below` stays byte-for-byte as it is. That is the point.
+
+**What it costs, concretely.**
+
+Unaffected — the split stays available:
+- every document with one visible SDF layer (its composition is never applied,
+  by the first-visible rule, so the predicate is trivially true);
+- every document that exists today;
+- every multi-layer document whose TOP visible SDF layer unions hard, whatever
+  the layers beneath it are set to. `A − B + C` sculpted on `C` keeps the fast
+  path.
+
+Loses the split — top visible SDF layer composed, i.e. sculpting into the cutter:
+- the append resume (#348) — `plan_resume` returns `usable = false`;
+- the frontier drag resume (#360/#362) — `plan_frontier` likewise;
+- the full path's Active/Below split — one whole-document batch instead of two
+  halves, and no seed stored.
+
+It does NOT lose anything else, because two consumers already refuse every
+multi-layer document and this change does not touch them: the #306 cold-brick
+prefix path (`prefix_source`, `clay_c.cpp:1734`, `if (has_below) return src;`)
+and the device refill's seed keep (`resume_batch_into_host`, `:12564`,
+`*keep_seeds = !doc->plan_resume(1).has_below;`).
+
+**What a benchmark shows.** Register a composed-top-layer arm beside the
+existing pair `BM_BrickRefillResumed` / `BM_BrickRefillFull`
+(`benchmarks/bench_main.cpp:1385`, `:1388`) and gate the `resumed_frac` counter
+(`:1849`) through `MAX_COUNTER` in `tools/check_bench.py:794` — the claim is a
+COUNT, so it is asserted as one. Expected: `resumed_frac` 0.0 on the composed
+arm against ~1.0 on the union arm, and per-dab cost equal to `BM_BrickRefillFull`
+— the pre-#348 cost of a stroke on a multi-layer document, restored for that one
+shape and no other. A wall-clock floor is the wrong gate here and
+`MAX_COUNTER` skips silently on absence, so the union arm needs a `FASTER_THAN`
+pair as well or the row can pass by not running.
+
+### 2. Policy at each site
+
+Detection is cheap wherever the `Document` is in hand; the table says so per row.
+
+| # | Site (verified) | Policy | Detection | Test |
+|---|---|---|---|---|
+| 1 | `include/clay/scene/tape.h:147` — `compile_document` | CHANGES. This is the definition of the fold, so it does not detect anything; it folds. Comment rewritten: visible SDF layers FOLD left to right, the first initialising and its op not applied. | none needed | the §3.3 parity fixture, plus the order gate (`A−B+C` vs `A+C−B`) |
+| 2 | `tape.h:198-206` + `tape_build.cpp:1255` — the resumable checkpoint's trailing union | `resume()` emits the ACTIVE LAYER's composition instead of `Op::Add`, still guarded by `cp.doc_have_acc`. The op is DERIVED from the `const Layer&` `resume()` already takes — it is NOT added to `TapeCheckpoint`. | `layer.composition`, already a parameter | `test_tape_prefix_reuse.cpp:167`, new subcases with a composed active layer; `require_identical(reused, full)` |
+| 3 | `tape.h:355-375` — `compile_document_part` | Both halves stay correct compiles; only the JOIN changes, and it is the active layer's composition. Header restated: the join is no longer universally a hard Add, and a caller that re-applies the join itself must refuse unless `layer_join_is_hard_union`. Engine does not refuse. | caller's, see rows 6-8 | `combine(below, only, active.composition)` equals `compile_document` over a `lattice(16)`, memcmp, with the teeth check that a union-composed pair differs |
+| 4 | `tape.h:386-405` — `compile_document_except` | NOT repairable and not repaired. With `A, B(Subtract), C` and `excluded = B`, no combine of `A+C` and `B` equals `A−B+C`: removing a middle layer changes what everything above it folds onto. The COMPILE stays valid ("the document without that layer"); the SUM promise is deleted from the header. The four callers whose contract IS the min composition REFUSE with `CLAY_ERROR_INVALID_ARGUMENT` naming the layer. | `document_fold_is_hard_union(doc)` — the strict predicate — at `clay_c.cpp:3149` (`compile_document_without`), `:14144` (`clay_brick_cache_eval_requests_excluding`, which already has a `CLAY_ERROR_NOT_FOUND` refusal to sit beside), `pyclay_module.cpp:6547` and `:6562` | `test_c_eval_excluding.cpp:83` and `:120` UPDATED, not weakened: the zero-differing-samples assertion is kept for the union arm with a comment saying it now holds only while every layer unions, and a composed arm asserts the refusal |
+| 5 | `tape_build.cpp:1362` — `compile_document_append`'s `info`/`lipschitz_bounds_gradient`/`bounds` carry-over | REFUSE: `return false` when the trailing union is not a hard Add. The comment's justification ("a hard Add is exact and adds no extent") is then true wherever the function proceeds. A refusal costs one full compile, which `tape.h:290-296` already documents as the price of not being certain. Folding `info` by hand here is possible and is deliberately not done in v1: a wrongly-true `lipschitz_bounds_gradient` feeds `prove_uniform` and stores a brick that reads surface as outside. | `last_visible_sdf_layer(doc)` is already called at `:1343` | append a composed active layer, assert the call returns false and the caller's full compile is bit-identical to the reference |
+| 6 | `bindings/c/clay_c.cpp:1498` `plan_resume` (statement at `:1545`) | `usable = false` when `has_below && !layer_join_is_hard_union(doc.document)`, inserted AFTER `:1517`. `has_below` keeps meaning "more than one visible SDF layer" — three callers probe it as a topology question and the existing comment at `:1513-1515` says it is set before any decline for exactly that reason. | the `Document` is a member | `test_c_frontier_resume.cpp:266`/`:681` shape: a composed document's plan comes back unusable |
+| 7 | `bindings/c/clay_c.cpp:1558` `plan_frontier` (statement at `:1584`) | Identical insertion after `:1570`. | same | same |
+| 8 | `bindings/c/clay_c.cpp:14250` `eval_requests_impl` | `const bool split = visible_sdf > 1 && layer_join_is_hard_union(...)` replaces `has_below` as the driver of `ChunkHalf` (`:14386`, `:14399`), the fold (`:14408`) and `store_seeds` (`:14418`). When refused: one `ChunkHalf::Whole` batch, and NO SEED STORED — the precedent is `resume_batch_into_host`'s "It stores nothing rather than something mislabelled" (`:12545-12552`). | `doc->doc.document`, in hand | a composed two-layer document's refill is sample-identical to a freshly built document's; the next batch reports `resumed_bricks == 0` |
+| 9 | `bindings/c/clay_c.cpp:13263` `fold_layers_below` | **THE SITE THAT CANNOT DETECT, and therefore must not be reachable.** It takes six floats and no document. UNCHANGED; its comment gains the precondition that it is only ever reached where the join is a hard Add. Its `rev == now` caller at `:13903` does not consult a plan at all, so the enforcement is at the STORE (row 8): a two-half seed only exists if the join was a hard Add when it was taken, and any composition change bumps `revision`, so `rev == now` cannot see a stale one. | none — by construction | the row-8 test is the proof; assert `resumed_bricks` (a count) and sample identity, never the clock |
+| 10 | `tests/unit/scene_utils.h:200` `ref_eval_document` — **the ninth site, which proposal.md's table of eight misses** | The reference evaluator hard-codes `ctape_combine_values(acc, lv, ccombine_add, cblend_hard, 0, 0)` between layers and applies no first-visible rule at layer level. It MUST learn the composition, copying `ref_eval_list`'s shape at `:175`. Left alone, the reference and the compiler agree only while every fixture unions — which is the exact condition under which a fold bug is invisible. **It is a DIFFERENTIAL and not an independent evaluator — see §13l, which struck that word and says what it is instead.** | n/a (test code) | `test_scene.cpp`, "tape matches reference tree evaluation (composed gnarly scene)", built by the record stage against `composed_gnarly_document` |
+| — | `clay_c.cpp:12564` `resume_batch_into_host`, `:1727` `prefix_source`, `:1596` `shaped_entry` | UNCHANGED. The first two already refuse every multi-layer document. `shaped_entry`'s `want_below` gate keys on presence only, which is sufficient because row 8 never stores a two-half seed for a refused document. | — | covered by row 8 |
+
+Two ops are refused at the setter and that refusal is load-bearing here rather
+than cosmetic: `Op::None` (255, groups-only — `ctape_combine_dist` would write
+it as an unknown mode and return the accumulator, discarding the layer) and both
+transitions (their parameters live in `Node::transition`, which a
+`LayerComposition` has nowhere to put; `emit_combine` would silently fall back to
+`Compiler::default_transition_` at `tape_build.cpp:389`). `op_is_known`
+(`clay_c.cpp:320`) already rejects `Op::None` and ACCEPTS the transitions, so
+`validate_item_op_blend` alone is not enough — copy `validate_group_op_blend`'s
+transition refusal (`:378`), which exists for the same reason.
+
+### 3. Invalidation
+
+**What a composition change invalidates.** It is an ordinary layer-property
+command: it goes through `apply_edit` (`clay_c.cpp:3644`), lands on plain
+`touch_region`, and must NOT be added to `command_is_structural` (`:3454`) or
+`command_frontier` (`:3490`) — a composition change moves no root ordinals, and
+marking it structural would retire every prefix seed in the document for nothing.
+Derived state:
+
+- compiled tape and cull index — free, both keyed on `revision`;
+- SDF prefix cache and the whole-layer digest — composition MUST join
+  `digest::mix_layer_head` (`src/session/layer_digest.h:212`), which enumerates
+  fields explicitly and is invisible to a new one. `SdfPrefixCache::verify` is
+  described in-file as the safety net that cannot be forgotten; a field
+  `mix_layer_head` does not see is a field the safety net does not protect;
+- brick seed store — through `revision` plus the `touch_region` bound below.
+  Composition does NOT join `ResumeKey` (`clay_c.cpp:1256`); that key
+  deliberately excludes document-wide values, and adding one strands entries
+  rather than replacing them (the comment at `:1247-1255` says so);
+- the cull pad — `Compiler::document_pad` (`tape_build.cpp:1112`) and
+  `CullIndex::refresh_pad` (`src/scene/cull_index.cpp:36`) are a MAXIMUM OVER
+  LAYERS of each layer's own sum and have no inter-layer term at all. A smooth
+  or extended layer fold drags the document's running accumulator exactly as a
+  smooth item combine drags a layer's, so the fold's support must enter as a
+  per-layer constant, following `blend_k_seam` (`bounds.cpp:1211-1215`), which is
+  the existing precedent for a LAYER-owned k reaching the pad. This is needed
+  whether or not anything is split — see §4.
+
+**The dirty bound of a composition change.** `command_influence_bound`
+(`src/scene/commands.cpp:371`) sends every layer command to
+`layer_command_bound` (`:330`), which is `layer_influence_bound(*l)` — the
+layer's OWN extent. That is the right answer for a smooth-k or rounding change
+(dilated by the fold's support) and for Subtract. It is TOO SMALL for Intersect.
+`apply_edit` already unions the bound on both sides of the apply, so a change
+`Intersect → Add` dirties the wider box too, for free. `layer_command_bound` is
+the only function in the chain that holds the `Document`, so the below-extent
+loop belongs there; `layer_influence_bound` (`bounds.cpp:1531`) takes only a
+`Layer` and must not be widened in place.
+
+**Does a subtractive or intersecting LAYER widen the influence of edits made
+INSIDE the layers beneath it? NO — and this is the answer the field evidence
+demands.** A combine is POINTWISE in its two operands: `ctape_combine_values`
+reads `a.d` and `b.d` at the sample and nothing else. An edit beneath that
+changes the accumulator at `p` changes the folded result at `p` and nowhere
+else, whatever operator sits above. The only spatial spreading a fold adds is
+the blend support of the fold itself, which is a fixed radius and is exactly
+what `group_blend_support` (`bounds.cpp:1404`) already computes for an enclosing
+group. So:
+
+> An edit inside a lower layer dirties its own influence bound, dilated by the
+> blend supports of the folds above it. Not the layer above's extent, not the
+> document.
+
+That is the direct analogue of what `node_reach_bound` (`:1443`) already does
+once per enclosing group, and it keeps the host's measured 16.8x brick-count
+growth out of the ordinary edit path entirely.
+
+**Where the cost genuinely is, and it is one arrow only.** What IS non-local is
+editing the composed layer itself, and the asymmetry is the far field, not the
+combine:
+
+- **Subtract is LOCAL.** `max(a, −b)`: far from `b`'s geometry, `−b` is a large
+  negative number and loses the max, so the result is `a`. This is why
+  `op_is_local` (`include/clay/scene/types.h:160`) excludes only Intersect and
+  the transitions, and why a subtract ITEM is culled by its own geometry. A
+  subtract LAYER is bounded by ITS OWN extent, dilated by its fold's support.
+- **Intersect is not.** `max(a, b)`: far from `b`'s geometry, `b` is a large
+  POSITIVE number and WINS the max, so the result differs from `a` everywhere
+  the accumulator has material. `bounds.cpp:1270` measures exactly this — drift
+  exactly 0 outside the layer's extent over 400,000 points, against 0.100 and
+  0.065 outside the item's own geometry. One level up, an intersect LAYER's
+  influence is the accumulated extent of the visible SDF layers BELOW it, and
+  nothing in the tree computes that today. It needs a document-level analogue of
+  `layer_influence_extent` (`:1352`), memoized the way `LayerExtentCache`
+  (`bounds.h:133-215`) memoizes the layer one and carrying the same
+  `walks()`/`keeps()` counters, because a cache that quietly stops firing here
+  reads as correct.
+- The same widening applies to `SetLayerVisibleCmd` and to a reorder
+  (`clay_document_move_layer`, `clay_c.cpp:5289`, a Remove+Add pair each bounded
+  by the moved layer's own extent). Gate 6.1 ("hide/show a subtractive layer
+  restores exact geometry") passes on the subtract case while the intersect case
+  quietly leaves stale bricks; gate 6.2 tests the geometry of a reorder and not
+  its dirty region. Both need an intersect arm.
+
+**What conservative costs here, said plainly.** For the intersect arm the
+conservative bound IS the box the host measured: 26.2x the surface bricks of the
+geometry produced at reference size, 241.2x at 10x extent, 16.8x brick-count
+growth for a 31.6x volume — 45.5 ms and 7.5 s per frame respectively. That is
+the price of setting a layer to Intersect and then touching it. It is bounded
+because it fires only for Intersect, only on that layer's own edits, and never
+on edits beneath. It is not acceptable as a steady state.
+
+**The measurement that would narrow it.** Not the bound — the REFILL REGION. The
+host's own finding is that the intersect walks a BOX and produces a BAND: the
+dirty region is the AABB and the refill visits the bricks of that VOLUME rather
+than the bricks that hold band. Intersecting the dirty region with the bricks
+that already hold band is a cache-side change that would cut the count by that
+same 26.2x/241.2x, and — if the unresolved per-brick factor turns out to be item
+overlap or brick population rather than extent as such — would also stop visiting
+the deep-interior bricks that cull nothing away, recovering part of it too. The
+host's in-flight 2x2 (dabs held at 0.18 versus scaled; cutter buried versus at
+the surface, in both scenes) is what settles which. **Nothing in this change
+depends on the outcome**, and nothing in this change should be built on a guess
+about it: this decision commits only to the box, which is correct either way, and
+names the band intersection as the follow-up. That work is not specific to layer
+composition — an intersect ITEM pays it today, at the numbers above — and it
+should be its own change.
+
+### 4. Where the tree refutes design.md
+
+House style is to say so.
+
+1. **§1's argument against (b) does not describe this split.** "The accumulated
+   value part-way down a chain" — there is no part-way-down. The split seam is
+   the last visible SDF layer, fixed in five places, and `below` is the complete
+   accumulator. Consequently **(c) is not a follow-up; it is the v1 answer, and
+   it costs one predicate on one layer rather than a loop over all of them.**
+   §1's leaning would have refused the fast path for `A − B + C` sculpted on `C`,
+   which is the ordinary shape the feature creates, for no correctness gain.
+2. **§1 attributes the smooth-drag problem to the split. It belongs to the cull
+   pad.** `document_pad` has no inter-layer term, so a smooth layer fold makes
+   per-brick tapes drop items the whole-document compile keeps — inside the band,
+   where nothing is looking — whether or not anything is split. Refusing the
+   split does not fix it and never would have. See §3.
+3. **§3's bounds table is wrong in both directions, and contradicts the sentence
+   directly beneath it** ("the item-level bound logic is the single source"):
+   - `Intersect | the intersection` is **TOO SMALL** and is precisely the
+     missing-surface failure the same section warns about. The result's MATERIAL
+     is in the intersection; the FIELD changes everywhere the left operand has
+     material, because the intersect uses the right operand's far field. The
+     item-level source says so in as many words (`bounds.cpp:1260-1270`,
+     `Nonlocality::BoundedByLayer`).
+   - `Subtract | the left operand's alone` is **looser than the item-level
+     source**, which makes a subtract LOCAL (`op_is_local`, `types.h:160`) and
+     bounds it by its own geometry dilated by rounding and blend support
+     (`geometry_bound`, `bounds.cpp:918-923`).
+
+   Corrected, from the single source: **Subtract → its own extent, dilated.
+   Intersect → the extent of the visible SDF layers BELOW it. Smooth/extended →
+   the union, dilated by `ccombine_extended_support` / `Blend::support()`.**
+4. **§5 says composition joins the key of "the brick seed store". It must not
+   join `ResumeKey`** (`clay_c.cpp:1256`), which deliberately excludes
+   document-wide values and would strand entries rather than replace them. It
+   invalidates through `revision` plus `touch_region`.
+5. **§2's "SHALL follow the item rule" needs one qualification or it inverts.**
+   The item rule at `tape_build.cpp:957` SKIPS a non-Add op with nothing beneath;
+   the spec requires the first visible layer to INITIALISE. What transfers is the
+   `if (have_acc)` guard on the combine — which `run()` at `:1200` and
+   `run_part()` at `:1166` already have — not the `continue`. Copying the
+   `continue` produces the blank screen §2 exists to prevent.
+6. **design.md never names `if (!layer_val) continue;`** (`tape_build.cpp:1199`
+   and `:1165`), and it is a second silent-wrong-field site INSIDE `run()`:
+   skipping the combine for a layer whose chain culled to nothing is right for
+   Add and Subtract and catastrophic for Intersect, where combining with nothing
+   must remove everything below. It differs per brick, so the whole-document tape
+   and the per-brick tape disagree exactly where nobody is looking. §2 must
+   decide it — `emit_empty` (`:272`) plus the combine, mirroring `seeded` at
+   `:975` — and the split inherits whatever it decides for free, which is one
+   more reason for (c) over (b).
+7. **§4 (symmetry) costs zero code, confirmed.** Mirror and radial copies are
+   emitted per-item inside `emit_item` and folded by their own seam combines
+   (`tape_build.cpp:818`, `:859`) before `compile_list` returns, so a combine
+   emitted where `:1200` sits today is already after the layer's symmetry has
+   resolved, once. It stays true only while nobody hoists the layer combine
+   earlier for a bounds or cull reason.
+8. **Line numbers and one path.** `src/scene/clay_c.cpp` does not exist — it is
+   `bindings/c/clay_c.cpp`. The `have_acc` rule is `tape_build.cpp:957`, not
+   `:876`. "A hard Add is exact and adds no extent" is `tape_build.cpp:1362`, not
+   `:1281`. The two refill statements are `clay_c.cpp:1545` and `:1584`, not
+   `:1502` and `:1541`. `compile_document_except` is `tape.h:405`, not `:390`.
+   Grep the quoted sentence, never the line number.
+
+## 6. What a layer-wide dirty region would cost, measured
+
+The invalidation policy in §5 says "conservative first, then narrow". This
+section is the number that says how conservative is too conservative, measured
+by ClaySpaceDesktop on 2026-09-06 against an intersect ITEM — which is the same
+shape this change gives a LAYER, one level up.
+
+A 12-frame drag of an intersecting cylinder over one SDF layer of 97 items,
+against a subtracting control on the identical fixture and frame path, in two
+scenes differing only in extent. Refill per frame, cutter placed on the surface
+in both so nothing is confounded:
+
+| | refill ms | bricks/frame | µs/brick |
+|---|---:|---:|---:|
+| subtract (`op_is_local`) | 14.78 | 741 | 19.9 |
+| intersect (`BoundedByLayer`) | 11,512.38 | 100,800 | 114.2 |
+| ratio | **779x** | **136x** | **5.7x** |
+
+The 779x is a product of two factors and both are properties of WHICH BRICKS GET
+VISITED:
+
+- **Count, 136x.** An intersect's dirty region is the layer's AABB and the refill
+  walks the bricks of that VOLUME rather than the bricks that hold band. It
+  refills 26.2x the surface bricks of the geometry it produces at reference size
+  and 241.2x at 10x, and the ratio grows with radius.
+- **Population, 5.7x.** A box walk visits interior bricks, where nothing culls
+  the document away and every tape is long; a band walk visits rim bricks, where
+  most of it culls out. Measured directly at 4.4x with the brick count pinned at
+  741 by construction, varying only whether the cutter is buried or on the
+  surface.
+
+**There is no extent-driven per-brick cost.** Holding the dab at 0.18 and the
+cutter on the surface, a brick costs 9.95 µs at r=1 and 9.15 µs at r=√10 — 0.92x,
+flat. The per-brick growth in the first measurement was item overlap (a fixture
+whose dabs scale √10 against a fixed 0.16 brick edge: 12.5x) plus brick
+population (4.4x). A first reading of a second, extent-driven engine slope was
+retracted by the host that found it once its own control was shown to be
+confounded.
+
+**What this requires of this change.** A composition change is a layer-property
+edit; it must not be given a region that scales with the layer when a tighter one
+is correct. And an edit made INSIDE a layer beneath a subtractive or intersecting
+layer must not inherit the composed layer's whole extent by default, because that
+is exactly the 779x above, arriving one level up and on every frame of a drag.
+Where this change chooses to be conservative, §5 says what it costs and names the
+measurement that would narrow it; it does not choose conservative by omission.
+
+**And count matters on its own.** With the overlap effect entirely removed, the
+box walk is still 88,200 bricks at 9.15 µs — 806 ms a frame. A future fix that
+only made bricks cheaper would leave a 0.8-second frame; the region is the thing.
+
+## 7. Writing at minor 17 — REFUSE, do not degrade
+
+Raised by ClaySpaceDesktop on 2026-09-06 while the host surface was still being
+designed, and it changes what stage 5 builds.
+
+The repo rule is that a new minor must be **writable at the previous one,
+degrading to whatever that minor meant, with the notes saying exactly what the
+downgrade loses**. Every minor so far has obeyed it cheaply because the loss was
+never something an artist made — 16 → 17's own note says writing at the older
+minor costs "the payload deduplication and nothing an artist authored — a file
+that is larger and identical in content".
+
+**18 → 17 is the first minor where the degrade changes the model.** A
+subtractive layer written at 17 comes back as a union: the cutter that was
+carving a hole is a lump welded onto the form. Nothing is corrupt, nothing
+refuses, the file opens, and the sculpture is wrong in a way that looks
+deliberate. That is the empty-tape `max(below, FAR)` failure one level up and
+visible to the artist rather than buried in a brick.
+
+**The decision:**
+
+1. `serialize_document(doc, minor)` with `minor < 18` **refuses** when any SDF
+   layer carries a composition that is not the default hard union. Refusing is
+   the direction this format already fails in — records are not length-prefixed
+   precisely so an older build meeting a newer minor fails rather than misreads —
+   and it is the only direction that cannot be quietly wrong.
+2. Where every layer's composition IS the default, writing at 17 is allowed and
+   produces exactly what 17 always meant, byte for byte. So the repo rule stays
+   true for every document the older minor can actually express, and the refusal
+   covers exactly the documents it cannot. "Writable at the previous minor"
+   means *when the previous minor can say it*, not *by discarding what it
+   cannot*.
+3. **A host must be able to ask before it saves.** This change ships a query
+   across the C ABI: can this document be written at minor N without losing
+   authored intent? A host that can ask puts an honest sentence in front of a
+   person; one that cannot guesses on their behalf. `CLAY_ERROR_UNSUPPORTED` is
+   the code the refusal itself returns.
+
+**Not in this change, and recorded as a gap rather than inherited:** a C-ABI host
+cannot choose the minor it writes at all. `clay_document_save` takes a path and
+`clay_document_save_memory` takes a blob; neither takes a version, and the minor
+is a parameter on the C++ `scene::serialize_document` that does not cross the
+ABI. Three releases of upgrade notes have advised hosts to "write at the older
+minor if you exchange documents with an older build", and no C-ABI host has ever
+been able to take that advice. It cost nothing while the loss was deduplication.
+It is not free now: a host that wants an interchange copy cannot offer one, and a
+host that wants to refuse to write 17 has nothing to refuse because it could
+never ask. A save-at-minor entry point needs its own change — the blob variant,
+the autosave and journal paths, and the other lossy minors all come with it — and
+the query above is the half that makes this change's decision answerable from a
+host meanwhile.
+
+## 8. SDF-only is the shape of the FEATURE, not of stage 1
+
+Asked by ClaySpaceDesktop on 2026-09-06, because the answer decides whether their
+interface explains a live boolean per OPERATION or per OPERAND, and they would
+rather write the sentence once. It is per operand, and it is durable.
+
+`run()` folds `if (!layer.visible || layer.kind != LayerKind::Sdf || !layer.sdf)
+continue;` (`src/scene/tape_build.cpp:1243`, and again at `:1281` for the part
+compile). A mesh or voxel layer contributes NOTHING to what a document evaluates
+to, and that is a standing architectural property rather than an omission: for
+mesh it is structural, since `tools/check_layering.py` withholds `mesh` from
+`clay::scene`, which is what makes "a mesh layer does not change what the
+document evaluates to" a fact about the build rather than a maintained promise.
+
+So a composition on a non-SDF layer would be **state that does nothing**, which
+the spec delta forbids in as many words: "A layer whose kind cannot enter the tape
+SHALL REFUSE a composition rather than store one that does nothing, so that a
+control a host offers is a control that acts." Widening the setter later would
+mean either lifting a representation into the tape or storing a control that lies,
+and the first is a different change entirely.
+
+**The route for the other representations is CONVERSION, not a later widening.** A
+mesh becomes a field through the mesh-to-field import and is then an ordinary SDF
+layer that can carry a composition — which is why gate 6.5 of this change is "a
+converted mesh-to-SDF layer works as a cutter" and not an afterthought. A voxel
+region becomes a field item through a captured volume. Both are existing routes.
+
+**The sentence a host can write and keep:** a subtool is live when it is a FIELD
+subtool; a mesh or grid subtool becomes live by being converted into one; and a
+resolved boolean remains first-class for operands that are not converted, rather
+than being the old way waiting to be retired.
+
+## 9. An absent operand, and two gates that follow from it
+
+Two things ClaySpaceDesktop raised on 2026-09-06 against stage 2's `fold_layer`.
+Both are gates for stage 3, and both are cheap.
+
+### The divergence is real, and this side of it is not free to change
+
+Their RESOLVED boolean filters an empty subtool out of `boolean_operands`
+entirely — "because there is nothing in them to combine" — so an absent operand
+is not an operand. The live fold does the opposite: when a layer produces no
+value it emits an explicit empty and folds it, whenever
+`fold_changes_an_empty_layer` says the operator reads an absent operand as a
+change (`src/scene/tape_build.cpp:99`, which probes `ctape_combine_dist` against
+`CLAY_TAPE_FAR` at five sample distances rather than hard-coding a list of ops).
+
+**That is not a preference and it cannot follow theirs**, because `layer_val` is
+false for two different reasons and only one of them is emptiness:
+
+- the layer has no visible contributing items — genuinely empty, and
+- **the layer's chain was wholly CULLED in this compile's region**, which a
+  per-brick compile does constantly for a layer with content elsewhere.
+
+Skipping the fold in the second case would be a silent per-brick wrongness of
+exactly the kind this change exists to avoid: an intersecting layer must still
+remove material from a brick its own geometry does not reach, because the
+whole-document compile removes it there. So the fold stays.
+
+**What follows is a documentation duty, not a code change.** For a
+DOCUMENT-empty operand the two routes now disagree: a resolved boolean skips the
+operand, a live one applies it, so an empty intersecting layer blanks the field
+where the resolved path would leave it alone. The header must say so beside the
+setter, so a host that wants parity can filter empty operands itself — which is a
+host policy, and the engine cannot take it without breaking the culled case.
+
+### Gate: a converted layer as the BASE, not only as the cutter
+
+Task 6.5 gates "a converted mesh-to-SDF layer works as a cutter". The host's
+`boolean_operands` puts every representation on BOTH sides, and a mesh converted
+to a field so that something can be cut out OF it is at least as common as
+converting the cutter. Add the base case beside it: **a converted layer beneath a
+field cutter, with the fold applied to it.** If the fold treats base and cutter
+symmetrically the gate is redundant and costs one fixture; if it does not, it is
+the gate that finds it.
+
+Their crossings are first-class controls a sculptor already has — `MeshToSdf`
+(triangles onto a lattice as a volume item) and `VoxelToSdf` (occupancy read back
+as a distance field, redistanced) — so §8's "convert this subtool to make the
+boolean live" names a menu entry rather than work anyone has to build.
+
+### Gate: an empty intersecting layer, decided rather than discovered
+
+A test asserting what a DOCUMENT-empty layer set to Intersect does, so the
+divergence above is deliberate and stays that way. The test is the record.
+
+## 10. The cull pad has no term for a layer-level blend k — REQUIRED before this ships
+
+Raised by stage 2's handover, recorded here because a handover is read by the
+next stage and this must be read by all of them.
+
+`Compiler::document_pad` sums the pad terms a layer's ITEMS need. A layer
+composition can now carry a smooth blend with its own `k`, and nothing adds a
+term for it. The fold is live as of stage 2, so this is a hole in the tree today
+rather than a future one, and it is the same silent class as everything else in
+this change: a per-brick culled tape that drops items the whole-document compile
+keeps returns a field that never existed, with no error and no visual tell beyond
+geometry that is subtly wrong at a brick boundary.
+
+**What is required, not optional, before this change is reviewable:**
+
+1. A pad term for the layer combine's `k` and rounding, folded into
+   `document_pad` the way an item's chain terms already fold. `cull_pad_terms`
+   is the place the tree already keeps terms UNADDED and unresolved, and
+   `blend_cull_pad`'s definition records why the chain envelope grows with the
+   contributor count — a layer fold is one more contributor to that chain, at
+   the document level.
+2. A test that FAILS without the term: a document whose layers fold with a
+   smooth k, compiled per brick against a region small enough that the naive pad
+   drops a contributing item, compared with the whole-document compile. Assert
+   band-clamped identity, which is what the culled tape already promises.
+3. Where the pad is deliberately conservative, say what it costs. A pad that is
+   too wide is a slower compile; one that is too narrow is wrong geometry. Those
+   are not symmetric and the comment should say so.
+
+A hard-union fold needs no term, which is why nothing needed one before and why
+every existing document stays exactly as fast as it was.
+
+### §10a. The term is a SUM over the stack, and it is not the layer's own
+
+Written after §13's sweep found it, and it corrects requirement 1 above rather
+than merely satisfying it.
+
+Requirement 1 said the term folds into `document_pad` "the way an item's chain
+terms already fold", and named `cull_pad_terms` as the place to keep it. The
+first implementation did exactly that: `cull_pad_terms(content, layer)` raised
+`blend_fixed` by that LAYER's own `layer_blend_support`, and both readers —
+`document_pad` and `CullIndex::refresh_pad` — are a MAXIMUM OVER LAYERS. That is
+wrong twice, and only the maximum hid the second one:
+
+- **A max where the quantity is a SUM.** The drag an item passes through is
+  every fold ABOVE it, and folds compose — the second one sees a field that
+  already differs over the first's dilated box and can move its own result that
+  much further again. The change already spelled this out for the dirty region
+  (`folds_from_layer_support`, `src/scene/commands.cpp`), so the pad took the
+  smaller of this change's own two answers to one question.
+- **Charged to the layer that OWNS the fold**, while the items that need it are
+  in the layers below. Under a document-wide maximum that misattribution is
+  invisible, so fixing the sum without fixing the attribution would have moved
+  the error rather than closed it.
+
+Measured, four spheres r = 0.5 at x = 0, 0.62, 1.24, 1.86 with the top N folds
+set to a quadratic k, swept over 240 regions of 0.06 each dilated by a 0.1 band,
+comparing a culled compile with the whole-document one inside the band: worst
+drift 0 at one composed fold — which is the only shape the original test
+exercised — 0.0180 at two (k = 0.3), 0.0229 and 0.0268 at three (k = 0.3, 0.45),
+and 0 for the all-hard baseline. Dilating each region by a further 2k took the
+two-fold row to 0 and the three-fold row to 0.0049, which is what identified the
+PAD rather than the fold, and showed the shortfall scaling with the fold COUNT.
+
+**What is there now.** `folds_from_layer_support(doc, layer)` moves to
+`scene/bounds.{h,cpp}` as the one definition of the quantity, and
+`scene::document_cull_pad(doc)` is a maximum over visible SDF layers of that
+layer's own `cull_pad` PLUS its fold sum. `cull_pad_terms` carries no fold term
+at all: it answers what one layer's ITEM CHAIN needs, and a fold is not a
+property of the layer that owns it. `CullIndex::refresh_pad` is the same
+expression over cached terms, and the two are now held equal by a test rather
+than by a comment, because a compile takes whichever it has.
+
+**And the first visible SDF layer's own composition is not a term**, because it
+is never applied. Counting it was safe and not free: over-wide keeps items a
+compile did not need and costs a longer tape, too narrow drops an item the field
+needed and costs the geometry — the directions are not symmetric, which is
+exactly why the merely-slow one is still not taken when the exact term is in
+hand.
+
+## 11. The placement classifier does not read the composition — REQUIRED, and it is live now
+
+Raised by ClaySpaceDesktop on 2026-09-06, checked against the tree, and it is a
+real defect introduced by stage 2 rather than a hypothetical.
+
+`scene::layer_scales_cleanly` (`src/scene/placement.cpp:46`) decides whether a
+uniformly scaled layer is a SIMILARITY of its own field. It walks the layer's
+ITEM nodes and returns false for any visible node with a soft blend and a
+positive `k` — "the blend radius is the term the layer's scale does not reach".
+**It does not look at `layer.composition`.** Stage 2 gave the LAYER its own
+blend, so a layer whose items are all hard but whose COMPOSITION carries a smooth
+`k` now classifies as Similarity, and takes the cheap invalidation, while its
+field changes in a way a similarity does not describe. Three callers act on that
+verdict: `layer_placement_change` (`:64`), `clay_c.cpp:5702` and
+`pyclay_module.cpp:4430`.
+
+This is the item-level asymmetry the v0.84.0 known limits already record, one
+level up: "Rounding scales with the placement and `blend.k` does not; measured at
+1.289 where a similarity says 2." And the asymmetry is genuinely only `k` here —
+`fold_layer` takes `comp.rounding * layer_distance_scale(layer)`, so the layer's
+rounding DOES follow its scale. Only the radius does not.
+
+It matters more here than in the item case, because the verdict feeds
+`clay_layer_placement_begin/_update/_commit` — the gesture that exists to SKIP
+work. A wrong Similarity there is a picture that lags its own field, not a
+recomputation that costs a little.
+
+**Required:**
+
+1. `layer_scales_cleanly` returns false when
+   `layer.composition.blend.profile != BlendProfile::Hard &&
+   layer.composition.blend.k > 0.0f`, so such a layer classifies GENERAL and
+   promises nothing — the same answer the item case gives, for the same reason.
+2. A regression test: a layer whose ITEMS all scale cleanly but whose composition
+   carries a smooth `k`, scaled uniformly, reports GENERAL from
+   `clay_layer_placement_report`. **Prove it by reverting the predicate and
+   watching it fail**, which is this repository's rule for a regression test and
+   the only way to know the test could ever have caught it.
+3. Say it in the header BESIDE the composition setter, not only in the placement
+   notes. A host reading `LayerComposition` has no reason to look under placement
+   to find out what a blend does to a drag — the host that raised this could not
+   have found it from outside, which is the argument for where the sentence goes.
+
+**Why an artist meets this on an ordinary day**, in the host's words: a blend
+radius is an absolute world distance, and whole subtools get scaled. Place a
+cutter, set a soft join, scale the cutter — the join then covers the same
+absolute distance across a bigger cutter, so the cut reads as getting harder as
+the subtool grows. That part is inherent to a radius in world units. What must
+not also happen is the gesture skipping invalidation on the strength of a
+similarity that is not one.
+
+### §11a. The header must state the TRADE, not only the classification
+
+Raised by the host on 2026-09-06 and checked: a composition change is a document
+command (`SetLayerCompositionCmd`, stage 1), while `clay_layer_placement_*` is a
+gesture whose premise is that the document does not move until the commit. So a
+host cannot have both halves of what it will assume it has:
+
+- **An absolute radius** — what a blend `k` is, in the layer's units — keeps the
+  drag cheap, and the join covers the same world distance however large the
+  subtool grows, so the cut reads as hardening with size.
+- **A radius scaled to compensate** keeps the join proportional at every size,
+  and makes scaling that layer an EDIT rather than a placement, because writing
+  the composition is a command. The gesture is gone for that layer, and nothing
+  reports its absence.
+
+Neither is wrong and the engine does not pick. But a host reading
+`LayerComposition` has every reason to assume it can have both — the blend is on
+the composition, the scale is on the transform, and the interaction lives in a
+third file. A header that says only "a soft `k` classifies GENERAL" teaches a
+host that it is slow and not why, and the obvious fix (scale the radius to
+compensate) silently removes the gesture.
+
+**Required beside the composition setter, in addition to the classification
+sentence:** *a blend radius is an absolute distance and does not follow the
+layer's scale; a host that compensates for that turns every scale of that layer
+into an edit.* One clause more than the classification, and it is the clause that
+stops someone discovering the trade by measuring it.
+
+## 12. The excluding preview: the refusal is right, and it must not be the whole answer
+
+Raised by ClaySpaceDesktop on 2026-09-06, checked against the tree, and it
+changes stage 5's scope.
+
+**First, the reassurance they asked for.** `clay_brick_cache_eval_requests_excluding`
+(`bindings/c/clay_c.cpp:14290`) carries the SAME refusal as the document form:
+`first_composed_fold_layer` on the whole document, `CLAY_ERROR_INVALID_ARGUMENT`,
+before any work. So a composed document gives their preview an error and not a
+wrong picture. That was the failure they were worried about and it does not
+exist.
+
+**What the refusal costs them, and it is not small.** Their live Suavizar and
+Relaxar evaluate every visible SDF layer EXCEPT the one under the brush once at
+pointer-down, then compose the preview per frame with a `min`. That is exact
+today for the reason the header states — visible layers hard-union, and a union
+IS the smaller of two distances. Once any layer composes, `min` is not that
+field, so the call refuses and **live smoothing stops working on any document
+that uses this feature**. A change that adds a capability and silently removes
+one from the host's most-used tool is not a good trade.
+
+**Their proposed repair is sound, but only under a condition the refusal must
+state.** Excluding a layer from the MIDDLE of a fold cannot be repaired: layers
+above it fold onto an accumulator that included it, so the two halves are not two
+operands of one combine. But when the excluded layer is the LAST visible SDF
+layer, the halves ARE two operands of one combine — which is exactly what stage 4
+repaired for `compile_document_part`, and `scene::layer_join_composition(doc,
+active)` is already the combine they rejoin under.
+
+So the pairing that works is **Below + Active**, not Except + Active, and the
+join is the active layer's own composition, which a host can already read through
+`clay_document_layer_composition`.
+
+**The gap that makes this a stage 5 task rather than advice:** `ChunkHalf::Below`
+exists (`clay_c.cpp:4122`, used by the resume split) and **no C entry point
+exposes it**. A host can ask for one layer (`clay_brick_cache_eval_requests_layer`)
+and for everything-except-one (`_excluding`), and cannot ask for everything-below.
+
+**Required of stage 5:**
+
+1. `clay_brick_cache_eval_requests_below` — the same shape as its two siblings,
+   `ChunkHalf::Below`, refusing only when the named layer is NOT the last visible
+   SDF layer, with the message saying which layer is. That refusal is narrow: the
+   layers beneath may compose however they like, because `compile_document_part`
+   folds them with their own compositions.
+2. The header on `_excluding` says what to use instead and when — that a preview
+   of the TOP layer composes exactly with `_below` plus that layer's own
+   composition, and that excluding from the middle of a fold has no repair. A
+   refusal that names the alternative is a different thing from one that does not.
+3. A test that the two routes agree: `below` folded with the active layer's
+   composition equals the whole document, over sampled points, for a document
+   whose lower layers compose and whose top layer composes.
+
+This is the same asymmetry as the 0.1 decision, arriving at a host-facing call:
+the seam is one question, and everything below it is already answered.
+
+### §12a. The active layer is often NOT the top, and the refusal must name what blocks it
+
+Corrected by the host on 2026-09-06, against its own reference fixture rather
+than against an intuition. Their `visual_shell` stack is four rows —
+`Detalhes_secundarios`, `Poros`, `Forma_principal`, `Base` — and the ACTIVE layer
+is `Forma_principal`, third of four. The excluded layer is whatever the sculptor
+clicked; nothing constrains it to the top. A sculptor blocks out a form, adds
+pores and fine detail above it, and goes back down to smooth the form underneath.
+So "the layer under the brush is usually the top" is wrong, and §12's condition
+bites in the ordinary case rather than in a corner.
+
+**Two things narrow it, and neither changes the rule.** The condition is the last
+visible **SDF** layer, so mesh, voxel and hierarchy subtools above the active one
+do not disqualify it and neither do hidden ones — a stack whose upper rows are a
+carried mesh and a rasterised grid still qualifies while looking to the artist as
+though something is above. And a document where nothing composes is unaffected
+entirely.
+
+**What does NOT narrow it, checked rather than assumed:** "every layer above is a
+plain union" is not sufficient. With `⊕` the active layer's fold and `U` the
+union of the layers above, the document is `(below ⊕ active) ∪ U`, and neither
+`_excluding` nor `_below` alone can produce that — `_excluding` gives
+`below ∪ U`, and `(below ∪ U) ⊕ active` is a different field for any `⊕` that is
+not itself a union. Repairing that case needs a THREE-way split (below, active,
+above) and a host composing twice. Recorded as the widening this could take if
+the fallthrough measures large enough to want it; not this change.
+
+**Required, and it is the third time this medicine applies:** `_below`'s refusal
+SHALL hand back the id of the layer that blocks it — the lowest visible SDF layer
+above the named one — exactly as `clay_document_writable_at_minor` returns its
+blocking layer and as the composition setter names what it refused. The host's
+subtool rows are engine layers, so an id becomes a row a person can select, and
+the sentence becomes *"hide or move Poros to smooth Forma_principal live"* rather
+than *"live smoothing is not available here"*. One names an action; the other
+names a wall. It matters more here than in the `writable_at_minor` case: a
+document has one format and a stack has many layers, so without the id the host
+walks the stack to re-derive a fact the refusal already computed.
+
+### §12b. Make the refusal rule executable, not a review note
+
+The rule this change produced — a refusal that knows an id returns it — is
+currently three separate implementations and a sentence in the roadmap. A
+sentence is checked when someone leans on it; a test is checked every run. So the
+rule gets a test rather than a reviewer:
+
+**Required:** one test case walking every refusal in this change that has an id
+to give — the composition setter on a non-SDF layer, `clay_document_writable_at_minor`
+on a document with a composed layer, and `clay_brick_cache_eval_requests_below`
+on a layer that is not the topmost visible SDF one — asserting each returns the
+error code AND a non-zero blocking id that names the layer actually responsible.
+A refusal that returns the code with a zero id fails the test.
+
+It is cheap, it fails the day a fourth refusal is added without its id, and it
+turns "we agreed to do this" into something that does not depend on anyone
+remembering.
+
+### §12c. What was built for §12, §12a and §12b, and the two things to look at
+
+Written by the stage that closed blocker 5, because §12 had already been
+reported as done once while `clay_brick_cache_eval_requests_below` existed
+nowhere but in this file.
+
+**What is there now.** The entry point takes the same arguments as its two
+siblings plus a `clay_layer_id* out_blocking_layer`, compiles `ChunkHalf::Below`
+through the same `scoped_refill`, and refuses on one condition:
+`scene::visible_sdf_layer_above(doc, layer)` is non-zero. That predicate is a
+POSITION in the stack rather than a property of the layer — it answers for a
+hidden or non-SDF layer like any other — and it skips hidden, mesh and voxel
+layers above, because those are not in the fold and a split beneath them is
+still the whole document. The refusals that are about the layer the CALLER named
+(no such layer; a voxel or mesh layer as the seam) carry no id, and the header
+says so: the id a host does not have is the one above.
+
+**Look at this first: the setter's id has no out-parameter, so its channel is
+the message.** §12b asks for one test walking three refusals, and two of them
+have an out-parameter while `clay_document_set_layer_composition` does not and
+cannot grow one without changing a signature its callers already hold. Its
+refusal now spells `layer <id> is not an SDF layer, ...` and the test PARSES the
+id out of `clay_last_error()`. That is a channel only because something reads
+it; it is also weaker than an out-parameter, and the alternative — a
+`clay_last_blocking_layer()` accessor beside `clay_last_error()`, set by every
+refusal that knows an id — is the shape to take if a fourth refusal arrives, or
+if a reviewer would rather the rule be one mechanism than three.
+
+**And this second: `Except` and `Below` are the same compile wherever this call
+is legal.** With nothing visible and SDF above the named layer, "every layer
+except this one" and "every layer before this one" are the same set in the same
+order, so the two halves are byte-identical and NO test can tell which one the
+entry point asked for. The half is therefore held by the refusal alone: it is
+what keeps the accepted domain narrow enough for the two to coincide. A reviewer
+looking for a test that separates them will not find one, and should not read
+that as a gap.
+
+## 13. The general form of all three blockers, and the sweep it requires
+
+Named by ClaySpaceDesktop on 2026-09-06 after reading the review findings, and it
+is one sentence that covers all three:
+
+> **A culled compile is not a small whole-document compile.** Every question this
+> change asks must be asked of the DOCUMENT, not of the compile in front of it.
+
+The three instances, all correct as "what has this compile seen" and all wrong as
+"what does this document contain":
+
+| predicate | true meaning | mistaken for |
+|---|---|---|
+| `layer_val` false | empty **or wholly culled in this region** | the layer is empty |
+| `have_acc` false | nothing emitted yet **or the cull dropped everything below** | this is the first visible SDF layer |
+| `cull_pad_terms` | the terms an ITEM chain needs | the terms the document needs, fold included |
+
+The property they share is that **the cull is an optimisation and a predicate can
+observe it.** An optimisation is supposed to be invisible to results; any value
+derived from it leaks it, and the leak is visible only per brick, which is
+precisely where nobody looks.
+
+`have_acc` is the sharpest case and the diagnosis is worth keeping: it reused the
+right rule at the WRONG SCOPE. The item-level rule is correct because an item
+chain is compiled whole; the layer-level question is asked against a document a
+brick has already been allowed to forget most of. Reusing rather than inventing
+was the right instinct and it is what carried the bug.
+
+**Required, and it is a sweep rather than three fixes:** every place the fold
+path reads state a cull region can change must be found and decided, not only the
+three the reviewers named. The first was caught before it shipped, the third by
+being promoted out of a handover note, and the second by review — so the score is
+one found by looking and two by writing things down where someone had to pass
+them. A fourth would need somebody looking for the same thing a third time.
+
+**A host dependency, so a partial landing is not mistaken for their bug:**
+ClaySpaceDesktop's `place_layer` and `set_object_transform` both refill
+`union(before, after)` from bounds this engine computes. If a bound does not
+account for the folds ABOVE a layer, their refill is too small and they leave
+stale geometry with no error, having asked for exactly what they were told. Their
+refill correctness rides on the upward widening landing completely.
+
+### §13a. Two adjacent bools are one transposition apart — make the compiler hold it
+
+Raised by the host on 2026-09-06 against the fix for §13's blocker, and checked
+against the tree, where it is real rather than hypothetical:
+
+    bool fold_layer(const Layer& layer, bool layer_val, bool have_acc);
+    bool compile_and_fold_layer(const Layer& layer, bool first, bool have_acc);
+
+Two adjacent `bool`s in each, three call sites between them (`run`, `run_part`,
+and `compile_and_fold_layer` into `fold_layer`), and a transposition at any of
+them compiles silently and produces the exact defect the fix just closed — a
+composed layer initialising instead of folding, per brick, with no error.
+
+The shout-case comment above `fold_layer` is right and stays, but a comment
+protects a reader who is LOOKING. It does not protect a caller who is confident,
+and it is in the category this change has twice recorded as decaying: nothing
+re-runs it.
+
+**Required before merge:** give first-ness a distinct type — a one-field struct
+is enough (`struct FirstVisibleLayer { bool value; };`) — so a swap is a compile
+error at every call site, forever, with no test to run and nothing to remember.
+This is the asan argument applied to a signature rather than to memory: the
+change is exactly the shape where the compiler can hold an invariant a human
+otherwise keeps having to.
+
+The reviewers' second pass should answer one question about every predicate pair
+in the fold path: **could these two arguments be swapped, and would anything
+notice?** If the answer is "no, and nothing would", the comment is the whole
+defence, which this change has already proved is not enough — the first version
+of that line passed a full green gate run including asan and tsan.
+
+### §13b. The exact call path a real host takes, confirmed
+
+Confirmed by ClaySpaceDesktop on 2026-09-06, against its own source rather than
+from memory, and it narrows §13's closing paragraph from a warning to two
+symbols:
+
+    node_bound      -> Document::node_influence_bound -> clay_layer_node_influence_bound
+    refill_region   -> BrickCache::mark_dirty         -> clay_brick_cache_mark_dirty
+
+`place_layer` and `set_object_transform` compute `union(before, after)` from
+`clay_layer_node_influence_bound` — the reader that the first fix left reporting
+the UN-DILATED box — and hand the result to `clay_brick_cache_mark_dirty`, which
+takes the region it is given and cannot correct it. So the query is the surface
+that has to be right; the dirty call is downstream of the mistake and blameless.
+
+**This is why the query and the command path may not disagree.** A host that
+dirties by what it was told leaves stale geometry having asked for exactly the
+right thing, and the symptom on its side is missing surface with nothing to point
+at — the host's own note says its first instinct would have been to look at its
+mesh layer rather than at a bound the engine handed back. `clay.h` already
+promises this of `mark_dirty_nodes`: "the region is the single most likely thing
+to get silently wrong and a bound that is too tight leaves visibly stale bricks
+at a blend seam."
+
+So the fix for blockers 2, 3 and 4 is not "dilate four call sites". It is that
+**one function answers "where can an edit reach in this document", and the query,
+the dirty calls, the command path and the gesture reaches all go through it** —
+which is what `node_influence_bound_in_document`'s own comment already claims and
+this change made false.
+
+### §13c. Which of the three gesture reaches a real host actually drives
+
+Established 2026-09-06 by reading both trees rather than reasoning about them,
+and it reorders blocker 3 rather than widening it.
+
+The three `GestureRegion` reaches that bypass `command_influence_bound` belong to
+`clay_layer_place_stamps` (`bindings/c/clay_c.cpp:9488`),
+`clay_layer_move_surface` (`:7613`) and `clay_layer_magnify_surface` (`:7745`).
+Against the one host we can check:
+
+| entry point | driven? |
+|---|---|
+| `clay_layer_place_stamps` | **no caller anywhere** — one of the 29 entry points v0.84.0 added that this host calls none of |
+| `clay_layer_move_surface` / `_preview` | **yes** — wrapped in its `sculpt.rs` and driven by its Mover tool, which is a sculptor pulling the surface with the pointer |
+| `clay_layer_magnify_surface` / `_preview` | wrapped by neither and called by nobody |
+
+**And the stroke path was never broken.** `clay_layer_apply_stroke` (`:7989`)
+applies each stroke node through `apply_edit` (`:8024`) inside an undo group, so
+every field dab already routes through `command_influence_bound` and inherited
+the first fix. The asymmetry blocker 3 names is real and it is between
+PLACE-STAMPS and apply-edit, not between strokes and apply-edit.
+
+So the live exposure is **one tool, on a drag** — where a region that is too
+small shows as the surface tearing behind the pointer rather than as a stale
+patch found later. All three reaches still get fixed; this says which one has a
+user behind it today, and it is the one whose symptom is continuous.
+
+**Method note, because it is the transferable part.** Both sides of this were
+asserted before they were checked and both assertions were wrong: the host said
+its stroke path carried every dab (it takes the fixed route), and this file said
+the stamp stroke was the exposed one (it is `place_stamps`, which nobody calls).
+Each was checkable in a minute because the other named a SYMBOL and a FILE rather
+than describing a flow. Name the symbol even when you might be wrong about it —
+especially then, since that is what makes the correction cheap.
+
+### §13d. A test the fix modified is not evidence for the fix
+
+Raised by the host on 2026-09-06 while stage 2 was still uncommitted, and it is
+the sharpest thing said about this change's own test discipline.
+
+If a test asserted the too-small bound and now asserts the dilated one, it agrees
+with the new code for the same reason it agreed with the old: **it was updated
+to.** That is not an argument against updating it — it had to change. It is that
+the evidence has to come from somewhere the fix did not touch.
+
+**The question to ask of every test file this change MODIFIED, rather than
+added:**
+
+> Would this file still fail if the fix were reverted, and is the thing that
+> fails a line that existed BEFORE?
+
+- Both yes: it was a genuine regression test all along, and it caught the defect
+  the moment the defect appeared.
+- Only a line the fix added fails: the file is DOCUMENTATION of the new
+  behaviour rather than a check on it. That is fine — as long as nobody counts
+  it twice, in a report or in a review.
+
+This is the same shape as a test that asserts only what CAN be read and therefore
+passes on both sides of the change it exists to announce, arriving from the other
+direction: **a test that moves with the code it tests has the same blindness as a
+test that never moves.**
+
+**Required of the third review:** for every modified test file in this change —
+`tests/unit/test_c_undo_bound.cpp` is the one that prompted this, and it is not
+the only one — apply the question above and report which category each falls
+into. The revert proof is the instrument: flipping the fix and watching a NEW
+assertion fail says something that the modified assertion passing cannot.
+
+### §13e. One function, and what the second review's blockers 2, 3 and 4 turned out to be
+
+§13b closes by saying the fix "is not 'dilate four call sites'. It is that ONE
+function answers 'where can an edit reach in this document'". That is what is
+there now, and this section records the shape of it and the one finding that
+does not match the report it came from.
+
+**The one function is `scene::layer_reach_in_document(doc, layer_id, in_layer)`**
+(`include/clay/scene/bounds.h`): a box the caller knows the LAYER's field cannot
+change outside of, carried to the box the DOCUMENT's field cannot change outside
+of. It is the only place `folds_from_layer_support` is applied to a bound.
+Everything goes through it:
+
+| route | how it reaches the term |
+|---|---|
+| `clay_layer_node_influence_bound` | `node_influence_bound_in_document` |
+| `clay_brick_cache_mark_dirty_nodes` | the same function |
+| `scene::node_command_bound` | IS that function now — it looks the content up from a layer id and calls it |
+| `clay_layer_influence_bound` | `layer_influence_bound_in_document` |
+| `clay_brick_cache_mark_dirty_layer` | the same function |
+| `scene::layer_command_bound` | that function plus `first_visible_flip_bound`, the one term only a command has |
+| `first_visible_flip_bound` | `layer_influence_bound_in_document` for the promoted layer |
+| the stamp stroke, the surface drag, the surface magnify | `layer_reach_in_document` on each stated reach; the drag's instanced-sharer boxes come from `layer_influence_bound_in_document` |
+
+Two consequences worth stating rather than discovering:
+
+1. **The node query is `node_reach_bound` now, not `node_influence_bound`.** The
+   query used to stop at the node's own box while the command path dilated by
+   each enclosing GROUP's blend support — a pre-existing instance of exactly the
+   disagreement §13b forbids, one level below the fold. `test_c_undo_bound.cpp`
+   encoded it: its "a child of a blended group covers the seam" case asserted
+   the undo bound was strictly WIDER than the query. That case is updated, not
+   weakened — the requirement is now asserted against the child's own geometry,
+   and a new subcase holds the query and the undo bound EQUAL, which is the
+   property this change needs.
+2. **`layer_influence_bound` is not widened in place** and now says in its own
+   comment why it cannot be: it takes a `Layer`, and the folds above are a
+   property of the stack. `node_reach_bound` carries the same sentence.
+
+**Blocker 3 is real as a contract violation and its stated consequence is not
+reachable. Both halves matter.** The three gesture reaches genuinely carried no
+fold term, and `GestureRegion`'s own contract is "It MUST cover everything the
+bracket does — a region that does not is stale bricks". But a gesture's reach
+has exactly one consumer, `clay_document::touch_regions`, and
+`touch_region_locked` compares each seed's brick DILATED BY `band + pad`, where
+`pad` is the document cull pad — a maximum over layers of that layer's chain pad
+PLUS the folds above it, so `pad >= folds_from_layer_support(edited layer)` for
+every document, by construction. The shortfall was inside the pad.
+
+Measured, on a three-layer fixture over a 504-brick window (258,048 samples):
+with the gesture's dilation removed a drag leaves 288 seeds where the fixed one
+leaves 216, and the refill that follows is bit-identical to a cold document's —
+0 stale samples, worst 0.0, either way. So "every dab left stale bricks" did not
+happen, and the reason it did not is a number owned by the CULL PAD rather than
+by the reach. That is the accidental kind of correctness this change exists to
+remove: the coverage is not what `GestureRegion` promises, it would not survive
+a second consumer of a gesture's reach, and it depends on stage 1's own fix
+having landed first. The reaches are dilated, and the regression tests assert
+the INVALIDATION (a seed in the shell the fold adds is dropped; a seed outside
+both reaches is kept — exactly one of two survives) rather than pretending to a
+stale brick that does not occur.
+
+**§13d applied to this stage's two modified test files, before anyone counts
+one of them twice.**
+
+- `tests/unit/test_c_undo_bound.cpp` — **DOCUMENTATION, not evidence.** Its two
+  pre-existing assertions were `b.hi[0] > chi[0]` and `b.hi[0] >= chi[0] + k`,
+  with the QUERY standing in for the child's un-dilated box; they failed the
+  moment the query widened (`CHECK( 4.3 > 4.3 )`) and were re-pointed at the
+  child's own geometry. Revert the fix and neither of them fails again: they
+  assert the UNDO bound, which this stage did not narrow. Only the subcase this
+  stage ADDED — the query and the undo bound are equal — fails on a revert. So
+  the file records the new behaviour and proves nothing about it.
+- `tests/unit/test_layer_fold_sites.cpp` — **evidence, and only because nothing
+  in it was modified.** Every assertion here is in a case this stage added, and
+  each of the seven entry points was proved by a TARGETED revert that failed a
+  new assertion with a number: 1,660 / 536 / 700 / 536 changed samples outside
+  the box, and `2 == 1` surviving seeds for each of the three gestures. A file
+  that is only appended to cannot have moved with the code, which is the
+  property §13d is asking for; the older cases in it still pass untouched.
+
+The transferable half: the query's disagreement with the command path was
+VISIBLE in a test all along — `test_c_undo_bound.cpp` asserted it as a
+requirement, one level below the fold, for group blends. It read as a property
+worth having rather than as a defect, and nothing re-asked whether the two
+answers should differ at all. A test can encode the bug as the spec, and then
+updating it is the moment to say which of the two it was.
+
+### §13g. An expectation derived from the system under test measures consistency, not correctness
+
+*Landed as a second §13e, colliding with the §13e above; renumbered to the next free
+letter so the two references below name one section. It therefore sits before §13f,
+which was written later: a section keeps the letter it is given, and this document
+already interleaves its 12s and 13s. The third review's handover cites it as §13e.*
+
+The general form of two mistakes made in this change's own review cycle, stated
+by the host on 2026-09-06 after both had been fixed separately and neither had
+been recognised from inside the other.
+
+- `test_c_undo_bound.cpp` compared the undo bound against
+  `clay_layer_node_influence_bound` — one output of the bounds machinery against
+  another. It could not detect the machinery being wrong in a way that moves
+  BOTH, which is precisely what this change introduced. It looked like a check
+  and was an invariant.
+- A release note claimed a brush got stronger, citing a surface measured with a
+  PICK, in a release that changed the pick. The expected value and the thing
+  under test came from one place, so agreement was guaranteed and disagreement
+  would have been uninterpretable.
+
+**The fix is the same move in both cases: take the expectation from somewhere the
+code under test cannot reach.** Stage 2 used the child's own geometry as a
+literal (`2.0f + 0.3f`) instead of reading the query back; the host used
+`clay_eval_points`, a different instrument from the marcher. A literal and a
+second instrument are the same thing.
+
+**The test for whether comparing two outputs is legitimate** — because sometimes
+it must be — is whether **the two could ever disagree for a reason you would want
+to hear about.** Asserting that the query and the undo bound now agree is a real
+claim, because they are supposed to and a divergence is a defect worth an alarm.
+Deriving one from the other and then asserting a property of the pair was not.
+
+**Required of the third review**, alongside §13d: sweep every test this change
+adds or modifies for an expected value that comes from the system under test, and
+report each as either a legitimate invariant (the two could disagree for a reason
+worth hearing) or a tautology (they cannot). This is cheap to check and it is the
+failure that survives a green suite.
+
+**A note beside §13g, deliberately NOT a third sweep.** A test can be sound
+within a run and unsound as a fixture for COMPARING runs, and the second use is
+invisible in the file. The host's `sdf_brushes` asserts that a brush moves the
+surface by more than 1e-3, reading both sides through one pick in one process on
+one build — legitimate by every test above, since a brush that does nothing is a
+disagreement worth hearing. It broke anyway, because the comparison that mattered
+was ACROSS a pin, and the instrument was not the same for those two runs. Nothing
+in the file says it is comparing builds, because it is not: that comparison lives
+in a person reading two runs.
+
+Anything read through a marcher, a rasteriser, a timer or a floating-point
+reduction acquires this property the moment someone compares two versions with
+it — which is what an engine upgrade is. **The defence is not a different
+assertion; it is knowing which of your tests are ALSO used as measuring devices
+across builds, and saying so where they live.** This repository has the same
+shape in `tests/device/baseline.json`, which holds entries taken at different ABI
+versions side by side.
+
+It is left as a note rather than a required sweep on the host's own argument:
+§13d and §13g are mechanical and answerable from a diff, and this one depends on
+how a test is USED rather than on what it contains. A sweep that cannot be
+answered from a diff would weaken the two that can.
+
+### §12d. Why `_below` refuses at all, and what the blocking id does not say
+
+*Landed as a second §12c, colliding with the §12c above; renumbered for the same reason
+as §13g. The handover that added it cites it as §12c.*
+
+Two questions from the host on 2026-09-06, both answerable from the code as
+committed, and one of them is a real gap.
+
+**Q: under a hard union, `_excluding` works at ANY stack position — so is
+`_below`'s topmost requirement a limit that is not there?**
+
+No, and the reason is not the one the header implies. It is not that composition
+above is order-dependent; it is that **there is no `_above` query.** `_below`
+answers "every visible SDF layer before this one, folded as the document folds
+them". A host holding that plus its own preview of the target can rebuild the
+document only when nothing visible sits above — because whatever is above is
+material it cannot obtain, and that is true whether the layers above union or
+compose. A hard union above is just as absent.
+
+**Nothing is lost for the union case, which is the half that matters to a host
+shipping today.** `_excluding` refuses on `first_composed_fold_layer`, so a
+document where every layer unions never meets that refusal and keeps working at
+any stack position, exactly as it does now. `_below` is the repair for the case
+`_excluding` cannot serve — a composed document — and is not a narrowing of it.
+**The header must say that**, because read beside `_excluding` the restriction
+looks like one.
+
+**Q: when two layers above block, which does `out_blocking_layer` name?**
+
+`scene::visible_sdf_layer_above` (`src/scene/tape_build.cpp:1589`) returns the
+FIRST visible SDF layer after the target's position — the lowest — and nothing in
+the signature or the message says whether others follow. Hidden, mesh and voxel
+layers above are correctly skipped, since they are not in the fold walk either.
+
+**That gap is real and it is the host's to feel:** their sentence is *"hide or
+move `Poros` to smooth `Forma_principal` live"*, and on a four-row stack with two
+field layers above the target it is wrong by omission — the sculptor acts, tries
+again, and is refused again naming the next one. **Required of the third review:**
+decide whether the refusal reports the lowest blocker plus a count, or the lowest
+with a flag saying more follow, or all of them — and say which in the header
+either way. The current behaviour is defensible and undocumented, which is the
+combination that produces a wrong sentence in a host.
+
+**DECIDED: THE LOWEST PLUS A COUNT.** `clay_brick_cache_eval_requests_below`
+takes a second out-parameter, `out_blocking_count`, which receives how many
+visible SDF layers sit above the named one altogether; `out_blocking_layer` is
+the lowest of them, unchanged. The error detail gains "N visible SDF layers are
+above it in all" when N > 1, so a host that only echoes the message is not
+misled either. The two answer different halves and neither substitutes for the
+other: the id is the row to act on FIRST, because hiding or moving it is what
+makes progress, and the count is what decides the SENTENCE.
+
+*Why not a flag.* "More follow" is a count with information discarded and
+nothing saved — the walk that finds the second blocker is the walk that counts
+them all — and a host that wants to say how many is back where it started.
+
+*Why not all of them.* An id list on a refusal path needs a caller array, a
+capacity and a truncation rule, which is three parameters and a new failure mode
+for a message. A host that wants the names enumerates the visible SDF layers
+above the named one itself, with the rule the header states; the count is the
+one fact it cannot get without that walk, and it is exactly the fact the refusal
+had already computed. If a host later reports that it is doing that walk on
+every refusal, the list is the widening to take, and it takes it with the same
+predicate.
+
+*What it cost.* One parameter on an entry point that has never shipped —
+0.86.0 is unreleased — and one walk that already existed:
+`scene::visible_sdf_layer_above(doc, layer, &count)` counts in the same pass and
+short-circuits at the first match when nobody passes a counter, so the question
+a caller does not ask still costs what it did. A second predicate answering
+"how many are above" would have been the duplication this change is organised
+against.
+
+### §13f. What the fourth review's record stage changed, and the two contract errors it found
+
+The stage after the below form's (§12c). Its findings were two majors about the
+code, a set of minors, and the accuracy of this contract — which is the half worth writing down
+here, because a design document that names a function the tree does not have is
+the same failure as a tasks list that ticks a box nothing did.
+
+**The two contract errors.**
+
+1. **`document_fold_is_hard_union` did not exist as this document describes it.**
+   It existed as a bool wrapper with no caller outside its own tests, while
+   `include/clay/scene/tape.h` told a reader that the three excluding entry
+   points took it — they take `first_composed_fold_layer`, whose non-zero answer
+   is the layer each refusal names. Deleted rather than re-documented: a second
+   spelling of one predicate is what this change is organised against, and the
+   bool is the spelling that cannot name a layer. The six assertions that used
+   it now spell the same question with the id form, which four of them already
+   asserted on the next line.
+
+2. **Row 9 of §2's table has the `rev == now` argument backwards**, and so did
+   the comment in the tree it came from. It says a composition change bumps
+   `revision`, so the shortcut cannot meet a stale two-half seed. But a
+   composition change is an ordinary REGION invalidation, and
+   `touch_region_locked` KEEPS a seed whose brick the edit cannot reach and
+   carries it forward to the NEW revision — the comment at the shortcut itself
+   says exactly that. So `rev == now` IS reachable straight after a composition
+   change, holding a seed taken under the old fold. What makes the hard-Add
+   rejoin still exact there is the invalidation's BOX: a surviving brick is one
+   the composed layer's field cannot reach, so the active half is empty in it and
+   folding an absent operand is identity for the operators that reach the
+   shortcut — and for the one where it is not, an Intersect, which empties the
+   field everywhere the accumulator has material,
+   `layer_influence_bound_in_document` widens that command's box to the extent of
+   the layers beneath. The precondition is being held up by a bound nobody would
+   guess is holding it, which is now written beside both.
+
+**The two majors.** `fold_layer`'s two adjacent bools are one type now
+(`LayerLeftValue`, typed where the value is produced so a transposition has no
+brace to move with it — §13a asked this of every predicate pair in the fold
+path, and the first pass typed only `compile_and_fold_layer`), and §9's second
+gate is built: a converted mesh as the BASE, under a field cutter, hard and
+smooth, against the one-layer item form. The fold treats base and cutter
+symmetrically, so it is the redundant gate §9 allowed for — but not a vacuous
+one: dropping the fold's blend moves 592 of its samples.
+
+**And the one thing the minors turned up that nobody had asked about.**
+`compile_layer_suffix` has no seam refusal where its sibling
+`compile_document_append` gained one, and the reason is not an oversight: it
+copies no prefix `info`, `lipschitz_bounds_gradient` or `bounds`, which is what
+that refusal protects, and `resume()` EMITS the seam's own composition rather
+than assuming a hard Add. That was an argument in a comment until this stage;
+it is a test now (`test_suffix_tape.cpp`, a seeded suffix across a composed seam
+is bit-identical to the whole document, three arms, failing on all three when
+the seam is forced to a hard Add). The hard Add belongs to the CALLER that holds
+two halves apart in host floats, and so does that caller's refusal — which is
+why every in-tree caller of the suffix states `doc_have_acc = false`.
+
+**CORRECTED BY §13m: that paragraph and the test under it were both half
+true.** `resume()` emitted the seam's composition only where the appended chain
+produced a value in the region being compiled; where the cull left the layer
+with nothing, an early return skipped the seam entirely. Read the paragraph
+above as a statement of intent that the tree did not yet keep, and the test as
+one that could not have caught the gap — three conditions in its own fixture
+each hid it. See §13m.
+
+### §13h. The revert experiment §13d asks for, run
+
+Run on an isolated worktree at `b3b51c01` with the fold dilation stubbed out —
+`layer_reach_in_document`'s `support` forced to 0 — rebuilt and run. (The stub
+does not compile as written: removing the term leaves `doc` and `layer_id`
+unused and `-Werror=unused-parameter` rejects it, which is the reminder that a
+revert has to COMPILE before it proves anything.)
+
+**`tests/unit/test_c_undo_bound.cpp` PASSES with the fix reverted.** 10 cases,
+164 assertions, all green. So by §13d's question it is **documentation of the new
+behaviour, not evidence for it** — and the reason is §13e, arriving in a form
+neither section anticipated:
+
+> its new subcase asserts that the QUERY and the COMMAND path report the same
+> box. The fix made those two the same function. So the assertion compares one
+> output with itself, and reverting the shared term moves both sides together.
+> **It cannot fail.**
+
+That is not an argument for deleting it — it documents a contract a future change
+could break by re-splitting the two paths, which is exactly what happened once
+already. It is an argument for not counting it as coverage of the dilation.
+
+**What DOES catch the revert, in `tests/unit/test_layer_fold_sites.cpp`:**
+
+- *"an intersecting layer's commands dirty what it can take away"* — `b.min.x <
+  own.min.x`, `b.max.x > own.max.x`, and `b.max.x == Approx(own.max.x +
+  support)` all fail.
+- *"an item edit is dilated by the folds it passes through"* —
+  `changed_outside(before, after, reach, pts, &worst) == 0` fails, which is the
+  property itself rather than a proxy for it: field values change outside the
+  region the engine reported as reaching.
+
+So the dilation IS covered, by two cases in one file, and the coverage does not
+come from the file that looks like it should provide it. **Both facts are worth
+carrying: the test that reads as the regression test is not one, and the tests
+that are do not have "undo bound" in their names.**
+
+### §13i. Unifying two paths converts every assertion comparing them into a tautology
+
+Separated from §13e by the host on 2026-09-06, and the distinction decides how a
+reviewer uses each.
+
+§13e is STATIC: an assertion whose expected value is derived from the system
+under test measures consistency. You answer it by reading the test — where does
+the expectation come from.
+
+This one is not answerable that way. `test_c_undo_bound.cpp`'s subcase was SOUND
+when written: the query path and the command path were genuinely two functions,
+and requiring them to agree could have failed for a reason worth hearing.
+**Nothing in the test changed, and nothing in it could have.** The fix merged the
+two functions, and that is what made the assertion vacuous. Read at any point,
+before or after, it shows an expectation taken from a legitimately independent
+source.
+
+**So this is a trigger condition rather than a property**, and it is the kind of
+change nobody re-audits tests for: a refactor that deletes a duplicate
+implementation is not supposed to change behaviour, and it does not. It changes
+what the tests are CAPABLE OF DETECTING.
+
+**Required of the third review, and it is answerable from a diff:** *this change
+merged two code paths — which assertions compared them?* This change merged at
+least three pairs: the query and the command path for a node's reach, the query
+and the dirty call for a layer's, and `document_pad` with `CullIndex::refresh_pad`
+onto one expression. Every assertion that held two of those equal is now
+comparing one thing with itself. Report each as still-meaningful (it pins a
+contract a future split could break, which is worth keeping and not worth
+counting) or as coverage that has quietly evaporated.
+
+### §13j. An identical ASSERTION COUNT after a deletion proves the code was never reached
+
+The third review's second major was found this way and the technique deserves a
+name, because it answers a question §13d and §13e cannot.
+
+Delete a live term — here `comp.rounding * layer_distance_scale(layer)` in
+`fold_layer` — rebuild, and run the whole suite. It stayed green at
+**16,464,984 assertions, the identical count**. A green suite after a deletion
+could always mean the tests are lenient about that term. **An identical COUNT
+means nothing anywhere executed differently**, so no test so much as evaluated a
+branch that reached it. That distinguishes "covered but not asserted" from "not
+reached at all", and nothing else in this file's toolkit does.
+
+It completes the set, and the three ask different questions:
+
+| | question | answerable by |
+|---|---|---|
+| §13d | could this test ever fail? | reverting the fix and running it |
+| §13e | is its expectation independent of the code? | reading the test |
+| §13j | **is this code executed at all?** | deleting it and comparing assertion COUNTS |
+
+§13j is the only one of the three with no judgement in it. A count is a number,
+the comparison is mechanical, and the answer does not depend on who reads the
+test. Use it on any term a change adds that a reviewer cannot find a case for —
+it is cheaper than arguing about whether a case exists.
+
+### §13k. The PAINT classification hole is latent for a host, not absent
+
+The third review found that a `CLAY_OP_PAINT` composition with a HARD profile and
+a positive radius classifies as SIMILARITY, because `Op::Paint` sits below the
+extended-op range and falls through both clauses of
+`composition_radius_ignores_scale`. Checked against the consuming host, and the
+distinction matters for how the fix is written:
+
+**`Combine::Paint` is in that host's vocabulary and maps to `Op::Paint` — the
+type exists and the mapping is live.** What prevents it is one line: the list its
+interface offers is the full set FILTERED to exclude Paint, because its surface
+path carries no per-vertex colour to the GPU, so a Paint stroke would change the
+field and show nothing. A sculptor cannot select it and no document it writes
+contains one.
+
+So the hole is unreachable **by a filter, not by an inability**. The day that
+renderer carries colour the filter comes off, and the op becomes reachable in the
+same commit — a change that would have no reason to ask whether this engine's
+scale predicate covers it. **Fix the predicate so any positive radius disqualifies
+regardless of profile or op**, rather than adding Paint to a list; a list is the
+thing that was already wrong.
+
+### §13m. The fourth cull-observable predicate, and what it says about the sweep
+
+*Landed as a second §13j, colliding with the §13j above; renumbered to the next free
+letter for the same reason as §13g and §12d. The fifth review's handover and the
+commit that closed it cite it as §13j, and the two references above now name this
+section.*
+
+Found by the fifth review, closed by the stage after it, and it is the thing
+§13 said would need somebody looking a third time.
+
+**The defect.** `Compiler::resume` opened its stack unwind with
+
+    if (!chain_val && cp.frames.empty()) return;
+
+and `chain_val` is what `compile_list` returned for the APPENDED nodes under
+THIS COMPILE'S CULL. Where a region held none of them and the checkpoint sat at
+a root list rather than inside a group, the function returned before emitting
+the seam's fold at all — so `compile_layer_suffix` silently dropped a composed
+fold in exactly the bricks a stroke's dabs do not reach, which is most bricks of
+most dabs. It is §13's general form verbatim, and the fourth instance of it:
+a cull-dependent value read as a question about the document.
+
+The comment above that line said the return was "harmless where there are no
+frames — a root list has nothing pending". It was true when it was written and
+this change is what made it false: the layer's own fold became something
+pending. **A comment that states a precondition is only as current as the last
+person to re-derive it**, which is the same argument §13a made for typing
+`fold_layer`'s two bools, arriving at a line of prose instead of a signature.
+
+**What it falsified.** `include/clay/scene/tape.h` told a reader, in writing,
+that "the fold at the seam is EMITTED, not assumed … so a composed seam compiles
+as the composition", and §13f and tasks 7.8 recorded that as settled and held by
+a test. Measured on a clean build — a base sphere at the origin, a cutter whose
+one dab sits at x = 5, compiled for a region of ±1.5: the checkpoint comes back
+`layer_have_acc=false doc_have_acc=true frames=0`, the suffix compiles to ZERO
+instructions, and against the whole-document compile of the same document under
+the same cull it differs at 0 of 729 lattice samples for Add, 0 of 729 for
+Subtract and **729 of 729 for Intersect**, worst 3.4e37 (`CLAY_TAPE_FAR`),
+equal to the seed at all 729. That set is exactly `fold_changes_an_empty_layer`.
+
+**Not reachable from the shipped C ABI**, and saying so is part of the finding
+rather than a softening of it: every in-tree caller of `compile_layer_suffix`
+states `doc_have_acc = false`, and `plan_resume`/`plan_frontier` refuse a
+composed seam through `layer_join_is_hard_union` before that. It was a latent
+hole in a public C++ contract, one caller change from being a wrong field per
+brick — and the C ABI's own refusals are what were holding it shut, which is the
+accidental correctness §13e names.
+
+**The fix is not the condition; it is that there is one spelling of the seam.**
+Narrowing the early return to `!cp.doc_have_acc || !fold_changes_an_empty_layer(…)`
+would have worked and would have left the rule written twice — once in
+`fold_layer` and once as the negation of a return. `emit_layer_fold` is the whole
+rule now (nothing beneath; an absent operand the operator ignores; an absent
+operand it reads), `fold_layer` and `resume` both call it, and the early return
+has nothing left to decide. Two walks reach a layer seam and they cannot
+disagree about an absent operand without the fast path being a different field
+from the slow one, per brick.
+
+**Why no test could see it, which is the transferable half.** The case added at
+7.8 asserted `REQUIRE(cp.layer_have_acc)`, passed NO cull region, and carried
+only Add and Subtract arms. Each of those three independently hides the defect:
+with dabs in the layer `chain_val` is true whatever the cull does (`compile_list`
+RETURNS ITS INCOMING `have_acc`, so `chain_val` is "is there a value on the
+stack afterwards" and not "did the appended chain emit anything"); with no cull
+region nothing is ever dropped; and Add and Subtract are precisely the operators
+for which folding an absent operand is identity. **A fixture can be wrong in
+three independent ways at once and still look like the case it is named after** —
+and the name is what a reviewer reads. The new case asserts its fixture
+(`layer_have_acc` false, `doc_have_acc` true, no frames) rather than assuming
+it, which is what makes it re-readable.
+
+**What this says about §13's sweep.** The sweep was asked for and was run, and
+it missed this one. The reason is worth keeping: it looked for predicates in the
+FOLD path, and this one is in the RESUME path — a function whose job is to
+reproduce the fold rather than to decide it, and which therefore did not read as
+somewhere the fold's rules live. **The scope of "every place the fold path reads
+state a cull region can change" has to include every place that RE-EMITS the
+fold, not only the places that decide it.** The score is now two found by
+looking and three by writing things down where someone had to pass them.
+
+### §13l. The record stage's answers: the two sweeps, and a word struck from §2
+
+Written by the sixth review's record stage, which is the minors and the accuracy
+of this file. Three of them are documents claiming something the tree does not
+do, which is the failure this change has now been caught in three times, so they
+are recorded here rather than only fixed.
+
+**§13i's sweep, run: which assertions compared two paths this change merged.**
+The question is answerable from a diff and the answer is three pairs.
+
+| merged pair | assertions that compared them | verdict |
+|---|---|---|
+| the node query and the command path (`node_influence_bound_in_document`) | `test_c_undo_bound.cpp` lines 113-114 and 217-218, both PRE-EXISTING, and the subcase this change added | **evaporated as coverage, kept as a pin.** All three compare one function's output with itself now; §13h already reported the added subcase and missed the two older pairs, which is the sharper half — a pre-existing assertion can go vacuous without anybody touching it |
+| the layer query and the dirty call (`layer_influence_bound_in_document`) | none | nothing to report: no test held those two equal |
+| `document_pad` and `CullIndex::refresh_pad` | `test_layer_fold_sites.cpp`, "and the cached index reports exactly the same number" | **still meaningful.** The two are one expression over DIFFERENT inputs — the compiler's live document against the index's cached per-layer terms — so they can still disagree, and a stale cached term is exactly the failure worth hearing about |
+
+The three vacuous pairs are marked in the file as pinning a contract rather than
+providing coverage, with what a future re-split would break. Nothing is deleted:
+the two paths were genuinely two functions before this change and could be again.
+
+**And the same question asked of a test this change ADDED**, since §13i is about
+what a merge does and not only about what a merge did: the
+`SetLayerCompositionCmd`, `SetLayerMirrorCmd` and `SetLayerRadialCmd` rows added
+to "every command's inverse restores the document bit-identically" cannot fail as
+coverage of what they set. `apply_one` for a layer setter reads the old value
+into the inverse and then writes the new one, so the round trip is an assignment
+and its undo, restoring by construction whatever the field is, and both sides of
+the comparison are read through one `serialize_document`. What a row there can
+still catch — a command with no registered inverse, or an applier that writes
+nothing — is real and is not about compositions. Marked in place, kept, and not
+counted twice.
+
+**`ref_eval_document` is a DIFFERENTIAL, and "independent" is struck from §2 row
+10.** The reviewer's finding is right: the layer fold in the reference was
+derived by reading `compile_and_fold_layer`, so on the fold RULE the two agree by
+construction. Restoring independence was considered and NOT taken, for a reason
+worth stating rather than a preference:
+
+- the evaluator was never independent of the KERNEL — `ref_combine` has always
+  called `ctape_combine_values`, and the file header has always said it "reuses
+  the kernel's prim/combine dispatch". Making the LAYER fold independent while
+  the ITEM fold is shared buys an independence the document does not have one
+  level down, and would read as a promise the file cannot keep;
+- the obvious re-derivation (seed the accumulator with the far field and fold
+  unconditionally) is equal to what is there for every operator the setter
+  accepts, so it would be a second spelling with the same answers — and it has
+  its own quiet divergence, the colour of a document whose layers all produce
+  nothing, which no fixture would have caught.
+
+So the word is struck and the function says what it is: a differential over
+everything the COMPILER contributes and the reference does not have — traversal
+order, transform inversion, mirror emission, culling, checkpoints, the tape's
+stack discipline — which is most of this change, and which is why the fold's own
+cases still run through it. What it cannot catch is now written above it: a fold
+rule wrong in the same way on both sides, and a wrong `ctape_combine_values`.
+The rule's evidence is the analytic expectations in `test_layer_fold.cpp`, the
+item/layer parity fixtures in `test_layer_parity.cpp` and the C ABI gates in
+`test_layer_gates.cpp`, none of which reads this evaluator.
+
+**§2 row 10's test now exists.** It named `test_scene.cpp:50` "with a composed
+`gnarly_document` variant" and nothing was built; `test_scene.cpp` was
+unmodified by this change. A named test that does not exist is what
+`tools/check_task_symbols.py` was written for after this change reported an
+entry point as built that existed only in this file — and this one was in a
+design document, where that gate cannot see it. The case is built against
+`composed_gnarly_document`: the same whole-vocabulary fixture with a Subtract on
+the first visible layer that must NOT be applied, a smooth Subtract with a
+rounding under it, a smooth Add at the instance, and an Intersect on top whose
+box contains the body and not the instance. It asserts its own fixture and
+compares 2,000 points against the reference in distance and colour.
+
+**And the teeth found a fixture that composed nothing**, which is worth keeping
+because it is the failure a composed variant invites. The second teeth arm
+defaults ONE fold — the instance's smooth Add — and expects the field to move;
+it read 0. The instance sits at x = 3 in `gnarly_document`, further from
+everything else than any radius the fold could carry, so that layer was composed
+in name only and the whole-document count (2,000 of 2,000) was carried by the
+Intersect alone. The variant moves it to x = 1.9, where the two surfaces are
+about 0.3 apart, and the arm reads 28 — small because a seam is a thin shell in
+a uniformly sampled 8-unit cube, and asserted exactly for that reason.

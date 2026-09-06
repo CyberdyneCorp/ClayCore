@@ -157,13 +157,19 @@ TEST_CASE("prefix reuse: one layer") {
 }
 
 // Layers do NOT simply concatenate: each compiles against its own accumulator
-// and is folded into the layers below by a hard union emitted AFTER its chain.
-// So with more than one visible layer the cached tape ends in that union, and
+// and is folded into the layers below by a combine emitted AFTER its chain.
+// So with more than one visible layer the cached tape ends in that combine, and
 // an appended item belongs IN FRONT of it. Emitting it after would combine it
 // against every layer — invisible for a hard Add, because min is associative,
 // and simply the wrong field for a smooth blend or a subtract. That is why
 // these cases carry soft blends and a subtract: a hard-Add-only test would
 // pass against the bug.
+//
+// The combine is the ACTIVE layer's own composition, and where it is not a
+// hard Add the reuse is REFUSED rather than taken -- the carry-over of the
+// prefix's `info` and `bounds` is only sound for one that is exact and adds no
+// extent. Both halves are below: what a composed seam does, and that a
+// composed layer BENEATH the seam costs nothing.
 TEST_CASE("prefix reuse: the appended item goes in front of the layer union") {
     SUBCASE("two layers, smooth append") {
         Document d;
@@ -206,6 +212,54 @@ TEST_CASE("prefix reuse: the appended item goes in front of the layer union") {
         b.sdf->insert(dab(1, 0, 0, 0.5f));
         d.find_layer(b.id)->visible = false;
         check_append(d, a, {dab(0, 0.5f, 0, 0.3f, Op::Add, 0.05f)});
+    }
+    SUBCASE("a layer BENEATH the seam may compose, and the reuse still stands") {
+        // The ordinary shape of the feature: a cutter underneath the layer the
+        // artist is sculpting into. The seam is the LAST visible SDF layer, so
+        // this keeps the fast path and must stay bit-identical.
+        Document d;
+        LayerRef a = add_layer(d, "a");
+        LayerRef b = add_layer(d, "b");
+        LayerRef c = add_layer(d, "c");
+        a.sdf->insert(dab(0, 0, 0, 1.0f));
+        b.sdf->insert(dab(0.6f, 0, 0, 0.5f));
+        c.sdf->insert(dab(1, 0, 0, 0.5f));
+        Layer* mid = d.find_layer(b.id);
+        mid->composition.op = Op::Subtract;
+        mid->composition.blend = Blend{BlendProfile::Cubic, 0.2f};
+        check_append(d, c, {dab(1.0f, 0.4f, 0, 0.3f, Op::Add, 0.05f)});
+    }
+    SUBCASE("a composed SEAM refuses the reuse, and the caller compiles in full") {
+        // Not a wrong reuse and not an almost-right one: `info` and `bounds`
+        // are carried from the prefix on the strength of a hard Add, so
+        // anything else is refused. Every kind of "anything else" is here,
+        // because each breaks a different half of that sentence.
+        for (LayerComposition comp : {
+                 [] { LayerComposition c; c.op = Op::Subtract; return c; }(),
+                 [] { LayerComposition c; c.op = Op::Intersect; return c; }(),
+                 [] { LayerComposition c; c.blend = Blend{BlendProfile::Cubic, 0.2f}; return c; }(),
+                 [] { LayerComposition c; c.rounding = 0.15f; return c; }(),
+             }) {
+            CAPTURE(static_cast<int>(comp.op));
+            CAPTURE(comp.blend.k);
+            CAPTURE(comp.rounding);
+            Document d;
+            LayerRef a = add_layer(d, "a");
+            LayerRef b = add_layer(d, "b");
+            a.sdf->insert(dab(0, 0, 0, 1.0f));
+            b.sdf->insert(dab(1, 0, 0, 0.5f));
+            d.find_layer(b.id)->composition = comp;
+
+            TapeCheckpoint cp;
+            const Tape prefix = compile_document_resumable(d, &cp);
+            const NodeId added = b.sdf->insert(dab(1.0f, 0.4f, 0, 0.3f));
+            Tape reused;
+            TapeCheckpoint next;
+            CHECK_FALSE(compile_document_append(prefix, cp, d, {added}, &reused, &next));
+            // The refusal leaves `out` untouched, which is what lets a caller
+            // fall through to a full compile without clearing it first.
+            CHECK(reused.instrs.empty());
+        }
     }
 }
 
