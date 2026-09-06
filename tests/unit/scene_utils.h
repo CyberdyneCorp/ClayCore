@@ -197,16 +197,89 @@ inline bool ref_eval_list(const std::vector<scene::NodeId>& ids,
     return have_acc;
 }
 
+// WHAT THIS IS, SAID EXACTLY, because the word it used to carry was
+// "independent" and that was an overclaim (fold-the-layers-with-an-operator,
+// design.md §2 row 10).
+//
+// It is a DIFFERENTIAL, not an independent oracle. It shares with the compiler
+// everything the file header lists -- the kernel's prim and combine dispatch --
+// and, since layers gained a composition, the FOLD RULE as well: which layer is
+// first, what a layer that is not first does with an absent accumulator, and
+// that an absent layer value is the far field. Those were written from the
+// spec's statements and are spelled differently here (this folds the far field
+// unconditionally where `emit_layer_fold` asks `fold_changes_an_empty_layer`
+// and skips the identity cases), but they were derived by reading
+// `compile_and_fold_layer`, and a reader is owed that rather than a claim of
+// independence.
+//
+// WHAT IT THEREFORE CATCHES: everything the COMPILER contributes and this does
+// not have -- traversal order, transform inversion, mirror emission, culling,
+// checkpoints, the tape's stack discipline -- which is a large part of this
+// change and is why the fold's own tests still run through here. A change to
+// one side and not the other fails loudly.
+//
+// WHAT IT CANNOT CATCH, stated so nobody counts it twice: a fold rule that is
+// wrong in the same way on both sides, and a wrong `ctape_combine_values`. The
+// rule's own evidence has to come from somewhere neither reaches -- the
+// analytic expectations in test_layer_fold.cpp (an intersecting layer over
+// nothing is nothing; a subtract removes exactly the cutter), the item/layer
+// parity fixtures in test_layer_parity.cpp, which compare a document folded by
+// LAYERS against the same shape folded by ITEMS in one layer, and the C ABI
+// gates in test_layer_gates.cpp.
 inline CTapeValue ref_eval_document(const scene::Document& doc, cfloat3 p) {
     using namespace kernel;
     CTapeValue acc;
     bool have_acc = false;
+    // FIRST IS A PROPERTY OF THE LAYER LIST, not of what the layers beneath
+    // happened to produce. Reading it off `have_acc` is exactly the defect this
+    // evaluator exists to catch in the compiler, so it must not repeat it: a
+    // document whose lower layers are empty would then show an intersecting
+    // layer whole, and agree with a compiler that did the same.
+    bool first = true;
     for (const scene::Layer& layer : doc.layers) {
         if (!layer.visible || layer.kind != scene::LayerKind::Sdf || !layer.sdf) continue;
+        const bool is_first = first;
+        first = false;
+        const scene::LayerComposition& lc = layer.composition;
+        // An absent accumulator under a layer that is not the first: the item
+        // rule, which is what compile_and_fold_layer lifts (a carving operator
+        // over nothing is nothing; Shell and Replace fold against the far
+        // field; a union is the layer itself).
+        if (!is_first && !have_acc && lc.op != scene::Op::Add &&
+            !scene::op_creates_material(lc.op))
+            continue;
         CTapeValue lv;
-        if (!ref_eval_list(layer.sdf->roots, *layer.sdf, layer, p, lv, false)) continue;
-        if (have_acc)
-            acc = ctape_combine_values(acc, lv, ccombine_add, cblend_hard, 0.0f, 0.0f);
+        if (!ref_eval_list(layer.sdf->roots, *layer.sdf, layer, p, lv, false)) {
+            // A layer whose chain produced nothing IS the far field, and this
+            // says so directly rather than deciding which operators may be
+            // skipped: combining with FAR is already a no-op for the ones the
+            // compiler skips, and it is not for the ones it does not.
+            //
+            // With nothing on either side there is nothing to fold at all --
+            // unless the operator makes material out of the far field (Shell,
+            // Replace), which the seed below hands it.
+            if (!have_acc && !(!is_first && scene::op_creates_material(lc.op))) continue;
+            lv.d = CLAY_TAPE_FAR;
+            lv.color = kernel::cf3(1.0f, 1.0f, 1.0f);
+        }
+        // THE LAYER'S OWN COMPOSITION, and the first visible SDF layer's is not
+        // applied -- it initialises. Reading the field here rather than folding
+        // a hard Add is what stops this evaluator agreeing with the compiler
+        // for the wrong reason: one that unions whatever the document says
+        // agrees only while every fixture unions, which is the one condition
+        // under which a fold bug is invisible. It does NOT make the two
+        // independent -- see the note above the function for what this shares
+        // with the compiler and what therefore has to be proved elsewhere.
+        const float rb = lc.rounding * scene::layer_distance_scale(layer);
+        if (is_first)
+            acc = lv;
+        else if (have_acc)
+            acc = ctape_combine_values(acc, lv, static_cast<int>(lc.op),
+                                       static_cast<int>(lc.blend.profile), lc.blend.k, rb);
+        else if (lc.op != scene::Op::Add)
+            // Shell or Replace over an absent accumulator: the far field is the
+            // left operand, exactly as ref_eval_list seeds one for an item.
+            acc = ref_combine(nullptr, kernel::cf3(1.0f, 1.0f, 1.0f), lv, lc.op, lc.blend, rb);
         else
             acc = lv;
         have_acc = true;
@@ -313,9 +386,52 @@ inline Document gnarly_document() {
     base.sdf->insert(item(Prim::box(cf3(1.5f, 0.2f, 1.5f)), cf3(0, 0, 0)));
 
     Layer* inst = doc.instance_layer(doc.layers[0].id, "body-instance");
-    
+
     inst->xform.position = cf3(3, 0, 0);
 
+    return doc;
+}
+
+// The same document with its layers FOLDED rather than unioned
+// (fold-the-layers-with-an-operator, design.md §2 row 10). `gnarly_document`
+// exercises the whole ITEM vocabulary against one inter-layer combine -- the
+// hard union every layer had before compositions existed -- so on its own it is
+// the fixture under which a fold defect is invisible.
+//
+// Every kind of fold the setter accepts appears once, and each is chosen to be
+// VISIBLE over the sampled domain rather than merely set:
+//   * the first visible layer carries a Subtract that MUST NOT BE APPLIED (it
+//     initialises), which is the rule a per-brick cull can otherwise flip;
+//   * `base`, the plinth under the body, SUBTRACTS with a smooth radius and a
+//     rounding -- so both terms of the fold are non-zero and the rounding is
+//     the one that scales with the layer;
+//   * `body-instance` unions SMOOTHLY, moved in to x = 1.9 so that there IS a
+//     seam for the radius to bulge at -- at its own x = 3 the two clusters are
+//     further apart than any radius the fold carries, and the layer would be
+//     composed in name only;
+//   * `clip`, added on top, INTERSECTS a box that contains the body and not
+//     the instance -- the operator whose far field wins, and the one that
+//     turns a skipped fold into material that should not be there.
+inline Document composed_gnarly_document() {
+    Document doc = gnarly_document();
+    doc.layers[0].composition =
+        scene::LayerComposition{Op::Subtract, Blend{BlendProfile::Quadratic, 0.2f}, 0.05f};
+    doc.layers[1].composition =
+        scene::LayerComposition{Op::Subtract, Blend{BlendProfile::Quadratic, 0.15f}, 0.04f};
+    doc.layers[2].composition =
+        scene::LayerComposition{Op::Add, Blend{BlendProfile::Chamfer, 0.5f}, 0.0f};
+
+    // The instance moves in from x = 3 to x = 1.9: at 3 the two clusters are
+    // further apart than any radius the fold could carry, so its composition
+    // would be the identity everywhere and the layer would be composed in name
+    // only. Here the two surfaces are about 0.3 apart and the smooth union has
+    // a seam to bulge at.
+    doc.layers[2].xform.position = cf3(1.9f, 0, 0);
+
+    Layer& clip = doc.add_sdf_layer("clip");
+    clip.sdf->insert(item(Prim::box(cf3(2.2f, 2.2f, 2.2f)), cf3(0, 0, 0)));
+    clip.composition =
+        scene::LayerComposition{Op::Intersect, Blend{BlendProfile::Quadratic, 0.1f}, 0.0f};
     return doc;
 }
 

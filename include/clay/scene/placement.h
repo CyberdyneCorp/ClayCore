@@ -13,9 +13,27 @@
 // which is what keeps a rounded or blended shape SIMILAR to itself rather than
 // merely relocated.
 //
-// Layers combine with a hard union, so no cross-layer term has to be re-solved
-// when one layer moves. That is the whole argument, and it is why the gate for
-// this is a field EQUALITY test rather than a tolerance.
+// LAYERS NO LONGER ALWAYS HARD-UNION, and this paragraph used to say they do.
+// Since ABI 0.86.0 a visible SDF layer folds into the layers beneath it under
+// its OWN composition (`LayerComposition`), which can carry a blend radius and a
+// rounding -- the cross-layer terms this paragraph was written to say did not
+// exist. What survives of the argument, and it is still what makes the gate a
+// field EQUALITY test rather than a tolerance:
+//
+//   * The classification is about THE LAYER'S OWN FIELD -- "its surface
+//     afterwards is its surface beforehand moved by the same matrix" -- and no
+//     fold enters that. It was never a claim about the document's field, which
+//     a min already broke: min(A, moved B) is not moved(min(A, B)).
+//   * The fold's ROUNDING follows the layer's scale (`fold_layer` takes
+//     `composition.rounding * layer_distance_scale(layer)`), exactly as an
+//     item's does; its blend RADIUS does not, and that is why
+//     `layer_scales_cleanly` reads the composition and returns false for any
+//     positive `composition.blend.k`. See the paragraph on it below.
+//   * What the fold DOES change is the INVALIDATION, not the classification: a
+//     layer's edits reach further than the layer once something above folds
+//     smoothly over it, and that widening is `scene::layer_reach_in_document`'s
+//     job, not this file's. A Rigid or Similarity verdict says what the layer's
+//     field did; it never said how little to redraw.
 //
 // A NON-UNIFORM layer scale is excluded on purpose. It changes the field's
 // Lipschitz behaviour -- `cfi_scale_nonuniform` already records that for items
@@ -90,6 +108,20 @@ PlacementChange placement_change(const math::Transform& from, kernel::cfloat3 fr
 // cleanly may be classified as a Similarity; one that does not may still be
 // classified Rigid, because a rigid change scales nothing and so cannot expose
 // the difference.
+//
+// AND THE LAYER'S OWN COMPOSITION, which is a radius one level up: false for
+// ANY positive `composition.blend.k`, whatever the op and whatever the profile.
+// A radius is a radius -- a soft profile spends it as the blend radius, an
+// extended mode (groove, shell, incise, pipe, the reliefs) as its own radius or
+// depth with the profile ignored, and a PAINT as its colour falloff with the
+// profile ignored too -- and `chain_blend_support`, which the document's cull
+// pad is built on, already reads that one field as a world distance for every
+// op. Enumerating the ops that spend it is the list this got wrong twice.
+// Conservative for a hard Add, Subtract or Intersect, whose `k` the kernel
+// ignores: they report General for a value that is doing nothing, which costs a
+// recomputation rather than a picture that lags its own field.
+// The fold's ROUNDING is not a term -- it is scaled with the layer, where the
+// radius is not.
 bool layer_scales_cleanly(const Layer& layer);
 
 // How this layer moves to a proposed placement -- `placement_change` with the

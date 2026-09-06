@@ -14,6 +14,7 @@ Gates:
   dialect       kernel headers compile under every backend profile
   licenses      dependency manifest is permissive and in sync
   openspec      specs validate strictly
+  task-symbols  every backticked identifier a tasks.md claims exists in the tree
   tests         full ctest suite (unit + C ABI smoke + CLI selftest)
   parity        every backend registered in this build matches CPU scalar
                 (that is what the unit suite's parity cases assert). Read it
@@ -275,6 +276,7 @@ def main() -> int:
     for name, script, extra in (("layering", "check_layering.py", []),
                                 ("dialect", "check_kernel_dialect.py", []),
                                 ("licenses", "check_licenses.py", []),
+                                ("task-symbols", "check_task_symbols.py", []),
                                 ("bindings", "check_binding_parity.py",
                                  parity_args)):
         ok, out = run([sys.executable, str(REPO / "tools" / script)] + extra)

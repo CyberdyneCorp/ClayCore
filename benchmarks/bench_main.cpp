@@ -818,6 +818,98 @@ BENCHMARK(BM_WholeDocAppend10000)->Unit(benchmark::kMillisecond);
 void BM_WholeDocAppend50000(benchmark::State& state) { deep_doc_whole_append(state, 50000); }
 BENCHMARK(BM_WholeDocAppend50000)->Unit(benchmark::kMillisecond);
 
+// -- a LAYER boolean against the ITEM boolean it already is ------------------
+//    (fold-the-layers-with-an-operator, task 6.6)
+//
+// The claim these six rows hold is that giving a whole LAYER an operator costs
+// about what the equivalent item-level combine costs, because it IS that
+// combine: one `Compiler::emit_chain_combine` at the end of each layer's
+// chain, the same call `compile_group` makes at the end of a group's. There is
+// no second fold, no second evaluator and no second copy of the kernel math,
+// and a regression that grew one would show here as a ratio far from 1.
+//
+// THE TWO ARMS ARE THE SAME FIELD, not merely the same size. `layers` chains of
+// dabs folded with `op`, spelled as separate LAYERS and as GROUPS inside one
+// layer -- which is the one-layer equivalent of a composed layer, since an item
+// chain A, B(Subtract), C(Subtract) subtracts twice where a layer unions B with
+// C first and subtracts once. `test_layer_parity.cpp` holds that they agree in
+// distance, colour, bounds and safe step; this pair holds what they cost.
+//
+// TOTAL ITEM COUNT IS HELD CONSTANT across the sweep -- kFoldItems dabs split
+// into `layers` chunks -- so the row measures the FOLD and not the geometry.
+// Growing the items with the layers would make the 1000-layer row ten times the
+// document of the 100-layer one and the ratio would say nothing about either.
+//
+// AND THE COUNT HALF OF THE CLAIM IS NOT HERE. "One combine per fold, and the
+// same one" is a count, so it is asserted as a count, on the compiled tape, in
+// tests/unit/test_layer_gates.cpp -- 2N-1 instructions for N items at every
+// chunking, in both forms, because a layer fold does not ADD a combine: it is
+// the one the chain would have emitted anyway, with a different operator. A
+// clock cannot tell one combine from two among 2,000 items.
+constexpr int kFoldItems = 2000;
+
+scene::Document fold_stack(int layers, scene::Op op, bool as_layers) {
+    scene::Document doc;
+    const int per = kFoldItems / layers;
+    const double golden = 0.6180339887;
+    scene::Layer* one = as_layers ? nullptr : &doc.add_sdf_layer("all");
+    for (int c = 0; c < layers; ++c) {
+        scene::Layer* target = one;
+        scene::NodeId parent = scene::kNoNode;
+        if (as_layers) {
+            target = &doc.add_sdf_layer("chunk");
+            if (c > 0) target->composition.op = op;
+        } else if (c > 0) {
+            scene::Node group;
+            group.is_group = true;
+            group.op = op;
+            parent = one->sdf->insert(group);
+        }
+        for (int i = 0; i < per; ++i) {
+            const int n = c * per + i;
+            scene::Node dab;
+            dab.prim = scene::Prim::sphere(0.05f);
+            const double u = std::fmod(static_cast<double>(n + 1) * golden, 1.0);
+            const double v = (static_cast<double>(n) + 0.5) / static_cast<double>(kFoldItems);
+            const double phi = std::acos(1.0 - 2.0 * v);
+            const double th = 6.283185307 * u;
+            dab.xform.position = cf3(static_cast<float>(std::sin(phi) * std::cos(th)),
+                                     static_cast<float>(std::cos(phi)),
+                                     static_cast<float>(std::sin(phi) * std::sin(th)));
+            if (parent == scene::kNoNode)
+                target->sdf->insert(dab);
+            else
+                target->sdf->insert(dab, parent);
+        }
+    }
+    return doc;
+}
+
+void fold_stack_compile(benchmark::State& state, int layers, bool as_layers) {
+    scene::Document doc = fold_stack(layers, scene::Op::Subtract, as_layers);
+    for (auto _ : state) {
+        scene::Tape tape = scene::compile_document(doc);
+        benchmark::DoNotOptimize(tape.instrs.size());
+        state.counters["instrs"] = static_cast<double>(tape.instrs.size());
+    }
+    state.counters["folds"] = static_cast<double>(layers - 1);
+    state.counters["items"] = static_cast<double>(kFoldItems);
+}
+
+void BM_LayerFoldStack10(benchmark::State& state) { fold_stack_compile(state, 10, true); }
+BENCHMARK(BM_LayerFoldStack10)->Unit(benchmark::kMillisecond);
+void BM_LayerFoldStack100(benchmark::State& state) { fold_stack_compile(state, 100, true); }
+BENCHMARK(BM_LayerFoldStack100)->Unit(benchmark::kMillisecond);
+void BM_LayerFoldStack1000(benchmark::State& state) { fold_stack_compile(state, 1000, true); }
+BENCHMARK(BM_LayerFoldStack1000)->Unit(benchmark::kMillisecond);
+
+void BM_ItemFoldStack10(benchmark::State& state) { fold_stack_compile(state, 10, false); }
+BENCHMARK(BM_ItemFoldStack10)->Unit(benchmark::kMillisecond);
+void BM_ItemFoldStack100(benchmark::State& state) { fold_stack_compile(state, 100, false); }
+BENCHMARK(BM_ItemFoldStack100)->Unit(benchmark::kMillisecond);
+void BM_ItemFoldStack1000(benchmark::State& state) { fold_stack_compile(state, 1000, false); }
+BENCHMARK(BM_ItemFoldStack1000)->Unit(benchmark::kMillisecond);
+
 // The cull ALONE, over a dab's worth of bricks: this is the ~64 ns x item x
 // brick walk #118 says is past the interactive budget at 10k items before a
 // sample is evaluated.
@@ -1379,6 +1471,99 @@ void refill_stroke(benchmark::State& state, bool prime) {
     state.counters["history"] = static_cast<double>(kRefillHistory);
     clay_document_destroy(d);
 }
+
+// WHAT A LAYER BOOLEAN COSTS THE REFILL, priced rather than asserted
+// (fold-the-layers-with-an-operator, task 0.1).
+//
+// The resumable multi-layer split holds the ACTIVE layer's value and the layers
+// beneath it apart and rejoins them in host floats with a hard Add
+// (`fold_layers_below`), which takes six floats and cannot be told what the
+// fold is. So a document whose TOP visible SDF layer composes REFUSES the split
+// -- `plan_resume`, `plan_frontier` and the full path's Active/Below halves,
+// all on `layer_join_is_hard_union` -- and a stroke into that layer walks the
+// whole document per brick, as every multi-layer stroke did before #348.
+//
+// These two arms are the same document twice, differing only in the top
+// layer's composition, so what separates them is the refusal and nothing else.
+// THE CLAIM IS A COUNT: `resumed_frac` is 0.0 on the composed arm and ~1.0 on
+// the union one, and tools/check_bench.py gates both -- a wall clock cannot
+// tell "the split was refused" from "this machine is busy", and the fallback is
+// meant to be slower, so a ceiling on the composed arm's TIME would be a gate
+// on the wrong thing.
+clay_document* abi_sculpt_layers(int nodes, int op, int blend, float k) {
+    clay_document* d = clay_document_create();
+    clay_layer_id base = 0, top = 0;
+    clay_add_sdf_layer(d, "base", &base);
+    clay_add_sdf_layer(d, "top", &top);
+    auto add = [&](clay_layer_id l, float r, float x, float y, float z) {
+        clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+        const float p[3] = {x, y, z};
+        clay_item_set_position(it, p);
+        clay_layer_add_item(d, l, it, nullptr);
+        clay_item_destroy(it);
+    };
+    // The body is the layer BENEATH; every dab is on the layer above it, which
+    // is the layer a stroke appends to and the one carrying the composition.
+    add(base, 1.0f, 0, 0, 0);
+    for (int i = 1; i < nodes; ++i) {
+        const double z = 1.0 - 2.0 * (i + 0.5) / nodes;
+        const double r = std::sqrt(std::max(0.0, 1.0 - z * z));
+        const double th = 2.399963 * i;
+        const double a = r * std::cos(th), b = r * std::sin(th);
+        add(top, 0.05f, static_cast<float>(std::sqrt(std::max(0.0, 1.0 - a * a - b * b))),
+            static_cast<float>(a), static_cast<float>(b));
+    }
+    clay_document_set_layer_composition(d, top, op, blend, k, 0.0f);
+    return d;
+}
+
+void refill_stroke_layers(benchmark::State& state, int op, int blend, float k) {
+    clay_document* d = abi_sculpt_layers(kRefillHistory, op, blend, k);
+    const std::vector<clay_brick_request> reqs = pole_requests();
+    const std::size_t per = 8 * 8 * 8;
+    std::vector<float> out(static_cast<std::size_t>(kRefillBricks) * per);
+    // Primed on BOTH arms: the composed arm is refused its split at the store
+    // as well, so priming it stores nothing and the counter below reads what
+    // the loop did rather than what the fixture was left in.
+    clay_brick_cache_eval_requests(d, nullptr, reqs.data(), kRefillBricks, out.data(), out.size(),
+                                   nullptr, 0);
+    clay_resume_stats before{};
+    before.struct_size = sizeof before;
+    clay_document_resume_stats(d, &before);
+
+    clay_layer_id top = 0;
+    clay_document_layer_at(d, 1, &top);
+    float y = 0.0f;
+    for (auto _ : state) {
+        state.PauseTiming();
+        const float r = 0.05f;
+        clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+        const float p[3] = {0.98f, y, -0.1f};
+        y += 0.001f;
+        clay_item_set_position(it, p);
+        clay_layer_add_item(d, top, it, nullptr);
+        clay_item_destroy(it);
+        state.ResumeTiming();
+        clay_brick_cache_eval_requests(d, nullptr, reqs.data(), kRefillBricks, out.data(),
+                                       out.size(), nullptr, 0);
+    }
+    clay_resume_stats rs{};
+    rs.struct_size = sizeof rs;
+    clay_document_resume_stats(d, &rs);
+    const double resumed = static_cast<double>(rs.resumed_bricks - before.resumed_bricks);
+    const double refilled = static_cast<double>(rs.refilled_bricks - before.refilled_bricks);
+    const double served = resumed + refilled;
+    if (served == 0) state.SkipWithError("no brick was served; nothing is being measured");
+    state.counters["history"] = static_cast<double>(kRefillHistory);
+    // The gated pair. Which of the two is the ceiling depends on the arm: the
+    // union arm must not START WALKING (refilled_frac ~ 0) and the composed arm
+    // must not silently keep the split it is supposed to have been refused
+    // (resumed_frac == 0). Both are ratios of counts, so they say the same
+    // thing on any machine.
+    state.counters["resumed_frac"] = served > 0 ? resumed / served : 0.0;
+    state.counters["refilled_frac"] = served > 0 ? refilled / served : 1.0;
+    clay_document_destroy(d);
+}
 }  // namespace
 
 void BM_BrickRefillResumed(benchmark::State& state) { refill_stroke(state, true); }
@@ -1386,6 +1571,20 @@ BENCHMARK(BM_BrickRefillResumed)->Unit(benchmark::kMillisecond);
 
 void BM_BrickRefillFull(benchmark::State& state) { refill_stroke(state, false); }
 BENCHMARK(BM_BrickRefillFull)->Unit(benchmark::kMillisecond);
+
+// The same stroke on a two-layer document whose top layer HARD-UNIONS: the
+// split is available, and every brick of the primed window resumes.
+void BM_BrickRefillLayersUnion(benchmark::State& state) {
+    refill_stroke_layers(state, CLAY_OP_ADD, CLAY_BLEND_HARD, 0.0f);
+}
+BENCHMARK(BM_BrickRefillLayersUnion)->Unit(benchmark::kMillisecond);
+
+// ...and the same document with a SMOOTH SUBTRACT on that top layer, which is
+// the shape that loses the split. Same items, same bricks, same stroke.
+void BM_BrickRefillLayersComposed(benchmark::State& state) {
+    refill_stroke_layers(state, CLAY_OP_SUBTRACT, CLAY_BLEND_QUADRATIC, 0.08f);
+}
+BENCHMARK(BM_BrickRefillLayersComposed)->Unit(benchmark::kMillisecond);
 
 // A DAB'S WORTH OF DIRTY BRICKS ON A SCULPTED SURFACE, cold, through the
 // library refill: the case the uniform-brick gate exists for. A dab dirties

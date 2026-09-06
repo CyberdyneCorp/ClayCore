@@ -1888,6 +1888,40 @@ void check_group_op_blend(scene::Op op, const scene::Blend& blend, float roundin
             "outer chain with their own");
 }
 
+// A LAYER's composition, under the same rules the C ABI states beside
+// clay_document_set_layer_composition. A layer boolean IS an item boolean, so
+// the operators and blends are the item ones -- but Op.INLINE names a group's
+// children-apply-outward mode and a layer has no outer chain to apply into,
+// and the transitions read their endpoints from a NODE, which a layer
+// composition has none of, so both are refused here rather than compiled
+// against defaults nobody wrote.
+void check_layer_composition(scene::Op op, const scene::Blend& blend, float rounding) {
+    if (op == scene::Op::None)
+        throw std::invalid_argument(
+            "op must be a combine operator, not Op.INLINE — that one is for add_group");
+    if (scene::op_is_transition(op))
+        throw std::invalid_argument("a layer cannot carry a transition op");
+    if (!std::isfinite(blend.k) || blend.k < 0.0f)
+        throw std::invalid_argument("blend k must be finite and >= 0");
+    if (!std::isfinite(rounding) || rounding < 0.0f)
+        throw std::invalid_argument("rounding must be finite and >= 0");
+}
+
+// The blend a composition carries, as the Python object it was set with: the
+// SUBCLASS names the profile, which is the only place Python can read it back
+// from, so what comes out of layer_composition goes straight back into
+// set_layer_composition.
+nb::object blend_object(const scene::Blend& b) {
+    switch (b.profile) {
+        case scene::BlendProfile::Quadratic: return nb::cast(PySmooth(b.k));
+        case scene::BlendProfile::Cubic: return nb::cast(PyCubic(b.k));
+        case scene::BlendProfile::Circular: return nb::cast(PyCircular(b.k));
+        case scene::BlendProfile::Chamfer: return nb::cast(PyChamfer(b.k));
+        case scene::BlendProfile::Hard: break;
+    }
+    return nb::cast(PyBlend(scene::BlendProfile::Hard, b.k));
+}
+
 // -- numpy point evaluation -----------------------------------------------------
 
 struct PointsView {
@@ -2310,8 +2344,9 @@ nb::object quad_report_dict(const mesh::QuadFit& fit, std::size_t target) {
 
 // Mesh ONE SDF layer, in world space under that layer's transform. The mesh
 // half of the scoped split a placement preview draws from; `below = false` is
-// "this layer alone", which hard-unions with the excluding half to give the
-// whole document.
+// "this layer alone", which says the same thing however the document folds it.
+// Putting it back together with the excluding half is a MINIMUM only while
+// every layer unions -- eval_excluding refuses once one composes.
 PyMesh mesh_layer_only(const PyDocument& d, scene::LayerId layer, int resolution,
                        nb::handle voxel_size, nb::handle decimate_ratio,
                        const std::string& backend_name, const std::string& mesher,
@@ -6699,14 +6734,22 @@ NB_MODULE(pyclay, m) {
                      throw std::invalid_argument(
                          "no layer " + std::to_string(excluded) + " to exclude: excluding a "
                          "layer the document does not hold would evaluate the whole document");
+                 if (const scene::LayerId composed =
+                         scene::first_composed_fold_layer(d.doc->document))
+                     throw std::invalid_argument(
+                         "layer " + std::to_string(composed) + " composes with the layers below "
+                         "it, so the document without layer " + std::to_string(excluded) +
+                         " does not compose back to the whole document");
                  return eval_field(scene::compile_document_except(d.doc->document, excluded),
                                    points, backend, Want::Distances);
              },
              "excluded"_a, "points"_a, "backend"_a = "cpu",
              "Signed distances of every visible SDF layer EXCEPT `excluded` -> (N,) float32.\n"
-             "Layers hard-union, so np.minimum(this, your own preview of that layer) is\n"
-             "exactly what the whole document evaluates to. A layer the document does not\n"
-             "hold raises rather than evaluating everything.")
+             "While every layer unions, np.minimum(this, your own preview of that layer)\n"
+             "is exactly what the whole document evaluates to. A document where any layer\n"
+             "composes RAISES: removing a layer from the middle of a fold changes what\n"
+             "every layer above it folds onto, so there is no composition to perform. A\n"
+             "layer the document does not hold raises rather than evaluating everything.")
         .def("gradients_excluding",
              [](const PyDocument& d, scene::LayerId excluded, nb::handle points,
                 const std::string& backend) {
@@ -6714,6 +6757,12 @@ NB_MODULE(pyclay, m) {
                      throw std::invalid_argument(
                          "no layer " + std::to_string(excluded) + " to exclude: excluding a "
                          "layer the document does not hold would evaluate the whole document");
+                 if (const scene::LayerId composed =
+                         scene::first_composed_fold_layer(d.doc->document))
+                     throw std::invalid_argument(
+                         "layer " + std::to_string(composed) + " composes with the layers below "
+                         "it, so the document without layer " + std::to_string(excluded) +
+                         " does not compose back to the whole document");
                  return eval_field(scene::compile_document_except(d.doc->document, excluded),
                                    points, backend, Want::Gradients);
              },
@@ -7388,6 +7437,72 @@ NB_MODULE(pyclay, m) {
                  return nb::make_tuple(l->ghost, l->locked);
              },
              "layer"_a, "A layer's (ghost, locked) flags")
+        .def("set_layer_composition",
+             [](PyDocument& d, scene::LayerId layer, nb::handle op, nb::handle blend,
+                nb::handle rounding) {
+                 const scene::Layer* found = d.doc->document.find_layer(layer);
+                 if (!found) throw std::invalid_argument("no layer with that id in this document");
+                 // A layer whose kind cannot enter the tape refuses rather than
+                 // storing a control that does nothing: a voxel grid and a mesh
+                 // are composited by their own rules and never fold here.
+                 if (found->kind != scene::LayerKind::Sdf || !found->sdf)
+                     throw std::invalid_argument(
+                         "only an SDF layer carries a composition; a voxel or mesh layer has no "
+                         "chain to fold");
+                 scene::LayerComposition c = found->composition;
+                 if (!op.is_none()) c.op = nb::cast<scene::Op>(op);
+                 if (!blend.is_none()) c.blend = nb::cast<const PyBlend&>(blend).b;
+                 if (!rounding.is_none()) c.rounding = nb::cast<float>(rounding);
+                 check_layer_composition(c.op, c.blend, c.rounding);
+                 apply_or_throw(d.doc->document,
+                                scene::Command{scene::SetLayerCompositionCmd{layer, c}},
+                                "set_layer_composition", d.undo.get());
+             },
+             "layer"_a, "op"_a = nb::none(), "blend"_a = nb::none(), "rounding"_a = nb::none(),
+             "How this layer folds into the visible SDF layers BENEATH it; omitted "
+             "arguments keep their value. The FIRST visible SDF layer initialises the "
+             "accumulator and its own operator is not applied, so a stack cannot open "
+             "with Subtract against nothing and show an empty frame. Refuses a non-SDF "
+             "layer, Op.INLINE and the transition ops.")
+        .def("layer_composition",
+             [](const PyDocument& d, scene::LayerId layer) {
+                 const scene::Layer* l = d.doc->document.find_layer(layer);
+                 if (!l) throw std::invalid_argument("no layer with that id in this document");
+                 if (l->kind != scene::LayerKind::Sdf || !l->sdf)
+                     throw std::invalid_argument(
+                         "only an SDF layer carries a composition; a voxel or mesh layer has "
+                         "none to report");
+                 return nb::make_tuple(l->composition.op, blend_object(l->composition.blend),
+                                       l->composition.rounding);
+             },
+             "layer"_a,
+             "A layer's (op, blend, rounding) fold. A non-SDF layer raises rather than "
+             "answering Op.ADD, which would read as a composition it cannot carry.")
+        .def("writable_at_minor",
+             [](const PyDocument& d, unsigned minor) {
+                 if (minor == 0) throw std::invalid_argument("a format minor starts at 1");
+                 // Clamped rather than refused above this build's layout, as
+                 // the C form clamps: the question is only ever about writing
+                 // DOWN, and a minor from the future loses nothing.
+                 const std::uint16_t asked =
+                     minor > scene::kSceneMinor ? scene::kSceneMinor
+                                                : static_cast<std::uint16_t>(minor);
+                 const scene::LayerId blocking =
+                     scene::layer_blocking_minor(d.doc->document, asked);
+                 return nb::make_tuple(blocking == 0, blocking);
+             },
+             "minor"_a,
+             "Can this document be written at scene format minor `minor`? Returns\n"
+             "(ok, blocking_layer): (True, 0) when every layer can be said at that\n"
+             "layout, and (False, layer_id) naming the FIRST layer that cannot --\n"
+             "which today means a layer carrying a non-default composition below\n"
+             "minor 18. Ask BEFORE saving: writing a subtracting layer at 17 would\n"
+             "bring it back as a union, so the cutter that carved a hole returns as\n"
+             "a lump welded on, in a file that opens cleanly and looks deliberate.\n"
+             "A minor above this build's is clamped to it rather than refused. The\n"
+             "id is returned rather than only a flag so a host can say WHICH subtool\n"
+             "to change instead of making the artist find it. Mirrors\n"
+             "clay_document_writable_at_minor.")
         .def("set_layer_transform",
              [](PyDocument& d, scene::LayerId layer, nb::handle position,
                 nb::handle rotation_axis_angle, nb::handle scale) {

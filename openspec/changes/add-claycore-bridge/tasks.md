@@ -30,7 +30,10 @@ example and the "retopo export profile" question still wait on 1.5 and 1.6.
       are their own change rather than two more enumerators here pretending to
       be as cheap as the rest." This is that change
 - [x] 1.5 ANSWERED by reading that repository. The answer is NOT "nothing":
-      `docs/sculpt-handoff-format.md` defines a sculpt handoff, that repo ships
+      CyberRemesherAndUV's own docs/sculpt-handoff-format.md defines a sculpt
+      handoff — named unquoted and with its repository, because a backticked
+      path reads as THIS tree's file and tools/check_task_symbols.py checks it
+      as one — that repo ships
       the READING half only, and it records that agreement with ClayCore was
       outstanding because no negotiation ever took place. Their CLI already
       assumed our half existed. Missing on our side were the two header comment

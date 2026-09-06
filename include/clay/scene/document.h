@@ -263,6 +263,17 @@ struct Layer {
     std::uint16_t radial_count = 0;  // 0/1 = off, else copies INCLUDING the original
     std::uint8_t radial_axis = 1;    // 0/1/2 — Y by default, as Repeat::radial arrays
     float radial_k = 0.0f;           // seam smoothing between neighbouring copies
+    // How this layer combines with the accumulated field of the visible SDF
+    // layers BELOW it. Defaults to the hard union every document has always
+    // folded with, so an untouched layer changes nothing.
+    //
+    // It lives on the LAYER RECORD and not on the shared content, which is what
+    // makes two instance layers of one edit list able to compose differently —
+    // the same reason the transform and the symmetry live here.
+    //
+    // MEANINGFUL ONLY FOR LayerKind::Sdf. A voxel or mesh layer refuses the
+    // command that sets it rather than storing a value nothing reads.
+    LayerComposition composition;
     std::shared_ptr<SdfContent> sdf;  // shared between instances
     // Voxel and mesh content live beside the document, keyed by layer id (see
     // io::ClaySpaceDoc): the layering table withholds both modules from

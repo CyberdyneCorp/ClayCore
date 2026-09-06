@@ -521,6 +521,72 @@ check(clay_voxel_repair_report(shellGrid, &repairReport) == CLAY_OK
       && repairReport.airtight != 0, "the shell is airtight now")
 check(clay_voxel_grid_destroy(shellGrid) == CLAY_OK, "destroyed the shell grid")
 
+// -- a layer's composition ---------------------------------------------------
+//
+// The operator a whole layer folds into the layers beneath it with (ABI
+// 0.86.0). Both halves are exercised, because a setter shipped without a
+// reader is a control a host cannot show the current value of.
+
+var compOp: Int32 = -1
+var compBlend: Int32 = -1
+var compK: Float = -1
+var compRounding: Float = -1
+check(clay_document_layer_composition(doc, layer, &compOp, &compBlend, &compK, &compRounding)
+      == CLAY_OK
+      && compOp == Int32(CLAY_OP_ADD.rawValue) && compBlend == Int32(CLAY_BLEND_HARD.rawValue)
+      && compK == 0 && compRounding == 0,
+      "a layer starts folding as the hard union every document has always used")
+
+check(clay_document_set_layer_composition(doc, layer, Int32(CLAY_OP_SUBTRACT.rawValue),
+                                          Int32(CLAY_BLEND_QUADRATIC.rawValue), 0.2, 0.01)
+      == CLAY_OK, "set a smooth subtracting fold")
+check(clay_document_layer_composition(doc, layer, &compOp, &compBlend, &compK, &compRounding)
+      == CLAY_OK
+      && compOp == Int32(CLAY_OP_SUBTRACT.rawValue)
+      && compBlend == Int32(CLAY_BLEND_QUADRATIC.rawValue)
+      && compK == 0.2 && compRounding == 0.01,
+      "and it reads back exactly what was written")
+
+// Every out pointer is optional, which is what lets a host ask one question.
+compOp = -1
+check(clay_document_layer_composition(doc, layer, &compOp, nil, nil, nil) == CLAY_OK
+      && compOp == Int32(CLAY_OP_SUBTRACT.rawValue), "the reader takes any subset of them")
+
+// CLAY_OP_INLINE is a group's mode and a layer has no outer chain to apply
+// into; a transition reads its endpoints from a node, and a composition has
+// none to read.
+check(clay_document_set_layer_composition(doc, layer, Int32(CLAY_OP_INLINE.rawValue),
+                                          Int32(CLAY_BLEND_HARD.rawValue), 0, 0)
+      == CLAY_ERROR_INVALID_ARGUMENT, "an inline layer means nothing and is refused")
+check(clay_document_set_layer_composition(doc, layer, Int32(CLAY_OP_TRANSITION_LINEAR.rawValue),
+                                          Int32(CLAY_BLEND_HARD.rawValue), 0, 0)
+      == CLAY_ERROR_INVALID_ARGUMENT, "a transition needs a node and is refused")
+check(clay_document_set_layer_composition(doc, layer, Int32(CLAY_OP_SUBTRACT.rawValue),
+                                          Int32(CLAY_BLEND_HARD.rawValue), -1, 0)
+      == CLAY_ERROR_INVALID_ARGUMENT, "a negative blend radius is refused")
+
+// A layer whose kind cannot enter the tape refuses at BOTH ends rather than
+// storing a control that does nothing or answering a fold it cannot carry.
+check(clay_document_set_layer_composition(doc, voxelLayer, Int32(CLAY_OP_SUBTRACT.rawValue),
+                                          Int32(CLAY_BLEND_HARD.rawValue), 0, 0)
+      == CLAY_ERROR_INVALID_ARGUMENT, "a voxel layer refuses a composition")
+check(clay_document_layer_composition(doc, voxelLayer, &compOp, nil, nil, nil)
+      == CLAY_ERROR_INVALID_ARGUMENT, "and does not answer one either")
+
+// Ask before saving at an older layout: minor 18 is the first that can SAY a
+// composition, and writing this document at 17 would bring the cutter back as
+// a lump welded on rather than a hole cut out.
+var blocking: clay_layer_id = 0
+check(clay_document_writable_at_minor(doc, 17, &blocking) == CLAY_ERROR_UNSUPPORTED
+      && blocking == layer, "an older layout cannot say this document, and names the layer")
+check(clay_document_writable_at_minor(doc, 18, &blocking) == CLAY_OK && blocking == 0,
+      "the current layout can")
+
+// Put it back: everything after this section reads the document's field, and a
+// subtracting base layer would change every one of those answers.
+check(clay_document_set_layer_composition(doc, layer, Int32(CLAY_OP_ADD.rawValue),
+                                          Int32(CLAY_BLEND_HARD.rawValue), 0, 0) == CLAY_OK,
+      "restored the union")
 // -- masks -------------------------------------------------------------------
 
 var mask: OpaquePointer? = nil
