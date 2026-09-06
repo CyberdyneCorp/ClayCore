@@ -103,8 +103,9 @@
 
 ## 4. Version and gates
 
-- [ ] 4.1 **ABI 0.85.0 -> 0.86.0**, moved in the PR that adds the entry points,
-      not at release time. NOT DONE HERE — the three entry points landed at
+- [x] 4.1 **ABI 0.85.0 -> 0.86.0**, moved in the PR that adds the entry points,
+      not at release time. Done by the reconciling commit on this branch, which
+      moved all three lines once for the PR's four entry points. NOT DONE HERE — the three entry points landed at
       0.85.0 and the reconciling change owns the bump, so that one branch moves
       the three lines once. All three lines must agree: `CMakeLists.txt`
       (`project(... VERSION)`), `bindings/c/clay.h`
@@ -116,9 +117,12 @@
       `python3 tools/check_test_shards.py`.
 - [x] 4.3 `npx -y @fission-ai/openspec@1.8.0 validate --all --strict`.
 - [ ] 4.4 `python3 tools/release_check.py --skip-slow` before pushing.
-- [ ] 4.5 `docs/05-*` gains the three; `docs/RELEASE.md` at release time. Owned
+- [x] 4.5 `docs/05-*` gains the three; `docs/RELEASE.md` at release time. Owned
       by the reconciling change alongside 4.1, so the library reference and the
-      version lines move together.
+      version lines move together. Landed as "Dropping a subtool on the floor
+      (ABI 0.86.0)" in section 6, after the instancing section because the
+      never-severed rule reads from it, plus the three names in the pyclay
+      section. `docs/RELEASE.md` deliberately untouched.
 
 ## Deliberately not in this change
 

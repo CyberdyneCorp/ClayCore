@@ -86,10 +86,14 @@
 - [x] 5.7 Per-function cognitive complexity within the backend target of 15; if
       the derivation is genuinely irreducible, say so with its score rather than
       splitting it into functions nobody can follow
-- [ ] 5.8 **ABI 0.85.0 -> 0.86.0** in `CMakeLists.txt`, `bindings/c/clay.h`
+- [x] 5.8 **ABI 0.85.0 -> 0.86.0** in `CMakeLists.txt`, `bindings/c/clay.h`
       (`CLAY_ABI_MAJOR`/`MINOR`/`PATCH`) and `pyproject.toml`. This change adds
-      an entry point, so the minor moves in the PR that adds it
-- [ ] 5.9 `docs/05` gains the call
+      an entry point, so the minor moves in the PR that adds it. All three lines
+      moved together in the reconciling commit, which owns them for the four
+      entry points this PR adds
+- [x] 5.9 `docs/05` gains the call — "What to bake at, and whether to bake at
+      all (ABI 0.86.0)" in section 3, beside the paragraph on what a bake costs
+      the march, plus `layer.consolidation_advice` in the pyclay section
 - [ ] 5.10 CI green
 
 ## 6. Settled, and what stays open
