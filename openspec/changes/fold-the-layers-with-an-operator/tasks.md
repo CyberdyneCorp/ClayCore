@@ -285,3 +285,14 @@
       `examples/75_layer_booleans.py`, registered in `EXAMPLES`. Parity verified
       with `--pyclay ... --require-import`, which prints "imported <path>" — the
       bare invocation compares the parsed source against itself and cannot fail
+
+## 7. From the review, and from the host reading the fix
+
+- [x] 7.1 First-ness is a TYPE, not a second bool (design.md §13a).
+      `FirstVisibleLayer` in tape_build.cpp's anonymous namespace, the local at
+      both call sites is that type, and a transposition is a compile error —
+      proved by swapping the arguments at one site and reading
+      `error: cannot convert 'bool' to 'FirstVisibleLayer'`, then reverting
+- [ ] 7.2 The sweep design.md §13 requires: every remaining place the fold path
+      reads state a cull region can change, found rather than fixed one at a
+      time. Three are closed; the sweep itself is the reviewers' second pass

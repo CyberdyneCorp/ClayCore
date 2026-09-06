@@ -96,6 +96,16 @@ kernel::CFieldInfo swept_field_info(const Node& item) {
 // organised against. Distance is the whole probe: the colour-only mode (paint)
 // weights by the same absent operand and is identity in colour for the same
 // reason its distance is.
+// Is this the document's first visible SDF layer? A TYPE rather than a bool,
+// because `compile_and_fold_layer` takes this beside `have_acc` and the two are
+// one transposition apart at every call site -- which is exactly the defect
+// this change already shipped once, when first-ness was READ OFF `have_acc`
+// (see that function's comment). A comment protects a reader who is looking; a
+// distinct type protects a caller who is confident, and costs one line.
+struct FirstVisibleLayer {
+    bool value;
+};
+
 bool fold_changes_an_empty_layer(const LayerComposition& c, float round_world) {
     const int mode = static_cast<int>(c.op);
     const int profile = static_cast<int>(c.blend.profile);
@@ -1331,10 +1341,10 @@ struct Compiler {
     // (`op_creates_material` states the same argument for items). A union takes
     // neither branch, `min(FAR, b) == b`, which is why a document that predates
     // compositions still emits byte for byte what it always did.
-    bool compile_and_fold_layer(const Layer& layer, bool first, bool have_acc) {
+    bool compile_and_fold_layer(const Layer& layer, FirstVisibleLayer first, bool have_acc) {
         const LayerComposition& comp = layer.composition;
         bool seeded = false;
-        if (!first && !have_acc && comp.op != Op::Add) {
+        if (!first.value && !have_acc && comp.op != Op::Add) {
             // Nothing beneath and an operator that cannot make material out of
             // nothing: the layer contributes nothing here. Its chain is not
             // compiled at all, exactly as compile_list drops such an item,
@@ -1392,7 +1402,7 @@ struct Compiler {
         // forward; `Except` is the document without that layer, so whichever
         // layer opens the remainder initialises it. `Before` is a prefix, so
         // its first layer is the document's first either way.
-        bool first = true;
+        FirstVisibleLayer first{true};
         for (const Layer& layer : doc.layers) {
             if (!layer.visible || layer.kind != LayerKind::Sdf || !layer.sdf) continue;
             // Before STOPS at the named layer, so everything above it goes too.
@@ -1409,7 +1419,7 @@ struct Compiler {
             // The same body run() uses, so a PART is resumable on the same
             // terms as a whole and emits the same bytes at the same boundary.
             have_acc = compile_and_fold_layer(layer, first, have_acc);
-            first = false;
+            first = FirstVisibleLayer{false};
         }
     }
 
@@ -1418,11 +1428,11 @@ struct Compiler {
         bool have_acc = false;
         // The document's own first visible SDF layer, read off the layer list
         // and never off the accumulator -- see compile_and_fold_layer.
-        bool first = true;
+        FirstVisibleLayer first{true};
         for (const Layer& layer : doc.layers) {
             if (!layer.visible || layer.kind != LayerKind::Sdf || !layer.sdf) continue;
             have_acc = compile_and_fold_layer(layer, first, have_acc);
-            first = false;
+            first = FirstVisibleLayer{false};
         }
     }
 
