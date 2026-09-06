@@ -1422,32 +1422,41 @@ constant's doc comment, so the next person knows it was chosen against an
 artifact rather than by eye. **That is tuning around an engine bug and they say
 so**; the fix belongs here.
 
-**STANDING, moved twice in one afternoon and settled by a rerun: real, reproducible
-on demand in the reporter's harness, standalone repro not yet extracted.** The
-fat-tendril case reruns deterministically — 3 pinholes, incremental 3 / rebuilt 3
-/ our own mesher 3 — so the defect exists and the cull-pad exclusion above is
-against something real.
+**STANDING, and the repro now exists and has been run HERE: the mesh has no
+holes in it.** `/tmp/claycore-swept-curve-pinhole.clayspace`, 4154 bytes,
+container minor 17, six fat tendrils on the starting sphere — produced through
+the host's real brush at a taper span of 100, saved, and re-opened on a build
+carrying none of that brush code, which is the check that makes it a document
+rather than a process.
 
-What does NOT reproduce is a standalone reconstruction. The same paths authored
-directly through the ABI — `Item::stroke`, `set_curve_points` with
-`PointType::Spline`, `set_stroke_blend_k` at half the radius, uniform 0.12, one
-through six tendrils, meshed at resolution 96 — returns zero on every count.
-Capture framing was the leading suspect and has been ruled out: fixing it changed
-nothing. **So the difference is in how the DOCUMENT is built, not in the items,
-not in the mesher call and not in the capture.** The failing case comes from the
-host's own document type, which sets a document up before anything is drawn; the
-reconstruction starts from a bare document with a hand-added SDF layer. Two
-documents holding the same items are not the same document, and whatever the
-setup does — most likely the domain the mesher samples over at a given resolution
-— is the variable.
+Loaded through pyclay on this tree and meshed at the resolution the host used,
+and at two more:
 
-The repro that will arrive is the host SAVING the document its own failing test
-produces, rather than rebuilding one from parts, which is the right move once
-rebuilding from parts has been shown not to reproduce. **It will be written at
-container minor 17 and this tree is at 18; that is fine and needs no
-accommodation** — the reader takes the file's own minor from the header and
-refuses only a newer MAJOR (`src/io/clayspace.cpp`, `ForwardVersion`), which is
-what backward-open means.
+| resolution | V | F | Euler | watertight | 2-manifold | slivers (area < 1e-9) |
+|---:|---:|---:|---:|:---:|:---:|---:|
+| 96 | 75,640 | 151,276 | **2** | yes | yes | 150 |
+| 128 | 134,716 | 269,428 | **2** | yes | yes | 343 |
+| 192 | 303,562 | 607,120 | **2** | yes | yes | 1,342 |
+
+**Euler characteristic 2 is a topological sphere.** No tunnel, no handle, no
+boundary — a pinhole you can see through would drop it by two and does not. The
+mesh is watertight and 2-manifold at every resolution tried, so **whatever the
+host counts as background pixels enclosed by surface, it is not a hole in the
+surface this engine produces.**
+
+What that leaves, in the order I would look: geometry thin enough to fall
+between samples in a rasteriser (the sliver count grows with resolution, and
+`min_area` is 7.6e-12 at 96 and 1.3e-13 at 192 — triangles far below a pixel),
+the host's own render path, or its pixel-counting heuristic. **The cull pad was
+already excluded** — `clay_document_mesh` takes the whole-document tape with no
+cull region.
+
+The finding that survives regardless is the one the host drew before the file
+existed: **two documents holding the same items are not the same document.** A
+hand-built reconstruction with identical items, spline type and blend produces
+zero of whatever this produces, so something in how the host's document type
+configures a document is the variable — and it is now diffable, because the
+file is here and a hand-built equivalent is a few lines.
 
 ### Refusals a host cannot render — a standing rule, and three instances
 
