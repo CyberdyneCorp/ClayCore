@@ -1915,6 +1915,76 @@ direction.
 
 That leaves ours as the remaining half of the pair, and now it is the only half.
 
+**And it has now fired, exactly as predicted, on this box.** A gate run at load
+30.7 failed on `BM_CAbiSmoothPreviewDelta: 0.79x BM_CAbiSmoothPreviewFullSnapshot
+above the 0.5x ceiling`. Four consecutive runs of the SAME binary on the SAME
+tree, minutes apart:
+
+```
+run 1: delta=0.3  full=0.5  ratio=0.601   delta_frac=0.10070945945945947
+run 2: delta=0.3  full=0.3  ratio=1.183   delta_frac=0.10070945945945947
+run 3: delta=0.4  full=0.3  ratio=1.722   delta_frac=0.10070945945945947
+run 4: delta=0.0  full=0.0  ratio=0.430   delta_frac=0.10070945945945947
+```
+
+**The ratio swings 4x. The byte fraction is bit-identical to seventeen decimal
+places.** The branch touches no file on that path. So the gate reported a
+failure with no provenance, and it took four manual runs to establish that the
+number meant nothing.
+
+**The knowledge was already in the file.** The comment beside that very
+threshold says the time is "THE WEAKER HALF HERE", that both sides "are
+microseconds wide and a pause/resume sits inside each", and that "the BYTES are
+the headline and `delta_frac` below gates them exactly". The tool knew which of
+its two numbers was trustworthy and had no way to act on it, because nothing
+reads the load.
+
+**Two things this sharpens.** A self-relative threshold is not automatically
+robust: this one compares two measurements from ONE run, which is the property
+recorded elsewhere in this document as what makes a threshold travel — and it
+still fails, because both sides are sub-microsecond and the noise floor is above
+the signal. *Self-relative protects against a platform, not against a scheduler.*
+And a threshold whose own comment names it the weaker of two available
+measurements should not be the one that fails the build: `delta_frac` was green
+throughout.
+
+**The host's answer is better than a load guard, and it retires the row rather
+than satisfying it: compare COUNTS, not durations.** Every comparative gate they
+wrote today asserts brick counts — 168 against 1452, 300 against 350,
+`grown * 3 < whole`. A count cannot move with the platform and it cannot move
+with the load. When the thing being bounded is WORK, the count is usually
+available and is usually the better instrument; **the duration is the proxy that
+happens to be easier to reach for.**
+
+Their sentence for the row: *a load guard makes a bad number honest about its
+conditions; preferring the count makes the number unnecessary.* Our own file had
+the deterministic measurement sitting beside the noisy one — already gated,
+already passing, bit-identical to seventeen decimal places — and still failed the
+build on the ratio.
+
+**A third shape, which is neither a count nor a guarded duration.** Their
+`instrumentation.rs` measures a re-mesh, asserts a stall was recorded, and sets
+the threshold to **zero**, with the reason beside it: *"A threshold of zero, so
+the measurement is about what is recorded rather than about how fast this
+particular machine is. A test that asserts a real 16 ms overrun would pass or
+fail on the runner."* It takes a duration and puts nothing about its SIZE in the
+verdict — the assertion is about the mechanism, and the machine cannot vote.
+That is the move where a duration must be in the loop but must not be in the
+verdict.
+
+**What none of the three saves.** Their `sculpt_latency`, `gesture_end` and
+`stroke_budget` hold absolute millisecond budgets, and `gesture_end` failed twice
+under their own suite's contention and passed in isolation both times. Those are
+honest budgets rather than ratios — a sculptor does feel 16 ms — so the answer
+there is not a better instrument but a quieter box. Worth naming so the count
+rule is not over-applied: **a budget about human perception has to stay a
+duration.**
+
+**The ordering, for our own bench gate:** prefer a count; if a duration is
+unavoidable and the verdict is about a MECHANISM, gate at zero; if the verdict is
+genuinely about TIME, then and only then is a load guard the answer, and it
+should refuse to RECORD rather than to COMPARE.
+
 **And it had been hiding the state of their default branch, not only two PRs.**
 Main itself was red on Performance for the same refusal-on-the-comparison-path.
 Worth adding to the pair: a guard on the wrong act does not merely block work
@@ -2499,6 +2569,56 @@ Recorded so they are decisions rather than oversights:
   runtime for authoring brushes. Nothing is lost by the decision — the brush
   engine's interface above emits ordinary edit items for its own reasons, so a
   future reversal would extend that boundary rather than redesign it.
+
+### An invalidation token must be monotonic; a version may restore
+
+Settled for #472 by the consumer, and the argument is better than the one I put
+to them. I framed it as *the number is an invalidation token, not the age of the
+restored mesh*. Their reading of why that decides it:
+
+**The one guarantee a token has to give is that the same number means the same
+content — and that holds only while the number never repeats.** Advance on undo
+AND redo and it is monotonic, so a number a host holds is either current or
+superseded, never reused for something else. Restore the pre-undo value on redo
+and the number can come back; then two different histories present the same
+revision, and the failure is a cache believed fresh that is not — a stroke
+landing against a mesh that no longer exists, with nothing reporting it.
+
+**Which direction each choice fails in is the whole decision.** Monotonic costs a
+rebuild after undo-then-redo, where a restoring token would have kept the cache:
+loud, bounded, correct. Restoring costs a silent wrong answer, unbounded. *Between
+a cheap wrong answer and an expensive right one, a token should be right.*
+
+**And the name settles the design on its own.** If the number were a VERSION —
+an age — restoring would be correct, because the content really is the pre-undo
+content. It is not an age. It is an identity for *the numbering my caches were
+built against*, and undo-then-redo produces a numbering those caches were not
+built against **even though the vertices agree.** Calling it invalidation rather
+than versioning answers the question without further argument.
+
+Generalised, for anything this repository hands a host as a change token: decide
+whether it identifies CONTENT or identifies AN EPOCH OF MUTATION. If a consumer
+uses it to decide whether its own derived state is stale, it is an epoch, it must
+be monotonic, and it must advance on every restoration — including the ones that
+put back bytes it has seen before.
+
+### A test written to fail on the other repository's fix
+
+The host's `voxel_remesh.rs` asserts today that the mesh-layer revision does NOT
+move across undo — deliberately, documenting the gap rather than working around
+it silently. **The day #472 lands, that assertion fails, and the failure is their
+signal to remove the engine-undo-depth workaround they carry.**
+
+Worth naming as a practice: a test written to fail on someone else's fix is the
+cheapest handshake between two repositories. It needs no release note anybody
+reads, no version check, and no coordination on timing — the consumer finds out
+because their own suite tells them, at the moment it becomes true. The
+alternative is noticing the workaround is dead six months later, which is how
+workarounds become permanent.
+
+The same shape is available to us in the other direction, and we do not use it:
+where this document records something a host owes us, an assertion that fails
+when they deliver it would tell us, instead of a row nobody re-reads.
 
 ### The tripwire says the number moved; the handshake is that something acted on it
 
@@ -3176,6 +3296,7 @@ depending on the committed baseline at all. It is the self-relative rule applied
 to a baseline problem: **two measurements one run apart beat one measurement
 against a number from thirty-two releases ago**, and it needs no permission from
 anybody to take.
+
 
 ## Requirements taken from their bugs
 
