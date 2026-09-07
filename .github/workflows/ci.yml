@@ -5,6 +5,26 @@ on:
     branches: [main]
   pull_request:
 
+# A FORCE-PUSH SUPERSEDES ITS OWN RUN RATHER THAN QUEUING BESIDE IT.
+#
+# Without this, every rebase of a stacked series leaves its previous run in the
+# queue holding three macOS jobs, and those jobs are the scarcest thing here --
+# one has taken 84 minutes. Two sessions rebasing normal work over one day left
+# 47 superseded runs queued between them, and a PR that nobody had touched sat
+# with its macOS jobs UNSTARTED for five hours and thirty-nine minutes behind
+# them. Nothing was broken and nothing was failing; the demand was simply
+# already spoken for.
+#
+# Keyed on the ref rather than the SHA, because the point is that a NEW push to
+# the SAME branch cancels the OLD one -- keying on the SHA would make every run
+# its own group and change nothing. `main` is excluded from cancellation by the
+# `github.ref == 'refs/heads/main'` guard below: a push to main is a merge whose
+# result somebody will cite later, and cancelling it to serve a newer merge
+# would leave a commit on the default branch with no verdict.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   build-test:
     name: build+test (${{ matrix.os }}, cpu-only)
