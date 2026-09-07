@@ -110,6 +110,15 @@ struct CaseResult: Codable {
     /// existed, which the gate compares raw rather than guessing.
     var canaryBeforeMs: Double = 0
     var canaryAfterMs: Double = 0
+    /// The windows of a SUSTAINED case, or nil for every other case
+    /// (gate-sustained-device-sculpting).
+    ///
+    /// Optional so that every record written before this existed still decodes,
+    /// and so that the axis a case was measured over is visible in the record
+    /// rather than inferred from its name: a case with windows was measured
+    /// over SESSION LENGTH and a case with `measurements` across an axis was
+    /// measured over DOCUMENT SIZE, and the two fail for different reasons.
+    var windows: [SustainedWindow]? = nil
 }
 
 /// One sample of a fixed workload that touches nothing under test.

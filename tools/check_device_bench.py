@@ -7,6 +7,10 @@ Three independent failures, because they mean different things:
   BUDGET      this case is slower than what its interaction class allows,
               whether or not it regressed. A baseline can enshrine something
               already too slow; the budget is what says so.
+  DRIFT       a sustained case's late window differs from its early one:
+              the counts moved, the arena did not converge, the footprint grew,
+              or the time rose while the counts held. This is the SESSION-LENGTH
+              axis, and it catches what GROWTH structurally cannot.
   GROWTH      per-stamp cost grows super-linearly in document size. A level
               that passes today at 1000 stamps can still be the wrong SHAPE,
               and shape is what bites at 10000.
@@ -195,6 +199,88 @@ def cases_measured_under_drift(run: dict) -> list[tuple[str, float]]:
         if factor is not None and factor > CANARY_DRIFT_TOLERANCE:
             drifted.append((case["name"], factor))
     return sorted(drifted, key=lambda pair: pair[1], reverse=True)
+
+
+# How much a sustained case's late window may exceed its early one before that
+# is a finding rather than a device.
+#
+# WIDER ON TIME THAN ON COUNTS, deliberately. The counts are integers the engine
+# produced and are the same everywhere; the times are a warm iPad at the end of a
+# seven-session run, where the thermal state is expected to have moved. A time
+# band tight enough to catch a leak would fail on heat, and heat is the thing
+# this run cannot hold still.
+#
+# So the COUNTS carry the gate and the times carry a warning: a window whose p95
+# rose while its counts held is a thermal or an allocator reading, and one whose
+# counts rose is the engine doing more work for the same request.
+SESSION_TIME_TOLERANCE = 1.60
+SESSION_COUNT_TOLERANCE = 0.05
+# The footprint may rise by this much across a run before it is called growth.
+# Not zero: a first window pays for lazily built structures a later one does not,
+# so the honest comparison is MIDDLE against LATE, and this is the slack on it.
+SESSION_FOOTPRINT_TOLERANCE = 0.10
+
+
+def session_drift(name, case):
+    """A sustained case's windows, checked for drift over session length."""
+    windows = case.get("windows")
+    if not windows or len(windows) < 2:
+        return []
+    early, late = windows[0], windows[-1]
+    out = []
+
+    # THE COUNTS FIRST, because they are the half that means the same thing on
+    # every machine. A sustained fixture is built so that the same dabs done
+    # later touch the same surface; a drift here is the engine, not the device.
+    for field, label in (("verticesConsidered", "considered"),
+                         ("verticesAffected", "affected")):
+        a, b = early.get(field, 0), late.get(field, 0)
+        if a <= 0:
+            continue
+        ratio = abs(b - a) / a
+        if ratio > SESSION_COUNT_TOLERANCE:
+            out.append(
+                f"{name}: DRIFT the late window {label} {b} against the early "
+                f"window's {a} ({ratio * 100:.1f}%, tolerance "
+                f"{SESSION_COUNT_TOLERANCE * 100:.0f}%) — the same dabs on the "
+                f"same surface reached a different amount, which is the engine "
+                f"rather than the device")
+
+    # THE ARENA. A per-stamp scratch still growing in the last window is scratch
+    # that is never released, and no allocation count can see it — a high-water
+    # mark is the only thing that can. Compared middle-to-late, because the first
+    # window legitimately pays to grow it once.
+    if len(windows) >= 3:
+        mid, last = windows[-2], windows[-1]
+        if last.get("scratchHighWaterBytes", 0) > mid.get("scratchHighWaterBytes", 0):
+            out.append(
+                f"{name}: DRIFT the per-stamp scratch is still growing in the "
+                f"last window ({mid.get('scratchHighWaterBytes')} -> "
+                f"{last.get('scratchHighWaterBytes')} bytes) — an arena that has "
+                f"not converged is scratch that is never released")
+
+        # THE FOOTPRINT, likewise middle against late.
+        m, l = mid.get("footprintBytes", 0), last.get("footprintBytes", 0)
+        if m > 0 and l > m * (1.0 + SESSION_FOOTPRINT_TOLERANCE):
+            out.append(
+                f"{name}: DRIFT the process footprint grew from {m / 1e6:.1f} MB "
+                f"to {l / 1e6:.1f} MB between the last two windows "
+                f"(+{(l / m - 1) * 100:.1f}%, tolerance "
+                f"{SESSION_FOOTPRINT_TOLERANCE * 100:.0f}%) while the work did not")
+
+    # THE TIME, last and wide, and only where the counts did NOT move — a slower
+    # window that also did more work has already been reported above, and saying
+    # it twice would make one finding look like two.
+    a95, b95 = early.get("p95Ms", 0.0), late.get("p95Ms", 0.0)
+    counts_held = not out
+    if counts_held and a95 > 0 and b95 > a95 * SESSION_TIME_TOLERANCE:
+        states = f"{early.get('thermalState', '?')} -> {late.get('thermalState', '?')}"
+        out.append(
+            f"{name}: DRIFT p95 rose from {a95:.3f} ms to {b95:.3f} ms "
+            f"(x{b95 / a95:.2f}, tolerance x{SESSION_TIME_TOLERANCE}) while the "
+            f"counts held — thermal {states}. Read the thermal states before "
+            f"reading this as a leak")
+    return out
 
 
 def canary_drift(run: dict) -> tuple[float, dict, dict] | None:
@@ -588,6 +674,14 @@ def main() -> int:
             failures.append(
                 f"{name}: GROWTH cost scales as N^{growth:.2f} in document size "
                 f"(over N^{MAX_GROWTH_EXPONENT}) — {sizes}")
+
+        # DRIFT — the OTHER axis. GROWTH above is over DOCUMENT SIZE and
+        # catches an algorithm that is not local; this is over SESSION LENGTH
+        # and catches a leak, an unbounded cache, a history outgrowing its
+        # budget or an arena that never converges. None of those scale with the
+        # document, so no case on the other axis can fail on them however large
+        # it is made.
+        failures.extend(session_drift(name, case))
 
     for name in budgets:
         if name not in {c["name"] for c in run["cases"]}:
