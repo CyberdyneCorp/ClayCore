@@ -3236,10 +3236,32 @@ outcome of getting it wrong is worse than a bug — a *correct* check gets widen
 permanently, on behalf of a caller who never needed it, and nothing afterwards
 records that the reason was mistaken.
 
+**And it is worse than the bug it resembles, for a reason worth stating on its
+own: TIGHTENING ANNOUNCES ITSELF; LOOSENING IS SILENT FOREVER.** Wrongly
+narrowing the reader makes files start failing and somebody goes looking.
+Widening it correct-to-permissive produces no failure at any point — not at the
+change, not on the first non-triangle file, not ever. The check simply stops
+being a check.
+
+**So the evidence of the mistake is destroyed by the mistake.** Every other item
+in this section leaves something behind to find: a red lane nobody read, a queued
+run nobody counted, a spread annotation printing nothing. This one leaves an
+ordinary-looking permissive reader, indistinguishable from one that was always
+meant to be permissive, and the only record that it was ever load-bearing is a
+commit message nobody reads while debugging a mesh that came apart three releases
+later.
+
 The question that catches it: **which entry point will actually be called?** —
-asked before deciding whether a constraint is a burden. A library with two save
-paths has two answers to "what does the file contain", and only one of them is
-the contract in play.
+asked BEFORE the change, because afterwards there is nothing left to ask it
+about. A library with two save paths has two answers to "what does the file
+contain", and only one of them is the contract in play. *"Which entry point"* is
+answerable for about ten seconds and then it is not.
+
+**And that says where to point it.** Not at every constraint — at every
+**RELAXATION**, which is a much smaller set and a reviewable one. Two save paths,
+two readers, or two callers give two answers to "what does this contain", and
+relaxations are the only changes among them where getting it wrong is
+unrecoverable.
 
 ### The concurrency default is a two-repo finding
 
