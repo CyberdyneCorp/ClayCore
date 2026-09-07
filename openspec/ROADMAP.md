@@ -2475,6 +2475,48 @@ Recorded so they are decisions rather than oversights:
   engine's interface above emits ordinary edit items for its own reasons, so a
   future reversal would extend that boundary rather than redesign it.
 
+### The tripwire says the number moved; the handshake is that something acted on it
+
+Recorded earlier: a test written to fail on the other repository's fix is the
+cheapest cross-repo handshake. The host has now corrected that, and the
+correction is the useful half.
+
+Their side of #472 is **three** things, not one. The tripwire
+(`voxel_remesh.rs:271`) is the one that fires. The workaround is
+`struct Rebuild { layer, engine_depth }` and the half of
+`settle_geometry_revisions` that forgets a mesh sculptor when history stands at
+a rebuild's depth. **And the third is a BEHAVIOURAL test** —
+`a_stroke_lands_after_the_rebuild_is_undone`: rebuild, undo, stroke, and the
+stroke must land on the restored triangles. **It names no mechanism.** It passes
+today through the depth record and must still pass tomorrow through the
+revision.
+
+**So the handshake is deleting the workaround and finding the BEHAVIOURAL test
+still green.** Re-running the tripwire is not the handshake: it says the number
+moved and says nothing about whether anything acted on it. If the behavioural
+test goes red once the record comes out, the number is moving at a moment their
+`settle` is not asked at — and that, rather than the tripwire's colour, is the
+result worth reporting.
+
+**The general form:** a tripwire proves the SIGNAL changed. Only a test written
+in the vocabulary of the user's action proves the signal was USED. A handshake
+between two repositories needs both, and the mechanism-free one is the one that
+survives the mechanism being replaced.
+
+### Two documented behaviours, an undocumented composition
+
+From their cut tool, offered as a contract question rather than a bug: **a cut
+added to a mirrored layer came back reflected**, because the layer mirror
+reflects items and a cut is an item. `clay_item_set_mirror(-1)` is the right
+opt-out and it works.
+
+Each half is documented. Neither document mentions the other, and the
+composition is where the surprise lives. Worth carrying as a review question for
+any new item KIND we add: what does every layer-level operator already do to an
+item, and does this one want that? The answer is often yes — a mirrored cut is
+defensible — but it should be a decision with a sentence behind it rather than a
+default nobody chose.
+
 ## Requirements taken from their bugs
 
 Worth writing into the specs they touch, because a competitor's known failure is
