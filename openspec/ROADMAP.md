@@ -2883,6 +2883,39 @@ test — it can turn the parity gate into a tautology and still print a pass.
 **The shape, again:** *"did everything I ran pass"* was answered correctly and
 truthfully. *"Did I run everything"* was never asked.
 
+### An exit code that conflates absence with falsity
+
+`git merge-base --is-ancestor A B` returns non-zero for *"A is not an ancestor of
+B"* and non-zero for *"A does not exist"*, and **nothing in the exit code
+separates them.**
+
+Verifying that six branches were ancestors of a stack tip before recommending a
+single tip merge, I built the branch list from a table I had printed with a
+44-character field. One name was truncated. The truncated ref does not exist, the
+command returned non-zero, and I read it as *"this branch is not in the stack"*.
+
+**Where that would have landed is what makes it the sharpest instance in this
+section.** It was not a silent pass. I was about to send another session a message
+saying its stack was broken — it would have gone looking for a break that was not
+there, and the evidence for the search would have been a command that ran
+cleanly. Their reading of the cost:
+
+> A false alarm from a trusted peer costs more than a silent pass, because it
+> spends someone else's attention on a fiction.
+
+**The repair is to assert the precondition before asking the question.** Resolve
+every ref with `git rev-parse --verify` first, take the names from
+`gh pr view <n> --json headRefName` rather than from anything typed or printed,
+and report a missing ref as *"an ancestry answer here would be meaningless"*
+rather than as a negative. A missing input must not be able to wear the costume
+of a real answer.
+
+**And the other session redid its own check even though its answer had been
+right**, because its loop used full names only by accident — the truncation was
+in its `printf` and not in its loop variable. The rule it drew is the one worth
+keeping: *a check that gives the correct answer for a reason you did not arrange
+is not a check you can rely on next time.*
+
 ### A tool that answers a narrower question than the one you asked
 
 The sharpest concrete instance of the class below, and it cost a real measurement
