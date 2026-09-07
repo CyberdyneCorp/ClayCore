@@ -63,3 +63,25 @@
 - [ ] 6.2 Full unit suite green
 - [ ] 6.3 `python3 tools/release_check.py --skip-slow`
 - [ ] 6.4 CI green
+
+## 8. What the gate run found about this case
+
+- [x] 8.1 The seven-session run FAILED it: "no declared budget in the baseline".
+      The case was added with its coverage exemption and no budget
+- [x] 8.2 A budget would not have fixed it. The case measures 0.019 ms and a
+      budget fails only when the overshoot clears NOISE_FLOOR_MS (0.05), so a
+      budget at today's value could not fail until 0.069 ms -- 3.6x slower.
+      That is not a loose budget; it is not a gate, and writing one would read
+      as coverage
+- [x] 8.3 Its real gate is `session_drift`, which ran and passed. So the
+      baseline declares WHICH gate applies -- `"gate": "drift"` -- rather than
+      inventing a ceiling. "Every case must declare a budget" stays true: it
+      declares the gate
+- [x] 8.4 The declaration is checked in both directions rather than trusted: the
+      case must carry windows, and its p95 must still be under the floor. A case
+      that grows into measurable territory HAS a number to gate and the
+      declaration has gone stale -- the rule the binding-parity gate applies to
+      its own exemptions
+- [x] 8.5 Both halves proven to fire, on doctored runs: p95 forced to 0.421 ms
+      reports "it has a number worth gating"; windows removed reports "nothing
+      gates it"
