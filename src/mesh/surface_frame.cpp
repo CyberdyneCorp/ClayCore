@@ -42,18 +42,39 @@ SurfaceFrame orthonormalize(cfloat3 normal, cfloat3 rough_tangent) {
 // because a subdivided quad is not planar and a cross product would depend on
 // which corner it was taken at; the sum's LENGTH is twice the area, which is
 // the weighting a vertex normal wants.
-cfloat3 newell(const LevelTopology& topology, const std::vector<cfloat3>& positions,
-               std::uint32_t f) {
-    std::uint32_t arity = 0;
-    const std::uint32_t* c = topology.face(f, &arity);
+cfloat3 newell_of(const std::uint32_t* c, std::uint32_t arity,
+                  const std::vector<cfloat3>& positions, const LevelHalo* halo) {
     cfloat3 n = kernel::cf3(0, 0, 0);
     for (std::uint32_t i = 0; i < arity; ++i) {
-        const cfloat3 a = positions[c[i]];
-        const cfloat3 b = positions[c[(i + 1) % arity]];
+        const std::uint32_t ia = c[i], ib = c[(i + 1) % arity];
+        const cfloat3 a = halo ? halo->position_of(positions, ia) : positions[ia];
+        const cfloat3 b = halo ? halo->position_of(positions, ib) : positions[ib];
         n = n + kernel::cf3((a.y - b.y) * (a.z + b.z), (a.z - b.z) * (a.x + b.x),
                             (a.x - b.x) * (a.y + b.y));
     }
     return n;
+}
+
+cfloat3 newell(const LevelTopology& topology, const std::vector<cfloat3>& positions,
+               std::uint32_t f) {
+    std::uint32_t arity = 0;
+    const std::uint32_t* c = topology.face(f, &arity);
+    return newell_of(c, arity, positions, nullptr);
+}
+
+// What the faces beyond the level contribute to `v`'s normal. Zero for every
+// interior vertex, which is most of them, and zero for a dense level.
+cfloat3 halo_sum(const LevelHalo* halo, const std::vector<cfloat3>& positions, std::uint32_t v) {
+    cfloat3 sum = kernel::cf3(0, 0, 0);
+    if (halo == nullptr || halo->empty()) return sum;
+    std::size_t count = 0;
+    const std::uint32_t* faces = halo->faces_of(v, &count);
+    for (std::size_t i = 0; i < count; ++i) {
+        std::uint32_t arity = 0;
+        const std::uint32_t* c = halo->faces.face(faces[i], &arity);
+        sum = sum + newell_of(c, arity, positions, halo);
+    }
+    return sum;
 }
 
 // The mean of several frames' tangents, which is what an edge point and a face
@@ -129,7 +150,8 @@ cfloat3 rotate_shortest_arc(cfloat3 v, cfloat3 from, cfloat3 to) {
 }
 
 void level_normals(const LevelTopology& topology, const LevelConnectivity& conn,
-                   const std::vector<cfloat3>& positions, std::vector<cfloat3>* out) {
+                   const std::vector<cfloat3>& positions, std::vector<cfloat3>* out,
+                   const LevelHalo* halo) {
     out->assign(topology.vertex_count, kernel::cf3(0, 0, 0));
     std::vector<cfloat3> face_normal(topology.face_count);
     for (std::uint32_t f = 0; f < topology.face_count; ++f)
@@ -139,21 +161,25 @@ void level_normals(const LevelTopology& topology, const LevelConnectivity& conn,
         const std::uint32_t* faces = conn.faces_of(v, &count);
         cfloat3 sum = kernel::cf3(0, 0, 0);
         for (std::size_t i = 0; i < count; ++i) sum = sum + face_normal[faces[i]];
-        (*out)[v] = safe_unit(sum, kernel::cf3(0, 1, 0));
+        // The other half of the ring, where the level stops and the surface
+        // does not. Added BEFORE normalizing, because it is an area-weighted
+        // sum and normalizing each half first would weight the two halves by
+        // their face counts instead of by their areas.
+        (*out)[v] = safe_unit(sum + halo_sum(halo, positions, v), kernel::cf3(0, 1, 0));
     }
 }
 
 void level_normals_partial(const LevelTopology& topology, const LevelConnectivity& conn,
                            const std::vector<cfloat3>& positions,
                            const std::vector<std::uint32_t>& vertices,
-                           std::vector<cfloat3>* inout) {
+                           std::vector<cfloat3>* inout, const LevelHalo* halo) {
     if (inout->size() < topology.vertex_count) inout->resize(topology.vertex_count, kernel::cf3(0, 1, 0));
     for (std::uint32_t v : vertices) {
         std::size_t count = 0;
         const std::uint32_t* faces = conn.faces_of(v, &count);
         cfloat3 sum = kernel::cf3(0, 0, 0);
         for (std::size_t i = 0; i < count; ++i) sum = sum + newell(topology, positions, faces[i]);
-        (*inout)[v] = safe_unit(sum, kernel::cf3(0, 1, 0));
+        (*inout)[v] = safe_unit(sum + halo_sum(halo, positions, v), kernel::cf3(0, 1, 0));
     }
 }
 

@@ -24,7 +24,8 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 91
+#define CLAY_ABI_MINOR 92
+#define CLAY_ABI_MINOR 92
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -8110,6 +8111,16 @@ clay_result clay_multires_add_level(clay_multires* surface, clay_cancel_token* t
  * refined hierarchy would have held there, bit for bit -- the stencils are
  * evaluated against the same parent neighbourhood -- which is why a fine
  * patch's boundary meets the coarse edge beside it exactly.
+ *
+ * SINCE 0.90.0 THAT IS TRUE OF THE NORMALS AND THE DETAIL FRAMES TOO, and
+ * before it, it was not. A vertex normal is the sum of the faces around it, and
+ * at a region boundary half of that ring is not stored at this level: the
+ * boundary normals were wrong by up to 23.4 degrees at level 1. A normal builds
+ * a frame and `P = S + Frame * Detail`, so a coefficient authored at a boundary
+ * vertex reconstructed up to 17% of its own magnitude away from where a dense
+ * hierarchy puts it. The missing half of the ring is now evaluated from the
+ * parent by the same stencils, so it agrees exactly. A HOST NEEDS TO DO
+ * NOTHING; the cost is +13% on a full level evaluation and nothing per dab.
  *
  * CLAY_MULTIRES_PATCH_NOT_REFINABLE when a named patch, or a patch beside it,
  * is not resident at the parent level. clay_multires_refine_patches_to_level

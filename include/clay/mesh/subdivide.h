@@ -280,6 +280,100 @@ LevelTopology subdivide_topology_for_patches(const LevelTopology& parent,
                                              const LevelConnectivity& conn,
                                              const std::vector<char>& keep);
 
+// -- the ring a regional level does not store ---------------------------------
+//
+// WHAT IT IS FOR, and the measurement that says it is needed. A regional level's
+// POSITIONS are bit-identical to the dense hierarchy's — that is
+// `full_of`'s whole argument, and it is gated. Its NORMALS were not: measured
+// against a hierarchy refined everywhere to the same level, a regional level's
+// boundary normals were wrong by 0.406 (23.4 degrees) at level 1, 0.209 at
+// level 2 and 0.103 at level 3, at exactly the vertices whose face ring at that
+// level is incomplete.
+//
+// The cause is one line — a vertex normal is the sum of `conn.faces_of(v)`, and
+// beside a refined region half of that ring is not stored — and the consequence
+// is not a shading artefact. A multires surface reconstructs as
+// `P(n) = S(n) + Frame * Detail`, and a frame is built from the normal, so a
+// coefficient authored at a boundary vertex reconstructed to a DIFFERENT WORLD
+// OFFSET than the same coefficient on a dense hierarchy. The bit-identity
+// guarantee held only while boundary detail was zero.
+//
+// So the missing half of the ring is built: the child faces of the parent faces
+// the level did NOT refine, kept only where they touch a vertex it DOES store.
+//
+// THE SAME SUBDIVISION, NOT AN APPROXIMATION OF IT. These faces come out of the
+// same loop `subdivide_topology_for_patches` runs, over the same `ChildLayout`,
+// in the same corner order, and their vertices' positions come from the same
+// stencils against the same parent. A halo vertex therefore holds what the
+// dense level holds at that point for the same reason a stored vertex does.
+//
+// THE PARENT ALWAYS HAS WHAT THIS READS. `add_level_for_patches` refuses with
+// `PatchNotRefinable` unless every patch sharing a vertex with a refined one is
+// resident at the parent, and `refine_patches_to_level` grows each intermediate
+// level by the rings the levels above need. The one ring this walks is exactly
+// the ring that guarantee already provides.
+//
+// DERIVED AND DROPPABLE, like `LevelConnectivity`, and it costs the region's
+// BOUNDARY rather than its area: a face is here only if it touches a stored
+// vertex.
+struct LevelHalo {
+    // Corners in a COMBINED numbering: a vertex the level stores keeps its
+    // stored id, and a vertex only these faces reference is
+    // `stored_count + k`. That is what lets the level's own arrays be indexed
+    // unchanged — stored vertex `i` is still `i` — while a halo face can still
+    // name the corners it needs.
+    //
+    // `face_patch` is deliberately EMPTY and `patch_of` on it means nothing:
+    // these faces are a neighbourhood, not part of the level, and nothing
+    // uploads or dirties them.
+    LevelTopology faces;
+    // The layout ids of the halo-only vertices, ascending — what
+    // `subdivide_positions` is asked for through a `ChildIndex`.
+    std::vector<std::uint32_t> full_of;
+    // Their positions, filled by the caller from the parent. Indexed from
+    // `stored_count`.
+    std::vector<kernel::cfloat3> positions;
+    std::uint32_t stored_count = 0;
+
+    // The halo faces touching each STORED vertex, CSR over `[0, stored_count)`.
+    // Empty for the interior, which is most of them.
+    std::vector<std::uint32_t> vertex_face_offsets, vertex_faces;
+
+    bool empty() const { return faces.face_count == 0; }
+    std::uint32_t halo_vertex_count() const { return static_cast<std::uint32_t>(full_of.size()); }
+
+    const std::uint32_t* faces_of(std::uint32_t v, std::size_t* count) const {
+        if (v >= stored_count || vertex_face_offsets.empty()) {
+            *count = 0;
+            return nullptr;
+        }
+        const std::uint32_t begin = vertex_face_offsets[v], end = vertex_face_offsets[v + 1];
+        *count = end - begin;
+        return vertex_faces.data() + begin;
+    }
+    // A corner's position, from the level's own array below `stored_count` and
+    // from this one above it.
+    kernel::cfloat3 position_of(const std::vector<kernel::cfloat3>& stored,
+                                std::uint32_t v) const {
+        return v < stored_count ? stored[v] : positions[v - stored_count];
+    }
+    std::size_t bytes() const;
+
+    // A `ChildIndex` naming the halo-only vertices, for evaluating them.
+    ChildIndex index() const {
+        ChildIndex idx;
+        idx.full_of = full_of.empty() ? nullptr : full_of.data();
+        idx.count = static_cast<std::uint32_t>(full_of.size());
+        return idx;
+    }
+};
+
+// Build it. `keep` is the same array `subdivide_topology_for_patches` was given
+// and `child` is what it returned; a DENSE child gets an empty halo, because a
+// level that refines every patch has no ring outside itself.
+LevelHalo build_level_halo(const LevelTopology& parent, const LevelConnectivity& conn,
+                           const std::vector<char>& keep, const LevelTopology& child);
+
 // The child level's positions with NO detail applied — the pure subdivision
 // surface a detail coefficient is measured against.
 //
