@@ -1,9 +1,11 @@
 #include <doctest/doctest.h>
 
 #include <cmath>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "clay/field/volume.h"
 #include "clay/scene/bounds.h"
 #include "clay/scene/commands.h"
 #include "clay/scene/document.h"
@@ -622,6 +624,37 @@ TEST_CASE("intersect delta: a hidden or absent node keeps the conservative answe
         f.cutter = 9999;
         const std::optional<Aabb> b = scene::command_surface_delta_bound(f.doc, move_cmd(f));
         CHECK_FALSE(b.has_value());
+    }
+    {
+        // A sampled VOLUME operand, and a GATED one. Neither is in the proof:
+        // a volume's field outside the samples it stores is whatever its
+        // extrapolation says, and a gated combine is `mix(acc, combine(...),
+        // mask)` -- a lerp, and a lerp of a beyond-band value is not beyond
+        // band. Asked directly rather than through the probe, because a
+        // fixture that cannot be evaluated proves nothing about a field.
+        Fixture f = base(Prim::sphere(0.5f), hard(), cf3(-0.4f, 0, 0), cf3(0.4f, 0, 0));
+        SdfContent& c = *f.doc.find_layer(f.layer)->sdf;
+        const auto ball = [](kernel::cfloat3 p) { return kernel::clength(p) - 0.4f; };
+        const auto payload = std::make_shared<field::FieldVolume>(field::FieldVolume::sample(
+            ball, Aabb{cf3(-0.6f, -0.6f, -0.6f), cf3(0.6f, 0.6f, 0.6f)}, 0.05f, 0.15f));
+
+        Node* cut = c.find_mut(f.cutter);
+        cut->gate = payload;
+        CHECK_FALSE(scene::command_surface_delta_bound(f.doc, move_cmd(f)).has_value());
+        cut->gate = nullptr;
+        CHECK(scene::command_surface_delta_bound(f.doc, move_cmd(f)).has_value());
+
+        // A gate on ANOTHER node in the chain refuses too: what it carries is
+        // this item's difference, not its own.
+        Node paint = item(Prim::sphere(0.5f), cf3(0.3f, 0.3f, 0), Op::Add);
+        paint.gate = payload;
+        const NodeId gated = c.insert(paint);
+        CHECK_FALSE(scene::command_surface_delta_bound(f.doc, move_cmd(f)).has_value());
+        (void)c.remove(gated);
+
+        cut->prim = Prim::volume();
+        cut->volume = payload;
+        CHECK_FALSE(scene::command_surface_delta_bound(f.doc, move_cmd(f)).has_value());
     }
     {
         // Every other command kind, on the very node the fast path is about.
