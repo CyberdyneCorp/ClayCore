@@ -64,8 +64,12 @@ FILENAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.+-]*\.([A-Za-z][A-Za-z0-9]*)$")
 EXTENSIONS = {
     "cpp", "h", "hpp", "cc", "c", "cu", "cl", "metal", "mm", "swift", "inc",
     "py", "sh", "js", "html", "md", "txt", "toml", "yaml", "yml", "json",
-    "cmake", "in", "plist", "clayspace",
+    "cmake", "in", "plist", "clayspace", "rs", "glsl",
 }
+
+# `name.ext:120` -- a file with the line someone read it at. The line number is
+# not a claim about the tree, so it is stripped and the file is checked.
+AT_LINE = re.compile(r"^(.+\.[A-Za-z][A-Za-z0-9]*):[0-9]+$")
 
 # Words that pass the identifier shape and are English, not code.
 PROSE = {
@@ -76,6 +80,29 @@ PROSE = {
 
 def is_path(span: str) -> bool:
     return "/" in span and PATHLIKE.match(span) is not None
+
+
+def member_parts(span: str) -> list[str]:
+    """The checkable halves of a dotted citation, e.g. `report.moved_vertices`.
+
+    THE REWRITE LOST THIS AND THE MERGE SAID IT HAD NOT. main's gate split a
+    dotted form and checked each part, so a struct field AND the struct both
+    had to exist; the rewrite recognised only paths, filenames and identifiers,
+    so every `A.b` fell through the "no opinion" branch in silence. That is the
+    same defect as the skipped bare filename, left standing on the member form.
+
+    A part is checkable when it carries an underscore or begins with a capital,
+    which is main's rule: it keeps `0.88.0` an opinionless span rather than a
+    claim about three symbols named `0`, `88` and `0`.
+    """
+    # A span with whitespace is quoted PROSE, not a claim about code -- an
+    # error message like `GLIBCXX_3.4.31 not found` is a word, a dot and more
+    # words. The path and identifier shapes reject whitespace already; this is
+    # the member form saying the same thing.
+    if "." not in span or "/" in span or any(c.isspace() for c in span):
+        return []
+    parts = [p for p in re.split(r"[.:]+", span) if p]
+    return [p for p in parts if IDENT.match(p) and ("_" in p or p[:1].isupper())]
 
 
 def is_filename(span: str) -> bool:
@@ -219,10 +246,16 @@ def unresolved(span: str, dirs: list[str]) -> str | None:
     """Why this span names nothing in the tree, or None when it resolves."""
     if is_path(span):
         return None if path_resolves(span) else f"no such file `{span}`"
+    at_line = AT_LINE.match(span)
+    if at_line:
+        span = at_line.group(1)
     if is_filename(span):
         return None if span in tracked_basenames() else f"no such file `{span}`"
     if is_ident(span):
         return None if find_symbol(span, dirs) else f"no such symbol `{span}`"
+    for part in member_parts(span):
+        if not find_symbol(part, dirs):
+            return f"no such symbol `{part}`, from `{span}`"
     # No recognised shape: the gate never had an opinion on it, so it cannot
     # be debt either.
     return None
@@ -295,7 +328,8 @@ def self_test() -> int:
 
     A gate that is only ever run against a passing tree has never been shown to
     fail, and the stale-row rule in particular is invisible until a debt is
-    paid -- which on this branch has not happened yet. So it is exercised here
+    paid -- which on this branch it was, when merging main retired seven rows.
+    So it is exercised here
     against a tree built to make it fire, and this runs as a ctest so the claim
     does not decay into a comment.
     """
@@ -478,6 +512,25 @@ def self_test() -> int:
         expect("a change name that exists must still be checked", 0,
                "task symbols resolve in 1 change(s)", ["demo"])
 
+        # 17-19. The DOTTED MEMBER form. main's gate split it and checked each
+        # part; the rewrite recognised only paths, filenames and identifiers,
+        # so `A.b` fell through the "no opinion" branch in silence and the
+        # merge that took the rewrite said the opposite in its own message.
+        write(tasks, "- [ ] uses `ClayGhostStruct.ghost_member_xyz`\n")
+        expect("an invented dotted member must fail", 1,
+               "no such symbol `ClayGhostStruct`")
+
+        write(src, "struct ClayGhostStruct { int ghost_member_xyz; };\n")
+        expect("a dotted member whose both parts are present must pass", 0,
+               "task symbols resolve in 1 change(s)")
+
+        # ...and a quoted ERROR MESSAGE is prose, not three symbol claims. This
+        # is the direction that keeps the new check from failing a task list
+        # that quotes a linker error, which is how it was caught.
+        write(tasks, "- [ ] saw `GLIBCXX_3.4.31 not found` on the runner\n")
+        expect("a quoted message with spaces must not be read as symbols", 0,
+               "task symbols resolve in 1 change(s)")
+
         for failure in failures:
             print(failure)
         if failures:
@@ -507,6 +560,16 @@ def main() -> int:
         if missing:
             for name in missing:
                 print(f"no such change `{name}` under openspec/changes/")
+            return 1
+        # A directory is not a task list. `check` returns [] when tasks.md is
+        # absent, so naming a change that has none read nothing and still
+        # reported a clean run -- the same silent pass the name guard above
+        # exists to stop, one level in.
+        empty = [name for name in wanted
+                 if not os.path.isfile(os.path.join(CHANGES, name, "tasks.md"))]
+        if empty:
+            for name in empty:
+                print(f"`{name}` has no tasks.md to check")
             return 1
         changes = wanted
     else:

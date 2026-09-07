@@ -788,8 +788,10 @@
   more — and this note no longer has to name one to say so
 - GATED BY `clay_task_symbols_selftest`, a ctest, because the stale-row rule
   CANNOT FIRE ON A HEALTHY TREE — it only speaks once a recorded debt is paid,
-  which has not happened on this branch, so running the gate in CI proves
-  nothing about that half. `--self-test` builds a throw-away git tree where the
+  which a green CI run therefore proves nothing about. It has since fired for
+  real: merging main paid three rows outright and the path-resolution fix
+  retired four more that were never debt, taking the baseline from twelve rows
+  to five. The self-test is what covers the half a healthy tree cannot. `--self-test` builds a throw-away git tree where the
   rule must fire and where it must stay quiet, and runs the real gate over it;
   it needs no build artefact. PROVED BY REVERT — replacing the stale-row call
   with an empty list: checks 3 and 4 fail, both reporting
