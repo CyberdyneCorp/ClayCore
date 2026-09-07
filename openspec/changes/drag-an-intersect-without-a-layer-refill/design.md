@@ -1,0 +1,136 @@
+# Design
+
+## The two questions
+
+```
+GENERIC INFLUENCE                       EDIT DELTA
+"where can this node change             "where can THIS EDIT have moved
+ the field?"                             the surface?"
+        |                                       |
+        +-- Intersect -> the layer              +-- a supported move -> the swept
+            (item_nonlocality,                      old/new support
+             unchanged)                          +-- everything else -> nullopt,
+                                                     and the caller keeps the
+                                                     conservative union
+```
+
+Both are computed on every edit, and the second is used only when both sides of
+the apply produce one. Keeping the first is not waste: it is what a refusal
+falls back to, and a refusal must never cost correctness to discover.
+
+## Why the swept union is enough, and where each term comes from
+
+Let `G_old` and `G_new` be the operand's geometry bounds on the two sides —
+`item_geometry_bound`, so already dilated by rounding, by the item's own combine
+support, and by every copy the layer's mirror and radial modes emit, with their
+seam blends.
+
+1. **The band-clamped claim.** At a point `p` outside `G_old ∪ G_new` dilated by
+   the band, the operand's own field is `> band` on both sides. The chain's
+   value after the operand is `max(acc, item) >= item > band` on both sides, so
+   the value a brick STORES — band-clamped and quantized — is the same on both
+   sides. That is the whole argument, and it is why the claim is about the
+   surface and the band around it rather than about the field.
+
+2. **Why the band is not a term in the box.** Every consumer dilates by it
+   already: `BrickCache::mark_dirty` dilates the region by the band, and the
+   seed store dilates each brick by band + pad. Adding it here would double it.
+
+3. **Why the chain pad IS a term.** The raw value out there is NOT unchanged —
+   it is the moved operand's own distance. A local op does not have this
+   problem: `min(acc, big)` is `acc` bit for bit outside the support, so nothing
+   downstream can see the edit at all. Here a smooth combine further down the
+   chain, whose other operand is within its support of the running value, can
+   carry a beyond-band difference back toward the band. `blend_cull_pad`
+   measured exactly that drag for culling (0.26 below the base sphere's own
+   distance at k = 0.06 over 600 dabs) and `cull_pad` is its expression,
+   resolved against the same effective contributor count. This reuses it rather
+   than deriving a second one — bounds.cpp warns in three places that two
+   spellings of "how far a combine reaches" will diverge.
+
+4. **The ancestor groups.** `node_reach_bound`'s walk, term for term, through
+   `group_blend_support`. The one difference is that it does not take
+   `node_reach_bound`'s layer-extent escape for a non-local group: a group only
+   has to combine POINTWISE here, and an intersecting group leaves the running
+   value beyond the band on both sides for the reason the item does.
+
+5. **The layer folds.** `layer_reach_in_document`, which is
+   `folds_from_layer_support` — the same sum the influence path carries. This is
+   the one term a probe could show is load-bearing: removing it produced 203
+   sign changes outside the box on the layer-composition fixtures, worst 0.529.
+
+6. **Instancing.** The union over every layer sharing the content, exactly as
+   `node_influence_bound_in_document` takes it (#325). Shared content is not
+   ambiguity here — each layer contributes its own swept box under its own
+   transform.
+
+## The proof domain, as fallback rules
+
+`command_surface_delta_bound` returns `std::nullopt` — and the caller keeps the
+conservative union — for:
+
+| refused | why |
+|---|---|
+| any command but `SetTransformCmd` | a different question; a prim, op or blend change moves the operand's field where it stands |
+| an op that is not `Intersect` | nothing to narrow: the influence bound is already this box |
+| a node absent, hidden, or a group on either side | there is no operand to sweep |
+| a deformer chain on the operand | a warped field underestimates distance by its Lipschitz factor, and the bound carries no dilation for that |
+| a sampled-volume primitive | its field outside the samples it stores is whatever the extrapolation says |
+| an unbounded primitive, an infinite grid repeat | no finite geometry to sweep |
+| a GATE on the operand | a gated combine is `mix(acc, combine(acc, item), mask)`, and a lerp of a beyond-band value is not beyond band |
+| a gate or a spatial morph ANYWHERE in the layer's chain | the same lerp, downstream: it carries the beyond-band difference into the band at any distance |
+| a morph in a layer fold at or above the layer | the same, one level up |
+| an infinite or non-finite support anywhere, an empty or infinite box | nothing to claim |
+
+The gate and morph rules are the ones a reader is most likely to think
+unnecessary. They are the cases where the difference between "band-clamped
+equal" and "equal" becomes visible, and a local op never meets them because for
+a local op the difference is zero.
+
+## Two instruments, and they do not see the same things
+
+The PROBE samples the field and asks whether a point's meshing classification
+changed outside the claimed box. The ORACLE keeps a brick cache across the edit,
+dirties the reported region, refills, and compares every stored brick and the
+mesh against a cache rebuilt from nothing.
+
+They are not redundant, and the fold term shows why: the probe failed on it
+immediately, while the first oracle fixture could not see it at all — a fold
+only moves the document's surface where the two layers' fields are within its
+support of each other, and a small shape folded beside the form leaves that
+region empty of bricks. The oracle's fold fixture is now a box over the whole
+form, and the term's absence costs 93 stale bricks.
+
+The lesson is the fixture's, not the test's: a gate that passes because its
+fixture has nothing to disagree about is the failure mode this repository keeps
+meeting, and the way to find it is to break the code on purpose and check the
+gate notices.
+
+## What was tried and rejected
+
+**Weakening `item_nonlocality` for Intersect.** The one-line change. It makes
+the public influence query, per-brick culling (which may never drop an
+intersect), the generic dirty-node API and every other Intersect edit unsound.
+The measurements that put the layer bound there are in bounds.cpp and are not in
+dispute.
+
+**Answering the delta from one side of the apply.** The after box alone is what
+a naive implementation produces, and the probe's own self-test asserts it FAILS
+— sign changes and band changes outside it — so the sweep is not optional and
+the probe can see when a bound is one term short.
+
+**Narrowing `clay_brick_cache_mark_dirty_nodes` instead of adding an entry
+point.** That call answers "an edit to this node" with no before state; it
+cannot know a move happened, and making it assume one would be wrong for every
+other edit a host makes through it.
+
+**A per-brick predicate inside the swept box.** The region was the dominant
+cost — 9,680 bricks against 286 at ten times the extent — so it comes first.
+Whether the 286 can be narrowed further is a separate measurement.
+
+## Cost
+
+Two extra `item_geometry_bound` calls, two `cull_pad` walks of the layer's node
+map and two ancestor walks per edit — measured at 0.002 ms a frame beside the
+influence bound that is still taken. `cull_pad` walks the node map reading blend
+parameters only; it is not the geometry walk #451 was about.
