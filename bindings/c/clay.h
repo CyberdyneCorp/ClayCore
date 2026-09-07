@@ -7918,17 +7918,32 @@ void clay_multires_destroy(clay_multires* surface);
 clay_result clay_layer_multires_present(const clay_document* doc, clay_layer_id layer,
                                         int32_t* out_present);
 
-/* A BORROWED handle onto the layer's hierarchy, or CLAY_ERROR_NOT_FOUND when it
- * has none. The document owns it: the handle must not outlive the document, and
- * destroying the handle leaves the hierarchy in place. Removing the hierarchy
- * makes every handle onto it answer CLAY_ERROR_NOT_FOUND rather than dangle. */
+/* A handle onto the layer's hierarchy, or CLAY_ERROR_NOT_FOUND when it has none.
+ *
+ * TWO OBJECTS, AND ONLY ONE OF THEM IS BORROWED. The HIERARCHY is the document's:
+ * this handle does not own it, and destroying the handle leaves it in place. The
+ * HANDLE is an allocation of YOURS, and you free it with clay_multires_destroy
+ * exactly as you would one from clay_multires_from_mesh. "Borrowed" describes
+ * what the handle points at, never the handle.
+ *
+ * Said here because a host reads the call that PRODUCES a thing when deciding
+ * whether it owes a free, not the call that destroys it -- and the previous
+ * wording, "the document owns it", had a pronoun that could be read as the
+ * handle. That reading leaks the handle and nothing about it looks wrong: the
+ * hierarchy is fine, the document is fine, and only a leak checker on a platform
+ * that has one ever says so.
+ *
+ * The handle must not outlive the document. Removing the hierarchy makes every
+ * handle onto it answer CLAY_ERROR_NOT_FOUND rather than dangle. */
 clay_result clay_layer_multires(clay_document* doc, clay_layer_id layer,
                                 clay_multires** out_surface);
 
 /* MOVE `source`'s hierarchy into the layer. The document owns it afterwards and
  * writes it on save, and `source` becomes a BORROWED handle onto it -- so a host
  * that built a hierarchy and attached it keeps using the same handle, now
- * referring to the document's.
+ * referring to the document's, AND STILL FREES THAT HANDLE when it is done with
+ * it. The move transfers the hierarchy; it does not transfer the allocation the
+ * caller is holding.
  *
  * A MOVE AND NOT A COPY, which is a cost decision rather than a style one.
  * mesh::MultiresSurface is move-only, so a copying form would have to round trip
