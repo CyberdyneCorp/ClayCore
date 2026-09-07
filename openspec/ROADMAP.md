@@ -2517,6 +2517,60 @@ item, and does this one want that? The answer is often yes — a mirrored cut is
 defensible — but it should be a decision with a sentence behind it rather than a
 default nobody chose.
 
+### A revert proof that did not compile is not a revert proof
+
+The house rule says: revert the fix, check the revert still COMPILES, check the
+test fails. **This is what the middle clause is for**, and the iPad session
+nearly shipped a false green that names the mechanism exactly.
+
+Its first revert deleted two call sites. That left a helper unreferenced,
+`-Werror,-Wunused-function` failed the build, **and the harness ran the STALE
+binary** — which reported `2 passed | 0 failed`. It had `build_exit=2` and
+`2 passed` on adjacent lines and began reading the second one.
+
+**A test runner will happily give you yesterday's answer.** Nothing about
+`2 passed` says which binary produced it, and a revert is precisely the moment
+you are least entitled to assume — you have just deliberately broken the code,
+so a build failure is the expected outcome and the least surprising thing to
+skim past.
+
+**The fix is mechanical: assert the build succeeded before reading the test
+result.** Same shape as the vacuity guard above — a cheap check that the thing
+you are about to believe was produced by the code you think you changed. (Their
+second revert kept the helper referenced under `if (false)`, so the revert
+isolated the call sites and the build stayed clean.)
+
+Worth adding to any harness that runs a build and a test in one script: the exit
+code of the build is a precondition of the test's output meaning anything, and
+scripts that print both put them where a reader chooses.
+
+### A measurement below the instrument's floor, and why a budget would be worse than none
+
+The device gate reported `mesh_sustained_grab: no declared budget in the
+baseline`. The obvious repair is to declare one. **That would be worse than the
+gap**, and the reason generalises.
+
+The case measures **0.019 ms per dab** against a suite floor of **0.125 ms** —
+6.6x BELOW what the instrument can resolve. A budget derived from it would gate
+noise, and it would do so while **reading as coverage**: a row with a number
+beside it looks watched.
+
+**26 measurement points across ~15 cases in that run sit under the floor.** For
+most that is harmless — they are the small end of a 10/100/1000 growth axis and
+only the top point gates. `mesh_sustained_grab` is different because it has ONE
+measurement: its axis is windows rather than document size, so there is no larger
+point to fall back on.
+
+**Which means the checker is asking the wrong question of it.** The case's claim
+is DRIFT — the last window is not slower than the first — not an absolute cost,
+and the harness already has a `DRIFT` verdict. A budget requirement running ahead
+of the drift verdict turns a well-posed case into an ill-posed one.
+
+**The rule: before declaring a budget, check the measurement is above the floor
+that produced it.** A gate on a quantity the instrument cannot resolve is the
+measurement twin of a fixture that cannot fail — and it is harder to spot,
+because unlike an absent gate it leaves a number in the report.
+
 ### The vacuity guard: the assertion form of the revert proof
 
 The cheapest instrument in this document, and the one that turns a judgement into
