@@ -194,16 +194,16 @@ cool() {
     sleep "$COOLDOWN"
 }
 
-session "1/5 — the light verb cases, cold" "$RESULTS_VERB" \
+session "1/7 — the light verb cases, cold" "$RESULTS_VERB" \
     -only-testing:ClayCoreDeviceVerbTests
 cool
-session "2/5 — the heavy verb cases, cold" "$RESULTS_VERBH" \
+session "2/7 — the heavy verb cases, cold" "$RESULTS_VERBH" \
     -only-testing:ClayCoreDeviceVerbHeavyTests
 cool
-session "3/5 — latency and parity, cold" "$RESULTS_CORE" \
+session "3/7 — latency and parity, cold" "$RESULTS_CORE" \
     -only-testing:ClayCoreDeviceMeasureTests -only-testing:ClayCoreDeviceTests
 cool
-session "4/5 — the gallery, cold" "$RESULTS_GALLERY" \
+session "4/7 — the gallery, cold" "$RESULTS_GALLERY" \
     -only-testing:ClayCoreDeviceGalleryTests
 cool
 # ADAPTIVE TOPOLOGY, LAST. Appended rather than inserted: the 69 committed
@@ -213,7 +213,7 @@ cool
 # which can only make its own figures pessimistic -- the safe direction for a
 # suite whose baselines do not exist yet. Move it earlier only together with a
 # full re-baseline.
-session "5/6 — adaptive topology, cold" "$RESULTS_DYNTOPO" \
+session "5/7 — adaptive topology, cold" "$RESULTS_DYNTOPO" \
     -only-testing:ClayCoreDeviceDyntopoTests
 cool
 # THE DETAIL CASE, LAST, for the reason dyntopo is second-to-last: its
