@@ -2544,11 +2544,32 @@ hierarchy's own faces, worst `|unit(area) - unit(angle)|` per vertex:
 | bumpy, 5.0x graded | 1.827 (131.97°) | 1.251 (77.40°) | 0.897 (53.31°) |
 
 The existing fixture discriminates easily — **1089 of 1089 vertices differ at
-level 3**, and a port that reached for the angle-weighted function would have
-failed at 4.47° against a defect of 0.103: louder than the thing being fixed. The
-two planar rows are the control that makes the rest trustworthy: a flat cage
-reads exactly 0.000000 whether graded or not, because there the weightings must
-agree.
+level 3**. The two planar rows are the control that makes the rest trustworthy: a
+flat cage reads exactly 0.000000 whether graded or not, because there the
+weightings must agree.
+
+**And a wrong port makes the defect SMALLER without fixing it, which is why the
+gate has to assert exact equality.** Measured at the boundary corners on the
+built port:
+
+```
+the defect being fixed, level 3:    0.103  (5.90°)
+the wrong port, level 3, ordinary:  0.071  (4.05°)   124 corners still wrong
+the wrong port, level 3, 3.0x:      0.267 (15.35°)
+the wrong port, level 1, 3.0x:      1.485 (95.88°)
+```
+
+The angle-weighted port is about **70% of the defect** — it moves 124 corners
+from 5.90° off to 4.05° off. **An improvement that is still wrong is exactly what
+a tolerance-based gate lets through**, and only asserting exact `0.000000`
+against the dense oracle separates a fix from an improvement. That is the real
+argument for the strict assertion, and it is stronger than "the wrong answer
+would be obvious".
+
+The graded cage earns its place on the same measurement rather than on the
+discrimination question: both cages catch the wrong port, and the graded one
+catches it **eight times more loudly at level 1** (95.88° against 11.37°). Keep
+it for the margin, not because the ordinary cage is blind.
 
 **"Graded" sounds like the property and is not.** A 3.0x graded planar cage
 distinguishes nothing. That is the trap worth naming, and it is the one that
