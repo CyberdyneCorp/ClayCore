@@ -235,7 +235,10 @@ own:
   mesh subtool costs the weld plus the ray tree — around 116 ms and 89 ms at
   296k triangles — and the tree is built lazily, so a host that moves only
   `create` to a worker still pays the tree on whichever thread picks first.
-  Call `_refresh` there too.
+  Call `_refresh` there too. **Since 0.89.0 the weld half is paid once per
+  layer, not once per session**: the document holds the adjacency and hands it
+  to every sculptor over that layer, so a second `create` over unchanged
+  triangles is 0.25 ms rather than 121 ms. See the topology cache below.
 
 **And what never reaches a device at all.** Every bake in the ABI —
 `clay_layer_consolidate` and its `_cost` / `_cancellable` / `_region` forms,
@@ -2037,6 +2040,46 @@ opens its step and closes it before returning, and calls on one document must be
 serialized, so there is no moment at which you could hold a handle, have a step
 open, and ask. It is reported anyway so the total stays the sum of the fields if
 an entry point spanning a step is ever added. Do not build a response around it.
+
+**The topology cache IS in this report, and it is the one sculptor-adjacent
+figure a document can account for by itself** (ABI 0.89.0). Building the weld
+classes and the neighbourhood CSR a brush walks is the whole of what a sculptor
+costs to construct — 120.8 ms on a 296k-triangle mesh, against a sculptor whose
+other members are empty vectors — and it used to be paid again by every session
+opened on the same triangles. The document now holds one per mesh layer:
+
+```c
+clay_topology_cache_stats s = { .struct_size = sizeof s };
+clay_document_topology_cache_stats(doc, &s);   /* entries, bytes, hits, misses */
+
+uint64_t released = 0;
+clay_document_trim_topology_cache(doc, &released);
+```
+
+Read `hits` and `misses` first, not `bytes`. A cache that never hits and a
+cache that is not there are indistinguishable from outside, so those two are the
+only way to tell whether your session pattern is defeating it.
+
+- **Sculpting does not invalidate an entry.** A weld partition is pinned when it
+  is built and positions move under it freely — the fixed-topology contract, and
+  what a sculptor live across a stroke has always held. A sculptor created after
+  a stroke therefore gets what the live one had. The one visible consequence: a
+  vertex dragged out of a coincidence it was welded into stays in its class.
+- **Replacing a layer's triangles does.** `clay_document_replace_mesh_layer`,
+  `clay_document_voxel_remesh_layer` and `clay_mesh_weld` on a layer all drop
+  the entry.
+- **An entry is verified, not trusted.** Every lookup fingerprints the entry
+  against the mesh it is about to be served for — counts, weld epsilon and a
+  hash of the index buffer, 0.25 ms — so two meshes with identical counts and
+  different connectivity cannot be served each other's data, and a replacement
+  path that failed to invalidate is a slow miss rather than a wrong answer.
+- **A trim releases only what no live sculptor holds**, which is a fact rather
+  than a best effort: entries are reference-counted. It is safe from a memory
+  warning arriving mid-stroke — it releases the layers nobody is working on and
+  leaves the one under the finger alone.
+- **A standalone `clay_mesh` builds its own.** It belongs to no layer, so there
+  is no identity to key an entry on, and keying on the pointer would key a cache
+  on an address the next allocation can reuse.
 
 **A sculptor's scratch is not in this report, and it is not an omission.**
 `clay_document_memory` measures the document; a mesh sculptor is a handle held

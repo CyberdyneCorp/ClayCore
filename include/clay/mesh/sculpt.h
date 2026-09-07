@@ -165,6 +165,23 @@ class MeshSculptor {
     // For a caller that already built an adjacency (an importer, a test). The
     // adjacency must match `m`; it is checked.
     MeshSculptor(Mesh& m, Adjacency adjacency);
+    // For a caller that has one to SHARE — a document's `TopologyCache`, or a
+    // hierarchy handing over the level adjacency it already holds.
+    //
+    // The adjacency is const and shared, which is what the fixed-topology
+    // contract makes safe: no verb in this file writes one, and two sculptors
+    // over one mesh want the same partition by definition. It is also what
+    // makes the second sculptor over a 296k-triangle mesh free rather than
+    // 120 ms — see `mesh/topology_cache.h`.
+    //
+    // Null is refused by the same rule the other constructors follow: it is
+    // replaced by a build over `m`, so a caller cannot end up with a sculptor
+    // that has no neighbourhoods.
+    MeshSculptor(Mesh& m, std::shared_ptr<const Adjacency> adjacency);
+
+    // The adjacency this sculptor is using, for a caller that wants to hand the
+    // same one to another sculptor without going through a cache. Never null.
+    const std::shared_ptr<const Adjacency>& shared_adjacency() const { return topology_; }
 
     const Mesh& mesh() const { return mesh_; }
     Mesh& mesh() { return mesh_; }
@@ -513,7 +530,11 @@ class MeshSculptor {
     std::vector<kernel::cfloat3> origin_;
 
     Mesh& mesh_;
-    Adjacency adjacency_;
+    // The topology, OWNED JOINTLY. Declared before `adjacency_`, which is bound
+    // to it: the reference is what keeps every use in this class reading
+    // `adjacency_.ring(...)` exactly as it did when the member was by value.
+    std::shared_ptr<const Adjacency> topology_;
+    const Adjacency& adjacency_;
     BrushRegion region_;
     WalkScratch walk_;
     // The walk's own output, in weld classes, before the composition turns it

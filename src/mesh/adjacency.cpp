@@ -200,6 +200,14 @@ Adjacency Adjacency::build(const Mesh& m, float weld_epsilon) {
     return a;
 }
 
+std::size_t Adjacency::bytes() const {
+    const auto of = [](const std::vector<std::uint32_t>& v) {
+        return v.capacity() * sizeof(std::uint32_t);
+    };
+    return sizeof(Adjacency) + of(class_of_) + of(class_members_offsets_) + of(class_members_) +
+           of(ring_offsets_) + of(ring_) + of(tri_offsets_) + of(tris_);
+}
+
 void geodesic_region(const Mesh& m, const Adjacency& adj, kernel::cfloat3 seed_position,
                      float radius, WalkScratch& scratch, std::vector<std::uint32_t>* out_classes,
                      std::vector<float>* out_distance, std::uint32_t seed_hint,

@@ -568,6 +568,11 @@ class MultiresSurface {
     // until `absorb_level_edit` is told.
     Mesh& level_mesh(std::uint32_t level);
     const Adjacency& level_adjacency(std::uint32_t level);
+    // The same object, to SHARE. What `MultiresSculptor::bind` uses: a
+    // `MeshSculptor` built from the reference above copies the CSR arrays, and
+    // a rebind happens on every level change and every cache generation change.
+    // Null only when the level does not exist.
+    std::shared_ptr<const Adjacency> level_adjacency_shared(std::uint32_t level);
 
     // THE COMPLETE SURFACE NEIGHBOURHOOD of this level's vertices: the faces a
     // uniformly refined hierarchy would have put around them that this level

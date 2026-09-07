@@ -968,3 +968,184 @@ TEST_CASE("c abi: the peaks are high-water marks a host reads without owning any
     clay_mesh_sculptor_destroy(s);
     clay_mesh_destroy(m);
 }
+
+// -- the shared topology cache (share-mesh-topology-cache) --------------------
+//
+// WHAT THESE DEFEND is that the host can see the cache at all. The engine's own
+// gates are in test_topology_cache.cpp; these are the ones an integrator's bug
+// report would be about — "is my session pattern hitting it", "can I give the
+// memory back mid-stroke" — and neither is answerable from a C++ unit test.
+
+namespace {
+
+clay_topology_cache_stats cache_stats(const clay_document* doc) {
+    clay_topology_cache_stats s;
+    std::memset(&s, 0, sizeof s);
+    s.struct_size = static_cast<std::uint32_t>(sizeof s);
+    REQUIRE(clay_document_topology_cache_stats(doc, &s) == CLAY_OK);
+    return s;
+}
+
+clay_layer_id add_grid_layer(clay_document* doc, const char* name, clay_mesh** out_borrowed,
+                             int n = 8) {
+    clay_mesh* source = grid_mesh(n, 1.0f);
+    clay_mesh_layer_desc desc;
+    std::memset(&desc, 0, sizeof desc);
+    desc.struct_size = static_cast<std::uint32_t>(sizeof desc);
+    desc.name = name;
+    clay_layer_id layer = 0;
+    REQUIRE(clay_document_add_mesh_layer(doc, source, &desc, &layer, out_borrowed) == CLAY_OK);
+    clay_mesh_destroy(source);
+    return layer;
+}
+
+}  // namespace
+
+TEST_CASE("c abi: two sculptors over one layer share one adjacency") {
+    Doc d;
+    clay_mesh* borrowed = nullptr;
+    add_grid_layer(d.doc, "carried", &borrowed);
+
+    CHECK(cache_stats(d.doc).entries == 0);  // nothing has sculpted yet
+
+    clay_mesh_sculptor* first = nullptr;
+    clay_mesh_sculptor* second = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(borrowed, -1.0f, &first) == CLAY_OK);
+    REQUIRE(clay_mesh_sculptor_create(borrowed, -1.0f, &second) == CLAY_OK);
+
+    const clay_topology_cache_stats s = cache_stats(d.doc);
+    CHECK(s.entries == 1);
+    CHECK(s.misses == 1);
+    CHECK(s.hits == 1);  // THE SECOND CREATE DID NOT BUILD
+    CHECK(s.bytes > 0);
+    CHECK(s.build_ns > 0);
+
+    // And the shared adjacency is the right one: both sessions agree about the
+    // class space, and both can stamp.
+    std::size_t a = 0, b = 0;
+    CHECK(clay_mesh_sculptor_class_count(first, &a) == CLAY_OK);
+    CHECK(clay_mesh_sculptor_class_count(second, &b) == CLAY_OK);
+    CHECK(a == b);
+    const clay_mesh_brush_desc brush_desc = brush(CLAY_MESH_BRUSH_DRAW, 0.5f, 0.5f);
+    std::size_t moved = 0;
+    CHECK(clay_mesh_sculptor_stamp(second, &brush_desc, nullptr, nullptr, &moved) == CLAY_OK);
+    CHECK(moved > 0);
+
+    clay_mesh_sculptor_destroy(first);
+    clay_mesh_sculptor_destroy(second);
+}
+
+TEST_CASE("c abi: a standalone mesh does not enter the cache") {
+    Doc d;
+    clay_mesh* m = grid_mesh(8, 1.0f);  // owned by nobody; belongs to no layer
+    clay_mesh_sculptor* s = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(m, -1.0f, &s) == CLAY_OK);
+    // No identity to key on, so no entry — and the document's cache is not
+    // touched by a mesh that is not its.
+    CHECK(cache_stats(d.doc).entries == 0);
+    clay_mesh_sculptor_destroy(s);
+    clay_mesh_destroy(m);
+}
+
+TEST_CASE("c abi: a trim releases what nothing holds and keeps what a session does") {
+    Doc d;
+    clay_mesh* held = nullptr;
+    clay_mesh* loose = nullptr;
+    add_grid_layer(d.doc, "held", &held);
+    add_grid_layer(d.doc, "loose", &loose);
+
+    clay_mesh_sculptor* keep = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(held, -1.0f, &keep) == CLAY_OK);
+    {
+        clay_mesh_sculptor* transient = nullptr;
+        REQUIRE(clay_mesh_sculptor_create(loose, -1.0f, &transient) == CLAY_OK);
+        clay_mesh_sculptor_destroy(transient);
+    }
+    CHECK(cache_stats(d.doc).entries == 2);
+
+    std::uint64_t released = 0;
+    CHECK(clay_document_trim_topology_cache(d.doc, &released) == CLAY_OK);
+    CHECK(released > 0);
+    CHECK(cache_stats(d.doc).entries == 1);
+
+    // A trim arriving mid-stroke leaves the layer under the finger alone.
+    const clay_mesh_brush_desc brush_desc = brush(CLAY_MESH_BRUSH_DRAW, 0.5f, 0.5f);
+    std::size_t moved = 0;
+    CHECK(clay_mesh_sculptor_stamp(keep, &brush_desc, nullptr, nullptr, &moved) == CLAY_OK);
+    CHECK(moved > 0);
+
+    clay_mesh_sculptor_destroy(keep);
+    // Now nothing holds it, and the second trim gets it back.
+    released = 0;
+    CHECK(clay_document_trim_topology_cache(d.doc, &released) == CLAY_OK);
+    CHECK(released > 0);
+    CHECK(cache_stats(d.doc).entries == 0);
+
+    // NULL out pointer is not an error: "there was nothing to give back" is an
+    // answer a host is allowed to not want.
+    CHECK(clay_document_trim_topology_cache(d.doc, nullptr) == CLAY_OK);
+}
+
+TEST_CASE("c abi: the cache's bytes are in the memory report") {
+    Doc d;
+    clay_mesh* borrowed = nullptr;
+    const clay_layer_id layer = add_grid_layer(d.doc, "carried", &borrowed, 24);
+
+    clay_memory_report empty;
+    std::memset(&empty, 0, sizeof empty);
+    empty.struct_size = static_cast<std::uint32_t>(sizeof empty);
+    REQUIRE(clay_document_memory(d.doc, &empty) == CLAY_OK);
+    CHECK(empty.topology_cache == 0);
+
+    clay_mesh_sculptor* s = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(borrowed, -1.0f, &s) == CLAY_OK);
+
+    clay_memory_report filled;
+    std::memset(&filled, 0, sizeof filled);
+    filled.struct_size = static_cast<std::uint32_t>(sizeof filled);
+    REQUIRE(clay_document_memory(d.doc, &filled) == CLAY_OK);
+    CHECK(filled.topology_cache > 0);
+    CHECK(filled.topology_cache == cache_stats(d.doc).bytes);
+    // It is REBUILDABLE, and the totals still add up with it in.
+    CHECK(filled.rebuildable >= filled.topology_cache);
+    CHECK(filled.total == empty.total + filled.topology_cache);
+
+    // And it is attributed to the layer that caused it, so the per-layer view
+    // still reaches the document figure by addition.
+    clay_memory_report per_layer;
+    std::memset(&per_layer, 0, sizeof per_layer);
+    per_layer.struct_size = static_cast<std::uint32_t>(sizeof per_layer);
+    REQUIRE(clay_layer_memory(d.doc, layer, &per_layer) == CLAY_OK);
+    CHECK(per_layer.topology_cache == filled.topology_cache);
+
+    clay_mesh_sculptor_destroy(s);
+}
+
+TEST_CASE("c abi: replacing a layer's triangles invalidates the entry") {
+    Doc d;
+    clay_mesh* borrowed = nullptr;
+    const clay_layer_id layer = add_grid_layer(d.doc, "carried", &borrowed, 8);
+
+    clay_mesh_sculptor* first = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(borrowed, -1.0f, &first) == CLAY_OK);
+    clay_mesh_sculptor_destroy(first);
+    CHECK(cache_stats(d.doc).entries == 1);
+
+    // A wholesale replacement, which is the shape a remesh, an undo of one and
+    // a rebuild all take.
+    clay_mesh* replacement = grid_mesh(10, 1.0f);
+    std::uint64_t at = 0;
+    REQUIRE(clay_document_mesh_layer_revision(d.doc, layer, &at) == CLAY_OK);
+    REQUIRE(clay_document_replace_mesh_layer(d.doc, layer, replacement, at) == CLAY_OK);
+    clay_mesh_destroy(replacement);
+
+    // The entry the remesh replaced is gone, and the next session builds one.
+    CHECK(cache_stats(d.doc).entries == 0);
+    clay_mesh_sculptor* second = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(borrowed, -1.0f, &second) == CLAY_OK);
+    const clay_topology_cache_stats s = cache_stats(d.doc);
+    CHECK(s.entries == 1);
+    CHECK(s.misses == 2);
+    CHECK(s.hits == 0);
+    clay_mesh_sculptor_destroy(second);
+}
