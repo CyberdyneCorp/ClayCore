@@ -2256,6 +2256,45 @@ cause, and stopped. Recorded here because the reasoning is worth keeping: *a pee
 asking twice is not a reason to schedule someone else's product decision.* We
 asked twice; the right answer to the second ask was no.
 
+### A merge resolution is a claim, and mine went in unproved
+
+Resolving an add/add conflict on `tools/check_task_symbols.py`, I took the
+branch's 397-line rewrite over main's 134-line original and wrote in the merge
+message that the rewrite's `EXTENSIONS` set **"is a superset of main's
+`FILE_SUFFIX` tuple"**. I had compared the two lists. I had not compared the two
+BEHAVIOURS, and the sentence was false twice over.
+
+main's `claimed_symbols` split a dotted citation and checked each part, so a
+struct field and its struct both had to exist. The rewrite recognised only paths,
+filenames and identifiers, so every `A.b` reached the "no opinion" branch and
+returned `None`. **Twelve dotted citations across the non-archived changes went
+silently unverified** — `Document.to_bytes`,
+`clay_multires_stamp_report.moved_vertices`, `Document.writable_at_minor` and
+nine more. `EXTENSIONS` also dropped main's `.rs` and `.glsl`.
+
+**The aggravating detail is what the same branch was doing at the time**: wiring
+that gate into CI. It advertised the checker and weakened it in one change.
+
+**Why the existing habits did not catch it.** A merge is the one edit nobody
+diffs against its own parents — the review lens that found it had to be pointed
+at the merge commit explicitly, and it was pointed there only because the last
+round had already shown that commits written under time pressure go unread. Two
+full adversarial rounds had passed over this file. Neither could see it, because
+it did not exist until the merge.
+
+**The rule:** a conflict resolution that says "A subsumes B" is a claim of the
+same kind as a spec SHALL, and it needs the same evidence — run BOTH sides
+against one input and diff the answers. Comparing the two constant tables is
+comparing the parts of the behaviour that were easy to see.
+
+Recorded because it is the failure this document names elsewhere as the host's
+and as mine — *reading the right code and answering a different question* — this
+time in a merge message, where nothing re-runs it. When the fix landed it caught
+its own first false positive immediately: three tasks.md lines quoting a linker
+error, `GLIBCXX_3.4.31 not found`, read as three symbol claims. A span with
+whitespace is prose, which the path and identifier shapes had always known and
+the restored member rule had to be told.
+
 ### A negative repro that rules out one path, and the ceiling gate that localises it
 
 The host tried to reproduce the coarse ceiling reset and **could not**, and
