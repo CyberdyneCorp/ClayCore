@@ -1313,6 +1313,168 @@ TEST_CASE("c abi: a world raycast feeds a world stamp on a transformed layer") {
     CHECK(reference > 0);
 }
 
+TEST_CASE("c abi: a world raycast feeds a world STROKE on a transformed layer") {
+    // THE REGRESSION, and it is the same claim as the stamp case above made
+    // about the other two entry points. This session's header says a declared
+    // frame makes EVERY position, radius, direction and normal crossing this
+    // handle world "in every call: the stamp, both stroke calls, the raycast,
+    // and the mask". The stamp converted; the two stroke calls set
+    // `options.mesh_to_world` for the mask lattice and converted nothing else,
+    // so a host that raycast in world and fed the hit to a STROKE reached
+    // nothing -- and `applied == 0` is documented to mean "reached nothing,
+    // fully masked, or no displacement", so the failure was indistinguishable
+    // from three ordinary outcomes.
+    //
+    // Measured before the fix, three runs of one binary, which is what turns an
+    // absence into a proof:
+    //     no frame,   samples local: applied = 6
+    //     frame at 5, samples world: applied = 0   <- the defect
+    //     frame at 5, samples local: applied = 6   <- read as LOCAL, so unconverted
+    const float axis[3] = {0, 1, 0};
+    struct Placement {
+        const char* name;
+        float position[3];
+        float angle;
+        float scale;
+    };
+    const Placement placements[] = {
+        {"identity", {0, 0, 0}, 0.0f, 1.0f},
+        {"translated", {3.0f, -1.0f, 0.5f}, 0.0f, 1.0f},
+        {"rotated", {0, 0, 0}, 0.9f, 1.0f},
+        {"scaled", {0, 0, 0}, 0.0f, 2.5f},
+        {"combined", {3.0f, -1.0f, 0.5f}, 0.9f, 2.5f},
+    };
+
+    std::size_t reference = 0;
+    for (const Placement& p : placements) {
+        INFO("placement " << p.name);
+        Doc d;
+        const PlacedLayer l = place(d.doc, p.name, p.position, axis, p.angle, p.scale);
+        clay_mesh_sculptor* s = nullptr;
+        REQUIRE(clay_mesh_sculptor_create(l.mesh, -1.0f, &s) == CLAY_OK);
+        REQUIRE(clay_mesh_sculptor_use_layer_transform(s) == CLAY_OK);
+
+        // The same local point the stamp case aims at, placed by hand so the
+        // test does not build its input with the code under test.
+        const float local_target[3] = {0.2f, 0.02f, 0.1f};
+        float world_target[3] = {0, 0, 0};
+        {
+            const float c = std::cos(p.angle), sn = std::sin(p.angle);
+            const float sx = local_target[0] * p.scale, sy = local_target[1] * p.scale,
+                        sz = local_target[2] * p.scale;
+            world_target[0] = (c * sx + sn * sz) + p.position[0];
+            world_target[1] = sy + p.position[1];
+            world_target[2] = (-sn * sx + c * sz) + p.position[2];
+        }
+        const float origin[3] = {world_target[0], world_target[1] + 10.0f, world_target[2]};
+        const float dir[3] = {0.0f, -1.0f, 0.0f};
+
+        clay_mesh_hit hit;
+        std::memset(&hit, 0, sizeof hit);
+        hit.struct_size = static_cast<std::uint32_t>(sizeof hit);
+        REQUIRE(clay_mesh_sculptor_raycast(s, origin, dir, nullptr, &hit) == CLAY_OK);
+        REQUIRE(hit.hit == 1);
+
+        // A SHORT STROKE THROUGH THE HIT, in world, along the layer's own +x as
+        // the placement turned it. Eight samples, the spread the stroke case
+        // above this file uses, because a stroke fixture that reaches nothing
+        // proves nothing and one of my own invention did exactly that.
+        const float c = std::cos(p.angle), sn = std::sin(p.angle);
+        std::vector<float> samples;
+        for (int i = 0; i < 8; ++i) {
+            const float t = (-0.4f + 0.1f * static_cast<float>(i)) * 0.3f * p.scale;
+            samples.push_back(hit.position[0] + c * t);
+            samples.push_back(hit.position[1]);
+            samples.push_back(hit.position[2] - sn * t);
+            samples.push_back(1.0f);  // pressure
+            samples.push_back(0.0f);  // tilt
+        }
+
+        clay_stroke_preset preset;
+        preset.struct_size = static_cast<std::uint32_t>(sizeof preset);
+        REQUIRE(clay_stroke_preset_defaults(&preset) == CLAY_OK);
+        preset.radius = 0.30f * p.scale;  // WORLD, like everything else here
+        preset.strength = 0.8f;
+
+        const clay_mesh_brush_desc b = brush(CLAY_MESH_BRUSH_DRAW, 0.30f * p.scale, 0.5f);
+        std::size_t applied = 0;
+        REQUIRE(clay_mesh_sculptor_apply_stroke(s, samples.data(), samples.size() / 5, &preset, &b,
+                                                nullptr, nullptr, 0, nullptr,
+                                                &applied) == CLAY_OK);
+        CHECK(applied > 0);
+
+        const std::size_t count = displaced(l.mesh);
+        CHECK(count > 0);
+        if (std::string(p.name) == "identity")
+            reference = count;
+        else
+            // THE SAME VERTICES, whatever the placement -- the stroke walks the
+            // same path across the same surface, and its radius was scaled with
+            // it. This is the assertion the stamp case makes, and the reason it
+            // is worth making twice is that the two calls took different routes
+            // to the same contract and only one of them honoured it.
+            CHECK(count == reference);
+
+        clay_mesh_sculptor_destroy(s);
+    }
+    CHECK(reference > 0);
+}
+
+TEST_CASE("c abi: a preset stroke crosses the same frame the raw stroke does") {
+    // clay_mesh_sculptor_apply_preset is the second stroke call and had the
+    // same gap. It is checked separately rather than assumed, because the two
+    // read their stroke from different places -- one from a clay_stroke_preset,
+    // one from the stroke embedded in a clay_brush_preset -- and "the other one
+    // must be fine" is how the first was missed.
+    const float axis[3] = {0, 1, 0};
+    const float origin[3] = {0.0f, 0.0f, 0.0f};
+    const float at[3] = {3.0f, -1.0f, 0.5f};
+
+    std::size_t reference = 0;
+    for (float scale : {1.0f, 2.5f}) {
+        const bool identity = scale == 1.0f;
+        INFO("scale " << scale);
+        Doc d;
+        const PlacedLayer l =
+            place(d.doc, identity ? "flat" : "placed", identity ? origin : at, axis, 0.0f, scale);
+        clay_mesh_sculptor* s = nullptr;
+        REQUIRE(clay_mesh_sculptor_create(l.mesh, -1.0f, &s) == CLAY_OK);
+        if (!identity) REQUIRE(clay_mesh_sculptor_use_layer_transform(s) == CLAY_OK);
+
+        clay_brush_preset bp{};
+        bp.struct_size = sizeof(bp);
+        REQUIRE(clay_brush_preset_by_name("Standard", &bp) == CLAY_OK);
+        bp.stroke.radius = 0.30f * scale;
+        bp.stroke.strength = 0.8f;
+        bp.brush.radius = 0.30f * scale;
+
+        const float centre[3] = {identity ? 0.2f : at[0] + 0.2f * scale, 0.0f,
+                                 identity ? 0.1f : at[2] + 0.1f * scale};
+        std::vector<float> samples;
+        for (int i = 0; i < 8; ++i) {
+            samples.push_back(centre[0] + (-0.4f + 0.1f * static_cast<float>(i)) * 0.3f * scale);
+            samples.push_back(centre[1] + (identity ? 0.0f : -1.0f));
+            samples.push_back(centre[2]);
+            samples.push_back(1.0f);
+            samples.push_back(0.0f);
+        }
+
+        std::size_t applied = 0;
+        REQUIRE(clay_mesh_sculptor_apply_preset(s, samples.data(), samples.size() / 5, &bp, nullptr,
+                                                0, 0, 0, nullptr, nullptr, 0, nullptr,
+                                                &applied) == CLAY_OK);
+        CHECK(applied > 0);
+        const std::size_t count = displaced(l.mesh);
+        CHECK(count > 0);
+        if (identity)
+            reference = count;
+        else
+            CHECK(count == reference);
+        clay_mesh_sculptor_destroy(s);
+    }
+    CHECK(reference > 0);
+}
+
 TEST_CASE("c abi: an undeclared frame is exactly the behaviour that came before") {
     const float axis[3] = {0, 1, 0};
     const float at[3] = {3.0f, 0.0f, 0.0f};

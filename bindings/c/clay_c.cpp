@@ -15823,6 +15823,37 @@ void brush_settings_to_local(const clay_mesh_sculptor& s, mesh::MeshBrushSetting
     settings->layer_height = world_length_to_local(s, settings->layer_height);
 }
 
+// The STROKE's own world-valued fields, for a session that declares a space.
+//
+// A SECOND HELPER AND NOT AN OVERSIGHT IN THE FIRST. `apply_to_mesh` IGNORES
+// `settings.radius` and `settings.strength` -- each stamp brings its own, which
+// is what makes pressure and taper shape a mesh stroke exactly as they shape a
+// voxel one -- so `brush_settings_to_local` converts, among other things, the
+// one number a stroke never reads. What a stroke reads is here: the sample
+// positions and the PRESET's radius.
+//
+// The two velocities are world units PER SECOND, and a rate whose numerator is
+// a length scales exactly as the length does. Missing them would leave a
+// speed-driven brush reading the same gesture as faster or slower purely
+// because the layer was scaled.
+//
+// Everything else is already frame-free and is deliberately left alone:
+// `spacing` is a fraction of the DIAMETER, the jitters are fractions of the
+// radius, the tapers are fractions of the stroke, and strength, the pressure
+// curve, `steady` and the rotations are not lengths at all. Converting a
+// fraction would be the mirror of not converting a length.
+void stroke_to_local(const clay_mesh_sculptor& s, std::vector<brush::StrokeSample>* samples,
+                     brush::StrokePreset* preset) {
+    if (!s.has_frame) return;
+    for (brush::StrokeSample& sample : *samples) {
+        sample.position = world_point_to_local(s, sample.position);
+        sample.velocity = world_length_to_local(s, sample.velocity);
+    }
+    preset->radius = world_length_to_local(s, preset->radius);
+    preset->velocity_response.reference =
+        world_length_to_local(s, preset->velocity_response.reference);
+}
+
 // The mask is WORLD-ADDRESSED by design (voxel/mask.h) and a vertex handed to
 // the gate is in the MESH's own space, so the two only met correctly on an
 // untransformed layer. This is where they meet.
@@ -17066,6 +17097,10 @@ clay_result clay_mesh_sculptor_apply_stroke(clay_mesh_sculptor* sculptor,
     brush::StrokePreset resolved;
     r = read_stroke(samples_xyzpt, sample_count, preset, &samples, &resolved);
     if (r != CLAY_OK) return r;
+    // A declared session speaks WORLD in every call, this one included. Both
+    // halves: the descriptor, and the stroke's own radius and sample path.
+    brush_settings_to_local(*sculptor, &settings);
+    stroke_to_local(*sculptor, &samples, &resolved);
 
     voxel::MaskField* field_mask = nullptr;
     if (mask) {
@@ -17119,6 +17154,10 @@ clay_result clay_mesh_sculptor_apply_preset(clay_mesh_sculptor* sculptor,
     std::vector<brush::StrokeSample> samples;
     r = read_samples(samples_xyzpt, sample_count, &samples);
     if (r != CLAY_OK) return r;
+    // As above. A preset carries its stroke and its settings together, and both
+    // halves cross this boundary.
+    brush_settings_to_local(*sculptor, &p.settings);
+    stroke_to_local(*sculptor, &samples, &p.stroke);
 
     voxel::MaskField* field_mask = nullptr;
     if (mask) {

@@ -9689,6 +9689,14 @@ clay_result clay_mesh_sculptor_raycast(clay_mesh_sculptor* sculptor, const float
  * world-addressed by design (see -- masks --) and was being sampled at a local
  * vertex position by the single-stamp path.
  *
+ * A STROKE CARRIES LENGTHS THE DESCRIPTOR DOES NOT, and both stroke calls
+ * convert those too: the sample path, the PRESET's radius (apply_to_mesh
+ * ignores the descriptor's -- each stamp brings its own), and the two
+ * velocities, which are world units per second and scale as the length in
+ * their numerator does. Spacing, the jitters and the tapers are fractions and
+ * are deliberately left alone; converting a fraction would be the mirror of
+ * not converting a length.
+ *
  * NO FRAME IS THE IDENTITY, and the identity is exactly the behaviour that came
  * before this existed. A host that has not heard of it is not opted into it. */
 clay_result clay_mesh_sculptor_set_world_frame(clay_mesh_sculptor* sculptor,
