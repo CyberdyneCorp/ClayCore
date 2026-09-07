@@ -581,6 +581,13 @@ struct HierarchyDoc {
         // any sculpt layer`, so a hierarchy at one level holds nothing an artist
         // made — `refine` below is what makes it hold something.
         REQUIRE(clay_layer_take_multires(d, layer, surface) == CLAY_OK);
+        // AND THE HANDLE IS STILL OURS. `take` moves the HIERARCHY into the
+        // document and says so at its declaration -- "the handle follows its
+        // hierarchy rather than being left moved-from, so a host that built one
+        // and attached it keeps the handle it already has". Keeping it is the
+        // point; freeing it is still the caller's job, and freeing a borrowed
+        // handle is documented as safe rather than merely tolerated.
+        clay_multires_destroy(surface);
     }
 
     /// Add a level, which is what makes this hierarchy carry an artist's work.
@@ -590,6 +597,11 @@ struct HierarchyDoc {
         REQUIRE(surface != nullptr);
         std::int32_t err = -1;
         REQUIRE(clay_multires_add_level(surface, nullptr, &err) == CLAY_OK);
+        // BORROWED, and the handle is a separate allocation from the hierarchy:
+        // "destroying the handle leaves the hierarchy in place". The level this
+        // just added stays on the document's copy, which is what the cases below
+        // then ask about.
+        clay_multires_destroy(surface);
     }
     ~HierarchyDoc() { clay_document_destroy(d); }
     HierarchyDoc(const HierarchyDoc&) = delete;

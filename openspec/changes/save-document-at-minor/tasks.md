@@ -59,3 +59,23 @@
 - [x] 5.1 Full unit suite green
 - [ ] 5.2 `python3 tools/release_check.py --skip-slow`
 - [ ] 5.3 CI green
+
+## 8. The fixture leaked, and only one CI job could see it
+
+- [x] 8.1 `AddressSanitizer: 520 byte(s) leaked in 5 allocation(s)` on the ASan
+      job. `HierarchyDoc` builds a `clay_multires` handle and `refine()` borrows
+      one; neither was destroyed. Three constructions plus two refines is the
+      five
+- [x] 8.2 BOTH handles are the caller's. `clay_layer_take_multires` moves the
+      HIERARCHY and says at its declaration that "the handle follows its
+      hierarchy rather than being left moved-from"; `clay_layer_multires` hands
+      back a borrow where "destroying the handle leaves the hierarchy in place".
+      A handle is a separate allocation from the thing it names
+- [x] 8.3 NOT REPRODUCIBLE LOCALLY UNDER ASan -- macOS answers
+      "detect_leaks is not supported on this platform", so a clean local ASan
+      run says nothing at all about leaks. TSan and the plain Linux build passed
+      on the same commit; one job of sixteen could see this
+- [x] 8.4 Verified with the macOS `leaks` tool instead, both directions: 0 leaks
+      with the fix, `5 leaks for 560 total leaked bytes` with it reverted. The
+      byte count differs from CI's 520 because the handle struct differs by
+      platform; the five objects are the same five
