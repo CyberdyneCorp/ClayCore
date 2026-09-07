@@ -8483,3 +8483,86 @@ def test_a_weld_that_merges_nothing_does_not_invalidate_the_cache():
     merged = seamy.weld()
     assert merged["vertices_merged"] > 0
     assert doc.topology_cache_stats["entries"] == 1
+
+
+# -- which space a session speaks (define-carried-mesh-transform-semantics) ---
+
+def _ridged(n=16, half=1.0):
+    """A grid sloped in x and flat in z, so an axis swap is visible."""
+    positions = []
+    for z in range(n + 1):
+        for x in range(n + 1):
+            px = -half + 2.0 * half * x / n
+            positions.append((px, 0.10 * px, -half + 2.0 * half * z / n))
+    indices = []
+    stride = n + 1
+    for z in range(n):
+        for x in range(n):
+            a = z * stride + x
+            indices += [a, a + stride, a + 1, a + 1, a + stride, a + stride + 1]
+    return clay.Mesh.from_triangles(np.array(positions, dtype=np.float32),
+                                    np.array(indices, dtype=np.uint32))
+
+
+def test_a_world_raycast_feeds_a_world_stamp_on_a_transformed_layer():
+    doc = clay.Document()
+    carried = doc.add_mesh_layer(_ridged(), "carried")
+    doc.set_layer_transform(carried.layer, position=(3.0, -1.0, 0.5), scale=2.0)
+
+    s = clay.MeshSculptor(carried)
+    assert s.world_frame is None
+    s.use_layer_transform()
+    assert s.world_frame["scale"] == pytest.approx(2.0)
+
+    # local (0.2, 0.02, 0.1) placed by the layer, aimed at from above in world
+    world = (3.0 + 0.2 * 2.0, -1.0 + 0.02 * 2.0, 0.5 + 0.1 * 2.0)
+    hit = s.raycast((world[0], world[1] + 10.0, world[2]), (0, -1, 0))
+    assert hit is not None
+    assert hit["position"][0] == pytest.approx(world[0], abs=0.05)
+    assert hit["position"][2] == pytest.approx(world[2], abs=0.05)
+
+    # The gesture that used to move nothing: the world hit, straight back.
+    moved = s.stamp("draw", center=hit["position"], radius=0.6, strength=0.5)
+    assert moved > 0
+
+
+def test_an_undeclared_frame_is_the_behaviour_that_came_before():
+    doc = clay.Document()
+    carried = doc.add_mesh_layer(_ridged(), "carried")
+    doc.set_layer_transform(carried.layer, position=(3.0, 0.0, 0.0), scale=2.0)
+
+    s = clay.MeshSculptor(carried)
+    assert s.world_frame is None
+    # A LOCAL centre still means local, which is what every existing script sends.
+    assert s.stamp("draw", center=(0.2, 0.02, 0.1), radius=0.3, strength=0.5) > 0
+
+    s.use_layer_transform()
+    assert s.world_frame is not None
+    s.set_world_frame()          # nothing declared clears it, as NULL does in C
+    assert s.world_frame is None
+    s.set_world_frame(position=(1.0, 0.0, 0.0), scale=3.0)
+    assert s.world_frame["scale"] == pytest.approx(3.0)
+
+
+# The per-axis refusal is gated in C (test_c_mesh_sculpt.cpp) and not here,
+# because pyclay CANNOT SET A LAYER'S PER-AXIS SCALE at all: Document's
+# `set_layer_transform` takes a uniform scale only, and `scale_axes` appears
+# nowhere but `placement_report`, which reads. So a script cannot build the
+# state this refusal is about. That is a reachability gap of its own and it is
+# recorded rather than worked around here.
+
+
+def test_a_standalone_mesh_has_no_layer_to_adopt():
+    s = clay.MeshSculptor(_ridged())
+    with pytest.raises(RuntimeError, match="standalone"):
+        s.use_layer_transform()
+
+
+def test_two_frames_are_refused_rather_than_resolved_by_precedence():
+    doc = clay.Document()
+    carried = doc.add_mesh_layer(_ridged(), "carried")
+    doc.set_layer_transform(carried.layer, position=(3.0, 0.0, 0.0), scale=2.0)
+    s = clay.MeshSculptor(carried)
+    s.use_layer_transform()
+    with pytest.raises(ValueError, match="already declares"):
+        s.raycast((3.0, 5.0, 0.0), (0, -1, 0), position=(1, 2, 3))

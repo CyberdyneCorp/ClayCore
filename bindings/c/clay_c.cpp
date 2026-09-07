@@ -15486,6 +15486,33 @@ struct clay_mesh_sculptor {
     // no layer and cannot be replaced under anyone.
     std::uint64_t geometry_revision = 0;
     std::unique_ptr<mesh::MeshSculptor> sculptor;
+
+    // -- the space this session speaks (define-carried-mesh-transform-semantics)
+    //
+    // A mesh layer's vertex arrays are LAYER-LOCAL and its `xform` places them,
+    // which is the right contract and is not the defect. The defect was that
+    // the calls crossing that boundary did not agree: a raycast took a world
+    // ray and returned a world hit, and the stamp that hit fed read its centre
+    // as local, took no frame, and said nothing about it. On a layer translated
+    // by 3 and scaled by 2 that stamp moved 0 vertices and returned CLAY_OK,
+    // which is the same answer a fully masked stamp gives.
+    //
+    // Set, every position, radius and direction crossing this handle is WORLD
+    // and every readback is world. UNSET IS THE IDENTITY, which is exactly the
+    // behaviour that came before it -- the rule every appended knob in this ABI
+    // follows, so a host that has not heard of this is not opted into it.
+    //
+    // A `math::Transform` rather than a matrix, and that is a refusal rather
+    // than a simplification: a Transform is a SIMILARITY, so a normal is
+    // carried by its rotation and that IS the inverse transpose, and a world
+    // ball is still a ball in local so a brush RADIUS has a meaning. Under a
+    // per-axis scale neither holds -- a round brush in world is an ellipsoid on
+    // the model -- so a layer carrying one is refused by
+    // clay_mesh_sculptor_use_layer_transform rather than quietly read as
+    // uniform.
+    bool has_frame = false;
+    math::Transform frame;  // local -> world
+
     // The peaks this session measured. OWNED BY THE HANDLE and wired once at
     // create: the engine's seam borrows a pointer, and a borrowed pointer that
     // crossed this boundary would be a lifetime a host can get wrong exactly
@@ -15703,6 +15730,78 @@ clay_result read_mesh_frame(const clay_mesh_frame* src, math::Transform* out) {
     out->scale = d.scale != 0.0f ? d.scale : 1.0f;
     if (!(out->scale > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "frame scale must be > 0");
     return CLAY_OK;
+}
+
+// These take and return C++ types (a cfloat3, a MaskGate), so they live in this
+// anonymous namespace and NOT beside the entry points that call them: an
+// anonymous namespace does not reset language linkage, and the same definitions
+// inside the extern "C" block below would carry C linkage on signatures C
+// cannot spell. That is the C4190 family this file has been bitten by before.
+// -- the world/local crossing, in one place ----------------------------------
+//
+// ONE FUNCTION PER KIND OF QUANTITY, because the three rules differ and a call
+// site that picked the wrong one would be wrong plausibly: a POSITION takes the
+// translation, a DIRECTION does not, and a LENGTH takes only the scale. They
+// are here rather than at four call sites for the reason `pick.h` gives for
+// doing the raycast conversion inside the library: a caller doing it by hand
+// gets a brush whose radius changes when a layer is scaled, and gets it wrong
+// silently.
+//
+// THE RETURN TRIP IS NOT HERE and that is deliberate: the only value this ABI
+// hands back in world is a raycast hit, and `pick::raycast_mesh` already owns
+// both directions of that conversion -- the ray in, the hit out -- for the
+// reason its own header gives. A second local-to-world pair here would be a
+// second answer to one question.
+kernel::cfloat3 world_point_to_local(const clay_mesh_sculptor& s, kernel::cfloat3 p) {
+    return s.has_frame ? s.frame.apply_inverse(p) : p;
+}
+// A direction, and a NORMAL, which under a similarity are the same map: the
+// inverse transpose of a rotation-and-uniform-scale is that rotation, so no
+// separate normal path can drift from this one. Under a per-axis scale they
+// diverge, which is why such a layer is refused rather than approximated.
+kernel::cfloat3 world_vector_to_local(const clay_mesh_sculptor& s, kernel::cfloat3 v) {
+    return s.has_frame ? s.frame.rotation.conjugate().rotate(v) : v;
+}
+float world_length_to_local(const clay_mesh_sculptor& s, float len) {
+    return s.has_frame ? len / s.frame.scale : len;
+}
+
+// Rewrite the settings a host gave in world into the mesh's own space. Every
+// field that IS a position, a direction or a length, and no others: `strength`
+// is scaled by the radius and so is already frame-free, and `polish_angle` is
+// an angle, which a similarity does not change.
+void brush_settings_to_local(const clay_mesh_sculptor& s, mesh::MeshBrushSettings* settings) {
+    if (!s.has_frame) return;
+    settings->center = world_point_to_local(s, settings->center);
+    settings->radius = world_length_to_local(s, settings->radius);
+    settings->direction = world_vector_to_local(s, settings->direction);
+    settings->deposit_normal = world_vector_to_local(s, settings->deposit_normal);
+    settings->plane_point = world_point_to_local(s, settings->plane_point);
+    settings->plane_normal = world_vector_to_local(s, settings->plane_normal);
+    settings->layer_height = world_length_to_local(s, settings->layer_height);
+}
+
+// The mask is WORLD-ADDRESSED by design (voxel/mask.h) and a vertex handed to
+// the gate is in the MESH's own space, so the two only met correctly on an
+// untransformed layer. This is where they meet.
+field::MaskGate mask_gate_for(const clay_mesh_sculptor& s, voxel::MaskField* field_mask) {
+    if (field_mask == nullptr) return {};
+    if (!s.has_frame) return [field_mask](kernel::cfloat3 p) { return field_mask->sample(p); };
+    const math::Transform to_world = s.frame;
+    return [field_mask, to_world](kernel::cfloat3 p) {
+        return field_mask->sample(to_world.apply(p));
+    };
+}
+
+// A per-call `mesh_to_world` beside a session that already declares one.
+// REFUSED rather than resolved by precedence: a host passing both means one of
+// the two is what it believes, and picking silently would make the other a
+// wrong belief nothing corrects.
+clay_result reject_conflicting_frame(const clay_mesh_sculptor& s, const void* per_call) {
+    if (!s.has_frame || per_call == nullptr) return CLAY_OK;
+    return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                "this session already declares a world frame (clay_mesh_sculptor_set_world_frame "
+                "or _use_layer_transform); pass NULL here");
 }
 
 }  // namespace
@@ -16641,6 +16740,71 @@ clay_result clay_mesh_sculptor_reset_peak_telemetry(clay_mesh_sculptor* sculptor
     return CLAY_OK;
 }
 
+clay_result clay_mesh_sculptor_set_world_frame(clay_mesh_sculptor* sculptor,
+                                               const clay_mesh_frame* frame) {
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/false);
+    if (r != CLAY_OK) return r;
+    if (frame == nullptr) {
+        sculptor->has_frame = false;
+        sculptor->frame = math::Transform::identity();
+        return CLAY_OK;
+    }
+    math::Transform t;
+    r = read_mesh_frame(frame, &t);
+    if (r != CLAY_OK) return r;
+    sculptor->frame = t;
+    sculptor->has_frame = true;
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_use_layer_transform(clay_mesh_sculptor* sculptor) {
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/false);
+    if (r != CLAY_OK) return r;
+    if (!sculptor->mesh || !sculptor->mesh->doc)
+        return fail(CLAY_ERROR_NOT_FOUND,
+                    "this sculptor was built over a standalone mesh, which belongs to no layer");
+    const scene::Layer* l = sculptor->mesh->doc->doc.document.find_layer(sculptor->mesh->layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "the mesh layer is no longer in its document");
+    // A PER-AXIS SCALE IS REFUSED, not approximated. Under one, a round brush in
+    // world is an ellipsoid on the model, so `radius` stops naming anything a
+    // spherical walk can honour -- and a normal stops being carried by the
+    // rotation alone. Reading the scale as uniform would put the dab in a
+    // plausible wrong place and report success, which is the failure this whole
+    // change exists to remove. Closing it needs an anisotropic brush footprint,
+    // which is its own change with its own gates.
+    if (scene::layer_is_squashed(*l))
+        return fail(CLAY_ERROR_UNSUPPORTED,
+                    "this layer carries a per-axis scale, which a brush radius cannot express; "
+                    "an anisotropic footprint is not implemented");
+    sculptor->frame = l->xform;
+    sculptor->has_frame = true;
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_world_frame(const clay_mesh_sculptor* sculptor,
+                                           clay_mesh_frame* out_frame, int32_t* out_declared) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh sculptor");
+    if (out_declared) *out_declared = sculptor->has_frame ? 1 : 0;
+    if (!out_frame) return CLAY_OK;
+    clay_mesh_frame probe;
+    clay_result r = read_desc(out_frame, kMeshFrameOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_frame->struct_size;
+    clay_mesh_frame filled{};
+    const math::Transform& t = sculptor->frame;
+    filled.position[0] = t.position.x;
+    filled.position[1] = t.position.y;
+    filled.position[2] = t.position.z;
+    filled.rotation[0] = t.rotation.x;
+    filled.rotation[1] = t.rotation.y;
+    filled.rotation[2] = t.rotation.z;
+    filled.rotation[3] = t.rotation.w;
+    filled.scale = t.scale;
+    write_desc(out_frame, declared, filled);
+    return CLAY_OK;
+}
+
 clay_result clay_mesh_sculptor_stamp(clay_mesh_sculptor* sculptor, const clay_mesh_brush_desc* desc,
                                      const clay_mask* mask, clay_mesh_deltas* deltas,
                                      size_t* out_moved) {
@@ -16650,13 +16814,14 @@ clay_result clay_mesh_sculptor_stamp(clay_mesh_sculptor* sculptor, const clay_me
     mesh::MeshBrushSettings settings;
     r = read_mesh_brush(desc, &verb, &settings);
     if (r != CLAY_OK) return r;
+    brush_settings_to_local(*sculptor, &settings);
 
     field::MaskGate gate;
     if (mask) {
         voxel::MaskField* field_mask = nullptr;
         r = resolve_mask(mask, &field_mask);
         if (r != CLAY_OK) return r;
-        gate = [field_mask](kernel::cfloat3 p) { return field_mask->sample(p); };
+        gate = mask_gate_for(*sculptor, field_mask);
     }
     const std::size_t moved =
         sculptor->sculptor->stamp(verb, settings, gate, deltas ? &deltas->deltas : nullptr);
@@ -16847,7 +17012,12 @@ clay_result clay_mesh_sculptor_apply_stroke(clay_mesh_sculptor* sculptor,
     if (r != CLAY_OK) return r;
     brush::MeshStrokeOptions options;
     options.defer_normals = defer_normals != 0;
-    r = read_mesh_frame(mesh_to_world, &options.mesh_to_world);
+    r = reject_conflicting_frame(*sculptor, mesh_to_world);
+    if (r != CLAY_OK) return r;
+    if (sculptor->has_frame)
+        options.mesh_to_world = sculptor->frame;
+    else
+        r = read_mesh_frame(mesh_to_world, &options.mesh_to_world);
     if (r != CLAY_OK) return r;
 
     std::vector<brush::StrokeSample> samples;
@@ -16896,7 +17066,12 @@ clay_result clay_mesh_sculptor_apply_preset(clay_mesh_sculptor* sculptor,
     brush::MeshStrokeOptions options;
     options.defer_normals = defer_normals != 0;
     options.orient_alpha_by_stamp = orient_alpha_by_stamp != 0;
-    r = read_mesh_frame(mesh_to_world, &options.mesh_to_world);
+    r = reject_conflicting_frame(*sculptor, mesh_to_world);
+    if (r != CLAY_OK) return r;
+    if (sculptor->has_frame)
+        options.mesh_to_world = sculptor->frame;
+    else
+        r = read_mesh_frame(mesh_to_world, &options.mesh_to_world);
     if (r != CLAY_OK) return r;
 
     std::vector<brush::StrokeSample> samples;
@@ -19080,9 +19255,13 @@ clay_result clay_mesh_sculptor_raycast(clay_mesh_sculptor* sculptor, const float
     clay_mesh_hit probe;
     r = read_desc(out_hit, kMeshHitOriginal, &probe);
     if (r != CLAY_OK) return r;
-    math::Transform frame;
-    r = read_mesh_frame(xform, &frame);
+    r = reject_conflicting_frame(*sculptor, xform);
     if (r != CLAY_OK) return r;
+    math::Transform frame = sculptor->frame;
+    if (!sculptor->has_frame) {
+        r = read_mesh_frame(xform, &frame);
+        if (r != CLAY_OK) return r;
+    }
 
     math::Ray ray;
     ray.origin = kernel::cf3(origin[0], origin[1], origin[2]);

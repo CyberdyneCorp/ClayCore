@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 92
+#define CLAY_ABI_MINOR 93
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -7100,7 +7100,10 @@ typedef enum clay_mesh_falloff {
 typedef struct clay_mesh_brush_desc {
     uint32_t struct_size; /* = sizeof(clay_mesh_brush_desc); required */
     int32_t verb;         /* clay_mesh_brush */
-    float center[3];      /* in the MESH's own space */
+    /* In the MESH's own space, or in WORLD when the session declares a frame
+     * (clay_mesh_sculptor_set_world_frame). `direction`, `deposit_normal`,
+     * `plane_point`, `plane_normal`, `radius` and `layer_height` follow it. */
+    float center[3];
     float radius;         /* must be > 0 */
     /* Signed for every verb that has a sign, and scaled into world units by
      * the radius, so a brush behaves the same at any size. */
@@ -7134,10 +7137,13 @@ typedef struct clay_mesh_brush_desc {
     float polish_angle;
     int32_t smooth_iterations; /* 1..CLAY_MESH_MAX_SMOOTH_ITERATIONS */
     /* LAYER's ceiling: how far above the stroke's STARTING surface the deposit
-     * may reach, in WORLD units. World rather than radius-relative, unlike
-     * `strength`, and that is the point rather than an inconsistency — a
-     * ceiling that moved when the brush resized would not be a ceiling.
-     * Negative digs to a floor instead. */
+     * may reach, as an ABSOLUTE LENGTH rather than radius-relative, unlike
+     * `strength` — a ceiling that moved when the brush resized would not be a
+     * ceiling. Negative digs to a floor instead.
+     *
+     * (This said "in WORLD units", which meant absolute-rather-than-relative
+     * and read as document-world once the space of `center` became a question
+     * it could be confused with. It is in the same space as `center`.) */
     float layer_height;
     /* An ALPHA: a scalar stamp scaling this brush's per-vertex weight, so
      * detail work on a mesh layer is alpha-driven as it already is on voxels
@@ -7468,7 +7474,13 @@ clay_result clay_mesh_sculptor_stale_seeds_rejected(const clay_mesh_sculptor* sc
 
 /* One stamp. `mask` and `deltas` may be NULL. *out_moved receives how many weld
  * classes moved — zero for a stamp that reached nothing, that was fully masked,
- * or whose settings amount to no displacement. */
+ * or whose settings amount to no displacement.
+ *
+ * SPACE: the descriptor's positions, directions and lengths are in the MESH's
+ * own space, unless the session declares a world frame — see
+ * clay_mesh_sculptor_set_world_frame, which is also what makes `mask` sample
+ * where you meant. Those three are the only things `out_moved == 0` can mean;
+ * it no longer also means "you were in the wrong space". */
 clay_result clay_mesh_sculptor_stamp(clay_mesh_sculptor* sculptor, const clay_mesh_brush_desc* desc,
                                      const clay_mask* mask, clay_mesh_deltas* deltas,
                                      size_t* out_moved);
@@ -9592,9 +9604,72 @@ clay_result clay_mesh_sculptor_has_colors(const clay_mesh_sculptor* sculptor,
 clay_result clay_mesh_sculptor_ensure_colors(clay_mesh_sculptor* sculptor, const float color[3],
                                              int32_t* out_created);
 
+/* SPACES. `origin` and `direction` are WORLD, `xform` places the mesh in it, and
+ * the hit comes back in WORLD. The conversion is done inside on purpose --
+ * a caller doing it by hand gets a brush whose radius changes when a layer is
+ * scaled, and gets it wrong silently.
+ *
+ * PASS NULL FOR `xform` WHEN THE SESSION ALREADY DECLARES A FRAME. Passing both
+ * is CLAY_ERROR_INVALID_ARGUMENT rather than resolved by precedence: a host
+ * passing two frames believes one of them, and picking silently would leave the
+ * other a wrong belief nothing corrects. */
 clay_result clay_mesh_sculptor_raycast(clay_mesh_sculptor* sculptor, const float origin[3],
                                        const float direction[3], const clay_mesh_frame* xform,
                                        clay_mesh_hit* out_hit);
+
+/* -- WHICH SPACE A SESSION SPEAKS (ABI 0.91.0) -------------------------------
+ *
+ * A mesh layer's vertex arrays are LAYER-LOCAL and its transform places them.
+ * That is the right contract -- baking a transform into vertices every time a
+ * layer moves is expensive, lossy, and hostile to history -- and it is not what
+ * was wrong. What was wrong is that the calls crossing that boundary did not
+ * agree, and the header did not say which was which:
+ *
+ *   clay_mesh_sculptor_raycast  ->  takes a WORLD ray, returns a WORLD hit
+ *   clay_mesh_sculptor_stamp    ->  reads its centre and radius as LOCAL
+ *
+ * Those are the two calls a host makes back to back to sculpt where the finger
+ * is. On a layer translated by 3 and scaled by 2, feeding the first into the
+ * second moved 0 vertices and returned CLAY_OK -- and `moved == 0` is
+ * documented to mean "reached nothing, fully masked, or no displacement", so
+ * the failure was indistinguishable from three ordinary outcomes.
+ *
+ * A session now declares its space once. With a frame set, EVERY position,
+ * radius, direction and normal crossing this handle is WORLD, in every call:
+ * the stamp, both stroke calls, the raycast, and the mask -- which is
+ * world-addressed by design (see -- masks --) and was being sampled at a local
+ * vertex position by the single-stamp path.
+ *
+ * NO FRAME IS THE IDENTITY, and the identity is exactly the behaviour that came
+ * before this existed. A host that has not heard of it is not opted into it. */
+clay_result clay_mesh_sculptor_set_world_frame(clay_mesh_sculptor* sculptor,
+                                               const clay_mesh_frame* frame);
+
+/* Adopt the frame of the LAYER this sculptor's mesh belongs to. The call a host
+ * actually wants: reconstructing the frame by hand is the step that can be got
+ * wrong, and it is the step that made the failure above reachable.
+ *
+ * CLAY_ERROR_NOT_FOUND for a sculptor built over a standalone mesh, which
+ * belongs to no layer -- rather than adopting an identity, which would read as
+ * success.
+ *
+ * CLAY_ERROR_UNSUPPORTED for a layer carrying a PER-AXIS SCALE
+ * (clay_document_set_layer_transform_nonuniform). Under one, a round brush in
+ * world is an ellipsoid on the model, so `radius` stops naming anything a
+ * spherical surface walk can honour, and a normal stops being carried by the
+ * rotation alone. Reading the scale as uniform would put the dab in a plausible
+ * wrong place and report success, which is the failure this whole capability
+ * exists to remove. Closing it needs an anisotropic brush footprint, which is
+ * its own change with its own gates. The layer's BOUNDS and its contribution to
+ * clay_document_mesh_combined honour the per-axis scale either way. */
+clay_result clay_mesh_sculptor_use_layer_transform(clay_mesh_sculptor* sculptor);
+
+/* What frame this session is speaking, and whether one was declared at all.
+ * Either out pointer may be NULL. An undeclared frame reads back as the
+ * identity with *out_declared 0, which is the honest answer rather than a
+ * refusal: the identity is what the session is in fact using. */
+clay_result clay_mesh_sculptor_world_frame(const clay_mesh_sculptor* sculptor,
+                                           clay_mesh_frame* out_frame, int32_t* out_declared);
 
 clay_mesh_deltas* clay_mesh_deltas_create(void);
 void clay_mesh_deltas_destroy(clay_mesh_deltas* deltas);
