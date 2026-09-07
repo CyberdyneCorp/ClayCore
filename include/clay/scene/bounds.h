@@ -9,6 +9,7 @@
 // field arbitrarily far away, so their influence is infinite.
 
 #include <cstddef>
+#include <optional>
 
 #include "clay/math/geom.h"
 #include "clay/scene/document.h"
@@ -529,6 +530,53 @@ math::Aabb layer_reach_in_document(const Document& doc, LayerId layer_id,
 // and cannot drift.
 math::Aabb node_influence_bound_in_document(const Document& doc, const SdfContent& content,
                                             NodeId id, LayerExtent* extent = nullptr);
+
+// WHERE A CHANGE CONFINED TO ONE ITEM'S OWN GEOMETRY LANDS IN THE DOCUMENT:
+// the item's geometry bound, dilated by the pad its layer's CHAIN needs, once
+// per enclosing group by that group's blend support, and carried the rest of
+// the way up by layer_reach_in_document -- unioned over every layer sharing
+// the content, exactly as node_influence_bound_in_document is.
+//
+// IT IS NOT AN INFLUENCE BOUND, and the difference is the whole reason it
+// exists. `item_influence_bound` answers "where can this node change the
+// field", and for an INTERSECT the honest answer is the layer extent
+// (item_nonlocality says why, measured; none of that is weakened). This
+// answers a NARROWER question and is sound only as HALF OF A PAIR -- the same
+// box taken before an edit and after it, unioned -- where the two states
+// differ in nothing but this item's own geometry:
+//
+//   Outside the swept union, the item's own field is a positive beyond the
+//   band on BOTH sides, so `max(acc, item)` returns a beyond-band positive on
+//   both sides and the band-clamped result cannot have moved. What it does NOT
+//   claim is that the RAW value is unchanged -- it is not, it is the item's own
+//   distance and the item moved -- which is exactly why the chain pad is a term
+//   here and is not one in a local op's bound: a local combine outside its
+//   support is the IDENTITY (`min(acc, big)` is `acc`, bit for bit), while an
+//   intersect's is not, so a smooth combine further down the chain can drag
+//   that beyond-band difference back toward the band. `cull_pad` is the
+//   measured distance over which it can, and this reuses it rather than
+//   spelling a second one.
+//
+// The BAND is not a term: every consumer of a dirty region adds it
+// (BrickCache::mark_dirty dilates by the band, and the seed store dilates each
+// brick by band + pad).
+//
+// A NON-UNIFORM PER-AXIS SCALE, at the item or at the layer, is refused for the
+// same reason a deformer chain is. The box itself is right -- it composes
+// `scale_matrix` -- but the FIELD is not a distance there: `cscale_nu_dist`
+// multiplies the local value by the smallest component, so what the tape emits
+// is short of the true distance by up to max(s)/min(s) (scene/types.h,
+// `cfi_scale_nonuniform`). "> band outside the box" would then hold only out to
+// `band * max(s)/min(s)`, and nothing here dilates for the difference.
+//
+// nullopt where the argument does not reach, and a caller that gets one must
+// keep the conservative influence bound: an absent, hidden or grouped node; an
+// item or ancestor group whose combine is a spatial MORPH (a lerp whose weight
+// saturates -- pointwise, but with no support that describes how far a change
+// travels); an item with no finite geometry; a squashed item or layer; a fold
+// above that is a morph; an empty or infinite box anywhere in the walk.
+std::optional<math::Aabb> item_geometry_reach_in_document(const Document& doc,
+                                                          const SdfContent& content, NodeId id);
 
 // Whole-layer bound (union of root node bounds), IN THE LAYER'S OWN FIELD. It
 // takes a Layer and not a Document, so it cannot answer where a change to this

@@ -970,6 +970,76 @@ What remains is one walk per query rather than none: `apply_edit` takes
 two. Removing that needs a revision-scoped cache on the ABI's document, which
 `clay_document::cached()` is already shaped for.
 
+### ...and a MOVE of one is bounded by its sweep
+
+The layer-wide answer above is right for the question it answers and ruinous as
+a refill region. The reporter of #471 measured the same drag, the same document,
+the same 97 items, differing only in the operator: **3.8–4.2 ms subtracting
+against 41.5–44.0 ms intersecting**, and **12.8 ms against 6.8–10.1 SECONDS** on
+a fixture with ten times the extent. Nothing about an intersect is harder to
+evaluate; what differs is how much gets re-evaluated.
+
+The fix is not to weaken the influence bound — every consumer of it needs the
+conservative answer, and per-brick culling may never drop an intersect. It is
+that remeshing asks a NARROWER question. Not "where can this node change the
+field" but "where can THIS EDIT have moved the surface", and for an in-place
+MOVE the two have different answers. Outside the swept union of where the
+operand was and where it went, the operand's own field is a positive beyond the
+band on both sides, so `max(acc, item)` returns a beyond-band positive on both
+sides and the band-clamped value a brick stores cannot have moved.
+
+`scene::command_surface_delta_bound` is that second answer, for exactly one edit
+kind: a `SetTransformCmd` on an existing, visible Intersect item with finite
+support. It is `node_influence_bound_in_document` with the intersect arm taken
+out — the operand's geometry bound, dilated by its layer's chain pad, by each
+enclosing group's blend support and by the folds above, unioned over every
+instancing layer — taken on BOTH sides of the apply and unioned, because one
+side is not an answer. Everything else reports nothing and keeps the
+conservative union, which is what makes the change narrow: no other edit's
+region moves at all. It refuses a deformed operand (a warped field
+underestimates distance by a factor the bound carries no dilation for), a
+NON-UNIFORM per-axis scale on the operand or on its layer (the same
+underestimate, by a factor of `max(s)/min(s)` — `cscale_nu_dist` multiplies the
+local distance by the smallest component, so the field beyond the box is not the
+distance the box was drawn against), a sampled volume, an unbounded or
+infinitely repeated primitive, a GATE on the operand or anywhere in the layer's
+chain, and a spatial morph in the chain or in a fold above — the cases where
+"band-clamped equal" stops implying "equal", and a lerp downstream can carry a
+beyond-band difference back into the band.
+
+THE CHAIN PAD IS A TERM HERE AND IS NOT ONE IN A LOCAL OP'S BOUND, which is the
+one place the two bounds are not the same expression. A local combine outside
+its support is the identity bit for bit, so nothing downstream can see the edit;
+an intersect's is not — the raw value out there is the moved operand's own
+distance — so a smooth combine further down the chain can drag the difference
+back toward the band. `cull_pad` is the measured distance over which it can and
+is reused rather than re-derived.
+
+`clay_layer_set_transform_bound` (ABI 0.90.0) is the host's half: the edit
+`clay_layer_set_transform` applies plus the box it changed, in
+`clay_layer_node_influence_bound`'s three-state shape, ready for
+`clay_brick_cache_mark_dirty`. The generic queries are untouched — they answer
+for an arbitrary edit and stay conservative — and a host cannot tell whether it
+received the proved box or the fallback, because both are safe to dirty.
+
+Measured on the issue's fixture, one drag frame, 98 items, one voxel size at
+both extents (a 24-thread Linux desktop at load 3.5–4.1; the counts are
+deterministic, the milliseconds are what that machine did):
+
+| row | dirty bricks | AABB / layer | refill | total |
+|---|---|---|---|---|
+| subtract, reference | 63 | 2.9% | 2.81 ms | 5.04 ms |
+| intersect, layer bound, reference | 576 | 100% | 22.63 ms | 27.9 ms |
+| intersect, swept delta, reference | 121 | 7.9% | 5.66 ms | 7.51 ms |
+| intersect, layer bound, ten times | 9,680 | 100% | 328.90 ms | 397 ms |
+| intersect, swept delta, ten times | 286 | 1.2% | 12.19 ms | 15.7 ms |
+
+The claim held is the COUNT, not the clock: going from the reference fixture to
+one with ten times the cross-section, the same cutter making the same drag
+dirties **540 → 1,152 bricks** where the layer bound dirties **900 → 15,600**.
+The residual growth is the chain pad following the fixture's blend radii, which
+scale with the form; it is not the extent.
+
 ### Drawing a preview beside the rest of the document
 
 A live sculpt transaction previews **one layer** — that is what

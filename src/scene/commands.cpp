@@ -464,6 +464,26 @@ EditedItem command_edited_item(const Command& cmd) {
         cmd);
 }
 
+std::optional<math::Aabb> command_surface_delta_bound(const Document& doc, const Command& cmd) {
+    const auto* c = std::get_if<SetTransformCmd>(&cmd);
+    if (!c) return std::nullopt;
+    const Layer* l = doc.find_layer(c->layer);
+    if (!l || l->kind != LayerKind::Sdf || !l->sdf) return std::nullopt;
+    const Node* n = l->sdf->find(c->node);
+    if (!n || n->is_group || !n->visible) return std::nullopt;
+    // ONLY an intersect, so nothing else in this engine changes behaviour: a
+    // local op's node_influence_bound_in_document is already the box this
+    // computes, and answering here would be a second spelling of it.
+    if (n->op != Op::Intersect) return std::nullopt;
+    // The proof runs on the item's own distance field being beyond the band
+    // outside its geometry bound. A deformer chain UNDERESTIMATES distance by
+    // its Lipschitz factor and the bound carries no dilation for that, and a
+    // sampled volume's field outside the samples it stores is whatever its
+    // extrapolation says. Neither is in the proof, so neither takes the path.
+    if (!n->deformers.empty() || prim_is_volume(n->prim.type)) return std::nullopt;
+    return item_geometry_reach_in_document(doc, *l->sdf, c->node);
+}
+
 math::Aabb command_influence_bound(const Document& doc, const Command& cmd,
                                    LayerExtent* extent) {
     return std::visit(
