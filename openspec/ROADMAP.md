@@ -2574,6 +2574,72 @@ together rather than separately because the fix, if there is one, is a single
 idea: a gate that reads the branch's own manifest of what it claims and checks
 it against what everyone else has claimed.
 
+### 51 of our 177 benchmarks are measured and cannot fail
+
+Their finding arrived first and ours is the same effect by a different
+mechanism, so both are here.
+
+**Theirs: a baseline that stopped comparing.** Their committed bench baseline was
+recorded against engine **0.52.2** and they are pinned at **0.84.0**. It carries
+none of the groups added since — no `multires`, no `normals`, no `maintenance`,
+no `render`, no `visible`. The gate still fails on the 135 figures it holds, so
+it looks alive; but every one of those deltas now folds **thirty-two engine
+minors**, and everything added since prints as `new` and **cannot regress by
+construction**. Their own skip module exists to stop exactly this shape one level
+down: a measurement that quietly stopped being compared looks identical to one
+that is fine.
+
+**Ours: no baseline at all, and a rule table that does not cover the binary.**
+`tools/check_bench.py` reads one run and compares within it — `MAX_RATIO` and
+`FASTER_THAN` are same-run pairs, `MAX_MS` and `MAX_COUNTER` are hand-set
+absolutes. Nothing goes stale because nothing is recorded. But counted against
+the built binary:
+
+```
+registered benchmarks   177
+named in some rule      130
+IN NO RULE AT ALL        51
+```
+
+Those 51 run, print a figure, and nothing can fail on them. (Four names appear in
+rules with no benchmark — `BM_MetalStrokePatched`, `BM_MetalTapeResident`,
+`BM_MetalTapeReupload`, `BM_VulkanStrokePatched` — and those are correct:
+backend-conditional, and both tables skip an absent name deliberately.)
+
+**The shared shape:** a benchmark that is measured and ungated is
+indistinguishable, in the output, from one that is measured and passing. Theirs
+says `new`; ours just prints a number. Neither says *"nothing is watching this"*.
+
+**What would fix ours is cheap and is not a threshold.** A completeness check —
+every registered benchmark appears in at least one rule, or in an explicit
+exemption list carrying a reason — is the same instrument
+`tools/check_device_coverage.py` already applies to the device table and
+`check_test_shards.py` applies to the unit suite. Both were written for this
+exact failure. The bench gate is the one place the idea was not applied, and 51
+is what that costs. **An exemption with a reason is fine; 51 silent ones are
+not.**
+
+### Re-recording a baseline is its own change, never part of an upgrade
+
+Their reason for refusing to re-record as part of moving their pin, and it
+generalises past benchmarks:
+
+> re-recording blesses thirty-two releases of undiscussed drift in one commit,
+> and doing it in the same change as an upgrade would make the upgrade's own
+> effect unmeasurable.
+
+Both halves are worth keeping. A baseline refresh is a **claim about every
+release since the last one**, and burying it in a change that has its own effect
+to measure destroys the only run that could have separated them.
+
+**And the measurement they will send instead is the right one anyway:** record
+the figures at the old pin, move the pin, record again — same box, same binary,
+ratio reported with the load beside it. That answers the question without
+depending on the committed baseline at all. It is the self-relative rule applied
+to a baseline problem: **two measurements one run apart beat one measurement
+against a number from thirty-two releases ago**, and it needs no permission from
+anybody to take.
+
 ## Requirements taken from their bugs
 
 Worth writing into the specs they touch, because a competitor's known failure is
