@@ -471,13 +471,16 @@
       against tells it to look. The alternative was to report the bound level
       alone, and that is the silent failure this change exists to remove: a
       stamp that moved only the coarse side would come back 0. So the meaning is
-      stated on the field and the minor moves with it. THE NUMBER IS 0.88.0, not
-      the 0.87.0 written here: this branch was cut when the tree was at 0.85.0,
-      0.86.0 and 0.87.0 have both landed on main since, and 0.88.0 is the next
-      free minor. `CMakeLists.txt` `project(VERSION)`, `CLAY_ABI_MAJOR` /
+      stated on the field and the minor moves with it. THE NUMBER IS 0.89.0, and
+      it has moved twice while this branch was open: cut at 0.85.0, written here
+      as 0.87.0, corrected to 0.88.0 when 0.86.0 and 0.87.0 landed, and corrected
+      again when `persist-a-multires-hierarchy` took 0.88.0 on main. THE SECOND
+      COLLISION WAS SILENT: git auto-merged `bindings/c/clay.h` because both
+      sides read 88, and `release_check`'s version gate gets the three lines to
+      AGREE WITH EACH OTHER and never asks whether the minor is unclaimed. `CMakeLists.txt` `project(VERSION)`, `CLAY_ABI_MAJOR` /
       `CLAY_ABI_MINOR` / `CLAY_ABI_PATCH` in `bindings/c/clay.h`, and `version`
       in `pyproject.toml`; `release_check.py` reads
-      `cmake=0.88.0 abi=0.88.0 wheel=0.88.0`. 6.1 adds an entry point at this
+      `cmake=0.89.0 abi=0.89.0 wheel=0.89.0`. 6.1 adds an entry point at this
       same minor and does not move it again
 - [ ] 6.3 `docs/09-brush-latency-and-coverage.md` states the export gap under
       "What is not done yet" and is correct today; update it to what landed
@@ -654,7 +657,7 @@
   is corrected to what IS complete: the brush's readers. Measured with a probe
   case built for it and then deleted — it is task 1.1's gate, and 1.1 owns it
 - `moved_vertices` CHANGED MEANING UNDER AN UNCHANGED VERSION. See 6.2. Stated
-  on the field rather than beside it, and the minor moved to 0.88.0
+  on the field rather than beside it, and the minor moved to 0.89.0
 - A STALE SENTENCE THIS RECORD STILL CARRIED. The export-is-a-read bullet said
   the export evaluates "the levels `mesh_at_level` already evaluates" — the
   exact sentence the residency fix removed from `multires.h` for being false,
@@ -720,7 +723,7 @@
   `check_binding_parity.py` (735 pyclay capabilities), `check_task_symbols.py`
   and `openspec validate --all --strict` (39 items) all pass, and
   `release_check.py --skip-slow` reports the three version lines agreeing at
-  0.88.0. The CI job's NAME was left alone and only a step added: it is what a
+  0.89.0. The CI job's NAME was left alone and only a step added: it is what a
   required status check is pinned to and has not moved since the file was
   scaffolded. NO TIMING WAS TAKEN
 
@@ -848,7 +851,7 @@
 - THE PROPOSAL'S IMPACT DESCRIBED A DIFFERENT CHANGE. It had the ABI growing by
   an export entry point and the version lines moving to 0.87.0 "because two
   branches already claim 0.86.0"; 6.1 is unbuilt, the `clay.h` diff adds no
-  function, and the lines are at 0.88.0 for the reason 6.2 records. Its file list
+  function, and the lines are at 0.89.0 for the reason 6.2 records. Its file list
   named three files this branch never touched — `surface_frame.cpp` among them,
   which is section 1 and still owed — and none of the ones the work landed in.
   Rewritten from the diff. Three claims in `design.md` were overruled by what

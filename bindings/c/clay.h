@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 88
+#define CLAY_ABI_MINOR 89
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -8156,7 +8156,7 @@ typedef struct clay_multires_stamp_report {
     uint32_t level;
     /* Weld classes the stamp moved, SUMMED OVER EVERY LEVEL IT WROTE.
      *
-     * THE MEANING CHANGED AT ABI 0.88.0 WHILE THE LAYOUT DID NOT, which is the
+     * THE MEANING CHANGED AT ABI 0.89.0 WHILE THE LAYOUT DID NOT, which is the
      * whole reason the minor moves for it: a field that means something new
      * under the same number is worse than a new field, because nothing a host
      * compiles against tells it to look. Through 0.87.0 this was the count at

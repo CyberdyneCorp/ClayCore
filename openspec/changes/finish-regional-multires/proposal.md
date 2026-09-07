@@ -282,13 +282,15 @@ the diff rather than from the plan, because the two had already parted.
   `kSurfaceVersion` does not move and there is no format-minor bump.
 - **The ABI does not grow, and the version lines move anyway.** Task 6.1's export
   entry point is unbuilt: the `bindings/c/clay.h` diff adds no function, only
-  comments and the version. The three lines move to **0.88.0** together for a
+  comments and the version. The three lines move to **0.89.0** together for a
   field of an entry point that already existed and now means something new —
   `clay_multires_stamp_report.moved_vertices` counted the weld classes a stamp
   moved at the bound level, because a stamp only ever wrote one level, and it now
   sums the classes moved on every level a crossing stamp wrote. Same layout, same
   type, new meaning, which is worse than a new field because nothing a host
-  compiles against tells it to look. The number is 0.88.0 and not the 0.87.0 this
-  section first carried: the branch was cut when the tree was at 0.85.0, and
-  0.86.0 and 0.87.0 have both landed on main since. 6.1 would add its entry point
+  compiles against tells it to look. The number is 0.89.0, and it has moved
+  twice while this branch was open: cut at 0.85.0, written as 0.87.0, corrected
+  to 0.88.0 when 0.86.0 and 0.87.0 landed, and corrected again when
+  `persist-a-multires-hierarchy` took 0.88.0 on main. Nothing caught the second
+  collision, because both sides of the merge read 88 and agreed. 6.1 would add its entry point
   at this same minor and not move it again.
