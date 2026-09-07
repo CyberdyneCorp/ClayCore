@@ -107,6 +107,62 @@ void apply_base_layers(MultiresSurface::State& s, const std::vector<std::uint32_
 // one level where S and P are the same array, so a sculpt there moves the
 // surface the frames are built from — which is exactly why the detail above it
 // follows the form.
+// The neighbourhood for a level whose parent is ALREADY EVALUATED.
+//
+// `MultiresSurface::cross_level_at` is the outside door and begins with
+// `evaluate_up_to`; calling it from inside the evaluation would recurse into the
+// evaluation that is running. This is the same body with that step removed.
+//
+// EXACTLY FOUR CALLERS, NAMED because the precondition is silent when it breaks
+// and a described property is easier to talk past than a list:
+//
+//   full_evaluate, partial_evaluate, reapply_recomposed, drain_normals_pending
+//
+// All four are reached only from `evaluate_up_to`, and it is that function's
+// LOOP ORDER that holds the precondition rather than anything the callers do:
+// it walks levels 1..target in order, so level `l - 1` was evaluated on the
+// previous iteration, or is level 0 and was evaluated by `evaluate_level0`
+// before the loop. The one call outside the loop — `drain_normals_pending` on
+// the `below_is_current` early return — holds it for the other reason: nothing
+// below moved, so the parent is still current from a previous pass.
+//
+// A FIFTH CALLER MUST ARGUE WITH THIS COMMENT. The guard below returns null
+// when the parent is not evaluated, which is safe — nothing reads a released
+// cache — but it is NOT a fix: a null neighbourhood means the level's own ring
+// only, which is precisely the incomplete half-ring this whole path exists to
+// complete. So a caller that does not hold the precondition gets the OLD WRONG
+// NORMALS BACK, silently, and no test of the evaluation will fail. That is the
+// failure mode to weigh before adding one.
+//
+// Null rather than an empty object when there is no depth boundary, so the
+// readers pay one null check and no walk.
+const CrossLevelNeighborhood* cross_level_of(MultiresSurface::State& s, std::uint32_t level) {
+    if (level == 0 || !s.level_ok(level)) return nullptr;
+    LevelCache* c = s.levels[level].cache.get();
+    if (c == nullptr) return nullptr;
+    // A LEVEL THAT NEVER HAD ONE, decided from the topology alone. This is the
+    // only legitimate way for a regional path to see no neighbourhood, and
+    // separating it from "released" by name is what lets the release exist at
+    // all -- see `LevelCache::cross_released`.
+    if (level_is_self_contained(s.levels[level].topology, s.levels[level].patch_kept))
+        return nullptr;
+    if (!level_is_evaluated(s, level - 1)) return nullptr;
+    const MultiresLevel& parent = s.levels[level - 1];
+    // A RELEASED NEIGHBOURHOOD REBUILDS, it does not read as absent — and it
+    // needs no mark to do so, because `level_is_self_contained` above decides
+    // "never had one" from the TOPOLOGY. A null pointer here therefore means
+    // exactly one thing: this level needs a neighbourhood and does not have it.
+    if (!c->cross) {
+        c->cross = std::make_unique<CrossLevelNeighborhood>(
+            build_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
+                              s.levels[level].topology, s.levels[level].patch_kept));
+    } else {
+        refresh_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
+                            c->cross.get());
+    }
+    return c->cross->empty() ? nullptr : c->cross.get();
+}
+
 void refresh_base_frames(MultiresSurface::State& s) {
     MultiresLevel& lev = s.levels[0];
     LevelCache& c = *lev.cache;
@@ -115,6 +171,8 @@ void refresh_base_frames(MultiresSurface::State& s) {
     const std::vector<kernel::cfloat2>* uv_ptr = have_uvs ? &uvs : nullptr;
 
     if (s.base_frames_all) {
+        // Level 0 is the cage and is never regional, so it has no ring outside
+        // itself and passes none.
         level_normals(lev.topology, c.conn, c.mesh.positions, &c.mesh.normals);
         build_base_frames(lev.topology, c.conn, c.mesh.positions, c.mesh.normals, uv_ptr,
                           &c.frames);
@@ -129,10 +187,6 @@ void refresh_base_frames(MultiresSurface::State& s) {
     s.base_frames_dirty.clear();
 }
 
-// Defined below, beside the evaluation that builds it.
-const LevelHalo* ensure_halo(MultiresSurface::State& s, std::uint32_t level,
-                             bool parent_moved = false);
-
 // Display normals a direct detail write left stale — an undo replaying a
 // gesture, or a verb writing coefficients rather than positions. Costs the
 // footprint and nothing when there is none.
@@ -142,7 +196,7 @@ void drain_normals_pending(MultiresSurface::State& s, std::uint32_t level) {
     LevelCache& c = *lev.cache;
     expand_by_face_ring(lev.topology, c.conn, lev.normals_pending, &s.scratch_mark, &s.scratch_c);
     level_normals_partial(lev.topology, c.conn, c.mesh.positions, s.scratch_c, &c.mesh.normals,
-                          ensure_halo(s, level));
+                          cross_level_of(s, level));
     lev.normals_pending.clear();
 }
 
@@ -175,48 +229,6 @@ void evaluate_level0(MultiresSurface::State& s) {
     drain_normals_pending(s, 0);
 }
 
-// The ring beyond a regional level, and the positions of the vertices only it
-// references.
-//
-// TOPOLOGY ONCE, POSITIONS EVERY TIME. The faces are a function of the parent's
-// topology and this level's `patch_kept`, neither of which moves while a cache
-// lives; the positions are the parent's subdivided surface and move whenever it
-// does. Splitting them is what keeps this proportional to the region's boundary
-// rather than to the level.
-//
-// Returns null for a dense level, where the level's own faces ARE the whole
-// ring and the halo would be an empty structure consulted per vertex.
-const LevelHalo* ensure_halo(MultiresSurface::State& s, std::uint32_t level, bool parent_moved) {
-    if (level == 0) return nullptr;  // the cage is never regional
-    MultiresLevel& lev = s.levels[level];
-    if (lev.topology.dense()) return nullptr;
-    LevelCache& c = *lev.cache;
-    const MultiresLevel& parent = s.levels[level - 1];
-    const LevelCache& pc = *parent.cache;
-    bool just_built = false;
-    if (!c.halo_built) {
-        c.halo = build_level_halo(parent.topology, pc.conn, lev.patch_kept, lev.topology);
-        c.halo_built = true;
-        just_built = true;
-    }
-    if (c.halo.empty()) return nullptr;
-    // THE POSITIONS FOLLOW THE PARENT AND NOTHING ELSE, which is what keeps a
-    // stamp at level `level` from paying for them. A detail write, an undo
-    // replaying one, a recomposition -- none of those move the parent, so none
-    // of them can move a vertex outside this level, and refreshing on each
-    // measured at 18x the cost of the re-evaluation it was attached to.
-    if (parent_moved || just_built) {
-        // THE PARENT'S OWN POSITIONS: `P(parent)`, with the parent's detail
-        // already applied -- the same array `c.subdivided` is built from, so a
-        // halo vertex holds what the dense level holds there. Detail at
-        // `level` is zero outside the refined region by definition, so S and P
-        // coincide for these vertices and one array serves both normal passes.
-        subdivide_positions(parent.topology, pc.conn, pc.mesh.positions, c.halo.index(),
-                            &c.halo.positions);
-    }
-    return &c.halo;
-}
-
 void full_evaluate(MultiresSurface::State& s, std::uint32_t level) {
     const MultiresLevel& parent = s.levels[level - 1];
     MultiresLevel& lev = s.levels[level];
@@ -225,16 +237,16 @@ void full_evaluate(MultiresSurface::State& s, std::uint32_t level) {
 
     const ChildIndex stored = ChildIndex::of(lev.topology);
     subdivide_positions(parent.topology, pc.conn, pc.mesh.positions, stored, &c.subdivided);
-    const LevelHalo* halo = ensure_halo(s, level, /*parent_moved=*/true);
     // The S-normals exist only to build the frames, which then carry them —
     // so they go into scratch rather than into a per-level array nobody would
     // read again.
     if (s.scratch_normals.size() < lev.topology.vertex_count)
         s.scratch_normals.resize(lev.topology.vertex_count, kernel::cf3(0, 1, 0));
-    level_normals(lev.topology, c.conn, c.subdivided, &s.scratch_normals, halo);
+    const CrossLevelNeighborhood* cross = cross_level_of(s, level);
+    level_normals(lev.topology, c.conn, c.subdivided, &s.scratch_normals, cross);
     transport_frames(parent.topology, pc.conn, pc.frames, s.scratch_normals, stored, &c.frames);
     apply_detail_all(lev);
-    level_normals(lev.topology, c.conn, c.mesh.positions, &c.mesh.normals, halo);
+    level_normals(lev.topology, c.conn, c.mesh.positions, &c.mesh.normals, cross);
     s.stats.vertices_evaluated += lev.topology.vertex_count;
     s.stats.normals_recomputed += lev.topology.vertex_count;
     ++s.stats.full_level_rebuilds;
@@ -258,15 +270,11 @@ void partial_evaluate(MultiresSurface::State& s, std::uint32_t level) {
 
     subdivide_positions_partial(parent.topology, pc.conn, pc.mesh.positions, stored, s.scratch_a,
                                 &c.subdivided);
-    // The halo positions are refreshed WHOLE rather than partially, and that is
-    // a measurement rather than a shortcut: the halo is one face-ring wide, so
-    // rebuilding it costs the boundary, while the bookkeeping to work out which
-    // halo vertices a parent edit reached would cost a walk of the same order.
-    const LevelHalo* halo = ensure_halo(s, level, /*parent_moved=*/!parent.pending.empty());
     if (s.scratch_normals.size() < lev.topology.vertex_count)
         s.scratch_normals.resize(lev.topology.vertex_count, kernel::cf3(0, 1, 0));
+    const CrossLevelNeighborhood* cross = cross_level_of(s, level);
     level_normals_partial(lev.topology, c.conn, c.subdivided, s.scratch_b, &s.scratch_normals,
-                          halo);
+                          cross);
     transport_frames_partial(parent.topology, pc.conn, pc.frames, s.scratch_normals, stored,
                              s.scratch_b, &c.frames);
     apply_detail(lev, s.scratch_b);
@@ -275,7 +283,7 @@ void partial_evaluate(MultiresSurface::State& s, std::uint32_t level) {
     // did not move still shades differently when its neighbour did.
     expand_by_face_ring(lev.topology, c.conn, s.scratch_b, &s.scratch_mark, &s.scratch_c);
     level_normals_partial(lev.topology, c.conn, c.mesh.positions, s.scratch_c, &c.mesh.normals,
-                          halo);
+                          cross);
 
     s.stats.vertices_evaluated += s.scratch_b.size();
     s.stats.normals_recomputed += s.scratch_c.size();
@@ -299,7 +307,7 @@ void reapply_recomposed(MultiresSurface::State& s, std::uint32_t level,
     apply_detail(lev, vertices);
     expand_by_face_ring(lev.topology, c.conn, vertices, &s.scratch_mark, &s.scratch_c);
     level_normals_partial(lev.topology, c.conn, c.mesh.positions, s.scratch_c, &c.mesh.normals,
-                          ensure_halo(s, level));
+                          cross_level_of(s, level));
     s.stats.vertices_evaluated += vertices.size();
     s.stats.normals_recomputed += s.scratch_c.size();
     lev.pending.insert(lev.pending.end(), vertices.begin(), vertices.end());

@@ -860,6 +860,31 @@ class MultiresSurface {
     // level nor the display level nor an ancestor one of them needs. Rebuilding
     // reproduces them bit-identically; the authoritative detail is untouched.
     void drop_inactive_caches();
+
+    // Release the cross-level neighbourhoods and NOTHING ELSE, returning the
+    // bytes given back. The levels stay resident and stay evaluated; their
+    // positions, normals and frames are untouched.
+    //
+    // WHY IT IS ITS OWN CALL. A neighbourhood is the cheapest thing here to
+    // give back and the most expensive to hold: it is derived from the level
+    // below by the same stencils that built the level, so it rebuilds exactly,
+    // and it is re-read on every access anyway. Every other release in this
+    // class costs a level its evaluation.
+    //
+    // WHAT IT COSTS, said rather than discovered: the next access rebuilds
+    // through `build_cross_level` instead of walking the rim through
+    // `refresh_cross_level`. The refresh alone is 7.5-18.6% of a dab depending
+    // on rim length (#493); a rebuild is strictly more. A trim taken mid-stroke
+    // therefore makes the NEXT dab pay for it. That is the trade a
+    // memory-pressure path exists to make, and it is the reason this is not
+    // called on any ordinary path.
+    //
+    // A RELEASE LEAVES A MARK. "Regional and released" and "self-contained and
+    // never had one" are different states and the evaluation must not confuse
+    // them — the second legitimately has no neighbourhood, the first must
+    // rebuild before its boundary normals are read. See
+    // `LevelCache::cross_released`.
+    std::size_t release_cross_levels();
     // Release every level's cache EXCEPT the sculpt level's and the display
     // level's — including the levels between them and the cage.
     //
