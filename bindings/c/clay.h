@@ -3980,6 +3980,23 @@ clay_result clay_mesh_voxel_remesh(const clay_mesh* source,
  * every mesh layer it holds; a token held across a save and a reopen is
  * meaningless rather than merely stale.
  *
+ * AND IT GOES WRONG QUIETLY IF YOU HOLD ONE ACROSS A REOPEN. A fresh domain
+ * starts at 1, so a stored 1 read back against a fresh 1 says UNCHANGED for an
+ * entirely different mesh — the failure is agreement, not a mismatch you would
+ * notice. Drop every token you hold when you open a document. A host whose open
+ * path builds a new document and assigns over the old one cannot reach this;
+ * one that reuses a layer table across the reopen can.
+ *
+ * A COMMIT THAT USED TO SUCCEED CAN NOW BE REFUSED, and this is the one
+ * behaviour change here that is not about a stale cache. Read a revision, let
+ * the artist undo and redo back to the SAME triangles, then hand that revision
+ * to clay_document_replace_mesh_layer: through 0.84.0 the number had not moved
+ * and the commit went in; now it has moved twice and the commit is refused with
+ * CLAY_ERROR_FORWARD_VERSION. That is correct — the numbering your worker's
+ * result was computed against is gone even though the vertices agree — but it
+ * is a refusal a host did not previously have to handle. Re-read the revision
+ * and commit again.
+ *
  * Zero for a layer that is not a mesh layer, or does not exist. */
 clay_result clay_document_mesh_layer_revision(const clay_document* doc, clay_layer_id layer,
                                               uint64_t* out_revision);

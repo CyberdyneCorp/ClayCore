@@ -395,3 +395,49 @@ TEST_CASE("c abi: an undo with nothing to undo spends no mesh generation") {
     CHECK(revision(doc.doc, layer) == drained);
     CHECK(layer_holds(doc.doc, layer, fine));
 }
+
+TEST_CASE("c abi: a round trip through undo and redo refuses a commit it used to take") {
+    // THE ONE BEHAVIOUR CHANGE HERE THAT IS NOT ABOUT A STALE CACHE, and it is
+    // a refusal a host did not previously have to handle. A worker reads the
+    // revision, computes a remesh, and while it works the artist undoes and
+    // redoes back to the SAME triangles. Through 0.84.0 the number had not
+    // moved and the commit went in; now it has moved twice and the commit is
+    // refused.
+    //
+    // It is refused for the right reason. The vertices agree and the NUMBERING
+    // does not: a token names the generation a result was computed against, and
+    // that generation is gone. The fixture asserts both halves — that the
+    // content really did come back identical, and that the commit is still
+    // refused — because a refusal on changed content would prove nothing.
+    const TriMesh fine = sphere(1.0f, 8, 16);
+    const TriMesh coarse = sphere(0.5f, 4, 8);
+
+    DocHandle doc;
+    doc.doc = clay_document_create();
+    REQUIRE(doc.doc != nullptr);
+    REQUIRE(clay_document_enable_undo(doc.doc) == CLAY_OK);
+    const clay_layer_id layer = attach_layer(&doc, fine);
+
+    REQUIRE(replace_with(doc.doc, layer, coarse) == CLAY_OK);
+    const std::uint64_t held = revision(doc.doc, layer);
+    REQUIRE(held == 2u);
+
+    std::int32_t moved = 0;
+    REQUIRE(clay_document_undo(doc.doc, &moved) == CLAY_OK);
+    REQUIRE(moved == 1);
+    REQUIRE(clay_document_redo(doc.doc, &moved) == CLAY_OK);
+    REQUIRE(moved == 1);
+
+    // The triangles are back to exactly what the token was read against...
+    CHECK(layer_holds(doc.doc, layer, coarse));
+    // ...and the token is not, so the commit is refused.
+    CHECK(revision(doc.doc, layer) == 4u);
+    CHECK(replace_with(doc.doc, layer, fine, held) == CLAY_ERROR_FORWARD_VERSION);
+    CHECK(layer_holds(doc.doc, layer, coarse));
+
+    // Re-reading is the whole remedy, and it must actually work — a refusal a
+    // host cannot clear would be a worse bug than the one this change fixes.
+    const std::uint64_t reread = revision(doc.doc, layer);
+    CHECK(replace_with(doc.doc, layer, fine, reread) == CLAY_OK);
+    CHECK(layer_holds(doc.doc, layer, fine));
+}

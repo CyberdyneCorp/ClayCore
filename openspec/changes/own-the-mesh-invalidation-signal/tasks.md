@@ -54,3 +54,27 @@
       that it is per-session
 - [x] 5.2 `Document.mesh_layer_revision`'s docstring says the same
 - [x] 5.3 The ROADMAP entry for #472 records the outcome
+- [x] 5.4 Two consequences the CONSUMER found, neither of which is a stale
+      cache, both now on the header and one of them gated:
+      - **A held token across a reopen fails by AGREEING.** A fresh domain
+        starts at 1, so a stored 1 read against a fresh 1 says "unchanged" for a
+        different mesh. The header already said a token does not survive a
+        reopen; it did not say the failure is agreement rather than a mismatch
+        anyone would notice. Invisible to a host whose open path builds a new
+        document and assigns over the old one — which is what theirs does, and
+        why they could not have hit it — and reachable by one that reuses a
+        layer table
+      - **`replace_mesh_layer`'s expected-revision CAS now refuses a commit it
+        used to take.** Read a revision, let the artist undo and redo back to
+        the SAME triangles, then commit: the number moved twice while the
+        content came back, so the commit is refused with
+        `CLAY_ERROR_FORWARD_VERSION` where through 0.84.0 it succeeded. Correct
+        under this change's own rule — a token names the generation a result was
+        computed against, and that generation is gone even though the vertices
+        agree — but a refusal a host did not previously have to handle. Gated by
+        "a round trip through undo and redo refuses a commit it used to take",
+        which asserts BOTH halves: that the content really did come back
+        identical, and that the commit is still refused. A refusal on changed
+        content would prove nothing. It also asserts the remedy works, because a
+        refusal a host cannot clear would be worse than the bug this change
+        fixes
