@@ -8,6 +8,11 @@
       `mesh_to_world` since it shipped
 - [x] 1.4 Both lambdas place the point; no new field, no new plumbing, the same
       shape `mesh_mask_gate` already had
+- [x] 1.5 The header said `mesh_to_world` "is used ONLY to find each vertex on
+      the mask's world-addressed lattice" — true of the code, false of what the
+      code needed, and the two agreeing is why review found nothing. Reworded to
+      name the transform's reach as a SET of three lattices, at both stroke
+      calls, so the next one added is not the next instance
 
 ## 2. The strength
 

@@ -91,6 +91,25 @@ The strength, through the round trip that could see it:
 | 0.50 | 0.50 | 0.50 |
 | 1.00 | 1.00 | 1.00 |
 
+## The Header Said "Only The Mask", And Was Right About The Code
+
+`clay_mesh_sculptor_apply_stroke` documents its `mesh_to_world` parameter as:
+
+> `mesh_to_world` is the layer transform and is used ONLY to find each vertex on
+> the mask's world-addressed lattice; NULL means identity. Everything else here
+> is in the mesh's own space.
+
+That is a TRUE description of the code and a FALSE description of what the code
+needs. There are three world-addressed lattices — the painted mask, the cavity
+measure, the group field — and the transform reached one, with the sentence
+naming that one as though it were the design rather than the omission.
+
+**The documentation and the code agreed with each other and both were wrong**,
+which is why review found nothing: a reader checking the code against the
+comment finds them consistent. Reworded here to name the transform's reach as a
+SET rather than as a single lattice, so the next world-addressed thing added to
+this call is not the next instance of this bug.
+
 ## What Building It Refuted
 
 **A single sphere cannot see the placement bug.** The regression case was first
