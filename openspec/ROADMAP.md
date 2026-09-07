@@ -3205,6 +3205,59 @@ arriving as a claim about users rather than about a test — and the host declin
 to let its own clean result be quoted in the direction that would have flattered
 the original wording.
 
+### A ceiling that is never reached is not a ceiling
+
+The reciprocal of the entry below, and it lands on our own defaults.
+
+The consuming host corrected its own claim to me: it had said its third reader
+was protected because `Mesh::load` passes `ImportBudget::default()`. That default
+is `{0, 0}`, which our header defines as *"the library's default"* — **so the
+convenience call delegates the ceiling to us and chooses nothing.** Had that been
+its production path it would have reported a guard of its own when what it had
+was ours, wearing its name.
+
+It is not the production path. Its importer sets an explicit **8,000,000**
+vertices, with a test already holding it there:
+
+> *"A ceiling that is never reached is not a ceiling. The engine's default is 50M
+> vertices; a desktop that carries that has already lost the frame budget."*
+
+**The guard is not "is there a limit" but "is the limit reachable by the thing
+you are afraid of".** A 50M-vertex bound against a hostile file is a limit no
+attacker will ever meet.
+
+**And checking our own side, the criticism lands.** `include/clay/io/result.h:34`
+carries the comment *"loaders validate declared counts against actual payload
+size BEFORE allocating"* — which is the real security property, and it is the
+`available / per_vertex` divide. But the numbers themselves:
+
+```
+max_vertices   = 50M     no reason recorded
+max_triangles  = 100M    no reason recorded
+max_file_bytes = 2 GiB   reason recorded: "a directory tells LONG_MAX on glibc"
+```
+
+Two of the three ceilings have no rationale beside them and one does. **So a
+reader cannot tell which job the 50M is doing** — resource ceiling, or hostile
+input bound — and it is fit for the first and useless for the second. Nothing is
+wrong today, because the divide is what stops a malicious header; the defect is
+that the file does not say so, and a future editor tuning "the import limits"
+cannot know which property is load-bearing.
+
+**The habit this points at is sharper than "check your limits".** The other
+session's diagnosis of its own error: *the same guard was read correctly by one
+person and half-correctly by me.* Its importer's author had `ImportBudget` filed
+as BOTH a memory control and an input bound and wrote the second reason down; the
+session reading it later had only the first. So the thing to look for is not
+unguarded limits but **limits whose reason is recorded in only one place** —
+because then only that place gets updated when the reason changes, and every
+other reader inherits a number with no argument attached.
+
+**Follow-up, not done:** record beside `max_vertices` and `max_triangles` which
+of the two jobs they are for, as `max_file_bytes` already does. One comment, and
+it is the difference between a number a future editor can reason about and one
+they can only preserve.
+
 ### "We validate the header" describes the bug and the fix identically
 
 Prompted by a downstream tag that hardened a PLY reader against a header sizing
