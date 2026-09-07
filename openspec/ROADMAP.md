@@ -2871,6 +2871,53 @@ The repair is the same in both materials: sum the `N passed` figures and report
 the total beside the verdict, **so the number has a denominator a reader can
 disbelieve.**
 
+### The sanitizer that cannot see the thing you ran it for
+
+The sharpest platform-shaped instance, and it nearly carried a leak onto main
+inside a seven-PR tip merge.
+
+**macOS ASan does not detect leaks.** It reports
+`detect_leaks is not supported on this platform` and runs everything else
+normally — so a session that reproduced a CI failure locally on macOS, saw
+"ASan passes clean, 9/9, 32 minutes", and reported that, made **a true statement
+about a run that was not checking for leaks.**
+
+CI caught it because our ASan job runs on `ubuntu-latest` (`ci.yml:283-284`) with
+nothing setting `detect_leaks=0`. **520 bytes in 5 allocations** — three
+`clay_multires_from_mesh` handles and two `clay_layer_multires` handles, never
+destroyed, in a test fixture. The header says at each declaration that the handle
+is the caller's; `clay_layer_multires` hands back a BORROW where *"destroying the
+handle leaves the hierarchy in place"*, and the author read "borrowed" as "not
+mine to free". **A handle is a separate allocation from the thing it names.**
+
+**One job of sixteen could see it.** TSan passed on that commit. The plain ubuntu
+build passed. The macOS ASan job passed *while being structurally unable to
+report the defect*.
+
+**And the isolation sweep had the matching hole, stated plainly by its author:**
+it ran `cpu-only`, not `asan-ubsan`. *"Seven of seven green in isolation"* was
+true of the configuration run and silent about sanitizers — and it was about to
+justify collapsing seven PRs onto main as one commit with one matrix. The honest
+record is: **seven branches green under `cpu-only` at their current hashes, and
+the tip additionally clean under ASan/leaks.** Not seven under sanitizers.
+
+**The verification of the replacement tool is the part to copy.** macOS has
+`leaks`, which does work, and rather than trusting its zero they ran it both ways:
+
+```
+with the fix     0 leaks for 0 total leaked bytes
+fix reverted     5 leaks for 560 total leaked bytes
+```
+
+Same five objects CI counted, 560 against 520 because the handle struct differs by
+platform. **A clean result from a tool you have not used before proves nothing
+until you have seen it go red.** That is the vacuity guard aimed at an instrument
+rather than a fixture.
+
+**The general rule:** a green from a sanitizer is a claim about the checks that
+sanitizer was able to run, and the set of checks is platform-dependent. *"ASan
+passed"* is not a sentence — *"ASan passed with leak detection active"* is.
+
 ### "100% of 9" and "100% of 10" are different claims
 
 A verification sweep that ran seven branches in isolation, all seven green, and
