@@ -2517,74 +2517,69 @@ item, and does this one want that? The answer is often yes — a mirrored cut is
 defensible — but it should be a decision with a sentence behind it rather than a
 default nobody chose.
 
-### Measure the difference the gate detects, not a proxy for it
+### Put the bound between the noise floor and the wrong answer, and state both
 
-The strongest fixture rule in this document, and it arrived as a correction to a
-weaker version of itself that had already been written down here. Both halves are
-kept, because the mistake is the instructive part.
+The most-corrected entry in this file. It was written three times from three
+confident measurements, each wrong in a different way, and the arc is the lesson
+rather than a preamble to it.
 
-**The weaker version, which was wrong.** The iPad session was about to gate
-area-weighted against angle-weighted normals at a region boundary. It measured
-the worst incident-triangle-area ratio per boundary vertex, found its cage falls
-to **1.05x by level 3**, and concluded the fixture could not distinguish the two
-weightings under any circumstances. That measurement was real and correctly
-taken. **It was about the wrong quantity.**
+**The question.** A gate for regional-boundary normals against a fully-refined
+dense hierarchy as oracle. Area-weighted (`newell`, raw, summed before
+normalizing) is right; angle-weighted (`normal_contribution`, over `kQuadTris`)
+is the wrong port that looks like the answer.
 
-**What actually discriminates is CURVATURE, not unequal areas.** The two
-weightings weight by different things — area and corner angle — and they diverge
-where the surface BENDS. Measured directly, both computed over the dense
-hierarchy's own faces, worst `|unit(area) - unit(angle)|` per vertex:
-
-| cage | level 1 | level 2 | level 3 |
-|---|---:|---:|---:|
-| planar, uniform | 0.000000 (0.00°) | 0.000000 | 0.000000 |
-| planar, 3.0x graded | 0.000000 (0.00°) | 0.000000 | 0.000000 |
-| **the existing bumpy cage** | **0.317 (18.27°)** | 0.165 (9.48°) | **0.078 (4.47°)** |
-| bumpy, 3.0x graded | 1.173 (71.82°) | 0.787 (46.34°) | 0.198 (11.37°) |
-| bumpy, 5.0x graded | 1.827 (131.97°) | 1.251 (77.40°) | 0.897 (53.31°) |
-
-The existing fixture discriminates easily — **1089 of 1089 vertices differ at
-level 3**. The two planar rows are the control that makes the rest trustworthy: a
-flat cage reads exactly 0.000000 whether graded or not, because there the
-weightings must agree.
-
-**And a wrong port makes the defect SMALLER without fixing it, which is why the
-gate has to assert exact equality.** Measured at the boundary corners on the
-built port:
+**The numbers that matter, measured on the built port:**
 
 ```
-the defect being fixed, level 3:    0.103  (5.90°)
-the wrong port, level 3, ordinary:  0.071  (4.05°)   124 corners still wrong
-the wrong port, level 3, 3.0x:      0.267 (15.35°)
-the wrong port, level 1, 3.0x:      1.485 (95.88°)
+ordering noise on a CORRECT port, worst over both cages:   4.5e-07
+the wrong port, the SMALLEST it ever reads:                7.1e-02
 ```
 
-The angle-weighted port is about **70% of the defect** — it moves 124 corners
-from 5.90° off to 4.05° off. **An improvement that is still wrong is exactly what
-a tolerance-based gate lets through**, and only asserting exact `0.000000`
-against the dense oracle separates a fix from an improvement. That is the real
-argument for the strict assertion, and it is stronger than "the wrong answer
-would be obvious".
+A factor of about **160,000**. Any tolerance between roughly `1e-6` and `1e-2`
+passes the correct port and fails the wrong one — there is no reasonable bound a
+reviewer could pick that gets this wrong. **The gate is robust, not delicate**,
+and `< 1e-6` was right all along.
 
-The graded cage earns its place on the same measurement rather than on the
-discrimination question: both cages catch the wrong port, and the graded one
-catches it **eight times more loudly at level 1** (95.88° against 11.37°). Keep
-it for the margin, not because the ordinary cage is blind.
+**The rule, which is a procedure rather than a slogan:** derive the tolerance
+from the MEASURED noise floor, check it against the MEASURED wrong answer, and
+state both. A gate is meaningful exactly insofar as those two numbers are far
+apart, and **how far apart they are is the thing to report**. A gate whose noise
+floor and whose wrong answer sit within an order of magnitude of each other is
+not a gate, whatever its bound. (The same discipline the sustained-session gate
+already followed and nobody noticed generalising: 0.08% measured residue, 2%
+tolerance, wrong fixture at 2.1x — floor stated, wrong answer stated, bound
+between them.)
 
-**"Graded" sounds like the property and is not.** A 3.0x graded planar cage
-distinguishes nothing. That is the trap worth naming, and it is the one that
-nearly replaced a working fixture with a more elaborate blind one.
+**Why the correct port is not exact, which is our own text.** The residue is
+float epsilon from summation ORDER: the dense hierarchy sums one contiguous ring,
+the regional one sums its own faces and then appends the derived ones. Same
+faces, same values, different order, different last bits — exactly what
+`cross_level.h` already says: *"ORDER IS PART OF THE ANSWER, because float
+addition is not associative and the readers sum over it."* **A gate demanding
+exact equality across two summation orders would fail a correct port.**
 
-**So the rule is not "measure something before trusting the fixture".** It is
-**measure the difference the gate is supposed to detect, directly** — because a
-proxy for it can be confidently wrong in EITHER direction. This proxy was wrong
-in the direction that discards a good fixture; the failures recorded elsewhere in
-this document were wrong in the direction that keeps a blind one. The
-zero-boundary-detail bit-identity gate, the plane cage whose normals all sat
-within a few degrees of +Y, the squashed-operand box that reached past the body:
-each was a check answering correctly about the tree in front of it and never
-asking whether it could tell the difference. **The question is not "did I
-measure" — it is "did I measure the thing the assertion is about".**
+**The three wrong turns, kept because the pattern is the point.**
+
+1. *Wrong quantity.* Incident-triangle-area ratio was measured to decide whether
+   a fixture could tell area-weighting from angle-weighting. It fell to 1.05x by
+   level 3 and the fixture was declared blind. But the two weightings diverge
+   where the surface BENDS, not where areas are unequal — the existing cage
+   discriminates at 1089 of 1089 vertices, and a planar cage reads exactly zero
+   however hard it is graded. *"Graded" sounds like the property and is not.*
+2. *Wrong vertex set.* A figure taken over the dense hierarchy at ALL vertices
+   was carried across to the BOUNDARY CORNERS as though it were the same
+   measurement, producing an argument that the wrong port fails louder than the
+   defect. At the corners it reads 0.071 against the defect's 0.103 — **70% of
+   it, an improvement that is still wrong.**
+3. *Wrong precision.* The correct port was reported as exactly `0.000000`. It was
+   `%.6f` printing `4.5e-07`. An argument was then built on the discarded digits
+   — and that argument said the gate had to demand exactness, which is the one
+   thing it must not do.
+
+**The one-line version, and the reason this entry exists at all:** *the
+measurement is rarely the weak step; choosing the quantity, the vertex set and
+the precision are.* Every one of the three was a real number, correctly taken,
+reasoned from carefully. Nothing downstream of the choice catches the choice.
 
 ### The cross-level refresh is on the per-dab path, and it was priced elsewhere at 18x
 
