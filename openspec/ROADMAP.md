@@ -2634,6 +2634,33 @@ Recorded because everything else in this section was found by that discipline
 being applied to code, and this is the instance where the discipline was not
 applied to a number.
 
+### Four shapes, one sentence: a well-formed answer to a narrower question
+
+The through-line of everything in this section, named by the consuming host after
+the fourth instance turned up in a different material from the first three:
+
+| the thing | the narrower question it answered | the question being asked |
+|---|---|---|
+| a **gate** that cannot fail | does the assertion hold on this fixture | could it ever not hold |
+| a **safeguard** that cannot fail | is the flag set | does removing it change anything |
+| a **fallback** that hides its own fault | is the output correct | did the fast path run |
+| a **query** that hides its own history | what is the state now | what has happened |
+
+**All four return well-formed answers.** None errors, none is empty, none looks
+like a failure — which is why none of them is caught by reading the output. A
+gate prints a pass. A flag reads true. A pick returns the right position. `gh pr
+checks` prints green after a re-run, with no trace that anything flaked.
+
+**And the catching move is the same in all four:** establish that the check could
+have produced a different answer, then read the answer. Delete the term and see
+whether anything moves; delete the flag and see whether anything moves; assert
+the mechanism RAN rather than that the output was right; ask what question the
+command actually answered.
+
+Everything below is an instance. They are kept separately because each one cost
+something specific to find, and the specifics are what make the shape
+recognisable the next time it wears different clothes.
+
 ### A tool that answers a narrower question than the one you asked
 
 The sharpest concrete instance of the class below, and it cost a real measurement
