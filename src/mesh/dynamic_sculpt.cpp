@@ -563,6 +563,58 @@ DynamicStampResult DynamicSculptor::stamp(MeshBrush verb, const MeshBrushSetting
     return out;
 }
 
+// THE SHARED KERNELS. Not one line of deformation math lives in this file,
+// which is the property `add-shared-brush-kernels` exists to make possible and
+// the reason Clay means one thing here and on a fixed mesh.
+//
+// A FREE FUNCTION rather than a block inside `stamp_impl`: the switch is
+// thirteen arms and it was most of what made that function 25 against a
+// backend cognitive-complexity target of 15. It reads no member, so lifting it
+// out costs nothing and says so.
+void dispatch_displacement(MeshBrush verb, const SculptSnapshot& snapshot,
+                           const SculptNeighbors& neighbors, const MeshBrushSettings& brush,
+                           SculptScratch& scratch, kernel::cfloat3* out) {
+    switch (verb) {
+        case MeshBrush::Grab:
+        case MeshBrush::Snakehook:
+            kernel_grab(snapshot, brush, out);
+            break;
+        case MeshBrush::Draw:
+            kernel_draw(snapshot, brush, out);
+            break;
+        case MeshBrush::Inflate:
+            kernel_inflate(snapshot, brush, out);
+            break;
+        case MeshBrush::Pinch:
+            kernel_pinch(snapshot, brush, out);
+            break;
+        case MeshBrush::Flatten:
+            kernel_flatten(snapshot, brush, out);
+            break;
+        case MeshBrush::Clay:
+            kernel_clay(snapshot, brush, out);
+            break;
+        case MeshBrush::Crease:
+            kernel_crease(snapshot, brush, out);
+            break;
+        case MeshBrush::Nudge:
+            kernel_nudge(snapshot, brush, out);
+            break;
+        case MeshBrush::Smooth:
+        case MeshBrush::Polish:
+        case MeshBrush::Scrape:
+            kernel_smooth_family(verb, snapshot, neighbors, brush, scratch, out);
+            break;
+        case MeshBrush::Relax:
+            kernel_relax(snapshot, neighbors, brush, scratch, out);
+            break;
+        case MeshBrush::Layer:
+        case MeshBrush::Paint:
+        case MeshBrush::Smear:
+            break;  // handled above, or not offered
+    }
+}
+
 // The three topology counters, in one place: `stamp_impl` has two exits and a
 // remesh can run at either, and two copies of this would drift the first time a
 // fourth operation was added.
@@ -643,48 +695,7 @@ DynamicStampResult DynamicSculptor::stamp_impl(MeshBrush verb, const MeshBrushSe
     } else {
         displacement_.assign(region_.size(), kernel::cf3(0, 0, 0));
         kernel::cfloat3* d = displacement_.data();
-        // THE SHARED KERNELS. Not one line of deformation math lives in this
-        // file, which is the property `add-shared-brush-kernels` exists to make
-        // possible and the reason Clay means one thing.
-        switch (verb) {
-            case MeshBrush::Grab:
-            case MeshBrush::Snakehook:
-                kernel_grab(snapshot, brush, d);
-                break;
-            case MeshBrush::Draw:
-                kernel_draw(snapshot, brush, d);
-                break;
-            case MeshBrush::Inflate:
-                kernel_inflate(snapshot, brush, d);
-                break;
-            case MeshBrush::Pinch:
-                kernel_pinch(snapshot, brush, d);
-                break;
-            case MeshBrush::Flatten:
-                kernel_flatten(snapshot, brush, d);
-                break;
-            case MeshBrush::Clay:
-                kernel_clay(snapshot, brush, d);
-                break;
-            case MeshBrush::Crease:
-                kernel_crease(snapshot, brush, d);
-                break;
-            case MeshBrush::Nudge:
-                kernel_nudge(snapshot, brush, d);
-                break;
-            case MeshBrush::Smooth:
-            case MeshBrush::Polish:
-            case MeshBrush::Scrape:
-                kernel_smooth_family(verb, snapshot, neighbors, brush, scratch_, d);
-                break;
-            case MeshBrush::Relax:
-                kernel_relax(snapshot, neighbors, brush, scratch_, d);
-                break;
-            case MeshBrush::Layer:
-            case MeshBrush::Paint:
-            case MeshBrush::Smear:
-                break;  // handled above, or not offered
-        }
+        dispatch_displacement(verb, snapshot, neighbors, brush, scratch_, d);
         kernel_timer.stop();
         StageTimer write_timer(stages_, SculptStage::Writeback);
         out.moved_vertices = write_positions(record);
