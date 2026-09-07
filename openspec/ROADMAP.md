@@ -2914,6 +2914,44 @@ test — it can turn the parity gate into a tautology and still print a pass.
 **The shape, again:** *"did everything I ran pass"* was answered correctly and
 truthfully. *"Did I run everything"* was never asked.
 
+### Quoting the most favourable sample of the least reproducible statistic
+
+The other half of *"movement in both directions"*, found by a third session
+within ten minutes of being warned about the first half — and it corrected a
+number **upward**, which is the direction nobody checks.
+
+Four runs of one artefact on a verified-empty box:
+
+```
+median   166.5 / 166.9 / 166.7 / 166.3 us    stable to +-0.3 us
+p99      195.4 / 211.2 / 188.8 / 191.6 us
+worst    392.2 / 376.1 / 371.3 / 365.9 us    spread of 26 us
+counters 383 activated / 354 withdrawn / 338 evicted / 166 pages   IDENTICAL x4
+```
+
+The figure that milestone had shipped — in its committed artefact, its screenshot
+and its report to a user — was **358 us worst tick.** *Every one of the four quiet
+runs is worse than it.*
+
+**So the published number was not inflated by contention. It was the most
+favourable sample of the least reproducible statistic in the report**, and
+re-measuring on a quiet box corrected it the wrong way. The intuition that a busy
+box inflates a figure is right for a median and useless for a maximum: a worst
+tick is an extreme-value statistic, its spread here is **26 us against a median
+spread of 0.3**, and a single sample of it is a draw rather than a measurement.
+
+**The counters did not move at all.** Same four runs, identical to the unit. So
+the criterion that asserts *identical counters across two runs* was written
+correctly, and what was wrong was only what the artefact PRINTED and what was
+therefore repeated onward. That is the count-versus-duration rule arriving as a
+report-formatting question rather than a gate-design one: **the gate was right and
+the headline was not.**
+
+The repair they took is worth stealing: a table in the sample's own README saying
+**which statistic to quote and which not to**, beside the numbers. A figure whose
+spread is two orders of magnitude larger than its neighbour's should not be the
+one on the screenshot.
+
 ### The mirror: a failure that looks like a FINDING
 
 Everything else in this section is a failure that looks like SUCCESS — a gate
@@ -2992,7 +3030,7 @@ partition a namespace — issues against pull requests, tags against branches,
 tracked against on-disk — will each report a confident absence about a thing the
 other holds.
 
-### Three checks that could not fire, in one day
+### Checks that could not fire, in one day
 
 The generalisation, from three instances found in a single session — all in the
 same session's own tooling, all caught by that session:
@@ -3002,9 +3040,10 @@ same session's own tooling, all caught by that session:
 | a revert deleted two call sites, `-Werror,-Wunused-function` failed the build, the harness ran the **stale binary** | `build_exit=2` and `2 passed` printed on adjacent lines |
 | `git rebase` piped to `tail`, so `set -e` saw **tail's** exit code | the rebase conflicted and the loop carried on through two more branches |
 | `grep -c` returning **exit 1 on a clean build** — no matches is a failure code | a successful check read as a failed one |
+| four criteria written as `just test-integration -R "world_(activation\|streaming)"`, which **dies on a bash syntax error** because the recipe interpolates its arguments textually into `bash -c` — the same dead command in CI and in two permanent gates | a stamp, a green tick and an exit code all reported success |
 
-Three disguises: a stale artifact, a discarded exit code, and an exit code that
-means something other than what the reader assumed. **In every one the check was
+Four disguises: a stale artifact, a discarded exit code, an exit code that means
+something other than what the reader assumed, and a command that never parsed. **In every one the check was
 structurally unable to fire and the output was well-formed.**
 
 **The common fix is not care.** It is making a check assert its own
