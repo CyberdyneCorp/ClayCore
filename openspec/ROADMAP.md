@@ -2517,6 +2517,44 @@ item, and does this one want that? The answer is often yes — a mirrored cut is
 defensible — but it should be a decision with a sentence behind it rather than a
 default nobody chose.
 
+### "It would be wrong to" is not "nothing does"
+
+One sentence from the iPad session, offered against its own work, and it names a
+substitution that runs under several findings in this file:
+
+> I reasoned from *"copying would be wrong"* to *"nothing copies"*, which are
+> different claims and only one of them is checkable.
+
+It was about to delete `ClaySpaceDoc`'s copy assignment. The normative claim is
+easy and was correct; the empirical one is the one that decides whether deleting
+it breaks a caller, and it takes a grep. (It came back clean — every holder takes
+the document by `shared_ptr` or reference, and the single by-value use in the
+repository is `ClaySpaceDoc result;` in `load_clayspace`, which is the move path.)
+
+**The substitution is invisible because the two sentences sound like one.** A
+design argument for why something SHOULD NOT happen reads as evidence that it
+DOES NOT, and only the second licenses removing the thing that would catch it.
+The same shape sits under the ABI-minor collision — *"a minor should be unique"*
+was true and *"this minor is unclaimed"* was never checked — and under the merge
+message that claimed one gate subsumed another after comparing their constant
+tables rather than their answers.
+
+**The test for it is mechanical:** the claim you are about to act on, can it be
+checked by running something? If not, you are holding the other one.
+
+### An assertion is a gate, so make it fail before trusting it
+
+A corollary that arrived attached to the above. Adding a `static_assert` to name
+a confusing compiler error, the session temporarily added a `std::mutex` member
+to make it fire, confirmed it named the operation that broke at the definition
+that broke it, and removed the member again.
+
+Worth recording because an assertion is the one kind of gate people skip this
+step for — a `static_assert` looks like documentation, and documentation does not
+get a test. But a `static_assert` on a condition that is unreachable, or worded
+for a case that cannot arise, is a safeguard that cannot fail, and it costs one
+temporary member to find out.
+
 ### A safeguard that cannot fail, and the quantity that cancels the error
 
 Two findings from one attempt, and the first is a category this file did not
