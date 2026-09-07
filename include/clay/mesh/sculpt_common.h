@@ -323,6 +323,70 @@ struct StageTelemetry {
     static const char* name(SculptStage stage);
 };
 
+// WHAT A STAMP DID, beside how long it took
+// (complete-sculpt-performance-instrumentation).
+//
+// A DURATION ALONE CANNOT SAY WHY A DURATION CHANGED. A stage that got slower
+// because it touched twice as many vertices and a stage that got slower because
+// its inner loop regressed are the same number, and a regression report that
+// cannot tell them apart sends someone to the wrong file.
+//
+// ONE RECORD, and that is the point rather than a convenience. Most of these
+// numbers already existed -- `MeshSculptor::anchor_measurements`,
+// `workset().size()`, `write_region().size()`, `dirty_chunks().size()`,
+// `Bvh`'s walk stats, `memory::PeakTelemetry` -- each on its own accessor with
+// its own shape and its own lifetime. A regression that has to assemble a
+// stamp's story out of six places does not get assembled.
+//
+// BORROWED AND NULL BY DEFAULT, exactly as `StageTelemetry` is: one predictable
+// branch per counted site and nothing else. A counter is an increment, so
+// unlike a clock read it is nearly free even when it is on -- but "nearly free"
+// on a per-vertex loop is a cost the measurement would then include, so the
+// null check stays.
+struct SculptCounters {
+    // -- what the stamp reached, and what it moved -----------------------------
+    // These two are DIFFERENT and the difference is the falloff: a workset holds
+    // everything the brush reached, including the rim where the weight is zero
+    // and everything a mask held still. `affected` is what actually changed.
+    std::uint64_t vertices_considered = 0;
+    std::uint64_t vertices_affected = 0;
+    // Class positions MEASURED while resolving where the dab landed -- the
+    // chunk descent's candidates, a scan's whole class space, the walk's own
+    // seed scan. The number that says "a dab costs what it touches" is holding.
+    std::uint64_t positions_measured = 0;
+    std::uint64_t faces_touched = 0;
+    std::uint64_t chunks_touched = 0;
+    // Ring entries flattened for the smoothing family. Zero for a verb that
+    // reads no neighbour, which is most of them.
+    std::uint64_t neighbors_gathered = 0;
+    // Kernel passes: a smooth with four iterations is four, a draw is one.
+    std::uint64_t kernel_passes = 0;
+
+    // -- adaptive topology -----------------------------------------------------
+    // Zero on a fixed mesh and on a hierarchy level, which cannot change
+    // topology at all -- reported rather than omitted, so a representation that
+    // does not use a counter and one that stopped filling it are distinguishable.
+    std::uint64_t splits = 0;
+    std::uint64_t collapses = 0;
+    std::uint64_t flips = 0;
+
+    // -- what it wrote ---------------------------------------------------------
+    std::uint64_t detail_blocks_touched = 0;
+    std::uint64_t history_bytes = 0;
+    // The high-water mark of the per-stamp scratch, in bytes.
+    std::uint64_t scratch_high_water = 0;
+
+    void reset() { *this = SculptCounters{}; }
+};
+
+// Adds to a borrowed record, or does nothing at all when it is null. A free
+// function rather than a method on the pointer so the null check is written
+// once instead of at every call site.
+inline void count(SculptCounters* counters, std::uint64_t SculptCounters::*field,
+                  std::uint64_t n) {
+    if (counters != nullptr) counters->*field += n;
+}
+
 // Times one stage into `telemetry`, or does nothing at all when it is null.
 // Constructed per stage per stamp, so the null case has to be free: it is one
 // predictable branch and no clock read.

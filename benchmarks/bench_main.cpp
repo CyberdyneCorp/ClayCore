@@ -375,6 +375,206 @@ BENCHMARK(BM_LayerDragPerFrame)->Unit(benchmark::kMillisecond);
 void BM_LayerDragOneRefill(benchmark::State& state) { layer_drag(state, /*gesture=*/true); }
 BENCHMARK(BM_LayerDragOneRefill)->Unit(benchmark::kMillisecond);
 
+// DRAGGING A BOOLEAN OPERAND ACROSS A FORM (issue #471), which is the same
+// gizmo drag one level down: the LAYER stays put and one ITEM in it moves.
+//
+// The issue's fixture, mirrored here so the regression is visible without the
+// host: one SDF layer holding a starting sphere and 8 strokes of 12 stamps --
+// 97 items -- and the operand at the ROOT of that layer, a cylinder r 0.25
+// h 1.6 at [0, 0.9, 0], dragged around a circle of radius 0.7 at constant
+// height. One frame per iteration, which is what a host pays and what the
+// issue reports.
+//
+// THREE ROWS, and the middle one is the point:
+//   Subtract          the control. Its influence bound IS its own geometry, so
+//                     a frame dirties the operand and nothing else.
+//   IntersectLayer    what an intersect cost before this change: max(acc, item)
+//                     can change the field anywhere the layer has material, so
+//                     the influence bound is the LAYER's extent and the refill
+//                     follows it. 41.5-44.0 ms a frame in the issue's report,
+//                     and 6.8-10.1 SECONDS at ten times the extent.
+//   Intersect         the swept delta bound. Same edit, same document, the
+//                     region narrowed to where the operand was and went.
+//
+// THE ARGUMENT IS THE EXTENT MULTIPLE: 1 is the reference form, 10 is the
+// ten-times-the-cross-section one (radius sqrt(10)), with the SAME item count,
+// the same cutter and the same drag -- the condition the delta bound's claim
+// is stated under.
+//
+// READ THE COUNTERS, NOT THE CLOCK. `dirty_bricks`, `aabb_volume`,
+// `layer_volume` and `volume_ratio` are deterministic and are what the claim
+// is made in; the milliseconds beside them are what this machine happened to
+// take, and this repository's benchmark gate deliberately holds no threshold
+// for them (a shared runner reads the same pair 0.43x and 1.72x minutes
+// apart).
+namespace {
+
+// The issue's document, at a given form radius.
+scene::Document drag_document(float body, scene::Op op, scene::NodeId* out_cutter) {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("body");
+    auto add = [&](scene::Prim prim, kernel::cfloat3 pos, scene::Op o, float k) {
+        scene::Node n;
+        n.prim = prim;
+        n.xform.position = pos;
+        n.op = o;
+        n.blend = scene::Blend{k > 0 ? scene::BlendProfile::Quadratic : scene::BlendProfile::Hard,
+                               k};
+        return l.sdf->insert(n);
+    };
+    add(scene::Prim::sphere(body), cf3(0, 0, 0), scene::Op::Add, 0.0f);
+    // 8 strokes of 12 stamps, laid on the sphere.
+    for (int stroke = 0; stroke < 8; ++stroke) {
+        const float lon = 6.2831853f * static_cast<float>(stroke) / 8.0f;
+        for (int i = 0; i < 12; ++i) {
+            const float t = static_cast<float>(i) / 11.0f;
+            const float y = -0.85f + 1.7f * t;
+            const float ring = std::sqrt(std::max(0.05f, 1.0f - y * y));
+            const float phi = lon + 0.6f * t;
+            add(scene::Prim::sphere(0.16f * body),
+                cf3(std::cos(phi) * ring * body, y * body, std::sin(phi) * ring * body),
+                scene::Op::Add, 0.05f * body);
+        }
+    }
+    *out_cutter = add(scene::Prim::capped_cylinder(0.25f, 0.8f), cf3(0.7f, 0.9f, 0), op, 0.0f);
+    return doc;
+}
+
+// Where the drag's frame `f` puts the operand: a circle at constant height.
+math::Transform drag_frame(int f) {
+    const float t = static_cast<float>(f % 12) / 12.0f;
+    math::Transform x;
+    x.position = cf3(std::sin(t * 6.2831853f) * 0.7f, 0.9f, 0.0f);
+    return x;
+}
+
+double box_volume(const math::Aabb& b) {
+    if (b.empty() || b.is_infinite()) return 0.0;
+    const kernel::cfloat3 e = b.extent();
+    return static_cast<double>(e.x) * e.y * e.z;
+}
+
+using Clock = std::chrono::steady_clock;
+double ms_since(Clock::time_point t0) {
+    return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+}
+
+void operand_drag(benchmark::State& state, scene::Op op, bool delta) {
+    const float body = std::sqrt(static_cast<float>(state.range(0)));
+    scene::NodeId cutter = 0;
+    scene::Document doc = drag_document(body, op, &cutter);
+    scene::Layer& layer = doc.layers.front();
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+
+    // THE SAME VOXEL SIZE AT BOTH EXTENTS, which is what makes the ten-times
+    // row mean anything: the artist works at one level of detail and the model
+    // gets bigger, so the layer holds ten times the cross-section in bricks.
+    // Scaling the voxel with the form keeps the brick count flat and measures
+    // the pathology away.
+    brick::BrickCache cache(brick::BrickConfig{8, 0.05f, 3, 0});
+    {
+        scene::LayerExtent memo;
+        cache.mark_dirty(scene::layer_influence_bound(layer, &memo));
+        const scene::CullIndex index(doc);
+        std::vector<float> values;
+        for (const brick::BrickRequest& req : cache.take_dirty()) {
+            scene::CullRegion cull{cache.cull_region(req.key)};
+            scene::Tape tape = scene::compile_document(doc, &cull, &index);
+            values.resize(static_cast<std::size_t>(req.grid.nx) * req.grid.ny * req.grid.nz);
+            cpu->eval_grid(tape, req.grid, values.data());
+            cache.submit(req, values.data());
+        }
+    }
+
+    double bound_ms = 0, refill_ms = 0, remesh_ms = 0;
+    double aabb_volume = 0, layer_volume = 0;
+    std::int64_t bricks = 0, tris = 0, frames = 0;
+    int frame = 0;
+    std::vector<float> values;
+    for (auto _ : state) {
+        const scene::Command cmd =
+            scene::Command{scene::SetTransformCmd{layer.id, cutter, drag_frame(++frame)}};
+
+        // 1. THE BOUND, both sides of the apply, exactly as apply_edit takes
+        //    it -- including the influence bound the fallback would use, so
+        //    the row measures the whole decision and not half of it.
+        const Clock::time_point t0 = Clock::now();
+        scene::LayerExtent before_memo;
+        math::Aabb region = scene::command_influence_bound(doc, cmd, &before_memo);
+        const std::optional<math::Aabb> delta_before =
+            delta ? scene::command_surface_delta_bound(doc, cmd) : std::nullopt;
+        scene::apply(doc, cmd);
+        scene::LayerExtent after_memo;
+        region.expand(scene::command_influence_bound(doc, cmd, &after_memo));
+        if (const std::optional<math::Aabb> delta_after =
+                delta ? scene::command_surface_delta_bound(doc, cmd) : std::nullopt;
+            delta_before && delta_after) {
+            region = *delta_before;
+            region.expand(*delta_after);
+        }
+        bound_ms += ms_since(t0);
+        aabb_volume += box_volume(region);
+        {
+            scene::LayerExtent memo;
+            layer_volume += box_volume(scene::layer_influence_bound(layer, &memo));
+        }
+
+        // 2. THE REFILL of what that region dirtied.
+        const Clock::time_point t1 = Clock::now();
+        cache.mark_dirty(region);
+        const std::vector<brick::BrickRequest> reqs = cache.take_dirty();
+        const scene::CullIndex index(doc);
+        std::vector<brick::BrickKey> keys;
+        keys.reserve(reqs.size());
+        for (const brick::BrickRequest& req : reqs) {
+            scene::CullRegion cull{cache.cull_region(req.key)};
+            scene::Tape tape = scene::compile_document(doc, &cull, &index);
+            values.resize(static_cast<std::size_t>(req.grid.nx) * req.grid.ny * req.grid.nz);
+            cpu->eval_grid(tape, req.grid, values.data());
+            cache.submit(req, values.data());
+            keys.push_back(req.key);
+        }
+        bricks += static_cast<std::int64_t>(reqs.size());
+        refill_ms += ms_since(t1);
+
+        // 3. THE REMESH of those bricks and no others, which is what an
+        //    incremental host draws.
+        const Clock::time_point t2 = Clock::now();
+        const mesh::Mesh m = mesh::mesh_bricks(cache, nullptr, {}, &keys);
+        remesh_ms += ms_since(t2);
+        tris += static_cast<std::int64_t>(m.triangle_count());
+        ++frames;
+        benchmark::DoNotOptimize(m.triangle_count());
+    }
+    const double n = static_cast<double>(frames > 0 ? frames : 1);
+    state.counters["bound_ms"] = bound_ms / n;
+    state.counters["refill_ms"] = refill_ms / n;
+    state.counters["remesh_ms"] = remesh_ms / n;
+    state.counters["dirty_bricks"] = static_cast<double>(bricks) / n;
+    state.counters["triangles"] = static_cast<double>(tris) / n;
+    state.counters["aabb_volume"] = aabb_volume / n;
+    state.counters["layer_volume"] = layer_volume / n;
+    state.counters["volume_ratio"] = layer_volume > 0 ? aabb_volume / layer_volume : 0.0;
+    state.counters["items"] = static_cast<double>(layer.sdf->nodes().size());
+}
+
+}  // namespace
+
+void BM_OperandDragSubtract(benchmark::State& state) {
+    operand_drag(state, scene::Op::Subtract, /*delta=*/true);
+}
+BENCHMARK(BM_OperandDragSubtract)->Arg(1)->Arg(10)->Unit(benchmark::kMillisecond);
+
+void BM_OperandDragIntersectLayerBound(benchmark::State& state) {
+    operand_drag(state, scene::Op::Intersect, /*delta=*/false);
+}
+BENCHMARK(BM_OperandDragIntersectLayerBound)->Arg(1)->Arg(10)->Unit(benchmark::kMillisecond);
+
+void BM_OperandDragIntersect(benchmark::State& state) {
+    operand_drag(state, scene::Op::Intersect, /*delta=*/true);
+}
+BENCHMARK(BM_OperandDragIntersect)->Arg(1)->Arg(10)->Unit(benchmark::kMillisecond);
+
 // Capturing a region of the field as a stamp, and placing one
 // (stamp-a-captured-field).
 //

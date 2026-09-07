@@ -320,6 +320,85 @@ enum Fixture {
         return (m, sf, sc)
     }
 
+    /// A DOCUMENT MESH LAYER and a sculptor over it — the fixture the harness
+    /// did not have (gate-sustained-device-sculpting).
+    ///
+    /// `mesh_sculptor_stamp` and `mesh_sculptor_apply_stroke` were EXEMPT as
+    /// unmeasured for exactly this reason: every other case here drives a field
+    /// or a grid, and a mesh brush needs an imported mesh with its adjacency
+    /// built once. The fixed-topology path is the classical sculpting mode and
+    /// no iPad had ever run it.
+    ///
+    /// The same plane `dynamicPatch` builds, but taken into a DOCUMENT as a
+    /// mesh layer, because that is what a host sculpts: a standalone mesh
+    /// belongs to no layer, shares no adjacency and cannot be picked against
+    /// through the document.
+    ///
+    /// Returns the document, the borrowed layer mesh and the sculptor. The
+    /// document owns the mesh; destroy the sculptor, then the document.
+    static func meshLayerPatch(stamps: Int, spacing: Float = 0.02)
+        -> (doc: OpaquePointer, mesh: OpaquePointer, sculptor: OpaquePointer)? {
+        let side = max(4, Int(Double(stamps).squareRoot() * 5.0))
+        let stride = side + 1
+        let half = Float(side) * spacing * 0.5
+
+        var positions = [Float]()
+        positions.reserveCapacity(stride * stride * 3)
+        for z in 0...side {
+            for x in 0...side {
+                positions.append(Float(x) * spacing - half)
+                // A SLOPE, not a flat sheet: a flat plane makes every vertex
+                // normal identical, which is a fixture whose falloff and whose
+                // deposit direction cannot disagree about anything. See the
+                // roadmap's note about a fixture whose normals all point one
+                // way.
+                positions.append(0.05 * (Float(x) * spacing - half))
+                positions.append(Float(z) * spacing - half)
+            }
+        }
+        var indices = [UInt32]()
+        indices.reserveCapacity(side * side * 6)
+        for z in 0..<side {
+            for x in 0..<side {
+                let a = UInt32(z * stride + x)
+                let b = a + 1
+                let c = a + UInt32(stride)
+                let d = c + 1
+                indices.append(contentsOf: [a, c, b, b, c, d])
+            }
+        }
+
+        var source: OpaquePointer? = nil
+        let built = positions.withUnsafeBufferPointer { p in
+            indices.withUnsafeBufferPointer { i in
+                clay_mesh_from_triangles(p.baseAddress, stride * stride,
+                                         i.baseAddress, indices.count, &source)
+            }
+        }
+        guard built == CLAY_OK, let src = source else { return nil }
+        defer { clay_mesh_destroy(src) }
+
+        guard let doc = clay_document_create() else { return nil }
+        var desc = clay_mesh_layer_desc()
+        desc.struct_size = UInt32(MemoryLayout<clay_mesh_layer_desc>.size)
+        var layer: clay_layer_id = 0
+        var borrowed: OpaquePointer? = nil
+        guard "carried".withCString({ name -> clay_result in
+            desc.name = name
+            return clay_document_add_mesh_layer(doc, src, &desc, &layer, &borrowed)
+        }) == CLAY_OK, let mesh = borrowed else {
+            clay_document_destroy(doc)
+            return nil
+        }
+        var sculptor: OpaquePointer? = nil
+        guard clay_mesh_sculptor_create(mesh, -1.0, &sculptor) == CLAY_OK,
+              let sc = sculptor else {
+            clay_document_destroy(doc)
+            return nil
+        }
+        return (doc, mesh, sc)
+    }
+
     /// Half the side length of the patch `dynamicPatch(stamps:)` builds — the
     /// distance from its centre to its boundary, which is what a dab has to
     /// stay inside. Kept beside the builder so the two cannot drift.

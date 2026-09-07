@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 89
+#define CLAY_ABI_MINOR 96
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -545,6 +545,26 @@ typedef struct clay_memory_report {
     uint64_t essential;    /* the user's work; never released */
     uint64_t rebuildable;  /* reconstructs to an identical surface */
     uint64_t undoable;     /* undo depth, and the host's own policy */
+
+    /* -- the topology cache (ABI 0.89.0, share-mesh-topology-cache) ----------
+     *
+     * The adjacency the mesh sculptors over a layer share, held by the DOCUMENT
+     * — so unlike the surface tier above, this line is filled by
+     * clay_document_memory with no ledger from the host.
+     *
+     * REBUILDABLE, and reached with clay_document_trim_topology_cache. It is
+     * ~10 MB for a 296k-triangle layer, which is worth releasing under pressure
+     * and worth 120 ms to rebuild, so it is neither free to hold nor free to
+     * drop. clay_document_topology_cache_stats is the finer view.
+     *
+     * BELOW THE THREE ROLL-UPS, not beside the tier it belongs with, and that
+     * placement is the rule rather than an oversight: `essential`,
+     * `rebuildable` and `undoable` are at offsets every caller compiled since
+     * ABI 0.78.0 has baked in, so a field inserted above them is a re-layout
+     * and a breaking change. It is still counted INSIDE `rebuildable` and
+     * inside `total`, so the roll-ups stay true — which is the direction a
+     * memory report has to err in, and the same trade the surface tier made. */
+    uint64_t topology_cache;
 } clay_memory_report;
 
 /* -- what a host will spend, and what it may take back ------------------------
@@ -734,6 +754,71 @@ clay_result clay_document_memory(const clay_document* doc, clay_memory_report* o
 clay_result clay_document_memory_with_surfaces(const clay_document* doc,
                                                const clay_memory_ledger* surfaces,
                                                clay_memory_report* out_report);
+
+/* -- the topology cache (share-mesh-topology-cache) ---------------------------
+ *
+ * WHAT IT IS. Creating a mesh sculptor over a layer builds the weld classes and
+ * the neighbourhood CSR its brushes walk, and that is the WHOLE of what a
+ * sculptor costs to construct: 120.8 ms on a 296k-triangle mesh, against a
+ * sculptor whose other members are empty vectors. A second sculptor over the
+ * same unchanged triangles used to pay 123.6 ms for the identical partition.
+ * The document now holds one per layer and hands it to both; the second create
+ * is 0.25 ms.
+ *
+ * WHAT INVALIDATES IT: replacing a layer's triangles. What does NOT: sculpting.
+ * A weld partition is pinned when it is built and positions move under it
+ * freely — that is the fixed-topology contract, and a sculptor live across a
+ * stroke has always behaved this way, so a sculptor created after the stroke
+ * now gets what the live one had. A vertex dragged out of a coincidence it was
+ * welded into therefore stays in its class. That is deliberate and it is the
+ * only behavioural difference this cache makes.
+ *
+ * AN ENTRY IS VERIFIED, NOT TRUSTED. Every lookup fingerprints the cached entry
+ * against the mesh it is about to be served for — counts, weld epsilon and a
+ * hash of the index buffer, 0.25 ms — so two meshes with identical vertex and
+ * triangle counts and different connectivity cannot be served each other's
+ * data, and a replacement path that failed to invalidate is a slow miss rather
+ * than a wrong answer. */
+
+typedef struct clay_topology_cache_stats {
+    uint32_t struct_size; /* = sizeof(clay_topology_cache_stats); required */
+
+    uint64_t entries; /* one per mesh layer that has been sculpted */
+    uint64_t bytes;   /* what a trim could reach, if nothing held it */
+
+    /* HITS AND MISSES ARE THE POINT, and are why this call exists rather than
+     * only a byte count. A cache that never hits and a cache that is not there
+     * are indistinguishable from outside — same answers, same timings within
+     * noise — and an integrator who cannot tell the difference cannot tell
+     * whether their session pattern is defeating it. */
+    uint64_t hits;
+    uint64_t misses;
+    /* Entries the cache let go of: an invalidation, a fingerprint mismatch that
+     * rebuilt over an existing entry, a trim, a document close. */
+    uint64_t evictions;
+
+    /* Cumulative, in nanoseconds. build_ns is what the cache exists to avoid
+     * and verify_ns is what it costs to be sure; a host reading the two
+     * together is reading the trade directly rather than taking this comment's
+     * word for it. */
+    uint64_t build_ns;
+    uint64_t verify_ns;
+} clay_topology_cache_stats;
+
+clay_result clay_document_topology_cache_stats(const clay_document* doc,
+                                               clay_topology_cache_stats* out_stats);
+
+/* Release every cached entry NO LIVE SCULPTOR IS HOLDING, and report the bytes.
+ *
+ * Nothing a live sculptor holds is released, and that is a fact rather than a
+ * best effort: entries are reference-counted and the cache can see whether it
+ * is the only holder. So this is safe to call from a memory warning that
+ * arrives mid-stroke — it will release the layers nobody is working on and
+ * leave the one under the finger alone.
+ *
+ * out_released_bytes may be NULL. A trim that released nothing is CLAY_OK with
+ * zero, not an error: "there was nothing to give back" is an answer. */
+clay_result clay_document_trim_topology_cache(clay_document* doc, uint64_t* out_released_bytes);
 
 /* The same breakdown for ONE layer, so a large document can be attributed to
  * the layer responsible rather than merely reported as large.
@@ -1148,6 +1233,55 @@ clay_result clay_layer_set_transform_nonuniform(clay_document* doc, clay_layer_i
                                                 clay_node_id node, const float position[3],
                                                 const float rotation_axis[3], float rotation_angle,
                                                 const float scale[3]);
+/* The uniform edit again, PLUS THE WORLD BOX IT ACTUALLY CHANGED (ABI 0.90.0,
+ * issue #471). Identical in what it applies and what it records — one
+ * SetTransformCmd, one undo step — and it answers the question the generic
+ * bound queries cannot: not "where can this node influence the field" but
+ * "where did THIS MOVE change the surface".
+ *
+ * They are different questions and the second is often far smaller. An
+ * INTERSECT's influence is the whole layer, because `max(acc, item)` is the
+ * item's own value everywhere the item is not — correct, measured, and what
+ * clay_layer_node_influence_bound and clay_brick_cache_mark_dirty_nodes still
+ * report, because an arbitrary edit to an intersect really does reach that far.
+ * A MOVE does not: outside the swept union of where the operand was and where
+ * it went, its field is a positive beyond the band on both sides, so the max
+ * returns a beyond-band positive on both sides and the band-clamped result
+ * cannot have moved. Dragging an intersect cylinder across a 97-item sculpt
+ * refilled the layer every frame — 41.5-44.0 ms against 3.8-4.2 for the same
+ * drag with a SUBTRACT operand, and 6.8-10.1 SECONDS on a fixture with ten
+ * times the extent.
+ *
+ * THE BOX IS THE ONE TO HAND clay_brick_cache_mark_dirty, and the three states
+ * are clay_layer_node_influence_bound's:
+ *   *out_has_bounds 0            nothing to dirty; out_min/out_max untouched
+ *   1, *out_infinite 0           the finite box, ready for mark_dirty
+ *   1, *out_infinite 1           unbounded — mark_dirty with both regions NULL
+ * Any of the four out-pointers may be NULL, and with all four NULL this IS
+ * clay_layer_set_transform.
+ *
+ * WHAT IT DOES NOT PROMISE. It is never the narrow box on a guess: where the
+ * engine cannot prove the local claim it reports the same conservative bound
+ * the influence query reports, and a host cannot tell which it got — nor does
+ * it need to, since both are safe to dirty. It falls back for an op that is not
+ * an intersect (whose influence bound is already this box), a node that is
+ * missing, hidden or a group, a deformer chain, a sampled-volume or unbounded
+ * primitive, an infinite grid repeat, a gate, a NON-UNIFORM per-axis scale on
+ * the operand or on its layer, a spatial morph or a gate anywhere in the
+ * layer's chain, and a morph in a layer fold above it. It says
+ * nothing about any OTHER edit: two moves reported one at a time are two boxes,
+ * and a host that dirties by only the last one has skipped the first.
+ *
+ * It is the box for THE SURFACE AND THE BAND AROUND IT, which is what a brick
+ * cache stores and what a mesher reads. Outside it the raw far-field distance
+ * DOES change — it is the moved operand's own distance — so a consumer that
+ * reads unclamped values far from the surface wants the influence query
+ * instead. */
+clay_result clay_layer_set_transform_bound(clay_document* doc, clay_layer_id layer,
+                                           clay_node_id node, const float position[3],
+                                           const float rotation_axis[3], float rotation_angle,
+                                           float scale, float out_min[3], float out_max[3],
+                                           int32_t* out_has_bounds, int32_t* out_infinite);
 /* Replace a node's primitive. Its deformers, repetition, profile and stroke
  * belong to the node, not to the primitive, and survive the edit. */
 clay_result clay_layer_set_prim(clay_document* doc, clay_layer_id layer, clay_node_id node,
@@ -1505,14 +1639,64 @@ clay_result clay_document_layer_composition(const clay_document* doc, clay_layer
  * is only ever about writing DOWN. A minor of 0 is CLAY_ERROR_INVALID_ARGUMENT.
  * out_blocking_layer may be NULL, and is set to 0 on CLAY_OK.
  *
- * A RECORDED GAP, not an oversight: this ABI has no way to write at an older
- * minor at all. clay_document_save takes a path and clay_document_save_memory
- * takes a blob; neither takes a version, and the layout is a parameter on the
- * C++ serializer that does not cross this boundary. So today the honest use of
- * this call is "warn me that this document has become one an older build cannot
- * open", and a save-at-minor entry point is its own change. */
+ * THE GAP THIS RECORDED IS CLOSED (ABI 0.93.0): clay_document_save_at_minor and
+ * clay_document_save_memory_at_minor write at the layout this call reports on,
+ * and refuse with the same answer it gives.
+ *
+ * AND CLOSING IT FOUND THIS CALL WRONG. It asked only whether a layer's
+ * COMPOSITION could be written, because composition was the only field whose
+ * absence changed the model when it was written. Container minor 19 added an
+ * 'MRES' chunk carrying a mesh layer's multiresolution hierarchy, and this call
+ * did not learn about it: a document with a hierarchy reported CLAY_OK at minor
+ * 18, which has no chunk to put one in. It now answers for the whole document.
+ *
+ * A hierarchy carrying no DETAIL still reports CLAY_OK, and that is the same
+ * line every other minor draws: subdivision is deterministic, so a hierarchy
+ * without detail rebuilds from its cage and losing it is the ordinary "smaller
+ * or plainer" degrade. Detail is something an artist made and cannot be
+ * rebuilt. */
 clay_result clay_document_writable_at_minor(const clay_document* doc, uint32_t minor,
                                             clay_layer_id* out_blocking_layer);
+
+/* -- WRITING AT AN OLDER LAYOUT (ABI 0.93.0) ---------------------------------
+ *
+ * Save this document at scene format minor `minor` rather than at this build's
+ * own. What a host needs to hand a file to a build that has not been updated.
+ *
+ * REFUSED, NEVER DOWNGRADED. CLAY_ERROR_UNSUPPORTED when `minor` cannot say
+ * what this document says, with *out_blocking_layer naming the first layer that
+ * blocks it and clay_last_error spelling out why — exactly the answer
+ * clay_document_writable_at_minor gives, from the same predicate, so asking
+ * before and being refused after cannot disagree.
+ *
+ * NO NEW ERROR CODE FOR IT, deliberately. CLAY_ERROR_UNSUPPORTED already means
+ * this and already carries the blocking layer through the query above; a second
+ * code for one condition would be a second answer to one question, and a host
+ * would have to handle both to be correct.
+ *
+ * NOTHING IS WRITTEN ON A REFUSAL. An existing file at `path` is left exactly
+ * as it was: a save that cannot represent the document must not first destroy
+ * the last one that could.
+ *
+ * A `minor` at or above this build's own layout writes this build's layout,
+ * because the question is only ever about writing DOWN. A minor of 0 is
+ * CLAY_ERROR_INVALID_ARGUMENT. out_blocking_layer may be NULL.
+ *
+ * WHAT AN OLDER MINOR ACTUALLY LOSES, said once rather than per call: 14 comes
+ * back unsquashed, 15's instances come back as copies, 17 writes each payload
+ * once per node, and below 19 a hierarchy carrying no detail is absent and
+ * rebuilds from its cage. Every one of those is smaller or plainer. The two
+ * that would be a DIFFERENT SCULPTURE — a composition below 18, a hierarchy
+ * with detail below 19 — are refused instead. */
+clay_result clay_document_save_at_minor(const clay_document* doc, const char* path,
+                                        uint32_t minor, clay_layer_id* out_blocking_layer);
+
+/* The same write into memory. Free the result with clay_blob_destroy; on a
+ * refusal *out_blob is left NULL rather than set to an empty blob, so a caller
+ * that checks the pointer and a caller that checks the result agree. */
+clay_result clay_document_save_memory_at_minor(const clay_document* doc, uint32_t minor,
+                                               clay_blob** out_blob,
+                                               clay_layer_id* out_blocking_layer);
 
 /* -- what a re-placement guarantees (ABI 0.82.0) ----------------------------
  *
@@ -2475,8 +2659,9 @@ clay_result clay_layer_node_prim(const clay_document* doc, clay_layer_id layer,
  * otherwise has to have kept for itself, in a table beside the .clay keyed by
  * node id, and to have kept correct across undo and redo on its own.
  *
- * clay_layer_set_color is the one setter with no reader here; a host that
- * needs one should say so rather than keep the table alive for it.
+ * clay_layer_node_color completes the set: it was the one setter with no
+ * reader, and a host reloading a document had to keep the colours in that
+ * table beside the .clay after all.
  *
  * clay_layer_node_influence_bound is NOT the position answer, and a host that
  * reaches for it gets a wrong one: it is dilated by rounding and blend support,
@@ -2560,6 +2745,30 @@ clay_result clay_layer_node_params(const clay_document* doc, clay_layer_id layer
 clay_result clay_layer_node_op_blend(const clay_document* doc, clay_layer_id layer,
                                      clay_node_id node, int32_t* out_op, int32_t* out_blend,
                                      float* out_blend_k, float* out_rounding);
+
+/* The node's colour, as clay_layer_set_color takes it.
+ *
+ * TOTAL: THERE IS NO UNSET COLOUR. An ITEM's colour is the one its
+ * clay_item_desc carried, and a host that zeroed that descriptor placed a BLACK
+ * item — which is the reason this reader is worth having rather than a
+ * formality: that was previously unfindable. A GROUP takes no colour at
+ * creation, so it is the one node a C host can make that carries the engine's
+ * own default of (0.7, 0.7, 0.7).
+ *
+ * A GROUP ANSWERS, for the reason its setter accepts one: a CLAY_OP_SHELL or
+ * CLAY_OP_REPLACE group paints a seed colour, so the value is a group's to
+ * hold. That is the one place this reader differs from
+ * clay_layer_node_transform, which refuses a group because a group's transform
+ * reaches nothing.
+ *
+ * WHAT IT IS NOT: the colour the surface SHOWS at a point. Nodes compose, and
+ * what a shell over a red sphere renders is the composition's answer — it
+ * reaches a host on a meshed surface, through clay_mesh_colors. This is the
+ * value THIS NODE holds: what its setter wrote, what a save round-trips, and
+ * what clay_raycast_attributed's out_node names when a host wants the colour
+ * behind a point on screen. */
+clay_result clay_layer_node_color(const clay_document* doc, clay_layer_id layer,
+                                  clay_node_id node, float out_rgb[3]);
 
 /* The layer's TOP-LEVEL nodes, count-then-index, in the layer's EVALUATION
  * order — index 0 is the node evaluated first, and the index is the one
@@ -7015,7 +7224,10 @@ typedef enum clay_mesh_falloff {
 typedef struct clay_mesh_brush_desc {
     uint32_t struct_size; /* = sizeof(clay_mesh_brush_desc); required */
     int32_t verb;         /* clay_mesh_brush */
-    float center[3];      /* in the MESH's own space */
+    /* In the MESH's own space, or in WORLD when the session declares a frame
+     * (clay_mesh_sculptor_set_world_frame). `direction`, `deposit_normal`,
+     * `plane_point`, `plane_normal`, `radius` and `layer_height` follow it. */
+    float center[3];
     float radius;         /* must be > 0 */
     /* Signed for every verb that has a sign, and scaled into world units by
      * the radius, so a brush behaves the same at any size. */
@@ -7049,10 +7261,13 @@ typedef struct clay_mesh_brush_desc {
     float polish_angle;
     int32_t smooth_iterations; /* 1..CLAY_MESH_MAX_SMOOTH_ITERATIONS */
     /* LAYER's ceiling: how far above the stroke's STARTING surface the deposit
-     * may reach, in WORLD units. World rather than radius-relative, unlike
-     * `strength`, and that is the point rather than an inconsistency — a
-     * ceiling that moved when the brush resized would not be a ceiling.
-     * Negative digs to a floor instead. */
+     * may reach, as an ABSOLUTE LENGTH rather than radius-relative, unlike
+     * `strength` — a ceiling that moved when the brush resized would not be a
+     * ceiling. Negative digs to a floor instead.
+     *
+     * (This said "in WORLD units", which meant absolute-rather-than-relative
+     * and read as document-world once the space of `center` became a question
+     * it could be confused with. It is in the same space as `center`.) */
     float layer_height;
     /* An ALPHA: a scalar stamp scaling this brush's per-vertex weight, so
      * detail work on a mesh layer is alpha-driven as it already is on voxels
@@ -7096,12 +7311,14 @@ typedef struct clay_mesh_brush_desc {
      * automasking existed. Appended, so a host compiled against the older
      * layout sends zeroes and gets exactly that.
      *
-     * THREE OF THE FIVE FACTORS CROSS HERE. The other two — CAVITY and
-     * SURFACE_GROUP — need an input this descriptor cannot carry: a field to
-     * measure cavity from, and the document's group lattice, both of which are
-     * callbacks on the C++ side. Setting their bits from C is inert rather than
-     * an error, and the descriptor that carries their inputs is a follow-up
-     * rather than a guess made against a sample of one. */
+     * THREE OF THE FIVE FACTORS ARE COMPLETE HERE. The other two — CAVITY and
+     * SURFACE_GROUP — need an input this descriptor cannot carry: something
+     * that answers a world point, which on the C++ side is a std::function.
+     * Their bits still live here, because which factors RUN is a property of
+     * the brush; what they consume arrives separately, through
+     * clay_mesh_sculptor_set_automask_sources below. A bit set with no source
+     * is inert rather than an error, which is what lets a host carry an
+     * automask preset it has not yet baked a cavity mask for. */
     uint32_t automask_factors; /* clay_automask_factor, OR-ed */
     /* NORMAL_ANGLE: how far the surface may turn from the brush's own facing
      * before the gate closes, in radians. Full strength up to this angle, zero
@@ -7161,8 +7378,8 @@ typedef enum clay_automask_factor {
     CLAY_AUTOMASK_NORMAL_ANGLE = 1u << 0,
     CLAY_AUTOMASK_TOPOLOGY_CONNECTED = 1u << 1,
     CLAY_AUTOMASK_BOUNDARY = 1u << 2,
-    /* Declared so the bit values match the C++ vocabulary exactly, and inert
-     * from C until the descriptor that carries their inputs lands. */
+    /* These two consume an input the brush descriptor cannot carry; supply it
+     * with clay_automask_sources below. Without it they are inert. */
     CLAY_AUTOMASK_CAVITY = 1u << 3,
     CLAY_AUTOMASK_SURFACE_GROUP = 1u << 4
 } clay_automask_factor;
@@ -7170,6 +7387,87 @@ typedef enum clay_automask_factor {
 /* The engine's defaults, so a host fills in what it means and takes the rest.
  * The verb defaults to DRAW and the geodesic flag to on. */
 clay_result clay_mesh_brush_defaults(clay_mesh_brush_desc* out_desc);
+
+/* -- THE TWO FACTORS THAT NEED MORE THAN A DESCRIPTOR ------------------------
+ *
+ * CAVITY and SURFACE_GROUP were declared with the other three and were inert
+ * from C: setting their bits did nothing, because each needs an INPUT a
+ * descriptor of scalars cannot hold — something that answers a world point.
+ * This is the descriptor the automask block above called a follow-up.
+ *
+ * WHY HANDLES AND NOT A CALLBACK. The engine takes these as std::functions and
+ * evaluates them PER VERTEX FROM WORKER THREADS with no lock held, so a C
+ * function pointer here would be a re-entrant call into a host from inside a
+ * stamp. This ABI declares no function-pointer type anywhere, and this is not
+ * the place to start: both inputs already exist as world-addressed lattices
+ * with handles of their own, and a lattice read is what the engine wants.
+ *
+ * THE SAME MODEL PYCLAY WIRES, deliberately. pyclay takes a MaskField and the
+ * document's group lattice and refuses a Python callable for exactly the reason
+ * above; these are the same two objects. The bindings therefore agree about
+ * what a cavity automask MEANS rather than each having reached the feature its
+ * own way.
+ *
+ * WHAT THE CAVITY MASK IS, precisely, because "the same estimator" is a claim
+ * worth being exact about. clay_mask_from_surface with CLAY_MEASURE_CAVITY
+ * bakes brush::measure_at onto a lattice. A C++ caller hands the automask that
+ * estimator as a function and it is evaluated point by point; through here it
+ * is the same estimator SAMPLED. So a painted cavity mask and a cavity automask
+ * agree about this surface by construction rather than by inspection — the two
+ * are literally the same lattice — and what differs from the C++ path is the
+ * resolution, which is the cell_size you passed when you baked it rather than
+ * something hidden here.
+ *
+ * BOTH LATTICES ARE WORLD-ADDRESSED, AND SO IS THE SAMPLING. A sculptor's
+ * vertices are in the MESH's own space, and each is placed by the session's
+ * declared frame — clay_mesh_sculptor_set_world_frame or
+ * clay_mesh_sculptor_use_layer_transform — before either lattice is asked. That
+ * is the same conversion the painted `mask` argument already gets, and it has
+ * to be: a cavity automask and a painted cavity mask that disagreed about one
+ * surface would defeat the whole point of there being one estimator. A session
+ * that declares no frame is sampled where its vertices are, which for a
+ * standalone mesh is the truth rather than an assumption.
+ *
+ * The frame is read WHEN A LATTICE IS ASKED, so declaring it after naming the
+ * sources is not a mistake and neither order is the wrong one.
+ *
+ * ONLY THE FIXED-MESH SESSION DECLARES A SPACE. The adaptive and
+ * multiresolution sculptors have no world frame to declare, so their lattices
+ * — these two and the painted `mask` they already took — are sampled at the
+ * surface's own positions. That is not new here and not a special case for the
+ * automask: it is the same reading their mask gate has always had. A host
+ * sculpting a PLACED adaptive or multiresolution surface through a
+ * world-addressed lattice should say so, and the frame follows for all three
+ * lattices at once rather than for one of them.
+ *
+ * BORROWED, AND FOR THE WHOLE STROKE. Neither handle is copied: the sculptor
+ * holds what they resolve to until you set sources again or clear them, so both
+ * must outlive that. This is the contract clay_mesh_sculptor_apply_stroke's own
+ * `mask` argument already has — resolved once, used for every stamp — applied
+ * to a setter because these are set once per STROKE. They hold std::functions
+ * on the engine side, and rebuilding those per dab is an allocation per dab,
+ * which the allocation gate forbids. */
+typedef struct clay_automask_sources {
+    uint32_t struct_size; /* = sizeof(clay_automask_sources); required */
+    /* CAVITY: the crevice measure, as a lattice. Bake it with
+     * clay_mask_from_surface(doc, CLAY_MEASURE_CAVITY, ...). Null leaves the
+     * factor inert however the brush's CAVITY bit and its strength are set,
+     * which is what "the engine was never given a surface to measure" should
+     * cost. */
+    const clay_mask* cavity;
+    /* SURFACE_GROUP: the document's polygroups, from clay_document_groups. A
+     * WORLD LATTICE rather than a per-face identifier, which is what lets a
+     * group survive a representation bridge. Null leaves the factor inert. */
+    const clay_groups* groups;
+    /* The group the stroke started in; everything else is masked out. Resolve
+     * it with clay_groups_at at the stroke's first sample — the engine does not
+     * pick one for you, because "where the stroke began" is a fact about the
+     * gesture and only the host has it. */
+    uint32_t active_group;
+} clay_automask_sources;
+
+/* The setters that take one are declared with the sculptors, after all three
+ * handle types exist — search clay_mesh_sculptor_set_automask_sources. */
 
 /* -- THE BRUSH MODEL, AND BRUSHES AS DATA ------------------------------------
  *
@@ -7383,7 +7681,13 @@ clay_result clay_mesh_sculptor_stale_seeds_rejected(const clay_mesh_sculptor* sc
 
 /* One stamp. `mask` and `deltas` may be NULL. *out_moved receives how many weld
  * classes moved — zero for a stamp that reached nothing, that was fully masked,
- * or whose settings amount to no displacement. */
+ * or whose settings amount to no displacement.
+ *
+ * SPACE: the descriptor's positions, directions and lengths are in the MESH's
+ * own space, unless the session declares a world frame — see
+ * clay_mesh_sculptor_set_world_frame, which is also what makes `mask` sample
+ * where you meant. Those three are the only things `out_moved == 0` can mean;
+ * it no longer also means "you were in the wrong space". */
 clay_result clay_mesh_sculptor_stamp(clay_mesh_sculptor* sculptor, const clay_mesh_brush_desc* desc,
                                      const clay_mask* mask, clay_mesh_deltas* deltas,
                                      size_t* out_moved);
@@ -7801,6 +8105,31 @@ clay_result clay_dynamic_surface_copy_chunk(const clay_dynamic_sculptor* sculpto
 typedef struct clay_multires clay_multires;
 typedef struct clay_multires_sculptor clay_multires_sculptor;
 
+/* Set them, or pass null for `sources` to clear both.
+ *
+ * SETTING SOURCES DOES NOT ENABLE ANYTHING. The bits in
+ * clay_mesh_brush_desc.automask_factors still decide which factors run; these
+ * are the inputs those bits consume. A host that sets sources and no bits gets
+ * exactly the stamps it got before, which is what makes wiring this up safe to
+ * do once at session start.
+ *
+ * A source with no bit costs nothing — it is never evaluated. A bit with no
+ * source is inert rather than an error, which is the behaviour these two bits
+ * always had and is what lets a host set its automask preset before it has
+ * baked a cavity mask.
+ *
+ * Returns CLAY_ERROR_NOT_FOUND if a borrowed mask is no longer in its document.
+ * The three take the same descriptor because the factors mean the same thing
+ * whichever surface is being sculpted; a fixed mesh, a DynamicSurface and a
+ * MultiresSurface differ in where the result is stored, not in what a crevice
+ * is. */
+clay_result clay_mesh_sculptor_set_automask_sources(clay_mesh_sculptor* sculptor,
+                                                    const clay_automask_sources* sources);
+clay_result clay_dynamic_sculptor_set_automask_sources(clay_dynamic_sculptor* sculptor,
+                                                       const clay_automask_sources* sources);
+clay_result clay_multires_sculptor_set_automask_sources(clay_multires_sculptor* sculptor,
+                                                        const clay_automask_sources* sources);
+
 /* Why an operation was refused. Mirrors mesh::MultiresError; use
  * clay_multires_error_text for a message. */
 typedef enum clay_multires_error {
@@ -8025,6 +8354,16 @@ clay_result clay_multires_add_level(clay_multires* surface, clay_cancel_token* t
  * refined hierarchy would have held there, bit for bit -- the stencils are
  * evaluated against the same parent neighbourhood -- which is why a fine
  * patch's boundary meets the coarse edge beside it exactly.
+ *
+ * SINCE 0.90.0 THAT IS TRUE OF THE NORMALS AND THE DETAIL FRAMES TOO, and
+ * before it, it was not. A vertex normal is the sum of the faces around it, and
+ * at a region boundary half of that ring is not stored at this level: the
+ * boundary normals were wrong by up to 23.4 degrees at level 1. A normal builds
+ * a frame and `P = S + Frame * Detail`, so a coefficient authored at a boundary
+ * vertex reconstructed up to 17% of its own magnitude away from where a dense
+ * hierarchy puts it. The missing half of the ring is now evaluated from the
+ * parent by the same stencils, so it agrees exactly. A HOST NEEDS TO DO
+ * NOTHING; the cost is +13% on a full level evaluation and nothing per dab.
  *
  * CLAY_MULTIRES_PATCH_NOT_REFINABLE when a named patch, or a patch beside it,
  * is not resident at the parent level. clay_multires_refine_patches_to_level
@@ -9497,9 +9836,191 @@ clay_result clay_mesh_sculptor_has_colors(const clay_mesh_sculptor* sculptor,
 clay_result clay_mesh_sculptor_ensure_colors(clay_mesh_sculptor* sculptor, const float color[3],
                                              int32_t* out_created);
 
+/* SPACES. `origin` and `direction` are WORLD, `xform` places the mesh in it, and
+ * the hit comes back in WORLD. The conversion is done inside on purpose --
+ * a caller doing it by hand gets a brush whose radius changes when a layer is
+ * scaled, and gets it wrong silently.
+ *
+ * PASS NULL FOR `xform` WHEN THE SESSION ALREADY DECLARES A FRAME. Passing both
+ * is CLAY_ERROR_INVALID_ARGUMENT rather than resolved by precedence: a host
+ * passing two frames believes one of them, and picking silently would leave the
+ * other a wrong belief nothing corrects. */
 clay_result clay_mesh_sculptor_raycast(clay_mesh_sculptor* sculptor, const float origin[3],
                                        const float direction[3], const clay_mesh_frame* xform,
                                        clay_mesh_hit* out_hit);
+
+/* -- WHERE A DAB'S TIME WENT, AND WHY (ABI 0.92.0) ---------------------------
+ *
+ * NO PERFORMANCE WORK ON TOTAL DAB TIME ALONE. A stamp is a dozen stages and a
+ * total tells you which of them to open exactly as well as a coin does.
+ *
+ * The engine has timed those stages since 0.78.0 and NOTHING OUTSIDE COULD READ
+ * THEM: one benchmark program in the repository consumed the record, no C entry
+ * point exposed it, and no test asserted on it. That is the shape of defect this
+ * ABI has shipped before — the engine can do it and the host cannot reach it.
+ *
+ * COUNTS AS WELL AS TIMES, because a duration alone cannot say why a duration
+ * changed. A stage that got slower because it touched twice as many vertices and
+ * a stage whose inner loop regressed are the same number, and a report that
+ * cannot tell them apart sends someone to the wrong file.
+ *
+ * ACCUMULATED ACROSS STAMPS from the moment you enable it, so a host measuring a
+ * stroke reads the stroke. clay_mesh_sculptor_reset_stage_report is how you
+ * measure one dab.
+ *
+ * NOTHING IS TIMED OR COUNTED UNTIL YOU ENABLE IT. A stamp is the thing being
+ * measured, so an unconditional pair of clock reads per stage would be a cost
+ * the measurement then included. Disabled, a stage costs one predictable branch.
+ *
+ * THE SAME VOCABULARY ON ALL THREE REPRESENTATIONS, so a row from the fixed
+ * mesh, one from the adaptive surface and one from a hierarchy level can be
+ * compared. A stage a representation does not use reports zero rather than being
+ * omitted — which is what makes "does not use this stage" and "stopped filling
+ * it" different readings. */
+
+typedef enum clay_sculpt_stage {
+    CLAY_SCULPT_STAGE_SEED_RESOLVE = 0,  /* where the dab landed */
+    CLAY_SCULPT_STAGE_SPATIAL_QUERY = 1, /* the region walk */
+    CLAY_SCULPT_STAGE_WEIGHT = 2,
+    CLAY_SCULPT_STAGE_ALPHA = 3,
+    CLAY_SCULPT_STAGE_AUTOMASK = 4,
+    CLAY_SCULPT_STAGE_SNAPSHOT = 5,
+    CLAY_SCULPT_STAGE_NEIGHBOR_BUILD = 6,
+    CLAY_SCULPT_STAGE_KERNEL = 7,   /* the verb itself */
+    CLAY_SCULPT_STAGE_WRITEBACK = 8,
+    CLAY_SCULPT_STAGE_NORMAL_REFRESH = 9,
+    CLAY_SCULPT_STAGE_TOPOLOGY = 10, /* adaptive surfaces only; zero elsewhere */
+    CLAY_SCULPT_STAGE_CHUNK_MARK = 11,
+    CLAY_SCULPT_STAGE_BVH_UPDATE = 12
+} clay_sculpt_stage;
+
+/* How many this build knows. A newer engine may report more; a caller sized to
+ * this one reads this many and the report says how many there were. */
+#define CLAY_SCULPT_STAGE_COUNT 13
+
+typedef struct clay_sculpt_stage_report {
+    uint32_t struct_size; /* = sizeof(clay_sculpt_stage_report); required */
+
+    /* Indexed by clay_sculpt_stage. `stage_count` is what THIS ENGINE filled,
+     * which may be fewer than CLAY_SCULPT_STAGE_COUNT if the caller's header is
+     * newer than the library it is linked against. */
+    uint32_t stage_count;
+    uint64_t nanos[CLAY_SCULPT_STAGE_COUNT];
+    uint64_t calls[CLAY_SCULPT_STAGE_COUNT];
+
+    /* -- what the stamps DID. The half a duration cannot supply. --------------
+     *
+     * `considered` and `affected` DIFFER and the gap is the point: a workset
+     * holds everything the brush reached, including the rim of the falloff where
+     * the weight is zero and everything a mask held still. When a dab costs more
+     * than it should, that gap is the first thing to look at. */
+    uint64_t vertices_considered;
+    uint64_t vertices_affected;
+    /* Class positions MEASURED while resolving where the dab landed — the chunk
+     * descent's candidates, a scan's whole class space, the walk's own seed
+     * scan. This is the number that says "a dab costs what it touches" is still
+     * true; it is not a time and no machine changes it. */
+    uint64_t positions_measured;
+    uint64_t faces_touched;
+    uint64_t chunks_touched;
+    uint64_t neighbors_gathered;
+    uint64_t kernel_passes;
+
+    /* Adaptive topology. Zero on a fixed mesh and on a hierarchy level, neither
+     * of which can change topology at all. */
+    uint64_t splits;
+    uint64_t collapses;
+    uint64_t flips;
+
+    uint64_t detail_blocks_touched;
+    uint64_t history_bytes;
+    uint64_t scratch_high_water;
+} clay_sculpt_stage_report;
+
+/* Start or stop timing and counting on this session. Off by default. Enabling
+ * does not clear what is already there; enabling on a fresh session starts from
+ * zero. */
+clay_result clay_mesh_sculptor_set_stage_report_enabled(clay_mesh_sculptor* sculptor,
+                                                        int32_t enabled);
+/* Read the accumulated report. Answers with zeroes when nothing was enabled,
+ * which is the honest figure rather than a refusal. */
+clay_result clay_mesh_sculptor_stage_report(const clay_mesh_sculptor* sculptor,
+                                            clay_sculpt_stage_report* out_report);
+/* Zero it, so the next stamp is measured on its own. */
+clay_result clay_mesh_sculptor_reset_stage_report(clay_mesh_sculptor* sculptor);
+
+/* The same three for the adaptive surface, which had no breakdown at all before
+ * 0.92.0 and is the representation whose per-dab cost is hardest to predict: it
+ * splits, collapses and flips as it goes, so the same brush at the same radius
+ * is not the same work twice running. CLAY_SCULPT_STAGE_TOPOLOGY is the stage
+ * only this one fills. */
+clay_result clay_dynamic_sculptor_set_stage_report_enabled(clay_dynamic_sculptor* sculptor,
+                                                           int32_t enabled);
+clay_result clay_dynamic_sculptor_stage_report(const clay_dynamic_sculptor* sculptor,
+                                               clay_sculpt_stage_report* out_report);
+clay_result clay_dynamic_sculptor_reset_stage_report(clay_dynamic_sculptor* sculptor);
+
+/* -- WHICH SPACE A SESSION SPEAKS (ABI 0.91.0) -------------------------------
+ *
+ * A mesh layer's vertex arrays are LAYER-LOCAL and its transform places them.
+ * That is the right contract -- baking a transform into vertices every time a
+ * layer moves is expensive, lossy, and hostile to history -- and it is not what
+ * was wrong. What was wrong is that the calls crossing that boundary did not
+ * agree, and the header did not say which was which:
+ *
+ *   clay_mesh_sculptor_raycast  ->  takes a WORLD ray, returns a WORLD hit
+ *   clay_mesh_sculptor_stamp    ->  reads its centre and radius as LOCAL
+ *
+ * Those are the two calls a host makes back to back to sculpt where the finger
+ * is. On a layer translated by 3 and scaled by 2, feeding the first into the
+ * second moved 0 vertices and returned CLAY_OK -- and `moved == 0` is
+ * documented to mean "reached nothing, fully masked, or no displacement", so
+ * the failure was indistinguishable from three ordinary outcomes.
+ *
+ * A session now declares its space once. With a frame set, EVERY position,
+ * radius, direction and normal crossing this handle is WORLD, in every call:
+ * the stamp, both stroke calls, the raycast, and the mask -- which is
+ * world-addressed by design (see -- masks --) and was being sampled at a local
+ * vertex position by the single-stamp path.
+ *
+ * A STROKE CARRIES LENGTHS THE DESCRIPTOR DOES NOT, and both stroke calls
+ * convert those too: the sample path, the PRESET's radius (apply_to_mesh
+ * ignores the descriptor's -- each stamp brings its own), and the two
+ * velocities, which are world units per second and scale as the length in
+ * their numerator does. Spacing, the jitters and the tapers are fractions and
+ * are deliberately left alone; converting a fraction would be the mirror of
+ * not converting a length.
+ *
+ * NO FRAME IS THE IDENTITY, and the identity is exactly the behaviour that came
+ * before this existed. A host that has not heard of it is not opted into it. */
+clay_result clay_mesh_sculptor_set_world_frame(clay_mesh_sculptor* sculptor,
+                                               const clay_mesh_frame* frame);
+
+/* Adopt the frame of the LAYER this sculptor's mesh belongs to. The call a host
+ * actually wants: reconstructing the frame by hand is the step that can be got
+ * wrong, and it is the step that made the failure above reachable.
+ *
+ * CLAY_ERROR_NOT_FOUND for a sculptor built over a standalone mesh, which
+ * belongs to no layer -- rather than adopting an identity, which would read as
+ * success.
+ *
+ * CLAY_ERROR_UNSUPPORTED for a layer carrying a PER-AXIS SCALE
+ * (clay_document_set_layer_transform_nonuniform). Under one, a round brush in
+ * world is an ellipsoid on the model, so `radius` stops naming anything a
+ * spherical surface walk can honour, and a normal stops being carried by the
+ * rotation alone. Reading the scale as uniform would put the dab in a plausible
+ * wrong place and report success, which is the failure this whole capability
+ * exists to remove. Closing it needs an anisotropic brush footprint, which is
+ * its own change with its own gates. The layer's BOUNDS and its contribution to
+ * clay_document_mesh_combined honour the per-axis scale either way. */
+clay_result clay_mesh_sculptor_use_layer_transform(clay_mesh_sculptor* sculptor);
+
+/* What frame this session is speaking, and whether one was declared at all.
+ * Either out pointer may be NULL. An undeclared frame reads back as the
+ * identity with *out_declared 0, which is the honest answer rather than a
+ * refusal: the identity is what the session is in fact using. */
+clay_result clay_mesh_sculptor_world_frame(const clay_mesh_sculptor* sculptor,
+                                           clay_mesh_frame* out_frame, int32_t* out_declared);
 
 clay_mesh_deltas* clay_mesh_deltas_create(void);
 void clay_mesh_deltas_destroy(clay_mesh_deltas* deltas);

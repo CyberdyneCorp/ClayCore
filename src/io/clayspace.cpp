@@ -246,13 +246,45 @@ std::uint64_t snapshot_identity(const std::uint8_t* data, std::size_t size) {
     return h == 0 ? 1ull : h;
 }
 
-std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc) {
+scene::LayerId multires_blocking_minor(const ClaySpaceDoc& doc, std::uint16_t minor) {
+    // The 'MRES' chunk arrived at 19; at or above it, nothing about a hierarchy
+    // blocks a write.
+    if (minor >= 19) return 0;
+    // ASCENDING BY LAYER ID rather than in map order, so two builds asked the
+    // same question about the same document name the same layer. `mesh_layers`
+    // is a std::map, so this is already its order -- said rather than relied on.
+    for (const auto& [layer_id, surface] : doc.multires_layers) {
+        if (!is_mesh_layer(doc.document, layer_id)) continue;
+        if (multires_carries_detail(surface)) return layer_id;
+    }
+    return 0;
+}
+
+scene::LayerId document_blocking_minor(const ClaySpaceDoc& doc, std::uint16_t minor) {
+    const scene::LayerId scene_blocking = scene::layer_blocking_minor(doc.document, minor);
+    if (scene_blocking != 0) return scene_blocking;
+    return multires_blocking_minor(doc, minor);
+}
+
+std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc, std::uint16_t minor) {
+    // REFUSED BEFORE A BYTE IS WRITTEN, so a caller that ignores the return
+    // value cannot end up with a partial file that opens. Empty is the refusal,
+    // which is `serialize_document`'s convention.
+    if (minor == 0 || document_blocking_minor(doc, minor) != 0) return {};
+    const std::uint16_t at = minor > kClaySpaceMinor ? kClaySpaceMinor : minor;
+
     std::vector<std::uint8_t> out;
     put_u32(out, kMagic);
     put_u16(out, kClaySpaceMajor);
-    put_u16(out, kClaySpaceMinor);
+    put_u16(out, at);
 
-    put_chunk(out, kScene, scene::serialize_document(doc.document));
+    std::vector<std::uint8_t> scene_bytes = scene::serialize_document(doc.document, at);
+    // The scene payload refuses the same way. Checked rather than assumed: the
+    // two refusals are computed from the same predicate today, and a document
+    // that got past `document_blocking_minor` and was then refused here would
+    // otherwise be a file with an empty scene chunk.
+    if (scene_bytes.empty()) return {};
+    put_chunk(out, kScene, scene_bytes);
     for (const auto& [layer_id, grid] : doc.voxel_layers) {
         if (!is_voxel_layer(doc.document, layer_id)) continue;
         std::vector<std::uint8_t> payload;
@@ -281,7 +313,13 @@ std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc) {
     // layer" test its cage is, so an orphan left by an undone removal is held in
     // memory and not written. The surface encodes itself; nothing here adds a
     // second version to negotiate.
+    // A CHUNK A MINOR DID NOT HAVE IS NOT WRITTEN AT THAT MINOR. 'MRES' arrived
+    // at 19, so a file written at 18 carries no hierarchies -- and one carrying
+    // DETAIL refused the whole write above rather than arriving here to be
+    // dropped, which is the difference between a plainer file and a different
+    // sculpture.
     for (const auto& [layer_id, surface] : doc.multires_layers) {
+        if (at < 19) break;
         if (!is_mesh_layer(doc.document, layer_id)) continue;
         std::vector<std::uint8_t> payload;
         put_u32(payload, layer_id);
@@ -398,8 +436,16 @@ IoStatus load_clayspace(const std::uint8_t* data, std::size_t size, ClaySpaceDoc
     return IoStatus::success();
 }
 
-IoStatus save_clayspace_file(const ClaySpaceDoc& doc, const std::string& path) {
-    return detail::write_whole_file(path, save_clayspace(doc));
+IoStatus save_clayspace_file(const ClaySpaceDoc& doc, const std::string& path,
+                             std::uint16_t minor) {
+    const std::vector<std::uint8_t> bytes = save_clayspace(doc, minor);
+    // NOTHING IS WRITTEN ON A REFUSAL, so an existing file at `path` is left
+    // exactly as it was. A save that cannot represent the document must not
+    // first destroy the last one that could.
+    if (bytes.empty())
+        return IoStatus{IoError::Unsupported,
+                        "this document cannot be written at that format minor"};
+    return detail::write_whole_file(path, bytes);
 }
 
 IoStatus load_clayspace_file(const std::string& path, ClaySpaceDoc* out,

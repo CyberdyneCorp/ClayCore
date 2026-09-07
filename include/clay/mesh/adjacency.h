@@ -93,6 +93,12 @@ class Adjacency {
         return m.positions.size() == class_of_.size() && m.indices.size() == triangle_count_ * 3;
     }
 
+    // What this structure costs, for a memory ledger. CAPACITY rather than
+    // size: the CSR arrays are built by `reserve` and `resize` and what the
+    // process is holding is what a host under pressure gets back, not what the
+    // structure logically contains.
+    std::size_t bytes() const;
+
    private:
     static const std::uint32_t* span(const std::vector<std::uint32_t>& offsets,
                                      const std::vector<std::uint32_t>& values, std::uint32_t i,

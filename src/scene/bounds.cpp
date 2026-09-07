@@ -1635,6 +1635,145 @@ Aabb node_influence_bound_in_document(const Document& doc, const SdfContent& con
     return out;
 }
 
+namespace {
+
+// A combine whose result at p is a function of its operands at p, and which
+// moves that result no further than its own SUPPORT from where an operand
+// moved. Every op but the spatial morphs: their weight saturates
+// (ctransition_radial_weight is a clamp), so past the transition's span the
+// result IS the item's own field and a change to that field lands arbitrarily
+// far away -- pointwise, with no support that says how far.
+bool op_is_pointwise(Op op) { return !op_is_transition(op); }
+
+// Whether every visible node in this layer's chain combines pointwise AND
+// leaves a beyond-band operand alone.
+//
+// THE SECOND HALF IS WHY THIS IS NOT JUST `op_is_pointwise` PER NODE. A
+// GATED node combines as `mix(acc, combine(acc, item), mask)`, so where the
+// mask is between 0 and 1 the result is a lerp of the running value -- and a
+// lerp of a beyond-band value is not beyond band. An intersect's delta leaves
+// the running value beyond the band on both sides but NOT equal, so a gated
+// node further down the chain can carry that difference into the band at any
+// distance. A morph downstream does the same thing for the same reason.
+//
+// Neither costs a local op anything, which is why nothing had to say this
+// before: outside its own support a local combine is the identity, so there is
+// no difference for a lerp to carry.
+bool chain_carries_only_supports(const SdfContent& content) {
+    for (const auto& [id, n] : content.nodes()) {
+        (void)id;
+        if (!n.visible) continue;
+        if (!op_is_pointwise(n.op)) return false;
+        if (n.gated()) return false;
+    }
+    return true;
+}
+
+// The same question of the FOLDS: every visible SDF layer's composition from
+// `layer_id` up (the ones folds_from_layer_support sums) must be pointwise
+// too. A layer composition carries no gate.
+bool folds_from_layer_are_pointwise(const Document& doc, LayerId layer_id) {
+    bool at_or_above = false;
+    for (const Layer& l : doc.layers) {
+        if (l.id == layer_id) at_or_above = true;
+        if (!at_or_above) continue;
+        if (!l.visible || l.kind != LayerKind::Sdf || !l.sdf) continue;
+        if (!op_is_pointwise(l.composition.op)) return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+namespace {
+
+// The ancestor walk `node_reach_bound` performs, term for term and with its
+// acyclicity guard -- but WITHOUT its layer-extent escape, because a group
+// above only has to combine POINTWISE here rather than locally. An intersecting
+// group leaves the running value beyond the band on both sides for the reason
+// the item does. False where the walk meets something the local argument does
+// not cover.
+bool dilate_by_ancestors(const SdfContent& content, NodeId id, const Layer& layer, Aabb* b) {
+    NodeId cur = id;
+    for (std::size_t step = 0; step <= content.nodes().size(); ++step) {
+        NodeId parent = kNoNode;
+        int index = -1;
+        if (!content.locate(cur, &parent, &index)) return false;
+        if (parent == kNoNode) return true;
+        const Node* g = content.find(parent);
+        if (!g || !g->visible || !op_is_pointwise(g->op)) return false;
+        *b = b->dilated(group_blend_support(*g, layer));
+        cur = parent;
+    }
+    return false;
+}
+
+// One layer's contribution: the item's geometry as THAT layer places it,
+// dilated by the pad its chain needs and by the groups above, then carried up
+// to the document.
+std::optional<Aabb> geometry_reach_in_layer(const Document& doc, const SdfContent& content,
+                                            const Node& item, NodeId id, const Layer& layer) {
+    if (!folds_from_layer_are_pointwise(doc, layer.id)) return std::nullopt;
+    // A NON-UNIFORM per-axis scale at EITHER level, refused for the reason a
+    // deformer chain is. `cscale_nu_dist` multiplies the local distance by the
+    // SMALLEST component, so the field this item emits is short of the true
+    // distance by up to max(s)/min(s) -- scene/types.h says exactly that, and
+    // `cfi_scale_nonuniform` records it on the tape. The whole argument here is
+    // "outside the box dilated by the band, the item's own field is > band";
+    // with a squashed placement that only holds out to `band * max(s)/min(s)`,
+    // and this box carries no dilation for the difference. `placement.h`
+    // excludes a squashed layer from the sibling classifier for the same
+    // mechanism.
+    if (!placed_is_similarity(layer, item)) return std::nullopt;
+    Aabb b = item_geometry_bound(item, layer);
+    if (b.empty() || b.is_infinite()) return std::nullopt;
+    // THE CHAIN PAD, which a local op's bound does not carry and this one must
+    // -- see the header. `cull_pad` is the one expression for it, and it is the
+    // same number the compiler pads a per-brick cull region by, resolved
+    // against the same effective contributor count.
+    const float pad = cull_pad(content, layer);
+    if (!std::isfinite(pad)) return std::nullopt;
+    b = b.dilated(pad);
+    if (!dilate_by_ancestors(content, id, layer, &b) || b.is_infinite()) return std::nullopt;
+    const Aabb up = layer_reach_in_document(doc, layer.id, b);
+    if (up.empty() || up.is_infinite()) return std::nullopt;
+    return up;
+}
+
+// The numerical sanity check the fallback rules ask for: a box built out of
+// FLT_MAX arithmetic is not a claim anybody should dirty by.
+bool box_is_sane(const Aabb& b) {
+    auto sane = [](float lo, float hi) {
+        return std::isfinite(lo) && std::isfinite(hi) && hi >= lo;
+    };
+    return sane(b.min.x, b.max.x) && sane(b.min.y, b.max.y) && sane(b.min.z, b.max.z);
+}
+
+}  // namespace
+
+std::optional<Aabb> item_geometry_reach_in_document(const Document& doc,
+                                                    const SdfContent& content, NodeId id) {
+    const Node* n = content.find(id);
+    if (!n || n->is_group || !n->visible) return std::nullopt;
+    // The item's own combine, and the geometry the bound is taken around.
+    if (!op_is_pointwise(n->op) || n->gated()) return std::nullopt;
+    if (n->repeat.is_infinite_grid() || prim_is_unbounded(n->prim.type)) return std::nullopt;
+    if (!chain_carries_only_supports(content)) return std::nullopt;
+
+    // Every layer sharing the content, exactly as node_influence_bound_in_document
+    // takes them: one edit lands once per instancing layer, each through that
+    // layer's own transform.
+    Aabb out;
+    for (const Layer& l : doc.layers) {
+        if (l.sdf.get() != &content) continue;
+        const std::optional<Aabb> in_layer = geometry_reach_in_layer(doc, content, *n, id, l);
+        if (!in_layer) return std::nullopt;
+        out.expand(*in_layer);
+    }
+    if (out.empty() || out.is_infinite() || !box_is_sane(out)) return std::nullopt;
+    return out;
+}
+
 Aabb layer_reach_in_document(const Document& doc, LayerId layer_id, const Aabb& in_layer) {
     // Empty stays empty (nothing changed, so nothing reaches) and infinite
     // stays infinite (dilating FLT_MAX overflows to the same claim, badly).

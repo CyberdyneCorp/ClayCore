@@ -1012,6 +1012,23 @@ void MultiresSurface::drop_intermediate_caches() {
     release_generation(*state_, released);
 }
 
+std::size_t MultiresSurface::release_cross_levels() {
+    if (!state_) return 0;
+    std::size_t released = 0;
+    for (MultiresLevel& l : state_->levels) {
+        if (!l.cache || !l.cache->cross) continue;
+        released += l.cache->cross->bytes();
+        l.cache->cross.reset();
+    }
+    // NO GENERATION BUMP. `cache_generation` is what a bound `MeshSculptor`
+    // compares to decide whether the `Mesh&` it holds still points into live
+    // storage, and this releases nothing a sculptor holds a reference into --
+    // the level's own positions, normals and faces are all untouched. Moving it
+    // would rebind every live sculptor to say that something they cannot see
+    // changed.
+    return released;
+}
+
 void MultiresSurface::drop_inactive_caches() {
     if (!state_) return;
     // Evaluating a level reads its parent's positions, so the levels BELOW the

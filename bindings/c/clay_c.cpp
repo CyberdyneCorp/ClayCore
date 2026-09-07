@@ -60,6 +60,7 @@
 #include "clay/mesh/marching.h"
 #include "clay/mesh/quad_mesh.h"
 #include "clay/mesh/sculpt.h"
+#include "clay/mesh/topology_cache.h"
 #include "clay/mesh/surface_nets.h"
 #include "clay/mesh/to_field.h"
 #include "clay/mesh/transfer.h"
@@ -628,6 +629,26 @@ inline clay_memory_report to_c_report(const io::MemoryReport& r) {
     out.undoable = r.undoable();
     return out;
 }
+// The document-owned topology cache, folded into a filled report.
+//
+// NOT INSIDE to_c_report, and that is the ownership showing through: the report
+// is built from `io::MemoryReport`, which describes a `scene::Document`, and
+// this cache belongs to the C ABI's document handle instead. Threading a byte
+// count down into `io` so it could be added one layer lower would put a C-ABI
+// concern inside the serializer's own memory model.
+//
+// It joins `total` and `rebuildable` because it is memory the process is
+// holding that reconstructs to an identical structure. That does move `total`
+// for a caller that sculpts, and it is the same direction the surface tier
+// already chose: the totals stay true rather than the breakdown staying
+// constant.
+inline clay_memory_report with_topology_cache(clay_memory_report r, std::size_t bytes) {
+    r.topology_cache = bytes;
+    r.total += bytes;
+    r.rebuildable += bytes;
+    return r;
+}
+
 constexpr std::size_t kMeasureParamsOriginal =
     offsetof(clay_measure_params, seed) + sizeof(std::uint32_t);
 constexpr std::size_t kProjectionOriginal =
@@ -2764,7 +2785,8 @@ namespace {
 
 // Defined at the end of this namespace: every edit routes through the
 // command vocabulary. Declared here because it is used above.
-clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char* what);
+clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char* what,
+                       math::Aabb* out_reach = nullptr);
 
 // The same edit, WITHOUT the invalidation — for a gesture that knows the region
 // it can reach and invalidates once for all of its commands. See GestureRegion.
@@ -3007,6 +3029,72 @@ voxel::GroupField* group_field_mut(clay_groups* groups) {
 const voxel::MaskField* mask_of(const clay_mask* mask) {
     voxel::MaskField* m = nullptr;
     return resolve_mask(mask, &m) == CLAY_OK ? m : nullptr;
+}
+
+constexpr std::size_t kAutomaskSourcesOriginal =
+    offsetof(clay_automask_sources, active_group) + sizeof(std::uint32_t);
+
+// The two automask factors `mesh` cannot compute for itself, as the C ABI
+// carries them. FILE SCOPE, above the first extern "C", for the reason
+// `group_field` above states.
+//
+// RESOLVED ONCE AND HELD FOR THE STROKE. Both fields borrow, and what the
+// sculptor keeps is what they RESOLVE TO rather than the handles themselves —
+// the same reading clay_mesh_sculptor_apply_stroke's own `mask` argument
+// already gets, where one resolve_mask at the top serves every stamp of the
+// stroke. Re-resolving per call is the alternative and it puts a map lookup in
+// the innermost loop of a stamp, since these are evaluated per vertex.
+//
+// THE SAME TWO LAMBDAS PYCLAY BUILDS, which is worth being explicit about: a
+// MaskField sampled at a world point, and a GroupField asked at one. Two
+// bindings reaching this feature by two different estimators would be two
+// answers about one surface, and preventing exactly that is what automask.h
+// says the callback shape is for.
+//
+// BOTH LATTICES ARE WORLD-ADDRESSED AND THE VERTICES ARE NOT. A sculptor's
+// positions are the MESH's own, so the point has to be placed before either
+// lattice is asked — the same conversion mesh_mask_gate makes for the painted
+// mask, and for the same reason: a cavity automask and a painted cavity mask
+// that disagreed about one surface is exactly what automask.h says must not
+// happen, and on a transformed layer sampling the unplaced point is how they
+// would.
+//
+// THE FRAME IS READ WHEN THE LATTICE IS ASKED, not captured here. A host may
+// declare its frame after it names its sources — clay_mesh_sculptor_set_world_
+// frame and clay_mesh_sculptor_use_layer_transform are both callable at any
+// point in a session — and a closure holding the frame it happened to find
+// would measure in the wrong place and report nothing wrong. The pointer is the
+// sculptor's own member, so it outlives the inputs the sculptor holds. Null for
+// the two sculptors that declare no frame, where the identity is the truth
+// rather than a default.
+clay_result read_automask_sources(const clay_automask_sources* sources,
+                                  const math::Transform* frame, mesh::AutomaskInputs* out) {
+    *out = mesh::AutomaskInputs{};
+    if (!sources) return CLAY_OK;  // cleared: both factors go inert again
+    clay_automask_sources s;
+    clay_result r = read_desc(sources, kAutomaskSourcesOriginal, &s);
+    if (r != CLAY_OK) return r;
+    if (s.cavity) {
+        voxel::MaskField* cavity = nullptr;
+        r = resolve_mask(s.cavity, &cavity);
+        if (r != CLAY_OK) return r;
+        out->cavity = [cavity, frame](kernel::cfloat3 p) {
+            return cavity->sample(frame ? frame->apply(p) : p);
+        };
+    }
+    if (s.groups) {
+        // A handle whose document has no lattice yet reads as no source rather
+        // than as an error: "this document has no groups" is an answer, and
+        // refusing it would make a host bracket the call on a condition it
+        // would have to ask a second question to know.
+        if (const voxel::GroupField* groups = group_field(s.groups)) {
+            out->group = [groups, frame](kernel::cfloat3 p) {
+                return static_cast<std::uint32_t>(groups->at(frame ? frame->apply(p) : p));
+            };
+        }
+    }
+    out->active_group = s.active_group;
+    return CLAY_OK;
 }
 
 // Brackets a group edit so it becomes one undo step, on the same RAII shape
@@ -3772,7 +3860,8 @@ struct GestureRegion {
     GestureRegion& operator=(const GestureRegion&) = delete;
 };
 
-clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char* what) {
+clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char* what,
+                       math::Aabb* out_reach) {
     // What this edit can reach, taken on BOTH sides of the apply and unioned.
     // One side is not an answer: an add's node is not there before, a removal's
     // is not there after, and a move has two ends -- the contract
@@ -3794,6 +3883,13 @@ clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char
     scene::LayerExtent before_memo(&doc->extent_cache());
     const math::Aabb reach_before =
         scene::command_influence_bound(doc->doc.document, cmd, &before_memo);
+    // THE OTHER QUESTION, asked on the same side: where can this edit change
+    // the SURFACE, as opposed to the field (issue #471). Available for one
+    // edit kind -- moving an existing intersect item -- and nullopt for
+    // everything else, so every other command's region is what it always was.
+    // Both sides must answer for it to be used; see below.
+    const std::optional<math::Aabb> delta_before =
+        scene::command_surface_delta_bound(doc->doc.document, cmd);
     r = perform_edit(doc, cmd, what);
     if (r != CLAY_OK) return r;
     {
@@ -3808,6 +3904,20 @@ clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char
     math::Aabb reach = reach_before;
     scene::LayerExtent after_memo(&doc->extent_cache());
     reach.expand(scene::command_influence_bound(doc->doc.document, cmd, &after_memo));
+    // The swept surface delta REPLACES the influence union when both sides
+    // claim one, which is the narrowing #471 asks for. Both sides, because one
+    // is not an answer: the before box holds the operand where it was and the
+    // after box where it went, and the union of the two is the swept support
+    // the proof is about. Either side refusing keeps the conservative union
+    // above -- which is why the influence bound is still taken on both sides
+    // rather than skipped, and why a fallback can never come out too tight.
+    if (const std::optional<math::Aabb> delta_after =
+            scene::command_surface_delta_bound(doc->doc.document, cmd);
+        delta_before && delta_after) {
+        reach = *delta_before;
+        reach.expand(*delta_after);
+    }
+    if (out_reach) *out_reach = reach;
     // The funnel every command-based edit passes through, so the tape cache is
     // invalidated in one place for all of them — and the one place that can
     // tell the cache an edit was an APPEND, which is what a brush stamp is
@@ -4612,6 +4722,45 @@ eval::DeviceBuffer brick_slot(const eval::DeviceBuffer& whole, std::size_t at, s
     return s;
 }
 
+// PLACED IN A NAMESPACE OUTSIDE `extern "C"`, because `minor_refusal` returns a
+// std::string: an anonymous namespace does not reset language linkage, so the
+// same definition inside the block below would carry C linkage on a signature C
+// cannot spell. The C4190 family this file has been bitten by before.
+// Why a minor refuses, named by what actually blocks it. TWO REASONS AND TWO
+// SENTENCES: a host reading "a layer carries a composition" about a layer that
+// carries a hierarchy would go and look at the wrong thing.
+std::string minor_refusal(const clay_document* doc, std::uint16_t at, clay_layer_id blocking) {
+    if (scene::layer_blocking_minor(doc->doc.document, at) == blocking)
+        return "a layer carries a composition that this format minor cannot say: writing it "
+               "there would turn a cutting layer into a unioning one";
+    return "a mesh layer carries a multiresolution hierarchy with DETAIL, and this format "
+           "minor has no chunk to put one in: the levels would be absent and cannot be "
+           "re-sculpted from the cage";
+}
+
+// The layout a save-at-minor will actually write at, or a refusal.
+//
+// ONE PLACE FOR BOTH SAVE CALLS, so the path form and the memory form cannot
+// come to different conclusions about the same document -- which is the failure
+// the format's own "both halves or neither" rule is about, one level up.
+clay_result resolve_write_minor(const clay_document* doc, std::uint32_t minor,
+                                clay_layer_id* out_blocking_layer, std::uint16_t* out_at) {
+    if (out_blocking_layer) *out_blocking_layer = 0;
+    if (minor == 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "a format minor starts at 1");
+    // Clamped rather than refused above this build's layout, exactly as
+    // clay_document_writable_at_minor clamps: the question is only about
+    // writing DOWN.
+    const std::uint16_t at = minor > scene::kSceneMinor ? scene::kSceneMinor
+                                                        : static_cast<std::uint16_t>(minor);
+    const scene::LayerId blocking = io::document_blocking_minor(doc->doc, at);
+    if (blocking != 0) {
+        if (out_blocking_layer) *out_blocking_layer = blocking;
+        return fail(CLAY_ERROR_UNSUPPORTED, minor_refusal(doc, at, blocking));
+    }
+    *out_at = at;
+    return CLAY_OK;
+}
+
 }  // namespace
 
 extern "C" {
@@ -4722,7 +4871,9 @@ clay_result clay_document_memory(const clay_document* doc, clay_memory_report* o
     clay_result r = read_desc(out_report, kMemoryReportOriginal, &probe);
     if (r != CLAY_OK) return r;
     const std::uint32_t declared = out_report->struct_size;
-    write_desc(out_report, declared, to_c_report(io::document_memory(doc->doc, doc->undo.get())));
+    write_desc(out_report, declared,
+               with_topology_cache(to_c_report(io::document_memory(doc->doc, doc->undo.get())),
+                                   doc->doc.topology_cache.bytes()));
     return CLAY_OK;
 }
 
@@ -4749,8 +4900,39 @@ clay_result clay_document_memory_with_surfaces(const clay_document* doc,
                        static_cast<std::size_t>(given.bytes[i]));
     }
     write_desc(out_report, declared,
-               to_c_report(io::document_memory(doc->doc, doc->undo.get(),
-                                               surfaces ? &ledger : nullptr)));
+               with_topology_cache(to_c_report(io::document_memory(doc->doc, doc->undo.get(),
+                                                                   surfaces ? &ledger : nullptr)),
+                                   doc->doc.topology_cache.bytes()));
+    return CLAY_OK;
+}
+
+constexpr std::size_t kTopologyCacheStatsOriginal =
+    offsetof(clay_topology_cache_stats, verify_ns) + sizeof(std::uint64_t);
+
+clay_result clay_document_topology_cache_stats(const clay_document* doc,
+                                               clay_topology_cache_stats* out_stats) {
+    if (!doc || !out_stats) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    clay_topology_cache_stats probe;
+    clay_result r = read_desc(out_stats, kTopologyCacheStatsOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_stats->struct_size;
+    const mesh::TopologyCacheStats s = doc->doc.topology_cache.stats();
+    clay_topology_cache_stats filled{};
+    filled.entries = s.entries;
+    filled.bytes = s.bytes;
+    filled.hits = s.hits;
+    filled.misses = s.misses;
+    filled.evictions = s.evictions;
+    filled.build_ns = s.build_nanoseconds;
+    filled.verify_ns = s.verify_nanoseconds;
+    write_desc(out_stats, declared, filled);
+    return CLAY_OK;
+}
+
+clay_result clay_document_trim_topology_cache(clay_document* doc, uint64_t* out_released_bytes) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const std::size_t released = doc->doc.topology_cache.release_unused();
+    if (out_released_bytes) *out_released_bytes = static_cast<std::uint64_t>(released);
     return CLAY_OK;
 }
 
@@ -4764,7 +4946,11 @@ clay_result clay_layer_memory(const clay_document* doc, clay_layer_id layer,
     io::MemoryReport rep;
     if (!io::layer_memory(doc->doc, layer, &rep))
         return fail(CLAY_ERROR_NOT_FOUND, "no such layer");
-    write_desc(out_report, declared, to_c_report(rep));
+    // Attributed to the layer that caused it, which the cache can do because it
+    // is keyed by layer. The content lines already sum across layers and this
+    // one does too, so the document figure stays reachable by addition.
+    write_desc(out_report, declared,
+               with_topology_cache(to_c_report(rep), doc->doc.topology_cache.bytes_of(layer)));
     return CLAY_OK;
 }
 
@@ -5067,6 +5253,25 @@ clay_result clay_layer_set_transform_nonuniform(clay_document* doc, clay_layer_i
                       "node not found");
 }
 
+clay_result clay_layer_set_transform_bound(clay_document* doc, clay_layer_id layer,
+                                           clay_node_id node, const float position[3],
+                                           const float rotation_axis[3], float rotation_angle,
+                                           float scale, float out_min[3], float out_max[3],
+                                           int32_t* out_has_bounds, int32_t* out_infinite) {
+    const scene::Node* target = peek_node(doc, layer, node);
+    if (target && target->is_group)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "a group has no transform of its own: transform its children");
+    math::Transform xform;
+    clay_result r = read_transform(position, rotation_axis, rotation_angle, scale, &xform);
+    if (r != CLAY_OK) return r;
+    math::Aabb reach;
+    r = apply_edit(doc, scene::Command{scene::SetTransformCmd{layer, node, xform}},
+                   "node not found", &reach);
+    if (r != CLAY_OK) return r;
+    return write_influence(reach, out_min, out_max, out_has_bounds, out_infinite);
+}
+
 clay_result clay_layer_set_prim(clay_document* doc, clay_layer_id layer, clay_node_id node,
                                 int32_t prim, const float* params, size_t param_count) {
     if (!prim_is_known(prim)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown primitive type");
@@ -5281,6 +5486,7 @@ void axis_angle_of(const math::Transform& xform, float out_axis[3], float* out_a
     out_axis[2] = axis.z;
 }
 
+
 }  // namespace
 
 clay_result clay_layer_node_transform(const clay_document* doc, clay_layer_id layer,
@@ -5382,6 +5588,27 @@ clay_result clay_layer_node_op_blend(const clay_document* doc, clay_layer_id lay
     if (out_blend) *out_blend = static_cast<std::int32_t>(n->blend.profile);
     if (out_blend_k) *out_blend_k = n->blend.k;
     if (out_rounding) *out_rounding = n->rounding;
+    return CLAY_OK;
+}
+
+clay_result clay_layer_node_color(const clay_document* doc, clay_layer_id layer,
+                                  clay_node_id node, float out_rgb[3]) {
+    const scene::Node* n = nullptr;
+    clay_result r = find_node(doc, layer, node, &n);
+    if (r != CLAY_OK) return r;
+    // A group answers, for the reason clay_layer_set_color accepts one: a
+    // CLAY_OP_SHELL or CLAY_OP_REPLACE group paints a seed colour against empty
+    // space, so the value is a group's to hold. The transform reader refuses a
+    // group and this one does not, and that difference is the two setters'
+    // difference rather than an inconsistency between the readers.
+    //
+    // Total: an item's colour came from clay_item_desc and a group's from
+    // scene::Node's own default, so there is no unset state to report.
+    if (out_rgb) {
+        out_rgb[0] = n->color.x;
+        out_rgb[1] = n->color.y;
+        out_rgb[2] = n->color.z;
+    }
     return CLAY_OK;
 }
 
@@ -5580,12 +5807,51 @@ clay_result clay_document_writable_at_minor(const clay_document* doc, uint32_t m
     const std::uint16_t asked = minor > scene::kSceneMinor
                                     ? scene::kSceneMinor
                                     : static_cast<std::uint16_t>(minor);
-    const scene::LayerId blocking = scene::layer_blocking_minor(doc->doc.document, asked);
+    // THE WHOLE DOCUMENT, not only the scene. This asked
+    // `scene::layer_blocking_minor` alone, which knows about composition and
+    // nothing else -- so a document carrying a multiresolution hierarchy, which
+    // container minor 19 added an 'MRES' chunk for, reported CLAY_OK at 18.
+    // The header promises "nothing an artist authored dropped".
+    const scene::LayerId blocking = io::document_blocking_minor(doc->doc, asked);
     if (blocking == 0) return CLAY_OK;
     if (out_blocking_layer) *out_blocking_layer = blocking;
-    return fail(CLAY_ERROR_UNSUPPORTED,
-                "a layer carries a composition that this format minor cannot say: writing it "
-                "there would turn a cutting layer into a unioning one");
+    return fail(CLAY_ERROR_UNSUPPORTED, minor_refusal(doc, asked, blocking));
+}
+
+clay_result clay_document_save_at_minor(const clay_document* doc, const char* path,
+                                        uint32_t minor, clay_layer_id* out_blocking_layer) {
+    if (!doc || !path) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or path");
+    std::uint16_t at = 0;
+    clay_result r = resolve_write_minor(doc, minor, out_blocking_layer, &at);
+    if (r != CLAY_OK) return r;
+    const io::IoStatus s = io::save_clayspace_file(doc->doc, path, at);
+    // Noted only on success, and only at THIS build's layout: a file written at
+    // an older minor is not a snapshot the journal from here on can be paired
+    // with, because replaying this build's events onto it would produce a
+    // document that minor cannot express.
+    if (s.ok() && at == scene::kSceneMinor && doc->undo)
+        doc->undo->note_snapshot(doc->doc.document.snapshot_id);
+    return from_io(s);
+}
+
+clay_result clay_document_save_memory_at_minor(const clay_document* doc, uint32_t minor,
+                                               clay_blob** out_blob,
+                                               clay_layer_id* out_blocking_layer) {
+    if (!doc || !out_blob) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out_blob");
+    *out_blob = nullptr;
+    std::uint16_t at = 0;
+    clay_result r = resolve_write_minor(doc, minor, out_blocking_layer, &at);
+    if (r != CLAY_OK) return r;
+    std::vector<std::uint8_t> bytes = io::save_clayspace(doc->doc, at);
+    // The pre-check above already answered, so an empty result here would mean
+    // the two disagreed. Refused rather than handed back as a valid blob.
+    if (bytes.empty())
+        return fail(CLAY_ERROR_UNSUPPORTED,
+                    "this document cannot be written at that format minor");
+    *out_blob = new clay_blob{std::move(bytes)};
+    if (at == scene::kSceneMinor && doc->undo)
+        doc->undo->note_snapshot(doc->doc.document.snapshot_id);
+    return CLAY_OK;
 }
 
 // -- discovering layers ------------------------------------------------------
@@ -15428,6 +15694,40 @@ struct clay_mesh_sculptor {
     // no layer and cannot be replaced under anyone.
     std::uint64_t geometry_revision = 0;
     std::unique_ptr<mesh::MeshSculptor> sculptor;
+
+    // -- the space this session speaks (define-carried-mesh-transform-semantics)
+    //
+    // A mesh layer's vertex arrays are LAYER-LOCAL and its `xform` places them,
+    // which is the right contract and is not the defect. The defect was that
+    // the calls crossing that boundary did not agree: a raycast took a world
+    // ray and returned a world hit, and the stamp that hit fed read its centre
+    // as local, took no frame, and said nothing about it. On a layer translated
+    // by 3 and scaled by 2 that stamp moved 0 vertices and returned CLAY_OK,
+    // which is the same answer a fully masked stamp gives.
+    //
+    // Set, every position, radius and direction crossing this handle is WORLD
+    // and every readback is world. UNSET IS THE IDENTITY, which is exactly the
+    // behaviour that came before it -- the rule every appended knob in this ABI
+    // follows, so a host that has not heard of this is not opted into it.
+    //
+    // A `math::Transform` rather than a matrix, and that is a refusal rather
+    // than a simplification: a Transform is a SIMILARITY, so a normal is
+    // carried by its rotation and that IS the inverse transpose, and a world
+    // ball is still a ball in local so a brush RADIUS has a meaning. Under a
+    // per-axis scale neither holds -- a round brush in world is an ellipsoid on
+    // the model -- so a layer carrying one is refused by
+    // clay_mesh_sculptor_use_layer_transform rather than quietly read as
+    // uniform.
+    bool has_frame = false;
+    math::Transform frame;  // local -> world
+
+    // The per-stage breakdown, OWNED BY THE HANDLE and wired into the engine
+    // only while the host has asked for it. Off by default: a stamp is the
+    // thing being measured, so an unconditional pair of clock reads per stage
+    // would be a cost the measurement then included.
+    mesh::StageTelemetry stages;
+    mesh::SculptCounters counters;
+
     // The peaks this session measured. OWNED BY THE HANDLE and wired once at
     // create: the engine's seam borrows a pointer, and a borrowed pointer that
     // crossed this boundary would be a lifetime a host can get wrong exactly
@@ -15455,6 +15755,9 @@ struct clay_dynamic_sculptor {
     // dirty set got. A host tuning a staging buffer needs both and should not
     // have to add two numbers that were measured over different stamps.
     memory::PeakTelemetry peak;
+    // See clay_mesh_sculptor: off by default, and nothing is timed until asked.
+    mesh::StageTelemetry stages;
+    mesh::SculptCounters counters;
 };
 
 struct clay_mesh_lattice {
@@ -15645,6 +15948,152 @@ clay_result read_mesh_frame(const clay_mesh_frame* src, math::Transform* out) {
     out->scale = d.scale != 0.0f ? d.scale : 1.0f;
     if (!(out->scale > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "frame scale must be > 0");
     return CLAY_OK;
+}
+
+constexpr std::size_t kSculptStageReportOriginal =
+    offsetof(clay_sculpt_stage_report, scratch_high_water) + sizeof(std::uint64_t);
+
+// ONE FILLER FOR BOTH REPRESENTATIONS, so the fixed mesh and the adaptive
+// surface cannot report the same stage under different names or drift on which
+// counters they fill. `stage_count` is what THIS engine wrote rather than what
+// the header declares: a caller compiled against a newer header and linked
+// against an older library reads a smaller number rather than trailing zeroes
+// it cannot tell from measured ones.
+clay_result write_stage_report(const mesh::StageTelemetry& stages,
+                               const mesh::SculptCounters& counters,
+                               clay_sculpt_stage_report* out_report) {
+    if (!out_report) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_report");
+    clay_sculpt_stage_report probe;
+    clay_result r = read_desc(out_report, kSculptStageReportOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_report->struct_size;
+    clay_sculpt_stage_report filled{};
+    const std::size_t n = mesh::kSculptStageCount < CLAY_SCULPT_STAGE_COUNT
+                              ? mesh::kSculptStageCount
+                              : static_cast<std::size_t>(CLAY_SCULPT_STAGE_COUNT);
+    filled.stage_count = static_cast<std::uint32_t>(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        filled.nanos[i] = stages.nanos[i];
+        filled.calls[i] = stages.calls[i];
+    }
+    filled.vertices_considered = counters.vertices_considered;
+    filled.vertices_affected = counters.vertices_affected;
+    filled.positions_measured = counters.positions_measured;
+    filled.faces_touched = counters.faces_touched;
+    filled.chunks_touched = counters.chunks_touched;
+    filled.neighbors_gathered = counters.neighbors_gathered;
+    filled.kernel_passes = counters.kernel_passes;
+    filled.splits = counters.splits;
+    filled.collapses = counters.collapses;
+    filled.flips = counters.flips;
+    filled.detail_blocks_touched = counters.detail_blocks_touched;
+    filled.history_bytes = counters.history_bytes;
+    filled.scratch_high_water = counters.scratch_high_water;
+    write_desc(out_report, declared, filled);
+    return CLAY_OK;
+}
+
+// These take and return C++ types (a cfloat3, a MaskGate), so they live in this
+// anonymous namespace and NOT beside the entry points that call them: an
+// anonymous namespace does not reset language linkage, and the same definitions
+// inside the extern "C" block below would carry C linkage on signatures C
+// cannot spell. That is the C4190 family this file has been bitten by before.
+// -- the world/local crossing, in one place ----------------------------------
+//
+// ONE FUNCTION PER KIND OF QUANTITY, because the three rules differ and a call
+// site that picked the wrong one would be wrong plausibly: a POSITION takes the
+// translation, a DIRECTION does not, and a LENGTH takes only the scale. They
+// are here rather than at four call sites for the reason `pick.h` gives for
+// doing the raycast conversion inside the library: a caller doing it by hand
+// gets a brush whose radius changes when a layer is scaled, and gets it wrong
+// silently.
+//
+// THE RETURN TRIP IS NOT HERE and that is deliberate: the only value this ABI
+// hands back in world is a raycast hit, and `pick::raycast_mesh` already owns
+// both directions of that conversion -- the ray in, the hit out -- for the
+// reason its own header gives. A second local-to-world pair here would be a
+// second answer to one question.
+kernel::cfloat3 world_point_to_local(const clay_mesh_sculptor& s, kernel::cfloat3 p) {
+    return s.has_frame ? s.frame.apply_inverse(p) : p;
+}
+// A direction, and a NORMAL, which under a similarity are the same map: the
+// inverse transpose of a rotation-and-uniform-scale is that rotation, so no
+// separate normal path can drift from this one. Under a per-axis scale they
+// diverge, which is why such a layer is refused rather than approximated.
+kernel::cfloat3 world_vector_to_local(const clay_mesh_sculptor& s, kernel::cfloat3 v) {
+    return s.has_frame ? s.frame.rotation.conjugate().rotate(v) : v;
+}
+float world_length_to_local(const clay_mesh_sculptor& s, float len) {
+    return s.has_frame ? len / s.frame.scale : len;
+}
+
+// Rewrite the settings a host gave in world into the mesh's own space. Every
+// field that IS a position, a direction or a length, and no others: `strength`
+// is scaled by the radius and so is already frame-free, and `polish_angle` is
+// an angle, which a similarity does not change.
+void brush_settings_to_local(const clay_mesh_sculptor& s, mesh::MeshBrushSettings* settings) {
+    if (!s.has_frame) return;
+    settings->center = world_point_to_local(s, settings->center);
+    settings->radius = world_length_to_local(s, settings->radius);
+    settings->direction = world_vector_to_local(s, settings->direction);
+    settings->deposit_normal = world_vector_to_local(s, settings->deposit_normal);
+    settings->plane_point = world_point_to_local(s, settings->plane_point);
+    settings->plane_normal = world_vector_to_local(s, settings->plane_normal);
+    settings->layer_height = world_length_to_local(s, settings->layer_height);
+}
+
+// The STROKE's own world-valued fields, for a session that declares a space.
+//
+// A SECOND HELPER AND NOT AN OVERSIGHT IN THE FIRST. `apply_to_mesh` IGNORES
+// `settings.radius` and `settings.strength` -- each stamp brings its own, which
+// is what makes pressure and taper shape a mesh stroke exactly as they shape a
+// voxel one -- so `brush_settings_to_local` converts, among other things, the
+// one number a stroke never reads. What a stroke reads is here: the sample
+// positions and the PRESET's radius.
+//
+// The two velocities are world units PER SECOND, and a rate whose numerator is
+// a length scales exactly as the length does. Missing them would leave a
+// speed-driven brush reading the same gesture as faster or slower purely
+// because the layer was scaled.
+//
+// Everything else is already frame-free and is deliberately left alone:
+// `spacing` is a fraction of the DIAMETER, the jitters are fractions of the
+// radius, the tapers are fractions of the stroke, and strength, the pressure
+// curve, `steady` and the rotations are not lengths at all. Converting a
+// fraction would be the mirror of not converting a length.
+void stroke_to_local(const clay_mesh_sculptor& s, std::vector<brush::StrokeSample>* samples,
+                     brush::StrokePreset* preset) {
+    if (!s.has_frame) return;
+    for (brush::StrokeSample& sample : *samples) {
+        sample.position = world_point_to_local(s, sample.position);
+        sample.velocity = world_length_to_local(s, sample.velocity);
+    }
+    preset->radius = world_length_to_local(s, preset->radius);
+    preset->velocity_response.reference =
+        world_length_to_local(s, preset->velocity_response.reference);
+}
+
+// The mask is WORLD-ADDRESSED by design (voxel/mask.h) and a vertex handed to
+// the gate is in the MESH's own space, so the two only met correctly on an
+// untransformed layer. This is where they meet.
+field::MaskGate mask_gate_for(const clay_mesh_sculptor& s, voxel::MaskField* field_mask) {
+    if (field_mask == nullptr) return {};
+    if (!s.has_frame) return [field_mask](kernel::cfloat3 p) { return field_mask->sample(p); };
+    const math::Transform to_world = s.frame;
+    return [field_mask, to_world](kernel::cfloat3 p) {
+        return field_mask->sample(to_world.apply(p));
+    };
+}
+
+// A per-call `mesh_to_world` beside a session that already declares one.
+// REFUSED rather than resolved by precedence: a host passing both means one of
+// the two is what it believes, and picking silently would make the other a
+// wrong belief nothing corrects.
+clay_result reject_conflicting_frame(const clay_mesh_sculptor& s, const void* per_call) {
+    if (!s.has_frame || per_call == nullptr) return CLAY_OK;
+    return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                "this session already declares a world frame (clay_mesh_sculptor_set_world_frame "
+                "or _use_layer_transform); pass NULL here");
 }
 
 }  // namespace
@@ -16515,8 +16964,19 @@ clay_result clay_mesh_sculptor_create(clay_mesh* mesh, float weld_epsilon,
     handle->mesh = mesh;
     handle->bound = data;
     handle->geometry_revision = mesh->doc ? mesh_layer_revision_of(mesh->doc, mesh->layer) : 0;
-    handle->sculptor = std::make_unique<mesh::MeshSculptor>(
-        *data, weld_epsilon < 0.0f ? mesh::kDefaultWeldEpsilon : weld_epsilon);
+    const float epsilon = weld_epsilon < 0.0f ? mesh::kDefaultWeldEpsilon : weld_epsilon;
+    // THROUGH THE DOCUMENT'S CACHE when there is a document. A second sculptor
+    // over one unchanged layer costs 0.25 ms instead of 121 ms on a
+    // 296k-triangle mesh, because the adjacency it would have rebuilt is the
+    // one the first is already holding.
+    //
+    // A STANDALONE MESH BUILDS ITS OWN. It belongs to no document, so there is
+    // no identity to key an entry on, and inventing one from the pointer would
+    // key a cache on an address that can be reused by the next allocation.
+    handle->sculptor =
+        mesh->doc ? std::make_unique<mesh::MeshSculptor>(
+                        *data, mesh->doc->doc.topology_cache.acquire(mesh->layer, *data, epsilon))
+                  : std::make_unique<mesh::MeshSculptor>(*data, epsilon);
     handle->sculptor->set_telemetry(&handle->peak);
     *out_sculptor = handle.release();
     return CLAY_OK;
@@ -16572,6 +17032,147 @@ clay_result clay_mesh_sculptor_reset_peak_telemetry(clay_mesh_sculptor* sculptor
     return CLAY_OK;
 }
 
+clay_result clay_mesh_sculptor_set_stage_report_enabled(clay_mesh_sculptor* sculptor,
+                                                        int32_t enabled) {
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/false);
+    if (r != CLAY_OK) return r;
+    sculptor->sculptor->set_stage_telemetry(enabled ? &sculptor->stages : nullptr);
+    sculptor->sculptor->set_counters(enabled ? &sculptor->counters : nullptr);
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_stage_report(const clay_mesh_sculptor* sculptor,
+                                            clay_sculpt_stage_report* out_report) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh sculptor");
+    return write_stage_report(sculptor->stages, sculptor->counters, out_report);
+}
+
+clay_result clay_mesh_sculptor_reset_stage_report(clay_mesh_sculptor* sculptor) {
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/false);
+    if (r != CLAY_OK) return r;
+    sculptor->stages.reset();
+    sculptor->counters.reset();
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_sculptor_set_stage_report_enabled(clay_dynamic_sculptor* sculptor,
+                                                           int32_t enabled) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    sculptor->sculptor->set_stage_telemetry(enabled ? &sculptor->stages : nullptr);
+    sculptor->sculptor->set_counters(enabled ? &sculptor->counters : nullptr);
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_sculptor_stage_report(const clay_dynamic_sculptor* sculptor,
+                                               clay_sculpt_stage_report* out_report) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    return write_stage_report(sculptor->stages, sculptor->counters, out_report);
+}
+
+clay_result clay_dynamic_sculptor_reset_stage_report(clay_dynamic_sculptor* sculptor) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    sculptor->stages.reset();
+    sculptor->counters.reset();
+    return CLAY_OK;
+}
+
+// The three setters that complete the automask across the boundary. Each is the
+// same two lines because the factors mean the same thing whichever surface is
+// under the brush; the sculptors differ in where a displacement is STORED, and
+// a crevice is not a fact about storage.
+clay_result clay_mesh_sculptor_set_automask_sources(clay_mesh_sculptor* sculptor,
+                                                    const clay_automask_sources* sources) {
+    // for_edit=false: naming the inputs is not itself an edit, so a session may
+    // wire its automask before it has decided to move anything.
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/false);
+    if (r != CLAY_OK) return r;
+    mesh::AutomaskInputs inputs;
+    r = read_automask_sources(sources, &sculptor->frame, &inputs);
+    if (r != CLAY_OK) return r;
+    sculptor->sculptor->set_automask_inputs(std::move(inputs));
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_sculptor_set_automask_sources(clay_dynamic_sculptor* sculptor,
+                                                       const clay_automask_sources* sources) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    mesh::AutomaskInputs inputs;
+    clay_result r = read_automask_sources(sources, /*frame=*/nullptr, &inputs);
+    if (r != CLAY_OK) return r;
+    sculptor->sculptor->set_automask_inputs(std::move(inputs));
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_set_world_frame(clay_mesh_sculptor* sculptor,
+                                               const clay_mesh_frame* frame) {
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/false);
+    if (r != CLAY_OK) return r;
+    if (frame == nullptr) {
+        sculptor->has_frame = false;
+        sculptor->frame = math::Transform::identity();
+        return CLAY_OK;
+    }
+    math::Transform t;
+    r = read_mesh_frame(frame, &t);
+    if (r != CLAY_OK) return r;
+    sculptor->frame = t;
+    sculptor->has_frame = true;
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_use_layer_transform(clay_mesh_sculptor* sculptor) {
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/false);
+    if (r != CLAY_OK) return r;
+    if (!sculptor->mesh || !sculptor->mesh->doc)
+        return fail(CLAY_ERROR_NOT_FOUND,
+                    "this sculptor was built over a standalone mesh, which belongs to no layer");
+    const scene::Layer* l = sculptor->mesh->doc->doc.document.find_layer(sculptor->mesh->layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "the mesh layer is no longer in its document");
+    // A PER-AXIS SCALE IS REFUSED, not approximated. Under one, a round brush in
+    // world is an ellipsoid on the model, so `radius` stops naming anything a
+    // spherical walk can honour -- and a normal stops being carried by the
+    // rotation alone. Reading the scale as uniform would put the dab in a
+    // plausible wrong place and report success, which is the failure this whole
+    // change exists to remove. Closing it needs an anisotropic brush footprint,
+    // which is its own change with its own gates.
+    if (scene::layer_is_squashed(*l))
+        return fail(CLAY_ERROR_UNSUPPORTED,
+                    "this layer carries a per-axis scale, which a brush radius cannot express; "
+                    "an anisotropic footprint is not implemented");
+    sculptor->frame = l->xform;
+    sculptor->has_frame = true;
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_world_frame(const clay_mesh_sculptor* sculptor,
+                                           clay_mesh_frame* out_frame, int32_t* out_declared) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh sculptor");
+    if (out_declared) *out_declared = sculptor->has_frame ? 1 : 0;
+    if (!out_frame) return CLAY_OK;
+    clay_mesh_frame probe;
+    clay_result r = read_desc(out_frame, kMeshFrameOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_frame->struct_size;
+    clay_mesh_frame filled{};
+    const math::Transform& t = sculptor->frame;
+    filled.position[0] = t.position.x;
+    filled.position[1] = t.position.y;
+    filled.position[2] = t.position.z;
+    filled.rotation[0] = t.rotation.x;
+    filled.rotation[1] = t.rotation.y;
+    filled.rotation[2] = t.rotation.z;
+    filled.rotation[3] = t.rotation.w;
+    filled.scale = t.scale;
+    write_desc(out_frame, declared, filled);
+    return CLAY_OK;
+}
+
 clay_result clay_mesh_sculptor_stamp(clay_mesh_sculptor* sculptor, const clay_mesh_brush_desc* desc,
                                      const clay_mask* mask, clay_mesh_deltas* deltas,
                                      size_t* out_moved) {
@@ -16581,13 +17182,14 @@ clay_result clay_mesh_sculptor_stamp(clay_mesh_sculptor* sculptor, const clay_me
     mesh::MeshBrushSettings settings;
     r = read_mesh_brush(desc, &verb, &settings);
     if (r != CLAY_OK) return r;
+    brush_settings_to_local(*sculptor, &settings);
 
     field::MaskGate gate;
     if (mask) {
         voxel::MaskField* field_mask = nullptr;
         r = resolve_mask(mask, &field_mask);
         if (r != CLAY_OK) return r;
-        gate = [field_mask](kernel::cfloat3 p) { return field_mask->sample(p); };
+        gate = mask_gate_for(*sculptor, field_mask);
     }
     const std::size_t moved =
         sculptor->sculptor->stamp(verb, settings, gate, deltas ? &deltas->deltas : nullptr);
@@ -16778,13 +17380,22 @@ clay_result clay_mesh_sculptor_apply_stroke(clay_mesh_sculptor* sculptor,
     if (r != CLAY_OK) return r;
     brush::MeshStrokeOptions options;
     options.defer_normals = defer_normals != 0;
-    r = read_mesh_frame(mesh_to_world, &options.mesh_to_world);
+    r = reject_conflicting_frame(*sculptor, mesh_to_world);
+    if (r != CLAY_OK) return r;
+    if (sculptor->has_frame)
+        options.mesh_to_world = sculptor->frame;
+    else
+        r = read_mesh_frame(mesh_to_world, &options.mesh_to_world);
     if (r != CLAY_OK) return r;
 
     std::vector<brush::StrokeSample> samples;
     brush::StrokePreset resolved;
     r = read_stroke(samples_xyzpt, sample_count, preset, &samples, &resolved);
     if (r != CLAY_OK) return r;
+    // A declared session speaks WORLD in every call, this one included. Both
+    // halves: the descriptor, and the stroke's own radius and sample path.
+    brush_settings_to_local(*sculptor, &settings);
+    stroke_to_local(*sculptor, &samples, &resolved);
 
     voxel::MaskField* field_mask = nullptr;
     if (mask) {
@@ -16827,12 +17438,21 @@ clay_result clay_mesh_sculptor_apply_preset(clay_mesh_sculptor* sculptor,
     brush::MeshStrokeOptions options;
     options.defer_normals = defer_normals != 0;
     options.orient_alpha_by_stamp = orient_alpha_by_stamp != 0;
-    r = read_mesh_frame(mesh_to_world, &options.mesh_to_world);
+    r = reject_conflicting_frame(*sculptor, mesh_to_world);
+    if (r != CLAY_OK) return r;
+    if (sculptor->has_frame)
+        options.mesh_to_world = sculptor->frame;
+    else
+        r = read_mesh_frame(mesh_to_world, &options.mesh_to_world);
     if (r != CLAY_OK) return r;
 
     std::vector<brush::StrokeSample> samples;
     r = read_samples(samples_xyzpt, sample_count, &samples);
     if (r != CLAY_OK) return r;
+    // As above. A preset carries its stroke and its settings together, and both
+    // halves cross this boundary.
+    brush_settings_to_local(*sculptor, &p.settings);
+    stroke_to_local(*sculptor, &samples, &p.stroke);
 
     voxel::MaskField* field_mask = nullptr;
     if (mask) {
@@ -18011,6 +18631,17 @@ clay_result clay_multires_sculptor_reset_peak_telemetry(clay_multires_sculptor* 
     return CLAY_OK;
 }
 
+clay_result clay_multires_sculptor_set_automask_sources(clay_multires_sculptor* sculptor,
+                                                        const clay_automask_sources* sources) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
+    mesh::AutomaskInputs inputs;
+    clay_result r = read_automask_sources(sources, /*frame=*/nullptr, &inputs);
+    if (r != CLAY_OK) return r;
+    sculptor->sculptor->set_automask_inputs(std::move(inputs));
+    return CLAY_OK;
+}
+
 clay_result clay_multires_sculptor_stamp(clay_multires_sculptor* sculptor,
                                          const clay_mesh_brush_desc* brush, const clay_mask* mask,
                                          clay_multires_stamp_report* out_report) {
@@ -19011,9 +19642,13 @@ clay_result clay_mesh_sculptor_raycast(clay_mesh_sculptor* sculptor, const float
     clay_mesh_hit probe;
     r = read_desc(out_hit, kMeshHitOriginal, &probe);
     if (r != CLAY_OK) return r;
-    math::Transform frame;
-    r = read_mesh_frame(xform, &frame);
+    r = reject_conflicting_frame(*sculptor, xform);
     if (r != CLAY_OK) return r;
+    math::Transform frame = sculptor->frame;
+    if (!sculptor->has_frame) {
+        r = read_mesh_frame(xform, &frame);
+        if (r != CLAY_OK) return r;
+    }
 
     math::Ray ray;
     ray.origin = kernel::cf3(origin[0], origin[1], origin[2]);

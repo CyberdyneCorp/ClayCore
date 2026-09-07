@@ -54,6 +54,7 @@
 #include "clay/mesh/quad_mesh.h"
 #include "clay/mesh/deform.h"
 #include "clay/mesh/sculpt.h"
+#include "clay/mesh/topology_cache.h"
 #include "clay/mesh/transfer.h"
 #include "clay/mesh/voxel_remesh.h"
 #include "clay/mesh/weld.h"
@@ -693,6 +694,42 @@ struct PyMeshSculptor {
     // sculptor is built. See `peak_dict` for why a script reads a copy of this
     // rather than being handed the block the engine writes into.
     memory::PeakTelemetry peak;
+
+    // Which space this session speaks. See the C ABI's
+    // clay_mesh_sculptor_set_world_frame for the defect it closes: a raycast
+    // returns a WORLD hit and a stamp read its centre as LOCAL, so feeding one
+    // into the other on a transformed layer moved nothing and raised nothing.
+    // Undeclared is the identity, which is exactly the behaviour before it.
+    bool has_frame = false;
+    math::Transform frame;
+
+    // The per-stage breakdown, OWNED HERE and wired into the engine only while
+    // a script has asked for it. Off by default: a stamp is the thing being
+    // measured, so an unconditional clock read per stage would be a cost the
+    // measurement then included.
+    mesh::StageTelemetry stages;
+    mesh::SculptCounters counters;
+
+    kernel::cfloat3 to_local(kernel::cfloat3 p) const {
+        return has_frame ? frame.apply_inverse(p) : p;
+    }
+    // A direction and a normal are the same map under a similarity: the inverse
+    // transpose of a rotation-and-uniform-scale is that rotation.
+    kernel::cfloat3 vector_to_local(kernel::cfloat3 v) const {
+        return has_frame ? frame.rotation.conjugate().rotate(v) : v;
+    }
+    float length_to_local(float len) const { return has_frame ? len / frame.scale : len; }
+
+    void settings_to_local(mesh::MeshBrushSettings* settings) const {
+        if (!has_frame) return;
+        settings->center = to_local(settings->center);
+        settings->radius = length_to_local(settings->radius);
+        settings->direction = vector_to_local(settings->direction);
+        settings->deposit_normal = vector_to_local(settings->deposit_normal);
+        settings->plane_point = to_local(settings->plane_point);
+        settings->plane_normal = vector_to_local(settings->plane_normal);
+        settings->layer_height = length_to_local(settings->layer_height);
+    }
 
     mesh::MeshSculptor& live(bool for_edit) const {
         if (!sculptor) throw std::runtime_error("this sculptor was never built");
@@ -1594,6 +1631,28 @@ struct PyPlacementGesture {
 
 // The one place a mesh layer's triangles are swapped from Python, so both
 // callers get the same guards, the same undo record and the same invalidation.
+// The layout a save will write at, or a refusal naming what blocks it.
+//
+// ONE PLACE FOR `save` AND `to_bytes`, so the two cannot come to different
+// conclusions about the same document — the same reason the C ABI's two save
+// forms share `resolve_write_minor`.
+std::uint16_t write_minor_or_throw(const PyDocument& d, nb::handle minor) {
+    if (minor.is_none()) return scene::kSceneMinor;
+    const unsigned asked = nb::cast<unsigned>(minor);
+    if (asked == 0) throw std::invalid_argument("a format minor starts at 1");
+    // Clamped rather than refused above this build's layout, as
+    // `writable_at_minor` clamps: the question is only about writing DOWN.
+    const std::uint16_t at = asked > scene::kSceneMinor
+                                 ? scene::kSceneMinor
+                                 : static_cast<std::uint16_t>(asked);
+    const scene::LayerId blocking = io::document_blocking_minor(*d.doc, at);
+    if (blocking != 0)
+        throw std::runtime_error("this document cannot be written at scene format minor " +
+                                 std::to_string(at) + "; layer " + std::to_string(blocking) +
+                                 " blocks it (see writable_at_minor)");
+    return at;
+}
+
 // Mirrors replace_mesh_layer_geometry in the C ABI exactly.
 void py_replace_mesh_layer(PyDocument& d, scene::LayerId layer, mesh::Mesh replacement,
                            nb::handle expected_revision) {
@@ -5223,7 +5282,17 @@ NB_MODULE(pyclay, m) {
                 self->mesh = pm;
                 self->bound = &data;
                 self->geometry_revision = pm->doc ? pm->doc->mesh_revision(pm->layer) : 0;
-                self->sculptor = std::make_shared<mesh::MeshSculptor>(data, weld_epsilon);
+                // FROM THE DOCUMENT'S CACHE when this mesh is a layer's, so a
+                // second session over one layer does not rebuild the weld
+                // classes and the neighbourhood CSR a brush walks -- 0.25 ms
+                // against 120.8 ms on a 296k-triangle layer. A standalone mesh
+                // belongs to no document, has no identity to key on, and builds
+                // its own exactly as it always did.
+                self->sculptor =
+                    pm->doc ? std::make_shared<mesh::MeshSculptor>(
+                                  data, pm->doc->topology_cache.acquire(pm->layer, data,
+                                                                        weld_epsilon))
+                            : std::make_shared<mesh::MeshSculptor>(data, weld_epsilon);
                 // Pointed at the block this object owns and never re-pointed:
                 // the sculptor is built once here and `live()` refuses rather
                 // than rebuilding, so the peaks belong to the session.
@@ -5260,7 +5329,18 @@ NB_MODULE(pyclay, m) {
                     alpha_tangent, alpha_extent, color, automask, stamp_azimuth, &chosen);
                 mesh::VertexDeltas* record =
                     deltas.is_none() ? nullptr : nb::cast<PyVertexDeltas*>(deltas)->deltas.get();
+                s.settings_to_local(&settings);
                 field::MaskGate gate = mask_gate_of(mask);
+                // The mask is WORLD-addressed and a vertex reaches the gate in
+                // the MESH's own space, so on a transformed layer the two only
+                // met correctly by accident. This is where they meet.
+                if (s.has_frame && gate) {
+                    const math::Transform to_world = s.frame;
+                    field::MaskGate local = std::move(gate);
+                    gate = [local, to_world](kernel::cfloat3 p) {
+                        return local(to_world.apply(p));
+                    };
+                }
                 mesh::MeshSculptor& live = s.live(true);
                 nb::gil_scoped_release release;
                 return live.stamp(chosen, settings, gate, record);
@@ -5501,6 +5581,132 @@ NB_MODULE(pyclay, m) {
             "cavity"_a = nb::none(), "groups"_a = nb::none(), "active_group"_a = 0,
             nb::keep_alive<1, 2>(), nb::keep_alive<1, 3>(), kAutomaskInputsDoc)
         .def(
+            "set_stage_report_enabled",
+            [](PyMeshSculptor& s, bool enabled) {
+                mesh::MeshSculptor& live = s.live(false);
+                live.set_stage_telemetry(enabled ? &s.stages : nullptr);
+                live.set_counters(enabled ? &s.counters : nullptr);
+            },
+            "enabled"_a,
+            "Start or stop timing and counting the stages of every stamp.\n\n"
+            "Off by default and nothing is measured until you ask: a stamp is the\n"
+            "thing being measured, so an unconditional clock read per stage would be\n"
+            "a cost the measurement then included.")
+        .def(
+            "reset_stage_report",
+            [](PyMeshSculptor& s) {
+                s.stages.reset();
+                s.counters.reset();
+            },
+            "Zero it, so the next stamp is measured on its own.")
+        .def_prop_ro(
+            "stage_report",
+            [](const PyMeshSculptor& s) {
+                nb::dict out;
+                nb::dict nanos, calls;
+                for (std::size_t i = 0; i < mesh::kSculptStageCount; ++i) {
+                    const char* name =
+                        mesh::StageTelemetry::name(static_cast<mesh::SculptStage>(i));
+                    nanos[name] = s.stages.nanos[i];
+                    calls[name] = s.stages.calls[i];
+                }
+                out["nanos"] = nanos;
+                out["calls"] = calls;
+                out["vertices_considered"] = s.counters.vertices_considered;
+                out["vertices_affected"] = s.counters.vertices_affected;
+                out["positions_measured"] = s.counters.positions_measured;
+                out["faces_touched"] = s.counters.faces_touched;
+                out["chunks_touched"] = s.counters.chunks_touched;
+                out["neighbors_gathered"] = s.counters.neighbors_gathered;
+                out["kernel_passes"] = s.counters.kernel_passes;
+                out["splits"] = s.counters.splits;
+                out["collapses"] = s.counters.collapses;
+                out["flips"] = s.counters.flips;
+                out["detail_blocks_touched"] = s.counters.detail_blocks_touched;
+                out["history_bytes"] = s.counters.history_bytes;
+                out["scratch_high_water"] = s.counters.scratch_high_water;
+                return out;
+            },
+            "Where the stamps went, and WHAT THEY DID.\n\n"
+            "`nanos` and `calls` are per stage, by name. The rest are counts, and\n"
+            "they are the half a duration cannot supply: a stage that got slower\n"
+            "because it touched twice as much and one whose inner loop regressed are\n"
+            "the same number.\n\n"
+            "`vertices_considered` and `vertices_affected` DIFFER, and the gap is the\n"
+            "falloff's rim plus whatever a mask held still — the first thing to look\n"
+            "at when a dab costs more than it should.\n\n"
+            "Accumulated from the moment you enable it, so a script measuring a\n"
+            "stroke reads the stroke; `reset_stage_report` measures one dab.")
+        .def(
+            "use_layer_transform",
+            [](PyMeshSculptor& s) {
+                if (!s.mesh || !s.mesh->doc)
+                    throw std::runtime_error(
+                        "this sculptor was built over a standalone mesh, which belongs to no "
+                        "layer");
+                const scene::Layer* l = s.mesh->doc->document.find_layer(s.mesh->layer);
+                if (!l) throw std::runtime_error("the mesh layer is no longer in its document");
+                if (scene::layer_is_squashed(*l))
+                    throw std::runtime_error(
+                        "this layer carries a per-axis scale, which a brush radius cannot "
+                        "express; an anisotropic footprint is not implemented");
+                s.frame = l->xform;
+                s.has_frame = true;
+            },
+            "Speak WORLD space, using this layer's own transform.\n\n"
+            "A mesh layer's vertex arrays are layer-local and its transform places\n"
+            "them. Without this, `raycast` returns a WORLD hit and `stamp` reads its\n"
+            "centre as LOCAL — so feeding one into the other on a transformed layer\n"
+            "moves nothing and raises nothing. With it, every position, radius,\n"
+            "direction and normal crossing this sculptor is world, `mask` included.\n\n"
+            "Raises for a standalone mesh, which belongs to no layer, and for a layer\n"
+            "carrying a PER-AXIS scale: under one a round brush in world is an\n"
+            "ellipsoid on the model, so `radius` names nothing a spherical surface\n"
+            "walk can honour. Reading it as uniform would put the dab in a plausible\n"
+            "wrong place and report success.")
+        .def(
+            "set_world_frame",
+            [](PyMeshSculptor& s, nb::handle position, nb::handle rotation_axis_angle,
+               nb::handle scale) {
+                // ALL THREE OMITTED CLEARS IT, which is what passing NULL does
+                // to clay_mesh_sculptor_set_world_frame. One call for both, so
+                // the two bindings cannot grow different vocabularies for the
+                // same state.
+                if (position.is_none() && rotation_axis_angle.is_none() && scale.is_none()) {
+                    s.has_frame = false;
+                    s.frame = math::Transform::identity();
+                    return;
+                }
+                math::Transform t;
+                if (!position.is_none()) t.position = to_f3(position, "position");
+                if (!rotation_axis_angle.is_none()) t.rotation = to_axis_angle(rotation_axis_angle);
+                if (!scale.is_none()) t.scale = nb::cast<float>(scale);
+                if (!(t.scale > 0.0f)) throw std::invalid_argument("scale must be > 0");
+                s.frame = t;
+                s.has_frame = true;
+            },
+            "position"_a = nb::none(), "rotation_axis_angle"_a = nb::none(),
+            "scale"_a = nb::none(),
+            "Declare the frame this session speaks, or clear it by passing nothing.\n\n"
+            "Prefer `use_layer_transform` when the mesh belongs to a layer: it is the\n"
+            "same statement without the chance of reconstructing the frame wrongly,\n"
+            "and it is the only form that can see a per-axis scale and refuse it.")
+        .def_prop_ro(
+            "world_frame",
+            [](const PyMeshSculptor& s) -> nb::object {
+                if (!s.has_frame) return nb::none();
+                nb::dict out;
+                out["position"] = nb::make_tuple(s.frame.position.x, s.frame.position.y,
+                                                 s.frame.position.z);
+                out["rotation"] = nb::make_tuple(s.frame.rotation.x, s.frame.rotation.y,
+                                                 s.frame.rotation.z, s.frame.rotation.w);
+                out["scale"] = s.frame.scale;
+                return out;
+            },
+            "The frame this session speaks, or None when it speaks the mesh's own\n"
+            "space — which is the default and is exactly the behaviour that came\n"
+            "before this existed.")
+        .def(
             "raycast",
             [](PyMeshSculptor& s, nb::handle origin, nb::handle direction, nb::handle position,
                nb::handle rotation_axis, float rotation_angle, float scale) {
@@ -5511,12 +5717,22 @@ NB_MODULE(pyclay, m) {
                     throw std::invalid_argument("direction has no length");
                 ray.dir = kernel::cnormalize(ray.dir);
                 if (!(scale > 0.0f)) throw std::invalid_argument("scale must be > 0");
-                math::Transform xform;
-                if (!position.is_none()) xform.position = to_f3(position, "position");
-                if (!rotation_axis.is_none())
-                    xform.rotation = math::Quat::from_axis_angle(
-                        kernel::cnormalize(to_f3(rotation_axis, "rotation_axis")), rotation_angle);
-                xform.scale = scale;
+                const bool given = !position.is_none() || !rotation_axis.is_none() ||
+                                   rotation_angle != 0.0f || scale != 1.0f;
+                if (s.has_frame && given)
+                    throw std::invalid_argument(
+                        "this sculptor already declares a world frame "
+                        "(use_layer_transform / world_frame=); pass no placement here");
+                math::Transform xform = s.frame;
+                if (!s.has_frame) {
+                    xform = math::Transform::identity();
+                    if (!position.is_none()) xform.position = to_f3(position, "position");
+                    if (!rotation_axis.is_none())
+                        xform.rotation = math::Quat::from_axis_angle(
+                            kernel::cnormalize(to_f3(rotation_axis, "rotation_axis")),
+                            rotation_angle);
+                    xform.scale = scale;
+                }
 
                 mesh::MeshSculptor& live = s.live(false);
                 const mesh::Mesh& mm = live.mesh();
@@ -7352,24 +7568,41 @@ NB_MODULE(pyclay, m) {
              "points"_a,
              "Snap (N, 3) points onto the surface; returns positions and outward normals")
         .def("save",
-             [](const PyDocument& d, const std::string& path) {
-                 check_io(io::save_clayspace_file(*d.doc, path));
+             [](const PyDocument& d, const std::string& path, nb::handle minor) {
+                 const std::uint16_t at = write_minor_or_throw(d, minor);
+                 check_io(io::save_clayspace_file(*d.doc, path, at));
                  // These bytes are a snapshot the journal from here on can be
                  // paired with, whether the host meant them as a crash
                  // snapshot or as an ordinary save. check_io threw if the
                  // write failed, so there is no failure path to guard.
-                 if (*d.undo) (*d.undo)->note_snapshot(d.doc->document.snapshot_id);
+                 //
+                 // ONLY AT THIS BUILD'S LAYOUT: a file written at an older
+                 // minor is not a snapshot this build's journal can be replayed
+                 // onto, because replaying it would produce a document that
+                 // minor cannot express.
+                 if (at == scene::kSceneMinor && *d.undo)
+                     (*d.undo)->note_snapshot(d.doc->document.snapshot_id);
              },
-             "path"_a, "Save the document as .clayspace")
+             "path"_a, "minor"_a = nb::none(),
+             "Save the document as .clayspace.\n\n"
+             "`minor` writes at an older scene format layout, for a file a build\n"
+             "that has not been updated can open. REFUSED rather than downgraded\n"
+             "when that layout cannot say what this document says -- ask\n"
+             "`writable_at_minor` first to find out which layer blocks it -- and\n"
+             "NOTHING IS WRITTEN on a refusal, so an existing file is left alone.")
         .def(
             "to_bytes",
-            [](const PyDocument& d) {
-                const std::vector<std::uint8_t> bytes = io::save_clayspace(*d.doc);
+            [](const PyDocument& d, nb::handle minor) {
+                const std::uint16_t at = write_minor_or_throw(d, minor);
+                const std::vector<std::uint8_t> bytes = io::save_clayspace(*d.doc, at);
                 // See `save`: the bytes just produced are a snapshot the
-                // journal from here on continues from.
-                if (*d.undo) (*d.undo)->note_snapshot(d.doc->document.snapshot_id);
+                // journal from here on continues from, and only at this
+                // build's own layout.
+                if (at == scene::kSceneMinor && *d.undo)
+                    (*d.undo)->note_snapshot(d.doc->document.snapshot_id);
                 return nb::bytes(bytes.data(), bytes.size());
             },
+            "minor"_a = nb::none(),
             "The same bytes `save` would write, without a path — for a host\n"
             "whose documents live in a container, a database or a network\n"
             "request rather than on a filesystem. Read them back with\n"
@@ -7555,8 +7788,12 @@ NB_MODULE(pyclay, m) {
                  const std::uint16_t asked =
                      minor > scene::kSceneMinor ? scene::kSceneMinor
                                                 : static_cast<std::uint16_t>(minor);
-                 const scene::LayerId blocking =
-                     scene::layer_blocking_minor(d.doc->document, asked);
+                 // THE WHOLE DOCUMENT, not only the scene. This asked
+                 // `layer_blocking_minor` alone, which knows about composition
+                 // and nothing else, so a document carrying a multiresolution
+                 // hierarchy -- container minor 19's 'MRES' chunk -- answered
+                 // True at 18, which has no chunk to put one in.
+                 const scene::LayerId blocking = io::document_blocking_minor(*d.doc, asked);
                  return nb::make_tuple(blocking == 0, blocking);
              },
              "minor"_a,
@@ -7569,8 +7806,11 @@ NB_MODULE(pyclay, m) {
              "a lump welded on, in a file that opens cleanly and looks deliberate.\n"
              "A minor above this build's is clamped to it rather than refused. The\n"
              "id is returned rather than only a flag so a host can say WHICH subtool\n"
-             "to change instead of making the artist find it. Mirrors\n"
-             "clay_document_writable_at_minor.")
+             "to change instead of making the artist find it.\n\n"
+             "It also answers for a MULTIRESOLUTION HIERARCHY, which arrived with the\n"
+             "container's minor 19: a hierarchy holding only its cage is a plainer\n"
+             "file below that and is allowed, and one an artist has refined cannot be\n"
+             "rebuilt and is refused. Mirrors clay_document_writable_at_minor.")
         .def("set_layer_transform",
              [](PyDocument& d, scene::LayerId layer, nb::handle position,
                 nb::handle rotation_axis_angle, nb::handle scale) {
@@ -7716,6 +7956,38 @@ NB_MODULE(pyclay, m) {
                  return (*d.undo)->redo(d.doc->document, grid_for(d), mesh_for(d), nullptr, mask_for(d));
              },
              "Reapply the last undone step; returns False when there is nothing to redo")
+        .def_prop_ro(
+            "topology_cache_stats",
+            [](const PyDocument& d) {
+                nb::dict out;
+                const mesh::TopologyCacheStats s = d.doc->topology_cache.stats();
+                out["entries"] = s.entries;
+                out["bytes"] = s.bytes;
+                out["hits"] = s.hits;
+                out["misses"] = s.misses;
+                out["evictions"] = s.evictions;
+                out["build_ns"] = s.build_nanoseconds;
+                out["verify_ns"] = s.verify_nanoseconds;
+                return out;
+            },
+            "What the shared adjacency cache has done.\n\n"
+            "Creating a MeshSculptor over a layer builds the weld classes and\n"
+            "neighbourhood CSR its brushes walk, which is the WHOLE of what a\n"
+            "sculptor costs to construct: 120.8 ms on a 296k-triangle mesh. The\n"
+            "document holds one per layer and hands it to every sculptor over\n"
+            "that layer, so the second create is 0.25 ms.\n\n"
+            "`hits` and `misses` are the point: a cache that never hits and a\n"
+            "cache that is absent are otherwise indistinguishable from here.\n\n"
+            "Sculpting does NOT invalidate an entry — a weld partition is pinned\n"
+            "when it is built and positions move under it freely, which is what a\n"
+            "sculptor live across a stroke has always done. Replacing a layer's\n"
+            "triangles does.")
+        .def(
+            "trim_topology_cache",
+            [](PyDocument& d) { return d.doc->topology_cache.release_unused(); },
+            "Release every cached adjacency no live MeshSculptor is holding, and\n"
+            "return the bytes. Nothing a live sculptor holds is released, so this\n"
+            "is safe to call from a memory warning that arrives mid-stroke.")
         .def_prop_ro(
             "history_bytes",
             [](const PyDocument& d) {
