@@ -55,9 +55,9 @@ seam blends.
    value beyond the band on both sides for the reason the item does.
 
 5. **The layer folds.** `layer_reach_in_document`, which is
-   `folds_from_layer_support` — the same sum the influence path carries. This is
-   the one term a probe could show is load-bearing: removing it produced 203
-   sign changes outside the box on the layer-composition fixtures, worst 0.529.
+   `folds_from_layer_support` — the same sum the influence path carries.
+   Removing it produced 203 sign changes outside the box on the
+   layer-composition fixtures, worst 0.529.
 
 6. **Instancing.** The union over every layer sharing the content, exactly as
    `node_influence_bound_in_document` takes it (#325). Shared content is not
@@ -97,6 +97,38 @@ The gate and morph rules are the ones a reader is most likely to think
 unnecessary. They are the cases where the difference between "band-clamped
 equal" and "equal" becomes visible, and a local op never meets them because for
 a local op the difference is zero.
+
+## Gating a term that can only widen the box
+
+Three of the four terms are DILATIONS. Every numeric gate on the box is
+one-sided in the shrinking direction — `delta_growth < 4.0`, the two count
+comparisons, `volume(delta) < 0.35 * volume(conservative)` — so a term that only
+widens it can be deleted and every one of them passes more comfortably. The fold
+term escaped that because a fixture existed where its absence changed the FIELD;
+the chain pad and the ancestor group supports did not, and were shipped
+ungated until review said so.
+
+**The chain pad now has a fixture, because it is a field claim.** A body, a hard
+intersect operand, and one smooth dab at k = 0.25 whose surface passes 0.03 from
+a point where the running value IS the operand's own distance — 0.30 before the
+move, 0.95 after. `smin` turns that into −0.103 against +0.028: a sign change
+0.30 from the operand's box, twice the band, and `cull_pad` = min(4k, 2.80k) =
+0.70 is what covers it. Dropping the term: 288 sign changes, 38 samples entering
+the band and 560 leaving it, worst |db| 0.244.
+
+**The ancestor supports cannot have one, and this is why.** A group's blend
+drags a beyond-band value by strictly less than its own support, and `cull_pad`
+already carries 2.80k of that support's 4k — every node feeds it, groups
+included. So the window a probe would have to find a counterexample in is the
+1.2k between them, where the correction is under a hundredth of the band and
+below the fp16 the brick cache quantizes to. The term is conservative and the
+walk it mirrors (`node_reach_bound`) has its own tests; what this branch owed
+was a gate that it is PRESENT. That is an arithmetic pin: five nodes, a dab at
+k = 0.4 and a group at k = 0.25, so `cull_pad` = 1.12 and the group support =
+1.0, and the six faces of the reported box asserted against 0.3 ∓ 2.12 by hand.
+Deleting the pad reports −0.70 where −1.82 is derived; deleting the ancestor
+walk reports −0.82. The two helper values are asserted beside it, so a change to
+either formula fails at the formula and says which one moved.
 
 ## Two instruments, and they do not see the same things
 

@@ -572,6 +572,78 @@ TEST_CASE("intersect delta: a long smooth chain") {
     check("200 smooth dabs and one intersect", std::move(f), 3.0f);
 }
 
+TEST_CASE("intersect delta: a smooth combine downstream drags the difference back") {
+    // WHY THE CHAIN PAD IS A TERM, as a field rather than as arithmetic.
+    //
+    // Outside the swept geometry the operand's own field is beyond the band on
+    // both sides -- but it is not EQUAL, and a smooth combine further down the
+    // chain reads it. At (1, 0, 0) the body reads -0.5, so `max(acc, item)` is
+    // the operand's own distance: 0.30 before the move and 0.95 after. The last
+    // dab's surface passes 0.03 from the same point, and smin at k = 0.25
+    // (support 4k = 1.0) turns that difference into
+    //   before: 0.03 - ((1.0 - 0.27) / 1.0)^2 * 0.25 = -0.103
+    //   after:  0.03 - ((1.0 - 0.92) / 1.0)^2 * 0.25 = +0.028
+    // -- a SIGN CHANGE 0.30 from the operand's box, twice the band. `cull_pad`
+    // is min(4k, 2.80k) = 0.70 and covers it; drop that term and the reported
+    // box ends 0.15 short of the point, in a brick nothing dirtied.
+    Fixture f;
+    Layer& l = f.doc.add_sdf_layer("body");
+    f.layer = l.id;
+    l.sdf->insert(item(Prim::sphere(1.5f), cf3(0, 0, 0), Op::Add));
+    f.cutter = l.sdf->insert(item(Prim::sphere(0.3f), cf3(0.4f, 0, 0), Op::Intersect));
+    l.sdf->insert(item(Prim::sphere(1.97f), cf3(3.0f, 0, 0), Op::Add, smooth(0.25f)));
+    f.after = at(cf3(-0.25f, 0, 0));
+    check("a smooth dab reading the operand's far field", std::move(f), 5.0f);
+}
+
+TEST_CASE("intersect delta: the chain pad and the groups above are terms in the box") {
+    // The pad and the ancestor supports can only WIDEN the box, so every count
+    // and volume gate in this branch passes more comfortably without them, and
+    // a probe cannot reach the ancestor term at all: a group's blend drags a
+    // beyond-band value by less than its own support, and `cull_pad` already
+    // carries 2.80k of that support's 4k. So both are pinned here as
+    // arithmetic, against numbers derived from the formulas rather than from
+    // the walk under test.
+    //
+    // Five nodes, no symmetry, one layer folding hard:
+    //   cull_pad      = min(support(k), 2.80 * k) over the layer's blends
+    //                 = min(4 * 0.4, 2.80 * 0.4) = 1.12  -- the dab's k, the
+    //                   largest in the map; the envelope holds at its base
+    //                   below 76 nodes
+    //   group support = max(support(0.25), 0.25) = 1.0   -- the group above
+    //   fold support  = 0                                -- one layer, hard
+    Document doc;
+    Layer& l = doc.add_sdf_layer("body");
+    l.sdf->insert(item(Prim::sphere(1.0f), cf3(0, 0, 0), Op::Add));
+    l.sdf->insert(item(Prim::sphere(0.5f), cf3(0.2f, 0.6f, 0), Op::Add, smooth(0.4f)));
+    Node g;
+    g.is_group = true;
+    g.op = Op::Add;
+    g.blend = smooth(0.25f);
+    const NodeId gid = l.sdf->insert(g);
+    l.sdf->insert(item(Prim::sphere(0.35f), cf3(0.9f, 0.2f, 0), Op::Add), gid);
+    const NodeId cutter =
+        l.sdf->insert(item(Prim::sphere(0.3f), cf3(0.6f, 0, 0), Op::Intersect), gid);
+
+    // The two numbers, asked of the helpers that own them, so a change to
+    // either formula fails HERE and says which one moved.
+    CHECK(scene::cull_pad(*l.sdf, l) == doctest::Approx(1.12f));
+    CHECK(scene::group_blend_support(*l.sdf->find(gid), l) == doctest::Approx(1.0f));
+
+    const scene::Command cmd{scene::SetTransformCmd{l.id, cutter, at(cf3(-0.4f, 0, 0))}};
+    const std::optional<Aabb> b = scene::command_surface_delta_bound(doc, cmd);
+    REQUIRE(b.has_value());
+    // A HARD intersect, so its geometry bound is the primitive's box and
+    // nothing else: sphere r = 0.3 at (0.6, 0, 0) is x in [0.3, 0.9] and y, z
+    // in [-0.3, 0.3], dilated by 1.12 + 1.0 = 2.12 on every side.
+    CHECK(b->min.x == doctest::Approx(-1.82f));
+    CHECK(b->max.x == doctest::Approx(3.02f));
+    CHECK(b->min.y == doctest::Approx(-2.42f));
+    CHECK(b->max.y == doctest::Approx(2.42f));
+    CHECK(b->min.z == doctest::Approx(-2.42f));
+    CHECK(b->max.z == doctest::Approx(2.42f));
+}
+
 TEST_CASE("intersect delta: the probe has teeth") {
     // THE TEST FOR THE TEST. Everything above passes; that is worth nothing
     // unless a bound one term short FAILS, and the cheapest term to remove is
