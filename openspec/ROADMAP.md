@@ -1904,6 +1904,29 @@ conditions moving x1.63 across a run while `thermalState` read `nominal` at both
 ends. A single-sample condition stamp is the same defect as a single-sample
 measurement — it cannot see the thing it exists to detect.
 
+**AND THE TWO-ENDED STAMP IS WEAKER THAN THIS ROW FIRST CLAIMED**, corrected by
+the session that built it after using it. Load rose 0.54 -> 7.49 across their
+clean run, and **that rise was their own benchmark** — a load average cannot
+separate the measuring process from anyone else's, so a pair of stamps detects
+*"the box got busier"* without saying whose fault it is. It would still have
+caught the aborted window (beginning at 1.7, ending at 12, with nothing of theirs
+that heavy) — but only because the author knew their own contribution was smaller
+than the rise, which is a judgement rather than a reading.
+
+**What made the run trustworthy was the PRECONDITION, not the stamps:** a
+verified-EMPTY PROCESS TREE, supplied by the session that owned the load — *no
+ninja, no cmake, no ctest, no cargo, no clang-tidy, no cc1plus, and nothing of
+mine scheduled to start.* Two attempts had already died on load averages that
+looked fine, because a gap between build stages and the end of a run are
+indistinguishable in that number.
+
+So the ordering for a measurement that cannot be retaken: **establish an empty
+process tree first, record the stamps second.** The stamps are evidence about the
+run for a later reader; the precondition is what makes the run worth taking. The
+canary in the device gate is the stronger instrument precisely because it measures
+a FIXED WORKLOAD rather than the machine's total load — it is a probe, not a
+census, and a probe cannot be confounded by the thing probing it.
+
 **Their half is now fixed, and the fix names the distinction rather than moving
 the check.** `refuses_a_busy_run(comparing, busy, allow_busy)` — refuse to
 RECORD, never to COMPARE — with four unit tests and, separately, an end-to-end
