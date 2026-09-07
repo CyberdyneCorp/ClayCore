@@ -2475,6 +2475,56 @@ Recorded so they are decisions rather than oversights:
   engine's interface above emits ordinary edit items for its own reasons, so a
   future reversal would extend that boundary rather than redesign it.
 
+### An invalidation token must be monotonic; a version may restore
+
+Settled for #472 by the consumer, and the argument is better than the one I put
+to them. I framed it as *the number is an invalidation token, not the age of the
+restored mesh*. Their reading of why that decides it:
+
+**The one guarantee a token has to give is that the same number means the same
+content — and that holds only while the number never repeats.** Advance on undo
+AND redo and it is monotonic, so a number a host holds is either current or
+superseded, never reused for something else. Restore the pre-undo value on redo
+and the number can come back; then two different histories present the same
+revision, and the failure is a cache believed fresh that is not — a stroke
+landing against a mesh that no longer exists, with nothing reporting it.
+
+**Which direction each choice fails in is the whole decision.** Monotonic costs a
+rebuild after undo-then-redo, where a restoring token would have kept the cache:
+loud, bounded, correct. Restoring costs a silent wrong answer, unbounded. *Between
+a cheap wrong answer and an expensive right one, a token should be right.*
+
+**And the name settles the design on its own.** If the number were a VERSION —
+an age — restoring would be correct, because the content really is the pre-undo
+content. It is not an age. It is an identity for *the numbering my caches were
+built against*, and undo-then-redo produces a numbering those caches were not
+built against **even though the vertices agree.** Calling it invalidation rather
+than versioning answers the question without further argument.
+
+Generalised, for anything this repository hands a host as a change token: decide
+whether it identifies CONTENT or identifies AN EPOCH OF MUTATION. If a consumer
+uses it to decide whether its own derived state is stale, it is an epoch, it must
+be monotonic, and it must advance on every restoration — including the ones that
+put back bytes it has seen before.
+
+### A test written to fail on the other repository's fix
+
+The host's `voxel_remesh.rs` asserts today that the mesh-layer revision does NOT
+move across undo — deliberately, documenting the gap rather than working around
+it silently. **The day #472 lands, that assertion fails, and the failure is their
+signal to remove the engine-undo-depth workaround they carry.**
+
+Worth naming as a practice: a test written to fail on someone else's fix is the
+cheapest handshake between two repositories. It needs no release note anybody
+reads, no version check, and no coordination on timing — the consumer finds out
+because their own suite tells them, at the moment it becomes true. The
+alternative is noticing the workaround is dead six months later, which is how
+workarounds become permanent.
+
+The same shape is available to us in the other direction, and we do not use it:
+where this document records something a host owes us, an assertion that fails
+when they deliver it would tell us, instead of a row nobody re-reads.
+
 ## Requirements taken from their bugs
 
 Worth writing into the specs they touch, because a competitor's known failure is
