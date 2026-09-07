@@ -1149,3 +1149,266 @@ TEST_CASE("c abi: replacing a layer's triangles invalidates the entry") {
     CHECK(s.hits == 0);
     clay_mesh_sculptor_destroy(second);
 }
+
+// -- which space a session speaks (define-carried-mesh-transform-semantics) ---
+//
+// A MESH LAYER'S ARRAYS ARE LAYER-LOCAL AND THAT IS THE RIGHT CONTRACT. What
+// was wrong is that the two calls a host makes back to back to sculpt where the
+// finger is were in different spaces and neither said so: the raycast takes a
+// world ray and returns a world hit, and the stamp read its centre as local.
+// Feeding one into the other on a transformed layer moved nothing and returned
+// CLAY_OK — which the ABI documents as meaning "reached nothing, fully masked,
+// or no displacement", so the failure was indistinguishable from three ordinary
+// outcomes.
+//
+// The fixture is deliberately ASYMMETRIC — a ridge along one axis only — so an
+// axis swap or a rotation error moves a different count rather than the same
+// count somewhere else.
+
+namespace {
+
+// A grid with a ridge along +x only. Nothing about it is symmetric in x and z.
+clay_mesh* ridged_mesh(int n = 16, float half = 1.0f) {
+    const float step = 2.0f * half / static_cast<float>(n);
+    std::vector<float> pos;
+    std::vector<std::uint32_t> idx;
+    for (int z = 0; z <= n; ++z)
+        for (int x = 0; x <= n; ++x) {
+            const float px = -half + step * static_cast<float>(x);
+            pos.push_back(px);
+            pos.push_back(0.10f * px);  // a slope in x and nothing in z
+            pos.push_back(-half + step * static_cast<float>(z));
+        }
+    const std::uint32_t stride = static_cast<std::uint32_t>(n + 1);
+    for (std::uint32_t z = 0; z < static_cast<std::uint32_t>(n); ++z)
+        for (std::uint32_t x = 0; x < static_cast<std::uint32_t>(n); ++x) {
+            const std::uint32_t a = z * stride + x, b = a + 1, c = a + stride, d = c + 1;
+            for (std::uint32_t i : {a, c, b, b, c, d}) idx.push_back(i);
+        }
+    clay_mesh* m = nullptr;
+    REQUIRE(clay_mesh_from_triangles(pos.data(), pos.size() / 3, idx.data(), idx.size(), &m) ==
+            CLAY_OK);
+    return m;
+}
+
+struct PlacedLayer {
+    clay_layer_id layer = 0;
+    clay_mesh* mesh = nullptr;
+};
+
+PlacedLayer place(clay_document* doc, const char* name, const float position[3],
+                  const float axis[3], float angle, float scale) {
+    clay_mesh* source = ridged_mesh();
+    clay_mesh_layer_desc desc;
+    std::memset(&desc, 0, sizeof desc);
+    desc.struct_size = static_cast<std::uint32_t>(sizeof desc);
+    desc.name = name;
+    PlacedLayer out;
+    REQUIRE(clay_document_add_mesh_layer(doc, source, &desc, &out.layer, &out.mesh) == CLAY_OK);
+    clay_mesh_destroy(source);
+    REQUIRE(clay_document_set_layer_transform(doc, out.layer, position, axis, angle, scale) ==
+            CLAY_OK);
+    return out;
+}
+
+// How many vertices this layer's own arrays show as moved off the ridge.
+std::size_t displaced(const clay_mesh* m) {
+    const float* p = clay_mesh_positions(m);
+    const std::size_t n = clay_mesh_vertex_count(m);
+    std::size_t moved = 0;
+    for (std::size_t i = 0; i < n; ++i)
+        if (std::fabs(p[i * 3 + 1] - 0.10f * p[i * 3]) > 1e-5f) ++moved;
+    return moved;
+}
+
+}  // namespace
+
+TEST_CASE("c abi: a world raycast feeds a world stamp on a transformed layer") {
+    const float axis[3] = {0, 1, 0};
+
+    // Four placements, and the same gesture through each. The count must be the
+    // count the identity layer moves: the ray hits the same point of the same
+    // surface, so the same vertices are under it.
+    struct Placement {
+        const char* name;
+        float position[3];
+        float angle;
+        float scale;
+    };
+    const Placement placements[] = {
+        {"identity", {0, 0, 0}, 0.0f, 1.0f},
+        {"translated", {3.0f, -1.0f, 0.5f}, 0.0f, 1.0f},
+        {"rotated", {0, 0, 0}, 0.9f, 1.0f},
+        {"scaled", {0, 0, 0}, 0.0f, 2.5f},
+        {"combined", {3.0f, -1.0f, 0.5f}, 0.9f, 2.5f},
+    };
+
+    std::size_t reference = 0;
+    for (const Placement& p : placements) {
+        INFO("placement " << p.name);
+        Doc d;
+        const PlacedLayer l = place(d.doc, p.name, p.position, axis, p.angle, p.scale);
+
+        clay_mesh_sculptor* s = nullptr;
+        REQUIRE(clay_mesh_sculptor_create(l.mesh, -1.0f, &s) == CLAY_OK);
+        REQUIRE(clay_mesh_sculptor_use_layer_transform(s) == CLAY_OK);
+
+        // The session says what it declares, and says it was declared.
+        clay_mesh_frame back;
+        std::memset(&back, 0, sizeof back);
+        back.struct_size = static_cast<std::uint32_t>(sizeof back);
+        std::int32_t declared = 0;
+        CHECK(clay_mesh_sculptor_world_frame(s, &back, &declared) == CLAY_OK);
+        CHECK(declared == 1);
+        CHECK(back.scale == doctest::Approx(p.scale));
+
+        // THE SAME WORLD GESTURE: a point on the layer's own surface, found by
+        // transforming a local point the ridge exists at, then aimed at from
+        // above in world.
+        const float local_target[3] = {0.2f, 0.02f, 0.1f};
+        float world_target[3] = {0, 0, 0};
+        {
+            // local -> world by hand, once, so the test does not depend on the
+            // code under test to build its own input.
+            const float c = std::cos(p.angle), sn = std::sin(p.angle);
+            const float sx = local_target[0] * p.scale, sy = local_target[1] * p.scale,
+                        sz = local_target[2] * p.scale;
+            world_target[0] = (c * sx + sn * sz) + p.position[0];
+            world_target[1] = sy + p.position[1];
+            world_target[2] = (-sn * sx + c * sz) + p.position[2];
+        }
+        const float origin[3] = {world_target[0], world_target[1] + 10.0f, world_target[2]};
+        const float dir[3] = {0.0f, -1.0f, 0.0f};
+
+        clay_mesh_hit hit;
+        std::memset(&hit, 0, sizeof hit);
+        hit.struct_size = static_cast<std::uint32_t>(sizeof hit);
+        REQUIRE(clay_mesh_sculptor_raycast(s, origin, dir, nullptr, &hit) == CLAY_OK);
+        REQUIRE(hit.hit == 1);
+        // The hit is in WORLD, under the ray it was cast along.
+        CHECK(hit.position[0] == doctest::Approx(world_target[0]).epsilon(0.02));
+        CHECK(hit.position[2] == doctest::Approx(world_target[2]).epsilon(0.02));
+
+        // ...and it is fed straight back as a brush centre, which is the whole
+        // gesture and the thing that used to move nothing.
+        clay_mesh_brush_desc b = brush(CLAY_MESH_BRUSH_DRAW, 0.30f * p.scale, 0.5f);
+        b.center[0] = hit.position[0];
+        b.center[1] = hit.position[1];
+        b.center[2] = hit.position[2];
+        std::size_t moved = 0;
+        REQUIRE(clay_mesh_sculptor_stamp(s, &b, nullptr, nullptr, &moved) == CLAY_OK);
+        CHECK(moved > 0);
+
+        const std::size_t count = displaced(l.mesh);
+        CHECK(count > 0);
+        if (std::string(p.name) == "identity")
+            reference = count;
+        else
+            // THE SAME VERTICES, whatever the placement: the ray finds the same
+            // point of the same surface, and the radius was scaled with it.
+            CHECK(count == reference);
+
+        clay_mesh_sculptor_destroy(s);
+    }
+    CHECK(reference > 0);
+}
+
+TEST_CASE("c abi: an undeclared frame is exactly the behaviour that came before") {
+    const float axis[3] = {0, 1, 0};
+    const float at[3] = {3.0f, 0.0f, 0.0f};
+    Doc d;
+    const PlacedLayer l = place(d.doc, "carried", at, axis, 0.0f, 2.0f);
+
+    clay_mesh_sculptor* s = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(l.mesh, -1.0f, &s) == CLAY_OK);
+
+    std::int32_t declared = 1;
+    clay_mesh_frame back;
+    std::memset(&back, 0, sizeof back);
+    back.struct_size = static_cast<std::uint32_t>(sizeof back);
+    CHECK(clay_mesh_sculptor_world_frame(s, &back, &declared) == CLAY_OK);
+    CHECK(declared == 0);
+    CHECK(back.scale == doctest::Approx(1.0f));  // the identity, honestly reported
+
+    // A LOCAL centre still means local, which is what every existing host sends.
+    clay_mesh_brush_desc b = brush(CLAY_MESH_BRUSH_DRAW, 0.30f, 0.5f);
+    b.center[0] = 0.2f;
+    b.center[1] = 0.02f;
+    b.center[2] = 0.1f;
+    std::size_t moved = 0;
+    REQUIRE(clay_mesh_sculptor_stamp(s, &b, nullptr, nullptr, &moved) == CLAY_OK);
+    CHECK(moved > 0);
+
+    // Clearing a declared frame puts it back.
+    REQUIRE(clay_mesh_sculptor_use_layer_transform(s) == CLAY_OK);
+    REQUIRE(clay_mesh_sculptor_set_world_frame(s, nullptr) == CLAY_OK);
+    CHECK(clay_mesh_sculptor_world_frame(s, nullptr, &declared) == CLAY_OK);
+    CHECK(declared == 0);
+
+    clay_mesh_sculptor_destroy(s);
+}
+
+TEST_CASE("c abi: a per-axis scale is refused rather than read as uniform") {
+    Doc d;
+    const float axis[3] = {0, 1, 0};
+    const float at[3] = {0, 0, 0};
+    const PlacedLayer l = place(d.doc, "squashed", at, axis, 0.0f, 1.0f);
+    const float scale[3] = {2.0f, 1.0f, 0.5f};
+    REQUIRE(clay_document_set_layer_transform_nonuniform(d.doc, l.layer, at, axis, 0.0f, scale) ==
+            CLAY_OK);
+
+    clay_mesh_sculptor* s = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(l.mesh, -1.0f, &s) == CLAY_OK);
+    // REFUSED, not approximated. Under a per-axis scale a round brush in world
+    // is an ellipsoid on the model, so `radius` names nothing a spherical walk
+    // can honour — and a plausible wrong answer reporting success is the exact
+    // failure this capability exists to remove.
+    CHECK(clay_mesh_sculptor_use_layer_transform(s) == CLAY_ERROR_UNSUPPORTED);
+    std::int32_t declared = 1;
+    CHECK(clay_mesh_sculptor_world_frame(s, nullptr, &declared) == CLAY_OK);
+    CHECK(declared == 0);  // the refusal declared nothing
+    clay_mesh_sculptor_destroy(s);
+}
+
+TEST_CASE("c abi: a standalone mesh has no layer to adopt") {
+    clay_mesh* m = ridged_mesh();
+    clay_mesh_sculptor* s = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(m, -1.0f, &s) == CLAY_OK);
+    CHECK(clay_mesh_sculptor_use_layer_transform(s) == CLAY_ERROR_NOT_FOUND);
+    // ...but it may still be told a frame, which is what a host holding a mesh
+    // outside a document does.
+    clay_mesh_frame f;
+    std::memset(&f, 0, sizeof f);
+    f.struct_size = static_cast<std::uint32_t>(sizeof f);
+    f.rotation[3] = 1.0f;
+    f.scale = 2.0f;
+    CHECK(clay_mesh_sculptor_set_world_frame(s, &f) == CLAY_OK);
+    clay_mesh_sculptor_destroy(s);
+    clay_mesh_destroy(m);
+}
+
+TEST_CASE("c abi: two frames are refused rather than resolved by precedence") {
+    Doc d;
+    const float axis[3] = {0, 1, 0};
+    const float at[3] = {3.0f, 0.0f, 0.0f};
+    const PlacedLayer l = place(d.doc, "carried", at, axis, 0.0f, 2.0f);
+    clay_mesh_sculptor* s = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(l.mesh, -1.0f, &s) == CLAY_OK);
+    REQUIRE(clay_mesh_sculptor_use_layer_transform(s) == CLAY_OK);
+
+    clay_mesh_frame f;
+    std::memset(&f, 0, sizeof f);
+    f.struct_size = static_cast<std::uint32_t>(sizeof f);
+    f.rotation[3] = 1.0f;
+    f.scale = 1.0f;
+    const float origin[3] = {3.0f, 5.0f, 0.0f};
+    const float dir[3] = {0, -1, 0};
+    clay_mesh_hit hit;
+    std::memset(&hit, 0, sizeof hit);
+    hit.struct_size = static_cast<std::uint32_t>(sizeof hit);
+    // A host passing two frames believes one of them; picking silently would
+    // leave the other a wrong belief nothing corrects.
+    CHECK(clay_mesh_sculptor_raycast(s, origin, dir, &f, &hit) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_mesh_sculptor_raycast(s, origin, dir, nullptr, &hit) == CLAY_OK);
+    clay_mesh_sculptor_destroy(s);
+}

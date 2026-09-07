@@ -2111,6 +2111,58 @@ serialized, so there is no moment at which you could hold a handle, have a step
 open, and ask. It is reported anyway so the total stays the sum of the fields if
 an entry point spanning a step is ever added. Do not build a response around it.
 
+### Which space a mesh-sculpting call speaks
+
+A mesh layer's vertex arrays are **layer-local** and its transform places them.
+That is the contract, and it is the right one — baking a transform into vertices
+every time a layer moves is expensive, lossy and hostile to history.
+
+What was wrong until 0.91.0 is that the calls crossing that boundary did not
+agree, and the header did not say which was which:
+
+| call | takes | returns |
+|---|---|---|
+| the layer's `positions` / `indices` | — | **local** |
+| `clay_layer_bounds` | — | **world** |
+| `clay_document_mesh_combined` | — | **world** |
+| `clay_mesh_sculptor_raycast` | **world** ray + a frame | **world** hit |
+| `clay_mesh_sculptor_stamp` | **local** centre and radius | local |
+| `clay_mesh_sculptor_apply_stroke` / `_preset` | **local** samples | local |
+| `clay_mesh_sculptor_lattice` / `_deformer` | **local** cage and axes | local |
+
+Rows four and five are the two calls a host makes back to back to sculpt where
+the finger is. On a layer translated by 3 and scaled by 2, feeding the first
+into the second **moved 0 vertices and returned `CLAY_OK`** — and `moved == 0`
+is documented to mean "reached nothing, fully masked, or no displacement", so
+the failure was indistinguishable from three ordinary outcomes.
+
+**A session now declares its space once:**
+
+```c
+clay_mesh_sculptor_use_layer_transform(sculptor);   /* the call you want */
+/* or, for a mesh held outside a document: */
+clay_mesh_sculptor_set_world_frame(sculptor, &frame);
+```
+
+With a frame declared, every position, radius, direction and normal crossing
+that handle is world — the stamp, both stroke calls, the raycast, and the
+**mask**, which is world-addressed by design and was being sampled at a local
+vertex position by the single-stamp path. Declaring nothing is the identity,
+which is exactly the behaviour that came before; a host that has not heard of
+this is not opted into it. Passing a per-call frame *and* declaring a session
+one is refused rather than resolved by precedence.
+
+`clay_mesh_sculptor_use_layer_transform` **refuses a layer carrying a per-axis
+scale** (`CLAY_ERROR_UNSUPPORTED`). Under one, a round brush in world is an
+ellipsoid on the model, so `radius` names nothing a spherical surface walk can
+honour and a normal stops being carried by the rotation alone. Reading the scale
+as uniform would put the dab in a plausible wrong place and report success.
+Closing it needs an anisotropic brush footprint. Bounds and the combined export
+honour the per-axis scale either way.
+
+The lattice and the deformer stay **local-only** and say so: a cage is authored
+against the model, not against the world.
+
 **The topology cache IS in this report, and it is the one sculptor-adjacent
 figure a document can account for by itself** (ABI 0.89.0). Building the weld
 classes and the neighbourhood CSR a brush walks is the whole of what a sculptor

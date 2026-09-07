@@ -695,6 +695,35 @@ struct PyMeshSculptor {
     // rather than being handed the block the engine writes into.
     memory::PeakTelemetry peak;
 
+    // Which space this session speaks. See the C ABI's
+    // clay_mesh_sculptor_set_world_frame for the defect it closes: a raycast
+    // returns a WORLD hit and a stamp read its centre as LOCAL, so feeding one
+    // into the other on a transformed layer moved nothing and raised nothing.
+    // Undeclared is the identity, which is exactly the behaviour before it.
+    bool has_frame = false;
+    math::Transform frame;
+
+    kernel::cfloat3 to_local(kernel::cfloat3 p) const {
+        return has_frame ? frame.apply_inverse(p) : p;
+    }
+    // A direction and a normal are the same map under a similarity: the inverse
+    // transpose of a rotation-and-uniform-scale is that rotation.
+    kernel::cfloat3 vector_to_local(kernel::cfloat3 v) const {
+        return has_frame ? frame.rotation.conjugate().rotate(v) : v;
+    }
+    float length_to_local(float len) const { return has_frame ? len / frame.scale : len; }
+
+    void settings_to_local(mesh::MeshBrushSettings* settings) const {
+        if (!has_frame) return;
+        settings->center = to_local(settings->center);
+        settings->radius = length_to_local(settings->radius);
+        settings->direction = vector_to_local(settings->direction);
+        settings->deposit_normal = vector_to_local(settings->deposit_normal);
+        settings->plane_point = to_local(settings->plane_point);
+        settings->plane_normal = vector_to_local(settings->plane_normal);
+        settings->layer_height = length_to_local(settings->layer_height);
+    }
+
     mesh::MeshSculptor& live(bool for_edit) const {
         if (!sculptor) throw std::runtime_error("this sculptor was never built");
         mesh::Mesh& now = for_edit ? mesh->editable() : const_cast<mesh::Mesh&>(mesh->data());
@@ -5271,7 +5300,18 @@ NB_MODULE(pyclay, m) {
                     alpha_tangent, alpha_extent, color, automask, stamp_azimuth, &chosen);
                 mesh::VertexDeltas* record =
                     deltas.is_none() ? nullptr : nb::cast<PyVertexDeltas*>(deltas)->deltas.get();
+                s.settings_to_local(&settings);
                 field::MaskGate gate = mask_gate_of(mask);
+                // The mask is WORLD-addressed and a vertex reaches the gate in
+                // the MESH's own space, so on a transformed layer the two only
+                // met correctly by accident. This is where they meet.
+                if (s.has_frame && gate) {
+                    const math::Transform to_world = s.frame;
+                    field::MaskGate local = std::move(gate);
+                    gate = [local, to_world](kernel::cfloat3 p) {
+                        return local(to_world.apply(p));
+                    };
+                }
                 mesh::MeshSculptor& live = s.live(true);
                 nb::gil_scoped_release release;
                 return live.stamp(chosen, settings, gate, record);
@@ -5512,6 +5552,75 @@ NB_MODULE(pyclay, m) {
             "cavity"_a = nb::none(), "groups"_a = nb::none(), "active_group"_a = 0,
             nb::keep_alive<1, 2>(), nb::keep_alive<1, 3>(), kAutomaskInputsDoc)
         .def(
+            "use_layer_transform",
+            [](PyMeshSculptor& s) {
+                if (!s.mesh || !s.mesh->doc)
+                    throw std::runtime_error(
+                        "this sculptor was built over a standalone mesh, which belongs to no "
+                        "layer");
+                const scene::Layer* l = s.mesh->doc->document.find_layer(s.mesh->layer);
+                if (!l) throw std::runtime_error("the mesh layer is no longer in its document");
+                if (scene::layer_is_squashed(*l))
+                    throw std::runtime_error(
+                        "this layer carries a per-axis scale, which a brush radius cannot "
+                        "express; an anisotropic footprint is not implemented");
+                s.frame = l->xform;
+                s.has_frame = true;
+            },
+            "Speak WORLD space, using this layer's own transform.\n\n"
+            "A mesh layer's vertex arrays are layer-local and its transform places\n"
+            "them. Without this, `raycast` returns a WORLD hit and `stamp` reads its\n"
+            "centre as LOCAL — so feeding one into the other on a transformed layer\n"
+            "moves nothing and raises nothing. With it, every position, radius,\n"
+            "direction and normal crossing this sculptor is world, `mask` included.\n\n"
+            "Raises for a standalone mesh, which belongs to no layer, and for a layer\n"
+            "carrying a PER-AXIS scale: under one a round brush in world is an\n"
+            "ellipsoid on the model, so `radius` names nothing a spherical surface\n"
+            "walk can honour. Reading it as uniform would put the dab in a plausible\n"
+            "wrong place and report success.")
+        .def(
+            "set_world_frame",
+            [](PyMeshSculptor& s, nb::handle position, nb::handle rotation_axis_angle,
+               nb::handle scale) {
+                // ALL THREE OMITTED CLEARS IT, which is what passing NULL does
+                // to clay_mesh_sculptor_set_world_frame. One call for both, so
+                // the two bindings cannot grow different vocabularies for the
+                // same state.
+                if (position.is_none() && rotation_axis_angle.is_none() && scale.is_none()) {
+                    s.has_frame = false;
+                    s.frame = math::Transform::identity();
+                    return;
+                }
+                math::Transform t;
+                if (!position.is_none()) t.position = to_f3(position, "position");
+                if (!rotation_axis_angle.is_none()) t.rotation = to_axis_angle(rotation_axis_angle);
+                if (!scale.is_none()) t.scale = nb::cast<float>(scale);
+                if (!(t.scale > 0.0f)) throw std::invalid_argument("scale must be > 0");
+                s.frame = t;
+                s.has_frame = true;
+            },
+            "position"_a = nb::none(), "rotation_axis_angle"_a = nb::none(),
+            "scale"_a = nb::none(),
+            "Declare the frame this session speaks, or clear it by passing nothing.\n\n"
+            "Prefer `use_layer_transform` when the mesh belongs to a layer: it is the\n"
+            "same statement without the chance of reconstructing the frame wrongly,\n"
+            "and it is the only form that can see a per-axis scale and refuse it.")
+        .def_prop_ro(
+            "world_frame",
+            [](const PyMeshSculptor& s) -> nb::object {
+                if (!s.has_frame) return nb::none();
+                nb::dict out;
+                out["position"] = nb::make_tuple(s.frame.position.x, s.frame.position.y,
+                                                 s.frame.position.z);
+                out["rotation"] = nb::make_tuple(s.frame.rotation.x, s.frame.rotation.y,
+                                                 s.frame.rotation.z, s.frame.rotation.w);
+                out["scale"] = s.frame.scale;
+                return out;
+            },
+            "The frame this session speaks, or None when it speaks the mesh's own\n"
+            "space — which is the default and is exactly the behaviour that came\n"
+            "before this existed.")
+        .def(
             "raycast",
             [](PyMeshSculptor& s, nb::handle origin, nb::handle direction, nb::handle position,
                nb::handle rotation_axis, float rotation_angle, float scale) {
@@ -5522,12 +5631,22 @@ NB_MODULE(pyclay, m) {
                     throw std::invalid_argument("direction has no length");
                 ray.dir = kernel::cnormalize(ray.dir);
                 if (!(scale > 0.0f)) throw std::invalid_argument("scale must be > 0");
-                math::Transform xform;
-                if (!position.is_none()) xform.position = to_f3(position, "position");
-                if (!rotation_axis.is_none())
-                    xform.rotation = math::Quat::from_axis_angle(
-                        kernel::cnormalize(to_f3(rotation_axis, "rotation_axis")), rotation_angle);
-                xform.scale = scale;
+                const bool given = !position.is_none() || !rotation_axis.is_none() ||
+                                   rotation_angle != 0.0f || scale != 1.0f;
+                if (s.has_frame && given)
+                    throw std::invalid_argument(
+                        "this sculptor already declares a world frame "
+                        "(use_layer_transform / world_frame=); pass no placement here");
+                math::Transform xform = s.frame;
+                if (!s.has_frame) {
+                    xform = math::Transform::identity();
+                    if (!position.is_none()) xform.position = to_f3(position, "position");
+                    if (!rotation_axis.is_none())
+                        xform.rotation = math::Quat::from_axis_angle(
+                            kernel::cnormalize(to_f3(rotation_axis, "rotation_axis")),
+                            rotation_angle);
+                    xform.scale = scale;
+                }
 
                 mesh::MeshSculptor& live = s.live(false);
                 const mesh::Mesh& mm = live.mesh();
