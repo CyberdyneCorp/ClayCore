@@ -8452,3 +8452,34 @@ def test_a_trim_releases_what_nothing_holds_and_keeps_what_a_session_does():
     del held
     assert doc.trim_topology_cache() > 0
     assert doc.topology_cache_stats["entries"] == 0
+
+
+def test_a_weld_that_merges_nothing_does_not_invalidate_the_cache():
+    """REGRESSION. The forget() beside the revision bump was written outside the
+    `if` guarding it, so every weld invalidated the entry whether or not it
+    merged anything — including the ordinary case of a host welding defensively
+    before a conversion. gcc's -Wmisleading-indentation caught it; this pins it.
+
+    A weld that DID merge must still invalidate, which the second half asserts,
+    so a fix that simply removed the call cannot pass."""
+    doc, carried = _mesh_layer_doc()
+    clay.MeshSculptor(carried)
+    assert doc.topology_cache_stats["entries"] == 1
+
+    clean = carried.weld()                       # a grid has no duplicates
+    assert clean["vertices_merged"] == 0
+    assert doc.topology_cache_stats["entries"] == 1
+    assert doc.topology_cache_stats["evictions"] == 0
+
+    # And a weld that does merge still invalidates.
+    grid = _plane_grid(6)
+    doubled = clay.Mesh.from_triangles(
+        np.concatenate([np.array(grid.positions), np.array(grid.positions)]).astype(np.float32),
+        np.concatenate([np.array(grid.indices),
+                        np.array(grid.indices) + len(grid.positions)]).astype(np.uint32))
+    seamy = doc.add_mesh_layer(doubled, "seamy")
+    clay.MeshSculptor(seamy)
+    assert doc.topology_cache_stats["entries"] == 2
+    merged = seamy.weld()
+    assert merged["vertices_merged"] > 0
+    assert doc.topology_cache_stats["entries"] == 1
