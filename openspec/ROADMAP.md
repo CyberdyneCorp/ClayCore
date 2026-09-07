@@ -3032,6 +3032,44 @@ The repair they took is worth stealing: a table in the sample's own README sayin
 spread is two orders of magnitude larger than its neighbour's should not be the
 one on the screenshot.
 
+### The right verdict with a wrong particular
+
+The subtlest failure in this section, because **a wrong verdict gets investigated
+and a wrong particular gets reused.**
+
+Checking that a PR had landed as a merge commit rather than a squash — the
+distinction that had cost a sibling repository a whole feature — a session ran:
+
+```
+git rev-list --parents -n1 <sha> | wc -w    ->  3
+```
+
+and read it as *"three parents, so a merge commit"*. `git rev-list --parents`
+prints **the commit itself followed by its parents**, so 3 fields is one self plus
+**two** parents. Two is exactly what `--merge` produces; three would be an octopus
+merge, which nothing in that repository does.
+
+**The thresholds discriminate correctly** — a squash gives 1 self + 1 parent = 2
+fields — so the verdict was right, the merge really was clean, and the conclusion
+drawn from it was sound. **The model behind the number was wrong.**
+
+**Why that is worse than being wrong.** A wrong verdict provokes a search. A wrong
+particular is quoted onward: the next person to copy that line while actually
+needing the parent count gets a number one too high, and it arrives carrying the
+authority of a check that was *validated by its verdict*. The check will have
+been right every time it was used for the thing it was written for, which is
+exactly the history that makes it trusted for the thing it was not.
+
+`git log -1 --format=%p | wc -w` gives 2, and means parents.
+
+**It is one layer in from the rest of this section.** Not a check that could not
+fail — a check whose OUTPUT was described in terms the tool does not use. The
+session's own summary: *"I said I had checked the shape rather than assuming, and
+then reported a number I had not understood."*
+
+The catching question is a third variant, after *"could this fail"* and *"would
+this pass if the subject did not exist"*: **what does this number count?**
+
 ### The mirror: a failure that looks like a FINDING
 
 Everything else in this section is a failure that looks like SUCCESS — a gate
