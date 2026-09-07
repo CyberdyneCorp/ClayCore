@@ -99,6 +99,7 @@ add_executable(clay_unit_tests
   unit/test_bench_spread.cpp
   unit/test_bvh_refit.cpp
   unit/test_topology_cache.cpp
+  unit/test_sustained_session.cpp
   unit/test_meshers.cpp
   unit/test_pick.cpp
   unit/test_io.cpp

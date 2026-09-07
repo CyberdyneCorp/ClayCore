@@ -288,6 +288,26 @@ targets:
         BUNDLE_LOADER: "$(TEST_HOST)"
         OTHER_LDFLAGS: -lc++
 
+  ClayCoreDeviceSustainedTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Sustained
+      - path: Shared
+    dependencies:
+      - target: ClayCoreDeviceHost
+      - framework: ../../dist/claycore.xcframework
+        embed: false
+      - sdk: Metal.framework
+      - sdk: Foundation.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.cyberdyne.claycore.devicesustained
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/ClayCoreDeviceHost.app/ClayCoreDeviceHost"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        OTHER_LDFLAGS: -lc++
+
   ClayCoreDeviceGalleryTests:
     type: bundle.unit-test
     platform: iOS
@@ -320,6 +340,7 @@ schemes:
         ClayCoreDeviceGalleryTests: [test]
         ClayCoreDeviceDyntopoTests: [test]
         ClayCoreDeviceDetailTests: [test]
+        ClayCoreDeviceSustainedTests: [test]
     test:
       targets:
         # THIS LIST IS NOT THE RUN ORDER. tools/run_device_bench.sh drives the
@@ -345,3 +366,9 @@ schemes:
         - ClayCoreDeviceTests
         - ClayCoreDeviceDyntopoTests
         - ClayCoreDeviceDetailTests
+        # LAST, at the warm end, which is the rule a new suite follows here so
+        # it cannot displace an existing case's thermal position. It is also
+        # where this one belongs on its own terms: a sustained SESSION is a warm
+        # device by definition, and measuring one cold would be measuring the
+        # first minute of a session rather than the session.
+        - ClayCoreDeviceSustainedTests

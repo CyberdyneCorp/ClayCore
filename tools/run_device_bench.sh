@@ -155,8 +155,9 @@ RESULTS_CORE="${RESULTS%.xcresult}.core.xcresult"
 RESULTS_GALLERY="${RESULTS%.xcresult}.gallery.xcresult"
 RESULTS_DYNTOPO="${RESULTS%.xcresult}.dyntopo.xcresult"
 RESULTS_DETAIL="${RESULTS%.xcresult}.detail.xcresult"
+RESULTS_SUSTAINED="${RESULTS%.xcresult}.sustained.xcresult"
 rm -rf "$RESULTS_VERB" "$RESULTS_VERBH" "$RESULTS_CORE" "$RESULTS_GALLERY" \
-       "$RESULTS_DYNTOPO" "$RESULTS_DETAIL"
+       "$RESULTS_DYNTOPO" "$RESULTS_DETAIL" "$RESULTS_SUSTAINED"
 
 run_session() {
     # $1 = result bundle, rest = extra xcodebuild args
@@ -222,17 +223,30 @@ cool
 # and a process boundary returns memory, not temperature. Measured: added to
 # the latency bundle it took that session from `nominal` to `serious` on both
 # sides of an A/B, which marks the run invalid.
-session "6/6 — the detail pass, cold" "$RESULTS_DETAIL" \
+session "6/7 — the detail pass, cold" "$RESULTS_DETAIL" \
     -only-testing:ClayCoreDeviceDetailTests
+cool
+# THE SUSTAINED SESSION, LAST, and this one belongs at the warm end on its own
+# terms rather than only by the rule new suites follow. It measures whether a
+# warm dab drifts over thousands of dabs, and a SESSION is a warm device by
+# definition -- taking it cold would measure the first minute of a session
+# rather than the session.
+#
+# It still gets its own cold start and its own process, because what it is
+# looking for is memory over time and a bundle that inherited another's
+# high-water mark could not see it.
+session "7/7 — the sustained session, cold start" "$RESULTS_SUSTAINED" \
+    -only-testing:ClayCoreDeviceSustainedTests
 
 JSON="${CLAY_DEVICE_JSON:-$ROOT/build/device/device-bench.json}"
 python3 "$ROOT/tools/collect_device_bench.py" \
     "$RESULTS_VERB" "$RESULTS_VERBH" "$RESULTS_CORE" "$RESULTS_GALLERY" \
-    "$RESULTS_DYNTOPO" "$RESULTS_DETAIL" "$JSON"
+    "$RESULTS_DYNTOPO" "$RESULTS_DETAIL" "$RESULTS_SUSTAINED" "$JSON"
 
 echo "device-bench: OK"
 echo "  result bundles: $RESULTS_VERB"
 echo "                  $RESULTS_VERBH"
 echo "                  $RESULTS_CORE"
+echo "                  $RESULTS_SUSTAINED"
 echo "                  $RESULTS_GALLERY"
 echo "                  $RESULTS_DYNTOPO"
