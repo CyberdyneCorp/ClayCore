@@ -1015,7 +1015,7 @@ distance — so a smooth combine further down the chain can drag the difference
 back toward the band. `cull_pad` is the measured distance over which it can and
 is reused rather than re-derived.
 
-`clay_layer_set_transform_bound` (ABI 0.89.0) is the host's half: the edit
+`clay_layer_set_transform_bound` (ABI 0.90.0) is the host's half: the edit
 `clay_layer_set_transform` applies plus the box it changed, in
 `clay_layer_node_influence_bound`'s three-state shape, ready for
 `clay_brick_cache_mark_dirty`. The generic queries are untouched — they answer

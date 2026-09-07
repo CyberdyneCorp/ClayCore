@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 89
+#define CLAY_ABI_MINOR 90
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -1148,7 +1148,7 @@ clay_result clay_layer_set_transform_nonuniform(clay_document* doc, clay_layer_i
                                                 clay_node_id node, const float position[3],
                                                 const float rotation_axis[3], float rotation_angle,
                                                 const float scale[3]);
-/* The uniform edit again, PLUS THE WORLD BOX IT ACTUALLY CHANGED (ABI 0.89.0,
+/* The uniform edit again, PLUS THE WORLD BOX IT ACTUALLY CHANGED (ABI 0.90.0,
  * issue #471). Identical in what it applies and what it records — one
  * SetTransformCmd, one undo step — and it answers the question the generic
  * bound queries cannot: not "where can this node influence the field" but

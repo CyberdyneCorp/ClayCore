@@ -46,7 +46,7 @@ A second, narrower bound beside the influence bound, for exactly one edit kind.
   command, op, and for every case the proof does not cover.
 - `apply_edit` uses it when BOTH sides claim one, and keeps the conservative
   union otherwise.
-- `clay_layer_set_transform_bound` (ABI 0.89.0) — the same edit a host already
+- `clay_layer_set_transform_bound` (ABI 0.90.0) — the same edit a host already
   makes, plus the region it changed, ready for `clay_brick_cache_mark_dirty`.
   `clay_layer_node_influence_bound` and `clay_brick_cache_mark_dirty_nodes` are
   unchanged: they answer for an arbitrary edit and must stay conservative.

@@ -11,7 +11,7 @@
       `clay_brick_cache_mark_dirty_nodes` untouched.
 - [x] Use the delta in `apply_edit` (bindings/c/clay_c.cpp) when BOTH sides
       claim one, and keep the conservative union otherwise.
-- [x] Add `clay_layer_set_transform_bound`, ABI 0.89.0 — the edit plus the
+- [x] Add `clay_layer_set_transform_bound`, ABI 0.90.0 — the edit plus the
       region it changed, for a host that keeps a brick cache.
 - [x] Its C ABI test: `tests/unit/test_c_transform_bound.cpp` — the box against
       the generic query beside it, the same edit as the plain setter, and the
@@ -48,5 +48,12 @@
       band-entered, 560 band-left, worst |db| 0.244, and the box narrowing
       -1.82 -> -0.70); and the ancestor supports dropped (the box narrowing
       -1.82 -> -0.82, exactly the group's 1.0).
-- [x] Bump CMakeLists.txt, pyproject.toml and CLAY_ABI_* to 0.89.0.
+- [x] Bump CMakeLists.txt, pyproject.toml and CLAY_ABI_* to 0.90.0. WRITTEN AS
+      0.89.0 FIRST: main was at 0.88.0 when this branch was cut, so 0.89.0 read
+      as the next free minor — and `finish-regional-multires` was already open
+      claiming it. A minor is only free against the tree; it is not free against
+      the branches nobody has merged yet, and no gate asks the second question:
+      `release_check` gets cmake, abi and pyproject to agree WITH EACH OTHER and
+      never asks whether the number is already claimed. Assigned deliberately
+      here — 0.89.0 to that change, 0.90.0 to this one — rather than computed.
 - [x] Document the entry point in `bindings/c/clay.h` and `docs/05-claycore-library.md`.
