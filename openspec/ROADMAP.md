@@ -2815,6 +2815,14 @@ session chose to RUN it rather than argue it. A prediction recorded before the
 disagreement is what turns a green revert into a question about the fixture
 rather than about the fix.
 
+**The timing is load-bearing and the author said so:** it was written down
+*hours* before the revert check, naming a number and a condition. *"Had I only
+had the intuition at the moment the revert came back green, I would have believed
+the test."* An intuition produced in response to an unwelcome result is
+indistinguishable, from the inside, from motivated reasoning; the same intuition
+recorded in advance is a prediction. **The difference is not the thought, it is
+when it was written down.**
+
 And the guard asserts **stability rather than a threshold**: that the span
 settles, not what it settles at. The magnitude is a property of the margin and
 the fixture; settling at all is the property under test. **A threshold there
@@ -2883,38 +2891,48 @@ test — it can turn the parity gate into a tautology and still print a pass.
 **The shape, again:** *"did everything I ran pass"* was answered correctly and
 truthfully. *"Did I run everything"* was never asked.
 
-### An exit code that conflates absence with falsity
+### The mirror: a failure that looks like a FINDING
+
+Everything else in this section is a failure that looks like SUCCESS — a gate
+that cannot fail, a query that hides its history, a filter matching nothing, a
+build that registered nothing. **This one is the mirror, and it deserves its own
+heading rather than filing under theirs.**
 
 `git merge-base --is-ancestor A B` returns non-zero for *"A is not an ancestor of
 B"* and non-zero for *"A does not exist"*, and **nothing in the exit code
-separates them.**
+separates them.** Verifying six branches against a stack tip before recommending
+a single tip merge, I built the branch list from a table I had printed with a
+44-character field. One name was truncated. The ref does not exist, the command
+returned non-zero, and I read it as *"this branch is not in the stack"*.
 
-Verifying that six branches were ancestors of a stack tip before recommending a
-single tip merge, I built the branch list from a table I had printed with a
-44-character field. One name was truncated. The truncated ref does not exist, the
-command returned non-zero, and I read it as *"this branch is not in the stack"*.
+**The asymmetry is the finding.** A silent pass costs you the defect you already
+had. A false alarm costs SOMEONE ELSE'S attention, spends it on a fiction, and —
+the part worth keeping — **the evidence trail for the search is a command that
+ran cleanly**, so the person chasing it has nothing to disbelieve. They would
+have gone looking at their stack, not at my `printf`.
 
-**Where that would have landed is what makes it the sharpest instance in this
-section.** It was not a silent pass. I was about to send another session a message
-saying its stack was broken — it would have gone looking for a break that was not
-there, and the evidence for the search would have been a command that ran
-cleanly. Their reading of the cost:
+**And the catching question is a DIFFERENT one from the rest of this section.**
+Everywhere else it is *"would this fail if the thing were broken"*. Here it is:
 
-> A false alarm from a trusted peer costs more than a silent pass, because it
-> spends someone else's attention on a fiction.
+> **Would this pass if the thing I am asking about did not exist?**
 
-**The repair is to assert the precondition before asking the question.** Resolve
-every ref with `git rev-parse --verify` first, take the names from
+Every predicate that reports through an exit code alone conflates a false answer
+with an absent subject. It is not confined to shell: the consuming host named its
+own idiom for it — `Option::is_some_and` on a lookup that can be `None` for two
+different reasons — and went to look rather than assume the shape stops at the
+process boundary.
+
+**The repair, in both idioms:** resolve the subject first and say so separately.
+`git rev-parse --verify` every ref before asking about it, take names from
 `gh pr view <n> --json headRefName` rather than from anything typed or printed,
-and report a missing ref as *"an ancestry answer here would be meaningless"*
-rather than as a negative. A missing input must not be able to wear the costume
-of a real answer.
+and report a missing subject as *"an answer here would be meaningless"* rather
+than as a negative.
 
-**And the other session redid its own check even though its answer had been
-right**, because its loop used full names only by accident — the truncation was
-in its `printf` and not in its loop variable. The rule it drew is the one worth
-keeping: *a check that gives the correct answer for a reason you did not arrange
-is not a check you can rely on next time.*
+**And the other session redid its own ancestry check even though its answer had
+been right**, because its loop used full names only by accident — the truncation
+was in its `printf`, not its loop variable. Its rule: *a check that gives the
+correct answer for a reason you did not arrange is not a check you can rely on
+next time.*
 
 ### A tool that answers a narrower question than the one you asked
 
