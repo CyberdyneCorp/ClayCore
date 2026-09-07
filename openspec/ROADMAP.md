@@ -1889,6 +1889,44 @@ that host's own Linux baseline argues — and print the load beside every figure
 emits, so a number carries the conditions it was taken under rather than a
 person's assurance that they checked.
 
+**And print it TWICE — at the start and at the end of the run.** A one-shot load
+stamp describes the moment a run begins and says nothing about the minutes that
+follow, which is where the drift lives. The host nearly recorded a permanent
+"before" this way: it verified load 1.72 with one process running, and ninety
+seconds later — the time it took to write the conditions file — four
+`clang-tidy` processes and a `cc1plus` had started and the load was 8.47 and
+climbing. A ten-minute benchmark begun at 1.7 and finished at 12 **would have
+looked fine, because the header stamps the load at the start.**
+
+The device gate already does this correctly and is the model: it records
+`canaryBeforeMs` and `canaryAfterMs` per case, which is what let it report
+conditions moving x1.63 across a run while `thermalState` read `nominal` at both
+ends. A single-sample condition stamp is the same defect as a single-sample
+measurement — it cannot see the thing it exists to detect.
+
+**AND THE TWO-ENDED STAMP IS WEAKER THAN THIS ROW FIRST CLAIMED**, corrected by
+the session that built it after using it. Load rose 0.54 -> 7.49 across their
+clean run, and **that rise was their own benchmark** — a load average cannot
+separate the measuring process from anyone else's, so a pair of stamps detects
+*"the box got busier"* without saying whose fault it is. It would still have
+caught the aborted window (beginning at 1.7, ending at 12, with nothing of theirs
+that heavy) — but only because the author knew their own contribution was smaller
+than the rise, which is a judgement rather than a reading.
+
+**What made the run trustworthy was the PRECONDITION, not the stamps:** a
+verified-EMPTY PROCESS TREE, supplied by the session that owned the load — *no
+ninja, no cmake, no ctest, no cargo, no clang-tidy, no cc1plus, and nothing of
+mine scheduled to start.* Two attempts had already died on load averages that
+looked fine, because a gap between build stages and the end of a run are
+indistinguishable in that number.
+
+So the ordering for a measurement that cannot be retaken: **establish an empty
+process tree first, record the stamps second.** The stamps are evidence about the
+run for a later reader; the precondition is what makes the run worth taking. The
+canary in the device gate is the stronger instrument precisely because it measures
+a FIXED WORKLOAD rather than the machine's total load — it is a probe, not a
+census, and a probe cannot be confounded by the thing probing it.
+
 **Their half is now fixed, and the fix names the distinction rather than moving
 the check.** `refuses_a_busy_run(comparing, busy, allow_busy)` — refuse to
 RECORD, never to COMPARE — with four unit tests and, separately, an end-to-end
@@ -2604,6 +2642,1040 @@ workarounds become permanent.
 The same shape is available to us in the other direction, and we do not use it:
 where this document records something a host owes us, an assertion that fails
 when they deliver it would tell us, instead of a row nobody re-reads.
+
+### The tripwire says the number moved; the handshake is that something acted on it
+
+Recorded earlier: a test written to fail on the other repository's fix is the
+cheapest cross-repo handshake. The host has now corrected that, and the
+correction is the useful half.
+
+Their side of #472 is **three** things, not one. The tripwire
+(`voxel_remesh.rs:271`) is the one that fires. The workaround is
+`struct Rebuild { layer, engine_depth }` and the half of
+`settle_geometry_revisions` that forgets a mesh sculptor when history stands at
+a rebuild's depth. **And the third is a BEHAVIOURAL test** —
+`a_stroke_lands_after_the_rebuild_is_undone`: rebuild, undo, stroke, and the
+stroke must land on the restored triangles. **It names no mechanism.** It passes
+today through the depth record and must still pass tomorrow through the
+revision.
+
+**So the handshake is deleting the workaround and finding the BEHAVIOURAL test
+still green.** Re-running the tripwire is not the handshake: it says the number
+moved and says nothing about whether anything acted on it. If the behavioural
+test goes red once the record comes out, the number is moving at a moment their
+`settle` is not asked at — and that, rather than the tripwire's colour, is the
+result worth reporting.
+
+**The general form:** a tripwire proves the SIGNAL changed. Only a test written
+in the vocabulary of the user's action proves the signal was USED. A handshake
+between two repositories needs both, and the mechanism-free one is the one that
+survives the mechanism being replaced.
+
+### Two documented behaviours, an undocumented composition
+
+From their cut tool, offered as a contract question rather than a bug: **a cut
+added to a mirrored layer came back reflected**, because the layer mirror
+reflects items and a cut is an item. `clay_item_set_mirror(-1)` is the right
+opt-out and it works.
+
+Each half is documented. Neither document mentions the other, and the
+composition is where the surprise lives. Worth carrying as a review question for
+any new item KIND we add: what does every layer-level operator already do to an
+item, and does this one want that? The answer is often yes — a mirrored cut is
+defensible — but it should be a decision with a sentence behind it rather than a
+default nobody chose.
+
+### A revert proof that did not compile is not a revert proof
+
+The house rule says: revert the fix, check the revert still COMPILES, check the
+test fails. **This is what the middle clause is for**, and the iPad session
+nearly shipped a false green that names the mechanism exactly.
+
+Its first revert deleted two call sites. That left a helper unreferenced,
+`-Werror,-Wunused-function` failed the build, **and the harness ran the STALE
+binary** — which reported `2 passed | 0 failed`. It had `build_exit=2` and
+`2 passed` on adjacent lines and began reading the second one.
+
+**A test runner will happily give you yesterday's answer.** Nothing about
+`2 passed` says which binary produced it, and a revert is precisely the moment
+you are least entitled to assume — you have just deliberately broken the code,
+so a build failure is the expected outcome and the least surprising thing to
+skim past.
+
+**The fix is mechanical: assert the build succeeded before reading the test
+result.** Same shape as the vacuity guard above — a cheap check that the thing
+you are about to believe was produced by the code you think you changed. (Their
+second revert kept the helper referenced under `if (false)`, so the revert
+isolated the call sites and the build stayed clean.)
+
+Worth adding to any harness that runs a build and a test in one script: the exit
+code of the build is a precondition of the test's output meaning anything, and
+scripts that print both put them where a reader chooses.
+
+### Two floors, and neither path can object to this case
+
+The device gate reported `mesh_sustained_grab: no declared budget in the
+baseline`. The obvious repair is to declare one. **Neither gate could ever fire
+on it**, and `check_device_bench.py` holds two different floors that say so:
+
+```
+NOISE_FLOOR_MS = 0.05      the absolute overshoot ANY failure must clear   (:59)
+0.125 ms (derived)         the baseline above which a REGRESSION can fire  (:280)
+```
+
+The second falls out of the first. A regression needs
+`measured > baseline * tolerance` AND `grew > NOISE_FLOOR_MS` (:552, tolerance
+1.40), so the floor binds until `baseline * 0.4 > 0.05` — i.e. `baseline > 0.125`.
+The tool says so in its own words at line 280: *"a figure under 0.125 ms cannot
+be objected to."*
+
+Against a p95 of **0.019 ms**:
+
+```
+budget path:      fails only above 0.069 ms  = 3.6x today
+regression path:  1.4x growth is a 0.0076 ms overshoot, never clears 0.05
+```
+
+So it is not "a budget would be loose". **It is that neither the budget path nor
+the regression path can ever object to this case**, whatever number is written
+beside it — and a row with a number reads as coverage. `"gate": "drift"` is the
+right answer, for a firmer reason than looseness: the case's claim is about
+session LENGTH, and a millisecond ceiling was never the instrument for it.
+
+The declaration was made falsifiable in both directions on doctored runs —
+windows removed fails with *"declares the drift gate but records no windows"*,
+and a p95 raised to 0.421 fails with *"it has a number worth gating, so give it a
+budget and drop the declaration"*. **A declaration that cannot go stale is a
+permanent escape hatch**; this one expires the moment the case grows into
+measurable territory.
+
+### A partial read that confirms a suspicion is the easiest place to stop
+
+This entry was written three times and the middle version was wrong, in a way
+worth more than the entry.
+
+The 0.125 figure was quoted from memory. Checking it, the session found
+`NOISE_FLOOR_MS = 0.05`, saw the disagreement, **announced the remembered figure
+was wrong, and retracted a note that had been right** — without asking whether
+the two numbers were the same quantity. They are not: one is the overshoot floor,
+the other the baseline below which the regression path is inert, and the second
+is derived from the first.
+
+**The read was correct and partial, and it confirmed the suspicion that prompted
+it.** That combination is the hard one: a check that disconfirms invites another
+look, and a check that confirms ends the search. The stopping rule fires exactly
+when it should not.
+
+The instrument is the one already in this file, pointed at a fact instead of a
+test: *what is the OTHER number for?* A quantity that disagrees with your
+expectation is evidence about one of them, and which one is not settled by the
+disagreement. **Ask what a value is FOR before concluding it contradicts
+another** — the same move as asking whether a fixture could tell the difference,
+and as asking which path can observe a defect.
+
+Recorded because everything else in this section was found by that discipline
+being applied to code, and this is the instance where the discipline was not
+applied to a number.
+
+### Four shapes, one sentence: a well-formed answer to a narrower question
+
+The through-line of everything in this section, named by the consuming host after
+the fourth instance turned up in a different material from the first three:
+
+| the thing | the narrower question it answered | the question being asked |
+|---|---|---|
+| a **gate** that cannot fail | does the assertion hold on this fixture | could it ever not hold |
+| a **safeguard** that cannot fail | is the flag set | does removing it change anything |
+| a **fallback** that hides its own fault | is the output correct | did the fast path run |
+| a **query** that hides its own history | what is the state now | what has happened |
+
+**All four return well-formed answers.** None errors, none is empty, none looks
+like a failure — which is why none of them is caught by reading the output. A
+gate prints a pass. A flag reads true. A pick returns the right position. `gh pr
+checks` prints green after a re-run, with no trace that anything flaked.
+
+**And the catching move is the same in all four:** establish that the check could
+have produced a different answer, then read the answer. Delete the term and see
+whether anything moves; delete the flag and see whether anything moves; assert
+the mechanism RAN rather than that the output was right; ask what question the
+command actually answered.
+
+Everything below is an instance. They are kept separately because each one cost
+something specific to find, and the specifics are what make the shape
+recognisable the next time it wears different clothes.
+
+### A fixture aligned with the world could not see a projection grow
+
+The best instance of the fixture class in this document, because the fix was
+correct, the revert check said it was not, and the fixture is why.
+
+**The bug.** A cut is an ITEM, so a layer's bounds grow to hold it — and the host
+was reading those bounds as the region the NEXT cut had to clear. A feedback
+loop: each cut enlarges the region the following one must sweep. Measured across
+successive cuts: **2.0, 18, 146, 1170, 9362** — eightfold a cut. The tool stops
+working after a few strokes, which is how the user reported it.
+
+The repair is to frame the sweep against the SURFACE's extent instead, on the
+ground that a subtract cannot add surface.
+
+**Then the revert check said the fix was unproven.** Deleting it changed nothing
+the test could observe, and by the rule this document keeps arriving at, an
+unprovable fix is one to remove.
+
+**The fixture was the reason.** It used a frame squared up with the world — and
+the projection of an axis-aligned box onto an axis-aligned direction is exactly
+its own width, so the growth term the fix exists to stop is identically zero
+there. **Structurally incapable of seeing the defect**, and its green was the
+read that confirms and ends the search.
+
+Re-run at 45 degrees with the fix reverted: **2.000, 4.83, 7.66, 10.49** — a
+steady 2.83 a cut, refused outright from the tenth. With the fix: **5.071 and
+flat forever.**
+
+**Two things to take.** The claim had been written earlier in a checkable form —
+*"under a turned frame the projection grows by the box's diagonal"* — and the
+session chose to RUN it rather than argue it. A prediction recorded before the
+disagreement is what turns a green revert into a question about the fixture
+rather than about the fix.
+
+**The timing is load-bearing and the author said so:** it was written down
+*hours* before the revert check, naming a number and a condition. *"Had I only
+had the intuition at the moment the revert came back green, I would have believed
+the test."* An intuition produced in response to an unwelcome result is
+indistinguishable, from the inside, from motivated reasoning; the same intuition
+recorded in advance is a prediction. **The difference is not the thought, it is
+when it was written down.**
+
+And the guard asserts **stability rather than a threshold**: that the span
+settles, not what it settles at. The magnitude is a property of the margin and
+the fixture; settling at all is the property under test. **A threshold there
+would have been a number nobody could defend and a gate that moved with the
+fixture.**
+
+### A filter with no denominator is the same defect as a build option
+
+The consuming host applied the rule below to its own habit and found it: every
+verification it had reported all night was
+
+```
+cargo test ... 2>&1 | grep -E "test result: FAILED|^error"
+```
+
+and *"green"* when nothing matched. **A run that executed zero tests, or silently
+dropped a target, produces exactly the same empty output as a clean one.** Same
+shape as the missing `pyclay_pytest`, arriving through a FILTER instead of a
+build option — which is worth recording separately, because the two look nothing
+alike and fail identically.
+
+The repair is the same in both materials: sum the `N passed` figures and report
+the total beside the verdict, **so the number has a denominator a reader can
+disbelieve.**
+
+### "100% of 9" and "100% of 10" are different claims
+
+A verification sweep that ran seven branches in isolation, all seven green, and
+was thrown away — because it was not measuring what it said it measured.
+
+`CLAY_BUILD_PYTHON` defaults to **OFF** and the `cpu-only` preset does not set
+it. A checkout whose CMake cache retained an explicit setting from earlier builds
+`pyclay`; a fresh worktree gets the default and does not. So the sweep ran **9
+registered tests where the same commits run 10 in the author's own checkout**,
+and the missing one was `pyclay_pytest`.
+
+**The worst possible test to drop from that particular sweep.** `pyclay_pytest`
+is what caught a cache-`acquire` regression hours earlier — four failures, every
+one `entries == 0` where 1 was expected — and the branch most likely to contain
+such a regression was the one whose entire subject is that cache. The sweep would
+have certified it green while being structurally incapable of catching it.
+
+**The tell was in the output the whole time**: `out of 9` where the author had
+been reading `out of 10` all night. Read past, because the number beside it said
+100%.
+
+**The repair is to report what was EXERCISED, not only how much of it passed.**
+The sweep now prints the registered count beside the pass rate. *"100% of 9" and
+"100% of 10" are different claims and only one of them was mine to make.*
+
+**And there is a tool in this tree that gets it right by construction.**
+`tools/release_check.py:239` passes `-DCLAY_BUILD_PYTHON=ON` explicitly — with a
+comment at :229 saying it is ON there and nowhere else in that script's history —
+and hands the parity gate `--pyclay <build>/bindings/python --require-import`. A
+bare `cmake --preset cpu-only` inherits whatever the cache retained. **The
+decision is made by construction in one path and by accident in the other**, and
+only one of them is the documented way to reproduce CI.
+
+There is a second edge on the same trap, already recorded in the `claycore-verify`
+skill: `check_binding_parity.py` run bare falls back to comparing the parsed
+`pyclay_module.cpp` **against itself** when no module can be imported, and that
+comparison cannot fail. It prints `parsed bindings/python/pyclay_module.cpp`
+rather than `imported <path>`. So a sweep without pyclay does not merely skip a
+test — it can turn the parity gate into a tautology and still print a pass.
+
+**The shape, again:** *"did everything I ran pass"* was answered correctly and
+truthfully. *"Did I run everything"* was never asked.
+
+### A mean over samples that are not the same thing
+
+The end of that thread, and the worst of the three: not a noisy figure, **a figure
+of two different things added together.**
+
+Asked to rank every sampled figure in its report by within-run spread, the
+consuming host found **36 of 95 span more than 3x inside a single run.** The
+widest:
+
+```
+brush.voxel.apagar   144x   13 samples over 0.21-30.33, mean 15.44
+brush.voxel.camada    88x   13 samples over 0.33-29.16, mean 13.37
+brush.voxel.padrao    82x   13 samples over 0.36-29.42, mean 13.58
+brush.voxel.raspar    70x   13 samples over 0.49-34.15, mean 27.62
+brush.voxel.inflar    61x   13 samples over 0.58-35.56, mean 24.39
+```
+
+The samples are dabs at successive points along one path and **none is
+discarded**, so a mean of 15.44 sits over a body near 30 because one sample near
+0.2 is averaged in. **A mean is only a description when the samples are draws
+from one population**, and nothing in the number says whether they were.
+
+**It had been in the baseline shape all along, unremarked**, because nobody read
+the range column beside the number. That is the whole finding: the evidence was
+printed, adjacent, on every run.
+
+**They declined to explain it, and that was right. Then they checked anyway, and
+that was righter.** The withheld explanation — *"the first sample lands off the
+form"* — turned out to be **false for the two worst figures**, and testing it
+split one fault into two.
+
+The check needed no quiet box, which is the part neither of us saw: **"does the
+first dab do less work" is a COUNT, and counts do not care about load.** Thirteen
+samples, each `apply_stroke` reporting whether it changed anything and how many
+bricks it dirtied:
+
+```
+apagar   all 13 changed something, each dirtying exactly 1 brick
+raspar   all 13 changed something, each dirtying exactly 1 brick
+padrao   samples 0, 1 and 12 changed NOTHING; the other ten dirty 1
+```
+
+So for `apagar` and `raspar` — **the two worst spreads, 144x and 70x** — the
+workload is identical across all thirteen and the durations still span 0.21 to
+30.33 ms. Whatever costs the difference **is not in the edit**. The harness times
+`apply_stroke` plus the screen refresh, so it is in the refresh or around it: a
+narrowing, not a diagnosis, and going further does need a quiet box. And for
+`padrao` the workload story holds but not as told — three no-ops, at **both ends**
+of the path rather than only the start.
+
+**Two rules, and the second is the one that was missing.** *A number you cannot
+explain is better recorded as unexplained than as explained wrongly* — still
+right, and it stopped a wrong cause entering the file. But **an explanation
+withheld is still owed**: recording it as unexplained and moving on would have
+left the hole for as long as anyone left it there, with the wrong intuition intact
+and unexamined in the author's head. Declining to guess was correct; stopping at
+declining was not.
+
+**What broke the deadlock was noticing the question was answerable by a different
+instrument than the one it had been denied.** The measurement wanted a quiet box
+and could not have one; the *count* wanted nothing. That is the count-over-duration
+rule arriving a third way — not as a better gate and not as a better headline, but
+as **a way to answer a question whose obvious instrument is unavailable.**
+
+**We do not have this shape, and we also lack the instrument that would find it
+if we acquired one.** ClayCore's benchmarks are Google Benchmark bodies where
+every iteration runs the same work, so `real_time` is a mean over a homogeneous
+population by construction; the only `for` loops over "samples" in
+`benchmarks/bench_main.cpp` build sphere geometry. But `tools/check_bench.py`
+reads `real_time` and the counters and **never looks at a spread** — the JSON
+carries `repetitions` and `repetition_index` and nothing consults them. So a body
+that became heterogeneous would be gated on its mean with nothing to report the
+range. Same family as the 51 ungated benchmarks recorded above: not a defect
+today, and no instrument that would say when it became one.
+
+**The reporting repair they took is the general one:** a table beside the figures
+marking each row *safe / caution / not* — p95 rows all "caution" because they are
+single-sampled, the five above "not at all". A report that says which of its own
+numbers to quote is doing something no gate can do for it.
+
+### Quoting the most favourable sample of the least reproducible statistic
+
+The other half of *"movement in both directions"*, found by a third session
+within ten minutes of being warned about the first half — and it corrected a
+number **upward**, which is the direction nobody checks.
+
+Four runs of one artefact on a verified-empty box:
+
+```
+median   166.5 / 166.9 / 166.7 / 166.3 us    stable to +-0.3 us
+p99      195.4 / 211.2 / 188.8 / 191.6 us
+worst    392.2 / 376.1 / 371.3 / 365.9 us    spread of 26 us
+counters 383 activated / 354 withdrawn / 338 evicted / 166 pages   IDENTICAL x4
+```
+
+The figure that milestone had shipped — in its committed artefact, its screenshot
+and its report to a user — was **358 us worst tick.** *Every one of the four quiet
+runs is worse than it.*
+
+**So the published number was not inflated by contention. It was the most
+favourable sample of the least reproducible statistic in the report**, and
+re-measuring on a quiet box corrected it the wrong way. The intuition that a busy
+box inflates a figure is right for a median and useless for a maximum: a worst
+tick is an extreme-value statistic, its spread here is **26 us against a median
+spread of 0.3**, and a single sample of it is a draw rather than a measurement.
+
+**The counters did not move at all.** Same four runs, identical to the unit. So
+the criterion that asserts *identical counters across two runs* was written
+correctly, and what was wrong was only what the artefact PRINTED and what was
+therefore repeated onward. That is the count-versus-duration rule arriving as a
+report-formatting question rather than a gate-design one: **the gate was right and
+the headline was not.**
+
+The repair they took is worth stealing: a table in the sample's own README saying
+**which statistic to quote and which not to**, beside the numbers. A figure whose
+spread is two orders of magnitude larger than its neighbour's should not be the
+one on the screenshot.
+
+### The right verdict with a wrong particular
+
+The subtlest failure in this section, because **a wrong verdict gets investigated
+and a wrong particular gets reused.**
+
+Checking that a PR had landed as a merge commit rather than a squash — the
+distinction that had cost a sibling repository a whole feature — a session ran:
+
+```
+git rev-list --parents -n1 <sha> | wc -w    ->  3
+```
+
+and read it as *"three parents, so a merge commit"*. `git rev-list --parents`
+prints **the commit itself followed by its parents**, so 3 fields is one self plus
+**two** parents. Two is exactly what `--merge` produces; three would be an octopus
+merge, which nothing in that repository does.
+
+**The thresholds discriminate correctly** — a squash gives 1 self + 1 parent = 2
+fields — so the verdict was right, the merge really was clean, and the conclusion
+drawn from it was sound. **The model behind the number was wrong.**
+
+**Why that is worse than being wrong.** A wrong verdict provokes a search. A wrong
+particular is quoted onward: the next person to copy that line while actually
+needing the parent count gets a number one too high, and it arrives carrying the
+authority of a check that was *validated by its verdict*. The check will have
+been right every time it was used for the thing it was written for, which is
+exactly the history that makes it trusted for the thing it was not.
+
+`git log -1 --format=%p | wc -w` gives 2, and means parents.
+
+**It is one layer in from the rest of this section.** Not a check that could not
+fail — a check whose OUTPUT was described in terms the tool does not use. The
+session's own summary: *"I said I had checked the shape rather than assuming, and
+then reported a number I had not understood."*
+
+The catching question is a third variant, after *"could this fail"* and *"would
+this pass if the subject did not exist"*: **what does this number count?**
+
+### The mirror: a failure that looks like a FINDING
+
+Everything else in this section is a failure that looks like SUCCESS — a gate
+that cannot fail, a query that hides its history, a filter matching nothing, a
+build that registered nothing. **This one is the mirror, and it deserves its own
+heading rather than filing under theirs.**
+
+`git merge-base --is-ancestor A B` returns non-zero for *"A is not an ancestor of
+B"* and non-zero for *"A does not exist"*, and **nothing in the exit code
+separates them.** Verifying six branches against a stack tip before recommending
+a single tip merge, I built the branch list from a table I had printed with a
+44-character field. One name was truncated. The ref does not exist, the command
+returned non-zero, and I read it as *"this branch is not in the stack"*.
+
+**The asymmetry is the finding.** A silent pass costs you the defect you already
+had. A false alarm costs SOMEONE ELSE'S attention, spends it on a fiction, and —
+the part worth keeping — **the evidence trail for the search is a command that
+ran cleanly**, so the person chasing it has nothing to disbelieve. They would
+have gone looking at their stack, not at my `printf`.
+
+**And the catching question is a DIFFERENT one from the rest of this section.**
+Everywhere else it is *"would this fail if the thing were broken"*. Here it is:
+
+> **Would this pass if the thing I am asking about did not exist?**
+
+Every predicate that reports through an exit code alone conflates a false answer
+with an absent subject. It is not confined to shell: the consuming host named its
+own idiom for it — `Option::is_some_and` on a lookup that can be `None` for two
+different reasons — and went to look rather than assume the shape stops at the
+process boundary.
+
+**The repair, in both idioms:** resolve the subject first and say so separately.
+`git rev-parse --verify` every ref before asking about it, take names from
+`gh pr view <n> --json headRefName` rather than from anything typed or printed,
+and report a missing subject as *"an answer here would be meaningless"* rather
+than as a negative.
+
+**And the other session redid its own ancestry check even though its answer had
+been right**, because its loop used full names only by accident — the truncation
+was in its `printf`, not its loop variable. Its rule: *a check that gives the
+correct answer for a reason you did not arrange is not a check you can rely on
+next time.*
+
+### A tool that answers a narrower question than the one you asked
+
+The sharpest concrete instance of the class below, and it cost a real measurement
+before it was caught.
+
+A session checking whether issue **#493** existed ran `gh pr view 493`. That
+subcommand resolves PULL REQUESTS only, and answered:
+
+```
+GraphQL: Could not resolve to a PullRequest with the number of 493.
+```
+
+which reads as *"493 does not exist"*. It does — `gh issue view 493` returns it.
+Reproduced here rather than relayed.
+
+**On that reading the session concluded it had FABRICATED a citation and a
+measurement**, deleted a real figure from a header, and replaced it with "the
+magnitude is not measured". Its own summary of the damage is the part to keep:
+*removing a real number and asserting its absence is the same defect as inventing
+one, pointing the other way* — and a header in this tree is trusted precisely
+because its numbers are real.
+
+**Two things made it stick.** The tool's negative was about its own narrower
+domain and was phrased as a flat negative. And the reading CONFIRMED a suspicion —
+the same stopping-rule failure recorded above with the two noise floors, by the
+same session two hours earlier, the first time accusing a number and the second
+time accusing itself. It named the failure and then walked into it.
+
+**The catching question is this section's own, aimed at a tool instead of a
+test:** what question did this command actually answer? A negative from a
+narrower query is not a negative from the broad one, and CLI subcommands that
+partition a namespace — issues against pull requests, tags against branches,
+tracked against on-disk — will each report a confident absence about a thing the
+other holds.
+
+### Checks that could not fire, in one day
+
+The generalisation, from three instances found in a single session — all in the
+same session's own tooling, all caught by that session:
+
+| what happened | why the output looked like an answer |
+|---|---|
+| a revert deleted two call sites, `-Werror,-Wunused-function` failed the build, the harness ran the **stale binary** | `build_exit=2` and `2 passed` printed on adjacent lines |
+| `git rebase` piped to `tail`, so `set -e` saw **tail's** exit code | the rebase conflicted and the loop carried on through two more branches |
+| `grep -c` returning **exit 1 on a clean build** — no matches is a failure code | a successful check read as a failed one |
+| four criteria written as `just test-integration -R "world_(activation\|streaming)"`, which **dies on a bash syntax error** because the recipe interpolates its arguments textually into `bash -c` — the same dead command in CI and in two permanent gates | a stamp, a green tick and an exit code all reported success |
+
+Four disguises: a stale artifact, a discarded exit code, an exit code that means
+something other than what the reader assumed, and a command that never parsed. **In every one the check was
+structurally unable to fire and the output was well-formed.**
+
+**The common fix is not care.** It is making a check assert its own
+preconditions: the build succeeded before the test result is read, the command's
+own status rather than a pipeline's, the difference between "no matches" and
+"failed to look". That is the same instrument as the vacuity guard below and as
+the revert proof itself — *establish that this check could have produced a
+different answer, then read the answer.*
+
+### Survivable and invisible are the same property
+
+A correction to review advice I gave, and the cost was mine to see and I did not.
+
+Reviewing a document-owned topology cache, I said: take the CHOKEPOINT (invalidate
+where the triangles are installed, so no writer can forget) **and** keep the
+FINGERPRINT (verify each entry against the mesh it is about to serve, so a missed
+invalidation is a slow miss rather than a wrong adjacency). *"Both, not either."*
+
+Then the port missed a chokepoint. `install_mesh_geometry` is not the only place
+triangles enter a layer — `note_mesh_geometry_replaced` is the other, because a
+WELD rewrites them in place and never reaches the installer. **Nothing failed.**
+The fingerprint absorbed it: a weld moves the vertex and triangle counts, the
+entry fails verification, the cache rebuilds. **120 ms where 0.25 ms was
+promised, invisible to every correctness test in the suite.**
+
+The sentence that names it, from the session that hit it:
+
+> Making a system survivable and making its faults invisible are the same
+> property, not two.
+
+**That is a real cost of defence in depth and I did not weigh it.** A fallback
+that makes a fault survivable removes the symptom that would have found it: the
+second layer buys correctness and spends detectability. Asking for both is still
+right here — a wrong adjacency is worse than a slow one — but it is a trade
+rather than a free addition, and **the review that asks for both owes the
+compensating gate.**
+
+**That gate is to assert the MECHANISM ran, not that the output is right.**
+`entries == 1`, `hits == 1`. A correctness test passes happily over a cache that
+has silently stopped caching; only a test that asserts the fast path was TAKEN
+can see it. Same instrument as the vacuity guard below and as *"which path can
+observe this defect"* — and here it caught two of four quiet failures in a rebase
+where three of the four produced no error at all.
+
+**A second instance, found independently by the other host within the hour of
+reading this rule.** `ClayDocument::pick` raycasts the brick cache and falls back
+to the document on a miss, and the comment above it states the point — *"the cost
+is the ray's path through the band rather than a march against the whole tape"*.
+If the cache path silently stopped being taken, **every pick would still return
+the right position** by marching the tape. Correct, slower, invisible: a pick is a
+position, and the position is identical either way.
+
+Nothing gates it, and the two candidates fail for instructive reasons. A test
+proving the cache *can* raycast in isolation says nothing about whether `pick`
+uses it. And the one timing figure nearby measures a DIFFERENT call — object
+attribution rather than the surface pick — so there is not even an accidental
+timing detector. **The fallback sits eight lines from a comment explaining
+exactly why the fast path matters, and nothing enforces it.**
+
+**The general form of that rebase:** a patch built against an unmerged branch
+encodes assumptions its merge invalidates, and **the invalidations are mostly
+quiet** — a reset file silently reverting another change, a blanket conflict rule
+dropping hunks that needed both sides, a chokepoint that arrived on the branch
+after the patch was written. The compiler catches the load-bearing ones. Nothing
+catches the ones that only cost speed.
+
+### The vacuity guard: the assertion form of the revert proof
+
+The cheapest instrument in this document, and the one that turns a judgement into
+a fact.
+
+A comparison gate can carry, as its last line, an assertion that **the two sides
+it compares actually differ somewhere** — the iPad session's `any_differed`. It
+caught a regression case written on a sphere: a sphere is convex, so its cavity
+is zero at the placed point and the unplaced one alike, and **every assertion in
+the case held with the fix deleted.** The guard is what failed. Three lines
+standing between a green test and a green test of nothing.
+
+**The framing that matters, which is narrower than "check the fixture is
+interesting":** it is not a check that the fixture is representative — that is a
+judgement, and judgements can be argued into. It is a check that **the comparison
+is not vacuous**, which is a fact. *"Is this fixture representative"* invites a
+discussion. *"Would this assertion fail if the fix were deleted"* has an answer.
+
+**So it is the assertion form of the revert proof this repository already
+requires**, available inside the test rather than as a separate procedure — the
+cheap mechanical half of the thing, running on every CI run instead of once at
+review. The revert proof is stronger and stays required; the guard is what
+survives after the person who ran it moves on.
+
+Worth adding to the comparison gates already in the tree that lack one. Every
+fixture failure recorded in this file — the zero-boundary-detail bit-identity
+gate, the plane cage whose normals all sat within a few degrees of +Y, the
+squashed-operand box that reached past the body, the convex sphere — would have
+been caught by a line asserting the two sides differ before asserting how.
+
+### New ABI surface is opt-in, so a version bump's blast radius is not its diff
+
+Twice tonight the answer to *"does this reach the consuming host"* was **no, and
+not by luck**. Both are structural, which is why they are worth writing down
+rather than re-deriving each time the question comes up:
+
+- **The C descriptor's shape.** The cavity and surface-group automask factors
+  cannot cross the flat `clay_mesh_brush_desc` — they need a field callback it
+  cannot carry. So the placement defect in `mesh_automask_inputs` (#495) is
+  unreachable from C by construction, and bites only pyclay, which does not go
+  through the descriptor.
+- **A pin move does not adopt a new call.** Regional subdivision arrives in the
+  ABI at 0.89.0 and reaches an application only when someone binds
+  `clay_multires_add_level_region` there. **A version bump changes what a host
+  CAN call, not what it DOES call.**
+
+The second generalises into something useful for reading an upgrade's risk: **the
+blast radius of a release is not its diff.** It is the diff intersected with the
+call sites a host already has, plus whatever that host deliberately takes up
+afterwards. A new entry point is zero risk on the pin move itself; a changed
+MEANING behind an existing entry point is not — which is exactly why
+`clay_multires_stamp_report.moved_vertices` changing what it counts under an
+unchanged layout was worth a minor of its own, and a whole new export API in the
+same release would not have been.
+
+**The corollary for release notes:** the section a host must read is not "what is
+new" but "what is different behind a call you already make". Those are usually
+different sections and the second is usually shorter, and it is the one that
+decides whether an upgrade is safe.
+
+**And it does not survive being carried forward.** The host that established
+both facts said it will re-run the greps after the pin rather than cite tonight's
+answer — *a fact about a boundary is only as good as the last time someone looked
+at it.* Both facts above are true of a tree that is moving; neither is a
+property.
+
+### A habit written down as a constraint is wrong in both directions
+
+The mirror of the entry below, and the more surprising half: a rule that
+misattributes its own cause fails PERMISSIVELY as well as restrictively.
+
+The consuming host carried a note reading *"the merge queue here squashes"*, and
+had lost a whole feature to it — a stacked PR squash-merged into main, its child
+merged four hours later into a branch that had stopped being a path to main, the
+PR reading MERGED with green CI and the content simply absent. Found by a user
+using the application.
+
+**There is no merge queue.** Checking the repository after I checked ours:
+squash, merge-commit and rebase all enabled, `merge_queue_enabled: null`. The
+squash is a habit — every PR since #1 has landed that way and nothing forces it.
+
+So the note as written stated a **repository limitation** where the truth was a
+**default**, and the loss it recorded was real but misattributed. Their own
+account of the cost is the part worth keeping:
+
+> A rule stated as a constraint when it is really a default is wrong in the
+> permissive direction as well as the restrictive one.
+
+It would have had them refuse legitimate stacked work on the grounds that the
+repository could not do it, when `gh pr merge <tip> --merge` lands a stack there
+safely. **A false "we cannot" is as expensive as a false "we can" and much harder
+to notice**, because nothing ever fails: the work simply never gets attempted,
+and the rule looks vindicated every day it is obeyed.
+
+**And the two repositories turned out to be mirror images**, which is what makes
+this worth more than a correction. ClayCore is squash-ENABLED with a
+merge-commit practice; theirs is merge-ENABLED with a squash practice. Both are
+one button from the other, in opposite directions. Neither habit is written
+anywhere that a tool enforces.
+
+The narrower true statement, which is what both of us now hold: *stacking is
+unsafe under squash, and squash is what happens in that repository unless
+somebody deliberately chooses otherwise.* The cause is the method, not the
+repository — and the practical form is a flag on one command rather than a
+policy about branches.
+
+**Neither of us found this alone.** They gave me a warning with a qualification
+attached — *check whether your queue squashes before relaying this* — and
+checking mine is what prompted them to check theirs, which is where the note
+turned out to be wrong. A caveat offered against one's own argument is what made
+both answers real.
+
+### "It would be wrong to" is not "nothing does"
+
+One sentence from the iPad session, offered against its own work, and it names a
+substitution that runs under several findings in this file:
+
+> I reasoned from *"copying would be wrong"* to *"nothing copies"*, which are
+> different claims and only one of them is checkable.
+
+It was about to delete `ClaySpaceDoc`'s copy assignment. The normative claim is
+easy and was correct; the empirical one is the one that decides whether deleting
+it breaks a caller, and it takes a grep. (It came back clean — every holder takes
+the document by `shared_ptr` or reference, and the single by-value use in the
+repository is `ClaySpaceDoc result;` in `load_clayspace`, which is the move path.)
+
+**The substitution is invisible because the two sentences sound like one.** A
+design argument for why something SHOULD NOT happen reads as evidence that it
+DOES NOT, and only the second licenses removing the thing that would catch it.
+The same shape sits under the ABI-minor collision — *"a minor should be unique"*
+was true and *"this minor is unclaimed"* was never checked — and under the merge
+message that claimed one gate subsumed another after comparing their constant
+tables rather than their answers.
+
+**The test for it is mechanical:** the claim you are about to act on, can it be
+checked by running something? If not, you are holding the other one.
+
+### An assertion is a gate, so make it fail before trusting it
+
+A corollary that arrived attached to the above. Adding a `static_assert` to name
+a confusing compiler error, the session temporarily added a `std::mutex` member
+to make it fire, confirmed it named the operation that broke at the definition
+that broke it, and removed the member again.
+
+Worth recording because an assertion is the one kind of gate people skip this
+step for — a `static_assert` looks like documentation, and documentation does not
+get a test. But a `static_assert` on a condition that is unreachable, or worded
+for a case that cannot arise, is a safeguard that cannot fail, and it costs one
+temporary member to find out.
+
+### A safeguard that cannot fail, and the quantity that cancels the error
+
+Two findings from one attempt, and the first is a category this file did not
+have.
+
+**I asked for a flag that turned out to be unfalsifiable.** Reviewing a change
+that lets a trim release a cross-level neighbourhood, I required a mark
+distinguishing *"regional, neighbourhood released"* from *"self-contained, never
+had one"* — on the reasoning that if evaluation re-ran while the pointer was null
+and the code read null as self-contained, the boundary normals would silently
+fall back to the incomplete ring.
+
+**The second clause does not hold, and the flag therefore cannot fail.**
+`cross_level_of` decides self-contained from
+`level_is_self_contained(topology, patch_kept)` — a property of the TOPOLOGY,
+checked before the pointer is consulted. So a null neighbourhood on a regional
+level already means exactly one thing: this level needs one and does not have it,
+rebuild. And `release_cross_levels` does `cross.reset()`, so *released* and
+*never built* are literally the same state — a null pointer, with no observable
+difference for a mark to carry.
+
+The proof was three failed attempts to break the mark: the first broke the
+private path while the test went through the public one; the second compared the
+wrong quantity (below); and the third revealed there was nothing to break.
+
+**The category: a SAFEGUARD that cannot fail.** This document is a catalogue of
+gates that cannot fail. A safeguard that cannot fail is worse in one specific
+way — **nobody re-reads a flag.** A test at least gets run and its output looked
+at; a defensive flag is read once at review and then trusted forever, so a
+mechanism whose removal changes no observable behaviour can sit in a codebase
+indefinitely looking like protection. The instrument that finds one is the same:
+delete it and see whether anything moves.
+
+**And the invariant was already there** because `level_is_self_contained` made
+"never had one" DECIDABLE FROM THE TOPOLOGY. That is the general lesson worth
+more than the flag: a state that can be derived from data the code already holds
+does not need a bit recording it, and adding the bit creates a second source of
+truth that can drift from the first. The redundancy is the hazard, not the
+safety.
+
+### Comparing the quantity that cancels the error
+
+The second attempt failed for a reason worth its own line, because it is the
+sharpest instance of the wrong-quantity class in this file.
+
+The test compared **positions** across a stamp, to detect a wrong boundary frame.
+It could not: within one stamp, the frame that WRITES a coefficient and the frame
+that READS it back are the same frame, so `P = S + Frame · Detail` reconstructs
+to the same point whatever the frame is. **A wrong frame cancels itself in the
+quantity being measured.** Comparing normals — the quantity that is directly
+wrong — caught it at once.
+
+This is the same shape as the bit-identity gate that passes on zero boundary
+detail, and it is why that one passes: with `Detail = 0` there is nothing for the
+frame to be wrong ABOUT. Both are cases where the observable was chosen because
+it is the thing users see, and the defect is invisible in it by construction.
+**The question is not "is this quantity important" — it is "can this quantity
+differ when the thing under test is wrong".**
+
+### Put the bound between the noise floor and the wrong answer, and state both
+
+The most-corrected entry in this file. It was written three times from three
+confident measurements, each wrong in a different way, and the arc is the lesson
+rather than a preamble to it.
+
+**The question.** A gate for regional-boundary normals against a fully-refined
+dense hierarchy as oracle. Area-weighted (`newell`, raw, summed before
+normalizing) is right; angle-weighted (`normal_contribution`, over `kQuadTris`)
+is the wrong port that looks like the answer.
+
+**The numbers that matter, measured on the built port:**
+
+```
+ordering noise on a CORRECT port, worst over both cages:   4.5e-07
+the wrong port, the SMALLEST it ever reads:                7.1e-02
+```
+
+A factor of about **160,000**. Any tolerance between roughly `1e-6` and `1e-2`
+passes the correct port and fails the wrong one — there is no reasonable bound a
+reviewer could pick that gets this wrong. **The gate is robust, not delicate**,
+and `< 1e-6` was right all along.
+
+**The rule, which is a procedure rather than a slogan:** derive the tolerance
+from the MEASURED noise floor, check it against the MEASURED wrong answer, and
+state both. A gate is meaningful exactly insofar as those two numbers are far
+apart, and **how far apart they are is the thing to report**. A gate whose noise
+floor and whose wrong answer sit within an order of magnitude of each other is
+not a gate, whatever its bound. (The same discipline the sustained-session gate
+already followed and nobody noticed generalising: 0.08% measured residue, 2%
+tolerance, wrong fixture at 2.1x — floor stated, wrong answer stated, bound
+between them.)
+
+**Why the correct port is not exact, which is our own text.** The residue is
+float epsilon from summation ORDER: the dense hierarchy sums one contiguous ring,
+the regional one sums its own faces and then appends the derived ones. Same
+faces, same values, different order, different last bits — exactly what
+`cross_level.h` already says: *"ORDER IS PART OF THE ANSWER, because float
+addition is not associative and the readers sum over it."* **A gate demanding
+exact equality across two summation orders would fail a correct port.**
+
+**The three wrong turns, kept because the pattern is the point.**
+
+1. *Wrong quantity.* Incident-triangle-area ratio was measured to decide whether
+   a fixture could tell area-weighting from angle-weighting. It fell to 1.05x by
+   level 3 and the fixture was declared blind. But the two weightings diverge
+   where the surface BENDS, not where areas are unequal — the existing cage
+   discriminates at 1089 of 1089 vertices, and a planar cage reads exactly zero
+   however hard it is graded. *"Graded" sounds like the property and is not.*
+2. *Wrong vertex set.* A figure taken over the dense hierarchy at ALL vertices
+   was carried across to the BOUNDARY CORNERS as though it were the same
+   measurement, producing an argument that the wrong port fails louder than the
+   defect. At the corners it reads 0.071 against the defect's 0.103 — **70% of
+   it, an improvement that is still wrong.**
+3. *Wrong precision.* The correct port was reported as exactly `0.000000`. It was
+   `%.6f` printing `4.5e-07`. An argument was then built on the discarded digits
+   — and that argument said the gate had to demand exactness, which is the one
+   thing it must not do.
+
+**The one-line version, and the reason this entry exists at all:** *the
+measurement is rarely the weak step; choosing the quantity, the vertex set and
+the precision are.* Every one of the three was a real number, correctly taken,
+reasoned from carefully. Nothing downstream of the choice catches the choice.
+
+### The cross-level refresh is on the per-dab path, and it was priced elsewhere at 18x
+
+`MultiresSculptor::stamp` calls `bind()` on every dab, and `bind()` on a binding
+that is still good calls `cross_level_at(level)`, which calls
+`refresh_cross_level` — a walk over the region rim re-subdividing every outside
+vertex from the parent's positions. Every dab, whether or not anything below
+moved.
+
+That is deliberate and the reason is written beside it: the outside vertices
+belong to the level BELOW, a stroke down there moves them without this level's
+cache going stale, and *"tracking them would be a fourth revision counter
+guarding a walk over the region rim"*. Handing back what was last read would be
+an answer a reader cannot tell from a current one. The behaviour has a gate.
+
+**What the trade was made without is a number, and the iPad session has one from
+its own halo**, which cached the outside positions and refreshed only when the
+parent moved: refreshing on every evaluation instead cost **18x on a
+re-evaluation that had not moved the parent — 0.0002 to 0.0036 ms.** Their
+structure is the same shape as ours, so the figure transfers.
+
+Two things keep this a follow-up rather than a defect. The 18x is measured on
+the case where **nothing** below moved, which is the best case for caching and
+the worst case for us; a crossing stamp writes the coarse side, so on a regional
+hierarchy under an actual stroke the parent often HAS moved and the refresh is
+work that had to happen. And the correctness argument for re-reading is sound —
+the cheap version needs an invalidation signal, which is the fourth counter the
+comment declines.
+
+**SETTLED, and the answer is worse than the 18x suggested. Measured against this
+branch (issue #493):** the refresh is **7.5% of a dab** on a 4x4 region at level
+3 and **18.6%** on an 8x8 at level 4 — 16,641 vertices, an ordinary amount of
+sculpting, and roughly one dab in five spent re-deriving a neighbourhood that did
+not move.
+
+**The shape is the finding, not the size.** The refresh scales with the RIM and
+the dab scales with the FOOTPRINT, so the ratio grows with region size at fixed
+brush size. It grows with the thing regional refinement exists to make
+affordable.
+
+**And the parent-moved split I asked for turned out to be unnecessary**, for a
+reason worth keeping: when the parent has moved, the refresh is work that had to
+happen, so the overhead there is zero by construction. The measured column IS the
+interior-dab overhead — and interior dabs are the majority of a stroke inside a
+refined region, because a crossing stamp is what happens at the boundary, not
+what happens while an artist works in the middle of the area they refined. Asking
+for a second measurement would have been asking for a number that is zero by
+definition.
+
+The "fourth revision counter" objection still stands and this does not overrule
+it — it prices it. Tracked as #493 rather than fixed in a reviewed change.
+
+### `openspec validate` cannot see a change directory nobody is implementing
+
+Found by the iPad session while rebasing: its #484 was carrying three files of
+#485's openspec change, swept in by a stash cycle. Nothing caught it.
+`openspec validate --all --strict` is perfectly happy with a proposal whose
+implementation is absent — which is **correct** for a change under review, and is
+exactly why a stray one is invisible.
+
+The same shape as the ABI-minor collision recorded above: a check that passes
+because the thing it would object to is indistinguishable, in isolation, from
+something legitimate. A proposal with no code is the normal state of a proposal;
+a version line agreeing with the branch it was merged from is the normal state of
+a merge. **Both gates are answering correctly and neither is answering the
+question a reviewer has.**
+
+The question in both cases is about the RELATIONSHIP to work outside the diff —
+is this change directory one this branch owns, is this minor one another branch
+claims — and no gate in this repository asks anything of that kind. Recorded
+together rather than separately because the fix, if there is one, is a single
+idea: a gate that reads the branch's own manifest of what it claims and checks
+it against what everyone else has claimed.
+
+### 51 of our 177 benchmarks are measured and cannot fail
+
+Their finding arrived first and ours is the same effect by a different
+mechanism, so both are here.
+
+**Theirs: a baseline that stopped comparing.** Their committed bench baseline was
+recorded against engine **0.52.2** and they are pinned at **0.84.0**. It carries
+none of the groups added since — no `multires`, no `normals`, no `maintenance`,
+no `render`, no `visible`. The gate still fails on the 135 figures it holds, so
+it looks alive; but every one of those deltas now folds **thirty-two engine
+minors**, and everything added since prints as `new` and **cannot regress by
+construction**. Their own skip module exists to stop exactly this shape one level
+down: a measurement that quietly stopped being compared looks identical to one
+that is fine.
+
+**Ours: no baseline at all, and a rule table that does not cover the binary.**
+`tools/check_bench.py` reads one run and compares within it — `MAX_RATIO` and
+`FASTER_THAN` are same-run pairs, `MAX_MS` and `MAX_COUNTER` are hand-set
+absolutes. Nothing goes stale because nothing is recorded. But counted against
+the built binary:
+
+```
+registered benchmarks   177
+named in some rule      130
+IN NO RULE AT ALL        51
+```
+
+Those 51 run, print a figure, and nothing can fail on them. (Four names appear in
+rules with no benchmark — `BM_MetalStrokePatched`, `BM_MetalTapeResident`,
+`BM_MetalTapeReupload`, `BM_VulkanStrokePatched` — and those are correct:
+backend-conditional, and both tables skip an absent name deliberately.)
+
+**The shared shape:** a benchmark that is measured and ungated is
+indistinguishable, in the output, from one that is measured and passing. Theirs
+says `new`; ours just prints a number. Neither says *"nothing is watching this"*.
+
+**What would fix ours is cheap and is not a threshold.** A completeness check —
+every registered benchmark appears in at least one rule, or in an explicit
+exemption list carrying a reason — is the same instrument
+`tools/check_device_coverage.py` already applies to the device table and
+`check_test_shards.py` applies to the unit suite. Both were written for this
+exact failure. The bench gate is the one place the idea was not applied, and 51
+is what that costs. **An exemption with a reason is fine; 51 silent ones are
+not.**
+
+### A before-and-after needs a before that exists
+
+The correction to the entry below, made by the host against its own promise
+before it delivered on it, and the general point is worth more than the case.
+
+They offered a same-box before-and-after ratio in place of their stale baseline —
+record at the old pin, move, record again. Better than the baseline for the
+general case. Then they checked the fixture and found **two things that make it
+inapplicable to the question I asked**:
+
+1. **Their multires fixture is uniform.** A 16×16 cage with `add_level` called
+   four times over the whole surface. So `multires.stamp.mean` is precisely the
+   flat number the rim refresh cannot touch — no depth boundary, no outside
+   vertices, an empty neighbourhood returned without work. They would have sent
+   it, and it would have looked like an answer.
+2. **There is no regional "before".** At their pin, `clay.h` has only
+   `clay_multires_add_level` over the whole surface; regional multires arrives
+   *with* the change being measured. **You cannot take a before-and-after on a
+   code path whose "before" is its own absence.**
+
+The second is the transferable one. A ratio between two pins is the right
+instrument for *"did this change cost the path that already existed"* and is no
+instrument at all for *"what does the path this change ADDS cost"*. Those are
+different questions and the same measurement name serves neither honestly.
+
+**What answers the second is a reference taken in the same run**: the new path
+against the old path, one box, one binary — regional-over-uniform rather than
+regional-at-two-pins. Self-relative again, and available on day one, where the
+two-pin ratio needs a past that never existed.
+
+**And the honest third answer is "the path does not run here".** They said
+plainly that if their adapter keeps building only uniform hierarchies after the
+upgrade, the rim refresh never executes on their side and they will report that
+rather than manufacture a figure. A measurement that cannot be taken should be
+reported as not taken.
+
+### Re-recording a baseline is its own change, never part of an upgrade
+
+Their reason for refusing to re-record as part of moving their pin, and it
+generalises past benchmarks:
+
+> re-recording blesses thirty-two releases of undiscussed drift in one commit,
+> and doing it in the same change as an upgrade would make the upgrade's own
+> effect unmeasurable.
+
+Both halves are worth keeping. A baseline refresh is a **claim about every
+release since the last one**, and burying it in a change that has its own effect
+to measure destroys the only run that could have separated them.
+
+**And the measurement they will send instead is the right one anyway:** record
+the figures at the old pin, move the pin, record again — same box, same binary,
+ratio reported with the load beside it. That answers the question without
+depending on the committed baseline at all. It is the self-relative rule applied
+to a baseline problem: **two measurements one run apart beat one measurement
+against a number from thirty-two releases ago**, and it needs no permission from
+anybody to take.
+
 
 ## Requirements taken from their bugs
 
