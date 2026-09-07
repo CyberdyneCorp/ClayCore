@@ -2634,7 +2634,41 @@ Recorded because everything else in this section was found by that discipline
 being applied to code, and this is the instance where the discipline was not
 applied to a number.
 
-### Three checks that could not fire, in one day
+### A tool that answers a narrower question than the one you asked
+
+The sharpest concrete instance of the class below, and it cost a real measurement
+before it was caught.
+
+A session checking whether issue **#493** existed ran `gh pr view 493`. That
+subcommand resolves PULL REQUESTS only, and answered:
+
+```
+GraphQL: Could not resolve to a PullRequest with the number of 493.
+```
+
+which reads as *"493 does not exist"*. It does — `gh issue view 493` returns it.
+Reproduced here rather than relayed.
+
+**On that reading the session concluded it had FABRICATED a citation and a
+measurement**, deleted a real figure from a header, and replaced it with "the
+magnitude is not measured". Its own summary of the damage is the part to keep:
+*removing a real number and asserting its absence is the same defect as inventing
+one, pointing the other way* — and a header in this tree is trusted precisely
+because its numbers are real.
+
+**Two things made it stick.** The tool's negative was about its own narrower
+domain and was phrased as a flat negative. And the reading CONFIRMED a suspicion —
+the same stopping-rule failure recorded above with the two noise floors, by the
+same session two hours earlier, the first time accusing a number and the second
+time accusing itself. It named the failure and then walked into it.
+
+**The catching question is this section's own, aimed at a tool instead of a
+test:** what question did this command actually answer? A negative from a
+narrower query is not a negative from the broad one, and CLI subcommands that
+partition a namespace — issues against pull requests, tags against branches,
+tracked against on-disk — will each report a confident absence about a thing the
+other holds.
+
 ### Three checks that could not fire, in one day
 
 The generalisation, from three instances found in a single session — all in the
@@ -2691,6 +2725,21 @@ has silently stopped caching; only a test that asserts the fast path was TAKEN
 can see it. Same instrument as the vacuity guard below and as *"which path can
 observe this defect"* — and here it caught two of four quiet failures in a rebase
 where three of the four produced no error at all.
+
+**A second instance, found independently by the other host within the hour of
+reading this rule.** `ClayDocument::pick` raycasts the brick cache and falls back
+to the document on a miss, and the comment above it states the point — *"the cost
+is the ray's path through the band rather than a march against the whole tape"*.
+If the cache path silently stopped being taken, **every pick would still return
+the right position** by marching the tape. Correct, slower, invisible: a pick is a
+position, and the position is identical either way.
+
+Nothing gates it, and the two candidates fail for instructive reasons. A test
+proving the cache *can* raycast in isolation says nothing about whether `pick`
+uses it. And the one timing figure nearby measures a DIFFERENT call — object
+attribution rather than the surface pick — so there is not even an accidental
+timing detector. **The fallback sits eight lines from a comment explaining
+exactly why the fast path matters, and nothing enforces it.**
 
 **The general form of that rebase:** a patch built against an unmerged branch
 encodes assumptions its merge invalidates, and **the invalidations are mostly
