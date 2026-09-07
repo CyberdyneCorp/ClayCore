@@ -7109,7 +7109,12 @@ typedef struct clay_mesh_brush_desc {
     float automask_normal_angle;
     /* BOUNDARY: how many rings of fade to leave at an open border. */
     int32_t automask_boundary_rings;
-    /* CAVITY: how much of the measured cavity to apply, in [0,1]. */
+    /* CAVITY: how much of the measured cavity to apply, in [0,1]. This is a
+     * SLIDER, so ZERO IS OFF and is passed straight through — unlike the two
+     * fields above it, where zero reads as the engine's default. A slider an
+     * artist dragged to zero must cost nothing, and reading it as "unset" made
+     * it mask the crevices completely instead; a preset saved at zero came back
+     * at full. Take clay_mesh_brush_defaults if you want the engine's 1.0. */
     float automask_cavity_strength;
     /* THE STAMP'S GRAIN: how far the stamp's in-plane axes are turned about its
      * own facing, in radians. This is what makes a rake, a chisel, clay strips,
@@ -7510,9 +7515,17 @@ clay_result clay_mesh_sculptor_lattice(clay_mesh_sculptor* sculptor,
  * GRAB anchors on the first stamp and drags by the motion between stamps;
  * SNAKEHOOK re-anchors on every stamp, so its region walks with the pull.
  *
- * `mesh_to_world` is the layer transform and is used ONLY to find each vertex
- * on the mask's world-addressed lattice; NULL means identity. Everything else
- * here is in the mesh's own space.
+ * `mesh_to_world` is the layer transform, and it places each vertex onto EVERY
+ * world-addressed lattice this call samples: the painted mask, the cavity
+ * measure and the group field. NULL means identity. Everything else here is in
+ * the mesh's own space.
+ *
+ * IT SAID "THE MASK" UNTIL place-the-automask-lattices, which was a true
+ * description of the code and a false one of what the code needed: the other
+ * two lattices arrived later and were sampled UNPLACED. The two agreeing is why
+ * review found nothing -- a reader checking the code against the comment finds
+ * them consistent. Named as a set now, so the next world-addressed thing added
+ * here is not the next instance.
  *
  * `defer_normals` non-zero recomputes normals once at the end instead of per
  * stamp. Faster, identical result.
@@ -8256,8 +8269,10 @@ clay_result clay_multires_sculptor_stamp(clay_multires_sculptor* sculptor,
  * resolution of what a stroke IS, so a stamp lands in the same place with the
  * same radius and the same pressure-scaled strength on either representation.
  *
- * `mesh_to_world` is the layer transform and is used ONLY to find each vertex
- * on the mask's world-addressed lattice; NULL means identity.
+ * `mesh_to_world` is the layer transform, and it places each vertex onto every
+ * world-addressed lattice this call samples -- the painted mask, the cavity
+ * measure and the group field. NULL means identity. See the note at
+ * clay_mesh_sculptor_apply_stroke for why it named only the mask.
  *
  * `defer_normals` non-zero recomputes normals once at the end instead of per
  * stamp. Faster, identical result.

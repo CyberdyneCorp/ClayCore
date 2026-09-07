@@ -308,6 +308,13 @@ std::vector<scene::Node> stamps_to_nodes(scene::SdfContent& content,
 // `mesh_to_world` is how a vertex is found on the mask lattice — identity when
 // the layer is untransformed, which is the common case and the default.
 //
+// THE SAME PLACEMENT APPLIES TO `cavity_field` AND `groups` below, which are
+// world-addressed for the same reason and were sampled UNPLACED until
+// place-the-automask-lattices. On an untransformed layer nothing moved; on a
+// placed one a painted cavity mask and a cavity automask protected different
+// crevices of one surface, which is the disagreement `mesh/automask.h` says
+// having one estimator exists to prevent.
+//
 // Nothing here enters a tape, an edit list or the parity fixture. A sculpted
 // mesh layer is still never evaluated.
 struct MeshStrokeOptions {
@@ -315,7 +322,9 @@ struct MeshStrokeOptions {
     // Faster, identical result; a live preview wants it off.
     bool defer_normals = false;
 
-    // Where the mesh sits, for sampling the mask alone.
+    // Where the mesh sits: how a vertex is placed onto the mask lattice, the
+    // cavity field and the group lattice, all three of which are world-
+    // addressed.
     math::Transform mesh_to_world = math::Transform::identity();
 
     // Let each stamp's ORIENTATION turn the brush's alpha, which is what makes

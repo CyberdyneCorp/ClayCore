@@ -2476,6 +2476,21 @@ load-bearing rather than an inconvenience: the requirement is that a painted
 cavity mask and a cavity automask cannot disagree about one surface, and `mesh`
 structurally cannot write a second estimator to disagree with.
 
+**And they are sampled where the layer IS.** All three world lattices — the
+painted mask, the cavity field, the group field — are asked about the vertex's
+*placed* position, using the stroke's `mesh_to_world`. The painted mask was
+placed and the other two were not, so on a layer whose transform is not the
+identity a painted cavity mask and a cavity automask protected different
+crevices of the same surface. One estimator does not prevent two answers if its
+two callers ask it about different points, and every fixture that leaves its
+layer at the origin sees exactly zero difference — which is why it survived.
+
+`automask_cavity_strength` is a slider, so **zero is off**, passed straight
+through rather than read as "unset, take the engine's 1.0" the way the two
+appended fields beside it are. Reading it as unset made a slider an artist
+dragged to zero mask the crevices completely, and a preset saved at zero came
+back at full. pyclay never had this: it exposes the field directly.
+
 Runnable: [`examples/65_brush_presets.py`](../examples/65_brush_presets.py) —
 one gesture through five presets, with every claim above asserted rather than
 illustrated.
