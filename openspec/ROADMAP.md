@@ -2688,6 +2688,42 @@ gate, the plane cage whose normals all sat within a few degrees of +Y, the
 squashed-operand box that reached past the body, the convex sphere — would have
 been caught by a line asserting the two sides differ before asserting how.
 
+### New ABI surface is opt-in, so a version bump's blast radius is not its diff
+
+Twice tonight the answer to *"does this reach the consuming host"* was **no, and
+not by luck**. Both are structural, which is why they are worth writing down
+rather than re-deriving each time the question comes up:
+
+- **The C descriptor's shape.** The cavity and surface-group automask factors
+  cannot cross the flat `clay_mesh_brush_desc` — they need a field callback it
+  cannot carry. So the placement defect in `mesh_automask_inputs` (#495) is
+  unreachable from C by construction, and bites only pyclay, which does not go
+  through the descriptor.
+- **A pin move does not adopt a new call.** Regional subdivision arrives in the
+  ABI at 0.89.0 and reaches an application only when someone binds
+  `clay_multires_add_level_region` there. **A version bump changes what a host
+  CAN call, not what it DOES call.**
+
+The second generalises into something useful for reading an upgrade's risk: **the
+blast radius of a release is not its diff.** It is the diff intersected with the
+call sites a host already has, plus whatever that host deliberately takes up
+afterwards. A new entry point is zero risk on the pin move itself; a changed
+MEANING behind an existing entry point is not — which is exactly why
+`clay_multires_stamp_report.moved_vertices` changing what it counts under an
+unchanged layout was worth a minor of its own, and a whole new export API in the
+same release would not have been.
+
+**The corollary for release notes:** the section a host must read is not "what is
+new" but "what is different behind a call you already make". Those are usually
+different sections and the second is usually shorter, and it is the one that
+decides whether an upgrade is safe.
+
+**And it does not survive being carried forward.** The host that established
+both facts said it will re-run the greps after the pin rather than cite tonight's
+answer — *a fact about a boundary is only as good as the last time someone looked
+at it.* Both facts above are true of a tree that is moving; neither is a
+property.
+
 ### "It would be wrong to" is not "nothing does"
 
 One sentence from the iPad session, offered against its own work, and it names a
