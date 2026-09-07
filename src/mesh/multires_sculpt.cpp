@@ -109,7 +109,14 @@ bool MultiresDelta::apply(MultiresSurface& surface) const {
 MultiresSculptor::MultiresSculptor(MultiresSurface& surface) : surface_(surface) {}
 MultiresSculptor::~MultiresSculptor() = default;
 
-void MultiresSculptor::begin_stroke() { level_deltas_.clear(); }
+void MultiresSculptor::begin_stroke() {
+    level_deltas_.clear();
+    // AND THE COARSE LEVELS' RECORDS, for the reason this call clears the
+    // bound level's: `MeshBrush::Layer` measures its ceiling from where the
+    // STROKE found the surface, and a coarse level under a crossing stroke has
+    // exactly that question to answer about its own vertices.
+    for (CoarseLevel& c : coarse_) c.deltas.clear();
+}
 
 void MultiresSculptor::set_automask_inputs(AutomaskInputs inputs) {
     automask_ = std::move(inputs);
@@ -157,16 +164,33 @@ void MultiresSculptor::bind() {
     // pressure while a sculptor existed: the level's `Mesh` is inside the cache,
     // so a stale `MeshSculptor` would hold a reference into storage that is
     // gone.
-    if (sculptor_ && bound_level_ == level && bound_generation_ == generation) return;
-    if (bound_level_ != level) level_deltas_.clear();
+    if (sculptor_ && bound_level_ == level && bound_generation_ == generation) {
+        // THE ONE THING THAT IS RE-READ ON A BINDING THAT IS STILL GOOD. The
+        // faces this level does not store are positioned by the level BELOW,
+        // and a stroke down there moves them without invalidating anything up
+        // here — so the pointer is refreshed every time rather than only when
+        // the sculptor is rebuilt.
+        sculptor_->set_cross_level(&surface_.cross_level_at(level));
+        return;
+    }
+    // THE ONE THING A GENERATION-ONLY REBIND KEEPS. `MeshBrush::Layer` measures
+    // its ceiling from where the STROKE found the surface, so the records have
+    // to outlive a cache drop the host made under memory pressure; only a LEVEL
+    // change makes them meaningless, because they are indexed by a numbering
+    // that changed with it.
+    const bool same_level = bound_level_ == level;
+    if (!same_level) level_deltas_.clear();
 
     Mesh& mesh = surface_.level_mesh(level);
     const Adjacency& adjacency = surface_.level_adjacency(level);
     sculptor_ = std::make_unique<MeshSculptor>(mesh, adjacency);
     bound_level_ = level;
-    // Read AFTER the two calls above: either of them may have built a cache and
-    // moved the generation on.
-    bound_generation_ = surface_.cache_generation();
+    // THE SURFACE THIS LEVEL IS PART OF, which for a regionally refined
+    // hierarchy is more than the level holds. Without it every walk inside the
+    // sculptor reads the rim of the refined region as an open border of the
+    // model; with it there is no level anywhere in the brush path, because the
+    // neighbours it was missing simply have an identity. See `cross_level.h`.
+    sculptor_->set_cross_level(&surface_.cross_level_at(level));
     if (automask_set_) sculptor_->set_automask_inputs(automask_);
     sculptor_->set_defer_normals(defer_normals_);
     sculptor_->set_telemetry(telemetry_);
@@ -182,6 +206,42 @@ void MultiresSculptor::bind() {
     // Rebound with the sculptor, so a level or generation change cannot leave a
     // table describing a different mesh in the hands of a live sculptor.
     sculptor_->set_chunks(&surface_.level_chunks(level));
+    // AND THE LEVELS BELOW THAT ARE PART OF THE SAME SURFACE. On a regionally
+    // refined hierarchy the patches beside the refined region have no vertex
+    // here at all, so a stamp reaching past the region has to write them where
+    // they live. See `stamp`.
+    bind_coarse(level, same_level);
+    // Read AFTER every call above: any of them may have built a cache and moved
+    // the generation on.
+    bound_generation_ = surface_.cache_generation();
+}
+
+void MultiresSculptor::bind_coarse(std::uint32_t level, bool keep_records) {
+    // THE SAME ASYMMETRY THE BOUND LEVEL'S RECORD KEEPS, and for the same
+    // reason. The list itself is rebuilt every time -- it is derived from the
+    // topology, and rebuilding it is what makes a rebind safe -- but a
+    // generation-only rebind is a cache drop under a live stroke, and a coarse
+    // level that lost its record would answer "where did the stroke find this
+    // vertex" with the surface as it stands MID-STROKE. `MeshBrush::Layer`
+    // would then deposit its whole ceiling again on the coarse side while the
+    // bound level correctly held at it, which is a step at the seam that
+    // appears only when the host is short of memory.
+    std::vector<CoarseLevel> previous;
+    if (keep_records) previous.swap(coarse_);
+    coarse_.clear();
+    for (std::uint32_t k = 0; k < level; ++k) {
+        // THE OWNERSHIP RULE, and it is one line because the level above
+        // already answers it. A level that refines every patch holds a vertex
+        // point for every vertex of the level below, so nothing down there is
+        // ever the vertex an artist is looking at -- which is every level of a
+        // uniform-depth hierarchy, and why one takes this path at all.
+        if (surface_.topology_at(k + 1).dense()) continue;
+        CoarseLevel c;
+        c.level = k;
+        for (CoarseLevel& was : previous)
+            if (was.level == k) c.deltas = std::move(was.deltas);
+        coarse_.push_back(std::move(c));
+    }
 }
 
 void build_multires_workset(const MeshSculptor& level_sculptor, std::uint32_t level,
@@ -230,10 +290,189 @@ const BrushScratchArena* MultiresSculptor::arena() const {
     return sculptor_ ? &sculptor_->arena() : nullptr;
 }
 
+namespace {
+
+// The LEVEL VERTICES a write region names, through the adjacency's own member
+// list rather than by assuming the two indices agree. They usually do -- a
+// level's vertices are already distinct geometric points -- but two that
+// coincide bit for bit weld into one class, and from that class onward every id
+// would be off by one. The hierarchy stores detail per VERTEX, so an off-by-one
+// here writes a wrinkle onto its neighbour.
+void expand_write_region(const MeshSculptor& sculptor, std::vector<std::uint32_t>* out) {
+    const Adjacency& adjacency = sculptor.adjacency();
+    for (WorkItemId item : sculptor.write_region()) {
+        std::size_t members = 0;
+        const std::uint32_t* member = adjacency.members(item.as_weld_class(), &members);
+        for (std::size_t i = 0; i < members; ++i) out->push_back(member[i]);
+    }
+}
+
+// WHICH OF WHAT A COARSE STAMP MOVED IS THAT LEVEL'S TO KEEP. A vertex whose
+// vertex point the level `above` stores is a vertex the artist is looking at up
+// there, and the bound level's own write is the one that moves it -- so it goes
+// back where it was rather than into a coefficient. That is exactly the
+// partition `mixed_mesh_at_level` emits, asked through the same `ChildIndex`,
+// which is what makes "no vertex of the mixed-depth surface is written twice" a
+// property of the representation rather than a tolerance.
+//
+// Returns the number of weld classes with anything to keep.
+std::size_t partition_coarse_write(const MeshSculptor& sculptor, ChildIndex above,
+                                   std::vector<std::uint32_t>* owned,
+                                   std::vector<std::uint32_t>* elsewhere) {
+    const Adjacency& adjacency = sculptor.adjacency();
+    std::size_t classes = 0;
+    for (WorkItemId item : sculptor.write_region()) {
+        std::size_t members = 0;
+        const std::uint32_t* member = adjacency.members(item.as_weld_class(), &members);
+        bool keep = false;
+        for (std::size_t i = 0; i < members; ++i) {
+            const bool mine = above.stored(member[i]) == kNoVertex;
+            (mine ? owned : elsewhere)->push_back(member[i]);
+            keep = keep || mine;
+        }
+        if (keep) ++classes;
+    }
+    return classes;
+}
+
+}  // namespace
+
+// THE LAYER'S coefficients, not the base's: with an active layer the base is
+// untouched, so recording it would produce an undo that restores something the
+// gesture never changed and leaves the pass in place. The stack still holds the
+// PRE-stamp values, because `absorb_level_edit` is the one call that writes
+// them.
+void MultiresSculptor::note_layer_before(std::uint32_t level,
+                                         const std::vector<std::uint32_t>& vertices,
+                                         SculptLayerId active_layer,
+                                         SculptLayerDelta* layer_record) {
+    layer_record->set_layer(active_layer);
+    const DetailField* field = surface_.sculpt_layers().detail_at(active_layer, level);
+    for (std::uint32_t v : vertices)
+        layer_record->note_detail(level, v, field ? field->get(v) : LocalDetail{});
+}
+
+void MultiresSculptor::note_before(std::uint32_t level, const std::vector<std::uint32_t>& vertices,
+                                   const VertexDeltas& deltas, SculptLayerId active_layer,
+                                   MultiresDelta* record, SculptLayerDelta* layer_record) {
+    if (active_layer != kNoSculptLayer) {
+        if (layer_record != nullptr) note_layer_before(level, vertices, active_layer, layer_record);
+        return;
+    }
+    if (record == nullptr) return;
+    if (level > 0) {
+        // The detail field still holds the PRE-stamp coefficients: nothing has
+        // written it yet, because `absorb_level_edit` is the one call that does.
+        const DetailField& detail = surface_.detail_at(level);
+        for (std::uint32_t v : vertices) record->note_detail(level, v, detail.get(v));
+        return;
+    }
+    for (std::uint32_t v : vertices) {
+        // Where the STROKE found it, which the level record already keeps;
+        // falling back to the current position would record a gesture that
+        // undoes to the middle of itself.
+        const std::optional<kernel::cfloat3> origin = deltas.origin_of(v);
+        record->note_base(v, origin ? *origin : surface_.base_position(v));
+    }
+}
+
+std::size_t MultiresSculptor::stamp_coarse(MeshBrush verb, const MeshBrushSettings& settings,
+                                           const field::MaskGate& gate, SculptLayerId active_layer,
+                                           MultiresDelta* record, SculptLayerDelta* layer_record) {
+    std::size_t moved = 0;
+    // THE BOUND LEVEL'S SEED IS NOT A SEED DOWN HERE. `seed_class` is an index
+    // into the BOUND level's weld-class numbering and every level has its own,
+    // so forwarding it verbatim spends the coarse dab in somebody else's
+    // addressing. `MeshSculptor::accepted_seed` cannot catch it: an
+    // UNREVISIONED seed is trusted after a bounds check, which is what pyclay's
+    // `stamp` and every host built against a pre-0.86 `clay_mesh_brush_desc`
+    // send -- and on a regional hierarchy the coarse level is usually the
+    // LARGER of the two, so the stale index is essentially always in bounds.
+    // `geodesic_region` returns EMPTY when the seed is further than the radius
+    // from the centre, so the coarse side of the stroke would silently do
+    // nothing while the count came back looking whole. This is the hazard
+    // `sculpt_common.h` already documents across rebinds, and a level is a
+    // rebind.
+    //
+    // BLANKED RATHER THAN TRANSLATED: there is no map between two levels' class
+    // numberings, and the scan the seed exists to skip is what a coarse walk
+    // over a quarter of the vertices costs anyway.
+    MeshBrushSettings coarse_settings = settings;
+    coarse_settings.seed_class = kNoClass;
+    coarse_settings.seed_revision = kNoSeedRevision;
+    for (CoarseLevel& c : coarse_) {
+        c.written.clear();
+        not_owned_.clear();
+        // BUILT FOR THE STAMP AND DROPPED WITH IT -- see `CoarseLevel` for the
+        // memory that buys. The chunk table is handed over for the same reason
+        // the bound level's is: without it an unseeded dab resolves its anchor
+        // by scanning the level.
+        //
+        // `set_defer_normals` IS NOT FORWARDED, and the header says why: a
+        // sculptor that lives for one stamp has no stroke to defer into, and a
+        // deferred set dies unflushed with it. The telemetry blocks are not
+        // forwarded either -- a peak reported here would be a second arena's
+        // and not the bound level's, which `arena()` already says it reports.
+        Mesh& mesh = surface_.level_mesh(c.level);
+        MeshSculptor sculptor(mesh, surface_.level_adjacency(c.level));
+        sculptor.set_cross_level(&surface_.cross_level_at(c.level));
+        if (automask_set_) sculptor.set_automask_inputs(automask_);
+        sculptor.set_chunks(&surface_.level_chunks(c.level));
+        if (sculptor.stamp(verb, coarse_settings, gate, &c.deltas) == 0) continue;
+
+        moved += partition_coarse_write(sculptor, ChildIndex::of(surface_.topology_at(c.level + 1)),
+                                        &c.written, &not_owned_);
+        surface_.restore_level_positions(c.level, not_owned_);
+        // AND THE BOUNDS THE SAME CALL GOT WRONG. This sculptor recomputed the
+        // normals and refit the chunk bounds of everything it wrote before the
+        // partition existed, both from the DISPLACED positions -- it has to,
+        // because it does not defer, and the note on `set_defer_normals` says
+        // why it must not. `restore_level_positions` puts the positions back
+        // and re-derives the normals the hierarchy owns; the bounds are this
+        // table's, so they are refit here, by the same call, over the same
+        // write region. A chunk whose box no longer contains its own vertices
+        // makes `nearest_class` through the chunk index miss on the next dab --
+        // the hazard `absorb_level_edit` writes down.
+        if (!not_owned_.empty())
+            sculptor.publish_chunks(/*normals_changed=*/true, /*attributes_changed=*/false);
+        if (c.written.empty()) continue;
+        note_before(c.level, c.written, c.deltas, active_layer, record, layer_record);
+        surface_.absorb_level_edit(c.level, c.written);
+        write_levels_.push_back(c.level);
+    }
+    return moved;
+}
+
+// Rewrite every entry's "after" from the surface as it now is, so the last
+// stamp of a gesture wins. One or the other and never both, because the active
+// layer is one thing.
+void MultiresSculptor::sync_after(SculptLayerId active_layer, MultiresDelta* record,
+                                  SculptLayerDelta* layer_record) {
+    if (active_layer != kNoSculptLayer) {
+        if (layer_record) layer_record->sync_after(surface_.sculpt_layers());
+        return;
+    }
+    if (record) record->sync_after(surface_);
+}
+
+// The vertices the bound level's stamp moved, and THE POSITIONS IT ASKED FOR --
+// kept because the coarse writes move `S(n)` under this level and the level is
+// re-evaluated from them. Absorbing this level first would store a coefficient
+// that then reconstructs to the asked-for position PLUS that ripple, which is
+// the doubled contribution at the seam the ordering exists to make impossible.
+// See `stamp` in the header for the three measurements.
+void MultiresSculptor::capture_fine_targets() {
+    expand_write_region(*sculptor_, &touched_);
+    fine_targets_.clear();
+    const std::vector<kernel::cfloat3>& positions = sculptor_->mesh().positions;
+    for (std::uint32_t v : touched_) fine_targets_.push_back(positions[v]);
+}
+
 std::size_t MultiresSculptor::stamp(MeshBrush verb, const MeshBrushSettings& settings,
                                     const field::MaskGate& gate, MultiresDelta* record,
                                     SculptLayerDelta* layer_record) {
     touched_.clear();
+    write_levels_.clear();
     if (!surface_.valid()) return 0;
     // REFUSED BEFORE THE BRUSH MOVES ANYTHING. `absorb_level_edit` refuses a
     // locked layer too and puts the level's mesh back when it does, but that is
@@ -250,62 +489,42 @@ std::size_t MultiresSculptor::stamp(MeshBrush verb, const MeshBrushSettings& set
     // driven whether or not the caller wants a multires record, because Layer
     // needs it either way.
     const std::size_t moved = sculptor_->stamp(verb, settings, gate, &level_deltas_);
-    if (moved == 0) return 0;
+    if (moved != 0) capture_fine_targets();
+    const std::size_t coarse =
+        coarse_.empty() ? 0
+                        : stamp_coarse(verb, settings, gate, active_layer, record, layer_record);
+    if (moved == 0 && coarse == 0) return 0;
 
-    // WELD CLASSES BACK TO LEVEL VERTICES, through the adjacency's own member
-    // list rather than by assuming the two indices agree. They usually do — a
-    // level's vertices are already distinct geometric points — but two that
-    // coincide bit for bit weld into one class, and from that class onward
-    // every id would be off by one. The hierarchy stores detail per VERTEX, so
-    // an off-by-one here writes a wrinkle onto its neighbour.
     // The hierarchy's own view of the stamp, before the level's weld classes are
     // expanded into the level vertices `absorb_level_edit` consumes.
     build_multires_workset(*sculptor_, level, &workset_);
 
-    const Adjacency& adjacency = sculptor_->adjacency();
-    for (WorkItemId item : sculptor_->write_region()) {
-        std::size_t member_count = 0;
-        const std::uint32_t* members = adjacency.members(item.as_weld_class(), &member_count);
-        for (std::size_t i = 0; i < member_count; ++i) touched_.push_back(members[i]);
+    if (!touched_.empty()) {
+        // Reading the mesh re-evaluates it from the levels the coarse writes
+        // moved; the asked-for positions go back in on top of that, and the
+        // coefficient the absorb stores is the one that reaches them from where
+        // the surface now is.
+        if (coarse != 0) {
+            Mesh& mesh = surface_.level_mesh(level);
+            for (std::size_t i = 0; i < touched_.size(); ++i)
+                mesh.positions[touched_[i]] = fine_targets_[i];
+        }
+        note_before(level, touched_, level_deltas_, active_layer, record, layer_record);
+        surface_.absorb_level_edit(level, touched_);
+        write_levels_.push_back(level);
     }
 
-    if (active_layer != kNoSculptLayer) {
-        // THE LAYER'S coefficients, not the base's: with an active layer the
-        // base is untouched, so recording it would produce an undo that
-        // restores something the gesture never changed and leaves the pass in
-        // place. The stack still holds the PRE-stamp values here, because
-        // `absorb_level_edit` below is the one call that writes them.
-        if (layer_record) {
-            layer_record->set_layer(active_layer);
-            const DetailField* field = surface_.sculpt_layers().detail_at(active_layer, level);
-            for (std::uint32_t v : touched_)
-                layer_record->note_detail(level, v, field ? field->get(v) : LocalDetail{});
-        }
-    } else if (record) {
-        if (level == 0) {
-            for (std::uint32_t v : touched_) {
-                // Where the STROKE found it, which the level record already
-                // keeps; falling back to the current position would record a
-                // gesture that undoes to the middle of itself.
-                const std::optional<kernel::cfloat3> origin = level_deltas_.origin_of(v);
-                record->note_base(v, origin ? *origin : surface_.base_position(v));
-            }
-        } else {
-            // The detail field still holds the PRE-stamp coefficients: nothing
-            // has written it yet, because `absorb_level_edit` below is the one
-            // call that does.
-            const DetailField& detail = surface_.detail_at(level);
-            for (std::uint32_t v : touched_) record->note_detail(level, v, detail.get(v));
-        }
-    }
+    sync_after(active_layer, record, layer_record);
+    return moved + coarse;
+}
 
-    surface_.absorb_level_edit(level, touched_);
-    if (active_layer != kNoSculptLayer) {
-        if (layer_record) layer_record->sync_after(surface_.sculpt_layers());
-    } else if (record) {
-        record->sync_after(surface_);
-    }
-    return moved;
+const std::vector<std::uint32_t>& MultiresSculptor::last_write_vertices_at(
+    std::uint32_t level) const {
+    static const std::vector<std::uint32_t> kNone;
+    if (level == bound_level_) return touched_;
+    for (const CoarseLevel& c : coarse_)
+        if (c.level == level) return c.written;
+    return kNone;
 }
 
 }  // namespace mesh

@@ -53,7 +53,18 @@ float corner_angle(const Mesh& m, std::uint32_t tri, int corner) {
 // normal, turns that straight into a golf-ball dimple across the stamp. The
 // angle at the corner is a property of the surface rather than of how it was
 // triangulated, and the dimple goes away.
-kernel::cfloat3 class_normal(const Mesh& m, const Adjacency& adj, std::uint32_t cls) {
+//
+// `cross`, when the mesh is one level of a regional hierarchy, adds the faces
+// that level does not store. Away from a depth boundary it contributes nothing
+// and costs one branch; at one it is the difference between the normal a
+// uniformly refined hierarchy would have and a normal tipped into the refined
+// region, because the incident faces on the coarse side are simply absent.
+// `test_multires_sculpt` measures it through the verb that displaces along it:
+// an Inflate stamp on a region rim finishes a thousandth of a unit from where
+// the uniform hierarchy finishes it without this, and within float rounding of
+// it with.
+kernel::cfloat3 class_normal(const Mesh& m, const Adjacency& adj, std::uint32_t cls,
+                             const CrossLevelNeighborhood* cross) {
     std::size_t n = 0;
     const std::uint32_t* tris = adj.triangles_of(cls, &n);
     kernel::cfloat3 sum = kernel::cf3(0, 0, 0);
@@ -62,6 +73,12 @@ kernel::cfloat3 class_normal(const Mesh& m, const Adjacency& adj, std::uint32_t 
         for (int corner = 0; corner < 3; ++corner)
             if (adj.class_of(m.indices[tris[i] * 3 + corner]) == cls)
                 sum = sum + face * corner_angle(m, tris[i], corner);
+    }
+    if (cross && !cross->empty()) {
+        std::size_t mc = 0;
+        const std::uint32_t* members = adj.members(cls, &mc);
+        for (std::size_t k = 0; k < mc; ++k)
+            sum = sum + cross->normal_contribution(m.positions, members[k]);
     }
     return safe_normalize(sum, kernel::cf3(0, 1, 0));
 }
@@ -389,7 +406,7 @@ kernel::cfloat3 MeshSculptor::automask_reference(const MeshBrushSettings& settin
         return safe_normalize(settings.deposit_normal, kernel::cf3(0, 1, 0));
     const std::uint32_t near = automask_seed_ != kNoClass ? automask_seed_
                                                           : nearest_class(settings.center);
-    return near != kNoClass ? class_normal(mesh_, adjacency_, near) : kernel::cf3(0, 1, 0);
+    return near != kNoClass ? class_normal(mesh_, adjacency_, near, cross_) : kernel::cf3(0, 1, 0);
 }
 
 std::uint32_t MeshSculptor::accepted_seed(const MeshBrushSettings& settings) {
@@ -626,7 +643,7 @@ void MeshSculptor::publish_chunks(bool normals_changed, bool attributes_changed)
 // it is not a `std::function`.
 kernel::cfloat3 MeshSculptor::normal_of_item(const void* context, WorkItemId item) {
     const MeshSculptor* self = static_cast<const MeshSculptor*>(context);
-    return class_normal(self->mesh_, self->adjacency_, item.as_weld_class());
+    return class_normal(self->mesh_, self->adjacency_, item.as_weld_class(), self->cross_);
 }
 
 // THE WALK: everything the brush REACHES, with the distance each was reached
@@ -750,13 +767,13 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
         kernel::cfloat3 fallback = kernel::cf3(0, 1, 0);
         if (kernel::clength(settings.alpha_direction) < 1e-9f) {
             const std::uint32_t near = nearest_class(settings.center);
-            if (near != kNoClass) fallback = class_normal(mesh_, adjacency_, near);
+            if (near != kNoClass) fallback = class_normal(mesh_, adjacency_, near, cross_);
         }
         alpha_frame = alpha_frame_for(settings, fallback);
     }
     }
 
-    const MeshWorkItemTopology topology(mesh_, adjacency_, region_);
+    const MeshWorkItemTopology topology(mesh_, adjacency_, region_, cross_);
     const WorkItemId seed_item = WorkItemId::weld_class(automask_seed_);
 
     WorkComposeInputs in;
@@ -987,9 +1004,60 @@ void MeshSculptor::build_neighbors(bool want_normals, bool want_colors) {
             const std::uint32_t nv = adjacency_.members(nc, &mc)[0];
             nb_positions_.push_back(mesh_.positions[nv]);
             if (colors) nb_colors_.push_back(mesh_.colors[nv]);
-            if (want_normals) nb_normals_.push_back(class_normal(mesh_, adjacency_, nc));
+            if (want_normals) nb_normals_.push_back(class_normal(mesh_, adjacency_, nc, cross_));
         }
+        append_outside_neighbors(r.items[i].as_weld_class(), want_normals, colors);
         nb_offsets_.push_back(static_cast<std::uint32_t>(nb_slots_.size()));
+    }
+}
+
+// THE NEIGHBOURS THE LEVEL DOES NOT STORE, appended after the ring above.
+//
+// A depth boundary is where the Laplacian was wrong and could not know it: it
+// divides by the ring size AS FOUND, which at the rim is short and one-sided,
+// so the mean is biased into the refined region and the border is dragged
+// inward. There is no branch to fix — the coarse neighbour has no vertex, no
+// weld class and no triangle at this level — so the fix is to give it an
+// identity, and this is that identity arriving in the CSR every kernel already
+// reads. Nothing downstream branches on a level.
+//
+// They are always OUTSIDE the workset: a vertex this level does not store
+// cannot be a work item, so its slot is `kOutsideRegion` and the kernels read
+// its position from `nb_positions_` exactly as they do for a ring neighbour the
+// brush did not reach.
+//
+// A cross-level neighbour that IS a vertex of this level is not appended,
+// because it is already in the ring above: it shares a derived face edge with
+// this class, and a derived face's two stored corners are a vertex point and an
+// edge point of the same coarse corner, which the neighbouring refined face
+// already joins. `test_multires_sculpt` gates that count at 0 rather than
+// leaving it as an argument.
+void MeshSculptor::append_outside_neighbors(std::uint32_t cls, bool want_normals, bool colors) {
+    if (!cross_ || cross_->empty()) return;
+    // A vertex this level does not store has no colour to report, and a level
+    // of a multires hierarchy carries no colour attribute in the first place —
+    // so rather than invent one, a colour verb keeps the ring it already had.
+    if (colors) return;
+    std::size_t mc = 0;
+    const std::uint32_t* members = adjacency_.members(cls, &mc);
+    nb_outside_.clear();
+    for (std::size_t k = 0; k < mc; ++k) {
+        std::size_t rc = 0;
+        const std::uint32_t* ring = cross_->ring_of(members[k], &rc);
+        for (std::size_t j = 0; j < rc; ++j) {
+            const std::uint32_t id = ring[j];
+            if (cross_->inside(id)) continue;
+            // A welded class can reach the same outside vertex through two of
+            // its members; counting it twice would weight it twice in a mean.
+            if (std::find(nb_outside_.begin(), nb_outside_.end(), id) != nb_outside_.end())
+                continue;
+            nb_outside_.push_back(id);
+            nb_slots_.push_back(kOutsideRegion);
+            nb_positions_.push_back(cross_->outside_positions[id - cross_->vertex_count]);
+            if (want_normals)
+                nb_normals_.push_back(safe_normalize(
+                    cross_->normal_contribution(mesh_.positions, id), kernel::cf3(0, 1, 0)));
+        }
     }
 }
 void MeshSculptor::gather_stroke_origin(const VertexDeltas& record) {
@@ -1291,6 +1359,16 @@ void MeshSculptor::recompute_normals(const std::vector<std::uint32_t>& classes,
                 if (adjacency_.class_of(v) == c)
                     mesh_.normals[v] = mesh_.normals[v] + fn * corner_angle(mesh_, tris[k], corner);
             }
+        }
+        // The faces this level does not store, on the same corners and with the
+        // same angle weighting. Nothing at all away from a depth boundary.
+        if (cross_ && !cross_->empty()) {
+            std::size_t mc = 0;
+            const std::uint32_t* members = adjacency_.members(c, &mc);
+            for (std::size_t k = 0; k < mc; ++k)
+                mesh_.normals[members[k]] =
+                    mesh_.normals[members[k]] +
+                    cross_->normal_contribution(mesh_.positions, members[k]);
         }
     }
     for (std::uint32_t c : classes) {
