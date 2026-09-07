@@ -3153,6 +3153,58 @@ then reported a number I had not understood."*
 The catching question is a third variant, after *"could this fail"* and *"would
 this pass if the subject did not exist"*: **what does this number count?**
 
+### Prose consistent under both readings, and the re-read that confirms the wrong one
+
+A third member of the family whose distinguishing property is that **the checking
+behaviour is what fails**. It cost 520 bytes in five leaked handles.
+
+`clay_layer_multires` said:
+
+> A BORROWED handle onto the layer's hierarchy ... **The document owns it**: the
+> handle must not outlive the document, and destroying the handle leaves the
+> hierarchy in place.
+
+**The defect is one pronoun.** Read *it* as the handle and the paragraph
+instructs a host not to free it. Read *it* as the hierarchy and the paragraph is
+correct.
+
+**And both readings survive the next clause**, which is what makes it invisible.
+*"Destroying the handle leaves the hierarchy in place"* says what destroying DOES
+without ever saying you MAY — so a reader checking their understanding against
+the following sentence **gets agreement either way.** Re-reading is the natural
+repair and it is precisely the move that cannot work here.
+
+`clay_multires_destroy` already said the right thing — *"a BORROWED handle from
+clay_layer_multires frees only the handle"* — at the other end of the header,
+which is the wrong end: **a host reads the call that PRODUCES a thing when
+deciding whether it owes a free, not the call that destroys it.**
+
+**Where it belongs in this catalogue.** Not with the silent passes. Beside the
+false alarm, because those two share what makes them worse than a plain bug:
+
+```
+a silent pass          costs you the defect you already had
+a false alarm          spends someone else's attention on a fiction
+prose consistent
+  under both readings  costs you the RE-READ -- the one move a careful
+                       person makes
+```
+
+**And a disciplined refusal worth recording alongside it.** The consuming host
+grepped and found it never calls that entry point at all — every handle it holds
+comes from `clay_multires_from_mesh`, with a `Drop` impl destroying each exactly
+once. It then said which way that cuts:
+
+> It means we are **not** evidence that the old wording was safe — nobody here
+> read it and got it right, because nobody here read it. Do not let
+> "ClaySpaceDesktop was fine" count for anything in that direction.
+
+**A population that never met the hazard is not a sample of people who survived
+it.** That is the same error as a fixture whose quantity under test is zero,
+arriving as a claim about users rather than about a test — and the host declined
+to let its own clean result be quoted in the direction that would have flattered
+the original wording.
+
 ### The mirror: a failure that looks like a FINDING
 
 Everything else in this section is a failure that looks like SUCCESS — a gate
