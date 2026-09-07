@@ -450,6 +450,19 @@ void History::record_barrier(std::string what) {
     push(std::move(step));
 }
 
+bool History::install_mesh(scene::LayerId layer, mesh::Mesh triangles, const MeshFor& mesh_for) {
+    // The installer owns the invalidation signal as well as the assignment, so
+    // an owner that keeps a per-layer geometry generation cannot be restored
+    // past without learning of it (#472).
+    if (mesh_installer_) return mesh_installer_(layer, std::move(triangles));
+    // No installer: the owner keeps no generation, and this is what every
+    // wholesale restore did before one existed.
+    mesh::Mesh* m = mesh_for ? mesh_for(layer) : nullptr;
+    if (!m) return false;
+    *m = std::move(triangles);
+    return true;
+}
+
 bool History::apply_step(const Step& step, bool forward, scene::Document& doc,
                          const GridFor& grid_for, const MeshFor& mesh_for,
                          math::Aabb* out_bound, const MaskFor& mask_for) {
@@ -477,17 +490,19 @@ bool History::apply_step(const Step& step, bool forward, scene::Document& doc,
             return forward ? step.deltas.apply(*m) : step.deltas.revert(*m);
         }
         case Step::Kind::MeshReplace: {
-            mesh::Mesh* m = mesh_for ? mesh_for(step.layer) : nullptr;
-            // Refused rather than skipped, for the reason a missing grid is:
-            // skipping would take the step off the stack and leave the next
-            // undo reversing something older than the user asked for.
-            if (!m) return false;
             // A COPY on each side, not a move. The step has to survive being
             // applied so it can be applied again in the other direction, which
             // is what redo is; moving out of it would empty the step the first
             // time it was used.
-            *m = forward ? step.mesh_after : step.mesh_before;
-            return true;
+            //
+            // Through install_mesh rather than through the resolver, because
+            // this is a WHOLESALE replacement and the owner has to hear about
+            // it. Refused rather than skipped when the layer is gone, for the
+            // reason a missing grid is: skipping would take the step off the
+            // stack and leave the next undo reversing something older than the
+            // user asked for.
+            return install_mesh(step.layer, forward ? step.mesh_after : step.mesh_before,
+                                mesh_for);
         }
         case Step::Kind::DynamicMesh: {
             mesh::DynamicSurface* surface = dynamic_for_ ? dynamic_for_(step.layer) : nullptr;
@@ -1149,7 +1164,13 @@ bool History::replay(const std::uint8_t* data, std::size_t size, scene::Document
                 step.layer = layer;
                 step.mesh_before = *m;
                 step.mesh_after = restored;
-                *m = std::move(restored);
+                // The same installer the undo and redo paths use, so a replayed
+                // rebuild advances the owner's geometry generation exactly as
+                // the rebuild it is reproducing did (#472).
+                if (!install_mesh(layer, std::move(restored), mesh_for)) {
+                    if (out) *out = result;
+                    return false;
+                }
                 JournalEvent e;
                 e.kind = JournalEvent::Kind::MeshReplace;
                 e.layer = layer;
