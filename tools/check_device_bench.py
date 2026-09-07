@@ -584,9 +584,44 @@ def main() -> int:
 
         # BUDGET — every case must declare one. An unbudgeted latency number
         # is a measurement, and this tool exists to gate.
+        #
+        # A CASE MAY DECLARE `"gate": "drift"` INSTEAD OF A MILLISECOND CEILING,
+        # and exactly one kind of case may: a sustained one, whose claim is that
+        # the last window is no slower than the first rather than that a dab
+        # fits in a frame. `mesh_sustained_grab` is the worked example, and the
+        # arithmetic is why it cannot have a ceiling. It measures 0.019 ms, and
+        # a budget only fails when the overshoot clears NOISE_FLOOR_MS — so a
+        # budget set at today's value could not fail until the case reached
+        # 0.069 ms, which is 3.6x slower. That is not a loose budget; it is not
+        # a gate at all, and writing one would read as coverage.
+        #
+        # The declaration is checked rather than trusted, in both directions:
+        # the case must actually carry windows for session_drift to gate, and
+        # its p95 must still be under the floor. A case that has grown into
+        # measurable territory HAS a number to gate and the exemption has gone
+        # stale — the same rule the binding-parity gate applies to its own
+        # exemption list, and for the same reason.
         budget = budgets.get(name)
         if budget is None:
             failures.append(f"{name}: no declared budget in the baseline")
+        elif budget.get("gate") == "drift":
+            if not case.get("windows"):
+                failures.append(
+                    f"{name}: declares the drift gate but records no windows, so "
+                    f"nothing gates it — either it is not a sustained case or "
+                    f"the harness stopped emitting them")
+            elif measured > NOISE_FLOOR_MS:
+                failures.append(
+                    f"{name}: declares the drift gate because it measured under "
+                    f"the {NOISE_FLOOR_MS:.3f} ms floor, and now measures "
+                    f"{measured:.3f} ms — it has a number worth gating, so give "
+                    f"it a budget and drop the declaration")
+            else:
+                notes.append(
+                    f"{name}: gated on session drift, not on a ceiling: "
+                    f"{measured:.3f} ms is under the {NOISE_FLOOR_MS:.3f} ms "
+                    f"floor, so a budget here could not fail until the case was "
+                    f"{(measured + NOISE_FLOOR_MS) / measured:.1f}x slower")
         else:
             over = measured - budget["budgetMs"]
             if measured > budget["budgetMs"] and over > NOISE_FLOOR_MS:
