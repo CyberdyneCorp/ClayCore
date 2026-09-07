@@ -42,6 +42,7 @@
 #include <vector>
 
 #include "clay/kernel/shim.h"
+#include "clay/mesh/cross_level.h"
 #include "clay/mesh/subdivide.h"
 
 namespace clay {
@@ -76,16 +77,36 @@ inline void world_to_frame(const SurfaceFrame& f, kernel::cfloat3 d, float* t, f
 // sum is the area vector of the polygon whatever it does out of plane, and its
 // LENGTH is twice the area, so summing the unnormalized face normals over a
 // vertex's faces is the area weighting for free.
+//
+// `cross`, when the level is one of a REGIONAL hierarchy, adds the faces the
+// level does not store to every vertex on the edge of what it does. Without it
+// a boundary vertex's normal is the average of half a ring — measured against a
+// dense hierarchy at 0.406 (23.4 degrees) at level 1, 0.209 at level 2 and
+// 0.103 at level 3 — and because `P(n) = S(n) + Frame * Detail` and the frame is
+// built from this normal, a coefficient authored there reconstructs to a
+// different world offset than the same coefficient on a dense hierarchy.
+//
+// SUMMED AS RAW NEWELL, exactly as the level's own faces are, and NOT through
+// `CrossLevelNeighborhood::normal_contribution`. That function normalizes each
+// triangle and weights it by the corner angle, which is what the BRUSH's
+// `class_normal` wants; this sum is area-weighted because `newell` returns twice
+// the projected area and is never normalized. Mixing them would weight a
+// boundary vertex differently from an interior one — measured at 4.47 degrees at
+// level 3 on an ordinary curved cage, LOUDER than the defect being fixed, and
+// exactly zero on a planar one however it is graded. Curvature is what makes the
+// two visible, not unequal areas.
 void level_normals(const LevelTopology& topology, const LevelConnectivity& conn,
                    const std::vector<kernel::cfloat3>& positions,
-                   std::vector<kernel::cfloat3>* out);
+                   std::vector<kernel::cfloat3>* out,
+                   const CrossLevelNeighborhood* cross = nullptr);
 
 // The same for a subset. `inout` must already be sized to the level; entries
 // outside `vertices` are neither read nor written.
 void level_normals_partial(const LevelTopology& topology, const LevelConnectivity& conn,
                            const std::vector<kernel::cfloat3>& positions,
                            const std::vector<std::uint32_t>& vertices,
-                           std::vector<kernel::cfloat3>* inout);
+                           std::vector<kernel::cfloat3>* inout,
+                           const CrossLevelNeighborhood* cross = nullptr);
 
 // -- frames -------------------------------------------------------------------
 

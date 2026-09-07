@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(claycore
-  VERSION 0.90.0
+  VERSION 0.96.0
   DESCRIPTION "Portable C++20 SDF + voxel engine library"
   LANGUAGES C CXX)  # C: ufbx
 
@@ -92,6 +92,7 @@ add_library(claycore
   src/mesh/dynamic_validate.cpp
   src/mesh/topology_delta.cpp
   src/mesh/topology_ops.cpp
+  src/mesh/topology_cache.cpp
   src/mesh/dynamic_bvh.cpp
   src/mesh/surface_chunks.cpp
   src/mesh/chunk_tree.cpp

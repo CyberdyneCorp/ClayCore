@@ -8380,3 +8380,292 @@ def test_the_cage_and_the_base_are_compared_not_reconciled():
     # A round trip does not reconcile them.
     back = clay.load_bytes(doc.to_bytes())
     assert back.layer_multires_matches_cage(layer) is False
+
+
+# -- the shared topology cache (share-mesh-topology-cache) --------------------
+#
+# A sculptor's whole construction cost is the weld classes and neighbourhood
+# CSR its brushes walk — 120.8 ms on a 296k-triangle mesh — and a document now
+# holds one per layer rather than letting every session build its own. What is
+# asserted here is what a Python host can SEE: that sharing happened, that
+# sculpting does not invalidate it, that replacing the triangles does, and that
+# a trim gives the bytes back without touching a live session.
+
+def _mesh_layer_doc(n=10):
+    doc = clay.Document()
+    carried = doc.add_mesh_layer(_plane_grid(n), "carried")
+    return doc, carried
+
+
+def test_two_sculptors_over_one_layer_share_one_adjacency():
+    doc, carried = _mesh_layer_doc()
+    assert doc.topology_cache_stats["entries"] == 0
+
+    first = clay.MeshSculptor(carried)
+    second = clay.MeshSculptor(carried)
+
+    stats = doc.topology_cache_stats
+    assert stats["entries"] == 1
+    assert stats["misses"] == 1
+    assert stats["hits"] == 1          # the second create did not build
+    assert stats["bytes"] > 0
+    assert stats["build_ns"] > 0
+    assert first.class_count == second.class_count
+    assert second.stamp("draw", center=(0, 0, 0), radius=0.5, strength=0.5) > 0
+
+
+def test_an_owned_mesh_does_not_enter_a_documents_cache():
+    doc, _ = _mesh_layer_doc()
+    clay.MeshSculptor(_plane_grid(8))   # belongs to no layer
+    assert doc.topology_cache_stats["entries"] == 0
+
+
+def test_sculpting_keeps_the_entry_and_replacing_the_triangles_does_not():
+    doc, carried = _mesh_layer_doc()
+    sculptor = clay.MeshSculptor(carried)
+    assert sculptor.stamp("draw", center=(0, 0, 0), radius=0.5, strength=0.5) > 0
+    del sculptor
+
+    # A stroke moved vertices; the partition it was built over is still the one
+    # a live sculptor would be holding, so the next session hits.
+    clay.MeshSculptor(carried)
+    assert doc.topology_cache_stats["hits"] == 1
+
+    doc.replace_mesh_layer(carried.layer, _plane_grid(12))
+    assert doc.topology_cache_stats["entries"] == 0
+    clay.MeshSculptor(doc.mesh_layer("carried"))
+    stats = doc.topology_cache_stats
+    assert stats["entries"] == 1
+    assert stats["misses"] == 2
+    assert stats["hits"] == 1
+
+
+def test_a_trim_releases_what_nothing_holds_and_keeps_what_a_session_does():
+    doc, carried = _mesh_layer_doc()
+    held = clay.MeshSculptor(carried)
+    assert doc.topology_cache_stats["entries"] == 1
+
+    assert doc.trim_topology_cache() == 0        # something holds it
+    assert doc.topology_cache_stats["entries"] == 1
+    assert held.stamp("draw", center=(0, 0, 0), radius=0.5, strength=0.5) > 0
+
+    del held
+    assert doc.trim_topology_cache() > 0
+    assert doc.topology_cache_stats["entries"] == 0
+
+
+def test_a_weld_that_merges_nothing_does_not_invalidate_the_cache():
+    """REGRESSION. The forget() beside the revision bump was written outside the
+    `if` guarding it, so every weld invalidated the entry whether or not it
+    merged anything — including the ordinary case of a host welding defensively
+    before a conversion. gcc's -Wmisleading-indentation caught it; this pins it.
+
+    A weld that DID merge must still invalidate, which the second half asserts,
+    so a fix that simply removed the call cannot pass."""
+    doc, carried = _mesh_layer_doc()
+    clay.MeshSculptor(carried)
+    assert doc.topology_cache_stats["entries"] == 1
+
+    clean = carried.weld()                       # a grid has no duplicates
+    assert clean["vertices_merged"] == 0
+    assert doc.topology_cache_stats["entries"] == 1
+    assert doc.topology_cache_stats["evictions"] == 0
+
+    # And a weld that does merge still invalidates.
+    grid = _plane_grid(6)
+    doubled = clay.Mesh.from_triangles(
+        np.concatenate([np.array(grid.positions), np.array(grid.positions)]).astype(np.float32),
+        np.concatenate([np.array(grid.indices),
+                        np.array(grid.indices) + len(grid.positions)]).astype(np.uint32))
+    seamy = doc.add_mesh_layer(doubled, "seamy")
+    clay.MeshSculptor(seamy)
+    assert doc.topology_cache_stats["entries"] == 2
+    merged = seamy.weld()
+    assert merged["vertices_merged"] > 0
+    assert doc.topology_cache_stats["entries"] == 1
+
+
+# -- which space a session speaks (define-carried-mesh-transform-semantics) ---
+
+def _ridged(n=16, half=1.0):
+    """A grid sloped in x and flat in z, so an axis swap is visible."""
+    positions = []
+    for z in range(n + 1):
+        for x in range(n + 1):
+            px = -half + 2.0 * half * x / n
+            positions.append((px, 0.10 * px, -half + 2.0 * half * z / n))
+    indices = []
+    stride = n + 1
+    for z in range(n):
+        for x in range(n):
+            a = z * stride + x
+            indices += [a, a + stride, a + 1, a + 1, a + stride, a + stride + 1]
+    return clay.Mesh.from_triangles(np.array(positions, dtype=np.float32),
+                                    np.array(indices, dtype=np.uint32))
+
+
+def test_a_world_raycast_feeds_a_world_stamp_on_a_transformed_layer():
+    doc = clay.Document()
+    carried = doc.add_mesh_layer(_ridged(), "carried")
+    doc.set_layer_transform(carried.layer, position=(3.0, -1.0, 0.5), scale=2.0)
+
+    s = clay.MeshSculptor(carried)
+    assert s.world_frame is None
+    s.use_layer_transform()
+    assert s.world_frame["scale"] == pytest.approx(2.0)
+
+    # local (0.2, 0.02, 0.1) placed by the layer, aimed at from above in world
+    world = (3.0 + 0.2 * 2.0, -1.0 + 0.02 * 2.0, 0.5 + 0.1 * 2.0)
+    hit = s.raycast((world[0], world[1] + 10.0, world[2]), (0, -1, 0))
+    assert hit is not None
+    assert hit["position"][0] == pytest.approx(world[0], abs=0.05)
+    assert hit["position"][2] == pytest.approx(world[2], abs=0.05)
+
+    # The gesture that used to move nothing: the world hit, straight back.
+    moved = s.stamp("draw", center=hit["position"], radius=0.6, strength=0.5)
+    assert moved > 0
+
+
+def test_an_undeclared_frame_is_the_behaviour_that_came_before():
+    doc = clay.Document()
+    carried = doc.add_mesh_layer(_ridged(), "carried")
+    doc.set_layer_transform(carried.layer, position=(3.0, 0.0, 0.0), scale=2.0)
+
+    s = clay.MeshSculptor(carried)
+    assert s.world_frame is None
+    # A LOCAL centre still means local, which is what every existing script sends.
+    assert s.stamp("draw", center=(0.2, 0.02, 0.1), radius=0.3, strength=0.5) > 0
+
+    s.use_layer_transform()
+    assert s.world_frame is not None
+    s.set_world_frame()          # nothing declared clears it, as NULL does in C
+    assert s.world_frame is None
+    s.set_world_frame(position=(1.0, 0.0, 0.0), scale=3.0)
+    assert s.world_frame["scale"] == pytest.approx(3.0)
+
+
+# The per-axis refusal is gated in C (test_c_mesh_sculpt.cpp) and not here,
+# because pyclay CANNOT SET A LAYER'S PER-AXIS SCALE at all: Document's
+# `set_layer_transform` takes a uniform scale only, and `scale_axes` appears
+# nowhere but `placement_report`, which reads. So a script cannot build the
+# state this refusal is about. That is a reachability gap of its own and it is
+# recorded rather than worked around here.
+
+
+def test_a_standalone_mesh_has_no_layer_to_adopt():
+    s = clay.MeshSculptor(_ridged())
+    with pytest.raises(RuntimeError, match="standalone"):
+        s.use_layer_transform()
+
+
+def test_two_frames_are_refused_rather_than_resolved_by_precedence():
+    doc = clay.Document()
+    carried = doc.add_mesh_layer(_ridged(), "carried")
+    doc.set_layer_transform(carried.layer, position=(3.0, 0.0, 0.0), scale=2.0)
+    s = clay.MeshSculptor(carried)
+    s.use_layer_transform()
+    with pytest.raises(ValueError, match="already declares"):
+        s.raycast((3.0, 5.0, 0.0), (0, -1, 0), position=(1, 2, 3))
+
+
+# -- the per-stage breakdown (complete-sculpt-performance-instrumentation) ----
+
+def test_a_stamp_reports_where_its_time_went_and_what_it_did():
+    m = _plane_grid(24)
+    s = clay.MeshSculptor(m)
+
+    # Off by default: a stamp is the thing being measured.
+    assert s.stamp("draw", center=(0, 0, 0), radius=0.5, strength=0.5) > 0
+    assert s.stage_report["vertices_considered"] == 0
+    assert s.stage_report["nanos"]["kernel"] == 0
+
+    s.set_stage_report_enabled(True)
+    assert s.stamp("draw", center=(0, 0, 0), radius=0.5, strength=0.5) > 0
+    r = s.stage_report
+    assert r["vertices_considered"] > 0
+    assert r["vertices_affected"] > 0
+    # The workset holds the rim of the falloff too, so it reaches at least as
+    # much as it moves. That gap is what a duration cannot tell you.
+    assert r["vertices_considered"] >= r["vertices_affected"]
+    assert r["faces_touched"] > 0
+    assert r["kernel_passes"] == 1
+    assert r["calls"]["kernel"] > 0
+    assert r["nanos"]["kernel"] > 0
+    # A fixed mesh cannot change topology, so these are zero — reported rather
+    # than omitted, which is what separates "does not use this" from "stopped
+    # filling it".
+    assert r["splits"] == 0 and r["collapses"] == 0 and r["flips"] == 0
+
+    # A smooth is several passes, and the counter says so.
+    s.reset_stage_report()
+    assert s.stage_report["vertices_considered"] == 0
+    s.stamp("smooth", center=(0, 0, 0), radius=0.5, strength=0.5, smooth_iterations=4)
+    assert s.stage_report["kernel_passes"] == 4
+    assert s.stage_report["neighbors_gathered"] > 0
+
+    s.set_stage_report_enabled(False)
+    s.reset_stage_report()
+    s.stamp("draw", center=(0, 0, 0), radius=0.5, strength=0.5)
+    assert s.stage_report["vertices_considered"] == 0
+
+
+# -- writing at an older layout (save-document-at-minor) ----------------------
+
+def _quad_cage(n=4):
+    positions = [(0.5 * x - 1.0, 0.0, 0.5 * z - 1.0)
+                 for z in range(n + 1) for x in range(n + 1)]
+    indices = []
+    for z in range(n):
+        for x in range(n):
+            a = z * (n + 1) + x
+            indices += [a, a + n + 1, a + 1, a + 1, a + n + 1, a + n + 2]
+    return clay.Mesh.from_triangles(np.array(positions, dtype=np.float32),
+                                    np.array(indices, dtype=np.uint32))
+
+
+def test_writable_at_minor_answers_for_a_hierarchy_too(tmp_path):
+    """REGRESSION. writable_at_minor asked only about a layer's COMPOSITION, so a
+    document carrying a multiresolution hierarchy — which the container's minor
+    19 added an 'MRES' chunk for — answered True at 18, which has no chunk to
+    put one in. The promise is 'nothing an artist authored dropped'."""
+    doc = clay.Document()
+    cage = _quad_cage()
+    carried = doc.add_mesh_layer(cage, "carried")
+    doc.layer_take_multires(carried.layer, clay.MultiresSurface.from_mesh(cage))
+
+    # Only the cage: a hierarchy at one level holds nothing an artist made, and
+    # losing it below 19 is the ordinary plainer-file degrade.
+    assert doc.writable_at_minor(18) == (True, 0)
+    at18 = doc.to_bytes(minor=18)
+    at19 = doc.to_bytes(minor=19)
+    assert len(at18) < len(at19)      # no 'MRES' chunk at 18
+
+    # A level above the cage is a decision an artist made and cannot be rebuilt.
+    doc.layer_multires(carried.layer).add_level()
+    ok, blocking = doc.writable_at_minor(18)
+    assert ok is False
+    assert blocking == carried.layer
+
+    with pytest.raises(RuntimeError, match="cannot be written at scene format minor 18"):
+        doc.to_bytes(minor=18)
+    # ...and at this build's layout it still writes.
+    assert len(doc.to_bytes(minor=19)) > 0
+
+
+def test_a_refused_save_leaves_the_file_that_was_there_alone(tmp_path):
+    doc = clay.Document()
+    cage = _quad_cage()
+    carried = doc.add_mesh_layer(cage, "carried")
+    doc.layer_take_multires(carried.layer, clay.MultiresSurface.from_mesh(cage))
+
+    path = tmp_path / "refusal.clayspace"
+    doc.save(str(path), minor=19)
+    before = path.read_bytes()
+    assert before
+
+    doc.layer_multires(carried.layer).add_level()
+    with pytest.raises(RuntimeError, match="cannot be written at scene format minor 18"):
+        doc.save(str(path), minor=18)
+    # A save that cannot represent the document must not first destroy the last
+    # one that could.
+    assert path.read_bytes() == before

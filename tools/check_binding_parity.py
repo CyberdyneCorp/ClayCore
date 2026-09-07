@@ -321,6 +321,16 @@ ALIASES = {
     "TopologySettings.preserve_boundaries": "clay_dynamic_topology_defaults",
     "TopologySettings.preserve_uv_seams": "clay_dynamic_topology_defaults",
     "TopologySettings.preserve_sharp_edges": "clay_dynamic_topology_defaults",
+    # The two factors that need an input. They were exempt while the C ABI had
+    # no way to carry a std::function; they cross now as the two world-addressed
+    # lattices pyclay itself takes — the SAME two objects, so the bindings agree
+    # about what a cavity automask means rather than each having reached the
+    # feature its own way. The exemption was removed rather than reworded: a
+    # capability that has become reachable in C is exactly what this gate is
+    # built to notice.
+    "MeshSculptor.set_automask_inputs": "clay_mesh_sculptor_set_automask_sources",
+    "DynamicSculptor.set_automask_inputs": "clay_dynamic_sculptor_set_automask_sources",
+    "MultiresSculptor.set_automask_inputs": "clay_multires_sculptor_set_automask_sources",
     "AutomaskSettings.factors": "clay_mesh_brush_defaults",
     "AutomaskSettings.normal_angle": "clay_mesh_brush_defaults",
     "AutomaskSettings.boundary_rings": "clay_mesh_brush_defaults",
@@ -491,26 +501,6 @@ CLASS_CTOR = {
 # instead of disappearing, and it fails when one becomes reachable in C or
 # vanishes from pyclay.
 EXEMPT = {
-    # The two automask factors a mesh module cannot compute for itself — the
-    # cavity measure and the surface-group lattice — reach a sculptor as
-    # std::functions, and a std::function is exactly what the C ABI cannot
-    # carry. The three factors that need no input DO cross, as the
-    # automask_factors block on clay_mesh_brush_desc; clay.h says so at that
-    # field and calls the descriptor carrying the other two a follow-up rather
-    # than a guess made against a sample of one. pyclay can wire them because it
-    # has non-callable objects that answer a world point — a MaskField and the
-    # document's own group lattice — which is what makes this a genuine
-    # difference between the bindings rather than a gap in one.
-    "MeshSculptor.set_automask_inputs": "the cavity and surface-group "
-                                        "estimators are std::functions; the C "
-                                        "ABI carries the three input-free "
-                                        "automask factors on "
-                                        "clay_mesh_brush_desc and says at that "
-                                        "field that a descriptor for these two "
-                                        "is a follow-up",
-    "DynamicSculptor.set_automask_inputs": "as above",
-    "MultiresSculptor.set_automask_inputs": "as above",
-
     "VoxelGrid.sculpt_layer": "a Python-idiom wrapper, not a capability: it "
                               "returns the context manager over "
                               "clay_voxel_begin_sculpt_layer and "

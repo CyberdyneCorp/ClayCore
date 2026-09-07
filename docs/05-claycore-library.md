@@ -235,7 +235,10 @@ own:
   mesh subtool costs the weld plus the ray tree — around 116 ms and 89 ms at
   296k triangles — and the tree is built lazily, so a host that moves only
   `create` to a worker still pays the tree on whichever thread picks first.
-  Call `_refresh` there too.
+  Call `_refresh` there too. **Since 0.89.0 the weld half is paid once per
+  layer, not once per session**: the document holds the adjacency and hands it
+  to every sculptor over that layer, so a second `create` over unchanged
+  triangles is 0.25 ms rather than 121 ms. See the topology cache below.
 
 **And what never reaches a device at all.** Every bake in the ABI —
 `clay_layer_consolidate` and its `_cost` / `_cancellable` / `_region` forms,
@@ -2107,6 +2110,137 @@ opens its step and closes it before returning, and calls on one document must be
 serialized, so there is no moment at which you could hold a handle, have a step
 open, and ask. It is reported anyway so the total stays the sum of the fields if
 an entry point spanning a step is ever added. Do not build a response around it.
+
+### Where a dab's time went, and why
+
+**No performance work on total dab time alone.** A stamp is a dozen stages, and
+a total tells you which of them to open exactly as well as a coin does.
+
+The engine has timed those stages since 0.78.0, and until 0.92.0 nothing outside
+could read them: one benchmark program in the repository consumed the record, no
+C entry point exposed it, no test asserted on it, and the adaptive surface — the
+representation whose per-dab cost is hardest to predict, because it splits,
+collapses and flips as it goes — carried no telemetry at all.
+
+```c
+clay_mesh_sculptor_set_stage_report_enabled(sculptor, 1);
+/* ... stamp ... */
+clay_sculpt_stage_report r = { .struct_size = sizeof r };
+clay_mesh_sculptor_stage_report(sculptor, &r);
+```
+
+with `clay_dynamic_sculptor_*` counterparts, and `reset_stage_report` to measure
+one dab rather than a stroke.
+
+**Read the counts before the times.** A stage that got slower because it touched
+twice as many vertices and a stage whose inner loop regressed are the same
+number, and a report that cannot tell them apart sends someone to the wrong
+file. `vertices_considered` and `vertices_affected` DIFFER — the workset holds
+the rim of the falloff where the weight is zero and everything a mask held still
+— and that gap is the first thing to look at when a dab costs more than it
+should. `kernel_passes` separates "the kernel got slower" from "the caller asked
+for four times as much smoothing". `positions_measured` is the number that says
+"a dab costs what it touches" is still true.
+
+**Nothing is timed or counted until you enable it.** A stamp is the thing being
+measured, so an unconditional pair of clock reads per stage would be a cost the
+measurement then included. Disabled, a stage costs one predictable branch.
+
+**A stage a representation does not use reports zero rather than being
+omitted** — a fixed mesh cannot split anything, and that has to read differently
+from a counter that stopped being filled.
+
+### Which space a mesh-sculpting call speaks
+
+A mesh layer's vertex arrays are **layer-local** and its transform places them.
+That is the contract, and it is the right one — baking a transform into vertices
+every time a layer moves is expensive, lossy and hostile to history.
+
+What was wrong until 0.91.0 is that the calls crossing that boundary did not
+agree, and the header did not say which was which:
+
+| call | takes | returns |
+|---|---|---|
+| the layer's `positions` / `indices` | — | **local** |
+| `clay_layer_bounds` | — | **world** |
+| `clay_document_mesh_combined` | — | **world** |
+| `clay_mesh_sculptor_raycast` | **world** ray + a frame | **world** hit |
+| `clay_mesh_sculptor_stamp` | **local** centre and radius | local |
+| `clay_mesh_sculptor_apply_stroke` / `_preset` | **local** samples | local |
+| `clay_mesh_sculptor_lattice` / `_deformer` | **local** cage and axes | local |
+
+Rows four and five are the two calls a host makes back to back to sculpt where
+the finger is. On a layer translated by 3 and scaled by 2, feeding the first
+into the second **moved 0 vertices and returned `CLAY_OK`** — and `moved == 0`
+is documented to mean "reached nothing, fully masked, or no displacement", so
+the failure was indistinguishable from three ordinary outcomes.
+
+**A session now declares its space once:**
+
+```c
+clay_mesh_sculptor_use_layer_transform(sculptor);   /* the call you want */
+/* or, for a mesh held outside a document: */
+clay_mesh_sculptor_set_world_frame(sculptor, &frame);
+```
+
+With a frame declared, every position, radius, direction and normal crossing
+that handle is world — the stamp, both stroke calls, the raycast, and the
+**mask**, which is world-addressed by design and was being sampled at a local
+vertex position by the single-stamp path. Declaring nothing is the identity,
+which is exactly the behaviour that came before; a host that has not heard of
+this is not opted into it. Passing a per-call frame *and* declaring a session
+one is refused rather than resolved by precedence.
+
+`clay_mesh_sculptor_use_layer_transform` **refuses a layer carrying a per-axis
+scale** (`CLAY_ERROR_UNSUPPORTED`). Under one, a round brush in world is an
+ellipsoid on the model, so `radius` names nothing a spherical surface walk can
+honour and a normal stops being carried by the rotation alone. Reading the scale
+as uniform would put the dab in a plausible wrong place and report success.
+Closing it needs an anisotropic brush footprint. Bounds and the combined export
+honour the per-axis scale either way.
+
+The lattice and the deformer stay **local-only** and say so: a cage is authored
+against the model, not against the world.
+
+**The topology cache IS in this report, and it is the one sculptor-adjacent
+figure a document can account for by itself** (ABI 0.89.0). Building the weld
+classes and the neighbourhood CSR a brush walks is the whole of what a sculptor
+costs to construct — 120.8 ms on a 296k-triangle mesh, against a sculptor whose
+other members are empty vectors — and it used to be paid again by every session
+opened on the same triangles. The document now holds one per mesh layer:
+
+```c
+clay_topology_cache_stats s = { .struct_size = sizeof s };
+clay_document_topology_cache_stats(doc, &s);   /* entries, bytes, hits, misses */
+
+uint64_t released = 0;
+clay_document_trim_topology_cache(doc, &released);
+```
+
+Read `hits` and `misses` first, not `bytes`. A cache that never hits and a
+cache that is not there are indistinguishable from outside, so those two are the
+only way to tell whether your session pattern is defeating it.
+
+- **Sculpting does not invalidate an entry.** A weld partition is pinned when it
+  is built and positions move under it freely — the fixed-topology contract, and
+  what a sculptor live across a stroke has always held. A sculptor created after
+  a stroke therefore gets what the live one had. The one visible consequence: a
+  vertex dragged out of a coincidence it was welded into stays in its class.
+- **Replacing a layer's triangles does.** `clay_document_replace_mesh_layer`,
+  `clay_document_voxel_remesh_layer` and `clay_mesh_weld` on a layer all drop
+  the entry.
+- **An entry is verified, not trusted.** Every lookup fingerprints the entry
+  against the mesh it is about to be served for — counts, weld epsilon and a
+  hash of the index buffer, 0.25 ms — so two meshes with identical counts and
+  different connectivity cannot be served each other's data, and a replacement
+  path that failed to invalidate is a slow miss rather than a wrong answer.
+- **A trim releases only what no live sculptor holds**, which is a fact rather
+  than a best effort: entries are reference-counted. It is safe from a memory
+  warning arriving mid-stroke — it releases the layers nobody is working on and
+  leaves the one under the finger alone.
+- **A standalone `clay_mesh` builds its own.** It belongs to no layer, so there
+  is no identity to key an entry on, and keying on the pointer would key a cache
+  on an address the next allocation can reuse.
 
 **A sculptor's scratch is not in this report, and it is not an omission.**
 `clay_document_memory` measures the document; a mesh sculptor is a handle held

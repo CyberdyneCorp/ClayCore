@@ -287,22 +287,29 @@ enum Coverage {
         // shape is also different enough to be worth its own number rather
         // than an inherited one: a stamp is O(vertices the falloff reached)
         // after an O(vertices) adjacency build the session pays once.
-        .exempt("mesh_sculptor_stamp",
-                because: "unmeasured: the device harness has no mesh-layer "
-                       + "fixture, so no case drives a mesh brush yet. Named "
-                       + "here rather than left out of VERB_PATTERNS, which "
-                       + "would make the whole family invisible to this gate. "
-                       + "Closing it needs an imported mesh in the harness and "
-                       + "a session that builds the adjacency once."),
+        // MEASURED SINCE gate-sustained-device-sculpting. The exemption that
+        // was here said what closing it needed — "an imported mesh in the
+        // harness and a session that builds the adjacency once" — and
+        // `Fixture.meshLayerPatch` is that. It is REPLACED rather than
+        // annotated, because an exemption that no longer applies is a record of
+        // something nobody rechecked, which this list refuses by design.
+        //
+        // MEASURED OVER SESSION LENGTH rather than over the document axis every
+        // other case here uses, which is the point of the case: the fixed-mesh
+        // path is now covered on hardware AND the axis an artist's session
+        // actually runs along is covered at all.
+        .measured("mesh_sculptor_stamp", by: "mesh_sustained_grab"),
         .exempt("mesh_sculptor_apply_stroke",
-                because: "unmeasured, as mesh_sculptor_stamp is and for the "
-                       + "same reason. The stroke path is the one worth "
-                       + "measuring first when the fixture exists: it is what "
-                       + "a drag actually drives, and it amortises the "
-                       + "adjacency the stamp path pays for separately."),
+                because: "still unmeasured, but no longer for the reason it "
+                       + "shared with mesh_sculptor_stamp: the mesh-layer "
+                       + "fixture now exists (Fixture.meshLayerPatch) and the "
+                       + "stamp path is measured over it. What is missing is a "
+                       + "stroke case, and the stroke is the one worth having: "
+                       + "it is what a drag actually drives and it amortises "
+                       + "the adjacency the stamp path pays for separately."),
         .exempt("mesh_sculptor_deform",
-                because: "unmeasured, for the same missing mesh-layer fixture "
-                       + "as mesh_sculptor_stamp — but it is a DIFFERENT cost "
+                because: "still unmeasured; the mesh-layer fixture it was "
+                       + "waiting on now exists — but it is a DIFFERENT cost "
                        + "shape and should not inherit that case's number when "
                        + "one exists. A stamp is O(the vertices a falloff "
                        + "reached) after an adjacency build the session pays "

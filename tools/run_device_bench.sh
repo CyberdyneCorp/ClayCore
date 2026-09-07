@@ -155,8 +155,9 @@ RESULTS_CORE="${RESULTS%.xcresult}.core.xcresult"
 RESULTS_GALLERY="${RESULTS%.xcresult}.gallery.xcresult"
 RESULTS_DYNTOPO="${RESULTS%.xcresult}.dyntopo.xcresult"
 RESULTS_DETAIL="${RESULTS%.xcresult}.detail.xcresult"
+RESULTS_SUSTAINED="${RESULTS%.xcresult}.sustained.xcresult"
 rm -rf "$RESULTS_VERB" "$RESULTS_VERBH" "$RESULTS_CORE" "$RESULTS_GALLERY" \
-       "$RESULTS_DYNTOPO" "$RESULTS_DETAIL"
+       "$RESULTS_DYNTOPO" "$RESULTS_DETAIL" "$RESULTS_SUSTAINED"
 
 run_session() {
     # $1 = result bundle, rest = extra xcodebuild args
@@ -193,16 +194,16 @@ cool() {
     sleep "$COOLDOWN"
 }
 
-session "1/5 — the light verb cases, cold" "$RESULTS_VERB" \
+session "1/7 — the light verb cases, cold" "$RESULTS_VERB" \
     -only-testing:ClayCoreDeviceVerbTests
 cool
-session "2/5 — the heavy verb cases, cold" "$RESULTS_VERBH" \
+session "2/7 — the heavy verb cases, cold" "$RESULTS_VERBH" \
     -only-testing:ClayCoreDeviceVerbHeavyTests
 cool
-session "3/5 — latency and parity, cold" "$RESULTS_CORE" \
+session "3/7 — latency and parity, cold" "$RESULTS_CORE" \
     -only-testing:ClayCoreDeviceMeasureTests -only-testing:ClayCoreDeviceTests
 cool
-session "4/5 — the gallery, cold" "$RESULTS_GALLERY" \
+session "4/7 — the gallery, cold" "$RESULTS_GALLERY" \
     -only-testing:ClayCoreDeviceGalleryTests
 cool
 # ADAPTIVE TOPOLOGY, LAST. Appended rather than inserted: the 69 committed
@@ -212,7 +213,7 @@ cool
 # which can only make its own figures pessimistic -- the safe direction for a
 # suite whose baselines do not exist yet. Move it earlier only together with a
 # full re-baseline.
-session "5/6 — adaptive topology, cold" "$RESULTS_DYNTOPO" \
+session "5/7 — adaptive topology, cold" "$RESULTS_DYNTOPO" \
     -only-testing:ClayCoreDeviceDyntopoTests
 cool
 # THE DETAIL CASE, LAST, for the reason dyntopo is second-to-last: its
@@ -222,17 +223,30 @@ cool
 # and a process boundary returns memory, not temperature. Measured: added to
 # the latency bundle it took that session from `nominal` to `serious` on both
 # sides of an A/B, which marks the run invalid.
-session "6/6 — the detail pass, cold" "$RESULTS_DETAIL" \
+session "6/7 — the detail pass, cold" "$RESULTS_DETAIL" \
     -only-testing:ClayCoreDeviceDetailTests
+cool
+# THE SUSTAINED SESSION, LAST, and this one belongs at the warm end on its own
+# terms rather than only by the rule new suites follow. It measures whether a
+# warm dab drifts over thousands of dabs, and a SESSION is a warm device by
+# definition -- taking it cold would measure the first minute of a session
+# rather than the session.
+#
+# It still gets its own cold start and its own process, because what it is
+# looking for is memory over time and a bundle that inherited another's
+# high-water mark could not see it.
+session "7/7 — the sustained session, cold start" "$RESULTS_SUSTAINED" \
+    -only-testing:ClayCoreDeviceSustainedTests
 
 JSON="${CLAY_DEVICE_JSON:-$ROOT/build/device/device-bench.json}"
 python3 "$ROOT/tools/collect_device_bench.py" \
     "$RESULTS_VERB" "$RESULTS_VERBH" "$RESULTS_CORE" "$RESULTS_GALLERY" \
-    "$RESULTS_DYNTOPO" "$RESULTS_DETAIL" "$JSON"
+    "$RESULTS_DYNTOPO" "$RESULTS_DETAIL" "$RESULTS_SUSTAINED" "$JSON"
 
 echo "device-bench: OK"
 echo "  result bundles: $RESULTS_VERB"
 echo "                  $RESULTS_VERBH"
 echo "                  $RESULTS_CORE"
+echo "                  $RESULTS_SUSTAINED"
 echo "                  $RESULTS_GALLERY"
 echo "                  $RESULTS_DYNTOPO"

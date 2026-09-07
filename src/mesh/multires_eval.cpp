@@ -107,6 +107,62 @@ void apply_base_layers(MultiresSurface::State& s, const std::vector<std::uint32_
 // one level where S and P are the same array, so a sculpt there moves the
 // surface the frames are built from — which is exactly why the detail above it
 // follows the form.
+// The neighbourhood for a level whose parent is ALREADY EVALUATED.
+//
+// `MultiresSurface::cross_level_at` is the outside door and begins with
+// `evaluate_up_to`; calling it from inside the evaluation would recurse into the
+// evaluation that is running. This is the same body with that step removed.
+//
+// EXACTLY FOUR CALLERS, NAMED because the precondition is silent when it breaks
+// and a described property is easier to talk past than a list:
+//
+//   full_evaluate, partial_evaluate, reapply_recomposed, drain_normals_pending
+//
+// All four are reached only from `evaluate_up_to`, and it is that function's
+// LOOP ORDER that holds the precondition rather than anything the callers do:
+// it walks levels 1..target in order, so level `l - 1` was evaluated on the
+// previous iteration, or is level 0 and was evaluated by `evaluate_level0`
+// before the loop. The one call outside the loop — `drain_normals_pending` on
+// the `below_is_current` early return — holds it for the other reason: nothing
+// below moved, so the parent is still current from a previous pass.
+//
+// A FIFTH CALLER MUST ARGUE WITH THIS COMMENT. The guard below returns null
+// when the parent is not evaluated, which is safe — nothing reads a released
+// cache — but it is NOT a fix: a null neighbourhood means the level's own ring
+// only, which is precisely the incomplete half-ring this whole path exists to
+// complete. So a caller that does not hold the precondition gets the OLD WRONG
+// NORMALS BACK, silently, and no test of the evaluation will fail. That is the
+// failure mode to weigh before adding one.
+//
+// Null rather than an empty object when there is no depth boundary, so the
+// readers pay one null check and no walk.
+const CrossLevelNeighborhood* cross_level_of(MultiresSurface::State& s, std::uint32_t level) {
+    if (level == 0 || !s.level_ok(level)) return nullptr;
+    LevelCache* c = s.levels[level].cache.get();
+    if (c == nullptr) return nullptr;
+    // A LEVEL THAT NEVER HAD ONE, decided from the topology alone. This is the
+    // only legitimate way for a regional path to see no neighbourhood, and
+    // separating it from "released" by name is what lets the release exist at
+    // all -- see `LevelCache::cross_released`.
+    if (level_is_self_contained(s.levels[level].topology, s.levels[level].patch_kept))
+        return nullptr;
+    if (!level_is_evaluated(s, level - 1)) return nullptr;
+    const MultiresLevel& parent = s.levels[level - 1];
+    // A RELEASED NEIGHBOURHOOD REBUILDS, it does not read as absent — and it
+    // needs no mark to do so, because `level_is_self_contained` above decides
+    // "never had one" from the TOPOLOGY. A null pointer here therefore means
+    // exactly one thing: this level needs a neighbourhood and does not have it.
+    if (!c->cross) {
+        c->cross = std::make_unique<CrossLevelNeighborhood>(
+            build_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
+                              s.levels[level].topology, s.levels[level].patch_kept));
+    } else {
+        refresh_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
+                            c->cross.get());
+    }
+    return c->cross->empty() ? nullptr : c->cross.get();
+}
+
 void refresh_base_frames(MultiresSurface::State& s) {
     MultiresLevel& lev = s.levels[0];
     LevelCache& c = *lev.cache;
@@ -115,6 +171,8 @@ void refresh_base_frames(MultiresSurface::State& s) {
     const std::vector<kernel::cfloat2>* uv_ptr = have_uvs ? &uvs : nullptr;
 
     if (s.base_frames_all) {
+        // Level 0 is the cage and is never regional, so it has no ring outside
+        // itself and passes none.
         level_normals(lev.topology, c.conn, c.mesh.positions, &c.mesh.normals);
         build_base_frames(lev.topology, c.conn, c.mesh.positions, c.mesh.normals, uv_ptr,
                           &c.frames);
@@ -137,7 +195,8 @@ void drain_normals_pending(MultiresSurface::State& s, std::uint32_t level) {
     if (lev.normals_pending.empty() || !lev.cache) return;
     LevelCache& c = *lev.cache;
     expand_by_face_ring(lev.topology, c.conn, lev.normals_pending, &s.scratch_mark, &s.scratch_c);
-    level_normals_partial(lev.topology, c.conn, c.mesh.positions, s.scratch_c, &c.mesh.normals);
+    level_normals_partial(lev.topology, c.conn, c.mesh.positions, s.scratch_c, &c.mesh.normals,
+                          cross_level_of(s, level));
     lev.normals_pending.clear();
 }
 
@@ -183,10 +242,11 @@ void full_evaluate(MultiresSurface::State& s, std::uint32_t level) {
     // read again.
     if (s.scratch_normals.size() < lev.topology.vertex_count)
         s.scratch_normals.resize(lev.topology.vertex_count, kernel::cf3(0, 1, 0));
-    level_normals(lev.topology, c.conn, c.subdivided, &s.scratch_normals);
+    const CrossLevelNeighborhood* cross = cross_level_of(s, level);
+    level_normals(lev.topology, c.conn, c.subdivided, &s.scratch_normals, cross);
     transport_frames(parent.topology, pc.conn, pc.frames, s.scratch_normals, stored, &c.frames);
     apply_detail_all(lev);
-    level_normals(lev.topology, c.conn, c.mesh.positions, &c.mesh.normals);
+    level_normals(lev.topology, c.conn, c.mesh.positions, &c.mesh.normals, cross);
     s.stats.vertices_evaluated += lev.topology.vertex_count;
     s.stats.normals_recomputed += lev.topology.vertex_count;
     ++s.stats.full_level_rebuilds;
@@ -212,7 +272,9 @@ void partial_evaluate(MultiresSurface::State& s, std::uint32_t level) {
                                 &c.subdivided);
     if (s.scratch_normals.size() < lev.topology.vertex_count)
         s.scratch_normals.resize(lev.topology.vertex_count, kernel::cf3(0, 1, 0));
-    level_normals_partial(lev.topology, c.conn, c.subdivided, s.scratch_b, &s.scratch_normals);
+    const CrossLevelNeighborhood* cross = cross_level_of(s, level);
+    level_normals_partial(lev.topology, c.conn, c.subdivided, s.scratch_b, &s.scratch_normals,
+                          cross);
     transport_frames_partial(parent.topology, pc.conn, pc.frames, s.scratch_normals, stored,
                              s.scratch_b, &c.frames);
     apply_detail(lev, s.scratch_b);
@@ -220,7 +282,8 @@ void partial_evaluate(MultiresSurface::State& s, std::uint32_t level) {
     // The display normals reach one ring further again, because a vertex that
     // did not move still shades differently when its neighbour did.
     expand_by_face_ring(lev.topology, c.conn, s.scratch_b, &s.scratch_mark, &s.scratch_c);
-    level_normals_partial(lev.topology, c.conn, c.mesh.positions, s.scratch_c, &c.mesh.normals);
+    level_normals_partial(lev.topology, c.conn, c.mesh.positions, s.scratch_c, &c.mesh.normals,
+                          cross);
 
     s.stats.vertices_evaluated += s.scratch_b.size();
     s.stats.normals_recomputed += s.scratch_c.size();
@@ -243,7 +306,8 @@ void reapply_recomposed(MultiresSurface::State& s, std::uint32_t level,
     LevelCache& c = *lev.cache;
     apply_detail(lev, vertices);
     expand_by_face_ring(lev.topology, c.conn, vertices, &s.scratch_mark, &s.scratch_c);
-    level_normals_partial(lev.topology, c.conn, c.mesh.positions, s.scratch_c, &c.mesh.normals);
+    level_normals_partial(lev.topology, c.conn, c.mesh.positions, s.scratch_c, &c.mesh.normals,
+                          cross_level_of(s, level));
     s.stats.vertices_evaluated += vertices.size();
     s.stats.normals_recomputed += s.scratch_c.size();
     lev.pending.insert(lev.pending.end(), vertices.begin(), vertices.end());
@@ -529,9 +593,8 @@ Mesh& MultiresSurface::level_mesh(std::uint32_t level) {
     return c.mesh;
 }
 
-const Adjacency& MultiresSurface::level_adjacency(std::uint32_t level) {
-    static const Adjacency kEmpty;
-    if (!state_ || !state_->level_ok(level)) return kEmpty;
+std::shared_ptr<const Adjacency> MultiresSurface::level_adjacency_shared(std::uint32_t level) {
+    if (!state_ || !state_->level_ok(level)) return nullptr;
     Mesh& m = level_mesh(level);
     LevelCache& c = *state_->levels[level].cache;
     if (!c.adjacency) {
@@ -539,9 +602,15 @@ const Adjacency& MultiresSurface::level_adjacency(std::uint32_t level) {
         // the surface, so an epsilon here would fuse a thin wall to itself for
         // no benefit. Two vertices that genuinely coincide bit for bit still
         // weld, which is what keeps a degenerate cage from cracking.
-        c.adjacency = std::make_unique<Adjacency>(Adjacency::build(m, 0.0f));
+        c.adjacency = std::make_shared<const Adjacency>(Adjacency::build(m, 0.0f));
     }
-    return *c.adjacency;
+    return c.adjacency;
+}
+
+const Adjacency& MultiresSurface::level_adjacency(std::uint32_t level) {
+    static const Adjacency kEmpty;
+    std::shared_ptr<const Adjacency> a = level_adjacency_shared(level);
+    return a ? *a : kEmpty;
 }
 
 const CrossLevelNeighborhood& MultiresSurface::cross_level_at(std::uint32_t level) {

@@ -1185,6 +1185,13 @@ DOCUMENT_LAYER_CALLS = {
     # scoped to: the scope is a slice of the document's hard union between
     # layers, which is what the two calls sum to.
     "clay_brick_cache_eval_requests_layer",
+    # The DOCUMENT layer this sculptor's mesh belongs to, whose transform places
+    # it in the scene. An artist's channel has no transform and no placement, so
+    # there is nothing for the ambiguity to be between -- and spelling it
+    # `use_mesh_layer_transform` would read as "the transform of a mesh layer"
+    # rather than "adopt the frame of the layer this session's mesh is in",
+    # which is what it does.
+    "clay_mesh_sculptor_use_layer_transform",
 }
 
 

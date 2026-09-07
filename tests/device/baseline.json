@@ -83,6 +83,13 @@
       "measuredMs": 0.4473,
       "rawMs": 0.4457
     },
+    "mesh_sustained_grab": {
+      "gate": "drift",
+      "class": "interactive",
+      "measuredMs": 0.019083,
+      "rawMs": 0.019083,
+      "note": "Gated by session_drift, not by a ceiling. This case's claim is that a sustained session does not slow down or leak over its LENGTH -- the late window against the early one, in vertex counts, scratch high-water, footprint and time. Its per-dab p95 is 0.019 ms, under the 0.05 ms noise floor, so a millisecond budget could not fail until the case was 3.6x slower and would read as coverage. If it ever measures above the floor the checker fails and asks for a real budget."
+    },
     "move_drags": {
       "budgetMs": 0.104,
       "class": "gesture",

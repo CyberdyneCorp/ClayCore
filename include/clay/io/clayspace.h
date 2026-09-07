@@ -100,12 +100,14 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <type_traits>
 #include <string>
 #include <vector>
 
 #include "clay/io/result.h"
 #include "clay/mesh/mesh_data.h"
 #include "clay/mesh/multires.h"
+#include "clay/mesh/topology_cache.h"
 #include "clay/scene/document.h"
 #include "clay/voxel/grid.h"
 #include "clay/voxel/groups.h"
@@ -279,13 +281,59 @@ struct ClaySpaceDoc {
     void install_mesh_geometry(scene::LayerId layer, mesh::Mesh triangles) {
         mesh_layers.insert_or_assign(layer, std::move(triangles));
         ++mesh_geometry_revision[layer];
+        // AND THE ADJACENCY BUILT OVER THE TRIANGLES THAT JUST LEFT. It is the
+        // same statement as the line above it and lands here for the same
+        // reason: this is where triangles ENTER a layer, so it is where what
+        // was derived from them can be invalidated without every caller having
+        // to remember. `note_mesh_geometry_replaced` below is the other half --
+        // a weld rewrites them in place and never comes through here.
+        topology_cache.forget(layer);
     }
+
+    // THE ADJACENCY EVERY MESH SCULPTOR OVER A LAYER SHARES, keyed by layer id.
+    //
+    // HERE, BESIDE THE TRIANGLES, for the reason `mesh_geometry_revision` is
+    // here: it describes them, and a cache that lived on a binding handle would
+    // be invalidated only by the paths that binding knows about. Both bindings
+    // reach this one, and `install_mesh_geometry` above is what keeps it
+    // honest.
+    //
+    // Building the weld classes and the neighbourhood CSR a brush walks is the
+    // WHOLE of what a sculptor costs to construct -- 120.8 ms on a
+    // 296k-triangle mesh, against a sculptor whose other members are empty
+    // vectors -- and a second session on one layer used to pay it again. It is
+    // 0.25 ms now.
+    //
+    // AN ENTRY IS VERIFIED, NOT TRUSTED. Every lookup fingerprints the entry
+    // against the mesh it is about to be served for, so a replacement path that
+    // reached `mesh_layers` some other way is a slow miss rather than a wrong
+    // adjacency. That is belt and braces with the line above, deliberately:
+    // this counter has been wrong before (#472).
+    //
+    // RUNTIME-ONLY, like the generation beside it: nothing here is serialized
+    // and a reopen starts empty.
+    mesh::TopologyCache topology_cache;
 
     // The same signal for a rewrite made IN PLACE through a borrowed mesh --
     // a weld, which rewrites the triangles without ever holding a second copy
     // of them. Separate from the installer rather than folded into it because
     // the alternative is copying a whole mesh out and back to say one thing.
-    void note_mesh_geometry_replaced(scene::LayerId layer) { ++mesh_geometry_revision[layer]; }
+    //
+    // IT FORGETS TOO, AND THAT IS THE POINT OF IT BEING A SECOND CHOKEPOINT. A
+    // weld changes the triangles an adjacency was built over without replacing
+    // the container they live in, so `install_mesh_geometry` never runs and
+    // cannot speak for it. Two paths change a layer's geometry; both invalidate
+    // here, and neither caller has to remember.
+    //
+    // The fingerprint would have caught a miss -- a weld moves the vertex and
+    // triangle counts, so the entry fails verification and is rebuilt. That is
+    // exactly why this was missed when the cache was written against the
+    // installer alone: the belt held while the braces were absent, and nothing
+    // failed. Forgetting here makes the miss impossible rather than survivable.
+    void note_mesh_geometry_replaced(scene::LayerId layer) {
+        ++mesh_geometry_revision[layer];
+        topology_cache.forget(layer);
+    }
 
     // A mesh layer's multiresolution hierarchy, keyed the same way and for the
     // same layering reason. Before this, a hierarchy was a STANDALONE handle
@@ -321,6 +369,24 @@ struct ClaySpaceDoc {
     std::vector<std::uint8_t> thumbnail_png;      // optional passthrough
     std::vector<std::uint8_t> camera_bookmarks;   // optional passthrough
 };
+
+// THE ONE THING THIS STRUCT HAS TO STAY, said here rather than discovered at a
+// call site three files away.
+//
+// `load_clayspace` builds a fresh document and MOVE-ASSIGNS it over the
+// caller's (`*out = std::move(result)`). A member that is not move-assignable
+// — a std::mutex, an atomic, a reference, a const field — deletes the implicit
+// move, and the compiler then reports that the COPY assignment is deleted,
+// naming an operation nobody wrote at a line that is not the cause. This says
+// what actually broke, at the definition that broke it.
+//
+// `mesh::TopologyCache` is the member that made this reachable: it holds a
+// mutex and declares its moves explicitly for exactly this reason.
+static_assert(std::is_move_assignable_v<ClaySpaceDoc>,
+              "load_clayspace move-assigns a fresh document over the caller's. A member that "
+              "is not move-assignable -- a std::mutex, an atomic, a reference -- deletes the "
+              "implicit move and the error names COPY assignment instead. Declare the "
+              "member's moves explicitly, as mesh::TopologyCache does.");
 
 // WHICH SNAPSHOT IS THIS (survive-a-crash 2.1).
 //
@@ -365,23 +431,58 @@ bool multires_carries_detail(const mesh::MultiresSurface& surface);
 // -- the ways this actually happens -- all change a count.
 bool multires_matches_cage(const mesh::Mesh& cage, const mesh::MultiresSurface& surface);
 
-// NO `multires_blocking_minor`, deliberately, and the reason is worth keeping
-// because the plan for this change had one. It was modelled on
-// `scene::layer_blocking_minor`, which exists because `serialize_document` takes
-// a minor to WRITE at and can therefore be asked to write one it cannot express.
-// `save_clayspace` takes no such parameter: the container is always written at
-// `kClaySpaceMinor`, and the older-minor discipline in this format lives in the
-// SCENE PAYLOAD rather than here. A query answering which layer blocks a write
-// nobody can request would be an entry point with no caller.
+// `multires_blocking_minor` DID NOT EXIST, and the reason it did not is worth
+// keeping beside the reason it does now.
 //
-// What replaces it is `multires_carries_detail` above, which answers the
-// question a host actually has -- "would anything an artist made be lost" --
-// without pretending the container has a downgrade path it does not.
+// It was modelled on `scene::layer_blocking_minor`, which exists because
+// `serialize_document` takes a minor to WRITE at and can therefore be asked to
+// write one it cannot express. `save_clayspace` took no such parameter -- the
+// container was always written at `kClaySpaceMinor` -- so a query answering
+// which layer blocks a write nobody could request was an entry point with no
+// caller. That was correct.
+//
+// `save_clayspace` now takes a minor (save-document-at-minor), and the caller
+// exists. The gap that reasoning left behind was real and reachable:
+// `clay_document_writable_at_minor` promises "nothing an artist authored
+// dropped" and asks only `scene::layer_blocking_minor`, which knows about
+// composition and nothing else -- so a document carrying a hierarchy reported
+// CLAY_OK at minor 18, which has no 'MRES' chunk to put one in.
+//
+// The line it draws is `multires_carries_detail`, which is the function that
+// was already here for exactly this question. A hierarchy with no detail is
+// reconstructible from its cage by a deterministic subdivision, so dropping it
+// is the ordinary "smaller or plainer" degrade this format has always allowed.
+// A hierarchy carrying DETAIL is something an artist made and cannot be
+// rebuilt, so writing below the minor that can carry it is refused.
+scene::LayerId multires_blocking_minor(const ClaySpaceDoc& doc, std::uint16_t minor);
 
-std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc);
+// The first layer, of any kind, that `minor` cannot express. ONE ANSWER for a
+// host that has one question: `scene::layer_blocking_minor` and
+// `multires_blocking_minor` each know about one field, and a caller that had to
+// ask both and combine them would be the place the two got out of step.
+scene::LayerId document_blocking_minor(const ClaySpaceDoc& doc, std::uint16_t minor);
+
+// `minor` is the layout to WRITE at, defaulting to the current one.
+//
+// REFUSES -- returns an EMPTY vector, which is never a valid stream since even
+// an empty document writes a magic number -- when `minor` cannot express what
+// this document says, which is exactly `document_blocking_minor` being
+// non-zero. That is `serialize_document`'s convention, followed here so a
+// caller that already handles one handles both.
+//
+// A chunk a minor did not have IS NOT WRITTEN AT THAT MINOR. Minor 19 added
+// 'MRES'; written at 18 the hierarchies are absent, and a hierarchy carrying
+// detail refuses the write rather than being absent, per
+// `multires_blocking_minor`.
+std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc,
+                                         std::uint16_t minor = kClaySpaceMinor);
 IoStatus load_clayspace(const std::uint8_t* data, std::size_t size, ClaySpaceDoc* out);
 
-IoStatus save_clayspace_file(const ClaySpaceDoc& doc, const std::string& path);
+// Refuses with the same rule `save_clayspace` does, and LEAVES ANY EXISTING
+// FILE UNTOUCHED when it refuses: a save that cannot represent the document
+// must not first destroy the last one that could.
+IoStatus save_clayspace_file(const ClaySpaceDoc& doc, const std::string& path,
+                             std::uint16_t minor = kClaySpaceMinor);
 // The budget's max_file_bytes bounds what will be read into memory before the
 // buffer is sized. It is a parameter rather than a fixed ceiling because a
 // document carrying sampled volumes is large by nature, and nothing here caps

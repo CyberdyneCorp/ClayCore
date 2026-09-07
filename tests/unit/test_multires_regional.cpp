@@ -583,22 +583,31 @@ TEST_CASE("regional: the memory report carries the cross-level neighbourhood") {
     REQUIRE_FALSE(s.cross_level_at(3).empty());
 
     // THEN THE HOST ACTS ON THE REPORT, which is the whole reason the row
-    // exists: `drop_all_caches` releases every neighbourhood along with
-    // everything else derived, and reading the level back brings the levels
-    // home resident and evaluated with no neighbourhood among them. A stroke
-    // that crosses a depth boundary writes the coarse side too and builds the
-    // neighbourhood of the levels it writes, so this is also what makes the
-    // measurement below a measurement of one term rather than of whichever
-    // levels the stamp happened to reach.
+    // exists.
+    //
+    // MEASURED ACROSS THE RELEASE RATHER THAN ACROSS THE BUILD, and that is a
+    // change forced by the frame fix: evaluating a regional level now BUILDS
+    // its neighbourhood, because the boundary normals need it. So the level
+    // cannot be brought home "resident and evaluated with no neighbourhood
+    // among them" any more, and a delta taken across a later `cross_level_at`
+    // reads zero — not because the term is unpriced, but because it was already
+    // there.
+    //
+    // Releasing it isolates the term in the direction a host actually acts in,
+    // which makes this stronger than measuring the build: `release_cross_levels`
+    // releases the neighbourhoods AND NOTHING ELSE, so the fall in the row is
+    // the term under test and nothing besides.
     s.drop_all_caches();
     s.positions_at(3);
-    const mesh::MultiresMemory before = s.memory();
-    // Nothing else is allocated on the way: every level this reads is already
-    // resident and evaluated, so the difference between the two reports is the
-    // term under test and nothing besides.
     const mesh::CrossLevelNeighborhood& cross = s.cross_level_at(3);
     REQUIRE_FALSE(cross.empty());
-    const mesh::MultiresMemory after = s.memory();
+    const mesh::MultiresMemory before = s.memory();
+
+    // The positions BEFORE the release, so a trim that quietly re-derived
+    // something is visible. A release that moved the surface would otherwise
+    // pass every assertion below it.
+    const std::vector<cfloat3> positions_before = s.positions_at(3);
+    const std::vector<cfloat3> normals_before = s.normals_at(3);
 
     // WHAT IT SHOULD WEIGH, COUNTED FROM THE ARRAYS `build_cross_level` FILLED
     // rather than from `bytes()` — an expectation the checked code computes
@@ -615,9 +624,27 @@ TEST_CASE("regional: the memory report carries the cross-level neighbourhood") {
     REQUIRE(cross.face_count() > 0u);
     REQUIRE(floor_bytes > 4096u);
 
+    const std::size_t given_back = s.release_cross_levels();
+    const mesh::MultiresMemory after = s.memory();
+
     INFO("runtime_index " << before.runtime_index << " -> " << after.runtime_index
-                          << ", neighbourhood floor " << floor_bytes);
-    CHECK(after.runtime_index >= before.runtime_index + floor_bytes);
+                          << ", neighbourhood floor " << floor_bytes << ", released "
+                          << given_back);
+    CHECK(given_back >= floor_bytes);
+    CHECK(before.runtime_index >= after.runtime_index + floor_bytes);
+
+    // THE RELEASE MOVED NOTHING. The levels stay resident and stay evaluated;
+    // what went is derived and rebuilds exactly. A release that re-derived a
+    // position would be invisible to every byte count above.
+    CHECK(same_bits(s.positions_at(3), positions_before));
+    CHECK(same_bits(s.normals_at(3), normals_before));
+
+    // AND IT REBUILDS RATHER THAN READING AS ABSENT. A released neighbourhood
+    // that came back empty would be the silent path this mark exists to close:
+    // the boundary normals would fall back to the level's own incomplete ring
+    // and nothing would fail.
+    REQUIRE_FALSE(s.cross_level_at(3).empty());
+    CHECK(same_bits(s.normals_at(3), normals_before));
 
     // AND IT IS THE RUNTIME ROW THAT MOVED. A host answering a memory warning
     // acts on the categories separately, so a neighbourhood priced into the
@@ -1562,4 +1589,77 @@ TEST_CASE("regional: a released level asked for its connectivity is still not ev
     CHECK(after.outside_layout == before.outside_layout);
     CHECK(same_floats(after.outside_positions, before.outside_positions));
     CHECK(s.memory().resident_levels == 4);
+}
+
+TEST_CASE("regional: a released neighbourhood rebuilds rather than reading as absent") {
+    // THE GATE THAT COULD NOT EXIST BEFORE THE RELEASE DID.
+    //
+    // While "no neighbourhood" had exactly one meaning — this level stores
+    // every child of every face of its parent — a null return was legal and its
+    // legality was decidable from the topology, so there was nothing to assert.
+    // A release creates a SECOND meaning, and the two must not be confused: a
+    // self-contained level legitimately has none, and a released one still
+    // needs one.
+    //
+    // Confusing them is silent: the boundary normals fall back to the level's
+    // own incomplete ring and no byte count, no position check and no
+    // evaluation test fails.
+    //
+    // IT COMPARES NORMALS, NOT POSITIONS, and that is the whole of why this
+    // gate works. Within one stamp the frame that WRITES a coefficient and the
+    // frame that READS it back are the same frame, so a wrong frame cancels and
+    // `P = S + Frame * Detail` comes out unchanged. The first version of this
+    // test compared positions and passed with the mark deleted. The normal is
+    // the quantity that is directly wrong.
+    const Mesh cage = grid_quads(4, 1.0f);
+    auto build_and_stamp = [&](bool trim) {
+        MultiresSurface s = build(cage);
+        REQUIRE(s.refine_patches_to_level({5, 6, 9, 10}, 3));
+        (void)s.normals_at(3);
+        REQUIRE_FALSE(s.cross_level_at(3).empty());
+        if (trim) REQUIRE(s.release_cross_levels() > 0);
+
+        // A RE-EVALUATION AFTER THE RELEASE — the path that would be wrong.
+        // `full_evaluate` asks for the neighbourhood, and a released one that
+        // read as absent would complete no ring at all.
+        s.set_sculpt_level(3);
+        mesh::MeshBrushSettings settings;
+        settings.radius = 0.25f;
+        settings.strength = 0.4f;
+        settings.center = s.positions_at(3)[0];
+        settings.direction = cf3(0, 1, 0);
+        {
+            mesh::MultiresSculptor sculptor(s);
+            sculptor.begin_stroke();
+            (void)sculptor.stamp(mesh::MeshBrush::Draw, settings);
+        }
+        // NOTHING ASKS FOR THE NEIGHBOURHOOD BEFORE THE NORMALS ARE READ.
+        // `cross_level_at` REBUILDS a released one, so a call here would repair
+        // the state under test and the comparison would pass either way.
+        const mesh::LevelTopology& t = s.topology_at(3);
+        const std::vector<cfloat3>& n = s.normals_at(3);
+        std::vector<cfloat3> out;
+        for (std::uint32_t f = 0; f < t.face_count; ++f) {
+            std::uint32_t arity = 0;
+            const std::uint32_t* c = t.face(f, &arity);
+            for (std::uint32_t i = 0; i < arity; ++i) out.push_back(n[c[i]]);
+        }
+        return out;
+    };
+
+    const std::vector<cfloat3> untrimmed = build_and_stamp(false);
+    const std::vector<cfloat3> released = build_and_stamp(true);
+    REQUIRE_FALSE(untrimmed.empty());
+    REQUIRE(untrimmed.size() == released.size());
+
+    // A trim must leave the surface exactly where a hierarchy that was never
+    // trimmed puts it. The neighbourhood is derived, so a rebuild is the same
+    // bytes and the normals are the same bits.
+    double worst = 0.0;
+    for (std::size_t i = 0; i < untrimmed.size(); ++i) {
+        const cfloat3 d = untrimmed[i] - released[i];
+        worst = std::max(worst, std::sqrt(static_cast<double>(cdot2(d))));
+    }
+    INFO("worst normal difference after a release: " << worst);
+    CHECK(worst == 0.0);
 }

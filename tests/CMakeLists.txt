@@ -98,6 +98,8 @@ add_executable(clay_unit_tests
   unit/test_c_mesh_layer_revision.cpp
   unit/test_bench_spread.cpp
   unit/test_bvh_refit.cpp
+  unit/test_topology_cache.cpp
+  unit/test_sustained_session.cpp
   unit/test_meshers.cpp
   unit/test_pick.cpp
   unit/test_io.cpp
@@ -156,6 +158,7 @@ add_executable(clay_unit_tests
   unit/test_c_cold_brick_seed.cpp
   unit/test_c_field_stamp.cpp
   unit/test_c_stamp_capture.cpp
+  unit/test_c_automask_reach.cpp
   unit/test_c_mask_from_group.cpp
   unit/test_volume_cull.cpp
   unit/test_deformer_cull.cpp

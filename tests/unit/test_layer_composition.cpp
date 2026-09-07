@@ -21,7 +21,10 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <vector>
@@ -524,4 +527,205 @@ TEST_CASE("c abi: a host can ask whether an older format can still say this") {
     REQUIRE(clay_document_set_layer_composition(doc.d, doc.cutter, CLAY_OP_ADD, CLAY_BLEND_HARD, 0,
                                                 0) == CLAY_OK);
     CHECK(clay_document_writable_at_minor(doc.d, 17, nullptr) == CLAY_OK);
+}
+
+// -- writing at an older layout (save-document-at-minor) ----------------------
+//
+// `clay_document_writable_at_minor` shipped with a comment recording its own
+// gap: "this ABI has no way to write at an older minor at all ... a save-at-minor
+// entry point is its own change". Closing it found the QUERY wrong too: it asked
+// only `scene::layer_blocking_minor`, which knows about a layer's composition
+// and nothing else, so a document carrying a multiresolution hierarchy — which
+// container minor 19 added an 'MRES' chunk for — reported CLAY_OK at minor 18,
+// which has no chunk to put one in. The header promises "nothing an artist
+// authored dropped".
+
+namespace {
+
+// A quad cage and a hierarchy over it, attached to a mesh layer. The state that
+// only minor 19 can write.
+struct HierarchyDoc {
+    clay_document* d = clay_document_create();
+    clay_layer_id layer = 0;
+    clay_mesh* borrowed = nullptr;
+
+    HierarchyDoc() {
+        std::vector<float> pos;
+        std::vector<std::uint32_t> idx;
+        const int n = 4;
+        for (int z = 0; z <= n; ++z)
+            for (int x = 0; x <= n; ++x) {
+                pos.push_back(0.5f * static_cast<float>(x) - 1.0f);
+                pos.push_back(0.0f);
+                pos.push_back(0.5f * static_cast<float>(z) - 1.0f);
+            }
+        for (std::uint32_t z = 0; z < static_cast<std::uint32_t>(n); ++z)
+            for (std::uint32_t x = 0; x < static_cast<std::uint32_t>(n); ++x) {
+                const std::uint32_t a = z * (n + 1) + x, b = a + 1, c = a + n + 1, dd = c + 1;
+                for (std::uint32_t i : {a, c, b, b, c, dd}) idx.push_back(i);
+            }
+        clay_mesh* mesh = nullptr;
+        REQUIRE(clay_mesh_from_triangles(pos.data(), pos.size() / 3, idx.data(), idx.size(),
+                                         &mesh) == CLAY_OK);
+        clay_mesh_layer_desc desc;
+        std::memset(&desc, 0, sizeof desc);
+        desc.struct_size = static_cast<std::uint32_t>(sizeof desc);
+        desc.name = "carried";
+        REQUIRE(clay_document_add_mesh_layer(d, mesh, &desc, &layer, &borrowed) == CLAY_OK);
+
+        clay_multires* surface = nullptr;
+        std::int32_t err = -1;
+        REQUIRE(clay_multires_from_mesh(mesh, nullptr, &surface, &err) == CLAY_OK);
+        clay_mesh_destroy(mesh);
+        // JUST THE CAGE. `io::multires_carries_detail` is `level_count() > 1 ||
+        // any sculpt layer`, so a hierarchy at one level holds nothing an artist
+        // made — `refine` below is what makes it hold something.
+        REQUIRE(clay_layer_take_multires(d, layer, surface) == CLAY_OK);
+        // AND THE HANDLE IS STILL OURS. `take` moves the HIERARCHY into the
+        // document and says so at its declaration -- "the handle follows its
+        // hierarchy rather than being left moved-from, so a host that built one
+        // and attached it keeps the handle it already has". Keeping it is the
+        // point; freeing it is still the caller's job, and freeing a borrowed
+        // handle is documented as safe rather than merely tolerated.
+        clay_multires_destroy(surface);
+    }
+
+    /// Add a level, which is what makes this hierarchy carry an artist's work.
+    void refine() {
+        clay_multires* surface = nullptr;
+        REQUIRE(clay_layer_multires(d, layer, &surface) == CLAY_OK);
+        REQUIRE(surface != nullptr);
+        std::int32_t err = -1;
+        REQUIRE(clay_multires_add_level(surface, nullptr, &err) == CLAY_OK);
+        // BORROWED, and the handle is a separate allocation from the hierarchy:
+        // "destroying the handle leaves the hierarchy in place". The level this
+        // just added stays on the document's copy, which is what the cases below
+        // then ask about.
+        clay_multires_destroy(surface);
+    }
+    ~HierarchyDoc() { clay_document_destroy(d); }
+    HierarchyDoc(const HierarchyDoc&) = delete;
+    HierarchyDoc& operator=(const HierarchyDoc&) = delete;
+};
+
+}  // namespace
+
+TEST_CASE("c abi: a hierarchy holding only its cage is a plainer file, not a different one") {
+    HierarchyDoc doc;
+    std::int32_t present = 0;
+    REQUIRE(clay_layer_multires_present(doc.d, doc.layer, &present) == CLAY_OK);
+    REQUIRE(present == 1);
+
+    // A HIERARCHY AT ONE LEVEL holds nothing an artist made: it is the cage,
+    // which the mesh layer carries anyway. Losing it below minor 19 is the
+    // ordinary "smaller or plainer" degrade every earlier minor makes, and it
+    // is not refused — the line `io::multires_carries_detail` already drew.
+    clay_layer_id blocking = 99;
+    CHECK(clay_document_writable_at_minor(doc.d, 18, &blocking) == CLAY_OK);
+    CHECK(blocking == 0);
+
+    clay_blob* at18 = nullptr;
+    REQUIRE(clay_document_save_memory_at_minor(doc.d, 18, &at18, nullptr) == CLAY_OK);
+    REQUIRE(at18 != nullptr);
+    clay_blob* at19 = nullptr;
+    REQUIRE(clay_document_save_memory_at_minor(doc.d, 19, &at19, nullptr) == CLAY_OK);
+
+    // The 18 stream is SHORTER, because it carries no 'MRES' chunk. That is the
+    // whole claim: a chunk a minor did not have is not written at that minor.
+    CHECK(clay_blob_size(at18) < clay_blob_size(at19));
+
+    // ...and the 18 file reopens with the cage and no hierarchy.
+    clay_document* back = nullptr;
+    REQUIRE(clay_document_load_memory(clay_blob_data(at18), clay_blob_size(at18), &back) ==
+            CLAY_OK);
+    std::int32_t back_present = 1;
+    CHECK(clay_layer_multires_present(back, doc.layer, &back_present) == CLAY_OK);
+    CHECK(back_present == 0);
+    clay_document_destroy(back);
+    clay_blob_destroy(at18);
+    clay_blob_destroy(at19);
+}
+
+TEST_CASE("c abi: a hierarchy an artist has worked in refuses an older layout") {
+    HierarchyDoc doc;
+    // A LEVEL ABOVE THE CAGE. That is a decision an artist made, and it cannot
+    // be recovered from a file that has no chunk to carry it.
+    doc.refine();
+
+    clay_layer_id blocking = 0;
+    // REGRESSION: this returned CLAY_OK before document_blocking_minor existed,
+    // for a document whose hierarchy minor 18 has no chunk to carry.
+    CHECK(clay_document_writable_at_minor(doc.d, 18, &blocking) == CLAY_ERROR_UNSUPPORTED);
+    CHECK(blocking == doc.layer);
+    CHECK(std::strlen(clay_last_error()) > 0);
+
+    // The save refuses with the SAME answer, from the same predicate, so asking
+    // before and being refused after cannot disagree.
+    clay_blob* blob = reinterpret_cast<clay_blob*>(1);  // must be nulled on refusal
+    blocking = 0;
+    CHECK(clay_document_save_memory_at_minor(doc.d, 18, &blob, &blocking) ==
+          CLAY_ERROR_UNSUPPORTED);
+    CHECK(blob == nullptr);
+    CHECK(blocking == doc.layer);
+
+    // ...and at 19 it writes.
+    REQUIRE(clay_document_save_memory_at_minor(doc.d, 19, &blob, nullptr) == CLAY_OK);
+    REQUIRE(blob != nullptr);
+    clay_blob_destroy(blob);
+}
+
+TEST_CASE("c abi: a refused save leaves the file that was there alone") {
+    HierarchyDoc doc;
+    const char* path = "save_at_minor_refusal.clayspace";
+    // A good file first, at this build's layout.
+    REQUIRE(clay_document_save_at_minor(doc.d, path, 19, nullptr) == CLAY_OK);
+    std::vector<std::uint8_t> before;
+    {
+        std::ifstream f(path, std::ios::binary);
+        REQUIRE(f.good());
+        before.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    REQUIRE(!before.empty());
+
+    doc.refine();
+
+    // A SAVE THAT CANNOT REPRESENT THE DOCUMENT MUST NOT FIRST DESTROY THE LAST
+    // ONE THAT COULD. Nothing is written, so the bytes on disk are the bytes
+    // that were there.
+    CHECK(clay_document_save_at_minor(doc.d, path, 18, nullptr) == CLAY_ERROR_UNSUPPORTED);
+    std::vector<std::uint8_t> after;
+    {
+        std::ifstream f(path, std::ios::binary);
+        REQUIRE(f.good());
+        after.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    CHECK(after == before);
+    std::remove(path);
+}
+
+TEST_CASE("c abi: save-at-minor agrees with the query, and refuses the same arguments") {
+    CDoc doc;
+    REQUIRE(clay_document_set_layer_composition(doc.d, doc.cutter, CLAY_OP_SUBTRACT,
+                                                CLAY_BLEND_HARD, 0, 0) == CLAY_OK);
+    clay_blob* blob = nullptr;
+    clay_layer_id blocking = 0;
+    CHECK(clay_document_save_memory_at_minor(doc.d, 17, &blob, &blocking) ==
+          CLAY_ERROR_UNSUPPORTED);
+    CHECK(blocking == doc.cutter);
+    CHECK(blob == nullptr);
+
+    // The two calls answer from one predicate.
+    clay_layer_id asked = 0;
+    CHECK(clay_document_writable_at_minor(doc.d, 17, &asked) == CLAY_ERROR_UNSUPPORTED);
+    CHECK(asked == blocking);
+
+    // Above this build's layout writes this build's layout — the question is
+    // only about writing DOWN — and the argument rules match the query's.
+    CHECK(clay_document_save_memory_at_minor(doc.d, 999, &blob, nullptr) == CLAY_OK);
+    clay_blob_destroy(blob);
+    blob = nullptr;
+    CHECK(clay_document_save_memory_at_minor(doc.d, 0, &blob, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_document_save_at_minor(doc.d, nullptr, 18, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_document_save_at_minor(nullptr, "x", 18, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
 }

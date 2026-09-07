@@ -182,8 +182,11 @@ void MultiresSculptor::bind() {
     if (!same_level) level_deltas_.clear();
 
     Mesh& mesh = surface_.level_mesh(level);
-    const Adjacency& adjacency = surface_.level_adjacency(level);
-    sculptor_ = std::make_unique<MeshSculptor>(mesh, adjacency);
+    // SHARED rather than copied. `MeshSculptor(Mesh&, Adjacency)` takes the
+    // adjacency by value, so every rebind — a level change, a cache generation
+    // change — duplicated the level's CSR arrays: 0.2-0.78 ms on a
+    // 296k-triangle level, for a partition the hierarchy is already holding.
+    sculptor_ = std::make_unique<MeshSculptor>(mesh, surface_.level_adjacency_shared(level));
     bound_level_ = level;
     // THE SURFACE THIS LEVEL IS PART OF, which for a regionally refined
     // hierarchy is more than the level holds. Without it every walk inside the
