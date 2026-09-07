@@ -297,10 +297,17 @@ TEST_CASE("intersect delta: rotation and scale, not only translation") {
         check("uniformly scaled down", std::move(f));
     }
     {
-        // The per-axis scale rides the same command (#320), so it is the same
-        // edit kind and must take the same path.
+        // The per-axis scale rides the same command (#320), and it is REFUSED
+        // rather than proved -- see the fixture below for the counterexample.
+        //
+        // This one asserted the opposite until it was reviewed, and it could
+        // never have caught its own mistake: r = 0.6 times (2.2, 0.5, 1.4)
+        // gives a box reaching x = 1.52, past the body's own surface, so
+        // everywhere the operand's field is short the accumulated value is a
+        // larger positive and wins the max. The short value is never returned.
         Fixture f = base(Prim::sphere(0.6f), hard(), cf3(0, 0.1f, 0), cf3(0.2f, 0.1f, 0));
         f.after_axes = cf3(2.2f, 0.5f, 1.4f);
+        f.provable = false;
         check("squashed per axis", std::move(f));
     }
     {
@@ -309,6 +316,49 @@ TEST_CASE("intersect delta: rotation and scale, not only translation") {
         f.after = turned(cf3(0.45f, 0.3f, 0.2f), cf3(1, 0.2f, 0), 1.4f, 1.6f);
         check("moved, turned and scaled at once", std::move(f));
     }
+}
+
+TEST_CASE("intersect delta: a squashed placement is refused, and here is why") {
+    // THE FIELD IS NOT A DISTANCE where the placement is not a similarity:
+    // `cscale_nu_dist` multiplies the local value by min(s), so what the tape
+    // emits outside the operand's box is short of the true distance by up to
+    // max(s)/min(s). The box is right -- item_geometry_bound composes
+    // scale_matrix -- and the FIELD outside it is not > band where the box says
+    // it is, which is the whole premise. Same mechanism as the deformer chain,
+    // and the reason placement.h excludes a squashed layer from the sibling
+    // classifier.
+    //
+    // The fixture puts the shortfall where the max RETURNS it, which is what
+    // "squashed per axis" above lacks. A sphere r = 0.5 under axes
+    // (1, 1, 0.1) is a disc: x, y in [-0.5, 0.5], z in [-0.05, 0.05], and its
+    // field along x is 0.1 * (|x - cx| - 0.5), a TENTH of the distance. Swept
+    // from x = 0.3 to x = -0.3 the geometry union is x in [-0.8, 0.8]; hard
+    // blends, no groups, one layer, so no pad, no group support and no fold --
+    // the reported box IS that union and a consumer dilates it to x <= 0.95.
+    // At x = 2.0, 1.05 outside it, the field reads 0.12 before the move and
+    // 0.18 after: the sample LEAVES the band in a brick nothing dirtied. The
+    // body at r = 2.4 reads -0.4 there and loses the max to both.
+    auto squashed = [](cfloat3 node_axes, cfloat3 layer_axes, float body_radius) {
+        Fixture f;
+        Layer& l = f.doc.add_sdf_layer("body");
+        l.scale_axes = layer_axes;
+        f.layer = l.id;
+        l.sdf->insert(item(Prim::sphere(body_radius), cf3(0, 0, 0), Op::Add));
+        Node cut = item(Prim::sphere(0.5f), cf3(0.3f, 0, 0), Op::Intersect);
+        cut.scale_axes = node_axes;
+        f.cutter = l.sdf->insert(cut);
+        f.after = at(cf3(-0.3f, 0, 0));
+        f.after_axes = node_axes;
+        f.provable = false;
+        return f;
+    };
+    check("a squashed operand", squashed(cf3(1, 1, 0.1f), cf3(1, 1, 1), 2.4f));
+    // ...and the LAYER's own per-axis scale (#373), which composes into the
+    // same distance factor -- min(1, 1, 0.2) = 0.2, a field a fifth of the
+    // distance -- against a box drawn against the whole of it. r = 1.8 keeps
+    // the body's squashed value below the operand's at x = 1.33, where the
+    // sample leaves the band 0.38 outside the box.
+    check("a squashed layer", squashed(cf3(1, 1, 1), cf3(1, 1, 0.2f), 1.8f));
 }
 
 TEST_CASE("intersect delta: where the operand sits and where it goes") {

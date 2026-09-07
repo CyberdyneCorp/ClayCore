@@ -29,9 +29,18 @@
       `BM_OperandDragSubtract` at the reference and ten-times extents, reporting
       bound, refill and remesh time beside the dirty-brick count and the AABB
       volume ratio. NO threshold added to `tools/check_bench.py`.
+- [x] Refuse a NON-UNIFORM per-axis scale on the operand or on a layer holding
+      it (`placed_is_similarity` in `geometry_reach_in_layer`): the field is
+      short of the distance by up to max(s)/min(s), so it is not `> band` where
+      the box says it is. With fixtures that put the shortfall where
+      `max(acc, item)` RETURNS it, which the pre-existing "squashed per axis"
+      one did not.
 - [x] Prove each gate fails with the change reverted, and that the revert
       compiles: the delta disabled (delta 900 -> 15,600 bricks, identical to the
-      conservative bound, three cases failing), and the fold term dropped (203
-      sign changes in the probe, 93 stale bricks in the oracle).
+      conservative bound, three cases failing); the fold term dropped (203 sign
+      changes in the probe, 93 stale bricks in the oracle); and the squash
+      refusal dropped (225 band-entered and 225 band-left samples on the
+      squashed operand, worst |db| 0.060 at (2, 0, 0); 568 and 527 on the
+      squashed layer, worst 0.120 at (1, 0, 0)).
 - [x] Bump CMakeLists.txt, pyproject.toml and CLAY_ABI_* to 0.89.0.
 - [x] Document the entry point in `bindings/c/clay.h` and `docs/05-claycore-library.md`.

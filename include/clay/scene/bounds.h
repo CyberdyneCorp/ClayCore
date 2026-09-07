@@ -561,12 +561,20 @@ math::Aabb node_influence_bound_in_document(const Document& doc, const SdfConten
 // (BrickCache::mark_dirty dilates by the band, and the seed store dilates each
 // brick by band + pad).
 //
+// A NON-UNIFORM PER-AXIS SCALE, at the item or at the layer, is refused for the
+// same reason a deformer chain is. The box itself is right -- it composes
+// `scale_matrix` -- but the FIELD is not a distance there: `cscale_nu_dist`
+// multiplies the local value by the smallest component, so what the tape emits
+// is short of the true distance by up to max(s)/min(s) (scene/types.h,
+// `cfi_scale_nonuniform`). "> band outside the box" would then hold only out to
+// `band * max(s)/min(s)`, and nothing here dilates for the difference.
+//
 // nullopt where the argument does not reach, and a caller that gets one must
 // keep the conservative influence bound: an absent, hidden or grouped node; an
 // item or ancestor group whose combine is a spatial MORPH (a lerp whose weight
 // saturates -- pointwise, but with no support that describes how far a change
-// travels); an item with no finite geometry; a fold above that is a morph; an
-// empty or infinite box anywhere in the walk.
+// travels); an item with no finite geometry; a squashed item or layer; a fold
+// above that is a morph; an empty or infinite box anywhere in the walk.
 std::optional<math::Aabb> item_geometry_reach_in_document(const Document& doc,
                                                           const SdfContent& content, NodeId id);
 

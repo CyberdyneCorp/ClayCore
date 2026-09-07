@@ -75,12 +75,23 @@ conservative union — for:
 | an op that is not `Intersect` | nothing to narrow: the influence bound is already this box |
 | a node absent, hidden, or a group on either side | there is no operand to sweep |
 | a deformer chain on the operand | a warped field underestimates distance by its Lipschitz factor, and the bound carries no dilation for that |
+| a non-uniform per-axis scale on the operand or on a layer holding it | the same underestimate, by exactly `max(s)/min(s)`: `cscale_nu_dist` multiplies the local distance by the SMALLEST component, so the field outside the box is short of the distance the box was drawn against and `> band` holds only out to `band * max(s)/min(s)`. The box itself is right — `item_geometry_bound` composes `scale_matrix` — which is what makes this a field refusal and not a geometry one. `placement.h` excludes a squashed layer from the sibling classifier for the same mechanism |
 | a sampled-volume primitive | its field outside the samples it stores is whatever the extrapolation says |
 | an unbounded primitive, an infinite grid repeat | no finite geometry to sweep |
 | a GATE on the operand | a gated combine is `mix(acc, combine(acc, item), mask)`, and a lerp of a beyond-band value is not beyond band |
 | a gate or a spatial morph ANYWHERE in the layer's chain | the same lerp, downstream: it carries the beyond-band difference into the band at any distance |
 | a morph in a layer fold at or above the layer | the same, one level up |
 | an infinite or non-finite support anywhere, an empty or infinite box | nothing to claim |
+
+**The squash rule was found by review, and the fixture that should have caught
+it certified the opposite.** "squashed per axis" asserted the bound was PROVABLE
+for `scale_axes = (2.2, 0.5, 1.4)` and could not see the defect: where that
+operand's field is short (between 0.15 and 0.66 of its box) the body's own
+accumulated value already dominates the `max`, so the intersect never returns
+the short value there. The fixture now asserts the refusal, and two new ones
+put the short value where the max DOES return it — a disc-shaped operand
+(`min(s) = 0.1`) inside a body big enough that `max(acc, item)` is the item —
+so that the revert has somewhere to fail.
 
 The gate and morph rules are the ones a reader is most likely to think
 unnecessary. They are the cases where the difference between "band-clamped

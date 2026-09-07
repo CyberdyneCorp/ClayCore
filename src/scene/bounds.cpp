@@ -1714,6 +1714,17 @@ bool dilate_by_ancestors(const SdfContent& content, NodeId id, const Layer& laye
 std::optional<Aabb> geometry_reach_in_layer(const Document& doc, const SdfContent& content,
                                             const Node& item, NodeId id, const Layer& layer) {
     if (!folds_from_layer_are_pointwise(doc, layer.id)) return std::nullopt;
+    // A NON-UNIFORM per-axis scale at EITHER level, refused for the reason a
+    // deformer chain is. `cscale_nu_dist` multiplies the local distance by the
+    // SMALLEST component, so the field this item emits is short of the true
+    // distance by up to max(s)/min(s) -- scene/types.h says exactly that, and
+    // `cfi_scale_nonuniform` records it on the tape. The whole argument here is
+    // "outside the box dilated by the band, the item's own field is > band";
+    // with a squashed placement that only holds out to `band * max(s)/min(s)`,
+    // and this box carries no dilation for the difference. `placement.h`
+    // excludes a squashed layer from the sibling classifier for the same
+    // mechanism.
+    if (!placed_is_similarity(layer, item)) return std::nullopt;
     Aabb b = item_geometry_bound(item, layer);
     if (b.empty() || b.is_infinite()) return std::nullopt;
     // THE CHAIN PAD, which a local op's bound does not carry and this one must

@@ -998,10 +998,14 @@ side is not an answer. Everything else reports nothing and keeps the
 conservative union, which is what makes the change narrow: no other edit's
 region moves at all. It refuses a deformed operand (a warped field
 underestimates distance by a factor the bound carries no dilation for), a
-sampled volume, an unbounded or infinitely repeated primitive, a GATE on the
-operand or anywhere in the layer's chain, and a spatial morph in the chain or in
-a fold above — the cases where "band-clamped equal" stops implying "equal", and
-a lerp downstream can carry a beyond-band difference back into the band.
+NON-UNIFORM per-axis scale on the operand or on its layer (the same
+underestimate, by a factor of `max(s)/min(s)` — `cscale_nu_dist` multiplies the
+local distance by the smallest component, so the field beyond the box is not the
+distance the box was drawn against), a sampled volume, an unbounded or
+infinitely repeated primitive, a GATE on the operand or anywhere in the layer's
+chain, and a spatial morph in the chain or in a fold above — the cases where
+"band-clamped equal" stops implying "equal", and a lerp downstream can carry a
+beyond-band difference back into the band.
 
 THE CHAIN PAD IS A TERM HERE AND IS NOT ONE IN A LOCAL OP'S BOUND, which is the
 one place the two bounds are not the same expression. A local combine outside

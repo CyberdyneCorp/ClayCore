@@ -1181,8 +1181,9 @@ clay_result clay_layer_set_transform_nonuniform(clay_document* doc, clay_layer_i
  * it need to, since both are safe to dirty. It falls back for an op that is not
  * an intersect (whose influence bound is already this box), a node that is
  * missing, hidden or a group, a deformer chain, a sampled-volume or unbounded
- * primitive, an infinite grid repeat, a gate, a spatial morph or a gate
- * anywhere in the layer's chain, and a morph in a layer fold above it. It says
+ * primitive, an infinite grid repeat, a gate, a NON-UNIFORM per-axis scale on
+ * the operand or on its layer, a spatial morph or a gate anywhere in the
+ * layer's chain, and a morph in a layer fold above it. It says
  * nothing about any OTHER edit: two moves reported one at a time are two boxes,
  * and a host that dirties by only the last one has skipped the first.
  *

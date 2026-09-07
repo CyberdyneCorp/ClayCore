@@ -34,11 +34,18 @@ content. A caller SHALL union the two sides; one side alone is not an answer.
   the meshing band, or leaves it
 - **AND** the node's influence bound still reports the layer's extent
 
+The proof rests on the operand's own field being a DISTANCE outside its geometry
+bound. Where the placement is not a similarity — a non-uniform `scale_axes` on
+the item or on a layer holding it — the field is short of the true distance by
+up to `max(s)/min(s)`, and the engine SHALL report nothing rather than a box the
+field does not honour.
+
 #### Scenario: an edit the proof does not cover
 
 - **GIVEN** an Intersect operand that is deformed, gated, unbounded, infinitely
-  repeated, a sampled volume, or sits in a layer whose chain holds a spatial
-  morph or a gate
+  repeated, a sampled volume, carries a non-uniform per-axis scale or sits in a
+  layer that does, or sits in a layer whose chain holds a spatial morph or a
+  gate
 - **WHEN** it is moved by a SetTransformCmd
 - **THEN** no surface-delta bound is reported
 - **AND** the caller dirties by the conservative influence bound instead

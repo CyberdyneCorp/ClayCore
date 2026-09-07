@@ -300,6 +300,9 @@ math::Aabb command_influence_bound(const Document& doc, const Command& cmd,
 //   - a node that is missing, hidden or a group on either side;
 //   - a deformer chain (its Lipschitz factor is not in the proof), a volume
 //     primitive, an unbounded primitive, an infinite grid repeat, a gate;
+//   - a NON-UNIFORM per-axis scale on the operand or on a layer holding it,
+//     whose field is short of the true distance by up to max(s)/min(s) and so
+//     is not > band where the box says it is;
 //   - a morph or a gate anywhere in the layer's chain, a morph in a fold above
 //     it, an infinite support, a box that fails a numerical sanity check --
 //     all of which `item_geometry_reach_in_document` refuses.
