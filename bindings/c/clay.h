@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 94
+#define CLAY_ABI_MINOR 95
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -1639,14 +1639,64 @@ clay_result clay_document_layer_composition(const clay_document* doc, clay_layer
  * is only ever about writing DOWN. A minor of 0 is CLAY_ERROR_INVALID_ARGUMENT.
  * out_blocking_layer may be NULL, and is set to 0 on CLAY_OK.
  *
- * A RECORDED GAP, not an oversight: this ABI has no way to write at an older
- * minor at all. clay_document_save takes a path and clay_document_save_memory
- * takes a blob; neither takes a version, and the layout is a parameter on the
- * C++ serializer that does not cross this boundary. So today the honest use of
- * this call is "warn me that this document has become one an older build cannot
- * open", and a save-at-minor entry point is its own change. */
+ * THE GAP THIS RECORDED IS CLOSED (ABI 0.93.0): clay_document_save_at_minor and
+ * clay_document_save_memory_at_minor write at the layout this call reports on,
+ * and refuse with the same answer it gives.
+ *
+ * AND CLOSING IT FOUND THIS CALL WRONG. It asked only whether a layer's
+ * COMPOSITION could be written, because composition was the only field whose
+ * absence changed the model when it was written. Container minor 19 added an
+ * 'MRES' chunk carrying a mesh layer's multiresolution hierarchy, and this call
+ * did not learn about it: a document with a hierarchy reported CLAY_OK at minor
+ * 18, which has no chunk to put one in. It now answers for the whole document.
+ *
+ * A hierarchy carrying no DETAIL still reports CLAY_OK, and that is the same
+ * line every other minor draws: subdivision is deterministic, so a hierarchy
+ * without detail rebuilds from its cage and losing it is the ordinary "smaller
+ * or plainer" degrade. Detail is something an artist made and cannot be
+ * rebuilt. */
 clay_result clay_document_writable_at_minor(const clay_document* doc, uint32_t minor,
                                             clay_layer_id* out_blocking_layer);
+
+/* -- WRITING AT AN OLDER LAYOUT (ABI 0.93.0) ---------------------------------
+ *
+ * Save this document at scene format minor `minor` rather than at this build's
+ * own. What a host needs to hand a file to a build that has not been updated.
+ *
+ * REFUSED, NEVER DOWNGRADED. CLAY_ERROR_UNSUPPORTED when `minor` cannot say
+ * what this document says, with *out_blocking_layer naming the first layer that
+ * blocks it and clay_last_error spelling out why — exactly the answer
+ * clay_document_writable_at_minor gives, from the same predicate, so asking
+ * before and being refused after cannot disagree.
+ *
+ * NO NEW ERROR CODE FOR IT, deliberately. CLAY_ERROR_UNSUPPORTED already means
+ * this and already carries the blocking layer through the query above; a second
+ * code for one condition would be a second answer to one question, and a host
+ * would have to handle both to be correct.
+ *
+ * NOTHING IS WRITTEN ON A REFUSAL. An existing file at `path` is left exactly
+ * as it was: a save that cannot represent the document must not first destroy
+ * the last one that could.
+ *
+ * A `minor` at or above this build's own layout writes this build's layout,
+ * because the question is only ever about writing DOWN. A minor of 0 is
+ * CLAY_ERROR_INVALID_ARGUMENT. out_blocking_layer may be NULL.
+ *
+ * WHAT AN OLDER MINOR ACTUALLY LOSES, said once rather than per call: 14 comes
+ * back unsquashed, 15's instances come back as copies, 17 writes each payload
+ * once per node, and below 19 a hierarchy carrying no detail is absent and
+ * rebuilds from its cage. Every one of those is smaller or plainer. The two
+ * that would be a DIFFERENT SCULPTURE — a composition below 18, a hierarchy
+ * with detail below 19 — are refused instead. */
+clay_result clay_document_save_at_minor(const clay_document* doc, const char* path,
+                                        uint32_t minor, clay_layer_id* out_blocking_layer);
+
+/* The same write into memory. Free the result with clay_blob_destroy; on a
+ * refusal *out_blob is left NULL rather than set to an empty blob, so a caller
+ * that checks the pointer and a caller that checks the result agree. */
+clay_result clay_document_save_memory_at_minor(const clay_document* doc, uint32_t minor,
+                                               clay_blob** out_blob,
+                                               clay_layer_id* out_blocking_layer);
 
 /* -- what a re-placement guarantees (ABI 0.82.0) ----------------------------
  *
