@@ -7073,7 +7073,12 @@ typedef struct clay_mesh_brush_desc {
     float automask_normal_angle;
     /* BOUNDARY: how many rings of fade to leave at an open border. */
     int32_t automask_boundary_rings;
-    /* CAVITY: how much of the measured cavity to apply, in [0,1]. */
+    /* CAVITY: how much of the measured cavity to apply, in [0,1]. This is a
+     * SLIDER, so ZERO IS OFF and is passed straight through — unlike the two
+     * fields above it, where zero reads as the engine's default. A slider an
+     * artist dragged to zero must cost nothing, and reading it as "unset" made
+     * it mask the crevices completely instead; a preset saved at zero came back
+     * at full. Take clay_mesh_brush_defaults if you want the engine's 1.0. */
     float automask_cavity_strength;
     /* THE STAMP'S GRAIN: how far the stamp's in-plane axes are turned about its
      * own facing, in radians. This is what makes a rake, a chisel, clay strips,

@@ -19,6 +19,7 @@
 #include "clay/mesh/quad_mesh.h"
 #include "clay/mesh/sculpt.h"
 #include "clay/pick/pick.h"
+#include "clay/voxel/groups.h"
 #include "clay/scene/tape.h"
 #include "scene_utils.h"
 
@@ -2024,6 +2025,129 @@ TEST_CASE("automask: the cavity automask is the painted cavity mask's own estima
         CHECK(sculptor.automask_inputs().cavity(p) ==
               brush::measure_at(sphere, brush::SurfaceMeasure::Cavity, p, measure));
     }
+}
+
+TEST_CASE("automask: a placed layer's cavity and group lattices are asked where the layer is") {
+    // THE REGRESSION. `mesh_mask_gate` places a vertex with `mesh_to_world`
+    // before sampling the painted mask; `mesh_automask_inputs`, three lines
+    // below it, did not — so on a layer whose transform is not the identity, a
+    // painted cavity mask and a cavity AUTOMASK protected different crevices of
+    // one surface. That is the exact disagreement `automask.h` says having a
+    // single estimator prevents, and one estimator does not prevent it when its
+    // two callers ask it about different points.
+    //
+    // Invisible in every other automask case in this file, and not because it
+    // is subtle: they all leave the layer at the origin, where the transform is
+    // the identity and the error is exactly zero.
+    math::Transform to_world;
+    to_world.position = cf3(5.0f, 0.0f, 0.0f);
+
+    // TWO OVERLAPPING SPHERES, not one. A single sphere is CONVEX and its
+    // cavity measure is zero everywhere -- on the surface and five units away
+    // from it alike -- so a fixture built on one cannot tell a placed sample
+    // from an unplaced one, and the `any_differed` guard at the end of this
+    // case caught exactly that. The union of two leaves a concave seam, and the
+    // seam is what a cavity automask is for.
+    //
+    // Centred where the layer ENDS UP, so the two samples are different
+    // regimes: across the crease, and five units clear of the shape.
+    auto crease = [](cfloat3 p) {
+        const float a = kernel::clength(p - cf3(5.0f, -0.35f, 0.0f)) - 0.5f;
+        const float b = kernel::clength(p - cf3(5.0f, 0.35f, 0.0f)) - 0.5f;
+        return a < b ? a : b;
+    };
+    brush::MeasureSettings measure;
+    measure.scale = 0.5f;
+
+    Mesh m = plane_grid(12, 1.0f);
+    MeshSculptor sculptor(m);
+
+    brush::MeshStrokeOptions options;
+    options.mesh_to_world = to_world;
+    options.cavity_field = crease;
+    options.cavity_measure = measure;
+    options.groups = nullptr;
+
+    std::vector<brush::StrokeSample> path;
+    for (int i = 0; i < 4; ++i) {
+        brush::StrokeSample sample;
+        sample.position = cf3(-0.3f + 0.2f * static_cast<float>(i), 0.0f, 0.0f);
+        path.push_back(sample);
+    }
+    brush::StrokePreset preset;
+    preset.radius = 0.25f;
+    preset.spacing = 0.5f;
+    const std::vector<brush::Stamp> stamps = brush::resolve_stroke(path, preset);
+    REQUIRE(!stamps.empty());
+
+    MeshBrushSettings settings;
+    settings.strength = 0.5f;
+    settings.automask.factors = static_cast<std::uint32_t>(mesh::AutomaskFactor::Cavity);
+    brush::apply_to_mesh(sculptor, stamps, MeshBrush::Draw, settings, nullptr, nullptr, options);
+
+    REQUIRE(static_cast<bool>(sculptor.automask_inputs().cavity));
+    bool any_differed = false;
+    for (float x = -0.4f; x <= 0.4f; x += 0.2f) {
+        const cfloat3 p = cf3(x, 0.0f, 0.0f);
+        CAPTURE(x);
+        const float placed =
+            brush::measure_at(crease, brush::SurfaceMeasure::Cavity, to_world.apply(p), measure);
+        const float unplaced =
+            brush::measure_at(crease, brush::SurfaceMeasure::Cavity, p, measure);
+        CAPTURE(placed);
+        CAPTURE(unplaced);
+        CHECK(sculptor.automask_inputs().cavity(p) == placed);
+        if (placed != unplaced) any_differed = true;
+    }
+    // Or every CHECK above would hold with the placement deleted, and the case
+    // would be a test of nothing.
+    CHECK(any_differed);
+}
+
+TEST_CASE("automask: a placed layer's group lattice is asked where the layer is") {
+    math::Transform to_world;
+    to_world.position = cf3(5.0f, 0.0f, 0.0f);
+
+    Mesh m = plane_grid(12, 1.0f);
+    MeshSculptor sculptor(m);
+
+    // A lattice that answers "group 1" ONLY where the layer ends up. Unplaced,
+    // every vertex reads group 0, none matches the active group, and the stamp
+    // is masked out whole -- which is indistinguishable from a stroke that
+    // reached nothing, and is exactly how this stayed unnoticed.
+    voxel::GroupField lattice(0.05f);
+    lattice.fill(math::Aabb{cf3(4.0f, -1.0f, -1.0f), cf3(6.0f, 1.0f, 1.0f)}, 1);
+
+    brush::MeshStrokeOptions options;
+    options.mesh_to_world = to_world;
+    options.groups = &lattice;
+    options.active_group = 1;
+
+    std::vector<brush::StrokeSample> path;
+    for (int i = 0; i < 4; ++i) {
+        brush::StrokeSample sample;
+        sample.position = cf3(-0.3f + 0.2f * static_cast<float>(i), 0.0f, 0.0f);
+        path.push_back(sample);
+    }
+    brush::StrokePreset preset;
+    preset.radius = 0.25f;
+    preset.spacing = 0.5f;
+    const std::vector<brush::Stamp> stamps = brush::resolve_stroke(path, preset);
+
+    MeshBrushSettings settings;
+    settings.strength = 0.5f;
+    settings.automask.factors = static_cast<std::uint32_t>(mesh::AutomaskFactor::SurfaceGroup);
+    const std::vector<cfloat3> before = m.positions;
+    const std::size_t applied =
+        brush::apply_to_mesh(sculptor, stamps, MeshBrush::Draw, settings, nullptr, nullptr,
+                             options);
+    CHECK(applied > 0);
+    CHECK(moved_count(before, m.positions) > 0);
+
+    // The lattice itself agrees, asked directly: this is the value the gate
+    // reads, and it is 1 only at the placed point.
+    CHECK(static_cast<std::uint32_t>(lattice.at(to_world.apply(cf3(0, 0, 0)))) == 1u);
+    CHECK(static_cast<std::uint32_t>(lattice.at(cf3(0, 0, 0))) != 1u);
 }
 
 TEST_CASE("adjacency over a mesh whose indices point past its vertices reads nothing past the end") {

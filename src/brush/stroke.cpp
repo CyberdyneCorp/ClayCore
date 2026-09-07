@@ -438,20 +438,34 @@ namespace {
 // would be two answers about one surface.
 bool mesh_automask_inputs(const MeshStrokeOptions& options, mesh::AutomaskInputs* out) {
     if (!options.cavity_field && !options.groups) return false;
+    // BOTH OF THESE ARE WORLD-ADDRESSED AND THE VERTEX IS NOT, so the point is
+    // placed before either is asked — the same conversion `mesh_mask_gate` just
+    // above makes, and it belongs here for the same reason.
+    //
+    // It was missing, and what it cost was precise: on a layer whose transform
+    // is not the identity, a painted cavity mask was sampled at the vertex's
+    // world position and a cavity AUTOMASK at its mesh-local one, so the two
+    // protected different crevices of one surface. That is the exact
+    // disagreement automask.h says having a single estimator exists to prevent,
+    // and having one estimator does not prevent it if the two callers ask it
+    // about different points. An untransformed layer is the identity and was
+    // never wrong, which is why this survived: it is invisible in every fixture
+    // that does not place its layer.
+    const math::Transform to_world = options.mesh_to_world;
     if (options.cavity_field) {
         const std::function<float(kernel::cfloat3)>& field = options.cavity_field;
         const MeasureSettings measure = options.cavity_measure;
         // THE SAME ESTIMATOR a painted cavity mask uses. Not a mesh-side
         // curvature from a vertex ring — two implementations of one measure is
         // two answers about one surface.
-        out->cavity = [field, measure](kernel::cfloat3 p) {
-            return measure_at(field, SurfaceMeasure::Cavity, p, measure);
+        out->cavity = [field, measure, to_world](kernel::cfloat3 p) {
+            return measure_at(field, SurfaceMeasure::Cavity, to_world.apply(p), measure);
         };
     }
     if (options.groups) {
         const voxel::GroupField* groups = options.groups;
-        out->group = [groups](kernel::cfloat3 p) -> std::uint32_t {
-            return static_cast<std::uint32_t>(groups->at(p));
+        out->group = [groups, to_world](kernel::cfloat3 p) -> std::uint32_t {
+            return static_cast<std::uint32_t>(groups->at(to_world.apply(p)));
         };
     }
     out->active_group = options.active_group;

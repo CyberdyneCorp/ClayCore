@@ -167,6 +167,56 @@ TEST_CASE("c brush preset: automasking crosses on the brush descriptor") {
     CHECK(back.brush.automask_boundary_rings == 3);
 }
 
+TEST_CASE("c brush preset: a cavity slider at zero comes back at zero") {
+    // THE REGRESSION. read_mesh_brush treated automask_cavity_strength the way
+    // it treats the two appended scalars beside it -- "zero means the caller
+    // declared an older layout, give them the engine default" -- and that rule
+    // is wrong for this one, because it is a SLIDER and zero is a value a host
+    // MEANS. mesh/automask.h says of it: 0 is "off even when the factor bit is
+    // set, which is what a host's slider at zero should cost".
+    //
+    // So a preset saved with the cavity slider dragged to off deserialized at
+    // FULL, and full is the opposite of off. This is the path that could see
+    // it: the stamp could not, because CLAY_AUTOMASK_CAVITY is inert from C
+    // until a descriptor carries the field it measures, so the value reached
+    // MeshBrushSettings and was never consulted. A round trip consults it.
+    clay_brush_preset p{};
+    p.struct_size = sizeof(p);
+    REQUIRE(clay_brush_preset_by_name("Standard", &p) == CLAY_OK);
+
+    // The engine's own default is 1, so a test that never sets the field would
+    // pass whatever this call does. Zero has to be asked for.
+    REQUIRE(p.brush.automask_cavity_strength == doctest::Approx(1.0f));
+    p.brush.automask_factors = CLAY_AUTOMASK_CAVITY;
+    p.brush.automask_cavity_strength = 0.0f;
+
+    size_t needed = 0;
+    REQUIRE(clay_brush_preset_serialize(&p, nullptr, &needed) == CLAY_OK);
+    std::vector<uint8_t> bytes(needed);
+    size_t written = needed;
+    REQUIRE(clay_brush_preset_serialize(&p, bytes.data(), &written) == CLAY_OK);
+
+    clay_brush_preset back{};
+    back.struct_size = sizeof(back);
+    REQUIRE(clay_brush_preset_deserialize(bytes.data(), bytes.size(), &back) == CLAY_OK);
+    CHECK(back.brush.automask_cavity_strength == doctest::Approx(0.0f));
+    // And the bit still crossed, so this is a value that survived rather than a
+    // factor that was dropped on the way -- which would zero the strength too
+    // and read as a pass.
+    CHECK(back.brush.automask_factors == CLAY_AUTOMASK_CAVITY);
+
+    // Every value in between is itself, which is what "passed straight through"
+    // means and what distinguishes this from special-casing zero.
+    for (float want : {0.0f, 0.25f, 0.5f, 1.0f}) {
+        CAPTURE(want);
+        p.brush.automask_cavity_strength = want;
+        written = needed;
+        REQUIRE(clay_brush_preset_serialize(&p, bytes.data(), &written) == CLAY_OK);
+        REQUIRE(clay_brush_preset_deserialize(bytes.data(), bytes.size(), &back) == CLAY_OK);
+        CHECK(back.brush.automask_cavity_strength == doctest::Approx(want));
+    }
+}
+
 TEST_CASE("c brush preset: a preset sized as it shipped survives the brush growing a field") {
     // THE REGRESSION (add-extreme-poly-runtime). clay_brush_preset EMBEDS
     // clay_mesh_brush_desc, and the preset's "original layout" used to be

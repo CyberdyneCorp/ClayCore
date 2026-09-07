@@ -15581,8 +15581,19 @@ clay_result read_mesh_brush(const clay_mesh_brush_desc* src, mesh::MeshBrush* ou
     out->automask.factors = d.automask_factors;
     if (d.automask_normal_angle > 0.0f) out->automask.normal_angle = d.automask_normal_angle;
     if (d.automask_boundary_rings > 0) out->automask.boundary_rings = d.automask_boundary_rings;
-    if (d.automask_cavity_strength > 0.0f)
-        out->automask.cavity_strength = d.automask_cavity_strength;
+    // CAVITY STRENGTH IS PASSED STRAIGHT THROUGH, on the same footing as the
+    // grain below and for the same reason: zero is a value a host MEANS. It is
+    // a slider, and mesh/automask.h says of it that 0 is "off even when the
+    // factor bit is set, which is what a host's slider at zero should cost".
+    // Reading it as "unset, take the default" made a slider at zero mask the
+    // crevices COMPLETELY -- the opposite of what the artist dragged it to.
+    //
+    // WHAT THIS BROKE, observably and today: read_brush_preset comes through
+    // here, so a preset saved with the cavity slider at zero deserialized at
+    // FULL. The stamp itself could not show it -- CLAY_AUTOMASK_CAVITY is inert
+    // from C until a descriptor carries the field it measures -- which is why a
+    // round trip is what this is tested by.
+    out->automask.cavity_strength = d.automask_cavity_strength;
     // The stamp's grain, appended. Zero is passed STRAIGHT THROUGH rather than
     // read as a default, because zero is the value that means "unrotated" and
     // the engine branches on exactly that — see make_stamp_frame. Every other
