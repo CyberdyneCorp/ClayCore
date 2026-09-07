@@ -85,6 +85,25 @@ does.
   1.12.0 also prints, as INFO, what an `openspec archive` WOULD refuse — a
   MODIFIED block whose target requirement no live spec carries — which is worth
   reading before you try the archive rather than after.
+- **`check_gallery.py` asserts nothing unless `examples/run_all.py` ran first.**
+  Run bare it compares the COMMITTED outputs against HEAD -- stale files that are
+  self-consistent with each other -- so a writer that has moved is invisible and
+  the row goes green. CI regenerates first and then checks, which is the only
+  order that gates anything. It caught a format-minor bump this way after a local
+  bare run passed; the same drift is what left `08_scene.clayspace` at minor 9
+  while the writer emitted 15 (#410). Regenerate, then check:
+  `CLAY_EXAMPLES_FAST=1 PYTHONPATH=<build>/bindings/python python3 examples/run_all.py`
+  and commit ONLY the structural changes -- renders, `.ply` and `.obj` differ
+  across platforms by design and CI discards them.
+- **The C ABI gate FFI-checks `libclay_shared.dylib`, and that target only exists
+  when `CLAY_BUILD_TESTS=ON`.** Reconfiguring a build dir with tests OFF — which
+  is tempting when you only want `pyclay` for the parity gate — deletes the
+  target and LEAVES THE OLD DYLIB ON DISK, so `release_check` reads a library
+  older than the header and reports entry points as "declared but not exported"
+  that are present in `libclaycore.a`. The fix is to rebuild that dir with tests
+  on (or delete it), not to touch the header. Same family as the binding-parity
+  trap above: a gate reading a stale artifact out of a tree somebody
+  reconfigured.
 - **`clay_bench` in `build/cpu-only` is stale by construction** — benchmarks are
   OFF in that cache. See the `claycore-bench` skill.
 - **The Swift smoke consumes the prebuilt xcframework**, not the working tree,

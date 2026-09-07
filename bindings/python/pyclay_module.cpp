@@ -7478,6 +7478,82 @@ NB_MODULE(pyclay, m) {
              "layer"_a,
              "A layer's (op, blend, rounding) fold. A non-SDF layer raises rather than "
              "answering Op.ADD, which would read as a composition it cannot carry.")
+        .def("layer_multires_present",
+             [](const PyDocument& d, scene::LayerId layer) {
+                 const scene::Layer* l = d.doc->document.find_layer(layer);
+                 if (!l) throw std::invalid_argument("no layer with that id in this document");
+                 if (l->kind != scene::LayerKind::Mesh)
+                     throw std::invalid_argument(
+                         "only a mesh layer can carry a hierarchy; ask about the layer holding "
+                         "the cage");
+                 return d.doc->multires_layers.count(layer) != 0;
+             },
+             "layer"_a,
+             "Does this mesh layer carry a multiresolution hierarchy?\n\n"
+             "False is an ordinary answer -- most mesh layers are just meshes. A layer\n"
+             "that is not a mesh layer RAISES rather than answering False, because\n"
+             "'not that kind of row' and 'that kind of row, with nothing on it' are the\n"
+             "two states a host most needs told apart.")
+        .def("layer_multires",
+             [](PyDocument& d, scene::LayerId layer) -> mesh::MultiresSurface& {
+                 auto it = d.doc->multires_layers.find(layer);
+                 if (it == d.doc->multires_layers.end())
+                     throw std::invalid_argument("that layer carries no hierarchy");
+                 return it->second;
+             },
+             "layer"_a, nb::rv_policy::reference_internal,
+             "The layer's hierarchy, BORROWED from the document.\n\n"
+             "The document owns it: this does not copy, the object is invalidated by\n"
+             "removing the hierarchy or dropping the document, and letting it be\n"
+             "collected leaves the document's hierarchy alone.")
+        .def("layer_take_multires",
+             [](PyDocument& d, scene::LayerId layer, mesh::MultiresSurface& source) {
+                 const scene::Layer* l = d.doc->document.find_layer(layer);
+                 if (!l) throw std::invalid_argument("no layer with that id in this document");
+                 if (l->kind != scene::LayerKind::Mesh)
+                     throw std::invalid_argument("only a mesh layer can carry a hierarchy");
+                 if (d.doc->multires_layers.count(layer))
+                     throw std::invalid_argument(
+                         "that layer already carries a hierarchy: remove it first, because the "
+                         "levels this would drop cannot be re-sculpted from the cage");
+                 if (!source.valid()) throw std::invalid_argument("empty hierarchy");
+                 d.doc->multires_layers.emplace(layer, std::move(source));
+             },
+             "layer"_a, "surface"_a,
+             "MOVE a hierarchy into the layer; the document owns it and writes it on\n"
+             "save.\n\n"
+             "A MOVE, so `surface` is EMPTIED -- MultiresSurface is move-only in C++\n"
+             "and a copying form would round trip through encode/decode, which is\n"
+             "hundreds of megabytes on the largest thing an artist is holding. Read it\n"
+             "back with Document.layer_multires(layer). To attach the same hierarchy twice,\n"
+             "serialize it and build a second.")
+        .def("layer_remove_multires",
+             [](PyDocument& d, scene::LayerId layer) {
+                 auto it = d.doc->multires_layers.find(layer);
+                 if (it == d.doc->multires_layers.end())
+                     throw std::invalid_argument("that layer carries no hierarchy");
+                 d.doc->multires_layers.erase(it);
+             },
+             "layer"_a,
+             "Drop the layer's hierarchy. The cage stays: removing a hierarchy is not a\n"
+             "reason to remove the mesh a host is still drawing.")
+        .def("layer_multires_matches_cage",
+             [](const PyDocument& d, scene::LayerId layer) {
+                 auto h = d.doc->multires_layers.find(layer);
+                 if (h == d.doc->multires_layers.end())
+                     throw std::invalid_argument("that layer carries no hierarchy");
+                 auto m = d.doc->mesh_layers.find(layer);
+                 static const mesh::Mesh kEmpty;
+                 return io::multires_matches_cage(
+                     m == d.doc->mesh_layers.end() ? kEmpty : m->second, h->second);
+             },
+             "layer"_a,
+             "Does the layer's cage agree with its hierarchy's base level?\n\n"
+             "COMPUTED, never stored, and exact rather than tolerant. False is not an\n"
+             "error: it is the ordinary state after the cage has been edited, which\n"
+             "nothing forbids. Reconciling the two is yours -- a hierarchy is built\n"
+             "from a MESH and keeps no link back, so the two could always drift and\n"
+             "this only lets you see it.")
         .def("writable_at_minor",
              [](const PyDocument& d, unsigned minor) {
                  if (minor == 0) throw std::invalid_argument("a format minor starts at 1");

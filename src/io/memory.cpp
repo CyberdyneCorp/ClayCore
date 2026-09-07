@@ -36,6 +36,21 @@ void add_mesh(MemoryReport* r, const mesh::Mesh& m) {
     ++r->mesh_layer_count;
 }
 
+// A hierarchy the DOCUMENT holds, which is new. The comment on
+// MemoryReport::surface_content says a document cannot walk a surface because a
+// host holds one beside the document rather than inside it -- true of every
+// surface a host built and, since 'MRES', not true of a hierarchy the document
+// carries. Those are walked here; the ledger below still covers the ones the
+// host owns, and the two do not overlap because a document only ever holds what
+// it loaded or was given.
+void add_multires(MemoryReport* r, const mesh::MultiresSurface& s) {
+    const mesh::MultiresMemory m = s.memory();
+    r->surface_content += m.base + m.topology;
+    r->multires_detail += m.detail;
+    r->sculpt_layers += m.sculpt_layers;
+    r->surface_caches += m.evaluated + m.composed + m.runtime_index;
+}
+
 // The surface tier, from the ledger the host filled. One place, so the mapping
 // from a category to a report line is written once and the two cannot drift.
 void add_surfaces(MemoryReport* r, const memory::MemoryLedger& ledger) {
@@ -79,6 +94,7 @@ MemoryReport document_memory(const ClaySpaceDoc& doc, const session::History* hi
     for (const auto& [id, grid] : doc.voxel_layers) add_voxel(&r, grid);
     for (const auto& [id, mask] : doc.masks) add_mask(&r, mask);
     for (const auto& [id, m] : doc.mesh_layers) add_mesh(&r, m);
+    for (const auto& [id, s] : doc.multires_layers) add_multires(&r, s);
     if (history) r.history = history->bytes().total;
     r.passthrough = vector_bytes(doc.thumbnail_png) + vector_bytes(doc.camera_bookmarks);
     if (surfaces != nullptr) add_surfaces(&r, *surfaces);
@@ -119,6 +135,8 @@ bool layer_memory(const ClaySpaceDoc& doc, scene::LayerId layer, MemoryReport* o
     if (mask != doc.masks.end()) add_mask(&r, mask->second);
     auto m = doc.mesh_layers.find(layer);
     if (m != doc.mesh_layers.end()) add_mesh(&r, m->second);
+    auto h = doc.multires_layers.find(layer);
+    if (h != doc.multires_layers.end()) add_multires(&r, h->second);
 
     // history and passthrough stay zero: both are document-wide, and this is
     // what makes the layers plus the document-wide lines reconstruct the total.

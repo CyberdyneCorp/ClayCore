@@ -104,6 +104,7 @@
 
 #include "clay/io/result.h"
 #include "clay/mesh/mesh_data.h"
+#include "clay/mesh/multires.h"
 #include "clay/scene/document.h"
 #include "clay/voxel/grid.h"
 #include "clay/voxel/groups.h"
@@ -192,7 +193,26 @@ inline constexpr std::uint16_t kClaySpaceMajor = 1;
 // whose layers all union, and REFUSED for one that carries a composition,
 // because a subtractive layer written as a union opens cleanly as a different
 // sculpture. scene::layer_blocking_minor is the query a caller asks first.
-inline constexpr std::uint16_t kClaySpaceMinor = 18;
+// Minor 19 adds an 'MRES' chunk: one mesh layer's multiresolution hierarchy,
+// the layer id and the bytes MultiresSurface::encode() already produces. A NEW
+// CHUNK, so this is minor 13's mild kind -- length prefixed, skipped by a build
+// that predates 19 exactly as it already skips a mesh layer it does not know,
+// and the scene payload is untouched, so a document carrying no hierarchy
+// serialises to the bytes it always did. The container does not version the
+// surface: the chunk gates whether a hierarchy EXISTS and the surface's own
+// encoding gates what is in it, because two negotiations of one question
+// eventually disagree.
+//
+// THE ONE-DIRECTIONAL LOSS IS THE UNSAFE DIRECTION HERE, which is new. Minor 13
+// named the same shape for groups and could call it safe: a build that predates
+// it opens a document, saves it back, and drops the groups -- "geometry
+// reappearing is recoverable and obvious". A build predating 19 doing the same
+// drops a SCULPT. The cage returns, the levels do not, and the file opens
+// cleanly and looks deliberate, which is the one failure this format works
+// hardest to avoid. Nothing here can stop an older build; what this can do is
+// say so, and `multires_carries_detail` is what a host asks to know whether a
+// given document has anything to lose.
+inline constexpr std::uint16_t kClaySpaceMinor = 19;
 
 // The document bundle a .clayspace file holds. Voxel layer content is keyed
 // by layer id (the scene module stays voxel-agnostic by layering rule).
@@ -215,6 +235,25 @@ struct ClaySpaceDoc {
     // and load_clayspace drops a chunk that names none, which is what keeps an
     // orphan harmless without breaking undo within a session.
     std::map<scene::LayerId, mesh::Mesh> mesh_layers;
+    // A mesh layer's multiresolution hierarchy, keyed the same way and for the
+    // same layering reason. Before this, a hierarchy was a STANDALONE handle
+    // that no document held, so saving a sculpt saved the base cage and dropped
+    // every level above it -- and a host's own side-car file was the only record
+    // that a row had ever been a hierarchy.
+    //
+    // THE CAGE EXISTS TWICE and the two are NOT reconciled. mesh_layers holds
+    // the triangles; the hierarchy holds its own copy of the base level, because
+    // mesh::multires_from_mesh builds from a mesh VALUE and keeps no link back.
+    // The two could already diverge before they were both stored, so carrying
+    // them together does not create that hazard -- it makes it observable, which
+    // `multires_matches_cage` below is for. Nothing here edits either to agree
+    // with the other: a save that mutated authored content would be a worse
+    // surprise than a disagreement a caller can ask about.
+    //
+    // Orphan behaviour is mesh_layers', for its reason: an entry outlives its
+    // layer so undo within a session works, the writer emits a chunk only for an
+    // id that is still a mesh layer, and the reader drops one naming none.
+    std::map<scene::LayerId, mesh::MultiresSurface> multires_layers;
     // Surface groups: named regions of the MODEL, on one world-space lattice
     // (add-surface-groups). PER DOCUMENT rather than per layer, and that is the
     // decision rather than an accident — a mask is per layer because it gates
@@ -246,6 +285,46 @@ struct ClaySpaceDoc {
 // things already in memory. Costs 0.24 ms on a 1.13 MB snapshot, against the
 // 1.52 ms the save producing those bytes costs.
 std::uint64_t snapshot_identity(const std::uint8_t* data, std::size_t size);
+
+// -- hierarchies, and the two questions carrying one raises -------------------
+
+// Does a hierarchy hold anything an artist authored above its base cage?
+// Levels above 0, or any sculpt layer -- a base deformation layer writes at
+// level 0 and is still authored, so a level count alone would miss it.
+//
+// This is the question a DOWNGRADE turns on, not a display concern: a cage with
+// nothing on it loses nothing by being written as a plain mesh layer.
+bool multires_carries_detail(const mesh::MultiresSurface& surface);
+
+// Does this layer's cage agree with its hierarchy's base level?
+//
+// NOT a promise that they ever will. A hierarchy is built from a mesh VALUE
+// (`mesh::multires_from_mesh`) and keeps no link to the layer, so the two have
+// always been able to drift; before this change nothing in the document could
+// see it, because the hierarchy was not in the document. This answers the
+// question rather than preventing the drift, and nothing here edits either side
+// to agree with the other.
+//
+// COMPUTED, NEVER STORED. `snapshot_identity` is the right shape and the wrong
+// storage: it is stable "neither across builds that change the document encoding
+// nor across byte orders", so a hash written into a file would report a
+// divergence that had not happened the first time an encoding moved. Counts are
+// compared before positions, because a retopology, a decimation or a re-import
+// -- the ways this actually happens -- all change a count.
+bool multires_matches_cage(const mesh::Mesh& cage, const mesh::MultiresSurface& surface);
+
+// NO `multires_blocking_minor`, deliberately, and the reason is worth keeping
+// because the plan for this change had one. It was modelled on
+// `scene::layer_blocking_minor`, which exists because `serialize_document` takes
+// a minor to WRITE at and can therefore be asked to write one it cannot express.
+// `save_clayspace` takes no such parameter: the container is always written at
+// `kClaySpaceMinor`, and the older-minor discipline in this format lives in the
+// SCENE PAYLOAD rather than here. A query answering which layer blocks a write
+// nobody can request would be an entry point with no caller.
+//
+// What replaces it is `multires_carries_detail` above, which answers the
+// question a host actually has -- "would anything an artist made be lost" --
+// without pretending the container has a downgrade path it does not.
 
 std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc);
 IoStatus load_clayspace(const std::uint8_t* data, std::size_t size, ClaySpaceDoc* out);

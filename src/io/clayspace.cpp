@@ -28,6 +28,7 @@ constexpr std::uint32_t kScene = fourcc("SCNE");
 constexpr std::uint32_t kVoxel = fourcc("VOXL");
 constexpr std::uint32_t kMask = fourcc("MASK");
 constexpr std::uint32_t kMesh = fourcc("MESH");
+constexpr std::uint32_t kMultires = fourcc("MRES");
 constexpr std::uint32_t kGroups = fourcc("GRUP");
 constexpr std::uint32_t kThumb = fourcc("THMB");
 constexpr std::uint32_t kCamera = fourcc("CAMB");
@@ -145,7 +146,48 @@ void drop_unmatched_mesh_chunks(ClaySpaceDoc* out) {
     }
 }
 
+// The same rule for a hierarchy, on the same test its cage takes: a chunk
+// naming a layer this document no longer holds is dropped rather than kept as a
+// hierarchy nothing can reach.
+void drop_unmatched_multires_chunks(ClaySpaceDoc* out) {
+    for (auto it = out->multires_layers.begin(); it != out->multires_layers.end();) {
+        if (is_mesh_layer(out->document, it->first))
+            ++it;
+        else
+            it = out->multires_layers.erase(it);
+    }
+}
+
 }  // namespace
+
+bool multires_carries_detail(const mesh::MultiresSurface& surface) {
+    // Levels above the cage, OR any sculpt layer. The second half is not
+    // redundant: a base deformation layer writes at level 0, so a hierarchy of
+    // one level can still hold work an artist did.
+    return surface.level_count() > 1 || !surface.sculpt_layers().empty();
+}
+
+bool multires_matches_cage(const mesh::Mesh& cage, const mesh::MultiresSurface& surface) {
+    const mesh::Mesh& base = surface.base_mesh();
+    // Counts first. A retopology, a decimation and a re-import are how this
+    // actually happens and every one of them changes a count, so the expensive
+    // comparison is reached only by a cage that was edited in place.
+    if (base.positions.size() != cage.positions.size()) return false;
+    if (base.indices.size() != cage.indices.size()) return false;
+    if (base.quads.size() != cage.quads.size()) return false;
+    if (base.indices != cage.indices) return false;
+    if (base.quads != cage.quads) return false;
+    for (std::size_t i = 0; i < base.positions.size(); ++i) {
+        const kernel::cfloat3& a = base.positions[i];
+        const kernel::cfloat3& b = cage.positions[i];
+        // Exact, not tolerant. The question is "is this the same cage", and a
+        // tolerance would answer "near enough to what?" with a number nobody
+        // chose -- the same refusal clay_consolidation_params makes about
+        // cell_size. A host wanting a tolerant compare has both meshes.
+        if (a.x != b.x || a.y != b.y || a.z != b.z) return false;
+    }
+    return true;
+}
 
 std::uint64_t snapshot_identity(const std::uint8_t* data, std::size_t size) {
     // EIGHT BYTES AT A TIME, and that is a measurement rather than a
@@ -221,6 +263,18 @@ std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc) {
         payload.insert(payload.end(), mesh_bytes.begin(), mesh_bytes.end());
         put_chunk(out, kMesh, payload);
     }
+    // A mesh layer's hierarchy, gated on the same "is it still that kind of
+    // layer" test its cage is, so an orphan left by an undone removal is held in
+    // memory and not written. The surface encodes itself; nothing here adds a
+    // second version to negotiate.
+    for (const auto& [layer_id, surface] : doc.multires_layers) {
+        if (!is_mesh_layer(doc.document, layer_id)) continue;
+        std::vector<std::uint8_t> payload;
+        put_u32(payload, layer_id);
+        std::vector<std::uint8_t> surface_bytes = surface.encode();
+        payload.insert(payload.end(), surface_bytes.begin(), surface_bytes.end());
+        put_chunk(out, kMultires, payload);
+    }
     // Surface groups: ONE chunk for the document, not one per layer, because
     // the lattice is per document. Skipped entirely when nothing is named, so a
     // document that never used the feature is byte-identical to what it was.
@@ -293,6 +347,15 @@ IoStatus load_clayspace(const std::uint8_t* data, std::size_t size, ClaySpaceDoc
         } else if (cc == kMesh) {
             IoStatus s = read_mesh_chunk(payload, static_cast<std::size_t>(len), &result);
             if (!s.ok()) return s;
+        } else if (cc == kMultires) {
+            if (len < 4) return IoStatus::fail(IoError::Malformed, "multires chunk too short");
+            std::uint32_t layer_id = 0;
+            std::memcpy(&layer_id, payload, 4);
+            mesh::MultiresSurface surface;
+            if (!mesh::MultiresSurface::decode(payload + 4, static_cast<std::size_t>(len) - 4,
+                                               &surface))
+                return IoStatus::fail(IoError::Malformed, "multires chunk parse failed");
+            result.multires_layers.emplace(layer_id, std::move(surface));
         } else if (cc == kGroups) {
             auto groups = voxel::GroupField::deserialize(payload, static_cast<std::size_t>(len));
             if (!groups) return IoStatus::fail(IoError::Malformed, "group chunk parse failed");
@@ -310,6 +373,7 @@ IoStatus load_clayspace(const std::uint8_t* data, std::size_t size, ClaySpaceDoc
     // business, and the scene chunk a mesh chunk is matched against may not
     // have been read yet.
     drop_unmatched_mesh_chunks(&result);
+    drop_unmatched_multires_chunks(&result);
     drop_unmatched_voxel_chunks(&result);
     // The other half of the pairing: a document loaded from a snapshot knows
     // which one it is, so replay can refuse a journal taken against a
