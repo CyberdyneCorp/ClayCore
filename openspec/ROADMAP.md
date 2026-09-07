@@ -2914,6 +2914,55 @@ test — it can turn the parity gate into a tautology and still print a pass.
 **The shape, again:** *"did everything I ran pass"* was answered correctly and
 truthfully. *"Did I run everything"* was never asked.
 
+### A mean over samples that are not the same thing
+
+The end of that thread, and the worst of the three: not a noisy figure, **a figure
+of two different things added together.**
+
+Asked to rank every sampled figure in its report by within-run spread, the
+consuming host found **36 of 95 span more than 3x inside a single run.** The
+widest:
+
+```
+brush.voxel.apagar   144x   13 samples over 0.21-30.33, mean 15.44
+brush.voxel.camada    88x   13 samples over 0.33-29.16, mean 13.37
+brush.voxel.padrao    82x   13 samples over 0.36-29.42, mean 13.58
+brush.voxel.raspar    70x   13 samples over 0.49-34.15, mean 27.62
+brush.voxel.inflar    61x   13 samples over 0.58-35.56, mean 24.39
+```
+
+The samples are dabs at successive points along one path and **none is
+discarded**, so a mean of 15.44 sits over a body near 30 because one sample near
+0.2 is averaged in. **A mean is only a description when the samples are draws
+from one population**, and nothing in the number says whether they were.
+
+**It had been in the baseline shape all along, unremarked**, because nobody read
+the range column beside the number. That is the whole finding: the evidence was
+printed, adjacent, on every run.
+
+**And they declined to explain it**, which is the part to keep. The first sample
+may land off the form, or on a region a previous dab already flattened — they
+recorded it as an observation about the figures rather than a cause, on the
+grounds that guessing would be *"a well-formed answer to a narrower question"*
+one more time. **A number you cannot explain is better recorded as
+unexplained than as explained wrongly.**
+
+**We do not have this shape, and we also lack the instrument that would find it
+if we acquired one.** ClayCore's benchmarks are Google Benchmark bodies where
+every iteration runs the same work, so `real_time` is a mean over a homogeneous
+population by construction; the only `for` loops over "samples" in
+`benchmarks/bench_main.cpp` build sphere geometry. But `tools/check_bench.py`
+reads `real_time` and the counters and **never looks at a spread** — the JSON
+carries `repetitions` and `repetition_index` and nothing consults them. So a body
+that became heterogeneous would be gated on its mean with nothing to report the
+range. Same family as the 51 ungated benchmarks recorded above: not a defect
+today, and no instrument that would say when it became one.
+
+**The reporting repair they took is the general one:** a table beside the figures
+marking each row *safe / caution / not* — p95 rows all "caution" because they are
+single-sampled, the five above "not at all". A report that says which of its own
+numbers to quote is doing something no gate can do for it.
+
 ### Quoting the most favourable sample of the least reproducible statistic
 
 The other half of *"movement in both directions"*, found by a third session
