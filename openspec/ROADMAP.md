@@ -2961,6 +2961,52 @@ answer — *a fact about a boundary is only as good as the last time someone loo
 at it.* Both facts above are true of a tree that is moving; neither is a
 property.
 
+### A habit written down as a constraint is wrong in both directions
+
+The mirror of the entry below, and the more surprising half: a rule that
+misattributes its own cause fails PERMISSIVELY as well as restrictively.
+
+The consuming host carried a note reading *"the merge queue here squashes"*, and
+had lost a whole feature to it — a stacked PR squash-merged into main, its child
+merged four hours later into a branch that had stopped being a path to main, the
+PR reading MERGED with green CI and the content simply absent. Found by a user
+using the application.
+
+**There is no merge queue.** Checking the repository after I checked ours:
+squash, merge-commit and rebase all enabled, `merge_queue_enabled: null`. The
+squash is a habit — every PR since #1 has landed that way and nothing forces it.
+
+So the note as written stated a **repository limitation** where the truth was a
+**default**, and the loss it recorded was real but misattributed. Their own
+account of the cost is the part worth keeping:
+
+> A rule stated as a constraint when it is really a default is wrong in the
+> permissive direction as well as the restrictive one.
+
+It would have had them refuse legitimate stacked work on the grounds that the
+repository could not do it, when `gh pr merge <tip> --merge` lands a stack there
+safely. **A false "we cannot" is as expensive as a false "we can" and much harder
+to notice**, because nothing ever fails: the work simply never gets attempted,
+and the rule looks vindicated every day it is obeyed.
+
+**And the two repositories turned out to be mirror images**, which is what makes
+this worth more than a correction. ClayCore is squash-ENABLED with a
+merge-commit practice; theirs is merge-ENABLED with a squash practice. Both are
+one button from the other, in opposite directions. Neither habit is written
+anywhere that a tool enforces.
+
+The narrower true statement, which is what both of us now hold: *stacking is
+unsafe under squash, and squash is what happens in that repository unless
+somebody deliberately chooses otherwise.* The cause is the method, not the
+repository — and the practical form is a flag on one command rather than a
+policy about branches.
+
+**Neither of us found this alone.** They gave me a warning with a qualification
+attached — *check whether your queue squashes before relaying this* — and
+checking mine is what prompted them to check theirs, which is where the note
+turned out to be wrong. A caveat offered against one's own argument is what made
+both answers real.
+
 ### "It would be wrong to" is not "nothing does"
 
 One sentence from the iPad session, offered against its own work, and it names a
