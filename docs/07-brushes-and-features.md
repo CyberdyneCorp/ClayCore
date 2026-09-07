@@ -2491,6 +2491,32 @@ appended fields beside it are. Reading it as unset made a slider an artist
 dragged to zero mask the crevices completely, and a preset saved at zero came
 back at full. pyclay never had this: it exposes the field directly.
 
+**Reaching those two from a host.** A `std::function` does not cross the C ABI,
+so from C those two bits were declared and inert until ABI 0.96.0 — the header
+said so at the field. They cross now as `clay_automask_sources`, naming the two
+world-addressed lattices the engine already hands out handles for:
+`clay_mask_from_surface(CLAY_MEASURE_CAVITY, …)` for the crevice measure and
+`clay_document_groups` for the polygroups. Those are the same two objects pyclay
+takes, and deliberately: pyclay refuses a Python callable because a stamp
+evaluates these per vertex from a worker thread with the GIL released, and a C
+function pointer would be the same re-entrant call into a host. Two bindings
+reaching one feature by two estimators would be two answers about one surface,
+which is the thing this design exists to prevent.
+
+Naming the sources enables nothing — the brush's bits still decide which factors
+run — and a bit with no source stays inert rather than becoming an error, so a
+host can carry an automask preset before it has baked the lattice that preset
+needs.
+
+**A session that declares a space is sampled in it.** A fixed-mesh session that
+has declared its world frame — `clay_mesh_sculptor_set_world_frame` or
+`clay_mesh_sculptor_use_layer_transform` — has each vertex placed by that frame
+before any of the three world lattices is asked, the painted mask included. The
+frame is read when a lattice is sampled rather than captured when the sources
+are named, so declaring it after naming them is not a mistake. The adaptive and
+multiresolution sessions declare no frame and are sampled where their vertices
+are, which is what their mask gate already did.
+
 Runnable: [`examples/65_brush_presets.py`](../examples/65_brush_presets.py) —
 one gesture through five presets, with every claim above asserted rather than
 illustrated.

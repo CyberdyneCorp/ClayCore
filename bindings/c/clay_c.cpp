@@ -3030,6 +3030,72 @@ const voxel::MaskField* mask_of(const clay_mask* mask) {
     return resolve_mask(mask, &m) == CLAY_OK ? m : nullptr;
 }
 
+constexpr std::size_t kAutomaskSourcesOriginal =
+    offsetof(clay_automask_sources, active_group) + sizeof(std::uint32_t);
+
+// The two automask factors `mesh` cannot compute for itself, as the C ABI
+// carries them. FILE SCOPE, above the first extern "C", for the reason
+// `group_field` above states.
+//
+// RESOLVED ONCE AND HELD FOR THE STROKE. Both fields borrow, and what the
+// sculptor keeps is what they RESOLVE TO rather than the handles themselves —
+// the same reading clay_mesh_sculptor_apply_stroke's own `mask` argument
+// already gets, where one resolve_mask at the top serves every stamp of the
+// stroke. Re-resolving per call is the alternative and it puts a map lookup in
+// the innermost loop of a stamp, since these are evaluated per vertex.
+//
+// THE SAME TWO LAMBDAS PYCLAY BUILDS, which is worth being explicit about: a
+// MaskField sampled at a world point, and a GroupField asked at one. Two
+// bindings reaching this feature by two different estimators would be two
+// answers about one surface, and preventing exactly that is what automask.h
+// says the callback shape is for.
+//
+// BOTH LATTICES ARE WORLD-ADDRESSED AND THE VERTICES ARE NOT. A sculptor's
+// positions are the MESH's own, so the point has to be placed before either
+// lattice is asked — the same conversion mesh_mask_gate makes for the painted
+// mask, and for the same reason: a cavity automask and a painted cavity mask
+// that disagreed about one surface is exactly what automask.h says must not
+// happen, and on a transformed layer sampling the unplaced point is how they
+// would.
+//
+// THE FRAME IS READ WHEN THE LATTICE IS ASKED, not captured here. A host may
+// declare its frame after it names its sources — clay_mesh_sculptor_set_world_
+// frame and clay_mesh_sculptor_use_layer_transform are both callable at any
+// point in a session — and a closure holding the frame it happened to find
+// would measure in the wrong place and report nothing wrong. The pointer is the
+// sculptor's own member, so it outlives the inputs the sculptor holds. Null for
+// the two sculptors that declare no frame, where the identity is the truth
+// rather than a default.
+clay_result read_automask_sources(const clay_automask_sources* sources,
+                                  const math::Transform* frame, mesh::AutomaskInputs* out) {
+    *out = mesh::AutomaskInputs{};
+    if (!sources) return CLAY_OK;  // cleared: both factors go inert again
+    clay_automask_sources s;
+    clay_result r = read_desc(sources, kAutomaskSourcesOriginal, &s);
+    if (r != CLAY_OK) return r;
+    if (s.cavity) {
+        voxel::MaskField* cavity = nullptr;
+        r = resolve_mask(s.cavity, &cavity);
+        if (r != CLAY_OK) return r;
+        out->cavity = [cavity, frame](kernel::cfloat3 p) {
+            return cavity->sample(frame ? frame->apply(p) : p);
+        };
+    }
+    if (s.groups) {
+        // A handle whose document has no lattice yet reads as no source rather
+        // than as an error: "this document has no groups" is an answer, and
+        // refusing it would make a host bracket the call on a condition it
+        // would have to ask a second question to know.
+        if (const voxel::GroupField* groups = group_field(s.groups)) {
+            out->group = [groups, frame](kernel::cfloat3 p) {
+                return static_cast<std::uint32_t>(groups->at(frame ? frame->apply(p) : p));
+            };
+        }
+    }
+    out->active_group = s.active_group;
+    return CLAY_OK;
+}
+
 // Brackets a group edit so it becomes one undo step, on the same RAII shape
 // MaskStep uses. Every mutating group entry point takes one, which is what
 // keeps eleven call sites from each having to remember — the omission that made
@@ -5480,6 +5546,27 @@ clay_result clay_layer_node_op_blend(const clay_document* doc, clay_layer_id lay
     if (out_blend) *out_blend = static_cast<std::int32_t>(n->blend.profile);
     if (out_blend_k) *out_blend_k = n->blend.k;
     if (out_rounding) *out_rounding = n->rounding;
+    return CLAY_OK;
+}
+
+clay_result clay_layer_node_color(const clay_document* doc, clay_layer_id layer,
+                                  clay_node_id node, float out_rgb[3]) {
+    const scene::Node* n = nullptr;
+    clay_result r = find_node(doc, layer, node, &n);
+    if (r != CLAY_OK) return r;
+    // A group answers, for the reason clay_layer_set_color accepts one: a
+    // CLAY_OP_SHELL or CLAY_OP_REPLACE group paints a seed colour against empty
+    // space, so the value is a group's to hold. The transform reader refuses a
+    // group and this one does not, and that difference is the two setters'
+    // difference rather than an inconsistency between the readers.
+    //
+    // Total: an item's colour came from clay_item_desc and a group's from
+    // scene::Node's own default, so there is no unset state to report.
+    if (out_rgb) {
+        out_rgb[0] = n->color.x;
+        out_rgb[1] = n->color.y;
+        out_rgb[2] = n->color.z;
+    }
     return CLAY_OK;
 }
 
@@ -16951,6 +17038,34 @@ clay_result clay_dynamic_sculptor_reset_stage_report(clay_dynamic_sculptor* scul
     return CLAY_OK;
 }
 
+// The three setters that complete the automask across the boundary. Each is the
+// same two lines because the factors mean the same thing whichever surface is
+// under the brush; the sculptors differ in where a displacement is STORED, and
+// a crevice is not a fact about storage.
+clay_result clay_mesh_sculptor_set_automask_sources(clay_mesh_sculptor* sculptor,
+                                                    const clay_automask_sources* sources) {
+    // for_edit=false: naming the inputs is not itself an edit, so a session may
+    // wire its automask before it has decided to move anything.
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/false);
+    if (r != CLAY_OK) return r;
+    mesh::AutomaskInputs inputs;
+    r = read_automask_sources(sources, &sculptor->frame, &inputs);
+    if (r != CLAY_OK) return r;
+    sculptor->sculptor->set_automask_inputs(std::move(inputs));
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_sculptor_set_automask_sources(clay_dynamic_sculptor* sculptor,
+                                                       const clay_automask_sources* sources) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    mesh::AutomaskInputs inputs;
+    clay_result r = read_automask_sources(sources, /*frame=*/nullptr, &inputs);
+    if (r != CLAY_OK) return r;
+    sculptor->sculptor->set_automask_inputs(std::move(inputs));
+    return CLAY_OK;
+}
+
 clay_result clay_mesh_sculptor_set_world_frame(clay_mesh_sculptor* sculptor,
                                                const clay_mesh_frame* frame) {
     clay_result r = resolve_sculptor(sculptor, /*for_edit=*/false);
@@ -18471,6 +18586,17 @@ clay_result clay_multires_sculptor_reset_peak_telemetry(clay_multires_sculptor* 
     if (!sculptor || !sculptor->sculptor)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
     sculptor->peak.reset();
+    return CLAY_OK;
+}
+
+clay_result clay_multires_sculptor_set_automask_sources(clay_multires_sculptor* sculptor,
+                                                        const clay_automask_sources* sources) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
+    mesh::AutomaskInputs inputs;
+    clay_result r = read_automask_sources(sources, /*frame=*/nullptr, &inputs);
+    if (r != CLAY_OK) return r;
+    sculptor->sculptor->set_automask_inputs(std::move(inputs));
     return CLAY_OK;
 }
 

@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 95
+#define CLAY_ABI_MINOR 96
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -2610,8 +2610,9 @@ clay_result clay_layer_node_prim(const clay_document* doc, clay_layer_id layer,
  * otherwise has to have kept for itself, in a table beside the .clay keyed by
  * node id, and to have kept correct across undo and redo on its own.
  *
- * clay_layer_set_color is the one setter with no reader here; a host that
- * needs one should say so rather than keep the table alive for it.
+ * clay_layer_node_color completes the set: it was the one setter with no
+ * reader, and a host reloading a document had to keep the colours in that
+ * table beside the .clay after all.
  *
  * clay_layer_node_influence_bound is NOT the position answer, and a host that
  * reaches for it gets a wrong one: it is dilated by rounding and blend support,
@@ -2695,6 +2696,30 @@ clay_result clay_layer_node_params(const clay_document* doc, clay_layer_id layer
 clay_result clay_layer_node_op_blend(const clay_document* doc, clay_layer_id layer,
                                      clay_node_id node, int32_t* out_op, int32_t* out_blend,
                                      float* out_blend_k, float* out_rounding);
+
+/* The node's colour, as clay_layer_set_color takes it.
+ *
+ * TOTAL: THERE IS NO UNSET COLOUR. An ITEM's colour is the one its
+ * clay_item_desc carried, and a host that zeroed that descriptor placed a BLACK
+ * item — which is the reason this reader is worth having rather than a
+ * formality: that was previously unfindable. A GROUP takes no colour at
+ * creation, so it is the one node a C host can make that carries the engine's
+ * own default of (0.7, 0.7, 0.7).
+ *
+ * A GROUP ANSWERS, for the reason its setter accepts one: a CLAY_OP_SHELL or
+ * CLAY_OP_REPLACE group paints a seed colour, so the value is a group's to
+ * hold. That is the one place this reader differs from
+ * clay_layer_node_transform, which refuses a group because a group's transform
+ * reaches nothing.
+ *
+ * WHAT IT IS NOT: the colour the surface SHOWS at a point. Nodes compose, and
+ * what a shell over a red sphere renders is the composition's answer — it
+ * reaches a host on a meshed surface, through clay_mesh_colors. This is the
+ * value THIS NODE holds: what its setter wrote, what a save round-trips, and
+ * what clay_raycast_attributed's out_node names when a host wants the colour
+ * behind a point on screen. */
+clay_result clay_layer_node_color(const clay_document* doc, clay_layer_id layer,
+                                  clay_node_id node, float out_rgb[3]);
 
 /* The layer's TOP-LEVEL nodes, count-then-index, in the layer's EVALUATION
  * order — index 0 is the node evaluated first, and the index is the one
@@ -7237,12 +7262,14 @@ typedef struct clay_mesh_brush_desc {
      * automasking existed. Appended, so a host compiled against the older
      * layout sends zeroes and gets exactly that.
      *
-     * THREE OF THE FIVE FACTORS CROSS HERE. The other two — CAVITY and
-     * SURFACE_GROUP — need an input this descriptor cannot carry: a field to
-     * measure cavity from, and the document's group lattice, both of which are
-     * callbacks on the C++ side. Setting their bits from C is inert rather than
-     * an error, and the descriptor that carries their inputs is a follow-up
-     * rather than a guess made against a sample of one. */
+     * THREE OF THE FIVE FACTORS ARE COMPLETE HERE. The other two — CAVITY and
+     * SURFACE_GROUP — need an input this descriptor cannot carry: something
+     * that answers a world point, which on the C++ side is a std::function.
+     * Their bits still live here, because which factors RUN is a property of
+     * the brush; what they consume arrives separately, through
+     * clay_mesh_sculptor_set_automask_sources below. A bit set with no source
+     * is inert rather than an error, which is what lets a host carry an
+     * automask preset it has not yet baked a cavity mask for. */
     uint32_t automask_factors; /* clay_automask_factor, OR-ed */
     /* NORMAL_ANGLE: how far the surface may turn from the brush's own facing
      * before the gate closes, in radians. Full strength up to this angle, zero
@@ -7302,8 +7329,8 @@ typedef enum clay_automask_factor {
     CLAY_AUTOMASK_NORMAL_ANGLE = 1u << 0,
     CLAY_AUTOMASK_TOPOLOGY_CONNECTED = 1u << 1,
     CLAY_AUTOMASK_BOUNDARY = 1u << 2,
-    /* Declared so the bit values match the C++ vocabulary exactly, and inert
-     * from C until the descriptor that carries their inputs lands. */
+    /* These two consume an input the brush descriptor cannot carry; supply it
+     * with clay_automask_sources below. Without it they are inert. */
     CLAY_AUTOMASK_CAVITY = 1u << 3,
     CLAY_AUTOMASK_SURFACE_GROUP = 1u << 4
 } clay_automask_factor;
@@ -7311,6 +7338,87 @@ typedef enum clay_automask_factor {
 /* The engine's defaults, so a host fills in what it means and takes the rest.
  * The verb defaults to DRAW and the geodesic flag to on. */
 clay_result clay_mesh_brush_defaults(clay_mesh_brush_desc* out_desc);
+
+/* -- THE TWO FACTORS THAT NEED MORE THAN A DESCRIPTOR ------------------------
+ *
+ * CAVITY and SURFACE_GROUP were declared with the other three and were inert
+ * from C: setting their bits did nothing, because each needs an INPUT a
+ * descriptor of scalars cannot hold — something that answers a world point.
+ * This is the descriptor the automask block above called a follow-up.
+ *
+ * WHY HANDLES AND NOT A CALLBACK. The engine takes these as std::functions and
+ * evaluates them PER VERTEX FROM WORKER THREADS with no lock held, so a C
+ * function pointer here would be a re-entrant call into a host from inside a
+ * stamp. This ABI declares no function-pointer type anywhere, and this is not
+ * the place to start: both inputs already exist as world-addressed lattices
+ * with handles of their own, and a lattice read is what the engine wants.
+ *
+ * THE SAME MODEL PYCLAY WIRES, deliberately. pyclay takes a MaskField and the
+ * document's group lattice and refuses a Python callable for exactly the reason
+ * above; these are the same two objects. The bindings therefore agree about
+ * what a cavity automask MEANS rather than each having reached the feature its
+ * own way.
+ *
+ * WHAT THE CAVITY MASK IS, precisely, because "the same estimator" is a claim
+ * worth being exact about. clay_mask_from_surface with CLAY_MEASURE_CAVITY
+ * bakes brush::measure_at onto a lattice. A C++ caller hands the automask that
+ * estimator as a function and it is evaluated point by point; through here it
+ * is the same estimator SAMPLED. So a painted cavity mask and a cavity automask
+ * agree about this surface by construction rather than by inspection — the two
+ * are literally the same lattice — and what differs from the C++ path is the
+ * resolution, which is the cell_size you passed when you baked it rather than
+ * something hidden here.
+ *
+ * BOTH LATTICES ARE WORLD-ADDRESSED, AND SO IS THE SAMPLING. A sculptor's
+ * vertices are in the MESH's own space, and each is placed by the session's
+ * declared frame — clay_mesh_sculptor_set_world_frame or
+ * clay_mesh_sculptor_use_layer_transform — before either lattice is asked. That
+ * is the same conversion the painted `mask` argument already gets, and it has
+ * to be: a cavity automask and a painted cavity mask that disagreed about one
+ * surface would defeat the whole point of there being one estimator. A session
+ * that declares no frame is sampled where its vertices are, which for a
+ * standalone mesh is the truth rather than an assumption.
+ *
+ * The frame is read WHEN A LATTICE IS ASKED, so declaring it after naming the
+ * sources is not a mistake and neither order is the wrong one.
+ *
+ * ONLY THE FIXED-MESH SESSION DECLARES A SPACE. The adaptive and
+ * multiresolution sculptors have no world frame to declare, so their lattices
+ * — these two and the painted `mask` they already took — are sampled at the
+ * surface's own positions. That is not new here and not a special case for the
+ * automask: it is the same reading their mask gate has always had. A host
+ * sculpting a PLACED adaptive or multiresolution surface through a
+ * world-addressed lattice should say so, and the frame follows for all three
+ * lattices at once rather than for one of them.
+ *
+ * BORROWED, AND FOR THE WHOLE STROKE. Neither handle is copied: the sculptor
+ * holds what they resolve to until you set sources again or clear them, so both
+ * must outlive that. This is the contract clay_mesh_sculptor_apply_stroke's own
+ * `mask` argument already has — resolved once, used for every stamp — applied
+ * to a setter because these are set once per STROKE. They hold std::functions
+ * on the engine side, and rebuilding those per dab is an allocation per dab,
+ * which the allocation gate forbids. */
+typedef struct clay_automask_sources {
+    uint32_t struct_size; /* = sizeof(clay_automask_sources); required */
+    /* CAVITY: the crevice measure, as a lattice. Bake it with
+     * clay_mask_from_surface(doc, CLAY_MEASURE_CAVITY, ...). Null leaves the
+     * factor inert however the brush's CAVITY bit and its strength are set,
+     * which is what "the engine was never given a surface to measure" should
+     * cost. */
+    const clay_mask* cavity;
+    /* SURFACE_GROUP: the document's polygroups, from clay_document_groups. A
+     * WORLD LATTICE rather than a per-face identifier, which is what lets a
+     * group survive a representation bridge. Null leaves the factor inert. */
+    const clay_groups* groups;
+    /* The group the stroke started in; everything else is masked out. Resolve
+     * it with clay_groups_at at the stroke's first sample — the engine does not
+     * pick one for you, because "where the stroke began" is a fact about the
+     * gesture and only the host has it. */
+    uint32_t active_group;
+} clay_automask_sources;
+
+/* The setters that take one are declared with the sculptors, after all three
+ * handle types exist — search clay_mesh_sculptor_set_automask_sources. */
 
 /* -- THE BRUSH MODEL, AND BRUSHES AS DATA ------------------------------------
  *
@@ -7947,6 +8055,31 @@ clay_result clay_dynamic_surface_copy_chunk(const clay_dynamic_sculptor* sculpto
 
 typedef struct clay_multires clay_multires;
 typedef struct clay_multires_sculptor clay_multires_sculptor;
+
+/* Set them, or pass null for `sources` to clear both.
+ *
+ * SETTING SOURCES DOES NOT ENABLE ANYTHING. The bits in
+ * clay_mesh_brush_desc.automask_factors still decide which factors run; these
+ * are the inputs those bits consume. A host that sets sources and no bits gets
+ * exactly the stamps it got before, which is what makes wiring this up safe to
+ * do once at session start.
+ *
+ * A source with no bit costs nothing — it is never evaluated. A bit with no
+ * source is inert rather than an error, which is the behaviour these two bits
+ * always had and is what lets a host set its automask preset before it has
+ * baked a cavity mask.
+ *
+ * Returns CLAY_ERROR_NOT_FOUND if a borrowed mask is no longer in its document.
+ * The three take the same descriptor because the factors mean the same thing
+ * whichever surface is being sculpted; a fixed mesh, a DynamicSurface and a
+ * MultiresSurface differ in where the result is stored, not in what a crevice
+ * is. */
+clay_result clay_mesh_sculptor_set_automask_sources(clay_mesh_sculptor* sculptor,
+                                                    const clay_automask_sources* sources);
+clay_result clay_dynamic_sculptor_set_automask_sources(clay_dynamic_sculptor* sculptor,
+                                                       const clay_automask_sources* sources);
+clay_result clay_multires_sculptor_set_automask_sources(clay_multires_sculptor* sculptor,
+                                                        const clay_automask_sources* sources);
 
 /* Why an operation was refused. Mirrors mesh::MultiresError; use
  * clay_multires_error_text for a message. */
