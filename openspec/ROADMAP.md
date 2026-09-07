@@ -1879,6 +1879,21 @@ that host's own Linux baseline argues — and print the load beside every figure
 emits, so a number carries the conditions it was taken under rather than a
 person's assurance that they checked.
 
+**And print it TWICE — at the start and at the end of the run.** A one-shot load
+stamp describes the moment a run begins and says nothing about the minutes that
+follow, which is where the drift lives. The host nearly recorded a permanent
+"before" this way: it verified load 1.72 with one process running, and ninety
+seconds later — the time it took to write the conditions file — four
+`clang-tidy` processes and a `cc1plus` had started and the load was 8.47 and
+climbing. A ten-minute benchmark begun at 1.7 and finished at 12 **would have
+looked fine, because the header stamps the load at the start.**
+
+The device gate already does this correctly and is the model: it records
+`canaryBeforeMs` and `canaryAfterMs` per case, which is what let it report
+conditions moving x1.63 across a run while `thermalState` read `nominal` at both
+ends. A single-sample condition stamp is the same defect as a single-sample
+measurement — it cannot see the thing it exists to detect.
+
 **Their half is now fixed, and the fix names the distinction rather than moving
 the check.** `refuses_a_busy_run(comparing, busy, allow_busy)` — refuse to
 RECORD, never to COMPARE — with four unit tests and, separately, an end-to-end
