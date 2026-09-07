@@ -3392,19 +3392,6 @@ std::uint64_t mesh_layer_revision_of(const clay_document* doc, clay_layer_id lay
     return doc->doc.mesh_revision(layer);
 }
 
-// Bump it, and drop what was cached over the triangles it describes.
-//
-// ONE FUNCTION FOR BOTH, because the two are the same statement and splitting
-// them is how a replacement path ends up bumping one and not the other. The
-// cache would survive that -- an entry is fingerprinted against the mesh it is
-// served for, so a missed `forget` is a slower miss and never a wrong answer --
-// but paying 120 ms to discover an invalidation was skipped is not a design,
-// it is a safety net doing a job somebody should have done.
-void replace_mesh_layer_revision(clay_document* doc, clay_layer_id layer) {
-    doc->mesh_geometry_revision[layer] = mesh_layer_revision_of(doc, layer) + 1;
-    doc->topology_cache.forget(layer);
-}
-
 clay_mesh* borrow_mesh_layer(clay_document* doc, clay_layer_id layer) {
     clay_mesh& handle = doc->mesh_handles[layer];
     handle.doc = doc;
@@ -4758,7 +4745,7 @@ clay_result clay_document_memory(const clay_document* doc, clay_memory_report* o
     const std::uint32_t declared = out_report->struct_size;
     write_desc(out_report, declared,
                with_topology_cache(to_c_report(io::document_memory(doc->doc, doc->undo.get())),
-                                   doc->topology_cache.bytes()));
+                                   doc->doc.topology_cache.bytes()));
     return CLAY_OK;
 }
 
@@ -4787,7 +4774,7 @@ clay_result clay_document_memory_with_surfaces(const clay_document* doc,
     write_desc(out_report, declared,
                with_topology_cache(to_c_report(io::document_memory(doc->doc, doc->undo.get(),
                                                                    surfaces ? &ledger : nullptr)),
-                                   doc->topology_cache.bytes()));
+                                   doc->doc.topology_cache.bytes()));
     return CLAY_OK;
 }
 
@@ -4801,7 +4788,7 @@ clay_result clay_document_topology_cache_stats(const clay_document* doc,
     clay_result r = read_desc(out_stats, kTopologyCacheStatsOriginal, &probe);
     if (r != CLAY_OK) return r;
     const std::uint32_t declared = out_stats->struct_size;
-    const mesh::TopologyCacheStats s = doc->topology_cache.stats();
+    const mesh::TopologyCacheStats s = doc->doc.topology_cache.stats();
     clay_topology_cache_stats filled{};
     filled.entries = s.entries;
     filled.bytes = s.bytes;
@@ -4816,7 +4803,7 @@ clay_result clay_document_topology_cache_stats(const clay_document* doc,
 
 clay_result clay_document_trim_topology_cache(clay_document* doc, uint64_t* out_released_bytes) {
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
-    const std::size_t released = doc->topology_cache.release_unused();
+    const std::size_t released = doc->doc.topology_cache.release_unused();
     if (out_released_bytes) *out_released_bytes = static_cast<std::uint64_t>(released);
     return CLAY_OK;
 }
@@ -4835,7 +4822,7 @@ clay_result clay_layer_memory(const clay_document* doc, clay_layer_id layer,
     // is keyed by layer. The content lines already sum across layers and this
     // one does too, so the document figure stays reachable by addition.
     write_desc(out_report, declared,
-               with_topology_cache(to_c_report(rep), doc->topology_cache.bytes_of(layer)));
+               with_topology_cache(to_c_report(rep), doc->doc.topology_cache.bytes_of(layer)));
     return CLAY_OK;
 }
 
@@ -16597,7 +16584,7 @@ clay_result clay_mesh_sculptor_create(clay_mesh* mesh, float weld_epsilon,
     // key a cache on an address that can be reused by the next allocation.
     handle->sculptor =
         mesh->doc ? std::make_unique<mesh::MeshSculptor>(
-                        *data, mesh->doc->topology_cache.acquire(mesh->layer, *data, epsilon))
+                        *data, mesh->doc->doc.topology_cache.acquire(mesh->layer, *data, epsilon))
                   : std::make_unique<mesh::MeshSculptor>(*data, epsilon);
     handle->sculptor->set_telemetry(&handle->peak);
     *out_sculptor = handle.release();

@@ -68,3 +68,32 @@
 - [x] 6.2 Full unit suite green (2,537 cases, 9 ctest entries)
 - [ ] 6.3 `python3 tools/release_check.py --skip-slow`
 - [ ] 6.4 CI green
+
+## 9. Porting it onto #488, after that merged
+
+- [x] 9.1 The cache moved from the two binding handles into `io::ClaySpaceDoc`,
+      beside the `mesh_geometry_revision` #488 put there. Both bindings take it
+      from the document now
+- [x] 9.2 The C ABI's own bump-and-forget helper is deleted -- it no longer
+      exists to cite, which is why it is described here rather than named.
+      `install_mesh_geometry` and `note_mesh_geometry_replaced` supersede it,
+      and that was one of the two collisions agreed in the other session's
+      favour
+- [x] 9.3 `TopologyCache` declares its moves explicitly, with the moved-from
+      cache left EMPTY and copying deleted. The `static_assert` beside
+      `ClaySpaceDoc` FIRED on the real integration when only half the port was
+      applied, naming the cause at the definition -- without it the error was
+      "copy assignment is implicitly deleted" in `clayspace.cpp`, for a move
+      nobody wrote
+- [x] 9.4 FOUND AND FIXED -- the port forgot at `install_mesh_geometry` only,
+      and claimed in its own comment that this was the one place triangles
+      enter a layer. Main has TWO chokepoints: a weld rewrites triangles IN
+      PLACE through `note_mesh_geometry_replaced` and never reaches the
+      installer. Both forget now
+- [x] 9.5 NOTHING WOULD HAVE FAILED, which is why it survived. A weld moves the
+      vertex and triangle counts, so the fingerprint rejects the stale entry and
+      rebuilds -- 120 ms where 0.25 ms was promised, invisible to every
+      correctness test. The redundancy that makes the cache survivable is what
+      made this fault undetectable; those are the same property
+- [x] 9.6 The weld case proven by reverting the second forget: one assertion,
+      the one that matters, on a clean build

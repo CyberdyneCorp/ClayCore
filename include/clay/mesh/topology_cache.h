@@ -126,6 +126,40 @@ struct TopologyCacheStats {
 
 class TopologyCache {
    public:
+    TopologyCache() = default;
+
+    // MOVABLE, AND EXPLICITLY SO, because the member is a std::mutex and a
+    // mutex is not. `io::ClaySpaceDoc` holds one of these and `load_clayspace`
+    // MOVE-ASSIGNS a fresh document over the caller's, so an implicitly deleted
+    // move here becomes a compiler error at that call site naming COPY
+    // assignment — an operation nobody wrote, three files away from the cause.
+    // The static_assert beside `ClaySpaceDoc` names it at the definition
+    // instead, and this is what makes it pass.
+    //
+    // THE MOVED-FROM CACHE IS LEFT EMPTY rather than unspecified. It is about
+    // to be destroyed in every real use, but "unspecified" is a promise that a
+    // later reader has to go and check, and clearing costs nothing here.
+    //
+    // COPYING STAYS DELETED. Two documents holding entries under one layer id
+    // is exactly the cross-document collision this being document-owned exists
+    // to prevent, and a copy is the one operation that could produce it.
+    TopologyCache(TopologyCache&& other) noexcept { *this = std::move(other); }
+    TopologyCache& operator=(TopologyCache&& other) noexcept {
+        if (this == &other) return *this;
+        std::lock_guard<std::mutex> theirs(other.mutex_);
+        std::lock_guard<std::mutex> mine(mutex_);
+        entries_ = std::move(other.entries_);
+        hits_ = other.hits_;
+        misses_ = other.misses_;
+        evictions_ = other.evictions_;
+        build_ns_ = other.build_ns_;
+        verify_ns_ = other.verify_ns_;
+        other.entries_.clear();
+        return *this;
+    }
+    TopologyCache(const TopologyCache&) = delete;
+    TopologyCache& operator=(const TopologyCache&) = delete;
+
     // The adjacency for `m`, built if there is no live entry for `owner` that
     // fingerprints against it. Never null.
     //

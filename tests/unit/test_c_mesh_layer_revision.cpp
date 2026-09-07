@@ -367,6 +367,52 @@ TEST_CASE("c abi: the mesh geometry revision stands still for everything that is
     }
 }
 
+TEST_CASE("c abi: a weld drops the shared adjacency too, not only a replacement") {
+    // THE SECOND CHOKEPOINT. A weld rewrites a layer's triangles through the
+    // borrowed mesh, so `install_mesh_geometry` never runs -- only
+    // `note_mesh_geometry_replaced` does. If only the installer forgot, the
+    // entry here would survive a weld and be caught later by the fingerprint
+    // instead, which is a slow miss rather than a wrong answer and is therefore
+    // invisible to a test that only checks correctness.
+    const TriMesh seamed = sphere(1.0f, 8, 16);
+
+    DocHandle doc;
+    doc.doc = clay_document_create();
+    REQUIRE(doc.doc != nullptr);
+    const clay_layer_id layer = attach_layer(&doc, seamed);
+
+    clay_topology_cache_stats s;
+    const auto entries = [&] {
+        std::memset(&s, 0, sizeof s);
+        s.struct_size = static_cast<std::uint32_t>(sizeof s);
+        REQUIRE(clay_document_topology_cache_stats(doc.doc, &s) == CLAY_OK);
+        return s.entries;
+    };
+
+    clay_mesh* borrowed = nullptr;
+    REQUIRE(clay_document_mesh_layer_by_id(doc.doc, layer, &borrowed) == CLAY_OK);
+    clay_mesh_sculptor* sc = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(borrowed, -1.0f, &sc) == CLAY_OK);
+    clay_mesh_sculptor_destroy(sc);
+    CHECK(entries() == 1u);
+
+    // A weld that actually merges something, or this asserts nothing: the
+    // revision bump and the forget are both guarded on the weld having done
+    // work, and a weld that merged zero vertices leaves the cache alone
+    // CORRECTLY.
+    clay_weld_desc wd;
+    std::memset(&wd, 0, sizeof wd);
+    wd.struct_size = static_cast<std::uint32_t>(sizeof wd);
+    REQUIRE(clay_mesh_weld_defaults(&wd) == CLAY_OK);
+    wd.epsilon = 0.05f;
+    clay_weld_report report;
+    std::memset(&report, 0, sizeof report);
+    report.struct_size = static_cast<std::uint32_t>(sizeof report);
+    REQUIRE(clay_mesh_weld(borrowed, &wd, &report) == CLAY_OK);
+    REQUIRE(report.vertices_merged > 0);
+    CHECK(entries() == 0u);
+}
+
 TEST_CASE("c abi: an undo with nothing to undo spends no mesh generation") {
     // The empty stack is reported rather than failed, and a report is not a
     // replacement — a UI that drives the button without tracking state must not
@@ -440,4 +486,90 @@ TEST_CASE("c abi: a round trip through undo and redo refuses a commit it used to
     const std::uint64_t reread = revision(doc.doc, layer);
     CHECK(replace_with(doc.doc, layer, fine, reread) == CLAY_OK);
     CHECK(layer_holds(doc.doc, layer, fine));
+}
+
+TEST_CASE("c abi: the shared adjacency is dropped by every path that replaces triangles") {
+    // THE REASON THE CACHE LIVES BESIDE THE TRIANGLES rather than on a binding
+    // handle. An adjacency built over a layer's triangles does not survive a
+    // wholesale replacement, and the paths that replace them include undo, redo
+    // and journal replay — none of which a binding's own map can see, because
+    // they restore a mesh through `session::History`'s resolver.
+    //
+    // A cache invalidated at the call sites a binding knows about would be
+    // correct for a rebuild and stale for an undo of one, which is the shape of
+    // #472 exactly.
+    //
+    // TWO CHOKEPOINTS, NOT ONE, and the second is why this case grew a weld.
+    // `install_mesh_geometry` is where triangles ENTER a layer;
+    // `note_mesh_geometry_replaced` is where a weld rewrites them IN PLACE
+    // without ever holding a second copy. An earlier draft of this cache
+    // forgot at the installer alone and said in its own comment that the
+    // installer was the only place -- which the weld path falsifies. Nothing
+    // failed, because the fingerprint caught it: a weld moves the vertex and
+    // triangle counts, so the entry fails verification and is rebuilt. The belt
+    // held while the braces were absent, which is exactly why it went unnoticed
+    // and exactly why the weld is asserted here rather than reasoned about.
+    const TriMesh fine = sphere(1.0f, 8, 16);
+    const TriMesh coarse = sphere(0.5f, 4, 8);
+
+    DocHandle doc;
+    doc.doc = clay_document_create();
+    REQUIRE(doc.doc != nullptr);
+    REQUIRE(clay_document_enable_undo(doc.doc) == CLAY_OK);
+    const clay_layer_id layer = attach_layer(&doc, fine);
+
+    const auto entries = [&] {
+        clay_topology_cache_stats s;
+        std::memset(&s, 0, sizeof s);
+        s.struct_size = static_cast<std::uint32_t>(sizeof s);
+        REQUIRE(clay_document_topology_cache_stats(doc.doc, &s) == CLAY_OK);
+        return s.entries;
+    };
+    const auto warm = [&] {
+        clay_mesh* borrowed = nullptr;
+        REQUIRE(clay_document_mesh_layer_by_id(doc.doc, layer, &borrowed) == CLAY_OK);
+        clay_mesh_sculptor* s = nullptr;
+        REQUIRE(clay_mesh_sculptor_create(borrowed, -1.0f, &s) == CLAY_OK);
+        clay_mesh_sculptor_destroy(s);
+    };
+
+    warm();
+    CHECK(entries() == 1u);
+
+    // A REBUILD. The path a binding could see, and the only one the first
+    // version of this cache invalidated.
+    REQUIRE(replace_with(doc.doc, layer, coarse) == CLAY_OK);
+    CHECK(entries() == 0u);
+
+    // AN UNDO OF THAT REBUILD — the path it could not see. Every vertex and
+    // index goes back and nothing in the binding is told.
+    warm();
+    CHECK(entries() == 1u);
+    std::int32_t moved = 0;
+    REQUIRE(clay_document_undo(doc.doc, &moved) == CLAY_OK);
+    REQUIRE(moved == 1);
+    CHECK(layer_holds(doc.doc, layer, fine));
+    CHECK(entries() == 0u);
+
+    // AND A REDO, which is a second assignment site rather than a call into the
+    // first.
+    warm();
+    CHECK(entries() == 1u);
+    REQUIRE(clay_document_redo(doc.doc, &moved) == CLAY_OK);
+    REQUIRE(moved == 1);
+    CHECK(layer_holds(doc.doc, layer, coarse));
+    CHECK(entries() == 0u);
+
+    // AND THE ADJACENCY SERVED AFTERWARDS DESCRIBES THE TRIANGLES THAT ARE
+    // THERE. A count is what a stale entry would get wrong: the two fixtures
+    // differ at 224 triangles against 48, so an adjacency held over from the
+    // fine mesh cannot be mistaken for one built over the coarse one.
+    clay_mesh* borrowed = nullptr;
+    REQUIRE(clay_document_mesh_layer_by_id(doc.doc, layer, &borrowed) == CLAY_OK);
+    clay_mesh_sculptor* s = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(borrowed, -1.0f, &s) == CLAY_OK);
+    std::size_t vertices = 0;
+    REQUIRE(clay_mesh_sculptor_vertex_count(s, &vertices) == CLAY_OK);
+    CHECK(vertices == clay_mesh_vertex_count(borrowed));
+    clay_mesh_sculptor_destroy(s);
 }

@@ -100,12 +100,14 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <type_traits>
 #include <string>
 #include <vector>
 
 #include "clay/io/result.h"
 #include "clay/mesh/mesh_data.h"
 #include "clay/mesh/multires.h"
+#include "clay/mesh/topology_cache.h"
 #include "clay/scene/document.h"
 #include "clay/voxel/grid.h"
 #include "clay/voxel/groups.h"
@@ -279,13 +281,59 @@ struct ClaySpaceDoc {
     void install_mesh_geometry(scene::LayerId layer, mesh::Mesh triangles) {
         mesh_layers.insert_or_assign(layer, std::move(triangles));
         ++mesh_geometry_revision[layer];
+        // AND THE ADJACENCY BUILT OVER THE TRIANGLES THAT JUST LEFT. It is the
+        // same statement as the line above it and lands here for the same
+        // reason: this is where triangles ENTER a layer, so it is where what
+        // was derived from them can be invalidated without every caller having
+        // to remember. `note_mesh_geometry_replaced` below is the other half --
+        // a weld rewrites them in place and never comes through here.
+        topology_cache.forget(layer);
     }
+
+    // THE ADJACENCY EVERY MESH SCULPTOR OVER A LAYER SHARES, keyed by layer id.
+    //
+    // HERE, BESIDE THE TRIANGLES, for the reason `mesh_geometry_revision` is
+    // here: it describes them, and a cache that lived on a binding handle would
+    // be invalidated only by the paths that binding knows about. Both bindings
+    // reach this one, and `install_mesh_geometry` above is what keeps it
+    // honest.
+    //
+    // Building the weld classes and the neighbourhood CSR a brush walks is the
+    // WHOLE of what a sculptor costs to construct -- 120.8 ms on a
+    // 296k-triangle mesh, against a sculptor whose other members are empty
+    // vectors -- and a second session on one layer used to pay it again. It is
+    // 0.25 ms now.
+    //
+    // AN ENTRY IS VERIFIED, NOT TRUSTED. Every lookup fingerprints the entry
+    // against the mesh it is about to be served for, so a replacement path that
+    // reached `mesh_layers` some other way is a slow miss rather than a wrong
+    // adjacency. That is belt and braces with the line above, deliberately:
+    // this counter has been wrong before (#472).
+    //
+    // RUNTIME-ONLY, like the generation beside it: nothing here is serialized
+    // and a reopen starts empty.
+    mesh::TopologyCache topology_cache;
 
     // The same signal for a rewrite made IN PLACE through a borrowed mesh --
     // a weld, which rewrites the triangles without ever holding a second copy
     // of them. Separate from the installer rather than folded into it because
     // the alternative is copying a whole mesh out and back to say one thing.
-    void note_mesh_geometry_replaced(scene::LayerId layer) { ++mesh_geometry_revision[layer]; }
+    //
+    // IT FORGETS TOO, AND THAT IS THE POINT OF IT BEING A SECOND CHOKEPOINT. A
+    // weld changes the triangles an adjacency was built over without replacing
+    // the container they live in, so `install_mesh_geometry` never runs and
+    // cannot speak for it. Two paths change a layer's geometry; both invalidate
+    // here, and neither caller has to remember.
+    //
+    // The fingerprint would have caught a miss -- a weld moves the vertex and
+    // triangle counts, so the entry fails verification and is rebuilt. That is
+    // exactly why this was missed when the cache was written against the
+    // installer alone: the belt held while the braces were absent, and nothing
+    // failed. Forgetting here makes the miss impossible rather than survivable.
+    void note_mesh_geometry_replaced(scene::LayerId layer) {
+        ++mesh_geometry_revision[layer];
+        topology_cache.forget(layer);
+    }
 
     // A mesh layer's multiresolution hierarchy, keyed the same way and for the
     // same layering reason. Before this, a hierarchy was a STANDALONE handle
@@ -321,6 +369,24 @@ struct ClaySpaceDoc {
     std::vector<std::uint8_t> thumbnail_png;      // optional passthrough
     std::vector<std::uint8_t> camera_bookmarks;   // optional passthrough
 };
+
+// THE ONE THING THIS STRUCT HAS TO STAY, said here rather than discovered at a
+// call site three files away.
+//
+// `load_clayspace` builds a fresh document and MOVE-ASSIGNS it over the
+// caller's (`*out = std::move(result)`). A member that is not move-assignable
+// — a std::mutex, an atomic, a reference, a const field — deletes the implicit
+// move, and the compiler then reports that the COPY assignment is deleted,
+// naming an operation nobody wrote at a line that is not the cause. This says
+// what actually broke, at the definition that broke it.
+//
+// `mesh::TopologyCache` is the member that made this reachable: it holds a
+// mutex and declares its moves explicitly for exactly this reason.
+static_assert(std::is_move_assignable_v<ClaySpaceDoc>,
+              "load_clayspace move-assigns a fresh document over the caller's. A member that "
+              "is not move-assignable -- a std::mutex, an atomic, a reference -- deletes the "
+              "implicit move and the error names COPY assignment instead. Declare the "
+              "member's moves explicitly, as mesh::TopologyCache does.");
 
 // WHICH SNAPSHOT IS THIS (survive-a-crash 2.1).
 //
