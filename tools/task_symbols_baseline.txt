@@ -1,0 +1,64 @@
+# Names in an in-flight change's tasks.md that do not resolve in the tree, and
+# that predate `tools/check_task_symbols.py`.
+#
+# This file is DEBT, recorded rather than hidden. Each line is the change and
+# the exact backticked span the gate could not resolve. Entries are added by
+# hand only: a new change cannot acquire one by accident, which is the whole
+# point of keeping the list here instead of loosening the matcher.
+#
+# Recorded 2026-09-06, when the gate was written. Nothing was edited in another
+# change to produce this list — an owner clears their own rows by correcting the
+# name or by building the thing.
+#
+# AUDITED WHEN THE GATE WAS WIRED INTO CI, and three rows came off it. All
+# three were the same gate defect rather than debt anyone owed: `upload_tape`,
+# `MetalBackend::upload_tape` and `wait_for` live in `backends/metal/`, and
+# `backends/` was not one of the directories the gate searched. The audit
+# itself only became possible once this file stopped being part of the tree the
+# gate searches: it lives under `tools/`, so every name written here used to
+# resolve by its own record. What is left below is debt in the two honest shapes — a name that
+# belongs to another repository or to a build artefact, and a name a change has
+# promised and not yet built.
+#
+# RE-AUDITED once the gate learned to read a qualified name whole. Until then it
+# searched for the trailing identifier alone, so `MetalBackend::upload_tape` had
+# been struck on evidence about `upload_tape` and nothing else — the class was
+# never looked at. Every struck row and every row below was re-run against the
+# corrected matcher: all three strikes hold (`upload_tape` and `wait_for` are
+# both members of `class MetalBackend` in `backends/metal/metal_backend.cpp`),
+# and every row below still fails to resolve, so none of them is a strike this
+# gate was simply unable to see.
+#
+# A ROW IS RETIRED BY THE GATE, NOT BY GOODWILL. Every row here is re-read on
+# every run: if the change stops citing the span, or the span starts resolving,
+# the gate FAILS and names the row to delete. A debt list nobody retires stops
+# describing the tree and goes on quietly exempting a name long after the debt
+# is paid -- so if that name is later renamed away, the gate stays silent about
+# the very thing it exists to catch. This sentence used to be advice to a human;
+# `--self-test` is where both directions are proved.
+#
+# The live example WENT OFF AS WRITTEN. `LayerComposition` resolved on main (it
+# landed with the layer-composition change) and not on the branch this file was
+# audited from; nobody remembered to delete its row, and the first run after
+# that merge failed and named it. Its row, and two more the mechanism caught the
+# same way, are gone.
+#
+# RE-AUDITED once a path-shaped citation stopped being resolved through the
+# filesystem. Four more rows came off, and none of them was debt anyone owed:
+# `brush/procedural_mask.h`, `brush/surface_measure.h`, `Shared/` and
+# `examples/60` all name tracked files by a suffix or a prefix rather than by a
+# root-relative path, which the old `os.path.exists` could not see and a bare
+# filename never needed. What is left is debt in one honest shape: a name in
+# another repository, in a build artefact, or promised and not yet built. Two of
+# those rows also stopped being machine-dependent -- `dist/claycore.xcframework`
+# is gitignored build output and `../../backends/cpu/` is outside the checkout,
+# so both used to resolve or not depending on whose disk the gate ran on, and
+# both now fail everywhere.
+#
+# <change>\t<span>
+
+add-claycore-bridge	fieldSampledMaps
+add-device-perf-gates	Headers/clay/kernel/
+add-device-perf-gates	dist/claycore.xcframework
+add-mobile-thread-scheduling	../../backends/cpu/
+speed-the-metal-path	bytesNoCopy

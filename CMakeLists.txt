@@ -104,7 +104,9 @@ add_library(claycore
   src/mesh/surface_frame.cpp
   src/mesh/detail_field.cpp
   src/mesh/multires.cpp
+  src/mesh/cross_level.cpp
   src/mesh/multires_eval.cpp
+  src/mesh/multires_mixed.cpp
   src/mesh/multires_chunks.cpp
   src/mesh/multires_sculpt.cpp
   src/mesh/project.cpp

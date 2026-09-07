@@ -24,7 +24,7 @@
       carries the per-level patch sets; a version 1 or 2 stream has none and
       `uniform_depth()` is true, which is exactly what it was
 - [x] 1.3 `add_level_for_patches(patches)` takes a PATCH LIST;
-      `refine_patches_to_level` sits on top and `examples/74` shows a world-ball
+      `refine_patches_to_level` sits on top and `examples/74_regional_multires.py` shows a world-ball
       selection above both
 
 ## 2. Balance and transitions
@@ -110,7 +110,6 @@
       clay_multires_patch_depth call, which is a name the tree has never
       carried (left unquoted here on purpose: a backticked name is a CLAIM to
       tools/check_task_symbols.py, and it caught this one on its first run);
-      caught by tools/check_task_symbols.py on its first run;
       pyclay including `topology_at`; `examples/74_regional_multires.py`
 - [x] 5.8 No level removal over a region. `remove_highest_level` drops the top
       level whatever it refines, which is the operation that already existed;

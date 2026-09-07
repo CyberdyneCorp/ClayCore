@@ -95,6 +95,7 @@ add_executable(clay_unit_tests
   unit/test_mesh_weld.cpp
   unit/test_voxel_remesh.cpp
   unit/test_c_voxel_remesh.cpp
+  unit/test_c_mesh_layer_revision.cpp
   unit/test_bench_spread.cpp
   unit/test_bvh_refit.cpp
   unit/test_meshers.cpp
@@ -313,6 +314,15 @@ add_test(NAME clay_unit_shards_partition
          COMMAND ${Python3_EXECUTABLE}
                  ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_test_shards.py
                  --binary $<TARGET_FILE:clay_unit_tests>)
+
+# THE TASK-SYMBOLS GATE'S OWN GATE. Its stale-baseline rule cannot fire on a
+# healthy tree -- it only speaks when a recorded debt has been paid -- so
+# running it in CI proves nothing about that half. The self-test builds a throw-
+# away tree where the rule must fire and where it must stay quiet, and runs the
+# real gate over it. It needs no build artefact, only git and Python.
+add_test(NAME clay_task_symbols_selftest
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_task_symbols.py --self-test)
 endif()
 
 # CUDA architecture selection is pure CMake, so it is tested by script rather

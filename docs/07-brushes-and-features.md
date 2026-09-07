@@ -2163,6 +2163,23 @@ vertex and index COUNTS are unchanged by a replacement that happens to land on
 the same ones — so before this, a same-count rebuild left a sculptor stamping
 into an adjacency and a BVH describing triangles that no longer existed.
 
+**Every path that replaces the triangles advances it, history included.** The
+counter lives in `io::ClaySpaceDoc` beside the triangles it counts, and
+`install_mesh_geometry` is the only way triangles enter a layer — so an attach,
+a rebuild, a load, an undo, a redo and a replayed journal event all advance it
+and none of them can forget. Through 0.84.0 it lived on the binding's own
+handle instead, which meant undo, redo and replay restored every vertex and
+every index and left the token where it was; a host that rebuilt, undid and kept
+sculpting got a refused stroke on the next dab with nothing naming the cause.
+
+It **advances** on an undo rather than returning to the value it held before the
+rebuild. The number is an invalidation token for a host's live caches, not the
+age of the restored mesh: a BVH built over the rebuilt triangles is just as
+wrong after the undo, and a revision handed back to its old value would say the
+opposite. A rebuild reads 2, undoing it reads 3, redoing reads 4. It is per
+document instance and is not written to a `.clayspace` — nothing it invalidates
+survives a reopen, so a loaded document starts fresh at 1.
+
 Runnable: [`examples/67_voxel_remesh.py`](../examples/67_voxel_remesh.py) —
 spikes thinner than a coarse voxel disappearing, a stretched surface's edge
 lengths before and after, and two crossing shells cut open to show the interior

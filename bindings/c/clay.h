@@ -4010,6 +4010,42 @@ clay_result clay_mesh_voxel_remesh(const clay_mesh* source,
  * rebuilt in between, the commit is refused with CLAY_ERROR_FORWARD_VERSION
  * rather than overwriting work the artist did while waiting.
  *
+ * EVERY WHOLESALE REPLACEMENT ADVANCES IT, history included: an attach, a
+ * rebuild through the document, a weld that changed something, an undo, a redo
+ * and a replayed journal event. Through 0.84.0 undo, redo and replay did not,
+ * because the counter lived beside the ABI handle rather than beside the
+ * triangles — so a host that rebuilt, undid and kept sculpting was refused on
+ * the next dab, holding an adjacency and a BVH over triangles the document no
+ * longer had, with nothing naming the cause (#472).
+ *
+ * IT ADVANCES ON AN UNDO RATHER THAN RETURNING TO WHAT IT WAS. The number is an
+ * invalidation token for YOUR live caches, not the age of the restored mesh: a
+ * cache built over the rebuilt triangles is wrong after the undo too, and a
+ * revision handed back to its old value would say the opposite. So a rebuild
+ * reads 2, undoing it reads 3, and redoing reads 4.
+ *
+ * PER DOCUMENT INSTANCE, and not carried in a saved file. Nothing it invalidates
+ * survives a reopen, so a loaded document starts a fresh generation at 1 for
+ * every mesh layer it holds; a token held across a save and a reopen is
+ * meaningless rather than merely stale.
+ *
+ * AND IT GOES WRONG QUIETLY IF YOU HOLD ONE ACROSS A REOPEN. A fresh domain
+ * starts at 1, so a stored 1 read back against a fresh 1 says UNCHANGED for an
+ * entirely different mesh — the failure is agreement, not a mismatch you would
+ * notice. Drop every token you hold when you open a document. A host whose open
+ * path builds a new document and assigns over the old one cannot reach this;
+ * one that reuses a layer table across the reopen can.
+ *
+ * A COMMIT THAT USED TO SUCCEED CAN NOW BE REFUSED, and this is the one
+ * behaviour change here that is not about a stale cache. Read a revision, let
+ * the artist undo and redo back to the SAME triangles, then hand that revision
+ * to clay_document_replace_mesh_layer: through 0.84.0 the number had not moved
+ * and the commit went in; now it has moved twice and the commit is refused with
+ * CLAY_ERROR_FORWARD_VERSION. That is correct — the numbering your worker's
+ * result was computed against is gone even though the vertices agree — but it
+ * is a refusal a host did not previously have to handle. Re-read the revision
+ * and commit again.
+ *
  * Zero for a layer that is not a mesh layer, or does not exist. */
 clay_result clay_document_mesh_layer_revision(const clay_document* doc, clay_layer_id layer,
                                               uint64_t* out_revision);
@@ -8192,7 +8228,38 @@ clay_result clay_multires_project(clay_multires* surface, const clay_mesh* refer
 
 typedef struct clay_multires_stamp_report {
     uint32_t struct_size; /* = sizeof(clay_multires_stamp_report); required */
-    uint32_t level;       /* the level the stamp was made on */
+    /* The level the brush was BOUND to, which on a regionally refined hierarchy
+     * is not the only level a stamp writes: the patches beside the refined
+     * region are coarser and have no vertex at this level for the brush to
+     * move, so a footprint reaching past the region is written at the level
+     * that part of the surface actually lives at.
+     *
+     * THIS NEEDS NOTHING NEW FROM A HOST. clay_multires_dirty_blocks reports
+     * BASE PATCHES rather than levels, and a stamp marks the patches it wrote
+     * at whatever level it wrote them, so a host re-copying its dirty patches
+     * at clay_multires_effective_level already picks the coarse write up. */
+    uint32_t level;
+    /* Weld classes the stamp moved, SUMMED OVER EVERY LEVEL IT WROTE.
+     *
+     * THE MEANING CHANGED AT ABI 0.89.0 WHILE THE LAYOUT DID NOT, which is the
+     * whole reason the minor moves for it: a field that means something new
+     * under the same number is worse than a new field, because nothing a host
+     * compiles against tells it to look. Through 0.87.0 this was the count at
+     * `level` alone -- correct then, because a stamp only ever wrote one level.
+     *
+     * A host reading it as "how many of MY level's vertices moved" now reads it
+     * wrong on a regionally refined hierarchy, and there is no call in this ABI
+     * that answers the old question: the per-level write lists are C++-side
+     * (MultiresSculptor::last_write_vertices_at). What this ABI gives a host is
+     * what it needed the number for -- "did anything move, and which patches do
+     * I re-copy" -- and the second half is clay_multires_dirty_blocks, which was
+     * already per patch rather than per level.
+     *
+     * NOTHING IS COUNTED TWICE. Every vertex of the mixed-depth surface belongs
+     * to exactly one level, so a coarse class whose whole write the level above
+     * owns is put back and not counted at all. A stamp on a uniform-depth
+     * hierarchy, or one that stays inside the refined region, writes one level
+     * and reports exactly what it reported before. */
     uint64_t moved_vertices;
     uint64_t base_revision;
     uint64_t detail_revision;

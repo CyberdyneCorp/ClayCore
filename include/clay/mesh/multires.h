@@ -58,6 +58,7 @@
 
 #include "clay/kernel/shim.h"
 #include "clay/mesh/adjacency.h"
+#include "clay/mesh/cross_level.h"
 #include "clay/mesh/detail_field.h"
 #include "clay/mesh/mesh_data.h"
 #include "clay/mesh/project.h"
@@ -226,6 +227,32 @@ struct MultiresExportOptions {
     bool colors = true;
 };
 
+// WHAT A MIXED-DEPTH EXPORT COULD NOT DO, said rather than swallowed
+// (finish-regional-multires).
+//
+// `build_block` returns true with an EMPTY block for a patch a level does not
+// store, so a host that forgets `effective_level` draws a hole and is told
+// nothing. A whole-surface export repeating that shape would omit a region of
+// the model with a bigger blast radius, so every refusal here has a name and
+// the mesh that comes back with one is empty rather than partial.
+enum class MultiresMixedStatus : std::uint32_t {
+    Ok = 0,
+    // No hierarchy, or a display level above `max_level()`.
+    NotBuilt = 1,
+    Cancelled = 2,
+    // The cage SPLITS its attributes -- duplicate raw vertices at one geometric
+    // point, which is how a flat mesh writes a UV seam -- and the caller asked
+    // for UVs or colours.
+    //
+    // The attribute hierarchy is a SECOND topology per level, mapped to the
+    // geometric one face for face. A mixed-depth face has corners from two
+    // levels and, at a split edge, a corner neither level's face carries, so
+    // there is no face-for-face counterpart to read a seam's two values
+    // through. Refused rather than guessed: ask again with `uvs` and `colors`
+    // off and the geometry comes back.
+    AttributeSplitCage = 3,
+};
+
 // -- the surface --------------------------------------------------------------
 
 class MultiresSurface {
@@ -384,6 +411,12 @@ class MultiresSurface {
     // that are.
 
     const LevelTopology& topology_at(std::uint32_t level) const;
+    // WHAT THIS ONE DOES NOT EVALUATE: anything. A level's connectivity is a
+    // function of its topology alone, so asking a level that was released for
+    // it BUILDS THE CACHE AND LEAVES THE SURFACE OUT OF IT — the positions, the
+    // subdivision and the frames all stay empty. The level then holds a cache
+    // and no surface, which counts in `MultiresMemory::resident_levels` and is
+    // not something another reader may take for an evaluated level.
     const LevelConnectivity& connectivity_at(std::uint32_t level);
 
     // P(n): the level as the artist sees it.
@@ -417,8 +450,116 @@ class MultiresSurface {
         std::uint32_t level = 0;
         std::vector<std::uint32_t> vertices;  // level vertex ids, ascending
         std::vector<std::uint32_t> indices;   // triangles, local to `vertices`
+
+        // The LEVEL each entry of `vertices` lives at, for a block that spans
+        // two of them. EMPTY when every vertex is at `level`, which is every
+        // block `build_block` has ever produced and every block of a uniform
+        // hierarchy -- so a host that ignores this array reads exactly what it
+        // read before.
+        //
+        // Only `build_mixed_block` fills it, and only at a depth boundary: a
+        // coarse patch's block there carries the FINE side's value at a shared
+        // cage vertex, and the fine point on a split edge, and both of those
+        // live one level up. See `build_mixed_block`.
+        //
+        // BOTH CALLS CLEAR IT, so one `Block` reused across the two loops — the
+        // way a host reuses one across its patches — never carries the last
+        // block's levels beside this block's vertices.
+        std::vector<std::uint32_t> vertex_levels;
     };
     bool build_block(std::uint32_t level, std::uint32_t patch, Block* out);
+
+    // -- mixed-depth export ---------------------------------------------------
+    //
+    // ONE WELDED MESH OVER A HIERARCHY OF SEVERAL DEPTHS, where base patch `p`
+    // contributes its faces at `effective_level(p, level)`
+    // (finish-regional-multires, the residual `refine-one-region-of-a-hierarchy`
+    // left as task 2.3).
+    //
+    // WATERTIGHT BY IDENTITY, not by distance. Where a coarse patch meets a
+    // finer one the two sides do not merely coincide, they are the SAME index:
+    //
+    //   * a cage vertex shared with a finer patch is emitted as the finer
+    //     level's vertex point -- the value one subdivision step closer to the
+    //     limit -- and EVERY coarse face incident to it takes that same index,
+    //     including a face that touches the fine region only at a corner and
+    //     has no split edge at all. Stopping at edge-adjacent faces would not
+    //     remove the crack, it would move it one face inwards onto a
+    //     coarse-coarse edge;
+    //   * a coarse edge the finer level has split carries that level's edge
+    //     point in the middle of the coarse face's corner list, so the coarse
+    //     face is a pentagon whose two half-edges are the fine side's own two
+    //     edges.
+    //
+    // Nothing is welded by proximity and no tolerance appears anywhere: the
+    // mismatch this closes is a subdivision step -- measured at 8.7% of a cage
+    // edge -- and any epsilon large enough to close it would fuse unrelated
+    // geometry.
+    //
+    // IT BRIDGES EXACTLY ONE LEVEL, and that is a property of the hierarchy
+    // rather than a limit of this call. `add_level_for_patches` refuses to
+    // refine a patch unless it AND its whole vertex ring are resident one level
+    // down, which is stricter than 2:1, so no two patches sharing a cage vertex
+    // can differ by more than one level. There is no chain of transitions to
+    // template and no configuration table.
+    //
+    // NOT QUAD-CLEAN AT A SPLIT EDGE, AND THAT IS ARITHMETIC RATHER THAN A
+    // SHORTCUT. A coarse quad with one split edge is a pentagon, and a polygon
+    // with an ODD number of boundary vertices cannot be divided into quads at
+    // all -- summing four edges per quad counts every interior edge twice, so
+    // the boundary count must be even, whatever vertices are added inside.
+    // Making it even would mean splitting a second edge of that face, which
+    // ripples into the next coarse face and the next, out of the transition and
+    // across the model. So `Mesh::quads` comes back EMPTY exactly when some
+    // edge is split, and non-empty -- with the invariant `mesh_data.h` states --
+    // when none is, which includes every uniform-depth export and every
+    // transition that is corner-only.
+    //
+    // IT IS A READ. It writes no detail, bumps neither `detail_revision` nor
+    // `base_revision`, and creates nothing a host would have to record as an
+    // edit. It does EVALUATE, and building a level cache moves
+    // `cache_generation`, which is the one observable a caller must expect
+    // from it.
+    //
+    // WHAT IT DOES NOT PROMISE IS RESIDENCY. It reads each emitted vertex at
+    // the level that vertex lives at, so every level up to `level` has to BE
+    // there -- and a level released by `drop_intermediate_caches` (or by the
+    // residency policy that calls it) is brought back to answer, which
+    // `mesh_at_level` at the same level does not do. A host that trims between
+    // exports pays for the levels below again; one that exports and then trims
+    // does not.
+    //
+    // NORMALS are computed over the assembled mesh's own faces, because a
+    // vertex on the seam has incident faces from both sides and neither level's
+    // normal array is a statement about that mesh. On a uniform-depth
+    // hierarchy the assembled mesh IS the level, so they are `mesh_at_level`'s
+    // normals bit for bit.
+    //
+    // WHO IT IS FOR: a host that wants one mesh rather than one draw per patch.
+    // `build_mixed_block` is the same surface for a host that uploads per
+    // patch; the two agree vertex for vertex, which is what keeps a host that
+    // uses both from cracking between them.
+    Mesh mixed_mesh_at_level(std::uint32_t level, const MultiresExportOptions& options = {},
+                             MultiresMixedStatus* out_status = nullptr,
+                             const parallel::CancelToken* cancel = nullptr);
+
+    // One base patch's faces for that same mixed-depth surface: the patch is at
+    // `effective_level(patch, level)`, its corners carry the finer side's value
+    // wherever a finer patch shares them, and its split edges carry the finer
+    // level's edge point.
+    //
+    // `Block::level` is the patch's OWN depth, not `level`. `Block::vertices`
+    // is ascending in (level, vertex id) and `Block::vertex_levels` names the
+    // level of each entry -- empty when they are all at `Block::level`, which is
+    // every block away from a depth boundary.
+    //
+    // TWO BLOCKS SHARE A VERTEX BY BITS: a vertex on the boundary between two
+    // patches is the same (level, id) in both, so it is the same three floats,
+    // and welding the assembled blocks at exactly zero tolerance closes the
+    // surface. That is the whole difference from looping `build_block` at
+    // `effective_level`, which leaves a T-junction on every split edge and a
+    // subdivision step of gap at every shared cage vertex.
+    bool build_mixed_block(std::uint32_t level, std::uint32_t patch, Block* out);
 
     // The level's own mesh and adjacency, which the sculptor drives directly.
     // Public because `multires_sculpt.cpp` is a separate translation unit and
@@ -427,6 +568,29 @@ class MultiresSurface {
     // until `absorb_level_edit` is told.
     Mesh& level_mesh(std::uint32_t level);
     const Adjacency& level_adjacency(std::uint32_t level);
+
+    // THE COMPLETE SURFACE NEIGHBOURHOOD of this level's vertices: the faces a
+    // uniformly refined hierarchy would have put around them that this level
+    // does not store, because their base patches are coarser here.
+    //
+    // Empty on a level that stores every patch, which is every level of a
+    // uniform hierarchy — so a reader that adds it in pays nothing and changes
+    // nothing away from a depth boundary. See `cross_level.h` for what is in it
+    // and why it is one materialized answer rather than one callback.
+    //
+    // Derived: it lives in the level's cache, it is released with everything
+    // else derived, and rebuilding it produces the same bytes. Nothing about it
+    // is serialized.
+    //
+    // ITS OUTSIDE VERTICES BELONG TO THE LEVEL BELOW, which a trim may have
+    // released -- `drop_intermediate_caches` releases exactly the levels
+    // between the cage and the ones in use. A level that stores every patch
+    // answers empty without reading the level below at all, so a uniform
+    // hierarchy pays nothing; a regionally refined one brings the level below
+    // back, because the outside positions are re-read from it on every access
+    // and neither a stale copy nor an empty answer is distinguishable from a
+    // current one by the readers.
+    const CrossLevelNeighborhood& cross_level_at(std::uint32_t level);
 
     // How many GEOMETRIC vertices the cage has — its weld classes, which is what
     // a level-0 vertex index means everywhere in this API. Not the same as
@@ -576,6 +740,28 @@ class MultiresSurface {
     // The ONE write path. A caller that moved a vertex and did not call this
     // has moved a cache.
     void absorb_level_edit(std::uint32_t level, const std::vector<std::uint32_t>& vertices);
+
+    // THE OTHER HALF OF THAT ONE WRITE PATH: put these vertices of the level's
+    // cached mesh back to what the STORED coefficients reconstruct to, keeping
+    // nothing.
+    //
+    // THE DISPLAY NORMALS TRAVEL WITH THEM, and that is part of "keeping
+    // nothing" rather than a courtesy. Whatever moved the level's mesh
+    // recomputed its normals from the DISPLACED positions -- `MeshSculptor`
+    // does it inside the write it was asked for -- so restoring the positions
+    // alone would leave the caller's edit alive in the shading. The recompute
+    // is queued the way `absorb_level_edit` queues its own and drained with it.
+    //
+    // For a caller that moved a level's mesh and then decided part of the move
+    // was not its to keep. `absorb_level_edit` already does this internally when
+    // it refuses a locked layer, for the same reason: the brush moves the mesh
+    // before the hierarchy is told about it, so declining to record a vertex
+    // without putting it back leaves a cached surface no stored coefficient
+    // reconstructs -- a moved cache, which is the one thing this API refuses to
+    // leave lying around.
+    //
+    // A no-op for a vertex out of range, and for an empty list.
+    void restore_level_positions(std::uint32_t level, const std::vector<std::uint32_t>& vertices);
 
     // Write one vertex's detail directly, in coefficients. What undo replays
     // and what a detail-erasing verb writes.

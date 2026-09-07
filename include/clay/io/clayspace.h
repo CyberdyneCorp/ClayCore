@@ -97,6 +97,7 @@
 // an uncoloured volume, which is every volume any build before this produced,
 // loses nothing to it.
 
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <string>
@@ -235,6 +236,57 @@ struct ClaySpaceDoc {
     // and load_clayspace drops a chunk that names none, which is what keeps an
     // orphan harmless without breaking undo within a session.
     std::map<scene::LayerId, mesh::Mesh> mesh_layers;
+    // PER MESH LAYER, THE GENERATION OF ITS TRIANGLES: 1 when they are first
+    // installed and one more every time they are REPLACED WHOLESALE. What it
+    // exists for is the change a cache does NOT survive -- a rebuild swaps every
+    // vertex and every index, and an adjacency, a BVH or a live sculptor built
+    // over the old ones is wrong in a way nothing else detects. A sculpt does
+    // not move it: a brush displaces vertices and leaves the topology alone,
+    // which is precisely the change those caches are built to survive.
+    //
+    // HERE, BESIDE THE TRIANGLES, rather than on the binding handle that used
+    // to hold it (#472). Kept there, the counter had exactly two writers and
+    // undo, redo and journal replay were none of them: they restore a mesh
+    // through `session::History`'s `mesh::Mesh*` resolver, which has no way to
+    // tell the binding's separate map which layers it replaced. So a rebuild
+    // moved the token and undoing the rebuild did not, and a host sculpting
+    // through an adjacency built over the restored triangles got a refused
+    // stroke naming nothing. The mutation now owns its invalidation signal:
+    // `install_mesh_geometry` is the only way triangles enter a layer, and it
+    // cannot install without advancing.
+    //
+    // RUNTIME-ONLY -- deliberately not serialized, and no format minor. The
+    // number is an invalidation token for caches that are LIVE in this session;
+    // nothing an adjacency or a sculptor was built over can survive a reopen,
+    // so a loaded document establishes a fresh generation domain starting at 1.
+    // Writing it would also make a save's bytes depend on how the session got
+    // here, which is exactly what the round-trip identity forbids.
+    std::map<scene::LayerId, std::uint64_t> mesh_geometry_revision;
+
+    // The generation of `layer`'s triangles. 1 for a layer that holds none, so
+    // a reader never has to distinguish "never installed" from "installed once"
+    // -- both mean "nothing has been replaced under you".
+    std::uint64_t mesh_revision(scene::LayerId layer) const {
+        auto it = mesh_geometry_revision.find(layer);
+        return it == mesh_geometry_revision.end() ? 1u : it->second;
+    }
+
+    // THE ONE PLACE A MESH LAYER'S TRIANGLES ARE INSTALLED. An attach, a
+    // rebuild, a load, an undo, a redo, a replayed journal event -- all of them
+    // land here, and every one of them advances the generation. A caller that
+    // reaches `mesh_layers` directly to assign is the bug this exists to make
+    // unreachable.
+    void install_mesh_geometry(scene::LayerId layer, mesh::Mesh triangles) {
+        mesh_layers.insert_or_assign(layer, std::move(triangles));
+        ++mesh_geometry_revision[layer];
+    }
+
+    // The same signal for a rewrite made IN PLACE through a borrowed mesh --
+    // a weld, which rewrites the triangles without ever holding a second copy
+    // of them. Separate from the installer rather than folded into it because
+    // the alternative is copying a whole mesh out and back to say one thing.
+    void note_mesh_geometry_replaced(scene::LayerId layer) { ++mesh_geometry_revision[layer]; }
+
     // A mesh layer's multiresolution hierarchy, keyed the same way and for the
     // same layering reason. Before this, a hierarchy was a STANDALONE handle
     // that no document held, so saving a sculpt saved the base cage and dropped

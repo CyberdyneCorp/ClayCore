@@ -1151,6 +1151,26 @@ struct clay_document {
             return it == doc.mesh_layers.end() ? nullptr : &it->second;
         };
     }
+    // The WHOLESALE half of the one above, and the reason there are two: an
+    // undo, a redo or a replayed rebuild swaps every vertex and every index,
+    // and the layer's geometry revision has to move for it (#472). Assigning
+    // through the pointer `mesh_for` hands out cannot say so.
+    //
+    // Refuses a layer that holds no triangles rather than creating one:
+    // History refuses a step whose payload it cannot place, which is what keeps
+    // the step on the stack instead of leaving the next undo reversing
+    // something older than the user asked for.
+    session::History::MeshInstaller mesh_installer() {
+        return [this](scene::LayerId id, mesh::Mesh triangles) {
+            if (!doc.mesh_layers.count(id)) return false;
+            doc.install_mesh_geometry(id, std::move(triangles));
+            // The same invalidation the document-side replace does, for the
+            // same reason: a restore that did not come through apply_edit has
+            // to say that everything cached is stale.
+            touch();
+            return true;
+        };
+    }
     // Borrowed handles are the document's, one per layer, handed back by
     // address: repeated lookups return the same handle, nothing leaks, and
     // std::map keeps the addresses stable as more layers arrive.
@@ -1208,11 +1228,6 @@ struct clay_document {
     clay_layer_id placement_gesture = 0;
     std::uint64_t extent_walks() const { return extent_cache_.walks(); }
     std::uint64_t extent_keeps() const { return extent_cache_.keeps(); }
-
-    // Per mesh layer, bumped only when its triangles are REPLACED wholesale.
-    // See mesh_layer_revision_of for why a sculpt deliberately does not bump it
-    // and why the pointer and count checks that came before it are not enough.
-    std::map<clay_layer_id, std::uint64_t> mesh_geometry_revision;
 
     // The general invalidation: everything the cache knows becomes stale.
     // This stays the DEFAULT, and the append form below is the exception you
@@ -3331,8 +3346,8 @@ clay_voxel_grid* borrow_layer(clay_document* doc, clay_layer_id layer) {
     return &handle;
 }
 
-// A mesh layer's geometry revision, and why it lives on the handle rather than
-// on the mesh.
+// A mesh layer's geometry revision, and why it lives beside the layer's
+// triangles rather than on this handle or on the mesh.
 //
 // `resolve_sculptor` compares `mesh_data_mut(s->mesh)` against the pointer the
 // sculptor was built over, which catches a layer that was REMOVED — a
@@ -3346,9 +3361,15 @@ clay_voxel_grid* borrow_layer(clay_document* doc, clay_layer_id layer) {
 // A counter closes that. Bumped only by a wholesale replacement, never by a
 // sculpt, because a sculpt is exactly the change those caches are built to
 // survive.
+//
+// It is `io::ClaySpaceDoc`'s, not this handle's, and that is #472's fix: kept
+// here it had two writers and undo, redo and journal replay were none of them,
+// because those restore a mesh through `session::History`'s resolver and this
+// map was not reachable from there. Beside the triangles, every path that
+// installs them advances it. This reader stays so the entry points below read
+// as they did.
 std::uint64_t mesh_layer_revision_of(const clay_document* doc, clay_layer_id layer) {
-    auto it = doc->mesh_geometry_revision.find(layer);
-    return it == doc->mesh_geometry_revision.end() ? 1u : it->second;
+    return doc->doc.mesh_revision(layer);
 }
 
 clay_mesh* borrow_mesh_layer(clay_document* doc, clay_layer_id layer) {
@@ -4946,6 +4967,11 @@ clay_result clay_document_enable_undo(clay_document* doc) {
         doc->undo->set_groups_resolver([doc]() -> voxel::GroupField* {
             return doc->doc.groups ? &*doc->doc.groups : nullptr;
         });
+        // Set once here for the same reason, and it is what makes undo, redo
+        // and journal replay advance a mesh layer's geometry revision (#472).
+        // Every History this binding builds is built here, so there is one
+        // place that has to know.
+        doc->undo->set_mesh_installer(doc->mesh_installer());
         // A document LOADED from bytes already knows which snapshot it is, and
         // the journal that starts here continues from exactly that one. Without
         // this seed the whole recovery path — load a snapshot, enable undo,
@@ -10267,7 +10293,7 @@ clay_result clay_document_add_mesh_layer(clay_document* doc, const clay_mesh* me
     if (r != CLAY_OK) return r;
     // Beside the document, keyed by layer id: undoing the attach removes the
     // layer and leaves this entry, which save_clayspace then does not write.
-    doc->doc.mesh_layers.insert_or_assign(id, std::move(stored));
+    doc->doc.install_mesh_geometry(id, std::move(stored));
     if (out_layer) *out_layer = id;
     if (out_mesh) *out_mesh = borrow_mesh_layer(doc, id);
     return CLAY_OK;
@@ -16207,8 +16233,7 @@ clay_result clay_mesh_weld(clay_mesh* mesh, const clay_weld_desc* desc,
     if (mesh->doc && report.vertices_merged + report.triangles_collapsed +
                              report.triangles_invalid >
                          0) {
-        mesh->doc->mesh_geometry_revision[mesh->layer] =
-            mesh_layer_revision_of(mesh->doc, mesh->layer) + 1;
+        mesh->doc->doc.note_mesh_geometry_replaced(mesh->layer);
         mesh->doc->touch();
     }
 
@@ -16400,8 +16425,7 @@ clay_result replace_mesh_layer_geometry(clay_document* doc, clay_layer_id layer,
     // tests it the same way. Unguarded, the first remesh on a document that
     // never enabled undo was a null dereference.
     if (doc->undo) doc->undo->record_mesh_replace(layer, it->second, replacement);
-    it->second = std::move(replacement);
-    doc->mesh_geometry_revision[layer] = now + 1;
+    doc->doc.install_mesh_geometry(layer, std::move(replacement));
     doc->touch();
     return CLAY_OK;
 }
