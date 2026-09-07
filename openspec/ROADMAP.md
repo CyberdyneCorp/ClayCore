@@ -3032,6 +3032,42 @@ The repair they took is worth stealing: a table in the sample's own README sayin
 spread is two orders of magnitude larger than its neighbour's should not be the
 one on the screenshot.
 
+### A wrong explanation that agrees with a right one
+
+Two sessions caught themselves in the same act within an hour, and the second
+supplied the reason it worked.
+
+Both were reporting a pending CI column as evidence of a slow shared runner
+queue. Both had **restarted those jobs themselves, minutes earlier** — one by
+pushing roadmap entries to a documentation branch that is also a pull request
+with sixteen jobs attached, the other by force-pushing an amend twice. *"The
+queue is slow"* and *"I just restarted it"* produce identical progress figures.
+
+**What made it convincing is the part worth recording:** a true fact of the same
+shape was already in the room. The runner queue genuinely IS slow — it had cost
+84 minutes on one job and flaked four times (#499) — so the wrong attribution
+agreed with a right one that everybody had already accepted.
+
+> A wrong explanation that agrees with a right one is much harder to catch than
+> one that contradicts it.
+
+A contradicting explanation gets argued with. An agreeing one gets absorbed,
+because the evidence for the true claim is doing double duty and nobody
+re-partitions it. Every other entry in this section is a check whose OUTPUT could
+not distinguish two states; this is a reader whose PRIOR could not, and no
+instrument protects against it.
+
+**The tell was available in both cases and neither looked**: a fresh run's start
+time against one's own push time — one `gh` call apart. The question that finds
+it is not about the number but about the reporter: *did I cause the thing I am
+about to explain?*
+
+**And the repair generalises past CI.** Treating a roadmap branch as a notebook is
+reasonable right up until the notebook is also a pull request, and **nothing
+announces the moment it becomes one.** Holding entries locally until the queue
+clears costs nothing, because the file is the artefact and the branch is only
+where it happens to live.
+
 ### The right verdict with a wrong particular
 
 The subtlest failure in this section, because **a wrong verdict gets investigated
