@@ -2871,6 +2871,53 @@ The repair is the same in both materials: sum the `N passed` figures and report
 the total beside the verdict, **so the number has a denominator a reader can
 disbelieve.**
 
+### The sanitizer that cannot see the thing you ran it for
+
+The sharpest platform-shaped instance, and it nearly carried a leak onto main
+inside a seven-PR tip merge.
+
+**macOS ASan does not detect leaks.** It reports
+`detect_leaks is not supported on this platform` and runs everything else
+normally — so a session that reproduced a CI failure locally on macOS, saw
+"ASan passes clean, 9/9, 32 minutes", and reported that, made **a true statement
+about a run that was not checking for leaks.**
+
+CI caught it because our ASan job runs on `ubuntu-latest` (`ci.yml:283-284`) with
+nothing setting `detect_leaks=0`. **520 bytes in 5 allocations** — three
+`clay_multires_from_mesh` handles and two `clay_layer_multires` handles, never
+destroyed, in a test fixture. The header says at each declaration that the handle
+is the caller's; `clay_layer_multires` hands back a BORROW where *"destroying the
+handle leaves the hierarchy in place"*, and the author read "borrowed" as "not
+mine to free". **A handle is a separate allocation from the thing it names.**
+
+**One job of sixteen could see it.** TSan passed on that commit. The plain ubuntu
+build passed. The macOS ASan job passed *while being structurally unable to
+report the defect*.
+
+**And the isolation sweep had the matching hole, stated plainly by its author:**
+it ran `cpu-only`, not `asan-ubsan`. *"Seven of seven green in isolation"* was
+true of the configuration run and silent about sanitizers — and it was about to
+justify collapsing seven PRs onto main as one commit with one matrix. The honest
+record is: **seven branches green under `cpu-only` at their current hashes, and
+the tip additionally clean under ASan/leaks.** Not seven under sanitizers.
+
+**The verification of the replacement tool is the part to copy.** macOS has
+`leaks`, which does work, and rather than trusting its zero they ran it both ways:
+
+```
+with the fix     0 leaks for 0 total leaked bytes
+fix reverted     5 leaks for 560 total leaked bytes
+```
+
+Same five objects CI counted, 560 against 520 because the handle struct differs by
+platform. **A clean result from a tool you have not used before proves nothing
+until you have seen it go red.** That is the vacuity guard aimed at an instrument
+rather than a fixture.
+
+**The general rule:** a green from a sanitizer is a claim about the checks that
+sanitizer was able to run, and the set of checks is platform-dependent. *"ASan
+passed"* is not a sentence — *"ASan passed with leak detection active"* is.
+
 ### "100% of 9" and "100% of 10" are different claims
 
 A verification sweep that ran seven branches in isolation, all seven green, and
@@ -3032,6 +3079,42 @@ The repair they took is worth stealing: a table in the sample's own README sayin
 spread is two orders of magnitude larger than its neighbour's should not be the
 one on the screenshot.
 
+### A wrong explanation that agrees with a right one
+
+Two sessions caught themselves in the same act within an hour, and the second
+supplied the reason it worked.
+
+Both were reporting a pending CI column as evidence of a slow shared runner
+queue. Both had **restarted those jobs themselves, minutes earlier** — one by
+pushing roadmap entries to a documentation branch that is also a pull request
+with sixteen jobs attached, the other by force-pushing an amend twice. *"The
+queue is slow"* and *"I just restarted it"* produce identical progress figures.
+
+**What made it convincing is the part worth recording:** a true fact of the same
+shape was already in the room. The runner queue genuinely IS slow — it had cost
+84 minutes on one job and flaked four times (#499) — so the wrong attribution
+agreed with a right one that everybody had already accepted.
+
+> A wrong explanation that agrees with a right one is much harder to catch than
+> one that contradicts it.
+
+A contradicting explanation gets argued with. An agreeing one gets absorbed,
+because the evidence for the true claim is doing double duty and nobody
+re-partitions it. Every other entry in this section is a check whose OUTPUT could
+not distinguish two states; this is a reader whose PRIOR could not, and no
+instrument protects against it.
+
+**The tell was available in both cases and neither looked**: a fresh run's start
+time against one's own push time — one `gh` call apart. The question that finds
+it is not about the number but about the reporter: *did I cause the thing I am
+about to explain?*
+
+**And the repair generalises past CI.** Treating a roadmap branch as a notebook is
+reasonable right up until the notebook is also a pull request, and **nothing
+announces the moment it becomes one.** Holding entries locally until the queue
+clears costs nothing, because the file is the artefact and the branch is only
+where it happens to live.
+
 ### The right verdict with a wrong particular
 
 The subtlest failure in this section, because **a wrong verdict gets investigated
@@ -3069,6 +3152,241 @@ then reported a number I had not understood."*
 
 The catching question is a third variant, after *"could this fail"* and *"would
 this pass if the subject did not exist"*: **what does this number count?**
+
+### Prose consistent under both readings, and the re-read that confirms the wrong one
+
+A third member of the family whose distinguishing property is that **the checking
+behaviour is what fails**. It cost 520 bytes in five leaked handles.
+
+`clay_layer_multires` said:
+
+> A BORROWED handle onto the layer's hierarchy ... **The document owns it**: the
+> handle must not outlive the document, and destroying the handle leaves the
+> hierarchy in place.
+
+**The defect is one pronoun.** Read *it* as the handle and the paragraph
+instructs a host not to free it. Read *it* as the hierarchy and the paragraph is
+correct.
+
+**And both readings survive the next clause**, which is what makes it invisible.
+*"Destroying the handle leaves the hierarchy in place"* says what destroying DOES
+without ever saying you MAY — so a reader checking their understanding against
+the following sentence **gets agreement either way.** Re-reading is the natural
+repair and it is precisely the move that cannot work here.
+
+`clay_multires_destroy` already said the right thing — *"a BORROWED handle from
+clay_layer_multires frees only the handle"* — at the other end of the header,
+which is the wrong end: **a host reads the call that PRODUCES a thing when
+deciding whether it owes a free, not the call that destroys it.**
+
+**Where it belongs in this catalogue.** Not with the silent passes. Beside the
+false alarm, because those two share what makes them worse than a plain bug:
+
+```
+a silent pass          costs you the defect you already had
+a false alarm          spends someone else's attention on a fiction
+prose consistent
+  under both readings  costs you the RE-READ -- the one move a careful
+                       person makes
+```
+
+**And a disciplined refusal worth recording alongside it.** The consuming host
+grepped and found it never calls that entry point at all — every handle it holds
+comes from `clay_multires_from_mesh`, with a `Drop` impl destroying each exactly
+once. It then said which way that cuts:
+
+> It means we are **not** evidence that the old wording was safe — nobody here
+> read it and got it right, because nobody here read it. Do not let
+> "ClaySpaceDesktop was fine" count for anything in that direction.
+
+**A population that never met the hazard is not a sample of people who survived
+it.** That is the same error as a fixture whose quantity under test is zero,
+arriving as a claim about users rather than about a test — and the host declined
+to let its own clean result be quoted in the direction that would have flattered
+the original wording.
+
+### A ceiling that is never reached is not a ceiling
+
+The reciprocal of the entry below, and it lands on our own defaults.
+
+The consuming host corrected its own claim to me: it had said its third reader
+was protected because `Mesh::load` passes `ImportBudget::default()`. That default
+is `{0, 0}`, which our header defines as *"the library's default"* — **so the
+convenience call delegates the ceiling to us and chooses nothing.** Had that been
+its production path it would have reported a guard of its own when what it had
+was ours, wearing its name.
+
+It is not the production path. Its importer sets an explicit **8,000,000**
+vertices, with a test already holding it there:
+
+> *"A ceiling that is never reached is not a ceiling. The engine's default is 50M
+> vertices; a desktop that carries that has already lost the frame budget."*
+
+**The guard is not "is there a limit" but "is the limit reachable by the thing
+you are afraid of".** A 50M-vertex bound against a hostile file is a limit no
+attacker will ever meet.
+
+**And checking our own side, the criticism lands.** `include/clay/io/result.h:34`
+carries the comment *"loaders validate declared counts against actual payload
+size BEFORE allocating"* — which is the real security property, and it is the
+`available / per_vertex` divide. But the numbers themselves:
+
+```
+max_vertices   = 50M     no reason recorded
+max_triangles  = 100M    no reason recorded
+max_file_bytes = 2 GiB   reason recorded: "a directory tells LONG_MAX on glibc"
+```
+
+Two of the three ceilings have no rationale beside them and one does. **So a
+reader cannot tell which job the 50M is doing** — resource ceiling, or hostile
+input bound — and it is fit for the first and useless for the second. Nothing is
+wrong today, because the divide is what stops a malicious header; the defect is
+that the file does not say so, and a future editor tuning "the import limits"
+cannot know which property is load-bearing.
+
+**The habit this points at is sharper than "check your limits".** The other
+session's diagnosis of its own error: *the same guard was read correctly by one
+person and half-correctly by me.* Its importer's author had `ImportBudget` filed
+as BOTH a memory control and an input bound and wrote the second reason down; the
+session reading it later had only the first. So the thing to look for is not
+unguarded limits but **limits whose reason is recorded in only one place** —
+because then only that place gets updated when the reason changes, and every
+other reader inherits a number with no argument attached.
+
+**Follow-up, not done:** record beside `max_vertices` and `max_triangles` which
+of the two jobs they are for, as `max_file_bytes` already does. One comment, and
+it is the difference between a number a future editor can reason about and one
+they can only preserve.
+
+### "We validate the header" describes the bug and the fix identically
+
+Prompted by a downstream tag that hardened a PLY reader against a header sizing
+an allocation from an attacker-controlled count. Checked here rather than
+assumed:
+
+```
+src/io/ply.cpp:387  if (per_vertex > 0 && h.vertex_count > available / per_vertex)
+             :388      return fail(Malformed, "declared counts exceed payload");
+             ...
+             :399  m.positions.reserve(h.vertex_count);
+```
+
+Absent, and for two reasons rather than one. The guard **precedes the reserve**
+by eight lines. And it **DIVIDES** — `available / per_vertex` — rather than
+multiplying a claimed count by a stride and comparing, **so the bound cannot
+overflow while computing itself.**
+
+**That second half is the finding.** A reader that computes
+`vertex_count * stride > available` is *also* validating the header, is also
+refusing before the reserve, and is wrong: the multiply overflows and the
+comparison passes. **Two implementations, one correct and one not, and the
+sentence describing them is the same sentence.**
+
+So *"we validate the header before allocating"* is a claim that **cannot be
+reviewed from the description** — it is true of both, and the difference is only
+visible by reading which arithmetic the guard does. A code review conducted at
+the level of the comment finds nothing to object to in either.
+
+**This is the entry-point near-miss in a different material.** There the error
+would have been in which writer a reader was compared against; here it is in
+which arithmetic a shared phrase denotes. Both are cases where **the abstraction
+everyone reasons in is coarser than the property that decides correctness** — and
+in both, the thing that catches it is refusing to stop at the description.
+
+**The pipeline's exposure, now known at all three readers:** ours divides and
+refuses early; the downstream remesher had the defect and fixed it in the tag
+being pinned; the consuming host **parses no mesh format at all** — every import
+goes through `clay_mesh_load`, so the third reader does not exist. Its
+`ImportBudget` refusal is the same shape one layer up, and its author had filed
+that as a memory-pressure control rather than a security boundary until this
+exchange.
+
+### A constraint judged against the wrong entry point of the same library
+
+A downstream team offered to relax a correct restriction, on the strength of a
+burden the asking host does not actually carry — and the host told them not to.
+
+CyberRemesherAndUV's reader is **triangles-only, hard**, at `handoff.cpp:403` on
+their side. Integrating against it, they offered to widen it. The consuming host
+declined, and it was right to, because
+`clay_mesh_save_handoff` already guarantees what the restriction requires.
+Verified here rather than relayed:
+
+```
+src/io/handoff.cpp:41   "mesh_data.h guarantees `indices` is the triangulation
+                         of the quads over the same positions"
+src/io/handoff.cpp:49   normals computed when absent
+clay.h                  "THE FACES ARE ALWAYS TRIANGLES ... NORMALS ARE ALWAYS
+                         PRESENT"
+```
+
+**What made the restriction look burdensome was `clay_mesh_save`** — a
+*different* entry point of the same library, which does carry quads. Judged
+against that call the reader looks restrictive; judged against the call actually
+being used it costs nothing.
+
+**So a requirement can be evaluated against the wrong member of a family and come
+out backwards.** Nobody misread the reader and nobody misread the writer; the
+error would have been in which writer the reader was being compared to. And the
+outcome of getting it wrong is worse than a bug — a *correct* check gets widened,
+permanently, on behalf of a caller who never needed it, and nothing afterwards
+records that the reason was mistaken.
+
+**And it is worse than the bug it resembles, for a reason worth stating on its
+own: TIGHTENING ANNOUNCES ITSELF; LOOSENING IS SILENT FOREVER.** Wrongly
+narrowing the reader makes files start failing and somebody goes looking.
+Widening it correct-to-permissive produces no failure at any point — not at the
+change, not on the first non-triangle file, not ever. The check simply stops
+being a check.
+
+**So the evidence of the mistake is destroyed by the mistake.** Every other item
+in this section leaves something behind to find: a red lane nobody read, a queued
+run nobody counted, a spread annotation printing nothing. This one leaves an
+ordinary-looking permissive reader, indistinguishable from one that was always
+meant to be permissive, and the only record that it was ever load-bearing is a
+commit message nobody reads while debugging a mesh that came apart three releases
+later.
+
+The question that catches it: **which entry point will actually be called?** —
+asked BEFORE the change, because afterwards there is nothing left to ask it
+about. A library with two save paths has two answers to "what does the file
+contain", and only one of them is the contract in play. *"Which entry point"* is
+answerable for about ten seconds and then it is not.
+
+**And that says where to point it.** Not at every constraint — at every
+**RELAXATION**, which is a much smaller set and a reviewable one. Two save paths,
+two readers, or two callers give two answers to "what does this contain", and
+relaxations are the only changes among them where getting it wrong is
+unrecoverable.
+
+### The concurrency default is a two-repo finding
+
+`ci.yml` in this repository had no `concurrency:` group, so a force-push queued a
+second run beside the first rather than replacing it. Two sessions' ordinary
+rebases left **47 superseded runs queued**, each holding three macOS jobs, and a
+PR nobody had touched sat with its jobs UNSTARTED for 5h39m.
+
+The consuming host checked its own workflow **expecting to find a group with a
+bad key** and found **none at all**: six of its seven queued runs were dead work,
+including a nine-hour-old run for a branch whose PR had merged three hours
+earlier.
+
+**That makes it a default nobody sets rather than a mistake somebody made** — and
+that is the difference between a fix and a lesson. A misconfigured group is one
+repository's problem; an absent one is what every repository starts with.
+
+The two decisions worth carrying with the fix, and the second is the one the
+default will not give you:
+
+```
+group: ci-${{ github.ref }}                                   key on the REF
+cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}    NOT plain true
+```
+
+Keying on the SHA puts every run in its own group and cancels nothing — a change
+that looks like a fix and does nothing. And **`cancel-in-progress: true` would
+cancel a merge run on the default branch**, leaving a commit somebody will later
+cite with no verdict: a quieter failure than a slow queue and a worse one.
 
 ### The mirror: a failure that looks like a FINDING
 
