@@ -2781,6 +2781,65 @@ Everything below is an instance. They are kept separately because each one cost
 something specific to find, and the specifics are what make the shape
 recognisable the next time it wears different clothes.
 
+### A fixture aligned with the world could not see a projection grow
+
+The best instance of the fixture class in this document, because the fix was
+correct, the revert check said it was not, and the fixture is why.
+
+**The bug.** A cut is an ITEM, so a layer's bounds grow to hold it — and the host
+was reading those bounds as the region the NEXT cut had to clear. A feedback
+loop: each cut enlarges the region the following one must sweep. Measured across
+successive cuts: **2.0, 18, 146, 1170, 9362** — eightfold a cut. The tool stops
+working after a few strokes, which is how the user reported it.
+
+The repair is to frame the sweep against the SURFACE's extent instead, on the
+ground that a subtract cannot add surface.
+
+**Then the revert check said the fix was unproven.** Deleting it changed nothing
+the test could observe, and by the rule this document keeps arriving at, an
+unprovable fix is one to remove.
+
+**The fixture was the reason.** It used a frame squared up with the world — and
+the projection of an axis-aligned box onto an axis-aligned direction is exactly
+its own width, so the growth term the fix exists to stop is identically zero
+there. **Structurally incapable of seeing the defect**, and its green was the
+read that confirms and ends the search.
+
+Re-run at 45 degrees with the fix reverted: **2.000, 4.83, 7.66, 10.49** — a
+steady 2.83 a cut, refused outright from the tenth. With the fix: **5.071 and
+flat forever.**
+
+**Two things to take.** The claim had been written earlier in a checkable form —
+*"under a turned frame the projection grows by the box's diagonal"* — and the
+session chose to RUN it rather than argue it. A prediction recorded before the
+disagreement is what turns a green revert into a question about the fixture
+rather than about the fix.
+
+And the guard asserts **stability rather than a threshold**: that the span
+settles, not what it settles at. The magnitude is a property of the margin and
+the fixture; settling at all is the property under test. **A threshold there
+would have been a number nobody could defend and a gate that moved with the
+fixture.**
+
+### A filter with no denominator is the same defect as a build option
+
+The consuming host applied the rule below to its own habit and found it: every
+verification it had reported all night was
+
+```
+cargo test ... 2>&1 | grep -E "test result: FAILED|^error"
+```
+
+and *"green"* when nothing matched. **A run that executed zero tests, or silently
+dropped a target, produces exactly the same empty output as a clean one.** Same
+shape as the missing `pyclay_pytest`, arriving through a FILTER instead of a
+build option — which is worth recording separately, because the two look nothing
+alike and fail identically.
+
+The repair is the same in both materials: sum the `N passed` figures and report
+the total beside the verdict, **so the number has a denominator a reader can
+disbelieve.**
+
 ### "100% of 9" and "100% of 10" are different claims
 
 A verification sweep that ran seven branches in isolation, all seven green, and
