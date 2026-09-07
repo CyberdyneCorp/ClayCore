@@ -2940,12 +2940,43 @@ from one population**, and nothing in the number says whether they were.
 the range column beside the number. That is the whole finding: the evidence was
 printed, adjacent, on every run.
 
-**And they declined to explain it**, which is the part to keep. The first sample
-may land off the form, or on a region a previous dab already flattened — they
-recorded it as an observation about the figures rather than a cause, on the
-grounds that guessing would be *"a well-formed answer to a narrower question"*
-one more time. **A number you cannot explain is better recorded as
-unexplained than as explained wrongly.**
+**They declined to explain it, and that was right. Then they checked anyway, and
+that was righter.** The withheld explanation — *"the first sample lands off the
+form"* — turned out to be **false for the two worst figures**, and testing it
+split one fault into two.
+
+The check needed no quiet box, which is the part neither of us saw: **"does the
+first dab do less work" is a COUNT, and counts do not care about load.** Thirteen
+samples, each `apply_stroke` reporting whether it changed anything and how many
+bricks it dirtied:
+
+```
+apagar   all 13 changed something, each dirtying exactly 1 brick
+raspar   all 13 changed something, each dirtying exactly 1 brick
+padrao   samples 0, 1 and 12 changed NOTHING; the other ten dirty 1
+```
+
+So for `apagar` and `raspar` — **the two worst spreads, 144x and 70x** — the
+workload is identical across all thirteen and the durations still span 0.21 to
+30.33 ms. Whatever costs the difference **is not in the edit**. The harness times
+`apply_stroke` plus the screen refresh, so it is in the refresh or around it: a
+narrowing, not a diagnosis, and going further does need a quiet box. And for
+`padrao` the workload story holds but not as told — three no-ops, at **both ends**
+of the path rather than only the start.
+
+**Two rules, and the second is the one that was missing.** *A number you cannot
+explain is better recorded as unexplained than as explained wrongly* — still
+right, and it stopped a wrong cause entering the file. But **an explanation
+withheld is still owed**: recording it as unexplained and moving on would have
+left the hole for as long as anyone left it there, with the wrong intuition intact
+and unexamined in the author's head. Declining to guess was correct; stopping at
+declining was not.
+
+**What broke the deadlock was noticing the question was answerable by a different
+instrument than the one it had been denied.** The measurement wanted a quiet box
+and could not have one; the *count* wanted nothing. That is the count-over-duration
+rule arriving a third way — not as a better gate and not as a better headline, but
+as **a way to answer a question whose obvious instrument is unavailable.**
 
 **We do not have this shape, and we also lack the instrument that would find it
 if we acquired one.** ClayCore's benchmarks are Google Benchmark bodies where
