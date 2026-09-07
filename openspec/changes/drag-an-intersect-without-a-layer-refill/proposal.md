@@ -135,6 +135,31 @@ pad is a real, measurable win and it needs the breadth of evidence
 samples each — because the direction of that error is stale geometry with
 nothing to point at.
 
+
+## What a host loses, and what it does not
+
+**Nothing is refused that used to work.** Every refusal in this change returns
+`std::nullopt` from the delta bound, and `apply_edit` then keeps `reach_before`
+— the conservative influence bound, which is computed on both sides regardless.
+A refused case dirties exactly the region it dirtied before, at exactly the cost
+it cost before. The fast path is an optimisation that declines; it is never a
+validation that rejects.
+
+That distinction matters most for the **non-uniform scale** refusal, because a
+squashed operand is a shape sculptors deliberately make — the consuming host
+ships a per-axis scale gizmo and binds
+`set_node_transform_nonuniform` / `set_layer_transform_nonuniform`, added
+because a capsule could not be squashed into a slot while the scale was uniform.
+So the release note wording is *"an operand with a non-uniform scale does not
+take the fast path"*, and never *"an operand with a non-uniform scale is
+refused"*. The second would be false and would stop an upgrade that costs
+nothing.
+
+The full refusal list — node absent on one side, op not Intersect, a group, not
+visible, a changed op or primitive, a deformer chain, a spatial morph, a gate, a
+sampled volume, an infinite repeat, an unbounded primitive, a non-uniform node
+or layer scale, or any support computing to infinity — all behave this way.
+
 ## What is deliberately not in this change
 
 - Any narrowing of `item_nonlocality`, `item_influence_bound`,

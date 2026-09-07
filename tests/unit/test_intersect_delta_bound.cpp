@@ -338,6 +338,24 @@ TEST_CASE("intersect delta: a squashed placement is refused, and here is why") {
     // At x = 2.0, 1.05 outside it, the field reads 0.12 before the move and
     // 0.18 after: the sample LEAVES the band in a brick nothing dirtied. The
     // body at r = 2.4 reads -0.4 there and loses the max to both.
+    //
+    // WHAT THIS FIXTURE IS WORTH, measured rather than asserted. Delete the
+    // refusal in `geometry_reach_in_layer` and the probe finds 225 samples
+    // entering the band and 225 leaving it outside the claimed box for the
+    // squashed OPERAND, worst |db| 0.060000 at (2, 0, 0); and 568 entering and
+    // 527 leaving for the squashed LAYER, worst |db| 0.120000 at (1, 0, 0).
+    // The numbers are here rather than only in a review because they are what
+    // says this case is load-bearing: the earlier "squashed per axis" fixture
+    // above certified the OPPOSITE and could not have failed, since its box
+    // reached past the body and the accumulator won every max where the
+    // operand's field was short. A squashed capsule is a shape a sculptor
+    // deliberately makes -- the consuming host ships a per-axis gizmo for it --
+    // so this is the ordinary case, not a corner.
+    //
+    // THE REFUSAL DECLINES THE FAST PATH, NOT THE EDIT. `std::nullopt` here
+    // leaves `apply_edit` on `reach_before`, the conservative influence bound,
+    // which is taken on both sides regardless. A squashed operand still moves;
+    // it dirties the layer the way it always did.
     auto squashed = [](cfloat3 node_axes, cfloat3 layer_axes, float body_radius) {
         Fixture f;
         Layer& l = f.doc.add_sdf_layer("body");
