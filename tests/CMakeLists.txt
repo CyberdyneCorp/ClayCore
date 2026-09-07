@@ -95,6 +95,7 @@ add_executable(clay_unit_tests
   unit/test_mesh_weld.cpp
   unit/test_voxel_remesh.cpp
   unit/test_c_voxel_remesh.cpp
+  unit/test_c_mesh_layer_revision.cpp
   unit/test_bench_spread.cpp
   unit/test_bvh_refit.cpp
   unit/test_meshers.cpp

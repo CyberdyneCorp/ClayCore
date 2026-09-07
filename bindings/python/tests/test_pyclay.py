@@ -7793,6 +7793,136 @@ def test_a_sculptor_is_refused_after_its_layer_is_rebuilt():
         sculptor.stamp("draw", center=(0.0, 1.0, 0.0), radius=0.4, strength=0.05)
 
 
+def test_a_mesh_layer_revision_advances_through_undo_redo_and_replay():
+    # Issue #472. Undo and redo swap every vertex and every index back, which is
+    # exactly the change an adjacency, a BVH or a live sculptor does NOT
+    # survive — so the token a caller holds against those caches has to move.
+    # It does not go back to what it was: the number is an invalidation token
+    # for a live cache, not the age of the restored mesh.
+    fine_p, fine_i = _remesh_sphere(rings=8, segments=16)
+    coarse_p, coarse_i = _remesh_sphere(radius=0.5, rings=4, segments=8)
+    assert len(fine_i) // 3 == 224
+    assert len(coarse_i) // 3 == 48
+
+    doc = clay.Document()
+    doc.enable_undo()
+    borrowed = doc.add_mesh_layer(clay.Mesh.from_triangles(fine_p, fine_i), "shell")
+    layer = borrowed.layer
+    assert doc.mesh_layer_revision(layer) == 1
+    assert borrowed.triangle_count == 224
+
+    doc.replace_mesh_layer(layer, clay.Mesh.from_triangles(coarse_p, coarse_i))
+    assert doc.mesh_layer_revision(layer) == 2
+    assert borrowed.triangle_count == 48
+
+    assert doc.undo()
+    assert borrowed.triangle_count == 224
+    assert doc.mesh_layer_revision(layer) == 3
+
+    assert doc.redo()
+    assert borrowed.triangle_count == 48
+    assert doc.mesh_layer_revision(layer) == 4
+
+    # Repeated cycles: every transition is a new generation, and none of them
+    # repeats a number a caller may still be holding.
+    last = 4
+    for _ in range(3):
+        assert doc.undo()
+        assert borrowed.triangle_count == 224
+        assert doc.mesh_layer_revision(layer) > last
+        last = doc.mesh_layer_revision(layer)
+        assert doc.redo()
+        assert borrowed.triangle_count == 48
+        assert doc.mesh_layer_revision(layer) > last
+        last = doc.mesh_layer_revision(layer)
+    assert last == 10
+
+
+def test_a_replayed_journal_advances_the_mesh_layer_revision():
+    # The SECOND path into the replacement. A bump written into undo() alone
+    # would pass the test above and leave this one exactly as broken.
+    fine_p, fine_i = _remesh_sphere(rings=8, segments=16)
+    coarse_p, coarse_i = _remesh_sphere(radius=0.5, rings=4, segments=8)
+
+    source = clay.Document()
+    borrowed = source.add_mesh_layer(clay.Mesh.from_triangles(fine_p, fine_i), "shell")
+    layer = borrowed.layer
+    # Enabled AFTER the attach, so the journal holds the replacement alone —
+    # which is what lets a document already holding the same layer replay it.
+    source.enable_undo()
+    source.replace_mesh_layer(layer, clay.Mesh.from_triangles(coarse_p, coarse_i))
+    blob, _now_at = source.journal_since(0)
+    assert len(blob) > 0
+
+    replayed = clay.Document()
+    same = replayed.add_mesh_layer(clay.Mesh.from_triangles(fine_p, fine_i), "shell")
+    assert same.layer == layer  # ids are monotonic, so the two documents agree
+    replayed.enable_undo()
+    assert replayed.mesh_layer_revision(layer) == 1
+
+    result = replayed.replay_journal(blob)
+    assert result["applied"] == 1
+    assert not result["stopped_at_barrier"]
+    assert same.triangle_count == 48
+    assert replayed.mesh_layer_revision(layer) == 2
+
+    assert replayed.undo()
+    assert same.triangle_count == 224
+    assert replayed.mesh_layer_revision(layer) == 3
+
+
+def test_a_mesh_layer_revision_stands_still_for_what_is_not_a_replacement():
+    # A fix that bumps on everything is not a fix: the value of the token is
+    # that a caller keeps its caches across the changes that do not invalidate
+    # them.
+    fine_p, fine_i = _remesh_sphere(rings=8, segments=16)
+    coarse_p, coarse_i = _remesh_sphere(radius=0.5, rings=4, segments=8)
+    doc = clay.Document()
+    doc.enable_undo()
+    kept = doc.add_mesh_layer(clay.Mesh.from_triangles(fine_p, fine_i), "kept")
+    other = doc.add_mesh_layer(clay.Mesh.from_triangles(fine_p, fine_i), "other")
+    start = doc.mesh_layer_revision(kept.layer)
+    assert start == 1
+
+    # A vertex-position sculpt: the fixed-topology contract, and the change the
+    # caches are built to survive.
+    sculptor = clay.MeshSculptor(kept)
+    assert sculptor.stamp("draw", center=(0.0, 1.0, 0.0), radius=0.4, strength=0.05) > 0
+    assert doc.mesh_layer_revision(kept.layer) == start
+
+    # Transform-only, visibility and protection: three edits that move a layer
+    # without touching a triangle, each of them a recorded step.
+    doc.set_layer_transform(kept.layer, position=(0.5, 0.25, -0.75), scale=2.0)
+    assert doc.mesh_layer_revision(kept.layer) == start
+    assert doc.undo()  # undoing one touches the layer, not a triangle
+    assert doc.mesh_layer_revision(kept.layer) == start
+
+    doc.set_layer_visible(kept.layer, False)
+    doc.set_layer_visible(kept.layer, True)
+    assert doc.mesh_layer_revision(kept.layer) == start
+
+    doc.set_layer_protection(kept.layer, ghost=True)
+    doc.set_layer_protection(kept.layer, ghost=False)
+    assert doc.mesh_layer_revision(kept.layer) == start
+
+    # History affecting ANOTHER layer leaves this one alone.
+    doc.replace_mesh_layer(other.layer, clay.Mesh.from_triangles(coarse_p, coarse_i))
+    assert doc.mesh_layer_revision(other.layer) == 2
+    assert doc.mesh_layer_revision(kept.layer) == start
+    assert doc.undo()
+    assert doc.mesh_layer_revision(other.layer) == 3
+    assert doc.mesh_layer_revision(kept.layer) == start
+
+    # A REFUSED replacement spends no generation.
+    now = doc.mesh_layer_revision(other.layer)
+    with pytest.raises(RuntimeError, match="rebuilt while this result"):
+        doc.replace_mesh_layer(other.layer,
+                               clay.Mesh.from_triangles(coarse_p, coarse_i),
+                               expected_revision=1)
+    assert doc.mesh_layer_revision(other.layer) == now
+    assert other.triangle_count == 224
+
+
 def test_voxel_remesh_layer_refuses_without_touching_the_layer():
     p, i = _remesh_sphere()
     doc = clay.Document()
