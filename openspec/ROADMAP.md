@@ -2544,33 +2544,68 @@ Worth adding to any harness that runs a build and a test in one script: the exit
 code of the build is a precondition of the test's output meaning anything, and
 scripts that print both put them where a reader chooses.
 
-### A measurement below the instrument's floor, and why a budget would be worse than none
+### A budget that cannot fail until the case is 3.6x slower
 
 The device gate reported `mesh_sustained_grab: no declared budget in the
 baseline`. The obvious repair is to declare one. **That would be worse than the
-gap**, and the reason generalises.
+gap**, and the arithmetic says so rather than a judgement:
 
-The case measures **0.019 ms per dab** against a suite floor of **0.125 ms** —
-6.6x BELOW what the instrument can resolve. A budget derived from it would gate
-noise, and it would do so while **reading as coverage**: a row with a number
-beside it looks watched.
+```
+p95                          0.019 ms
+NOISE_FLOOR_MS               0.050 ms   (check_device_bench.py)
+smallest failing overshoot   0.069 ms   = 3.6x today
+```
 
-**26 measurement points across ~15 cases in that run sit under the floor.** For
-most that is harmless — they are the small end of a 10/100/1000 growth axis and
-only the top point gates. `mesh_sustained_grab` is different because it has ONE
-measurement: its axis is windows rather than document size, so there is no larger
-point to fall back on.
+A budget only fails when the overshoot clears the noise floor. So a budget set at
+today's measurement **could not fail until the case was 3.6x slower** — not a
+loose budget, not a gate at all, and a row with a number beside it reads as
+coverage. The same tool already reports this defect from the other side, when it
+says a budget sits 12.8x above its measurement and "could get 13x slower
+unnoticed".
 
-**Which means the checker is asking the wrong question of it.** The case's claim
-is DRIFT — the last window is not slower than the first — not an absolute cost,
-and the harness already has a `DRIFT` verdict. A budget requirement running ahead
-of the drift verdict turns a well-posed case into an ill-posed one.
+**The repair is to declare WHICH GATE, not a ceiling.** `"gate": "drift"` keeps
+the rule that must not be weakened — every case declares something, and an
+unbudgeted latency number is a measurement rather than a gate — while letting a
+case whose claim is about session LENGTH be held to a drift verdict instead of a
+millisecond ceiling it was never the right instrument for.
 
-**The rule: before declaring a budget, check the measurement is above the floor
-that produced it.** A gate on a quantity the instrument cannot resolve is the
-measurement twin of a fixture that cannot fail — and it is harder to spot,
-because unlike an absent gate it leaves a number in the report.
+And the declaration itself was made falsifiable in both directions, on doctored
+runs:
 
+```
+windows removed   -> FAIL "declares the drift gate but records no windows,
+                           so nothing gates it"
+p95 -> 0.421 ms   -> FAIL "it has a number worth gating, so give it a budget
+                           and drop the declaration"
+```
+
+The second is the exemption-list rule applied to a budget: **a declaration that
+cannot go stale is a permanent escape hatch.** This one expires automatically the
+moment the case grows into measurable territory.
+
+### Three checks that could not fire, in one day
+
+The generalisation, from three instances found in a single session — all in the
+same session's own tooling, all caught by that session:
+
+| what happened | why the output looked like an answer |
+|---|---|
+| a revert deleted two call sites, `-Werror,-Wunused-function` failed the build, the harness ran the **stale binary** | `build_exit=2` and `2 passed` printed on adjacent lines |
+| `git rebase` piped to `tail`, so `set -e` saw **tail's** exit code | the rebase conflicted and the loop carried on through two more branches |
+| `grep -c` returning **exit 1 on a clean build** — no matches is a failure code | a successful check read as a failed one |
+
+Three disguises: a stale artifact, a discarded exit code, and an exit code that
+means something other than what the reader assumed. **In every one the check was
+structurally unable to fire and the output was well-formed.**
+
+**The common fix is not care.** It is making a check assert its own
+preconditions: the build succeeded before the test result is read, the command's
+own status rather than a pipeline's, the difference between "no matches" and
+"failed to look". That is the same instrument as the vacuity guard below and as
+the revert proof itself — *establish that this check could have produced a
+different answer, then read the answer.*
+
+### The vacuity guard: the assertion form of the revert proof
 ### The vacuity guard: the assertion form of the revert proof
 
 The cheapest instrument in this document, and the one that turns a judgement into
