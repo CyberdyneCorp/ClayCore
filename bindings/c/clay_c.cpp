@@ -4633,6 +4633,45 @@ eval::DeviceBuffer brick_slot(const eval::DeviceBuffer& whole, std::size_t at, s
     return s;
 }
 
+// PLACED IN A NAMESPACE OUTSIDE `extern "C"`, because `minor_refusal` returns a
+// std::string: an anonymous namespace does not reset language linkage, so the
+// same definition inside the block below would carry C linkage on a signature C
+// cannot spell. The C4190 family this file has been bitten by before.
+// Why a minor refuses, named by what actually blocks it. TWO REASONS AND TWO
+// SENTENCES: a host reading "a layer carries a composition" about a layer that
+// carries a hierarchy would go and look at the wrong thing.
+std::string minor_refusal(const clay_document* doc, std::uint16_t at, clay_layer_id blocking) {
+    if (scene::layer_blocking_minor(doc->doc.document, at) == blocking)
+        return "a layer carries a composition that this format minor cannot say: writing it "
+               "there would turn a cutting layer into a unioning one";
+    return "a mesh layer carries a multiresolution hierarchy with DETAIL, and this format "
+           "minor has no chunk to put one in: the levels would be absent and cannot be "
+           "re-sculpted from the cage";
+}
+
+// The layout a save-at-minor will actually write at, or a refusal.
+//
+// ONE PLACE FOR BOTH SAVE CALLS, so the path form and the memory form cannot
+// come to different conclusions about the same document -- which is the failure
+// the format's own "both halves or neither" rule is about, one level up.
+clay_result resolve_write_minor(const clay_document* doc, std::uint32_t minor,
+                                clay_layer_id* out_blocking_layer, std::uint16_t* out_at) {
+    if (out_blocking_layer) *out_blocking_layer = 0;
+    if (minor == 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "a format minor starts at 1");
+    // Clamped rather than refused above this build's layout, exactly as
+    // clay_document_writable_at_minor clamps: the question is only about
+    // writing DOWN.
+    const std::uint16_t at = minor > scene::kSceneMinor ? scene::kSceneMinor
+                                                        : static_cast<std::uint16_t>(minor);
+    const scene::LayerId blocking = io::document_blocking_minor(doc->doc, at);
+    if (blocking != 0) {
+        if (out_blocking_layer) *out_blocking_layer = blocking;
+        return fail(CLAY_ERROR_UNSUPPORTED, minor_refusal(doc, at, blocking));
+    }
+    *out_at = at;
+    return CLAY_OK;
+}
+
 }  // namespace
 
 extern "C" {
@@ -5339,6 +5378,7 @@ void axis_angle_of(const math::Transform& xform, float out_axis[3], float* out_a
     out_axis[2] = axis.z;
 }
 
+
 }  // namespace
 
 clay_result clay_layer_node_transform(const clay_document* doc, clay_layer_id layer,
@@ -5638,12 +5678,51 @@ clay_result clay_document_writable_at_minor(const clay_document* doc, uint32_t m
     const std::uint16_t asked = minor > scene::kSceneMinor
                                     ? scene::kSceneMinor
                                     : static_cast<std::uint16_t>(minor);
-    const scene::LayerId blocking = scene::layer_blocking_minor(doc->doc.document, asked);
+    // THE WHOLE DOCUMENT, not only the scene. This asked
+    // `scene::layer_blocking_minor` alone, which knows about composition and
+    // nothing else -- so a document carrying a multiresolution hierarchy, which
+    // container minor 19 added an 'MRES' chunk for, reported CLAY_OK at 18.
+    // The header promises "nothing an artist authored dropped".
+    const scene::LayerId blocking = io::document_blocking_minor(doc->doc, asked);
     if (blocking == 0) return CLAY_OK;
     if (out_blocking_layer) *out_blocking_layer = blocking;
-    return fail(CLAY_ERROR_UNSUPPORTED,
-                "a layer carries a composition that this format minor cannot say: writing it "
-                "there would turn a cutting layer into a unioning one");
+    return fail(CLAY_ERROR_UNSUPPORTED, minor_refusal(doc, asked, blocking));
+}
+
+clay_result clay_document_save_at_minor(const clay_document* doc, const char* path,
+                                        uint32_t minor, clay_layer_id* out_blocking_layer) {
+    if (!doc || !path) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or path");
+    std::uint16_t at = 0;
+    clay_result r = resolve_write_minor(doc, minor, out_blocking_layer, &at);
+    if (r != CLAY_OK) return r;
+    const io::IoStatus s = io::save_clayspace_file(doc->doc, path, at);
+    // Noted only on success, and only at THIS build's layout: a file written at
+    // an older minor is not a snapshot the journal from here on can be paired
+    // with, because replaying this build's events onto it would produce a
+    // document that minor cannot express.
+    if (s.ok() && at == scene::kSceneMinor && doc->undo)
+        doc->undo->note_snapshot(doc->doc.document.snapshot_id);
+    return from_io(s);
+}
+
+clay_result clay_document_save_memory_at_minor(const clay_document* doc, uint32_t minor,
+                                               clay_blob** out_blob,
+                                               clay_layer_id* out_blocking_layer) {
+    if (!doc || !out_blob) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out_blob");
+    *out_blob = nullptr;
+    std::uint16_t at = 0;
+    clay_result r = resolve_write_minor(doc, minor, out_blocking_layer, &at);
+    if (r != CLAY_OK) return r;
+    std::vector<std::uint8_t> bytes = io::save_clayspace(doc->doc, at);
+    // The pre-check above already answered, so an empty result here would mean
+    // the two disagreed. Refused rather than handed back as a valid blob.
+    if (bytes.empty())
+        return fail(CLAY_ERROR_UNSUPPORTED,
+                    "this document cannot be written at that format minor");
+    *out_blob = new clay_blob{std::move(bytes)};
+    if (at == scene::kSceneMinor && doc->undo)
+        doc->undo->note_snapshot(doc->doc.document.snapshot_id);
+    return CLAY_OK;
 }
 
 // -- discovering layers ------------------------------------------------------

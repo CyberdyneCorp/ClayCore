@@ -1631,6 +1631,28 @@ struct PyPlacementGesture {
 
 // The one place a mesh layer's triangles are swapped from Python, so both
 // callers get the same guards, the same undo record and the same invalidation.
+// The layout a save will write at, or a refusal naming what blocks it.
+//
+// ONE PLACE FOR `save` AND `to_bytes`, so the two cannot come to different
+// conclusions about the same document — the same reason the C ABI's two save
+// forms share `resolve_write_minor`.
+std::uint16_t write_minor_or_throw(const PyDocument& d, nb::handle minor) {
+    if (minor.is_none()) return scene::kSceneMinor;
+    const unsigned asked = nb::cast<unsigned>(minor);
+    if (asked == 0) throw std::invalid_argument("a format minor starts at 1");
+    // Clamped rather than refused above this build's layout, as
+    // `writable_at_minor` clamps: the question is only about writing DOWN.
+    const std::uint16_t at = asked > scene::kSceneMinor
+                                 ? scene::kSceneMinor
+                                 : static_cast<std::uint16_t>(asked);
+    const scene::LayerId blocking = io::document_blocking_minor(*d.doc, at);
+    if (blocking != 0)
+        throw std::runtime_error("this document cannot be written at scene format minor " +
+                                 std::to_string(at) + "; layer " + std::to_string(blocking) +
+                                 " blocks it (see writable_at_minor)");
+    return at;
+}
+
 // Mirrors replace_mesh_layer_geometry in the C ABI exactly.
 void py_replace_mesh_layer(PyDocument& d, scene::LayerId layer, mesh::Mesh replacement,
                            nb::handle expected_revision) {
@@ -7546,24 +7568,41 @@ NB_MODULE(pyclay, m) {
              "points"_a,
              "Snap (N, 3) points onto the surface; returns positions and outward normals")
         .def("save",
-             [](const PyDocument& d, const std::string& path) {
-                 check_io(io::save_clayspace_file(*d.doc, path));
+             [](const PyDocument& d, const std::string& path, nb::handle minor) {
+                 const std::uint16_t at = write_minor_or_throw(d, minor);
+                 check_io(io::save_clayspace_file(*d.doc, path, at));
                  // These bytes are a snapshot the journal from here on can be
                  // paired with, whether the host meant them as a crash
                  // snapshot or as an ordinary save. check_io threw if the
                  // write failed, so there is no failure path to guard.
-                 if (*d.undo) (*d.undo)->note_snapshot(d.doc->document.snapshot_id);
+                 //
+                 // ONLY AT THIS BUILD'S LAYOUT: a file written at an older
+                 // minor is not a snapshot this build's journal can be replayed
+                 // onto, because replaying it would produce a document that
+                 // minor cannot express.
+                 if (at == scene::kSceneMinor && *d.undo)
+                     (*d.undo)->note_snapshot(d.doc->document.snapshot_id);
              },
-             "path"_a, "Save the document as .clayspace")
+             "path"_a, "minor"_a = nb::none(),
+             "Save the document as .clayspace.\n\n"
+             "`minor` writes at an older scene format layout, for a file a build\n"
+             "that has not been updated can open. REFUSED rather than downgraded\n"
+             "when that layout cannot say what this document says -- ask\n"
+             "`writable_at_minor` first to find out which layer blocks it -- and\n"
+             "NOTHING IS WRITTEN on a refusal, so an existing file is left alone.")
         .def(
             "to_bytes",
-            [](const PyDocument& d) {
-                const std::vector<std::uint8_t> bytes = io::save_clayspace(*d.doc);
+            [](const PyDocument& d, nb::handle minor) {
+                const std::uint16_t at = write_minor_or_throw(d, minor);
+                const std::vector<std::uint8_t> bytes = io::save_clayspace(*d.doc, at);
                 // See `save`: the bytes just produced are a snapshot the
-                // journal from here on continues from.
-                if (*d.undo) (*d.undo)->note_snapshot(d.doc->document.snapshot_id);
+                // journal from here on continues from, and only at this
+                // build's own layout.
+                if (at == scene::kSceneMinor && *d.undo)
+                    (*d.undo)->note_snapshot(d.doc->document.snapshot_id);
                 return nb::bytes(bytes.data(), bytes.size());
             },
+            "minor"_a = nb::none(),
             "The same bytes `save` would write, without a path — for a host\n"
             "whose documents live in a container, a database or a network\n"
             "request rather than on a filesystem. Read them back with\n"
@@ -7749,8 +7788,12 @@ NB_MODULE(pyclay, m) {
                  const std::uint16_t asked =
                      minor > scene::kSceneMinor ? scene::kSceneMinor
                                                 : static_cast<std::uint16_t>(minor);
-                 const scene::LayerId blocking =
-                     scene::layer_blocking_minor(d.doc->document, asked);
+                 // THE WHOLE DOCUMENT, not only the scene. This asked
+                 // `layer_blocking_minor` alone, which knows about composition
+                 // and nothing else, so a document carrying a multiresolution
+                 // hierarchy -- container minor 19's 'MRES' chunk -- answered
+                 // True at 18, which has no chunk to put one in.
+                 const scene::LayerId blocking = io::document_blocking_minor(*d.doc, asked);
                  return nb::make_tuple(blocking == 0, blocking);
              },
              "minor"_a,
@@ -7763,8 +7806,11 @@ NB_MODULE(pyclay, m) {
              "a lump welded on, in a file that opens cleanly and looks deliberate.\n"
              "A minor above this build's is clamped to it rather than refused. The\n"
              "id is returned rather than only a flag so a host can say WHICH subtool\n"
-             "to change instead of making the artist find it. Mirrors\n"
-             "clay_document_writable_at_minor.")
+             "to change instead of making the artist find it.\n\n"
+             "It also answers for a MULTIRESOLUTION HIERARCHY, which arrived with the\n"
+             "container's minor 19: a hierarchy holding only its cage is a plainer\n"
+             "file below that and is allowed, and one an artist has refined cannot be\n"
+             "rebuilt and is refused. Mirrors clay_document_writable_at_minor.")
         .def("set_layer_transform",
              [](PyDocument& d, scene::LayerId layer, nb::handle position,
                 nb::handle rotation_axis_angle, nb::handle scale) {

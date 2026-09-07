@@ -8607,3 +8607,65 @@ def test_a_stamp_reports_where_its_time_went_and_what_it_did():
     s.reset_stage_report()
     s.stamp("draw", center=(0, 0, 0), radius=0.5, strength=0.5)
     assert s.stage_report["vertices_considered"] == 0
+
+
+# -- writing at an older layout (save-document-at-minor) ----------------------
+
+def _quad_cage(n=4):
+    positions = [(0.5 * x - 1.0, 0.0, 0.5 * z - 1.0)
+                 for z in range(n + 1) for x in range(n + 1)]
+    indices = []
+    for z in range(n):
+        for x in range(n):
+            a = z * (n + 1) + x
+            indices += [a, a + n + 1, a + 1, a + 1, a + n + 1, a + n + 2]
+    return clay.Mesh.from_triangles(np.array(positions, dtype=np.float32),
+                                    np.array(indices, dtype=np.uint32))
+
+
+def test_writable_at_minor_answers_for_a_hierarchy_too(tmp_path):
+    """REGRESSION. writable_at_minor asked only about a layer's COMPOSITION, so a
+    document carrying a multiresolution hierarchy — which the container's minor
+    19 added an 'MRES' chunk for — answered True at 18, which has no chunk to
+    put one in. The promise is 'nothing an artist authored dropped'."""
+    doc = clay.Document()
+    cage = _quad_cage()
+    carried = doc.add_mesh_layer(cage, "carried")
+    doc.layer_take_multires(carried.layer, clay.MultiresSurface.from_mesh(cage))
+
+    # Only the cage: a hierarchy at one level holds nothing an artist made, and
+    # losing it below 19 is the ordinary plainer-file degrade.
+    assert doc.writable_at_minor(18) == (True, 0)
+    at18 = doc.to_bytes(minor=18)
+    at19 = doc.to_bytes(minor=19)
+    assert len(at18) < len(at19)      # no 'MRES' chunk at 18
+
+    # A level above the cage is a decision an artist made and cannot be rebuilt.
+    doc.layer_multires(carried.layer).add_level()
+    ok, blocking = doc.writable_at_minor(18)
+    assert ok is False
+    assert blocking == carried.layer
+
+    with pytest.raises(RuntimeError, match="cannot be written at scene format minor 18"):
+        doc.to_bytes(minor=18)
+    # ...and at this build's layout it still writes.
+    assert len(doc.to_bytes(minor=19)) > 0
+
+
+def test_a_refused_save_leaves_the_file_that_was_there_alone(tmp_path):
+    doc = clay.Document()
+    cage = _quad_cage()
+    carried = doc.add_mesh_layer(cage, "carried")
+    doc.layer_take_multires(carried.layer, clay.MultiresSurface.from_mesh(cage))
+
+    path = tmp_path / "refusal.clayspace"
+    doc.save(str(path), minor=19)
+    before = path.read_bytes()
+    assert before
+
+    doc.layer_multires(carried.layer).add_level()
+    with pytest.raises(RuntimeError, match="cannot be written at scene format minor 18"):
+        doc.save(str(path), minor=18)
+    # A save that cannot represent the document must not first destroy the last
+    # one that could.
+    assert path.read_bytes() == before

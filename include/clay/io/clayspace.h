@@ -431,23 +431,58 @@ bool multires_carries_detail(const mesh::MultiresSurface& surface);
 // -- the ways this actually happens -- all change a count.
 bool multires_matches_cage(const mesh::Mesh& cage, const mesh::MultiresSurface& surface);
 
-// NO `multires_blocking_minor`, deliberately, and the reason is worth keeping
-// because the plan for this change had one. It was modelled on
-// `scene::layer_blocking_minor`, which exists because `serialize_document` takes
-// a minor to WRITE at and can therefore be asked to write one it cannot express.
-// `save_clayspace` takes no such parameter: the container is always written at
-// `kClaySpaceMinor`, and the older-minor discipline in this format lives in the
-// SCENE PAYLOAD rather than here. A query answering which layer blocks a write
-// nobody can request would be an entry point with no caller.
+// `multires_blocking_minor` DID NOT EXIST, and the reason it did not is worth
+// keeping beside the reason it does now.
 //
-// What replaces it is `multires_carries_detail` above, which answers the
-// question a host actually has -- "would anything an artist made be lost" --
-// without pretending the container has a downgrade path it does not.
+// It was modelled on `scene::layer_blocking_minor`, which exists because
+// `serialize_document` takes a minor to WRITE at and can therefore be asked to
+// write one it cannot express. `save_clayspace` took no such parameter -- the
+// container was always written at `kClaySpaceMinor` -- so a query answering
+// which layer blocks a write nobody could request was an entry point with no
+// caller. That was correct.
+//
+// `save_clayspace` now takes a minor (save-document-at-minor), and the caller
+// exists. The gap that reasoning left behind was real and reachable:
+// `clay_document_writable_at_minor` promises "nothing an artist authored
+// dropped" and asks only `scene::layer_blocking_minor`, which knows about
+// composition and nothing else -- so a document carrying a hierarchy reported
+// CLAY_OK at minor 18, which has no 'MRES' chunk to put one in.
+//
+// The line it draws is `multires_carries_detail`, which is the function that
+// was already here for exactly this question. A hierarchy with no detail is
+// reconstructible from its cage by a deterministic subdivision, so dropping it
+// is the ordinary "smaller or plainer" degrade this format has always allowed.
+// A hierarchy carrying DETAIL is something an artist made and cannot be
+// rebuilt, so writing below the minor that can carry it is refused.
+scene::LayerId multires_blocking_minor(const ClaySpaceDoc& doc, std::uint16_t minor);
 
-std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc);
+// The first layer, of any kind, that `minor` cannot express. ONE ANSWER for a
+// host that has one question: `scene::layer_blocking_minor` and
+// `multires_blocking_minor` each know about one field, and a caller that had to
+// ask both and combine them would be the place the two got out of step.
+scene::LayerId document_blocking_minor(const ClaySpaceDoc& doc, std::uint16_t minor);
+
+// `minor` is the layout to WRITE at, defaulting to the current one.
+//
+// REFUSES -- returns an EMPTY vector, which is never a valid stream since even
+// an empty document writes a magic number -- when `minor` cannot express what
+// this document says, which is exactly `document_blocking_minor` being
+// non-zero. That is `serialize_document`'s convention, followed here so a
+// caller that already handles one handles both.
+//
+// A chunk a minor did not have IS NOT WRITTEN AT THAT MINOR. Minor 19 added
+// 'MRES'; written at 18 the hierarchies are absent, and a hierarchy carrying
+// detail refuses the write rather than being absent, per
+// `multires_blocking_minor`.
+std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc,
+                                         std::uint16_t minor = kClaySpaceMinor);
 IoStatus load_clayspace(const std::uint8_t* data, std::size_t size, ClaySpaceDoc* out);
 
-IoStatus save_clayspace_file(const ClaySpaceDoc& doc, const std::string& path);
+// Refuses with the same rule `save_clayspace` does, and LEAVES ANY EXISTING
+// FILE UNTOUCHED when it refuses: a save that cannot represent the document
+// must not first destroy the last one that could.
+IoStatus save_clayspace_file(const ClaySpaceDoc& doc, const std::string& path,
+                             std::uint16_t minor = kClaySpaceMinor);
 // The budget's max_file_bytes bounds what will be read into memory before the
 // buffer is sized. It is a parameter rather than a fixed ceiling because a
 // document carrying sampled volumes is large by nature, and nothing here caps
