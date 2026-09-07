@@ -59,6 +59,7 @@ LevelCache::Bytes LevelCache::byte_split() const {
                 mesh.colors.capacity() * sizeof(kernel::cfloat3) +
                 mesh.uvs.capacity() * sizeof(kernel::cfloat2);
     b.chunk_index = chunks.bytes() + face_chunk.capacity() * sizeof(std::uint32_t);
+    if (cross) b.runtime += cross->bytes();
     if (adjacency) {
         // The adjacency's own arrays are not exposed; its three CSR pairs are
         // close enough to ten words a vertex that pricing it any more precisely

@@ -30,6 +30,19 @@ LevelCache& ensure_cache(MultiresSurface::State& s, std::uint32_t level) {
     return *lev.cache;
 }
 
+// Does this level hold a cache with a SURFACE in it?
+//
+// Not the same question as "does it hold a cache". `ensure_cache` allocates one
+// and builds the level's connectivity for a caller that wanted only that —
+// `connectivity_of`, which `MultiresSurface::connectivity_at` exposes — and
+// leaves `subdivided`, `frames` and `mesh.positions` empty behind an
+// `evaluated` flag that is still false. Every reader of a level's POSITIONS has
+// to ask this one, because a released level whose connectivity was asked for
+// since is indistinguishable from an evaluated one by the pointer alone.
+bool level_is_evaluated(const MultiresSurface::State& s, std::uint32_t level) {
+    return s.levels[level].cache && s.levels[level].cache->evaluated;
+}
+
 // P(n) = S(n) + Frame(n) * Detail(n), for these vertices. The one place the
 // model in `multires.h` is actually written down in code.
 //
@@ -289,7 +302,7 @@ namespace {
 // exact cost the short circuit exists to avoid. `evaluate_up_to` drains them
 // directly instead, which is why they are not tested here.
 bool below_is_current(const MultiresSurface::State& s, std::uint32_t target) {
-    if (!s.levels[target].cache || !s.levels[target].cache->evaluated) return false;
+    if (!level_is_evaluated(s, target)) return false;
     // A COMPOSITION CHANGE IS PENDING WORK. Without this a strength change on a
     // hierarchy nobody has edited since is silently swallowed: nothing is
     // pending, every cache says it is evaluated, and the dial does nothing.
@@ -342,6 +355,27 @@ void evaluate_up_to(MultiresSurface::State& s, std::uint32_t level) {
         s.levels[l - 1].pending.clear();
         s.levels[l - 1].pending_all = false;
     }
+}
+
+void evaluate_all_up_to(MultiresSurface::State& s, std::uint32_t level) {
+    if (s.levels.empty()) return;
+    const std::uint32_t target = std::min(level, static_cast<std::uint32_t>(s.levels.size() - 1));
+    // A missing cache is what `below_is_current` does not test for below the
+    // target, so asking for that level directly is what forces the walk: it
+    // fails the test on its own cache and rebuilds from the cage. Bit for bit
+    // the same surface — every input to a level is still here, which is the
+    // property `drop_all_caches` already rests on.
+    //
+    // AN ALLOCATED CACHE IS NOT AN EVALUATED ONE, and the two are one predicate
+    // here rather than two cases. `ensure_cache` builds a level's connectivity
+    // and nothing else — `connectivity_at` is a public call that reaches it, so
+    // a host that asks a released level for its connectivity leaves the cache
+    // holding a `conn` and an EMPTY position array. Testing only the pointer
+    // walks past exactly that level, and the reader downstream indexes an empty
+    // vector. `below_is_current` tests the flag for the same reason.
+    for (std::uint32_t l = 0; l <= target; ++l)
+        if (!level_is_evaluated(s, l)) evaluate_up_to(s, l);
+    evaluate_up_to(s, target);
 }
 
 // -- attributes ---------------------------------------------------------------
@@ -510,6 +544,60 @@ const Adjacency& MultiresSurface::level_adjacency(std::uint32_t level) {
     return *c.adjacency;
 }
 
+const CrossLevelNeighborhood& MultiresSurface::cross_level_at(std::uint32_t level) {
+    static const CrossLevelNeighborhood kEmpty;
+    if (!state_ || !state_->level_ok(level) || level == 0) return kEmpty;
+    MultiresSurface::State& s = *state_;
+    // The parent's evaluated positions are what the outside vertices are
+    // subdivided from, so the walk up has to have happened.
+    evaluate_up_to(s, level);
+    LevelCache& c = *s.levels[level].cache;
+    // THE LEVEL BELOW IS NOT ALWAYS RESIDENT. `evaluate_up_to` guarantees the
+    // cache of the level it was ASKED for and no other, on purpose: when
+    // nothing below has moved it short-circuits, which is the whole of what
+    // makes `drop_intermediate_caches` stay dropped. So the parent's
+    // connectivity and positions — which every outside vertex is subdivided
+    // from — can be gone, and reading them through a released cache is the
+    // undefined behaviour a sanitizer build catches here.
+    //
+    // A level that stores every child of every face of its parent has nothing
+    // outside it and can say so without the parent at all — which is every
+    // level of a uniform hierarchy, and why a trim there still holds.
+    //
+    // Anything else has to bring the parent back. Not for the topology, which
+    // is fixed for the life of the cache, but for the OUTSIDE POSITIONS: they
+    // belong to the level below, a stroke down there moves them without this
+    // level's cache going stale, and the re-read on the way past is what keeps
+    // them honest. Handing back what was last read would be an answer a reader
+    // cannot tell from a current one, and handing back an empty neighbourhood
+    // would read as "no depth boundary here".
+    //
+    // AND AN ALLOCATED CACHE IS NOT AN EVALUATED ONE: `ensure_cache` builds a
+    // level's connectivity and leaves its positions empty, which `connectivity_at`
+    // reaches from outside on a level a trim released. So the test is the flag
+    // and not the pointer.
+    if (!level_is_evaluated(s, level - 1)) {
+        if (level_is_self_contained(s.levels[level].topology, s.levels[level].patch_kept))
+            return kEmpty;
+        evaluate_up_to(s, level - 1);
+    }
+    const MultiresLevel& parent = s.levels[level - 1];
+    if (!c.cross) {
+        c.cross = std::make_unique<CrossLevelNeighborhood>(
+            build_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
+                              s.levels[level].topology, s.levels[level].patch_kept));
+        return *c.cross;
+    }
+    // The topology is fixed for the life of the cache; the outside POSITIONS
+    // are the level below's, and a stroke down there moves them without this
+    // level's cache going stale. Re-read on the way past rather than tracked,
+    // because tracking them would be a fourth revision counter guarding a walk
+    // over the region rim.
+    refresh_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
+                        c.cross.get());
+    return *c.cross;
+}
+
 bool MultiresSurface::build_block(std::uint32_t level, std::uint32_t patch, Block* out) {
     if (!out || !state_ || !state_->level_ok(level)) return false;
     const LevelTopology& t = state_->levels[level].topology;
@@ -519,6 +607,13 @@ bool MultiresSurface::build_block(std::uint32_t level, std::uint32_t patch, Bloc
     out->patch = patch;
     out->level = level;
     out->vertices.clear();
+    // CLEARED LIKE THE OTHER TWO, and for a reason a fresh block never shows:
+    // a single-level block says every vertex is at `level` by leaving this
+    // EMPTY, so a block reused after `build_mixed_block` would otherwise carry
+    // the last patch's levels beside this patch's vertices — a host reading the
+    // pair, as `Block`'s own comment tells it to, would read the wrong level's
+    // positions and, where the arrays are different lengths, read off the end.
+    out->vertex_levels.clear();
     out->indices.clear();
     // Two passes over the patch's faces rather than a hash map: the first
     // collects the vertices and sorts them, the second rewrites the corners
@@ -549,18 +644,8 @@ bool MultiresSurface::build_block(std::uint32_t level, std::uint32_t patch, Bloc
     return true;
 }
 
-namespace {
-
-// What a level's export should carry: each attribute the CAGE carried and the
-// caller still wants. A hierarchy over a mesh with no colours exports none, so
-// a layer's attribute set does not change under a round trip.
-struct ExportWants {
-    bool normals = false;
-    bool uvs = false;
-    bool colors = false;
-};
-
-ExportWants wants_of(const MultiresSurface::State& s, const MultiresExportOptions& options) {
+ExportWants export_wants(const MultiresSurface::State& s,
+                        const MultiresExportOptions& options) {
     const std::size_t n = s.base.positions.size();
     ExportWants w;
     w.normals = options.normals && !s.base.normals.empty();
@@ -568,6 +653,8 @@ ExportWants wants_of(const MultiresSurface::State& s, const MultiresExportOption
     w.colors = options.colors && s.base.colors.size() == n && !s.base.colors.empty();
     return w;
 }
+
+namespace {
 
 // The cage's attribute connectivity IS its geometric one, so the export is the
 // level with the subdivided attributes laid over it vertex for vertex.
@@ -614,7 +701,7 @@ Mesh MultiresSurface::mesh_at_level(std::uint32_t level, const MultiresExportOpt
     // of the model, which is worse than drawing nothing.
     if (cancel && cancel->cancelled()) return out;
 
-    const ExportWants wants = wants_of(*state_, options);
+    const ExportWants wants = export_wants(*state_, options);
     const bool need_attrs = wants.uvs || wants.colors || state_->attribute_split;
     const bool have_attrs = need_attrs ? ensure_attributes(*state_, level) : false;
 
@@ -653,9 +740,20 @@ void restore_positions(MultiresSurface::State& s, std::uint32_t level,
             c.mesh.positions[v] = s.base.positions[s.class_members[s.class_offsets[v]]];
         }
         if (rest) apply_base_layers(s, &vertices);
+        // AND THE DISPLAY NORMALS OVER THEM, which at level 0 travel with the
+        // base frames -- exactly what `absorb_base_edit` queues for the write
+        // this is the refusal of.
+        s.base_frames_dirty.insert(s.base_frames_dirty.end(), vertices.begin(), vertices.end());
         return;
     }
     apply_detail(lev, vertices);
+    // AND THE DISPLAY NORMALS, for the reason `absorb_level_edit` queues them
+    // over what it absorbs. The caller moved this level's mesh, and whatever
+    // recomputed its normals did so from the DISPLACED positions; putting the
+    // positions back and leaving those normals is keeping something, which is
+    // the one thing this call promises not to do. Drained over the region and
+    // its face ring by `drain_normals_pending`.
+    lev.normals_pending.insert(lev.normals_pending.end(), vertices.begin(), vertices.end());
 }
 
 // Is the write the caller is about to make refused because the layer it would
@@ -852,6 +950,26 @@ void MultiresSurface::absorb_level_edit(std::uint32_t level,
     lev.pending.insert(lev.pending.end(), vertices.begin(), vertices.end());
     mark_patches(*state_, level, vertices);
     ++state_->evaluated_revision;
+}
+
+void MultiresSurface::restore_level_positions(std::uint32_t level,
+                                              const std::vector<std::uint32_t>& vertices) {
+    if (!state_ || !state_->level_ok(level) || vertices.empty()) return;
+    // EVALUATED FIRST, for the same reason `absorb_level_edit` evaluates first:
+    // "what the stored coefficients reconstruct to" is a statement about
+    // `subdivided` and `frames`, and a level whose parent has moved does not
+    // have those yet.
+    evaluate_up_to(*state_, level);
+    // FILTERED, because `restore_positions` indexes the caches directly: it is
+    // reached from `absorb_level_edit`, which has already dropped the
+    // out-of-range ids, and this entry point has not.
+    const std::uint32_t count =
+        level == 0 ? state_->class_count : state_->levels[level].topology.vertex_count;
+    std::vector<std::uint32_t> in_range;
+    in_range.reserve(vertices.size());
+    for (std::uint32_t v : vertices)
+        if (v < count) in_range.push_back(v);
+    if (!in_range.empty()) restore_positions(*state_, level, in_range);
 }
 
 void MultiresSurface::set_detail(std::uint32_t level, std::uint32_t vertex,

@@ -221,6 +221,25 @@ class History {
     // outlive what it names.
     using GroupsFor = std::function<voxel::GroupField*()>;
     void set_groups_resolver(GroupsFor resolver) { groups_for_ = std::move(resolver); }
+    // Installing one mesh layer's WHOLE geometry, returning false if the layer
+    // holds no triangles any more. Distinct from `MeshFor`, and that separation
+    // is the fix for #472 rather than an indirection.
+    //
+    // `MeshFor` hands back a pointer, and a pointer is all a vertex-delta step
+    // needs: it moves positions inside a mesh whose identity does not change.
+    // A MeshReplace step and a MeshReplace journal event do something else
+    // entirely — they swap every vertex and every index — and an owner
+    // keeping a per-layer generation over its mesh layers cannot see that
+    // through a pointer it handed out. So it did not: a rebuild moved the
+    // owner's token and undoing the rebuild left it where it was, which is a
+    // stale adjacency, BVH or live sculptor with nothing naming the cause.
+    //
+    // Set once, for the reason `DynamicMeshFor` gives: adding a parameter to
+    // undo, redo and replay would break every host compiled against this
+    // header. An owner that keeps no generation may leave it unset, and a
+    // wholesale restore then assigns through `MeshFor` as it always did.
+    using MeshInstaller = std::function<bool(scene::LayerId, mesh::Mesh)>;
+    void set_mesh_installer(MeshInstaller installer) { mesh_installer_ = std::move(installer); }
 
     // Off by default, exactly as the command stack has always been opt-in. A
     // document that never enables it behaves as it did before this existed.
@@ -560,6 +579,11 @@ class History {
     // over children for a Compound. The census in sync_scene_steps counts
     // entries on the wrapped stack, and a collapsed group still names one.
     static std::size_t scene_steps_in(const Step& s);
+    // The ONE place a step or a journal event puts a whole mesh into a layer.
+    // Through the installer when the owner set one, and by assignment through
+    // the resolver when it did not; either way no wholesale restore anywhere in
+    // this file reaches a `mesh::Mesh*` and writes through it directly.
+    bool install_mesh(scene::LayerId layer, mesh::Mesh triangles, const MeshFor& mesh_for);
 
     scene::UndoStack commands_;
     std::vector<Step> steps_;
@@ -588,6 +612,7 @@ class History {
     GroupsFor groups_for_;
     DynamicMeshFor dynamic_for_;
     MultiresFor multires_for_;
+    MeshInstaller mesh_installer_;
     bool group_open_ = false;
     std::vector<std::uint8_t> group_snapshot_;
     scene::LayerId open_mask_layer_ = 0;

@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "clay/mesh/adjacency.h"
+#include "clay/mesh/cross_level.h"
 #include "clay/mesh/detail_field.h"
 #include "clay/mesh/multires.h"
 #include "clay/mesh/sculpt_layer.h"
@@ -47,6 +48,16 @@ struct LevelCache {
     bool faces_built = false;
     std::unique_ptr<Adjacency> adjacency;
     bool evaluated = false;
+
+    // The faces the COMPLETE neighbourhood of this level's vertices has and
+    // this level does not store -- empty on a level that stores every patch.
+    //
+    // IN THE CACHE like everything else derived, so `drop_all_caches` and
+    // `drop_intermediate_caches` already release it and `cache_generation`
+    // already moves when they do. Its topology is a function of the cage, the
+    // rule and the per-level patch sets; only its outside POSITIONS follow the
+    // level below, and those are re-read rather than rebuilt.
+    std::unique_ptr<CrossLevelNeighborhood> cross;
 
     // The level's chunks, and the face -> chunk map that marks them.
     //
@@ -264,6 +275,17 @@ void expand_by_face_ring(const LevelTopology& topology, const LevelConnectivity&
 // edits since the last call actually require.
 void evaluate_up_to(MultiresSurface::State& s, std::uint32_t level);
 
+// The same, plus the guarantee `evaluate_up_to` deliberately does NOT give: that
+// every level at or below `level` has its cache, not just `level` itself.
+//
+// A trim (`drop_intermediate_caches`, and the residency policy that calls it)
+// releases the levels between the cage and the one being worked on without
+// marking anything pending, and `evaluate_up_to` then short-circuits past them —
+// which is what makes a release STAY released for a caller that reads its own
+// level and nothing else. A caller that reads a vertex AT a lower level, as the
+// mixed-depth export does by construction, has to ask for that storage back.
+void evaluate_all_up_to(MultiresSurface::State& s, std::uint32_t level);
+
 // Note that these level vertices changed, for the host's changed-block drain.
 void mark_patches(MultiresSurface::State& s, std::uint32_t level,
                   const std::vector<std::uint32_t>& vertices);
@@ -276,6 +298,19 @@ void ensure_level_chunks(MultiresSurface::State& s, std::uint32_t level);
 // Build the cage's attributes at `level`, if it has any. Returns false when
 // there is nothing to build, which is not a failure.
 bool ensure_attributes(MultiresSurface::State& s, std::uint32_t level);
+
+// What a level's export should carry: each attribute the CAGE carried and the
+// caller still wants. A hierarchy over a mesh with no colours exports none, so
+// a layer's attribute set does not change under a round trip.
+struct ExportWants {
+    bool normals = false;
+    bool uvs = false;
+    bool colors = false;
+
+    bool attributes() const { return uvs || colors; }
+};
+
+ExportWants export_wants(const MultiresSurface::State& s, const MultiresExportOptions& options);
 
 // The connectivity of a level, built if it is not resident.
 const LevelConnectivity& connectivity_of(MultiresSurface::State& s, std::uint32_t level);

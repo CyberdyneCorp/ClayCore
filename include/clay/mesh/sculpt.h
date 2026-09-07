@@ -45,6 +45,7 @@
 #include "clay/field/relax.h"    // MaskGate
 #include "clay/mesh/chunk_tree.h"
 #include "clay/mesh/adjacency.h"
+#include "clay/mesh/cross_level.h"
 #include "clay/mesh/brush_arena.h"
 #include "clay/mesh/deform.h"
 #include "clay/mesh/bvh.h"
@@ -169,6 +170,23 @@ class MeshSculptor {
     Mesh& mesh() { return mesh_; }
     const Adjacency& adjacency() const { return adjacency_; }
     bool valid() const { return adjacency_.matches(mesh_); }
+
+    // THE SURFACE THIS MESH IS A PART OF, when it is one level of a regional
+    // multires hierarchy and the rest of the surface lives one level down.
+    //
+    // A level's own connectivity ends at the region rim, so without this every
+    // walk here reads a depth transition as an open border of the model: the
+    // Laplacian divides by a short one-sided ring, the angle-weighted normal
+    // tips into the refined region, and the boundary automask fades a seam the
+    // artist cannot see. With it, none of those has a level in it — the missing
+    // neighbours simply have an identity. See `cross_level.h`.
+    //
+    // BORROWED, never owned, and it must outlive the sculptor: it lives in the
+    // level's cache, which is exactly what `cache_generation` exists to make a
+    // caller rebind on. Null — the default — is an ordinary mesh, and every
+    // reader then does what it did before this existed.
+    void set_cross_level(const CrossLevelNeighborhood* cross) { cross_ = cross; }
+    const CrossLevelNeighborhood* cross_level() const { return cross_; }
 
     // Apply ONE stamp. Returns the number of weld classes that moved, which is
     // 0 for a stamp that reached nothing, that was fully masked, or whose
@@ -474,6 +492,8 @@ class MeshSculptor {
     // read neighbours, and the normals only for polish, which is the one verb
     // that reads a neighbour's own normal.
     void build_neighbors(bool want_normals, bool want_colors);
+    // The neighbours this level does not store, appended to the CSR above.
+    void append_outside_neighbors(std::uint32_t cls, bool want_normals, bool colors);
     // The compiled plan for this verb and these settings, recompiled only when
     // one of the three things it actually depends on changes.
     const BrushRuntimePlan& plan_for(MeshBrush verb, const MeshBrushSettings& settings);
@@ -538,6 +558,10 @@ class MeshSculptor {
     // everything else here is: a stroke of similar stamps must allocate on its
     // first stamp and never again.
     std::vector<std::uint32_t> nb_offsets_, nb_slots_;
+    // The outside ids appended for the item being built, so a welded class
+    // cannot count one of them twice. Cleared per item, kept for its storage.
+    std::vector<std::uint32_t> nb_outside_;
+    const CrossLevelNeighborhood* cross_ = nullptr;
     std::vector<kernel::cfloat3> nb_positions_, nb_normals_, nb_colors_;
     std::vector<std::uint32_t> pending_normals_, deferred_normals_;
     std::vector<char> normal_mark_;

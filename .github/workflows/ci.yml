@@ -333,12 +333,27 @@ jobs:
         run: setarch -R ctest --preset tsan
 
   checks:
+    # The NAME is the contract a required status check is pinned to, and it
+    # has not moved since this file was scaffolded — so a step is added
+    # here without renaming the job, as the kernels-artifact and SwiftPM
+    # steps already were. It was never the full list.
     name: layering, kernel dialect, licenses, binding parity, doc latency
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Module layering
         run: python3 tools/check_layering.py
+      # A tasks.md is a checklist someone else executes, so a backticked name
+      # that is not in the tree is a promise dressed up as a citation. The gate
+      # shipped WITHOUT this step and therefore ran on nothing -- this
+      # repository's own taxonomy entry, "a gate no change triggers", added by
+      # the change that wrote the taxonomy down. It reads text and runs
+      # `git grep`; no build, so it belongs here beside the other file gates.
+      # Names that predate it are in tools/task_symbols_baseline.txt, which is
+      # excluded from the tree the gate searches -- it lives under tools/, and
+      # without the exclusion every name recorded there resolved by its own row.
+      - name: Task symbols resolve
+        run: python3 tools/check_task_symbols.py
       # includes the emulated Metal profile: the kernel headers are published
       # for host shaders, so an MSL-only break must fail here and not wait for
       # the macOS job

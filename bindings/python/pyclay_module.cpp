@@ -531,31 +531,22 @@ struct PyMeshQuery {
     mesh::Bvh bvh;
 };
 
+// A MESH LAYER'S GEOMETRY REVISION IS `io::ClaySpaceDoc::mesh_revision`, and
+// this binding no longer keeps one. It used to hold its own map beside the C
+// ABI's — two counters over the same triangles that could disagree, and, worse,
+// two that neither undo nor redo could reach, because history restores a mesh
+// through a `mesh::Mesh*` resolver that names no map (#472). Both bindings now
+// read the one the document keeps beside the triangles, where every path that
+// installs them advances it. Bumped only by a WHOLESALE replacement: a sculpt
+// moves vertices and leaves the topology alone, which is exactly the change an
+// adjacency, a BVH or a live sculptor SURVIVES.
+
 // Owns a mesh, or borrows the one a document holds for a mesh layer, mirroring
 // PyVoxelGrid so a layer's triangles are read straight out of the document
 // rather than copied per access.
-// Per mesh layer, bumped only when its triangles are REPLACED wholesale — the
-// same counter the C ABI keeps, and for the same reason. A sculpt moves
-// vertices and leaves the topology alone, which is exactly the change an
-// adjacency, a BVH or a live sculptor SURVIVES; a rebuild swaps every vertex
-// and every index, and they do not.
-//
-// Shared rather than held by value because a `PyMesh` and a `PyMeshSculptor`
-// both need to read it and neither owns the document.
-using MeshRevisions = std::map<scene::LayerId, std::uint64_t>;
-
-std::uint64_t revision_of(const MeshRevisions& revisions, scene::LayerId layer) {
-    auto it = revisions.find(layer);
-    return it == revisions.end() ? 1u : it->second;
-}
-
 struct PyMesh {
     mesh::Mesh m;                           // the owned mesh; empty on a borrow
     std::shared_ptr<io::ClaySpaceDoc> doc;  // non-null: borrowed from a mesh layer
-    // The document's revision map, when this is a borrow. Held so a sculptor
-    // built over this mesh can tell a REBUILD from a sculpt; null on an owned
-    // mesh, which belongs to no layer and cannot be replaced under anyone.
-    std::shared_ptr<MeshRevisions> revisions;
     scene::LayerId layer = 0;
 
     // How this mesh was quad-meshed, when it was. On the wrapper rather than
@@ -693,9 +684,9 @@ struct PyMeshSculptor {
     nb::object owner;  // the Python Mesh, kept alive for the session's lifetime
     PyMesh* mesh = nullptr;
     mesh::Mesh* bound = nullptr;
-    // The layer's geometry revision when this was built. See MeshRevisions:
-    // it is the only one of the three checks below that can see a rebuild
-    // landing on the same vertex and index counts.
+    // The layer's geometry revision when this was built. It is the only one of
+    // the three checks below that can see a rebuild landing on the same vertex
+    // and index counts.
     std::uint64_t geometry_revision = 0;
     std::shared_ptr<mesh::MeshSculptor> sculptor;
     // The peaks this session measured, OWNED HERE and pointed at once when the
@@ -716,8 +707,7 @@ struct PyMeshSculptor {
         // replaced — and `valid()` catches a changed COUNT. A rebuild that
         // lands on the same counts passes both and leaves this sculptor's
         // adjacency and BVH describing triangles that no longer exist.
-        if (mesh->revisions &&
-            revision_of(*mesh->revisions, mesh->layer) != geometry_revision)
+        if (mesh->doc && mesh->doc->mesh_revision(mesh->layer) != geometry_revision)
             throw std::runtime_error(
                 "the mesh layer was rebuilt under this sculptor; build a new one");
         return *sculptor;
@@ -1576,7 +1566,6 @@ void apply_or_throw(scene::Document& doc, const scene::Command& cmd, const char*
 struct PyDocument {
     std::shared_ptr<io::ClaySpaceDoc> doc = std::make_shared<io::ClaySpaceDoc>();
     std::shared_ptr<UndoRef> undo = std::make_shared<UndoRef>();
-    std::shared_ptr<MeshRevisions> mesh_revisions = std::make_shared<MeshRevisions>();
 };
 
 
@@ -1626,7 +1615,7 @@ void py_replace_mesh_layer(PyDocument& d, scene::LayerId layer, mesh::Mesh repla
     if (replacement.has_quads() && !mesh::quads_consistent(replacement))
         throw std::invalid_argument("the replacement's quads do not describe its triangles");
 
-    const std::uint64_t now = revision_of(*d.mesh_revisions, layer);
+    const std::uint64_t now = d.doc->mesh_revision(layer);
     if (!expected_revision.is_none() &&
         nb::cast<std::uint64_t>(expected_revision) != now)
         throw std::runtime_error(
@@ -1636,8 +1625,7 @@ void py_replace_mesh_layer(PyDocument& d, scene::LayerId layer, mesh::Mesh repla
     // must not be asked to: deltas already on the stack for this layer were
     // recorded against the OLD vertex count.
     if (d.undo && *d.undo) (*d.undo)->record_mesh_replace(layer, it->second, replacement);
-    it->second = std::move(replacement);
-    (*d.mesh_revisions)[layer] = now + 1;
+    d.doc->install_mesh_geometry(layer, std::move(replacement));
 }
 
 nb::dict voxel_remesh_report_dict(const mesh::VoxelRemeshReport& r) {
@@ -4646,10 +4634,9 @@ NB_MODULE(pyclay, m) {
                 // layer is as stale as it would be after a rebuild. Bumped only
                 // when something moved: a weld that changed nothing must not
                 // invalidate a live sculptor.
-                if (self.revisions &&
+                if (self.doc &&
                     r.vertices_merged + r.triangles_collapsed + r.triangles_invalid > 0)
-                    (*self.revisions)[self.layer] =
-                        revision_of(*self.revisions, self.layer) + 1;
+                    self.doc->note_mesh_geometry_replaced(self.layer);
                 nb::dict out;
                 out["vertices_before"] = r.vertices_before;
                 out["vertices_after"] = r.vertices_after;
@@ -5235,8 +5222,7 @@ NB_MODULE(pyclay, m) {
                 self->owner = mesh;
                 self->mesh = pm;
                 self->bound = &data;
-                self->geometry_revision =
-                    pm->revisions ? revision_of(*pm->revisions, pm->layer) : 0;
+                self->geometry_revision = pm->doc ? pm->doc->mesh_revision(pm->layer) : 0;
                 self->sculptor = std::make_shared<mesh::MeshSculptor>(data, weld_epsilon);
                 // Pointed at the block this object owns and never re-pointed:
                 // the sculptor is built once here and `live()` refuses rather
@@ -6830,7 +6816,7 @@ NB_MODULE(pyclay, m) {
                 const scene::Layer* l = d.doc->document.find_layer(layer);
                 if (!l || l->kind != scene::LayerKind::Mesh)
                     throw std::invalid_argument("no mesh layer with that id");
-                return revision_of(*d.mesh_revisions, layer);
+                return d.doc->mesh_revision(layer);
             },
             "layer"_a,
             "A mesh layer's geometry revision: bumped every time its triangles\n"
@@ -6842,7 +6828,15 @@ NB_MODULE(pyclay, m) {
             "in a way nothing else detects.\n\n"
             "Read it, do the slow work, then hand it to replace_mesh_layer: if\n"
             "the layer was rebuilt in between, the commit is refused rather than\n"
-            "overwriting work done while you were waiting.")
+            "overwriting work done while you were waiting.\n\n"
+            "EVERY wholesale replacement advances it, history included: an\n"
+            "attach, a rebuild, a weld that changed something, undo, redo and a\n"
+            "replayed journal event. It ADVANCES on an undo rather than going\n"
+            "back to what it was — the number is an invalidation token for your\n"
+            "live caches, not the age of the restored mesh, so a rebuild reads\n"
+            "2, undoing it reads 3 and redoing reads 4.\n\n"
+            "Per document instance and not saved: nothing it invalidates\n"
+            "survives a reopen, so a loaded document starts fresh at 1.")
         .def(
             "replace_mesh_layer",
             [](PyDocument& d, scene::LayerId layer, const PyMesh& replacement,
@@ -6889,7 +6883,7 @@ NB_MODULE(pyclay, m) {
                 // makes this transactional: the rebuild reads it while the
                 // layer still holds the original, so a refusal is a discard.
                 const mesh::Mesh source = it->second;
-                const std::uint64_t at = revision_of(*d.mesh_revisions, layer);
+                const std::uint64_t at = d.doc->mesh_revision(layer);
 
                 mesh::VoxelRemeshResult r;
                 {
@@ -6933,10 +6927,9 @@ NB_MODULE(pyclay, m) {
                  apply_or_throw(d.doc->document,
                                 scene::Command{scene::AddLayerCmd{std::move(l), -1}},
                                 "add_mesh_layer", d.undo.get());
-                 d.doc->mesh_layers.insert_or_assign(id, std::move(stored));
+                 d.doc->install_mesh_geometry(id, std::move(stored));
                  PyMesh borrowed;
                  borrowed.doc = d.doc;
-                 borrowed.revisions = d.mesh_revisions;
                  borrowed.layer = id;
                  return borrowed;
              },
@@ -7215,7 +7208,6 @@ NB_MODULE(pyclay, m) {
                      if (!d.doc->mesh_layers.count(l.id)) continue;
                      PyMesh borrowed;
                      borrowed.doc = d.doc;
-                     borrowed.revisions = d.mesh_revisions;
                      borrowed.layer = l.id;
                      return nb::cast(borrowed);
                  }
@@ -7687,6 +7679,19 @@ NB_MODULE(pyclay, m) {
                      (*d.undo)->set_groups_resolver([doc]() -> voxel::GroupField* {
                          return doc->groups ? &*doc->groups : nullptr;
                      });
+                     // The WHOLESALE half of mesh_for, set once here for the
+                     // same reason. It is what makes undo, redo and journal
+                     // replay advance a mesh layer's geometry revision (#472):
+                     // assigning through the pointer mesh_for hands out cannot
+                     // say that every vertex and index was swapped. Refuses a
+                     // layer that holds no triangles rather than creating one,
+                     // so History keeps the step it cannot place.
+                     (*d.undo)->set_mesh_installer(
+                         [doc](scene::LayerId id, mesh::Mesh triangles) {
+                             if (!doc->mesh_layers.count(id)) return false;
+                             doc->install_mesh_geometry(id, std::move(triangles));
+                             return true;
+                         });
                      // A document loaded from bytes already knows which
                      // snapshot it is, and the journal starting here continues
                      // from that one. Without this seed the recovery path —
@@ -8984,7 +8989,14 @@ NB_MODULE(pyclay, m) {
             "seed_revision"_a = nb::none(), "automask"_a = nb::none(),
             "stamp_azimuth"_a = 0.0f,
             "One stamp at the surface's current sculpt level. Returns how many\n"
-            "weld classes moved.\n\n"
+            "weld classes moved, SUMMED OVER EVERY LEVEL THE STAMP WROTE: on a\n"
+            "regionally refined hierarchy the patches beside the refined region\n"
+            "have no vertex at the sculpt level, so a footprint reaching past\n"
+            "the region is written where that part of the surface lives, and\n"
+            "the count is the whole of it rather than the sculpt level's share.\n"
+            "Nothing is counted twice — every vertex of the mixed-depth surface\n"
+            "belongs to exactly one level — and a hierarchy of one depth writes\n"
+            "one level and reports what it always did.\n\n"
             "`seed_class` starts the surface walk where the finger did instead\n"
             "of scanning the level for the nearest vertex, and `seed_revision`\n"
             "is `seed_revision` READ AT THE TIME OF THE PICK. Pass both or\n"
