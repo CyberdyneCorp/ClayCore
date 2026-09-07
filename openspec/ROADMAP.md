@@ -2517,42 +2517,53 @@ item, and does this one want that? The answer is often yes — a mirrored cut is
 defensible — but it should be a decision with a sentence behind it rather than a
 default nobody chose.
 
-### Pick a fixture by measuring that it CAN fail
+### Measure the difference the gate detects, not a proxy for it
 
-The strongest version of the fixture rule this document keeps arriving at, and it
-came with numbers.
+The strongest fixture rule in this document, and it arrived as a correction to a
+weaker version of itself that had already been written down here. Both halves are
+kept, because the mistake is the instructive part.
 
-The iPad session was going to gate area-weighted against angle-weighted normals
-at a region boundary on a graded cage. Before trusting the gate it measured the
-property that decides whether the two weightings can disagree at all — the worst
-incident-triangle-area ratio per boundary vertex:
+**The weaker version, which was wrong.** The iPad session was about to gate
+area-weighted against angle-weighted normals at a region boundary. It measured
+the worst incident-triangle-area ratio per boundary vertex, found its cage falls
+to **1.05x by level 3**, and concluded the fixture could not distinguish the two
+weightings under any circumstances. That measurement was real and correctly
+taken. **It was about the wrong quantity.**
+
+**What actually discriminates is CURVATURE, not unequal areas.** The two
+weightings weight by different things — area and corner angle — and they diverge
+where the surface BENDS. Measured directly, both computed over the dense
+hierarchy's own faces, worst `|unit(area) - unit(angle)|` per vertex:
 
 | cage | level 1 | level 2 | level 3 |
 |---|---:|---:|---:|
-| the fixture it had | 1.14x | 1.10x | **1.05x** |
-| graded, 1.35x per cell | 1.41x | 1.27x | 1.16x |
-| graded, 2.0x | 1.94x | 1.71x | 1.45x |
-| graded, 3.0x | 3.80x | 3.04x | **2.56x** |
-| graded, 5.0x | 7.89x | 8.41x | 6.40x |
+| planar, uniform | 0.000000 (0.00°) | 0.000000 | 0.000000 |
+| planar, 3.0x graded | 0.000000 (0.00°) | 0.000000 | 0.000000 |
+| **the existing bumpy cage** | **0.317 (18.27°)** | 0.165 (9.48°) | **0.078 (4.47°)** |
+| bumpy, 3.0x graded | 1.173 (71.82°) | 0.787 (46.34°) | 0.198 (11.37°) |
+| bumpy, 5.0x graded | 1.827 (131.97°) | 1.251 (77.40°) | 0.897 (53.31°) |
 
-**Subdivision smooths area differences fast**, which neither of us expected. Its
-existing cage is 1.05x by level 3 — so it could not have distinguished the two
-weightings *under any circumstances*, and the gate would have read 0.000000
-whichever function was ported. The mild grading it was about to add, 1.35x per
-cell, reaches 1.16x and is no better.
+The existing fixture discriminates easily — **1089 of 1089 vertices differ at
+level 3**, and a port that reached for the angle-weighted function would have
+failed at 4.47° against a defect of 0.103: louder than the thing being fixed. The
+two planar rows are the control that makes the rest trustworthy: a flat cage
+reads exactly 0.000000 whether graded or not, because there the weightings must
+agree.
 
-So the fixture needs a **3.0x-per-cell grade or stronger**, and the procedure is
-the transferable part: **assert that the two implementations actually disagree on
-the fixture before trusting the fixture to tell them apart.**
+**"Graded" sounds like the property and is not.** A 3.0x graded planar cage
+distinguishes nothing. That is the trap worth naming, and it is the one that
+nearly replaced a working fixture with a more elaborate blind one.
 
-That is the operational form of every fixture finding in this document — the
-zero-boundary-detail bit-identity gate, the plane cage whose normals were all
-within a few degrees of +Y, the squashed-operand box that reached past the body.
-Each was a check answering correctly about the tree in front of it and never
-asking the question that makes it meaningful. **The question is "could this
-fixture tell the difference", and nothing about a passing assertion asks it.**
-Measuring the discriminating property costs one run and is the only thing that
-does.
+**So the rule is not "measure something before trusting the fixture".** It is
+**measure the difference the gate is supposed to detect, directly** — because a
+proxy for it can be confidently wrong in EITHER direction. This proxy was wrong
+in the direction that discards a good fixture; the failures recorded elsewhere in
+this document were wrong in the direction that keeps a blind one. The
+zero-boundary-detail bit-identity gate, the plane cage whose normals all sat
+within a few degrees of +Y, the squashed-operand box that reached past the body:
+each was a check answering correctly about the tree in front of it and never
+asking whether it could tell the difference. **The question is not "did I
+measure" — it is "did I measure the thing the assertion is about".**
 
 ### The cross-level refresh is on the per-dab path, and it was priced elsewhere at 18x
 
