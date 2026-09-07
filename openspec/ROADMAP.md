@@ -2517,6 +2517,65 @@ item, and does this one want that? The answer is often yes — a mirrored cut is
 defensible — but it should be a decision with a sentence behind it rather than a
 default nobody chose.
 
+### A safeguard that cannot fail, and the quantity that cancels the error
+
+Two findings from one attempt, and the first is a category this file did not
+have.
+
+**I asked for a flag that turned out to be unfalsifiable.** Reviewing a change
+that lets a trim release a cross-level neighbourhood, I required a mark
+distinguishing *"regional, neighbourhood released"* from *"self-contained, never
+had one"* — on the reasoning that if evaluation re-ran while the pointer was null
+and the code read null as self-contained, the boundary normals would silently
+fall back to the incomplete ring.
+
+**The second clause does not hold, and the flag therefore cannot fail.**
+`cross_level_of` decides self-contained from
+`level_is_self_contained(topology, patch_kept)` — a property of the TOPOLOGY,
+checked before the pointer is consulted. So a null neighbourhood on a regional
+level already means exactly one thing: this level needs one and does not have it,
+rebuild. And `release_cross_levels` does `cross.reset()`, so *released* and
+*never built* are literally the same state — a null pointer, with no observable
+difference for a mark to carry.
+
+The proof was three failed attempts to break the mark: the first broke the
+private path while the test went through the public one; the second compared the
+wrong quantity (below); and the third revealed there was nothing to break.
+
+**The category: a SAFEGUARD that cannot fail.** This document is a catalogue of
+gates that cannot fail. A safeguard that cannot fail is worse in one specific
+way — **nobody re-reads a flag.** A test at least gets run and its output looked
+at; a defensive flag is read once at review and then trusted forever, so a
+mechanism whose removal changes no observable behaviour can sit in a codebase
+indefinitely looking like protection. The instrument that finds one is the same:
+delete it and see whether anything moves.
+
+**And the invariant was already there** because `level_is_self_contained` made
+"never had one" DECIDABLE FROM THE TOPOLOGY. That is the general lesson worth
+more than the flag: a state that can be derived from data the code already holds
+does not need a bit recording it, and adding the bit creates a second source of
+truth that can drift from the first. The redundancy is the hazard, not the
+safety.
+
+### Comparing the quantity that cancels the error
+
+The second attempt failed for a reason worth its own line, because it is the
+sharpest instance of the wrong-quantity class in this file.
+
+The test compared **positions** across a stamp, to detect a wrong boundary frame.
+It could not: within one stamp, the frame that WRITES a coefficient and the frame
+that READS it back are the same frame, so `P = S + Frame · Detail` reconstructs
+to the same point whatever the frame is. **A wrong frame cancels itself in the
+quantity being measured.** Comparing normals — the quantity that is directly
+wrong — caught it at once.
+
+This is the same shape as the bit-identity gate that passes on zero boundary
+detail, and it is why that one passes: with `Detail = 0` there is nothing for the
+frame to be wrong ABOUT. Both are cases where the observable was chosen because
+it is the thing users see, and the defect is invisible in it by construction.
+**The question is not "is this quantity important" — it is "can this quantity
+differ when the thing under test is wrong".**
+
 ### Put the bound between the noise floor and the wrong answer, and state both
 
 The most-corrected entry in this file. It was written three times from three
