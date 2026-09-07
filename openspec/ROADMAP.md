@@ -2517,6 +2517,43 @@ item, and does this one want that? The answer is often yes — a mirrored cut is
 defensible — but it should be a decision with a sentence behind it rather than a
 default nobody chose.
 
+### Pick a fixture by measuring that it CAN fail
+
+The strongest version of the fixture rule this document keeps arriving at, and it
+came with numbers.
+
+The iPad session was going to gate area-weighted against angle-weighted normals
+at a region boundary on a graded cage. Before trusting the gate it measured the
+property that decides whether the two weightings can disagree at all — the worst
+incident-triangle-area ratio per boundary vertex:
+
+| cage | level 1 | level 2 | level 3 |
+|---|---:|---:|---:|
+| the fixture it had | 1.14x | 1.10x | **1.05x** |
+| graded, 1.35x per cell | 1.41x | 1.27x | 1.16x |
+| graded, 2.0x | 1.94x | 1.71x | 1.45x |
+| graded, 3.0x | 3.80x | 3.04x | **2.56x** |
+| graded, 5.0x | 7.89x | 8.41x | 6.40x |
+
+**Subdivision smooths area differences fast**, which neither of us expected. Its
+existing cage is 1.05x by level 3 — so it could not have distinguished the two
+weightings *under any circumstances*, and the gate would have read 0.000000
+whichever function was ported. The mild grading it was about to add, 1.35x per
+cell, reaches 1.16x and is no better.
+
+So the fixture needs a **3.0x-per-cell grade or stronger**, and the procedure is
+the transferable part: **assert that the two implementations actually disagree on
+the fixture before trusting the fixture to tell them apart.**
+
+That is the operational form of every fixture finding in this document — the
+zero-boundary-detail bit-identity gate, the plane cage whose normals were all
+within a few degrees of +Y, the squashed-operand box that reached past the body.
+Each was a check answering correctly about the tree in front of it and never
+asking the question that makes it meaningful. **The question is "could this
+fixture tell the difference", and nothing about a passing assertion asks it.**
+Measuring the discriminating property costs one run and is the only thing that
+does.
+
 ### The cross-level refresh is on the per-dab path, and it was priced elsewhere at 18x
 
 `MultiresSculptor::stamp` calls `bind()` on every dab, and `bind()` on a binding
@@ -2545,12 +2582,28 @@ work that had to happen. And the correctness argument for re-reading is sound �
 the cheap version needs an invalidation signal, which is the fourth counter the
 comment declines.
 
-**What would settle it:** measure the refresh as a fraction of a dab on a
-regional hierarchy under a real stroke, splitting the parent-moved and
-parent-unmoved cases, before adding any counter. A 18x on 0.0002 ms is 0.0036 ms
-and may be invisible beside the stamp; the same ratio on a rim ten times longer
-is not. **The ratio is transferable and the absolute is not**, which is the whole
-of why this row says "measure" rather than "fix".
+**SETTLED, and the answer is worse than the 18x suggested. Measured against this
+branch (issue #493):** the refresh is **7.5% of a dab** on a 4x4 region at level
+3 and **18.6%** on an 8x8 at level 4 — 16,641 vertices, an ordinary amount of
+sculpting, and roughly one dab in five spent re-deriving a neighbourhood that did
+not move.
+
+**The shape is the finding, not the size.** The refresh scales with the RIM and
+the dab scales with the FOOTPRINT, so the ratio grows with region size at fixed
+brush size. It grows with the thing regional refinement exists to make
+affordable.
+
+**And the parent-moved split I asked for turned out to be unnecessary**, for a
+reason worth keeping: when the parent has moved, the refresh is work that had to
+happen, so the overhead there is zero by construction. The measured column IS the
+interior-dab overhead — and interior dabs are the majority of a stroke inside a
+refined region, because a crossing stamp is what happens at the boundary, not
+what happens while an artist works in the middle of the area they refined. Asking
+for a second measurement would have been asking for a number that is zero by
+definition.
+
+The "fourth revision counter" objection still stands and this does not overrule
+it — it prices it. Tracked as #493 rather than fixed in a reviewed change.
 
 ### `openspec validate` cannot see a change directory nobody is implementing
 
