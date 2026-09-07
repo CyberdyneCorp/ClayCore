@@ -365,6 +365,17 @@ class MeshSculptor {
     void set_stage_telemetry(StageTelemetry* stages) { stages_ = stages; }
     StageTelemetry* stage_telemetry() const { return stages_; }
 
+    // -- what a stamp DID (complete-sculpt-performance-instrumentation) -------
+    // The counts beside the clocks, borrowed and null by default. A stage that
+    // got slower because it touched twice as much and one whose inner loop
+    // regressed are the same duration; these are what tell them apart.
+    //
+    // ACCUMULATED ACROSS STAMPS, like `StageTelemetry`, so a caller measuring a
+    // stroke reads the stroke. `SculptCounters::reset` is how a caller measures
+    // one dab.
+    void set_counters(SculptCounters* counters) { counters_ = counters; }
+    SculptCounters* counters() const { return counters_; }
+
     // -- the chunk query path ------------------------------------------------
     // Borrow the `ChunkTable` describing this sculptor's surface, which turns
     // the brush's two spatial questions — everything in this ball, and the
@@ -564,6 +575,7 @@ class MeshSculptor {
     std::size_t stale_seeds_rejected_ = 0;
     memory::PeakTelemetry* telemetry_ = nullptr;
     StageTelemetry* stages_ = nullptr;
+    SculptCounters* counters_ = nullptr;
     // The multi-pass kernels' buffers, reset rather than freed between stamps.
     SculptScratch scratch_;
     // The compiled plan and the three inputs it depends on. Not the whole

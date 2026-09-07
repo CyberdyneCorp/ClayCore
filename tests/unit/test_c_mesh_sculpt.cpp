@@ -1574,3 +1574,73 @@ TEST_CASE("c abi: two frames are refused rather than resolved by precedence") {
     CHECK(clay_mesh_sculptor_raycast(s, origin, dir, nullptr, &hit) == CLAY_OK);
     clay_mesh_sculptor_destroy(s);
 }
+
+// -- the per-stage breakdown (complete-sculpt-performance-instrumentation) ----
+//
+// The engine has timed these stages since 0.78.0 and nothing outside could read
+// them: one benchmark program consumed the record, no C entry point exposed it,
+// and no test asserted on it. Thirteen stages, one consumer, zero gates — a
+// stage whose timer is deleted in a refactor reports zero, which reads exactly
+// like a stage that did no work.
+
+TEST_CASE("c abi: a mesh stamp reports where its time went and what it did") {
+    clay_mesh* m = grid_mesh(24, 1.0f);
+    clay_mesh_sculptor* s = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(m, -1.0f, &s) == CLAY_OK);
+    const clay_mesh_brush_desc d = brush(CLAY_MESH_BRUSH_DRAW, 0.5f, 0.5f);
+
+    clay_sculpt_stage_report r;
+    std::memset(&r, 0, sizeof r);
+    r.struct_size = static_cast<std::uint32_t>(sizeof r);
+
+    // Off by default: a stamp is the thing being measured.
+    std::size_t moved = 0;
+    REQUIRE(clay_mesh_sculptor_stamp(s, &d, nullptr, nullptr, &moved) == CLAY_OK);
+    REQUIRE(clay_mesh_sculptor_stage_report(s, &r) == CLAY_OK);
+    CHECK(r.stage_count == CLAY_SCULPT_STAGE_COUNT);
+    CHECK(r.vertices_considered == 0);
+    CHECK(r.nanos[CLAY_SCULPT_STAGE_KERNEL] == 0);
+
+    REQUIRE(clay_mesh_sculptor_set_stage_report_enabled(s, 1) == CLAY_OK);
+    REQUIRE(clay_mesh_sculptor_stamp(s, &d, nullptr, nullptr, &moved) == CLAY_OK);
+    REQUIRE(moved > 0);
+    std::memset(&r, 0, sizeof r);
+    r.struct_size = static_cast<std::uint32_t>(sizeof r);
+    REQUIRE(clay_mesh_sculptor_stage_report(s, &r) == CLAY_OK);
+
+    CHECK(r.vertices_considered > 0);
+    CHECK(r.vertices_affected > 0);
+    CHECK(r.vertices_considered >= r.vertices_affected);
+    CHECK(r.kernel_passes == 1);          // a draw is one pass
+    CHECK(r.faces_touched > 0);
+    CHECK(r.positions_measured > 0);
+    // A FIXED MESH CANNOT CHANGE TOPOLOGY, so these are zero — reported rather
+    // than omitted, which is what makes "does not use this stage" and "stopped
+    // filling it" different readings.
+    CHECK(r.splits == 0);
+    CHECK(r.collapses == 0);
+    CHECK(r.flips == 0);
+    CHECK(r.nanos[CLAY_SCULPT_STAGE_TOPOLOGY] == 0);
+
+    CHECK(r.calls[CLAY_SCULPT_STAGE_SPATIAL_QUERY] > 0);
+    CHECK(r.calls[CLAY_SCULPT_STAGE_KERNEL] > 0);
+    CHECK(r.calls[CLAY_SCULPT_STAGE_WRITEBACK] > 0);
+    CHECK(r.calls[CLAY_SCULPT_STAGE_NORMAL_REFRESH] > 0);
+    CHECK(r.nanos[CLAY_SCULPT_STAGE_KERNEL] > 0);
+
+    // A SMOOTH IS SEVERAL PASSES, and the counter says so — which is how a
+    // report distinguishes "the kernel stage got slower" from "the caller asked
+    // for four times as much smoothing".
+    REQUIRE(clay_mesh_sculptor_reset_stage_report(s) == CLAY_OK);
+    clay_mesh_brush_desc smooth = brush(CLAY_MESH_BRUSH_SMOOTH, 0.5f, 0.5f);
+    smooth.smooth_iterations = 4;
+    REQUIRE(clay_mesh_sculptor_stamp(s, &smooth, nullptr, nullptr, &moved) == CLAY_OK);
+    std::memset(&r, 0, sizeof r);
+    r.struct_size = static_cast<std::uint32_t>(sizeof r);
+    REQUIRE(clay_mesh_sculptor_stage_report(s, &r) == CLAY_OK);
+    CHECK(r.kernel_passes == 4);
+    CHECK(r.neighbors_gathered > 0);  // the smoothing family reads a ring
+
+    clay_mesh_sculptor_destroy(s);
+    clay_mesh_destroy(m);
+}

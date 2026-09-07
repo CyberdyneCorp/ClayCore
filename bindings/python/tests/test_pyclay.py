@@ -8566,3 +8566,44 @@ def test_two_frames_are_refused_rather_than_resolved_by_precedence():
     s.use_layer_transform()
     with pytest.raises(ValueError, match="already declares"):
         s.raycast((3.0, 5.0, 0.0), (0, -1, 0), position=(1, 2, 3))
+
+
+# -- the per-stage breakdown (complete-sculpt-performance-instrumentation) ----
+
+def test_a_stamp_reports_where_its_time_went_and_what_it_did():
+    m = _plane_grid(24)
+    s = clay.MeshSculptor(m)
+
+    # Off by default: a stamp is the thing being measured.
+    assert s.stamp("draw", center=(0, 0, 0), radius=0.5, strength=0.5) > 0
+    assert s.stage_report["vertices_considered"] == 0
+    assert s.stage_report["nanos"]["kernel"] == 0
+
+    s.set_stage_report_enabled(True)
+    assert s.stamp("draw", center=(0, 0, 0), radius=0.5, strength=0.5) > 0
+    r = s.stage_report
+    assert r["vertices_considered"] > 0
+    assert r["vertices_affected"] > 0
+    # The workset holds the rim of the falloff too, so it reaches at least as
+    # much as it moves. That gap is what a duration cannot tell you.
+    assert r["vertices_considered"] >= r["vertices_affected"]
+    assert r["faces_touched"] > 0
+    assert r["kernel_passes"] == 1
+    assert r["calls"]["kernel"] > 0
+    assert r["nanos"]["kernel"] > 0
+    # A fixed mesh cannot change topology, so these are zero — reported rather
+    # than omitted, which is what separates "does not use this" from "stopped
+    # filling it".
+    assert r["splits"] == 0 and r["collapses"] == 0 and r["flips"] == 0
+
+    # A smooth is several passes, and the counter says so.
+    s.reset_stage_report()
+    assert s.stage_report["vertices_considered"] == 0
+    s.stamp("smooth", center=(0, 0, 0), radius=0.5, strength=0.5, smooth_iterations=4)
+    assert s.stage_report["kernel_passes"] == 4
+    assert s.stage_report["neighbors_gathered"] > 0
+
+    s.set_stage_report_enabled(False)
+    s.reset_stage_report()
+    s.stamp("draw", center=(0, 0, 0), radius=0.5, strength=0.5)
+    assert s.stage_report["vertices_considered"] == 0

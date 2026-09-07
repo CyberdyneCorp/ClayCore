@@ -393,3 +393,92 @@ TEST_CASE("c dynamic: the fixed mesh sculptor is untouched by any of this") {
     clay_mesh_sculptor_destroy(sculptor);
     clay_mesh_destroy(mesh);
 }
+
+// -- the per-stage breakdown (complete-sculpt-performance-instrumentation) ----
+//
+// THE ADAPTIVE SURFACE HAD NONE, and it is the representation whose per-dab cost
+// is hardest to predict: it splits, collapses and flips as it goes, so the same
+// brush at the same radius is not the same work twice running.
+//
+// THESE ASSERT COUNTS, NOT CLOCKS. A duration is a claim about the machine that
+// ran it; a count of splits is the same integer everywhere. The one thing
+// asserted about time is that a stage which did work took some, which is what
+// catches a `StageTimer` deleted in a refactor — the failure mode thirteen
+// stages, one consumer and zero tests left completely open.
+
+namespace {
+
+clay_sculpt_stage_report dynamic_report(const clay_dynamic_sculptor* s) {
+    clay_sculpt_stage_report r;
+    std::memset(&r, 0, sizeof r);
+    r.struct_size = static_cast<std::uint32_t>(sizeof r);
+    REQUIRE(clay_dynamic_sculptor_stage_report(s, &r) == CLAY_OK);
+    return r;
+}
+
+std::uint64_t nanos_of(const clay_sculpt_stage_report& r, clay_sculpt_stage stage) {
+    const std::size_t i = static_cast<std::size_t>(stage);
+    return i < r.stage_count ? r.nanos[i] : 0;
+}
+std::uint64_t calls_of(const clay_sculpt_stage_report& r, clay_sculpt_stage stage) {
+    const std::size_t i = static_cast<std::size_t>(stage);
+    return i < r.stage_count ? r.calls[i] : 0;
+}
+
+}  // namespace
+
+TEST_CASE("c dynamic: a stamp reports where its time went and what it did") {
+    Fixture fx;
+    const clay_mesh_brush_desc brush = draw_brush();
+    const clay_dynamic_topology_desc topo = topology(true);
+
+    // NOTHING IS MEASURED UNTIL ASKED. A stamp is the thing being measured.
+    REQUIRE(clay_dynamic_sculptor_stamp(fx.sculptor, &brush, &topo, nullptr, nullptr) == CLAY_OK);
+    const clay_sculpt_stage_report quiet = dynamic_report(fx.sculptor);
+    CHECK(quiet.stage_count == CLAY_SCULPT_STAGE_COUNT);
+    CHECK(quiet.vertices_considered == 0);
+    for (std::uint32_t i = 0; i < quiet.stage_count; ++i) {
+        INFO("stage " << i);
+        CHECK(quiet.nanos[i] == 0);
+        CHECK(quiet.calls[i] == 0);
+    }
+
+    REQUIRE(clay_dynamic_sculptor_set_stage_report_enabled(fx.sculptor, 1) == CLAY_OK);
+    REQUIRE(clay_dynamic_sculptor_stamp(fx.sculptor, &brush, &topo, nullptr, nullptr) == CLAY_OK);
+    const clay_sculpt_stage_report r = dynamic_report(fx.sculptor);
+
+    // THE COUNTS, which are the same integers on every machine.
+    CHECK(r.vertices_considered > 0);
+    CHECK(r.vertices_affected > 0);
+    // A workset holds the rim of the falloff too, so it reaches at least as much
+    // as it moves. This is the gap a host looks at when a dab costs too much.
+    CHECK(r.vertices_considered >= r.vertices_affected);
+    CHECK(r.kernel_passes > 0);
+    CHECK(r.faces_touched > 0);
+    // THE STAGE ONLY THIS REPRESENTATION FILLS.
+    CHECK(r.splits > 0);
+
+    // THE STAGES WERE REACHED. Asserting calls rather than nanos wherever a
+    // stage can legitimately be too fast to register on a coarse clock.
+    CHECK(calls_of(r, CLAY_SCULPT_STAGE_SPATIAL_QUERY) > 0);
+    CHECK(calls_of(r, CLAY_SCULPT_STAGE_KERNEL) > 0);
+    CHECK(calls_of(r, CLAY_SCULPT_STAGE_WRITEBACK) > 0);
+    CHECK(calls_of(r, CLAY_SCULPT_STAGE_NORMAL_REFRESH) > 0);
+    CHECK(calls_of(r, CLAY_SCULPT_STAGE_TOPOLOGY) > 0);
+    // The one time assertion: a stage that ran took some. This is what catches
+    // a StageTimer removed in a refactor, which otherwise reports zero and
+    // reads exactly like a stage that did nothing.
+    CHECK(nanos_of(r, CLAY_SCULPT_STAGE_KERNEL) > 0);
+
+    // A reset measures the next dab on its own.
+    REQUIRE(clay_dynamic_sculptor_reset_stage_report(fx.sculptor) == CLAY_OK);
+    const clay_sculpt_stage_report cleared = dynamic_report(fx.sculptor);
+    CHECK(cleared.vertices_considered == 0);
+    CHECK(cleared.splits == 0);
+    CHECK(calls_of(cleared, CLAY_SCULPT_STAGE_KERNEL) == 0);
+
+    // Disabling stops it, which is what makes "off by default" a fact.
+    REQUIRE(clay_dynamic_sculptor_set_stage_report_enabled(fx.sculptor, 0) == CLAY_OK);
+    REQUIRE(clay_dynamic_sculptor_stamp(fx.sculptor, &brush, &topo, nullptr, nullptr) == CLAY_OK);
+    CHECK(dynamic_report(fx.sculptor).vertices_considered == 0);
+}
