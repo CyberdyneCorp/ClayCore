@@ -2,60 +2,71 @@
 
 - [x] 1.1 Independent repro against a dense hierarchy as oracle: positions
       identical at 0.000000000, normals wrong by 0.406 / 0.209 / 0.103 at levels
-      1 / 2 / 3, at 20 / 52 / 116 corners
-- [x] 1.2 Locate the cause rather than the symptom: `level_normals` sums
-      `conn.faces_of(v)`, and a regional level's boundary vertex has an
-      incomplete ring at that level
+      1 / 2 / 3
+- [x] 1.2 The cause, not the symptom: `level_normals` sums `conn.faces_of(v)`,
+      and a regional boundary vertex has an incomplete ring at that level
+- [x] 1.3 The coefficient gate: `(0.013, -0.021, 0.034)` authored at every
+      corner reconstructs up to 0.0072 away from the dense hierarchy, 17% of its
+      own magnitude
 
-## 2. The neighbourhood
+## 2. One neighbourhood, not two
 
-- [x] 2.1 `build_level_halo`: the child faces of the parent faces a
-      level did NOT refine, kept only where they touch a stored vertex
-- [x] 2.2 Emitted by the same loop, the same `ChildLayout` and the same corner
-      order as `subdivide_topology_for_patches`, so a halo face is the dense
-      level's face and not an approximation of one
-- [x] 2.3 Halo vertices numbered ABOVE the level's own, so the level's stored
-      vertex `i` is still vertex `i` and every existing consumer is unchanged
-- [x] 2.4 Halo positions from `subdivide_positions` against the same parent
-- [x] 2.5 A dense level builds none
+- [x] 2.1 A parallel level-halo struct was built here independently and is
+      DISCARDED -- deleted outright, which is why it is described rather than
+      cited. `CrossLevelNeighborhood` already derives the same faces over the
+      same joined numbering, and two derivations of one concept is what this
+      milestone names in its first sentence
+- [x] 2.2 `cross_newell_sum` — raw Newell over `face_corners()` and
+      `position()`, added before normalizing
+- [x] 2.3 `cross_level_of` — an internal accessor, because `cross_level_at`
+      begins with `evaluate_up_to` and would recurse into the running evaluation
+- [x] 2.4 Threaded through the six sites that produce a level's normals; the two
+      in `refresh_base_frames` stay null because level 0 is never regional
+- [x] 2.5 All four callers NAMED in the comment, with `evaluate_up_to`'s loop
+      order as what holds the precondition and the one call outside the loop
+      that holds it for the other reason
 
-## 3. Consumers, in the order that protects stored detail
+## 3. The weighting
 
-- [x] 3.1 Normals
-- [x] 3.2 Transported detail frames
-- [x] 3.3 NOT Smooth, Relax or the neighbour-dependent automasks — those follow
-      in their own change over the same object, because a Smooth over a wrong
-      frame is worse than a Smooth that has not been fixed yet
+- [x] 3.1 NOT `normal_contribution`: it normalizes and angle-weights, which is
+      what the brush's `class_normal` wants and is a different quantity
+- [x] 3.2 MEASURED that the choice is observable: 18.27° / 9.48° / 4.47° on a
+      curved cage, and exactly 0.000000 on a planar one however graded
+- [x] 3.3 Curvature is the discriminating property, not unequal areas
 
-## 4. Cost and lifetime
+## 4. Release
 
-- [x] 4.1 Cached in `LevelCache`, rebuilt identically, released by
-      `drop_all_caches` with the rest of the runtime
-- [x] 4.2 Counted in `MultiresMemory::runtime_index`
-- [x] 4.3 MEASURED, A/B, minimum of nine runs a side, 16x16 cage with a 4x4
-      region: full evaluation +13% at level 4 (1.335 -> 1.513 ms), bytes +7%
-      (975,600 -> 1,041,776), and a one-detail re-evaluation UNCHANGED at
-      0.0002-0.0003 ms — which is the number that matters, because that is the
-      per-dab path
-- [x] 4.4 Two costs found and removed rather than accepted: `ChildIndex`'s
-      binary search (+71% before a direct layout-id map) and refreshing the halo
-      positions on an evaluation that had not moved the parent (18x on a
-      re-evaluation)
+- [x] 4.1 `release_cross_levels()` — the neighbourhoods and nothing else
+- [x] 4.2 No `cache_generation` bump: nothing a bound sculptor references moves
+- [x] 4.3 The rebuild cost stated at the declaration rather than discovered
+- [x] 4.4 A `cross_released` mark was added and REMOVED: the release nulls the
+      pointer, so "released" and "never built" are one state, and
+      `level_is_self_contained` already decides "never had one" from the
+      topology. A mechanism whose removal changes no observable behaviour is not
+      a safeguard
 
-## 5. Gates
+## 5. Gates, and what it took to make them able to fail
 
-- [x] 5.1 Dense hierarchy as oracle: normals agree at every corner of the
-      refined region, boundary included
-- [x] 5.2 The existing position bit-identity gate still passes
-- [x] 5.3 Detail authored ACROSS a boundary reconstructs to the same world
-      offset as on a dense hierarchy — the claim the frame actually protects
-- [x] 5.4 A uniform hierarchy's normals and frames are byte-identical to before
-- [x] 5.5 PROVEN TO CATCH ITS REGRESSION: with the halo removed, the gate reads
-      the 0.406 / 0.209 / 0.103 errors again
-- [x] 5.6 Caches dropped and rebuilt gives identical normals
+- [x] 5.1 Boundary normals against the dense oracle at levels 1–3
+- [x] 5.2 The coefficient-reconstruction gate — the one that says it reached
+      storage rather than shading
+- [x] 5.3 A uniform hierarchy unchanged
+- [x] 5.4 The memory test measures the FALL across the release, `floor_bytes`
+      from the CSR sizes rather than from `bytes()`, plus positions AND normals
+      bit-identical across the trim
+- [x] 5.5 THREE GATES PASSED WITH THE FIX DELETED before one worked: one broke a
+      path the test did not take; one compared POSITIONS, which cannot detect a
+      wrong frame because the frame that writes a coefficient and the frame that
+      reads it back are the same frame; one asserted a flag that could not fail
+- [x] 5.6 The bound sits between the measured noise floor (4.5e-07) and the
+      measured wrong answer (7.1e-02), and both are stated. Exact equality is
+      NOT required and would fail a correct implementation: the two hierarchies
+      sum the same faces in different orders
 
 ## 6. Verification
 
-- [x] 6.1 Full unit suite green (2,543 cases, 9 ctest entries)
-- [ ] 6.2 `python3 tools/release_check.py --skip-slow`
-- [ ] 6.3 CI green
+- [x] 6.1 Full suite on the parent branch with the port applied: 9/9, zero
+      build errors, 33 of 33 regional cases
+- [ ] 6.2 Rebased onto `finish-regional-multires` once it is on main
+- [ ] 6.3 `python3 tools/release_check.py --skip-slow`
+- [ ] 6.4 CI green
