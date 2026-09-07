@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 88
+#define CLAY_ABI_MINOR 89
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -1148,6 +1148,54 @@ clay_result clay_layer_set_transform_nonuniform(clay_document* doc, clay_layer_i
                                                 clay_node_id node, const float position[3],
                                                 const float rotation_axis[3], float rotation_angle,
                                                 const float scale[3]);
+/* The uniform edit again, PLUS THE WORLD BOX IT ACTUALLY CHANGED (ABI 0.89.0,
+ * issue #471). Identical in what it applies and what it records — one
+ * SetTransformCmd, one undo step — and it answers the question the generic
+ * bound queries cannot: not "where can this node influence the field" but
+ * "where did THIS MOVE change the surface".
+ *
+ * They are different questions and the second is often far smaller. An
+ * INTERSECT's influence is the whole layer, because `max(acc, item)` is the
+ * item's own value everywhere the item is not — correct, measured, and what
+ * clay_layer_node_influence_bound and clay_brick_cache_mark_dirty_nodes still
+ * report, because an arbitrary edit to an intersect really does reach that far.
+ * A MOVE does not: outside the swept union of where the operand was and where
+ * it went, its field is a positive beyond the band on both sides, so the max
+ * returns a beyond-band positive on both sides and the band-clamped result
+ * cannot have moved. Dragging an intersect cylinder across a 97-item sculpt
+ * refilled the layer every frame — 41.5-44.0 ms against 3.8-4.2 for the same
+ * drag with a SUBTRACT operand, and 6.8-10.1 SECONDS on a fixture with ten
+ * times the extent.
+ *
+ * THE BOX IS THE ONE TO HAND clay_brick_cache_mark_dirty, and the three states
+ * are clay_layer_node_influence_bound's:
+ *   *out_has_bounds 0            nothing to dirty; out_min/out_max untouched
+ *   1, *out_infinite 0           the finite box, ready for mark_dirty
+ *   1, *out_infinite 1           unbounded — mark_dirty with both regions NULL
+ * Any of the four out-pointers may be NULL, and with all four NULL this IS
+ * clay_layer_set_transform.
+ *
+ * WHAT IT DOES NOT PROMISE. It is never the narrow box on a guess: where the
+ * engine cannot prove the local claim it reports the same conservative bound
+ * the influence query reports, and a host cannot tell which it got — nor does
+ * it need to, since both are safe to dirty. It falls back for an op that is not
+ * an intersect (whose influence bound is already this box), a node that is
+ * missing, hidden or a group, a deformer chain, a sampled-volume or unbounded
+ * primitive, an infinite grid repeat, a gate, a spatial morph or a gate
+ * anywhere in the layer's chain, and a morph in a layer fold above it. It says
+ * nothing about any OTHER edit: two moves reported one at a time are two boxes,
+ * and a host that dirties by only the last one has skipped the first.
+ *
+ * It is the box for THE SURFACE AND THE BAND AROUND IT, which is what a brick
+ * cache stores and what a mesher reads. Outside it the raw far-field distance
+ * DOES change — it is the moved operand's own distance — so a consumer that
+ * reads unclamped values far from the surface wants the influence query
+ * instead. */
+clay_result clay_layer_set_transform_bound(clay_document* doc, clay_layer_id layer,
+                                           clay_node_id node, const float position[3],
+                                           const float rotation_axis[3], float rotation_angle,
+                                           float scale, float out_min[3], float out_max[3],
+                                           int32_t* out_has_bounds, int32_t* out_infinite);
 /* Replace a node's primitive. Its deformers, repetition, profile and stroke
  * belong to the node, not to the primitive, and survive the edit. */
 clay_result clay_layer_set_prim(clay_document* doc, clay_layer_id layer, clay_node_id node,

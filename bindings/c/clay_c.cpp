@@ -2749,7 +2749,8 @@ namespace {
 
 // Defined at the end of this namespace: every edit routes through the
 // command vocabulary. Declared here because it is used above.
-clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char* what);
+clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char* what,
+                       math::Aabb* out_reach = nullptr);
 
 // The same edit, WITHOUT the invalidation — for a gesture that knows the region
 // it can reach and invalidates once for all of its commands. See GestureRegion.
@@ -3751,7 +3752,8 @@ struct GestureRegion {
     GestureRegion& operator=(const GestureRegion&) = delete;
 };
 
-clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char* what) {
+clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char* what,
+                       math::Aabb* out_reach) {
     // What this edit can reach, taken on BOTH sides of the apply and unioned.
     // One side is not an answer: an add's node is not there before, a removal's
     // is not there after, and a move has two ends -- the contract
@@ -3773,6 +3775,13 @@ clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char
     scene::LayerExtent before_memo(&doc->extent_cache());
     const math::Aabb reach_before =
         scene::command_influence_bound(doc->doc.document, cmd, &before_memo);
+    // THE OTHER QUESTION, asked on the same side: where can this edit change
+    // the SURFACE, as opposed to the field (issue #471). Available for one
+    // edit kind -- moving an existing intersect item -- and nullopt for
+    // everything else, so every other command's region is what it always was.
+    // Both sides must answer for it to be used; see below.
+    const std::optional<math::Aabb> delta_before =
+        scene::command_surface_delta_bound(doc->doc.document, cmd);
     r = perform_edit(doc, cmd, what);
     if (r != CLAY_OK) return r;
     {
@@ -3787,6 +3796,20 @@ clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char
     math::Aabb reach = reach_before;
     scene::LayerExtent after_memo(&doc->extent_cache());
     reach.expand(scene::command_influence_bound(doc->doc.document, cmd, &after_memo));
+    // The swept surface delta REPLACES the influence union when both sides
+    // claim one, which is the narrowing #471 asks for. Both sides, because one
+    // is not an answer: the before box holds the operand where it was and the
+    // after box where it went, and the union of the two is the swept support
+    // the proof is about. Either side refusing keeps the conservative union
+    // above -- which is why the influence bound is still taken on both sides
+    // rather than skipped, and why a fallback can never come out too tight.
+    if (const std::optional<math::Aabb> delta_after =
+            scene::command_surface_delta_bound(doc->doc.document, cmd);
+        delta_before && delta_after) {
+        reach = *delta_before;
+        reach.expand(*delta_after);
+    }
+    if (out_reach) *out_reach = reach;
     // The funnel every command-based edit passes through, so the tape cache is
     // invalidated in one place for all of them — and the one place that can
     // tell the cache an edit was an APPEND, which is what a brush stamp is
@@ -5039,6 +5062,25 @@ clay_result clay_layer_set_transform_nonuniform(clay_document* doc, clay_layer_i
     if (r != CLAY_OK) return r;
     return apply_edit(doc, scene::Command{scene::SetTransformCmd{layer, node, xform, axes}},
                       "node not found");
+}
+
+clay_result clay_layer_set_transform_bound(clay_document* doc, clay_layer_id layer,
+                                           clay_node_id node, const float position[3],
+                                           const float rotation_axis[3], float rotation_angle,
+                                           float scale, float out_min[3], float out_max[3],
+                                           int32_t* out_has_bounds, int32_t* out_infinite) {
+    const scene::Node* target = peek_node(doc, layer, node);
+    if (target && target->is_group)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "a group has no transform of its own: transform its children");
+    math::Transform xform;
+    clay_result r = read_transform(position, rotation_axis, rotation_angle, scale, &xform);
+    if (r != CLAY_OK) return r;
+    math::Aabb reach;
+    r = apply_edit(doc, scene::Command{scene::SetTransformCmd{layer, node, xform}},
+                   "node not found", &reach);
+    if (r != CLAY_OK) return r;
+    return write_influence(reach, out_min, out_max, out_has_bounds, out_infinite);
 }
 
 clay_result clay_layer_set_prim(clay_document* doc, clay_layer_id layer, clay_node_id node,
