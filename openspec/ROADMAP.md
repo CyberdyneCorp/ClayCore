@@ -2619,6 +2619,42 @@ exact failure. The bench gate is the one place the idea was not applied, and 51
 is what that costs. **An exemption with a reason is fine; 51 silent ones are
 not.**
 
+### A before-and-after needs a before that exists
+
+The correction to the entry below, made by the host against its own promise
+before it delivered on it, and the general point is worth more than the case.
+
+They offered a same-box before-and-after ratio in place of their stale baseline —
+record at the old pin, move, record again. Better than the baseline for the
+general case. Then they checked the fixture and found **two things that make it
+inapplicable to the question I asked**:
+
+1. **Their multires fixture is uniform.** A 16×16 cage with `add_level` called
+   four times over the whole surface. So `multires.stamp.mean` is precisely the
+   flat number the rim refresh cannot touch — no depth boundary, no outside
+   vertices, an empty neighbourhood returned without work. They would have sent
+   it, and it would have looked like an answer.
+2. **There is no regional "before".** At their pin, `clay.h` has only
+   `clay_multires_add_level` over the whole surface; regional multires arrives
+   *with* the change being measured. **You cannot take a before-and-after on a
+   code path whose "before" is its own absence.**
+
+The second is the transferable one. A ratio between two pins is the right
+instrument for *"did this change cost the path that already existed"* and is no
+instrument at all for *"what does the path this change ADDS cost"*. Those are
+different questions and the same measurement name serves neither honestly.
+
+**What answers the second is a reference taken in the same run**: the new path
+against the old path, one box, one binary — regional-over-uniform rather than
+regional-at-two-pins. Self-relative again, and available on day one, where the
+two-pin ratio needs a past that never existed.
+
+**And the honest third answer is "the path does not run here".** They said
+plainly that if their adapter keeps building only uniform hierarchies after the
+upgrade, the rim refresh never executes on their side and they will report that
+rather than manufacture a figure. A measurement that cannot be taken should be
+reported as not taken.
+
 ### Re-recording a baseline is its own change, never part of an upgrade
 
 Their reason for refusing to re-record as part of moving their pin, and it
