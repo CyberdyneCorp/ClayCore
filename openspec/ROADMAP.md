@@ -2781,6 +2781,49 @@ Everything below is an instance. They are kept separately because each one cost
 something specific to find, and the specifics are what make the shape
 recognisable the next time it wears different clothes.
 
+### "100% of 9" and "100% of 10" are different claims
+
+A verification sweep that ran seven branches in isolation, all seven green, and
+was thrown away — because it was not measuring what it said it measured.
+
+`CLAY_BUILD_PYTHON` defaults to **OFF** and the `cpu-only` preset does not set
+it. A checkout whose CMake cache retained an explicit setting from earlier builds
+`pyclay`; a fresh worktree gets the default and does not. So the sweep ran **9
+registered tests where the same commits run 10 in the author's own checkout**,
+and the missing one was `pyclay_pytest`.
+
+**The worst possible test to drop from that particular sweep.** `pyclay_pytest`
+is what caught a cache-`acquire` regression hours earlier — four failures, every
+one `entries == 0` where 1 was expected — and the branch most likely to contain
+such a regression was the one whose entire subject is that cache. The sweep would
+have certified it green while being structurally incapable of catching it.
+
+**The tell was in the output the whole time**: `out of 9` where the author had
+been reading `out of 10` all night. Read past, because the number beside it said
+100%.
+
+**The repair is to report what was EXERCISED, not only how much of it passed.**
+The sweep now prints the registered count beside the pass rate. *"100% of 9" and
+"100% of 10" are different claims and only one of them was mine to make.*
+
+**And there is a tool in this tree that gets it right by construction.**
+`tools/release_check.py:239` passes `-DCLAY_BUILD_PYTHON=ON` explicitly — with a
+comment at :229 saying it is ON there and nowhere else in that script's history —
+and hands the parity gate `--pyclay <build>/bindings/python --require-import`. A
+bare `cmake --preset cpu-only` inherits whatever the cache retained. **The
+decision is made by construction in one path and by accident in the other**, and
+only one of them is the documented way to reproduce CI.
+
+There is a second edge on the same trap, already recorded in the `claycore-verify`
+skill: `check_binding_parity.py` run bare falls back to comparing the parsed
+`pyclay_module.cpp` **against itself** when no module can be imported, and that
+comparison cannot fail. It prints `parsed bindings/python/pyclay_module.cpp`
+rather than `imported <path>`. So a sweep without pyclay does not merely skip a
+test — it can turn the parity gate into a tautology and still print a pass.
+
+**The shape, again:** *"did everything I ran pass"* was answered correctly and
+truthfully. *"Did I run everything"* was never asked.
+
 ### A tool that answers a narrower question than the one you asked
 
 The sharpest concrete instance of the class below, and it cost a real measurement
