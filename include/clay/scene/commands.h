@@ -274,6 +274,40 @@ EditedItem command_edited_item(const Command& cmd);
 math::Aabb command_influence_bound(const Document& doc, const Command& cmd,
                                    LayerExtent* extent = nullptr);
 
+// WHERE A SUPPORTED EDIT CAN CHANGE THE SURFACE, which is a different and
+// narrower question from where it changes the FIELD.
+//
+// `command_influence_bound` above answers the field question, and for an
+// INTERSECT the answer is the whole layer's extent -- correct, measured, and
+// catastrophic as a refill region: an intersect operand dragged across a form
+// re-meshed the layer every frame, 41.5-44.0 ms against 3.8-4.2 for the same
+// drag with a subtracting operand, and 6.8-10.1 SECONDS on a fixture with ten
+// times the extent (issue #471).
+//
+// This answers the other question for the ONE edit kind that measured: a
+// SetTransformCmd moving an existing, visible INTERSECT item with finite
+// support. Taken on both sides of the apply and unioned -- exactly as the
+// influence bound is, and by the same caller -- the union is the swept support
+// of the operand's old and new geometry, outside which the item's own field is
+// beyond the band on both sides and `max(acc, item)` cannot have moved the
+// band-clamped result. `item_geometry_reach_in_document` is where that
+// argument is written and where its terms are.
+//
+// nullopt for EVERYTHING ELSE, deliberately and by construction:
+//   - any other command kind;
+//   - an op that is not Intersect -- a local op's influence bound already IS
+//     this box, so there is nothing to narrow and nothing to change;
+//   - a node that is missing, hidden or a group on either side;
+//   - a deformer chain (its Lipschitz factor is not in the proof), a volume
+//     primitive, an unbounded primitive, an infinite grid repeat, a gate;
+//   - a morph or a gate anywhere in the layer's chain, a morph in a fold above
+//     it, an infinite support, a box that fails a numerical sanity check --
+//     all of which `item_geometry_reach_in_document` refuses.
+// A caller that gets nullopt on EITHER side must keep the conservative union.
+// Falling back is the feature: too wide costs a refill, too narrow is stale
+// geometry with nothing on the host's side to point at.
+std::optional<math::Aabb> command_surface_delta_bound(const Document& doc, const Command& cmd);
+
 // What an AddLayerCmd that REINSERTS an existing layer must name as its
 // content source: the first OTHER layer in stack order holding the same edit
 // list, or 0 when this layer holds it alone.
