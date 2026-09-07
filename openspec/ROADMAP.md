@@ -1335,7 +1335,17 @@ telling us. It told us three things.
   **at revision 2 throughout**. A sculptor who rebuilds, undoes and keeps working
   gets a refused stroke on the next dab. They hold the gap as a failing-when-fixed
   equality in their own suite and work around it by recording the engine depth
-  each rebuild sits at
+  each rebuild sits at.
+  **CLOSED by `own-the-mesh-invalidation-signal`.** The cause was structural
+  rather than a missed call site: the counter lived on the ABI handle and had two
+  writers, while undo, redo and journal replay restore a mesh through
+  `session::History`'s `mesh::Mesh*` resolver, which cannot say which layers it
+  replaced. The generation moved into `io::ClaySpaceDoc` beside the triangles,
+  `install_mesh_geometry` became the only way triangles enter a layer, and
+  `History` gained a set-once installer so the `MeshReplace` step and the
+  `MeshReplace` journal event land in the same primitive. rebuild = 2, undo = 3,
+  redo = 4. pyclay's parallel map was deleted rather than synchronised, so the two
+  bindings read one counter
 - **#451's residual**, below.
 
 ### #451 is 21% recovered, not closed, and the residual is `BoundedByLayer`

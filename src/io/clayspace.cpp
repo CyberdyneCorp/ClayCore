@@ -107,7 +107,15 @@ IoStatus read_mesh_chunk(const std::uint8_t* payload, std::size_t len, ClaySpace
     mesh::Mesh m;
     IoStatus s = load_mesh_stream(payload + 4, len - 4, &m);
     if (!s.ok()) return s;
-    out->mesh_layers.emplace(layer_id, std::move(m));
+    // FIRST CHUNK WINS, which is the emplace this replaced and what the voxel,
+    // mask and hierarchy readers below each do: a file naming one layer twice
+    // is malformed, and letting a trailing chunk override geometry already read
+    // is the worse of the two answers.
+    if (out->mesh_layers.count(layer_id)) return IoStatus::success();
+    // Through the installer, like every other path that puts triangles into a
+    // layer, so a loaded document comes up with a generation per mesh layer
+    // rather than with an empty map every reader would have to default.
+    out->install_mesh_geometry(layer_id, std::move(m));
     return IoStatus::success();
 }
 
@@ -139,10 +147,16 @@ void drop_unmatched_voxel_chunks(ClaySpaceDoc* out) {
 
 void drop_unmatched_mesh_chunks(ClaySpaceDoc* out) {
     for (auto it = out->mesh_layers.begin(); it != out->mesh_layers.end();) {
-        if (is_mesh_layer(out->document, it->first))
+        if (is_mesh_layer(out->document, it->first)) {
             ++it;
-        else
+        } else {
+            // The generation goes with the triangles it counted. Layer ids are
+            // monotonic so a dropped id can never be captured by a later
+            // layer, but leaving a count behind for geometry that is gone
+            // would hand the next reader a number describing nothing.
+            out->mesh_geometry_revision.erase(it->first);
             it = out->mesh_layers.erase(it);
+        }
     }
 }
 
