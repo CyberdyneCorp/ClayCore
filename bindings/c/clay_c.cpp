@@ -17293,10 +17293,32 @@ clay_result resolve_multires(clay_multires* handle, mesh::MultiresSurface** out)
 }  // namespace
 
 struct clay_multires {
-    mesh::MultiresSurface surface;
+    // Lifetime mirrors clay_mask and clay_voxel_grid exactly, which is where
+    // this shape is documented: `owned` is the caller's, made by
+    // clay_multires_from_mesh or _deserialize and destroyed by
+    // clay_multires_destroy. A handle with `doc` set is BORROWED from a
+    // document layer, destroy REJECTS it, and it must not outlive its document.
+    //
+    // A borrowed handle stores the id rather than a pointer, so removing the
+    // hierarchy makes every handle onto it answer NOT_FOUND instead of
+    // dangling -- resolve_multires does the lookup on each call for exactly
+    // that reason, as resolve_mask does.
+    mesh::MultiresSurface owned;
+    clay_document* doc = nullptr;
+    clay_layer_id layer = 0;
     // Scratch the block copy fills, kept on the handle so a host draining a
     // hundred blocks a frame does not allocate a hundred times.
     mesh::MultiresSurface::Block block;
+
+    bool borrowed() const { return doc != nullptr; }
+    mesh::MultiresSurface* target() {
+        if (!doc) return &owned;
+        auto it = doc->doc.multires_layers.find(layer);
+        return it == doc->doc.multires_layers.end() ? nullptr : &it->second;
+    }
+    const mesh::MultiresSurface* target() const {
+        return const_cast<clay_multires*>(this)->target();
+    }
 };
 
 struct clay_multires_sculptor {
@@ -17310,17 +17332,23 @@ struct clay_multires_sculptor {
 
 namespace {
 
-clay_result resolve_multires_ro(const clay_multires* handle, const mesh::MultiresSurface** out) {
+clay_result resolve_multires(clay_multires* handle, mesh::MultiresSurface** out) {
     if (!handle) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires surface");
-    if (!handle->surface.valid()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "empty hierarchy");
-    *out = &handle->surface;
+    mesh::MultiresSurface* s = handle->target();
+    // NOT_FOUND rather than INVALID_ARGUMENT, and the two mean opposite things:
+    // a borrowed handle whose hierarchy was removed is a stale reference a host
+    // can recover from, not a malformed call it should stop making.
+    if (!s) return fail(CLAY_ERROR_NOT_FOUND, "hierarchy is no longer in its document");
+    if (!s->valid()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "empty hierarchy");
+    *out = s;
     return CLAY_OK;
 }
 
-clay_result resolve_multires(clay_multires* handle, mesh::MultiresSurface** out) {
-    if (!handle) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires surface");
-    if (!handle->surface.valid()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "empty hierarchy");
-    *out = &handle->surface;
+clay_result resolve_multires_ro(const clay_multires* handle, const mesh::MultiresSurface** out) {
+    mesh::MultiresSurface* s = nullptr;
+    const clay_result r = resolve_multires(const_cast<clay_multires*>(handle), &s);
+    if (r != CLAY_OK) return r;
+    *out = s;
     return CLAY_OK;
 }
 
@@ -17379,15 +17407,117 @@ clay_result clay_multires_from_mesh(const clay_mesh* mesh_handle, const clay_mul
         return fail(CLAY_ERROR_INVALID_ARGUMENT, mesh::multires_error_text(err));
     }
     auto* handle = new clay_multires{};
-    handle->surface = std::move(*built);
+    handle->owned = std::move(*built);
     *out_surface = handle;
     return CLAY_OK;
 }
 
-void clay_multires_destroy(clay_multires* surface) { delete surface; }
+void clay_multires_destroy(clay_multires* surface) {
+    // A borrowed handle owns nothing -- its `owned` member is an empty surface
+    // and the document holds the real one -- so this frees the wrapper and
+    // leaves the hierarchy. clay_mask_destroy refuses the borrowed case instead;
+    // it can, because it returns clay_result and this returns void, and
+    // widening that signature would break every host compiled against it.
+    delete surface;
+}
+
+namespace {
+
+// The three-way answer D6 asks for, in one place so the four entry points below
+// cannot drift on what "not that kind of layer" means.
+clay_result mesh_layer_for_multires(const clay_document* doc, clay_layer_id layer,
+                                    const scene::Layer** out) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "no layer carries this id");
+    if (l->kind != scene::LayerKind::Mesh)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "layer is not a mesh layer");
+    *out = l;
+    return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_layer_multires_present(const clay_document* doc, clay_layer_id layer,
+                                        int32_t* out_present) {
+    if (!out_present) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_present");
+    const scene::Layer* l = nullptr;
+    const clay_result r = mesh_layer_for_multires(doc, layer, &l);
+    if (r != CLAY_OK) return r;
+    *out_present = doc->doc.multires_layers.count(layer) ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_layer_multires(clay_document* doc, clay_layer_id layer,
+                                clay_multires** out_surface) {
+    if (!out_surface) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_surface");
+    const scene::Layer* l = nullptr;
+    const clay_result r = mesh_layer_for_multires(doc, layer, &l);
+    if (r != CLAY_OK) return r;
+    if (!doc->doc.multires_layers.count(layer))
+        return fail(CLAY_ERROR_NOT_FOUND, "layer carries no hierarchy");
+    auto* handle = new clay_multires{};
+    handle->doc = doc;
+    handle->layer = layer;
+    *out_surface = handle;
+    return CLAY_OK;
+}
+
+clay_result clay_layer_take_multires(clay_document* doc, clay_layer_id layer,
+                                     clay_multires* source) {
+    if (!source) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null source hierarchy");
+    const scene::Layer* l = nullptr;
+    const clay_result r = mesh_layer_for_multires(doc, layer, &l);
+    if (r != CLAY_OK) return r;
+    if (doc->doc.multires_layers.count(layer))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "layer already carries a hierarchy: remove it first, because the levels "
+                    "this would drop cannot be re-sculpted from the cage");
+    if (source->borrowed())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "source is borrowed from a document, which still holds it: there is "
+                    "nothing to move");
+    if (!source->owned.valid()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "empty hierarchy");
+    doc->doc.multires_layers.emplace(layer, std::move(source->owned));
+    // The handle follows its hierarchy rather than being left moved-from, so a
+    // host that built one and attached it keeps the handle it already has.
+    source->doc = doc;
+    source->layer = layer;
+    return CLAY_OK;
+}
+
+clay_result clay_layer_remove_multires(clay_document* doc, clay_layer_id layer) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    auto it = doc->doc.multires_layers.find(layer);
+    if (it == doc->doc.multires_layers.end())
+        return fail(CLAY_ERROR_NOT_FOUND, "layer carries no hierarchy");
+    doc->doc.multires_layers.erase(it);
+    return CLAY_OK;
+}
+
+clay_result clay_layer_multires_matches_cage(const clay_document* doc, clay_layer_id layer,
+                                             int32_t* out_matches) {
+    if (!out_matches) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_matches");
+    const scene::Layer* l = nullptr;
+    const clay_result r = mesh_layer_for_multires(doc, layer, &l);
+    if (r != CLAY_OK) return r;
+    auto h = doc->doc.multires_layers.find(layer);
+    if (h == doc->doc.multires_layers.end())
+        return fail(CLAY_ERROR_NOT_FOUND, "layer carries no hierarchy");
+    auto m = doc->doc.mesh_layers.find(layer);
+    // A mesh layer with no triangles cannot agree with any cage, and saying so
+    // is better than reporting a match against an empty mesh.
+    static const mesh::Mesh kEmpty;
+    *out_matches =
+        io::multires_matches_cage(m == doc->doc.mesh_layers.end() ? kEmpty : m->second, h->second)
+            ? 1
+            : 0;
+    return CLAY_OK;
+}
 
 uint32_t clay_multires_level_count(const clay_multires* surface) {
-    return surface ? surface->surface.level_count() : 0u;
+    const mesh::MultiresSurface* s = surface ? surface->target() : nullptr;
+    return s ? s->level_count() : 0u;
 }
 
 clay_result clay_multires_sculpt_level(const clay_multires* surface, uint32_t* out_level) {
@@ -17730,7 +17860,7 @@ clay_result clay_multires_deserialize(const uint8_t* data, size_t size,
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     mesh::multires_error_text(mesh::MultiresError::Decode));
     auto* handle = new clay_multires{};
-    handle->surface = std::move(decoded);
+    handle->owned = std::move(decoded);
     *out_surface = handle;
     return CLAY_OK;
 }
@@ -17864,7 +17994,9 @@ clay_result clay_multires_sculptor_stamp(clay_multires_sculptor* sculptor,
         gate = [field_mask](kernel::cfloat3 p) { return field_mask->sample(p); };
     }
 
-    mesh::MultiresSurface& s = sculptor->owner->surface;
+    mesh::MultiresSurface* sp = sculptor->owner ? sculptor->owner->target() : nullptr;
+    if (!sp) return fail(CLAY_ERROR_NOT_FOUND, "hierarchy is no longer in its document");
+    mesh::MultiresSurface& s = *sp;
     const std::uint32_t level = s.sculpt_level();
     const std::size_t moved = sculptor->sculptor->stamp(verb, settings, gate, nullptr);
 
@@ -17916,7 +18048,9 @@ clay_result clay_multires_sculptor_apply_stroke(clay_multires_sculptor* sculptor
         if (r != CLAY_OK) return r;
     }
 
-    mesh::MultiresSurface& s = sculptor->owner->surface;
+    mesh::MultiresSurface* sp = sculptor->owner ? sculptor->owner->target() : nullptr;
+    if (!sp) return fail(CLAY_ERROR_NOT_FOUND, "hierarchy is no longer in its document");
+    mesh::MultiresSurface& s = *sp;
     const std::uint32_t level = s.sculpt_level();
     const std::size_t applied =
         brush::apply_to_multires(*sculptor->sculptor, brush::resolve_stroke(samples, resolved),
@@ -17940,8 +18074,9 @@ clay_result clay_multires_sculptor_apply_stroke(clay_multires_sculptor* sculptor
 }
 
 size_t clay_multires_dirty_block_count(const clay_multires* surface) {
-    if (!surface || !surface->surface.valid()) return 0;
-    return surface->surface.dirty_patches().size();
+    const mesh::MultiresSurface* s = surface ? surface->target() : nullptr;
+    if (!s || !s->valid()) return 0;
+    return s->dirty_patches().size();
 }
 
 clay_result clay_multires_dirty_blocks(const clay_multires* surface, uint32_t* out_patches,
@@ -18036,8 +18171,8 @@ clay_result clay_multires_copy_block(clay_multires* surface, uint32_t patch, uin
     if (out_indices && index_capacity < block.indices.size())
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "index buffer too small for this block");
 
-    const std::vector<kernel::cfloat3>& positions = surface->surface.positions_at(level);
-    const std::vector<kernel::cfloat3>& normals = surface->surface.normals_at(level);
+    const std::vector<kernel::cfloat3>& positions = surface->target()->positions_at(level);
+    const std::vector<kernel::cfloat3>& normals = surface->target()->normals_at(level);
     for (std::size_t i = 0; i < block.vertices.size(); ++i) {
         const std::uint32_t v = block.vertices[i];
         if (out_positions) {
@@ -18549,7 +18684,7 @@ clay_result clay_multires_sculpt_layer_stroke_begin(clay_multires_sculpt_layer_s
     // shows three different things: a gesture already running, a channel the
     // caller asked for that does not exist, and a finished pass that is locked.
     if (was_open) return refuse_sculpt_layer(out_error, CLAY_MULTIRES_SCULPT_LAYER_STROKE_OPEN);
-    const mesh::SculptLayerStack& stack = stroke->owner->surface.sculpt_layers();
+    const mesh::SculptLayerStack& stack = (*stroke->owner->target()).sculpt_layers();
     const mesh::SculptLayer* active = stack.find(stack.active());
     if (self->write_domain() == mesh::MultiresWriteDomain::Detail && !active)
         return refuse_sculpt_layer(out_error, CLAY_MULTIRES_NO_SUCH_SCULPT_LAYER);
@@ -18580,7 +18715,7 @@ clay_result clay_multires_sculpt_layer_stroke_stamp(clay_multires_sculpt_layer_s
         read_layer_stroke_stamp(stroke, brush, mask, &self, &verb, &settings, &gate);
     if (r != CLAY_OK) return r;
     const std::size_t moved = self->stamp(verb, settings, gate);
-    return write_layer_stroke_report(stroke->owner->surface, moved, out_report);
+    return write_layer_stroke_report((*stroke->owner->target()), moved, out_report);
 }
 
 clay_result clay_multires_sculpt_layer_stroke_stamp_detail(
@@ -18634,7 +18769,7 @@ clay_result clay_multires_sculpt_layer_stroke_stamp_detail(
         out.under_resolved = rep.under_resolved ? 1 : 0;
         write_desc(out_stamp_report, declared, out);
     }
-    return write_layer_stroke_report(stroke->owner->surface, moved, out_report);
+    return write_layer_stroke_report((*stroke->owner->target()), moved, out_report);
 }
 
 clay_result clay_multires_sculpt_layer_stroke_smooth(clay_multires_sculpt_layer_stroke* stroke,
@@ -18653,7 +18788,7 @@ clay_result clay_multires_sculpt_layer_stroke_smooth(clay_multires_sculpt_layer_
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown smooth mode: " + std::to_string(mode));
     const std::size_t moved =
         self->smooth(static_cast<mesh::MultiresSmoothMode>(mode), settings, gate);
-    return write_layer_stroke_report(stroke->owner->surface, moved, out_report);
+    return write_layer_stroke_report((*stroke->owner->target()), moved, out_report);
 }
 
 clay_result clay_multires_sculpt_layer_stroke_erase(clay_multires_sculpt_layer_stroke* stroke,
@@ -18668,7 +18803,7 @@ clay_result clay_multires_sculpt_layer_stroke_erase(clay_multires_sculpt_layer_s
         read_layer_stroke_stamp(stroke, brush, mask, &self, &verb, &settings, &gate);
     if (r != CLAY_OK) return r;
     const std::size_t moved = self->erase(settings, gate);
-    return write_layer_stroke_report(stroke->owner->surface, moved, out_report);
+    return write_layer_stroke_report((*stroke->owner->target()), moved, out_report);
 }
 
 clay_result clay_multires_sculpt_layer_stroke_restore(clay_multires_sculpt_layer_stroke* stroke,
@@ -18683,7 +18818,7 @@ clay_result clay_multires_sculpt_layer_stroke_restore(clay_multires_sculpt_layer
         read_layer_stroke_stamp(stroke, brush, mask, &self, &verb, &settings, &gate);
     if (r != CLAY_OK) return r;
     const std::size_t moved = self->restore(settings, gate);
-    return write_layer_stroke_report(stroke->owner->surface, moved, out_report);
+    return write_layer_stroke_report((*stroke->owner->target()), moved, out_report);
 }
 
 clay_result clay_multires_sculpt_layer_stroke_stamps(
@@ -19058,13 +19193,14 @@ clay_result resolve_view(clay_surface_view* view, mesh::SurfaceView* out) {
             return CLAY_OK;
         }
         case mesh::SurfaceKind::Multires: {
-            if (!view->multires_handle || !view->multires_handle->surface.valid())
+            if (!view->multires_handle || !view->multires_handle->target() ||
+                !view->multires_handle->target()->valid())
                 return fail(CLAY_ERROR_INVALID_ARGUMENT, "empty hierarchy");
-            if (view->level >= view->multires_handle->surface.level_count())
+            if (view->level >= view->multires_handle->target()->level_count())
                 return fail(CLAY_ERROR_NOT_FOUND,
                             "level " + std::to_string(view->level) + " is gone from this "
                             "hierarchy; take a new view");
-            *out = mesh::SurfaceView::over_level(view->multires_handle->surface, view->level);
+            *out = mesh::SurfaceView::over_level(*view->multires_handle->target(), view->level);
             return CLAY_OK;
         }
     }

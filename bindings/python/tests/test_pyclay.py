@@ -8160,3 +8160,93 @@ def test_one_convenience_placement_is_one_undo_step():
     assert layer.bounds() == before
     assert doc.redo() is True
     assert layer.bounds() != before
+
+
+# -- a document carries a multiresolution hierarchy ---------------------------
+#
+# Before this a hierarchy was a standalone object no document held, so saving a
+# sculpt saved the base cage and dropped every level above it. A host's own
+# side-car file was the only record that a row had ever been a hierarchy.
+
+
+def _cage_doc(levels=2):
+    doc = clay.Document()
+    borrowed = doc.add_mesh_layer(_plane_grid(4), name="cage")
+    surface = clay.MultiresSurface.from_mesh(_plane_grid(4))
+    for _ in range(levels):
+        surface.add_level()
+    doc.layer_take_multires(borrowed.layer, surface)
+    return doc, borrowed.layer
+
+
+def test_a_document_says_which_rows_carry_a_hierarchy():
+    doc, layer = _cage_doc()
+    assert doc.layer_multires_present(layer) is True
+
+    plain = doc.add_mesh_layer(_plane_grid(4), name="plain")
+    # False is an ordinary answer: most mesh layers are just meshes.
+    assert doc.layer_multires_present(plain.layer) is False
+
+    # A layer that is not a mesh layer RAISES rather than answering False.
+    sdf = doc.add_sdf_layer("sdf")
+    with pytest.raises(Exception):
+        doc.layer_multires_present(sdf)
+
+
+def test_attaching_is_a_move_and_the_document_owns_it_afterwards():
+    doc = clay.Document()
+    borrowed = doc.add_mesh_layer(_plane_grid(4), name="cage")
+    surface = clay.MultiresSurface.from_mesh(_plane_grid(4))
+    surface.add_level()
+    assert surface.level_count == 2
+
+    doc.layer_take_multires(borrowed.layer, surface)
+    # MOVED: the document holds it, and the emptied source no longer reports
+    # levels. pyclay exposes no `valid`, so the level count is the observable.
+    assert surface.level_count == 0
+    assert doc.layer_multires(borrowed.layer).level_count == 2
+
+
+def test_a_hierarchy_survives_a_round_trip_through_bytes():
+    doc, layer = _cage_doc(levels=2)
+    levels = doc.layer_multires(layer).level_count
+    assert levels == 3
+
+    back = clay.load_bytes(doc.to_bytes())
+    # Walk the rows the way a host with no side-car would.
+    assert back.layer_multires_present(layer) is True
+    assert back.layer_multires(layer).level_count == levels
+
+
+def test_the_borrowed_hierarchy_outlives_the_python_reference():
+    doc, layer = _cage_doc()
+    surface = doc.layer_multires(layer)
+    del surface  # the document still holds it
+    assert doc.layer_multires_present(layer) is True
+    assert len(clay.load_bytes(doc.to_bytes()).to_bytes()) > 0
+
+
+def test_replacing_is_refused_and_removing_keeps_the_cage():
+    doc, layer = _cage_doc()
+    second = clay.MultiresSurface.from_mesh(_plane_grid(4))
+    with pytest.raises(Exception):
+        doc.layer_take_multires(layer, second)
+
+    doc.layer_remove_multires(layer)
+    assert doc.layer_multires_present(layer) is False
+    # The cage stays: removing a hierarchy is not a reason to remove the mesh.
+    assert doc.mesh_layer("cage") is not None
+
+
+def test_the_cage_and_the_base_are_compared_not_reconciled():
+    doc, layer = _cage_doc()
+    assert doc.layer_multires_matches_cage(layer) is True
+
+    # Editing the cage behind the hierarchy's back is allowed and observable.
+    sculptor = clay.MeshSculptor(doc.mesh_layer("cage"))
+    assert sculptor.stamp("draw", center=(0, 0, 0), radius=0.5, strength=0.5) > 0
+    assert doc.layer_multires_matches_cage(layer) is False
+
+    # A round trip does not reconcile them.
+    back = clay.load_bytes(doc.to_bytes())
+    assert back.layer_multires_matches_cage(layer) is False

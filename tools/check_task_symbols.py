@@ -72,9 +72,17 @@ EXTENSIONS = {
 AT_LINE = re.compile(r"^(.+\.[A-Za-z][A-Za-z0-9]*):[0-9]+$")
 
 # Words that pass the identifier shape and are English, not code.
+#
+# The OPENSPEC DELTA KEYWORDS are here for the same reason as the rest: a
+# tasks.md that says a block "is a `MODIFIED` block against ..." is quoting the
+# validator's vocabulary, not naming a symbol. They are capitalised, so IDENT
+# accepts them, and one of them resolved off unrelated source while the other
+# did not -- which is a gate answering a question nobody asked, twice, and
+# disagreeing with itself.
 PROSE = {
     "and", "or", "not", "the", "a", "an", "is", "it", "no", "yes", "true", "false",
     "TODO", "NOT", "DONE", "ALREADY", "READ", "MEASURE", "DECISION", "x", "n", "k",
+    "ADDED", "MODIFIED", "REMOVED", "RENAMED", "SHALL", "MUST", "WHEN", "THEN",
 }
 
 

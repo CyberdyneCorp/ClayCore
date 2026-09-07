@@ -1599,7 +1599,54 @@ Runnable: [`examples/60_surviving_a_crash.py`](../examples/60_surviving_a_crash.
 
 ## 8. File I/O (`clay::io`)
 
-- **Document format** (`.clayspace`): binary chunked container (versioned chunks: scene commands, palettes, voxel grids RLE/palette-compressed, thumbnails PNG, camera bookmarks). Forward-version refusal, backward-compat guaranteed; pure claycore so Python/CI can read and write projects.
+- **Document format** (`.clayspace`): binary chunked container (versioned chunks: scene commands, palettes, voxel grids RLE/palette-compressed, imported meshes, multiresolution hierarchies, thumbnails PNG, camera bookmarks). Forward-version refusal, backward-compat guaranteed; pure claycore so Python/CI can read and write projects.
+- **A mesh layer's multiresolution hierarchy is carried by the document**
+  (`'MRES'`, container minor 19, ABI 0.88.0). Before this a hierarchy was a
+  standalone handle no document held, so saving a sculpt wrote the base cage as
+  an ordinary mesh layer and dropped every level above it — and a host's own
+  side-car file was the only record that a row had ever been a hierarchy.
+  - `clay_layer_multires_present` says which rows carry one, without decoding
+    anything, and tells "not a mesh layer" apart from "a mesh layer with
+    nothing on it".
+  - `clay_layer_take_multires` MOVES a hierarchy into a layer and repoints the
+    source handle at the document's copy. A move rather than a copy because
+    `MultiresSurface` is move-only in C++ and a copying form would round trip
+    through encode/decode — hundreds of megabytes on the largest thing an
+    artist is holding.
+  - `clay_layer_multires` hands back a BORROWED handle; the document owns it,
+    destroying the handle leaves the hierarchy, and removing the hierarchy makes
+    every handle onto it answer `CLAY_ERROR_NOT_FOUND` rather than dangle.
+  - `clay_layer_remove_multires` drops it. Replacing is refused rather than
+    silent: a mask can be repainted and sculpted levels cannot be recovered from
+    the cage, so the destruction is a call a host has to mean.
+  - **The cage exists twice and is not reconciled.** The mesh layer holds
+    triangles and the hierarchy holds its own copy of the base level, because a
+    hierarchy is built from a MESH and keeps no link back. The two could always
+    drift; carrying both in a document does not change that, and nothing edits
+    either to agree with the other. `clay_layer_multires_matches_cage` lets a
+    host see it — computed on demand, never stored, and exact rather than
+    tolerant. A `0` is the ordinary state after the cage has been edited, not an
+    error.
+  - **What it costs, measured**, a 289-vertex cage sculpted at its finest level:
+
+    | levels | vertices at top | document bytes | save |
+    |---:|---:|---:|---:|
+    | none | — | 9,750 | 0.012 ms |
+    | 1 | 1,601 | 44,090 | 0.053 ms |
+    | 2 | 6,273 | 105,582 | 0.132 ms |
+    | 3 | 24,833 | 326,870 | 0.402 ms |
+    | 4 | 98,817 | 1,211,926 | 1.546 ms |
+
+    **The cost follows AUTHORED DETAIL, not level count.** The same hierarchy at
+    four levels with nothing sculpted into it adds 128 bytes and no measurable
+    time, because the detail field is sparse. So a host cannot price a document
+    from its level count, and a deep hierarchy an artist has not touched is
+    nearly free to carry.
+
+    A hierarchy is routinely the largest payload in a document, and
+    `clay_document_save` is whole-document and synchronous — so an autosave on a
+    timer stalls for the whole of the figure above. That is not fixed here; the
+    journal (`survive-a-crash`) is where incremental saving belongs.
 - **OBJ + MTL**: custom reader/writer (dependency-free), vertex-color extension documented.
 - **FBX**: import via **ufbx** (MIT, single-file, battle-tested); export via minimal binary FBX writer (meshes, transforms, vertex colors, units/axis correct for Unity/Unreal/Blender — validated in CI via assimp/Blender-headless round trips).
 - **PLY**: reader/writer with vertex colors (interchange with SDF Modeler/MagicaCSG ecosystems).
@@ -1918,11 +1965,19 @@ allowed to touch.
 can be attributed to the abandoned blockout that is 200 MB of it rather than
 merely called large.
 
-**A `MultiresSurface` is not in this report, and that is a consequence of what
-it is rather than an omission.** It is a standalone handle like `DynamicSurface`
-— no `scene::Layer` owns one — so the document cannot walk to it. Its accounting
-is per surface, through `clay_multires_memory`, and it makes the same
-authoritative/rebuildable split this table does:
+**A `MultiresSurface` a HOST holds is not in this report, and that is a
+consequence of what it is rather than an omission.** A surface the host built
+and keeps beside the document is a standalone handle like `DynamicSurface`, so
+the document cannot walk to it. Its accounting is per surface, through
+`clay_multires_memory`, and it makes the same authoritative/rebuildable split
+this table does:
+
+**A hierarchy the DOCUMENT carries IS in this report** (ABI 0.88.0). Once
+`clay_layer_take_multires` has moved one into a layer, the document holds it and
+walks it: `base` and `topology` land in `surface_content`, `detail` in
+`multires_detail`, `sculpt_layers` in `sculpt_layers`, and the rebuildable rows
+in `surface_caches`. The two cannot double-count, because a document only ever
+reports what it holds and the ledger only what the host passed in.
 
 | | may you release it? | what it costs you |
 |---|---|---|

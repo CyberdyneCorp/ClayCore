@@ -1731,6 +1731,24 @@ clay_result clay_document_layer_transform_nonuniform(const clay_document* doc, c
  * the answer either -- it classifies a placement the caller already knows, and
  * the whole point of these is that the caller does not know it yet.
  *
+ * WHAT RIGID DOES NOT SAY, and it matters more since ABI 0.86.0 gave a layer a
+ * fold. RIGID is a claim about THIS LAYER'S OWN FIELD -- its surface afterwards
+ * is its surface beforehand moved by the same matrix -- and never about the
+ * document's. A plain hard union already broke that second reading:
+ * min(A, moved B) is not moved(min(A, B)), because A did not move. A host that
+ * transformed its whole drawn scene on a RIGID verdict was wrong before any
+ * operator existed; a folding layer makes the error visible rather than
+ * creating it.
+ *
+ * So the drawn geometry these let a host transform is THIS LAYER'S, and how
+ * much it must still redraw is clay_brick_cache_mark_dirty_layer's answer
+ * rather than this call's. For a pure translation -- which all three of these
+ * are -- that region is where the layer was plus where it now is, widened by
+ * any SMOOTH fold above it and, for an INTERSECT composition alone, by the
+ * extent of the visible SDF layers beneath. A subtract stays bounded by this
+ * layer. These calls read no composition and promise nothing about which one a
+ * document uses.
+ *
  * AN INSTANCE IS PLACED, NEVER SEVERED. What instancing shares is the edit
  * list; a placement is not shared. So these move the named layer alone, leave
  * every other layer over the same content evaluating to exactly what it did,
@@ -7802,7 +7820,108 @@ clay_result clay_multires_defaults(clay_multires_desc* out_desc);
  * `out_error` receives a clay_multires_error. */
 clay_result clay_multires_from_mesh(const clay_mesh* mesh, const clay_multires_desc* desc,
                                     clay_multires** out_surface, int32_t* out_error);
+/* Frees a handle. A handle from clay_multires_from_mesh or _deserialize owns its
+ * hierarchy and this releases it; a BORROWED handle from clay_layer_multires
+ * frees only the handle and leaves the document's hierarchy alone.
+ *
+ * clay_mask_destroy REFUSES a borrowed mask rather than ignoring it, and this
+ * does not, for one reason: that call returns clay_result and this one returns
+ * void, and widening it would change a signature every existing host compiled
+ * against. Freeing a borrowed handle is safe rather than merely tolerated -- the
+ * handle owns nothing when it is borrowed -- so the difference costs a host a
+ * diagnostic it cannot act on anyway. */
 void clay_multires_destroy(clay_multires* surface);
+
+/* -- a hierarchy the DOCUMENT carries (ABI 0.88.0) ---------------------------
+ *
+ * Before this, a hierarchy was a standalone handle no document held: saving a
+ * sculpt wrote the base cage as an ordinary mesh layer and dropped every level
+ * above it, and a host's own side-car file was the only record that a row had
+ * ever been a hierarchy. Lose the side-car and the levels are gone, in a file
+ * that opens cleanly.
+ *
+ * A hierarchy attached here is written to the .clayspace and comes back from a
+ * load, keyed by the layer id -- an identity that survives a process, which a
+ * handle address does not.
+ *
+ * THE CAGE EXISTS TWICE AND IS NOT RECONCILED. The mesh layer holds triangles
+ * and the hierarchy holds its own copy of the base level, because a hierarchy is
+ * built from a MESH rather than from a layer and keeps no link back. The two
+ * could always drift; carrying both in a document does not change that and
+ * nothing here edits either to agree with the other. What is new is that you can
+ * ASK -- see clay_layer_multires_matches_cage. Keeping them in step is still the
+ * host's, exactly as it is today.
+ *
+ * A HIERARCHY STILL DOES NOT REACH THE EVALUATED FIELD. It is authored geometry
+ * in the sense an imported mesh is: stored beside the document, withheld from
+ * the scene module by the layering table, and the field a document compiles is
+ * the same with it and without it. */
+
+/* Does this layer carry a hierarchy? *out_present is 0/1.
+ *
+ * CLAY_ERROR_NOT_FOUND when no layer carries the id, so that code keeps meaning
+ * "no such layer" alone; CLAY_ERROR_INVALID_ARGUMENT when the layer is not a
+ * MESH layer, which is this ABI's answer for "that layer cannot take this
+ * operation". A host walking every row to build an outliner asks this about rows
+ * that legitimately have no hierarchy, and 0 is an ordinary answer rather than a
+ * failure -- the two states a host most needs told apart are "not that kind of
+ * row" and "that kind of row, with nothing on it". */
+clay_result clay_layer_multires_present(const clay_document* doc, clay_layer_id layer,
+                                        int32_t* out_present);
+
+/* A BORROWED handle onto the layer's hierarchy, or CLAY_ERROR_NOT_FOUND when it
+ * has none. The document owns it: the handle must not outlive the document, and
+ * destroying the handle leaves the hierarchy in place. Removing the hierarchy
+ * makes every handle onto it answer CLAY_ERROR_NOT_FOUND rather than dangle. */
+clay_result clay_layer_multires(clay_document* doc, clay_layer_id layer,
+                                clay_multires** out_surface);
+
+/* MOVE `source`'s hierarchy into the layer. The document owns it afterwards and
+ * writes it on save, and `source` becomes a BORROWED handle onto it -- so a host
+ * that built a hierarchy and attached it keeps using the same handle, now
+ * referring to the document's.
+ *
+ * A MOVE AND NOT A COPY, which is a cost decision rather than a style one.
+ * mesh::MultiresSurface is move-only, so a copying form would have to round trip
+ * through encode/decode: hundreds of megabytes and a full re-decode on a call a
+ * host reads as bookkeeping. A hierarchy is routinely the largest thing an
+ * artist is holding and this library does not hide a cost of that size behind a
+ * setter. To attach the same hierarchy twice, serialize it and build a second.
+ *
+ * REFUSED, rather than replacing, when the layer already carries one:
+ * clay_layer_remove_multires first. clay_document_add_mask replaces a layer's
+ * mask silently and is right to -- a mask can be repainted -- while the levels
+ * this would drop cannot be re-sculpted from the cage, so the destruction is
+ * made a separate call a host has to mean.
+ *
+ * Refuses a layer that is not a MESH layer, refuses a source that is already
+ * borrowed (there is nothing to move: the document holding it still does), and
+ * does not touch the layer's triangles -- attaching does not make the cage agree
+ * with the hierarchy's base, for the reason above. */
+clay_result clay_layer_take_multires(clay_document* doc, clay_layer_id layer,
+                                     clay_multires* source);
+
+/* Drop the layer's hierarchy. CLAY_ERROR_NOT_FOUND when it had none. Borrowed
+ * handles onto it then fail with CLAY_ERROR_NOT_FOUND rather than dangling. The
+ * layer's triangles are left where they are: removing a hierarchy is not a
+ * reason to remove the cage a host is still drawing. */
+clay_result clay_layer_remove_multires(clay_document* doc, clay_layer_id layer);
+
+/* Does the layer's cage agree with its hierarchy's base level? *out_matches is
+ * 0/1; CLAY_ERROR_NOT_FOUND when the layer carries no hierarchy.
+ *
+ * COMPUTED, NEVER STORED, and exact rather than tolerant. A stored identity
+ * would be stable neither across builds that change an encoding nor across byte
+ * orders, so it would report a divergence that had not happened; a tolerance
+ * would answer "near enough to what?" with a number nobody chose. A host wanting
+ * a tolerant comparison holds both meshes and can make its own.
+ *
+ * A 0 here is NOT an error and NOT a corruption. It is the ordinary state after
+ * a host has edited the cage of a layer carrying a hierarchy, which nothing
+ * forbids. What it tells a host is that projecting or rebuilding is now its
+ * decision to make. */
+clay_result clay_layer_multires_matches_cage(const clay_document* doc, clay_layer_id layer,
+                                             int32_t* out_matches);
 
 uint32_t clay_multires_level_count(const clay_multires* surface);
 /* WHERE THE BRUSH WRITES and WHAT THE HOST DRAWS, independently. Editing a

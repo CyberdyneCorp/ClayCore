@@ -22,7 +22,7 @@ Last reconciled against `3dcoat_study/MISSING_FEATURES.md` and
 caught five items this file had dropped. Every ClayCore-owned row in their
 catalogue is now represented here or in the deferred list below.
 
-## Where the engine is (2026-09-06, v0.86.0)
+## Where the engine is (2026-09-06, v0.87.0)
 
 21 capabilities, 205 archived changes, 19 still open. Complete enough that the
 gaps below are about *sculpting affordances*, not about the field engine — and
@@ -1310,7 +1310,7 @@ symmetry, or not theirs.
 | | Row | What the host says |
 |---|---|---|
 | **1** | `fold-the-layers-with-an-operator` | **A subtractive LAYER, not a subtractive item.** Their unit of "a thing an artist grabs and moves" IS the layer — a subtool is a layer — so an item-level cutter does not reach the workflow at all. What they ship instead is an honest RESOLVED boolean: each operand is sampled into a volume, the two are combined into a subtool of their own, and moving an operand afterwards does not update the result. The interface says so rather than implying otherwise, and the operands are kept so it can be re-run. Their own roadmap has said since the subtools work that the same vocabulary upgrades to a live boolean the day this lands, with no interface change |
-| **2** | A `.clayspace` does not carry a multires hierarchy | **Not the transition polygons this file ranked.** They do not export hierarchies, so `refine-one-region-of-a-hierarchy`'s export residual does not bite them. What bites is one level up: a hierarchy row is TWO objects on their side — a mesh layer holding the cage, and a `clay_multires` beside it — and because the engine reports a hierarchy's layer as a MESH layer, with no `LayerRepresentation::Multires`, their side-car file is the only thing in the world that knows a row was ever a hierarchy. Lose the side-car and the sculptor's levels are gone and the row returns as the flat cage it demonstrably is. They made the loss loud in three panels and in a diagnostics report; loud is not fixed. **The ask is either the document carrying the hierarchy, or a `LayerRepresentation` that says what the row is** |
+| **2** | ~~A `.clayspace` does not carry a multires hierarchy~~ **LANDED** (`persist-a-multires-hierarchy`, ABI 0.88.0, container minor 19). An `'MRES'` chunk carries a mesh layer's hierarchy keyed by layer id, `clay_layer_multires_present` answers what a row is without a side-car, and `clay_layer_multires` hands the loaded hierarchy back as a borrowed handle. The host's either/or asked for the document carrying it OR a `LayerRepresentation`; the first was taken, and no such type was invented — a chunk keyed by layer id answers the question, and an enum describing payload presence would have been a second source of truth. Two things the change found: the cage exists TWICE and is not reconciled (a hierarchy is built from a mesh value and keeps no link back, so the two could always drift — `clay_layer_multires_matches_cage` makes it observable rather than preventing it), and the cost follows AUTHORED DETAIL rather than level count, so an untouched four-level hierarchy adds 128 bytes while a sculpted one adds 1.2 MB. Original: | **Not the transition polygons this file ranked.** They do not export hierarchies, so `refine-one-region-of-a-hierarchy`'s export residual does not bite them. What bites is one level up: a hierarchy row is TWO objects on their side — a mesh layer holding the cage, and a `clay_multires` beside it — and because the engine reports a hierarchy's layer as a MESH layer, with no `LayerRepresentation::Multires`, their side-car file is the only thing in the world that knows a row was ever a hierarchy. Lose the side-car and the sculptor's levels are gone and the row returns as the flat cage it demonstrably is. They made the loss loud in three panels and in a diagnostics report; loud is not fixed. **The ask is either the document carrying the hierarchy, or a `LayerRepresentation` that says what the row is** |
 | ~~**3**~~ | ~~`add-mesh-sculptor` off the interface thread (their #368)~~ **premise already false, 2026-09-01** | The threading ask they DO have, and it is not the mobile one. `clay_mesh_sculptor_create` cannot be built off the interface thread: it is a weld and an adjacency pass, **160 ms over 296,216 triangles**, and a mesh layer has no other route to its surface because the pick after an activation is answered by `clay_mesh_sculptor_raycast`. Holding a sculptor per mesh took the repeated cost out; the FIRST weld of each mesh has nowhere to go. The call resolves its mesh through a mutable path into the document, and the ABI's only threading contract is the brick cache's. Either that contract extended to this call, or a split between an off-thread adjacency build and a cheap adopt |
 | **3b** | Reuse a mesh's adjacency across sculptors, keyed on topology revision | What actually remains of #368 once the threading half is struck. Two sculptors over one mesh each build their own adjacency, and a rebuilt layer discards it. A different ticket from the one filed, and a smaller one |
 | **4** | SDF sculpt layers (`add-sculpt-layers` 1.9) | Not blocking, and a visible asymmetry: voxel rows carry a stack of recorded passes and hierarchy rows carry one, SDF rows do not, and in their layer stack those sit next to each other. A user asks why; the answer is "the engine doesn't". Take it if it is cheap as a weighted group |
@@ -1686,6 +1686,39 @@ Two hypotheses the host went in expecting and the engine disproved, both measure
 Recorded because a negative result about our own culling, measured from outside,
 is evidence nothing in this repository can produce for itself.
 
+### Regional multires: the bit-identity gate passes because the fixture has no boundary detail
+
+Found by auditing `finish-regional-multires` against the tree, and it is a defect
+in SHIPPED code rather than in the change that found it.
+
+`refine-one-region-of-a-hierarchy` ships a gate asserting that a regional level's
+vertices are bit-identical to the dense hierarchy's, and the gate is real: the
+same stencils run against the same parent, re-measured independently at
+**0.000000000 difference at levels 1, 2 and 3.**
+
+**But normals and FRAMES are already wrong at a region boundary, before any
+transition polygon exists** — up to **0.104** (about 6 degrees) at level 1,
+0.0486 at level 2, 0.0294 at level 3 — and they differ at exactly the vertices
+whose face ring at that level is incomplete. The two predicates were checked
+against each other: zero disagreements at every level.
+
+**Why that reaches storage rather than display.** A multires surface is
+`P(n) = S(n) + Frame · Detail`. A frame that is 6 degrees off means a coefficient
+authored at a boundary vertex **reconstructs to a different world offset than the
+same coefficient on a dense hierarchy**. So the bit-identity claim holds only
+while the boundary detail is ZERO — which is the only case the shipped gate
+exercises. Sculpt at a region boundary and the guarantee is gone, silently.
+
+**This is why "no host exports hierarchies today" does not make it deferrable.**
+The consuming host's position — a hierarchy contributes its cage, the sculpted
+level is reached through a bake — means nobody meets it through export. It is
+reached by SCULPTING near a boundary, which is the ordinary use.
+
+It also inverts the residual ordering the change recorded: task 3.4, the
+cross-level neighbourhood, is not something that follows 2.3's export
+transitions. **It is the thing underneath both**, because a normal is a property
+of the neighbourhood and not of the transition polygon.
+
 ### Refusals a host cannot render — a standing rule, and three instances
 
 **A refusal that knows an id should return it, and a host should never have to
@@ -1815,6 +1848,120 @@ needs. They have that number for one hop of four (median ratio 0.9998x, 171 of
 comparison is honest; it is not yet sensitive, and those are different
 properties.
 
+### Our bench gate has no load guard at all, and only a brief has been stopping it
+
+Found by comparing against the consuming host's, which has the opposite defect
+and is the more instructive one.
+
+**Theirs refuses, and on the wrong act.** Their CI passes `--json` to keep a
+run's figures as an artifact; their bench binary reads the presence of that flag
+as *"we are recording a baseline"*, checks the load, and exits 2 on a busy runner
+**before it ever reaches the comparison**. Two branches failed identically on
+`refusing to record a baseline: load 17.28 across 3 cores`, for a baseline nobody
+asked to record, with no comparison run. **Two acts sharing one flag, and the
+load check attached to the wrong one.** One line separates them.
+
+**Ours does not refuse at all.** `tools/check_bench.py` reads `/proc/loadavg`
+nowhere — the only mention of load in the file is a comment recording the
+conditions a threshold was once measured under. So a bench run on a loaded box
+produces numbers with no provenance and no complaint, and the only thing that
+stopped one today was a workflow brief telling a stage not to run it. **A
+discipline that lives in a prompt is not a gate**, and it held only because it
+was written down three workflows earlier.
+
+The pair is the point: a load guard on the wrong act fails loudly and blocks work
+that should proceed; no load guard at all passes quietly and records a number
+nobody can use. **The second is worse and looks better.**
+
+What a guard here should do, if one is added: refuse to RECORD, never to COMPARE
+— a comparison across two pins is the whole point of an upgrade measurement, as
+that host's own Linux baseline argues — and print the load beside every figure it
+emits, so a number carries the conditions it was taken under rather than a
+person's assurance that they checked.
+
+**Their half is now fixed, and the fix names the distinction rather than moving
+the check.** `refuses_a_busy_run(comparing, busy, allow_busy)` — refuse to
+RECORD, never to COMPARE — with four unit tests and, separately, an end-to-end
+run of both paths with the threshold forced. Their own reason for doing both is
+the one worth keeping: **the unit tests say the rule is right, and only the run
+says it is wired to anything.** A rule that is correct and unreachable is the
+same gate failure as a fixture nobody stands in, arriving from the other
+direction.
+
+That leaves ours as the remaining half of the pair, and now it is the only half.
+
+**And it had been hiding the state of their default branch, not only two PRs.**
+Main itself was red on Performance for the same refusal-on-the-comparison-path.
+Worth adding to the pair: a guard on the wrong act does not merely block work
+that should proceed — it conceals whether the branch everyone builds on is
+passing, and a red main that everyone has learned to read as "the bench gate
+again" is indistinguishable from a red main that means something.
+
+### A fourth way a gate is real and unenforced: an exact assertion about a state nobody reaches
+
+The three recorded above are a gate no change triggers, a gate the wrong version
+runs, and a gate compiled but never run. The multires bit-identity gate is none
+of them, and it guarantees nothing about the case people will hit.
+
+It is not a weak assertion: it is exact, and re-measured independently at
+**0.000000000** difference at three levels. It is not a tautology: its two sides
+are genuinely independent, a regional level and a dense one. It runs on every
+change, in the right job, at the right version.
+
+**It asserts a state nobody sculpts in.** Bit-identity between a regional level
+and a dense hierarchy holds exactly while the boundary detail is zero, and that
+is the only case the fixture builds. The moment a coefficient is authored at a
+boundary vertex, `P(n) = S(n) + Frame · Detail` reconstructs it against a frame
+up to six degrees out, and the guarantee is gone — without the gate moving.
+
+**The question that finds this class is not about the assertion, it is about the
+fixture: what state does this test put the system in, and is it the state a user
+puts it in?** A test can be precise, independent, executed and current, and still
+be measuring a corner of the space nobody stands in. None of §13d, §13e or §13j
+reaches it — those ask whether the test could fail, whether its expectation is
+independent, and whether the code is executed. This asks whether the SCENARIO is
+representative, and only a person who knows what users do can answer it.
+
+Which is why it took a host to find: the consuming session's regional refinement
+turned out to be over a VOXEL GRID rather than a hierarchy — the same English
+word, a different operation — so it is not exposed today, and it said so with the
+condition attached rather than filing the row as not-applicable.
+
+### A threshold between two measurements from ONE run is stable; one against a specification is not
+
+The generalisation of two failures on one PR, and the sharper half is the host's.
+
+`#477`'s `build+test (macos, +metal, parity)` failed a single check out of
+15,199,205: `CHECK(moved_from(one_default) == 28)`. `moved_from` counts how many
+of 2,000 samples move by more than `1e-4`, so **the integer is decided by however
+many samples sit NEAR that threshold** — a thin shell puts a handful there, and a
+platform contracting a multiply-add differently moves one across. It read 28
+under GCC and something else under AppleClang. The comment beside it said
+"asserted exactly" as though that were rigour; it was fragility with a
+justification attached.
+
+**The host's own threshold has the identical shape and survives, for a reason
+worth stealing.** Its guard asserts *fewer than 40 pixels differ*, where a
+correct implementation reads 1 and a too-small region reads 2,363 — so 40 sits
+roughly geometrically between signal and noise, with both teeth doing work. But
+the property that makes it PLATFORM-STABLE is different: **both captures come
+from the same machine in the same run, so a platform that renders differently
+cancels rather than accumulates.** Mine compared a count against a number written
+down earlier, and the two sides shared only a specification.
+
+**The rule:** a threshold between two measurements taken in one run is
+self-relative and travels; a threshold against an absolute recorded elsewhere
+does not, however carefully the absolute was measured. Where a number must be
+absolute, assert a BAND with both teeth named — what it catches at the low end
+and what at the high — and report the value seen, so a failure says by how much
+rather than only that a bound was crossed.
+
+**And the fragile surface was the TESTS, three times.** Both CI failures on that
+PR were in test code rather than in the change, and both were findable only by a
+compiler this machine does not run. A green job is evidence about the change AND
+about how much of the test suite that platform's codegen happens to agree with;
+those are different claims and a matrix reports them as one.
+
 ### Agreement across N paths rules out only what differs between them
 
 The reasoning error that produced the pinhole report, named by the host that
@@ -1916,6 +2063,303 @@ They have offered a per-pin list of "calls we do not make and why" — 29 entry
 points long for v0.84.0 — and a real session trace for `reference/host_loop.py`,
 which covers the sequence and not the hours. Both are worth more than another
 synthetic fixture, and neither costs this repository anything to accept.
+
+### The host cannot evaluate the fold, because main is untagged
+
+The consuming host is pinned at **v0.84.0**. The fold is on main at 0.87.0 with
+no tag, so they cannot pin it, cannot call it, and declined to say whether it
+fits — **"arriving, not evaluated"** — on the explicit ground that reading a
+header is what produced two of their wrong answers today.
+
+That is the right call and it has a cost we should name: **until a tag exists,
+every answer we get back about the fold is a header reading, which is the class
+of answer both sides have now been burned by.** The unblock is a release cut, not
+a code change, and it is the cheapest open item on this list.
+
+What they could say without calling it is that the SHAPE is right — per-operand
+composition, a resolved boolean still first-class for operands nobody converts,
+and a refusal carrying a blocking id **and** a count. Those were the three things
+they asked for and all three are in. Fit is still unknown.
+
+### The format pre-check should name the layer, not return a boolean
+
+Recorded above: a C-ABI host cannot choose the format minor it writes. The host
+has now said what it actually wants from a pre-check, and it is narrower and more
+specific than "check before you write".
+
+**Their save is four lines** — build a C string, call `clay_document_save`, check
+the result. A refusal comes back as an engine error and reaches the sculptor as
+text, which is **correct and late**: they have already chosen a filename and
+pressed save. What a `clay_document_writable_at_minor` buys is the ability to say
+so **while the document is being built** — to grey the older-format option, or to
+name which subtool is the reason, before anyone commits to a path.
+
+So it is **wanted, not needed**: the safety is already ours, in the refusal. It
+should not hold anything up, and it should not be sold as a correctness fix.
+
+**But a boolean is the wrong return.** Their argument is the one `_below` already
+settled: *"this document needs 18"* sends a sculptor hunting; *"Poros needs 18"*
+does not. The blocking layer is already an id inside the refusal path, so
+exposing it costs nothing — and a pre-check that returns less than the refusal it
+predicts is a worse interface than no pre-check.
+
+### The seed hazard the host cannot reach, and why their type is the reason
+
+Our review found `stamp_coarse` forwarding the bound level's `seed_class` into a
+coarse level's class space: an UNREVISIONED seed is trusted verbatim, the coarse
+level is larger so the stale index is always in bounds, `geodesic_region` starts
+outside its own radius and returns empty, and the coarse dab **silently does
+nothing.** pyclay's `MultiresSculptor.stamp` defaults `seed_revision` to `None`,
+so the unrevisioned mode is the DEFAULT rather than an edge case.
+
+**It cannot reach the host, and the reason is structural rather than lucky.** On
+the hierarchy path they pass no seed at all. Where they do send one, their
+`MeshSeed` carries `class` and `revision` **together in one type** — there is no
+way to express a bare class in their vocabulary, so the mode we default to is
+unreachable from there by construction.
+
+**That is the transferable part.** Our seed is two independent fields and a
+sentinel that means "trust me"; theirs is one value that cannot be halved. The
+same hazard exists in both codebases and only one of them can express it. Note
+this is not an argument for removing the unrevisioned mode here —
+`accepted_seed`'s own comment already records why that was rejected, and the
+reason still holds: silently refusing an unrevisioned seed turns every shipped
+caller's fast path into a full scan, which is a performance regression delivered
+as a correctness fix.
+
+They reached it the expensive way and named the artefact: a test module
+`the_silent_empty_dab` — a pick, a remesh under the pick, then a dab where the
+pick landed, run twice with the revision token kept and struck off. **It lives in
+their crate rather than in their tests directory because the broken state cannot
+be reached from outside**, which is the honest place for a test whose fixture is
+unreachable through the public surface.
+
+**Their proposed sharpening was checked and REJECTED, and the reason is worth
+more than the suggestion.** They asked whether forwarding the class with the
+BOUND level's revision would turn the silent no-op into something counted rather
+than removing the forwarding. The premise holds: every `MeshSculptor` mints its
+own `seed_revision_` at construction (`src/mesh/sculpt.cpp:225` and `:228`,
+`next_seed_revision()`), so coarse and bound never share one, and the mismatch
+would increment `stale_seeds_rejected_` and fall back to the same scan.
+
+**But that counter is not ours to spend.** `stale_seeds_rejected` is public on
+both surfaces — `clay_mesh_sculptor_stale_seeds_rejected` and pyclay's
+`MeshSculptor.stale_seeds_rejected` — and it means *the host handed us a seed
+from an old numbering*. Tripping it internally on every coarse dab by design
+would make it fire constantly for a reason no host caused, destroying the one
+signal hosts have for their own staleness bugs; `bindings/python/tests/
+test_seed_and_peaks.py` asserts it is exactly 0 and exactly 1.
+
+**And the telemetry it promises would be unreadable anyway**: the coarse
+sculptor is a throwaway destroyed with the stamp, so nobody can ever call the
+accessor on it. So the seed is BLANKED in the copy each coarse sculptor is
+given, and the shipped reason is the one that survives inspection: there is no
+map between two levels' class numberings to translate a seed with, and the scan
+the seed exists to skip is what a coarse walk over a quarter of the vertices
+costs regardless.
+
+### Layer across a depth boundary has a live host, which ranks the three majors
+
+The host ships `clay_multires_sculptor_stamp (LAYER)` as their multires verb
+today, driven through `hierarchy.surface_mut().sculptor()`. So the coarse ceiling
+reset — `bind_coarse` emptying every coarse level's stroke record on a
+generation-only rebind, while the bound level's `level_deltas_` correctly
+survives — **is a step at the seam in a brush a sculptor can pick today, on a
+representation we already offer.**
+
+Of the three majors the review confirmed, that is the one with a user behind it.
+The other two are a corrupted display normal and a silent no-op; both are real
+and neither is reachable by anyone we know of yet.
+
+### A fixture whose normals all point the same way hides a wrong normal
+
+The clearest instance yet of the fixture class, and it arrived by a route worth
+recording: a reviewer's finding that was WRONG AS STATED, with a real defect
+underneath it that only reproducing the probe could find.
+
+The claim was that `append_outside_neighbors`'s `want_normals` output is never
+executed. It is: deleting it makes `nb_normals_` shorter than `nb_slots_` and
+fails an existing case at `CHECK(crossed.dropped == 0)`. **The SLOT is gated.**
+
+**What is ungated is the VALUE.** Substituting a constant `cf3(0, 1, 0)` for the
+outside normal, keeping the list the same length, leaves the whole suite
+identical at 16,463,873 assertions and 0 failed. The reason is the fixture and
+not the code: `bumpy_quads` is a plane cage whose normals all sit within a few
+degrees of +Y, and `polish_gate` reads an ANGLE
+(`mean_ring_disagreement`) — so a constant normal sits comfortably inside the
+gate's own tolerance. **Every value in the fixture is nearly the constant the
+bug substitutes.**
+
+The repair was the fixture, not the assertion: the new case runs on a TORUS,
+where a wrong outside normal reads as a hard edge, `polish_gate` shuts, and the
+rim is silently not polished at all. Proved by substituting the constant again —
+`crossed.dropped` reads 3 at radius 0.20 and 1 at radius 0.30 against 0.
+
+**Two things to carry forward.** First, this is the same shape as the
+bit-identity gate passing on zero boundary detail, arrived at independently:
+*a fixture in which the quantity under test is degenerate proves nothing about
+the quantity.* The question to ask a comparison gate is what value would have to
+be non-zero — or non-uniform — for the assertion to be a real claim.
+
+Second, the reviewer was wrong and the finding was still worth its cost. The fix
+agent reproduced the probe rather than arguing from the code, found the claim
+did not hold, and found the real gap one level down. **A wrong finding that is
+reproduced rather than dismissed is a cheap way to be right about something
+else.**
+
+### A suppression list is evidence about the checker, and the host has nowhere to write one
+
+Our task-symbols gate went from **12 baseline rows to 5** when the resolver was
+fixed. Seven of the twelve were never debt: they were the tool's own defect
+written down as though somebody owed it. The cause was a single line — a
+path-shaped citation answered by `os.path.exists` rather than by `git ls-files`
+— and it produced three failures that looked unrelated: gitignored build output
+counting as resolved, a `..` citation answered by whatever sat beside the
+checkout, and an inversion in which a MORE specific citation fails while a vaguer
+one passes.
+
+**The inversion is what made it undetectable from inside.** `scene/bounds`
+resolving while `ClayCoreLink/Empty.swift` does not is backwards from the way
+anyone would test a path resolver, so it survives the obvious check — and each
+failure it caused was parked in the baseline as debt, which is the one place
+nobody re-reads.
+
+**The host cannot have this problem, and not by foresight.** They grepped their
+gates for an allowlist, a baseline, a waiver, a known-failures file — anything a
+violation could be parked in — and there is nothing. The only allowlist in their
+`check_layering.py` is `UNSAFE_ALLOWED = {"claycore-sys", "claycore"}`, which is
+a RULE (two crates may hold `unsafe`), not a list of tolerated exceptions. So a
+gate that is wrong there cannot record its wrongness as debt: it fails, somebody
+has to look, and **the only place the pressure can go is into the tool.**
+
+**The rule, and it generalises past gates:** any accumulated list of accepted
+exceptions is a record of two things at once — what the code owes, and what the
+checker gets wrong — and nobody reads it as both. Twelve rows down to five, seven
+of which were never debt, is the number to put in front of anyone proposing a
+baseline file as the way to adopt a strict check gradually. **Their property was
+obtained by never building the mechanism**, which is the argument for not
+building one later rather than for tearing ours out today.
+
+### The host's Camada measurement, and a decision they declined to route around
+
+Their diagnosis of their own per-segment `begin_stroke` held up under
+measurement: **mesh Camada converges (1.010 -> 1.036 over six dabs) and hierarchy
+Camada is a straight line (0.010 -> 0.059)**, which is our Draw shape, and
+`begin_stroke()` appears exactly once in their codebase — per segment, in the
+hierarchy path only. Our own gate's ratio (draw past layer by more than three
+times) is what they will check the fix against.
+
+**They have not fixed it, deliberately.** It is a confirmed defect on a shipped
+brush and the fix changes how a tool behaves on a representation people are
+using, so they put it to their user once with the measurements and the one-line
+cause, and stopped. Recorded here because the reasoning is worth keeping: *a peer
+asking twice is not a reason to schedule someone else's product decision.* We
+asked twice; the right answer to the second ask was no.
+
+### A merge resolution is a claim, and mine went in unproved
+
+Resolving an add/add conflict on `tools/check_task_symbols.py`, I took the
+branch's 397-line rewrite over main's 134-line original and wrote in the merge
+message that the rewrite's `EXTENSIONS` set **"is a superset of main's
+`FILE_SUFFIX` tuple"**. I had compared the two lists. I had not compared the two
+BEHAVIOURS, and the sentence was false twice over.
+
+main's `claimed_symbols` split a dotted citation and checked each part, so a
+struct field and its struct both had to exist. The rewrite recognised only paths,
+filenames and identifiers, so every `A.b` reached the "no opinion" branch and
+returned `None`. **Twelve dotted citations across the non-archived changes went
+silently unverified** — `Document.to_bytes`,
+`clay_multires_stamp_report.moved_vertices`, `Document.writable_at_minor` and
+nine more. `EXTENSIONS` also dropped main's `.rs` and `.glsl`.
+
+**The aggravating detail is what the same branch was doing at the time**: wiring
+that gate into CI. It advertised the checker and weakened it in one change.
+
+**Why the existing habits did not catch it.** A merge is the one edit nobody
+diffs against its own parents — the review lens that found it had to be pointed
+at the merge commit explicitly, and it was pointed there only because the last
+round had already shown that commits written under time pressure go unread. Two
+full adversarial rounds had passed over this file. Neither could see it, because
+it did not exist until the merge.
+
+**The rule:** a conflict resolution that says "A subsumes B" is a claim of the
+same kind as a spec SHALL, and it needs the same evidence — run BOTH sides
+against one input and diff the answers. Comparing the two constant tables is
+comparing the parts of the behaviour that were easy to see.
+
+Recorded because it is the failure this document names elsewhere as the host's
+and as mine — *reading the right code and answering a different question* — this
+time in a merge message, where nothing re-runs it. When the fix landed it caught
+its own first false positive immediately: three tasks.md lines quoting a linker
+error, `GLIBCXX_3.4.31 not found`, read as three symbol claims. A span with
+whitespace is prose, which the path and identifier shapes had always known and
+the restored member rule had to be told.
+
+### A negative repro that rules out one path, and the ceiling gate that localises it
+
+The host tried to reproduce the coarse ceiling reset and **could not**, and
+reported the failure rather than the silence. Their probe: a flat cage converted
+to a hierarchy at 0, 1 and 2 levels, six Camada dabs inside ONE gesture at the
+same place, peak measured after each.
+
+```
+levels 0: [0.01, 0.02, 0.0299, 0.0398, 0.0497, 0.0594]
+levels 1: [0.01, 0.02, 0.0299, 0.0398, 0.0497, 0.0594]
+levels 2: [0.01, 0.02, 0.0299, 0.0398, 0.0497, 0.0594]
+```
+
+**Identical at every level count including ZERO**, where there is no coarse level
+to hold a record at all. So whatever those rows show is not level-dependent and
+is not the seam: if the defect were reachable this way, 1 and 2 would have to
+diverge from 0, and they do not by a digit.
+
+**It rules out one path and nothing else, and #1 is NOT downgraded on it.** The
+defect needs something that bumps `cache_generation` MID-STROKE, and their probe
+drove segments within a gesture without ever rebinding. An absence of evidence
+from a probe that never induces the precondition is not evidence of absence.
+
+**What the rows actually show is on their side, and our own gate is what
+localises it.** Six segments, six deposits, no ceiling — the Draw-shaped curve,
+not the Layer-shaped one. `test_mesh_sculpt.cpp:1000` already gates the property
+on the plain mesh path: twelve stamps against ONE record converge with
+`layer_12 <= 0.08f + 1e-4f`, contrasted against `Draw` at identical settings
+reading `draw_12 > 0.08f * 2.0f`. So the ceiling works where the record
+persists. Their `stroke_into` calls `begin_stroke()` per SEGMENT, and that call's
+own comment says it clears the record Layer measures its ceiling against — so
+their Camada resets its ceiling once per segment rather than once per gesture,
+which makes Layer behave like Draw on a held stroke. Their defect, on a path they
+ship, and they flagged it themselves because they had described the ceiling to us
+as working without having established it.
+
+**The pattern worth keeping is the shape of the report, not the result.** A probe
+that comes back negative is worth publishing WITH the precondition it failed to
+induce, because a bare "could not reproduce" would have downgraded a real defect
+that a live host can still reach.
+
+### The frame at a region boundary: what it costs to land it unfixed
+
+The host reviewed the regional-multires residual and asked for one thing, on the
+row that is theirs: **if the boundary frame is fixable inside the change, fix it
+there.** The reason is our own correction to them — nobody meets this through
+export, they meet it by sculpting near a boundary — so a change that lands
+regional refinement with frames up to six degrees out at boundary vertices ships
+a feature whose guarantee holds only where nobody works.
+
+**They checked that it does not reach them rather than assuming it.** Their
+`LayerOperation::RefineRegion` refines a **voxel grid**, not a hierarchy — the
+same English word, a different operation — and they call
+`clay_multires_add_level` for whole levels only, never a regional variant. So
+this is not a blocker on their account.
+
+**The condition they attached is the part to honour:** if it lands unfixed, the
+row must say what it COSTS, rather than being a follow-up nobody reads. Sections
+1.1-1.5 of `finish-regional-multires` are that work — the frame, the halo and
+coefficient smoothing — and they are deliberately unticked, with the spec delta
+rewritten to describe the tree instead of promising them. The cost, stated: a
+coefficient authored at a boundary vertex reconstructs against a frame up to
+0.170116 |dnormal| out (124 of 1024 emitted corners on the measured fixture), so
+bit-identity with a dense hierarchy holds unconditionally only while boundary
+detail is zero.
 
 ## Deliberately not doing
 
