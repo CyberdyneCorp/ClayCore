@@ -2111,6 +2111,45 @@ serialized, so there is no moment at which you could hold a handle, have a step
 open, and ask. It is reported anyway so the total stays the sum of the fields if
 an entry point spanning a step is ever added. Do not build a response around it.
 
+### Where a dab's time went, and why
+
+**No performance work on total dab time alone.** A stamp is a dozen stages, and
+a total tells you which of them to open exactly as well as a coin does.
+
+The engine has timed those stages since 0.78.0, and until 0.92.0 nothing outside
+could read them: one benchmark program in the repository consumed the record, no
+C entry point exposed it, no test asserted on it, and the adaptive surface — the
+representation whose per-dab cost is hardest to predict, because it splits,
+collapses and flips as it goes — carried no telemetry at all.
+
+```c
+clay_mesh_sculptor_set_stage_report_enabled(sculptor, 1);
+/* ... stamp ... */
+clay_sculpt_stage_report r = { .struct_size = sizeof r };
+clay_mesh_sculptor_stage_report(sculptor, &r);
+```
+
+with `clay_dynamic_sculptor_*` counterparts, and `reset_stage_report` to measure
+one dab rather than a stroke.
+
+**Read the counts before the times.** A stage that got slower because it touched
+twice as many vertices and a stage whose inner loop regressed are the same
+number, and a report that cannot tell them apart sends someone to the wrong
+file. `vertices_considered` and `vertices_affected` DIFFER — the workset holds
+the rim of the falloff where the weight is zero and everything a mask held still
+— and that gap is the first thing to look at when a dab costs more than it
+should. `kernel_passes` separates "the kernel got slower" from "the caller asked
+for four times as much smoothing". `positions_measured` is the number that says
+"a dab costs what it touches" is still true.
+
+**Nothing is timed or counted until you enable it.** A stamp is the thing being
+measured, so an unconditional pair of clock reads per stage would be a cost the
+measurement then included. Disabled, a stage costs one predictable branch.
+
+**A stage a representation does not use reports zero rather than being
+omitted** — a fixed mesh cannot split anything, and that has to read differently
+from a counter that stopped being filled.
+
 ### Which space a mesh-sculpting call speaks
 
 A mesh layer's vertex arrays are **layer-local** and its transform places them.

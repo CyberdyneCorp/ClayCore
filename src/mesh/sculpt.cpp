@@ -845,6 +845,13 @@ std::size_t MeshSculptor::stamp(MeshBrush verb, const MeshBrushSettings& setting
     if (!valid() || settings.radius <= 0.0f || mesh_.positions.empty()) return 0;
     const BrushRuntimePlan& plan = plan_for(verb, settings);
     gather(settings, gate);
+    // COUNTED HERE rather than at the end, so a stamp that reached something and
+    // moved nothing is still visible as a stamp that reached something -- which
+    // is exactly the case a duration cannot explain.
+    count(counters_, &SculptCounters::vertices_considered, region_.size());
+    count(counters_, &SculptCounters::positions_measured, anchor_measurements());
+    count(counters_, &SculptCounters::kernel_passes,
+          static_cast<std::uint64_t>(plan.smooth_passes > 0 ? plan.smooth_passes : 1));
     if (region_.empty()) return 0;
 
     if (plan.needs_neighbors)
@@ -1117,6 +1124,8 @@ std::size_t MeshSculptor::write_colors(VertexDeltas* record) {
     // verbs holding, so telling a host to re-upload geometry here would be
     // telling it to re-upload what it already has.
     if (painted != 0) publish_chunks(/*normals_changed=*/false, /*attributes_changed=*/true);
+    count(counters_, &SculptCounters::vertices_affected, painted);
+    count(counters_, &SculptCounters::chunks_touched, dirty_chunks_.size());
     return painted;
 }
 
@@ -1187,6 +1196,34 @@ std::size_t MeshSculptor::write(VertexDeltas* record) {
     // them when it runs, which is what makes "positions now, normals at the end
     // of the stroke" two uploads rather than one wrong one.
     publish_chunks(/*normals_changed=*/!defer_normals_, /*attributes_changed=*/false);
+    // WHAT THIS WRITE ACTUALLY DID. `moved` is the write region and
+    // `vertices_considered` above is the workset, and the gap between them is
+    // the falloff's rim plus whatever a mask held still -- which is the first
+    // thing to look at when a dab costs more than it should.
+    count(counters_, &SculptCounters::vertices_affected, moved);
+    // THE FACES THE WRITE REGION TOUCHES, walked here rather than taken from
+    // `refit_tris_`: that list is filled only when a ray tree EXISTS, and
+    // `surface_index` deliberately never builds one, so a session nothing has
+    // picked against would have reported zero faces for a stamp that moved
+    // hundreds. A counter that reads zero for the wrong reason is worse than no
+    // counter, because it reads as a finding.
+    //
+    // The walk is O(the write region) over CSR offsets already in cache, and it
+    // happens only when something is counting.
+    if (counters_ != nullptr) {
+        std::uint64_t faces = 0;
+        for (std::uint32_t c : pending_normals_) {
+            std::size_t n = 0;
+            adjacency_.triangles_of(c, &n);
+            faces += n;
+        }
+        counters_->faces_touched += faces;
+    }
+    count(counters_, &SculptCounters::chunks_touched, dirty_chunks_.size());
+    count(counters_, &SculptCounters::neighbors_gathered, nb_slots_.size());
+    if (record != nullptr)
+        count(counters_, &SculptCounters::history_bytes, record->bytes());
+    count(counters_, &SculptCounters::scratch_high_water, arena_.high_water_bytes());
     return moved;
 }
 

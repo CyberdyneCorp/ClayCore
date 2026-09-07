@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 93
+#define CLAY_ABI_MINOR 94
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -9665,6 +9665,117 @@ clay_result clay_mesh_sculptor_ensure_colors(clay_mesh_sculptor* sculptor, const
 clay_result clay_mesh_sculptor_raycast(clay_mesh_sculptor* sculptor, const float origin[3],
                                        const float direction[3], const clay_mesh_frame* xform,
                                        clay_mesh_hit* out_hit);
+
+/* -- WHERE A DAB'S TIME WENT, AND WHY (ABI 0.92.0) ---------------------------
+ *
+ * NO PERFORMANCE WORK ON TOTAL DAB TIME ALONE. A stamp is a dozen stages and a
+ * total tells you which of them to open exactly as well as a coin does.
+ *
+ * The engine has timed those stages since 0.78.0 and NOTHING OUTSIDE COULD READ
+ * THEM: one benchmark program in the repository consumed the record, no C entry
+ * point exposed it, and no test asserted on it. That is the shape of defect this
+ * ABI has shipped before — the engine can do it and the host cannot reach it.
+ *
+ * COUNTS AS WELL AS TIMES, because a duration alone cannot say why a duration
+ * changed. A stage that got slower because it touched twice as many vertices and
+ * a stage whose inner loop regressed are the same number, and a report that
+ * cannot tell them apart sends someone to the wrong file.
+ *
+ * ACCUMULATED ACROSS STAMPS from the moment you enable it, so a host measuring a
+ * stroke reads the stroke. clay_mesh_sculptor_reset_stage_report is how you
+ * measure one dab.
+ *
+ * NOTHING IS TIMED OR COUNTED UNTIL YOU ENABLE IT. A stamp is the thing being
+ * measured, so an unconditional pair of clock reads per stage would be a cost
+ * the measurement then included. Disabled, a stage costs one predictable branch.
+ *
+ * THE SAME VOCABULARY ON ALL THREE REPRESENTATIONS, so a row from the fixed
+ * mesh, one from the adaptive surface and one from a hierarchy level can be
+ * compared. A stage a representation does not use reports zero rather than being
+ * omitted — which is what makes "does not use this stage" and "stopped filling
+ * it" different readings. */
+
+typedef enum clay_sculpt_stage {
+    CLAY_SCULPT_STAGE_SEED_RESOLVE = 0,  /* where the dab landed */
+    CLAY_SCULPT_STAGE_SPATIAL_QUERY = 1, /* the region walk */
+    CLAY_SCULPT_STAGE_WEIGHT = 2,
+    CLAY_SCULPT_STAGE_ALPHA = 3,
+    CLAY_SCULPT_STAGE_AUTOMASK = 4,
+    CLAY_SCULPT_STAGE_SNAPSHOT = 5,
+    CLAY_SCULPT_STAGE_NEIGHBOR_BUILD = 6,
+    CLAY_SCULPT_STAGE_KERNEL = 7,   /* the verb itself */
+    CLAY_SCULPT_STAGE_WRITEBACK = 8,
+    CLAY_SCULPT_STAGE_NORMAL_REFRESH = 9,
+    CLAY_SCULPT_STAGE_TOPOLOGY = 10, /* adaptive surfaces only; zero elsewhere */
+    CLAY_SCULPT_STAGE_CHUNK_MARK = 11,
+    CLAY_SCULPT_STAGE_BVH_UPDATE = 12
+} clay_sculpt_stage;
+
+/* How many this build knows. A newer engine may report more; a caller sized to
+ * this one reads this many and the report says how many there were. */
+#define CLAY_SCULPT_STAGE_COUNT 13
+
+typedef struct clay_sculpt_stage_report {
+    uint32_t struct_size; /* = sizeof(clay_sculpt_stage_report); required */
+
+    /* Indexed by clay_sculpt_stage. `stage_count` is what THIS ENGINE filled,
+     * which may be fewer than CLAY_SCULPT_STAGE_COUNT if the caller's header is
+     * newer than the library it is linked against. */
+    uint32_t stage_count;
+    uint64_t nanos[CLAY_SCULPT_STAGE_COUNT];
+    uint64_t calls[CLAY_SCULPT_STAGE_COUNT];
+
+    /* -- what the stamps DID. The half a duration cannot supply. --------------
+     *
+     * `considered` and `affected` DIFFER and the gap is the point: a workset
+     * holds everything the brush reached, including the rim of the falloff where
+     * the weight is zero and everything a mask held still. When a dab costs more
+     * than it should, that gap is the first thing to look at. */
+    uint64_t vertices_considered;
+    uint64_t vertices_affected;
+    /* Class positions MEASURED while resolving where the dab landed — the chunk
+     * descent's candidates, a scan's whole class space, the walk's own seed
+     * scan. This is the number that says "a dab costs what it touches" is still
+     * true; it is not a time and no machine changes it. */
+    uint64_t positions_measured;
+    uint64_t faces_touched;
+    uint64_t chunks_touched;
+    uint64_t neighbors_gathered;
+    uint64_t kernel_passes;
+
+    /* Adaptive topology. Zero on a fixed mesh and on a hierarchy level, neither
+     * of which can change topology at all. */
+    uint64_t splits;
+    uint64_t collapses;
+    uint64_t flips;
+
+    uint64_t detail_blocks_touched;
+    uint64_t history_bytes;
+    uint64_t scratch_high_water;
+} clay_sculpt_stage_report;
+
+/* Start or stop timing and counting on this session. Off by default. Enabling
+ * does not clear what is already there; enabling on a fresh session starts from
+ * zero. */
+clay_result clay_mesh_sculptor_set_stage_report_enabled(clay_mesh_sculptor* sculptor,
+                                                        int32_t enabled);
+/* Read the accumulated report. Answers with zeroes when nothing was enabled,
+ * which is the honest figure rather than a refusal. */
+clay_result clay_mesh_sculptor_stage_report(const clay_mesh_sculptor* sculptor,
+                                            clay_sculpt_stage_report* out_report);
+/* Zero it, so the next stamp is measured on its own. */
+clay_result clay_mesh_sculptor_reset_stage_report(clay_mesh_sculptor* sculptor);
+
+/* The same three for the adaptive surface, which had no breakdown at all before
+ * 0.92.0 and is the representation whose per-dab cost is hardest to predict: it
+ * splits, collapses and flips as it goes, so the same brush at the same radius
+ * is not the same work twice running. CLAY_SCULPT_STAGE_TOPOLOGY is the stage
+ * only this one fills. */
+clay_result clay_dynamic_sculptor_set_stage_report_enabled(clay_dynamic_sculptor* sculptor,
+                                                           int32_t enabled);
+clay_result clay_dynamic_sculptor_stage_report(const clay_dynamic_sculptor* sculptor,
+                                               clay_sculpt_stage_report* out_report);
+clay_result clay_dynamic_sculptor_reset_stage_report(clay_dynamic_sculptor* sculptor);
 
 /* -- WHICH SPACE A SESSION SPEAKS (ABI 0.91.0) -------------------------------
  *

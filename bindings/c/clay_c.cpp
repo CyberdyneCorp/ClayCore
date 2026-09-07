@@ -15555,6 +15555,13 @@ struct clay_mesh_sculptor {
     bool has_frame = false;
     math::Transform frame;  // local -> world
 
+    // The per-stage breakdown, OWNED BY THE HANDLE and wired into the engine
+    // only while the host has asked for it. Off by default: a stamp is the
+    // thing being measured, so an unconditional pair of clock reads per stage
+    // would be a cost the measurement then included.
+    mesh::StageTelemetry stages;
+    mesh::SculptCounters counters;
+
     // The peaks this session measured. OWNED BY THE HANDLE and wired once at
     // create: the engine's seam borrows a pointer, and a borrowed pointer that
     // crossed this boundary would be a lifetime a host can get wrong exactly
@@ -15582,6 +15589,9 @@ struct clay_dynamic_sculptor {
     // dirty set got. A host tuning a staging buffer needs both and should not
     // have to add two numbers that were measured over different stamps.
     memory::PeakTelemetry peak;
+    // See clay_mesh_sculptor: off by default, and nothing is timed until asked.
+    mesh::StageTelemetry stages;
+    mesh::SculptCounters counters;
 };
 
 struct clay_mesh_lattice {
@@ -15771,6 +15781,49 @@ clay_result read_mesh_frame(const clay_mesh_frame* src, math::Transform* out) {
                                 : math::Quat::identity();
     out->scale = d.scale != 0.0f ? d.scale : 1.0f;
     if (!(out->scale > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "frame scale must be > 0");
+    return CLAY_OK;
+}
+
+constexpr std::size_t kSculptStageReportOriginal =
+    offsetof(clay_sculpt_stage_report, scratch_high_water) + sizeof(std::uint64_t);
+
+// ONE FILLER FOR BOTH REPRESENTATIONS, so the fixed mesh and the adaptive
+// surface cannot report the same stage under different names or drift on which
+// counters they fill. `stage_count` is what THIS engine wrote rather than what
+// the header declares: a caller compiled against a newer header and linked
+// against an older library reads a smaller number rather than trailing zeroes
+// it cannot tell from measured ones.
+clay_result write_stage_report(const mesh::StageTelemetry& stages,
+                               const mesh::SculptCounters& counters,
+                               clay_sculpt_stage_report* out_report) {
+    if (!out_report) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_report");
+    clay_sculpt_stage_report probe;
+    clay_result r = read_desc(out_report, kSculptStageReportOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_report->struct_size;
+    clay_sculpt_stage_report filled{};
+    const std::size_t n = mesh::kSculptStageCount < CLAY_SCULPT_STAGE_COUNT
+                              ? mesh::kSculptStageCount
+                              : static_cast<std::size_t>(CLAY_SCULPT_STAGE_COUNT);
+    filled.stage_count = static_cast<std::uint32_t>(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        filled.nanos[i] = stages.nanos[i];
+        filled.calls[i] = stages.calls[i];
+    }
+    filled.vertices_considered = counters.vertices_considered;
+    filled.vertices_affected = counters.vertices_affected;
+    filled.positions_measured = counters.positions_measured;
+    filled.faces_touched = counters.faces_touched;
+    filled.chunks_touched = counters.chunks_touched;
+    filled.neighbors_gathered = counters.neighbors_gathered;
+    filled.kernel_passes = counters.kernel_passes;
+    filled.splits = counters.splits;
+    filled.collapses = counters.collapses;
+    filled.flips = counters.flips;
+    filled.detail_blocks_touched = counters.detail_blocks_touched;
+    filled.history_bytes = counters.history_bytes;
+    filled.scratch_high_water = counters.scratch_high_water;
+    write_desc(out_report, declared, filled);
     return CLAY_OK;
 }
 
@@ -16810,6 +16863,54 @@ clay_result clay_mesh_sculptor_reset_peak_telemetry(clay_mesh_sculptor* sculptor
     if (!sculptor || !sculptor->sculptor)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh sculptor");
     sculptor->peak.reset();
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_set_stage_report_enabled(clay_mesh_sculptor* sculptor,
+                                                        int32_t enabled) {
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/false);
+    if (r != CLAY_OK) return r;
+    sculptor->sculptor->set_stage_telemetry(enabled ? &sculptor->stages : nullptr);
+    sculptor->sculptor->set_counters(enabled ? &sculptor->counters : nullptr);
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_stage_report(const clay_mesh_sculptor* sculptor,
+                                            clay_sculpt_stage_report* out_report) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh sculptor");
+    return write_stage_report(sculptor->stages, sculptor->counters, out_report);
+}
+
+clay_result clay_mesh_sculptor_reset_stage_report(clay_mesh_sculptor* sculptor) {
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/false);
+    if (r != CLAY_OK) return r;
+    sculptor->stages.reset();
+    sculptor->counters.reset();
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_sculptor_set_stage_report_enabled(clay_dynamic_sculptor* sculptor,
+                                                           int32_t enabled) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    sculptor->sculptor->set_stage_telemetry(enabled ? &sculptor->stages : nullptr);
+    sculptor->sculptor->set_counters(enabled ? &sculptor->counters : nullptr);
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_sculptor_stage_report(const clay_dynamic_sculptor* sculptor,
+                                               clay_sculpt_stage_report* out_report) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    return write_stage_report(sculptor->stages, sculptor->counters, out_report);
+}
+
+clay_result clay_dynamic_sculptor_reset_stage_report(clay_dynamic_sculptor* sculptor) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    sculptor->stages.reset();
+    sculptor->counters.reset();
     return CLAY_OK;
 }
 

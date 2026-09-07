@@ -98,6 +98,25 @@ class DynamicSculptor {
     void set_telemetry(memory::PeakTelemetry* telemetry) { telemetry_ = telemetry; }
     memory::PeakTelemetry* telemetry() const { return telemetry_; }
 
+    // -- the per-stage breakdown (complete-sculpt-performance-instrumentation)
+    //
+    // THE ADAPTIVE SURFACE WAS THE ONE REPRESENTATION WITH NONE, and it is the
+    // one whose per-dab cost is hardest to predict: it splits, collapses and
+    // flips as it goes, so "the same brush at the same radius" is not the same
+    // work twice running. The fixed mesh and the hierarchy have had
+    // `StageTelemetry` since add-extreme-poly-runtime; this is the third.
+    //
+    // Same vocabulary as the other two, deliberately, so a row from each can be
+    // compared. `SculptStage::Topology` is the stage only this one uses -- the
+    // other two report zero for it, which is the difference between "does not
+    // use this stage" and "stopped filling it".
+    //
+    // Borrowed, null by default, and NO CLOCK IS READ while null.
+    void set_stage_telemetry(StageTelemetry* stages) { stages_ = stages; }
+    StageTelemetry* stage_telemetry() const { return stages_; }
+    void set_counters(SculptCounters* counters) { counters_ = counters; }
+    SculptCounters* counters() const { return counters_; }
+
     const DynamicSurface& surface() const { return surface_; }
     DynamicSurface& surface() { return surface_; }
     const DynamicBvh& bvh() const { return bvh_; }
@@ -224,6 +243,10 @@ class DynamicSculptor {
     std::vector<VertexId> ring_scratch_;
     std::vector<HalfEdgeId> fan_scratch_;
     memory::PeakTelemetry* telemetry_ = nullptr;
+    void count_remesh(const RemeshStats& stats);
+
+    StageTelemetry* stages_ = nullptr;
+    SculptCounters* counters_ = nullptr;
     // The buffers `DynamicSurface::refresh_normals` would otherwise build for
     // itself, once per stamp plus one half-edge fan per vertex it touched.
     DynamicSurface::NormalRefreshScratch normal_scratch_;

@@ -497,7 +497,10 @@ std::size_t DynamicSculptor::write_positions(TopologyDelta* record) {
     // LOCAL normal recompute over the changed faces and every vertex they
     // touch, which is the ring — a face normal is shared, so a moved vertex
     // makes its neighbours' normals stale too.
-    surface_.refresh_normals(touched_faces_, &normal_scratch_);
+    {
+        StageTimer normal_timer(stages_, SculptStage::NormalRefresh);
+        surface_.refresh_normals(touched_faces_, &normal_scratch_);
+    }
 
     if (record) {
         for (FaceId f : touched_faces_) {
@@ -554,7 +557,19 @@ DynamicStampResult DynamicSculptor::stamp(MeshBrush verb, const MeshBrushSetting
         // add-shared-brush-runtime gave it `region_`.
         telemetry_->observe_workset(region_.size());
     }
+    count(counters_, &SculptCounters::vertices_affected, out.moved_vertices);
+    count_remesh(out.remesh);
+    count(counters_, &SculptCounters::faces_touched, touched_faces_.size());
     return out;
+}
+
+// The three topology counters, in one place: `stamp_impl` has two exits and a
+// remesh can run at either, and two copies of this would drift the first time a
+// fourth operation was added.
+void DynamicSculptor::count_remesh(const RemeshStats& stats) {
+    count(counters_, &SculptCounters::splits, stats.split);
+    count(counters_, &SculptCounters::collapses, stats.collapsed);
+    count(counters_, &SculptCounters::flips, stats.flipped);
 }
 
 DynamicStampResult DynamicSculptor::stamp_impl(MeshBrush verb, const MeshBrushSettings& brush,
@@ -573,28 +588,45 @@ DynamicStampResult DynamicSculptor::stamp_impl(MeshBrush verb, const MeshBrushSe
     const bool after = topology.enabled && (timing == RemeshTiming::AfterBrush ||
                                             timing == RemeshTiming::BeforeAndAfter);
 
-    if (before)
+    if (before) {
+        StageTimer topology_timer(stages_, SculptStage::Topology);
         out.remesh = remesh_region(surface_, &bvh_, brush.center, brush.radius, topology, record);
+    }
 
     const BrushModel model = model_of(verb);
     const BrushRuntimePlan plan = compile_plan(model, brush);
-    if (!gather(brush, gate, brush.geodesic)) {
+    bool reached = false;
+    {
+        StageTimer query_timer(stages_, SculptStage::SpatialQuery);
+        reached = gather(brush, gate, brush.geodesic);
+    }
+    count(counters_, &SculptCounters::vertices_considered, region_.size());
+    count(counters_, &SculptCounters::kernel_passes,
+          static_cast<std::uint64_t>(plan.smooth_passes > 0 ? plan.smooth_passes : 1));
+    if (!reached) {
         if (after) {
+            StageTimer topology_timer(stages_, SculptStage::Topology);
             const RemeshStats late =
                 remesh_region(surface_, &bvh_, brush.center, brush.radius, topology, record);
             out.remesh.split += late.split;
             out.remesh.collapsed += late.collapsed;
             out.remesh.flipped += late.flipped;
         }
+        count_remesh(out.remesh);
         return out;
     }
 
-    if (plan.needs_neighbors)
+    if (plan.needs_neighbors) {
+        StageTimer neighbor_timer(stages_, SculptStage::NeighborBuild);
         build_neighbors(plan.needs_neighbor_normals, plan.needs_neighbor_colors);
+    }
 
+    StageTimer snapshot_timer(stages_, SculptStage::Snapshot);
     const SculptSnapshot snapshot = snapshot_of();
     const SculptNeighbors neighbors = plan.needs_neighbors ? neighbors_of() : SculptNeighbors{};
+    snapshot_timer.stop();
 
+    StageTimer kernel_timer(stages_, SculptStage::Kernel);
     if (plan.model.target == BrushWriteTarget::Color) {
         color_target_.resize(region_.size());
         for (std::size_t i = 0; i < region_.size(); ++i)
@@ -605,6 +637,8 @@ DynamicStampResult DynamicSculptor::stamp_impl(MeshBrush verb, const MeshBrushSe
             kernel_paint(snapshot, brush, color_current_.data(), color_target_.data());
         else
             kernel_smear(snapshot, neighbors, brush, color_current_.data(), color_target_.data());
+        kernel_timer.stop();
+        StageTimer write_timer(stages_, SculptStage::Writeback);
         out.moved_vertices = write_colors(record);
     } else {
         displacement_.assign(region_.size(), kernel::cf3(0, 0, 0));
@@ -651,8 +685,11 @@ DynamicStampResult DynamicSculptor::stamp_impl(MeshBrush verb, const MeshBrushSe
             case MeshBrush::Smear:
                 break;  // handled above, or not offered
         }
+        kernel_timer.stop();
+        StageTimer write_timer(stages_, SculptStage::Writeback);
         out.moved_vertices = write_positions(record);
     }
+    kernel_timer.stop();
 
     for (std::size_t i = 0; i < region_.size(); ++i) {
         const DynamicVertex* rec = surface_.vertex(region_.items[i].as_surface_vertex());
@@ -662,6 +699,7 @@ DynamicStampResult DynamicSculptor::stamp_impl(MeshBrush verb, const MeshBrushSe
     }
 
     if (after) {
+        StageTimer topology_timer(stages_, SculptStage::Topology);
         const RemeshStats late =
             remesh_region(surface_, &bvh_, brush.center, brush.radius, topology, record);
         out.remesh.split += late.split;

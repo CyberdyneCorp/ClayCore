@@ -703,6 +703,13 @@ struct PyMeshSculptor {
     bool has_frame = false;
     math::Transform frame;
 
+    // The per-stage breakdown, OWNED HERE and wired into the engine only while
+    // a script has asked for it. Off by default: a stamp is the thing being
+    // measured, so an unconditional clock read per stage would be a cost the
+    // measurement then included.
+    mesh::StageTelemetry stages;
+    mesh::SculptCounters counters;
+
     kernel::cfloat3 to_local(kernel::cfloat3 p) const {
         return has_frame ? frame.apply_inverse(p) : p;
     }
@@ -5551,6 +5558,63 @@ NB_MODULE(pyclay, m) {
             },
             "cavity"_a = nb::none(), "groups"_a = nb::none(), "active_group"_a = 0,
             nb::keep_alive<1, 2>(), nb::keep_alive<1, 3>(), kAutomaskInputsDoc)
+        .def(
+            "set_stage_report_enabled",
+            [](PyMeshSculptor& s, bool enabled) {
+                mesh::MeshSculptor& live = s.live(false);
+                live.set_stage_telemetry(enabled ? &s.stages : nullptr);
+                live.set_counters(enabled ? &s.counters : nullptr);
+            },
+            "enabled"_a,
+            "Start or stop timing and counting the stages of every stamp.\n\n"
+            "Off by default and nothing is measured until you ask: a stamp is the\n"
+            "thing being measured, so an unconditional clock read per stage would be\n"
+            "a cost the measurement then included.")
+        .def(
+            "reset_stage_report",
+            [](PyMeshSculptor& s) {
+                s.stages.reset();
+                s.counters.reset();
+            },
+            "Zero it, so the next stamp is measured on its own.")
+        .def_prop_ro(
+            "stage_report",
+            [](const PyMeshSculptor& s) {
+                nb::dict out;
+                nb::dict nanos, calls;
+                for (std::size_t i = 0; i < mesh::kSculptStageCount; ++i) {
+                    const char* name =
+                        mesh::StageTelemetry::name(static_cast<mesh::SculptStage>(i));
+                    nanos[name] = s.stages.nanos[i];
+                    calls[name] = s.stages.calls[i];
+                }
+                out["nanos"] = nanos;
+                out["calls"] = calls;
+                out["vertices_considered"] = s.counters.vertices_considered;
+                out["vertices_affected"] = s.counters.vertices_affected;
+                out["positions_measured"] = s.counters.positions_measured;
+                out["faces_touched"] = s.counters.faces_touched;
+                out["chunks_touched"] = s.counters.chunks_touched;
+                out["neighbors_gathered"] = s.counters.neighbors_gathered;
+                out["kernel_passes"] = s.counters.kernel_passes;
+                out["splits"] = s.counters.splits;
+                out["collapses"] = s.counters.collapses;
+                out["flips"] = s.counters.flips;
+                out["detail_blocks_touched"] = s.counters.detail_blocks_touched;
+                out["history_bytes"] = s.counters.history_bytes;
+                out["scratch_high_water"] = s.counters.scratch_high_water;
+                return out;
+            },
+            "Where the stamps went, and WHAT THEY DID.\n\n"
+            "`nanos` and `calls` are per stage, by name. The rest are counts, and\n"
+            "they are the half a duration cannot supply: a stage that got slower\n"
+            "because it touched twice as much and one whose inner loop regressed are\n"
+            "the same number.\n\n"
+            "`vertices_considered` and `vertices_affected` DIFFER, and the gap is the\n"
+            "falloff's rim plus whatever a mask held still — the first thing to look\n"
+            "at when a dab costs more than it should.\n\n"
+            "Accumulated from the moment you enable it, so a script measuring a\n"
+            "stroke reads the stroke; `reset_stage_report` measures one dab.")
         .def(
             "use_layer_transform",
             [](PyMeshSculptor& s) {
