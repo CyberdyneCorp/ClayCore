@@ -2657,7 +2657,48 @@ own status rather than a pipeline's, the difference between "no matches" and
 the revert proof itself — *establish that this check could have produced a
 different answer, then read the answer.*
 
-### The vacuity guard: the assertion form of the revert proof
+### Survivable and invisible are the same property
+
+A correction to review advice I gave, and the cost was mine to see and I did not.
+
+Reviewing a document-owned topology cache, I said: take the CHOKEPOINT (invalidate
+where the triangles are installed, so no writer can forget) **and** keep the
+FINGERPRINT (verify each entry against the mesh it is about to serve, so a missed
+invalidation is a slow miss rather than a wrong adjacency). *"Both, not either."*
+
+Then the port missed a chokepoint. `install_mesh_geometry` is not the only place
+triangles enter a layer — `note_mesh_geometry_replaced` is the other, because a
+WELD rewrites them in place and never reaches the installer. **Nothing failed.**
+The fingerprint absorbed it: a weld moves the vertex and triangle counts, the
+entry fails verification, the cache rebuilds. **120 ms where 0.25 ms was
+promised, invisible to every correctness test in the suite.**
+
+The sentence that names it, from the session that hit it:
+
+> Making a system survivable and making its faults invisible are the same
+> property, not two.
+
+**That is a real cost of defence in depth and I did not weigh it.** A fallback
+that makes a fault survivable removes the symptom that would have found it: the
+second layer buys correctness and spends detectability. Asking for both is still
+right here — a wrong adjacency is worse than a slow one — but it is a trade
+rather than a free addition, and **the review that asks for both owes the
+compensating gate.**
+
+**That gate is to assert the MECHANISM ran, not that the output is right.**
+`entries == 1`, `hits == 1`. A correctness test passes happily over a cache that
+has silently stopped caching; only a test that asserts the fast path was TAKEN
+can see it. Same instrument as the vacuity guard below and as *"which path can
+observe this defect"* — and here it caught two of four quiet failures in a rebase
+where three of the four produced no error at all.
+
+**The general form of that rebase:** a patch built against an unmerged branch
+encodes assumptions its merge invalidates, and **the invalidations are mostly
+quiet** — a reset file silently reverting another change, a blanket conflict rule
+dropping hunks that needed both sides, a chokepoint that arrived on the branch
+after the patch was written. The compiler catches the load-bearing ones. Nothing
+catches the ones that only cost speed.
+
 ### The vacuity guard: the assertion form of the revert proof
 
 The cheapest instrument in this document, and the one that turns a judgement into
