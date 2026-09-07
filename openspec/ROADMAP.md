@@ -2517,6 +2517,63 @@ item, and does this one want that? The answer is often yes — a mirrored cut is
 defensible — but it should be a decision with a sentence behind it rather than a
 default nobody chose.
 
+### The cross-level refresh is on the per-dab path, and it was priced elsewhere at 18x
+
+`MultiresSculptor::stamp` calls `bind()` on every dab, and `bind()` on a binding
+that is still good calls `cross_level_at(level)`, which calls
+`refresh_cross_level` — a walk over the region rim re-subdividing every outside
+vertex from the parent's positions. Every dab, whether or not anything below
+moved.
+
+That is deliberate and the reason is written beside it: the outside vertices
+belong to the level BELOW, a stroke down there moves them without this level's
+cache going stale, and *"tracking them would be a fourth revision counter
+guarding a walk over the region rim"*. Handing back what was last read would be
+an answer a reader cannot tell from a current one. The behaviour has a gate.
+
+**What the trade was made without is a number, and the iPad session has one from
+its own halo**, which cached the outside positions and refreshed only when the
+parent moved: refreshing on every evaluation instead cost **18x on a
+re-evaluation that had not moved the parent — 0.0002 to 0.0036 ms.** Their
+structure is the same shape as ours, so the figure transfers.
+
+Two things keep this a follow-up rather than a defect. The 18x is measured on
+the case where **nothing** below moved, which is the best case for caching and
+the worst case for us; a crossing stamp writes the coarse side, so on a regional
+hierarchy under an actual stroke the parent often HAS moved and the refresh is
+work that had to happen. And the correctness argument for re-reading is sound —
+the cheap version needs an invalidation signal, which is the fourth counter the
+comment declines.
+
+**What would settle it:** measure the refresh as a fraction of a dab on a
+regional hierarchy under a real stroke, splitting the parent-moved and
+parent-unmoved cases, before adding any counter. A 18x on 0.0002 ms is 0.0036 ms
+and may be invisible beside the stamp; the same ratio on a rim ten times longer
+is not. **The ratio is transferable and the absolute is not**, which is the whole
+of why this row says "measure" rather than "fix".
+
+### `openspec validate` cannot see a change directory nobody is implementing
+
+Found by the iPad session while rebasing: its #484 was carrying three files of
+#485's openspec change, swept in by a stash cycle. Nothing caught it.
+`openspec validate --all --strict` is perfectly happy with a proposal whose
+implementation is absent — which is **correct** for a change under review, and is
+exactly why a stray one is invisible.
+
+The same shape as the ABI-minor collision recorded above: a check that passes
+because the thing it would object to is indistinguishable, in isolation, from
+something legitimate. A proposal with no code is the normal state of a proposal;
+a version line agreeing with the branch it was merged from is the normal state of
+a merge. **Both gates are answering correctly and neither is answering the
+question a reviewer has.**
+
+The question in both cases is about the RELATIONSHIP to work outside the diff —
+is this change directory one this branch owns, is this minor one another branch
+claims — and no gate in this repository asks anything of that kind. Recorded
+together rather than separately because the fix, if there is one, is a single
+idea: a gate that reads the branch's own manifest of what it claims and checks
+it against what everyone else has claimed.
+
 ## Requirements taken from their bugs
 
 Worth writing into the specs they touch, because a competitor's known failure is
