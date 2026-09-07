@@ -3961,6 +3961,25 @@ clay_result clay_mesh_voxel_remesh(const clay_mesh* source,
  * rebuilt in between, the commit is refused with CLAY_ERROR_FORWARD_VERSION
  * rather than overwriting work the artist did while waiting.
  *
+ * EVERY WHOLESALE REPLACEMENT ADVANCES IT, history included: an attach, a
+ * rebuild through the document, a weld that changed something, an undo, a redo
+ * and a replayed journal event. Through 0.84.0 undo, redo and replay did not,
+ * because the counter lived beside the ABI handle rather than beside the
+ * triangles — so a host that rebuilt, undid and kept sculpting was refused on
+ * the next dab, holding an adjacency and a BVH over triangles the document no
+ * longer had, with nothing naming the cause (#472).
+ *
+ * IT ADVANCES ON AN UNDO RATHER THAN RETURNING TO WHAT IT WAS. The number is an
+ * invalidation token for YOUR live caches, not the age of the restored mesh: a
+ * cache built over the rebuilt triangles is wrong after the undo too, and a
+ * revision handed back to its old value would say the opposite. So a rebuild
+ * reads 2, undoing it reads 3, and redoing reads 4.
+ *
+ * PER DOCUMENT INSTANCE, and not carried in a saved file. Nothing it invalidates
+ * survives a reopen, so a loaded document starts a fresh generation at 1 for
+ * every mesh layer it holds; a token held across a save and a reopen is
+ * meaningless rather than merely stale.
+ *
  * Zero for a layer that is not a mesh layer, or does not exist. */
 clay_result clay_document_mesh_layer_revision(const clay_document* doc, clay_layer_id layer,
                                               uint64_t* out_revision);
