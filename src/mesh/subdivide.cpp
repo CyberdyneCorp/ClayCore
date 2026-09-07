@@ -233,6 +233,114 @@ LevelTopology subdivide_topology_for_patches(const LevelTopology& parent,
     return child;
 }
 
+std::size_t LevelHalo::bytes() const {
+    return faces.bytes() + full_of.capacity() * sizeof(std::uint32_t) +
+           positions.capacity() * sizeof(kernel::cfloat3) +
+           vertex_face_offsets.capacity() * sizeof(std::uint32_t) +
+           vertex_faces.capacity() * sizeof(std::uint32_t);
+}
+
+LevelHalo build_level_halo(const LevelTopology& parent, const LevelConnectivity& conn,
+                           const std::vector<char>& keep, const LevelTopology& child) {
+    LevelHalo halo;
+    halo.stored_count = child.vertex_count;
+    // A level that stores every vertex its parent's layout defines has no ring
+    // outside itself, and neither has one built from an empty `keep` -- that is
+    // the dense path, where `subdivide_topology_for_patches` forwards to
+    // `subdivide_topology`.
+    if (child.dense() || keep.empty()) return halo;
+
+    const ChildLayout layout = ChildLayout::of(parent, conn);
+
+    // A DIRECT map from the layout id to the stored id, built once and dropped
+    // at the end of this call, rather than `ChildIndex::stored`'s binary search
+    // per corner. Measured: the search is consulted sixteen times per parent
+    // face and costs a dozen steps each, and it was 70% of what this whole
+    // neighbourhood cost to build.
+    //
+    // It is sized by the PARENT's layout, not by the dense surface, so it stays
+    // small for exactly the reason a regional level exists: the parent of a
+    // regional level is itself regional.
+    std::vector<std::uint32_t> stored_of(layout.total, kNoVertex);
+    for (std::uint32_t i = 0; i < child.vertex_count; ++i) {
+        const std::uint32_t full = child.dense() ? i : child.full_of[i];
+        if (full < stored_of.size()) stored_of[full] = i;
+    }
+    const auto stored_id = [&](std::uint32_t layout_id) {
+        return layout_id < stored_of.size() ? stored_of[layout_id] : kNoVertex;
+    };
+
+    // Pass one: the candidate faces, in the parent's own face order, corners
+    // still in the layout's numbering. Emitted by the same expression
+    // `subdivide_topology_for_patches` uses, so a halo face IS the dense
+    // level's face.
+    std::vector<std::uint32_t> layout_corners;
+    for (std::uint32_t f = 0; f < parent.face_count; ++f) {
+        const std::uint32_t patch = parent.patch_of(f);
+        if (patch < keep.size() && keep[patch]) continue;  // refined: already stored
+        std::uint32_t arity = 0;
+        const std::uint32_t begin = parent.face_begin(f);
+        const std::uint32_t* corners = parent.face(f, &arity);
+        for (std::uint32_t i = 0; i < arity; ++i) {
+            const std::uint32_t quad[4] = {corners[i],
+                                           layout.edge_base + conn.corner_edge[begin + i],
+                                           layout.face_base + f,
+                                           layout.edge_base +
+                                               conn.corner_edge[begin + (i + arity - 1) % arity]};
+            // ONLY WHERE IT TOUCHES THE LEVEL. A face of the unrefined
+            // neighbourhood that reaches no stored vertex contributes to no
+            // stored vertex's normal, and keeping it would make the halo cost
+            // the surface outside the region rather than the region's boundary.
+            bool touches = false;
+            for (std::uint32_t c : quad) touches = touches || stored_id(c) != kNoVertex;
+            if (!touches) continue;
+            for (std::uint32_t c : quad) layout_corners.push_back(c);
+        }
+    }
+    if (layout_corners.empty()) return halo;
+
+    // Pass two: the halo-only vertices, ascending and unique, so the numbering
+    // is a function of the topology rather than of visit order.
+    for (std::uint32_t c : layout_corners)
+        if (stored_id(c) == kNoVertex) halo.full_of.push_back(c);
+    std::sort(halo.full_of.begin(), halo.full_of.end());
+    halo.full_of.erase(std::unique(halo.full_of.begin(), halo.full_of.end()), halo.full_of.end());
+    const ChildIndex halo_index = halo.index();
+
+    halo.faces.corners.resize(layout_corners.size());
+    for (std::size_t i = 0; i < layout_corners.size(); ++i) {
+        const std::uint32_t stored = stored_id(layout_corners[i]);
+        halo.faces.corners[i] = stored != kNoVertex
+                                    ? stored
+                                    : halo.stored_count + halo_index.stored(layout_corners[i]);
+    }
+    halo.faces.face_count = static_cast<std::uint32_t>(layout_corners.size() / 4);
+    halo.faces.vertex_count = halo.stored_count + halo.halo_vertex_count();
+    halo.positions.assign(halo.halo_vertex_count(), kernel::cf3(0, 0, 0));
+
+    // The incidences, over the STORED vertices only: that is what a normal sum
+    // walks, and an entry for a halo-only vertex would be storage nothing reads.
+    halo.vertex_face_offsets.assign(halo.stored_count + 1, 0);
+    for (std::uint32_t f = 0; f < halo.faces.face_count; ++f)
+        for (std::uint32_t i = 0; i < 4; ++i) {
+            const std::uint32_t v = halo.faces.corners[f * 4 + i];
+            if (v < halo.stored_count) halo.vertex_face_offsets[v + 1]++;
+        }
+    for (std::uint32_t v = 0; v < halo.stored_count; ++v)
+        halo.vertex_face_offsets[v + 1] += halo.vertex_face_offsets[v];
+    halo.vertex_faces.resize(halo.vertex_face_offsets[halo.stored_count]);
+    {
+        std::vector<std::uint32_t> cursor(halo.vertex_face_offsets.begin(),
+                                          halo.vertex_face_offsets.end() - 1);
+        for (std::uint32_t f = 0; f < halo.faces.face_count; ++f)
+            for (std::uint32_t i = 0; i < 4; ++i) {
+                const std::uint32_t v = halo.faces.corners[f * 4 + i];
+                if (v < halo.stored_count) halo.vertex_faces[cursor[v]++] = f;
+            }
+    }
+    return halo;
+}
+
 namespace {
 
 // The four Catmull-Clark rules, over any value type that adds and scales. Used

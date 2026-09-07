@@ -76,16 +76,25 @@ inline void world_to_frame(const SurfaceFrame& f, kernel::cfloat3 d, float* t, f
 // sum is the area vector of the polygon whatever it does out of plane, and its
 // LENGTH is twice the area, so summing the unnormalized face normals over a
 // vertex's faces is the area weighting for free.
+//
+// `halo`, when given, is the ring a REGIONAL level does not store, and it is
+// what makes a regional level's boundary normal the dense hierarchy's rather
+// than the average of half a ring. Without it, measured against a hierarchy
+// refined everywhere to the same level, the boundary normals were wrong by
+// 0.406 (23.4 degrees) at level 1 -- and a normal builds a frame, and a frame
+// reconstructs stored detail, so that error reached the surface and not just
+// the shading. See `LevelHalo` in `subdivide.h`. Null, and a dense level, cost
+// one branch per vertex.
 void level_normals(const LevelTopology& topology, const LevelConnectivity& conn,
                    const std::vector<kernel::cfloat3>& positions,
-                   std::vector<kernel::cfloat3>* out);
+                   std::vector<kernel::cfloat3>* out, const LevelHalo* halo = nullptr);
 
 // The same for a subset. `inout` must already be sized to the level; entries
 // outside `vertices` are neither read nor written.
 void level_normals_partial(const LevelTopology& topology, const LevelConnectivity& conn,
                            const std::vector<kernel::cfloat3>& positions,
                            const std::vector<std::uint32_t>& vertices,
-                           std::vector<kernel::cfloat3>* inout);
+                           std::vector<kernel::cfloat3>* inout, const LevelHalo* halo = nullptr);
 
 // -- frames -------------------------------------------------------------------
 
