@@ -3205,6 +3205,71 @@ arriving as a claim about users rather than about a test — and the host declin
 to let its own clean result be quoted in the direction that would have flattered
 the original wording.
 
+### A constraint judged against the wrong entry point of the same library
+
+A downstream team offered to relax a correct restriction, on the strength of a
+burden the asking host does not actually carry — and the host told them not to.
+
+CyberRemesherAndUV's reader is **triangles-only, hard**, at `handoff.cpp:403` on
+their side. Integrating against it, they offered to widen it. The consuming host
+declined, and it was right to, because
+`clay_mesh_save_handoff` already guarantees what the restriction requires.
+Verified here rather than relayed:
+
+```
+src/io/handoff.cpp:41   "mesh_data.h guarantees `indices` is the triangulation
+                         of the quads over the same positions"
+src/io/handoff.cpp:49   normals computed when absent
+clay.h                  "THE FACES ARE ALWAYS TRIANGLES ... NORMALS ARE ALWAYS
+                         PRESENT"
+```
+
+**What made the restriction look burdensome was `clay_mesh_save`** — a
+*different* entry point of the same library, which does carry quads. Judged
+against that call the reader looks restrictive; judged against the call actually
+being used it costs nothing.
+
+**So a requirement can be evaluated against the wrong member of a family and come
+out backwards.** Nobody misread the reader and nobody misread the writer; the
+error would have been in which writer the reader was being compared to. And the
+outcome of getting it wrong is worse than a bug — a *correct* check gets widened,
+permanently, on behalf of a caller who never needed it, and nothing afterwards
+records that the reason was mistaken.
+
+The question that catches it: **which entry point will actually be called?** —
+asked before deciding whether a constraint is a burden. A library with two save
+paths has two answers to "what does the file contain", and only one of them is
+the contract in play.
+
+### The concurrency default is a two-repo finding
+
+`ci.yml` in this repository had no `concurrency:` group, so a force-push queued a
+second run beside the first rather than replacing it. Two sessions' ordinary
+rebases left **47 superseded runs queued**, each holding three macOS jobs, and a
+PR nobody had touched sat with its jobs UNSTARTED for 5h39m.
+
+The consuming host checked its own workflow **expecting to find a group with a
+bad key** and found **none at all**: six of its seven queued runs were dead work,
+including a nine-hour-old run for a branch whose PR had merged three hours
+earlier.
+
+**That makes it a default nobody sets rather than a mistake somebody made** — and
+that is the difference between a fix and a lesson. A misconfigured group is one
+repository's problem; an absent one is what every repository starts with.
+
+The two decisions worth carrying with the fix, and the second is the one the
+default will not give you:
+
+```
+group: ci-${{ github.ref }}                                   key on the REF
+cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}    NOT plain true
+```
+
+Keying on the SHA puts every run in its own group and cancels nothing — a change
+that looks like a fix and does nothing. And **`cancel-in-progress: true` would
+cancel a merge run on the default branch**, leaving a commit somebody will later
+cite with no verdict: a quieter failure than a slow queue and a worse one.
+
 ### The mirror: a failure that looks like a FINDING
 
 Everything else in this section is a failure that looks like SUCCESS — a gate
