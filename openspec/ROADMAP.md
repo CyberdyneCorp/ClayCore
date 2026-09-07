@@ -3205,6 +3205,49 @@ arriving as a claim about users rather than about a test — and the host declin
 to let its own clean result be quoted in the direction that would have flattered
 the original wording.
 
+### "We validate the header" describes the bug and the fix identically
+
+Prompted by a downstream tag that hardened a PLY reader against a header sizing
+an allocation from an attacker-controlled count. Checked here rather than
+assumed:
+
+```
+src/io/ply.cpp:387  if (per_vertex > 0 && h.vertex_count > available / per_vertex)
+             :388      return fail(Malformed, "declared counts exceed payload");
+             ...
+             :399  m.positions.reserve(h.vertex_count);
+```
+
+Absent, and for two reasons rather than one. The guard **precedes the reserve**
+by eight lines. And it **DIVIDES** — `available / per_vertex` — rather than
+multiplying a claimed count by a stride and comparing, **so the bound cannot
+overflow while computing itself.**
+
+**That second half is the finding.** A reader that computes
+`vertex_count * stride > available` is *also* validating the header, is also
+refusing before the reserve, and is wrong: the multiply overflows and the
+comparison passes. **Two implementations, one correct and one not, and the
+sentence describing them is the same sentence.**
+
+So *"we validate the header before allocating"* is a claim that **cannot be
+reviewed from the description** — it is true of both, and the difference is only
+visible by reading which arithmetic the guard does. A code review conducted at
+the level of the comment finds nothing to object to in either.
+
+**This is the entry-point near-miss in a different material.** There the error
+would have been in which writer a reader was compared against; here it is in
+which arithmetic a shared phrase denotes. Both are cases where **the abstraction
+everyone reasons in is coarser than the property that decides correctness** — and
+in both, the thing that catches it is refusing to stop at the description.
+
+**The pipeline's exposure, now known at all three readers:** ours divides and
+refuses early; the downstream remesher had the defect and fixed it in the tag
+being pinned; the consuming host **parses no mesh format at all** — every import
+goes through `clay_mesh_load`, so the third reader does not exist. Its
+`ImportBudget` refusal is the same shape one layer up, and its author had filed
+that as a memory-pressure control rather than a security boundary until this
+exchange.
+
 ### A constraint judged against the wrong entry point of the same library
 
 A downstream team offered to relax a correct restriction, on the strength of a
