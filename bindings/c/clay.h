@@ -545,6 +545,26 @@ typedef struct clay_memory_report {
     uint64_t essential;    /* the user's work; never released */
     uint64_t rebuildable;  /* reconstructs to an identical surface */
     uint64_t undoable;     /* undo depth, and the host's own policy */
+
+    /* -- the topology cache (ABI 0.89.0, share-mesh-topology-cache) ----------
+     *
+     * The adjacency the mesh sculptors over a layer share, held by the DOCUMENT
+     * — so unlike the surface tier above, this line is filled by
+     * clay_document_memory with no ledger from the host.
+     *
+     * REBUILDABLE, and reached with clay_document_trim_topology_cache. It is
+     * ~10 MB for a 296k-triangle layer, which is worth releasing under pressure
+     * and worth 120 ms to rebuild, so it is neither free to hold nor free to
+     * drop. clay_document_topology_cache_stats is the finer view.
+     *
+     * BELOW THE THREE ROLL-UPS, not beside the tier it belongs with, and that
+     * placement is the rule rather than an oversight: `essential`,
+     * `rebuildable` and `undoable` are at offsets every caller compiled since
+     * ABI 0.78.0 has baked in, so a field inserted above them is a re-layout
+     * and a breaking change. It is still counted INSIDE `rebuildable` and
+     * inside `total`, so the roll-ups stay true — which is the direction a
+     * memory report has to err in, and the same trade the surface tier made. */
+    uint64_t topology_cache;
 } clay_memory_report;
 
 /* -- what a host will spend, and what it may take back ------------------------
@@ -734,6 +754,71 @@ clay_result clay_document_memory(const clay_document* doc, clay_memory_report* o
 clay_result clay_document_memory_with_surfaces(const clay_document* doc,
                                                const clay_memory_ledger* surfaces,
                                                clay_memory_report* out_report);
+
+/* -- the topology cache (share-mesh-topology-cache) ---------------------------
+ *
+ * WHAT IT IS. Creating a mesh sculptor over a layer builds the weld classes and
+ * the neighbourhood CSR its brushes walk, and that is the WHOLE of what a
+ * sculptor costs to construct: 120.8 ms on a 296k-triangle mesh, against a
+ * sculptor whose other members are empty vectors. A second sculptor over the
+ * same unchanged triangles used to pay 123.6 ms for the identical partition.
+ * The document now holds one per layer and hands it to both; the second create
+ * is 0.25 ms.
+ *
+ * WHAT INVALIDATES IT: replacing a layer's triangles. What does NOT: sculpting.
+ * A weld partition is pinned when it is built and positions move under it
+ * freely — that is the fixed-topology contract, and a sculptor live across a
+ * stroke has always behaved this way, so a sculptor created after the stroke
+ * now gets what the live one had. A vertex dragged out of a coincidence it was
+ * welded into therefore stays in its class. That is deliberate and it is the
+ * only behavioural difference this cache makes.
+ *
+ * AN ENTRY IS VERIFIED, NOT TRUSTED. Every lookup fingerprints the cached entry
+ * against the mesh it is about to be served for — counts, weld epsilon and a
+ * hash of the index buffer, 0.25 ms — so two meshes with identical vertex and
+ * triangle counts and different connectivity cannot be served each other's
+ * data, and a replacement path that failed to invalidate is a slow miss rather
+ * than a wrong answer. */
+
+typedef struct clay_topology_cache_stats {
+    uint32_t struct_size; /* = sizeof(clay_topology_cache_stats); required */
+
+    uint64_t entries; /* one per mesh layer that has been sculpted */
+    uint64_t bytes;   /* what a trim could reach, if nothing held it */
+
+    /* HITS AND MISSES ARE THE POINT, and are why this call exists rather than
+     * only a byte count. A cache that never hits and a cache that is not there
+     * are indistinguishable from outside — same answers, same timings within
+     * noise — and an integrator who cannot tell the difference cannot tell
+     * whether their session pattern is defeating it. */
+    uint64_t hits;
+    uint64_t misses;
+    /* Entries the cache let go of: an invalidation, a fingerprint mismatch that
+     * rebuilt over an existing entry, a trim, a document close. */
+    uint64_t evictions;
+
+    /* Cumulative, in nanoseconds. build_ns is what the cache exists to avoid
+     * and verify_ns is what it costs to be sure; a host reading the two
+     * together is reading the trade directly rather than taking this comment's
+     * word for it. */
+    uint64_t build_ns;
+    uint64_t verify_ns;
+} clay_topology_cache_stats;
+
+clay_result clay_document_topology_cache_stats(const clay_document* doc,
+                                               clay_topology_cache_stats* out_stats);
+
+/* Release every cached entry NO LIVE SCULPTOR IS HOLDING, and report the bytes.
+ *
+ * Nothing a live sculptor holds is released, and that is a fact rather than a
+ * best effort: entries are reference-counted and the cache can see whether it
+ * is the only holder. So this is safe to call from a memory warning that
+ * arrives mid-stroke — it will release the layers nobody is working on and
+ * leave the one under the finger alone.
+ *
+ * out_released_bytes may be NULL. A trim that released nothing is CLAY_OK with
+ * zero, not an error: "there was nothing to give back" is an answer. */
+clay_result clay_document_trim_topology_cache(clay_document* doc, uint64_t* out_released_bytes);
 
 /* The same breakdown for ONE layer, so a large document can be attributed to
  * the layer responsible rather than merely reported as large.

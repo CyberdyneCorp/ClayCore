@@ -92,6 +92,7 @@ add_library(claycore
   src/mesh/dynamic_validate.cpp
   src/mesh/topology_delta.cpp
   src/mesh/topology_ops.cpp
+  src/mesh/topology_cache.cpp
   src/mesh/dynamic_bvh.cpp
   src/mesh/surface_chunks.cpp
   src/mesh/chunk_tree.cpp

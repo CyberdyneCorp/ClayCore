@@ -221,11 +221,18 @@ std::uint64_t next_seed_revision() {
 }  // namespace
 
 MeshSculptor::MeshSculptor(Mesh& m, float weld_epsilon)
-    : mesh_(m), adjacency_(Adjacency::build(m, weld_epsilon)),
-      seed_revision_(next_seed_revision()) {}
+    : mesh_(m), topology_(std::make_shared<const Adjacency>(Adjacency::build(m, weld_epsilon))),
+      adjacency_(*topology_), seed_revision_(next_seed_revision()) {}
 
 MeshSculptor::MeshSculptor(Mesh& m, Adjacency adjacency)
-    : mesh_(m), adjacency_(std::move(adjacency)), seed_revision_(next_seed_revision()) {}
+    : mesh_(m), topology_(std::make_shared<const Adjacency>(std::move(adjacency))),
+      adjacency_(*topology_), seed_revision_(next_seed_revision()) {}
+
+MeshSculptor::MeshSculptor(Mesh& m, std::shared_ptr<const Adjacency> adjacency)
+    : mesh_(m),
+      topology_(adjacency ? std::move(adjacency)
+                          : std::make_shared<const Adjacency>(Adjacency::build(m))),
+      adjacency_(*topology_), seed_revision_(next_seed_revision()) {}
 
 const Bvh& MeshSculptor::bvh() {
     if (!bvh_) bvh_ = std::make_unique<Bvh>(Bvh::build(mesh_));

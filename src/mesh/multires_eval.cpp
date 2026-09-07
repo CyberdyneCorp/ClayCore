@@ -529,9 +529,8 @@ Mesh& MultiresSurface::level_mesh(std::uint32_t level) {
     return c.mesh;
 }
 
-const Adjacency& MultiresSurface::level_adjacency(std::uint32_t level) {
-    static const Adjacency kEmpty;
-    if (!state_ || !state_->level_ok(level)) return kEmpty;
+std::shared_ptr<const Adjacency> MultiresSurface::level_adjacency_shared(std::uint32_t level) {
+    if (!state_ || !state_->level_ok(level)) return nullptr;
     Mesh& m = level_mesh(level);
     LevelCache& c = *state_->levels[level].cache;
     if (!c.adjacency) {
@@ -539,9 +538,15 @@ const Adjacency& MultiresSurface::level_adjacency(std::uint32_t level) {
         // the surface, so an epsilon here would fuse a thin wall to itself for
         // no benefit. Two vertices that genuinely coincide bit for bit still
         // weld, which is what keeps a degenerate cage from cracking.
-        c.adjacency = std::make_unique<Adjacency>(Adjacency::build(m, 0.0f));
+        c.adjacency = std::make_shared<const Adjacency>(Adjacency::build(m, 0.0f));
     }
-    return *c.adjacency;
+    return c.adjacency;
+}
+
+const Adjacency& MultiresSurface::level_adjacency(std::uint32_t level) {
+    static const Adjacency kEmpty;
+    std::shared_ptr<const Adjacency> a = level_adjacency_shared(level);
+    return a ? *a : kEmpty;
 }
 
 const CrossLevelNeighborhood& MultiresSurface::cross_level_at(std::uint32_t level) {

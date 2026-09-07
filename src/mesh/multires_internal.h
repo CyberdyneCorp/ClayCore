@@ -46,7 +46,11 @@ struct LevelCache {
     // rather than two that can drift.
     Mesh mesh;
     bool faces_built = false;
-    std::unique_ptr<Adjacency> adjacency;
+    // SHARED, not owned alone: `MultiresSculptor::bind` hands it to the
+    // level's `MeshSculptor` rather than copying it (0.2-0.78 ms per rebind on
+    // a 296k-triangle level). A sculptor holding one across a cache drop keeps
+    // the storage until its next rebind, which is one bind away.
+    std::shared_ptr<const Adjacency> adjacency;
     bool evaluated = false;
 
     // The faces the COMPLETE neighbourhood of this level's vertices has and

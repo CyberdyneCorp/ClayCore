@@ -54,6 +54,7 @@
 #include "clay/mesh/quad_mesh.h"
 #include "clay/mesh/deform.h"
 #include "clay/mesh/sculpt.h"
+#include "clay/mesh/topology_cache.h"
 #include "clay/mesh/transfer.h"
 #include "clay/mesh/voxel_remesh.h"
 #include "clay/mesh/weld.h"
@@ -7716,6 +7717,38 @@ NB_MODULE(pyclay, m) {
                  return (*d.undo)->redo(d.doc->document, grid_for(d), mesh_for(d), nullptr, mask_for(d));
              },
              "Reapply the last undone step; returns False when there is nothing to redo")
+        .def_prop_ro(
+            "topology_cache_stats",
+            [](const PyDocument& d) {
+                nb::dict out;
+                const mesh::TopologyCacheStats s = d.topology_cache->stats();
+                out["entries"] = s.entries;
+                out["bytes"] = s.bytes;
+                out["hits"] = s.hits;
+                out["misses"] = s.misses;
+                out["evictions"] = s.evictions;
+                out["build_ns"] = s.build_nanoseconds;
+                out["verify_ns"] = s.verify_nanoseconds;
+                return out;
+            },
+            "What the shared adjacency cache has done.\n\n"
+            "Creating a MeshSculptor over a layer builds the weld classes and\n"
+            "neighbourhood CSR its brushes walk, which is the WHOLE of what a\n"
+            "sculptor costs to construct: 120.8 ms on a 296k-triangle mesh. The\n"
+            "document holds one per layer and hands it to every sculptor over\n"
+            "that layer, so the second create is 0.25 ms.\n\n"
+            "`hits` and `misses` are the point: a cache that never hits and a\n"
+            "cache that is absent are otherwise indistinguishable from here.\n\n"
+            "Sculpting does NOT invalidate an entry — a weld partition is pinned\n"
+            "when it is built and positions move under it freely, which is what a\n"
+            "sculptor live across a stroke has always done. Replacing a layer's\n"
+            "triangles does.")
+        .def(
+            "trim_topology_cache",
+            [](PyDocument& d) { return d.topology_cache->release_unused(); },
+            "Release every cached adjacency no live MeshSculptor is holding, and\n"
+            "return the bytes. Nothing a live sculptor holds is released, so this\n"
+            "is safe to call from a memory warning that arrives mid-stroke.")
         .def_prop_ro(
             "history_bytes",
             [](const PyDocument& d) {

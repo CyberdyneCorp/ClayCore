@@ -8380,3 +8380,75 @@ def test_the_cage_and_the_base_are_compared_not_reconciled():
     # A round trip does not reconcile them.
     back = clay.load_bytes(doc.to_bytes())
     assert back.layer_multires_matches_cage(layer) is False
+
+
+# -- the shared topology cache (share-mesh-topology-cache) --------------------
+#
+# A sculptor's whole construction cost is the weld classes and neighbourhood
+# CSR its brushes walk — 120.8 ms on a 296k-triangle mesh — and a document now
+# holds one per layer rather than letting every session build its own. What is
+# asserted here is what a Python host can SEE: that sharing happened, that
+# sculpting does not invalidate it, that replacing the triangles does, and that
+# a trim gives the bytes back without touching a live session.
+
+def _mesh_layer_doc(n=10):
+    doc = clay.Document()
+    carried = doc.add_mesh_layer(_plane_grid(n), "carried")
+    return doc, carried
+
+
+def test_two_sculptors_over_one_layer_share_one_adjacency():
+    doc, carried = _mesh_layer_doc()
+    assert doc.topology_cache_stats["entries"] == 0
+
+    first = clay.MeshSculptor(carried)
+    second = clay.MeshSculptor(carried)
+
+    stats = doc.topology_cache_stats
+    assert stats["entries"] == 1
+    assert stats["misses"] == 1
+    assert stats["hits"] == 1          # the second create did not build
+    assert stats["bytes"] > 0
+    assert stats["build_ns"] > 0
+    assert first.class_count == second.class_count
+    assert second.stamp("draw", center=(0, 0, 0), radius=0.5, strength=0.5) > 0
+
+
+def test_an_owned_mesh_does_not_enter_a_documents_cache():
+    doc, _ = _mesh_layer_doc()
+    clay.MeshSculptor(_plane_grid(8))   # belongs to no layer
+    assert doc.topology_cache_stats["entries"] == 0
+
+
+def test_sculpting_keeps_the_entry_and_replacing_the_triangles_does_not():
+    doc, carried = _mesh_layer_doc()
+    sculptor = clay.MeshSculptor(carried)
+    assert sculptor.stamp("draw", center=(0, 0, 0), radius=0.5, strength=0.5) > 0
+    del sculptor
+
+    # A stroke moved vertices; the partition it was built over is still the one
+    # a live sculptor would be holding, so the next session hits.
+    clay.MeshSculptor(carried)
+    assert doc.topology_cache_stats["hits"] == 1
+
+    doc.replace_mesh_layer(carried.layer, _plane_grid(12))
+    assert doc.topology_cache_stats["entries"] == 0
+    clay.MeshSculptor(doc.mesh_layer("carried"))
+    stats = doc.topology_cache_stats
+    assert stats["entries"] == 1
+    assert stats["misses"] == 2
+    assert stats["hits"] == 1
+
+
+def test_a_trim_releases_what_nothing_holds_and_keeps_what_a_session_does():
+    doc, carried = _mesh_layer_doc()
+    held = clay.MeshSculptor(carried)
+    assert doc.topology_cache_stats["entries"] == 1
+
+    assert doc.trim_topology_cache() == 0        # something holds it
+    assert doc.topology_cache_stats["entries"] == 1
+    assert held.stamp("draw", center=(0, 0, 0), radius=0.5, strength=0.5) > 0
+
+    del held
+    assert doc.trim_topology_cache() > 0
+    assert doc.topology_cache_stats["entries"] == 0
