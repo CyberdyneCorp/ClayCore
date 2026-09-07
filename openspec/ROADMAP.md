@@ -1890,6 +1890,39 @@ direction.
 
 That leaves ours as the remaining half of the pair, and now it is the only half.
 
+**And it has now fired, exactly as predicted, on this box.** A gate run at load
+30.7 failed on `BM_CAbiSmoothPreviewDelta: 0.79x BM_CAbiSmoothPreviewFullSnapshot
+above the 0.5x ceiling`. Four consecutive runs of the SAME binary on the SAME
+tree, minutes apart:
+
+```
+run 1: delta=0.3  full=0.5  ratio=0.601   delta_frac=0.10070945945945947
+run 2: delta=0.3  full=0.3  ratio=1.183   delta_frac=0.10070945945945947
+run 3: delta=0.4  full=0.3  ratio=1.722   delta_frac=0.10070945945945947
+run 4: delta=0.0  full=0.0  ratio=0.430   delta_frac=0.10070945945945947
+```
+
+**The ratio swings 4x. The byte fraction is bit-identical to seventeen decimal
+places.** The branch touches no file on that path. So the gate reported a
+failure with no provenance, and it took four manual runs to establish that the
+number meant nothing.
+
+**The knowledge was already in the file.** The comment beside that very
+threshold says the time is "THE WEAKER HALF HERE", that both sides "are
+microseconds wide and a pause/resume sits inside each", and that "the BYTES are
+the headline and `delta_frac` below gates them exactly". The tool knew which of
+its two numbers was trustworthy and had no way to act on it, because nothing
+reads the load.
+
+**Two things this sharpens.** A self-relative threshold is not automatically
+robust: this one compares two measurements from ONE run, which is the property
+recorded elsewhere in this document as what makes a threshold travel — and it
+still fails, because both sides are sub-microsecond and the noise floor is above
+the signal. *Self-relative protects against a platform, not against a scheduler.*
+And a threshold whose own comment names it the weaker of two available
+measurements should not be the one that fails the build: `delta_frac` was green
+throughout.
+
 **And it had been hiding the state of their default branch, not only two PRs.**
 Main itself was red on Performance for the same refusal-on-the-comparison-path.
 Worth adding to the pair: a guard on the wrong act does not merely block work
