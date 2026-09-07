@@ -2544,45 +2544,72 @@ Worth adding to any harness that runs a build and a test in one script: the exit
 code of the build is a precondition of the test's output meaning anything, and
 scripts that print both put them where a reader chooses.
 
-### A budget that cannot fail until the case is 3.6x slower
+### Two floors, and neither path can object to this case
 
 The device gate reported `mesh_sustained_grab: no declared budget in the
-baseline`. The obvious repair is to declare one. **That would be worse than the
-gap**, and the arithmetic says so rather than a judgement:
+baseline`. The obvious repair is to declare one. **Neither gate could ever fire
+on it**, and `check_device_bench.py` holds two different floors that say so:
 
 ```
-p95                          0.019 ms
-NOISE_FLOOR_MS               0.050 ms   (check_device_bench.py)
-smallest failing overshoot   0.069 ms   = 3.6x today
+NOISE_FLOOR_MS = 0.05      the absolute overshoot ANY failure must clear   (:59)
+0.125 ms (derived)         the baseline above which a REGRESSION can fire  (:280)
 ```
 
-A budget only fails when the overshoot clears the noise floor. So a budget set at
-today's measurement **could not fail until the case was 3.6x slower** — not a
-loose budget, not a gate at all, and a row with a number beside it reads as
-coverage. The same tool already reports this defect from the other side, when it
-says a budget sits 12.8x above its measurement and "could get 13x slower
-unnoticed".
+The second falls out of the first. A regression needs
+`measured > baseline * tolerance` AND `grew > NOISE_FLOOR_MS` (:552, tolerance
+1.40), so the floor binds until `baseline * 0.4 > 0.05` — i.e. `baseline > 0.125`.
+The tool says so in its own words at line 280: *"a figure under 0.125 ms cannot
+be objected to."*
 
-**The repair is to declare WHICH GATE, not a ceiling.** `"gate": "drift"` keeps
-the rule that must not be weakened — every case declares something, and an
-unbudgeted latency number is a measurement rather than a gate — while letting a
-case whose claim is about session LENGTH be held to a drift verdict instead of a
-millisecond ceiling it was never the right instrument for.
-
-And the declaration itself was made falsifiable in both directions, on doctored
-runs:
+Against a p95 of **0.019 ms**:
 
 ```
-windows removed   -> FAIL "declares the drift gate but records no windows,
-                           so nothing gates it"
-p95 -> 0.421 ms   -> FAIL "it has a number worth gating, so give it a budget
-                           and drop the declaration"
+budget path:      fails only above 0.069 ms  = 3.6x today
+regression path:  1.4x growth is a 0.0076 ms overshoot, never clears 0.05
 ```
 
-The second is the exemption-list rule applied to a budget: **a declaration that
-cannot go stale is a permanent escape hatch.** This one expires automatically the
-moment the case grows into measurable territory.
+So it is not "a budget would be loose". **It is that neither the budget path nor
+the regression path can ever object to this case**, whatever number is written
+beside it — and a row with a number reads as coverage. `"gate": "drift"` is the
+right answer, for a firmer reason than looseness: the case's claim is about
+session LENGTH, and a millisecond ceiling was never the instrument for it.
 
+The declaration was made falsifiable in both directions on doctored runs —
+windows removed fails with *"declares the drift gate but records no windows"*,
+and a p95 raised to 0.421 fails with *"it has a number worth gating, so give it a
+budget and drop the declaration"*. **A declaration that cannot go stale is a
+permanent escape hatch**; this one expires the moment the case grows into
+measurable territory.
+
+### A partial read that confirms a suspicion is the easiest place to stop
+
+This entry was written three times and the middle version was wrong, in a way
+worth more than the entry.
+
+The 0.125 figure was quoted from memory. Checking it, the session found
+`NOISE_FLOOR_MS = 0.05`, saw the disagreement, **announced the remembered figure
+was wrong, and retracted a note that had been right** — without asking whether
+the two numbers were the same quantity. They are not: one is the overshoot floor,
+the other the baseline below which the regression path is inert, and the second
+is derived from the first.
+
+**The read was correct and partial, and it confirmed the suspicion that prompted
+it.** That combination is the hard one: a check that disconfirms invites another
+look, and a check that confirms ends the search. The stopping rule fires exactly
+when it should not.
+
+The instrument is the one already in this file, pointed at a fact instead of a
+test: *what is the OTHER number for?* A quantity that disagrees with your
+expectation is evidence about one of them, and which one is not settled by the
+disagreement. **Ask what a value is FOR before concluding it contradicts
+another** — the same move as asking whether a fixture could tell the difference,
+and as asking which path can observe a defect.
+
+Recorded because everything else in this section was found by that discipline
+being applied to code, and this is the instance where the discipline was not
+applied to a number.
+
+### Three checks that could not fire, in one day
 ### Three checks that could not fire, in one day
 
 The generalisation, from three instances found in a single session — all in the
