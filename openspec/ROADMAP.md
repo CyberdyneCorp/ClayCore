@@ -2517,6 +2517,36 @@ item, and does this one want that? The answer is often yes — a mirrored cut is
 defensible — but it should be a decision with a sentence behind it rather than a
 default nobody chose.
 
+### The vacuity guard: the assertion form of the revert proof
+
+The cheapest instrument in this document, and the one that turns a judgement into
+a fact.
+
+A comparison gate can carry, as its last line, an assertion that **the two sides
+it compares actually differ somewhere** — the iPad session's `any_differed`. It
+caught a regression case written on a sphere: a sphere is convex, so its cavity
+is zero at the placed point and the unplaced one alike, and **every assertion in
+the case held with the fix deleted.** The guard is what failed. Three lines
+standing between a green test and a green test of nothing.
+
+**The framing that matters, which is narrower than "check the fixture is
+interesting":** it is not a check that the fixture is representative — that is a
+judgement, and judgements can be argued into. It is a check that **the comparison
+is not vacuous**, which is a fact. *"Is this fixture representative"* invites a
+discussion. *"Would this assertion fail if the fix were deleted"* has an answer.
+
+**So it is the assertion form of the revert proof this repository already
+requires**, available inside the test rather than as a separate procedure — the
+cheap mechanical half of the thing, running on every CI run instead of once at
+review. The revert proof is stronger and stays required; the guard is what
+survives after the person who ran it moves on.
+
+Worth adding to the comparison gates already in the tree that lack one. Every
+fixture failure recorded in this file — the zero-boundary-detail bit-identity
+gate, the plane cage whose normals all sat within a few degrees of +Y, the
+squashed-operand box that reached past the body, the convex sphere — would have
+been caught by a line asserting the two sides differ before asserting how.
+
 ### "It would be wrong to" is not "nothing does"
 
 One sentence from the iPad session, offered against its own work, and it names a
