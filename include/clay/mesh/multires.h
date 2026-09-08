@@ -216,6 +216,15 @@ struct MultiresEvalStats {
     std::uint64_t normals_recomputed = 0;   // display normals rewritten
     std::uint64_t full_level_rebuilds = 0;  // a whole level redone
     std::uint64_t partial_level_updates = 0;
+    // A LEVEL'S CROSS-LEVEL NEIGHBOURHOOD, ASKED FOR AND RE-DERIVED. The
+    // neighbourhood's outside positions belong to the level below, so they are
+    // re-read when that level has moved and kept when it has not; the two
+    // counters are what says which happened. `reads` counts every access that
+    // reached a level with a depth boundary, `refreshes` the subset that walked
+    // the region rim again. Both stay 0 on a uniform hierarchy, which has no
+    // neighbourhood to hold.
+    std::uint64_t cross_level_reads = 0;
+    std::uint64_t cross_level_refreshes = 0;
 };
 
 struct MultiresExportOptions {

@@ -152,11 +152,13 @@ const CrossLevelNeighborhood* cross_level_of(MultiresSurface::State& s, std::uin
     // needs no mark to do so, because `level_is_self_contained` above decides
     // "never had one" from the TOPOLOGY. A null pointer here therefore means
     // exactly one thing: this level needs a neighbourhood and does not have it.
+    ++s.stats.cross_level_reads;
     if (!c->cross) {
         c->cross = std::make_unique<CrossLevelNeighborhood>(
             build_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
                               s.levels[level].topology, s.levels[level].patch_kept));
     } else {
+        ++s.stats.cross_level_refreshes;
         refresh_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
                             c->cross.get());
     }
@@ -650,6 +652,7 @@ const CrossLevelNeighborhood& MultiresSurface::cross_level_at(std::uint32_t leve
         evaluate_up_to(s, level - 1);
     }
     const MultiresLevel& parent = s.levels[level - 1];
+    ++s.stats.cross_level_reads;
     if (!c.cross) {
         c.cross = std::make_unique<CrossLevelNeighborhood>(
             build_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
@@ -661,6 +664,7 @@ const CrossLevelNeighborhood& MultiresSurface::cross_level_at(std::uint32_t leve
     // level's cache going stale. Re-read on the way past rather than tracked,
     // because tracking them would be a fourth revision counter guarding a walk
     // over the region rim.
+    ++s.stats.cross_level_refreshes;
     refresh_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
                         c.cross.get());
     return *c.cross;
