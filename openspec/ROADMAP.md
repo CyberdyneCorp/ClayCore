@@ -4040,6 +4040,8 @@ closes the question.
 | an issue left open past its fix (#321) | its own state — it reports a removed limitation to the reader most affected, and "a layer carries no combine operation" is the sentence that makes a host NOT build on layer-level combine |
 | "the identity is the truth rather than a default" (#506) | that the identity was the only thing EXPRESSIBLE, not what was true; accurate about the code and wrong about the geometry |
 | a test run aggregated across a mid-run edit | which compilation of the fixed target it measured |
+| an allowlist entry nobody calls any more | that its justification is gone — a future re-introduction passes review silently, because the gate already says yes |
+| a comment that documents someone else's bug as though it were their contract | the bug being FIXED; a reader learns the behaviour is X and cannot learn it might stop being X |
 | **a pre-commitment made against the wrong expected value** | that a CORRECT result can be the one it pre-agreed to read as a fault |
 
 The last is the sharpest, because it **inverts a safeguard** rather than merely
@@ -4065,6 +4067,30 @@ outside, which is an argument for cross-session review rather than against it.
   COMPILES. #506's first attempt reverted a mask gate and a descriptor
   conversion together; the test then failed at its precondition and proved
   nothing about the gate.
+- **On a gate:** watch it FAIL before shipping it, in every direction it is
+  meant to fail in. #506's inventory gate was proved twice — a hand-written
+  fifth site, and the identity branch reworded away — because a gate nobody has
+  watched fail is the first row of this table.
+- **Direction is not decoration.** The `fewer` half of #506's gate is the one
+  that protects a shipping host, and it exists because an outside reader
+  insisted the direction mattered. The same insistence found a non-obvious
+  `fewer` in a neighbouring repository's ingress allowlist, where a call
+  disappearing is safe but a ROW outliving its caller is a standing permission.
+
+### Whether this section is still doing anything
+
+The honest test, because a curated list of insights that no longer produces
+checks is this same defect one level up — **a record that cannot express whether
+it is still doing anything.**
+
+This table earns its space by GENERATING the next gate, not by being
+remembered. Two data points so far, and one is against it: the
+`field_mask->sample(p)` count became a gate only because an outside reader asked
+for the number, not because the table prompted it. So the test is whether anyone
+converts another row into a check over the next few changes. **If nothing has by
+the time three more changes land, cut this section rather than curating it** —
+the eight fixes and the gates are the load-bearing output, and prose that no
+longer generates them is decoration that reads like insurance.
 
 ## The layer/item parity gate rests on an arity, and the arity is easy to miss
 
