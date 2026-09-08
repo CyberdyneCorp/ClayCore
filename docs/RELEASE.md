@@ -618,6 +618,39 @@ forward-refuse).
    while the number never repeats. A rebuild after undo-then-redo is the intended
    cost — loud and bounded, against a silent stale cache that is neither.
 
+   **0.97.0 IS such a release, and it is the one to read if you sculpt on a
+   layer that has been MOVED** (issue #506). A layer's vertices are layer-local
+   and its `xform` places them; the lattices a brush consults -- the painted
+   mask, the cavity field, the group field -- are world-addressed. Only
+   `clay_mesh_sculptor` carried a frame between the two, so on a placed layer
+   `clay_multires_sculptor_stamp`, `clay_dynamic_sculptor_stamp` and the five
+   `read_layer_stroke_stamp` entry points sampled every lattice at the
+   **unplaced** point and gated the wrong region. To an artist that is "the mask
+   didn't take", which is why it went unfiled through several releases.
+
+   **IT IS OLDER AND WIDER THAN THE AUTOMASK WORK THAT EXPOSED IT.** 0.96.0
+   making `CLAY_AUTOMASK_CAVITY` and `CLAY_AUTOMASK_SURFACE_GROUP` reachable is
+   only where it was noticed: those two stamps have taken a `mask` and sampled
+   it unplaced at EVERY version that had them, so a host that has never touched
+   `clay_automask_sources` is affected too. Eight entry points land to fix it,
+   giving the other three sculptors what the mesh sculptor already had --
+   `clay_multires_sculptor_set_world_frame` / `_world_frame` /
+   `_use_layer_transform`, the `clay_dynamic_sculptor_` pair and the
+   `clay_multires_sculpt_layer_stroke_` trio -- so the ABI half is additive and
+   nothing a caller already links moved.
+
+   **What a caller observes without calling anything new is nothing, and that
+   is the point to be careful about.** The default is still the unplaced point:
+   a host that says nothing keeps today's behaviour, wrong region and all. The
+   fix is available rather than applied, because applying it silently would
+   change where an existing brush bites. Say `..._use_layer_transform` or pass a
+   frame.
+
+   The call sites were **found by sweeping, not by enumerating**:
+   `grep "field_mask->sample(p)"` over `clay_c.cpp` returns four -- the three
+   above plus `mask_gate_for`'s own correct `!has_frame` fallback -- after two
+   independent hand enumerations both came up short.
+
    **0.96.0 CARRIES TWO CHANGES A CALLER OBSERVES, both of them landing after
    the automask entry points above and neither of them an ABI move.**
 
