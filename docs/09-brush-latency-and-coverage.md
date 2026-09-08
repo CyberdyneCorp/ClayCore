@@ -174,7 +174,7 @@ representation, `s` the SDF one, `m` a mesh layer's own triangles.
 | Move / Rotate / Scale (whole layer) | Gizmo (object) | `clay_document_set_layer_transform` | s | `sdf_layer_transform_bricks` | **27.81** ‡ | interactive |
 | — | (a stamp after a drag) | `sdf_stamp` in the state a drag left | s | `sdf_stamp_after_drag_bricks` | 1.08 | interactive |
 | — | (a stamp after a drag, grouped) | as above, in a grouped document | s | `sdf_stamp_after_group_drag_bricks` | 1.15 | interactive |
-| ClayBuildup etc., dabs INSIDE A GROUP | Clay / Clay Strips | `Op::Relief` along a stroke, in a group | s | `sdf_stroke_in_group_bricks` | 0.909 ¶ | interactive |
+| ClayBuildup etc., dabs INSIDE A GROUP | Clay / Clay Strips | `Op::Relief` along a stroke, in a group | s | `sdf_stroke_in_group_bricks` | 2.102 ¶ | interactive |
 | ClayBuildup etc., SMOOTH-blended | Clay / Clay Strips | `Op::Relief` along a stroke, quadratic blend | s | `sdf_stroke_smooth_bricks` | 0.161 | interactive |
 | Blob | — | *not implemented* | | | | |
 | Slice / Knife | Split | *not implemented* | | | | |
@@ -308,6 +308,29 @@ refill takes it on the walk that produces the field, because that walk passes
 the checkpoint anyway; where the checkpoint sits at the tape's end with nothing
 open above it, the field IS the plane and no walk is needed. See
 `openspec/changes/append-into-a-group`.
+
+**And it moved again at 0.96.0, upward, because the DIRTY BOUND was wrong.**
+The 0.909 ms above was measured while `clay_brick_cache_mark_dirty_nodes`
+marked a node's own box rather than the box its edit reaches. A dab inside a
+blended group therefore left bricks holding pre-dab values: on the 100-stamp
+fixture, 17 of 216 bricks were stale, where the identical stroke with its dabs
+at the layer ROOT left none. #490 routed the dirty call through
+`node_reach_bound`, which dilates by each enclosing group's blend support, and
+the figure quoted in the table above is now **2.102 ms a dab**.
+
+That is not a regression and the number should not be read as one. The bricks a
+24-dab stroke refills go 232 to 924, and the 4x is the blend's OWN reach rather
+than a pad: `csmin_quadratic_support(k)` is `4k`, the same constant
+`csmin_quadratic` evaluates over, so at `k = 0.05` the field really does move
+0.20 out. The case did not get slower; it started doing work it always owed.
+The root control is unchanged at 0.0339 ms a dab, which is what says this is
+the group path and not the refill.
+
+Attribution, the A/B across `f931256c` and the staleness measurement are in
+issue #497. Two things it turned up are open beside it: #507, two bricks that
+are still stale after the fix and sit far outside any blend support, and #508,
+the group chain costing 1.8x an equivalent non-grouped smooth stroke at equal
+brick count.
 
 **One case is not yet at parity, and it is named.** A first stroke into a group
 that was EMPTY at the last full refill still pays one full walk per brick on
