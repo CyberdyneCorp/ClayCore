@@ -505,7 +505,7 @@ void bake_detail_vertex(MultiresSurface::State& s, std::uint32_t level, std::uin
     }
     lev.detail.set(vertex, after);
     lev.normals_pending.push_back(vertex);
-    lev.pending.push_back(vertex);
+    lev.note_moved(vertex);
     s.stack.invalidate(level, vertex / s.stack.block_size());
 }
 

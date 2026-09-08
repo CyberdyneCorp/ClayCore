@@ -214,7 +214,7 @@ void evaluate_level0(MultiresSurface::State& s) {
         c.subdivided.clear();  // S(0) IS P(0); see LevelCache
         s.base_frames_all = true;
         c.evaluated = true;
-        lev.pending_all = true;
+        lev.note_moved_all();
     } else if (!recomposed.empty()) {
         apply_base_layers(s, &recomposed);
         // A base layer that moved has moved the CAGE the artist sees, so the
@@ -222,7 +222,7 @@ void evaluate_level0(MultiresSurface::State& s) {
         // would for a level-0 stamp, because that is what this is.
         s.base_frames_dirty.insert(s.base_frames_dirty.end(), recomposed.begin(),
                                    recomposed.end());
-        lev.pending.insert(lev.pending.end(), recomposed.begin(), recomposed.end());
+        lev.note_moved(recomposed);
         mark_patches(s, 0, recomposed);
     }
     refresh_base_frames(s);
@@ -262,7 +262,7 @@ void partial_evaluate(MultiresSurface::State& s, std::uint32_t level) {
 
     // The children whose SUBDIVIDED position the parent's motion reaches...
     const ChildIndex stored = ChildIndex::of(lev.topology);
-    dirty_children(parent.topology, pc.conn, parent.pending, stored, &s.scratch_a);
+    dirty_children(parent.topology, pc.conn, parent.pending(), stored, &s.scratch_a);
     // ...and the halo around them, whose normals — and therefore frames, and
     // therefore reconstructed detail — moved even though their subdivided
     // position did not.
@@ -289,7 +289,7 @@ void partial_evaluate(MultiresSurface::State& s, std::uint32_t level) {
     s.stats.normals_recomputed += s.scratch_c.size();
     ++s.stats.partial_level_updates;
 
-    lev.pending.insert(lev.pending.end(), s.scratch_b.begin(), s.scratch_b.end());
+    lev.note_moved(s.scratch_b);
     mark_patches(s, level, s.scratch_b);
 }
 
@@ -310,7 +310,7 @@ void reapply_recomposed(MultiresSurface::State& s, std::uint32_t level,
                           cross_level_of(s, level));
     s.stats.vertices_evaluated += vertices.size();
     s.stats.normals_recomputed += s.scratch_c.size();
-    lev.pending.insert(lev.pending.end(), vertices.begin(), vertices.end());
+    lev.note_moved(vertices);
     mark_patches(s, level, vertices);
 }
 
@@ -374,7 +374,8 @@ bool below_is_current(const MultiresSurface::State& s, std::uint32_t target) {
     if (s.base_frames_all || !s.base_frames_dirty.empty()) return false;
     for (std::uint32_t l = 0; l < target; ++l) {
         const MultiresLevel& lev = s.levels[l];
-        if (lev.pending_all || !lev.pending.empty() || !lev.normals_pending.empty()) return false;
+        if (lev.pending_all() || !lev.pending().empty() || !lev.normals_pending.empty())
+            return false;
     }
     return true;
 }
@@ -399,15 +400,14 @@ void evaluate_up_to(MultiresSurface::State& s, std::uint32_t level) {
         // whose parent changed everywhere are the same case: rebuild it whole,
         // and a whole rebuild reads the composed field so the recomposition
         // only has to happen first.
-        if (!s.levels[l].cache->evaluated || s.levels[l - 1].pending_all) {
+        if (!s.levels[l].cache->evaluated || s.levels[l - 1].pending_all()) {
             ensure_composed(s, l, nullptr);
             full_evaluate(s, l);
-            s.levels[l].pending_all = true;
-            s.levels[l].pending.clear();
+            s.levels[l].note_moved_all();
         } else {
             recomposed.clear();
             ensure_composed(s, l, &recomposed);
-            if (!s.levels[l - 1].pending.empty()) partial_evaluate(s, l);
+            if (!s.levels[l - 1].pending().empty()) partial_evaluate(s, l);
             // A block whose COMPOSITION changed moved vertices that nothing
             // below this level touched — a strength change on a layer that
             // lives here and nowhere else. Those vertices get the same
@@ -416,8 +416,7 @@ void evaluate_up_to(MultiresSurface::State& s, std::uint32_t level) {
             if (!recomposed.empty()) reapply_recomposed(s, l, recomposed);
             drain_normals_pending(s, l);
         }
-        s.levels[l - 1].pending.clear();
-        s.levels[l - 1].pending_all = false;
+        s.levels[l - 1].clear_pending();
     }
 }
 
@@ -1016,7 +1015,7 @@ void MultiresSurface::absorb_level_edit(std::uint32_t level,
         lev.normals_pending.insert(lev.normals_pending.end(), vertices.begin(), vertices.end());
         ++state_->detail_revision;
     }
-    lev.pending.insert(lev.pending.end(), vertices.begin(), vertices.end());
+    lev.note_moved(vertices);
     mark_patches(*state_, level, vertices);
     ++state_->evaluated_revision;
 }
@@ -1063,7 +1062,7 @@ void MultiresSurface::set_detail(std::uint32_t level, std::uint32_t vertex,
             frame_to_world(c.frames[vertex], value.tangent, value.bitangent, value.normal);
         lev.normals_pending.push_back(vertex);
     }
-    lev.pending.push_back(vertex);
+    lev.note_moved(vertex);
     mark_patches(*state_, level, {vertex});
     ++state_->detail_revision;
     ++state_->evaluated_revision;
@@ -1086,7 +1085,7 @@ void MultiresSurface::set_base_position(std::uint32_t vertex, kernel::cfloat3 po
         }
     }
     state_->base_frames_dirty.push_back(vertex);
-    lev.pending.push_back(vertex);
+    lev.note_moved(vertex);
     lev.normals_pending.push_back(vertex);
     mark_patches(*state_, 0, {vertex});
     ++state_->base_revision;

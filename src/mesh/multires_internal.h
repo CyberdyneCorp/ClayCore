@@ -63,7 +63,6 @@ struct LevelCache {
     // level below, and those are re-read rather than rebuilt.
     std::unique_ptr<CrossLevelNeighborhood> cross;
 
-
     // The level's chunks, and the face -> chunk map that marks them.
     //
     // IN THE CACHE, so every `drop_*_caches` releases them and a rebuild
@@ -127,10 +126,52 @@ struct MultiresLevel {
     std::unique_ptr<LevelCache> cache;
 
     // Vertices at THIS level that changed and have not yet been pushed to the
-    // level above. `pending_all` is the same statement about every vertex,
+    // level above. `pending_all()` is the same statement about every vertex,
     // which is what a freshly built or freshly reloaded level is.
-    std::vector<std::uint32_t> pending;
-    bool pending_all = true;
+    //
+    // PRIVATE, WITH THE REVISION BESIDE IT, and that is the whole invalidation
+    // argument for the cross-level neighbourhood rather than a tidiness
+    // preference. The outside positions of the level ABOVE are
+    // `subdivide_positions` of THIS level's positions, so they go stale exactly
+    // when this level's positions move -- which is exactly when this level has
+    // something to push up. A writer that moves the positions and does not
+    // queue them here has already broken the level above through `subdivided`,
+    // visibly and under existing gates; there is no way to break the
+    // neighbourhood alone. `note_moved` is therefore the one door, and the
+    // revision cannot be forgotten separately because it rides on the queue
+    // that was already load-bearing.
+    const std::vector<std::uint32_t>& pending() const { return pending_; }
+    bool pending_all() const { return pending_all_; }
+
+    // Moves whenever this level's evaluated positions MAY hold values they did
+    // not hold before. Monotonic, never serialized, and NOT reset by a cache
+    // drop -- a released level rebuilds bit-identically, so a reader comparing
+    // across the drop would be told nothing changed while the storage it read
+    // from was replaced. It lives on the level rather than in the cache for
+    // that reason.
+    std::uint64_t positions_revision() const { return positions_revision_; }
+
+    void note_moved(std::uint32_t vertex) {
+        pending_.push_back(vertex);
+        ++positions_revision_;
+    }
+    void note_moved(const std::vector<std::uint32_t>& vertices) {
+        if (vertices.empty()) return;
+        pending_.insert(pending_.end(), vertices.begin(), vertices.end());
+        ++positions_revision_;
+    }
+    // EVERY vertex, which subsumes the list rather than adding to it.
+    void note_moved_all() {
+        pending_.clear();
+        pending_all_ = true;
+        ++positions_revision_;
+    }
+    // Pushed up, not changed: the level above has consumed the queue, and
+    // nothing about the positions themselves moved.
+    void clear_pending() {
+        pending_.clear();
+        pending_all_ = false;
+    }
 
     // Vertices at this level whose DISPLAY normal is stale because something
     // wrote detail straight into the level — an undo replaying a gesture, or a
@@ -153,6 +194,11 @@ struct MultiresLevel {
     bool keeps(std::uint32_t patch) const {
         return patch_kept.empty() || (patch < patch_kept.size() && patch_kept[patch] != 0);
     }
+
+   private:
+    std::vector<std::uint32_t> pending_;
+    bool pending_all_ = true;
+    std::uint64_t positions_revision_ = 1;
 };
 
 // The cage's attributes, subdivided. Rebuildable, and built only when something
