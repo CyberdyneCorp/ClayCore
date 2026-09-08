@@ -170,7 +170,7 @@ representation, `s` the SDF one, `m` a mesh layer's own triangles.
 | — | (display) | `VoxelGrid::mesh_greedy` | v | `voxel_mesh_whole` | 13.23 | operation |
 | — | (display, incremental) | `mesh_greedy_chunks` | v | `voxel_mesh_dirty` | **2.12** | interactive |
 | Move / Rotate / Scale (gizmo, one item) | Gizmo | `clay_layer_set_transform` | s | `sdf_node_transform_bricks` | **17.27** ‡ | interactive |
-| Move / Rotate / Scale (item inside a group) | Gizmo | `clay_layer_set_transform` | s | `sdf_group_transform_bricks` | **14.07** ‡ | interactive |
+| Move / Rotate / Scale (item inside a group) | Gizmo | `clay_layer_set_transform` | s | `sdf_group_transform_bricks` | **19.2** ‡ | interactive |
 | Move / Rotate / Scale (whole layer) | Gizmo (object) | `clay_document_set_layer_transform` | s | `sdf_layer_transform_bricks` | **27.81** ‡ | interactive |
 | — | (a stamp after a drag) | `sdf_stamp` in the state a drag left | s | `sdf_stamp_after_drag_bricks` | 1.08 | interactive |
 | — | (a stamp after a drag, grouped) | as above, in a grouped document | s | `sdf_stamp_after_group_drag_bricks` | 1.15 | interactive |
@@ -427,7 +427,14 @@ A full clean gate run has NOT been recorded for this change:
 budget in `tests/device/baseline.json` were re-recorded.
 
 ‡ **Re-measured on device, 2026-08-25**, at the end of the bake-and-brush
-performance program. A full 59-case run on the reference iPad (iPad15,5,
+performance program. **One row carrying this mark has since moved:
+`sdf_group_transform_bricks` is quoted at 19.2 ms from the 0.97.0 gate
+(2026-09-08), not at the 14.07 ms this run measured.** #490 widened the dirty
+bound for a node inside a group by that group's blend support, which doubles
+the bricks a drag inside a group refills. Unlike the stroke case beside it that
+bought no correctness here -- 0 stale bricks on the old bound either way -- so
+the tightening is filed as #515 and the ceiling was re-derived rather than the
+bound weakened. A full 59-case run on the reference iPad (iPad15,5,
 iPadOS 26.5.2) from a clean tree, `valid: true`, `treeDirty: false`, nominal
 thermals at both ends, `check_device_bench.py` OK with no case over budget —
 p95 at 1000 stamps, except `volume_hpolish`, whose axis is passes and which is
