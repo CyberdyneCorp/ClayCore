@@ -152,13 +152,17 @@ const CrossLevelNeighborhood* cross_level_of(MultiresSurface::State& s, std::uin
     // needs no mark to do so, because `level_is_self_contained` above decides
     // "never had one" from the TOPOLOGY. A null pointer here therefore means
     // exactly one thing: this level needs a neighbourhood and does not have it.
+    ++s.stats.cross_level_reads;
     if (!c->cross) {
         c->cross = std::make_unique<CrossLevelNeighborhood>(
             build_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
                               s.levels[level].topology, s.levels[level].patch_kept));
-    } else {
+        c->cross_parent_revision = parent.positions_revision();
+    } else if (c->cross_parent_revision != parent.positions_revision()) {
+        ++s.stats.cross_level_refreshes;
         refresh_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
                             c->cross.get());
+        c->cross_parent_revision = parent.positions_revision();
     }
     return c->cross->empty() ? nullptr : c->cross.get();
 }
@@ -214,7 +218,7 @@ void evaluate_level0(MultiresSurface::State& s) {
         c.subdivided.clear();  // S(0) IS P(0); see LevelCache
         s.base_frames_all = true;
         c.evaluated = true;
-        lev.pending_all = true;
+        lev.note_moved_all();
     } else if (!recomposed.empty()) {
         apply_base_layers(s, &recomposed);
         // A base layer that moved has moved the CAGE the artist sees, so the
@@ -222,7 +226,7 @@ void evaluate_level0(MultiresSurface::State& s) {
         // would for a level-0 stamp, because that is what this is.
         s.base_frames_dirty.insert(s.base_frames_dirty.end(), recomposed.begin(),
                                    recomposed.end());
-        lev.pending.insert(lev.pending.end(), recomposed.begin(), recomposed.end());
+        lev.note_moved(recomposed);
         mark_patches(s, 0, recomposed);
     }
     refresh_base_frames(s);
@@ -262,7 +266,7 @@ void partial_evaluate(MultiresSurface::State& s, std::uint32_t level) {
 
     // The children whose SUBDIVIDED position the parent's motion reaches...
     const ChildIndex stored = ChildIndex::of(lev.topology);
-    dirty_children(parent.topology, pc.conn, parent.pending, stored, &s.scratch_a);
+    dirty_children(parent.topology, pc.conn, parent.pending(), stored, &s.scratch_a);
     // ...and the halo around them, whose normals — and therefore frames, and
     // therefore reconstructed detail — moved even though their subdivided
     // position did not.
@@ -289,7 +293,7 @@ void partial_evaluate(MultiresSurface::State& s, std::uint32_t level) {
     s.stats.normals_recomputed += s.scratch_c.size();
     ++s.stats.partial_level_updates;
 
-    lev.pending.insert(lev.pending.end(), s.scratch_b.begin(), s.scratch_b.end());
+    lev.note_moved(s.scratch_b);
     mark_patches(s, level, s.scratch_b);
 }
 
@@ -310,7 +314,7 @@ void reapply_recomposed(MultiresSurface::State& s, std::uint32_t level,
                           cross_level_of(s, level));
     s.stats.vertices_evaluated += vertices.size();
     s.stats.normals_recomputed += s.scratch_c.size();
-    lev.pending.insert(lev.pending.end(), vertices.begin(), vertices.end());
+    lev.note_moved(vertices);
     mark_patches(s, level, vertices);
 }
 
@@ -374,7 +378,8 @@ bool below_is_current(const MultiresSurface::State& s, std::uint32_t target) {
     if (s.base_frames_all || !s.base_frames_dirty.empty()) return false;
     for (std::uint32_t l = 0; l < target; ++l) {
         const MultiresLevel& lev = s.levels[l];
-        if (lev.pending_all || !lev.pending.empty() || !lev.normals_pending.empty()) return false;
+        if (lev.pending_all() || !lev.pending().empty() || !lev.normals_pending.empty())
+            return false;
     }
     return true;
 }
@@ -399,15 +404,14 @@ void evaluate_up_to(MultiresSurface::State& s, std::uint32_t level) {
         // whose parent changed everywhere are the same case: rebuild it whole,
         // and a whole rebuild reads the composed field so the recomposition
         // only has to happen first.
-        if (!s.levels[l].cache->evaluated || s.levels[l - 1].pending_all) {
+        if (!s.levels[l].cache->evaluated || s.levels[l - 1].pending_all()) {
             ensure_composed(s, l, nullptr);
             full_evaluate(s, l);
-            s.levels[l].pending_all = true;
-            s.levels[l].pending.clear();
+            s.levels[l].note_moved_all();
         } else {
             recomposed.clear();
             ensure_composed(s, l, &recomposed);
-            if (!s.levels[l - 1].pending.empty()) partial_evaluate(s, l);
+            if (!s.levels[l - 1].pending().empty()) partial_evaluate(s, l);
             // A block whose COMPOSITION changed moved vertices that nothing
             // below this level touched — a strength change on a layer that
             // lives here and nowhere else. Those vertices get the same
@@ -416,8 +420,7 @@ void evaluate_up_to(MultiresSurface::State& s, std::uint32_t level) {
             if (!recomposed.empty()) reapply_recomposed(s, l, recomposed);
             drain_normals_pending(s, l);
         }
-        s.levels[l - 1].pending.clear();
-        s.levels[l - 1].pending_all = false;
+        s.levels[l - 1].clear_pending();
     }
 }
 
@@ -621,6 +624,16 @@ const CrossLevelNeighborhood& MultiresSurface::cross_level_at(std::uint32_t leve
     // subdivided from, so the walk up has to have happened.
     evaluate_up_to(s, level);
     LevelCache& c = *s.levels[level].cache;
+    // A LEVEL THAT STORES EVERY CHILD OF EVERY FACE OF ITS PARENT has nothing
+    // outside it, and says so from the TOPOLOGY alone — without the parent, and
+    // ahead of the counters. Ahead of them because an ask on a level with no
+    // depth boundary is not a cross-level read: `cross_level_of` tests the same
+    // thing first, and this used to test it only on the way past an unevaluated
+    // parent, so a uniform hierarchy — where every level is self-contained —
+    // counted one read per dab through `MultiresSculptor::bind` and none
+    // through `cross_level_of`, from the same surface.
+    if (level_is_self_contained(s.levels[level].topology, s.levels[level].patch_kept))
+        return kEmpty;
     // THE LEVEL BELOW IS NOT ALWAYS RESIDENT. `evaluate_up_to` guarantees the
     // cache of the level it was ASKED for and no other, on purpose: when
     // nothing below has moved it short-circuits, which is the whole of what
@@ -629,10 +642,7 @@ const CrossLevelNeighborhood& MultiresSurface::cross_level_at(std::uint32_t leve
     // from — can be gone, and reading them through a released cache is the
     // undefined behaviour a sanitizer build catches here.
     //
-    // A level that stores every child of every face of its parent has nothing
-    // outside it and can say so without the parent at all — which is every
-    // level of a uniform hierarchy, and why a trim there still holds.
-    //
+    // A trim of a uniform hierarchy still holds: those levels returned above.
     // Anything else has to bring the parent back. Not for the topology, which
     // is fixed for the life of the cache, but for the OUTSIDE POSITIONS: they
     // belong to the level below, a stroke down there moves them without this
@@ -645,25 +655,40 @@ const CrossLevelNeighborhood& MultiresSurface::cross_level_at(std::uint32_t leve
     // level's connectivity and leaves its positions empty, which `connectivity_at`
     // reaches from outside on a level a trim released. So the test is the flag
     // and not the pointer.
-    if (!level_is_evaluated(s, level - 1)) {
-        if (level_is_self_contained(s.levels[level].topology, s.levels[level].patch_kept))
-            return kEmpty;
-        evaluate_up_to(s, level - 1);
-    }
+    if (!level_is_evaluated(s, level - 1)) evaluate_up_to(s, level - 1);
     const MultiresLevel& parent = s.levels[level - 1];
+    ++s.stats.cross_level_reads;
     if (!c.cross) {
         c.cross = std::make_unique<CrossLevelNeighborhood>(
             build_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
                               s.levels[level].topology, s.levels[level].patch_kept));
+        c.cross_parent_revision = parent.positions_revision();
         return *c.cross;
     }
-    // The topology is fixed for the life of the cache; the outside POSITIONS
-    // are the level below's, and a stroke down there moves them without this
-    // level's cache going stale. Re-read on the way past rather than tracked,
-    // because tracking them would be a fourth revision counter guarding a walk
-    // over the region rim.
-    refresh_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
-                        c.cross.get());
+    // The topology is fixed for the life of the cache; the outside POSITIONS are
+    // the level below's, and a stroke down there moves them without this level's
+    // cache going stale. So they are re-read when — and only when — the level
+    // below has moved since the last read.
+    //
+    // THE SIGNAL IS THE QUEUE THAT WAS ALREADY THERE. Those positions are
+    // `subdivide_positions` of the parent's, so they go stale exactly when the
+    // parent has vertices to push up; `MultiresLevel::note_moved` is the one
+    // door onto that queue and moves `positions_revision` with it. Anything that
+    // writes the parent's positions and skips that door has already left the
+    // level above with stale `subdivided` and stale frames, which every existing
+    // multires gate reads — so there is no way to make this stale on its own.
+    //
+    // A write the hierarchy then PUTS BACK deliberately does not move it:
+    // `restore_positions` rewrites what the stored coefficients reconstruct to,
+    // which is what the last revision left in the array, so the pair is a no-op
+    // on the content and on the number. That is the coarse half of every
+    // interior dab of a crossing stroke.
+    if (c.cross_parent_revision != parent.positions_revision()) {
+        ++s.stats.cross_level_refreshes;
+        refresh_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
+                            c.cross.get());
+        c.cross_parent_revision = parent.positions_revision();
+    }
     return *c.cross;
 }
 
@@ -798,6 +823,15 @@ namespace {
 // What a refused write needs: the brush has already moved the level's mesh by
 // the time the hierarchy is told about it, so refusing a locked layer means
 // putting those vertices back rather than merely declining to record them.
+//
+// AND IT IS NOT A CHANGE, which is why it queues nothing for the level above
+// and does not move `positions_revision`. Every acknowledged write to a level's
+// positions ends by reading the stored coefficients back through the frame, so
+// "what the coefficients reconstruct to" IS what the array held at the current
+// revision -- the raw write this undoes never moved the number, and putting the
+// values back leaves both where they were. Bumping here instead would cost a
+// rim walk above for every interior dab of a crossing stroke, which restores
+// the whole coarse write and keeps nothing.
 void restore_positions(MultiresSurface::State& s, std::uint32_t level,
                        const std::vector<std::uint32_t>& vertices) {
     MultiresLevel& lev = s.levels[level];
@@ -1016,7 +1050,7 @@ void MultiresSurface::absorb_level_edit(std::uint32_t level,
         lev.normals_pending.insert(lev.normals_pending.end(), vertices.begin(), vertices.end());
         ++state_->detail_revision;
     }
-    lev.pending.insert(lev.pending.end(), vertices.begin(), vertices.end());
+    lev.note_moved(vertices);
     mark_patches(*state_, level, vertices);
     ++state_->evaluated_revision;
 }
@@ -1063,7 +1097,7 @@ void MultiresSurface::set_detail(std::uint32_t level, std::uint32_t vertex,
             frame_to_world(c.frames[vertex], value.tangent, value.bitangent, value.normal);
         lev.normals_pending.push_back(vertex);
     }
-    lev.pending.push_back(vertex);
+    lev.note_moved(vertex);
     mark_patches(*state_, level, {vertex});
     ++state_->detail_revision;
     ++state_->evaluated_revision;
@@ -1086,7 +1120,7 @@ void MultiresSurface::set_base_position(std::uint32_t vertex, kernel::cfloat3 po
         }
     }
     state_->base_frames_dirty.push_back(vertex);
-    lev.pending.push_back(vertex);
+    lev.note_moved(vertex);
     lev.normals_pending.push_back(vertex);
     mark_patches(*state_, 0, {vertex});
     ++state_->base_revision;

@@ -277,7 +277,7 @@ std::optional<MultiresSurface> MultiresSurface::from_mesh(const Mesh& mesh,
     const LevelConnectivity conn = LevelConnectivity::build(level0.topology);
     if (conn.non_manifold) return fail(MultiresError::NonManifold);
     level0.edge_count = conn.edges.size();
-    level0.pending_all = true;
+    level0.note_moved_all();
 
     s->levels.push_back(std::move(level0));
     s->patch_dirty.assign(s->levels[0].topology.face_count, 0);
@@ -427,7 +427,7 @@ bool MultiresSurface::add_level(MultiresError* out_error, const parallel::Cancel
     level.detail.reset(level.topology.vertex_count);
     level.edge_count = 2ull * state_->levels[parent_index].edge_count +
                        state_->levels[parent_index].topology.corners.size();
-    level.pending_all = true;
+    level.note_moved_all();
 
     state_->levels.push_back(std::move(level));
     // Every layer gains a slot for the new level, sized lazily on first write.
@@ -624,7 +624,7 @@ bool MultiresSurface::add_level_for_patches(const std::vector<std::uint32_t>& pa
     // counts every shared edge twice, so the next level's preflight errs high
     // -- the direction the header requires.
     level.edge_count = 4ull * level.topology.face_count;
-    level.pending_all = true;
+    level.note_moved_all();
     level.patch_kept = std::move(keep);
 
     state_->levels.push_back(std::move(level));
@@ -983,8 +983,7 @@ void MultiresSurface::drop_all_caches() {
         // The composed detail goes with the rest: it is `B + Σ s·m·L` and
         // every input to it is still here, so it rebuilds bit-identically.
         l.composed.reset();
-        l.pending.clear();
-        l.pending_all = true;
+        l.note_moved_all();
     }
     state_->base_rest.reset();
     state_->attr.clear();
@@ -1040,8 +1039,7 @@ void MultiresSurface::drop_inactive_caches() {
         released = released || state_->levels[l].cache != nullptr;
         state_->levels[l].cache.reset();
         state_->levels[l].composed.reset();
-        state_->levels[l].pending.clear();
-        state_->levels[l].pending_all = true;
+        state_->levels[l].note_moved_all();
     }
     state_->attr.resize(std::min<std::size_t>(state_->attr.size(), keep + 1u));
     release_generation(*state_, released);

@@ -127,7 +127,7 @@ bool MultiresSurface::project_from(const Mesh& reference, const ProjectOptions& 
         // subdivision of an already-fitted parent rather than the old detail
         // laid over it.
         lev.detail.reset(lev.topology.vertex_count);
-        state_->levels[l - 1].pending_all = true;
+        state_->levels[l - 1].note_moved_all();
         evaluate_up_to(*state_, l);
 
         projected = positions_at(l);
@@ -158,7 +158,7 @@ bool MultiresSurface::project_from(const Mesh& reference, const ProjectOptions& 
         // fitted surface and not the one we started from — and so that what the
         // hierarchy holds is what a reload would reconstruct rather than the
         // projected points we happened to compute.
-        state_->levels[l - 1].pending_all = true;
+        state_->levels[l - 1].note_moved_all();
         evaluate_up_to(*state_, l);
     }
     if (total.moved > 0) total.mean_offset = offset_sum / static_cast<double>(total.moved);

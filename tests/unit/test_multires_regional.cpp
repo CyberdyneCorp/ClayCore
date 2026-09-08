@@ -1663,3 +1663,238 @@ TEST_CASE("regional: a released neighbourhood rebuilds rather than reading as ab
     INFO("worst normal difference after a release: " << worst);
     CHECK(worst == 0.0);
 }
+
+// The vertex of `level` nearest the middle of the cage, which for the fixtures
+// below is the middle of the refined block.
+std::uint32_t centre_vertex(MultiresSurface& s, std::uint32_t level) {
+    const std::vector<cfloat3>& p = s.positions_at(level);
+    std::uint32_t best = 0;
+    float nearest = 1e30f;
+    for (std::uint32_t v = 0; v < static_cast<std::uint32_t>(p.size()); ++v) {
+        const float d = std::abs(p[v].x) + std::abs(p[v].z);
+        if (d < nearest) {
+            nearest = d;
+            best = v;
+        }
+    }
+    return best;
+}
+
+// The outside positions a hierarchy carrying this detail and NOTHING CACHED
+// would build. What "the cached answer is still the current one" is measured
+// against, computed by the build path rather than by the refresh path -- so a
+// refresh that had quietly stopped running could not also be what says it did
+// not need to.
+std::vector<cfloat3> outside_from_cold(MultiresSurface& s, std::uint32_t level) {
+    s.drop_all_caches();
+    return s.cross_level_at(level).outside_positions;
+}
+
+TEST_CASE("regional: an interior dab does not walk the region rim again") {
+    // THE COST #493 PRICES. `MultiresSculptor::stamp` asks for the bound
+    // level's cross-level neighbourhood on every dab, and every ask used to
+    // re-subdivide every outside vertex from the parent -- a walk over the
+    // REGION RIM, paid per dab, while the dab itself costs the BRUSH FOOTPRINT.
+    // So the share grew with the region, which is the thing regional refinement
+    // exists to make affordable.
+    //
+    // The 4x4-at-level-3 row of the issue's table: 1,089 stored vertices, 136
+    // outside, 132 derived faces.
+    const int n = 16;
+    const std::uint32_t level = 3;
+    MultiresSurface s = build(grid_quads(n, 1.0f));
+    REQUIRE(s.refine_patches_to_level(block_patches(n, 6, 6, 4), level));
+    REQUIRE(s.set_sculpt_level(level));
+    REQUIRE(s.topology_at(level).vertex_count == 1089u);
+    REQUIRE(s.cross_level_at(level).outside_positions.size() == 136u);
+
+    mesh::MeshBrushSettings settings;
+    settings.radius = 0.06f;  // Well inside the block, so no dab crosses the rim.
+    settings.strength = 0.3f;
+    settings.center = s.positions_at(level)[centre_vertex(s, level)];
+
+    mesh::MultiresSculptor sculptor(s);
+    sculptor.begin_stroke();
+    REQUIRE(sculptor.stamp(mesh::MeshBrush::Draw, settings) > 0);
+    // INTERIOR, and asserted rather than assumed: a crossing dab writes more
+    // than one level, and the parent it writes has every right to a refresh.
+    REQUIRE(sculptor.last_write_levels().size() == 1u);
+
+    s.reset_eval_stats();
+    std::size_t moved = 0;
+    for (int i = 0; i < 10; ++i) {
+        settings.center = s.positions_at(level)[centre_vertex(s, level)];
+        moved += sculptor.stamp(mesh::MeshBrush::Draw, settings);
+        REQUIRE(sculptor.last_write_levels().size() == 1u);
+    }
+    // NOT VACUOUS: the stroke really did move the surface, and the
+    // neighbourhood really was asked for -- once per dab at the bound level and
+    // again by the evaluation under each coarse level of the crossing path.
+    CHECK(moved > 0u);
+    CHECK(s.eval_stats().cross_level_reads >= 10u);
+    // AND THE RIM WAS NOT WALKED ONCE. This is the mechanism and not the
+    // consequence: a correctness check on the outside positions passes happily
+    // over a cache that has silently stopped caching.
+    CHECK(s.eval_stats().cross_level_refreshes == 0u);
+
+    // AND THE ANSWER IS STILL THE CURRENT ONE. Kept by value, because the
+    // cold rebuild below releases the storage it refers to.
+    const std::vector<cfloat3> cached = s.cross_level_at(level).outside_positions;
+    CHECK(same_floats(cached, outside_from_cold(s, level)));
+}
+
+TEST_CASE("regional: the rim is walked again when the level below moves") {
+    // THE OTHER HALF, as the MECHANISM rather than as values -- the values are
+    // "regional: the outside positions follow a stroke on the level below",
+    // which is unchanged and still the gate on the behaviour. What is asserted
+    // here is that the walk RAN: a reader must never be handed an answer from
+    // before a stroke it cannot tell from a current one.
+    const int n = 16;
+    const std::uint32_t level = 3;
+    MultiresSurface s = build(grid_quads(n, 1.0f));
+    REQUIRE(s.refine_patches_to_level(block_patches(n, 6, 6, 4), level));
+
+    const std::vector<cfloat3> before = s.cross_level_at(level).outside_positions;
+    REQUIRE(before.size() == 136u);
+
+    mesh::MeshBrushSettings settings;
+    settings.radius = 0.25f;
+    settings.strength = 1.0f;
+    settings.center = before[0];
+    REQUIRE(s.set_sculpt_level(level - 1));
+    mesh::MultiresSculptor sculptor(s);
+    sculptor.begin_stroke();
+    s.reset_eval_stats();
+    REQUIRE(sculptor.stamp(mesh::MeshBrush::Draw, settings) > 0);
+
+    const std::vector<cfloat3> after = s.cross_level_at(level).outside_positions;
+    CHECK(s.eval_stats().cross_level_refreshes >= 1u);
+
+    REQUIRE(after.size() == before.size());
+    std::size_t rim_moved = 0;
+    for (std::size_t i = 0; i < after.size(); ++i)
+        if (!(after[i].x == before[i].x && after[i].y == before[i].y &&
+              after[i].z == before[i].z))
+            ++rim_moved;
+    // NOT VACUOUS, and the two sides of the comparison genuinely differ: the
+    // stroke reached the outside set.
+    CHECK(rim_moved == 29u);
+    CHECK(same_floats(after, outside_from_cold(s, level)));
+}
+
+TEST_CASE("regional: a stroke on the CAGE moves the level above's outside positions") {
+    // THE WRITER A COUNTER AT THE ENUMERABLE SITES MISSES, and it is the one
+    // the re-read exists for.
+    //
+    // A level's positions are written from `multires_eval.cpp` in every case
+    // but one: at level 0 the brush writes the cache's `Mesh` DIRECTLY, and
+    // `absorb_base_edit` READS those positions into the cage rather than
+    // writing them back. So a revision bumped where the positions are assigned
+    // -- `apply_detail_all`, `gather_class_positions`, `subdivide_positions`,
+    // `subdivide_positions_partial`, the absorb read-back -- never moves for a
+    // cage stroke, and level 1's neighbourhood would keep serving the rim from
+    // before it. Nothing crashes; the boundary normals and frames are quietly
+    // built against a surface that moved.
+    //
+    // What closes it is that the revision rides on the queue the level above
+    // already depends on: `MultiresLevel::note_moved`, which `absorb_level_edit`
+    // calls at EVERY level because the level above has to re-subdivide either
+    // way.
+    const int n = 16;
+    MultiresSurface s = build(grid_quads(n, 1.0f));
+    REQUIRE(s.refine_patches_to_level(block_patches(n, 6, 6, 4), 3));
+
+    const std::vector<cfloat3> before = s.cross_level_at(1).outside_positions;
+    REQUIRE(before.size() == 72u);
+
+    mesh::MeshBrushSettings settings;
+    settings.radius = 0.5f;
+    settings.strength = 1.0f;
+    settings.center = before[0];
+    REQUIRE(s.set_sculpt_level(0));
+    mesh::MultiresSculptor sculptor(s);
+    sculptor.begin_stroke();
+    REQUIRE(sculptor.stamp(mesh::MeshBrush::Draw, settings) > 0);
+    // The cage was written, and it was written by the brush rather than by the
+    // hierarchy: the record the stamp keeps is level 0's own.
+    REQUIRE(sculptor.last_write_levels().size() == 1u);
+    REQUIRE(sculptor.last_write_levels()[0] == 0u);
+
+    const std::vector<cfloat3> after = s.cross_level_at(1).outside_positions;
+    REQUIRE(after.size() == before.size());
+    std::size_t rim_moved = 0;
+    for (std::size_t i = 0; i < after.size(); ++i)
+        if (!(after[i].x == before[i].x && after[i].y == before[i].y &&
+              after[i].z == before[i].z))
+            ++rim_moved;
+    CHECK(rim_moved == 13u);
+    // AND THE VALUES ARE THE COLD BUILD'S, not merely different from before.
+    CHECK(same_floats(after, outside_from_cold(s, 1)));
+}
+
+
+namespace {
+
+// Ten dabs at the middle of a level, and how much they moved. The driver both
+// halves of the case below run, so "no cross-level work" is a property of the
+// HIERARCHY and not of the way it was sculpted.
+std::size_t centre_stroke(MultiresSurface& s, std::uint32_t level, float radius) {
+    REQUIRE(s.set_sculpt_level(level));
+    mesh::MeshBrushSettings settings;
+    settings.radius = radius;
+    settings.strength = 0.3f;
+    mesh::MultiresSculptor sculptor(s);
+    sculptor.begin_stroke();
+    s.reset_eval_stats();
+    std::size_t moved = 0;
+    for (int i = 0; i < 10; ++i) {
+        settings.center = s.positions_at(level)[centre_vertex(s, level)];
+        moved += sculptor.stamp(mesh::MeshBrush::Draw, settings);
+    }
+    return moved;
+}
+
+}  // namespace
+
+TEST_CASE("regional: a uniform hierarchy reports no cross-level work") {
+    // WHAT THE COUNTERS PROMISE, on the hierarchy shape most hosts have. Every
+    // level of a uniform hierarchy is self-contained, so there is no
+    // neighbourhood to hold and no rim to walk, and `MultiresEvalStats` says
+    // both counters stay 0 here -- which is what lets a gate read "not 0" as
+    // "the region rim was asked for".
+    //
+    // `cross_level_at` tested self-containment only on the way past an
+    // UNEVALUATED parent, and the parent is evaluated on every dab --
+    // `MultiresSculptor::bind` asks for the level mesh first -- so the ask fell
+    // through to the counter and a uniform hierarchy reported a read per dab.
+    // `cross_level_of`, which tests it first, reported none from the same
+    // surface.
+    const int n = 8;
+    const std::uint32_t level = 2;
+    MultiresSurface uniform = build(grid_quads(n, 1.0f));
+    for (int l = 0; l < 3; ++l) REQUIRE(uniform.add_level());
+    REQUIRE(uniform.uniform_depth());
+
+    const std::size_t moved = centre_stroke(uniform, level, 0.2f);
+    CHECK(moved > 0u);
+    CHECK(uniform.eval_stats().cross_level_reads == 0u);
+    CHECK(uniform.eval_stats().cross_level_refreshes == 0u);
+
+    // AND A STROKE ON THE LEVEL BELOW MAKES NO REFRESH EITHER. There is nothing
+    // outside this level to re-read, so counting the ask would count a walk
+    // that did not run.
+    CHECK(centre_stroke(uniform, level - 1, 0.3f) > 0u);
+    CHECK(uniform.cross_level_at(level).empty());
+    CHECK(uniform.eval_stats().cross_level_reads == 0u);
+    CHECK(uniform.eval_stats().cross_level_refreshes == 0u);
+
+    // THE OTHER SIDE OF THE COMPARISON, so the 0s above are not a driver that
+    // quietly measures nothing: the same ten dabs on a hierarchy that DOES have
+    // a depth boundary count reads at the same level.
+    MultiresSurface regional = build(grid_quads(n, 1.0f));
+    REQUIRE(regional.refine_patches_to_level(block_patches(n, 2, 2, 4), level));
+    REQUIRE_FALSE(regional.uniform_depth());
+    REQUIRE_FALSE(regional.cross_level_at(level).empty());
+    CHECK(centre_stroke(regional, level, 0.2f) > 0u);
+    CHECK(regional.eval_stats().cross_level_reads >= 10u);
+}

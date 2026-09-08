@@ -8867,6 +8867,8 @@ NB_MODULE(pyclay, m) {
                 out["normals_recomputed"] = st.normals_recomputed;
                 out["full_level_rebuilds"] = st.full_level_rebuilds;
                 out["partial_level_updates"] = st.partial_level_updates;
+                out["cross_level_reads"] = st.cross_level_reads;
+                out["cross_level_refreshes"] = st.cross_level_refreshes;
                 return out;
             },
             "What the last evaluations actually did, so 'propagation is local'\n"
