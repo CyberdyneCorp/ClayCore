@@ -21,8 +21,21 @@ on:
 # `github.ref == 'refs/heads/main'` guard below: a push to main is a merge whose
 # result somebody will cite later, and cancelling it to serve a newer merge
 # would leave a commit on the default branch with no verdict.
+# MAIN GETS A GROUP OF ITS OWN PER COMMIT, and that is not the same thing as
+# `cancel-in-progress: false`. Setting that flag false protects a run that is
+# already EXECUTING; a run still PENDING in the same group is cancelled when a
+# newer one arrives regardless of it. So keying main on the ref alone lost a
+# verdict the first day it was live: 803b4d10's run was cancelled at the exact
+# second eada7a68's was created, and 803b4d10 is a merge on the default branch
+# that now has no result at all. That is the failure the exclusion was written
+# to prevent, produced by the exclusion.
+#
+# Keying main on the SHA gives every merge its own group, so main runs never
+# contend with each other and every commit on the default branch keeps its
+# verdict. A branch still keys on the ref, which is what makes a force-push
+# supersede its own run rather than queue beside it.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'branch' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
