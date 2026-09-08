@@ -112,6 +112,15 @@ to refresh" from "no longer refreshes".
 `cross_level_reads` is there so the mechanism gate cannot pass vacuously: zero
 refreshes means something only beside a non-zero count of asks.
 
+And an ask counts only where there is a neighbourhood to ask for. Both accessors
+test `level_is_self_contained` — from the TOPOLOGY, and ahead of the counters —
+so a uniform hierarchy, whose every level stores every patch, reports zero
+however hard it is sculpted. Nesting that test inside "the parent is not
+resident", which is where `cross_level_at` first had it, counted one read per dab
+through `MultiresSculptor::bind` and none through `cross_level_of`, from the same
+surface: the parent is evaluated on the normal path, so the early return was
+never reached.
+
 ## 5. Ordering, and the two places the revision is read
 
 `evaluate_up_to` walks levels 1..target in order and clears level `l-1`'s queue

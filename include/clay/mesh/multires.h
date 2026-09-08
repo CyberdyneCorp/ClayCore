@@ -220,9 +220,15 @@ struct MultiresEvalStats {
     // neighbourhood's outside positions belong to the level below, so they are
     // re-read when that level has moved and kept when it has not; the two
     // counters are what says which happened. `reads` counts every access that
-    // reached a level with a depth boundary, `refreshes` the subset that walked
-    // the region rim again. Both stay 0 on a uniform hierarchy, which has no
-    // neighbourhood to hold.
+    // reached a level with a depth boundary AND was answered there, `refreshes`
+    // the subset that walked the region rim again. Both stay 0 on a uniform
+    // hierarchy, whose every level is self-contained and holds no
+    // neighbourhood.
+    //
+    // AN ASK THAT COULD NOT BE ANSWERED IS NEITHER. `cross_level_of` hands back
+    // null on a level whose parent a trim released, rather than bringing the
+    // parent back the way the public `cross_level_at` does, so `reads` counts
+    // neighbourhoods DELIVERED and is not a count of callers.
     std::uint64_t cross_level_reads = 0;
     std::uint64_t cross_level_refreshes = 0;
 };

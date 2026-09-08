@@ -33,6 +33,12 @@ mechanism rather than inferred from values. A cache that has silently stopped
 caching, and a cache that has silently stopped refreshing, SHALL both be
 distinguishable from a correct one without reading a clock.
 
+A level with no depth boundary SHALL be reported as no cross-level work at all:
+every level of a uniform hierarchy is self-contained, holds no neighbourhood and
+walks no rim, so both counts SHALL stay at zero there however the hierarchy is
+sculpted. Otherwise "not zero" could not be read as "the region rim was asked
+for", which is the whole use of the pair.
+
 Releasing a neighbourhood, releasing a level's cache and rebuilding either SHALL
 remain correct and SHALL err toward re-deriving: a level rebuilt from cold
 produces the same positions, and re-reading them costs a walk rather than a wrong
@@ -46,6 +52,10 @@ answer.
 #### Scenario: A stroke on the level below re-derives the rim
 - **WHEN** a stroke is taken at the level below a refined region, reaching vertices its outside positions are subdivided from
 - **THEN** the neighbourhood is re-derived, its topology is unchanged, and its outside positions are the ones a hierarchy carrying the same detail and nothing cached would build
+
+#### Scenario: A uniform hierarchy reports no cross-level work
+- **WHEN** a stroke is taken on a hierarchy whose levels all store every patch, at the bound level and at the level below it
+- **THEN** both counts stay at zero, while the same stroke on a hierarchy with a depth boundary counts asks
 
 #### Scenario: A stroke on the cage re-derives the rim above it
 - **WHEN** a stroke is taken at level 0, where the brush writes the level's mesh directly and the hierarchy reads those positions into the cage rather than writing them back

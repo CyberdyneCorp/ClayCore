@@ -71,6 +71,12 @@
       fails this: CHECK( 0 == 13 )
 - [x] 5.4 The pre-existing gate "regional: the outside positions follow a stroke
       on the level below" passes UNCHANGED
+- [x] 5.5 "regional: a uniform hierarchy reports no cross-level work" — ten dabs
+      at the bound level and ten at the level below leave both counters at 0,
+      beside the same ten dabs on a regional hierarchy counting reads >= 10.
+      Testing `level_is_self_contained` only inside the not-evaluated branch of
+      `MultiresSurface::cross_level_at` compiles and fails it: CHECK( 10 == 0 ),
+      CHECK( 11 == 0 ), CHECK( 1 == 0 )
 
 ## 6. Measure again
 
