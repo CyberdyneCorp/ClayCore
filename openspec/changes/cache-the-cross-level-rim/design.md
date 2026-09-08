@@ -135,3 +135,39 @@ A cache drop is conservative in the safe direction: `positions_revision` lives o
 does not, and a released parent that is rebuilt goes through `full_evaluate` and
 `note_moved_all` — so it refreshes once more than it strictly needs to rather
 than once less.
+
+## Where this change does NOT help, said here because it was mis-said once
+
+**A uniform hierarchy sees no improvement, because it saw no cost.**
+`level_is_self_contained(child, keep)` is `keep.empty() || child.dense()`, so
+every level of a whole-surface hierarchy is self-contained, and `cross_level_at`
+returns the empty neighbourhood on that test BEFORE it counts a read and before
+it builds anything. The rim work was already zero there and a cache has nothing
+to save.
+
+The measured wins — 1,319 and 1,759 rim walks per 200 dabs going to 0 — are on
+REGIONAL fixtures, where levels genuinely have vertices outside themselves.
+
+**The phrase that caused the confusion is worth recording, because it is this
+repository's recurring defect in a sentence rather than in an API.** Describing
+the fix as reaching "the shared path" was told to the consuming host, and
+"shared" carried two scopes:
+
+- shared across the LEVELS of a regional hierarchy — the bound level and the
+  coarse levels `stamp_coarse` asks for. **True**, and the reason the win is
+  larger than #493 estimated.
+- shared across ALL hierarchies, regional or not. **False**, and the reading a
+  host with a uniform fixture took.
+
+One form of words, two scopes, only one of them true — the same shape as a
+constraint judged against the wrong entry point of the same library, and as
+"we validate the header" describing a correct and an incorrect guard
+identically. The host had already written the correct caveat about its own
+fixture and preferred our sentence over it, which is the cost: a claim that
+covers two scopes is not merely vague, it overrides a reader's accurate
+knowledge of the narrower one.
+
+**What would exercise this change from a host: a regional hierarchy**, which
+needs `clay_multires_add_level_region`. Adopting an unused ABI surface to score
+a benchmark measures a code path the application has never had, so a host that
+builds whole levels only is right to report no figure rather than bind one.
