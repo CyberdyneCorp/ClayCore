@@ -624,6 +624,16 @@ const CrossLevelNeighborhood& MultiresSurface::cross_level_at(std::uint32_t leve
     // subdivided from, so the walk up has to have happened.
     evaluate_up_to(s, level);
     LevelCache& c = *s.levels[level].cache;
+    // A LEVEL THAT STORES EVERY CHILD OF EVERY FACE OF ITS PARENT has nothing
+    // outside it, and says so from the TOPOLOGY alone — without the parent, and
+    // ahead of the counters. Ahead of them because an ask on a level with no
+    // depth boundary is not a cross-level read: `cross_level_of` tests the same
+    // thing first, and this used to test it only on the way past an unevaluated
+    // parent, so a uniform hierarchy — where every level is self-contained —
+    // counted one read per dab through `MultiresSculptor::bind` and none
+    // through `cross_level_of`, from the same surface.
+    if (level_is_self_contained(s.levels[level].topology, s.levels[level].patch_kept))
+        return kEmpty;
     // THE LEVEL BELOW IS NOT ALWAYS RESIDENT. `evaluate_up_to` guarantees the
     // cache of the level it was ASKED for and no other, on purpose: when
     // nothing below has moved it short-circuits, which is the whole of what
@@ -632,10 +642,7 @@ const CrossLevelNeighborhood& MultiresSurface::cross_level_at(std::uint32_t leve
     // from — can be gone, and reading them through a released cache is the
     // undefined behaviour a sanitizer build catches here.
     //
-    // A level that stores every child of every face of its parent has nothing
-    // outside it and can say so without the parent at all — which is every
-    // level of a uniform hierarchy, and why a trim there still holds.
-    //
+    // A trim of a uniform hierarchy still holds: those levels returned above.
     // Anything else has to bring the parent back. Not for the topology, which
     // is fixed for the life of the cache, but for the OUTSIDE POSITIONS: they
     // belong to the level below, a stroke down there moves them without this
@@ -648,11 +655,7 @@ const CrossLevelNeighborhood& MultiresSurface::cross_level_at(std::uint32_t leve
     // level's connectivity and leaves its positions empty, which `connectivity_at`
     // reaches from outside on a level a trim released. So the test is the flag
     // and not the pointer.
-    if (!level_is_evaluated(s, level - 1)) {
-        if (level_is_self_contained(s.levels[level].topology, s.levels[level].patch_kept))
-            return kEmpty;
-        evaluate_up_to(s, level - 1);
-    }
+    if (!level_is_evaluated(s, level - 1)) evaluate_up_to(s, level - 1);
     const MultiresLevel& parent = s.levels[level - 1];
     ++s.stats.cross_level_reads;
     if (!c.cross) {

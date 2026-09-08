@@ -1832,3 +1832,69 @@ TEST_CASE("regional: a stroke on the CAGE moves the level above's outside positi
     CHECK(same_floats(after, outside_from_cold(s, 1)));
 }
 
+
+namespace {
+
+// Ten dabs at the middle of a level, and how much they moved. The driver both
+// halves of the case below run, so "no cross-level work" is a property of the
+// HIERARCHY and not of the way it was sculpted.
+std::size_t centre_stroke(MultiresSurface& s, std::uint32_t level, float radius) {
+    REQUIRE(s.set_sculpt_level(level));
+    mesh::MeshBrushSettings settings;
+    settings.radius = radius;
+    settings.strength = 0.3f;
+    mesh::MultiresSculptor sculptor(s);
+    sculptor.begin_stroke();
+    s.reset_eval_stats();
+    std::size_t moved = 0;
+    for (int i = 0; i < 10; ++i) {
+        settings.center = s.positions_at(level)[centre_vertex(s, level)];
+        moved += sculptor.stamp(mesh::MeshBrush::Draw, settings);
+    }
+    return moved;
+}
+
+}  // namespace
+
+TEST_CASE("regional: a uniform hierarchy reports no cross-level work") {
+    // WHAT THE COUNTERS PROMISE, on the hierarchy shape most hosts have. Every
+    // level of a uniform hierarchy is self-contained, so there is no
+    // neighbourhood to hold and no rim to walk, and `MultiresEvalStats` says
+    // both counters stay 0 here -- which is what lets a gate read "not 0" as
+    // "the region rim was asked for".
+    //
+    // `cross_level_at` tested self-containment only on the way past an
+    // UNEVALUATED parent, and the parent is evaluated on every dab --
+    // `MultiresSculptor::bind` asks for the level mesh first -- so the ask fell
+    // through to the counter and a uniform hierarchy reported a read per dab.
+    // `cross_level_of`, which tests it first, reported none from the same
+    // surface.
+    const int n = 8;
+    const std::uint32_t level = 2;
+    MultiresSurface uniform = build(grid_quads(n, 1.0f));
+    for (int l = 0; l < 3; ++l) REQUIRE(uniform.add_level());
+    REQUIRE(uniform.uniform_depth());
+
+    const std::size_t moved = centre_stroke(uniform, level, 0.2f);
+    CHECK(moved > 0u);
+    CHECK(uniform.eval_stats().cross_level_reads == 0u);
+    CHECK(uniform.eval_stats().cross_level_refreshes == 0u);
+
+    // AND A STROKE ON THE LEVEL BELOW MAKES NO REFRESH EITHER. There is nothing
+    // outside this level to re-read, so counting the ask would count a walk
+    // that did not run.
+    CHECK(centre_stroke(uniform, level - 1, 0.3f) > 0u);
+    CHECK(uniform.cross_level_at(level).empty());
+    CHECK(uniform.eval_stats().cross_level_reads == 0u);
+    CHECK(uniform.eval_stats().cross_level_refreshes == 0u);
+
+    // THE OTHER SIDE OF THE COMPARISON, so the 0s above are not a driver that
+    // quietly measures nothing: the same ten dabs on a hierarchy that DOES have
+    // a depth boundary count reads at the same level.
+    MultiresSurface regional = build(grid_quads(n, 1.0f));
+    REQUIRE(regional.refine_patches_to_level(block_patches(n, 2, 2, 4), level));
+    REQUIRE_FALSE(regional.uniform_depth());
+    REQUIRE_FALSE(regional.cross_level_at(level).empty());
+    CHECK(centre_stroke(regional, level, 0.2f) > 0u);
+    CHECK(regional.eval_stats().cross_level_reads >= 10u);
+}
