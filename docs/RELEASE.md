@@ -545,9 +545,11 @@ forward-refuse).
    its field changes layer-wide, but its zero set only moves where surface can
    appear or disappear — is open, unproven, and the next thing to measure.
 
-   **0.85.0, 0.86.0, 0.89.0, 0.91.0, 0.92.0, 0.93.0, 0.94.0, 0.95.0 and 0.96.0
-   are not such releases**: all nine are additive, and a caller who calls nothing
-   new sees the same answers. 0.85.0 adds `clay_mask_fill_from_group`, the
+   **0.85.0, 0.86.0, 0.89.0, 0.91.0, 0.92.0, 0.93.0, 0.94.0 and 0.95.0 are not
+   such releases**: all eight are additive, and a caller who calls nothing new
+   sees the same answers. (0.96.0 is additive AT THE ABI in the same way -- the
+   automask sources below -- but it is listed separately further down, because
+   two later changes at that same minor do move an answer.) 0.85.0 adds `clay_mask_fill_from_group`, the
    direction `clay_groups_fill_from_mask` had lacked since it shipped. 0.86.0
    adds the three layer placements a host was assembling by hand out of
    `clay_layer_set_transform` and a bounds query — `clay_layer_snap_to_ground`,
@@ -568,7 +570,8 @@ forward-refuse).
    `clay_document_save_memory_at_minor` and `clay_document_writable_at_minor`.
    0.96.0 adds `clay_automask_sources` with
    `clay_mesh_sculptor_set_automask_sources` and its dynamic and multires
-   counterparts, plus `clay_layer_node_color`.
+   counterparts, plus `clay_layer_node_color` -- and then carries two observable
+   changes on top of them, written up below.
 
    **None of 0.85.0 through 0.95.0 was ever tagged.** They exist as minors in
    this release, exactly as 0.79.0–0.83.0 did in v0.84.0. Seven of them arrived
@@ -614,6 +617,42 @@ forward-refuse).
    guarantee is that the same number means the same content, which holds only
    while the number never repeats. A rebuild after undo-then-redo is the intended
    cost — loud and bounded, against a silent stale cache that is neither.
+
+   **0.96.0 CARRIES TWO CHANGES A CALLER OBSERVES, both of them landing after
+   the automask entry points above and neither of them an ABI move.**
+
+   **A dab inside a blended group dirties more, because it used to dirty too
+   little** (issue #497). `clay_brick_cache_mark_dirty_nodes` and
+   `clay_layer_node_influence_bound` answer from one body, and that body marked
+   a node's own box rather than the box its edit reaches. A dab inside a group
+   whose combine blends therefore left bricks holding pre-dab values -- the seam
+   a sculptor sees not update. Measured on the device gate's own fixture at 100
+   stamps, **17 of 216 bricks were stale**, and the identical stroke with its
+   dabs at the layer ROOT left none. Routing the dirty call through
+   `node_reach_bound`, which dilates by each enclosing group's blend support,
+   took that to 2 and took the bricks a 24-dab stroke refills from **232 to
+   924**. A HOST DIRTIES AND REFILLS MORE FOR THE SAME STROKE, which is the
+   change to plan for, and the reported box grows with it: on a radius-0.12 dab
+   in a `k = 0.05` quadratic group the span goes 0.240 to 0.640. The 4x is the
+   blend's own reach and not a pad -- `csmin_quadratic_support(k)` is `4k`, the
+   same constant `csmin_quadratic` evaluates over -- so it cannot be tightened
+   without being wrong. The case did not get slower; it started doing work it
+   always owed, and `tests/device/baseline.json` carries the re-derived ceiling
+   with that reason beside it. Two things this turned up are open and named:
+   **#507**, two bricks still stale afterwards and far outside any blend
+   support, and **#508**, the group chain costing 1.8x an equivalent
+   non-grouped smooth stroke at equal brick count.
+
+   **A crossing stroke stops re-deriving the region rim** (issue #493). The
+   cross-level rim neighbourhood was walked **4.8 times per dab**, not once, and
+   across those walks `full_level_rebuilds`, `partial_level_updates` and
+   `vertices_evaluated` were all zero -- the hierarchy evaluated nothing while
+   re-deriving the rim. Gated on counts because a count exists: **1,319 walks
+   over 200 dabs to 0** on a 4x4 level-3 region, 1,759 to 0 on an 8x8 level-4,
+   with `moved` identical on both sides so the work is the same and only the
+   redundant walk is gone. No new revision counter: `MultiresLevel::pending`
+   already carried the signal, and it is now private behind `note_moved` /
+   `clear_pending`.
 
    **0.90.0 IS such a release, in one way, and it is a speed** (issue #471). An
    intersecting boolean drag re-meshed the whole layer every frame: **2.54x its
