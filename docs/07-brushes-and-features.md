@@ -2508,14 +2508,41 @@ run — and a bit with no source stays inert rather than becoming an error, so a
 host can carry an automask preset before it has baked the lattice that preset
 needs.
 
-**A session that declares a space is sampled in it.** A fixed-mesh session that
-has declared its world frame — `clay_mesh_sculptor_set_world_frame` or
-`clay_mesh_sculptor_use_layer_transform` — has each vertex placed by that frame
+**A session that declares a space is sampled in it, on every surface.** A
+session that has declared its world frame has each vertex placed by that frame
 before any of the three world lattices is asked, the painted mask included. The
 frame is read when a lattice is sampled rather than captured when the sources
-are named, so declaring it after naming them is not a mistake. The adaptive and
-multiresolution sessions declare no frame and are sampled where their vertices
-are, which is what their mask gate already did.
+are named, so declaring it after naming them is not a mistake.
+
+All four handles carry one, as of 0.97.0:
+
+| handle | declare | adopt a layer's own | read back |
+|---|---|---|---|
+| `clay_mesh_sculptor` | `_set_world_frame` | `_use_layer_transform` | `_world_frame` |
+| `clay_multires_sculptor` | `_set_world_frame` | `_use_layer_transform` | `_world_frame` |
+| `clay_multires_sculpt_layer_stroke` | `_set_world_frame` | `_use_layer_transform` | `_world_frame` |
+| `clay_dynamic_sculptor` | `_set_world_frame` | — | `_world_frame` |
+
+The adaptive surface has no `_use_layer_transform` because it is not a document
+layer and there is no transform to read; declare it explicitly.
+
+Until 0.97.0 this said the adaptive and multiresolution sessions "declare no
+frame and are sampled where their vertices are, which is what their mask gate
+already did". That was accurate about the code and wrong about the geometry — a
+hierarchy built from a placed layer is layer-local, so being "sampled where
+their vertices are" meant being sampled somewhere the artist's mask was not.
+It presented as "the mask didn't take" (issue #506). It reached the painted mask
+on `clay_multires_sculptor_stamp`, `clay_dynamic_sculptor_stamp` and all five
+`clay_multires_sculpt_layer_stroke_*` verbs, so it did not need automasking to
+bite. `clay_multires_sculptor_apply_stroke` was the exception: it takes a
+per-call `mesh_to_world` and had been placing every lattice correctly all along,
+which is what settled that these surfaces are layer-local rather than
+incidentally untransformed.
+
+**Unset is still the identity**, so a host that declares nothing behaves exactly
+as it did. Declaring a frame BOTH on the handle and per-call — the only place
+that is expressible is `clay_multires_sculptor_apply_stroke`'s `mesh_to_world` —
+is refused rather than resolved by precedence.
 
 Runnable: [`examples/65_brush_presets.py`](../examples/65_brush_presets.py) —
 one gesture through five presets, with every claim above asserted rather than

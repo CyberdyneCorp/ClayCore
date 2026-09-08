@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 96
+#define CLAY_ABI_MINOR 97
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -8119,6 +8119,20 @@ typedef struct clay_multires_sculptor clay_multires_sculptor;
  * baked a cavity mask.
  *
  * Returns CLAY_ERROR_NOT_FOUND if a borrowed mask is no longer in its document.
+ *
+ * EACH READS THE FRAME ITS OWN HANDLE DECLARES (see _set_world_frame below).
+ * All three once passed the identity, and the two that carried no frame had that
+ * recorded beside the code as "the truth rather than a default" -- accurate
+ * about the code and wrong about the geometry, which is the expensive
+ * combination, because a reader who checked it found it confirmed. The identity
+ * was never the truth for a hierarchy built from a placed layer; it was the only
+ * thing expressible.
+ *
+ * ONE TRANSFORM, NOT TWO. Two places build the inputs these lattices are asked
+ * through -- this call, and the stroke path in brush/stroke.cpp -- and the
+ * second set_automask_inputs REPLACES the first rather than composing with it.
+ * So a host on both paths gets one placement, not a doubled one. Said here
+ * because establishing it otherwise means reading two files.
  * The three take the same descriptor because the factors mean the same thing
  * whichever surface is being sculpted; a fixed mesh, a DynamicSurface and a
  * MultiresSurface differ in where the result is stored, not in what a crevice
@@ -8129,6 +8143,69 @@ clay_result clay_dynamic_sculptor_set_automask_sources(clay_dynamic_sculptor* sc
                                                        const clay_automask_sources* sources);
 clay_result clay_multires_sculptor_set_automask_sources(clay_multires_sculptor* sculptor,
                                                         const clay_automask_sources* sources);
+
+/* -- WHERE THE SURFACE IS, ON EVERY SURFACE (ABI 0.97.0) ---------------------
+ *
+ * A layer's vertex arrays are LAYER-LOCAL and its `xform` places them. The
+ * lattices a brush consults -- the painted mask, the cavity field, the group
+ * field -- are WORLD-ADDRESSED. Something has to place the point between them,
+ * and until this only clay_mesh_sculptor could: it carried a frame and the
+ * other three handles carried nothing, so on a placed layer a mask sampled at
+ * the unplaced point and gated the wrong region.
+ *
+ * THAT WAS NOT A GAP IN THE AUTOMASKS, and the automasks are only where it was
+ * noticed. It reached three places:
+ *
+ *   - clay_multires_sculptor_stamp and clay_dynamic_sculptor_stamp, both of
+ *     which took a `mask` and sampled it unplaced, at EVERY version that had
+ *     them -- so a host that never touched clay_automask_sources was affected;
+ *   - all five clay_multires_sculpt_layer_stroke_* verbs, which share one
+ *     helper that built the same unplaced gate;
+ *   - clay_dynamic_sculptor_ and clay_multires_sculptor_set_automask_sources,
+ *     which passed no frame because there was none to pass.
+ *
+ * clay_multires_sculptor_apply_stroke was the exception and already correct: it
+ * takes a per-call `mesh_to_world` and places every lattice through it. One
+ * call requiring a frame while its handle carried none is what settled that
+ * these surfaces are layer-local rather than incidentally untransformed.
+ *
+ * UNSET IS THE IDENTITY on every one of these, so a host that has not heard of
+ * them is not opted in and nothing it already does changes. Set, every
+ * position, radius and direction crossing that handle is WORLD.
+ *
+ * A per-call `mesh_to_world` beside a declared session frame is REFUSED, not
+ * resolved by precedence -- a host passing both means one of the two is what it
+ * believes, and picking silently would make the other a wrong belief nothing
+ * corrects. That applies to clay_multires_sculptor_apply_stroke, the one call
+ * able to spell the frame twice.
+ *
+ * _use_layer_transform reads the layer's own transform, and refuses a per-axis
+ * scale rather than approximating it: under one, a round brush in world is an
+ * ellipsoid on the model, so `radius` stops naming anything a spherical walk
+ * can honour. It needs a hierarchy BORROWED from a document layer; a standalone
+ * one answers CLAY_ERROR_NOT_FOUND, because it belongs to no layer.
+ *
+ * THE DYNAMIC SURFACE HAS NO _use_layer_transform, and that is a fact about the
+ * ABI rather than an omission here: a clay_dynamic_surface is not a document
+ * layer and there is no transform to read. Declare it with _set_world_frame.
+ *
+ * _world_frame reads back what a handle currently declares, `out_declared`
+ * non-zero when it declares one at all. Provided on all four, because a
+ * declared frame a host cannot read back makes "did that take?" answerable only
+ * by stamping and inspecting the result. */
+clay_result clay_multires_sculptor_set_world_frame(clay_multires_sculptor* sculptor,
+                                                   const clay_mesh_frame* frame);
+clay_result clay_multires_sculptor_use_layer_transform(clay_multires_sculptor* sculptor);
+clay_result clay_multires_sculptor_world_frame(const clay_multires_sculptor* sculptor,
+                                               clay_mesh_frame* out_frame, int32_t* out_declared);
+
+clay_result clay_dynamic_sculptor_set_world_frame(clay_dynamic_sculptor* sculptor,
+                                                  const clay_mesh_frame* frame);
+clay_result clay_dynamic_sculptor_world_frame(const clay_dynamic_sculptor* sculptor,
+                                              clay_mesh_frame* out_frame, int32_t* out_declared);
+
+/* The sculpt-layer stroke's three are declared beside its own calls, after the
+ * handle exists; the paragraph above governs them. */
 
 /* Why an operation was refused. Mirrors mesh::MultiresError; use
  * clay_multires_error_text for a message. */
@@ -9098,6 +9175,18 @@ clay_result clay_multires_sculpt_layer_stroke_record_size(
 /* Close the gesture: releases the composition hold and restores the stack's
  * active layer. A gesture that changed nothing produces an empty record rather
  * than a step. */
+/* The session frame for all five stroke verbs (ABI 0.97.0). See "WHERE THE
+ * SURFACE IS, ON EVERY SURFACE" beside clay_multires_sculptor_set_world_frame:
+ * one helper reads the brush and the mask for _stamp, _stamp_detail, _smooth,
+ * _erase and _restore, so declaring it here places all five together. */
+clay_result clay_multires_sculpt_layer_stroke_set_world_frame(
+    clay_multires_sculpt_layer_stroke* stroke, const clay_mesh_frame* frame);
+clay_result clay_multires_sculpt_layer_stroke_use_layer_transform(
+    clay_multires_sculpt_layer_stroke* stroke);
+clay_result clay_multires_sculpt_layer_stroke_world_frame(
+    const clay_multires_sculpt_layer_stroke* stroke, clay_mesh_frame* out_frame,
+    int32_t* out_declared);
+
 clay_result clay_multires_sculpt_layer_stroke_commit(clay_multires_sculpt_layer_stroke* stroke,
                                                      size_t* out_entries);
 /* Discard. Restores the target channel EXACTLY — the recorded `before` values,

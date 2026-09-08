@@ -81,6 +81,205 @@ ARRAY_ELEMENT_STRUCTS = {
 }
 
 
+# EVERY MASK GATE COMES FROM ONE HELPER.
+#
+# Issue #506 was four sculpting entry points sampling the painted mask at the
+# UNPLACED point, across three handle types, so on a placed layer they gated the
+# wrong region. It presents as "the mask didn't take", which is why it went
+# unfiled through several releases. The fix routes every gate through
+# `mask_gate_for`, which places the point when its handle declares a frame.
+#
+# WHY THE INVARIANT IS "CAME FROM THE HELPER" AND NOT "DOES NOT CONTAIN A
+# STRING". The first version of this gate counted occurrences of one exact
+# expression, `field_mask->sample(p)`. That catches someone copying an older
+# revision verbatim and misses the likelier case entirely: a new entry point
+# written in its own style, naming its lambda parameter anything else, adds a
+# fifth unplaced site and the count does not move. The measurement was a string
+# count and the defect is an unplaced sample by any spelling -- a gate that
+# could not express the thing it watched for, which is the failure the change
+# that added it exists to fix. Reviewed by the host it protects, who said so.
+#
+# So the check is structural. Every `field::MaskGate` local must be sourced from
+# `mask_gate_for`, or filled by a helper that is (`read_layer_stroke_stamp`,
+# which serves the five sculpt-layer stroke verbs). A new site is then caught
+# however it samples, because the failure is "a gate that did not come from the
+# helper" rather than "a string that appeared".
+MASK_GATE_TYPE = "field::MaskGate"
+# Both spellings of a local: `field::MaskGate gate;` and the initialised form
+# `field::MaskGate gate = mask_gate_for(...);`. Not the helper's return type and
+# not the out-param, which are followed by `(` and `)`.
+MASK_GATE_DECL = r"field::MaskGate\s+(\w+)\s*[;=]"
+MASK_GATE_HELPER = "mask_gate_for("
+# Helpers that fill a caller's gate FROM MASK_GATE_HELPER, so a function handing
+# its local to one of these has sourced it correctly. Adding a name here is
+# claiming that helper places the point; check that it does.
+MASK_GATE_FILLERS = ("read_layer_stroke_stamp(",)
+# The handles that inherit SessionFrame, and so the ones for which "sampled
+# without placing" is a defect rather than the only possible reading. Any body
+# holding one of these is in scope for the direct-sample check.
+FRAME_CARRYING_HANDLES = (
+    "clay_mesh_sculptor",
+    "clay_dynamic_sculptor",
+    "clay_multires_sculptor",
+    "clay_multires_sculpt_layer_stroke",
+)
+
+
+def _strip_comments(text: str) -> str:
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return re.sub(r"//[^\n]*", "", text)
+
+
+def _enclosing_bodies(text: str) -> list[tuple[str, str]]:
+    """(name, body) for every top-level definition, by brace depth from column 0."""
+    out = []
+    for m in re.finditer(r"^[\w:<>,&*\s]+?(\w+)\([^;]*?\)\s*\{", text, re.M):
+        name, i, depth = m.group(1), m.end() - 1, 0
+        while i < len(text):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        out.append((name, text[m.start():i]))
+    return out
+
+
+def placed_mask_gates() -> list[str]:
+    raw = (REPO / "bindings" / "c" / "clay_c.cpp").read_text()
+    # COMMENTS STRIPPED FIRST, and that is not tidiness. Reading the file raw let
+    # a comment mentioning the sampled expression stand in for the code: remove
+    # the placing branch and leave a note saying what it used to do -- an
+    # ordinary thing to do -- and a raw scan still finds the string.
+    text = _strip_comments(raw)
+    bodies = _enclosing_bodies(text)
+    errors = []
+
+    # -- 1. every gate, bound to ITS OWN source -------------------------------
+    #
+    # PER LOCAL, NOT PER BODY. The first version of this asked whether the
+    # enclosing body mentioned the helper anywhere, which passes a function that
+    # declares two gates and hand-builds one of them -- the helper call would
+    # satisfy the check for the local it has nothing to do with. An entry point
+    # gating on two masks, or one extended to take a second, is an ordinary
+    # future, and the site this change fixed would have survived inside it.
+    attributed = 0
+    for name, body in bodies:
+        for local in re.findall(MASK_GATE_DECL, body):
+            attributed += 1
+            if name == "mask_gate_for":
+                continue
+            if re.search(r"\b%s\s*=\s*%s" % (re.escape(local), re.escape(MASK_GATE_HELPER)),
+                         body):
+                continue
+            if any(re.search(r"%s[^;]*&%s\b" % (re.escape(f), re.escape(local)), body)
+                   for f in MASK_GATE_FILLERS):
+                continue
+            errors.append(
+                f"{name} declares a {MASK_GATE_TYPE} `{local}` that does not come from "
+                f"{MASK_GATE_HELPER.rstrip('(')}. A sculpting entry point that gates on a mask "
+                f"must take its gate from that helper, which places the point when the handle "
+                f"declares a world frame; building the lambda here samples the lattice wherever "
+                f"the surface's own coordinates happen to be. See #506, where five entry points "
+                f"did exactly that")
+
+    # -- 2. corroboration, and NOT on the same input --------------------------
+    #
+    # Resolving the MaskField pointer by TYPE rather than by name. Matching one
+    # spelling shared the blindness this was meant to break: the fifth site
+    # sampled through a pointer called `m`, so a check for `field_mask->sample(`
+    # went blind on exactly the input the structural check above also missed.
+    # Two checks that fail together on one input are one check.
+    # SCOPED BY WHAT THE BODY HOLDS, not by an allowlist. Sampling a mask
+    # directly is correct wherever there is no frame to place with:
+    # clay_mask_sample IS the host's "read this mask at this world point", and
+    # read_relax_settings / read_flatten_settings gate item-volume operations
+    # whose lattice and mask already share a space. What makes a direct sample
+    # wrong is a handle that COULD have declared a frame, so that is the test --
+    # and it needs no maintained list, which is the same objection that made the
+    # filler tuple self-verifying above.
+    for name, body in bodies:
+        if name == "mask_gate_for" or not any(h in body for h in FRAME_CARRYING_HANDLES):
+            continue
+        for ptr in re.findall(r"voxel::MaskField\s*\*\s*(\w+)", body):
+            if re.search(r"\b%s->sample\(" % re.escape(ptr), body):
+                errors.append(
+                    f"{name} samples a voxel::MaskField (`{ptr}->sample(`) directly while "
+                    f"holding a handle that can declare a world frame. Only "
+                    f"{MASK_GATE_HELPER.rstrip('(')} may do that: it is the one place that "
+                    f"places the point onto the world-addressed lattice when the handle "
+                    f"declares one")
+
+    # -- 3. the fillers verify themselves ------------------------------------
+    #
+    # A filler is a claim that some other function sources the gate correctly,
+    # and a claim in a tuple is a one-line silent loosening that looks like
+    # configuration. So each one is checked rather than trusted.
+    by_name = dict(bodies)
+    for filler in MASK_GATE_FILLERS:
+        fname = filler.rstrip("(")
+        fbody = by_name.get(fname)
+        if fbody is None:
+            errors.append(f"{fname} is listed in MASK_GATE_FILLERS but is not defined in "
+                          f"clay_c.cpp; a filler that does not exist cannot fill anything")
+        elif MASK_GATE_HELPER not in fbody:
+            errors.append(f"{fname} is listed in MASK_GATE_FILLERS, which claims it fills a "
+                          f"caller's gate from {MASK_GATE_HELPER.rstrip('(')}, and it does not "
+                          f"call it. Either it places the point some other way -- in which case "
+                          f"say how, here -- or callers relying on it are unplaced")
+
+    # -- 4. the gate reports its own coverage ---------------------------------
+    #
+    # A declaration `_enclosing_bodies` cannot attribute to some function is a
+    # declaration nothing above examines, and the gate would report clean. So
+    # the count in the whole stripped file must equal the count attributed to a
+    # recognised body, and a shortfall is REPORTED rather than passed.
+    #
+    # THE OBVIOUS GUESS ABOUT WHAT THIS CATCHES IS WRONG, checked rather than
+    # assumed: the extractor's pattern begins `^[\w:<>,&*\s]+?`, and `\s` in
+    # that class matches leading whitespace, so an INDENTED definition is found
+    # perfectly well. What it cannot attribute is a declaration that sits in no
+    # function at all -- file scope, or a class body -- which is what this count
+    # actually reports. Verified by injecting one of each.
+    total = len(re.findall(MASK_GATE_DECL, text))
+    if total != attributed:
+        missing = total - attributed
+        errors.append(
+            f"{total} {MASK_GATE_TYPE} declarations in clay_c.cpp but only {attributed} sit in a "
+            f"function body this check can see: {missing} unexamined. A gate declared outside a "
+            f"function -- at file scope, or in a class body -- is never checked for where it came "
+            f"from, which is exactly the site this gate exists to catch. Put it in a function, or "
+            f"teach _enclosing_bodies to see it; do not adjust the count")
+
+    # -- and the identity branch still exists ---------------------------------
+    #
+    # THIS DIRECTION IS THE ONE THAT PROTECTS A SHIPPING HOST: `!has_frame`
+    # returning the unplaced sample is the whole of "unset is the identity", and
+    # at least one host found the old unplaced gate independently and
+    # compensated by painting its mask in the layer's frame. A reader who sees
+    # that branch as redundant and removes it silently changes behaviour for
+    # every placed layer such a host owns.
+    #
+    # Fails safe if the extractor misses the helper entirely: an absent body
+    # gives an empty string, which does not contain the branch.
+    #
+    # Deliberately NOT phrased as "update the constant if it moved": tightening a
+    # gate announces itself and loosening one is silent forever, so a reader who
+    # believes this should change has to say why in a diff someone reviews.
+    helper = by_name.get("mask_gate_for", "")
+    if "!s.has_frame" not in helper or "->sample(" not in helper:
+        errors.append(
+            "mask_gate_for no longer has an unplaced !has_frame branch. That branch IS "
+            "'unset is the identity' for every sculpting handle: a host that declares no "
+            "frame must keep sampling the lattice in its surface's own coordinates, because "
+            "at least one compensates for the old behaviour by painting its mask there. If "
+            "this is intended it is a behaviour change for every placed layer and belongs in "
+            "its own change with its own note, not in a gate edit")
+    return errors
+
+
 def hygiene() -> list[str]:
     text = (REPO / "bindings" / "c" / "clay.h").read_text()
     # strip comments
@@ -104,6 +303,7 @@ def hygiene() -> list[str]:
         errors.append("bare 'long' (platform-dependent width) in clay.h")
     if re.search(r"\bunsigned int\b|\bshort\b", text):
         errors.append("non-fixed-width integer type in clay.h")
+    errors += placed_mask_gates()
     return errors
 
 
@@ -1192,6 +1392,23 @@ DOCUMENT_LAYER_CALLS = {
     # rather than "adopt the frame of the layer this session's mesh is in",
     # which is what it does.
     "clay_mesh_sculptor_use_layer_transform",
+    # The same reading as clay_mesh_sculptor_use_layer_transform above, extended
+    # to the hierarchy by place-the-automask-on-every-surface: the DOCUMENT layer
+    # this hierarchy was borrowed from, whose transform places it in the scene.
+    #
+    # The ambiguity this gate exists to catch is genuinely absent here, and the
+    # reason is worth stating because a multires surface DOES carry artists'
+    # channels: sculpt layers have no transform and no placement, so "the layer's
+    # transform" cannot mean one of them. A standalone hierarchy answers
+    # NOT_FOUND for the same reason -- it belongs to no document layer, which is
+    # the only kind of layer that could have been meant.
+    "clay_multires_sculptor_use_layer_transform",
+    # And on the sculpt-layer STROKE, where the two senses genuinely sit side by
+    # side: the handle is scoped to an artist's channel and the transform it
+    # adopts is the document layer's. The call spells `use_layer_transform`
+    # rather than `use_sculpt_layer_transform` precisely because the channel is
+    # not what is being read -- a sculpt layer has no transform to adopt.
+    "clay_multires_sculpt_layer_stroke_use_layer_transform",
 }
 
 

@@ -4020,3 +4020,126 @@ scenarios that make them testable rather than aspirational.
 Two more the architecture gives us for free and should be stated rather than
 assumed: smoothing cannot act across a gap, because blends are rigid and local;
 and boolean results are watertight by construction.
+
+
+## A measurement that cannot express the failure it is watching for
+
+The one defect class that keeps arriving in new domains, collected here because
+fixing instances has left the shape intact and it has now cost four separate
+sessions. Every member is a **well-formed answer to a narrower question than the
+one being asked**, which is what makes it expensive: a reader who checks it
+finds it *confirmed*. Vagueness invites a second look; a well-formed wrong reason
+closes the question.
+
+| Instrument | What it has no representation for |
+|---|---|
+| a scale gate that counts touches | an O(surface) READ, which touches nothing |
+| `check_binding_parity.py`'s fallback | it compares the parsed module against ITSELF, so it cannot fail — `parsed …` and `imported …` differ by one word |
+| `moved_vertices == 0` | reached-nothing vs fully-masked vs no-displacement, three ordinary outcomes behind one number |
+| a bounds test whose two sample points can quantise into one cell | that both sides of the comparison read the same, so it passes for a reason unrelated to the property |
+| an issue left open past its fix (#321) | its own state — it reports a removed limitation to the reader most affected, and "a layer carries no combine operation" is the sentence that makes a host NOT build on layer-level combine |
+| "the identity is the truth rather than a default" (#506) | that the identity was the only thing EXPRESSIBLE, not what was true; accurate about the code and wrong about the geometry |
+| a test run aggregated across a mid-run edit | which compilation of the fixed target it measured |
+| an allowlist entry nobody calls any more | that its justification is gone — a future re-introduction passes review silently, because the gate already says yes |
+| a comment that documents someone else's bug as though it were their contract | the bug being FIXED; a reader learns the behaviour is X and cannot learn it might stop being X |
+| **a pre-commitment made against the wrong expected value** | that a CORRECT result can be the one it pre-agreed to read as a fault |
+
+The last is the sharpest, because it **inverts a safeguard** rather than merely
+being blind. Deciding in advance what a red run means is good discipline, and it
+converts a correct red into a false alarm with your own prior stamped on it if
+the expected value was wrong. The guard: state the expected value AND why, so
+the pre-commitment can be checked before the run rather than vindicated after
+it. This arrived from a host session whose fixture compared a subtracting LAYER
+against a flat subtracting item CHAIN — two documents that are supposed to
+differ (see below) — with red pre-agreed to mean the engine was broken.
+
+**Why this is structurally invisible from the inside.** The person who knows the
+narrow thing best is the one who states it, and is therefore the one least
+placed to notice that its scope went unmarked. It is cheap to catch from
+outside, which is an argument for cross-session review rather than against it.
+
+### The guard, in the two forms it takes
+
+- **On a comparison:** assert the two sides genuinely differ. That is the
+  assertion-side form of the revert proof, and
+  `test_c_place_every_surface.cpp` carries it as its own case.
+- **On a revert proof:** one revert per property, and check the revert still
+  COMPILES. #506's first attempt reverted a mask gate and a descriptor
+  conversion together; the test then failed at its precondition and proved
+  nothing about the gate.
+- **On a gate:** watch it FAIL before shipping it, in every direction it is
+  meant to fail in. A gate nobody has watched fail is the first row of this
+  table.
+- **And that is not enough, which is the finding.** #506's inventory gate was
+  proved to fail in both directions and was STILL the wrong invariant: it
+  counted one exact expression, `field_mask->sample(p)`, for a defect that is
+  "an unplaced sample by any spelling". A real fifth site already in the file
+  spelled its pointer `m` and the gate could not see it. **Proving a gate fires
+  tells you it is not inert; it tells you nothing about whether it fires on the
+  property rather than on one spelling of the property.** Two separate
+  questions, and conflating them is how a gate ships blind after being tested.
+  The rebuilt check asks where a mask gate CAME FROM — structural, so a new
+  site is caught however it samples — and keeps the count beside it in a
+  deliberately DIFFERENT SHAPE, so the two cannot fail together.
+- **A revert proof that does not build hands you the previous binary,** and
+  nothing in the output says so. Removing a call left its helper unused under
+  `-Werror`; the suite ran the old binary and a case appeared to fail for the
+  right reason. Checking the revert COMPILES caught an ambiguous failure once
+  and a FALSE PASS once — the second is worse, because an ambiguous failure
+  makes you look again and a false pass closes the question.
+- **A baseline is a claim, so measure it rather than reasoning to it.** #506's
+  deform case first used a taper aimed 100 units away as its "untouched"
+  control. A taper scales the cross-section ABOUT ITS AXIS, so distance
+  amplifies instead of nullifying: 10837.5 against an undeformed 153, used as
+  the frozen expectation, asserting roughly the opposite of the property.
+- **Direction is not decoration.** The `fewer` half of #506's gate is the one
+  that protects a shipping host, and it exists because an outside reader
+  insisted the direction mattered. The same insistence found a non-obvious
+  `fewer` in a neighbouring repository's ingress allowlist, where a call
+  disappearing is safe but a ROW outliving its caller is a standing permission.
+
+### Whether this section is still doing anything
+
+The honest test, because a curated list of insights that no longer produces
+checks is this same defect one level up — **a record that cannot express whether
+it is still doing anything.**
+
+This table earns its space by GENERATING the next gate, not by being
+remembered. Two data points so far, and one is against it: the
+`field_mask->sample(p)` count became a gate only because an outside reader asked
+for the number, not because the table prompted it. So the test is whether anyone
+converts another row into a check over the next few changes. **If nothing has by
+the time three more changes land, cut this section rather than curating it** —
+the eight fixes and the gates are the load-bearing output, and prose that no
+longer generates them is decoration that reads like insurance.
+
+## The layer/item parity gate rests on an arity, and the arity is easy to miss
+
+`tests/unit/test_layer_parity.cpp` asserts that a composed layer and its
+one-layer equivalent are one document, over union, smooth union, chamfered
+union, subtract, smooth subtract, intersect, smooth intersect, paint, groove,
+shell and incise, in distance, colour, bounds AND safe step. That gate is what
+holds back the bound-NARROWING half of `fold-the-layers-with-an-operator`'s task
+3.1.
+
+**What the equivalence actually says**, because two sessions read it wrongly in
+one day and the comment lives only in the test:
+
+- a composed layer of ONE item == a single item carrying the composition
+- a composed layer of SEVERAL items == **one GROUP** carrying the composition
+
+NOT a flat item chain. A chain `A, B(Subtract), C(Subtract)` subtracts TWICE
+where the layer form unions B with C first and subtracts ONCE. So "is a
+subtracting layer the same as a subtracting item?" has a true answer that is
+narrower than the question, and a fixture built on the wider reading goes red
+for a correct reason.
+
+### A gap that fixture structurally cannot see
+
+`test_layer_parity.cpp` compiles the `Document` in C++ and never crosses the C
+ABI. A binding that FLATTENED a layer's chain on the way through would build
+exactly the wrong document — the flat-chain-subtracts-twice one — and the
+fixture could not see it, because the flattening happens on a path it does not
+use. The test that would catch it is layer-of-several versus
+group-carrying-the-composition driven through C. Recorded here rather than left
+depending on a host session's queue.
