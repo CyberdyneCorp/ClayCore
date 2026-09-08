@@ -81,6 +81,49 @@ ARRAY_ELEMENT_STRUCTS = {
 }
 
 
+# The one place a world-addressed lattice may be sampled without placing the
+# point first: mask_gate_for's own `!has_frame` branch, which IS the identity
+# and is the whole of "unset is the identity" for every sculpting handle.
+#
+# WHY A COUNT AND NOT A REVIEW. Issue #506 was four entry points sampling the
+# painted mask at the unplaced point, across three handle types, and it was
+# found by sweeping for this form rather than by enumerating call sites -- the
+# enumerations two sessions produced were both short. The fix routes all of them
+# through `mask_gate_for`, but nothing stopped a FIFTH site from being written
+# by hand: it would compile, every test would pass, and the tests cover the
+# sites that exist rather than the absence of a new one.
+#
+# So the inventory is enforced rather than recorded. A new sculpting entry point
+# that needs a gate calls the helper; one that writes the lambda itself has to
+# edit this number and say why, which makes adding an unplaced sample a
+# deliberate act instead of an omission.
+UNPLACED_MASK_SAMPLE = "field_mask->sample(p)"
+UNPLACED_MASK_SAMPLE_ALLOWED = 1
+
+
+def placed_mask_gates() -> list[str]:
+    text = (REPO / "bindings" / "c" / "clay_c.cpp").read_text()
+    found = text.count(UNPLACED_MASK_SAMPLE)
+    if found == UNPLACED_MASK_SAMPLE_ALLOWED:
+        return []
+    if found > UNPLACED_MASK_SAMPLE_ALLOWED:
+        return [f"{found} unplaced mask samples ({UNPLACED_MASK_SAMPLE}) in clay_c.cpp, "
+                f"expected {UNPLACED_MASK_SAMPLE_ALLOWED} -- the only permitted one is "
+                f"mask_gate_for's !has_frame branch. A sculpting entry point that gates on "
+                f"a mask must call mask_gate_for, which places the point when its handle "
+                f"declares a frame; see issue #506, where four sites did not"]
+    # FEWER is also a failure, and the interesting one: it means the identity
+    # branch was removed or reworded, and with it the guarantee that a host
+    # declaring no frame keeps the behaviour it has. At least one shipping host
+    # compensates for the old unplaced gate by painting its mask in the layer's
+    # frame, so that branch is load-bearing rather than vestigial.
+    return [f"no unplaced mask sample found in clay_c.cpp, expected "
+            f"{UNPLACED_MASK_SAMPLE_ALLOWED} -- mask_gate_for's !has_frame branch is what "
+            f"makes 'unset is the identity' true for every sculpting handle. If it moved, "
+            f"update UNPLACED_MASK_SAMPLE here; if it went away, a host that declares no "
+            f"frame has silently changed behaviour"]
+
+
 def hygiene() -> list[str]:
     text = (REPO / "bindings" / "c" / "clay.h").read_text()
     # strip comments
@@ -104,6 +147,7 @@ def hygiene() -> list[str]:
         errors.append("bare 'long' (platform-dependent width) in clay.h")
     if re.search(r"\bunsigned int\b|\bshort\b", text):
         errors.append("non-fixed-width integer type in clay.h")
+    errors += placed_mask_gates()
     return errors
 
 
@@ -1192,6 +1236,23 @@ DOCUMENT_LAYER_CALLS = {
     # rather than "adopt the frame of the layer this session's mesh is in",
     # which is what it does.
     "clay_mesh_sculptor_use_layer_transform",
+    # The same reading as clay_mesh_sculptor_use_layer_transform above, extended
+    # to the hierarchy by place-the-automask-on-every-surface: the DOCUMENT layer
+    # this hierarchy was borrowed from, whose transform places it in the scene.
+    #
+    # The ambiguity this gate exists to catch is genuinely absent here, and the
+    # reason is worth stating because a multires surface DOES carry artists'
+    # channels: sculpt layers have no transform and no placement, so "the layer's
+    # transform" cannot mean one of them. A standalone hierarchy answers
+    # NOT_FOUND for the same reason -- it belongs to no document layer, which is
+    # the only kind of layer that could have been meant.
+    "clay_multires_sculptor_use_layer_transform",
+    # And on the sculpt-layer STROKE, where the two senses genuinely sit side by
+    # side: the handle is scoped to an artist's channel and the transform it
+    # adopts is the document layer's. The call spells `use_layer_transform`
+    # rather than `use_sculpt_layer_transform` precisely because the channel is
+    # not what is being read -- a sculpt layer has no transform to adopt.
+    "clay_multires_sculpt_layer_stroke_use_layer_transform",
 }
 
 

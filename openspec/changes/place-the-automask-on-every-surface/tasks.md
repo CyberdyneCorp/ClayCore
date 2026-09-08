@@ -95,7 +95,7 @@
       the multires gate (`at_placed` read 9.86 where it should read ~0 and
       `at_local` read 0 where it should read 9.86 — exactly inverted, which is
       the signature of a placement bug rather than of an inert mask), the
-      layer-stroke gate, the dynamic gate, and the `_apply_stroke` refusal.
+      layer-stroke gate, the dynamic gate, and the `clay_multires_sculptor_apply_stroke` refusal.
       A first attempt reverted the gate AND `brush_settings_to_local` together
       and failed at the precondition instead, proving nothing about the mask;
       that is why the reverts are one property each
