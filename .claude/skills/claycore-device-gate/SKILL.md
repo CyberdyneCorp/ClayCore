@@ -1,6 +1,6 @@
 ---
 name: claycore-device-gate
-description: Run claycore's iPad performance gate — the hardware check no CI runner can do. Covers the reference device and its UDID, signing, the four cold sessions, the tree discipline that decides whether a run counts, and how to read REGRESSION / BUDGET / GROWTH. Use before tagging a release, or whenever a change needs a real latency number.
+description: Run claycore's iPad performance gate — the hardware check no CI runner can do. Covers the reference device and its UDID, signing, the seven cold sessions, the tree discipline that decides whether a run counts, and how to read REGRESSION / BUDGET / GROWTH. Use before tagging a release, or whenever a change needs a real latency number.
 ---
 
 # The device gate
@@ -11,7 +11,9 @@ does not skip** — a skipped hardware gate and a passing one are
 indistinguishable in a log, which is exactly how "Metal is the iPad app's
 production path" reached v0.25.0 without a single iPad ever having run it.
 
-Budget **an hour**: ~40 minutes of run, plus 30 minutes of idle iPad first.
+Budget **two and a half to three hours**: seven sessions with a 900 s cooldown
+between each is 90 minutes of cooling alone, plus the run itself and 30 minutes
+of idle iPad before you start. Raise the cooldown and it grows from there.
 
 ## Before you start
 
@@ -85,8 +87,10 @@ cp build/device/device-bench.json build/device/runs/gate-v<X><Y><Z>.json   # kee
 git add tests/device/last-gate.json && git commit -m "Record the device gate for vX.Y.Z"
 ```
 
-**It is FOUR (five with dyntopo) cold `xcodebuild` sessions with a cooldown
-between each, and it must not be collapsed back into one.** Both halves of that
+**It is SEVEN cold `xcodebuild` sessions with a cooldown between each, and it
+must not be collapsed back into one.** `run_device_bench.sh` names them 1/7
+through 7/7: light verbs, heavy verbs, latency and parity, the gallery, adaptive
+topology, the detail pass, and the sustained session last. Both halves of that
 are measured, not chosen:
 
 - A jetsam kill is about the **peak**, not the schedule. The verb bundle died
@@ -199,6 +203,21 @@ idevicesyslog -u <udid> 2>/dev/null \
 **Check free disk before starting.** The whole gate needs little (~70 MB of
 result bundles), but Xcode's `iOS DeviceSupport` grows ~5.5 GB per device-and-OS
 ever attached and is the usual reason a dev Mac has nothing left.
+
+**A cold start is not enough on its own; the cooldowns have to out-pace the
+ambient.** On 2026-09-07, gating 0.96.0, the iPad began at **26.09 degC** — a
+genuinely cold start — and still climbed to 32.5-32.6 degC by session 3 with the
+default 900 s cooldowns, then crossed into `Warn` and lost
+`testStrokeRefreshInsideAGroup` to the kill above at 21:19:04. Sessions 1 and 2
+had passed. So the starting temperature tells you whether session 1 is safe and
+nothing more: watch the number BETWEEN sessions, and if it is not falling back
+under ~30 degC, raise `CLAY_DEVICE_COOLDOWN` before session 3 rather than after
+the failure.
+
+Reading the probe: the temperature is nested under the `IORegistry` key, not at
+the top level — `plistlib.loads(out)['IORegistry']['Temperature']`. A top-level
+read returns `None`, which looks like an unsupported device rather than a wrong
+key.
 
 **The fix is cooling, not splitting.** This device took ~12 minutes to fall from
 `Warn` to level 0 after one session. Give it a genuinely cold start, raise

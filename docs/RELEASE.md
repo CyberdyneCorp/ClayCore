@@ -545,6 +545,88 @@ forward-refuse).
    its field changes layer-wide, but its zero set only moves where surface can
    appear or disappear — is open, unproven, and the next thing to measure.
 
+   **0.85.0, 0.86.0, 0.89.0, 0.91.0, 0.92.0, 0.93.0, 0.94.0, 0.95.0 and 0.96.0
+   are not such releases**: all nine are additive, and a caller who calls nothing
+   new sees the same answers. 0.85.0 adds `clay_mask_fill_from_group`, the
+   direction `clay_groups_fill_from_mask` had lacked since it shipped. 0.86.0
+   adds the three layer placements a host was assembling by hand out of
+   `clay_layer_set_transform` and a bounds query — `clay_layer_snap_to_ground`,
+   `clay_layer_zero_to_origin`, `clay_layer_centre_bounds` — plus
+   `clay_layer_consolidation_advice`, which answers the resolution to bake at and
+   what it costs. 0.89.0 adds `clay_layer_set_transform_bound`. 0.91.0 adds
+   `clay_document_topology_cache_stats` and `clay_document_trim_topology_cache`,
+   which see and bound a cache the document now shares between sculptors. 0.92.0
+   adds no entry point: it builds the boundary frame on the cross-level
+   neighbourhood 0.89.0 landed, which that change deliberately left unticked
+   rather than promised. 0.93.0 adds `clay_mesh_sculptor_set_world_frame`,
+   `clay_mesh_sculptor_world_frame` and `clay_mesh_sculptor_use_layer_transform`.
+   0.94.0 adds the stage report — `clay_mesh_sculptor_set_stage_report_enabled`,
+   `clay_mesh_sculptor_stage_report`, `clay_mesh_sculptor_reset_stage_report` and
+   the dynamic trio — reporting what each stage of a dab cost *and what it did*,
+   because a duration alone cannot separate a stage that was slow from one that
+   was handed more work. 0.95.0 adds `clay_document_save_at_minor`,
+   `clay_document_save_memory_at_minor` and `clay_document_writable_at_minor`.
+   0.96.0 adds `clay_automask_sources` with
+   `clay_mesh_sculptor_set_automask_sources` and its dynamic and multires
+   counterparts, plus `clay_layer_node_color`.
+
+   **None of 0.85.0 through 0.95.0 was ever tagged.** They exist as minors in
+   this release, exactly as 0.79.0–0.83.0 did in v0.84.0. Seven of them arrived
+   in one merge: #484, #485, #486, #487, #492, #491 and #494 were a linear stack,
+   each an ancestor of the next, and `5e745e6a` closed all seven at once. So on
+   main's first-parent line the ABI reads 0.90.0 and then 0.96.0 with nothing
+   between, and 0.91.0–0.95.0 are commit states inside that merge rather than
+   points anyone can check out by tag. Do not read the jump as five removed
+   minors.
+
+   **0.87.0 IS such a release, and it is the formats.** An SDF layer gains a
+   `LayerComposition` — op, blend, `blend_k`, rounding, from the existing
+   item-level enums — so visible SDF layers no longer hard-union
+   unconditionally. **A document written before this is unchanged**: union with
+   the default blend is the default composition, and the first visible layer's
+   own operator is deliberately not applied, which is what stops
+   `Subtract(empty, A)` and `Intersect(empty, A)` opening a stack with nothing on
+   screen and no error. First-ness is a type (`FirstVisibleLayer`), not a second
+   bool, so transposing it is a compile error rather than a blank viewport. The
+   scene and `.clayspace` formats go to **minor 18** here.
+
+   **0.88.0 IS such a release, in three ways.** The scene and `.clayspace`
+   formats go to **minor 19**, carrying an `'MRES'` chunk that persists a mesh
+   layer's multires hierarchy keyed by layer id — an identity that survives a
+   process, which a handle address does not. Before it the engine reported a
+   hierarchy's row as an ordinary MESH layer, so a host's side-car file was the
+   only thing that knew the row had ever been a hierarchy.
+
+   **`clay_multires_stamp_report.moved_vertices` changed meaning**: it is now
+   summed over every level a stamp wrote, where it previously reported the bound
+   level alone. The layout is unchanged, so this breaks no build — it changes an
+   answer. Reporting the bound level alone made a stamp that moved only the
+   coarse side come back `0`, which is the silent success the change exists to
+   remove.
+
+   **`clay_document_mesh_layer_revision` now advances on undo and redo**
+   (issue #472). It is documented as bumped every time a layer's triangles are
+   replaced wholesale, and undoing a rebuild is exactly that — but the revision
+   did not move, so the one moment the number was added for was the one moment
+   it was silent. Eight writers touch the triangles and three bumped. A host that
+   cached against it on the assumption that it identifies *content* was relying
+   on something it never guaranteed: it identifies an epoch of mutation, and the
+   guarantee is that the same number means the same content, which holds only
+   while the number never repeats. A rebuild after undo-then-redo is the intended
+   cost — loud and bounded, against a silent stale cache that is neither.
+
+   **0.90.0 IS such a release, in one way, and it is a speed** (issue #471). An
+   intersecting boolean drag re-meshed the whole layer every frame: **2.54x its
+   subtracting control** on the identical fixture, and seconds per frame at ten
+   times the extent. The layer-wide influence bound is untouched and still
+   correct — `max(acc, item)` really can change the field anywhere the layer has
+   material. What lands beside it is a narrower bound answering a different
+   question: given this exact before and after node, where can the zero set
+   *relevant to refill and remeshing* have changed? `command_surface_delta_bound`
+   returns it for `SetTransformCmd` on a visible Intersect item with finite
+   support and `std::nullopt` for every other command, every other op, and every
+   case outside the proof.
+
    **0.54.1 is not such a release**: no symbol added or removed and no
    signature changed. It is a BEHAVIOUR fix to one existing verb, and the kind
    worth reading because the old behaviour was not wrong-looking, it was inert.
