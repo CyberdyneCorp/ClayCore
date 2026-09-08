@@ -170,6 +170,12 @@ void MultiresSculptor::bind() {
         // and a stroke down there moves them without invalidating anything up
         // here — so the pointer is refreshed every time rather than only when
         // the sculptor is rebuilt.
+        //
+        // The POINTER, and on an interior dab nothing else: `cross_level_at`
+        // walks the region rim again only when the level below has actually
+        // moved since the last ask. See its own note, and #493 for what the
+        // unconditional walk cost — it scaled with the RIM while the dab scaled
+        // with the FOOTPRINT, so its share grew with the region.
         sculptor_->set_cross_level(&surface_.cross_level_at(level));
         return;
     }

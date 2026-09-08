@@ -157,10 +157,12 @@ const CrossLevelNeighborhood* cross_level_of(MultiresSurface::State& s, std::uin
         c->cross = std::make_unique<CrossLevelNeighborhood>(
             build_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
                               s.levels[level].topology, s.levels[level].patch_kept));
-    } else {
+        c->cross_parent_revision = parent.positions_revision();
+    } else if (c->cross_parent_revision != parent.positions_revision()) {
         ++s.stats.cross_level_refreshes;
         refresh_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
                             c->cross.get());
+        c->cross_parent_revision = parent.positions_revision();
     }
     return c->cross->empty() ? nullptr : c->cross.get();
 }
@@ -657,16 +659,33 @@ const CrossLevelNeighborhood& MultiresSurface::cross_level_at(std::uint32_t leve
         c.cross = std::make_unique<CrossLevelNeighborhood>(
             build_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
                               s.levels[level].topology, s.levels[level].patch_kept));
+        c.cross_parent_revision = parent.positions_revision();
         return *c.cross;
     }
-    // The topology is fixed for the life of the cache; the outside POSITIONS
-    // are the level below's, and a stroke down there moves them without this
-    // level's cache going stale. Re-read on the way past rather than tracked,
-    // because tracking them would be a fourth revision counter guarding a walk
-    // over the region rim.
-    ++s.stats.cross_level_refreshes;
-    refresh_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
-                        c.cross.get());
+    // The topology is fixed for the life of the cache; the outside POSITIONS are
+    // the level below's, and a stroke down there moves them without this level's
+    // cache going stale. So they are re-read when — and only when — the level
+    // below has moved since the last read.
+    //
+    // THE SIGNAL IS THE QUEUE THAT WAS ALREADY THERE. Those positions are
+    // `subdivide_positions` of the parent's, so they go stale exactly when the
+    // parent has vertices to push up; `MultiresLevel::note_moved` is the one
+    // door onto that queue and moves `positions_revision` with it. Anything that
+    // writes the parent's positions and skips that door has already left the
+    // level above with stale `subdivided` and stale frames, which every existing
+    // multires gate reads — so there is no way to make this stale on its own.
+    //
+    // A write the hierarchy then PUTS BACK deliberately does not move it:
+    // `restore_positions` rewrites what the stored coefficients reconstruct to,
+    // which is what the last revision left in the array, so the pair is a no-op
+    // on the content and on the number. That is the coarse half of every
+    // interior dab of a crossing stroke.
+    if (c.cross_parent_revision != parent.positions_revision()) {
+        ++s.stats.cross_level_refreshes;
+        refresh_cross_level(parent.topology, parent.cache->conn, parent.cache->mesh.positions,
+                            c.cross.get());
+        c.cross_parent_revision = parent.positions_revision();
+    }
     return *c.cross;
 }
 
@@ -801,6 +820,15 @@ namespace {
 // What a refused write needs: the brush has already moved the level's mesh by
 // the time the hierarchy is told about it, so refusing a locked layer means
 // putting those vertices back rather than merely declining to record them.
+//
+// AND IT IS NOT A CHANGE, which is why it queues nothing for the level above
+// and does not move `positions_revision`. Every acknowledged write to a level's
+// positions ends by reading the stored coefficients back through the frame, so
+// "what the coefficients reconstruct to" IS what the array held at the current
+// revision -- the raw write this undoes never moved the number, and putting the
+// values back leaves both where they were. Bumping here instead would cost a
+// rim walk above for every interior dab of a crossing stroke, which restores
+// the whole coarse write and keeps nothing.
 void restore_positions(MultiresSurface::State& s, std::uint32_t level,
                        const std::vector<std::uint32_t>& vertices) {
     MultiresLevel& lev = s.levels[level];

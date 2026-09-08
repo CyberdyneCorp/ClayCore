@@ -60,8 +60,19 @@ struct LevelCache {
     // `drop_intermediate_caches` already release it and `cache_generation`
     // already moves when they do. Its topology is a function of the cage, the
     // rule and the per-level patch sets; only its outside POSITIONS follow the
-    // level below, and those are re-read rather than rebuilt.
+    // level below, and those are re-read rather than rebuilt -- when the level
+    // below has moved, which is what `cross_parent_revision` below decides.
     std::unique_ptr<CrossLevelNeighborhood> cross;
+    // WHICH PARENT THE OUTSIDE POSITIONS IN `cross` WERE READ FROM:
+    // `MultiresLevel::positions_revision` of the level below, as it stood at
+    // the last read. Different means the rim walk has to run again; equal means
+    // the answer already here IS the current one, which is the whole of #493.
+    //
+    // In the cache beside `cross` rather than beside the counter it compares,
+    // because it describes THIS derived thing and dies with it: dropping the
+    // level, or `release_cross_levels`, takes both and the next access rebuilds.
+    std::uint64_t cross_parent_revision = 0;
+
 
     // The level's chunks, and the face -> chunk map that marks them.
     //
