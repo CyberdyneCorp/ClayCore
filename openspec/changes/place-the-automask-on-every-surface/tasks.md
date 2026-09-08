@@ -27,9 +27,47 @@
 - [x] 2.3 `read_layer_stroke_stamp` — the same pair, and it serves FIVE entry
       points (`_stamp`, `_stamp_detail`, `_smooth`, `_erase`, `_restore`), so
       placing it there places all five and none can drift from the others
-- [x] 2.4 The bound is a SWEEP, not an enumeration: `grep` for the unplaced
-      `field_mask->sample(p)` across `clay_c.cpp` returns four sites, the three
-      above plus `mask_gate_for`'s own `!has_frame` fallback, which is correct
+- [x] 2.4 `clay_mesh_sculptor_deform` — A FIFTH SITE, AND NOT ONE OF #506's
+      THREE. It is on `clay_mesh_sculptor`, which has carried a frame since
+      `define-carried-mesh-transform-semantics`, and it sampled its mask
+      unplaced anyway *and* converted none of `MeshDeformSettings`' world
+      values (`origin`, `axis`, `span`). On a placed layer a taper's gizmo box
+      sat somewhere other than where the artist drew it and the freeze
+      protected the wrong region. `deform_settings_to_local` beside
+      `mask_gate_for`
+- [x] 2.5 THE SWEEP THAT FOUND FOUR COULD NOT HAVE FOUND THE FIFTH, which is
+      why the gate in 6.1 is structural. `grep` for the unplaced
+      `field_mask->sample(p)` returns four sites — the three in 2.1–2.3 plus
+      `mask_gate_for`'s own correct `!has_frame` fallback — and the deform site
+      spells its pointer `m`. A sweep for one expression is a better bound than
+      an enumeration and is still a bound on that expression, not on the defect
+
+## 6. The bound, enforced
+
+- [x] 6.1 Every `field::MaskGate` local must be sourced from `mask_gate_for`,
+      or from a helper that is (`read_layer_stroke_stamp`, serving the five
+      stroke verbs) — checked in `check_c_abi.py`'s hygiene pass, which
+      `release_check` and CI already run. STRUCTURAL RATHER THAN TEXTUAL: the
+      failure is "a gate that did not come from the helper", so a new site is
+      caught however it samples. It found `clay_mesh_sculptor_deform` on its
+      first run
+- [x] 6.2 Comments stripped before the scan. Not tidiness: "remove the code and
+      leave a note about what it used to do" is ordinary, and a note mentioning
+      the sampled expression would have held a raw count at its expected value
+      while the guarantee was gone
+- [x] 6.3 Corroboration in a DIFFERENT SHAPE so the two cannot fail together:
+      whatever the spelling, `field_mask->sample(` may appear only inside
+      `mask_gate_for`
+- [x] 6.4 The identity branch is checked too, and this is the direction that
+      protects a shipping host. Phrased so it cannot be followed into
+      inertness: no "update the constant if it moved", because tightening a
+      gate announces itself and loosening one is silent forever
+- [x] 6.5 PROVING A GATE FIRES IS NOT PROVING IT WATCHES THE RIGHT THING, and
+      conflating the two is how the first version of this gate shipped. It
+      counted one exact expression, was proved to fail in both directions, and
+      was still the wrong invariant — a string count for a defect that is "an
+      unplaced sample by any spelling". Both checks are needed and they are
+      separate
 
 ## 3. The ABI
 
@@ -99,3 +137,21 @@
       A first attempt reverted the gate AND `brush_settings_to_local` together
       and failed at the precondition instead, proving nothing about the mask;
       that is why the reverts are one property each
+- [x] 5.8 A REVERT THAT DOES NOT BUILD HANDS YOU THE PREVIOUS BINARY. Removing
+      `deform_settings_to_local`'s call left the helper unused under `-Werror`,
+      the suite ran the old binary, and the case appeared to fail for the right
+      reason. With the helper removed too the revert built — and the case
+      PASSED, which is what showed the gizmo property was untested:
+      `plain != undeformed` holds either way, because an unconverted origin
+      still deforms, just wrongly. The assertion that pins it is the
+      equivalence — a declared frame with a world gizmo is the same operation
+      as no frame with a local one — and it fails against a compiling revert.
+      Checking the revert COMPILES caught an ambiguous failure earlier and a
+      FALSE one here, which is the worse of the two
+- [x] 5.9 A CONTROL THAT DID NOT CONTROL, recorded because it nearly shipped:
+      the deform case first used a gizmo aimed 100 units away as its
+      "untouched" baseline. A taper scales the cross-section ABOUT ITS AXIS, so
+      a distant axis puts every vertex far from it and AMPLIFIES the result —
+      10837.5 against an undeformed 153. Used as the frozen baseline it
+      asserted roughly the opposite of the property. The baseline is the
+      undeformed plane, measured directly

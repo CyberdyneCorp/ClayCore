@@ -412,3 +412,107 @@ TEST_CASE("place every surface: a host that carries its own gesture is not opted
     const clay_mesh_frame f = translation(kPlacedX);
     CHECK(stamp_lift(&f, carried, kPlacedX) == doctest::Approx(stamp_lift(&f, nullptr, kPlacedX)));
 }
+
+namespace {
+
+// A taper on a placed FIXED MESH, with the mask placement isolated the same way
+// as on the three stamp paths.
+//
+// This site is not one of #506's three. It is on clay_mesh_sculptor -- the one
+// handle that has carried a frame since define-carried-mesh-transform-semantics
+// -- and it sampled its mask unplaced anyway, and converted neither its world
+// origin nor its world span. It was invisible to the first version of the gate
+// because the mask pointer here is named `m`, not `field_mask`; the structural
+// check that asks where a gate CAME FROM found it on its first run.
+//
+// Sum of |x| displacement rather than lift: a taper scales the cross-section
+// about the axis, so it moves vertices in x and z and leaves y alone.
+double taper_spread(const clay_mesh_frame* frame, clay_mask* mask, float origin_x) {
+    clay_mesh* m = plane_mesh(16, 1.0f);
+    clay_mesh_sculptor* s = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(m, -1.0f, &s) == CLAY_OK);
+    if (frame) REQUIRE(clay_mesh_sculptor_set_world_frame(s, frame) == CLAY_OK);
+
+    clay_mesh_deform_desc d{};
+    d.struct_size = sizeof(d);
+    REQUIRE(clay_mesh_deform_defaults(&d) == CLAY_OK);
+    d.verb = CLAY_MESH_DEFORM_TAPER;
+    d.origin[0] = origin_x;
+    d.origin[1] = -1.0f;
+    d.axis[0] = 0.0f;
+    d.axis[1] = 1.0f;
+    d.axis[2] = 0.0f;
+    d.span = 2.0f;
+    d.scale_start = 1.0f;
+    d.scale_end = 0.25f;
+
+    std::size_t moved = 0;
+    REQUIRE(clay_mesh_sculptor_deform(s, &d, mask, nullptr, &moved) == CLAY_OK);
+
+    const float* p = clay_mesh_positions(m);
+    const std::size_t n = clay_mesh_vertex_count(m);
+    double sum = 0.0;
+    for (std::size_t i = 0; i < n; ++i) sum += std::fabs(static_cast<double>(p[i * 3]));
+    clay_mesh_sculptor_destroy(s);
+    clay_mesh_destroy(m);
+    return sum;
+}
+
+// The same measure on a plane nothing has deformed. THE BASELINE FOR "FULLY
+// MASKED", and it has to be this rather than a deformer aimed away: a taper
+// scales the cross-section about its axis, so moving the gizmo far away does
+// not disable it, it puts every vertex a hundred units off the axis and
+// AMPLIFIES the result. Measured: a gizmo 100 units away gave 10837.5 against
+// an undeformed 153, and using it as an "untouched" control asserted the
+// opposite of the intended property.
+double plane_spread() {
+    clay_mesh* m = plane_mesh(16, 1.0f);
+    const float* p = clay_mesh_positions(m);
+    const std::size_t n = clay_mesh_vertex_count(m);
+    double sum = 0.0;
+    for (std::size_t i = 0; i < n; ++i) sum += std::fabs(static_cast<double>(p[i * 3]));
+    clay_mesh_destroy(m);
+    return sum;
+}
+
+}  // namespace
+
+TEST_CASE("place every surface: a deformer on a placed mesh gates where the mesh is") {
+    const clay_mesh_frame f = translation(kPlacedX);
+    const double undeformed = plane_spread();
+
+    // The unmasked taper, with the gizmo given in WORLD as a declared session
+    // requires. If `origin` were not converted, the axis would sit ten units
+    // off the mesh and the result would not be this -- so the precondition that
+    // it differs from the undeformed plane is also the assertion that the gizmo
+    // is placed.
+    const double plain = taper_spread(&f, nullptr, kPlacedX);
+    REQUIRE(plain > 0.0);
+    REQUIRE(plain != doctest::Approx(undeformed));
+
+    // AND THE GIZMO ITSELF IS PLACED, which the line above cannot show: with
+    // `origin` unconverted the axis sits ten units off the mesh and STILL
+    // deforms it -- more, not less, because a taper scales the cross-section
+    // about its axis and every vertex is then far from it. So the assertion has
+    // to be the equivalence: declaring a frame and giving the gizmo in world is
+    // the same operation as declaring nothing and giving it in the surface's own
+    // coordinates.
+    //
+    // Found by a revert that COMPILED. Removing the conversion first failed to
+    // build (the helper went unused under -Werror), the suite ran the previous
+    // binary, and the case appeared to fail for the right reason while proving
+    // nothing. With the helper removed too the revert built and this case
+    // passed -- which is what showed the property was untested.
+    CHECK(plain == doctest::Approx(taper_spread(nullptr, nullptr, 0.0f)));
+
+    Mask at_placed(kMaskCell);
+    fill_box_at(at_placed, kPlacedX);
+    Mask at_local(kMaskCell);
+    fill_box_at(at_local, 0.0f);
+
+    // Both halves, as everywhere else: the box around the placed surface
+    // freezes it back to the undeformed plane, and the box at the layer-local
+    // origin is never consulted and changes nothing.
+    CHECK(taper_spread(&f, at_placed, kPlacedX) == doctest::Approx(undeformed));
+    CHECK(taper_spread(&f, at_local, kPlacedX) == doctest::Approx(plain));
+}

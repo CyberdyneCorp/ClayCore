@@ -16062,6 +16062,24 @@ void brush_settings_to_local(const SessionFrame& s, mesh::MeshBrushSettings* set
     settings->layer_height = world_length_to_local(s, settings->layer_height);
 }
 
+// A DEFORMER's world-valued fields. `origin` is a point, `axis` a direction and
+// `span` a length along it; `scale_start`, `scale_end`, `angle` and `ease` are
+// ratios, an angle and an enum, which a similarity does not change.
+//
+// This was missed when the mesh session first learned its frame: the deformer
+// took a world origin and a world span, converted neither, and gated its mask
+// unplaced -- so on a placed layer a taper's gizmo box sat somewhere other than
+// where the artist drew it AND the freeze protected the wrong region. Found by
+// the structural half of check_c_abi.py's mask-gate check, which asks where a
+// gate CAME FROM rather than what it looks like; the string count that preceded
+// it could not see this site, because the pointer here is named `m`.
+void deform_settings_to_local(const SessionFrame& s, mesh::MeshDeformSettings* settings) {
+    if (!s.has_frame) return;
+    settings->origin = world_point_to_local(s, settings->origin);
+    settings->axis = world_vector_to_local(s, settings->axis);
+    settings->span = world_length_to_local(s, settings->span);
+}
+
 // The STROKE's own world-valued fields, for a session that declares a space.
 //
 // A SECOND HELPER AND NOT AN OVERSIGHT IN THE FIRST. `apply_to_mesh` IGNORES
@@ -17393,8 +17411,10 @@ clay_result clay_mesh_sculptor_deform(clay_mesh_sculptor* sculptor,
         r = resolve_mask(mask, &m);
         if (r != CLAY_OK) return r;
     }
-    field::MaskGate gate;
-    if (m) gate = [m](kernel::cfloat3 p) { return m->sample(p); };
+    // Both halves, as on every stamp path: a placed gate beside a local gizmo
+    // would be a new disagreement of the kind the frame exists to remove.
+    deform_settings_to_local(*sculptor, &settings);
+    field::MaskGate gate = mask_gate_for(*sculptor, m);
     const std::size_t moved = sculptor->sculptor->apply_deformer(
         settings, gate, deltas ? &deltas->deltas : nullptr);
     if (out_moved) *out_moved = moved;

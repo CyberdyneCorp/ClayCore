@@ -81,47 +81,108 @@ ARRAY_ELEMENT_STRUCTS = {
 }
 
 
-# The one place a world-addressed lattice may be sampled without placing the
-# point first: mask_gate_for's own `!has_frame` branch, which IS the identity
-# and is the whole of "unset is the identity" for every sculpting handle.
+# EVERY MASK GATE COMES FROM ONE HELPER.
 #
-# WHY A COUNT AND NOT A REVIEW. Issue #506 was four entry points sampling the
-# painted mask at the unplaced point, across three handle types, and it was
-# found by sweeping for this form rather than by enumerating call sites -- the
-# enumerations two sessions produced were both short. The fix routes all of them
-# through `mask_gate_for`, but nothing stopped a FIFTH site from being written
-# by hand: it would compile, every test would pass, and the tests cover the
-# sites that exist rather than the absence of a new one.
+# Issue #506 was four sculpting entry points sampling the painted mask at the
+# UNPLACED point, across three handle types, so on a placed layer they gated the
+# wrong region. It presents as "the mask didn't take", which is why it went
+# unfiled through several releases. The fix routes every gate through
+# `mask_gate_for`, which places the point when its handle declares a frame.
 #
-# So the inventory is enforced rather than recorded. A new sculpting entry point
-# that needs a gate calls the helper; one that writes the lambda itself has to
-# edit this number and say why, which makes adding an unplaced sample a
-# deliberate act instead of an omission.
-UNPLACED_MASK_SAMPLE = "field_mask->sample(p)"
-UNPLACED_MASK_SAMPLE_ALLOWED = 1
+# WHY THE INVARIANT IS "CAME FROM THE HELPER" AND NOT "DOES NOT CONTAIN A
+# STRING". The first version of this gate counted occurrences of one exact
+# expression, `field_mask->sample(p)`. That catches someone copying an older
+# revision verbatim and misses the likelier case entirely: a new entry point
+# written in its own style, naming its lambda parameter anything else, adds a
+# fifth unplaced site and the count does not move. The measurement was a string
+# count and the defect is an unplaced sample by any spelling -- a gate that
+# could not express the thing it watched for, which is the failure the change
+# that added it exists to fix. Reviewed by the host it protects, who said so.
+#
+# So the check is structural. Every `field::MaskGate` local must be sourced from
+# `mask_gate_for`, or filled by a helper that is (`read_layer_stroke_stamp`,
+# which serves the five sculpt-layer stroke verbs). A new site is then caught
+# however it samples, because the failure is "a gate that did not come from the
+# helper" rather than "a string that appeared".
+MASK_GATE_TYPE = "field::MaskGate"
+MASK_GATE_HELPER = "mask_gate_for("
+# Helpers that fill a caller's gate FROM MASK_GATE_HELPER, so a function handing
+# its local to one of these has sourced it correctly. Adding a name here is
+# claiming that helper places the point; check that it does.
+MASK_GATE_FILLERS = ("read_layer_stroke_stamp(",)
+
+
+def _strip_comments(text: str) -> str:
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return re.sub(r"//[^\n]*", "", text)
+
+
+def _enclosing_bodies(text: str) -> list[tuple[str, str]]:
+    """(name, body) for every top-level definition, by brace depth from column 0."""
+    out = []
+    for m in re.finditer(r"^[\w:<>,&*\s]+?(\w+)\([^;]*?\)\s*\{", text, re.M):
+        name, i, depth = m.group(1), m.end() - 1, 0
+        while i < len(text):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        out.append((name, text[m.start():i]))
+    return out
 
 
 def placed_mask_gates() -> list[str]:
-    text = (REPO / "bindings" / "c" / "clay_c.cpp").read_text()
-    found = text.count(UNPLACED_MASK_SAMPLE)
-    if found == UNPLACED_MASK_SAMPLE_ALLOWED:
-        return []
-    if found > UNPLACED_MASK_SAMPLE_ALLOWED:
-        return [f"{found} unplaced mask samples ({UNPLACED_MASK_SAMPLE}) in clay_c.cpp, "
-                f"expected {UNPLACED_MASK_SAMPLE_ALLOWED} -- the only permitted one is "
-                f"mask_gate_for's !has_frame branch. A sculpting entry point that gates on "
-                f"a mask must call mask_gate_for, which places the point when its handle "
-                f"declares a frame; see issue #506, where four sites did not"]
-    # FEWER is also a failure, and the interesting one: it means the identity
-    # branch was removed or reworded, and with it the guarantee that a host
-    # declaring no frame keeps the behaviour it has. At least one shipping host
-    # compensates for the old unplaced gate by painting its mask in the layer's
-    # frame, so that branch is load-bearing rather than vestigial.
-    return [f"no unplaced mask sample found in clay_c.cpp, expected "
-            f"{UNPLACED_MASK_SAMPLE_ALLOWED} -- mask_gate_for's !has_frame branch is what "
-            f"makes 'unset is the identity' true for every sculpting handle. If it moved, "
-            f"update UNPLACED_MASK_SAMPLE here; if it went away, a host that declares no "
-            f"frame has silently changed behaviour"]
+    raw = (REPO / "bindings" / "c" / "clay_c.cpp").read_text()
+    # COMMENTS STRIPPED FIRST, and that is not tidiness. Reading the file raw let
+    # a comment mentioning the sampled expression stand in for the code: remove
+    # the placing branch and leave a note saying what it used to do -- an
+    # ordinary thing to do -- and a raw scan still finds the string.
+    text = _strip_comments(raw)
+    errors = []
+    for name, body in _enclosing_bodies(text):
+        if name == "mask_gate_for":
+            continue
+        for local in re.findall(r"%s\s+(\w+)\s*;" % re.escape(MASK_GATE_TYPE), body):
+            sourced = MASK_GATE_HELPER in body or any(f in body for f in MASK_GATE_FILLERS)
+            if not sourced:
+                errors.append(
+                    f"{name} declares a {MASK_GATE_TYPE} `{local}` that does not come from "
+                    f"{MASK_GATE_HELPER.rstrip('(')}. A sculpting entry point that gates on a "
+                    f"mask must take its gate from that helper, which places the point when "
+                    f"the handle declares a world frame; building the lambda here samples the "
+                    f"lattice wherever the surface's own coordinates happen to be. See #506, "
+                    f"where four entry points did exactly that")
+    # CORROBORATION, and deliberately a different shape from the check above so
+    # the two do not fail together: whatever the spelling, the sample itself may
+    # only happen inside the helper.
+    outside = [name for name, body in _enclosing_bodies(text)
+               if name != "mask_gate_for" and "field_mask->sample(" in body]
+    if outside:
+        errors.append(f"{MASK_GATE_TYPE} sampling outside mask_gate_for in: "
+                      f"{', '.join(sorted(set(outside)))}")
+    # And the identity branch still exists. THIS DIRECTION IS THE ONE THAT
+    # PROTECTS A SHIPPING HOST: `!has_frame` returning the unplaced sample is the
+    # whole of "unset is the identity", and at least one host found the old
+    # unplaced gate independently and compensated by painting its mask in the
+    # layer's frame. A reader who sees that branch as redundant and removes it
+    # silently changes behaviour for every placed layer such a host owns.
+    #
+    # Deliberately NOT phrased as "update the constant if it moved": tightening a
+    # gate announces itself and loosening one is silent forever, so a reader who
+    # believes this should change has to say why in a diff someone reviews.
+    helper = dict(_enclosing_bodies(text)).get("mask_gate_for", "")
+    if "!s.has_frame" not in helper or "field_mask->sample(" not in helper:
+        errors.append(
+            "mask_gate_for no longer has an unplaced !has_frame branch. That branch IS "
+            "'unset is the identity' for every sculpting handle: a host that declares no "
+            "frame must keep sampling the lattice in its surface's own coordinates, because "
+            "at least one compensates for the old behaviour by painting its mask there. If "
+            "this is intended it is a behaviour change for every placed layer and belongs in "
+            "its own change with its own note, not in a gate edit")
+    return errors
 
 
 def hygiene() -> list[str]:

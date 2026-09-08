@@ -4068,9 +4068,30 @@ outside, which is an argument for cross-session review rather than against it.
   conversion together; the test then failed at its precondition and proved
   nothing about the gate.
 - **On a gate:** watch it FAIL before shipping it, in every direction it is
-  meant to fail in. #506's inventory gate was proved twice — a hand-written
-  fifth site, and the identity branch reworded away — because a gate nobody has
-  watched fail is the first row of this table.
+  meant to fail in. A gate nobody has watched fail is the first row of this
+  table.
+- **And that is not enough, which is the finding.** #506's inventory gate was
+  proved to fail in both directions and was STILL the wrong invariant: it
+  counted one exact expression, `field_mask->sample(p)`, for a defect that is
+  "an unplaced sample by any spelling". A real fifth site already in the file
+  spelled its pointer `m` and the gate could not see it. **Proving a gate fires
+  tells you it is not inert; it tells you nothing about whether it fires on the
+  property rather than on one spelling of the property.** Two separate
+  questions, and conflating them is how a gate ships blind after being tested.
+  The rebuilt check asks where a mask gate CAME FROM — structural, so a new
+  site is caught however it samples — and keeps the count beside it in a
+  deliberately DIFFERENT SHAPE, so the two cannot fail together.
+- **A revert proof that does not build hands you the previous binary,** and
+  nothing in the output says so. Removing a call left its helper unused under
+  `-Werror`; the suite ran the old binary and a case appeared to fail for the
+  right reason. Checking the revert COMPILES caught an ambiguous failure once
+  and a FALSE PASS once — the second is worse, because an ambiguous failure
+  makes you look again and a false pass closes the question.
+- **A baseline is a claim, so measure it rather than reasoning to it.** #506's
+  deform case first used a taper aimed 100 units away as its "untouched"
+  control. A taper scales the cross-section ABOUT ITS AXIS, so distance
+  amplifies instead of nullifying: 10837.5 against an undeformed 153, used as
+  the frozen expectation, asserting roughly the opposite of the property.
 - **Direction is not decoration.** The `fewer` half of #506's gate is the one
   that protects a shipping host, and it exists because an outside reader
   insisted the direction mattered. The same insistence found a non-obvious
