@@ -124,11 +124,12 @@
       "rawMs": 0.6484
     },
     "sdf_group_transform_bricks": {
-      "budgetMs": 20.8343,
+      "budgetMs": 28.804,
       "class": "interactive",
       "machineFactor": 0.9891,
-      "measuredMs": 13.8895,
-      "rawMs": 13.7383
+      "measuredMs": 19.2028,
+      "rawMs": 18.993458,
+      "note": "RE-DERIVED at 0.97.0. This case sat at ~1.39x of a baseline taken before #490 and crossed the 1.4x tolerance only when the machine factor moved x0.99 -> x0.97; the RAW number changed 0.25% between the 0.96.0 and 0.97.0 gates (18.945 -> 18.993 ms), so nothing regressed between them. The step is #490's, and it is the same dilation as #497: node_reach_bound widens a node's dirty box by each enclosing group's blend support. UNLIKE #497 IT BUYS NO CORRECTNESS HERE -- measured 0 stale bricks on the pre-#490 bound, against 17 of 216 for the in-group stroke -- because this fixture puts every stamp inside the group, so the group's combine has no left operand and its blend cannot move the result. Bricks over a 32-frame drag go 2144 -> 4300 for nothing. The bound is SOUND, only over-conservative, so the ceiling is re-derived rather than the bound weakened: getting a tightening wrong here is exactly what produced #497. Issue #515 carries the tightening and its acceptance test (2144 bricks with stale still 0). Do NOT restore the old numbers -- they predate a bound that is correct."
     },
     "sdf_layer_transform_bricks": {
       "budgetMs": 39.6744,
@@ -4778,14 +4779,14 @@
       "backend": "cpu",
       "budgetClass": "interactive",
       "bundle": "com.cyberdyne.claycore.devicemeasure",
-      "canaryAfterMs": 130.49625,
-      "canaryBeforeMs": 130.3955,
-      "growthExponent": 0.889403848322322,
+      "canaryAfterMs": 130.449875,
+      "canaryBeforeMs": 130.57075,
+      "growthExponent": 0.871707512549034,
       "measurements": [
         {
           "batch": 1,
-          "p50Ms": 0.202416,
-          "p95Ms": 0.228625,
+          "p50Ms": 0.309708,
+          "p95Ms": 0.342917,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -4793,8 +4794,8 @@
         },
         {
           "batch": 1,
-          "p50Ms": 1.134916,
-          "p95Ms": 1.374625,
+          "p50Ms": 1.681083,
+          "p95Ms": 1.87375,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -4802,17 +4803,17 @@
         },
         {
           "batch": 1,
-          "p50Ms": 12.071292,
-          "p95Ms": 13.73825,
+          "p50Ms": 17.05475,
+          "p95Ms": 18.993458,
           "p95SpreadMs": 0,
           "repeats": 1,
-          "samples": 128,
+          "samples": 89,
           "stamps": 1000
         }
       ],
       "name": "sdf_group_transform_bricks",
       "servedBy": "cpu",
-      "startedAtMs": 267.557,
+      "startedAtMs": 266.249916,
       "thermalStateEnd": "nominal",
       "thermalStateStart": "nominal",
       "verb": "sdf_group_transform"
