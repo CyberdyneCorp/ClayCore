@@ -9764,6 +9764,39 @@ clay_result clay_mesh_from_triangles(const float* positions, size_t vertex_count
     return CLAY_OK;
 }
 
+clay_result clay_mesh_from_quads(const float* positions, size_t vertex_count,
+                                 const uint32_t* quad_indices, size_t quad_index_count,
+                                 clay_mesh** out_mesh) {
+    if (!out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_mesh");
+    *out_mesh = nullptr;
+    if (!positions || !quad_indices)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null positions or quad_indices");
+    if (vertex_count == 0 || quad_index_count == 0 || quad_index_count % 4 != 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "need a whole number of quads");
+    auto built = std::make_unique<clay_mesh>();
+    built->data.positions.reserve(vertex_count);
+    for (size_t i = 0; i < vertex_count; ++i)
+        built->data.positions.push_back(
+            kernel::cf3(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]));
+    built->data.quads.assign(quad_indices, quad_indices + quad_index_count);
+    for (std::uint32_t index : built->data.quads)
+        if (index >= vertex_count)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "a quad corner points past the vertices");
+    // DERIVED, not taken: (a,b,c),(a,c,d) is the expansion mesh_data.h states,
+    // so mesh::quads_consistent holds by construction and the readers that
+    // already answer for a lattice-meshed quad mesh answer for this one too.
+    const size_t quads = quad_index_count / 4;
+    built->data.indices.resize(quads * 6);
+    for (size_t q = 0; q < quads; ++q) {
+        const std::uint32_t* c = &built->data.quads[q * 4];
+        std::uint32_t* t = &built->data.indices[q * 6];
+        t[0] = c[0]; t[1] = c[1]; t[2] = c[2];
+        t[3] = c[0]; t[4] = c[2]; t[5] = c[3];
+    }
+    *out_mesh = built.release();
+    return CLAY_OK;
+}
+
 clay_result clay_item_volume_from_mesh(const clay_mesh* mesh, const clay_volume_params* params,
                                        clay_item** out_item) {
     if (!params || !out_item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");

@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 98
+#define CLAY_ABI_MINOR 99
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -3920,6 +3920,37 @@ clay_result clay_mesh_transfer_attributes(const clay_mesh* source, clay_mesh* ta
 clay_result clay_mesh_from_triangles(const float* positions, size_t vertex_count,
                                      const uint32_t* indices, size_t index_count,
                                      clay_mesh** out_mesh);
+
+/* Build a mesh from caller-owned QUADS, for a host whose retopologiser is not
+ * this library's (issue #514). positions is vertex_count*3 floats and
+ * quad_indices is quad_index_count vertex indices, four per quad. Copied, so
+ * the caller's buffers may be freed on return.
+ *
+ * `indices` IS DERIVED HERE rather than taken, and that is the point: quad q
+ * with corners (a,b,c,d) becomes triangles (a,b,c) and (a,c,d), which is the
+ * expansion mesh_data.h states as the invariant tying the two arrays together.
+ * Deriving it makes the invariant true by construction, so every reader that
+ * already answers for a mesh this library quad-meshed — clay_mesh_quad_count,
+ * _quads, _copy_quads, _quad_report — answers for this one unchanged, and there
+ * is no second rule for where quads may come from.
+ *
+ * The count is in INDICES, not quads, to mirror clay_mesh_from_triangles and so
+ * that quad_count * 4 cannot overflow at the boundary. quad_index_count must be
+ * a non-zero multiple of four.
+ *
+ * PLANARITY AND CONVEXITY ARE NOT VALIDATED, deliberately and not laxly: every
+ * quad this library itself produces may be non-planar, and the lattice mesher
+ * emits near-zero-area quads around thin features. A host supplying a bad quad
+ * is exactly where one supplying a degenerate triangle already is.
+ *
+ * THE RULE A CALLER INHERITS: the invariant is stated over `indices`, so moving
+ * positions cannot break it and sculpting is safe. Rewriting `indices` is what
+ * breaks it, and anything that does must drop the quads — the same discipline
+ * decimation already follows, now reachable by meshes this library did not
+ * build. */
+clay_result clay_mesh_from_quads(const float* positions, size_t vertex_count,
+                                 const uint32_t* quad_indices, size_t quad_index_count,
+                                 clay_mesh** out_mesh);
 
 /* Resample a caller-owned per-vertex scalar — a mask, a weight — from one mesh
  * onto another by closest point (add-voxel-remesher, ABI 0.63.0).
