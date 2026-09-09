@@ -1538,6 +1538,57 @@ Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& lay
     return b.empty() ? b : b.dilated(group_blend_support(*n, layer));
 }
 
+// Does a group's OWN combine apply at all, or does it merely initialise?
+//
+// `compile_group` is the authority and this mirrors it term for term:
+//
+//     if (!have_acc && op != Add && !op_creates_material(op)) return have_acc;
+//     bool seeded = !have_acc && op != Add;
+//     if (seeded) emit_empty(group.color);
+//
+// So with nothing accumulated beneath it an ADD group emits no empty and no
+// combine -- its children ARE the value at that point -- and a blend support is
+// how far changing one operand can move a COMBINE's result. With no combine
+// there is no result to move, and dilating a reach bound by it buys nothing.
+// Every other case either seeds against empty (and then really does combine
+// against that seed, blend and all) or emits nothing whatsoever.
+//
+// `have_acc` is a walk-order fact the compiler discovers as it goes; bounds has
+// to decide it from the tree alone. So this answers only where it can PROVE the
+// accumulator empty and says "combines" everywhere else -- including where it
+// cannot see far enough to tell. Being wrong in that direction costs bricks;
+// being wrong in the other costs a brick that is never marked, which is the
+// failure #497 was.
+bool group_combine_can_move_result(const SdfContent& content, const Node& group) {
+    // Not an Add: it seeds against empty, or it produces nothing. Neither is
+    // ours to skip, and Shell/Replace specifically DO combine against the seed.
+    if (group.op != Op::Add) return true;
+
+    NodeId parent = kNoNode;
+    int index = -1;
+    if (!content.locate(group.id, &parent, &index)) return true;
+    if (index < 0) return true;
+
+    const std::vector<NodeId>* chain = &content.roots;
+    if (parent != kNoNode) {
+        const Node* p = content.find(parent);
+        if (!p) return true;
+        chain = &p->children;
+    }
+    if (static_cast<std::size_t>(index) > chain->size()) return true;
+
+    // Anything visible in front of it may have left a value on the stack.
+    // `compile_list` does skip a carving node that opens a chain, so this
+    // over-counts -- deliberately, because proving a sibling emits nothing is
+    // the compiler's walk and not a static question.
+    for (int i = 0; i < index; ++i) {
+        const Node* sibling = content.find((*chain)[static_cast<std::size_t>(i)]);
+        if (!sibling) return true;
+        if (sibling->visible) return true;
+    }
+    return false;
+}
+
 Aabb node_reach_bound(const SdfContent& content, NodeId id, const Layer& layer,
                       LayerExtent* extent) {
     // Where an edit to `id` can change the layer's field: the node's own
@@ -1586,7 +1637,9 @@ Aabb node_reach_bound(const SdfContent& content, NodeId id, const Layer& layer,
             return extent ? extent->of(*layer.sdf, layer)
                           : layer_influence_extent(*layer.sdf, layer);
         }
-        b = b.dilated(group_blend_support(*g, layer));
+        // #515: only where the combine actually happens.
+        if (group_combine_can_move_result(content, *g))
+            b = b.dilated(group_blend_support(*g, layer));
         cur = parent;
     }
     return Aabb{};
@@ -1702,7 +1755,11 @@ bool dilate_by_ancestors(const SdfContent& content, NodeId id, const Layer& laye
         if (parent == kNoNode) return true;
         const Node* g = content.find(parent);
         if (!g || !g->visible || !op_is_pointwise(g->op)) return false;
-        *b = b->dilated(group_blend_support(*g, layer));
+        // #515: the same predicate node_reach_bound uses, so the influence
+        // query and the Intersect surface-delta proof cannot disagree about
+        // where an edit reaches.
+        if (group_combine_can_move_result(content, *g))
+            *b = b->dilated(group_blend_support(*g, layer));
         cur = parent;
     }
     return false;

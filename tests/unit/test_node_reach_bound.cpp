@@ -87,13 +87,34 @@ scene::Node group_node(scene::Op op, float k) {
 }
 
 // depth 1 or 2 groups; `sibling` adds a far, large child beside the small one.
-Nested nested(int depth, float k, bool sibling, scene::Op op = scene::Op::Add) {
+// `beneath` puts a visible node at the LAYER ROOT, in front of the group.
+//
+// It is not decoration. After #515 an Add group with nothing accumulated
+// beneath it initialises rather than combines -- compile_group emits no empty
+// and no combine -- so its blend support cannot move the result and
+// node_reach_bound does not dilate by it. A fixture without a left operand
+// therefore has no ancestor contribution at all, which is the wrong shape for
+// every test here that is ABOUT the ancestor path. The no-left-operand shape is
+// covered on its own in test_c_in_group_dirty_reach.cpp.
+Nested nested(int depth, float k, bool sibling, scene::Op op = scene::Op::Add,
+              bool beneath = true) {
     Nested n;
     scene::Layer& l = n.doc.add_sdf_layer("l");
     n.layer_id = l.id;
+    if (beneath)
+        l.sdf->insert(clay_test::item(scene::Prim::sphere(0.25f), cf3(0, 2.0f, 0)));
     n.outer = l.sdf->insert(group_node(op, k));
     n.inner = n.outer;
-    if (depth >= 2) n.inner = l.sdf->insert(group_node(op, k), n.outer);
+    if (depth >= 2) {
+        // The INNER group needs a left operand of its own, inside the outer
+        // one, for the same reason the outer group needs one at the root: the
+        // first entry in a chain initialises and does not combine, so without
+        // this a two-level fixture dilates ONCE and the nesting test is
+        // measuring one group while believing it measures two.
+        if (beneath)
+            l.sdf->insert(clay_test::item(scene::Prim::sphere(0.25f), cf3(0, -2.0f, 0)), n.outer);
+        n.inner = l.sdf->insert(group_node(op, k), n.outer);
+    }
     n.child = l.sdf->insert(clay_test::item(scene::Prim::sphere(0.2f), cf3(0, 0, 0)), n.inner);
     if (sibling)
         n.sibling =
