@@ -91,6 +91,14 @@ TEST_CASE("a dab inside a blended group dirties past its own box") {
     const Box root_box = bound_of(rooted, at_root);
 
     Doc grouped;
+    // A NODE AT THE ROOT, BEFORE THE GROUP. Without one the group's combine has
+    // no left operand, and an Add group with nothing beneath it initialises
+    // rather than combines -- so its blend cannot move the result and the reach
+    // is NOT dilated (issue #515, asserted in its own case below). The fixture
+    // #497 measured had 100 stamps at the root beneath the group; this is that
+    // shape at its smallest.
+    const float beneath[3] = {0.10f, 0.10f + 3.0f * radius, 0.05f};
+    add_sphere(grouped, radius, beneath, nullptr);
     clay_node_id group = 0;
     REQUIRE(clay_layer_add_group(grouped.d, grouped.layer, 0, -1, CLAY_OP_ADD,
                                  CLAY_BLEND_QUADRATIC, blend_k, 0.0f, &group) == CLAY_OK);
@@ -120,6 +128,7 @@ TEST_CASE("a dab inside a blended group dirties past its own box") {
     // blend adds nothing, which is what says the dilation above is the support
     // rather than a constant somebody chose.
     Doc hard;
+    add_sphere(hard, radius, beneath, nullptr);  // the same left operand as above
     clay_node_id hard_group = 0;
     REQUIRE(clay_layer_add_group(hard.d, hard.layer, 0, -1, CLAY_OP_ADD, CLAY_BLEND_HARD, 0.0f,
                                  0.0f, &hard_group) == CLAY_OK);
@@ -150,6 +159,8 @@ TEST_CASE("the dirty call marks the same reach the query reports") {
         Doc doc;
         clay_node_id group = 0;
         if (in_group) {
+            const float beneath[3] = {0.10f, 0.10f + 3.0f * radius, 0.05f};
+            add_sphere(doc, radius, beneath, nullptr);  // the group's left operand
             REQUIRE(clay_layer_add_group(doc.d, doc.layer, 0, -1, CLAY_OP_ADD,
                                          CLAY_BLEND_QUADRATIC, 0.05f, 0.0f, &group) == CLAY_OK);
             const float sibling[3] = {0.10f - 2.0f * radius, 0.10f, 0.05f};
@@ -175,3 +186,105 @@ TEST_CASE("the dirty call marks the same reach the query reports") {
     CHECK(at_root > 0);  // the fixture reaches the path at all
     CHECK(in_group > at_root);
 }
+
+// --- #515: a combine that cannot move the result must not dilate the reach ----
+//
+// `compile_group` is the authority these mirror:
+//
+//     if (!have_acc && op != Add && !op_creates_material(op)) return have_acc;
+//     bool seeded = !have_acc && op != Add;
+//
+// so an ADD group with nothing beneath it initialises rather than combines, and
+// a blend support -- how far changing one operand moves a COMBINE's result --
+// has no result to move. Every other op either seeds against empty and really
+// does combine, or emits nothing at all.
+//
+// The matrix matters more than any one case: the cheap wrong fix is
+// `if (!has_left_operand) support = 0`, which is right for Add and wrong for
+// Shell and Replace.
+
+namespace {
+
+// The reach reported for a sphere at `pos` inside a group with `op`/`blend`,
+// with `beneath` deciding whether anything visible precedes the group.
+Box reach_in_group(Doc& doc, int32_t op, int32_t blend, float blend_k, bool beneath,
+                   float radius, const float pos[3]) {
+    if (beneath) {
+        const float under[3] = {pos[0], pos[1] + 3.0f * radius, pos[2]};
+        add_sphere(doc, radius, under, nullptr);
+    }
+    clay_node_id group = 0;
+    REQUIRE(clay_layer_add_group(doc.d, doc.layer, 0, -1, op, blend, blend_k, 0.0f, &group) ==
+            CLAY_OK);
+    const float sibling[3] = {pos[0] - 2.0f * radius, pos[1], pos[2]};
+    add_sphere(doc, radius, sibling, &group);
+    return bound_of(doc, add_sphere(doc, radius, pos, &group));
+}
+
+}  // namespace
+
+TEST_CASE("an Add group with nothing beneath it does not dilate the reach") {
+    const float pos[3] = {0.10f, 0.10f, 0.05f};
+    const float radius = 0.12f;
+
+    Doc rooted;
+    const Box root_box = bound_of(rooted, add_sphere(rooted, radius, pos, nullptr));
+
+    // No left operand: this group initialises, so its blend reaches nothing.
+    Doc alone;
+    const Box alone_box = reach_in_group(alone, CLAY_OP_ADD, CLAY_BLEND_QUADRATIC, 0.05f, false,
+                                         radius, pos);
+    for (int axis = 0; axis < 3; ++axis) {
+        CAPTURE(axis);
+        CHECK(alone_box.span(axis) == doctest::Approx(root_box.span(axis)).epsilon(1e-4));
+    }
+
+    // The SAME group with one visible node in front of it does combine, and the
+    // reach grows. One node is the whole difference between the two documents.
+    Doc after;
+    const Box after_box = reach_in_group(after, CLAY_OP_ADD, CLAY_BLEND_QUADRATIC, 0.05f, true,
+                                         radius, pos);
+    for (int axis = 0; axis < 3; ++axis) {
+        CAPTURE(axis);
+        CHECK(after_box.span(axis) > alone_box.span(axis));
+    }
+}
+
+TEST_CASE("a seeding group with nothing beneath it KEEPS its dilation") {
+    // The cheap wrong fix is "no left operand means no combine". These two ops
+    // seed against empty and then combine against that seed, blend and all, so
+    // skipping their dilation would under-dirty exactly where #497 did.
+    const float pos[3] = {0.10f, 0.10f, 0.05f};
+    const float radius = 0.12f;
+
+    Doc rooted;
+    const Box root_box = bound_of(rooted, add_sphere(rooted, radius, pos, nullptr));
+
+    // SHELL seeds and then combines against the seed, so its support is real
+    // and must survive: measured 0.2400 -> 0.3400 on this fixture.
+    Doc shell;
+    const Box shell_box =
+        reach_in_group(shell, CLAY_OP_SHELL, CLAY_BLEND_QUADRATIC, 0.05f, false, radius, pos);
+    CHECK(shell_box.span(0) > root_box.span(0));
+
+    // REPLACE also seeds, but its SUPPORT is zero by definition --
+    // ccombine_extended_support returns 0 for inset and replace, because they
+    // are decided by the operand's own sign outside its bound. So it dilates by
+    // nothing either way, and it is here to say that the equal spans below are
+    // the support being zero rather than the predicate having skipped it.
+    Doc replace;
+    const Box replace_box =
+        reach_in_group(replace, CLAY_OP_REPLACE, CLAY_BLEND_QUADRATIC, 0.05f, false, radius, pos);
+    CHECK(replace_box.span(0) == doctest::Approx(root_box.span(0)).epsilon(1e-4));
+
+    // And the ADD group beside them, which is the one #515 actually changes.
+    Doc add;
+    const Box add_box =
+        reach_in_group(add, CLAY_OP_ADD, CLAY_BLEND_QUADRATIC, 0.05f, false, radius, pos);
+    CHECK(add_box.span(0) == doctest::Approx(root_box.span(0)).epsilon(1e-4));
+    CHECK(shell_box.span(0) > add_box.span(0));
+}
+
+// The hidden-sibling case lives in test_node_reach_bound.cpp instead: no C ABI
+// entry point hides an individual SDF node (only layers, voxel sculpt layers and
+// surface groups have one), so it cannot be written from here.

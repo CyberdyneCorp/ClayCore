@@ -174,6 +174,16 @@ TEST_CASE("an undone removal is bounded by what came back") {
 TEST_CASE("a child of a blended group covers the seam without covering the group") {
     Doc doc;
     const float k = 0.5f;
+    // A NODE AT THE ROOT, IN FRONT OF THE GROUP, and the case does not hold
+    // without it. This test's premise is that the group's blend spreads the
+    // child's influence past the child's own box; a group's blend is how its
+    // total combines with what is ACCUMULATED BENEATH IT, so with nothing there
+    // it initialises rather than combines and spreads nothing (issue #515).
+    // Measured: the field beyond the child's own bound moves identically for a
+    // k=0.3 group and a hard one when the group is the only root node.
+    clay_item_desc under = sphere_desc(0.3f, 0.0f, 2.0f, 0.0f);
+    clay_node_id under_id = 0;
+    REQUIRE(clay_add_item(doc.d, doc.layer, &under, &under_id) == CLAY_OK);
     clay_node_id group = 0;
     REQUIRE(clay_layer_add_group(doc.d, doc.layer, 0, -1, CLAY_OP_ADD, CLAY_BLEND_QUADRATIC, k,
                                  0.0f, &group) == CLAY_OK);
