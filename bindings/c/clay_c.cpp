@@ -1801,6 +1801,8 @@ struct clay_document {
             s.layer_have_acc = e->layer_have_acc;
             s.frames = &e->frames;
             if (want_colour) s.stack_colors = e->stack_colors.data();
+            note_stack_loaded(e->stack_levels,
+                              e->stack.size() + (want_colour ? e->stack_colors.size() : 0));
         }
         if (want_below) {
             s.below = e->below.data();
@@ -2200,6 +2202,8 @@ struct clay_document {
             else
                 e.stack_colors.clear();
             e.stack_levels = stack_levels;
+            note_stack_stored(stack_levels,
+                              per * stack_levels + (stack_colors ? per * stack_levels * 3 : 0));
             e.frames = *frames;
         } else {
             e.stack.clear();
@@ -2283,6 +2287,34 @@ struct clay_document {
     // what makes the resumable path OBSERVABLE: it is bit-identical to the full
     // path by contract, so nothing about a refill's output can tell whether it
     // fired, and a fast path that quietly stopped firing reads as correct.
+    void note_stack_stored(std::uint32_t levels, std::size_t floats) const {
+        stack_seeds_stored_.fetch_add(1, std::memory_order_relaxed);
+        stack_levels_stored_.fetch_add(levels, std::memory_order_relaxed);
+        stack_floats_copied_.fetch_add(floats, std::memory_order_relaxed);
+    }
+    void note_stack_loaded(std::uint32_t levels, std::size_t floats) const {
+        stack_seeds_loaded_.fetch_add(1, std::memory_order_relaxed);
+        stack_levels_loaded_.fetch_add(levels, std::memory_order_relaxed);
+        stack_floats_copied_.fetch_add(floats, std::memory_order_relaxed);
+    }
+    void note_resume_branch(bool resumable) const {
+        if (resumable)
+            resume_suffix_compiles_.fetch_add(1, std::memory_order_relaxed);
+        else
+            resume_full_rebuilds_.fetch_add(1, std::memory_order_relaxed);
+    }
+    void resume_branch_stats(std::uint64_t* suffixes, std::uint64_t* rebuilds) const {
+        *suffixes = resume_suffix_compiles_.load(std::memory_order_relaxed);
+        *rebuilds = resume_full_rebuilds_.load(std::memory_order_relaxed);
+    }
+    void stack_seed_stats(std::uint64_t* stored, std::uint64_t* loaded, std::uint64_t* lv_stored,
+                          std::uint64_t* lv_loaded, std::uint64_t* floats) const {
+        *stored = stack_seeds_stored_.load(std::memory_order_relaxed);
+        *loaded = stack_seeds_loaded_.load(std::memory_order_relaxed);
+        *lv_stored = stack_levels_stored_.load(std::memory_order_relaxed);
+        *lv_loaded = stack_levels_loaded_.load(std::memory_order_relaxed);
+        *floats = stack_floats_copied_.load(std::memory_order_relaxed);
+    }
     void note_refill(std::uint64_t resumed, std::uint64_t refilled) const {
         resumed_bricks_.fetch_add(resumed, std::memory_order_relaxed);
         refilled_bricks_.fetch_add(refilled, std::memory_order_relaxed);
@@ -2736,6 +2768,15 @@ struct clay_document {
     // than a slightly stale one.
     mutable std::atomic<std::uint64_t> resumed_bricks_{0};
     mutable std::atomic<std::uint64_t> refilled_bricks_{0};
+    // What a GROUP seed costs, against the single plane a root seed carries
+    // (issue #508). Counted at the two sites that actually move the floats.
+    mutable std::atomic<std::uint64_t> stack_seeds_stored_{0};
+    mutable std::atomic<std::uint64_t> stack_seeds_loaded_{0};
+    mutable std::atomic<std::uint64_t> stack_levels_stored_{0};
+    mutable std::atomic<std::uint64_t> stack_levels_loaded_{0};
+    mutable std::atomic<std::uint64_t> stack_floats_copied_{0};
+    mutable std::atomic<std::uint64_t> resume_suffix_compiles_{0};
+    mutable std::atomic<std::uint64_t> resume_full_rebuilds_{0};
     mutable std::atomic<std::uint64_t> gated_bricks_{0};
     mutable std::atomic<bool> uniform_gate_{true};
     // The one-shot test seam of set_resume_store_interleave. Not under
@@ -13815,6 +13856,10 @@ clay_result clay_document_resume_stats(const clay_document* doc, clay_resume_sta
     clay_resume_stats filled{};
     doc->resume_stats(&filled.entries, &filled.bytes, &filled.budget, &filled.resumed_bricks,
                       &filled.refilled_bricks);
+    doc->stack_seed_stats(&filled.stack_seeds_stored, &filled.stack_seeds_loaded,
+                          &filled.stack_levels_stored, &filled.stack_levels_loaded,
+                          &filled.stack_floats_copied);
+    doc->resume_branch_stats(&filled.resume_suffix_compiles, &filled.resume_full_rebuilds);
     write_desc(out_stats, declared, filled);
     return CLAY_OK;
 }
@@ -14311,6 +14356,7 @@ void run_resume_task(const ResumeRun& run, ResumeTask& t, std::vector<float>& po
     const bool resumable =
         scene::compile_layer_suffix(cp, run.doc->doc.document, t.plan->appended, &suffix, &next,
                                     &cull, run.index);
+    run.doc->note_resume_branch(resumable);
     if (!resumable) {
         // REBUILD: one full walk of the active half -- what this brick
         // would have cost anyway -- taking the stack where its own

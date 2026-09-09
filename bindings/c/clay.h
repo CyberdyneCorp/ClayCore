@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 99
+#define CLAY_ABI_MINOR 100
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -11157,6 +11157,34 @@ typedef struct clay_resume_stats {
     uint64_t budget;           /* the ceiling they are evicted against */
     uint64_t resumed_bricks;   /* cumulative: bricks answered from a seed */
     uint64_t refilled_bricks;  /* cumulative: bricks that took the full walk */
+    /* -- what a seed COSTS, appended at ABI 0.99.0 for issue #508 -------------
+     *
+     * A brick inside a group resumes from the open chains its checkpoint
+     * stopped inside -- a STACK rather than a single plane -- and the stack is
+     * `per * levels` floats stored on every submit and read on every resume.
+     * The field half is one plane either way, so these are the term that a
+     * grouped stroke pays and a root one does not.
+     *
+     * Diagnostic and cumulative, like the pair above. A document whose strokes
+     * never enter a group reports zeroes forever. Counted rather than timed
+     * because a count is the same on every machine and a wall clock is not.
+     *
+     * Appended behind struct_size, so a caller compiled against the shorter
+     * layout passes the shorter size and never sees them. */
+    uint64_t stack_seeds_stored;  /* seeds written carrying a group stack */
+    uint64_t stack_seeds_loaded;  /* resumes that read one back */
+    uint64_t stack_levels_stored; /* summed depth of those writes */
+    uint64_t stack_levels_loaded; /* summed depth of those reads */
+    uint64_t stack_floats_copied; /* the actual copy: per * levels, both ways */
+    /* Which branch a RESUMED brick took. `compile_layer_suffix` emits only the
+     * appended items onto the seed; when it refuses, the brick takes a full
+     * walk of the active half instead, which costs what the whole document
+     * costs rather than what the dab does. The refusal is meant to be rare --
+     * once per stroke, to give a brick its first stack -- so a rebuild count
+     * that tracks the DAB count is the shape of a fast path that is not
+     * firing. */
+    uint64_t resume_suffix_compiles; /* the fast path: seed + appended only */
+    uint64_t resume_full_rebuilds;   /* the refusal: a whole active-half walk */
 } clay_resume_stats;
 
 clay_result clay_document_resume_stats(const clay_document* doc, clay_resume_stats* out_stats);
