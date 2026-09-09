@@ -4883,6 +4883,49 @@ NB_MODULE(pyclay, m) {
             "positions"_a, "indices"_a,
             "Build a mesh from an (N, 3) vertex array and a flat triangle index\n"
             "array — which is how you hand back a mesh you have edited.")
+        .def_static(
+            "from_quads",
+            [](nb::handle positions, nb::handle quads) {
+                PointsView pts = to_points(positions);
+                PyMesh out;
+                out.m.positions.reserve(pts.count);
+                for (std::size_t i = 0; i < pts.count; ++i)
+                    out.m.positions.push_back(
+                        kernel::cf3(pts.data[i * 3], pts.data[i * 3 + 1], pts.data[i * 3 + 2]));
+                nb::object flat = nb::module_::import_("numpy")
+                                      .attr("asarray")(quads, "dtype"_a = "uint32")
+                                      .attr("reshape")(-1);
+                for (nb::handle v : flat) {
+                    std::uint32_t index = nb::cast<std::uint32_t>(v);
+                    if (index >= pts.count)
+                        throw std::invalid_argument("a quad corner points past the vertices");
+                    out.m.quads.push_back(index);
+                }
+                if (out.m.quads.empty() || out.m.quads.size() % 4 != 0)
+                    throw std::invalid_argument("need a whole number of quads");
+                // DERIVED, not taken: (a,b,c),(a,c,d) is the expansion
+                // mesh_data.h states, so quads_consistent holds by construction
+                // and every reader answers as it does for a meshed quad mesh.
+                const std::size_t quad_count = out.m.quads.size() / 4;
+                out.m.indices.resize(quad_count * 6);
+                for (std::size_t q = 0; q < quad_count; ++q) {
+                    const std::uint32_t* c = &out.m.quads[q * 4];
+                    std::uint32_t* t = &out.m.indices[q * 6];
+                    t[0] = c[0]; t[1] = c[1]; t[2] = c[2];
+                    t[3] = c[0]; t[4] = c[2]; t[5] = c[3];
+                }
+                return out;
+            },
+            "positions"_a, "quads"_a,
+            "Build a mesh from an (N, 3) vertex array and a flat QUAD index array,\n"
+            "four per face — for quads from a retopologiser that is not this\n"
+            "library's (issue #514).\n\n"
+            "The triangulation is derived here, not taken: quad (a, b, c, d) becomes\n"
+            "(a, b, c) and (a, c, d), which is the invariant tying `quads` to\n"
+            "`indices`. So `quad_count` and the quad readers answer for this mesh\n"
+            "exactly as they do for one this library quad-meshed itself.\n\n"
+            "Planarity is not checked, deliberately — every quad this library makes\n"
+            "may be non-planar.")
         .def_prop_ro("positions",
                      [](nb::object self) {
                          return f3_view(self, nb::cast<PyMesh&>(self).data().positions);

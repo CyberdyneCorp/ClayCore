@@ -218,6 +218,7 @@ add_executable(clay_unit_tests
   unit/test_node_reach_bound.cpp
   unit/test_intersect_delta_bound.cpp
   unit/test_intersect_delta_oracle.cpp
+  unit/test_c_mesh_from_quads.cpp
   unit/test_c_in_group_dirty_reach.cpp
   unit/test_c_transform_bound.cpp
   unit/test_layer_extent_memo.cpp
