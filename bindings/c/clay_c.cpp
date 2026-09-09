@@ -1776,13 +1776,13 @@ struct clay_document {
                   bool want_below) const {
         Seed s;
         const ResumeEntry* e = shaped_entry(request, per, want_colour, want_below);
-        if (!e) return s;
+        if (!e) { seed_miss_no_entry_.fetch_add(1, std::memory_order_relaxed); return s; }
         // The cull pad decides which items a brick's compile keeps, so a seed
         // taken under a different one was continued from a different field.
         // The pad only grows on an append, so this is a real gate rather than
         // a formality.
-        if (e->pad != pad) return s;
-        if (!e->had_acc) return s;
+        if (e->pad != pad) { seed_miss_pad_.fetch_add(1, std::memory_order_relaxed); return s; }
+        if (!e->had_acc) { seed_miss_no_acc_.fetch_add(1, std::memory_order_relaxed); return s; }
         // The USE in least-recently-used. A brick answered straight from its
         // seed -- a refill with no edit in between, or one a region
         // invalidation could not reach -- is never re-stored, so without this
@@ -1793,6 +1793,11 @@ struct clay_document {
         // Handed over only when it is COMPLETE: the planes, the depth and the
         // frames are written together and read together, so a half-formed one
         // simply does not appear.
+        if (e->stack_levels > 0 &&
+            !(e->stack.size() == per * e->stack_levels &&
+              scene::checkpoint_stack_levels(e->frames, e->layer_have_acc) == e->stack_levels &&
+              (!want_colour || e->stack_colors.size() == per * e->stack_levels * 3)))
+            seed_miss_stack_shape_.fetch_add(1, std::memory_order_relaxed);
         if (e->stack_levels > 0 && e->stack.size() == per * e->stack_levels &&
             scene::checkpoint_stack_levels(e->frames, e->layer_have_acc) == e->stack_levels &&
             (!want_colour || e->stack_colors.size() == per * e->stack_levels * 3)) {
@@ -2205,6 +2210,15 @@ struct clay_document {
             note_stack_stored(stack_levels,
                               per * stack_levels + (stack_colors ? per * stack_levels * 3 : 0));
             e.frames = *frames;
+            // AND THE FOURTH THING THE READER TAKES. `seed_for` recomputes the
+            // depth with `checkpoint_stack_levels(e->frames, e->layer_have_acc)`
+            // and turns the stack down when it disagrees with `e->stack_levels`
+            // -- but this write validated against the INCOMING layer_have_acc
+            // and then left whatever the entry already held. So a write could
+            // pass its own check and the matching read still fail, which is the
+            // partial write the comment above says cannot happen. Measured on a
+            // 100-stamp in-group stroke: 219 of 267 full rebuilds were this.
+            e.layer_have_acc = layer_have_acc;
         } else {
             e.stack.clear();
             e.stack_colors.clear();
@@ -2306,6 +2320,13 @@ struct clay_document {
     void resume_branch_stats(std::uint64_t* suffixes, std::uint64_t* rebuilds) const {
         *suffixes = resume_suffix_compiles_.load(std::memory_order_relaxed);
         *rebuilds = resume_full_rebuilds_.load(std::memory_order_relaxed);
+    }
+    void seed_miss_stats(std::uint64_t* no_entry, std::uint64_t* pad, std::uint64_t* no_acc,
+                         std::uint64_t* stack_shape) const {
+        *no_entry = seed_miss_no_entry_.load(std::memory_order_relaxed);
+        *pad = seed_miss_pad_.load(std::memory_order_relaxed);
+        *no_acc = seed_miss_no_acc_.load(std::memory_order_relaxed);
+        *stack_shape = seed_miss_stack_shape_.load(std::memory_order_relaxed);
     }
     void stack_seed_stats(std::uint64_t* stored, std::uint64_t* loaded, std::uint64_t* lv_stored,
                           std::uint64_t* lv_loaded, std::uint64_t* floats) const {
@@ -2777,6 +2798,10 @@ struct clay_document {
     mutable std::atomic<std::uint64_t> stack_floats_copied_{0};
     mutable std::atomic<std::uint64_t> resume_suffix_compiles_{0};
     mutable std::atomic<std::uint64_t> resume_full_rebuilds_{0};
+    mutable std::atomic<std::uint64_t> seed_miss_no_entry_{0};
+    mutable std::atomic<std::uint64_t> seed_miss_pad_{0};
+    mutable std::atomic<std::uint64_t> seed_miss_no_acc_{0};
+    mutable std::atomic<std::uint64_t> seed_miss_stack_shape_{0};
     mutable std::atomic<std::uint64_t> gated_bricks_{0};
     mutable std::atomic<bool> uniform_gate_{true};
     // The one-shot test seam of set_resume_store_interleave. Not under
@@ -13860,6 +13885,8 @@ clay_result clay_document_resume_stats(const clay_document* doc, clay_resume_sta
                           &filled.stack_levels_stored, &filled.stack_levels_loaded,
                           &filled.stack_floats_copied);
     doc->resume_branch_stats(&filled.resume_suffix_compiles, &filled.resume_full_rebuilds);
+    doc->seed_miss_stats(&filled.seed_miss_no_entry, &filled.seed_miss_pad,
+                         &filled.seed_miss_no_acc, &filled.seed_miss_stack_shape);
     write_desc(out_stats, declared, filled);
     return CLAY_OK;
 }

@@ -11185,6 +11185,12 @@ typedef struct clay_resume_stats {
      * firing. */
     uint64_t resume_suffix_compiles; /* the fast path: seed + appended only */
     uint64_t resume_full_rebuilds;   /* the refusal: a whole active-half walk */
+    /* TEMPORARY (#508 hypothesis test): which gate in seed_for turned a seed
+     * down. Not for release -- see the PR discussion. */
+    uint64_t seed_miss_no_entry;
+    uint64_t seed_miss_pad;
+    uint64_t seed_miss_no_acc;
+    uint64_t seed_miss_stack_shape;
 } clay_resume_stats;
 
 clay_result clay_document_resume_stats(const clay_document* doc, clay_resume_stats* out_stats);
