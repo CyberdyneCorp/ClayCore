@@ -201,6 +201,28 @@ def cases_measured_under_drift(run: dict) -> list[tuple[str, float]]:
     return sorted(drifted, key=lambda pair: pair[1], reverse=True)
 
 
+def cases_with_unknown_conditions(run: dict) -> list[str]:
+    """Every case whose canary factor could not be determined at all.
+
+    THE THIRD STATE, and the reason this function exists. `canary_factor` is
+    careful to return None where the record cannot say rather than guess, and
+    both of its callers used to spell the test `factor is not None and factor >
+    TOLERANCE` — which puts "could not tell" down the same branch as "well
+    inside tolerance". A case with no bundle, or with a bundle no canary sample
+    can be lined up against, was therefore reported exactly as a case measured
+    on a settled device.
+
+    That is the failure the caution in `canary_factor` was written to avoid,
+    reintroduced one call later. Unknown is not fine; it is unknown, and a
+    reader deciding whether to trust a number needs to be told which one it is.
+    """
+    return sorted(
+        case["name"]
+        for case in run.get("cases", [])
+        if canary_factor(run, case) is None
+    )
+
+
 # How much a sustained case's late window may exceed its early one before that
 # is a finding rather than a device.
 #
@@ -517,14 +539,121 @@ def write_baseline(run: dict, path: pathlib.Path, tolerance: float) -> None:
               f"({INTERACTIVE_FRAME_SHARE_MS:.2f} ms): {', '.join(sorted(over))}")
 
 
+def _self_test() -> int:
+    """The three canary states, asserted rather than described.
+
+    `canary_factor` returns None where the record cannot say, and the bug this
+    exercises was that both callers spelled the test `factor is not None and
+    factor > TOLERANCE` -- putting "could not tell" down the same branch as
+    "well inside tolerance" (issue #500). A run where every case is fine and a
+    run where nothing can be determined printed the same reassuring line.
+
+    So the fixture is built to make each state fire, and this runs as a ctest so
+    the claim does not decay into a comment.
+    """
+    import io
+    import contextlib
+
+    def run_with(cases: list[dict]) -> dict:
+        return {
+            "deviceModel": "iPad15,5",
+            "osVersion": "test",
+            "canary": [
+                {"bundle": "b", "atMs": 0.0, "ms": 100.0, "thermalState": "nominal"},
+                {"bundle": "b", "atMs": 10.0, "ms": 100.0, "thermalState": "nominal"},
+                {"bundle": "b", "atMs": 900.0, "ms": 200.0, "thermalState": "nominal"},
+                {"bundle": "b", "atMs": 910.0, "ms": 200.0, "thermalState": "nominal"},
+            ],
+            "cases": cases,
+        }
+
+    def case(name: str, bundle: str | None, before: float, after: float) -> dict:
+        c = {
+            "name": name,
+            "startedAtMs": 100.0,
+            "measurements": [{"stamps": 1, "p95Ms": 1.0, "samples": 200}],
+        }
+        if bundle is not None:
+            c["bundle"] = bundle
+            c["canaryBeforeMs"] = before
+            c["canaryAfterMs"] = after
+        return c
+
+    failures = 0
+
+    def expect(label: str, got: bool) -> None:
+        nonlocal failures
+        print(f"  {'ok  ' if got else 'FAIL'} {label}")
+        if not got:
+            failures += 1
+
+    # 1. A case bracketed by a settled canary: known, and inside tolerance.
+    settled = run_with([case("settled", "b", 100.0, 100.0)])
+    expect("a settled case reports a factor",
+           canary_factor(settled, settled["cases"][0]) is not None)
+    expect("a settled case is not reported as drifted",
+           cases_measured_under_drift(settled) == [])
+    expect("a settled case is not reported as unknown",
+           cases_with_unknown_conditions(settled) == [])
+
+    # 2. A case bracketed by a drifted canary: known, and past tolerance.
+    drifted = run_with([case("hot", "b", 200.0, 200.0)])
+    expect("a drifted case is reported as drifted",
+           [n for n, _ in cases_measured_under_drift(drifted)] == ["hot"])
+    expect("a drifted case is not also reported as unknown",
+           cases_with_unknown_conditions(drifted) == [])
+
+    # 3. A case with no bundle: NOT determinable, and this is the one that used
+    #    to read exactly like state 1.
+    unknown = run_with([case("nameless", None, 0.0, 0.0)])
+    expect("an unbundled case has no factor",
+           canary_factor(unknown, unknown["cases"][0]) is None)
+    expect("an unbundled case is NOT reported as drifted",
+           cases_measured_under_drift(unknown) == [])
+    expect("an unbundled case IS reported as unknown",
+           cases_with_unknown_conditions(unknown) == ["nameless"])
+
+    # 4. And the two states must not print the same sentence. This is the whole
+    #    issue: the reassuring line may only appear when everything was asked
+    #    AND answered.
+    def drift_report(run: dict) -> str:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            d = cases_measured_under_drift(run)
+            u = cases_with_unknown_conditions(run)
+            if d:
+                print("drifted")
+            if u:
+                print("unknown")
+            if not d and not u:
+                print("every case was measured with the canary inside tolerance")
+        return buf.getvalue()
+
+    expect("a settled run says every case was inside tolerance",
+           "inside tolerance" in drift_report(settled))
+    expect("an UNKNOWN run does NOT say every case was inside tolerance",
+           "inside tolerance" not in drift_report(unknown))
+    expect("an unknown run says so", "unknown" in drift_report(unknown))
+
+    print("check_device_bench self-test: "
+          + ("OK" if failures == 0 else f"{failures} FAILED"))
+    return 1 if failures else 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(add_help=True)
-    parser.add_argument("run")
+    parser.add_argument("--self-test", action="store_true",
+                        help="exercise the canary's three states and exit")
+    parser.add_argument("run", nargs="?")
     parser.add_argument("--baseline", default=str(DEFAULT_BASELINE))
     parser.add_argument("--update", action="store_true",
                         help="write the baseline from this run instead of checking it")
     parser.add_argument("--tolerance", type=float, default=DEFAULT_TOLERANCE)
     args = parser.parse_args()
+    if args.self_test:
+        return _self_test()
+    if not args.run:
+        parser.error("a run file is required unless --self-test is given")
 
     run = load(pathlib.Path(args.run))
     baseline_path = pathlib.Path(args.baseline)
@@ -579,8 +708,12 @@ def main() -> int:
         # machine was while it ran. `raw` is what a user would feel and is what
         # the frame-share note below is about; `measured` is what is gated.
         measured, factor = normalised_p95(run, case)
+        # `machine unknown` rather than nothing: a bare "0.234 ms p95" reads as
+        # a number taken on a settled device, and the absence of a factor is
+        # exactly the case where nobody knows that.
         shown = (f"{measured:.3f} ms p95 (raw {raw:.3f}, machine x{factor:.2f})"
-                 if factor is not None else f"{measured:.3f} ms p95")
+                 if factor is not None
+                 else f"{measured:.3f} ms p95 (machine unknown)")
 
         # BUDGET — every case must declare one. An unbudgeted latency number
         # is a measurement, and this tool exists to gate.
@@ -753,6 +886,7 @@ def main() -> int:
     # on a settled device, named rather than left for a reader to infer from
     # offsets.
     drifted = cases_measured_under_drift(run)
+    unknown = cases_with_unknown_conditions(run)
     if drifted:
         print(f"  {len(drifted)} case(s) measured while the canary was past "
               f"x{CANARY_DRIFT_TOLERANCE} of its settled value:")
@@ -761,11 +895,22 @@ def main() -> int:
         print("    These sit at the end of their bundle and pay for every case "
               "ahead of them. Their budgets still hold, so this is a note on "
               "what the numbers mean, not a failure.")
-    elif any(c.get("bundle") for c in run.get("cases", [])):
+    # THE CLAIM BELOW IS ONLY TRUE OF THE CASES THAT COULD BE ASKED. Saying
+    # "every case was inside tolerance" while some of them could not be lined up
+    # against a canary sample at all is the same sentence for two different
+    # facts, and the weaker one reads as the stronger.
+    if unknown:
+        print(f"  {len(unknown)} case(s) whose conditions are UNKNOWN, not known "
+              f"to be fine: no canary sample can be lined up against them, so "
+              f"nothing here says whether the device was settled while they ran:")
+        for name in unknown[:8]:
+            print(f"    {name}")
+        if len(unknown) > 8:
+            print(f"    ... and {len(unknown) - 8} more")
+        print("    Re-collect with tools/collect_device_bench.py, which stamps "
+              "each case with its bundle, to make these answerable.")
+    if not drifted and not unknown:
         print("  every case was measured with the canary inside tolerance")
-    else:
-        print("  cases carry no bundle, so this run cannot attribute drift to "
-              "them — re-collect with tools/collect_device_bench.py")
 
     # Which cases could not be measured in one pass, and how far they moved
     # when repeated. Printed every run rather than only on failure: the point
