@@ -83,11 +83,95 @@ check(backends.contains("cpu"), "the CPU backend is registered")
 // nothing to register against, and what the ARTIFACT ships is gated where it
 // is decidable: tools/build_xcframework.sh fails the build outright if a
 // slice's merged archive carries no clay_metallib symbol.
+// Why a backend is missing, in the runtime's own words. Prose for a human by
+// contract — clay.h says do not branch on it — and the one place that rule
+// bends is here, where telling two causes apart IS the job and the text is the
+// only thing that separates them. Fail-safe: anything this does not recognise
+// is treated as a failure below, so a wording change loses the exemption
+// rather than the check.
+// The one classification the exemption below turns on, hoisted so it can be
+// asserted rather than trusted. TRUE means the metallib loaded and its
+// functions were found and this GPU's compiler refused to build a pipeline out
+// of them; false means anything else, including every shape that indicates a
+// broken artifact.
+func metalFailureIsThisGPU(_ why: String) -> Bool { why.contains("no compute pipeline") }
+
+func backendDiagnostic(_ name: String) -> String {
+    var size = 0
+    guard clay_backend_diagnostic(name, nil, &size) == CLAY_OK, size > 0 else { return "" }
+    var buffer = [CChar](repeating: 0, count: size)
+    guard clay_backend_diagnostic(name, &buffer, &size) == CLAY_OK else { return "" }
+    return buffer.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+}
+
+// WHAT THE EXEMPTION MUST NOT EXCUSE, asserted against the strings the engine
+// actually emits (backends/metal/metal_backend.cpp). Cheap, and it runs on the
+// same runner the exemption exists for, so a wording change that silently
+// widened the exemption fails here rather than in six months.
+for (text, expected) in [
+    // The runtime's own refusal: metallib loaded, function found, pipeline no.
+    ("no compute pipeline for clay_eval_grid: Compilation failed", true),
+    ("no compute pipeline for clay_raycast: Compilation failed", true),
+    // Every shape that means the ARTIFACT is wrong, which must still fail.
+    ("the metallib carries no function named clay_eval_grid", false),
+    ("could not load the embedded metallib", false),
+    ("this build was compiled without the Metal backend", false),
+    ("", false),
+] {
+    check(metalFailureIsThisGPU(text) == expected,
+          "a Metal diagnostic is classified correctly: \(expected ? "this GPU" : "our artifact") "
+          + "for \"\(text.isEmpty ? "(nothing reported)" : text)\"")
+}
+
 if let device = MTLCreateSystemDefaultDevice() {
     print("  Metal device: \(device.name)")
-    check(backends.contains("metal"),
-          "the Metal backend registered — this machine HAS a Metal device, so a "
-          + "missing backend would mean the embedded metallib failed to load")
+    if backends.contains("metal") {
+        check(true,
+              "the Metal backend registered — this machine HAS a Metal device, so a "
+              + "missing backend would mean the embedded metallib failed to load")
+    } else {
+        let why = backendDiagnostic("metal")
+        // A FOURTH CASE, and the one that made this check unreliable (#499).
+        //
+        // "no compute pipeline for X: Compilation failed" means the metallib
+        // LOADED and the function was FOUND — `newFunction` returning nil says
+        // "carries no function named X" instead, and a load failure says so
+        // too. So the artifact is intact and this machine's Metal compiler
+        // refused to build a pipeline out of it. On the iOS Simulator that GPU
+        // is paravirtualised and does exactly this, intermittently: observed
+        // failing and then passing on re-run with no code change, on the same
+        // runner image, while the macOS arm of this same script passed 412/412
+        // and a real simulator on a developer machine passed too.
+        //
+        // WHAT STILL GUARDS THE ARTIFACT, which is why this can be a warning
+        // rather than a failure here: tools/build_xcframework.sh fails the
+        // build outright if a slice's metallib is missing or empty, if it was
+        // built for the WRONG PLATFORM, or if the merged archive does not
+        // carry the clay_metallib symbol. All three are device-independent and
+        // all three are what a broken artifact actually looks like. This
+        // assertion adds "and this GPU can compile it", which is a statement
+        // about the GPU.
+        //
+        // macOS keeps failing. Only the Simulator is exempt, and only for this
+        // one shape.
+        let gpuCompilerRefused = metalFailureIsThisGPU(why)
+        #if targetEnvironment(simulator)
+        let exempt = gpuCompilerRefused
+        #else
+        let exempt = false
+        #endif
+        if exempt {
+            print("  WARN the Metal backend did not register, and the reason is this "
+                  + "GPU rather than the artifact: the metallib loaded and its functions "
+                  + "were found, and pipeline creation failed. See issue #499.")
+            print("  WARN diagnostic: \(why.split(separator: "\n").first.map(String.init) ?? why)")
+        } else {
+            check(false,
+                  "the Metal backend registered — this machine HAS a Metal device, so a "
+                  + "missing backend would mean the embedded metallib failed to load. "
+                  + "diagnostic: \(why.isEmpty ? "none reported" : why)")
+        }
+    }
 } else {
     print("  SKIP no Metal device on this machine, so there is nothing for the "
           + "backend to register against. This is the environment, not the "
