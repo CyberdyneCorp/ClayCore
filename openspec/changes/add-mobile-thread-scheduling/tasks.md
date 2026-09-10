@@ -105,5 +105,25 @@ does not get slower.
       there is an entry point whose intent is intrinsic rather than the
       caller's. The dab-level C ABI commits do not currently reach a pool
       dispatch, so a scope there would be decorative today
-- [ ] Q16-Q20, Q24 Device gates. Left unfrozen rather than set from container
-      numbers
+- [x] Q16-Q20, Q24 Device gates, FROZEN FROM A REAL RUN rather than from
+      container numbers. iPad15,5 / iPadOS 26.5.2, seven cold sessions at a
+      1800 s cooldown, ABI 0.101.0 at `2ff6ca6a`, `valid: true`,
+      `treeDirty: false`, both thermal samples nominal, 75 cases + 36 gallery,
+      `check_device_bench` and `check_device_coverage` both clean.
+      THE ACCEPTANCE CRITERION IS THAT SIZING FROM PERFORMANCE CORES COSTS
+      NOTHING: against the committed baseline over the 260 points whose
+      measurement shape matches across 55 shared cases, the median is 0.994x,
+      35 points are faster and 13 slower, and no case reports REGRESSION,
+      BUDGET or GROWTH. The pool went from `hardware_concurrency - 1` to
+      `performance_cores - 1` and the device did not notice, which is the
+      result this gate existed to establish -- the oversubscription it removes
+      was not buying anything.
+      TWO CASES LOOKED LIKE REGRESSIONS AND ARE NOT. `move_drags` and
+      `session_voxel_paint` read 10.09x and 4.56x on an earlier run of the same
+      code, both at PASS 1 only. Re-measured: move_drags pass 1 goes 0.122
+      (baseline) / 1.230 (run 1) / 0.595 (run 2) while passes 2-8 are 0.055 to
+      0.091 against a baseline of 0.064 to 0.095 -- faster throughout;
+      session_voxel_paint pass 1 goes 0.250 / 1.138 / 0.265 with passes 2-8 at
+      or below baseline. Pass 1 is the one-shot first draw #331 documents as
+      bimodal and deliberately not gated, and it moved differently in every run
+      of identical code.
