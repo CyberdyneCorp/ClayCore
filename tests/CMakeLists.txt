@@ -331,6 +331,14 @@ add_test(NAME clay_unit_shards_partition
 add_test(NAME clay_task_symbols_selftest
          COMMAND ${Python3_EXECUTABLE}
                  ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_task_symbols.py --self-test)
+
+# The device checker's canary has THREE states -- inside tolerance, past it, and
+# not determinable -- and the third used to print as the first (issue #500).
+# Needs no device and no record: the fixture is three synthetic runs built to
+# make each state fire.
+add_test(NAME clay_device_bench_selftest
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_device_bench.py --self-test)
 endif()
 
 # CUDA architecture selection is pure CMake, so it is tested by script rather
