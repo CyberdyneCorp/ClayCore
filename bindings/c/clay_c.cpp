@@ -568,6 +568,10 @@ constexpr std::size_t kBrickConfigOriginal =
     offsetof(clay_brick_config, memory_budget) + sizeof(std::uint64_t);
 constexpr std::size_t kBrickStatsOriginal =
     offsetof(clay_brick_stats, memory_budget) + sizeof(std::uint64_t);
+constexpr std::size_t kWorkerConfigOriginal =
+    offsetof(clay_worker_config, workers) + sizeof(std::uint32_t);
+constexpr std::size_t kWorkerReportOriginal =
+    offsetof(clay_worker_report, frozen) + sizeof(std::int32_t);
 constexpr std::size_t kResumeStatsOriginal =
     offsetof(clay_resume_stats, refilled_bricks) + sizeof(std::uint64_t);
 constexpr std::size_t kBrickMeshParamsOriginal =
@@ -4848,6 +4852,43 @@ void clay_version(int32_t* major, int32_t* minor, int32_t* patch) {
 }
 
 const char* clay_last_error(void) { return g_last_error.c_str(); }
+
+clay_result clay_configure_workers(const clay_worker_config* config) {
+    if (!config) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null config");
+    clay_worker_config c;
+    clay_result r = read_desc(config, kWorkerConfigOriginal, &c);
+    if (r != CLAY_OK) return r;
+    // REFUSED, NOT CLAMPED. A clamp lets a host believe a limit that was never
+    // applied, which is the failure this entry point exists to end.
+    if (c.workers > CLAY_MAX_WORKERS)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "worker count " + std::to_string(c.workers) + " is above CLAY_MAX_WORKERS (" +
+                        std::to_string(CLAY_MAX_WORKERS) + "); it is refused rather than clamped");
+    if (!parallel::ThreadPool::configure_workers(c.workers))
+        return fail(CLAY_ERROR_UNSUPPORTED,
+                    "the worker pool is already built, so its size can no longer move; call "
+                    "clay_configure_workers before the first evaluation and read "
+                    "clay_worker_report_get to see what took");
+    return CLAY_OK;
+}
+
+clay_result clay_worker_report_get(clay_worker_report* out_report) {
+    if (!out_report) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_report");
+    clay_worker_report probe;
+    clay_result r = read_desc(out_report, kWorkerReportOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_report->struct_size;
+    clay_worker_report filled{};
+    // READING THE COUNT DOES NOT BUILD THE POOL. A host asking what it will get
+    // must not be the thing that freezes the answer, or the query would change
+    // what it reports by being called.
+    filled.workers = static_cast<std::uint32_t>(parallel::ThreadPool::planned_worker_count());
+    filled.performance_cores = static_cast<std::uint32_t>(parallel::platform_performance_cores());
+    filled.logical_cores = static_cast<std::uint32_t>(std::thread::hardware_concurrency());
+    filled.frozen = parallel::ThreadPool::worker_count_frozen() ? 1 : 0;
+    write_desc(out_report, declared, filled);
+    return CLAY_OK;
+}
 
 clay_document* clay_document_create(void) { return new clay_document(); }
 

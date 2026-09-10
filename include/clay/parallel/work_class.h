@@ -21,6 +21,7 @@
 // stated in code rather than silently, so a reader can see the seam is
 // deliberate and where a Windows or Linux policy would go.
 
+#include <cstddef>
 #include <cstdint>
 
 namespace clay {
@@ -64,6 +65,20 @@ inline WorkClass current_work_class() noexcept { return detail::current_slot(); 
 // classes; everywhere else it does nothing yet, and the no-op is a written
 // branch rather than an absent file.
 void apply_platform_work_class(WorkClass cls) noexcept;
+
+// How many PERFORMANCE cores this machine has, or 0 for "the platform has no
+// opinion" (task 1.2).
+//
+// Zero is not "one core" and not an error: it is the answer on a machine whose
+// cores are interchangeable — an Intel Mac, and every platform but Apple today
+// — where every core IS a performance core and `hardware_concurrency` is the
+// honest count. A caller reads 0 as "use hardware_concurrency", which is what
+// the pool did before performance-core sizing existed.
+//
+// Defined in src/parallel/thread_policy.cpp beside the QoS mapping, because
+// both are the same question — what does THIS platform call a fast core — and
+// splitting them would give the next platform two files to edit.
+std::size_t platform_performance_cores() noexcept;
 
 // Record `cls` for this thread and hand it to the platform.
 inline void apply_work_class(WorkClass cls) noexcept {
