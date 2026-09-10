@@ -59,6 +59,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -70,8 +71,85 @@ namespace parallel {
 class ThreadPool {
   public:
     static ThreadPool& instance() {
-        static ThreadPool pool;
+        static ThreadPool pool(configured_worker_count());
         return pool;
+    }
+
+    // HOST OVERRIDE (task 1.5). Read ONCE, when the pool is first constructed,
+    // and a later call cannot move it -- resizing a live pool would have to
+    // stop threads that may be inside a caller's `fn`, and the ABI says so
+    // rather than pretending the knob is dynamic.
+    //
+    // `configure_workers` returns false when the pool already exists, so a host
+    // learns its call was too late instead of believing a limit that never
+    // applied. Zero is a legal value and means serial.
+    static bool configure_workers(std::size_t workers) noexcept {
+        std::lock_guard<std::mutex> lock(config_mutex());
+        if (config_frozen()) return false;
+        configured() = workers;
+        return true;
+    }
+
+    // What the pool WILL take. Called by `instance()` on the way to building it,
+    // so this is the call that FREEZES the count.
+    static std::size_t configured_worker_count() noexcept {
+        std::lock_guard<std::mutex> lock(config_mutex());
+        config_frozen() = true;
+        return configured() ? *configured() : default_worker_count();
+    }
+
+    // The same number WITHOUT freezing it, for a host asking what it would get.
+    // Separate from the above deliberately: a query that froze the value would
+    // change its own answer by being asked, and the ABI's report is exactly
+    // such a query.
+    static std::size_t planned_worker_count() noexcept {
+        std::lock_guard<std::mutex> lock(config_mutex());
+        return configured() ? *configured() : default_worker_count();
+    }
+
+    // Whether the pool has been built and the count can no longer move.
+    static bool worker_count_frozen() noexcept {
+        std::lock_guard<std::mutex> lock(config_mutex());
+        return config_frozen();
+    }
+
+    // How many workers the live pool actually holds, which is the number a host
+    // wants when it is deciding how many of its own threads to start.
+    std::size_t worker_count() const noexcept { return threads_.size(); }
+
+    // A POOL OF YOUR OWN, which is what makes the sizing testable and is the
+    // honest consequence of this change: a pool a host cannot construct is a
+    // pool it cannot reason about. `instance()` is still the one every call
+    // site uses; this is for a caller that wants a bounded pool for a bounded
+    // piece of work, and for the tests that need a known worker count without
+    // racing the singleton's one-shot construction.
+    explicit ThreadPool(std::size_t workers) {
+        for (std::size_t i = 0; i < workers; ++i)
+            threads_.emplace_back([this] { worker(); });
+    }
+
+    // Stops the workers and JOINS them, so a pool cannot outlive the threads
+    // that read it. Public with the constructor: a caller that can build one
+    // must be able to destroy one, and the join is what makes that safe while a
+    // worker may still be finishing the job it claimed.
+    ~ThreadPool() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        for (std::thread& t : threads_) t.join();
+    }
+
+    ThreadPool(const ThreadPool&) = delete;
+    ThreadPool& operator=(const ThreadPool&) = delete;
+
+    // The count the process-wide pool takes when nothing overrides it: one
+    // fewer than the fast cores, because the CALLING thread is a worker too.
+    static std::size_t default_worker_count() noexcept {
+        std::size_t cores = platform_performance_cores();
+        if (cores == 0) cores = std::thread::hardware_concurrency();
+        return cores > 1 ? cores - 1 : 0;
     }
 
     // fn(begin, end) is called on worker threads over disjoint ranges.
@@ -107,6 +185,20 @@ class ThreadPool {
         // called from an Interactive dab would drag the dab down with it. The
         // requested class is honoured when the call is a top-level one.
         if (in_job()) {
+            fn(0, n);
+            return;
+        }
+        // ZERO WORKERS MEANS SERIAL ON THE CALLING THREAD (task 1.5), and it
+        // is a contract rather than a consequence. A host that configures 0 is
+        // saying "do not start threads", and the honest answer is to run the
+        // whole range here -- not to decompose it and then discover there is
+        // nobody to hand the chunks to. `in_job()` above already covers the
+        // nested case; this covers the configured one.
+        //
+        // The class is still applied, because the work still has a class and
+        // the calling thread is the one that will do it.
+        if (threads_.empty()) {
+            WorkClassScope scope(cls);
             fn(0, n);
             return;
         }
@@ -172,6 +264,19 @@ class ThreadPool {
     }
 
   private:
+    static std::mutex& config_mutex() noexcept {
+        static std::mutex m;
+        return m;
+    }
+    static std::optional<std::size_t>& configured() noexcept {
+        static std::optional<std::size_t> v;
+        return v;
+    }
+    static bool& config_frozen() noexcept {
+        static bool f = false;
+        return f;
+    }
+
     struct Job {
         std::function<void(std::size_t, std::size_t)> fn;
         std::size_t n = 0;
@@ -230,20 +335,22 @@ class ThreadPool {
         }
     }
 
-    ThreadPool() {
-        unsigned hc = std::thread::hardware_concurrency();
-        unsigned count = hc > 1 ? hc - 1 : 0;
-        for (unsigned i = 0; i < count; ++i)
-            threads_.emplace_back([this] { worker(); });
-    }
-    ~ThreadPool() {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            stop_ = true;
-        }
-        cv_.notify_all();
-        for (std::thread& t : threads_) t.join();
-    }
+    // SIZED FROM PERFORMANCE CORES, not from every core (task 1.5).
+    //
+    // `hardware_concurrency` on an A- or M-series SoC counts P cores plus E
+    // cores and the pool treated them as interchangeable. Load balancing
+    // (2026-08-09) fixed the scheduling half -- a fast worker can steal from a
+    // slow one -- and left the sizing half: a worker per E core oversubscribes
+    // a device whose E cores the OS also wants for everything else. Measured on
+    // the box this was written on: hardware_concurrency 12, performance cores
+    // 8, so the old arithmetic spawned 11 workers for 8 fast cores.
+    //
+    // `platform_performance_cores()` returns 0 where the platform has no
+    // opinion -- an Intel Mac, and everywhere but Apple today -- and there the
+    // cores ARE interchangeable, so hardware_concurrency is the honest count
+    // and the behaviour is exactly what it was.
+    ThreadPool() : ThreadPool(default_worker_count()) {}
+
 
     void worker() {
         std::uint64_t seen = 0;

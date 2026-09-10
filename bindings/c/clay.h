@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 100
+#define CLAY_ABI_MINOR 101
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -78,6 +78,69 @@ void clay_version(int32_t* major, int32_t* minor, int32_t* patch);
 
 /* Thread-local detail message for the last failing call on this thread. */
 const char* clay_last_error(void);
+
+/* -- the worker pool a host cannot otherwise see -------------------------- */
+
+/* THE LIBRARY SAYS THE CALLER OWNS THREADING, and the CPU backend did not keep
+ * that promise: a process-wide pool spawned a worker per core the first time
+ * anything was evaluated, and a host that had sized its own pools could not see
+ * it, size it, or stop it competing.
+ *
+ * SIZED FROM PERFORMANCE CORES, not from every core. `hardware_concurrency` on
+ * an A- or M-series SoC counts P plus E cores; a worker per E core
+ * oversubscribes a device whose E cores the OS wants for everything else.
+ * Measured on an M-series box: 12 logical, 8 performance, so the old
+ * arithmetic started 11 workers for 8 fast cores. Where a platform does not
+ * distinguish them -- an Intel Mac, and everywhere but Apple today -- the cores
+ * ARE interchangeable and the count is `hardware_concurrency` exactly as
+ * before.
+ *
+ * `workers` is how many threads the pool starts BESIDE the calling thread, so
+ * the parallelism is workers + 1.
+ *
+ * ZERO IS LEGAL AND MEANS SERIAL: no threads are started and every dispatch
+ * runs on the calling thread. It is the setting for a host that owns its own
+ * scheduling completely, and it is a contract rather than a side effect -- the
+ * pool runs the whole range inline rather than decomposing work it has nobody
+ * to hand to.
+ *
+ * AN OUT-OF-RANGE VALUE IS REFUSED, NOT CLAMPED, with
+ * CLAY_ERROR_INVALID_ARGUMENT. A clamp would let a host believe a limit that
+ * was never applied, which is the failure this entry point exists to end. The
+ * ceiling is CLAY_MAX_WORKERS.
+ *
+ * ONCE, AND EARLY. The pool is built the first time anything evaluates, and
+ * this is read then. A later call is REFUSED with CLAY_ERROR_UNSUPPORTED rather
+ * than silently ignored: resizing a live pool would have to stop threads that
+ * may be inside your own callback, so the operation is not supported at all
+ * once the pool exists -- as distinct from the ARGUMENT being wrong, which is
+ * what CLAY_ERROR_INVALID_ARGUMENT means above. Call it before the first
+ * evaluation, and read clay_worker_report_get to see what actually took. */
+#define CLAY_MAX_WORKERS 1024
+
+typedef struct clay_worker_config {
+    uint32_t struct_size; /* = sizeof(clay_worker_config); required */
+    /* Threads to start beside the calling thread; 0 is serial. */
+    uint32_t workers;
+} clay_worker_config;
+
+clay_result clay_configure_workers(const clay_worker_config* config);
+
+/* What the pool holds, or will hold. Reported rather than assumed: a host that
+ * called clay_configure_workers too late learns the real number here instead of
+ * planning against one that never took.
+ *
+ * `out_workers` is the thread count beside the calling thread; `out_frozen` is
+ * 0/1 for whether the pool has been built and the count can no longer move. */
+typedef struct clay_worker_report {
+    uint32_t struct_size; /* = sizeof(clay_worker_report); required */
+    uint32_t workers;
+    uint32_t performance_cores; /* what the platform reports; 0 = no opinion */
+    uint32_t logical_cores;     /* hardware_concurrency, for comparison */
+    int32_t frozen;             /* 0/1 */
+} clay_worker_report;
+
+clay_result clay_worker_report_get(clay_worker_report* out_report);
 
 /* -- enums (values are ABI-stable) ---------------------------------------- */
 

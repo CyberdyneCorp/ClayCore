@@ -7,8 +7,12 @@
 
 #include "clay/parallel/work_class.h"
 
+#include <thread>
+
 #if defined(__APPLE__)
 #include <pthread/qos.h>
+#include <sys/sysctl.h>
+#include <sys/types.h>
 #endif
 
 namespace clay {
@@ -43,7 +47,37 @@ void apply_platform_work_class(WorkClass cls) noexcept {
     pthread_set_qos_class_self_np(to_qos(cls), 0);
 }
 
+// HOW A PLATFORM COUNTS PERFORMANCE CORES (task 1.2).
+//
+// `hw.perflevel0.logicalcpu` is the count of the FASTEST level. Apple orders
+// perflevels fastest-first, so level 0 is P on every SoC that distinguishes
+// them and is the whole machine on one that does not -- an Intel Mac has a
+// single perflevel, and there the answer is `hardware_concurrency`, which is
+// the right answer rather than a fallback.
+//
+// SYSCTL RATHER THAN A HARDCODED TABLE, because the table would be wrong on the
+// next SoC and wrong silently. A device the sysctl does not know is a device
+// this returns 0 for, and 0 means "no opinion" to the caller rather than "run
+// serially" -- the distinction the fallback below turns on.
+std::size_t platform_performance_cores() noexcept {
+    std::uint32_t count = 0;
+    std::size_t size = sizeof count;
+    if (sysctlbyname("hw.perflevel0.logicalcpu", &count, &size, nullptr, 0) == 0 && count > 0)
+        return count;
+    // The sysctl is absent before macOS 12 / iOS 15 and on Intel. Both are
+    // machines whose cores are interchangeable, so every core IS a performance
+    // core and hardware_concurrency is the honest count.
+    return 0;
+}
+
 #else
+
+// NO PLATFORM ANSWER, and that is different from "one core". Linux exposes
+// heterogeneity through cpufreq and DT bindings, Windows through
+// CPUSETINFORMATION EfficiencyClass, and neither is close enough to Apple's
+// perflevel to guess with. Returning 0 says "no opinion" and the caller falls
+// back to hardware_concurrency, which is what the pool did before this change.
+std::size_t platform_performance_cores() noexcept { return 0; }
 
 void apply_platform_work_class(WorkClass cls) noexcept {
     // NO-OP, AND WRITTEN OUT RATHER THAN ABSENT. Windows thread priorities,
