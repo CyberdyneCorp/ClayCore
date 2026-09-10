@@ -2027,6 +2027,8 @@ struct clay_document {
             scene::checkpoint_stack_levels(*stack->frames, stack->layer_have_acc) ==
                 stack->levels) {
             e.stack.assign(stack->values, stack->values + per * stack->levels);
+            note_stack_stored(stack->levels,
+                              per * stack->levels + (stack->colors ? per * stack->levels * 3 : 0));
             if (stack->colors)
                 e.stack_colors.assign(stack->colors, stack->colors + per * stack->levels * 3);
             e.frames = *stack->frames;
