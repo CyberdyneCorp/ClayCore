@@ -154,6 +154,15 @@ TEST_CASE("every surface measure answers about the surface, not a constant") {
     //     OCCLUSION          0.681          0.124
     //     THICKNESS          0.290          0.005
     //
+    // THE SECOND COLUMN UNDERSTATES CURVATURE AND THICKNESS, and the fixture is
+    // why: this ring lies in the seam PLANE of two equal lobes, which is a
+    // symmetry plane, so every point on it is the same point as far as a shape
+    // property is concerned. The 0.000 is this fixture's symmetry, not a fact
+    // about curvature. On an asymmetric probe set both carry on the second
+    // column too -- the ClaySpaceDesktop session measures Curvature separating
+    // seam from flank by 0.8 and Thickness by 0.283 (their #97). Recorded so
+    // nobody reads the zeros as a property of the measures.
+    //
     // NORMAL_DIR carries on the SECOND column alone, and by a full 1.0: it
     // compares a direction, so it sweeps the ring while both shapes present
     // nearly the same normals at any one point. An earlier draft asserted
@@ -203,6 +212,64 @@ TEST_CASE("every surface measure answers about the surface, not a constant") {
              "reachable but INERT — which is the shape the automask bits had for "
              "several releases and the defect this file exists to catch");
         CHECK((differs_between_shapes || varies_across_points));
+    }
+}
+
+TEST_CASE("no measure is another measure under a different name") {
+    // THE HOLE THE TWO CASES ABOVE LEAVE, found by the ClaySpaceDesktop session
+    // reviewing this file (ClaySpaceDesktop #96/#97). Both of them ask each
+    // measure about itself, and neither asks whether it is DISTINCT. Wire
+    // CLAY_MEASURE_CURVATURE to the cavity estimator and it reports cavity's
+    // numbers -- 1.000 between shapes on this fixture -- and sails through both.
+    // "Reachable, answering, and secretly a different measure" is a state they
+    // cannot see.
+    //
+    // They proved it on their side rather than argued it: wiring their Curvature
+    // to CLAY_MEASURE_CAVITY left their seam-above-flank assertion passing at
+    // 1.0 against 0.0, and only a second claim caught it.
+    //
+    // Pairwise inequality is the cheap general form. It needs no per-measure
+    // ground and it catches every swap, not the one somebody thought of.
+    const std::vector<float> pts = seam_points();
+    const std::size_t count = pts.size() / 3;
+    clay_measure_params params = defaults();
+
+    Doc seam;
+    const float left[3] = {-0.25f, 0.0f, 0.0f};
+    const float right[3] = {0.25f, 0.0f, 0.0f};
+    add_sphere(seam, 0.4f, left);
+    add_sphere(seam, 0.4f, right);
+    Doc smooth;
+    const float centre[3] = {0.0f, 0.0f, 0.0f};
+    add_sphere(smooth, 0.6f, centre);
+
+    std::vector<std::vector<float>> on_seam, on_smooth;
+    for (const Measure& m : kMeasures) {
+        std::vector<float> a(count, 0.0f), b(count, 0.0f);
+        REQUIRE(clay_measure_points(seam.d, m.value, pts.data(), count, &params, a.data(),
+                                    nullptr) == CLAY_OK);
+        REQUIRE(clay_measure_points(smooth.d, m.value, pts.data(), count, &params, b.data(),
+                                    nullptr) == CLAY_OK);
+        on_seam.push_back(std::move(a));
+        on_smooth.push_back(std::move(b));
+    }
+
+    // Two measures may legitimately agree on ONE shape -- cavity and curvature
+    // both read 1.0 at a crevice, and that is correct. Agreeing on BOTH, at
+    // every point, is the signature of one estimator behind two names.
+    for (std::size_t i = 0; i < std::size(kMeasures); ++i) {
+        for (std::size_t j = i + 1; j < std::size(kMeasures); ++j) {
+            CAPTURE(kMeasures[i].name);
+            CAPTURE(kMeasures[j].name);
+            bool differ = false;
+            for (std::size_t k = 0; k < count && !differ; ++k) {
+                if (std::fabs(on_seam[i][k] - on_seam[j][k]) > 1e-3f) differ = true;
+                if (std::fabs(on_smooth[i][k] - on_smooth[j][k]) > 1e-3f) differ = true;
+            }
+            INFO("these two answered identically on both shapes at every point, "
+                 "which is what one estimator wearing two enumerators looks like");
+            CHECK(differ);
+        }
     }
 }
 
