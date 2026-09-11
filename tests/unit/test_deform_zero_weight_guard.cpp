@@ -41,6 +41,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <initializer_list>
 
 #include "clay/kernel/deform.h"
 #include "clay/kernel/ease.h"
