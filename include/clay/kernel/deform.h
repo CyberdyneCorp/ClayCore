@@ -119,9 +119,57 @@ CLAY_FN float cfront_gate(cfloat3 p, cfloat3 centre, float radius, cfloat3 dir) 
 // monotonic in |d|, so a UI can calibrate; solving for the true preimage would
 // need an iteration per sample and buys nothing a sculptor can feel.
 // front_only != 0 gates on the half-space the pull heads into.
+//
+// `== 0.0f` AND NOT `<= 0.0f`, and that is the whole of it. ease_in_back,
+// ease_in_out_back, ease_in_elastic and ease_in_out_elastic all LEAVE [0,1] on
+// the way and go negative INSIDE the ball — for ease_in_back over 94.9% of its
+// volume, measured. That undershoot is the curve: a negative weight is grab
+// pushing the opposite way from the drag, which is what those curves are for.
+// `<= 0.0f` would early out of it and silently delete the effect. Measured over
+// 4.22M samples across all 33 easings and both front_only settings: `== 0.0f`
+// differs from no early-out at ZERO of them, and `<= 0.0f` differs at 77,712,
+// on exactly those four curves, by up to 0.208 world units at |displacement|
+// = 0.56 (the error scales with the displacement, so there is no fixed bound to
+// quote). cmagnify_point and cblob_offset carried the `<=` form and had exactly
+// this bug; both are now `==`.
+//
+// test_deform_zero_weight_guard.cpp pins the operator for all three, and it is
+// the file to keep: it asserts the PROPERTY, so a `<=` build fails it with no
+// table to regenerate. test_deformer_goldens.cpp pins grab and magnify
+// numerically as well — but not blob, whose row runs ease_smoothstep and so
+// never reaches the undershoot at all.
+//
+// The early-out goes BEFORE the front gate, not after: the gate is a normalize,
+// a dot and a clamp, and skipping it is the larger half of the saving.
+//
+// WORTH IT WHERE THE ZEROS ARE, WHICH IS NOT THE SCULPTING PATH. Measured on an
+// M2 Max, CPU backend, medians of 210 timed samples per point with the arms
+// interleaved and the first process run discarded, A/B against a build of this
+// header with the early-out removed:
+//
+//   clay_eval_points over the whole model, one item carrying the grab chain —
+//   1.51x at 8 grabs, 1.85x at 16, 2.09x at 32, and 2.23x at 32 with
+//   front_only=1, which is the front gate being skipped as well.
+//   The same 16-grab chain on one node of a 60-node blockout — 1.31x, because
+//   there the grabs are a minority of the field cost.
+//
+//   A CULLED BRICK REFILL — 1.01x at 16 grabs with one reaching, 1.00x at 32
+//   with two. NO MEASURABLE WIN, and that is the expected answer rather than a
+//   disappointing one: #452's deformer cull has already dropped the grabs that
+//   cannot reach the brick, one level up and far more cheaply, so by the time
+//   this function is called the zeros it would have caught are gone. The 2x is
+//   the whole-document path. An interactive sculpt does not get it.
+//
+// And where there are no zeros there is nothing, as it should be: 1.10x with
+// every probe inside one region, 1.03x on a radius covering every probe. Both
+// are noise — a control arm with NO deformer at all, running identical code in
+// both binaries, moved 0.95x, so this harness carries about ±5% of code-layout
+// systematic on cases this small (0.02-0.04 ms) and neither figure is outside
+// it. The tape numbers above are 10x that band.
 CLAY_FN cfloat3 cgrab_point(cfloat3 p, cfloat3 centre, float radius, cfloat3 displacement,
                             float front_only, int ease_type) {
     float w = cregion_weight(p, centre, radius, ease_type);
+    if (w == 0.0f) return p;  // finite support: untouched outside the radius
     if (front_only != 0.0f) w = w * cfront_gate(p, centre, radius, displacement);
     return p - displacement * w;   // inverse map: sample where the material came from
 }
@@ -147,7 +195,14 @@ CLAY_FN cfloat3 cmagnify_point(cfloat3 p, cfloat3 centre, float radius, float st
                                int ease_type) {
     cfloat3 v = p - centre;
     float w = cregion_weight(p, centre, radius, ease_type);
-    if (w <= 0.0f) return p;  // finite support: untouched outside the radius
+    // `== 0.0f`, NOT `<= 0.0f` — see cgrab_point. This read `<=` and so skipped
+    // the radial scale wherever the weight is negative, which is most of the
+    // ball under the four undershooting easings: a probe 0.625 from the centre
+    // of a unit region under ease_in_back carries w = -0.0968 and was left
+    // untouched instead of being scaled outward, moving the sampled point by
+    // 0.030 world units. With the region deformer inert over 94.9% of its own
+    // support, magnify under ease_in_back moved only 11 of 32 golden probes.
+    if (w == 0.0f) return p;  // finite support: untouched outside the radius
     float scale = cmax(1.0f - strength * w, 0.05f);
     return centre + v * scale;
 }
@@ -391,7 +446,14 @@ CLAY_FN float cblob_offset(cfloat3 p, cfloat3 centre, float radius, float amplit
                            float frequency, int octaves, float gain, cuint seed,
                            int ease_type) {
     float w = cregion_weight(p, centre, radius, ease_type);
-    if (w <= 0.0f) return 0.0f;
+    // `== 0.0f`, NOT `<= 0.0f` — see cgrab_point. This read `<=` and so returned
+    // no offset at all wherever the weight is negative, which under the four
+    // undershooting easings is most of the ball. A negative weight here is not a
+    // degenerate case to guard against: it flips the sign of the fractal, so the
+    // swelling eats in and the pockets swell, and the dab reads as blobby in the
+    // other direction. Suppressing it lost up to 0.075 world units of offset at
+    // amplitude 0.5 (the offset is linear in `amplitude`, so the error is too).
+    if (w == 0.0f) return 0.0f;
     return amplitude * w * cnoise_fbm(p * frequency, octaves, gain, seed);
 }
 

@@ -105,6 +105,8 @@ add_executable(clay_unit_tests
   unit/test_io.cpp
   unit/test_gltf.cpp
   unit/test_deformers.cpp
+  unit/test_deformer_goldens.cpp
+  unit/test_deform_zero_weight_guard.cpp
   unit/test_lifts.cpp
   unit/test_repetition.cpp
   unit/test_primitives_backfill.cpp
