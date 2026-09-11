@@ -32,6 +32,8 @@
 #include <doctest/doctest.h>
 
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <string>
 #include <vector>
