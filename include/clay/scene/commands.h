@@ -220,6 +220,23 @@ using Command =
 // caller which of the two it hit.
 LayerId edited_layer(const Command& cmd);
 
+// Would applying `cmd` to `doc` leave it exactly as it stands? A binding asks
+// this so it can answer "done, nothing to do" to a caller instead of the
+// NOT_FOUND that apply()'s nullopt would otherwise become — the two are the
+// same answer to apply() and opposite answers to a host (#536).
+//
+// TRUE ONLY WHERE AN APPLIER ACTUALLY SHORT-CIRCUITS, which today is the two
+// layer-symmetry setters: setting a mirror or a radial mode to the value the
+// layer already carries. Everything else answers false, including commands that
+// happen to write what was already there, and that asymmetry is the safe
+// direction: false costs a refill of something that did not move, where a wrong
+// true would swallow a real edit and leave silently stale geometry.
+//
+// Answering it is worth a call of its own because the alternative is not the
+// write — it is `command_influence_bound`, which for a layer setter is the
+// WHOLE LAYER. See apply_one(SetLayerMirrorCmd) for what that measured.
+bool command_changes_nothing(const Document& doc, const Command& cmd);
+
 // The world-space INFLUENCE bound of what `cmd` targets in the document AS IT
 // IS NOW — the box outside which applying (or having applied) it cannot change
 // the field. Empty means nothing to dirty; math::Aabb::infinite() means the

@@ -229,9 +229,49 @@ std::optional<Command> apply_one(Document& doc, const SetLayerNameCmd& c) {
     return Command{inverse};
 }
 
+// Does the layer ALREADY carry exactly what this command would write? One
+// spelling each, shared by the appliers below and by `command_changes_nothing`,
+// so a binding's "this edit is a no-op" answer cannot drift from the applier's.
+//
+// Compared on the BITS rather than with `==`, which costs nothing and keeps two
+// cases honest. `-0.0f == 0.0f` is true, so `==` would skip a set of -0.0 over
+// 0.0 and leave a document that does not hold what the caller asked for — and
+// `serialize_document` would see the difference even though the field does not.
+// A NaN k compares unequal to itself, so a layer holding one is always rewritten
+// rather than frozen where no further set can reach it.
+bool same_bits(float a, float b) { return std::memcmp(&a, &b, sizeof(float)) == 0; }
+
+bool already_set(const Layer& l, const SetLayerMirrorCmd& c) {
+    return l.mirror_axes == c.axes && same_bits(l.mirror_k, c.k);
+}
+
+bool already_set(const Layer& l, const SetLayerRadialCmd& c) {
+    // `count` is compared as the caller sent it, NOT normalised: 0 and 1 both
+    // mean "off" and the ABI stores whichever arrived (see
+    // clay_set_layer_radial), so 0 -> 1 is a real write even though the field
+    // it produces is the same one.
+    return l.radial_count == c.count && l.radial_axis == c.axis &&
+           same_bits(l.radial_k, c.k);
+}
+
 std::optional<Command> apply_one(Document& doc, const SetLayerMirrorCmd& c) {
     Layer* l = doc.find_layer(c.id);
     if (!l) return std::nullopt;
+    // A SET TO THE VALUE ALREADY THERE IS NOT AN EDIT (#536). nullopt is this
+    // vocabulary's "no, the document is unchanged" — the same answer
+    // SetLayerCompositionCmd gives below — so there is no inverse to record and
+    // nothing for command_influence_bound to dirty.
+    //
+    // This is not a micro-optimisation. A mirror set is bounded by
+    // layer_command_bound (`changes_layer_set=false`), which is the WHOLE
+    // LAYER, and a whole-layer invalidation drops the layer's brick seeds and
+    // breaks its append log. benchmarks/mirror_set_probe.cpp measured the
+    // refill after a no-op set at 31.00 ms on a 60-item form, against 0.31 ms
+    // for making no call at all — the same 500 bricks either way, 500 of the
+    // layer's 788 seeds gone — plus one undo entry. ClaySpaceDesktop calls this
+    // on every press, for every brush, from `point_the_mirror` on its
+    // stroke-arming path, so the whole cost was paid before the pointer moved.
+    if (already_set(*l, c)) return std::nullopt;
     SetLayerMirrorCmd inverse{c.id, l->mirror_axes, l->mirror_k};
     l->mirror_axes = c.axes;
     l->mirror_k = c.k;
@@ -241,6 +281,10 @@ std::optional<Command> apply_one(Document& doc, const SetLayerMirrorCmd& c) {
 std::optional<Command> apply_one(Document& doc, const SetLayerRadialCmd& c) {
     Layer* l = doc.find_layer(c.id);
     if (!l) return std::nullopt;
+    // The same short-circuit, for the identical shape: the radial mode is the
+    // other half of a layer's symmetry, it takes the same whole-layer bound,
+    // and a host that points one on every press points the other beside it.
+    if (already_set(*l, c)) return std::nullopt;
     SetLayerRadialCmd inverse{c.id, l->radial_count, l->radial_axis, l->radial_k};
     l->radial_count = c.count;
     l->radial_axis = c.axis;
@@ -287,6 +331,24 @@ LayerId edited_layer(const Command& cmd) {
                 return c.id;
             else
                 return c.layer;
+        },
+        cmd);
+}
+
+bool command_changes_nothing(const Document& doc, const Command& cmd) {
+    return std::visit(
+        [&](const auto& c) -> bool {
+            using C = std::decay_t<decltype(c)>;
+            if constexpr (std::is_same_v<C, SetLayerMirrorCmd> ||
+                          std::is_same_v<C, SetLayerRadialCmd>) {
+                const Layer* l = doc.find_layer(c.id);
+                // A MISSING LAYER IS NOT "UNCHANGED". apply() would return
+                // nullopt for it too, and a binding that treated the two alike
+                // would report a caller's bad id as a successful no-op.
+                return l && already_set(*l, c);
+            } else {
+                return false;
+            }
         },
         cmd);
 }

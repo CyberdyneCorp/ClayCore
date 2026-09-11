@@ -241,3 +241,191 @@ TEST_CASE("a layer with no mirror axes is untouched by the participation default
     clay_tape_release(a);
     clay_tape_release(b);
 }
+
+// ---------------------------------------------------------------------------
+// A NO-OP SYMMETRY SET IS NOT AN EDIT (issue #536)
+// ---------------------------------------------------------------------------
+//
+// ClaySpaceDesktop arms every stroke with `point_the_mirror`, which is
+// clay_set_layer_mirror whether or not the symmetry changed — once per press,
+// for every brush. `apply_one(SetLayerMirrorCmd)` used to write the axes and k
+// unconditionally and return an inverse, so that press recorded an undo entry
+// and took a WHOLE-LAYER invalidation: the layer's seeds dropped and its append
+// log broken before the pointer had moved.
+//
+// The radial half lives here rather than in test_c_layer_radial.cpp because it
+// is the SAME short-circuit over the same fixture; splitting it would duplicate
+// the warm cache and separate the two halves of one claim.
+//
+// BOTH HALVES ARE REQUIRED. A short-circuit that is too eager stops a real
+// symmetry change from taking effect, and that is silently wrong geometry
+// rather than a slow frame — so every "records nothing" case below is paired
+// with a "still records, and the field really moved" case, including the ones
+// where only k or only the axis differs.
+
+namespace {
+
+// Bricks currently holding a seed, which is what a whole-layer invalidation
+// drops. The seed store belongs to the DOCUMENT, so the count survives the
+// cache that filled it (see clay_resume_stats).
+std::uint64_t seed_entries(const clay_document* doc) {
+    clay_resume_stats st;
+    std::memset(&st, 0, sizeof st);
+    st.struct_size = static_cast<uint32_t>(sizeof st);
+    REQUIRE(clay_document_resume_stats(doc, &st) == CLAY_OK);
+    return st.entries;
+}
+
+std::size_t undo_depth(const clay_document* doc) {
+    std::size_t depth = 0;
+    REQUIRE(clay_document_undo_state(doc, nullptr, &depth, nullptr) == CLAY_OK);
+    return depth;
+}
+
+// Fill a cache over the model, leaving a seed on every brick it touched.
+void warm(const clay_document* doc) {
+    clay_brick_config cfg;
+    cfg.struct_size = sizeof(cfg);
+    REQUIRE(clay_brick_config_defaults(&cfg) == CLAY_OK);
+    clay_brick_cache* cache = clay_brick_cache_create(&cfg);
+    REQUIRE(cache != nullptr);
+    const float lo[3] = {-2.0f, -2.0f, -2.0f}, hi[3] = {2.0f, 2.0f, 2.0f};
+    REQUIRE(clay_brick_cache_mark_dirty(cache, lo, hi) == CLAY_OK);
+    const std::size_t samples = static_cast<std::size_t>(cfg.dim) * cfg.dim * cfg.dim;
+    const std::size_t chunk = 64;
+    std::vector<clay_brick_request> reqs(chunk);
+    std::vector<float> values(chunk * samples);
+    for (;;) {
+        std::size_t count = chunk, remaining = 0;
+        REQUIRE(clay_brick_cache_take_dirty(cache, reqs.data(), &count, &remaining) == CLAY_OK);
+        if (count == 0) break;
+        REQUIRE(clay_brick_cache_eval_requests(doc, nullptr, reqs.data(), count, values.data(),
+                                               count * samples, nullptr, 0) == CLAY_OK);
+        std::size_t accepted = 0;
+        REQUIRE(clay_brick_cache_submit(cache, reqs.data(), count, values.data(),
+                                        count * samples, nullptr, 0, nullptr, &accepted) ==
+                CLAY_OK);
+        if (remaining == 0) break;
+    }
+    clay_brick_cache_destroy(cache);
+}
+
+// The fixture the cases below share: an undoable document holding a unit
+// sphere and the issue's off-centre lump, already mirrored about x and already
+// arrayed, with a warm cache over it. Both symmetry values are therefore SET,
+// which is the state a host re-sets on every press.
+struct Armed {
+    Doc doc;
+    Armed() {
+        REQUIRE(clay_document_enable_undo(doc.d) == CLAY_OK);
+        clay_item_desc sphere = sphere_desc(1.0f);
+        REQUIRE(clay_add_item(doc.d, doc.layer, &sphere, nullptr) == CLAY_OK);
+        add_lump(doc, 0);
+        REQUIRE(clay_set_layer_mirror(doc.d, doc.layer, 1, 0, 0, 0.0f) == CLAY_OK);
+        // count 1 is radial OFF, so the fixture's FIELD is exactly the suite's
+        // above and the geometric readings below are the same 1.25 — but the
+        // value is SET, which is all the short-circuit is about.
+        REQUIRE(clay_set_layer_radial(doc.d, doc.layer, 1, 1, 0.0f) == CLAY_OK);
+        warm(doc.d);
+        REQUIRE(seed_entries(doc.d) > 0);  // else there is nothing to drop
+    }
+};
+
+}  // namespace
+
+TEST_CASE("setting the mirror to the value the layer already carries records nothing") {
+    Armed a;
+    const std::size_t depth = undo_depth(a.doc.d);
+    const std::uint64_t seeds = seed_entries(a.doc.d);
+    const float before = probe(a.doc.d, -1.0f);
+
+    // The press. CLAY_OK and not CLAY_ERROR_NOT_FOUND: apply()'s nullopt means
+    // "unchanged" here and "no such layer" elsewhere, and only one of the two
+    // is an error a host can act on.
+    REQUIRE(clay_set_layer_mirror(a.doc.d, a.doc.layer, 1, 0, 0, 0.0f) == CLAY_OK);
+
+    CHECK(undo_depth(a.doc.d) == depth);    // no undo entry for a no-op
+    CHECK(seed_entries(a.doc.d) == seeds);  // and nothing invalidated
+    CHECK(probe(a.doc.d, -1.0f) == doctest::Approx(before).epsilon(0.001));
+}
+
+TEST_CASE("setting the radial mode to the value the layer already carries records nothing") {
+    Armed a;
+    const std::size_t depth = undo_depth(a.doc.d);
+    const std::uint64_t seeds = seed_entries(a.doc.d);
+
+    REQUIRE(clay_set_layer_radial(a.doc.d, a.doc.layer, 1, 1, 0.0f) == CLAY_OK);
+
+    CHECK(undo_depth(a.doc.d) == depth);
+    CHECK(seed_entries(a.doc.d) == seeds);
+}
+
+TEST_CASE("a real mirror change still records, still invalidates, and still moves the field") {
+    Armed a;
+    const std::size_t depth = undo_depth(a.doc.d);
+    const std::uint64_t seeds = seed_entries(a.doc.d);
+    // Mirrored, so the far side carries the lump: the value the change removes.
+    REQUIRE(probe(a.doc.d, -1.0f) == doctest::Approx(1.25f).epsilon(0.01));
+
+    REQUIRE(clay_set_layer_mirror(a.doc.d, a.doc.layer, 0, 0, 0, 0.0f) == CLAY_OK);
+
+    CHECK(undo_depth(a.doc.d) == depth + 1);
+    CHECK(seed_entries(a.doc.d) < seeds);
+    // THE HALF THAT IS NOT ABOUT SPEED. An over-eager short-circuit leaves the
+    // field exactly as it was and says CLAY_OK, which a host cannot see at all
+    // until the render is wrong: the far side must be the untouched sphere.
+    CHECK(probe(a.doc.d, -1.0f) == doctest::Approx(1.0f).epsilon(0.005));
+    CHECK(probe(a.doc.d, 1.0f) == doctest::Approx(1.25f).epsilon(0.01));
+
+    // and it is one undo step, which restores the mirror
+    int32_t undone = 0;
+    REQUIRE(clay_document_undo(a.doc.d, &undone) == CLAY_OK);
+    REQUIRE(undone == 1);
+    CHECK(probe(a.doc.d, -1.0f) == doctest::Approx(1.25f).epsilon(0.01));
+}
+
+TEST_CASE("the seam blend alone is a change: same axes, different k") {
+    // The cheapest wrong short-circuit compares the axes and forgets k, which
+    // would freeze Mirror Blend at whatever value it was first given.
+    Armed a;
+    const std::size_t depth = undo_depth(a.doc.d);
+    const std::uint64_t seeds = seed_entries(a.doc.d);
+
+    REQUIRE(clay_set_layer_mirror(a.doc.d, a.doc.layer, 1, 0, 0, 0.2f) == CLAY_OK);
+
+    CHECK(undo_depth(a.doc.d) == depth + 1);
+    CHECK(seed_entries(a.doc.d) < seeds);
+}
+
+TEST_CASE("the radial axis alone is a change: same count and k, different axis") {
+    // The same mistake one field over. Arraying about Z instead of Y is a
+    // different model, and comparing only the count would silently keep Y.
+    Armed a;
+    const std::size_t depth = undo_depth(a.doc.d);
+    const std::uint64_t seeds = seed_entries(a.doc.d);
+
+    REQUIRE(clay_set_layer_radial(a.doc.d, a.doc.layer, 2, 1, 0.0f) == CLAY_OK);
+
+    CHECK(undo_depth(a.doc.d) == depth + 1);
+    CHECK(seed_entries(a.doc.d) < seeds);
+}
+
+TEST_CASE("a no-op set on a locked layer is still refused") {
+    // The short-circuit sits AFTER the protection check, deliberately. A lock
+    // is a state the artist chose and a host greys the layer out on the refusal
+    // it gets back; answering CLAY_OK because the write happened to be empty
+    // would make the lock look like it had lapsed.
+    Armed a;
+    REQUIRE(clay_document_set_layer_protection(a.doc.d, a.doc.layer, 0, 1) == CLAY_OK);
+    CHECK(clay_set_layer_mirror(a.doc.d, a.doc.layer, 1, 0, 0, 0.0f) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_set_layer_radial(a.doc.d, a.doc.layer, 1, 1, 0.0f) == CLAY_ERROR_INVALID_ARGUMENT);
+}
+
+TEST_CASE("a bad layer id is still NOT_FOUND, not a successful no-op") {
+    // The two reasons apply() says nullopt, kept apart: "already that value"
+    // and "no such layer" must not collapse into one answer.
+    Doc doc;
+    CHECK(clay_set_layer_mirror(doc.d, 4242, 1, 0, 0, 0.0f) == CLAY_ERROR_NOT_FOUND);
+    CHECK(clay_set_layer_radial(doc.d, 4242, 1, 1, 0.0f) == CLAY_ERROR_NOT_FOUND);
+}

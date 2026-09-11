@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(claycore
-  VERSION 0.102.0
+  VERSION 0.103.0
   DESCRIPTION "Portable C++20 SDF + voxel engine library"
   LANGUAGES C CXX)  # C: ufbx
 
@@ -505,6 +505,17 @@ if(CLAY_BUILD_BENCHMARKS)
   target_link_libraries(move_collapse_crossover_probe PRIVATE claycore)
   target_include_directories(move_collapse_crossover_probe PRIVATE bindings/c)
   clay_apply_warnings(move_collapse_crossover_probe)
+
+  # Also not gated: what setting a layer's mirror to the value it ALREADY
+  # CARRIES costs (#536). A host that points the mirror on its stroke-arming
+  # path pays it once per press, for every brush, before the pointer has moved.
+  # Drives the C ABI, so it needs bindings/c. Exits non-zero if the fixture
+  # cannot discriminate — if the warm pass refilled nothing there is no cache
+  # to invalidate and both arms measure an empty loop.
+  add_executable(mirror_set_probe benchmarks/mirror_set_probe.cpp)
+  target_link_libraries(mirror_set_probe PRIVATE claycore)
+  target_include_directories(mirror_set_probe PRIVATE bindings/c)
+  clay_apply_warnings(mirror_set_probe)
 
   # The chunk-size measurement (add-extreme-poly-runtime task 1.1). Its own
   # target rather than a case of clay_bench, because the decision rule reads

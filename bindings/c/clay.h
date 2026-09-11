@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 102
+#define CLAY_ABI_MINOR 103
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -2127,7 +2127,33 @@ clay_result clay_layer_zero_to_origin(clay_document* doc, clay_layer_id layer);
  * layer. Through 0.27.3 the flag was an opt-IN whose default excluded every
  * item, which made this call a silent no-op unless each item also passed
  * mirror = 1 (#60); 1 is still accepted and means what it meant. Layers with
- * no mirror axes evaluate exactly as before, whatever the items' flags. */
+ * no mirror axes evaluate exactly as before, whatever the items' flags.
+ *
+ * SETTING WHAT THE LAYER ALREADY CARRIES DOES NOTHING, since ABI 0.103.0
+ * (#536): identical axes and an identical mirror_k return CLAY_OK without
+ * recording an undo step and without invalidating anything. Through 0.102.0
+ * this call was an edit whatever it was handed — it wrote the bytes that were
+ * already there, pushed an inverse, and took the WHOLE-LAYER invalidation a
+ * layer transform takes, dropping the layer's brick seeds and breaking its
+ * append log. A host that points the mirror on its stroke-arming path paid that
+ * once per press, for every brush, before the pointer had moved; the stall
+ * ledger that found this put `begin stroke` at 92.7 ms average over 51 presses.
+ * Measured here on a 60-item form, 8-voxel bricks at 0.05, Apple M2 Max: the
+ * refill after a no-op set went from 31.00 ms to 0.32 ms, against 0.31 ms for
+ * making no call at all, with the same 500 bricks refilled either way. A real
+ * symmetry change is untouched at 49.67 -> 50.57 ms.
+ *
+ * Two consequences worth stating because they are what MOVES under a caller who
+ * changes nothing. A host that counted on the undo step existing — "my
+ * set-mirror button always costs exactly one undo" — now sees the step only
+ * when the symmetry really moved, which is what an artist means by an undo.
+ * And a host that re-set the mirror to force a refill has lost its lever: dirty
+ * the region with clay_brick_cache_mark_dirty_layer, which is the call for it.
+ *
+ * A LOCKED OR GHOSTED LAYER STILL REFUSES a no-op set
+ * (CLAY_ERROR_INVALID_ARGUMENT), and an id no layer holds is still
+ * CLAY_ERROR_NOT_FOUND. "Already that value" and "no such layer" are different
+ * answers, not one. */
 clay_result clay_set_layer_mirror(clay_document* doc, clay_layer_id layer, int32_t axis_x,
                                   int32_t axis_y, int32_t axis_z, float mirror_k);
 /* The layer's RADIAL symmetry: `count` copies of every participating item,
@@ -2142,6 +2168,12 @@ clay_result clay_set_layer_mirror(clay_document* doc, clay_layer_id layer, int32
  * per mode.
  *
  * An axis outside 0..2 or a negative blend is rejected rather than clamped.
+ *
+ * SETTING WHAT THE LAYER ALREADY CARRIES DOES NOTHING, since ABI 0.103.0, for
+ * the reasons and with the exceptions spelled out at clay_set_layer_mirror
+ * above. `count` is compared as you sent it and not normalised: 0 and 1 both
+ * mean off and both are stored, so 0 -> 1 is still an edit even though the
+ * field it produces is the same one.
  *
  * This is the MODE. clay_item_set_repeat_radial is the per-item MODIFIER, and
  * it stays the right tool for a large decorative array: this emits `count`

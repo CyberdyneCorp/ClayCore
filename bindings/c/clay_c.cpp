@@ -4213,7 +4213,13 @@ clay_result perform_edit(clay_document* doc, const scene::Command& cmd, const ch
 clay_result apply_edit_in_gesture(clay_document* doc, const scene::Command& cmd,
                                   const char* what) {
     const clay_result r = edit_guard(doc, cmd);
-    return r != CLAY_OK ? r : perform_edit(doc, cmd, what);
+    if (r != CLAY_OK) return r;
+    // The same no-op answer apply_edit gives (#536). There is no bound to skip
+    // on this path — the enclosing GestureRegion owns the invalidation — but
+    // the undo entry and the NOT_FOUND are both here, and a gesture must not
+    // report a command it correctly declined to record as a missing layer.
+    if (scene::command_changes_nothing(doc->doc.document, cmd)) return CLAY_OK;
+    return perform_edit(doc, cmd, what);
 }
 
 // ONE invalidation for a whole gesture, from a region the caller knows.
@@ -4275,6 +4281,20 @@ clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char
     // Gathered before the apply because after it the old shape is gone.
     clay_result r = edit_guard(doc, cmd);
     if (r != CLAY_OK) return r;
+    // AN EDIT THAT CHANGES NOTHING COSTS NOTHING (#536) — and in particular
+    // does not reach the two `command_influence_bound` calls below, which for a
+    // layer setter return the WHOLE LAYER. Answered here rather than left to
+    // apply(), whose nullopt would become a NOT_FOUND a caller cannot tell from
+    // a bad layer id.
+    //
+    // AFTER edit_guard, not before: a locked layer still refuses a no-op set.
+    // The refusal is about whether the artist's lock is respected, not about
+    // how much the write would have moved, and a host that greys out a locked
+    // layer on CLAY_ERROR_INVALID_ARGUMENT must keep seeing it.
+    if (scene::command_changes_nothing(doc->doc.document, cmd)) {
+        if (out_reach) *out_reach = math::Aabb{};
+        return CLAY_OK;
+    }
     // BOTH SIDES OFF ONE CACHE THAT SURVIVES THE EDIT (#451). The before-bound
     // reads the extent as it stands; the apply then changes the document; and
     // the cache is TOLD what changed before the after-bound reads it again, so
