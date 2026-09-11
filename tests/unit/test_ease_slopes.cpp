@@ -163,8 +163,12 @@ TEST_CASE("the circ family's declared slope is BELOW its real one — issue file
     // Pinned here as the current behaviour so the defect cannot be lost, and
     // so that whoever fixes it sees this case go red and updates it rather
     // than discovering the requirement from scratch.
-    for (const std::uint8_t e : {kernel::ease_in_circ, kernel::ease_out_circ,
-                                 kernel::ease_in_out_circ}) {
+    // Cast at the element rather than in the loop variable: a braced list of
+    // CEase deduced as CEase narrows to uint8_t on the way in, which MSVC
+    // treats as an error under /WX.
+    for (const std::uint8_t e : {static_cast<std::uint8_t>(kernel::ease_in_circ),
+                                 static_cast<std::uint8_t>(kernel::ease_out_circ),
+                                 static_cast<std::uint8_t>(kernel::ease_in_out_circ)}) {
         CAPTURE(int(e));
         const double declared = scene::ease_max_slope(e);
         const double observed = observed_max_slope(e, kSamples);
