@@ -84,11 +84,11 @@
       "rawMs": 0.4457
     },
     "mesh_sustained_grab": {
-      "gate": "drift",
       "class": "interactive",
+      "gate": "drift",
       "measuredMs": 0.019083,
-      "rawMs": 0.019083,
-      "note": "Gated by session_drift, not by a ceiling. This case's claim is that a sustained session does not slow down or leak over its LENGTH -- the late window against the early one, in vertex counts, scratch high-water, footprint and time. Its per-dab p95 is 0.019 ms, under the 0.05 ms noise floor, so a millisecond budget could not fail until the case was 3.6x slower and would read as coverage. If it ever measures above the floor the checker fails and asks for a real budget."
+      "note": "Gated by session_drift, not by a ceiling. This case's claim is that a sustained session does not slow down or leak over its LENGTH -- the late window against the early one, in vertex counts, scratch high-water, footprint and time. Its per-dab p95 is 0.019 ms, under the 0.05 ms noise floor, so a millisecond budget could not fail until the case was 3.6x slower and would read as coverage. If it ever measures above the floor the checker fails and asks for a real budget.",
+      "rawMs": 0.019083
     },
     "move_drags": {
       "budgetMs": 0.104,
@@ -128,8 +128,8 @@
       "class": "interactive",
       "machineFactor": 0.9891,
       "measuredMs": 19.2028,
-      "rawMs": 18.993458,
-      "note": "RE-DERIVED at 0.97.0. This case sat at ~1.39x of a baseline taken before #490 and crossed the 1.4x tolerance only when the machine factor moved x0.99 -> x0.97; the RAW number changed 0.25% between the 0.96.0 and 0.97.0 gates (18.945 -> 18.993 ms), so nothing regressed between them. The step is #490's, and it is the same dilation as #497: node_reach_bound widens a node's dirty box by each enclosing group's blend support. UNLIKE #497 IT BUYS NO CORRECTNESS HERE -- measured 0 stale bricks on the pre-#490 bound, against 17 of 216 for the in-group stroke -- because this fixture puts every stamp inside the group, so the group's combine has no left operand and its blend cannot move the result. Bricks over a 32-frame drag go 2144 -> 4300 for nothing. The bound is SOUND, only over-conservative, so the ceiling is re-derived rather than the bound weakened: getting a tightening wrong here is exactly what produced #497. Issue #515 carries the tightening and its acceptance test (2144 bricks with stale still 0). Do NOT restore the old numbers -- they predate a bound that is correct."
+      "note": "RE-DERIVED at 0.97.0. This case sat at ~1.39x of a baseline taken before #490 and crossed the 1.4x tolerance only when the machine factor moved x0.99 -> x0.97; the RAW number changed 0.25% between the 0.96.0 and 0.97.0 gates (18.945 -> 18.993 ms), so nothing regressed between them. The step is #490's, and it is the same dilation as #497: node_reach_bound widens a node's dirty box by each enclosing group's blend support. UNLIKE #497 IT BUYS NO CORRECTNESS HERE -- measured 0 stale bricks on the pre-#490 bound, against 17 of 216 for the in-group stroke -- because this fixture puts every stamp inside the group, so the group's combine has no left operand and its blend cannot move the result. Bricks over a 32-frame drag go 2144 -> 4300 for nothing. The bound is SOUND, only over-conservative, so the ceiling is re-derived rather than the bound weakened: getting a tightening wrong here is exactly what produced #497. Issue #515 carries the tightening and its acceptance test (2144 bricks with stale still 0). Do NOT restore the old numbers -- they predate a bound that is correct.",
+      "rawMs": 18.993458
     },
     "sdf_layer_transform_bricks": {
       "budgetMs": 39.6744,
@@ -220,8 +220,8 @@
       "class": "interactive",
       "machineFactor": 0.993,
       "measuredMs": 50.4548,
-      "rawMs": 50.101584,
-      "note": "RE-DERIVED at 0.96.0 against a CORRECTED measurement, not a faster one. The previous ceiling (32.954 ms) and baseline (21.816 ms p95) were taken while the dirty path UNDER-DIRTIED this case: clay_brick_cache_mark_dirty_nodes marked a node's own box rather than the box its edit reaches, so a dab inside a blended group left bricks holding pre-dab values. On this fixture at 100 stamps 17 of 216 bricks were stale, and the identical stroke with its dabs at the layer ROOT left none. #490 routed the dirty call through node_reach_bound, which dilates by each enclosing group's blend support: stale went to 2 and the bricks a 24-dab stroke refills went 232 -> 924. The 4x is the blend's OWN reach, not a pad -- a quadratic blend's support is 4k (csmin_quadratic_support), the same constant csmin_quadratic evaluates over, so at k=0.05 the field really does move 0.20 out. This case did not get slower; it started doing work it always owed. Attribution and the A/B are in issue #497, and tests/unit/test_c_in_group_dirty_reach.cpp holds the behaviour. Do NOT restore the old numbers to make a gate green -- they encode the bug."
+      "note": "RE-DERIVED at 0.96.0 against a CORRECTED measurement, not a faster one. The previous ceiling (32.954 ms) and baseline (21.816 ms p95) were taken while the dirty path UNDER-DIRTIED this case: clay_brick_cache_mark_dirty_nodes marked a node's own box rather than the box its edit reaches, so a dab inside a blended group left bricks holding pre-dab values. On this fixture at 100 stamps 17 of 216 bricks were stale, and the identical stroke with its dabs at the layer ROOT left none. #490 routed the dirty call through node_reach_bound, which dilates by each enclosing group's blend support: stale went to 2 and the bricks a 24-dab stroke refills went 232 -> 924. The 4x is the blend's OWN reach, not a pad -- a quadratic blend's support is 4k (csmin_quadratic_support), the same constant csmin_quadratic evaluates over, so at k=0.05 the field really does move 0.20 out. This case did not get slower; it started doing work it always owed. Attribution and the A/B are in issue #497, and tests/unit/test_c_in_group_dirty_reach.cpp holds the behaviour. Do NOT restore the old numbers to make a gate green -- they encode the bug.",
+      "rawMs": 50.101584
     },
     "sdf_stroke_metal": {
       "budgetMs": 2.7109,
@@ -1630,86 +1630,87 @@
       "backend": "cpu",
       "budgetClass": "gesture",
       "bundle": "com.cyberdyne.claycore.devicegallery",
-      "canaryAfterMs": 170.720208,
-      "canaryBeforeMs": 217.297542,
-      "growthExponent": 0.6450382834051892,
+      "canaryAfterMs": 129.607209,
+      "canaryBeforeMs": 129.887083,
+      "growthExponent": 0.09739578453239668,
       "measurements": [
         {
           "batch": 1,
-          "p50Ms": 0.128375,
-          "p95Ms": 0.128375,
-          "p95SpreadMs": 0.046874,
+          "p50Ms": 0.356916,
+          "p95Ms": 0.356916,
+          "p95SpreadMs": 0.015208,
           "repeats": 5,
           "samples": 1,
           "stamps": 1
         },
         {
           "batch": 1,
-          "p50Ms": 0.159709,
-          "p95Ms": 0.159709,
-          "p95SpreadMs": 0.04541600000000001,
+          "p50Ms": 0.12975,
+          "p95Ms": 0.12975,
+          "p95SpreadMs": 0.007957999999999993,
           "repeats": 5,
           "samples": 1,
           "stamps": 2
         },
         {
           "batch": 1,
-          "p50Ms": 0.21204099999999998,
-          "p95Ms": 0.21204099999999998,
-          "p95SpreadMs": 0.013833000000000012,
+          "p50Ms": 0.180458,
+          "p95Ms": 0.180458,
+          "p95SpreadMs": 0.008750000000000008,
           "repeats": 5,
           "samples": 1,
           "stamps": 3
         },
         {
           "batch": 1,
-          "p50Ms": 0.280791,
-          "p95Ms": 0.280791,
-          "p95SpreadMs": 0.023042000000000007,
+          "p50Ms": 0.230083,
+          "p95Ms": 0.230083,
+          "p95SpreadMs": 0.012750000000000011,
           "repeats": 5,
           "samples": 1,
           "stamps": 4
         },
         {
           "batch": 1,
-          "p50Ms": 0.327917,
-          "p95Ms": 0.327917,
-          "p95SpreadMs": 0.057084000000000024,
+          "p50Ms": 0.28520900000000005,
+          "p95Ms": 0.28520900000000005,
+          "p95SpreadMs": 0.008708000000000049,
           "repeats": 5,
           "samples": 1,
           "stamps": 5
         },
         {
           "batch": 1,
-          "p50Ms": 0.383501,
-          "p95Ms": 0.383501,
-          "p95SpreadMs": 0.008709000000000022,
+          "p50Ms": 0.335876,
+          "p95Ms": 0.335876,
+          "p95SpreadMs": 0.008706999999999965,
           "repeats": 5,
           "samples": 1,
           "stamps": 6
         },
         {
           "batch": 1,
-          "p50Ms": 0.44158400000000003,
-          "p95Ms": 0.44158400000000003,
-          "p95SpreadMs": 0.007791999999999966,
+          "p50Ms": 0.388125,
+          "p95Ms": 0.388125,
+          "p95SpreadMs": 0.00833299999999998,
           "repeats": 5,
           "samples": 1,
           "stamps": 7
         },
         {
           "batch": 1,
-          "p50Ms": 0.490917,
-          "p95Ms": 0.490917,
-          "p95SpreadMs": 0.010250000000000037,
+          "p50Ms": 0.437042,
+          "p95Ms": 0.437042,
+          "p95SpreadMs": 0.00795800000000002,
           "repeats": 5,
           "samples": 1,
           "stamps": 8
         }
       ],
       "name": "cut_passes",
+      "note": "RE-DERIVED at 0.103.0 from gate db0d9f1b. The previous numbers were recorded at abiVersion 0.56.0 (commit 240316506c) -- 47 minors earlier -- and that run's own canary drifted 217.30 -> 170.72 ms DURING the measurement, so it was taken on a device that was both slower and unsteady. It could not attribute anything.\n\nIT DID NOT REGRESS; IT GOT FASTER. Point by point against the old numbers: stamps 2-8 all improved 11-19% (0.81x, 0.85x, 0.82x, 0.87x, 0.88x, 0.88x, 0.89x) and the session's total work fell 3.4% (2.4248 -> 2.3435 ms). Only stamp 1 rose, 0.1284 -> 0.3569, which is first-touch: tape compile, first allocation, pool spin-up, none of it repeated on the later stamps -- which is precisely why those are the ones that improved. It is also unstable across runs (0.4278 on one gate attempt, 0.3569 on the next).\n\nTHE SCORING IS WHAT FAILED, and re-deriving does not fix it. This case is scored on the MEDIAN of eight one-shot timings, so one point moving reshuffles the sort order and lifts the median: a 3.4% improvement was reported as a 1.46x REGRESSION. See issue #544, and #331 for why the max is not gated either. A case scored this way cannot distinguish 'slower' from 'one point moved', and that is a defect in the scoring rather than in this baseline.\n\nDo NOT re-derive the whole baseline with --update to fix a case like this: it rewrites all 75 entries and would silently absorb any case that HAS regressed.",
       "servedBy": "cpu",
-      "startedAtMs": 10248.759584,
+      "startedAtMs": 6052.795875,
       "thermalStateEnd": "nominal",
       "thermalStateStart": "nominal",
       "verb": "session.cut_passes"
