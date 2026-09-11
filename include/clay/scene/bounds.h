@@ -32,6 +32,25 @@ math::Aabb item_local_bounds(const Node& item);
 // both the influence bound and the tape's tracked field info use this.
 float deformer_lipschitz(const Node& item);
 
+// The same bound over an EXPLICIT chain, which is what a culled tape needs.
+//
+// A per-brick tape carries only the deformers that can reach the brick: the
+// compiler drops every finite-support warp whose ball misses the region,
+// because over that region it is the identity (tape_build.cpp, issue #452).
+// The bound has to describe the chain that was EMITTED, not the one the item
+// happens to hold -- an identity contributes a factor of one, and charging for
+// it is charging for a warp that is not in the tape being bounded.
+//
+// Measured before this existed (benchmarks/cull_vs_bound_probe.cpp): a brick
+// under 48 move dabs emitted NINE grabs and declared 253.61, which is 1.125^48
+// -- the whole chain's product. The honest figure for that tape is 1.125^9 =
+// 2.93. At one dab the tape emitted NOTHING and still declared 1.12, for a
+// region where the field is an undeformed sphere. Issue #541.
+//
+// `item` still supplies the primitive's own extent and curve tolerance; only
+// the chain is taken from the caller.
+float deformer_lipschitz(const Node& item, const std::vector<Deformer>& deformers);
+
 // Steepest slope of an easing curve, measured by dense sampling. The curves are
 // arbitrary — back and elastic overshoot — so a constant would not be a safe
 // bound. Shared by the transition weight and the region deformers.

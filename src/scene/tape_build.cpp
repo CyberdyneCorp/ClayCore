@@ -143,6 +143,26 @@ struct Compiler {
     // fresh vector per item; only ever read between assignment and use.
     std::vector<StrokePoint> scratch_curve;
 
+    // THE CHAIN THAT WAS EMITTED, so `fold_info` can bound the tape it is
+    // actually describing rather than the item's full chain (issue #541).
+    //
+    // `cull_deformers` drops every finite-support warp the region cannot
+    // reach, because over that region it is the identity -- so the emitted
+    // chain is often far shorter than the item's. Bounding the long one
+    // declares a Lipschitz factor for warps that are not in the tape: measured
+    // at 48 move dabs, NINE grabs emitted against a declared 1.125^48 = 253.61
+    // where the emitted chain's own product is 1.125^9 = 2.93.
+    //
+    // KEYED ON THE SOURCE VECTOR'S ADDRESS, not on call order. Every emit_prim
+    // site passes `item.deformers` straight through, and `emit_empty` passes a
+    // temporary that can match no item. A stale chain here would be read as a
+    // SHORTER one and would UNDER-declare the bound, which does not cost
+    // frames -- it steps the marcher through the surface. So fold_info uses
+    // this only when the address proves it belongs to the item in hand, and
+    // falls back to the full chain otherwise.
+    const std::vector<Deformer>* live_chain_src_ = nullptr;
+    std::vector<Deformer> live_chain_;
+
     void begin_cull(const CullRegion* cull_region, float pad) {
         cull = cull_region;
         if (cull) cull_test = pad > 0.0f ? cull->region.dilated(pad) : cull->region;
@@ -243,6 +263,8 @@ struct Compiler {
         tape.params.push_back(repeat.counts.y);
         tape.params.push_back(repeat.counts.z);
         const std::vector<Deformer> live = cull_deformers(deformers, inv);
+        live_chain_ = live;
+        live_chain_src_ = &deformers;
         tape.params.push_back(static_cast<float>(live.size()));
         for (const Deformer& d : live) {
             // A guide is not a fixed size, so it goes in the blob and slots 1
@@ -539,8 +561,16 @@ struct Compiler {
         }
 
         // domain warps break the metric: fold the chain's Lipschitz factor
-        // (shared with the influence bound) so the safe step scale drops
-        float deform_l = deformer_lipschitz(item);
+        // (shared with the influence bound) so the safe step scale drops.
+        //
+        // Over the chain the tape actually CARRIES -- see live_chain_ -- which
+        // on a culled tape is the point of issue #541. Uncalled culling, a
+        // group, or any path that did not reach emit_prim leaves the address
+        // unmatched and takes the item's full chain, which is what the
+        // whole-document compile wants anyway.
+        const bool have_live = live_chain_src_ == &item.deformers;
+        float deform_l =
+            have_live ? deformer_lipschitz(item, live_chain_) : deformer_lipschitz(item);
         if (deform_l > 1.0f) prim_info = kernel::CFieldInfo{false, prim_info.lipschitz * deform_l};
         if (deformers_break_exactness(item)) prim_info.is_exact = false;
         if (op_is_transition(op)) {
