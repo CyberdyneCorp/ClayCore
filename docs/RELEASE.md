@@ -618,6 +618,56 @@ forward-refuse).
    while the number never repeats. A rebuild after undo-then-redo is the intended
    cost — loud and bounded, against a silent stale cache that is neither.
 
+   **0.98.0 through 0.101.0 are additive and observable only if you call
+   something new.** 0.98.0 stopped dilating a reach bound by a combine that
+   never happens (#515): a group drag refills 2.006x fewer bricks, 4300 -> 2144
+   over 32 frames, with stale bricks 0 on both sides. 0.99.0 added
+   `clay_mesh_from_quads` (#514). 0.100.0 fixed a partial write that made a
+   resumed brick rebuild 5.56 times instead of once (#508), 28.3 -> 12.2 ms.
+   0.101.0 added `clay_configure_workers` and `clay_worker_report_get` and
+   sized the pool from performance cores rather than logical ones (#243).
+
+   **0.102.0 IS such a release, and it is the one to read if you use MAGNIFY or
+   BLOB with a back or elastic easing** (#542's sibling, shipped as #527).
+   `cmagnify_point` and `cblob_offset` guarded their finite support with
+   `if (w <= 0.0f)`. Four curves -- `ease_in_back`, `ease_in_out_back`,
+   `ease_in_elastic`, `ease_in_out_elastic` -- go NEGATIVE inside the ball, and
+   that undershoot is the curve rather than an artefact: a negative weight is
+   the deformer acting the opposite way, which is what those curves are for. The
+   guard early-returned out of it, leaving magnify **inert over the outer 94.9%
+   of the ball it was asked to act on**. Measured over 4.22M samples across all
+   33 easings and both `front_only` settings: the corrected `== 0.0f` form
+   differs from no early-out at ZERO samples, and `<= 0.0f` differed at 77,712,
+   by up to 0.208 world units at |displacement| = 0.56. **A caller using any
+   other easing sees nothing change**, which is most callers -- but the four
+   that are affected were silently getting the opposite of what they asked for.
+
+   The same release gives `cgrab_point` the guard it never had (about 2x on a
+   whole-document evaluation, a few percent on the per-brick path) and culls
+   `clay_layer_eval_points` and its siblings to the probes they were handed
+   (12-20x clustered, free otherwise, bit-identical by construction).
+
+   **0.103.0 IS such a release, and it is the one to read if you count undo
+   entries** (#536). `clay_set_layer_mirror` wrote its axes and `k`
+   unconditionally and returned an inverse command, so setting a layer's mirror
+   to the value it ALREADY CARRIED recorded an undo entry and invalidated the
+   whole layer: 200 bricks dirtied against 0 for doing nothing, 8.88 ms on a
+   60-item form. It is now refused as unchanged, the way `SetLayerCompositionCmd`
+   beside it already was. A host that points the mirror per press -- which is a
+   natural thing to do -- was paying a full layer refill before the pointer moved.
+
+   **0.103.0 does NOT contain the `ease_max_slope` tightening** (#542), which is
+   written and tested but held back deliberately. The curves whose derivative
+   suprema are known analytically should return them instead of a 512-point
+   sample times a blanket 1.25x; the slope compounds through a deformer chain,
+   so that margin makes a 48-grab chain declare **1,443,068 where the analytic
+   product is 116,008** (12.44x). It edits `src/scene/bounds.cpp`, and the
+   device gate for this tag was recorded at `db0d9f1b` before it existed --
+   `release_check.py` fails the device row for any change under `src/` since the
+   gate ran, so shipping it here would have meant a second 2.5-hour hardware
+   run. It lands in the next minor with its own gate. Recording this so nobody
+   reads the issue as fixed by a tag that does not carry it.
+
    **0.97.0 IS such a release, and it is the one to read if you sculpt on a
    layer that has been MOVED** (issue #506). A layer's vertices are layer-local
    and its `xform` places them; the lattices a brush consults -- the painted
