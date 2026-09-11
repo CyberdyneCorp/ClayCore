@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <list>
 #include <map>
 #include <memory>
@@ -2365,6 +2366,37 @@ struct clay_document {
     bool uniform_gate() const { return uniform_gate_.load(std::memory_order_relaxed); }
     void set_uniform_gate(bool on) const { uniform_gate_.store(on, std::memory_order_relaxed); }
 
+    // The same seam for the bulk point-eval cull region (eval_points_culled):
+    // off, every such query compiles the whole layer or the whole document, as
+    // it did before the region existed. That is the reference the culled
+    // answers are held against bit for bit, and it is the only way to ask for
+    // it — the two paths are meant to be indistinguishable from outside.
+    bool point_cull() const { return point_cull_.load(std::memory_order_relaxed); }
+    void set_point_cull(bool on) const { point_cull_.store(on, std::memory_order_relaxed); }
+
+    // And the three outcomes of one that was tried: answered under the band the
+    // probe box named, answered under a WIDER one after that band turned out
+    // not to cover the answers, or given up on and answered from the whole
+    // tape. Counted because a test comparing the two paths CANNOT SEE WHICH IT
+    // TOOK otherwise — they agree by construction, so a cull that quietly
+    // stopped culling would pass every equality case in the suite. Cumulative
+    // over the document's life.
+    void note_point_cull(int attempts, bool held) const {
+        if (!held)
+            point_cull_fallbacks_.fetch_add(1, std::memory_order_relaxed);
+        else if (attempts > 1)
+            point_cull_widenings_.fetch_add(1, std::memory_order_relaxed);
+        else
+            point_culls_.fetch_add(1, std::memory_order_relaxed);
+    }
+    std::uint64_t point_culls() const { return point_culls_.load(std::memory_order_relaxed); }
+    std::uint64_t point_cull_widenings() const {
+        return point_cull_widenings_.load(std::memory_order_relaxed);
+    }
+    std::uint64_t point_cull_fallbacks() const {
+        return point_cull_fallbacks_.load(std::memory_order_relaxed);
+    }
+
     void resume_stats(std::uint64_t* entries, std::uint64_t* bytes, std::uint64_t* budget,
                       std::uint64_t* resumed, std::uint64_t* refilled) const {
         {
@@ -2810,6 +2842,10 @@ struct clay_document {
     mutable std::atomic<std::uint64_t> seed_miss_stack_shape_{0};
     mutable std::atomic<std::uint64_t> gated_bricks_{0};
     mutable std::atomic<bool> uniform_gate_{true};
+    mutable std::atomic<bool> point_cull_{true};
+    mutable std::atomic<std::uint64_t> point_culls_{0};
+    mutable std::atomic<std::uint64_t> point_cull_widenings_{0};
+    mutable std::atomic<std::uint64_t> point_cull_fallbacks_{0};
     // The one-shot test seam of set_resume_store_interleave. Not under
     // cache_mutex_: it is armed and fired on the one thread a test owns, and
     // the point where it fires holds no lock by design.
@@ -3373,6 +3409,10 @@ void write_cell(std::int32_t out[3], voxel::VoxelCoord c) {
     std::memcpy(out, &c, sizeof c);
 }
 
+// The half-width of the tetrahedron taps a gradient is assembled from
+// (eval::PointQuery), which the cull region below has to reach as well.
+constexpr float kGradientEps = 1e-4f;
+
 // Distances, colors and gradients come off one backend call and differ only in
 // which buffer they fill, so the backend lookup lives here once. The tape is
 // the caller's: a document compiles the whole stack, a layer only itself.
@@ -3384,7 +3424,7 @@ clay_result eval_into(const scene::Tape& tape, const char* backend, const float*
     eval::Backend* b = eval::Registry::instance().find(name);
     if (!b)
         return fail(CLAY_ERROR_NOT_FOUND, std::string("backend not registered: ") + name);
-    eval::PointQuery q{points_xyz, count, 1e-4f};
+    eval::PointQuery q{points_xyz, count, kGradientEps};
     if (b->eval_points(tape, q, out) != eval::Status::Ok)
         return fail(CLAY_ERROR_BACKEND, "eval_points failed");
     return CLAY_OK;
@@ -3401,14 +3441,298 @@ clay_result gradients_into(const scene::Tape& tape, const char* backend,
                      eval::PointResults{distances.data(), out_gradients_xyz, nullptr});
 }
 
+// -- the cull region a bulk point query answers under (issue #452) -----------
+//
+// A query that COMPILES ITS OWN TAPE — one layer's field, or the document
+// without a layer — used to compile all of it for probes standing in one
+// brush-sized corner of it, and then charge every probe for every item and
+// every warp it could not be affected by. Measured on a 401-item ball carrying
+// twelve grabs, 4,096 probes in a brush-sized box on the far side of it from
+// every grab: 9.41 ms for the distances and 41.1 ms for the gradients, against
+// 1.29 ms and 2.95 ms with the region below — 7.3x and 13.9x. With no warps at
+// all the same query is 2.8x, so this is not only about warps: most of what it
+// removes is the tape a probe walks that it could not be affected by.
+// `compile_layer` and `compile_document_except` have taken a `CullRegion` all
+// along — a brick refill (mesh/marching.cpp) and a pick ray (pick/pick.cpp)
+// each derive one from their own query — and this derives one from the probes:
+// their own AABB, dilated.
+//
+// WHY THIS NEEDS A BAND WHEN THOSE TWO CALLERS DO NOT. A culled tape agrees
+// with the full one inside the region only for values inside the band the
+// caller dilated by (scene/tape.h, and scene::cull_pad for what makes it hold
+// across a blend chain): the cull drops items whose influence bound is further
+// than that from the region, and dropping one is the identity — `min(acc,
+// far)` is `acc`, bit for bit — exactly while `acc` is nearer than the thing
+// dropped. A brick has a band by construction; a ray march only reads the
+// field near the surface it is hunting. A POINT QUERY HAS NEITHER. It is the
+// call clay.h points a host at for "the field's own distance past the band"
+// (see clay_brick_cache_eval_requests), so answering one probe with a
+// band-clamped stand-in would be a wrong number with nothing to say so.
+//
+// SO THE BAND IS GUESSED AND THEN VERIFIED, which is what makes this exact
+// rather than nearly. The guess is the probe box's own diagonal: a query
+// spread over a box of that size is asking about a neighbourhood of that size,
+// and it costs nothing to reach that far. The verification is that every
+// answer came back INSIDE the band — and where it did, each of those answers
+// is the full tape's answer bit for bit, by the contract above. Where it did
+// not, the band was too small a guess for this query and the whole thing is
+// answered again: once more at twice the widest answer, and failing that with
+// no cull at all, which is what the call did before this existed.
+//
+// WHAT THIS DOES NOT BUY, measured on the same fixture against the same query
+// with no region at all, because a measurement that only reports its wins is
+// an advertisement:
+//
+//   probes far outside every item          1.00x — the region keeps nothing,
+//                                          which is noticed before any probe
+//                                          is evaluated against it
+//   probes deep inside the material        0.86x — one cheap compile and 64
+//                                          probes, thrown away
+//   probes spread over the whole model     0.88x to 0.91x — the region covers
+//                                          the model, so the compile does the
+//                                          cull's work (0.42 us/item of bounds
+//                                          and tests) and drops nothing by it
+//   64 probes spread over the whole model  0.70x — the same overhead with a
+//                                          twentieth of the probes to spread
+//                                          it over, and 0.97 ms in absolute
+//                                          terms
+//
+// The spread cases are the honest cost of this and not a tuning failure: there
+// is nothing to cull and no cheap way to know that in advance. Knowing it
+// would take the layer's own extent, which costs a walk of the same items
+// unless it comes from `LayerExtentCache` — that is the next thing to try here
+// and it was not tried, because skipping a region can only ever be a cost
+// question and this one is 9-12% on a query that the whole-document call
+// (clay_eval_points, whose tape is cached) serves better anyway.
+//
+// A SINGLE PROBE IS NOT CULLED, and neither is a handful. A box with no extent
+// names no neighbourhood at all, and a box a few probes DO span is a bad
+// estimate of one: the bounding box of 8 samples of a cluster is smaller than
+// the cluster, so the band comes out short and the query pays for a second
+// attempt it did not need. Measured on the worked ball, against the same query
+// with no region: 8 probes 0.90x, 16 probes 0.96x, 32 probes 1.08x, and 64
+// probes 2.71x — every one of the first three needed the wider band and every
+// 64-probe query held on the first. The floor is where that turns. A host
+// asking about probes one at a time should ask about them in one call.
+constexpr std::size_t kMinCulledProbes = 64;
+
+// The taps a GRADIENT is assembled from sit `kGradientEps` off the probe on
+// each axis, so they are probes too: the region is dilated by that on top of
+// the band (mesh/marching.cpp does the same, for the same four taps), and a
+// probe's own answer has to leave room for what the taps can add to it. That
+// second half needs a bound on the field's SLOPE, which `info.lipschitz` is
+// only while `lipschitz_bounds_gradient` holds — it is a stepping bound
+// otherwise, and an ellipsoid's measures 1.09 against a stepping bound of 1
+// (scene/tape.h). Where it does not hold there is nothing to reason from and
+// the query is answered uncalled, rather than answered from a bound that does
+// not bound.
+float tap_reach(const scene::Tape& tape, float tap_pad) {
+    if (tap_pad <= 0.0f) return 0.0f;  // distances and colours are read AT the probe
+    if (!tape.lipschitz_bounds_gradient) return std::numeric_limits<float>::infinity();
+    return tap_pad * 1.7320509f * tape.info.lipschitz;  // the corner tap, sqrt(3) * eps away
+}
+
+// The probes' own box. A NaN coordinate leaves a NaN extent, which is not
+// greater than zero and so names no band: such a query is not culled at all,
+// decided by the same comparison every other degenerate box is.
+math::Aabb probe_box(const float* points_xyz, std::size_t count) {
+    math::Aabb box;
+    for (std::size_t i = 0; i < count; ++i)
+        box.expand(
+            kernel::cf3(points_xyz[i * 3], points_xyz[i * 3 + 1], points_xyz[i * 3 + 2]));
+    return box;
+}
+
+// The widest answer the tape gave, which is what the band has to clear. Written
+// as a negated comparison so a NaN becomes the maximum and fails every band
+// test after it.
+float widest_answer(const float* distances, std::size_t count) {
+    float widest = 0.0f;
+    for (std::size_t i = 0; i < count; ++i)
+        if (!(std::fabs(distances[i]) <= widest)) widest = std::fabs(distances[i]);
+    return widest;
+}
+
+// One compile and one evaluation against what it produced.
+template <typename Compile>
+clay_result compile_and_eval(const Compile& compile, const scene::CullRegion* cull,
+                             eval::Backend& backend, const eval::PointQuery& q,
+                             const eval::PointResults& out, scene::Tape* tape) {
+    const clay_result r = compile(cull, tape);
+    if (r != CLAY_OK) return r;
+    if (backend.eval_points(*tape, q, out) != eval::Status::Ok)
+        return fail(CLAY_ERROR_BACKEND, "eval_points failed");
+    return CLAY_OK;
+}
+
+// How far past the band the answers over `count` probes reach — the number the
+// band is verified against, written once so the trial below and the decision
+// cannot come to it differently.
+clay_result eval_reach(eval::Backend& backend, const scene::Tape& tape, const float* points_xyz,
+                       std::size_t count, const eval::PointResults& out, float tap_pad,
+                       float* out_reach) {
+    const eval::PointQuery q{points_xyz, count, kGradientEps};
+    if (backend.eval_points(tape, q, out) != eval::Status::Ok)
+        return fail(CLAY_ERROR_BACKEND, "eval_points failed");
+    *out_reach = widest_answer(out.distances, count) + tap_reach(tape, tap_pad);
+    return CLAY_OK;
+}
+
+// How many probes are tried against a band before the whole set is. A probe
+// set that reaches past its band usually does so at EVERY probe — deep inside
+// material, or far outside every item — and evaluating the other four thousand
+// against a tape that is about to be thrown away is the entire cost of a
+// missed guess: it measured 1.4x to 2x on exactly those two queries. Passing
+// this trial certifies nothing, so the whole set is still evaluated and still
+// verified; failing it only skips work, and the band the next attempt derives
+// from a trial's reach may come out short — which costs that attempt and
+// nothing else, because it is verified over the whole set like any other.
+// Sixty-four is enough to catch a set that is uniformly out of band and small
+// enough to be free beside a compile.
+constexpr std::size_t kBandTrialProbes = 64;
+
+// ONE attempt at one band: compile, verify, and say either that the answers
+// now in `out` are the whole tape's or what band to try next. Everything it
+// writes is provisional until it answers — a rejected attempt leaves stale
+// distances behind, and the next evaluation overwrites every one of them.
+template <typename Compile>
+clay_result try_band(const Compile& compile, eval::Backend& backend, const math::Aabb& box,
+                     float band, float tap_pad, const float* points_xyz, std::size_t count,
+                     const eval::PointResults& out, bool* out_answered, float* out_reach) {
+    *out_answered = false;
+    *out_reach = std::numeric_limits<float>::infinity();
+    scene::Tape tape;
+    const scene::CullRegion cull{box.dilated(band + tap_pad)};
+    clay_result r = compile(&cull, &tape);
+    if (r != CLAY_OK) return r;
+    // A region that kept NOTHING cannot answer: every probe reads
+    // CLAY_TAPE_FAR, which is a stand-in and not a distance, and no band a box
+    // that small can name covers it. Stopping here rather than growing the
+    // band saves a compile under a region the width of the world.
+    if (tape.empty()) return CLAY_OK;
+
+    float reach = 0.0f;
+    const eval::PointResults trial{out.distances, nullptr, nullptr};
+    r = eval_reach(backend, tape, points_xyz, std::min(count, kBandTrialProbes), trial, tap_pad,
+                   &reach);
+    if (r != CLAY_OK) return r;
+    if (reach < band) {
+        r = eval_reach(backend, tape, points_xyz, count, out, tap_pad, &reach);
+        if (r != CLAY_OK) return r;
+        *out_answered = reach < band;  // every answer is the full tape's, bit for bit
+    }
+    *out_reach = reach;
+    return CLAY_OK;
+}
+
+// How far past its band a query's answers may reach and still be worth a
+// SECOND, wider band rather than the whole tape. Correctness does not turn on
+// this — the wider band is verified exactly as the first was, and giving up
+// costs only the compile a query would have paid anyway — so it is a cost
+// question, and it was measured on the worked ball (401 items, twelve grabs,
+// 4,096 probes):
+//
+//   overshoot 2.1x, a cluster hovering 0.3 off the surface: widening 5.56x,
+//                   giving up 0.98x — the wider region still holds one cap of
+//                   the ball and drops the rest of it
+//   overshoot 3.6x, hovering 0.6 off: widening 1.96x, giving up 0.97x
+//   overshoot 5.8x, a cluster deep inside the material: widening 0.80x,
+//                   giving up 0.92x — the wider region swallows the model, and
+//                   a covering region costs a compile MORE than no region at
+//                   all (0.42 us/item for the bounds and the cull tests it
+//                   then does not use)
+//
+// So the cut sits between 3.6 and 5.8 on that fixture and this is where it is
+// put. It is a fit to one fixture and not a law; what makes that acceptable
+// here, and would not in a bound, is that being wrong costs a compile.
+constexpr float kWidenOvershoot = 4.0f;
+
+// The two attempts: the band the probe box names, then one at twice what that
+// attempt turned out to need. A third would be a loop with nothing to say it
+// terminates. `*out_attempts` is which one answered, or 0 for neither, and the
+// caller compiles the whole tape where this could not.
+template <typename Compile>
+clay_result eval_under_band(const Compile& compile, eval::Backend& backend, const math::Aabb& box,
+                            float band, float tap_pad, const float* points_xyz, std::size_t count,
+                            const eval::PointResults& out, int* out_attempts) {
+    *out_attempts = 0;
+    for (int attempt = 1; attempt <= 2 && std::isfinite(band) && band > 0.0f; ++attempt) {
+        bool answered = false;
+        float reach = 0.0f;
+        const clay_result r = try_band(compile, backend, box, band, tap_pad, points_xyz, count,
+                                       out, &answered, &reach);
+        if (r != CLAY_OK) return r;
+        if (answered) {
+            *out_attempts = attempt;
+            return CLAY_OK;
+        }
+        if (!(reach < kWidenOvershoot * band)) return CLAY_OK;  // NaN and infinity give up here
+        band = 2.0f * reach;
+    }
+    return CLAY_OK;
+}
+
+// Compiles and evaluates under the region above, `out.distances` carrying the
+// answers the verification reads. `compile` takes a cull region (null: none)
+// and fills a tape. `tap_pad` is kGradientEps for a gradient query and 0 for a
+// distance or colour one.
+template <typename Compile>
+clay_result eval_points_culled(const clay_document* doc, const Compile& compile,
+                               const char* backend, const float* points_xyz, std::size_t count,
+                               const eval::PointResults& out, float tap_pad) {
+    clay_result r = check_batch("points", count);
+    if (r != CLAY_OK) return r;
+    const char* name = backend ? backend : "cpu";
+    eval::Backend* b = eval::Registry::instance().find(name);
+    if (!b)
+        return fail(CLAY_ERROR_NOT_FOUND, std::string("backend not registered: ") + name);
+    const eval::PointQuery q{points_xyz, count, kGradientEps};
+
+    const math::Aabb box = probe_box(points_xyz, count);
+    // The guess: the probe box's own diagonal. A query spread over a box of
+    // that size is asking about a neighbourhood of that size.
+    const float band = doc->point_cull() && count >= kMinCulledProbes && out.distances
+                           ? kernel::clength(box.extent())
+                           : 0.0f;
+    int attempts = 0;
+    if (band > 0.0f) {
+        r = eval_under_band(compile, *b, box, band, tap_pad, points_xyz, count, out, &attempts);
+        if (r != CLAY_OK) return r;
+        if (attempts > 0) {
+            doc->note_point_cull(attempts, true);
+            return CLAY_OK;
+        }
+    }
+    scene::Tape tape;
+    r = compile_and_eval(compile, nullptr, *b, q, out, &tape);
+    if (r != CLAY_OK) return r;
+    if (band > 0.0f) doc->note_point_cull(0, false);  // a region was derived and did not hold
+    return CLAY_OK;
+}
+
+// The gradient form: the backends fill distances alongside whatever else was
+// asked for, and here the verification reads them, so the scratch buffer a
+// gradients-only caller does not want is load-bearing rather than a leftover.
+template <typename Compile>
+clay_result eval_gradients_culled(const clay_document* doc, const Compile& compile,
+                                  const char* backend, const float* points_xyz, std::size_t count,
+                                  float* out_gradients_xyz) {
+    clay_result r = check_batch("points", count);  // before the scratch buffer, not after
+    if (r != CLAY_OK) return r;
+    std::vector<float> distances(count ? count : 1);
+    return eval_points_culled(doc, compile, backend, points_xyz, count,
+                              eval::PointResults{distances.data(), out_gradients_xyz, nullptr},
+                              kGradientEps);
+}
+
 // One layer's own field, which is what the Python bindings' Layer.eval answers:
 // an edit in a layer above cannot change it, so a layer can be probed while the
 // stack it sits in is being authored.
-clay_result compile_one_layer(const clay_document* doc, clay_layer_id layer_id,
-                              scene::Tape* out) {
+clay_result compile_one_layer(const clay_document* doc, clay_layer_id layer_id, scene::Tape* out,
+                              const scene::CullRegion* cull = nullptr) {
     const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
     if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
-    *out = scene::compile_layer(*layer);
+    *out = scene::compile_layer(*layer, cull);
     return CLAY_OK;
 }
 
@@ -3420,7 +3744,8 @@ clay_result compile_one_layer(const clay_document* doc, clay_layer_id layer_id,
 // here and once from the preview. That is the exact defect this call exists to
 // prevent, so it is a refusal rather than a no-op.
 clay_result compile_document_without(const clay_document* doc, clay_layer_id excluded,
-                                     scene::Tape* out) {
+                                     scene::Tape* out,
+                                     const scene::CullRegion* cull = nullptr) {
     if (!doc->doc.document.find_layer(excluded))
         return fail(CLAY_ERROR_NOT_FOUND,
                     "no layer " + std::to_string(excluded) + " to exclude: excluding a layer the "
@@ -3439,7 +3764,7 @@ clay_result compile_document_without(const clay_document* doc, clay_layer_id exc
                         " composes with the layers below it, so the document without layer " +
                         std::to_string(excluded) +
                         " does not compose back to the whole document");
-    *out = scene::compile_document_except(doc->doc.document, excluded);
+    *out = scene::compile_document_except(doc->doc.document, excluded, cull);
     return CLAY_OK;
 }
 
@@ -8746,16 +9071,21 @@ clay_result clay_eval_gradients(const clay_document* doc, const char* backend,
                           count, out_gradients_xyz);
 }
 
+// The four calls below compile their own tape, so each one culls that compile
+// to the probes it was handed (eval_points_culled says how, and why it is the
+// same answers). clay_eval_points and clay_eval_gradients above deliberately do
+// NOT: their tape is the document's cached one, so there is no compile for a
+// region to make cheaper and deriving one would add the compile back.
 clay_result clay_layer_eval_points(const clay_document* doc, clay_layer_id layer,
                                    const char* backend, const float* points_xyz, size_t count,
                                    float* out_distances, float* out_colors_rgb) {
     if (!doc || !points_xyz || !out_distances)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null buffer");
-    scene::Tape tape;
-    clay_result r = compile_one_layer(doc, layer, &tape);
-    if (r != CLAY_OK) return r;
-    return eval_into(tape, backend, points_xyz, count,
-                     eval::PointResults{out_distances, nullptr, out_colors_rgb});
+    const auto compile = [doc, layer](const scene::CullRegion* cull, scene::Tape* out) {
+        return compile_one_layer(doc, layer, out, cull);
+    };
+    return eval_points_culled(doc, compile, backend, points_xyz, count,
+                              eval::PointResults{out_distances, nullptr, out_colors_rgb}, 0.0f);
 }
 
 clay_result clay_layer_eval_gradients(const clay_document* doc, clay_layer_id layer,
@@ -8763,10 +9093,10 @@ clay_result clay_layer_eval_gradients(const clay_document* doc, clay_layer_id la
                                       float* out_gradients_xyz) {
     if (!doc || !points_xyz || !out_gradients_xyz)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null buffer");
-    scene::Tape tape;
-    clay_result r = compile_one_layer(doc, layer, &tape);
-    if (r != CLAY_OK) return r;
-    return gradients_into(tape, backend, points_xyz, count, out_gradients_xyz);
+    const auto compile = [doc, layer](const scene::CullRegion* cull, scene::Tape* out) {
+        return compile_one_layer(doc, layer, out, cull);
+    };
+    return eval_gradients_culled(doc, compile, backend, points_xyz, count, out_gradients_xyz);
 }
 
 clay_result clay_eval_points_excluding(const clay_document* doc, clay_layer_id excluded,
@@ -8774,11 +9104,11 @@ clay_result clay_eval_points_excluding(const clay_document* doc, clay_layer_id e
                                        float* out_distances, float* out_colors_rgb) {
     if (!doc || !points_xyz || !out_distances)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null buffer");
-    scene::Tape tape;
-    clay_result r = compile_document_without(doc, excluded, &tape);
-    if (r != CLAY_OK) return r;
-    return eval_into(tape, backend, points_xyz, count,
-                     eval::PointResults{out_distances, nullptr, out_colors_rgb});
+    const auto compile = [doc, excluded](const scene::CullRegion* cull, scene::Tape* out) {
+        return compile_document_without(doc, excluded, out, cull);
+    };
+    return eval_points_culled(doc, compile, backend, points_xyz, count,
+                              eval::PointResults{out_distances, nullptr, out_colors_rgb}, 0.0f);
 }
 
 clay_result clay_eval_gradients_excluding(const clay_document* doc, clay_layer_id excluded,
@@ -8786,10 +9116,10 @@ clay_result clay_eval_gradients_excluding(const clay_document* doc, clay_layer_i
                                           size_t count, float* out_gradients_xyz) {
     if (!doc || !points_xyz || !out_gradients_xyz)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null buffer");
-    scene::Tape tape;
-    clay_result r = compile_document_without(doc, excluded, &tape);
-    if (r != CLAY_OK) return r;
-    return gradients_into(tape, backend, points_xyz, count, out_gradients_xyz);
+    const auto compile = [doc, excluded](const scene::CullRegion* cull, scene::Tape* out) {
+        return compile_document_without(doc, excluded, out, cull);
+    };
+    return eval_gradients_culled(doc, compile, backend, points_xyz, count, out_gradients_xyz);
 }
 
 clay_result clay_safe_step_scale(const clay_document* doc, float* out_scale) {
@@ -13973,6 +14303,22 @@ clay_result clay_internal_gated_bricks(const clay_document* doc, uint64_t* out_g
 clay_result clay_internal_set_uniform_gate(clay_document* doc, int32_t enabled) {
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
     doc->set_uniform_gate(enabled != 0);
+    return CLAY_OK;
+}
+
+clay_result clay_internal_set_point_cull(clay_document* doc, int32_t enabled) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    doc->set_point_cull(enabled != 0);
+    return CLAY_OK;
+}
+
+clay_result clay_internal_point_cull_stats(const clay_document* doc, uint64_t* out_culled,
+                                           uint64_t* out_widened, uint64_t* out_fallbacks) {
+    if (!doc || !out_culled || !out_widened || !out_fallbacks)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out pointer");
+    *out_culled = doc->point_culls();
+    *out_widened = doc->point_cull_widenings();
+    *out_fallbacks = doc->point_cull_fallbacks();
     return CLAY_OK;
 }
 
