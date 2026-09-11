@@ -66,6 +66,36 @@ clay_result clay_internal_set_resume_budget(clay_document* doc, uint64_t bytes);
 clay_result clay_internal_gated_bricks(const clay_document* doc, uint64_t* out_gated);
 clay_result clay_internal_set_uniform_gate(clay_document* doc, int32_t enabled);
 
+/* -- the bulk point-eval cull region ----------------------------------------
+ *
+ * clay_layer_eval_points, clay_layer_eval_gradients and the two _excluding
+ * forms compile their own tape, and cull that compile to the AABB of the
+ * probes they were handed (bindings/c/clay_c.cpp, eval_points_culled). The
+ * culled tape's answers are the whole tape's answers BIT FOR BIT -- the band
+ * the region is dilated by is verified against the answers that come back, and
+ * a query whose answers reach past it is re-run without a region -- so nothing
+ * observable says whether a query was culled, which is exactly why a test
+ * needs this seam to hold one against the other over the same probes.
+ *
+ * clay_internal_set_point_cull switches the region off (0) or on (non-zero)
+ * for one document. On by default; never off for a host, which has nothing to
+ * gain but the compile.
+ *
+ * clay_internal_point_cull_stats reports the three outcomes of a query that
+ * derived one, cumulative over the document's life: answered under the band
+ * the probe box named (*out_culled), answered under a WIDER band after that
+ * one turned out not to cover the answers (*out_widened), and given up on and
+ * answered from the whole tape (*out_fallbacks). A test that only compared the
+ * two paths could not tell a working cull from one that had quietly stopped
+ * culling -- they agree by construction -- so the cases that mean to exercise
+ * a culled answer, a widening, or the fallback assert on these.
+ *
+ * CLAY_ERROR_INVALID_ARGUMENT on a null document or out pointer.
+ */
+clay_result clay_internal_set_point_cull(clay_document* doc, int32_t enabled);
+clay_result clay_internal_point_cull_stats(const clay_document* doc, uint64_t* out_culled,
+                                           uint64_t* out_widened, uint64_t* out_fallbacks);
+
 /* -- the frontier half of one brick's seed (issue #360) ---------------------
  *
  * dirty_from / prefix_boundary / prefix_structure of the resume entry serving
