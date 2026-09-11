@@ -2935,7 +2935,40 @@ clay_result clay_eval_gradients(const clay_document* doc, const char* backend,
  * compiled, so an edit in a layer above cannot change the answer and a layer
  * can be probed while the stack around it is being authored. A layer that
  * shows nothing — hidden, or a voxel layer, which carries no SDF content —
- * evaluates as empty space rather than failing. */
+ * evaluates as empty space rather than failing.
+ *
+ * THE PROBES A CALL IS GIVEN ARE WHAT IT COMPILES FOR. These two and the two
+ * _excluding forms below compile a tape of their own, and that compile is
+ * culled to the box the probes occupy: items and finite-support warps a probe
+ * set provably cannot be affected by are not emitted, and not paid for per
+ * probe. Measured on a 401-item ball carrying twelve grabs, 4,096 probes in a
+ * brush-sized box on the far side of it from every grab: 9.41 ms -> 1.29 ms
+ * for the distances, 41.1 ms -> 2.95 ms for the gradients, and 1.52 ms ->
+ * 0.55 ms for the same distances with no warps in the document at all.
+ *
+ * SO GROUP PROBES THAT ARE NEAR EACH OTHER INTO ONE CALL where you have the
+ * choice. A call per probe pays for a compile per probe, as it always did, and
+ * fewer than 64 probes are not culled at all — the box a handful of probes
+ * span is too small an estimate of the neighbourhood they are asking about to
+ * be worth a compile.
+ *
+ * WHERE IT DOES NOT HELP, against the same queries before it existed: probes
+ * far outside every item, 1.00x; probes deep inside the material, 0.86x;
+ * probes spread over the whole model, 0.88x — there the region covers
+ * everything, so the compile does the cull's work and drops nothing by it. A
+ * host sampling the whole model rather than a part of it should reach for
+ * clay_eval_points, whose tape is the document's cached one.
+ *
+ * NONE OF THAT CHANGES AN ANSWER. The band inside which a culled tape is the
+ * full tape is verified against the distances that come back, and a query
+ * reaching past it is answered again with no region at all, so every value
+ * here is bit-identical to what the uncalled compile returns — including a
+ * distance far beyond any band, which is what this call is for
+ * (clay_brick_cache_eval_requests says so from the other side).
+ *
+ * clay_eval_points and clay_eval_gradients do NOT do this, and it is not an
+ * oversight: their tape is the document's cached one, so they have no compile
+ * to make cheaper and deriving a region would add one back. */
 clay_result clay_layer_eval_points(const clay_document* doc, clay_layer_id layer,
                                    const char* backend, const float* points_xyz, size_t count,
                                    float* out_distances, float* out_colors_rgb);
@@ -2998,7 +3031,12 @@ clay_result clay_layer_eval_gradients(const clay_document* doc, clay_layer_id la
  *
  * A HIDDEN layer, or one carrying no SDF content, SUCCEEDS: it contributes
  * nothing to the union already, so excluding it is a no-op, and refusing would
- * make a host branch on state it has no reason to track. */
+ * make a host branch on state it has no reason to track.
+ *
+ * Both compile a tape of their own, so both cull that compile to the box the
+ * probes occupy, with the answers unchanged bit for bit — see
+ * clay_layer_eval_points above, which says what that buys and what it does
+ * not. */
 clay_result clay_eval_points_excluding(const clay_document* doc, clay_layer_id excluded,
                                        const char* backend, const float* points_xyz, size_t count,
                                        float* out_distances, float* out_colors_rgb);
@@ -7056,8 +7094,61 @@ clay_result clay_sdf_move_preview_grab(const clay_sdf_move_tx* tx, clay_node_id 
  * That is the route the spec designates and the ABI did not offer. Without it a
  * C host had to write each resolved grab onto the layer with
  * clay_layer_add_deformer, sample, and then UNDO every one of them inside the
- * same segment — two document mutations and a full undo round-trip per pointer
- * event, to draw something the transaction was already holding.
+ * same segment, to draw something the transaction was already holding.
+ *
+ * ITS CASE IS CORRECTNESS AND SIMPLICITY, NOT SPEED. This comment used to call
+ * the old pattern "two document mutations and a full undo round-trip per
+ * pointer event", which reads as a cost. MEASURED, it is not one.
+ * benchmarks/move_preview_probe.cpp drives one drag twice over the same path —
+ * arm A authors the grabs, refills against the real document and undoes them;
+ * arm B refills against this preview — on a 200-stamp blockout at voxel 0.05
+ * with a drag radius of 0.40, Mac, Release, CPU, 240 timed pointer events an
+ * arm, the two arms ASSERTED to refill an equal 14,720 bricks and to draw
+ * fields agreeing to 0.000000000 (the same check reports 0.014503 on a drag
+ * that really is wrong, so it is one that could have failed):
+ *
+ *     A draw-then-undo      p50 14.4581 ms   p95 20.2760 ms
+ *     B preview document    p50 14.2364 ms   p95 20.2147 ms
+ *
+ * 1.02x at the median and 1.00x at the tail — with arm A FAVOURED, its grabs
+ * resolved outside its timed region so that it is not charged for the
+ * clay_sdf_move_update arm B pays for inside its own. A repeat on the same box
+ * reads 1.15x and 1.03x, which is the run-to-run band and not a different
+ * answer: the two mutations and the undo are a few percent, not a multiple,
+ * against the refill sitting beside them.
+ *
+ * THE ABSOLUTE NUMBER IS THE USEFUL ONE. ~14 ms a pointer event on EITHER
+ * pattern, nearly all of it refilling the ~61 bricks each event dirtied. A host
+ * chasing Move latency should look at its DIRTY REGION — how much it marks and
+ * how large its bricks are — and not at which of these two it draws through.
+ *
+ * WHAT THE MEASUREMENT DOES NOT TOUCH is why this entry point exists. Each of
+ * these is a property of the code rather than of a timing run:
+ *
+ *   - IT NEEDS NO UNDO. clay_document_begin_undo_group, its matching end and
+ *     clay_document_undo all return CLAY_ERROR_INVALID_ARGUMENT until
+ *     clay_document_enable_undo has been called, so the old pattern makes an
+ *     undo stack a PRECONDITION of drawing a frame. This route writes nothing,
+ *     so it has nothing to take back.
+ *
+ *   - IT CANNOT LEAVE A HALF-APPLIED DRAG. Between the first add_deformer and
+ *     the undo the grabs are on the DOCUMENT, and a frame that throws, returns
+ *     early on a failed refill, or misses the undo on one branch leaves them
+ *     there — a preview committed by accident. Here clay_sdf_move_commit is the
+ *     only writer; cancel and destroy write nothing at all.
+ *
+ *   - IT DOES NOT CHURN THE HISTORY. The undo restores the stack but not what
+ *     surrounds it. Measured on a single such frame: the journal goes from 2
+ *     events to 6 — GroupBegin, the grab, GroupEnd, Undo — and never shrinks,
+ *     so a 60-event drag leaves hundreds of crash-recovery events describing a
+ *     gesture the document did not keep, charged to clay_history_bytes.journal
+ *     until clay_document_journal_trim drops them. And authoring the group
+ *     CLEARS REDO exactly as any edit does, so an artist who had something to
+ *     redo does not once a preview frame has been drawn.
+ *
+ * NOT AN ARGUMENT FOR IT: previewing a layer you may not edit. Both routes
+ * start at clay_sdf_move_begin, which refuses a protected layer, so neither one
+ * draws a drag on one.
  *
  * VALID UNTIL commit, cancel or destroy, and NOT beyond: the handle borrows the
  * transaction's own preview content, so an update is visible through it with no

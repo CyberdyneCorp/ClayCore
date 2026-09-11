@@ -468,6 +468,44 @@ if(CLAY_BUILD_BENCHMARKS)
   target_link_libraries(tape_stack_probe PRIVATE claycore)
   clay_apply_warnings(tape_stack_probe)
 
+  # Also not gated: what the pre-0.72.0 draw-then-undo way of drawing a live
+  # Move drag costs against clay_sdf_move_preview_document. The header comment
+  # above that entry point argues a host off the old pattern and carried no
+  # number; this is the number. Drives the C ABI, so it needs bindings/c.
+  # Exits non-zero if the two arms refill different brick counts or draw
+  # different fields.
+  add_executable(move_preview_probe benchmarks/move_preview_probe.cpp)
+  target_link_libraries(move_preview_probe PRIVATE claycore)
+  target_include_directories(move_preview_probe PRIVATE bindings/c)
+  clay_apply_warnings(move_preview_probe)
+
+  # Also not gated: where a live Move drag's per-event cost actually goes.
+  # Splits the per-brick refill into the culled tape COMPILE and the grid
+  # evaluation, across four scene sizes, to answer whether a drag rebuilds a
+  # constant from inputs that did not change between pointer events. Uses the
+  # internal scene/eval API, so no bindings/c include.
+  add_executable(move_refill_split_probe benchmarks/move_refill_split_probe.cpp)
+  target_link_libraries(move_refill_split_probe PRIVATE claycore)
+  clay_apply_warnings(move_refill_split_probe)
+
+  # Also not gated: what FOUR DISCRETE Move dabs cost on a plain sphere, which
+  # is the user's actual reported case and the one the density explanation says
+  # should be free. Times begin/update/commit/refill per dab and raycasts after
+  # each, to separate a stall in the EDIT from one in RENDERING.
+  add_executable(move_dabs_probe benchmarks/move_dabs_probe.cpp)
+  target_link_libraries(move_dabs_probe PRIVATE claycore)
+  target_include_directories(move_dabs_probe PRIVATE bindings/c)
+  clay_apply_warnings(move_dabs_probe)
+
+  # Also not gated: whether baking a brush chain ever stops being a loss. The
+  # DEFORMERS degradation enum says consolidation is 6x worse and measures a
+  # 29x step-scale win; a live session reaches 490x on eight dabs, which is a
+  # different arithmetic. This looks for the crossover.
+  add_executable(move_collapse_crossover_probe benchmarks/move_collapse_crossover_probe.cpp)
+  target_link_libraries(move_collapse_crossover_probe PRIVATE claycore)
+  target_include_directories(move_collapse_crossover_probe PRIVATE bindings/c)
+  clay_apply_warnings(move_collapse_crossover_probe)
+
   # The chunk-size measurement (add-extreme-poly-runtime task 1.1). Its own
   # target rather than a case of clay_bench, because the decision rule reads
   # percentiles of a sum across four stages and google-benchmark reports one
