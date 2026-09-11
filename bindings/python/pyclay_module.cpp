@@ -1592,6 +1592,12 @@ void apply_or_throw(scene::Document& doc, const scene::Command& cmd, const char*
                                         (l->ghost ? "ghosted" : "locked") +
                                         " and takes no edits");
     }
+    // An edit that changes nothing is done before it starts (#536), and saying
+    // so here is what keeps apply()'s nullopt readable: the same answer means
+    // "already that value" and "no such id", and only one of the two is an
+    // error a caller can act on. Checked AFTER the protection test above, so a
+    // locked layer still refuses a no-op set.
+    if (scene::command_changes_nothing(doc, cmd)) return;
     // With a stack attached the edit is applied AND its inverse recorded, so
     // no reachable edit can escape undo. Without one it is a plain apply.
     bool ok = (undo && *undo) ? (*undo)->perform(doc, cmd) : static_cast<bool>(scene::apply(doc, cmd));

@@ -133,6 +133,26 @@ the same as an add mirrors the deposit. Until 0.27.3 this flag was an
 **opt-in that defaulted to excluded**, which read as the layer mirror doing
 nothing at all (#60). Layers with no mirror axes cost nothing either way.
 
+**Setting the symmetry to what the layer already carries is not an edit**
+(#536, ABI 0.103.0). Identical axes and an identical `mirror_k` — or, for the
+radial mode below, an identical count, axis and `radial_k` — leave the document
+alone: no undo step, no invalidation, `CLAY_OK`. Through 0.102.0 both setters
+wrote unconditionally and returned an inverse, so a re-set recorded an undo
+entry and took the **whole-layer** invalidation a layer transform takes,
+dropping the layer's brick seeds and breaking its append log. That matters
+because hosts point the symmetry on the stroke-arming path, once per press, for
+every brush — the ledger that found this put `begin stroke` at 92.7 ms average
+over 51 presses, larger than the stroke itself. `benchmarks/mirror_set_probe.cpp`
+puts a number on this side of it: on a 60-item form with 8-voxel bricks at 0.05
+(Apple M2 Max), the refill after a no-op set went from **31.00 ms to 0.32 ms**,
+against 0.31 ms for making no call at all — the same 500 bricks refilled either
+way, so what changed is that they resume instead of being walked. A real
+symmetry change is deliberately unmoved at 49.67 → 50.57 ms. A locked or ghosted layer still
+refuses a no-op set, and an unknown layer id is still `NOT_FOUND`: "already that
+value" and "no such layer" are different answers. A host that re-set the mirror
+to force a refill should dirty the region with `clay_brick_cache_mark_dirty_layer`
+instead, which is the call for it.
+
 For symmetry at **authoring** time instead — build one arm, get the node list
 of two — see `add_child` mirrored under Armatures (§6).
 
