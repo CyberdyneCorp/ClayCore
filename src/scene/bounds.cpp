@@ -626,11 +626,11 @@ struct ChainLink {
     LinkSupport support;
 };
 
-std::vector<ChainLink> chain_links(const Node& item) {
+std::vector<ChainLink> chain_links(const Node& item, const std::vector<Deformer>& deformers) {
     std::vector<ChainLink> links;
-    links.reserve(item.deformers.size());
+    links.reserve(deformers.size());
     Aabb local = prim_local_bounds(item);
-    for (const Deformer& d : item.deformers) {
+    for (const Deformer& d : deformers) {
         // Priced against the identity, so the number is this link's own
         // contribution and not the chain's total so far.
         kernel::CFieldInfo info = kernel::cfi_exact();
@@ -834,9 +834,11 @@ bool links_can_meet(const std::vector<ChainLink>& links, const std::vector<float
 
 }  // namespace
 
-float deformer_lipschitz(const Node& item) {
-    if (item.deformers.empty()) return 1.0f;
-    const std::vector<ChainLink> links = chain_links(item);
+float deformer_lipschitz(const Node& item) { return deformer_lipschitz(item, item.deformers); }
+
+float deformer_lipschitz(const Node& item, const std::vector<Deformer>& deformers) {
+    if (deformers.empty()) return 1.0f;
+    const std::vector<ChainLink> links = chain_links(item, deformers);
     const std::size_t n = links.size();
 
     // Travel accumulated up to and including each link, so the budget between

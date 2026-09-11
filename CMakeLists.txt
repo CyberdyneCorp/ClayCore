@@ -484,6 +484,25 @@ if(CLAY_BUILD_BENCHMARKS)
   # evaluation, across four scene sizes, to answer whether a drag rebuilds a
   # constant from inputs that did not change between pointer events. Uses the
   # internal scene/eval API, so no bindings/c include.
+  add_executable(declared_vs_actual_probe benchmarks/declared_vs_actual_probe.cpp)
+  target_link_libraries(declared_vs_actual_probe PRIVATE claycore)
+  target_include_directories(declared_vs_actual_probe PRIVATE bindings/c)
+  clay_apply_warnings(declared_vs_actual_probe)
+
+  add_executable(grab_jacobian_chain_probe benchmarks/grab_jacobian_chain_probe.cpp)
+  target_link_libraries(grab_jacobian_chain_probe PRIVATE claycore)
+  target_include_directories(grab_jacobian_chain_probe PRIVATE bindings/c)
+  clay_apply_warnings(grab_jacobian_chain_probe)
+
+  add_executable(move_regional_probe benchmarks/move_regional_probe.cpp)
+  target_link_libraries(move_regional_probe PRIVATE claycore)
+  target_include_directories(move_regional_probe PRIVATE bindings/c)
+  clay_apply_warnings(move_regional_probe)
+
+  add_executable(cull_vs_bound_probe benchmarks/cull_vs_bound_probe.cpp)
+  target_link_libraries(cull_vs_bound_probe PRIVATE claycore)
+  clay_apply_warnings(cull_vs_bound_probe)
+
   add_executable(move_refill_split_probe benchmarks/move_refill_split_probe.cpp)
   target_link_libraries(move_refill_split_probe PRIVATE claycore)
   clay_apply_warnings(move_refill_split_probe)
