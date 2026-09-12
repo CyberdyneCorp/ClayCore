@@ -253,3 +253,132 @@ TEST_CASE("a document written before the field loads with radial off") {
     clay_document_destroy(back);
     clay_blob_destroy(blob);
 }
+
+// -- reading symmetry back (issue #538) --------------------------------------
+//
+// The gap these close was load-bearing in a real silent-wrong-geometry bug. A
+// host that cannot ASK what a layer's mirror is has to remember, and a
+// remembered value is one an undo can invalidate behind its back: the host
+// short-circuits a redundant set, undo reverts the engine's command without
+// telling the cache, and the next stroke goes through a mirror the sculptor
+// turned off. Measured by a host at 0.28 world units of growth on the far side.
+
+TEST_CASE("a layer's mirror reads back what was set") {
+    Doc doc;
+    add_base(doc);
+
+    // A layer carrying no mirror answers with it OFF rather than refusing:
+    // "no mirror" is the true answer.
+    int32_t ax = -1, ay = -1, az = -1;
+    float k = -1.0f;
+    REQUIRE(clay_document_layer_mirror(doc.d, doc.layer, &ax, &ay, &az, &k) == CLAY_OK);
+    CHECK(ax == 0);
+    CHECK(ay == 0);
+    CHECK(az == 0);
+    CHECK(k == 0.0f);
+
+    REQUIRE(clay_set_layer_mirror(doc.d, doc.layer, 1, 0, 1, 0.25f) == CLAY_OK);
+    REQUIRE(clay_document_layer_mirror(doc.d, doc.layer, &ax, &ay, &az, &k) == CLAY_OK);
+    CHECK(ax == 1);
+    CHECK(ay == 0);
+    CHECK(az == 1);
+    CHECK(k == doctest::Approx(0.25f));
+
+    // What comes out goes straight back in, which is what makes
+    // read-compare-set possible for a host.
+    REQUIRE(clay_set_layer_mirror(doc.d, doc.layer, ax, ay, az, k) == CLAY_OK);
+    int32_t bx = 0, by = 0, bz = 0;
+    float bk = 0.0f;
+    REQUIRE(clay_document_layer_mirror(doc.d, doc.layer, &bx, &by, &bz, &bk) == CLAY_OK);
+    CHECK(bx == ax);
+    CHECK(by == ay);
+    CHECK(bz == az);
+    CHECK(bk == doctest::Approx(k));
+}
+
+TEST_CASE("a layer's radial array reads back what was set") {
+    Doc doc;
+    add_base(doc);
+
+    int32_t axis = -1, count = -1;
+    float k = -1.0f;
+    REQUIRE(clay_document_layer_radial(doc.d, doc.layer, &axis, &count, &k) == CLAY_OK);
+    CHECK(count == 0);
+
+    REQUIRE(clay_set_layer_radial(doc.d, doc.layer, 2, 5, 0.125f) == CLAY_OK);
+    REQUIRE(clay_document_layer_radial(doc.d, doc.layer, &axis, &count, &k) == CLAY_OK);
+    CHECK(axis == 2);
+    CHECK(count == 5);
+    CHECK(k == doctest::Approx(0.125f));
+
+    REQUIRE(clay_set_layer_radial(doc.d, doc.layer, axis, count, k) == CLAY_OK);
+    int32_t axis2 = 0, count2 = 0;
+    REQUIRE(clay_document_layer_radial(doc.d, doc.layer, &axis2, &count2, nullptr) == CLAY_OK);
+    CHECK(axis2 == axis);
+    CHECK(count2 == count);
+}
+
+TEST_CASE("symmetry read back follows an UNDO, which is the bug this closes") {
+    // THE REGRESSION. Without a reader a host caches the value it set, and an
+    // undo reverts the engine's command with nothing to tell the cache. The
+    // host then believes a symmetry the engine does not carry. This asserts the
+    // engine can be ASKED, so the host never has to believe anything.
+    Doc doc;
+    add_base(doc);
+    add_lump(doc, 0);
+    REQUIRE(clay_document_enable_undo(doc.d) == CLAY_OK);
+
+    REQUIRE(clay_set_layer_mirror(doc.d, doc.layer, 1, 0, 0, 0.0f) == CLAY_OK);
+    int32_t ax = 0;
+    REQUIRE(clay_document_layer_mirror(doc.d, doc.layer, &ax, nullptr, nullptr, nullptr) ==
+            CLAY_OK);
+    REQUIRE(ax == 1);
+
+    int32_t undone = 0;
+    REQUIRE(clay_document_undo(doc.d, &undone) == CLAY_OK);
+    REQUIRE(undone == 1);
+
+    // The engine no longer carries the mirror, and SAYS SO. A cache would still
+    // be reporting 1 here, and the next dab would go through a mirror the
+    // sculptor turned off.
+    REQUIRE(clay_document_layer_mirror(doc.d, doc.layer, &ax, nullptr, nullptr, nullptr) ==
+            CLAY_OK);
+    CHECK(ax == 0);
+
+    // The same for a radial array.
+    REQUIRE(clay_set_layer_radial(doc.d, doc.layer, 1, 6, 0.0f) == CLAY_OK);
+    int32_t count = 0;
+    REQUIRE(clay_document_layer_radial(doc.d, doc.layer, nullptr, &count, nullptr) == CLAY_OK);
+    REQUIRE(count == 6);
+    REQUIRE(clay_document_undo(doc.d, &undone) == CLAY_OK);
+    REQUIRE(clay_document_layer_radial(doc.d, doc.layer, nullptr, &count, nullptr) == CLAY_OK);
+    CHECK(count == 0);
+}
+
+TEST_CASE("reading symmetry is not editing, and a missing layer is NOT FOUND") {
+    Doc doc;
+    add_base(doc);
+    REQUIRE(clay_set_layer_mirror(doc.d, doc.layer, 0, 1, 0, 0.0f) == CLAY_OK);
+
+    // Every out-pointer is optional: a call passing none still validates the
+    // layer, which is how a host asks "is this still an SDF layer".
+    CHECK(clay_document_layer_mirror(doc.d, doc.layer, nullptr, nullptr, nullptr, nullptr) ==
+          CLAY_OK);
+    CHECK(clay_document_layer_radial(doc.d, doc.layer, nullptr, nullptr, nullptr) == CLAY_OK);
+
+    // Reading is not editing: a PROTECTED layer answers normally, while setting
+    // one is refused as it always was.
+    REQUIRE(clay_document_set_layer_protection(doc.d, doc.layer, 1, 0) == CLAY_OK);
+    int32_t ay = 0;
+    CHECK(clay_document_layer_mirror(doc.d, doc.layer, nullptr, &ay, nullptr, nullptr) == CLAY_OK);
+    CHECK(ay == 1);
+    CHECK(clay_set_layer_mirror(doc.d, doc.layer, 1, 1, 1, 0.0f) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    const clay_layer_id missing = doc.layer + 4242;
+    CHECK(clay_document_layer_mirror(doc.d, missing, nullptr, nullptr, nullptr, nullptr) ==
+          CLAY_ERROR_NOT_FOUND);
+    CHECK(clay_document_layer_radial(doc.d, missing, nullptr, nullptr, nullptr) ==
+          CLAY_ERROR_NOT_FOUND);
+    CHECK(clay_document_layer_mirror(nullptr, doc.layer, nullptr, nullptr, nullptr, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+}

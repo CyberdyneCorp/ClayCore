@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 104
+#define CLAY_ABI_MINOR 105
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -2180,6 +2180,42 @@ clay_result clay_set_layer_mirror(clay_document* doc, clay_layer_id layer, int32
  * instances per item where the modifier folds the query point in O(2). */
 clay_result clay_set_layer_radial(clay_document* doc, clay_layer_id layer, int32_t axis,
                                   int32_t count, float radial_k);
+
+/* READING a layer's symmetry back (ABI 0.105.0, issue #538).
+ *
+ * The odd one out until now: every other piece of layer state has a reader
+ * beside its writer — clay_document_layer_info, _transform, _composition,
+ * _protection — and symmetry had none. A host that cannot ask has to REMEMBER,
+ * and a remembered value is one an undo can invalidate behind its back.
+ *
+ * THAT IS A SILENT-WRONG-GEOMETRY BUG, not a tidiness complaint. A host caching
+ * "this layer's mirror is off" short-circuits a redundant set, which is correct
+ * and is the only thing it can do without this call. Undo then reverts the
+ * engine's SetLayerMirrorCmd and nothing tells the cache, so the host takes its
+ * early return and sculpts through a mirror it believes it turned off.
+ * Reproduced by a host: an unmirrored dab, an undo, the same dab again, and the
+ * far side grew 0.28 units on a stroke asked to be unmirrored.
+ *
+ * With a reader the desync is UNREACHABLE rather than fixed: read, compare, set
+ * only if it differs. No cache, nothing to go stale, and no need to reason
+ * about which undo ranges contained a symmetry edit.
+ *
+ * Each reader takes what its writer takes, so what comes out goes straight back
+ * in. A mirror axis reads 0 or 1 rather than the internal mask. Every
+ * out-pointer is optional, so a call passing none still validates the layer.
+ *
+ * READING IS NOT EDITING: a ghosted, locked or hidden layer answers normally,
+ * while SETTING one is refused as it always was. A layer that carries no
+ * symmetry answers with it off — 0/0/0 and a count of 0 — rather than
+ * refusing, because "no mirror" is the true answer and a host walking a stack
+ * should not special-case it. A non-SDF layer is refused: it cannot express
+ * one, and zeroes there would read as a real answer. */
+clay_result clay_document_layer_mirror(const clay_document* doc, clay_layer_id layer,
+                                       int32_t* out_axis_x, int32_t* out_axis_y,
+                                       int32_t* out_axis_z, float* out_mirror_k);
+clay_result clay_document_layer_radial(const clay_document* doc, clay_layer_id layer,
+                                       int32_t* out_axis, int32_t* out_count,
+                                       float* out_radial_k);
 
 /* -- discovering layers ----------------------------------------------------
  *

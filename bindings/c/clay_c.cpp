@@ -6242,6 +6242,42 @@ clay_result clay_document_set_layer_composition(clay_document* doc, clay_layer_i
                       "layer not found");
 }
 
+// Symmetry read back (issue #538). A layer with no mirror answers with it OFF
+// rather than refusing: "no mirror" is the true answer, and a host walking a
+// stack should not have to special-case it. A non-SDF layer IS refused, for the
+// reason the composition reader gives -- zeroes there would read as a real
+// answer to a question the layer cannot express.
+clay_result clay_document_layer_mirror(const clay_document* doc, clay_layer_id layer,
+                                       int32_t* out_axis_x, int32_t* out_axis_y,
+                                       int32_t* out_axis_z, float* out_mirror_k) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    if (l->kind != scene::LayerKind::Sdf)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "only an SDF layer carries a mirror");
+    // 0 or 1, not the internal mask: what comes out goes straight back into
+    // clay_set_layer_mirror, which is what makes read-compare-set possible.
+    if (out_axis_x) *out_axis_x = (l->mirror_axes & scene::kMirrorX) ? 1 : 0;
+    if (out_axis_y) *out_axis_y = (l->mirror_axes & scene::kMirrorY) ? 1 : 0;
+    if (out_axis_z) *out_axis_z = (l->mirror_axes & scene::kMirrorZ) ? 1 : 0;
+    if (out_mirror_k) *out_mirror_k = l->mirror_k;
+    return CLAY_OK;
+}
+
+clay_result clay_document_layer_radial(const clay_document* doc, clay_layer_id layer,
+                                       int32_t* out_axis, int32_t* out_count,
+                                       float* out_radial_k) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    if (l->kind != scene::LayerKind::Sdf)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "only an SDF layer carries a radial array");
+    if (out_axis) *out_axis = static_cast<int32_t>(l->radial_axis);
+    if (out_count) *out_count = static_cast<int32_t>(l->radial_count);
+    if (out_radial_k) *out_radial_k = l->radial_k;
+    return CLAY_OK;
+}
+
 clay_result clay_document_layer_composition(const clay_document* doc, clay_layer_id layer,
                                             int32_t* out_op, int32_t* out_blend,
                                             float* out_blend_k, float* out_rounding) {
