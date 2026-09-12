@@ -94,6 +94,7 @@ long drain(clay_brick_cache* cache, const clay_document* against) {
 struct Report {
     bool ok = false;
     std::size_t verts = 0, tris = 0, boundary = 0, nonmanifold = 0, degenerate = 0;
+    std::size_t slivers = 0;
     int watertight = 0, manifold = 0;
     long long euler = 0;
 };
@@ -110,6 +111,7 @@ Report validate(clay_mesh* m) {
     r.boundary = v.boundary_edges;
     r.nonmanifold = v.non_manifold_edges;
     r.degenerate = v.degenerate_triangles;
+    r.slivers = v.sliver_triangles;
     r.watertight = v.watertight;
     r.manifold = v.manifold;
     r.euler = v.euler_characteristic;
@@ -142,8 +144,8 @@ Report doc_mesh(const clay_document* doc) {
 
 void row(const char* label, const Report& r) {
     if (!r.ok) { std::printf("  %-26s  FAILED TO MESH OR VALIDATE\n", label); return; }
-    std::printf("  %-26s %8zu %8zu %10zu %8zu %6s %8lld\n", label, r.verts, r.tris, r.boundary,
-                r.nonmanifold, r.watertight ? "yes" : "NO", r.euler);
+    std::printf("  %-26s %8zu %8zu %9zu %7zu %8zu %6s\n", label, r.verts, r.tris, r.boundary,
+                r.degenerate, r.slivers, r.watertight ? "yes" : "NO");
 }
 
 // One Move drag, anchored at `centre`, pulled along `dir`. The host's fixture
@@ -271,8 +273,20 @@ int main() {
     clay_brick_cache_mark_dirty(cache, wmin, wmax);
     if (drain(cache, d.doc) <= 0) { std::printf("FAIL: warm refill produced no bricks\n"); return 1; }
 
-    std::printf("  %-26s %8s %8s %10s %8s %6s %8s\n", "stage", "verts", "tris", "boundary",
-                "nonmani", "tight", "euler");
+    // SLIVERS ARE THE COLUMN THAT MATTERS, and it is here because the host
+    // found the cause in their own source after this probe had already cleared
+    // the geometry: "face normals make the cache's degenerate preview
+    // triangles appear as pits across an otherwise smooth form"
+    // (clayspace-app geometry.rs:306).
+    //
+    // A sliver is legal geometry -- clay_validation_report calls it
+    // informational and deliberately leaves it out of `clean` -- but its FACE
+    // NORMAL is a cross product of near-parallel edges, which is numerically
+    // garbage. Shaded flat, that is a black speck on a smooth form. It needs
+    // no missing cell and no wrong gradient, which is exactly why this probe's
+    // first two oracles came back clean.
+    std::printf("  %-26s %8s %8s %9s %7s %8s %6s\n", "stage", "verts", "tris", "boundary",
+                "degen", "SLIVERS", "tight");
 
     const Report b0 = brick_mesh(cache, d.doc);
     const Report d0 = doc_mesh(d.doc);
@@ -363,19 +377,32 @@ int main() {
     std::printf("\n  VERDICT\n");
     const bool brick_holed = b3.boundary > 0 || b1.boundary > 0 || b2.boundary > 0;
     const bool doc_holed = d3.boundary > 0 || d1.boundary > 0 || d2.boundary > 0;
-    if (brick_holed && !doc_holed)
-        std::printf("    REPRODUCED: the brick mesher leaves boundary edges where the\n"
-                    "    document mesher leaves none. The host's workaround is justified.\n");
-    else if (brick_holed && doc_holed)
-        std::printf("    BOTH leave boundary edges. The document mesher is not the cure the\n"
-                    "    host believes it is, and the trade it is paying buys less than it costs.\n");
-    else if (!brick_holed && !doc_holed)
-        std::printf("    NOT REPRODUCED this way: both meshes are watertight at every stage.\n"
-                    "    The pits are not a hole in the triangle set on this fixture -- look at\n"
-                    "    the LOD/mip path, colour, or normals before changing the mesher.\n");
+    if (brick_holed || doc_holed)
+        std::printf("    boundary edges present -- see the table; a hole in the triangle set.\n");
     else
-        std::printf("    Only the DOCUMENT mesher leaves boundary edges, which inverts the\n"
-                    "    host's assumption entirely.\n");
+        std::printf("    NO HOLES. Every stage watertight on both meshers, so the specks are\n"
+                    "    not missing cells. That was this probe's first oracle and it is clean.\n");
+
+    // The one that reproduces. Compared AFTER an edit: on the untouched sphere
+    // the two meshers produce the same mesh and so the same slivers, which
+    // says nothing about either.
+    const std::size_t brick_sl = b1.slivers + b2.slivers + b3.slivers;
+    const std::size_t doc_sl = d1.slivers + d2.slivers + d3.slivers;
+    std::printf("\n    SLIVERS after editing:  brick %zu   document %zu\n", brick_sl, doc_sl);
+    if (brick_sl > doc_sl && brick_sl > 0) {
+        std::printf("    REPRODUCED. The brick mesher emits near-zero-area triangles the\n"
+                    "    document mesher does not. A sliver is legal geometry and is left out\n"
+                    "    of `clean` on purpose, but its FACE normal is a cross product of\n"
+                    "    near-parallel edges -- numerically garbage. Flat-shaded, that is a\n"
+                    "    black speck on a smooth form, with every cell present and every\n"
+                    "    gradient correct. It is only visible where a host cannot use\n"
+                    "    gradient normals: a live preview with no document behind it, and the\n"
+                    "    coarse LOD, which refuses gradient attributes outright.\n");
+    } else if (brick_sl == 0) {
+        std::printf("    Not reproduced: the brick mesher emitted no slivers here.\n");
+    } else {
+        std::printf("    Both meshers emit slivers; this fixture does not separate them.\n");
+    }
 
     clay_brick_cache_destroy(cache);
     clay_document_destroy(d.doc);
