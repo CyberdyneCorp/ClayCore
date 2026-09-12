@@ -71,15 +71,12 @@ TEST_CASE("every easing's declared slope is at or above its measured one") {
     // steepest segment sits between two of its 512 points has a chance of being
     // caught -- bounded above by the float noise floor documented at kSamples.
     for (int e = 0; e < kernel::ease_count; ++e) {
-        // The circ family is EXCLUDED here and pinned in its own case below,
-        // because it genuinely under-declares today: its derivative is
-        // unbounded at the endpoint and no sampled value can bound it. That is
-        // a pre-existing defect this file found and did not introduce, and it
-        // is recorded rather than silenced -- when it is fixed, delete this
-        // exclusion and the case below should go red until it is updated.
-        if (e == kernel::ease_in_circ || e == kernel::ease_out_circ ||
-            e == kernel::ease_in_out_circ)
-            continue;
+        // NOTHING IS EXCLUDED. The circ family used to be, because its
+        // derivative is unbounded at the endpoint and no sampled value can
+        // bound an infinity -- it was pinned in its own case as a defect. The
+        // curve is now held short of that singularity and renormalised (#543),
+        // so every easing in the table is covered by this loop and a new one
+        // that under-declares fails here rather than needing its own case.
         CAPTURE(e);
         const double declared = scene::ease_max_slope(std::uint8_t(e));
         const double observed = observed_max_slope(std::uint8_t(e), kSamples);
@@ -148,36 +145,59 @@ TEST_CASE("linear is exactly 1, which is the case that compounds") {
     CHECK(compounded < 15.0);
 }
 
-TEST_CASE("the circ family's declared slope is BELOW its real one — issue filed") {
-    // A PRE-EXISTING SOUNDNESS DEFECT, found by this file and not introduced by
-    // it. E(t) = 1 - sqrt(1 - t^2) has E'(t) = t / sqrt(1 - t^2), which is
-    // UNBOUNDED as t approaches 1. A 512-point sample cannot see an infinite
-    // derivative and a 1.25x margin does not rescue it, so the declared value
-    // comes back finite and too small:
+TEST_CASE("the circ family is bounded, because the curve is held short of its singularity") {
+    // WAS A PRE-EXISTING SOUNDNESS DEFECT (issue #543), pinned here as failing
+    // until it was fixed. E(t) = 1 - sqrt(1 - t^2) has E'(t) = t/sqrt(1 - t^2),
+    // UNBOUNDED as t -> 1, so no sampled value could bound it: the declared
+    // slope came back at 39.98 where a 4096-point sweep measured 90.50, and a
+    // denser sweep found more again. A bound BELOW the truth lets the marcher
+    // step through the surface.
     //
-    //     in_circ      declared 39.98   measured 90.50
-    //     out_circ     declared 39.98   measured 90.50
-    //     in_out_circ  declared 28.26   measured 63.99
-    //
-    // A bound BELOW the true slope lets the marcher step through the surface.
-    // Pinned here as the current behaviour so the defect cannot be lost, and
-    // so that whoever fixes it sees this case go red and updates it rather
-    // than discovering the requirement from scratch.
-    // Cast at the element rather than in the loop variable: a braced list of
-    // CEase deduced as CEase narrows to uint8_t on the way in, which MSVC
-    // treats as an error under /WX.
+    // The curve is now held at 1 - CLAY_CIRC_GUARD and renormalised, so its
+    // supremum is finite, closed form, and reached exactly at the guard --
+    // and ease_max_slope computes it from the SAME constant, so the two
+    // cannot drift apart.
     for (const std::uint8_t e : {static_cast<std::uint8_t>(kernel::ease_in_circ),
                                  static_cast<std::uint8_t>(kernel::ease_out_circ),
                                  static_cast<std::uint8_t>(kernel::ease_in_out_circ)}) {
         CAPTURE(int(e));
         const double declared = scene::ease_max_slope(e);
         const double observed = observed_max_slope(e, kSamples);
-        // The defect, asserted as it stands. When the fix lands this flips and
-        // the row moves into the case below.
-        CHECK(declared < observed);
-        WARN_MESSAGE(declared >= observed,
-                     "circ easing under-declares its slope; see the issue");
+        CHECK(declared >= observed - kNoiseAllowance);
     }
+
+    // AND THE CURVE STILL JOINS ITSELF. Clamping alone left f(1) at 0.98586,
+    // and CLAY_EASE_INOUT joins 0.5*f(2t) to 1 - 0.5*f(2-2t) at t = 0.5 -- so
+    // the halves stopped meeting and the curve jumped by 0.0141 there. A
+    // discontinuity is worse than a steep slope, and a difference quotient
+    // across it measured 92.96 against an analytic 70.70. This is the
+    // assertion that caught it.
+    const double lo = kernel::cease(kernel::ease_in_out_circ, 0.5f - 1e-4f);
+    const double hi = kernel::cease(kernel::ease_in_out_circ, 0.5f + 1e-4f);
+    CAPTURE(lo);
+    CAPTURE(hi);
+    CHECK(std::fabs(hi - lo) < 1e-2);
+
+    // AND THE CURVE ITSELF IS PINNED, not only its slope.
+    //
+    // NO PARITY SCENE OR DEFORMER GOLDEN USES A CIRC EASING -- checked, and the
+    // reason the whole suite stayed green through a change to kernel math. So
+    // these values are the only thing standing between the guard and a silent
+    // reshaping of the curve, and they are here rather than in a golden file
+    // because the guard is what they exist to pin.
+    //
+    // Taken from the renormalised curve at CLAY_CIRC_GUARD = 1e-4. Changing the
+    // guard SHOULD fail these: it is a deliberate reshaping and wants to be
+    // seen, not absorbed.
+    CHECK(kernel::cease(kernel::ease_in_circ, 0.25f) == doctest::Approx(0.0328).epsilon(0.01));
+    CHECK(kernel::cease(kernel::ease_in_circ, 0.50f) == doctest::Approx(0.1353).epsilon(0.01));
+    CHECK(kernel::cease(kernel::ease_in_circ, 0.90f) == doctest::Approx(0.5701).epsilon(0.01));
+    CHECK(kernel::cease(kernel::ease_in_circ, 0.99f) == doctest::Approx(0.8576).epsilon(0.01));
+
+    // The endpoints are exact, which is what renormalising buys: a grab's
+    // centre takes the FULL displacement rather than 98.6% of it.
+    CHECK(kernel::cease(kernel::ease_in_circ, 1.0f) == doctest::Approx(1.0).epsilon(1e-5));
+    CHECK(kernel::cease(kernel::ease_in_circ, 0.0f) == doctest::Approx(0.0).epsilon(1e-5));
 }
 
 TEST_CASE("the curves that are still sampled keep a margin, and are named") {
