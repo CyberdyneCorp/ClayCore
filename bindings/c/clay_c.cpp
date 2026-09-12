@@ -7594,6 +7594,15 @@ clay_result resolve_move(const clay_document* doc, clay_layer_id layer, const fl
     // Zero-filled by read_desc for a caller compiled against the older struct,
     // which is exactly "the host did not say" (#533).
     settings.gesture_id = p.gesture_id;
+    // Refused rather than ignored (#532). This entry point applies a whole drag
+    // in one call and keeps nothing between calls, so it has no previous
+    // position to trail from -- and a control that silently does nothing is
+    // the failure mode the field's own documentation is about. The live drag
+    // (clay_sdf_move_begin/update) is where steady belongs.
+    if (p.steady != 0.0f)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "steady needs a live drag: use clay_sdf_move_begin/update, which keeps the "
+                    "position a lagging drag trails from");
 
     *out_layer = l;
     if (out_radius) *out_radius = p.radius;
@@ -7816,6 +7825,12 @@ struct clay_sdf_prefix_cache {
 struct clay_sdf_move_tx {
     clay_document* doc = nullptr;
     std::optional<session::SdfMoveTransaction> tx;
+    // LAZY-MOUSE STATE (issue #532). `steady` is the lag and `applied` is what
+    // the surface was last actually dragged to, which is what a lagging drag
+    // has to trail FROM. Zero steady leaves `applied` unread and the path
+    // bit-identical to before this existed.
+    float steady = 0.0f;
+    kernel::cfloat3 applied = kernel::cf3(0.0f, 0.0f, 0.0f);
     // The drag as ordinary scene content (issue #388), built on first request.
     //
     // It holds the real document's LAYERS with the dragged one replaced by the
@@ -8285,6 +8300,11 @@ clay_sdf_move_tx* clay_sdf_move_begin(clay_document* doc, clay_layer_id layer,
         return nullptr;
     }
     if (check_ease(p.ease) != CLAY_OK) return nullptr;
+    // A lag outside [0, 1) is not a lag: 1 would never reach the cursor at all.
+    if (!(p.steady >= 0.0f) || p.steady >= 1.0f) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT, "steady must be in [0, 1)");
+        return nullptr;
+    }
     session::SdfSculptPolicy sp;
     if (read_sculpt_policy(policy, &sp) != CLAY_OK) return nullptr;
 
@@ -8303,6 +8323,7 @@ clay_sdf_move_tx* clay_sdf_move_begin(clay_document* doc, clay_layer_id layer,
     }
     auto* handle = new clay_sdf_move_tx();
     handle->doc = doc;
+    handle->steady = p.steady;
     handle->tx = std::move(tx);
     return handle;
 }
@@ -8313,9 +8334,19 @@ clay_result clay_sdf_move_update(clay_sdf_move_tx* tx, const float total_displac
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null transaction or displacement");
     if (!tx->tx || !tx->tx->live())
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "this transaction is spent");
-    const session::SdfSculptDirty dirty =
-        tx->tx->update(kernel::cf3(total_displacement[0], total_displacement[1],
-                                   total_displacement[2]));
+    kernel::cfloat3 want = kernel::cf3(total_displacement[0], total_displacement[1],
+                                       total_displacement[2]);
+    // The surface trails the cursor by `steady`, which is what lazy-mouse IS.
+    // It makes the result path-dependent, suspending the promise that updates
+    // of 0.1, 0.2 then 0.5 end where a single 0.5 does -- stated in clay.h
+    // beside the field, because that promise holds at steady == 0 and cannot
+    // hold above it.
+    if (tx->steady > 0.0f) {
+        const float follow = 1.0f - tx->steady;
+        want = tx->applied + (want - tx->applied) * follow;
+    }
+    tx->applied = want;
+    const session::SdfSculptDirty dirty = tx->tx->update(want);
     if (out_dirty) return write_dirty(dirty, out_dirty);
     return CLAY_OK;
 }
