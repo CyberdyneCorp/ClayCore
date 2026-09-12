@@ -477,6 +477,24 @@ struct Deformer {
     float b = 1.0f;      // taper: s0
     float c = 1.0f;      // taper: s1
     std::uint8_t ease = 0;
+    // WHICH GESTURE EMITTED THIS, when a host says (issue #533).
+    //
+    // A live drag replaces the leading run of grabs it already emitted rather
+    // than stacking, and `continues_gesture` decides "already emitted by me" by
+    // comparing centre and radius with raw float ==. That is only true of a
+    // drag holding both fixed: a pressure-driven radius, or a centre that
+    // follows the finger, changes the key every frame and coalescing stops --
+    // measured at 101x on a 60-frame drag.
+    //
+    // Zero means "the host did not say", and the bit-equality rule applies
+    // exactly as before.
+    //
+    // DELIBERATELY NOT SERIALISED. The id names a gesture IN FLIGHT and means
+    // nothing once it ends; the chain a file carries is the finished result. A
+    // loaded document reads 0 and falls back to the old rule, which is what it
+    // should do -- and writing it would change the scene format for a value no
+    // reader could use.
+    std::uint64_t gesture_id = 0;
     // Extension slots for the wide deformers: bend_linear needs nine floats
     // and k/a/b/c hold four. Written only for the types that use them, so the
     // document format needs no version bump.

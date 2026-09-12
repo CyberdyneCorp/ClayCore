@@ -205,6 +205,7 @@ PreparedMove prepare_item(const scene::Layer& layer, const scene::Node& n, scene
         settings.radius /
         (scale * scene::scale_axes_reach(axes) * scene::scale_axes_reach(layer.scale_axes));
     prepared.ease = settings.ease;
+    prepared.gesture_id = settings.gesture_id;
     prepared.front_only = settings.front_only;
     return prepared;
 }
@@ -253,10 +254,29 @@ void collect(const scene::SdfContent& content, const scene::Layer& layer,
 // The KIND is part of the match rather than fixed at grab, because a magnify
 // gesture (brush/magnify.h) continues itself by the same rule and a pinch must
 // not replace a drag's leading grab that happens to share its ball.
+// IS THIS GRAB ONE THIS GESTURE ALREADY EMITTED?
+//
+// When the host NAMED the gesture, that name answers it and nothing else is
+// consulted: the anchor may move, the radius may follow pressure, and either
+// may be recomputed through any float path -- it is still one drag, and one
+// warp. A named gesture never matches an unnamed one, or a differently named
+// one, so two live drags cannot fold into each other.
+//
+// When it did not, the old rule stands exactly: type, centre and radius by raw
+// float ==. That is correct for a drag holding both fixed, which is what the
+// original design assumed, and it is what a loaded document falls back to
+// because the id is not serialised.
+//
+// NOT AN EPSILON, deliberately. A tolerance would paper over a recomputed
+// anchor while silently folding two genuinely distinct gestures -- a re-grab a
+// hair from the last -- into one, which changes the document rather than
+// speeding it up. Quantising is worse: it makes the fold depend on where the
+// gesture happens to sit relative to the grid.
 bool continues_gesture(const scene::Deformer& lead, const MoveWarp& warp) {
     const auto same_identity = [&](const scene::Deformer& f) {
-        return lead.type == f.type && lead.k == f.k && lead.a == f.a && lead.b == f.b &&
-               lead.c == f.c;
+        if (lead.type != f.type) return false;
+        if (lead.gesture_id != 0 || f.gesture_id != 0) return lead.gesture_id == f.gesture_id;
+        return lead.k == f.k && lead.a == f.a && lead.b == f.b && lead.c == f.c;
     };
     return std::any_of(warp.gesture.begin(), warp.gesture.end(), same_identity) ||
            std::any_of(warp.deformers.begin(), warp.deformers.end(), same_identity);
@@ -352,6 +372,9 @@ void resolve_prepared_move(const PreparedMove& prepared, cfloat3 total_world_dis
         scene::Deformer grab =
             scene::Deformer::grab(image.local_centre, prepared.local_radius, local_displacement,
                                   prepared.ease, prepared.front_only);
+        // Stamped on every image, so a mirrored drag's copies belong to the
+        // same gesture as the one that produced them (#533).
+        grab.gesture_id = prepared.gesture_id;
         // Each grab lands in exactly one of the two: the reaching ones are the
         // warp, the others only its identity. With one image nothing lands in
         // `gesture`, and a fresh warp costs one allocation; a reused one, none.

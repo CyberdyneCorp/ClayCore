@@ -89,6 +89,9 @@ struct MoveSettings {
     // Gate the pull on the half-space it heads into, so the far side of a form
     // does not travel with the near side.
     bool front_only = false;
+    // Names the gesture, so a drag whose centre or radius MOVES is still one
+    // drag (issue #533). Zero leaves the old bit-equality rule in force.
+    std::uint64_t gesture_id = 0;
 };
 
 // One image of a drag under the layer's symmetry: where the ball is and which
@@ -202,6 +205,8 @@ struct PreparedMove {
     float node_uniform_scale = 1.0f;
 
     std::uint8_t ease = 0;
+    // Carried so the emitted grab can be stamped with it (#533).
+    std::uint64_t gesture_id = 0;
     bool front_only = false;
 };
 
