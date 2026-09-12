@@ -162,6 +162,7 @@ add_executable(clay_unit_tests
   unit/test_c_field_stamp.cpp
   unit/test_c_stamp_capture.cpp
   unit/test_c_automask_reach.cpp
+  unit/test_c_measure_reach.cpp
   unit/test_c_place_every_surface.cpp
   unit/test_c_mask_from_group.cpp
   unit/test_volume_cull.cpp
