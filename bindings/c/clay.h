@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 108
+#define CLAY_ABI_MINOR 109
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -6484,6 +6484,50 @@ typedef struct clay_move_params {
      * one. Leave it zero and the bit-equality rule applies exactly as before,
      * which is what a caller compiled against the older struct gets. */
     uint64_t gesture_id;
+    /* LAZY-MOUSE LAG for a live drag (ABI 0.109.0, issue #532). Same semantics
+     * and units as clay_stroke_preset.steady: 0 follows the cursor exactly,
+     * toward 1 lags more.
+     *
+     * IT IS THE ONLY STROKE SETTING A GRAB CAN USE, and the list below is the
+     * rest of clay_stroke_preset with the reason each one is absent. A control
+     * that does not act is worse than one that is missing, so none of them is
+     * accepted here "for symmetry".
+     *
+     *   spacing            A grab is ONE deformation per stroke, not one per
+     *                      dab. Honouring spacing is exactly what turns a
+     *                      gesture into tens of permanent warps -- which is
+     *                      the defect, not the feature. ZBrush and Blender
+     *                      reach parity by NOT resolving dabs.
+     *   pressure_size      The radius is frozen at press: a radius that moves
+     *                      mid-gesture changes the vertex set mid-drag, which
+     *                      is the one thing Grab is defined not to do.
+     *                      Blender documents pressure as unsupported for it.
+     *   strength,          A grab displaces; it does not deposit. There is no
+     *   pressure_strength  amount for these to scale.
+     *   jitter_*, seed     Jitter moves the stamp. One anchored region has no
+     *                      stamp to move.
+     *   taper_start/end    Ramps a radius along a stroke; see pressure_size.
+     *   rotate_along_stroke  Belongs to a FOLLOWING brush. Snake Hook is a
+     *                      separate question with a different answer, and its
+     *                      requirements are deliberately not met here.
+     *   accumulation       THE ONE MOST WORTH READING. It does NOT govern how
+     *                      successive Move gestures compose. A host assuming
+     *                      it does will ship a Move that silently accumulates
+     *                      warps. How two gestures compose is decided by
+     *                      `gesture_id` below and by nothing else.
+     *
+     * WHAT STEADY COSTS, stated because it suspends an invariant this header
+     * states elsewhere. clay_sdf_move_update promises that updates of 0.1, 0.2
+     * then 0.5 end exactly where a single fresh drag of 0.5 does. Lazy-mouse
+     * lag is PATH-DEPENDENT by definition, so at steady > 0 that no longer
+     * holds and cannot: the whole point is that the surface trails the cursor.
+     * At steady == 0 the path is bit-identical to before this field existed.
+     *
+     * ONLY THE LIVE DRAG ACCEPTS IT. clay_layer_move_surface applies a whole
+     * drag in one call and keeps nothing between calls, so it has no previous
+     * position to lag from; a non-zero steady there is REFUSED rather than
+     * ignored. */
+    float steady;
 } clay_move_params;
 
 /* Drag a layer's assembled SURFACE — ZBrush's Move. Named apart from

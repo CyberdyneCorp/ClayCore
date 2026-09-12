@@ -1006,3 +1006,135 @@ TEST_CASE("an unset gesture id leaves the old rule exactly as it was") {
     REQUIRE(clay_layer_eval_points(b.doc, lb, "cpu", probe, 1, &fb, nullptr) == CLAY_OK);
     CHECK(fa == fb);
 }
+
+// -- lazy-mouse lag on a live drag (issue #532) -------------------------------
+//
+// `steady` is the ONLY stroke-preset setting a grab can use. A grab is one
+// deformation per stroke rather than one per dab, its radius is frozen at
+// press, and it displaces rather than deposits -- so spacing, pressure, jitter,
+// taper and strength have nothing to act on, and accumulation does not govern
+// how successive gestures compose. The ignore-list lives in clay.h beside the
+// field; these cases pin the one that DOES act.
+
+TEST_CASE("steady makes a live drag trail the cursor, and zero does not") {
+    const float centre[3] = {0.0f, 0.0f, 1.0f};
+    const float target[3] = {0.0f, 0.0f, 0.40f};
+
+    // With no lag, one update lands exactly on the target.
+    float exact = 0.0f;
+    {
+        CDoc d;
+        const clay_layer_id l = one_ball(d.doc);
+        clay_move_params p = move_params(0.40f);
+        p.steady = 0.0f;
+        clay_sdf_move_tx* tx = clay_sdf_move_begin(d.doc, l, centre, &p, nullptr);
+        REQUIRE(tx != nullptr);
+        REQUIRE(clay_sdf_move_update(tx, target, nullptr) == CLAY_OK);
+        REQUIRE(clay_sdf_move_commit(tx, nullptr) == CLAY_OK);
+        clay_sdf_move_destroy(tx);
+        const float probe[3] = {0.0f, 0.0f, 1.2f};
+        REQUIRE(clay_layer_eval_points(d.doc, l, "cpu", probe, 1, &exact, nullptr) == CLAY_OK);
+    }
+
+    // With lag, ONE update falls short of the same target -- the surface is
+    // still on its way there.
+    float lagged = 0.0f;
+    {
+        CDoc d;
+        const clay_layer_id l = one_ball(d.doc);
+        clay_move_params p = move_params(0.40f);
+        p.steady = 0.6f;
+        clay_sdf_move_tx* tx = clay_sdf_move_begin(d.doc, l, centre, &p, nullptr);
+        REQUIRE(tx != nullptr);
+        REQUIRE(clay_sdf_move_update(tx, target, nullptr) == CLAY_OK);
+        REQUIRE(clay_sdf_move_commit(tx, nullptr) == CLAY_OK);
+        clay_sdf_move_destroy(tx);
+        const float probe[3] = {0.0f, 0.0f, 1.2f};
+        REQUIRE(clay_layer_eval_points(d.doc, l, "cpu", probe, 1, &lagged, nullptr) == CLAY_OK);
+    }
+    CAPTURE(exact);
+    CAPTURE(lagged);
+    CHECK(exact != lagged);
+
+    // And it CATCHES UP: held at the same target, repeated updates converge on
+    // where the unlagged drag already was. A lag that never arrived would be a
+    // different defect from the one this implements.
+    {
+        CDoc d;
+        const clay_layer_id l = one_ball(d.doc);
+        clay_move_params p = move_params(0.40f);
+        p.steady = 0.6f;
+        clay_sdf_move_tx* tx = clay_sdf_move_begin(d.doc, l, centre, &p, nullptr);
+        REQUIRE(tx != nullptr);
+        for (int i = 0; i < 40; ++i) REQUIRE(clay_sdf_move_update(tx, target, nullptr) == CLAY_OK);
+        REQUIRE(clay_sdf_move_commit(tx, nullptr) == CLAY_OK);
+        clay_sdf_move_destroy(tx);
+        const float probe[3] = {0.0f, 0.0f, 1.2f};
+        float settled = 0.0f;
+        REQUIRE(clay_layer_eval_points(d.doc, l, "cpu", probe, 1, &settled, nullptr) == CLAY_OK);
+        CAPTURE(settled);
+        CHECK(settled == doctest::Approx(exact).epsilon(0.01));
+    }
+}
+
+TEST_CASE("steady is REFUSED where it could not act, rather than ignored") {
+    CDoc d;
+    const clay_layer_id l = one_ball(d.doc);
+    const float centre[3] = {0.0f, 0.0f, 1.0f};
+    const float disp[3] = {0.0f, 0.0f, 0.25f};
+
+    // The stateless entry point keeps nothing between calls, so it has no
+    // previous position to trail from. Refused, not silently dropped.
+    clay_move_params p = move_params(0.40f);
+    p.steady = 0.5f;
+    std::size_t applied = 0;
+    CHECK(clay_layer_move_surface(d.doc, l, centre, disp, &p, &applied) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+
+    // Zero is not "set", so the same call goes through untouched.
+    p.steady = 0.0f;
+    CHECK(clay_layer_move_surface(d.doc, l, centre, disp, &p, &applied) == CLAY_OK);
+
+    // A lag of 1 never reaches the cursor at all, and outside [0,1) is not a lag.
+    clay_move_params bad = move_params(0.40f);
+    bad.steady = 1.0f;
+    CHECK(clay_sdf_move_begin(d.doc, l, centre, &bad, nullptr) == nullptr);
+    bad.steady = -0.1f;
+    CHECK(clay_sdf_move_begin(d.doc, l, centre, &bad, nullptr) == nullptr);
+}
+
+TEST_CASE("a caller predating steady is unaffected") {
+    // struct_size is the contract: a truncated descriptor zero-fills the field,
+    // which is exactly "not set". This also pins that steady was APPENDED --
+    // inserting it ahead of gesture_id would move that field's offset and break
+    // every caller compiled against 0.107.0.
+    CDoc a, b;
+    const clay_layer_id la = one_ball(a.doc);
+    const clay_layer_id lb = one_ball(b.doc);
+    const float centre[3] = {0.0f, 0.0f, 1.0f};
+    const float disp[3] = {0.0f, 0.0f, 0.25f};
+
+    clay_move_params full = move_params(0.40f);
+    full.steady = 0.0f;
+    clay_move_params old = move_params(0.40f);
+    old.struct_size = static_cast<uint32_t>(offsetof(clay_move_params, steady));
+
+    std::size_t n = 0;
+    REQUIRE(clay_layer_move_surface(a.doc, la, centre, disp, &full, &n) == CLAY_OK);
+    REQUIRE(clay_layer_move_surface(b.doc, lb, centre, disp, &old, &n) == CLAY_OK);
+
+    const float probe[3] = {0.0f, 0.0f, 1.2f};
+    float fa = 0.0f, fb = 0.0f;
+    REQUIRE(clay_layer_eval_points(a.doc, la, "cpu", probe, 1, &fa, nullptr) == CLAY_OK);
+    REQUIRE(clay_layer_eval_points(b.doc, lb, "cpu", probe, 1, &fb, nullptr) == CLAY_OK);
+    CHECK(fa == fb);
+
+    // gesture_id still lands where 0.107.0 put it: a descriptor sized to
+    // include it but not steady must still carry the id through.
+    clay_move_params mid = move_params(0.40f);
+    mid.gesture_id = 4242;
+    mid.struct_size = static_cast<uint32_t>(offsetof(clay_move_params, steady));
+    CDoc c;
+    const clay_layer_id lc = one_ball(c.doc);
+    REQUIRE(clay_layer_move_surface(c.doc, lc, centre, disp, &mid, &n) == CLAY_OK);
+}
