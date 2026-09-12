@@ -90,7 +90,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("pr")
     ap.add_argument("--min-checks", type=int, default=DEFAULT_MIN_CHECKS)
-    ap.add_argument("--timeout-mins", type=int, default=90)
+    # 90 was too short, twice. With several PRs queued this repo's matrix has
+    # taken over 90 minutes to finish its last job, and the watcher then
+    # refused a PR that was green minutes later -- #555 and #559 both. It fails
+    # toward NOT merging, which is the right direction, but a timeout that
+    # fires on healthy runs makes the tool useless rather than safe.
+    ap.add_argument("--timeout-mins", type=int, default=240)
     ap.add_argument("--poll", type=int, default=60, help="seconds between polls")
     ap.add_argument("--merge-method", default="merge",
                     choices=("merge", "squash", "rebase"))
