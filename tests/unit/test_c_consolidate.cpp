@@ -77,12 +77,14 @@ TEST_CASE("the C ABI reports a chain's degradation and what caused it") {
     CHECK(degraded.longest_deformer_chain == 9);
     CHECK(degraded.steepest_volume == doctest::Approx(1.0f));  // no volume involved
     CHECK(degraded.safe_step_scale < 0.05f);
-    // NOT advised, and issue #387 is why. The bound really is this bad, but
-    // the layer is ONE analytic item: the bake wins back no edit list and no
-    // stacked volume, and swaps a cheap primitive for a dense one. Measured on
-    // a real gesture, a 29x better step scale and a 6x SLOWER gesture. The
-    // advisory names the cure that applies rather than the symptom.
-    CHECK(degraded.advises_consolidation == 0);
+    // ADVISED since #534, and #387's reasoning is unchanged above the floor.
+    // A deformer-only layer wins back no edit list and no stacked volume, so
+    // the bake is normally a straight loss -- 29x better step scale, 6x slower
+    // gesture. But that names a REGIME, and this fixture is far past it: the
+    // crossover is near a step scale of 0.148 and this is under 0.05, where
+    // the baked arm measured 4x to 19x faster. Past that depth the march
+    // exhausts its budget and the field renders WRONG rather than slowly.
+    CHECK(degraded.advises_consolidation == 1);
     CHECK(degraded.degradation == CLAY_DEGRADATION_DEFORMERS);
     CHECK(degraded.steepest_deformer_chain > 1.0f);
     CHECK(degraded.drawable_count == 1);

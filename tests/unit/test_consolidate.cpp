@@ -215,6 +215,34 @@ TEST_CASE("a chain of polish passes degrades, and consolidation bounds it") {
     }
 }
 
+// The other half of #534: above the floor, #387's refusal is unchanged.
+//
+// Without this case the change would have replaced a rule with no rule -- every
+// degraded layer advised, which is what #387 measured as 6x WORSE. A mildly
+// warped deformer-only layer must still be told the bake is not its cure.
+TEST_CASE("a mildly degraded deformer-only layer is still NOT advised to bake") {
+    scene::Document doc = sphere_document(1.0f);
+    scene::Layer& layer = doc.layers.front();
+    const scene::NodeId id = layer.sdf->roots.front();
+
+    // ONE gentle grab: degraded enough to trip a generous caller threshold,
+    // nowhere near the depth at which marching fails.
+    layer.sdf->find_mut(id)->deformers.push_back(
+        scene::Deformer::grab(cf3(1.0f, 0, 0), 0.5f, cf3(0.05f, 0, 0)));
+
+    // Asked with a threshold loose enough that `degraded` is true, so this
+    // case tests the CURE half of the rule rather than the symptom half.
+    const scene::FieldReport r = scene::report_layer(layer, 0.99f);
+    REQUIRE(r.drawable_count == 1);
+    REQUIRE(r.steepest_volume == doctest::Approx(1.0f));
+    // The precondition that makes the case meaningful: above the floor. If a
+    // future change pushed this fixture under it, the case would pass for the
+    // wrong reason and say nothing.
+    REQUIRE(r.safe_step_scale > scene::kMarchFailsBelow);
+    CHECK(r.degradation == scene::Degradation::Deformers);
+    CHECK_FALSE(r.advises_consolidation);
+}
+
 TEST_CASE("a move stroke stops decaying once it is consolidated") {
     scene::Document doc = sphere_document(1.0f);
     scene::Layer& layer = doc.layers.front();
@@ -231,14 +259,19 @@ TEST_CASE("a move stroke stops decaying once it is consolidated") {
     CHECK(before.longest_deformer_chain == 9);
     CHECK(before.steepest_volume == doctest::Approx(1.0f));  // no volume is involved at all
     CHECK(before.safe_step_scale < 0.05f);
-    // NOT advised, and that is the point of issue #387. The bound really is
-    // this bad and consolidating really does fix it — the two checks below say
-    // so — but the layer is ONE analytic item, so the bake wins back no edit
-    // list and no stacked volume, and swaps a cheap primitive for a dense one.
-    // Measured on a real gesture: a 29x better step scale and a 6x SLOWER
-    // gesture. The advisory says which cure applies, not merely that something
-    // hurts.
-    CHECK_FALSE(before.advises_consolidation);
+    // ADVISED, and it was not before #534. Issue #387's reasoning still stands
+    // and is asserted in the case below: a deformer-only layer wins back no
+    // edit list and no stacked volume, so the bake is normally a straight loss
+    // -- measured on a real gesture at a 29x better step scale and a 6x SLOWER
+    // result.
+    //
+    // That measurement names a REGIME, and this fixture is far past it. The
+    // crossover is near a step scale of 0.148 and this layer is under 0.05,
+    // where the baked arm measured 4x to 19x faster; by 16 dabs the parametric
+    // arm scores 0 hits of 1844, so the field renders WRONG rather than slowly.
+    // Below kMarchFailsBelow the advisory fires whatever the layer is made of.
+    CHECK(before.safe_step_scale < scene::kMarchFailsBelow);
+    CHECK(before.advises_consolidation);
     CHECK(before.degradation == scene::Degradation::Deformers);
     CHECK(before.steepest_deformer_chain > 5.0f);
     CHECK(before.drawable_count == 1);
