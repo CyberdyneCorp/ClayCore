@@ -366,6 +366,92 @@ int main() {
     std::printf("    app, fastest of fourteen  %7.1f ms   (x%.1f this)\n", kAppFastestMs,
                 kAppFastestMs / (engine_total > 0 ? engine_total : 1.0));
     std::printf("    60 fps budget             %7.1f ms\n", kFrameBudgetMs);
+    // WHAT A DEEP CHAIN COSTS EACH MESHER (their #110 landed and split it).
+    //
+    // ClaySpaceDesktop settles every completed SDF stroke through
+    // clay_document_mesh, because the brick mesher leaves slivers (#549). With
+    // per-call timing they measured that settle at voxel 0.02:
+    //
+    //     dabs   verts   engine mesh
+    //        0   47024        14.59 ms
+    //        8   48411        21.17
+    //       24   48988        35.40
+    //       48   49250        57.48
+    //
+    // 3.9x the time for 4.7% more vertices. So the document mesher's cost is
+    // not its OUTPUT, it is what each sample costs -- and a sample costs more
+    // when more grabs reach it.
+    //
+    // THE HYPOTHESIS THIS TESTS: the two meshers pay the chain differently
+    // because only one of them evaluates the field. clay_brick_cache_mesh
+    // marches the CACHED lattice, which was evaluated once at refill and is
+    // just numbers by the time it is meshed. clay_document_mesh evaluates the
+    // field densely at every grid point, uncalled, so every sample walks every
+    // deformer. If that is right, the gap between them should OPEN with chain
+    // depth -- and the pits are then costing the host the cull, not just a
+    // second pass.
+    //
+    // Same dab counts as theirs so the two tables can be read together.
+    std::printf("\n  what a deep chain costs each mesher (their dab counts):\n");
+    std::printf("  %6s %10s %14s %14s %8s\n", "dabs", "bricks", "brick mesh ms",
+                "document ms", "ratio");
+    for (int dabs : {0, 8, 24, 48}) {
+        Doc dd;
+        if (!build(&dd)) break;
+        clay_brick_config bc2{};
+        bc2.struct_size = sizeof(bc2);
+        bc2.dim = kDim;
+        bc2.voxel_size = kVoxel;
+        bc2.band_voxels = 2;
+        clay_brick_cache* c3 = clay_brick_cache_create(&bc2);
+        if (!c3) { clay_document_destroy(dd.doc); break; }
+
+        // Dabs at fresh anchors around the cap, each its own gesture, so the
+        // chain genuinely grows rather than coalescing into one warp.
+        for (int i = 0; i < dabs; ++i) {
+            const float a = 0.37f * static_cast<float>(i);
+            const float ctr[3] = {std::cos(a) * 0.55f, std::sin(a) * 0.55f, 0.80f};
+            const float dsp[3] = {0.0f, 0.0f, 0.05f};
+            clay_move_params mp3{};
+            mp3.struct_size = sizeof(mp3);
+            mp3.radius = 0.40f;
+            std::size_t applied = 0;
+            if (clay_layer_move_surface(dd.doc, dd.layer, ctr, dsp, &mp3, &applied) != CLAY_OK)
+                break;
+        }
+        clay_brick_cache_mark_dirty(c3, wmin, wmax);
+        const long nb = drain(c3, dd.doc);
+
+        const MeshResult warm_b = mesh_all(c3, dd.doc, CLAY_NORMAL_GRADIENT, 0);
+        const MeshResult mb = mesh_all(c3, dd.doc, CLAY_NORMAL_GRADIENT, 0);
+
+        clay_mesh_params dp2{};
+        dp2.struct_size = sizeof(dp2);
+        dp2.voxel_size = kVoxel;
+        clay_mesh* warm_d = nullptr;
+        clay_document_mesh(dd.doc, &dp2, &warm_d);
+        if (warm_d) clay_mesh_destroy(warm_d);
+        clay_mesh* dm2 = nullptr;
+        const Clock::time_point t2 = Clock::now();
+        const clay_result r2 = clay_document_mesh(dd.doc, &dp2, &dm2);
+        const double dms = ms_since(t2);
+        if (dm2) clay_mesh_destroy(dm2);
+
+        // A mesher that produced nothing times nothing.
+        if (r2 != CLAY_OK || mb.verts == 0 || nb <= 0) {
+            std::printf("  %6d %10ld %14s %14s %8s  MEASURED NOTHING\n", dabs, nb, "-", "-", "-");
+        } else {
+            std::printf("  %6d %10ld %14.3f %14.3f %8.2fx\n", dabs, nb, mb.ms, dms,
+                        mb.ms > 0.0 ? dms / mb.ms : 0.0);
+        }
+        (void)warm_b;
+        clay_brick_cache_destroy(c3);
+        clay_document_destroy(dd.doc);
+    }
+    std::printf("  A ratio that OPENS with depth says the document mesher pays the chain\n"
+                "  per sample and the brick mesher does not -- so the pits (#549) cost a\n"
+                "  host the cull, not merely a second pass.\n");
+
     std::printf("\n  An engine total well under the application's figure puts the\n"
                 "  remainder host-side. An engine total near it makes #531 ours.\n");
 
