@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 109
+#define CLAY_ABI_MINOR 110
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -5432,6 +5432,27 @@ clay_voxel_grab_tx* clay_voxel_grab_begin(clay_voxel_grid* grid, const int32_t c
  * Idempotent: calling it twice with the same displacement leaves the grid
  * exactly as one call did, so a host may call it every frame without checking
  * whether the pointer moved. */
+/* LAZY-MOUSE LAG for this grab (ABI 0.110.0, issue #564). 0 follows the cursor
+ * exactly, toward the ceiling lags more; the ceiling is 0.95, the same one
+ * clay_stroke_resolve applies, and a value above it is REFUSED rather than
+ * clamped so the two paths cannot disagree silently.
+ *
+ * ON THE TRANSACTION RATHER THAN IN clay_brush_params, deliberately. That
+ * struct is shared by every stamp-based voxel entry point, and a stamp arrives
+ * already resolved -- clay_stroke_resolve has applied the lag before any brush
+ * sees it. A field accepted and inert on most of its callers is the failure
+ * mode clay_move_params' ignore-list is written against, so this lives only
+ * where it acts.
+ *
+ * A grab is the exception for the same structural reason Move is: it is a
+ * GESTURE taking a total displacement from an anchor, so it never passes
+ * through stroke resolution and cannot receive the lag that way.
+ *
+ * Set it before the first update, or between updates; it takes effect from the
+ * next one. Like Move's, a non-zero lag makes the result path-dependent, so the
+ * grab no longer ends where a single equivalent displacement would. */
+clay_result clay_voxel_grab_set_steady(clay_voxel_grab_tx* tx, float steady);
+
 clay_result clay_voxel_grab_update(clay_voxel_grab_tx* tx, const float total_displacement[3]);
 
 /* The box the gesture writes — the brush's footprint, fixed for the whole
