@@ -556,6 +556,15 @@ constexpr std::size_t kMaskExtrudeParamsOriginal =
     offsetof(clay_mask_extrude_params, band) + sizeof(float);
 constexpr std::size_t kGizmoCageOriginal =
     offsetof(clay_gizmo_cage, nz) + sizeof(std::int32_t);
+// THE CEILING BOTH LAZY-MOUSE PATHS SHARE (issue #564).
+//
+// brush::steady_path clamps a stroke's lag to 0.95. The gesture paths -- which
+// never pass through stroke resolution and so carry their own -- REFUSE above
+// it rather than clamping, so a host setting 0.99 cannot get 0.95 on a stroke
+// and 0.99 on a drag. One named control with two behaviours is the quiet
+// divergence this header spends pages warning about.
+constexpr float kSteadyCeiling = 0.95f;
+
 constexpr std::size_t kMoveParamsOriginal =
     offsetof(clay_move_params, front_only) + sizeof(std::int32_t);
 constexpr std::size_t kMagnifyParamsOriginal =
@@ -8300,9 +8309,13 @@ clay_sdf_move_tx* clay_sdf_move_begin(clay_document* doc, clay_layer_id layer,
         return nullptr;
     }
     if (check_ease(p.ease) != CLAY_OK) return nullptr;
-    // A lag outside [0, 1) is not a lag: 1 would never reach the cursor at all.
-    if (!(p.steady >= 0.0f) || p.steady >= 1.0f) {
-        fail(CLAY_ERROR_INVALID_ARGUMENT, "steady must be in [0, 1)");
+    // THE SAME CEILING EVERY LAZY-MOUSE PATH USES (issue #564). brush::
+    // steady_path clamps a stroke's lag to 0.95; this refuses above it, so a
+    // host setting 0.99 cannot get 0.95 on a stroke and 0.99 on a drag. One
+    // named control with two behaviours is the quiet divergence this header
+    // spends pages warning about.
+    if (!(p.steady >= 0.0f) || p.steady > kSteadyCeiling) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT, "steady must be in [0, 0.95]");
         return nullptr;
     }
     session::SdfSculptPolicy sp;
@@ -13203,6 +13216,11 @@ struct clay_voxel_grab_tx {
     clay_voxel_grid* handle = nullptr;
     voxel::VoxelGrid* grid = nullptr;
     std::optional<voxel::GrabTransaction> tx;
+    // Lazy-mouse state (issue #564), the same shape clay_sdf_move_tx carries:
+    // the lag, and what the grab was last actually dragged to, which is what a
+    // lagging drag trails FROM. Zero leaves `applied` unread.
+    float steady = 0.0f;
+    kernel::cfloat3 applied = kernel::cf3(0.0f, 0.0f, 0.0f);
 };
 
 clay_voxel_grab_tx* clay_voxel_grab_begin(clay_voxel_grid* grid, const int32_t cell[3],
@@ -13220,13 +13238,30 @@ clay_voxel_grab_tx* clay_voxel_grab_begin(clay_voxel_grid* grid, const int32_t c
     return handle;
 }
 
+clay_result clay_voxel_grab_set_steady(clay_voxel_grab_tx* tx, float steady) {
+    if (!tx || !tx->tx || !tx->tx->live())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null or spent grab transaction");
+    if (!(steady >= 0.0f) || steady > kSteadyCeiling)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "steady must be in [0, 0.95]");
+    tx->steady = steady;
+    return CLAY_OK;
+}
+
 clay_result clay_voxel_grab_update(clay_voxel_grab_tx* tx, const float total_displacement[3]) {
     if (!tx || !tx->tx || !tx->tx->live())
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null or spent grab transaction");
     if (!total_displacement) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null displacement");
     VoxelStep step(tx->handle, tx->grid);
-    tx->tx->update(kernel::cf3(total_displacement[0], total_displacement[1],
-                               total_displacement[2]));
+    kernel::cfloat3 want = kernel::cf3(total_displacement[0], total_displacement[1],
+                                       total_displacement[2]);
+    // Trails the cursor by `steady`, exactly as clay_sdf_move_update does. It
+    // makes the grab path-dependent, which is what lazy mouse IS.
+    if (tx->steady > 0.0f) {
+        const float follow = 1.0f - tx->steady;
+        want = tx->applied + (want - tx->applied) * follow;
+    }
+    tx->applied = want;
+    tx->tx->update(want);
     return CLAY_OK;
 }
 

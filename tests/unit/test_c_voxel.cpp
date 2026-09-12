@@ -1244,3 +1244,79 @@ TEST_CASE("c voxel: a grab transaction commits, cancels and refuses") {
         clay_voxel_grab_destroy(nullptr);  // and null is a no-op
     }
 }
+
+// -- lazy mouse on a voxel grab (issue #564) ---------------------------------
+//
+// A grab is a GESTURE taking a total displacement from an anchor, so it never
+// passes through clay_stroke_resolve and cannot receive the lag that way --
+// exactly Move's situation, and exactly why each carries its own.
+//
+// The lag lives on the TRANSACTION rather than in clay_brush_params, which is
+// shared with every stamp-based entry point where a stamp arrives already
+// resolved. A field accepted and inert on most of its callers is the failure
+// mode the Move ignore-list is written against.
+
+TEST_CASE("a steady voxel grab trails the cursor, then arrives") {
+    const float cell_size = 0.04f;
+    const clay_brush_params verb =
+        brush(24, CLAY_BRUSH_SHAPE_SPHERE, CLAY_BRUSH_FALLOFF_SMOOTH, 1.0f, 0);
+    const clay_brush_params stamp =
+        brush(17, CLAY_BRUSH_SHAPE_SPHERE, CLAY_BRUSH_FALLOFF_CONSTANT, 1.0f, 0);
+
+    // One drag to `total`, with `steady` lag, over `steps` updates.
+    auto drag = [&](float steady, int steps) {
+        CGrid c(cell_size);
+        std::int32_t index = 0;
+        const float colour[3] = {0.8f, 0.4f, 0.2f};
+        REQUIRE(clay_voxel_palette_add(c.grid, colour, &index) == CLAY_OK);
+        REQUIRE(clay_voxel_set_brush(c.grid, kOrigin, &stamp, index) == CLAY_OK);
+        clay_voxel_grab_tx* tx = clay_voxel_grab_begin(c.grid, kOrigin, &verb, 1);
+        REQUIRE(tx != nullptr);
+        REQUIRE(clay_voxel_grab_set_steady(tx, steady) == CLAY_OK);
+        const float total[3] = {0.0f, 8.0f * cell_size, 0.0f};
+        for (int i = 0; i < steps; ++i) REQUIRE(clay_voxel_grab_update(tx, total) == CLAY_OK);
+        REQUIRE(clay_voxel_grab_commit(tx) == CLAY_OK);
+        clay_voxel_grab_destroy(tx);
+        return cells_in(c.grid, -14, 14, 24);
+    };
+
+    const std::vector<std::int32_t> exact = drag(0.0f, 1);
+    const std::vector<std::int32_t> lagged = drag(0.6f, 1);
+    const std::vector<std::int32_t> settled = drag(0.6f, 60);
+
+    // The fixture has to have moved something, or every comparison below is
+    // between identical untouched grids.
+    {
+        CGrid rest(cell_size);
+        std::int32_t index = 0;
+        const float colour[3] = {0.8f, 0.4f, 0.2f};
+        REQUIRE(clay_voxel_palette_add(rest.grid, colour, &index) == CLAY_OK);
+        REQUIRE(clay_voxel_set_brush(rest.grid, kOrigin, &stamp, index) == CLAY_OK);
+        REQUIRE(exact != cells_in(rest.grid, -14, 14, 24));
+    }
+
+    // One update with lag lands somewhere else than one without.
+    CHECK(lagged != exact);
+    // Held at the same target it CATCHES UP. A lag that never arrived would be
+    // a different defect from the one implemented.
+    CHECK(settled == exact);
+}
+
+TEST_CASE("a voxel grab's steady shares the stroke path's ceiling") {
+    const clay_brush_params verb =
+        brush(11, CLAY_BRUSH_SHAPE_SPHERE, CLAY_BRUSH_FALLOFF_SMOOTH, 1.0f, 0);
+    CGrid c(0.1f);
+    clay_voxel_grab_tx* tx = clay_voxel_grab_begin(c.grid, kOrigin, &verb, 1);
+    REQUIRE(tx != nullptr);
+
+    // brush::steady_path clamps a stroke to 0.95. This REFUSES above it, so a
+    // host setting 0.99 cannot get 0.95 on a stroke and 0.99 on a grab.
+    CHECK(clay_voxel_grab_set_steady(tx, 0.0f) == CLAY_OK);
+    CHECK(clay_voxel_grab_set_steady(tx, 0.95f) == CLAY_OK);
+    CHECK(clay_voxel_grab_set_steady(tx, 0.96f) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_voxel_grab_set_steady(tx, 1.0f) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_voxel_grab_set_steady(tx, -0.1f) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_voxel_grab_set_steady(nullptr, 0.5f) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    clay_voxel_grab_destroy(tx);
+}
