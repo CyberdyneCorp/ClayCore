@@ -147,7 +147,7 @@ representation, `s` the SDF one, `m` a mesh layer's own triangles.
 | Pinch | Pinch | `magnify` (negative), `sculpt_pinch` | s v | `voxel_pinch` | 0.0041 | interactive |
 | Magnify | Inflate (local) | `magnify` (positive), `sculpt_magnify` | s v | `voxel_magnify` | 0.0041 | interactive |
 | Magnify / Pinch (SDF) | — | `magnify` deformer | s | `magnify_pinch` | 0.289 | gesture |
-| Rotate | Twist | `pose` / `pose_line` | s | `pose_region` | 0.0038 | gesture |
+| Rotate | Twist | `pose` / `pose_line` | s | `pose_region` | 0.0005 | gesture |
 | SnakeHook | Tube / SnakeHook | `brush::snakehook` | s | `snakehook_tendrils` | 0.289 | gesture |
 | — | Tube | `brush::tube` | s | `tube_create` | 0.0009 | gesture |
 | Trim (Rect/Circle/Lasso) | Trim | `cut::cut_item` | s | `cut_create` / `cut_passes` | 0.0001 / 0.077 | gesture |

@@ -103,11 +103,11 @@
       "measuredMs": 0.1613
     },
     "pose_region": {
-      "budgetMs": 2.9341,
+      "budgetMs": 0.3462,
       "class": "gesture",
       "machineFactor": 0.9957,
-      "measuredMs": 1.9561,
-      "rawMs": 1.9476
+      "measuredMs": 0.2308,
+      "rawMs": 0.2298
     },
     "sdf_consolidate": {
       "budgetMs": 373.7525,
@@ -4562,8 +4562,8 @@
       "measurements": [
         {
           "batch": 512,
-          "p50Ms": 0.606208,
-          "p95Ms": 0.62725,
+          "p50Ms": 0.222708,
+          "p95Ms": 0.228375,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -4571,8 +4571,8 @@
         },
         {
           "batch": 512,
-          "p50Ms": 0.73675,
-          "p95Ms": 0.775292,
+          "p50Ms": 0.221958,
+          "p95Ms": 0.227917,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -4580,8 +4580,8 @@
         },
         {
           "batch": 512,
-          "p50Ms": 1.900792,
-          "p95Ms": 1.947584,
+          "p50Ms": 0.220584,
+          "p95Ms": 0.224583,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
