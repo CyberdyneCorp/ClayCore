@@ -360,13 +360,44 @@ def worst_p95(case: dict) -> float:
     its unluckiest, and for these cases the axis is passes over one sculpt
     rather than a growth curve, so no point is privileged the way the largest
     document is elsewhere.
+
+    AND THE FIRST PASS IS NOT ONE OF THE OBSERVATIONS (issue #544). It carries
+    what the session pays ONCE -- tape compile, first allocation, thread-pool
+    spin-up -- and none of it recurs on the passes after it. Including it does
+    not merely add noise, it adds a point drawn from a DIFFERENT DISTRIBUTION,
+    and on a median of eight that one point can reorder the sort and push the
+    score past tolerance while the work got cheaper.
+
+    `cut_passes` on the v0.103.0 gate is the worked example. Seven of its eight
+    points improved by 11-19% and the total fell 3.4%, and it was scored a 1.46x
+    REGRESSION:
+
+        stamp 1   0.1284 -> 0.3569   2.78x   first touch, and unstable across
+                                             runs: 0.4278 on another attempt
+        stamps 2-8                   0.81 .. 0.89x, every one better
+        sum       2.4248 -> 2.3435   0.966x
+        median    0.3044 -> 0.3105   scored "1.46x"
+
+    Scoring the SUM was the other candidate and is rejected: it is the honest
+    statement of what a session cost, but it is ~8x the median, so every
+    absolute budget drawn against these cases would have to be redrawn in the
+    same change. Dropping the first point keeps the scale and removes exactly
+    the observation that does not belong to the thing being measured.
+
+    Applied to BOTH sides by construction, since a baseline is scored through
+    this same function -- so a baseline recorded before this change is still
+    compared like with like.
     """
     ms = case.get("measurements", [])
     if not ms:
         return float("nan")
     values = [m["p95Ms"] for m in ms]
     if single_observation(case):
-        return statistics.median(values)
+        # Every point kept when there are too few to spare one: a two-pass case
+        # scored on its second alone would be one observation wearing a
+        # median's name.
+        scored = values[1:] if len(values) >= 4 else values
+        return statistics.median(scored)
     return max(values)
 
 
@@ -634,6 +665,46 @@ def _self_test() -> int:
     expect("an UNKNOWN run does NOT say every case was inside tolerance",
            "inside tolerance" not in drift_report(unknown))
     expect("an unknown run says so", "unknown" in drift_report(unknown))
+
+    # -- the first pass is not one of the observations (issue #544) ----------
+    #
+    # cut_passes as the v0.103.0 gate actually measured it. Seven of eight
+    # points improved by 11-19% and the total fell 3.4%, and the case was
+    # scored a regression because the median of all eight includes a
+    # first-touch point drawn from a different distribution.
+    #
+    # Pinned with the REAL numbers rather than a synthetic pair, so the case
+    # cannot pass by being easier than the one that failed.
+    base_stamps = [0.1284, 0.1597, 0.2120, 0.2808, 0.3279, 0.3835, 0.4416, 0.4909]
+    now_stamps = [0.3569, 0.1298, 0.1805, 0.2301, 0.2852, 0.3359, 0.3881, 0.4370]
+
+    def _progressive(stamps):
+        return {"name": "cut_passes",
+                "measurements": [{"p95Ms": v, "p50Ms": v, "samples": 1, "repeats": 1}
+                                 for v in stamps]}
+
+    base_score = worst_p95(_progressive(base_stamps))
+    now_score = worst_p95(_progressive(now_stamps))
+    ratio = now_score / base_score
+
+    # The work got cheaper, and the score now says so.
+    assert sum(now_stamps) < sum(base_stamps), "fixture no longer has the total falling"
+    assert ratio < 1.0, f"cut_passes still scores as a regression: {ratio:.3f}x"
+
+    # And the OLD scoring is shown to disagree, so this asserts a change rather
+    # than a property the median already had.
+    import statistics as _st
+    old_ratio = _st.median(now_stamps) / _st.median(base_stamps)
+    assert old_ratio > 1.0, "the median of all eight no longer reproduces the defect"
+    assert ratio < old_ratio, "dropping the first point changed nothing"
+
+    # A short axis keeps every point: a two-pass case scored on its second
+    # alone would be one observation wearing a median's name.
+    two = [0.5, 0.1]
+    assert worst_p95(_progressive(two)) == _st.median(two), "a short axis lost a point"
+
+    print(f"check_device_bench self-test: cut_passes {old_ratio:.3f}x by the old "
+          f"scoring, {ratio:.3f}x with the first pass excluded")
 
     print("check_device_bench self-test: "
           + ("OK" if failures == 0 else f"{failures} FAILED"))
