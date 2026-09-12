@@ -8481,11 +8481,26 @@ struct GestureResolver {
     }
 };
 
+// WHERE A GESTURE REACHED, for a caller that has to invalidate it (issue #551).
+//
+// A host given only a count has to reconstruct the region from the brush size
+// and the distance travelled, which is both looser than this and WRONG under
+// symmetry: the engine states one box per drag image, and a caller with one box
+// either misses the reflected side or unions them -- and the union of two balls
+// a diameter apart is the slab between them, which under a mirror is the whole
+// document.
+struct GestureRegionOut {
+    float* boxes = nullptr;  // six floats per box: min xyz then max xyz
+    std::size_t capacity = 0;
+    std::size_t* out_count = nullptr;
+};
+
 clay_result apply_surface_gesture(clay_document* doc, clay_layer_id layer,
                                   const scene::Layer& l,
                                   const std::vector<brush::PreparedMove>& prepared,
                                   const GestureResolver& resolve_into,
-                                  std::vector<math::Aabb> reach, size_t* out_applied) {
+                                  std::vector<math::Aabb> reach, size_t* out_applied,
+                                  GestureRegionOut* regions = nullptr) {
     const scene::Layer* lp = &l;
     // THE CALLER'S BALLS ARE BOXES IN THIS LAYER'S FIELD, AND A LAYER'S FIELD IS
     // NOT THE DOCUMENT'S. A smooth or extended fold above this layer moves the
@@ -8520,6 +8535,34 @@ clay_result apply_surface_gesture(clay_document* doc, clay_layer_id layer,
     for (const scene::Layer& other : doc->doc.document.layers) {
         if (&other == lp || other.sdf != lp->sdf) continue;
         reach.push_back(scene::layer_influence_bound_in_document(doc->doc.document, other.id));
+    }
+
+    // THE REGION IS FINAL HERE and nothing has been touched yet: the dilation
+    // above and the sharer loop are reads, drag_frontier below takes a CONST
+    // document, and prepare_frontier_seeds after it is the first thing that
+    // records anything. So a caller's buffer is checked HERE, and a refusal
+    // costs it nothing -- the same order clay_layer_move_surface already uses
+    // for a protected layer, which is refused before the resampling rather
+    // than after it.
+    //
+    // The count is reported even when the buffer is too small, so a caller
+    // sizes and asks again rather than guessing.
+    if (regions) {
+        if (regions->out_count) *regions->out_count = reach.size();
+        if (reach.size() > regions->capacity)
+            return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                        "the gesture reached " + std::to_string(reach.size()) +
+                            " regions and the buffer holds " +
+                            std::to_string(regions->capacity) + "; nothing was applied");
+        for (std::size_t i = 0; i < reach.size(); ++i) {
+            float* b = regions->boxes + i * 6;
+            b[0] = reach[i].min.x;
+            b[1] = reach[i].min.y;
+            b[2] = reach[i].min.z;
+            b[3] = reach[i].max.x;
+            b[4] = reach[i].max.y;
+            b[5] = reach[i].max.z;
+        }
     }
 
     // What the drag can state about HISTORY, beside what the ball states about
@@ -8569,9 +8612,9 @@ clay_result apply_surface_gesture(clay_document* doc, clay_layer_id layer,
 
 }  // namespace
 
-clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
-                                    const float centre[3], const float displacement[3],
-                                    const clay_move_params* params, size_t* out_applied) {
+clay_result move_surface_impl(clay_document* doc, clay_layer_id layer, const float centre[3],
+                              const float displacement[3], const clay_move_params* params,
+                              size_t* out_applied, GestureRegionOut* regions) {
     const scene::Layer* l = nullptr;
     std::vector<brush::PreparedMove> prepared;
     float radius = 0.0f;
@@ -8623,7 +8666,27 @@ clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
     resolver.kind = GestureResolver::Kind::Move;
     resolver.displacement = world_pull;
     return apply_surface_gesture(doc, layer, *l, prepared, resolver, std::move(reach),
-                                 out_applied);
+                                 out_applied, regions);
+}
+
+clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
+                                    const float centre[3], const float displacement[3],
+                                    const clay_move_params* params, size_t* out_applied) {
+    return move_surface_impl(doc, layer, centre, displacement, params, out_applied, nullptr);
+}
+
+clay_result clay_layer_move_surface_regions(clay_document* doc, clay_layer_id layer,
+                                            const float centre[3], const float displacement[3],
+                                            const clay_move_params* params, size_t* out_applied,
+                                            float* out_boxes_xyz, size_t box_capacity,
+                                            size_t* out_box_count) {
+    if (box_capacity > 0 && !out_boxes_xyz)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "a non-zero capacity needs a buffer");
+    GestureRegionOut regions;
+    regions.boxes = out_boxes_xyz;
+    regions.capacity = box_capacity;
+    regions.out_count = out_box_count;
+    return move_surface_impl(doc, layer, centre, displacement, params, out_applied, &regions);
 }
 
 clay_result clay_layer_warp_cost_get(const clay_document* doc, clay_layer_id layer,

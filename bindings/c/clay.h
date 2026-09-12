@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 105
+#define CLAY_ABI_MINOR 106
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -6555,6 +6555,43 @@ clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
                                     const float centre[3],
                             const float displacement[3], const clay_move_params* params,
                             size_t* out_applied);
+
+/* The same drag, and it reports WHERE IT REACHED (ABI 0.106.0, issue #551).
+ *
+ * `clay_layer_move_surface` answers a COUNT, so a host that has to invalidate
+ * the edit reconstructs the region itself from the brush size and the distance
+ * travelled. That reconstruction is looser than the one this call already
+ * computes, and under symmetry it is WRONG: a drag states one box PER IMAGE,
+ * and a caller holding one box either misses the reflected side or unions them
+ * -- and the union of two balls a diameter apart is the slab between them,
+ * which under a mirror is the whole document.
+ *
+ * WHAT THE BOXES ARE. Six floats each, min xyz then max xyz, in DOCUMENT space
+ * and already dilated the way the invalidation itself is: by what a fold above
+ * the layer can move, and by the whole influence bound of every other layer
+ * sharing this edit list. They are what the gesture actually invalidates, not
+ * an approximation of it -- a host may mark exactly these and nothing else.
+ *
+ * THE COUNT IS NOT THE DRAG'S ALONE. It is one box per drag image plus one per
+ * layer sharing the edit list, so it is a property of the LAYER rather than of
+ * this gesture, and a host may size its buffer once.
+ *
+ * A BUFFER TOO SMALL IS REFUSED BEFORE ANYTHING IS APPLIED, with
+ * CLAY_ERROR_BUFFER_TOO_SMALL, and *out_box_count reports what was needed. The
+ * region is final before the first edit is recorded, which is what makes the
+ * refusal free -- the same order this call already uses for a protected layer,
+ * refused before the resampling rather than after it. A partial fill that had
+ * already edited the document would leave a caller unable to invalidate
+ * correctly, which is worse than refusing.
+ *
+ * Passing a capacity of 0 with a null buffer is the way to ASK the count
+ * without applying: it is refused, nothing is applied, and the count is
+ * reported. */
+clay_result clay_layer_move_surface_regions(clay_document* doc, clay_layer_id layer,
+                                            const float centre[3], const float displacement[3],
+                                            const clay_move_params* params, size_t* out_applied,
+                                            float* out_boxes_xyz, size_t box_capacity,
+                                            size_t* out_box_count);
 
 /* What the warps a layer has accumulated are charging it (issue #452).
  *
