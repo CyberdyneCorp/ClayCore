@@ -344,7 +344,7 @@ TEST_CASE("brick lod meshing: a level above 1 is refused, not clamped") {
     }
 }
 
-TEST_CASE("brick lod meshing: field attributes are level 0 only") {
+TEST_CASE("brick lod meshing: colours are level 0 only, gradients are not") {
     Doc doc;
     add_sphere(doc, 0.4f, 0, 0, 0);
     Cache cache(make_cache());
@@ -367,19 +367,57 @@ TEST_CASE("brick lod meshing: field attributes are level 0 only") {
         CHECK(clay_mesh_normals(g.m) != nullptr);
         CHECK(clay_mesh_colors(c.m) != nullptr);
     }
-    // At lod 1 they are refused rather than quietly downgraded: a coarse vertex
-    // is not on the field's surface, so the per-brick culled tape that makes
-    // them exact at lod 0 no longer agrees with the whole document's — and the
-    // mip carries no colour lattice, which read_bricks already reports rather
-    // than averaging.
+    // COLOURS stay refused at lod 1, and for their own reason: the mip carries
+    // no colour lattice, which read_bricks already reports rather than
+    // averaging. Nothing supplies one, so there is nothing to downgrade from.
     {
-        MeshHandle g, c;
-        CHECK(clay_brick_cache_mesh_lod(cache, doc.d, &gradient, 1, nullptr, 0, nullptr, &g.m) ==
-              CLAY_ERROR_INVALID_ARGUMENT);
+        MeshHandle c;
         CHECK(clay_brick_cache_mesh_lod(cache, doc.d, &coloured, 1, nullptr, 0, nullptr, &c.m) ==
               CLAY_ERROR_INVALID_ARGUMENT);
-        CHECK(g.m == nullptr);
         CHECK(c.m == nullptr);
+    }
+    // GRADIENT NORMALS ARE NOW ANSWERED AT A LEVEL (issue #549), through the
+    // WHOLE-DOCUMENT tape rather than the per-brick culled ones. The objection
+    // that kept them out was about the CULL -- a coarse vertex sits off the
+    // field's surface, where a culled tape and the whole one are only both
+    // out-of-band rather than equal -- and the whole document's tape is not
+    // band-clamped, so it has a real gradient exactly there.
+    {
+        MeshHandle g;
+        REQUIRE(clay_brick_cache_mesh_lod(cache, doc.d, &gradient, 1, nullptr, 0, nullptr,
+                                          &g.m) == CLAY_OK);
+        REQUIRE(clay_mesh_vertex_count(g.m) > 0);
+        REQUIRE(clay_mesh_normals(g.m) != nullptr);
+
+        // And they are the FIELD'S normals, not the triangles'. Scored against
+        // the sphere's own analytic normal, which at radius r about the origin
+        // is the unit position -- a check the mesher cannot satisfy by
+        // accident, and one that face normals on a coarse lattice fail.
+        const std::size_t n = clay_mesh_vertex_count(g.m);
+        const float* pos = clay_mesh_positions(g.m);
+        const float* nrm = clay_mesh_normals(g.m);
+        REQUIRE(pos != nullptr);
+        std::size_t compared = 0, bad = 0;
+        double worst = 0.0;
+        for (std::size_t i = 0; i < n; ++i) {
+            const double px = pos[i * 3], py = pos[i * 3 + 1], pz = pos[i * 3 + 2];
+            const double pl = std::sqrt(px * px + py * py + pz * pz);
+            const double nx = nrm[i * 3], ny = nrm[i * 3 + 1], nz = nrm[i * 3 + 2];
+            const double nl = std::sqrt(nx * nx + ny * ny + nz * nz);
+            if (!(pl > 1e-6) || !(nl > 1e-6)) continue;
+            double dot = (px * nx + py * ny + pz * nz) / (pl * nl);
+            if (dot > 1.0) dot = 1.0;
+            if (dot < -1.0) dot = -1.0;
+            const double deg = std::acos(dot) * 57.29577951308232;
+            ++compared;
+            if (deg > worst) worst = deg;
+            if (deg > 25.0) ++bad;
+        }
+        // A pass over nothing would be a pass for the wrong reason.
+        REQUIRE(compared > 0);
+        CAPTURE(worst);
+        CAPTURE(compared);
+        CHECK(bad == 0);
     }
     // Face normals come from the triangles and need no field, so they answer at
     // every level — otherwise "refused" would mean "no normals at lod 1".

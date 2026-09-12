@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 103
+#define CLAY_ABI_MINOR 104
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -12205,15 +12205,27 @@ clay_result clay_brick_cache_mesh(const clay_brick_cache* cache, const clay_docu
  * cheap way to ask first, and clay_brick_cache_build_mip's *out_built is the
  * same "not yet" reported where it is expected rather than exceptional.
  *
- * COLOURS AND GRADIENT NORMALS ARE REFUSED AT LOD 1, not downgraded. They are
- * evaluated through per-brick culled tapes whose agreement with the whole
- * document's holds because a vertex sits on the field's surface, well inside
- * the band; a coarse vertex sits on the MIP's surface, which can be most of a
- * coarse cell off it, where the culled tape and the full one are only both
- * out-of-band rather than equal. The mip also carries no colour lattice of its
- * own, which is what clay_brick_cache_read_bricks already reports rather than
- * averaging. CLAY_NORMAL_FACE comes from the triangles, needs no field, and
- * works at every level. */
+ * COLOURS ARE REFUSED AT LOD 1, not downgraded: the mip carries no colour
+ * lattice of its own, which is what clay_brick_cache_read_bricks already
+ * reports rather than averaging. Nothing here supplies one.
+ *
+ * GRADIENT NORMALS ARE ANSWERED AT EVERY LEVEL (ABI 0.104.0, issue #549), but
+ * NOT the same way. At lod 0 they come from per-brick CULLED tapes, so their
+ * cost follows the bricks named rather than the document's size. At a LEVEL
+ * they come from the WHOLE-DOCUMENT tape, and that difference is the whole
+ * point: a coarse vertex sits on the MIP's surface, which can be most of a
+ * coarse cell off the field's, and out there a culled tape and the full one
+ * are only both OUT-OF-BAND rather than equal. The whole document's tape is
+ * not band-clamped, so it still has a real gradient at that point.
+ *
+ * SO A LEVEL'S ATTRIBUTE PASS DOES NOT FOLLOW THE BRICKS NAMED. That is the
+ * cost, and it is taken because the alternative a host actually has is worse:
+ * CLAY_NORMAL_FACE on a coarse lattice measured up to 84.78 degrees from the
+ * field where the gradient reads 0.00, and a coarse surface shaded from the
+ * triangles is face-shaded by construction.
+ *
+ * CLAY_NORMAL_FACE comes from the triangles, needs no field, and works at every
+ * level. */
 clay_result clay_brick_cache_mesh_lod(const clay_brick_cache* cache, const clay_document* doc,
                                       const clay_brick_mesh_params* params, int32_t lod,
                                       const int32_t* keys_xyz, size_t key_count,
