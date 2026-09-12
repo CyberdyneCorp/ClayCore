@@ -142,6 +142,47 @@ enum class Degradation : std::uint8_t {
 };
 
 // What a layer's chain currently costs the marcher, and what is causing it.
+// BELOW THIS THE MARCH HAS ALREADY FAILED, so a bake is advised whatever the
+// layer is made of (issue #534).
+//
+// Consolidation is normally declined on a layer that is one drawable carrying a
+// brush chain, and that refusal is right in the regime it was measured in: the
+// bake swaps a cheap analytic item for a dense volume and came out 6x WORSE on
+// a real gesture, the 29x better step scale swamped by what the volume costs
+// per sample. A real session goes far past that regime.
+//
+// Measured with benchmarks/move_collapse_crossover_probe.cpp -- N dabs, then
+// 4096 rays against the parametric layer and against a consolidated copy:
+//
+//     dabs  step scale   parametric      baked    ratio
+//        1    0.727273      4.67 ms    7.30 ms    0.64x
+//        4    0.279762      7.80 ms    8.35 ms    0.93x
+//        6    0.147973     17.05 ms    9.01 ms    1.89x
+//        8    0.078267     37.47 ms    9.03 ms    4.15x
+//       16    0.006126    202.06 ms   10.24 ms   19.73x
+//
+// The curves cross near a step scale of 0.15, and the baked arm is FLAT: a
+// redistanced volume reports 0.577 at every depth -- 1/sqrt(3) to six figures
+// across an 8x range of cell sizes, because redistancing produces a
+// unit-gradient field. That is a property of redistancing rather than of the
+// fixture, and it is what makes a constant floor defensible here.
+//
+// AND PAST IT THE FIELD RENDERS WRONG, not merely slowly. At 16 dabs the
+// parametric arm scores 0 hits of 1844: the march exhausts its iteration budget
+// before reaching a form that is plainly there, and waiting does not fix it. A
+// host reproduced the same cliff independently -- full hits at 0.0247, 94%
+// loss at 0.0072.
+//
+// 0.125 sits below the measured 0.148 crossover, so a layer is advised only
+// once the bake is a clear win rather than a coin toss.
+//
+// A SCENE-MODEL CONSTANT RATHER THAN THE CALLER'S `advise_below_step_scale`.
+// Those answer different questions: the caller's says "is this degraded by my
+// standards", and this says "does the cure apply at all". A host that set a
+// generous threshold of its own should still be told when marching has stopped
+// working.
+inline constexpr float kMarchFailsBelow = 0.125f;
+
 struct FieldReport {
     float lipschitz = 1.0f;        // the compiled tape's declared bound
     float safe_step_scale = 1.0f;  // 1 / max(lipschitz, 1)

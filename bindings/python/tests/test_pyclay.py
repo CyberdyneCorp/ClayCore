@@ -4137,11 +4137,14 @@ def test_field_report_names_which_mechanism_degraded_a_chain():
     assert moved["longest_deformer_chain"] == 9
     assert moved["steepest_volume"] == pytest.approx(1.0)   # no volume is involved
     assert moved["safe_step_scale"] < 0.05
-    # NOT advised, and issue #387 is why: the layer is ONE analytic item, so a
-    # bake wins back no edit list and no stacked volume and swaps a cheap
-    # primitive for a dense one. Measured on a real gesture, a 29x better step
-    # scale and a 6x SLOWER gesture. The advisory names the cure that applies.
-    assert moved["advises_consolidation"] is False
+    # ADVISED since #534. #387's reasoning holds above the floor -- a
+    # deformer-only layer wins back no edit list and no stacked volume, so the
+    # bake is normally a straight loss at 29x the step scale and 6x the time --
+    # but that names a REGIME and this fixture is far past it. The crossover is
+    # near a step scale of 0.148 and this one is under 0.05, where the baked arm
+    # measured 4x to 19x faster; deeper still, the march exhausts its budget and
+    # the field renders WRONG rather than slowly.
+    assert moved["advises_consolidation"] is True
     assert moved["degradation"] == "deformers"
     assert moved["steepest_deformer_chain"] > 1.0
     assert moved["drawable_count"] == 1

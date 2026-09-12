@@ -211,7 +211,19 @@ FieldReport report_layer(const Layer& layer, float advise_below_step_scale) {
     // Advised whenever there IS something to absorb. On a layer degraded by
     // both, the bake fixes both — it is the deformer-only shape that is the
     // loss.
-    out.advises_consolidation = degraded && volumes;
+    //
+    // ... OR WHEN THE MARCH HAS ALREADY FAILED (issue #534). The refusal above
+    // is right in the regime it was measured in and wrong past it: the
+    // crossover is near a step scale of 0.148, and by 16 dabs the parametric
+    // arm scores 0 hits of 1844 — the field renders WRONG rather than slowly,
+    // and waiting does not fix it. kMarchFailsBelow sits under the measured
+    // crossover so a layer is advised only once the bake is a clear win.
+    //
+    // Keyed on the STEP SCALE and not on chain depth, because two runs at
+    // identical depth reached step scales 350x apart depending on how much the
+    // grabs overlapped. safe_step_scale already absorbs that, and it is what
+    // ray cost actually depends on.
+    out.advises_consolidation = degraded && (volumes || out.safe_step_scale < kMarchFailsBelow);
     return out;
 }
 
