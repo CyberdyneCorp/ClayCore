@@ -687,3 +687,185 @@ TEST_CASE("c move: a many-item drag resolves each item from its own share") {
         CHECK(top_at(together.doc, x) == doctest::Approx(top_at(alone.doc, x)).epsilon(1e-4));
     }
 }
+
+// -- where a drag reached (issue #551) ---------------------------------------
+//
+// clay_layer_move_surface answers a COUNT, so a host that has to invalidate the
+// edit reconstructs the region from brush size and distance travelled. That is
+// looser than what the engine already computed, and under symmetry it is wrong:
+// the engine states one box PER DRAG IMAGE, and a host holding one box either
+// misses the reflected side or unions them into the slab between them.
+
+namespace {
+
+struct Box {
+    float min[3], max[3];
+};
+
+bool inside(const Box& b, float x, float y, float z, float slack) {
+    return x >= b.min[0] - slack && x <= b.max[0] + slack && y >= b.min[1] - slack &&
+           y <= b.max[1] + slack && z >= b.min[2] - slack && z <= b.max[2] + slack;
+}
+
+clay_layer_id one_ball(clay_document* doc) {
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "form", &layer) == CLAY_OK);
+    const float r = 1.0f;
+    clay_item* item = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+    REQUIRE(item != nullptr);
+    clay_item_set_op(item, CLAY_OP_ADD);
+    clay_node_id node = 0;
+    REQUIRE(clay_layer_add_item(doc, layer, item, &node) == CLAY_OK);
+    clay_item_destroy(item);
+    return layer;
+}
+
+}  // namespace
+
+TEST_CASE("a drag reports the regions it reached, and they COVER what changed") {
+    CDoc d;
+    const clay_layer_id layer = one_ball(d.doc);
+
+    // Sample a shell around the whole form before and after, so "what changed"
+    // is measured rather than assumed.
+    std::vector<float> pts;
+    for (int i = 0; i < 24; ++i)
+        for (int j = 0; j < 24; ++j)
+            for (int k = 0; k < 24; ++k) {
+                pts.push_back(-1.6f + 3.2f * static_cast<float>(i) / 23.0f);
+                pts.push_back(-1.6f + 3.2f * static_cast<float>(j) / 23.0f);
+                pts.push_back(-1.6f + 3.2f * static_cast<float>(k) / 23.0f);
+            }
+    const std::size_t n = pts.size() / 3;
+    std::vector<float> before(n, 0.0f), after(n, 0.0f);
+    REQUIRE(clay_layer_eval_points(d.doc, layer, "cpu", pts.data(), n, before.data(), nullptr) ==
+            CLAY_OK);
+
+    const float centre[3] = {0.0f, 0.0f, 1.0f};
+    const float disp[3] = {0.0f, 0.0f, 0.25f};
+    const clay_move_params p = move_params(0.40f);
+
+    std::vector<float> boxes(6 * 32, 0.0f);
+    std::size_t applied = 0, count = 0;
+    REQUIRE(clay_layer_move_surface_regions(d.doc, layer, centre, disp, &p, &applied, boxes.data(),
+                                            32, &count) == CLAY_OK);
+    REQUIRE(applied > 0);
+    REQUIRE(count >= 1);
+    REQUIRE(count <= 32);
+
+    REQUIRE(clay_layer_eval_points(d.doc, layer, "cpu", pts.data(), n, after.data(), nullptr) ==
+            CLAY_OK);
+
+    // THE ORACLE: every point whose field actually moved must lie inside one of
+    // the reported boxes. A region set that missed one would leave a host with
+    // a stale brick and no way to know.
+    std::size_t changed = 0, uncovered = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (std::fabs(after[i] - before[i]) <= 1e-5f) continue;
+        ++changed;
+        bool covered = false;
+        for (std::size_t b = 0; b < count && !covered; ++b) {
+            Box box;
+            std::memcpy(box.min, &boxes[b * 6], sizeof box.min);
+            std::memcpy(box.max, &boxes[b * 6 + 3], sizeof box.max);
+            covered = inside(box, pts[i * 3], pts[i * 3 + 1], pts[i * 3 + 2], 1e-4f);
+        }
+        if (!covered) ++uncovered;
+    }
+    // A drag that changed nothing would pass the coverage check for the wrong
+    // reason, so the sample has to have moved.
+    CAPTURE(changed);
+    REQUIRE(changed > 0);
+    CHECK(uncovered == 0);
+}
+
+TEST_CASE("a mirrored drag reports a box PER IMAGE, which one box cannot express") {
+    CDoc d;
+    const clay_layer_id layer = one_ball(d.doc);
+    REQUIRE(clay_set_layer_mirror(d.doc, layer, 1, 0, 0, 0.0f) == CLAY_OK);
+
+    // Off the mirror plane, so the two images are genuinely apart.
+    const float centre[3] = {0.7f, 0.0f, 0.7f};
+    const float disp[3] = {0.0f, 0.0f, 0.2f};
+    const clay_move_params p = move_params(0.30f);
+
+    std::vector<float> boxes(6 * 32, 0.0f);
+    std::size_t applied = 0, count = 0;
+    REQUIRE(clay_layer_move_surface_regions(d.doc, layer, centre, disp, &p, &applied, boxes.data(),
+                                            32, &count) == CLAY_OK);
+    REQUIRE(count >= 2);
+
+    // The images straddle x = 0: one box reaches positive x, another negative.
+    bool pos = false, neg = false;
+    for (std::size_t b = 0; b < count; ++b) {
+        if (boxes[b * 6 + 3] > 0.2f) pos = true;   // max.x
+        if (boxes[b * 6 + 0] < -0.2f) neg = true;  // min.x
+    }
+    CHECK(pos);
+    CHECK(neg);
+}
+
+TEST_CASE("a buffer too small is refused BEFORE anything is applied") {
+    CDoc d;
+    const clay_layer_id layer = one_ball(d.doc);
+    REQUIRE(clay_set_layer_mirror(d.doc, layer, 1, 0, 0, 0.0f) == CLAY_OK);
+
+    const float probe[3] = {0.0f, 0.0f, 1.0f};
+    float before = 0.0f;
+    REQUIRE(clay_layer_eval_points(d.doc, layer, "cpu", probe, 1, &before, nullptr) == CLAY_OK);
+
+    const float centre[3] = {0.7f, 0.0f, 0.7f};
+    const float disp[3] = {0.0f, 0.0f, 0.2f};
+    const clay_move_params p = move_params(0.30f);
+
+    // Capacity 0 and no buffer: the way to ASK the count without applying.
+    std::size_t applied = 12345, count = 0;
+    CHECK(clay_layer_move_surface_regions(d.doc, layer, centre, disp, &p, &applied, nullptr, 0,
+                                          &count) == CLAY_ERROR_BUFFER_TOO_SMALL);
+    CHECK(count >= 2);
+
+    // NOTHING WAS APPLIED. This is the whole point of checking before the edit:
+    // a partial fill after editing would leave a caller unable to invalidate.
+    float after = 0.0f;
+    REQUIRE(clay_layer_eval_points(d.doc, layer, "cpu", probe, 1, &after, nullptr) == CLAY_OK);
+    CHECK(after == before);
+
+    // One short of what it needs is refused the same way.
+    std::vector<float> one(6, 0.0f);
+    std::size_t need = 0;
+    CHECK(clay_layer_move_surface_regions(d.doc, layer, centre, disp, &p, &applied, one.data(), 1,
+                                          &need) == CLAY_ERROR_BUFFER_TOO_SMALL);
+    CHECK(need == count);
+    REQUIRE(clay_layer_eval_points(d.doc, layer, "cpu", probe, 1, &after, nullptr) == CLAY_OK);
+    CHECK(after == before);
+
+    // And sized correctly it goes through.
+    std::vector<float> fit(6 * count, 0.0f);
+    CHECK(clay_layer_move_surface_regions(d.doc, layer, centre, disp, &p, &applied, fit.data(),
+                                          count, &need) == CLAY_OK);
+    CHECK(applied > 0);
+}
+
+TEST_CASE("the counting call still answers exactly what it always did") {
+    // clay_layer_move_surface is unchanged: same drag, same count, and it is
+    // now a thin wrapper over the shared implementation.
+    CDoc a, b;
+    const clay_layer_id la = one_ball(a.doc);
+    const clay_layer_id lb = one_ball(b.doc);
+    const float centre[3] = {0.0f, 0.0f, 1.0f};
+    const float disp[3] = {0.0f, 0.0f, 0.25f};
+    const clay_move_params p = move_params(0.40f);
+
+    std::size_t n_plain = 0, n_regions = 0, count = 0;
+    std::vector<float> boxes(6 * 32, 0.0f);
+    REQUIRE(clay_layer_move_surface(a.doc, la, centre, disp, &p, &n_plain) == CLAY_OK);
+    REQUIRE(clay_layer_move_surface_regions(b.doc, lb, centre, disp, &p, &n_regions, boxes.data(),
+                                            32, &count) == CLAY_OK);
+    CHECK(n_plain == n_regions);
+
+    const float probe[3] = {0.0f, 0.0f, 1.1f};
+    float fa = 0.0f, fb = 0.0f;
+    REQUIRE(clay_layer_eval_points(a.doc, la, "cpu", probe, 1, &fa, nullptr) == CLAY_OK);
+    REQUIRE(clay_layer_eval_points(b.doc, lb, "cpu", probe, 1, &fb, nullptr) == CLAY_OK);
+    CHECK(fa == fb);
+}
