@@ -198,11 +198,12 @@ struct NormalCheck {
     double worst_deg = 0.0;
 };
 
-NormalCheck check_normals(clay_brick_cache* cache, const Doc& d, double tol_deg) {
+NormalCheck check_normals(clay_brick_cache* cache, const Doc& d, double tol_deg,
+                          int normal_mode = CLAY_NORMAL_GRADIENT) {
     NormalCheck nc;
     clay_brick_mesh_params p{};
     p.struct_size = sizeof(p);
-    p.normals = CLAY_NORMAL_GRADIENT;
+    p.normals = normal_mode;
     p.colors = 0;
     clay_mesh* m = nullptr;
     if (clay_brick_cache_mesh(cache, d.doc, &p, nullptr, 0, nullptr, &m) != CLAY_OK || !m)
@@ -345,7 +346,37 @@ int main() {
 
     // "DARK" is a normal, not a hole. Checked after the full session, when the
     // cull has had every chance to drop a warp it should have kept.
-    const NormalCheck nc = check_normals(cache, d, 5.0);
+    const NormalCheck nc = check_normals(cache, d, 5.0, CLAY_NORMAL_GRADIENT);
+
+    // THE TEST THAT DECIDES WHETHER THE SLIVERS CAN SHADE BLACK THROUGH THIS
+    // API AT ALL. `compute_face_normals` (marching.cpp:961) accumulates the
+    // UNNORMALISED cross product per vertex -- whose length is twice the
+    // triangle's area -- and normalises once at the end. That is area
+    // weighting with no separate term, so a near-zero-area triangle
+    // contributes near-zero to its vertices.
+    //
+    // If that holds, CLAY_NORMAL_FACE is already a SMOOTH vertex normal rather
+    // than a flat per-triangle one, a sliver cannot poison it, and a host
+    // asking for FACE at any level already gets shading a sliver cannot dent.
+    // Measured against the field's own gradient on a smooth form: flat
+    // per-triangle normals would disagree wildly; area-weighted ones should
+    // track it closely.
+    const NormalCheck fc = check_normals(cache, d, 5.0, CLAY_NORMAL_FACE);
+    std::printf("\n  CLAY_NORMAL_FACE against the field gradient (are FACE normals flat?):\n");
+    if (!fc.ok || fc.checked == 0) {
+        std::printf("    could not be checked -- this line measures nothing\n");
+    } else {
+        std::printf("    %zu vertices, %zu off by more than 5 deg, worst %.2f deg\n", fc.checked,
+                    fc.bad, fc.worst_deg);
+        if (fc.worst_deg < 15.0)
+            std::printf("    FACE normals are SMOOTH (area-weighted per vertex), not flat. A\n"
+                        "    sliver's near-zero cross product cannot poison them, so the specks\n"
+                        "    cannot come from this call's normals -- whoever shades them flat\n"
+                        "    is doing it downstream of this API.\n");
+        else
+            std::printf("    FACE normals disagree sharply with the field: they are effectively\n"
+                        "    flat, and a sliver CAN shade black through them.\n");
+    }
     std::printf("\n  NORMALS on the brick mesh, against the field's own gradient:\n");
     if (!nc.ok) {
         std::printf("    could not be checked\n");
@@ -374,7 +405,118 @@ int main() {
             std::printf("    ^ a vertex whose stored normal disagrees with the field it sits\n"
                         "      on renders DARK. This is the shape the host's specks would take.\n");
     }
-    std::printf("\n  VERDICT\n");
+      // CANDIDATE FIX, measured before proposing it. `compute_face_normals`
+    // accumulates EVERY triangle's cross product. A degenerate triangle has no
+    // meaningful normal -- its cross product is a direction computed from
+    // near-parallel edges -- so including it is a bug rather than a small
+    // contribution that area weighting handles. This recomputes the same
+    // area-weighted normal with near-zero-area triangles EXCLUDED and scores
+    // it the same way. No vertex moves and no triangle changes; only the
+    // normals attribute differs, which is a far smaller blast radius than
+    // clamping the marcher's t.
+    {
+        clay_brick_mesh_params p{};
+        p.struct_size = sizeof(p);
+        p.normals = CLAY_NORMAL_FACE;
+        p.colors = 0;
+        clay_mesh* m = nullptr;
+        if (clay_brick_cache_mesh(cache, d.doc, &p, nullptr, 0, nullptr, &m) == CLAY_OK && m) {
+            const std::size_t nv = clay_mesh_vertex_count(m);
+            const std::size_t ni = clay_mesh_index_count(m);
+            struct P { float x, y, z; };
+            std::vector<P> pos(nv);
+            std::vector<std::uint32_t> idx(ni);
+            clay_vertex_layout lay{};
+            lay.struct_size = sizeof(lay);
+            lay.stride = sizeof(P);
+            lay.position_offset = 0;
+            lay.normal_offset = -1;
+            lay.color_offset = -1;
+            lay.uv_offset = -1;
+            const bool got = clay_mesh_copy_vertices(m, &lay, pos.data(), nv * sizeof(P)) == CLAY_OK
+                          && clay_mesh_copy_indices(m, idx.data(), ni) == CLAY_OK;
+            clay_mesh_destroy(m);
+            if (got && nv && ni) {
+                // Two accumulations over identical geometry: all triangles,
+                // and all but the slivers. The threshold is on twice the area,
+                // which is the cross product's own length.
+                std::vector<double> na(nv * 3, 0.0), nb(nv * 3, 0.0);
+                double longest = 0.0;
+                std::vector<double> cross(ni / 3 * 3, 0.0), clen(ni / 3, 0.0);
+                for (std::size_t t = 0; t < ni / 3; ++t) {
+                    const P& a = pos[idx[t * 3]];
+                    const P& b = pos[idx[t * 3 + 1]];
+                    const P& c = pos[idx[t * 3 + 2]];
+                    const double ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
+                    const double vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
+                    const double cx = uy * vz - uz * vy, cy = uz * vx - ux * vz,
+                                 cz = ux * vy - uy * vx;
+                    cross[t * 3] = cx; cross[t * 3 + 1] = cy; cross[t * 3 + 2] = cz;
+                    clen[t] = std::sqrt(cx * cx + cy * cy + cz * cz);
+                    if (clen[t] > longest) longest = clen[t];
+                }
+                const double cut = longest * 1e-3;  // a sliver, relative to the mesh's own scale
+                std::size_t excluded = 0;
+                for (std::size_t t = 0; t < ni / 3; ++t) {
+                    const bool sliver = clen[t] < cut;
+                    if (sliver) ++excluded;
+                    for (int k = 0; k < 3; ++k) {
+                        const std::uint32_t v = idx[t * 3 + k];
+                        for (int a2 = 0; a2 < 3; ++a2) {
+                            na[v * 3 + a2] += cross[t * 3 + a2];
+                            if (!sliver) nb[v * 3 + a2] += cross[t * 3 + a2];
+                        }
+                    }
+                }
+                std::vector<float> pts(nv * 3), grads(nv * 3, 0.0f);
+                for (std::size_t i = 0; i < nv; ++i) {
+                    pts[i * 3] = pos[i].x; pts[i * 3 + 1] = pos[i].y; pts[i * 3 + 2] = pos[i].z;
+                }
+                if (clay_layer_eval_gradients(d.doc, d.layer, "cpu", pts.data(), nv,
+                                              grads.data()) == CLAY_OK) {
+                    auto score = [&](const std::vector<double>& acc, std::size_t* bad) {
+                        double worst = 0.0;
+                        *bad = 0;
+                        for (std::size_t i = 0; i < nv; ++i) {
+                            const double l = std::sqrt(acc[i*3]*acc[i*3] + acc[i*3+1]*acc[i*3+1]
+                                                       + acc[i*3+2]*acc[i*3+2]);
+                            const float* g = &grads[i * 3];
+                            const double gl = std::sqrt((double)g[0]*g[0] + (double)g[1]*g[1]
+                                                        + (double)g[2]*g[2]);
+                            if (!(l > 1e-20) || !(gl > 1e-6)) continue;
+                            double dot = (acc[i*3]*g[0] + acc[i*3+1]*g[1] + acc[i*3+2]*g[2])
+                                         / (l * gl);
+                            if (dot > 1.0) dot = 1.0;
+                            if (dot < -1.0) dot = -1.0;
+                            const double deg = std::acos(dot) * 57.29577951308232;
+                            if (deg > 5.0) ++*bad;
+                            if (deg > worst) worst = deg;
+                        }
+                        return worst;
+                    };
+                    std::size_t bad_a = 0, bad_b = 0;
+                    const double wa = score(na, &bad_a);
+                    const double wb = score(nb, &bad_b);
+                    std::printf("\n  CANDIDATE FIX: exclude slivers from the normal accumulation\n");
+                    std::printf("    %zu of %zu triangles excluded (under %.3g of the longest)\n",
+                                excluded, ni / 3, 1e-3);
+                    std::printf("    all triangles      worst %6.2f deg,  %zu over 5 deg\n", wa, bad_a);
+                    std::printf("    slivers excluded   worst %6.2f deg,  %zu over 5 deg\n", wb, bad_b);
+                    if (excluded == 0)
+                        std::printf("    NOTHING WAS EXCLUDED -- the two rows are the same\n"
+                                    "    computation and this comparison measures nothing.\n");
+                    else if (wb < wa * 0.5)
+                        std::printf("    The exclusion helps materially.\n");
+                    else
+                        std::printf("    The exclusion does NOT account for the disagreement --\n"
+                                    "    so the FACE error is marching-cubes tessellation, not\n"
+                                    "    slivers, and excluding them would fix nothing.\n");
+                }
+            }
+        }
+    }
+
+  std::printf("\n  VERDICT\n");
     const bool brick_holed = b3.boundary > 0 || b1.boundary > 0 || b2.boundary > 0;
     const bool doc_holed = d3.boundary > 0 || d1.boundary > 0 || d2.boundary > 0;
     if (brick_holed || doc_holed)
