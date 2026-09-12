@@ -656,6 +656,73 @@ forward-refuse).
    beside it already was. A host that points the mirror per press -- which is a
    natural thing to do -- was paying a full layer refill before the pointer moved.
 
+   **0.104.0 through 0.109.0 are where the Move work actually landed, and two
+   of them fix WRONG ANSWERS rather than slow ones.**
+
+   **0.104.0 IS such a release for a host drawing a COARSE surface** (#549's
+   first half). `clay_brick_cache_mesh_lod` refused gradient normals above lod
+   0, so a coarse surface was face-shaded by construction -- and measured on a
+   worked sphere, face normals on a coarse lattice are up to **84.78 degrees**
+   from the field where the gradient reads 0.00. They are now answered at every
+   level, through the WHOLE-DOCUMENT tape rather than per-brick culled ones,
+   because the refusal was an argument about the CULL and not about the
+   gradient: a coarse vertex sits off the field's surface, where a culled tape
+   and the full one are only both out-of-band rather than equal. The cost is
+   that a level's attribute pass no longer follows the bricks named, and it is
+   taken deliberately. Colour stays refused above lod 0 for a reason the
+   gradient does not share: a mip carries no colour lattice.
+
+   **0.105.0 IS such a release, and it is the one to read if you CACHE a
+   layer's mirror** (#538). `clay_set_layer_mirror` and `clay_set_layer_radial`
+   were write-only, so a host had to remember what it set -- and an undo
+   reverts the engine's command without telling the cache. A host then sculpts
+   through a mirror the artist turned off: reproduced at **0.28 world units** of
+   growth on the far side of a stroke asked to be unmirrored.
+   `clay_document_layer_mirror` and `clay_document_layer_radial` make that
+   unreachable rather than fixed. Each reader takes what its writer takes, so a
+   read value writes straight back.
+
+   **0.106.0 IS such a release if you INVALIDATE after a drag** (#551).
+   `clay_layer_move_surface` reported a count and not a region, so a host
+   reconstructed one from brush size and distance -- looser than the engine's
+   own, and under symmetry WRONG: a drag acts at every image the layer's
+   symmetry makes of it, and one box either misses the reflected side or unions
+   them into the slab between them, which under a mirror is the whole document.
+   `clay_layer_move_surface_regions` reports the boxes the gesture actually
+   invalidates, and refuses a short buffer BEFORE applying anything.
+
+   **0.107.0 IS such a release if you offer PRESSURE on Move** (#533). A drag
+   continued the gesture in progress only if its centre and radius matched BIT
+   FOR BIT, which is true only of a drag holding both fixed. A pressure-driven
+   radius or a centre that follows the finger changed the key every frame and
+   coalescing stopped: 120 warps and 5.726 ms against 2 warps and 0.121 ms --
+   **101x** -- and linear in frame count. `clay_move_params.gesture_id` names
+   the gesture instead. Leave it zero and the old rule applies exactly.
+
+   **0.108.0 changes an ANSWER a host reads** (#534). `advises_consolidation`
+   was `degraded && volumes`, so a single drawable carrying a brush chain was
+   never advised, on the authority of a measurement that consolidation is 6x
+   WORSE there. That measurement names a regime and a session goes past it: the
+   crossover is near a step scale of 0.148, and at 16 dabs the parametric arm
+   scores **0 hits of 1844** -- the field renders wrong rather than slowly. The
+   flag now also fires below a step scale of 0.125.
+
+   **0.109.0 gives Move a lazy mouse and writes down what it ignores** (#532).
+   One field, `steady`; the other eleven stroke-preset controls are documented
+   beside it with the reason each is absent, because a control that does not act
+   is worse than one that is missing. The sentence most worth reading is that
+   `accumulation` does NOT govern how successive Move gestures compose.
+   Non-zero `steady` suspends the promise that updates of 0.1, 0.2 then 0.5 end
+   where a single 0.5 does -- lazy-mouse lag is path-dependent by definition --
+   and at zero the path is bit-identical.
+
+   **AND 0.104.0 CARRIES THE ONE THAT WAS HELD OUT OF v0.103.0.** #541 and #542
+   merged immediately after that tag, so v0.103.0 ships the degraded bound: it
+   made the marcher accept hits on rays that MISS the shape, 4090 against a
+   dense truth of 3960. That is picks landing on nothing, silently. v0.103.0's
+   draft release was never published for this reason, and anything on it or
+   earlier should move.
+
    **0.103.0 does NOT contain the `ease_max_slope` tightening** (#542), which is
    written and tested but held back deliberately. The curves whose derivative
    suprema are known analytically should return them instead of a 512-point
