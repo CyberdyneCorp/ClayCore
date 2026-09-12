@@ -716,7 +716,30 @@ forward-refuse).
    where a single 0.5 does -- lazy-mouse lag is path-dependent by definition --
    and at zero the path is bit-identical.
 
-   **AND 0.104.0 CARRIES THE ONE THAT WAS HELD OUT OF v0.103.0.** #541 and #542
+   **0.110.0 gives the voxel grab the same lazy mouse, and gives every path one
+   ceiling** (#564). clay_voxel_grab_update has clay_sdf_move_update's exact
+   shape -- a total displacement from an anchor -- so it never passes through
+   stroke resolution either and had no lag. It is set on the TRANSACTION rather
+   than in clay_brush_params, which is shared with every stamp-based entry point
+   where a lag is inert. And the two paths had disagreed: brush::steady_path
+   clamps a stroke to 0.95 while clay_sdf_move_begin refused only at 1.0, so a
+   host setting 0.99 got 0.95 on a stroke and 0.99 on a drag. Both gesture paths
+   now refuse above the shared ceiling.
+
+   **0.111.0 CHANGES KERNEL MATH, and it is the one to read if you pin the
+   kernels artifact** (#543). The circ easings declared a Lipschitz slope BELOW
+   their real one -- 39.98 against a measured 90.50 -- because E'(t) =
+   t/sqrt(1-t^2) is unbounded as t approaches 1 and no sampled value can bound
+   an infinity. A bound below the truth does not cost frames, it costs geometry:
+   the marcher steps past the surface, and cregion_weight reaches the singular
+   argument at a grab's CENTRE. The curve is now held at 1 - CLAY_CIRC_GUARD and
+   renormalised so it still reaches 1 exactly, which keeps CLAY_EASE_INOUT's two
+   halves meeting -- clamping alone made them jump by 0.0141, and a
+   discontinuity is worse than the steep slope being fixed. Field values move by
+   at most 1.4% for those three curves and for no others, so a host validating
+   against claycore-kernels.zip should re-baseline its circ rows.
+
+      **AND 0.104.0 CARRIES THE ONE THAT WAS HELD OUT OF v0.103.0.** #541 and #542
    merged immediately after that tag, so v0.103.0 ships the degraded bound: it
    made the marcher accept hits on rays that MISS the shape, 4090 against a
    dense truth of 3960. That is picks landing on nothing, silently. v0.103.0's
