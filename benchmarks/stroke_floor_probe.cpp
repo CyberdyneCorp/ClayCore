@@ -33,6 +33,9 @@
 // figure for the same brush so the comparison cannot be dodged.
 
 #include <chrono>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <vector>
