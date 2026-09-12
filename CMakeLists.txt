@@ -509,6 +509,11 @@ if(CLAY_BUILD_BENCHMARKS)
   target_include_directories(stroke_floor_probe PRIVATE bindings/c)
   clay_apply_warnings(stroke_floor_probe)
 
+  add_executable(sliver_origin_probe benchmarks/sliver_origin_probe.cpp)
+  target_link_libraries(sliver_origin_probe PRIVATE claycore)
+  target_include_directories(sliver_origin_probe PRIVATE bindings/c)
+  clay_apply_warnings(sliver_origin_probe)
+
   add_executable(cull_vs_bound_probe benchmarks/cull_vs_bound_probe.cpp)
   target_link_libraries(cull_vs_bound_probe PRIVATE claycore)
   clay_apply_warnings(cull_vs_bound_probe)
