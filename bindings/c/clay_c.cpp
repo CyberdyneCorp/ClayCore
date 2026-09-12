@@ -8309,9 +8309,13 @@ clay_sdf_move_tx* clay_sdf_move_begin(clay_document* doc, clay_layer_id layer,
         return nullptr;
     }
     if (check_ease(p.ease) != CLAY_OK) return nullptr;
-    // A lag outside [0, 1) is not a lag: 1 would never reach the cursor at all.
-    if (!(p.steady >= 0.0f) || p.steady >= 1.0f) {
-        fail(CLAY_ERROR_INVALID_ARGUMENT, "steady must be in [0, 1)");
+    // THE SAME CEILING EVERY LAZY-MOUSE PATH USES (issue #564). brush::
+    // steady_path clamps a stroke's lag to 0.95; this refuses above it, so a
+    // host setting 0.99 cannot get 0.95 on a stroke and 0.99 on a drag. One
+    // named control with two behaviours is the quiet divergence this header
+    // spends pages warning about.
+    if (!(p.steady >= 0.0f) || p.steady > kSteadyCeiling) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT, "steady must be in [0, 0.95]");
         return nullptr;
     }
     session::SdfSculptPolicy sp;

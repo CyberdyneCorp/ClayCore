@@ -6509,6 +6509,11 @@ typedef struct clay_move_params {
      * and units as clay_stroke_preset.steady: 0 follows the cursor exactly,
      * toward 1 lags more.
      *
+     * THE CEILING IS 0.95, the same one clay_stroke_resolve applies, and a
+     * value above it is REFUSED rather than clamped so the two paths cannot
+     * disagree silently (issue #564). clay_voxel_grab_set_steady is the same
+     * control on the other pointer-driven gesture, with the same ceiling.
+     *
      * IT IS THE ONLY STROKE SETTING A GRAB CAN USE, and the list below is the
      * rest of clay_stroke_preset with the reason each one is absent. A control
      * that does not act is worse than one that is missing, so none of them is

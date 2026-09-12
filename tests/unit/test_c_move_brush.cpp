@@ -1095,8 +1095,16 @@ TEST_CASE("steady is REFUSED where it could not act, rather than ignored") {
     p.steady = 0.0f;
     CHECK(clay_layer_move_surface(d.doc, l, centre, disp, &p, &applied) == CLAY_OK);
 
-    // A lag of 1 never reaches the cursor at all, and outside [0,1) is not a lag.
+    // THE SAME CEILING THE STROKE PATH USES (issue #564): brush::steady_path
+    // clamps to 0.95, and this refuses above it, so a host cannot set a value
+    // one path honours and the other quietly reduces.
     clay_move_params bad = move_params(0.40f);
+    bad.steady = 0.95f;
+    clay_sdf_move_tx* ok = clay_sdf_move_begin(d.doc, l, centre, &bad, nullptr);
+    CHECK(ok != nullptr);
+    if (ok) clay_sdf_move_destroy(ok);
+    bad.steady = 0.96f;
+    CHECK(clay_sdf_move_begin(d.doc, l, centre, &bad, nullptr) == nullptr);
     bad.steady = 1.0f;
     CHECK(clay_sdf_move_begin(d.doc, l, centre, &bad, nullptr) == nullptr);
     bad.steady = -0.1f;
