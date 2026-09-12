@@ -869,3 +869,140 @@ TEST_CASE("the counting call still answers exactly what it always did") {
     REQUIRE(clay_layer_eval_points(b.doc, lb, "cpu", probe, 1, &fb, nullptr) == CLAY_OK);
     CHECK(fa == fb);
 }
+
+// -- naming the gesture a drag continues (issue #533) -------------------------
+//
+// A live drag replaces the leading run of grabs it already emitted rather than
+// stacking, so a long drag costs ONE warp. Without an id the engine infers
+// "already emitted by me" from centre and radius matching BIT FOR BIT, which is
+// true only of a drag holding both fixed. Measured on a 60-frame drag: anchored
+// 2 warps, pressure-driven radius 120 warps and 101x the evaluation.
+
+namespace {
+
+std::uint64_t warp_count(clay_document* doc, clay_layer_id layer) {
+    clay_layer_warp_cost cost;
+    std::memset(&cost, 0, sizeof cost);
+    cost.struct_size = static_cast<uint32_t>(sizeof cost);
+    REQUIRE(clay_layer_warp_cost_get(doc, layer, &cost) == CLAY_OK);
+    return cost.warps;
+}
+
+clay_move_params move_params_id(float radius, std::uint64_t gesture_id) {
+    clay_move_params p = move_params(radius);
+    p.gesture_id = gesture_id;
+    return p;
+}
+
+// One drag of `frames` updates. `grow_radius` and `move_centre` are the two
+// natural gestures that defeated the bit-equality rule.
+std::uint64_t drag(clay_document* doc, clay_layer_id layer, std::uint64_t id, int frames,
+                   bool grow_radius, bool move_centre) {
+    for (int f = 1; f <= frames; ++f) {
+        const float t = static_cast<float>(f) / static_cast<float>(frames);
+        const float radius = grow_radius ? 0.30f + 0.10f * t : 0.30f;
+        const float centre[3] = {move_centre ? 0.05f * t : 0.0f, 0.0f, 1.0f};
+        const float disp[3] = {0.0f, 0.0f, 0.30f * t};
+        const clay_move_params p = move_params_id(radius, id);
+        std::size_t applied = 0;
+        REQUIRE(clay_layer_move_surface(doc, layer, centre, disp, &p, &applied) == CLAY_OK);
+    }
+    return warp_count(doc, layer);
+}
+
+}  // namespace
+
+TEST_CASE("a named gesture coalesces even when its radius and centre move") {
+    constexpr int kFrames = 24;
+
+    // The baseline the old rule already achieved: anchored, fixed radius.
+    {
+        CDoc d;
+        const clay_layer_id l = one_ball(d.doc);
+        CHECK(drag(d.doc, l, 0, kFrames, false, false) <= 2);
+    }
+
+    // WITHOUT an id, the two natural gestures stack one warp per frame. This is
+    // the defect, asserted so the fix cannot be mistaken for a no-op.
+    std::uint64_t unnamed_radius = 0, unnamed_centre = 0;
+    {
+        CDoc d;
+        const clay_layer_id l = one_ball(d.doc);
+        unnamed_radius = drag(d.doc, l, 0, kFrames, true, false);
+        CHECK(unnamed_radius > static_cast<std::uint64_t>(kFrames) / 2);
+    }
+    {
+        CDoc d;
+        const clay_layer_id l = one_ball(d.doc);
+        unnamed_centre = drag(d.doc, l, 0, kFrames, false, true);
+        CHECK(unnamed_centre > static_cast<std::uint64_t>(kFrames) / 2);
+    }
+
+    // WITH an id, both collapse to the anchored cost.
+    {
+        CDoc d;
+        const clay_layer_id l = one_ball(d.doc);
+        const std::uint64_t named = drag(d.doc, l, 0x5eed1234u, kFrames, true, false);
+        CAPTURE(unnamed_radius);
+        CAPTURE(named);
+        CHECK(named <= 2);
+    }
+    {
+        CDoc d;
+        const clay_layer_id l = one_ball(d.doc);
+        const std::uint64_t named = drag(d.doc, l, 0x5eed1234u, kFrames, false, true);
+        CAPTURE(unnamed_centre);
+        CAPTURE(named);
+        CHECK(named <= 2);
+    }
+}
+
+TEST_CASE("two different gestures do NOT fold into each other") {
+    // The reason this is an id and not an epsilon: a re-grab a hair from the
+    // last is a DIFFERENT gesture, and folding it would change the document
+    // rather than speed it up.
+    CDoc d;
+    const clay_layer_id l = one_ball(d.doc);
+    const std::uint64_t after_first = drag(d.doc, l, 1001, 8, true, false);
+    CHECK(after_first <= 2);
+    const std::uint64_t after_second = drag(d.doc, l, 1002, 8, true, false);
+    CHECK(after_second > after_first);
+
+    // And a NAMED gesture never continues an UNNAMED one, in either order.
+    CDoc e;
+    const clay_layer_id m = one_ball(e.doc);
+    const std::uint64_t unnamed = drag(e.doc, m, 0, 4, false, false);
+    const std::uint64_t then_named = drag(e.doc, m, 77, 4, false, false);
+    CHECK(then_named > unnamed);
+}
+
+TEST_CASE("an unset gesture id leaves the old rule exactly as it was") {
+    // A caller compiled against the older struct gets zero here, so the
+    // anchored drag must still coalesce and the moving one must still stack --
+    // identical behaviour, not merely similar.
+    CDoc a, b;
+    const clay_layer_id la = one_ball(a.doc);
+    const clay_layer_id lb = one_ball(b.doc);
+
+    // Same drag, one through the full struct with id 0 and one through a
+    // TRUNCATED struct_size that predates the field entirely.
+    for (int f = 1; f <= 6; ++f) {
+        const float centre[3] = {0.0f, 0.0f, 1.0f};
+        const float disp[3] = {0.0f, 0.0f, 0.05f * static_cast<float>(f)};
+
+        clay_move_params full = move_params_id(0.30f, 0);
+        std::size_t n = 0;
+        REQUIRE(clay_layer_move_surface(a.doc, la, centre, disp, &full, &n) == CLAY_OK);
+
+        clay_move_params old = move_params(0.30f);
+        old.struct_size = static_cast<uint32_t>(offsetof(clay_move_params, gesture_id));
+        REQUIRE(clay_layer_move_surface(b.doc, lb, centre, disp, &old, &n) == CLAY_OK);
+    }
+    CHECK(warp_count(a.doc, la) == warp_count(b.doc, lb));
+
+    const float probe[3] = {0.0f, 0.0f, 1.1f};
+    float fa = 0.0f, fb = 0.0f;
+    REQUIRE(clay_layer_eval_points(a.doc, la, "cpu", probe, 1, &fa, nullptr) == CLAY_OK);
+    REQUIRE(clay_layer_eval_points(b.doc, lb, "cpu", probe, 1, &fb, nullptr) == CLAY_OK);
+    CHECK(fa == fb);
+}

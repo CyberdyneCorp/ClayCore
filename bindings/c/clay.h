@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 106
+#define CLAY_ABI_MINOR 107
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -6452,6 +6452,38 @@ typedef struct clay_move_params {
     float radius;         /* the drag's radius in WORLD units; must be > 0 */
     int32_t ease;         /* falloff curve across the region */
     int32_t front_only;   /* non-zero: do not drag the far side of a form */
+    /* NAMES THE GESTURE (ABI 0.107.0, issue #533). Set it once at touch-down,
+     * hold it for the drag, change it on the next one. Zero means "not said".
+     *
+     * WHAT IT BUYS. A live drag replaces the leading run of grabs it already
+     * emitted rather than stacking them, so a 60-frame drag costs ONE warp.
+     * Without an id the engine has to infer "already emitted by me" from the
+     * centre and radius matching bit for bit -- which is true only of a drag
+     * holding both fixed. A pressure-driven radius, or a centre that follows
+     * the finger, changes the key every frame and the coalescing stops:
+     * measured on a 60-frame drag over a 2-item layer, 15,625 probes,
+     *
+     *     anchored                     2 warps   0.121 ms
+     *     recomputed anchor           58 warps   2.697 ms   47.6x
+     *     pressure-driven radius     120 warps   5.726 ms    101x
+     *     finger-following centre    120 warps   5.740 ms    101x
+     *
+     * and linear in frame count: 30/60/120/240 frames give 60/120/240/480
+     * warps when following, and 2 at every count when anchored.
+     *
+     * So a pressure-modulated radius -- the obvious ZBrush-parity feature --
+     * was not merely unsupported, it was 101x. Blender disabling pressure for
+     * Grab is not an oversight.
+     *
+     * NOT AN EPSILON. Matching centres within a tolerance would paper over a
+     * recomputed anchor while silently folding two genuinely DISTINCT gestures
+     * -- a re-grab a hair from the last -- into one. That changes the document
+     * rather than speeding it up.
+     *
+     * A named gesture never continues an unnamed one, or a differently named
+     * one. Leave it zero and the bit-equality rule applies exactly as before,
+     * which is what a caller compiled against the older struct gets. */
+    uint64_t gesture_id;
 } clay_move_params;
 
 /* Drag a layer's assembled SURFACE — ZBrush's Move. Named apart from

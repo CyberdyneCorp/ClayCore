@@ -7591,6 +7591,9 @@ clay_result resolve_move(const clay_document* doc, clay_layer_id layer, const fl
     settings.radius = p.radius;
     settings.ease = static_cast<std::uint8_t>(p.ease);
     settings.front_only = p.front_only != 0;
+    // Zero-filled by read_desc for a caller compiled against the older struct,
+    // which is exactly "the host did not say" (#533).
+    settings.gesture_id = p.gesture_id;
 
     *out_layer = l;
     if (out_radius) *out_radius = p.radius;
