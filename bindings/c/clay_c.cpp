@@ -16090,14 +16090,31 @@ clay_result brick_cache_mesh_at(const clay_brick_cache* cache, const clay_docume
     if (!doc && (options.normals == mesh::NormalMode::Gradient || options.colors))
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     "gradient normals and colours need a document to sample");
-    // A coarse vertex sits on the MIP's surface rather than the field's, so the
-    // per-brick culled tape that makes these attributes exact at lod 0 is only
-    // both-out-of-band there, not equal. Refused rather than approximated, the
-    // same answer read_bricks gives for a colour at lod 1.
-    if (lod != 0 && (options.normals == mesh::NormalMode::Gradient || options.colors))
+    // COLOURS remain level 0 only, and for a reason gradient normals do not
+    // share: the mip carries no colour lattice of its own, which is what
+    // clay_brick_cache_read_bricks already reports rather than averaging.
+    // Nothing below supplies one.
+    if (lod != 0 && options.colors)
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
-                    "gradient normals and colours are level 0 only: a mip's vertices are not on "
-                    "the field's surface and it carries no colour lattice");
+                    "colours are level 0 only: a mip carries no colour lattice");
+    // GRADIENT NORMALS AT A LEVEL ARE ALLOWED, through the WHOLE-DOCUMENT tape
+    // rather than the per-brick culled ones (issue #549).
+    //
+    // The objection that kept them out was specifically about the CULL: a
+    // coarse vertex sits on the mip's surface rather than the field's, so the
+    // culled tape that is band-clamp identical to the whole document's at lod 0
+    // is only both-OUT-OF-BAND there, not equal. That reasoning is correct and
+    // it is an argument against the culled tape, not against the gradient. The
+    // whole document's tape is not band-clamped, so it has a real gradient at a
+    // point the cached lattice would have clamped flat.
+    //
+    // What it costs is the property #73 bought: at a level the attribute pass
+    // no longer follows the bricks named. That is the trade, taken because the
+    // alternative a host actually has is worse -- measured on a worked sphere,
+    // CLAY_NORMAL_FACE is up to 84.78 degrees from the field where the gradient
+    // is 0.00, and a coarse surface is face-shaded BY CONSTRUCTION while this
+    // is refused.
+    const bool level_gradient = lod != 0 && options.normals == mesh::NormalMode::Gradient;
     // NULL keys means "every brick this level stores", which is what this call
     // did before the key list existed and what an export wants.
     std::vector<brick::BrickKey> subset;
@@ -16116,9 +16133,22 @@ clay_result brick_cache_mesh_at(const clay_brick_cache* cache, const clay_docume
     // revision-cached cull index rides along so the attribute pass reuses the
     // bounds the refill path just computed.
     std::shared_ptr<const scene::CullIndex> index = doc ? doc->cull_index() : nullptr;
-    handle->data = mesh::mesh_bricks(cache->cache, doc ? &doc->doc.document : nullptr, options,
-                                     keys_xyz ? &subset : nullptr, out_ranges ? &ranges : nullptr,
-                                     index.get(), lod);
+    // At a level the geometry is meshed WITHOUT attributes and the normals are
+    // applied afterwards from one whole-document tape; the per-brick pass is
+    // what the cull objection above is about.
+    mesh::MeshingOptions geom = options;
+    if (level_gradient) geom.normals = mesh::NormalMode::None;
+    handle->data = mesh::mesh_bricks(cache->cache,
+                                     level_gradient ? nullptr
+                                                    : (doc ? &doc->doc.document : nullptr),
+                                     geom, keys_xyz ? &subset : nullptr,
+                                     out_ranges ? &ranges : nullptr, index.get(), lod);
+    if (level_gradient) {
+        const scene::Tape whole = scene::compile_document(doc->doc.document);
+        mesh::MeshingOptions attr = options;
+        attr.colors = false;  // refused above; nothing supplies a mip colour
+        mesh::apply_tape_attributes(handle->data, whole, attr);
+    }
     if (out_ranges)
         for (std::size_t i = 0; i < ranges.size(); ++i) {
             out_ranges[i].key[0] = ranges[i].key.x;
