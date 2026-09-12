@@ -499,6 +499,11 @@ if(CLAY_BUILD_BENCHMARKS)
   target_include_directories(move_regional_probe PRIVATE bindings/c)
   clay_apply_warnings(move_regional_probe)
 
+  add_executable(brick_mesh_holes_probe benchmarks/brick_mesh_holes_probe.cpp)
+  target_link_libraries(brick_mesh_holes_probe PRIVATE claycore)
+  target_include_directories(brick_mesh_holes_probe PRIVATE bindings/c)
+  clay_apply_warnings(brick_mesh_holes_probe)
+
   add_executable(stroke_floor_probe benchmarks/stroke_floor_probe.cpp)
   target_link_libraries(stroke_floor_probe PRIVATE claycore)
   target_include_directories(stroke_floor_probe PRIVATE bindings/c)
