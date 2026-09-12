@@ -456,6 +456,96 @@ std::vector<ParityScene> parity_scenes() {
     warped("displace", scene::Prim::sphere(0.9f),
            scene::Deformer::displace(0.08f, 4.0f));
 
+    // -- deformers 14 through 20 (issue #535) ---------------------------------
+    //
+    // These reached NO parity scene and were unverified on every non-CPU
+    // backend. The guard that was supposed to force one has been inert since it
+    // was written: it pinned `cdeform_noise == 13`, an enumerator in the MIDDLE
+    // of the enum, and that assertion still holds, so it never fired. It now
+    // pins the LAST enumerator, which makes the next addition a compile error.
+    //
+    // EVERY SCENE HERE HAS TO ACTUALLY DEFORM. A lattice whose cage is
+    // untouched is the identity, a guide that does not turn exercises none of
+    // the frame transport, and a stamp of zeroes offsets nothing -- each of
+    // those would agree across backends while verifying that agreement on
+    // nothing at all. That is the same defect as the guard above, one level
+    // down, so each case below is built to move the field and the coverage test
+    // is only the second line of defence.
+    {
+        // Ranged twist and bend: the box extends BEYOND the range on both
+        // sides, so the scene contains the ramp and the untouched ends. An
+        // eased ramp rather than linear, so a backend ignoring the ease slot
+        // disagrees rather than passing on the equivalence.
+        warped("twist_range", scene::Prim::box(cf3(0.45f, 1.2f, 0.45f)),
+               scene::Deformer::twist_range(2.1f, -0.5f, 0.5f, 3));
+        warped("bend_range", scene::Prim::box(cf3(1.2f, 0.35f, 0.35f)),
+               scene::Deformer::bend_range(1.4f, -0.4f, 0.4f, 3));
+
+        // A guide that TURNS, and turns out of the plane it started in: the
+        // frames are parallel-transported by the compiler and read from the
+        // blob, so a backend that fetched the arc length but ignored the frames
+        // -- or transported them the other way -- gets a visibly different
+        // field. A straight guide would pass with none of that working.
+        std::vector<scene::StrokePoint> guide;
+        for (int i = 0; i < 5; ++i) {
+            const float t = static_cast<float>(i) / 4.0f;
+            scene::StrokePoint sp;
+            sp.pos = cf3(-1.0f + 2.0f * t, 0.45f * std::sin(t * 2.4f), 0.35f * t * t);
+            sp.radius = 0.3f;
+            guide.push_back(sp);
+        }
+        warped("bend_curve", scene::Prim::box(cf3(1.1f, 0.28f, 0.28f)),
+               scene::Deformer::bend_curve(guide, -1.0f, 1.0f));
+
+        // A cage with control points actually DRAGGED, and dragged
+        // asymmetrically so a backend that mirrored an index would disagree.
+        // The untouched corners keep the identity where the cage does nothing,
+        // which is half of what the interpolation has to get right.
+        auto dragged_cage = [](scene::Deformer d) {
+            d.set_cage_offset(0, 2, 1, cf3(0.0f, 0.30f, 0.10f));
+            d.set_cage_offset(2, 2, 1, cf3(0.18f, 0.12f, -0.06f));
+            d.set_cage_offset(1, 0, 1, cf3(-0.12f, -0.20f, 0.0f));
+            d.set_cage_offset(1, 1, 2, cf3(0.05f, 0.0f, 0.22f));
+            return d;
+        };
+        warped("lattice", scene::Prim::box(cf3(0.7f, 0.7f, 0.7f)),
+               dragged_cage(scene::Deformer::lattice(cf3(-0.8f, -0.8f, -0.8f),
+                                                     cf3(0.8f, 0.8f, 0.8f), 3, 3, 3)));
+
+        // The same cage through a NON-IDENTITY frame. Identity here would make
+        // this scene a duplicate of the one above and prove nothing about the
+        // extra transform, so the cage is both rotated and offset.
+        math::Transform cage_frame;
+        cage_frame.position = cf3(0.15f, -0.1f, 0.05f);
+        cage_frame.rotation = math::Quat::from_axis_angle(cf3(0.0f, 0.0f, 1.0f), 0.6f);
+        warped("lattice_xform", scene::Prim::box(cf3(0.7f, 0.7f, 0.7f)),
+               dragged_cage(scene::Deformer::lattice_transformed(
+                   cf3(-0.8f, -0.8f, -0.8f), cf3(0.8f, 0.8f, 0.8f), cage_frame, 3, 3, 3)));
+
+        // Blob: finite support, signed amplitude, several octaves so the
+        // fractal sum is exercised rather than one lobe.
+        warped("blob", scene::Prim::sphere(0.9f),
+               scene::Deformer::blob(cf3(0.25f, 0.30f, 0.0f), 0.8f, 0.12f, 5.0f, 3, 0.5f, 23u));
+
+        // Alpha: a stamp whose samples VARY. A constant image would offset the
+        // surface uniformly and agree across backends without the bilinear
+        // fetch ever being right, so this is a deterministic ramp crossed with
+        // a ridge -- no clock and no RNG, because two exports of one build must
+        // be byte-identical.
+        constexpr int kW = 16, kH = 16;
+        std::vector<float> stamp(static_cast<std::size_t>(kW) * kH, 0.0f);
+        for (int y = 0; y < kH; ++y)
+            for (int x = 0; x < kW; ++x) {
+                const float u = static_cast<float>(x) / (kW - 1);
+                const float v = static_cast<float>(y) / (kH - 1);
+                stamp[static_cast<std::size_t>(y) * kW + x] =
+                    u * 0.7f + 0.3f * std::sin(v * 6.2831853f);
+            }
+        warped("alpha", scene::Prim::sphere(0.9f),
+               scene::Deformer::alpha(cf3(0.0f, 0.0f, 0.9f), cf3(0, 0, 1), cf3(1, 0, 0),
+                                      stamp.data(), kW, kH, 0.6f, 0.7f, 0.15f));
+    }
+
     scenes.push_back({"gnarly", gnarly_document(), 4.5f});
     return scenes;
 }
@@ -502,7 +592,7 @@ TEST_CASE("parity: the corpus exercises every op, deformer and blend profile") {
     // rather than silently widening the set the corpus is measured against,
     // which is the whole point: a new op with no parity scene is unverified.
     static_assert(kernel::ccombine_incise == 15, "a combine op was added; widen this test");
-    static_assert(kernel::cdeform_noise == 13, "a deformer was added; widen this test");
+    static_assert(kernel::cdeform_alpha == 20, "a deformer was added; widen this test");
     static_assert(kernel::cblend_chamfer == 4, "a blend profile was added; widen this test");
 
     std::set<int> ops, deformers, profiles;
@@ -522,7 +612,7 @@ TEST_CASE("parity: the corpus exercises every op, deformer and blend profile") {
         CAPTURE(op);
         CHECK(ops.count(op) == 1);
     }
-    for (int d = 0; d <= kernel::cdeform_noise; ++d) {
+    for (int d = 0; d <= kernel::cdeform_alpha; ++d) {
         CAPTURE(d);
         CHECK(deformers.count(d) == 1);
     }
