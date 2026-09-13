@@ -75,6 +75,8 @@ The rule SHALL bind in BOTH directions. Where a descriptor is an OUTPUT, `struct
 
 Bounding the write SHALL NOT become a truncation for a current caller: a caller declaring the layout it was compiled against SHALL receive every field that layout contains, including fields appended after the original.
 
+`struct_size` SHALL be the only signal for "the caller did not declare this field". A field's own VALUE SHALL NOT be used as that signal where zero is a value the caller can mean — a strength, a weight, a slider — because the library cannot then tell an undeclared field from one deliberately set to zero, and the caller has no way to express the zero. Such a field SHALL be passed through and its documented default SHALL be zero, with the engine's preferred value supplied by the descriptor's `_defaults` call. Reading a slider's zero as "unset" inverts it, which is the failure this clause is written from.
+
 #### Scenario: Older caller against newer library
 - **WHEN** a caller sets `struct_size` to the size it was compiled against and the library has since appended fields
 - **THEN** the call succeeds, only the declared prefix is read, and the appended fields take their documented defaults
@@ -90,6 +92,10 @@ Bounding the write SHALL NOT become a truncation for a current caller: a caller 
 #### Scenario: Gate rejects an unversioned struct
 - **WHEN** a public descriptor struct is added without `struct_size`
 - **THEN** the C ABI hygiene check fails naming the struct
+
+#### Scenario: A zero a caller meant
+- **WHEN** a caller declares the current layout and sets a strength or weight field to zero
+- **THEN** the library reads zero, and a round trip through the descriptor returns zero
 
 ### Requirement: Complete primitive, op and blend enumerations
 `clay_prim` SHALL cover every primitive the scene model supports, including the lifts, and its values SHALL equal the corresponding tape opcodes so no translation table exists to drift. `clay_op` SHALL cover the boolean ops, paint, the eight extended combine modes and both transition morphs. `clay_blend` SHALL cover every blend profile.
@@ -2366,6 +2372,8 @@ A protected layer SHALL be refused BEFORE the rebuild rather than after it: rebu
 
 The ABI SHALL also expose the layer's geometry revision and a revision-checked replacement, so a host that ran the pure rebuild on its own worker thread can commit it without overwriting newer work. A stale commit SHALL be refused with a result code distinct from the codes for a bad argument and a missing layer.
 
+The revision the ABI reports SHALL advance for EVERY wholesale replacement of the layer's triangles, including an undo, a redo and a replayed journal event, and SHALL advance rather than return to an earlier value. A host holding a token against a live adjacency, spatial index or sculpting session gets one answer from it — "this is not the geometry you built over" — and a revision that stood still while undo swapped every vertex and every index makes that answer wrong in the one direction the host cannot detect. It is per-document-instance and is not carried in a saved file.
+
 #### Scenario: One call, one undo step
 - **WHEN** a host rebuilds a mesh layer through the document with undo enabled
 - **THEN** the layer holds the rebuilt triangles, the report describes them, and the undo depth grew by exactly one
@@ -2377,6 +2385,10 @@ The ABI SHALL also expose the layer's geometry revision and a revision-checked r
 #### Scenario: A stale commit is refused distinctly
 - **WHEN** a host commits a rebuild at a revision the layer has moved past
 - **THEN** the commit returns a result code distinct from an invalid argument and from a missing layer, and the layer keeps the newer geometry
+
+#### Scenario: Undoing and redoing a rebuild each report a new revision
+- **WHEN** a host attaches a mesh layer, rebuilds it, undoes and redoes
+- **THEN** the reported revision is strictly greater after each of those steps than before it, and the layer's triangles are the ones that step promised
 
 ### Requirement: Welding is reachable over the C ABI
 The C ABI SHALL expose the weld through a versioned descriptor with a defaults accessor, filling a versioned report bounded by the size the caller declared.
@@ -3830,4 +3842,232 @@ A host that ignores the mark and replays anyway SHALL get a refusal at that poin
 #### Scenario: Replaying past a barrier is refused, not approximated
 - **WHEN** a journal containing a barrier is replayed
 - **THEN** replay stops at the barrier and reports it, rather than continuing and producing a document missing that operation's effect
+
+### Requirement: Every sculptable surface can be told where it is
+
+A handle that sculpts a surface SHALL be able to declare the transform that
+places that surface in world, because the lattices a brush consults — the
+painted mask, the cavity field and the group field — are world-addressed while a
+layer's vertices are layer-local.
+
+#### Scenario: A declared frame places the painted mask
+
+- **GIVEN** a multires hierarchy whose vertices are layer-local
+- **AND** a session frame declared with
+  `clay_multires_sculptor_set_world_frame` that translates it
+- **WHEN** `clay_multires_sculptor_stamp` is called with a mask painted over the
+  region the surface occupies in WORLD
+- **THEN** the stamp is gated by that mask
+- **AND** a mask painted over the region the surface occupies in LAYER-LOCAL
+  coordinates does not gate it
+
+#### Scenario: The five sculpt-layer stroke verbs are placed together
+
+- **GIVEN** a sculpt-layer stroke with a declared session frame
+- **WHEN** any of `_stamp`, `_stamp_detail`, `_smooth`, `_erase` or `_restore`
+  is called with a mask
+- **THEN** the mask is sampled at the placed point, because all five read their
+  brush and their mask through one helper
+
+#### Scenario: An adaptive surface takes a declared frame
+
+- **GIVEN** a `clay_dynamic_surface` and a session frame declared with
+  `clay_dynamic_sculptor_set_world_frame`
+- **WHEN** `clay_dynamic_sculptor_stamp` is called with a mask
+- **THEN** the mask is sampled at the placed point
+
+#### Scenario: An adaptive surface has no layer transform to adopt
+
+- **GIVEN** a `clay_dynamic_sculptor`
+- **THEN** no `_use_layer_transform` is offered, because a
+  `clay_dynamic_surface` is not a document layer and there is no transform to
+  read
+- **AND** the header SHALL state that as a fact about the ABI rather than leave
+  it as an apparent omission
+
+#### Scenario: An unset frame is the identity
+
+- **GIVEN** a sculptor on which no frame has been declared
+- **WHEN** it stamps with a mask
+- **THEN** the mask is sampled at the surface's own coordinates, exactly as
+  before this change, so a host that has not heard of the frame is not opted in
+
+#### Scenario: A standalone hierarchy belongs to no layer
+
+- **GIVEN** a hierarchy built by `clay_multires_from_mesh` rather than borrowed
+  from a document layer
+- **WHEN** `clay_multires_sculptor_use_layer_transform` is called
+- **THEN** it SHALL answer `CLAY_ERROR_NOT_FOUND` rather than silently adopt the
+  identity
+
+#### Scenario: A layer carrying a per-axis scale is refused
+
+- **GIVEN** a hierarchy borrowed from a layer that carries a per-axis scale
+- **WHEN** `_use_layer_transform` is called
+- **THEN** it SHALL answer `CLAY_ERROR_UNSUPPORTED`, on the same terms and for
+  the same reason as `clay_mesh_sculptor_use_layer_transform`: a round brush in
+  world is an ellipsoid on the model, so `radius` stops naming anything a
+  spherical walk can honour
+
+### Requirement: A declared frame is readable, and cannot be spelled twice
+
+A host SHALL be able to read back what a handle declares, and SHALL be refused
+when it declares the same frame two ways.
+
+#### Scenario: Reading back a declared frame
+
+- **WHEN** `clay_multires_sculptor_world_frame`,
+  `clay_dynamic_sculptor_world_frame` or
+  `clay_multires_sculpt_layer_stroke_world_frame` is called
+- **THEN** `out_declared` SHALL be non-zero exactly when a frame is declared
+- **AND** `out_frame`, when non-NULL, SHALL carry that transform
+
+#### Scenario: Clearing a declared frame
+
+- **WHEN** a `_set_world_frame` is called with NULL
+- **THEN** the session returns to the identity and `out_declared` reads zero
+
+#### Scenario: A per-call frame beside a declared one is refused
+
+- **GIVEN** a multires sculptor with a declared session frame
+- **WHEN** `clay_multires_sculptor_apply_stroke` is called with a non-NULL
+  `mesh_to_world`
+- **THEN** it SHALL be refused rather than resolved by precedence, because a
+  host passing both means one of the two is what it believes and picking
+  silently would make the other a wrong belief nothing corrects
+
+#### Scenario: The same call with NULL is accepted
+
+- **GIVEN** the same sculptor with a declared session frame
+- **WHEN** `clay_multires_sculptor_apply_stroke` is called with a NULL
+  `mesh_to_world`
+- **THEN** it SHALL proceed, using the declared frame
+
+### Requirement: A host reaches every automask factor the engine has
+
+The C ABI SHALL let a host enable and supply EVERY automask factor the engine
+implements, including the two whose inputs are not scalars — the cavity measure
+and the surface-group lattice.
+
+Those two SHALL be supplied as the world-addressed lattices the engine already
+has handles for, and SHALL NOT be supplied as a host callback: they are
+evaluated per vertex from worker threads, and a re-entrant callback into a host
+from inside a stamp is a shape this boundary does not offer.
+
+They SHALL be named ONCE PER SESSION rather than per stamp, because the engine
+holds them as closures and rebuilding those per dab is an allocation per dab.
+
+Naming the inputs SHALL NOT enable any factor. Which factors run SHALL remain a
+property of the brush descriptor, so that a host may wire its inputs at session
+start without changing a single stamp.
+
+A factor whose bit is set with no input SHALL remain inert rather than
+becoming an error, so that a host may carry an automask preset before it has
+built the lattice that preset needs.
+
+The same descriptor SHALL be accepted by the fixed-mesh, adaptive and
+multiresolution sculptors, because the factors mean the same thing whichever
+surface is under the brush.
+
+#### Scenario: A factor's bit alone still changes nothing
+- **WHEN** a stamp sets an automask bit whose input has not been supplied
+- **THEN** the result is the result that stamp had before the factor was reachable
+
+#### Scenario: An input alone changes nothing
+- **WHEN** a session names its automask inputs and stamps with no automask bits set
+- **THEN** the result is the result that stamp had with no inputs named
+
+#### Scenario: A factor with its input gates the stamp
+- **WHEN** a stamp sets a factor's bit and its input has been supplied
+- **THEN** the per-vertex weight is scaled by that factor and the displacement changes accordingly
+
+#### Scenario: The inputs can be released
+- **WHEN** a session clears its automask inputs
+- **THEN** both factors are inert again and the session holds nothing of what they named
+
+#### Scenario: An input that has left its document is refused
+- **WHEN** a session names a borrowed lattice that is no longer in its document
+- **THEN** the call is refused as not found rather than accepted and silently ineffective
+
+### Requirement: A sculptor's declared frame places the point a world lattice is asked about
+
+A sculpting session's vertices are in the mesh's own space and the mask, cavity
+and group lattices are world-addressed. Every one of those lattices SHALL be
+sampled at the vertex's placed position, using the frame the session declared.
+
+The frame SHALL be read when a lattice is sampled rather than captured when the
+inputs are named, so that declaring a frame after naming inputs and naming
+inputs after declaring a frame produce the same result.
+
+A session that declares no frame SHALL be sampled where its vertices are. The
+adaptive and multiresolution sessions declare none, so their lattices — these
+two and the painted mask they already took — are sampled at the surface's own
+positions, which is the reading their mask gate already had.
+
+#### Scenario: A placed session reaches the region it was placed into
+- **WHEN** a session declares a frame and its automask inputs describe the region the mesh was placed into
+- **THEN** the automask reads that region rather than the region the untransformed mesh occupies
+
+#### Scenario: The order of the two calls does not matter
+- **WHEN** a session declares its frame after naming its automask inputs
+- **THEN** the result is the same as declaring it before
+
+### Requirement: A node's colour is readable
+
+Every value the C ABI can write onto a placed node SHALL be readable back, the
+node's colour included.
+
+The reader SHALL be total: there is no unset colour to report. An item's colour
+is the one its creation descriptor carried, and a group's — which takes none at
+creation — is the engine's own default.
+
+A group SHALL answer, because a group holds a colour its own setter writes.
+
+The value SHALL be what THIS NODE holds rather than what the composed surface
+shows at a point, which is a different question with a different answer.
+
+#### Scenario: What was written comes back
+- **WHEN** a node's colour is set and then read
+- **THEN** the value read is the value written
+
+#### Scenario: A node nobody coloured answers
+- **WHEN** a node whose colour was never set through the setter is read
+- **THEN** the colour it was created with is reported and the call succeeds
+
+#### Scenario: The value survives history
+- **WHEN** a colour edit is undone and redone
+- **THEN** the reader reports the colour of the state the document is in
+
+### Requirement: a transform edit can report the region it changed
+
+The ABI SHALL provide `clay_layer_set_transform_bound`: the edit
+`clay_layer_set_transform` applies, plus the world-space box outside which that
+edit did not change the surface or the band around it. It SHALL report the box
+in the three states `clay_layer_node_influence_bound` uses (no bounds, a finite
+box, unbounded), and SHALL be usable as the region for
+`clay_brick_cache_mark_dirty`.
+
+The box SHALL be the swept surface delta where the engine can prove one, and the
+conservative influence bound otherwise; a caller SHALL NOT be able to tell which
+it received, since both are safe to dirty.
+
+`clay_layer_node_influence_bound` and `clay_brick_cache_mark_dirty_nodes` SHALL
+be unchanged: they answer for an arbitrary edit to a node, which for an Intersect
+is still the layer's extent.
+
+#### Scenario: dragging an intersect operand
+
+- **GIVEN** a document whose layer holds an Intersect operand
+- **WHEN** the operand is moved with `clay_layer_set_transform_bound`
+- **THEN** the reported box is far smaller than the layer's extent
+- **AND** a brick cache dirtied by it and refilled holds the same bricks, values
+  and triangles as a cache rebuilt from nothing on the moved document
+
+#### Scenario: an edit outside the proof domain
+
+- **GIVEN** an operand whose delta the engine cannot prove local
+- **WHEN** it is moved with `clay_layer_set_transform_bound`
+- **THEN** the reported box is the conservative influence bound
+- **AND** the edit itself is applied and recorded exactly as
+  `clay_layer_set_transform` applies and records it
 

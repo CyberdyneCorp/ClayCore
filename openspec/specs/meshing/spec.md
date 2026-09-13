@@ -10,9 +10,7 @@ Beside it are the preview, quad and dual-contouring meshers, decimation,
 validation, attribute transfer and the sculpting a mesh accepts once it exists.
 `mesh::Mesh` — flat arrays every producer and consumer shares — is defined here,
 which is why this capability is also where its invariants are written down.
-
 ## Requirements
-
 ### Requirement: Default mesher with watertight guarantee
 `clay::mesh` SHALL provide a default cell-marching mesher whose output is watertight and 2-manifold by construction, running only over surface-crossing bricks. v1 implements this with marching tetrahedra (Freudenthal 6-tet decomposition with globally consistent face diagonals — no ambiguous configurations exist, so the guarantee is structural); a table-based marching cubes with asymptotic-decider ambiguity resolution MAY replace it later as a triangle-count optimization provided the same guarantees hold. The CPU implementation is the golden reference; GPU implementations (Metal/CUDA) SHALL match its topology invariants (watertight, manifold, Euler characteristic on golden scenes) though not bit-identical vertex positions.
 
@@ -1233,3 +1231,83 @@ that no longer fails when it should.
 #### Scenario: Measuring is free when nobody measures
 - **WHEN** queries run with no counter attached
 - **THEN** they cost what they cost without the instrumentation present
+
+### Requirement: A coarse level can be shaded from the field
+
+Gradient normals SHALL be answered at every level a cache can mesh, not only at
+the full-resolution one.
+
+A host drawing a coarse surface otherwise has only normals derived from the
+triangles, and on a coarse lattice those differ from the field's own gradient by
+enough to be visible — a coarse surface is then face-shaded by construction
+rather than by choice.
+
+**The evaluation SHALL differ by level, and the difference is the point.** At
+full resolution the attributes are evaluated through per-brick culled tapes, so
+their cost follows the bricks named. At a coarser level they SHALL be evaluated
+through the whole document's field, because a coarse vertex does not sit on the
+field's surface, and a culled tape agrees with the whole document's only where
+both are in band. Out there the two are both clamped rather than equal, and a
+bound derived from the clamped region is flat where the field is not.
+
+**A level's attribute pass therefore SHALL NOT be required to follow the bricks
+named**, and that cost SHALL be stated rather than discovered.
+
+Per-vertex COLOUR SHALL remain refused above the full-resolution level, for a
+reason the gradient does not share: a coarse level carries no colour samples of
+its own, and nothing supplies them. A refusal SHALL NOT be downgraded into an
+approximation.
+
+#### Scenario: A coarse level shaded from the field
+- **WHEN** a coarse level is meshed with gradient normals and a document
+- **THEN** it returns a mesh whose normals follow the field rather than the triangles
+
+#### Scenario: Colour at a coarse level
+- **WHEN** a coarse level is meshed with per-vertex colour asked for
+- **THEN** the call is refused rather than answered with an approximation
+
+#### Scenario: The full-resolution level is unchanged
+- **WHEN** the full-resolution level is meshed with gradient normals
+- **THEN** it is evaluated as it was before, through per-brick culled tapes
+
+#### Scenario: Normals from the triangles still work everywhere
+- **WHEN** a level is meshed with normals derived from the triangles and no document
+- **THEN** it succeeds at every level the cache can mesh
+
+### Requirement: The brick mesher keeps a crossing off a lattice corner
+
+A vertex placed by the brick mesher SHALL be kept off the endpoints of the edge
+it sits on, so that two edges crossing near a shared corner do not place two
+vertices at the same point.
+
+A brick stores its samples as `fp16` clamped to a band. Quantisation and band
+clamping both drive a sampled value to exactly its neighbour's, and the crossing
+parameter to 0 or 1. The resulting triangle has near-zero area and a face normal
+that is a cross product of near-parallel edges — numerically garbage, and black
+wherever gradient normals are unavailable.
+
+The cost of those triangles is not cosmetic. A host that cannot show them
+re-meshes the whole field rather than the bricks an edit touched, and a
+whole-field mesh evaluates with no cull, so its cost tracks the document instead
+of the edit.
+
+**The guard SHALL apply to the brick path only.** The tape path's vertices SHALL
+be unchanged, and callers that deliberately produce degenerate triangles — to
+exercise welding and remeshing — SHALL continue to receive them.
+
+The guard SHALL NOT change which triangles exist. The marching case index is
+determined by sign tests on the corner values, so the crossing parameter moves a
+vertex along its edge and cannot add, remove or reconnect a triangle.
+
+#### Scenario: A brick mesh carries no sliver
+- **WHEN** a document is meshed through the brick cache
+- **THEN** no triangle's area is negligible against the largest triangle's, and the mesh is watertight and manifold
+
+#### Scenario: The tape path is unchanged
+- **WHEN** the same document is meshed from its tape rather than from bricks
+- **THEN** the vertices are those the mesher placed before the guard existed
+
+#### Scenario: Topology is unaffected
+- **WHEN** a brick mesh is built with the guard and without it
+- **THEN** the triangle count is the same, and only vertex positions differ
+

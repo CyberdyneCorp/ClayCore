@@ -57,7 +57,7 @@
 
 ## 6. Still open
 
-- [ ] 6.1 Device gate on the reference iPad, with #542, before the tag that
+- [x] 6.1 Device gate on the reference iPad, with #542, before the tag that -- RAN: 7/7 sessions, 75 cases, 0 failures on iPad15,5 / iOS 26.5.2 at d391f817, tagged v0.113.0
       carries either
 - [ ] 6.2 The whole-document tape still compounds over the full chain, which is
       correct for it and is what #541's headline figure measures. A host that

@@ -41,7 +41,7 @@
 
 ## 5. Still open
 
-- [ ] 5.1 A host that pins rendered images needs to refresh them; told before
+- [x] 5.1 A host that pins rendered images needs to refresh them; told before
       this landed rather than after
-- [ ] 5.2 #567: `decimate` can return a non-manifold mesh from a valid input
-- [ ] 5.3 Device gate on the reference iPad before the tag that carries this
+- [x] 5.2 #567: `decimate` can return a non-manifold mesh from a valid input
+- [x] 5.3 Device gate on the reference iPad before the tag that carries this -- RAN: 7/7 sessions, 75 cases, 0 failures on iPad15,5 / iOS 26.5.2 at d391f817, tagged v0.113.0

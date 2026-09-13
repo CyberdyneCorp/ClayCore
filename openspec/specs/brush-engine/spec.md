@@ -11,9 +11,7 @@ applies in its own vocabulary.
 Apart from the representations it drives, and that separation is the point: a
 gesture must mean the same thing on a voxel layer, an SDF layer, a mask and a
 mesh, and it can only do that if "what the gesture was" is decided in one place.
-
 ## Requirements
-
 ### Requirement: Strokes resolve to stamps
 The module SHALL resolve a sequence of stroke samples — position, pressure, tilt and a monotone path parameter — into an ordered list of stamps, each carrying a position, radius, strength and orientation. Resolution SHALL be pure: it SHALL NOT read or modify a document.
 
@@ -535,7 +533,11 @@ An automask SHALL be computed for the vertices a stamp reaches and SHALL NOT be 
 
 Cavity and curvature automasks SHALL be derived from the SAME estimator the procedural mask verbs use, so that a painted cavity mask and a cavity automask cannot disagree about one surface.
 
+The cavity and surface-group automasks read WORLD-ADDRESSED lattices, and a sculptor's vertices are not in world space. Each vertex SHALL be placed by the stroke's mesh-to-world transform before either lattice is sampled — the same placement the painted mask already receives. One estimator does not prevent two answers about one surface if its two callers ask it about different points.
+
 The surface-group automask SHALL read the document's group field rather than a per-face group identifier. Groups are addressed on a world lattice so that they survive a representation bridge; a per-face copy would be a second answer to the same question and would not survive one.
+
+The cavity strength SHALL be honoured at zero. Zero is off even when the factor's bit is set, because it is what a host's slider at zero means, and a binding that reads it as "unset, take the default" inverts it.
 
 A fully automasked vertex SHALL be bit-identical to its input position.
 
@@ -546,6 +548,14 @@ A fully automasked vertex SHALL be bit-identical to its input position.
 #### Scenario: An automask costs the workset, not the model
 - **WHEN** a stamp with every automask enabled runs on a mesh of a million vertices with a footprint of a few thousand
 - **THEN** the automask evaluation touches the workset and its read halo only
+
+#### Scenario: A transformed layer's automask reads where the layer is
+- **WHEN** a stroke on a layer whose transform is not the identity enables the cavity or surface-group automask
+- **THEN** the lattice is sampled at the vertex's world position, and the factor gates the same surface a painted mask on that layer gates
+
+#### Scenario: A cavity strength of zero is off
+- **WHEN** a brush sets the cavity factor's bit and a cavity strength of zero
+- **THEN** the factor scales no weight, and the stamp is the stamp it would have been with the factor off
 
 ### Requirement: A brush preset is versioned and carries no image data
 A brush preset SHALL carry a schema version from its first release, SHALL deserialize an older version by supplying defaults, and SHALL REFUSE an unknown newer version rather than interpreting the prefix it recognises.
@@ -766,3 +776,36 @@ masked stroke.
 #### Scenario: An anchor out of reach is discarded, not spent
 - **WHEN** a dab lands further from the carried anchor than the brush radius
 - **THEN** the anchor is discarded and the dab moves the vertices it would have moved with no anchor at all, rather than moving nothing
+
+### Requirement: The automask sources read the frame their own handle declares
+
+The inputs that make `CLAY_AUTOMASK_CAVITY` and `CLAY_AUTOMASK_SURFACE_GROUP`
+answer SHALL be asked about the point the surface actually occupies, on every
+sculptor that can carry them.
+
+#### Scenario: Each sculptor places its own sources
+
+- **GIVEN** automask sources named through
+  `clay_mesh_sculptor_set_automask_sources`,
+  `clay_dynamic_sculptor_set_automask_sources` or
+  `clay_multires_sculptor_set_automask_sources`
+- **WHEN** either factor is consulted during a stamp
+- **THEN** the cavity field and the group lattice SHALL be sampled at the point
+  placed by the frame that sculptor declares
+
+#### Scenario: The frame is read when the lattice is asked
+
+- **GIVEN** a host that names its sources BEFORE declaring its frame
+- **WHEN** it then declares one and stamps
+- **THEN** the lattices SHALL be asked at the placed point, because the frame is
+  read at the moment the lattice is consulted and not captured when the sources
+  were named
+
+#### Scenario: One transform, not two
+
+- **GIVEN** a host that both names sources through the C setter and drives a
+  stroke that carries its own cavity field
+- **WHEN** the second set of inputs is installed
+- **THEN** it SHALL REPLACE the first rather than compose with it, so the point
+  is placed once and not twice
+
