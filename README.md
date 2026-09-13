@@ -536,7 +536,6 @@ short version:
 | | |
 |---|---|
 | **Author** | 28 primitives and 7 lifted 2D profiles, 17 combine ops under 5 blend profiles, 21 deformers, armatures (ZSpheres), control-point curves, the cut tool, grid/radial repetition and mirrors — all as an ordered, re-editable edit list with per-node exactness and Lipschitz tracking |
-| **Sculpt** | One stroke engine feeding four consumers: SDF edit items, voxel cells, mask fields and a mesh layer's own vertices. 10 voxel verbs with sculpt layers, 16 fixed-topology mesh verbs including colour, taper and twist on meshes, baked field relax/flatten/move-topological, and masking that gates *any* operation |
 | **Sculpt big** | Four mesh modes — fixed topology, adaptive topology, a Catmull-Clark multires hierarchy and a global voxel remesh. Under the three that persist, ONE chunk unit with four revisions, a dirty-chunk readback, a host-declared memory budget with an ordered pressure trim, and preflighted peaks. A dab costs what it touches: 200x the vertices at the same footprint is the same dab, gated in CI |
 | **Sculpt** | One stroke engine feeding four consumers: SDF edit items, voxel cells, mask fields and a mesh layer's own vertices. 10 voxel verbs with sculpt layers, 16 fixed-topology mesh verbs including colour, taper and twist on meshes, baked field relax/flatten/move-topological, and masking that gates *any* operation. The mesh verbs run one shared runtime across all three mesh representations — fixed, adaptive and multiresolution — so the falloff, the alpha, the mask, the automask and the stamp's grain are one implementation read three times rather than three that have to be kept in step |
 | **Evaluate** | CPU, Metal, CUDA, OpenCL and Vulkan from one kernel source, tolerance-gated against the CPU reference; a sparse fp16 brick cache with LOD mips, a memory budget and eviction, so a host can answer a platform memory warning without destroying it |
@@ -573,10 +572,6 @@ Recorded as decisions rather than gaps, with the reasoning in
   Catmull-Clark hierarchy with detail stored in a transported local frame, so a
   change to the form beneath a wrinkle does not destroy the wrinkle. Sculpt
   level and display level are independent — `examples/68_mesh_multires.py`.
-  **`mesh::MultiresSurface` shipped**, a fifth representation: a deterministic
-  Catmull-Clark hierarchy with detail stored in a transported local frame, a
-  sculpt level independent of the display level, and local low-to-high
-  propagation. `openspec/ROADMAP.md` Phase 5 row 3.
   **All three mesh representations run one brush runtime** — one workset, one
   factor order, one automask, one scratch arena, and a stamp azimuth a rake or
   a chisel is a preset over. They are not three sculptors that happen to agree:
@@ -613,6 +608,19 @@ Recorded as decisions rather than gaps, with the reasoning in
   gathered workset from 100k to 20M. `examples/71_extreme_poly.py`, and the
   matrix in
   [`docs/09-brush-latency-and-coverage.md`](docs/09-brush-latency-and-coverage.md).
+- **No promise that a mesh is byte-identical across toolchains.** Meshing reads
+  a floating-point field, so its output depends on floating-point contraction —
+  and therefore on compiler, architecture and optimisation level. Measured: the
+  same unit sphere at voxel 0.02 meshes to **281,568** triangles by default and
+  **281,544** with `-ffp-contract=off`, on one machine, one compiler, one flag
+  apart. The *topology guarantee* on a mesh layer is unaffected — `indices` and
+  `quads` still come back byte for byte from a sculpt, because that is a
+  statement about one process. What moves is a mesh **generated** from a field
+  on two different builds. `tests/unit/test_mesh_sculpt_parity.cpp` already
+  treats hashes this way, keeping one golden table per toolchain and gating the
+  portable half — the moved counts — everywhere; anything else pinning a
+  triangle count or a vertex position across platforms is resting on something
+  that moves.
 - **No PBR channels.** Polypaint works on all three representations; roughness
   and metallic want a UV parameterisation and a texture set, which live
   upstream of this library.
@@ -659,6 +667,22 @@ vm.mmap_rnd_bits=28` is the other fix.
 Backend availability changes speed, never results: every registered backend
 is checked against the CPU scalar reference by the parity suite (1e-4
 relative on distances, 1e-6 for the CPU batch path).
+
+**Read "registered" literally.** A backend that was not compiled into the build
+cannot fail that suite, so the sentence above is a statement about the build in
+front of you and not about the table. CI compiles CPU on three platforms, Metal
+on macOS, and Vulkan against a software rasteriser; **it has not built CUDA or
+OpenCL since 2026-08-07**, because neither runner has the hardware that would
+make those jobs mean what their names said. What gates every push for those two
+is `check_kernel_dialect.py`, which compiles every kernel header under the CPU,
+CUDA and Metal profiles plus the OpenCL amalgamation — a dialect break fails in
+seconds, an arithmetic divergence on real silicon does not.
+
+So CUDA, OpenCL and Vulkan-on-real-hardware are **manual, hardware-dependent
+gates** rather than continuous ones, and `docs/RELEASE.md` names them as things
+that must run before a release touching kernels. Last recorded device parity:
+**v0.25.0, 2026-08-10**, on an RTX 5060. The tier column below says what a
+backend is *for*; it does not say when it last ran.
 
 The `cuda` preset targets the installed GPU. When that GPU is newer than the
 CUDA toolkit — an RTX 50-series card against CUDA 12.0, say — nvcc cannot emit
