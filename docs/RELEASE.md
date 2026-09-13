@@ -763,12 +763,18 @@ forward-refuse).
    triangles from an input with none. Measured at 4 of 20 sphere-minus-box
    configurations; the sharpest case moved the Euler characteristic from -4 to
    -2, closing a handle. IS a release a caller observes: decimate now checks its
-   own result and retries with a different choice of collapses at the requested
-   size, so a triangle count can differ by one or two for the same options, and
-   where nothing clean is reachable the INPUT is returned -- a caller can get
-   more triangles than the ratio implies. A repair pass was built first and
-   rejected by measurement: the pinches are FLAT, four triangles at 0, 178.7,
-   178.7 and -177.3 degrees, so pairing them decides the surface's genus by a
+   own result and retries with a different choice of collapses AT THE REQUESTED
+   SIZE, so a triangle count can differ by one or two for the same options. It
+   does NOT return a bigger mesh to obtain a manifold one -- a caller picks a
+   ratio because it needs that size -- so where no collapse order is clean the
+   requested size comes back pinched and the new DecimateReport says so. Two
+   designs were refuted by measurement before this one: returning the
+   undecimated input turned a requested 12,418 triangles into 155,388 on
+   examples/37_groups and blew the gallery's 400 KiB model budget, and a retry
+   that merely held the TARGET still doubled 04_repeat_radial because Regularize
+   stops short of a target the plain pass reaches. A repair pass was built first
+   and rejected too: the pinches are FLAT, four triangles at 0, 178.7, 178.7 and
+   -177.3 degrees, so pairing them decides the surface's genus by a
    floating-point tie-break.
 
       **AND 0.104.0 CARRIES THE ONE THAT WAS HELD OUT OF v0.103.0.** #541 and #542
