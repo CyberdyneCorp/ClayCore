@@ -739,6 +739,38 @@ forward-refuse).
    at most 1.4% for those three curves and for no others, so a host validating
    against claycore-kernels.zip should re-baseline its circ rows.
 
+   **0.112.0 removes the sliver triangles from the brick mesher, and with them
+   the reason a host re-meshed the whole document** (#549). 2,297 slivers in
+   83,464 triangles on the reference fixture, from the crossing parameter
+   landing on an edge ENDPOINT -- which a brick's fp16 storage and band clamping
+   make likely, measured as sliver vertices sitting a median 0.0178 voxels from
+   the lattice against 0.2576 for every other vertex. The visible half is black
+   specks; the expensive half is that a host hid them by re-meshing the whole
+   field per stroke, and clay_document_mesh evaluates densely with NO cull --
+   9.40x degradation across 48 dabs against the brick path's 1.49x, 26.2 ms
+   against 6.3 ms. IS a release a caller observes: vertices on brick-built
+   meshes move by up to 5% of a voxel, so pinned images go red on an
+   improvement, while the triangle count is identical because the marching case
+   index comes from sign tests alone. The tape path passes no guard and is
+   bit-identical -- a global clamp broke 15 assertions in fixtures that produce
+   degenerate triangles on purpose to exercise the welder.
+
+   **0.113.0 stops decimation breaking a manifold it was given** (#567).
+   meshoptimizer chooses its own collapses and does not apply the link condition
+   collapse_edge refuses on, so clay_document_mesh -- documented as the
+   watertight, 2-manifold export path, with decimation reachable through
+   clay_mesh_params.decimate -- could return edges carrying four incident
+   triangles from an input with none. Measured at 4 of 20 sphere-minus-box
+   configurations; the sharpest case moved the Euler characteristic from -4 to
+   -2, closing a handle. IS a release a caller observes: decimate now checks its
+   own result and retries with a different choice of collapses at the requested
+   size, so a triangle count can differ by one or two for the same options, and
+   where nothing clean is reachable the INPUT is returned -- a caller can get
+   more triangles than the ratio implies. A repair pass was built first and
+   rejected by measurement: the pinches are FLAT, four triangles at 0, 178.7,
+   178.7 and -177.3 degrees, so pairing them decides the surface's genus by a
+   floating-point tie-break.
+
       **AND 0.104.0 CARRIES THE ONE THAT WAS HELD OUT OF v0.103.0.** #541 and #542
    merged immediately after that tag, so v0.103.0 ships the degraded bound: it
    made the marcher accept hits on rays that MISS the shape, 4090 against a
