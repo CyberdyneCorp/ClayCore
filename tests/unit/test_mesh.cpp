@@ -572,7 +572,7 @@ TEST_CASE("the brick mesher emits no sliver triangles") {
     CHECK(r.manifold);
 }
 
-TEST_CASE("decimation never returns a mesh with a pinched edge") {
+TEST_CASE("decimation recovers a pinch that is recoverable") {
     // meshoptimizer decides its own collapses and does not apply the link
     // condition `collapse_edge` refuses on, so a watertight 2-manifold input can
     // come back with edges carrying four incident triangles.
@@ -614,8 +614,51 @@ TEST_CASE("decimation never returns a mesh with a pinched edge") {
     CHECK(out.manifold);
     CHECK(out.watertight);
 
-    // The promise is kept by asking for slightly more geometry, not by giving
-    // up on decimating: a result that simply returned the input would pass
-    // every check above and defeat the purpose.
+    // Recovered by asking again, not by giving up on decimating: a result that
+    // returned the input would pass every check above and defeat the purpose.
     CHECK(d.triangle_count() < in.triangles / 2);
+
+    mesh::DecimateReport report;
+    mesh::decimate(m, opts, &report);
+    CHECK(report.manifold);
+    CHECK(report.input_manifold);
+    CHECK(report.attempts > 1);  // the first pass is the one that pinched
+}
+
+TEST_CASE("an unrecoverable pinch returns the requested size and says so") {
+    // The counterpart, and the case CI found after the first version of this
+    // fix shipped the opposite behaviour. At an aggressive ratio a pinch is not
+    // an incidental bad collapse -- merging sheets is WHAT THE RATIO MEANS -- so
+    // no retry recovers it.
+    //
+    // The first version returned the undecimated input here. On
+    // examples/37_groups that turned a requested 12,418 triangles into 155,388
+    // and blew the gallery's 400 KiB budget for committed models by tenfold.
+    // A caller asking for a twelfth of the geometry is not served by all of it.
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    l.sdf->insert(item(scene::Prim::torus(0.7f, 0.28f), cf3(0, 0, 0)));
+    scene::Node crossed = item(scene::Prim::torus(0.7f, 0.28f), cf3(0, 0, 0), scene::Op::Add,
+                               scene::Blend{scene::BlendProfile::Quadratic, 0.1f});
+    crossed.xform.rotation = math::Quat::from_axis_angle(cf3(1, 0, 0), 1.5707963f);
+    l.sdf->insert(crossed);
+    Mesh m = mesh::mesh_tape(scene::compile_document(doc),
+                             math::Aabb{cf3(-1.2f, -1.2f, -1.2f), cf3(1.2f, 1.2f, 1.2f)},
+                             0.035f);
+    REQUIRE(mesh::validate(m).non_manifold_edges == 0);
+
+    mesh::DecimateOptions opts;
+    opts.target_ratio = 0.02f;  // one triangle in fifty
+    opts.target_error = 0.5f;
+    mesh::DecimateReport report;
+    Mesh d = mesh::decimate(m, opts, &report);
+
+    // Whatever the topology came out as, the SIZE is the one that was asked
+    // for -- that is the property the gallery failure was about.
+    CHECK(d.triangle_count() < m.triangle_count() / 20);
+    CHECK(report.input_manifold);
+    // And if it could not be cleaned, the report says so rather than the caller
+    // having to validate the mesh to find out.
+    if (!report.manifold) CHECK(mesh::validate(d).non_manifold_edges > 0);
+    if (report.manifold) CHECK(mesh::validate(d).non_manifold_edges == 0);
 }

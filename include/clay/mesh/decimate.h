@@ -4,16 +4,32 @@
 // target triangle ratio or error bound, vertex-color aware — collapses
 // respect color boundaries through attribute weighting.
 //
-// A MANIFOLD INPUT YIELDS A MANIFOLD RESULT, and that is checked rather than
-// assumed. meshoptimizer applies its own collapse rules and not the link
-// condition `collapse_edge` refuses on (mesh/topology_ops.h), so a simplified
-// mesh can carry edges with four incident triangles -- measured on 4 of 20
-// shape-and-ratio configurations. Where that happens the simplification is
-// retried, preferring a different choice of collapses at the requested size
-// over a larger result; where no retry is clean the INPUT is returned, because
-// a caller that asked for fewer triangles is better served by more of them than
-// by a surface it cannot use. A mesh that arrives non-manifold is simplified and
-// returned as before.
+// DECIMATION CAN PINCH A SURFACE, AND THIS SAYS WHEN IT DID.
+//
+// meshoptimizer applies its own collapse rules and not the link condition
+// `collapse_edge` refuses on (mesh/topology_ops.h), so a watertight 2-manifold
+// input can come back with edges carrying four incident triangles.
+//
+// Where the requested simplification pinches, it is retried with a different
+// choice of collapses AT THE SAME TARGET, and a clean result is returned in
+// preference -- but only if it did not grow the mesh, because a caller picks a
+// ratio because it needs that size. That recovers the cases where a
+// pinch is incidental: measured over 20 shape-and-ratio configurations, 4
+// pinched and all 4 recovered on the first retry within two triangles of the
+// requested count.
+//
+// AT AGGRESSIVE RATIOS IT IS NOT RECOVERABLE AND THE RESULT IS RETURNED PINCHED.
+// Asking for one triangle in twelve of a grouped model merges sheets because
+// that is what the ratio means, not because a collapse went wrong: on
+// examples/37_groups, 155,388 triangles to 12,418, every one of six retries
+// came back pinched. Refusing that result would mean refusing to decimate, and
+// handing back the 155,388-triangle input instead is not a service to a caller
+// who asked for 8%.
+//
+// So pass a `DecimateReport` when the distinction matters -- an export gate,
+// anything downstream that cannot take a non-manifold mesh -- and decide there.
+// It is the caller who knows whether a smaller mesh or a two-sided one is worth
+// more, and the decision is not one this can make for them.
 //
 // The result is a TRIANGLE mesh even when the input carried quads: an edge
 // collapse breaks the quad pairing the first time it fires, so decimate drops
@@ -32,7 +48,18 @@ struct DecimateOptions {
     float color_weight = 1.0f;   // 0 disables color-aware collapse costs
 };
 
-Mesh decimate(const Mesh& m, const DecimateOptions& options);
+struct DecimateReport {
+    // No edge in the result carries more than two triangles.
+    bool manifold = true;
+    // Whether the INPUT was, which is what says whose defect a false `manifold`
+    // is. An input that arrives pinched is simplified and returned as it always
+    // was; this does not promise to repair what it did not break.
+    bool input_manifold = true;
+    // Simplifications actually run. 1 when the first result was clean.
+    int attempts = 1;
+};
+
+Mesh decimate(const Mesh& m, const DecimateOptions& options, DecimateReport* report = nullptr);
 
 }  // namespace mesh
 }  // namespace clay

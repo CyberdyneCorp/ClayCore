@@ -129,33 +129,45 @@ std::size_t aligned_target(std::size_t indices, float ratio) {
     return target < 3 ? 3 : target;
 }
 
-// What to try when the requested simplification lands on a pinch, in order.
+// What to try when the requested simplification lands on a pinch.
 //
-// STRATEGY FIRST, SIZE SECOND. `meshopt_SimplifyRegularize` picks different
-// collapses for the same target, and on the measured case it clears the pinch
-// at exactly the requested triangle count -- 23,472 either way -- so the caller
-// gets what it asked for. Asking for more geometry is the fallback, not the
-// first move: the same case needed 60% more triangles before an unregularized
-// pass came back clean, which is a far larger deviation than a different
-// collapse order.
+// EVERY RETRY KEEPS THE REQUESTED SIZE. `meshopt_SimplifyRegularize` picks
+// different collapses for the same target, and every recovery measured came
+// from that and not from asking for more geometry: 4 of 20 configurations
+// pinched, all 4 cleared here, within two triangles of the count requested.
 //
-// None of these is a guarantee. Regularize is not a manifold-preserving mode --
+// An earlier version also retried at 1.05x, 1.25x and 1.6x the target. It is
+// gone because a silent size increase is the wrong trade for the callers that
+// decimate at all: examples/_render.py exports at a ratio of 0.12 against a
+// 400 KiB budget for committed models. A caller picks a ratio because it needs
+// that size.
+//
+// Asking for the same target is NOT enough to hold a retry to the same size,
+// which is the part that had to be measured rather than assumed. Regularize
+// weighs triangle shape and will stop short of a target the plain pass reaches:
+// on 04_repeat_radial it answered 1,744 triangles where 834 were asked for and
+// 834 were delivered without it. So a retry is accepted only if it did not grow
+// the result materially -- the recoveries that matter came in within two
+// triangles, so the allowance is not what makes them work.
+constexpr float kRetryGrowthAllowance = 1.05f;
+//
+// Neither flag is a guarantee. Regularize is not a manifold-preserving mode --
 // measured over 21 shape-and-ratio combinations it both fixed cases and broke
-// ones that were clean without it -- so it is used as another thing to try and
-// check, never as a thing to trust.
-struct Attempt {
-    unsigned int flags;
-    float ratio_scale;
-};
-constexpr Attempt kRetries[] = {
-    {meshopt_SimplifyRegularize, 1.0f},      {meshopt_SimplifyRegularizeLight, 1.0f},
-    {0, 1.05f},                              {meshopt_SimplifyRegularize, 1.05f},
-    {0, 1.25f},                              {0, 1.6f},
-};
+// ones that were clean without it -- so it is another thing to try and then
+// check, never a thing to trust.
+constexpr unsigned int kRetryFlags[] = {meshopt_SimplifyRegularize,
+                                        meshopt_SimplifyRegularizeLight};
+
+void report_to(DecimateReport* report, bool manifold, bool input_manifold, int attempts) {
+    if (!report) return;
+    report->manifold = manifold;
+    report->input_manifold = input_manifold;
+    report->attempts = attempts;
+}
 
 }  // namespace
 
-Mesh decimate(const Mesh& input, const DecimateOptions& options) {
+Mesh decimate(const Mesh& input, const DecimateOptions& options, DecimateReport* report) {
     // A decimated mesh is a TRIANGLE mesh: an edge collapse breaks the quad
     // pairing the first time it fires, so `out` below is built without quads
     // and there is nothing to carry over. The empty passthrough is the one
@@ -164,6 +176,7 @@ Mesh decimate(const Mesh& input, const DecimateOptions& options) {
     if (input.empty()) {
         Mesh passthrough = input;
         drop_quads(passthrough);
+        report_to(report, true, true, 0);
         return passthrough;
     }
     Mesh m = weld_positions(input);
@@ -179,33 +192,45 @@ Mesh decimate(const Mesh& input, const DecimateOptions& options) {
     // incident triangles. Measured on an unmodified tree: a two-torus document
     // meshed at 0.035 and decimated to a quarter produced two such edges from an
     // input with none, and the Euler characteristic moved from -4 to -2 -- the
-    // collapse closed a handle and the non-manifold edges are the scar.
+    // collapse closed a handle.
     //
-    // `clay_document_mesh` documents itself as the watertight, 2-manifold export
-    // path and decimation is reachable through it, so a non-manifold result is
-    // not one this can return. It is not repairable after the fact either: the
-    // pinches are FLAT -- the four triangles at the two measured edges sit at 0,
-    // 178.7, 178.7 and -177.3 degrees around the edge -- so which pair belongs to
-    // which sheet is numerically undecidable, and the two answers differ in the
-    // genus they leave behind.
-    //
-    // So ask again for slightly more geometry instead. The same document is
-    // clean at neighbouring ratios, and a target is something to approach.
-    if (edge_manifold(out)) return out;
-    if (!edge_manifold(m)) return out;  // it arrived pinched; not this pass's doing
-
-    for (const Attempt& attempt : kRetries) {
-        const std::size_t target =
-            aligned_target(m.indices.size(), options.target_ratio * attempt.ratio_scale);
-        if (target >= m.indices.size()) break;
-        Mesh alt = simplify_to(m, target, options, with_colors, attempt.flags);
-        if (edge_manifold(alt)) return alt;
+    // Retry rather than repair. The pinches are FLAT -- the four triangles at
+    // the two measured edges sit at 0, 178.7, 178.7 and -177.3 degrees around
+    // the edge -- so which pair belongs to which sheet is numerically
+    // undecidable, and the two answers differ in the genus they leave behind.
+    if (edge_manifold(out)) {
+        report_to(report, true, true, 1);
+        return out;
+    }
+    if (!edge_manifold(m)) {
+        report_to(report, false, false, 1);  // it arrived pinched; not this pass's doing
+        return out;
     }
 
-    // Nothing clean near the requested size: hand back the input rather than a
-    // mesh that breaks the promise. It is welded and quad-free, so it is a
-    // decimation result in every respect except having been decimated.
-    return m;
+    const std::size_t size_ceiling = static_cast<std::size_t>(
+        static_cast<float>(out.triangle_count()) * kRetryGrowthAllowance);
+    int attempts = 1;
+    for (unsigned int flags : kRetryFlags) {
+        Mesh alt = simplify_to(m, target_indices, options, with_colors, flags);
+        ++attempts;
+        if (alt.triangle_count() > size_ceiling) continue;  // clean but not what was asked for
+        if (edge_manifold(alt)) {
+            report_to(report, true, true, attempts);
+            return alt;
+        }
+    }
+
+    // NO COLLAPSE ORDER CLEARS IT, so return the size that was asked for and say
+    // it is pinched.
+    //
+    // The alternative -- hand back the undecimated input -- was written first
+    // and is worse. On examples/37_groups it turned a requested 12,418 triangles
+    // into 155,388, a twelvefold file, because at one triangle in twelve a
+    // grouped model merges sheets by definition rather than by accident. A
+    // caller that asked for 8% is not served by 100%, and one that cannot use a
+    // pinched mesh needs to be told rather than handed a different problem.
+    report_to(report, false, true, attempts);
+    return out;
 }
 
 }  // namespace mesh
