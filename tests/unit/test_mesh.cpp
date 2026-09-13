@@ -618,11 +618,20 @@ TEST_CASE("decimation recovers a pinch that is recoverable") {
     // returned the input would pass every check above and defeat the purpose.
     CHECK(d.triangle_count() < in.triangles / 2);
 
+    // THE REPORT NEVER LIES, which is the part that holds on every toolchain.
+    //
+    // An earlier version asserted `report.attempts > 1` here -- that the first
+    // simplification is the one that pinched. It does on AppleClang, across
+    // twelve of the thirteen ratios from 0.21 to 0.32. It does NOT on the CI
+    // Linux runner, where the first pass at this ratio comes back clean and no
+    // retry runs. Which collapses meshoptimizer makes is decided by float
+    // ordering inside its own queue, so WHETHER a given document pinches is a
+    // property of the toolchain and not of this change. Pinning it failed CI on
+    // Linux, and would have left the rest of this case asserting nothing there.
     mesh::DecimateReport report;
-    mesh::decimate(m, opts, &report);
-    CHECK(report.manifold);
+    Mesh again = mesh::decimate(m, opts, &report);
     CHECK(report.input_manifold);
-    CHECK(report.attempts > 1);  // the first pass is the one that pinched
+    CHECK(report.manifold == (mesh::validate(again).non_manifold_edges == 0));
 }
 
 TEST_CASE("an unrecoverable pinch returns the requested size and says so") {
@@ -653,12 +662,46 @@ TEST_CASE("an unrecoverable pinch returns the requested size and says so") {
     mesh::DecimateReport report;
     Mesh d = mesh::decimate(m, opts, &report);
 
-    // Whatever the topology came out as, the SIZE is the one that was asked
-    // for -- that is the property the gallery failure was about.
-    CHECK(d.triangle_count() < m.triangle_count() / 20);
+    // Whatever the topology came out as, the result is DECIMATED -- that is the
+    // property the gallery failure was about, and the regression it guards
+    // returned 100% of the input. The bound is loose on purpose: exactly where
+    // meshoptimizer stops is a toolchain-dependent float question, and pinning
+    // that is the mistake the case above records.
+    CHECK(d.triangle_count() < m.triangle_count() / 2);
     CHECK(report.input_manifold);
-    // And if it could not be cleaned, the report says so rather than the caller
-    // having to validate the mesh to find out.
-    if (!report.manifold) CHECK(mesh::validate(d).non_manifold_edges > 0);
-    if (report.manifold) CHECK(mesh::validate(d).non_manifold_edges == 0);
+    CHECK(report.manifold == (mesh::validate(d).non_manifold_edges == 0));
+}
+
+TEST_CASE("decimation reports a pinch it was handed rather than claiming it") {
+    // The deterministic half. Whether a DOCUMENT pinches under simplification
+    // depends on the toolchain, so neither case above can be relied on to
+    // exercise the reporting path on every platform. This one builds the
+    // condition by hand and therefore fires everywhere: two quads sharing one
+    // edge, folded so four triangles meet along it.
+    Mesh m;
+    m.positions = {cf3(0, 0, 0),  cf3(1, 0, 0),                      // the shared edge
+                   cf3(0, 1, 0),  cf3(1, 1, 0),                      // sheet A
+                   cf3(0, -1, 0), cf3(1, -1, 0),                     // sheet B
+                   cf3(0, 0, 1),  cf3(1, 0, 1)};                     // sheet C, out of plane
+    auto quad = [&m](std::uint32_t a, std::uint32_t b, std::uint32_t c, std::uint32_t d) {
+        m.indices.insert(m.indices.end(), {a, b, c, c, b, d});
+    };
+    quad(0, 1, 2, 3);
+    quad(0, 1, 4, 5);
+    quad(0, 1, 6, 7);
+    REQUIRE(mesh::validate(m).non_manifold_edges > 0);  // the fixture is the point
+
+    // Ratio 1.0 so the simplifier has nothing to remove: the result keeps the
+    // pinch the fixture was built with, which is what makes this deterministic
+    // rather than another bet on which collapses meshoptimizer picks.
+    mesh::DecimateReport report;
+    mesh::DecimateOptions opts;
+    opts.target_ratio = 1.0f;
+    Mesh d = mesh::decimate(m, opts, &report);
+    REQUIRE(mesh::validate(d).non_manifold_edges > 0);
+    CHECK_FALSE(report.manifold);
+    CHECK_FALSE(report.input_manifold);
+    // And it does not spend retries trying to clean up something it did not
+    // break -- an input that arrives pinched is simplified once and returned.
+    CHECK(report.attempts == 1);
 }

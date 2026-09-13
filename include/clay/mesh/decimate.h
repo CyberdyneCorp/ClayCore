@@ -54,6 +54,13 @@ struct DecimateReport {
     // Whether the INPUT was, which is what says whose defect a false `manifold`
     // is. An input that arrives pinched is simplified and returned as it always
     // was; this does not promise to repair what it did not break.
+    //
+    // ONLY CONSULT THIS WHEN `manifold` IS FALSE. The input is examined only
+    // once the result is found pinched, because the answer is wanted for
+    // attribution and nothing else -- and the input is the larger mesh, so
+    // checking it on every call would cost far more than the check that earns
+    // its place. A clean result therefore leaves this `true` without having
+    // looked.
     bool input_manifold = true;
     // Simplifications actually run. 1 when the first result was clean.
     int attempts = 1;
