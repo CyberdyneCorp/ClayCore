@@ -48,6 +48,7 @@
 // refutation generalised from one.
 
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <map>
 #include <vector>
