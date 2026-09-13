@@ -6503,7 +6503,40 @@ typedef struct clay_move_params {
      *
      * A named gesture never continues an unnamed one, or a differently named
      * one. Leave it zero and the bit-equality rule applies exactly as before,
-     * which is what a caller compiled against the older struct gets. */
+     * which is what a caller compiled against the older struct gets.
+     *
+     * A CONTINUED GESTURE RESTATES THE DRAG. IT DOES NOT ADD TO IT.
+     *
+     * This is the part that bites, and it is a CONTRACT ON THE CALLER rather
+     * than a property of the id. A call that continues a gesture REPLACES the
+     * leading grabs it matches instead of stacking on them, so `displacement`
+     * must be the TOTAL from the gesture's anchor -- not the step since the
+     * last call -- and `centre` must be that anchor, because the surviving
+     * grab is centred wherever the last call put it.
+     *
+     * Name a gesture while still passing per-call deltas and you are asking
+     * the engine to replace the whole drag with its last piece. Measured on a
+     * six-slice drag of a sphere whose surface starts at y = 1.000, where a
+     * drag landing everything it was given reaches about 1.300
+     * (benchmarks/move_segmented_gesture_probe.cpp):
+     *
+     *     id 0, advancing centre, per-slice   6 warps  step 0.1176  y 1.0909
+     *     id 1, advancing centre, per-slice   1 warp   step 0.7000  y 1.0000
+     *     id 1, advancing centre, cumulative  1 warp   step 0.2800  y 1.0000
+     *     id 1, ANCHORED centre, cumulative   1 warp   step 0.2800  y 1.1569
+     *
+     * The middle two END WHERE THEY STARTED. Note the third especially: it
+     * takes two of the three requirements, and its warp count, declared
+     * Lipschitz and step scale are IDENTICAL to the correct row to every
+     * digit. Every cost metric a host would check to confirm the change says
+     * it worked, and only the surface says otherwise. Assert where the surface
+     * ENDS UP, not that the chain collapsed.
+     *
+     * A host that segments its stroke -- handing the engine slices of a
+     * pointer trail rather than one call per frame -- is the case this is
+     * written for. clay_sdf_move_begin/update/commit already works this way,
+     * so naming the gesture makes this entry point agree with that one rather
+     * than diverge from it. */
     uint64_t gesture_id;
     /* LAZY-MOUSE LAG for a live drag (ABI 0.109.0, issue #532). Same semantics
      * and units as clay_stroke_preset.steady: 0 follows the cursor exactly,
