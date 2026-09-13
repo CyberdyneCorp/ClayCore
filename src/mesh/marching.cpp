@@ -51,9 +51,49 @@ struct EdgeKeyHash {
     }
 };
 
+// HOW CLOSE A CROSSING MAY SIT TO A LATTICE POINT (issue #549).
+//
+// The crossing parameter t = f0/(f0-f1) can land at exactly 0 or 1, putting the
+// vertex on a lattice corner. When several edges of one cell do that, the
+// triangle between them has near-zero area -- a SLIVER. Its face normal is a
+// cross product of near-parallel edges, so it shades black wherever gradient
+// normals are unavailable, and a host re-meshes the WHOLE FIELD after every
+// stroke to hide them. That re-mesh evaluates the field densely with no cull,
+// which measured 26.2 ms against the per-brick path's 6.3 ms at 48 dabs.
+//
+// MEASURED BEFORE CHOOSING, with benchmarks/sliver_origin_probe.cpp. Distance
+// from the lattice, in voxels, over 47,532 triangles and 1,006 slivers:
+//
+//                       median    p90     under 0.01
+//     sliver vertices   0.0178   0.0364      34.4%
+//     other vertices    0.2576   0.4515       0.6%
+//
+// So slivers really are pinned and ordinary vertices are not, and the guard has
+// a window: above the sliver p90 of 0.0364 and below the ordinary p10 of
+// 0.0617. 0.05 moves essentially every sliver vertex and under a tenth of the
+// rest, by at most 0.05 * spacing -- 0.0025 world units at a 0.05 voxel.
+//
+// TOPOLOGY CANNOT CHANGE. The marching case index comes from SIGN TESTS alone
+// (`if (f[i] < 0.0f) inside_mask |= 1 << i`), so t decides only where a vertex
+// sits on an edge whose existence is already settled. Watertightness and the
+// Euler characteristic survive by construction rather than by being re-tested.
+constexpr float kEdgeGuard = 0.05f;
+
+// The crossing parameter, held off the lattice points. Used by BOTH the emitted
+// vertex and the shell classifier below -- they must agree bit for bit or brick
+// ownership describes a vertex that was never placed there.
+inline float edge_t(float f0, float f1, float guard) {
+    const float t = f0 / (f0 - f1);
+    if (!(guard > 0.0f)) return t;
+    return t < guard ? guard : (t > 1.0f - guard ? 1.0f - guard : t);
+}
+
 class Builder {
   public:
-    Builder(kernel::cfloat3 origin, float spacing) : origin_(origin), spacing_(spacing) {}
+    // `edge_guard` of 0 leaves the crossing exactly where the field puts it.
+    // Only the BRICK path passes a non-zero one -- see kEdgeGuard.
+    Builder(kernel::cfloat3 origin, float spacing, float edge_guard = 0.0f)
+        : origin_(origin), spacing_(spacing), edge_guard_(edge_guard) {}
 
     // Vertex on the crossing of lattice edge (p0, p1); welded by canonical key.
     std::uint32_t edge_vertex(LatticePoint p0, float f0, LatticePoint p1, float f1) {
@@ -67,7 +107,7 @@ class Builder {
         EdgeKey key{id0, id1};
         auto it = vertex_map_.find(key);
         if (it != vertex_map_.end()) return it->second;
-        float t = f0 / (f0 - f1);  // f0, f1 have opposite signs
+        float t = edge_t(f0, f1, edge_guard_);  // opposite signs; see kEdgeGuard
         cfloat3 a = origin_ + cf3((float)p0.i, (float)p0.j, (float)p0.k) * spacing_;
         cfloat3 b = origin_ + cf3((float)p1.i, (float)p1.j, (float)p1.k) * spacing_;
         std::uint32_t idx = static_cast<std::uint32_t>(out.positions.size());
@@ -87,6 +127,7 @@ class Builder {
   private:
     kernel::cfloat3 origin_;
     float spacing_;
+    float edge_guard_ = 0.0f;
     std::unordered_map<EdgeKey, std::uint32_t, EdgeKeyHash> vertex_map_;
 };
 
@@ -232,7 +273,10 @@ std::array<float, 3> shell_corner_lattice(ShellEdge e) {
         std::swap(e.p0, e.p1);
         std::swap(e.f0, e.f1);
     }
-    const float t = e.f0 / (e.f0 - e.f1);
+    // The SAME arithmetic the emitted vertex uses, guard included. Clamping one
+    // and not the other would make brick ownership describe a vertex that was
+    // never placed there, which is how seam artifacts start.
+    const float t = edge_t(e.f0, e.f1, kEdgeGuard);
     return {static_cast<float>(e.p0.i) + (static_cast<float>(e.p1.i - e.p0.i)) * t,
             static_cast<float>(e.p0.j) + (static_cast<float>(e.p1.j - e.p0.j)) * t,
             static_cast<float>(e.p0.k) + (static_cast<float>(e.p1.k - e.p0.k)) * t};
@@ -805,7 +849,9 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_
     // across, so bounding the memory costs no parallelism.
     constexpr std::size_t kBricksPerWave = 512;
     std::vector<ShellCollector> recorded;
-    Builder b(cf3(0, 0, 0), vs);
+    // The brick path, and ONLY it: see kEdgeGuard for why the tape path is
+    // left alone.
+    Builder b(cf3(0, 0, 0), vs, kEdgeGuard);
     std::vector<std::uint32_t> remap;
     for (std::size_t wave = 0; wave < keys->size(); wave += kBricksPerWave) {
     const std::size_t wave_end = std::min(wave + kBricksPerWave, keys->size());
