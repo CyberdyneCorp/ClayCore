@@ -37,6 +37,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -50,7 +51,30 @@ double ms_since(Clock::time_point t) {
 }
 
 constexpr int kDim = 8;
-constexpr float kVoxel = 0.05f;
+// THE FIXTURE'S RESOLUTION IS THE COMPARISON'S BIGGEST LEVER, and getting it
+// wrong is how this probe's first number was published overstated. The engine
+// total was measured here at 0.05 and set against an application figure taken
+// on a document at 0.02 -- 1,728 bricks against 17,576 -- and the resulting
+// "the engine is 4.9%" was a ratio between two different documents.
+//
+// Overridable so the engine's share can be measured on the HOST's own
+// configuration. ClaySpaceDesktop runs voxel_size 0.02 with band_voxels 3
+// (clayspace-engine/src/document.rs:3033), where the same drag costs the
+// engine 23.343 ms rather than 10.257 ms.
+float probe_voxel() {
+    if (const char* e = std::getenv("CLAY_PROBE_VOXEL")) {
+        const float v = std::strtof(e, nullptr);
+        if (v > 0.0f) return v;
+    }
+    return 0.05f;
+}
+int probe_band() {
+    if (const char* e = std::getenv("CLAY_PROBE_BAND")) {
+        const int b = std::atoi(e);
+        if (b > 0) return b;
+    }
+    return 2;
+}
 constexpr float kRadius = 0.40f;
 constexpr int kSegments = 6;
 
@@ -147,7 +171,7 @@ MeshResult mesh_all(clay_brick_cache* cache, const clay_document* doc, int norma
 int main() {
     std::printf("stroke_floor_probe: what the ENGINE charges for one whole stroke\n");
     std::printf("  clean one-item sphere r=1, voxel %.3f, move radius %.2f, %d segments\n",
-                static_cast<double>(kVoxel), static_cast<double>(kRadius), kSegments);
+                static_cast<double>(probe_voxel()), static_cast<double>(kRadius), kSegments);
     std::printf("  the application reports %.1f ms for this brush on this fixture (#531)\n\n",
                 kAppMoveMs);
 
@@ -157,8 +181,8 @@ int main() {
     clay_brick_config bc{};
     bc.struct_size = sizeof(bc);
     bc.dim = kDim;
-    bc.voxel_size = kVoxel;
-    bc.band_voxels = 2;
+    bc.voxel_size = probe_voxel();
+    bc.band_voxels = probe_band();
     bc.memory_budget = 0;
     clay_brick_cache* cache = clay_brick_cache_create(&bc);
     if (!cache) { std::printf("FAIL: no cache\n"); clay_document_destroy(d.doc); return 1; }
@@ -284,7 +308,7 @@ int main() {
     {
         clay_mesh_params dp{};
         dp.struct_size = sizeof(dp);
-        dp.voxel_size = kVoxel;
+        dp.voxel_size = probe_voxel();
         clay_mesh* warm_dm = nullptr;
         clay_document_mesh(d.doc, &dp, &warm_dm);
         if (warm_dm) clay_mesh_destroy(warm_dm);
@@ -315,8 +339,8 @@ int main() {
             clay_brick_config bc2{};
             bc2.struct_size = sizeof(bc2);
             bc2.dim = kDim;
-            bc2.voxel_size = kVoxel;
-            bc2.band_voxels = 2;
+            bc2.voxel_size = probe_voxel();
+            bc2.band_voxels = probe_band();
             clay_brick_cache* c2 = clay_brick_cache_create(&bc2);
             if (c2) {
                 clay_brick_cache_mark_dirty(c2, wmin, wmax);
@@ -404,8 +428,8 @@ int main() {
         clay_brick_config bc2{};
         bc2.struct_size = sizeof(bc2);
         bc2.dim = kDim;
-        bc2.voxel_size = kVoxel;
-        bc2.band_voxels = 2;
+        bc2.voxel_size = probe_voxel();
+        bc2.band_voxels = probe_band();
         clay_brick_cache* c3 = clay_brick_cache_create(&bc2);
         if (!c3) { clay_document_destroy(dd.doc); break; }
 
@@ -430,7 +454,7 @@ int main() {
 
         clay_mesh_params dp2{};
         dp2.struct_size = sizeof(dp2);
-        dp2.voxel_size = kVoxel;
+        dp2.voxel_size = probe_voxel();
         clay_mesh* warm_d = nullptr;
         clay_document_mesh(dd.doc, &dp2, &warm_d);
         if (warm_d) clay_mesh_destroy(warm_d);
