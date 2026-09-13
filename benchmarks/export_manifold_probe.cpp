@@ -32,6 +32,20 @@
 // different one appears at 0.59 and survives to 0.44, resolved by 0.43. A
 // pinch is CREATED by one collapse and REMOVED by a later one -- it is a
 // transient state of the simplification, not a property of the target size.
+//
+// AND THEY ARE FLAT, which is why this prints the radial layout. The four
+// triangles at each bad edge sit within about two degrees of each other, with
+// the fourth about 180 degrees away:
+//
+//     0.50, 0.55     +0.0   +179.9    -0.0    -1.7
+//     0.65           +0.0   -179.0  -179.4  -179.4
+//     0.70, 0.75     +0.0   +178.9    -0.6    -0.6
+//
+// That is the same configuration that killed the repair pass on #567's crossed
+// tori -- which pair of triangles belongs to which sheet is a rounding
+// tie-break, and the two answers leave different genus. So repair is refuted
+// on a SECOND, independent fixture, which is what it needed: the first
+// refutation generalised from one.
 
 #include <cmath>
 #include <cstdio>
@@ -101,6 +115,34 @@ int main() {
                 std::printf("        edge x%d  a=(%+.4f %+.4f %+.4f)  |a|=%.4f  len=%.5f\n",
                             kv.second, static_cast<double>(pa[0]), static_cast<double>(pa[1]),
                             static_cast<double>(pa[2]), r, len);
+                // ARE THESE PINCHES FLAT? That is what killed the repair pass on
+                // #567's fixture -- four triangles at 0, 178.7, 178.7 and -177.3
+                // degrees, where which pair belongs to which sheet is a rounding
+                // tie-break. If these are well separated, repair is viable here
+                // even though it was not there.
+                double ax[3] = {(pb[0]-pa[0])/len, (pb[1]-pa[1])/len, (pb[2]-pa[2])/len};
+                double ref[3] = {0,0,0}; bool have_ref = false;
+                std::printf("          radial:");
+                for (size_t ft = 0; ft < tris; ++ft) {
+                    std::uint32_t tri[3] = {idx[ft*3], idx[ft*3+1], idx[ft*3+2]};
+                    bool ha=false, hb=false; std::uint32_t apex=0;
+                    for (int k=0;k<3;++k){ if(tri[k]==a) ha=true; else if(tri[k]==b) hb=true; else apex=tri[k]; }
+                    if (!ha || !hb) continue;
+                    const float* pc = pos + apex*3;
+                    double d[3] = {pc[0]-pa[0], pc[1]-pa[1], pc[2]-pa[2]};
+                    const double dot = d[0]*ax[0]+d[1]*ax[1]+d[2]*ax[2];
+                    for (int k=0;k<3;++k) d[k] -= dot*ax[k];
+                    const double dl = std::sqrt(d[0]*d[0]+d[1]*d[1]+d[2]*d[2]);
+                    if (dl < 1e-12) { std::printf("  [apex on axis]"); continue; }
+                    for (int k=0;k<3;++k) d[k] /= dl;
+                    if (!have_ref) { for(int k=0;k<3;++k) ref[k]=d[k]; have_ref=true; }
+                    double bino[3] = {ax[1]*ref[2]-ax[2]*ref[1], ax[2]*ref[0]-ax[0]*ref[2],
+                                      ax[0]*ref[1]-ax[1]*ref[0]};
+                    const double cx = d[0]*ref[0]+d[1]*ref[1]+d[2]*ref[2];
+                    const double cy = d[0]*bino[0]+d[1]*bino[1]+d[2]*bino[2];
+                    std::printf("  %+7.1fdeg", std::atan2(cy, cx) * 57.29578);
+                }
+                std::printf("\n");
             }
         }
         clay_mesh_destroy(m);
