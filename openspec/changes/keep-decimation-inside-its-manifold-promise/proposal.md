@@ -60,39 +60,62 @@ no matter which rule reads it.
 
 ## What changes
 
-`decimate` checks its own result and **never returns a non-manifold mesh where
-the input was manifold**. When the requested simplification lands on a pinch it
-asks again — strategy first, size second:
+`decimate` checks its own result, retries a pinch it can recover, and **says
+when it could not**. `DecimateReport` carries `manifold`, `input_manifold` and
+the attempt count.
 
-| order | what changes | why |
-|---|---|---|
-| 1 | `meshopt_SimplifyRegularize`, same target | different collapses, same triangle count |
-| 2 | `meshopt_SimplifyRegularizeLight`, same target | |
-| 3-6 | 1.05x, 1.25x, 1.6x the target | more geometry, as a last resort |
-| — | the welded input | correct and larger, rather than broken |
+| | |
+|---|---|
+| first pass clean | returned, `manifold = true` |
+| pinched, a retry at the same target is clean and no larger | that result |
+| pinched, no clean retry within the size | the requested size, `manifold = false` |
+| input already pinched | simplified and returned, `input_manifold = false` |
 
-**Every one of the four measured failures recovered on the first retry**, at the
-requested size: 22,178 -> 22,180, 133,080 -> 133,078, 30,444 -> 30,444,
-22,208 -> 22,208 triangles.
-
-Strategy-before-size is measured, not assumed. The two-torus case needed
-**60% more triangles** before an unregularized pass came back clean, against a
-different collapse order costing it nothing.
+**Every one of the four measured recoveries came at the requested size**:
+22,178 -> 22,180, 133,080 -> 133,078, 30,444 -> 30,444, 22,208 -> 22,208.
 
 **Regularize is not a manifold-preserving mode and is not treated as one.**
 Across 21 shape-and-ratio combinations it fixed cases and also broke cases that
-were clean without it. It is used as another thing to try and then check, never
-as a thing to trust — which is why the check, not the flag, is the fix.
+were clean without it. It is another thing to try and then check, never a thing
+to trust — which is why the check, not the flag, is the fix.
+
+## What building it found, twice
+
+**The first version promised too much, and CI proved it.** It never returned a
+non-manifold mesh: where no retry was clean it handed back the undecimated
+input. `examples/run_all.py` went 76/76 to **74/76** — `34_organic_character`
+and `37_groups` blew the gallery's 400 KiB budget for committed models, the
+latter at **4021 KiB**.
+
+The premise was wrong. At an aggressive ratio a pinch is not an incidental bad
+collapse; merging sheets is **what the ratio means**. On `37_groups`, 155,388
+triangles to 12,418 at a ratio of 0.08, all six retries pinched and the fallback
+returned 155,388 — a twelvefold file. Refusing a pinched result there is
+refusing to decimate, so the promise had to become a *report* rather than a
+guarantee.
+
+**Then the retries themselves were caught growing the mesh.** Holding the target
+does not hold the size: `meshopt_SimplifyRegularize` weighs triangle shape and
+stops short of a target the plain pass reaches. On `04_repeat_radial` it
+answered **1,744 triangles where 834 were asked for** and 834 were delivered
+without it — doubling a committed model to buy manifoldness nobody requested.
+
+So a retry is now accepted only if it did not grow the result past 1.05x. The
+recoveries that matter came in within *two triangles*, so the allowance is not
+what makes them work. With that bound the gallery is byte-for-byte what it was:
+`04_repeat_radial` and `30_trim_curve` return to their committed element counts,
+76/76 examples run, and `check_gallery.py` passes.
 
 ## What it costs
 
 ```text
 clean path (76,112 triangles in, 19,028 out)    19.29 -> 19.97 ms    +3.5%
-when a retry fires                              one more simplification
+when a retry fires                              one more simplification each
 ```
 
 The clean path pays one edge-map pass over the output. A retry costs roughly a
-second decimation, on the ~20% of the configurations measured that need one.
+second decimation, on the ~20% of the configurations measured that need one; an
+unrecoverable pinch pays for both retries before returning the first result.
 
 ## What changes for a caller
 
