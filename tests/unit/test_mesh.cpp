@@ -571,3 +571,137 @@ TEST_CASE("the brick mesher emits no sliver triangles") {
     CHECK(r.watertight);
     CHECK(r.manifold);
 }
+
+TEST_CASE("decimation recovers a pinch that is recoverable") {
+    // meshoptimizer decides its own collapses and does not apply the link
+    // condition `collapse_edge` refuses on, so a watertight 2-manifold input can
+    // come back with edges carrying four incident triangles.
+    //
+    // THIS IS THE CONFIGURATION THAT DID IT, measured on an unmodified tree
+    // before the fix: two tori crossed at a right angle, meshed at 0.035, and
+    // decimated to a quarter. It produced two edges of incidence four -- each
+    // with two forward and two backward triangles -- from an input with none,
+    // and moved the Euler characteristic from -4 to -2. The collapse closed a
+    // handle; the non-manifold edges are the scar (issue #567).
+    //
+    // The ratio matters as much as the shape. The same document is clean at
+    // 0.05, 0.1, 0.4, 0.6, 0.8 and 0.9, so a case at any of those ratios would
+    // pass without the fix and assert nothing.
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    l.sdf->insert(item(scene::Prim::torus(0.7f, 0.28f), cf3(0, 0, 0)));
+    scene::Node crossed = item(scene::Prim::torus(0.7f, 0.28f), cf3(0, 0, 0), scene::Op::Add,
+                               scene::Blend{scene::BlendProfile::Quadratic, 0.1f});
+    crossed.xform.rotation = math::Quat::from_axis_angle(cf3(1, 0, 0), 1.5707963f);
+    l.sdf->insert(crossed);
+
+    Mesh m = mesh::mesh_tape(scene::compile_document(doc),
+                             math::Aabb{cf3(-1.2f, -1.2f, -1.2f), cf3(1.2f, 1.2f, 1.2f)},
+                             0.035f);
+    ValidationReport in = mesh::validate(m);
+    REQUIRE(in.triangles > 50000);  // the pinch needs the density it was found at
+    REQUIRE(in.non_manifold_edges == 0);
+    REQUIRE(in.watertight);
+
+    mesh::DecimateOptions opts;
+    opts.target_ratio = 0.25f;
+    opts.target_error = 0.05f;
+    Mesh d = mesh::decimate(m, opts);
+
+    ValidationReport out = mesh::validate(d);
+    CAPTURE(out.triangles);
+    CHECK(out.non_manifold_edges == 0);
+    CHECK(out.manifold);
+    CHECK(out.watertight);
+
+    // Recovered by asking again, not by giving up on decimating: a result that
+    // returned the input would pass every check above and defeat the purpose.
+    CHECK(d.triangle_count() < in.triangles / 2);
+
+    // THE REPORT NEVER LIES, which is the part that holds on every toolchain.
+    //
+    // An earlier version asserted `report.attempts > 1` here -- that the first
+    // simplification is the one that pinched. It does on AppleClang, across
+    // twelve of the thirteen ratios from 0.21 to 0.32. It does NOT on the CI
+    // Linux runner, where the first pass at this ratio comes back clean and no
+    // retry runs. Which collapses meshoptimizer makes is decided by float
+    // ordering inside its own queue, so WHETHER a given document pinches is a
+    // property of the toolchain and not of this change. Pinning it failed CI on
+    // Linux, and would have left the rest of this case asserting nothing there.
+    mesh::DecimateReport report;
+    Mesh again = mesh::decimate(m, opts, &report);
+    CHECK(report.input_manifold);
+    CHECK(report.manifold == (mesh::validate(again).non_manifold_edges == 0));
+}
+
+TEST_CASE("an unrecoverable pinch returns the requested size and says so") {
+    // The counterpart, and the case CI found after the first version of this
+    // fix shipped the opposite behaviour. At an aggressive ratio a pinch is not
+    // an incidental bad collapse -- merging sheets is WHAT THE RATIO MEANS -- so
+    // no retry recovers it.
+    //
+    // The first version returned the undecimated input here. On
+    // examples/37_groups that turned a requested 12,418 triangles into 155,388
+    // and blew the gallery's 400 KiB budget for committed models by tenfold.
+    // A caller asking for a twelfth of the geometry is not served by all of it.
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    l.sdf->insert(item(scene::Prim::torus(0.7f, 0.28f), cf3(0, 0, 0)));
+    scene::Node crossed = item(scene::Prim::torus(0.7f, 0.28f), cf3(0, 0, 0), scene::Op::Add,
+                               scene::Blend{scene::BlendProfile::Quadratic, 0.1f});
+    crossed.xform.rotation = math::Quat::from_axis_angle(cf3(1, 0, 0), 1.5707963f);
+    l.sdf->insert(crossed);
+    Mesh m = mesh::mesh_tape(scene::compile_document(doc),
+                             math::Aabb{cf3(-1.2f, -1.2f, -1.2f), cf3(1.2f, 1.2f, 1.2f)},
+                             0.035f);
+    REQUIRE(mesh::validate(m).non_manifold_edges == 0);
+
+    mesh::DecimateOptions opts;
+    opts.target_ratio = 0.02f;  // one triangle in fifty
+    opts.target_error = 0.5f;
+    mesh::DecimateReport report;
+    Mesh d = mesh::decimate(m, opts, &report);
+
+    // Whatever the topology came out as, the result is DECIMATED -- that is the
+    // property the gallery failure was about, and the regression it guards
+    // returned 100% of the input. The bound is loose on purpose: exactly where
+    // meshoptimizer stops is a toolchain-dependent float question, and pinning
+    // that is the mistake the case above records.
+    CHECK(d.triangle_count() < m.triangle_count() / 2);
+    CHECK(report.input_manifold);
+    CHECK(report.manifold == (mesh::validate(d).non_manifold_edges == 0));
+}
+
+TEST_CASE("decimation reports a pinch it was handed rather than claiming it") {
+    // The deterministic half. Whether a DOCUMENT pinches under simplification
+    // depends on the toolchain, so neither case above can be relied on to
+    // exercise the reporting path on every platform. This one builds the
+    // condition by hand and therefore fires everywhere: two quads sharing one
+    // edge, folded so four triangles meet along it.
+    Mesh m;
+    m.positions = {cf3(0, 0, 0),  cf3(1, 0, 0),                      // the shared edge
+                   cf3(0, 1, 0),  cf3(1, 1, 0),                      // sheet A
+                   cf3(0, -1, 0), cf3(1, -1, 0),                     // sheet B
+                   cf3(0, 0, 1),  cf3(1, 0, 1)};                     // sheet C, out of plane
+    auto quad = [&m](std::uint32_t a, std::uint32_t b, std::uint32_t c, std::uint32_t d) {
+        m.indices.insert(m.indices.end(), {a, b, c, c, b, d});
+    };
+    quad(0, 1, 2, 3);
+    quad(0, 1, 4, 5);
+    quad(0, 1, 6, 7);
+    REQUIRE(mesh::validate(m).non_manifold_edges > 0);  // the fixture is the point
+
+    // Ratio 1.0 so the simplifier has nothing to remove: the result keeps the
+    // pinch the fixture was built with, which is what makes this deterministic
+    // rather than another bet on which collapses meshoptimizer picks.
+    mesh::DecimateReport report;
+    mesh::DecimateOptions opts;
+    opts.target_ratio = 1.0f;
+    Mesh d = mesh::decimate(m, opts, &report);
+    REQUIRE(mesh::validate(d).non_manifold_edges > 0);
+    CHECK_FALSE(report.manifold);
+    CHECK_FALSE(report.input_manifold);
+    // And it does not spend retries trying to clean up something it did not
+    // break -- an input that arrives pinched is simplified once and returned.
+    CHECK(report.attempts == 1);
+}
