@@ -10,9 +10,7 @@ and the parity gates are written in, which is why its coverage is held EQUAL to
 the C ABI's rather than allowed to be a convenience subset —
 `check_binding_parity` fails on a capability reachable from one and not the
 other.
-
 ## Requirements
-
 ### Requirement: pyclay module
 The library SHALL ship a nanobind extension module `pyclay` exposing: document/layer construction (`Document`, `add_sdf_layer`, `add_voxel_layer`), the full edit vocabulary (primitives, ops, blends, transforms, deformers, mirrors, strokes) with Pythonic parameter names, field evaluation (`eval`, `gradients`), meshing with resolution/decimation/backend selection, mesh predicates (`is_watertight()` etc.), and save/load of `.clayspace` plus mesh export (OBJ/FBX/PLY/glTF).
 
@@ -807,6 +805,8 @@ A stale commit and a refused rebuild SHALL raise with messages naming which cont
 
 A sculpting session held over a layer that has since been rebuilt SHALL raise on its next operation, including when the replacement had the same vertex and triangle counts.
 
+The revision `pyclay` reports SHALL be the SAME quantity the C ABI reports for the same document — one counter kept beside the triangles, not a second one maintained in parallel — so the two bindings cannot answer differently about the same layer. It SHALL advance for every wholesale replacement, including an undo, a redo and a replayed journal event.
+
 #### Scenario: The layer rebuild is one undo step from Python
 - **WHEN** a mesh layer is rebuilt from Python with undo enabled
 - **THEN** the layer holds the new triangles, the returned report carries the stage timings and the surface distance, and one undo restores the previous triangles
@@ -814,6 +814,14 @@ A sculpting session held over a layer that has since been rebuilt SHALL raise on
 #### Scenario: A stale commit raises
 - **WHEN** a caller commits a rebuild at a revision the layer has moved past
 - **THEN** it raises, and the layer keeps the newer geometry
+
+#### Scenario: Undo, redo and replay each advance the revision from Python
+- **WHEN** a mesh layer is rebuilt, undone and redone, and a journal carrying a rebuild is replayed onto a document holding the earlier triangles
+- **THEN** the revision is strictly greater after each of those steps, and the layer holds the triangles that step promised
+
+#### Scenario: Nothing that is not a replacement moves it
+- **WHEN** the layer is sculpted, transformed, hidden and shown, protected, or a different mesh layer is rebuilt and undone
+- **THEN** this layer's revision is unchanged throughout
 
 ### Requirement: Welding is reachable from Python
 `pyclay` SHALL expose the weld on a mesh, returning what it did as named values, and SHALL raise on a negative tolerance rather than clamping it.
@@ -957,3 +965,4 @@ This is what lets an example assert the allocation discipline against the shippe
 #### Scenario: The gallery can assert the discipline
 - **WHEN** an example runs a stroke and reads the arena's growth count before and after its warm-up
 - **THEN** the count stops rising, and the example fails loudly if it does not
+

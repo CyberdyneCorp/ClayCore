@@ -9,9 +9,7 @@ to, and the one undo history that reverses every representation through it.
 The layer between the arithmetic below and everything that consumes it. A
 document is the only thing a host, a file, a binding and a renderer all agree
 about, so what it is has to be stated in one place rather than assumed in five.
-
 ## Requirements
-
 ### Requirement: Document structure
 `clay::scene` SHALL model a document as a list of layers, each `voxel`, `sdf` or `mesh` kind, with per-layer transform, visibility, resolution, and material. SDF layers SHALL hold an ordered edit list where each item applies to the combined result of all preceding items. Groups SHALL nest to depth ≥ 4 and carry group ops (including None). Layer instancing SHALL share content by reference such that editing the source updates all instances.
 
@@ -980,9 +978,38 @@ A document SHALL expose, per mesh layer, a revision that changes when the layer'
 
 The distinction is the point. A vertex-displacement brush leaves the topology alone, which is what lets an adjacency, a spatial index or a live sculpting session remain valid across it; a wholesale replacement invalidates all three. A revision that moved for both would force every consumer to rebuild after every brush stroke, and one that moved for neither would not exist.
 
+EVERY path that replaces a layer's triangles SHALL advance it, including the ones the document does not initiate: an attach, a rebuild through the document, a weld that changed something, an undo, a redo, and a replayed journal event. A restoration path that put the triangles back without advancing the revision is the failure this requirement exists to forbid — a consumer's cached adjacency, spatial index or sculpting session is then describing geometry the document no longer holds, and nothing else can detect it.
+
+The revision SHALL ADVANCE on an undo rather than being restored to the value it held when those triangles were last current. It is an invalidation token for a consumer's LIVE caches, not the age of the restored mesh: a consumer that built a cache over the replacement and then undid holds a cache for geometry that is gone, and a revision handed back to an earlier value would tell it the opposite. Monotonic advance is the only rule under which "my token differs from the document's" means "rebuild".
+
+A replacement that is REFUSED SHALL NOT advance it, and neither SHALL an undo or redo that had nothing to reverse. Everything that is not a replacement of the triangles SHALL leave it alone: a sculpt, a rename, a visibility or protection change, a transform-only edit, and history affecting a different layer.
+
+The revision is per-session state and SHALL NOT be serialized. Nothing it invalidates — an adjacency, a spatial index, a live sculpting session — survives a save and a reopen, so there is nothing on the other side of a load for a restored number to protect; a reopened document establishes a fresh generation domain. Writing it would also make a saved document's bytes depend on how the session reached that geometry, which the round trip's identity forbids.
+
 #### Scenario: A sculpt does not move it and a rebuild does
 - **WHEN** a mesh layer is stamped with a displacement brush and then rebuilt
 - **THEN** the revision is unchanged after the stamp and changed after the rebuild
+
+#### Scenario: Undo and redo each advance it, and restore the triangles they promise
+- **WHEN** a mesh layer is attached, rebuilt, undone and redone
+- **THEN** the revision strictly advances at each of the four transitions
+- **AND** the layer holds the attached triangles after the undo and the rebuilt ones after the redo
+
+#### Scenario: Repeated cycles never repeat a generation
+- **WHEN** undo and redo are alternated several times over one replacement
+- **THEN** every transition produces a revision greater than the one before it
+
+#### Scenario: A replayed journal advances it too
+- **WHEN** a journal containing a wholesale replacement is replayed onto a document holding the layer's earlier triangles
+- **THEN** the layer holds the replacement's triangles and the revision has advanced
+
+#### Scenario: Nothing else moves it
+- **WHEN** the layer is renamed, hidden and shown, transformed, protected, or a DIFFERENT mesh layer is rebuilt and undone
+- **THEN** this layer's revision is unchanged throughout
+
+#### Scenario: A refusal spends no generation
+- **WHEN** a replacement is refused for a stale expected revision or a protected layer, or an undo is asked for with nothing left to reverse
+- **THEN** the layer's triangles and its revision are both unchanged
 
 ### Requirement: A stale result cannot overwrite newer work
 Where a caller performs a long rebuild outside the document and commits the result afterwards, the commit SHALL accept the revision the caller read before starting, and SHALL be refused if the layer's geometry has been replaced since.
@@ -1800,3 +1827,59 @@ The tape SHALL be borrowed rather than owned, and SHALL outlive the call. Refusa
 - **THEN** it produces nothing
 - **AND WHEN** a bake is cancelled through its token
 - **THEN** it produces nothing rather than a partial volume
+
+### Requirement: an edit's surface delta is a separate question from a node's influence
+
+The engine SHALL answer two different questions about an edit, and SHALL NOT
+answer either with the other.
+
+`node_influence_bound_in_document` answers WHERE A NODE CAN CHANGE THE FIELD.
+For an Intersect item that is the extent of its layer, because `max(acc, item)`
+is the item's own value everywhere the item is not, and that answer SHALL NOT be
+narrowed: the public influence queries, per-brick culling, the generic
+dirty-node API and every edit kind other than the one below depend on it.
+
+`command_surface_delta_bound` answers WHERE ONE PARTICULAR EDIT CAN CHANGE THE
+BAND-CLAMPED FIELD, given the document before it and after it. It SHALL be
+available only for a `SetTransformCmd` on an existing, visible Intersect item
+whose support is finite, and SHALL report nothing for every other command, node
+and op — so that no other edit's dirty region changes at all.
+
+Where it answers, the region SHALL be the union of the operand's own geometry
+bound taken BEFORE the edit and AFTER it, each dilated by the pad its layer's
+chain needs (`cull_pad`), by each enclosing group's blend support, and by the
+support of every layer fold above it — and unioned over every layer sharing the
+content. A caller SHALL union the two sides; one side alone is not an answer.
+
+#### Scenario: an intersect operand is moved
+
+- **GIVEN** a layer holding a worked form and an Intersect operand at its root
+- **WHEN** the operand is moved by a SetTransformCmd
+- **THEN** the surface-delta bound covers where the operand was and where it went
+- **AND** outside that bound, dilated by the band, no sample changes sign, enters
+  the meshing band, or leaves it
+- **AND** the node's influence bound still reports the layer's extent
+
+The proof rests on the operand's own field being a DISTANCE outside its geometry
+bound. Where the placement is not a similarity — a non-uniform `scale_axes` on
+the item or on a layer holding it — the field is short of the true distance by
+up to `max(s)/min(s)`, and the engine SHALL report nothing rather than a box the
+field does not honour.
+
+#### Scenario: an edit the proof does not cover
+
+- **GIVEN** an Intersect operand that is deformed, gated, unbounded, infinitely
+  repeated, a sampled volume, carries a non-uniform per-axis scale or sits in a
+  layer that does, or sits in a layer whose chain holds a spatial morph or a
+  gate
+- **WHEN** it is moved by a SetTransformCmd
+- **THEN** no surface-delta bound is reported
+- **AND** the caller dirties by the conservative influence bound instead
+
+#### Scenario: an op that is not Intersect
+
+- **GIVEN** a Subtract, Add or Paint item
+- **WHEN** it is moved by a SetTransformCmd
+- **THEN** no surface-delta bound is reported, because the node's influence bound
+  is already that box
+
