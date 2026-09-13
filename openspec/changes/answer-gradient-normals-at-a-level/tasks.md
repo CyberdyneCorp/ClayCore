@@ -44,6 +44,6 @@
 
 ## 6. Still open
 
-- [ ] 6.1 Device gate before any tag carries this
-- [ ] 6.2 #549's other half: the brick mesher still emits the slivers. This
+- [x] 6.1 Device gate before any tag carries this -- RAN: 7/7 sessions, 75 cases, 0 failures on iPad15,5 / iOS 26.5.2 at d391f817, tagged v0.113.0
+- [x] 6.2 #549's other half: the brick mesher still emits the slivers. This
       changes what a host can ask for, not what the mesher produces

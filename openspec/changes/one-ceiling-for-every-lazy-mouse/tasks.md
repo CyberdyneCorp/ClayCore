@@ -35,6 +35,6 @@
 
 ## 5. Still open
 
-- [ ] 5.1 Device gate before any tag carries this
+- [x] 5.1 Device gate before any tag carries this -- RAN: 7/7 sessions, 75 cases, 0 failures on iPad15,5 / iOS 26.5.2 at d391f817, tagged v0.113.0
 - [ ] 5.2 Whether `steady_path` should refuse rather than clamp. More consistent
       with the house style, but it changes behaviour for existing preset callers

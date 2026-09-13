@@ -41,6 +41,6 @@
 
 ## 6. Still open
 
-- [ ] 6.1 Device gate before any tag carries this
+- [x] 6.1 Device gate before any tag carries this -- RAN: 7/7 sessions, 75 cases, 0 failures on iPad15,5 / iOS 26.5.2 at d391f817, tagged v0.113.0
 - [ ] 6.2 The other `clay_layer_*` surface gestures route through the same
       `apply_surface_gesture` and have the same gap
