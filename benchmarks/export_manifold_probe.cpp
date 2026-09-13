@@ -7,11 +7,36 @@
 // the kind of gap that makes two correct measurements incomparable.
 //
 // The reported case: one layer, one node, a unit sphere, nothing sculpted;
-// clay_document_mesh at voxel 0.02 with CLAY_MESHER_MARCHING and decimate
-// on. Six of fifteen ratios came back with a non-manifold edge, non-monotone
-// in the ratio -- 0.60 clean between a failing 0.55 and 0.65.
+// clay_document_mesh at voxel 0.02 with CLAY_MESHER_MARCHING and decimate on.
+//
+// Swept at 0.01 rather than the 0.05 the report used, because the coarse grid
+// badly understated it. 31 of 76 ratios from 0.20 to 0.95 come back
+// non-manifold, in exactly TWO CONTIGUOUS BANDS:
+//
+//     0.44 .. 0.59   16 ratios
+//     0.60           CLEAN -- a single isolated ratio
+//     0.61 .. 0.75   15 ratios
+//
+// Everything below 0.44 and above 0.75 is clean. A coarse sweep landing on
+// 0.60 reads as "non-monotone noise"; it is one lucky point in a 32-wide
+// region, and the default export ratio of 0.5 sits inside the first band.
+//
+// WITHIN A BAND IT IS THE SAME EDGE. Printing the incident positions shows
+// 0.65/0.70/0.75 all failing at (-0.379, -0.920, +0.100) and 0.50/0.55 both at
+// (+0.417, -0.143, +0.897). Every offending vertex lies exactly on the sphere
+// (|p| = 1.0000) and every bad edge is SHORTER THAN ONE VOXEL -- 0.0037 to
+// 0.036 against a voxel of 0.02.
+//
+// Since a higher ratio means FEWER collapses, the sequence reads: clean, a
+// pinch appears at 0.75 and survives down to 0.61, is resolved at 0.60, a
+// different one appears at 0.59 and survives to 0.44, resolved by 0.43. A
+// pinch is CREATED by one collapse and REMOVED by a later one -- it is a
+// transient state of the simplification, not a property of the target size.
 
+#include <cmath>
 #include <cstdio>
+#include <map>
+#include <vector>
 #include <cstring>
 
 #include "clay.h"
@@ -48,6 +73,36 @@ int main() {
         v.struct_size = sizeof v;
         clay_mesh_validation_report(m, 0, &v);
         const size_t tris = clay_mesh_index_count(m) / 3;
+
+        // WHERE the bad edge sits, not just that there is one. If it lands in
+        // the same place across ratios it is a feature of the input mesh that
+        // survives to certain collapse depths, not a random unlucky collapse.
+        if (v.non_manifold_edges) {
+            const float* pos = clay_mesh_positions(m);
+            const std::uint32_t* idx = clay_mesh_indices(m);
+            std::map<std::uint64_t, int> inc;
+            for (size_t t = 0; t < tris; ++t)
+                for (int e = 0; e < 3; ++e) {
+                    const std::uint32_t a = idx[t * 3 + e], b = idx[t * 3 + (e + 1) % 3];
+                    const std::uint64_t k = a < b ? (static_cast<std::uint64_t>(a) << 32) | b
+                                                  : (static_cast<std::uint64_t>(b) << 32) | a;
+                    ++inc[k];
+                }
+            for (const auto& kv : inc) {
+                if (kv.second <= 2) continue;
+                const std::uint32_t a = static_cast<std::uint32_t>(kv.first >> 32);
+                const std::uint32_t b = static_cast<std::uint32_t>(kv.first & 0xffffffffu);
+                const float* pa = pos + a * 3;
+                const float* pb = pos + b * 3;
+                const double len = std::sqrt((pa[0]-pb[0])*(pa[0]-pb[0]) +
+                                             (pa[1]-pb[1])*(pa[1]-pb[1]) +
+                                             (pa[2]-pb[2])*(pa[2]-pb[2]));
+                const double r = std::sqrt(pa[0]*pa[0] + pa[1]*pa[1] + pa[2]*pa[2]);
+                std::printf("        edge x%d  a=(%+.4f %+.4f %+.4f)  |a|=%.4f  len=%.5f\n",
+                            kv.second, static_cast<double>(pa[0]), static_cast<double>(pa[1]),
+                            static_cast<double>(pa[2]), r, len);
+            }
+        }
         clay_mesh_destroy(m);
         std::printf("  %-6s %.2f   tris %7zu   nm %3zu   bnd %3zu   euler %4lld   %s\n",
                     decimate ? "decim" : "raw", static_cast<double>(ratio), tris,
@@ -60,11 +115,12 @@ int main() {
     std::printf("unit sphere, one layer, voxel 0.02, CLAY_MESHER_MARCHING, through the C ABI\n\n");
     report(0.0f, 0);
     std::printf("\n");
-    const float ratios[15] = {0.25f, 0.30f, 0.35f, 0.40f, 0.45f, 0.50f, 0.55f, 0.60f,
-                              0.65f, 0.70f, 0.75f, 0.80f, 0.85f, 0.90f, 0.95f};
-    int pinched = 0;
-    for (float x : ratios) pinched += report(x, 1);
-    std::printf("\n  %d of 15 pinched\n", pinched);
+    int pinched = 0, total = 0;
+    for (int i = 20; i <= 95; ++i) {
+        pinched += report(static_cast<float>(i) / 100.0f, 1);
+        ++total;
+    }
+    std::printf("\n  %d of %d pinched\n", pinched, total);
     clay_document_destroy(doc);
     return 0;
 }
