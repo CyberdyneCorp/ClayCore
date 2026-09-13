@@ -112,10 +112,11 @@ int main() {
                 const double len = std::sqrt((pa[0]-pb[0])*(pa[0]-pb[0]) +
                                              (pa[1]-pb[1])*(pa[1]-pb[1]) +
                                              (pa[2]-pb[2])*(pa[2]-pb[2]));
-                const double r = std::sqrt(pa[0]*pa[0] + pa[1]*pa[1] + pa[2]*pa[2]);
+                const double from_origin =
+                    std::sqrt(pa[0]*pa[0] + pa[1]*pa[1] + pa[2]*pa[2]);
                 std::printf("        edge x%d  a=(%+.4f %+.4f %+.4f)  |a|=%.4f  len=%.5f\n",
                             kv.second, static_cast<double>(pa[0]), static_cast<double>(pa[1]),
-                            static_cast<double>(pa[2]), r, len);
+                            static_cast<double>(pa[2]), from_origin, len);
                 // ARE THESE PINCHES FLAT? That is what killed the repair pass on
                 // #567's fixture -- four triangles at 0, 178.7, 178.7 and -177.3
                 // degrees, where which pair belongs to which sheet is a rounding
