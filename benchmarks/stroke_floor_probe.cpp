@@ -68,6 +68,30 @@ float probe_voxel() {
     }
     return 0.05f;
 }
+// HOW DEEP A CHAIN THE LAYER ALREADY CARRIES when the timed drag starts.
+//
+// Every number this probe has published is at depth ~1: 203.4 ms was "first
+// stroke on a clean sphere", isolated by undo, so the engine's share was
+// measured at the FLOOR -- the cheapest document that exists. The complaint
+// that started #531 is "almost a second after 3 or 4 move dabs", and a host's
+// own probe puts the chain at 48 after eight dabs.
+//
+// Depth is engine cost and it lands on MESHING specifically: every sample in
+// eval_grid walks the chain to carry its point back to rest space, so a chain
+// of 48 is 48 inverse warps per sample across every brick a refill touches. It
+// is NOT the safe_step_scale decay, which is read exactly once and only in
+// raycast (backends/cpu/cpu_backend.cpp:236) -- eval_grid, eval_rows and
+// eval_points_batch never read it. Two different failures with two different
+// symptoms.
+int probe_chain() {
+    if (const char* e = std::getenv("CLAY_PROBE_CHAIN")) {
+        const int n = std::atoi(e);
+        if (n > 0) return n;
+    }
+    return 0;
+}
+
+
 int probe_band() {
     if (const char* e = std::getenv("CLAY_PROBE_BAND")) {
         const int b = std::atoi(e);
@@ -108,6 +132,28 @@ bool build(Doc* out) {
     if (res != CLAY_OK) { clay_document_destroy(doc); return false; }
     out->doc = doc;
     out->layer = layer;
+    return true;
+}
+
+// Stamp `n` grabs, each at its own centre so they STACK rather than coalesce:
+// `continues_gesture` folds a repeat at a bit-identical centre, and a probe
+// that dabbed one spot would report a chain of 1 and a beautifully flat curve.
+bool prestamp_chain(const Doc& d, int n) {
+    for (int i = 0; i < n; ++i) {
+        const float t = static_cast<float>(i + 1) / static_cast<float>(n + 1);
+        const float ang = 2.4f * static_cast<float>(i);
+        const float ctr[3] = {0.35f * std::cos(ang) * t, 0.35f * std::sin(ang) * t,
+                              std::sqrt(std::max(0.05f, 1.0f - 0.1225f * t * t))};
+        const float dsp[3] = {0.0f, 0.0f, 0.01f};
+        clay_move_params mp{};
+        mp.struct_size = sizeof mp;
+        mp.radius = kRadius;
+        mp.ease = 0;
+        mp.front_only = 1;
+        size_t applied = 0;
+        if (clay_layer_move_surface(d.doc, d.layer, ctr, dsp, &mp, &applied) != CLAY_OK)
+            return false;
+    }
     return true;
 }
 
@@ -335,7 +381,7 @@ int main() {
     // difference between an honest comparison and a flattering one.
     {
         Doc d2;
-        if (build(&d2)) {
+        if (build(&d2) && prestamp_chain(d2, probe_chain())) {
             clay_brick_config bc2{};
             bc2.struct_size = sizeof(bc2);
             bc2.dim = kDim;
