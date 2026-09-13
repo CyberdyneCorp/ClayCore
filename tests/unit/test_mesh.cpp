@@ -510,3 +510,64 @@ TEST_CASE("meshing a document gives the same mesh every time") {
             REQUIRE(again.positions[v].x == first.positions[v].x);
     }
 }
+
+TEST_CASE("the brick mesher emits no sliver triangles") {
+    // A sliver is a near-zero-area triangle. Its face normal is a cross product
+    // of near-parallel edges -- numerically garbage -- so it shades black
+    // wherever gradient normals are unavailable, and a host re-meshed the WHOLE
+    // FIELD after every completed stroke to hide them. That re-mesh evaluates
+    // the field densely with no cull and measured 26.2 ms against the per-brick
+    // path's 6.3 ms at 48 dabs, so the slivers were costing a host the cull
+    // rather than merely a second pass (issue #549).
+    //
+    // They came from the crossing parameter landing at an edge endpoint, which
+    // the cache's fp16 storage and band clamping make likely. Measured with
+    // benchmarks/sliver_origin_probe.cpp before the fix: sliver vertices sat a
+    // median of 0.0178 voxels from the lattice against 0.2576 for every other
+    // vertex, which is what said a guard on `t` was the right fix rather than
+    // a guess.
+    //
+    // THE GUARD IS ON THE BRICK PATH ONLY, so this case has to mesh through
+    // mesh_bricks. An earlier version of it used mesh_tape and measured 234
+    // slivers -- correct for that path, which is deliberately unguarded, and
+    // no statement at all about this one.
+    scene::Document doc = gnarly_document();
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    brick::BrickCache cache(brick::BrickConfig{8, 0.08f, 3, 0});
+    cache.mark_dirty(scene::layer_influence_bound(doc.layers[0]));
+    for (const brick::BrickRequest& req : cache.take_dirty()) {
+        scene::CullRegion cull{cache.cull_region(req.key)};
+        scene::Tape tape = scene::compile_document(doc, &cull);
+        std::vector<float> values(static_cast<std::size_t>(req.grid.nx) * req.grid.ny *
+                                  req.grid.nz);
+        REQUIRE(cpu->eval_grid(tape, req.grid, values.data()) == eval::Status::Ok);
+        cache.submit(req, values.data());
+    }
+    Mesh m = mesh::mesh_bricks(cache, &doc);
+
+    // A mesh of nothing has no slivers for the wrong reason.
+    REQUIRE(m.triangle_count() > 1000);
+
+    double longest = 0.0;
+    std::vector<double> area2(m.triangle_count(), 0.0);
+    for (std::size_t t = 0; t < m.triangle_count(); ++t) {
+        const cfloat3& p0 = m.positions[m.indices[t * 3]];
+        const cfloat3& p1 = m.positions[m.indices[t * 3 + 1]];
+        const cfloat3& p2 = m.positions[m.indices[t * 3 + 2]];
+        area2[t] = static_cast<double>(kernel::clength(kernel::ccross(p1 - p0, p2 - p0)));
+        longest = std::max(longest, area2[t]);
+    }
+    REQUIRE(longest > 0.0);
+    std::size_t slivers = 0;
+    for (double a : area2)
+        if (a < longest * 1e-3) ++slivers;
+    CAPTURE(m.triangle_count());
+    CHECK(slivers == 0);
+
+    // And the guard did not cost the property the brick mesher already had:
+    // the case index comes from SIGN TESTS, so `t` moves vertices without
+    // changing which triangles exist.
+    ValidationReport r = mesh::validate(m);
+    CHECK(r.watertight);
+    CHECK(r.manifold);
+}
