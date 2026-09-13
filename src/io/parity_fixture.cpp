@@ -126,6 +126,44 @@ Document ranged_twist_bend() {
     return doc;
 }
 
+// THE CIRC EASINGS, WHICH NO OTHER CASE EXERCISES.
+//
+// Every fixture above passes `ease = 3` (ease_in_quad) or takes the default, so
+// enum 21, 22 and 23 -- in_circ, out_circ, in_out_circ -- have never been
+// evaluated by any backend through this fixture. That is exactly how #543
+// changed those three curves by up to 1.4% and left all 46 cases green.
+//
+// WHAT THIS CAN AND CANNOT CATCH, because the limit is the reason it is worth
+// so little and still worth having. CPU, Metal and CUDA all compile the same
+// `ease.h`, so a wrong curve is wrong identically on every backend and parity
+// is blind to it -- `tests/unit/test_ease_slopes.cpp` is what pins the values
+// themselves. What this case reaches is a backend-SPECIFIC divergence in
+// compiling those curves: circ is the only family carrying a `sqrt` inside a
+// guarded subtraction, `(1 - g)(1 + g)` written that way because `1 - g*g`
+// cancels at g = 0.9999, and a fast-math or a different intrinsic on one
+// backend is precisely the thing that would separate them.
+//
+// Three items rather than one so a backend cannot pass by getting the in-out
+// form right and the one-sided forms wrong; ranges chosen so each ramp is
+// traversed rather than clipped.
+Document circ_easings() {
+    Document doc;
+    Layer& l = doc.add_sdf_layer("circ");
+    Node a = item(Prim::box(cf3(0.3f, 0.85f, 0.3f)), cf3(-0.8f, 0, 0), kColorA);
+    a.deformers.push_back(
+        scene::Deformer::twist_range(2.0f, -0.6f, 0.6f, kernel::ease_in_circ));
+    l.sdf->insert(a);
+    Node b = item(Prim::box(cf3(0.3f, 0.85f, 0.3f)), cf3(0, 0, 0), kColorB);
+    b.deformers.push_back(
+        scene::Deformer::twist_range(2.0f, -0.6f, 0.6f, kernel::ease_out_circ));
+    l.sdf->insert(b);
+    Node c = item(Prim::box(cf3(0.85f, 0.3f, 0.3f)), cf3(0.9f, 0, 0), kColorA);
+    c.deformers.push_back(
+        scene::Deformer::bend_range(1.5f, -0.45f, 0.45f, kernel::ease_in_out_circ));
+    l.sdf->insert(c);
+    return doc;
+}
+
 // Bending along a guide that TURNS, and turns out of the plane it started in.
 //
 // The guide's frames are parallel-transported by the COMPILER and read from
@@ -685,6 +723,9 @@ std::vector<FixtureCase> kernel_parity_cases() {
     add_case(&cases, "ranged_twist_bend",
              "twist and bend ramped across a span and held beyond it, eased",
              ranged_twist_bend());
+    add_case(&cases, "circ_easings",
+             "the three circ curves on ranged twists and a ranged bend (#543)",
+             circ_easings());
     add_case(&cases, "bend_along_curve",
              "an item bent along a guide that turns and climbs; frames come from the blob",
              bend_along_curve());
