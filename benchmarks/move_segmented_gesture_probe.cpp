@@ -155,15 +155,19 @@ int main() {
     std::printf("  arm                                        warps  chain   lipschitz  step_scale"
                 "   surface_y\n");
 
-    const Arm arms[3] = {
+    // D answers the question a reader asks next: is this a contract or a menu?
+    // It takes two of the three changes -- the id and the cumulative
+    // displacement -- and leaves the centre advancing.
+    const Arm arms[4] = {
         {"A  id 0, advancing centre, per-slice", 0, true, true},
         {"B  id 1, advancing centre, per-slice", 1, true, true},
         {"C  id 1, anchored centre, cumulative", 1, false, false},
+        {"D  id 1, advancing centre, cumulative", 1, true, false},
     };
-    double y[3] = {0, 0, 0}, lip[3] = {0, 0, 0}, step[3] = {0, 0, 0};
-    unsigned long long warps[3] = {0, 0, 0};
-    int chain[3] = {0, 0, 0};
-    for (int i = 0; i < 3; ++i) {
+    double y[4] = {0, 0, 0, 0}, lip[4] = {0, 0, 0, 0}, step[4] = {0, 0, 0, 0};
+    unsigned long long warps[4] = {0, 0, 0, 0};
+    int chain[4] = {0, 0, 0, 0};
+    for (int i = 0; i < 4; ++i) {
         if (!run_arm(arms[i], &y[i], &warps[i], &chain[i], &lip[i], &step[i])) return 1;
         std::printf("  %-40s %6llu  %5d  %10.4f  %10.6f  %10.4f\n", arms[i].name, warps[i],
                     chain[i], lip[i], step[i], y[i]);
@@ -176,6 +180,7 @@ int main() {
     std::printf("  surface        A %.4f   B %.4f   C %.4f\n", y[0], y[1], y[2]);
     std::printf("  B lost         %.4f of the %.4f it was asked to pull\n",
                 y[0] - y[1], y[0] - 1.0);
+    std::printf("  D (2 of 3)     surface %.4f against C's %.4f\n", y[3], y[2]);
 
     // -- the invariants -----------------------------------------------------
     if (chain[0] <= 1) {
