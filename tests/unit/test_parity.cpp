@@ -481,6 +481,35 @@ std::vector<ParityScene> parity_scenes() {
         warped("bend_range", scene::Prim::box(cf3(1.2f, 0.35f, 0.35f)),
                scene::Deformer::bend_range(1.4f, -0.4f, 0.4f, 3));
 
+        // THE CIRC EASINGS, enum 21/22/23, which no backend had ever been
+        // asked for. Every scene above passes ease = 3 or takes the default,
+        // which is how #543 changed those three curves by up to 1.4% and left
+        // the whole suite green.
+        //
+        // Circ is the only family carrying a `sqrt` inside a guarded
+        // subtraction -- `(1 - g)(1 + g)`, written that way because `1 - g*g`
+        // cancels at g = 0.9999 -- so a fast-math contraction or a different
+        // intrinsic on one backend is exactly what would separate them here and
+        // nowhere else. This cannot catch a WRONG curve: every backend compiles
+        // the same `ease.h`, so a wrong one is wrong identically and
+        // `test_ease_slopes.cpp` is what pins the values.
+        //
+        // THE SAME DOCUMENT ALREADY EXISTS IN `kernel_parity_cases()` and that
+        // is a different list, which nothing here reads. It reaches the kernels
+        // artifact a host validates against; it does not reach this case. The
+        // case being good was never the question -- being in the list the
+        // question is asked from was, and one run's assertion count not moving
+        // is what found it.
+        //
+        // Three, not one: in-out is built from the other two, so a single case
+        // lets an error in one half cancel against the other.
+        warped("ease_in_circ", scene::Prim::box(cf3(0.4f, 1.1f, 0.4f)),
+               scene::Deformer::twist_range(2.0f, -0.6f, 0.6f, kernel::ease_in_circ));
+        warped("ease_out_circ", scene::Prim::box(cf3(0.4f, 1.1f, 0.4f)),
+               scene::Deformer::twist_range(2.0f, -0.6f, 0.6f, kernel::ease_out_circ));
+        warped("ease_in_out_circ", scene::Prim::box(cf3(1.1f, 0.4f, 0.4f)),
+               scene::Deformer::bend_range(1.5f, -0.45f, 0.45f, kernel::ease_in_out_circ));
+
         // A guide that TURNS, and turns out of the plane it started in: the
         // frames are parallel-transported by the compiler and read from the
         // blob, so a backend that fetched the arc length but ignored the frames
