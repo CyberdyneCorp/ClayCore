@@ -269,3 +269,38 @@ TEST_CASE("c abi: a rigid motion carries the decimation report with the mesh") {
     CHECK(nonuniform.input_manifold == before.input_manifold);
     CHECK(nonuniform.attempts == before.attempts);
 }
+
+TEST_CASE("c abi: a weld forgets the decimation report rather than answering a stale one") {
+    // A decimation report describes A PARTICULAR SET OF TRIANGLES. `clay_mesh_weld`
+    // rewrites the indices of the SAME handle, so a report that survives it is not
+    // stale, it is FALSE — and the whole point of the field is attribution.
+    //
+    // Found by an adversarial review of the PR that added the report, with a probe
+    // on this shape: the report kept answering `manifold = 1` while the validator
+    // found the welded mesh non-manifold. An epsilon of a fifteenth of the voxel is
+    // an ordinary cleanup weld, not a contrived one.
+    Doc doc;
+    doc.add(CLAY_PRIM_TORUS, {0.6f, 0.2f});
+
+    Owned m;
+    const clay_mesh_params p = mesh_params(0.03f, CLAY_MESHER_MARCHING, 0.5f);
+    REQUIRE(clay_document_mesh(doc, &p, &m.m) == CLAY_OK);
+
+    // The report exists before the weld, which is what makes its absence afterwards
+    // a statement rather than the default.
+    const clay_decimate_report before = decimation_of(m);
+    CHECK(before.attempts >= 1);
+
+    clay_weld_desc w{};
+    w.struct_size = sizeof w;
+    REQUIRE(clay_mesh_weld_defaults(&w) == CLAY_OK);
+    w.epsilon = 0.002f;  // a fifteenth of the voxel
+    REQUIRE(clay_mesh_weld(m, &w, nullptr) == CLAY_OK);
+
+    // Forgotten, not recomputed: a recomputed answer would be to a question the
+    // caller never asked, and the reader already distinguishes "not decimated"
+    // from a clean verdict.
+    clay_decimate_report after{};
+    after.struct_size = sizeof after;
+    CHECK(clay_mesh_decimate_report(m, &after) != CLAY_OK);
+}
