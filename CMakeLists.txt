@@ -535,6 +535,11 @@ if(CLAY_BUILD_BENCHMARKS)
   # DEFORMERS degradation enum says consolidation is 6x worse and measures a
   # 29x step-scale win; a live session reaches 490x on eight dabs, which is a
   # different arithmetic. This looks for the crossover.
+  add_executable(mesh_cost_at_depth_probe benchmarks/mesh_cost_at_depth_probe.cpp)
+  target_link_libraries(mesh_cost_at_depth_probe PRIVATE claycore)
+  target_include_directories(mesh_cost_at_depth_probe PRIVATE bindings/c)
+  clay_apply_warnings(mesh_cost_at_depth_probe)
+
   add_executable(export_manifold_probe benchmarks/export_manifold_probe.cpp)
   target_link_libraries(export_manifold_probe PRIVATE claycore)
   target_include_directories(export_manifold_probe PRIVATE bindings/c)
