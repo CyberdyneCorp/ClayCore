@@ -27,13 +27,54 @@
 // the gradient read 0.00. "Cheaper normals" is not automatically acceptable on a
 // sculpting engine.
 //
-// SO THE VERDICT IS AN ANGLE, not a speedup. Reported as a distribution rather
-// than a mean, because a normal that is right on average and wrong on a rim is
-// what a sculptor sees.
+// SO THE FIRST VERDICT IS AN ANGLE, not a speedup. Reported as a distribution
+// rather than a mean, because a normal that is right on average and wrong on a
+// rim is what a sculptor sees.
+//
+// AND THE SPEEDUP IS NOW MEASURED TOO, because it had been INFERRED. #589
+// attributed the cost; nothing had timed the replacement actually running, and
+// "six trilinear reads must beat four chain-walking tape evaluations" is the
+// kind of obvious claim that put a 30x error in the first version of this file.
+//
+// IT WAS WRONG AGAIN, in the other direction. Per gradient, smooth fixture:
+//
+//     chain 0     tape 0.041 us   lattice 0.626 us    lattice 15x SLOWER
+//     chain 12    tape 0.520      lattice 0.631       about even
+//     chain 48    tape 2.058      lattice 0.642       lattice 3.2x cheaper
+//
+// A four-instruction tape walk on a one-item sphere is nearly free, while a
+// trilinear read is eight brick lookups and this probe does them through the
+// cache's hash for each of six offsets -- 48 finds per gradient. A real
+// implementation would exploit the locality (the six offsets usually share a
+// brick), so the shallow-depth figure is an UPPER bound on the cost rather than
+// the cost. The crossover is somewhere near chain 12 as written.
+//
+// A SHARP FIXTURE RUNS BESIDE THE SPHERE, for the reason the sphere cannot
+// answer: a trilinear field is C0 and a box edge is a gradient DISCONTINUITY,
+// so the lattice cannot represent it however fine the storage. A sphere with
+// grabs is everywhere smooth and is the gentle case; the rounded box with a
+// thin plate below is where this breaks if it breaks.
+//
+// IT BREAKS. Angle against the tape tap on the hard fixture:
+//
+//     median 0.000    p90 5.62    p99 49.80    worst 77.95 degrees
+//
+// The median is EXACTLY ZERO because a flat face is where a lattice difference
+// is perfect. The tail is the edges, and 77.95 degrees is within a few of the
+// 84.78 that got CLAY_NORMAL_FACE rejected in #550. Roughly one vertex in a
+// hundred is ~50 degrees wrong, and they are all on the silhouette a sculptor
+// is looking at.
+//
+// THIS ONE CANNOT BE OPTIMISED AWAY. The timing above is an implementation
+// detail; this is the C0 field meeting a discontinuous gradient, which is
+// structural. So the honest verdict is that a lattice difference is NOT a
+// general replacement for the tetrahedron tap: it is a conditional one, wanting
+// a deep chain AND a smooth form, and nothing cheap detects the second.
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <chrono>
 #include <cstdio>
 #include <vector>
 
@@ -136,17 +177,78 @@ bool lattice_gradient(const brick::BrickCache& cache, cfloat3 p, cfloat3* out,
 
 }  // namespace
 
+// How long each way actually takes over the same points. Warmed, repeated, and
+// reported per gradient so the two are comparable at any vertex count.
+struct Timing {
+    double tape_us = 0, lattice_us = 0;
+};
+
+Timing time_both(const brick::BrickCache& cache, const scene::Tape& whole,
+                 const std::vector<cfloat3>& pts) {
+    Timing t;
+    cfloat3 sink = cf3(0, 0, 0);
+    bool clamped = false;
+    // Warm: first touch pages the brick storage in, and the tape's first walk
+    // is not the one a mesher pays.
+    for (std::size_t i = 0; i < pts.size(); i += 64) {
+        sink = sink + tape_gradient(whole, pts[i], 1e-4f);
+        cfloat3 g;
+        if (lattice_gradient(cache, pts[i], &g, &clamped)) sink = sink + g;
+    }
+    const int kReps = 3;
+    auto t0 = std::chrono::steady_clock::now();
+    for (int r = 0; r < kReps; ++r)
+        for (cfloat3 p : pts) sink = sink + tape_gradient(whole, p, 1e-4f);
+    const double tape_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    t0 = std::chrono::steady_clock::now();
+    for (int r = 0; r < kReps; ++r)
+        for (cfloat3 p : pts) {
+            cfloat3 g;
+            if (lattice_gradient(cache, p, &g, &clamped)) sink = sink + g;
+        }
+    const double lat_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    // Defeat the optimiser without printing: a zero-length sink would let the
+    // whole loop be elided and both numbers would be a measurement of nothing.
+    if (kernel::clength(sink) < 0.0f) std::printf("unreachable\n");
+    const double n = static_cast<double>(pts.size()) * kReps;
+    t.tape_us = tape_ms * 1000.0 / n;
+    t.lattice_us = lat_ms * 1000.0 / n;
+    return t;
+}
+
 int main() {
     std::printf("Gradient normals: the tape's tetrahedron tap against a central\n");
     std::printf("difference on the brick cache's own stored lattice.\n");
     std::printf("unit sphere, voxel %.3f, dim %d, band %d.\n\n",
                 static_cast<double>(kVoxel), kDim, kBand);
 
+    struct Fixture { const char* name; bool hard; };
+    const Fixture fixtures[2] = {{"sphere + grabs (smooth)", false},
+                                 {"hard surface: box, thin plate, small sphere", true}};
     const int depths[3] = {0, 12, 48};
+    for (const Fixture& fx : fixtures) {
     for (int depth : depths) {
+    if (fx.hard && depth == 12) continue;  // two depths are enough to show the trend
     scene::Document doc;
     scene::Layer& l = doc.add_sdf_layer("form");
-    scene::Node n = item(scene::Prim::sphere(1.0f), cf3(0, 0, 0));
+    scene::Node n;
+    if (fx.hard) {
+        // WHAT A LATTICE STRUCTURALLY CANNOT DO. A trilinear field is C0, so a
+        // box EDGE is a gradient discontinuity no amount of storage resolves --
+        // the difference straddles the edge and answers with the average of two
+        // faces. The plate is 0.05 thick against a voxel of 0.02, so its two
+        // surfaces are barely two samples apart and each one's difference sees
+        // the other. The small sphere puts curvature high against the lattice.
+        n = item(scene::Prim::box(cf3(0.55f, 0.55f, 0.55f)), cf3(-0.55f, 0, 0));
+        l.sdf->insert(n);
+        l.sdf->insert(item(scene::Prim::box(cf3(0.5f, 0.5f, 0.025f)), cf3(0.55f, 0, 0.45f)));
+        l.sdf->insert(item(scene::Prim::sphere(0.14f), cf3(0.55f, 0, -0.35f)));
+        n = item(scene::Prim::box(cf3(0.18f, 0.6f, 0.18f)), cf3(0.55f, 0, 0));
+    } else {
+        n = item(scene::Prim::sphere(1.0f), cf3(0, 0, 0));
+    }
     // A Move chain is exactly a stack of grabs. Each at its own centre so they
     // stack rather than coalesce, and shallow so the form survives 48 of them.
     for (int i = 0; i < depth; ++i) {
@@ -205,7 +307,7 @@ int main() {
         std::sort(v.begin(), v.end());
         return v[static_cast<std::size_t>(p * static_cast<double>(v.size() - 1))];
     };
-    std::printf("\n=== CHAIN DEPTH %d ===\n", depth);
+    std::printf("\n=== %s, CHAIN DEPTH %d ===\n", fx.name, depth);
     std::printf("  vertices compared   %zu of %zu   (%zu had no full 6-neighbourhood)\n",
                 deg.size(), m.positions.size(), unavailable);
     std::printf("\n  angle between the two normals, degrees:\n");
@@ -223,7 +325,19 @@ int main() {
                     deg_clamped.size(), pct(deg_clamped, 0.5), pct(deg_clamped, 0.99),
                     pct(deg_clamped, 1.0));
 
+    // -- and what each way COSTS over the same points -----------------------
+    {
+        std::vector<cfloat3> pts;
+        pts.reserve(6000);
+        for (std::size_t i = 0; i < m.positions.size() && pts.size() < 6000; i += 11)
+            pts.push_back(m.positions[i]);
+        const Timing t = time_both(cache, whole, pts);
+        std::printf("  per gradient:  tape tap %7.3f us   lattice %7.3f us   %6.1fx cheaper\n",
+                    t.tape_us, t.lattice_us,
+                    t.lattice_us > 0 ? t.tape_us / t.lattice_us : 0.0);
+    }
     }  // depths
+    }  // fixtures
 
     std::printf("\n  For scale: #550 measured CLAY_NORMAL_FACE on a coarse lattice at up\n");
     std::printf("  to 84.78 degrees from the field, and that was judged unusable.\n");
