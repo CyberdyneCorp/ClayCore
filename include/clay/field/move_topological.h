@@ -91,6 +91,10 @@ FieldVolume move_topological(const PointBatch& source, const math::Aabb& region,
                              float cell_size, float band,
                              const TopologicalMoveSettings& settings);
 
+// Takes bounds, cell size, band AND feather from the source volume, so a
+// result can be composited on the same terms the source was. The free
+// functions above cannot: they are handed a region rather than a volume, and
+// leave the feather at its default.
 FieldVolume move_topological(const FieldVolume& v, const TopologicalMoveSettings& settings);
 
 }  // namespace field

@@ -368,8 +368,22 @@ FieldVolume move_topological(const PointBatch& source, const math::Aabb& region,
 
 FieldVolume move_topological(const FieldVolume& v, const TopologicalMoveSettings& settings) {
     if (v.empty()) return v;
-    return move_topological([&v](cfloat3 p) { return v.eval(p); }, v.bounds(), v.cell_size(),
-                            v.band(), settings);
+    // The free functions above take a callable and a region, so they have no
+    // volume to inherit from: bounds, cell size and band are passed explicitly
+    // and the FEATHER was simply dropped. A caller setting it on the source got
+    // a hard-edged result and no diagnostic, because the value was not ignored
+    // by a rule -- it was never carried.
+    //
+    // Measured by a host on a verified-clean sphere, in a metric that sees a
+    // shading defect rather than a displacement one: 1.756x of the reference
+    // roughness at one cell, 2.064x at the three this ships, 5.274x at twelve.
+    // The displacement itself was correct throughout (0.3832 of a 0.4 pull), so
+    // what they saw was a hard box of visible lattice around a move that had
+    // worked.
+    FieldVolume out = move_topological([&v](cfloat3 p) { return v.eval(p); }, v.bounds(),
+                                       v.cell_size(), v.band(), settings);
+    out.set_feather(v.feather());
+    return out;
 }
 
 }  // namespace field
