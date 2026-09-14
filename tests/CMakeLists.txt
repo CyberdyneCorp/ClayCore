@@ -192,6 +192,7 @@ add_executable(clay_unit_tests
   unit/test_c_brick_lod_mesh.cpp
   unit/test_c_mesh_copy.cpp
   unit/test_c_mesh_validation.cpp
+  unit/test_c_decimate_report.cpp
   unit/test_c_memory_io.cpp
   unit/test_session_history.cpp
   unit/test_session_journal.cpp

@@ -596,6 +596,8 @@ constexpr std::size_t kQuadParamsOriginal =
     offsetof(clay_quad_params, level) + sizeof(std::uint32_t);
 constexpr std::size_t kQuadReportOriginal =
     offsetof(clay_quad_report, clamped) + sizeof(std::int32_t);
+constexpr std::size_t kDecimateReportOriginal =
+    offsetof(clay_decimate_report, attempts) + sizeof(std::int32_t);
 constexpr std::size_t kHistoryBytesOriginal =
     offsetof(clay_history_bytes, dropped_steps) + sizeof(std::uint64_t);
 constexpr std::size_t kMemoryReportOriginal =
@@ -1140,6 +1142,14 @@ struct clay_mesh {
         std::uint64_t target = 0;
     };
     std::optional<QuadProvenance> quad_provenance;
+
+    // What decimation did to this mesh, when clay_mesh_params.decimate asked
+    // for it. On the HANDLE for the same reason the quad provenance is: it
+    // describes a CALL. A mesh read from a file, borrowed from a layer or
+    // concatenated was decimated by nobody, and clay_mesh_decimate_report
+    // refuses it rather than answering with a clean report a host cannot tell
+    // from "decimation ran and broke nothing".
+    std::optional<mesh::DecimateReport> decimate_provenance;
 };
 
 // What the uniform-brick gate proves about a brick, and keeps as that brick's
@@ -9826,13 +9836,22 @@ clay_result mesh_tape(const clay_document* doc, const scene::Tape& tape,
     // bytes it always did.
     if (doc->doc.groups) voxel::drop_hidden(m, *doc->doc.groups);
     if (m.empty()) return fail(CLAY_ERROR_BACKEND, "meshing produced no triangles");
+    // The report is taken on EVERY decimated call rather than on request: a
+    // caller cannot ask for it in advance -- clay_mesh_params predates it and
+    // grows by appending, so a flag there would be a field older hosts do not
+    // set -- and the check has already been paid for inside decimate itself.
+    // What crosses is the answer it already had.
+    std::optional<mesh::DecimateReport> decimated;
     if (p.decimate) {
         mesh::DecimateOptions opts;
         opts.target_ratio = p.decimate_ratio > 0 ? p.decimate_ratio : 0.5f;
-        m = mesh::decimate(m, opts);
+        mesh::DecimateReport dr;
+        m = mesh::decimate(m, opts, &dr);
+        decimated = dr;
     }
     auto* handle = new clay_mesh();
     handle->data = std::move(m);
+    handle->decimate_provenance = decimated;
     *out_mesh = handle;
     return CLAY_OK;
 }
@@ -10110,6 +10129,30 @@ clay_result clay_mesh_quad_report(const clay_mesh* mesh, clay_quad_report* out_r
     filled.iterations = p.fit.iterations;
     filled.within_tolerance = p.fit.within_tolerance ? 1 : 0;
     filled.clamped = p.fit.clamped ? 1 : 0;
+    write_desc(out_report, declared, filled);
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_decimate_report(const clay_mesh* mesh, clay_decimate_report* out_report) {
+    const mesh::Mesh* m = nullptr;
+    clay_result r = resolve_mesh(mesh, &m);
+    if (r != CLAY_OK) return r;
+    if (!out_report) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null report");
+    if (!mesh->decimate_provenance)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "this mesh was not decimated, so there is nothing to report -- set "
+                    "clay_mesh_params.decimate and mesh again; a clean report here would be "
+                    "indistinguishable from no decimation having run");
+    clay_decimate_report probe;
+    r = read_desc(out_report, kDecimateReportOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_report->struct_size;
+
+    const mesh::DecimateReport& d = *mesh->decimate_provenance;
+    clay_decimate_report filled{};
+    filled.manifold = d.manifold ? 1 : 0;
+    filled.input_manifold = d.input_manifold ? 1 : 0;
+    filled.attempts = d.attempts;
     write_desc(out_report, declared, filled);
     return CLAY_OK;
 }
@@ -11289,8 +11332,11 @@ clay_result clay_mesh_transform(const clay_mesh* mesh, const float position[3],
     auto* handle = new clay_mesh();
     handle->data = *src;
     // The quads come with the copy and stay valid: nothing here rewrites an
-    // index. So does the report — this is the same mesh, moved.
+    // index. So do the reports — this is the same mesh, moved. A rigid motion
+    // changes no edge's incidence, so a pinch survives it and so does the
+    // statement that there is none.
     handle->quad_provenance = mesh->quad_provenance;
+    handle->decimate_provenance = mesh->decimate_provenance;
     for (kernel::cfloat3& v : handle->data.positions) v = xform.apply(v);
     // Normals rotate, but do not translate and do not scale: a uniform scale
     // leaves a direction unchanged, and adding the position would turn a
@@ -11321,6 +11367,7 @@ clay_result clay_mesh_transform_nonuniform(const clay_mesh* mesh, const float po
     auto* handle = new clay_mesh();
     handle->data = *src;
     handle->quad_provenance = mesh->quad_provenance;
+    handle->decimate_provenance = mesh->decimate_provenance;
     for (kernel::cfloat3& v : handle->data.positions)
         v = xform.apply(kernel::cf3(v.x * axes.x, v.y * axes.y, v.z * axes.z));
     // Normals go through the INVERSE TRANSPOSE of the linear part, which for
