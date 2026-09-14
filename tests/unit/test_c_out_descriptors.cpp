@@ -182,6 +182,24 @@ TEST_CASE("c abi: an output descriptor is never filled past the size the caller 
         clay_mesh_destroy(mesh);
     }
 
+    SUBCASE("clay_mesh_decimate_report") {
+        Doc doc;
+        clay_mesh_params p{};
+        p.struct_size = sizeof(p);
+        p.voxel_size = 0.05f;
+        p.decimate = 1;
+        p.decimate_ratio = 0.5f;
+        clay_mesh* mesh = nullptr;
+        REQUIRE(clay_document_mesh(doc, &p, &mesh) == CLAY_OK);
+        REQUIRE(mesh != nullptr);
+        OldHostBuffer<clay_decimate_report> buf(ORIGINAL_OF(clay_decimate_report, attempts));
+        REQUIRE(clay_mesh_decimate_report(mesh, buf.ptr()) == CLAY_OK);
+        CHECK(buf.overrun() == 0);
+        CHECK(buf.reported_size() == buf.declared);
+        CHECK(buf.was_filled());
+        clay_mesh_destroy(mesh);
+    }
+
     SUBCASE("clay_voxel_repair_report") {
         clay_voxel_grid* g = clay_voxel_grid_create(0.1f);
         REQUIRE(g != nullptr);

@@ -524,6 +524,58 @@ Both are answered for any mesh, watertight or not. An open mesh still has a
 divergence-theorem sum, and refusing to state it would hide the number you use
 to notice the mesh is open.
 
+## What decimation did to it
+
+**A decimated mesh can come back pinched, and this is how you are told.**
+`meshoptimizer` picks its own collapses and does not apply the link condition
+this library refuses a collapse on, so a watertight 2-manifold input can leave
+with an edge carrying four incident triangles. Decimation retries such a result
+at the same target and prefers a clean one, but where no choice of collapses is
+clean it returns the size you asked for and **reports** the pinch rather than
+refusing — at an aggressive ratio, merging sheets is what the ratio means.
+
+```c
+clay_mesh_params p = {0};
+p.struct_size = sizeof(p);
+p.voxel_size = 0.02f;
+p.decimate = 1;
+p.decimate_ratio = 0.5f;
+clay_mesh* mesh = NULL;
+clay_document_mesh(doc, &p, &mesh);
+
+clay_decimate_report d;
+d.struct_size = sizeof(d);
+clay_mesh_decimate_report(mesh, &d);   /* refused if nothing decimated this mesh */
+if (!d.manifold && d.input_manifold)
+    puts("the simplification pinched it");
+```
+
+**This is not the same answer `clay_mesh_validation_report` gives.** The
+validator tells you the mesh in your hand carries a non-manifold edge. It cannot
+tell you whether decimation *made* it — the input mesh is gone by then — and
+`input_manifold` is the field that does. Read it only when `manifold` is 0: the
+input is examined only once the result is found pinched, so a clean result
+leaves it 1 without having looked. `attempts` is the number of simplifications
+actually run: 1 when the first was clean or when the input arrived pinched, up
+to 3 when the retry ladder was exhausted.
+
+**Do not treat this as an aggressive-ratio problem.** A unit sphere with nothing
+sculpted on it, meshed at voxel 0.02 with marching, comes back pinched at 31 of
+the 76 ratios between 0.20 and 0.95 — including the 0.5 an export panel puts in
+the slider by default (issue #575). Which ratios pinch is not stable across
+toolchains either: the mesh reaching the simplifier moves with floating-point
+contraction, and the same sphere is 281,568 triangles on one setting and 281,544
+on another, with 31 bad ratios on the first and none on the second. **So a host
+that cannot take a non-manifold mesh must read the report on every decimated
+export, not on the ones it guesses are risky.**
+
+The report describes a *call*, so it is carried by `clay_mesh_transform` and
+`clay_mesh_transform_nonuniform` — the same mesh, moved, with no index rewritten
+— and a mesh that was loaded from a file, borrowed from a document layer or
+concatenated is **refused** with `CLAY_ERROR_INVALID_ARGUMENT`. A clean report
+and no decimation at all are different facts, and answering the second with the
+first would tell you an export survived a pass that never ran.
+
 ## Ownership and lifetime
 
 Three cases, and the middle one is the trap.

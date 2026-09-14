@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 114
+#define CLAY_ABI_MINOR 115
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -3626,7 +3626,7 @@ typedef struct clay_mesh_params {
     uint32_t struct_size;   /* = sizeof(clay_mesh_params); required, see above */
     float voxel_size;       /* world units per cell; <= 0 picks from resolution */
     int32_t resolution;     /* used when voxel_size <= 0: cells across the largest extent */
-    int32_t decimate;       /* 0/1 */
+    int32_t decimate;       /* 0/1; READ clay_mesh_decimate_report AFTERWARDS */
     float decimate_ratio;   /* target triangle ratio when decimate != 0 */
     /* appended in ABI 0.3.0, after the original layout; both default to 0 */
     int32_t mesher;         /* clay_mesher */
@@ -3890,6 +3890,54 @@ typedef struct clay_quad_report {
 } clay_quad_report;
 
 clay_result clay_mesh_quad_report(const clay_mesh* mesh, clay_quad_report* out_report);
+
+/* WHETHER DECIMATION PINCHED THE SURFACE — for a mesh produced with
+ * clay_mesh_params.decimate set (ABI 0.115.0).
+ *
+ * The C side of mesh::DecimateReport (mesh/decimate.h), which until now was
+ * C++ ONLY. A host on this boundary could be handed a non-manifold export and
+ * had no way to be told: it could only re-validate the mesh itself afterwards
+ * with clay_mesh_validation_report.
+ *
+ * THAT IS NOT THE SAME ANSWER. Validation says the result carries a pinched
+ * edge. This says WHOSE pinch it is and what was tried to avoid it —
+ * `input_manifold` separates a pinch decimation created from one it was handed
+ * and does not promise to repair, and `attempts` says whether the retry ladder
+ * ran. Neither is recoverable by validating the result, because the input mesh
+ * is gone by the time a host holds one.
+ *
+ * `manifold` is 0 when an edge of the RESULT carries more than two incident
+ * triangles. It is a REPORT, not a failure: at an aggressive ratio merging
+ * sheets is what the ratio means, so the requested size is returned and
+ * reported rather than refused, and mesh/decimate.h states the whole policy.
+ * It is NOT confined to aggressive ratios — a unit sphere meshed at voxel 0.02
+ * and decimated comes back pinched at 31 of the 76 ratios from 0.20 to 0.95,
+ * including the 0.5 an export panel puts in the slider by default (issue
+ * #575). A host that cannot take a non-manifold mesh must therefore read this
+ * on EVERY decimated export rather than on the aggressive ones.
+ *
+ * ONLY CONSULT `input_manifold` WHEN `manifold` IS 0. The input is examined
+ * only once the result is found pinched, because the answer is wanted for
+ * attribution and nothing else — the input is the larger mesh, and checking it
+ * on every call would cost more than the check that earns its place. A clean
+ * result leaves this 1 WITHOUT HAVING LOOKED, so it is not a statement about
+ * the input there.
+ *
+ * A mesh that was NOT decimated is refused with CLAY_ERROR_INVALID_ARGUMENT
+ * rather than answered with a clean report, for the reason clay_mesh_quad_report
+ * refuses a mesh that was not quad-meshed: "decimation ran and broke nothing"
+ * and "no decimation ran" are different facts, and all-ones is indistinguishable
+ * from both. clay_mesh_transform and clay_mesh_transform_nonuniform carry the
+ * report with the mesh — that is the same mesh, moved — while clay_mesh_concat
+ * does not, because a concatenation was decimated by no single call. */
+typedef struct clay_decimate_report {
+    uint32_t struct_size;   /* = sizeof(clay_decimate_report); required */
+    int32_t manifold;       /* 0/1: no edge of the RESULT carries more than two triangles */
+    int32_t input_manifold; /* 0/1, and only when manifold is 0; see above */
+    int32_t attempts;       /* simplifications actually run; 1 when the first was clean */
+} clay_decimate_report;
+
+clay_result clay_mesh_decimate_report(const clay_mesh* mesh, clay_decimate_report* out_report);
 
 /* The box enclosing the mesh's positions — how a host frames an imported
  * model. It is answered here rather than by clay_layer_bounds because that
