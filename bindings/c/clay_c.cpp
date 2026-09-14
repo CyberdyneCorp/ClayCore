@@ -16579,6 +16579,19 @@ constexpr std::size_t kMeshHitOriginal =
 constexpr std::size_t kBrushArenaStatsOriginal =
     offsetof(clay_brush_arena_stats, growths) + sizeof(std::uint64_t);
 
+// A DECIMATION REPORT DESCRIBES A PARTICULAR SET OF TRIANGLES, so anything that
+// rewrites them makes it false rather than stale. `clay_mesh_weld` rewrites the
+// indices of the SAME handle, and a report that survived it kept answering
+// `manifold = 1` for a mesh the validator then found non-manifold -- measured on
+// a torus welded at a fifteenth of its voxel size, which is an ordinary cleanup.
+//
+// Dropped rather than recomputed: recomputing would answer a question nobody
+// asked, and `clay_mesh_decimate_report` already distinguishes "not decimated"
+// from a clean verdict with a message saying why that distinction matters.
+void forget_decimate_provenance(clay_mesh* mesh) {
+    if (mesh) mesh->decimate_provenance.reset();
+}
+
 mesh::Mesh* mesh_data_mut(clay_mesh* mesh) {
     if (!mesh) return nullptr;
     if (!mesh->doc) return &mesh->data;
@@ -17513,6 +17526,9 @@ clay_result clay_mesh_weld(clay_mesh* mesh, const clay_weld_desc* desc,
                            clay_weld_report* out_report) {
     if (!mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh");
     mesh::Mesh* data = mesh_data_mut(mesh);
+    // The weld rewrites indices, so any decimation verdict on this handle is
+    // about triangles that no longer exist.
+    forget_decimate_provenance(mesh);
     if (!data) return fail(CLAY_ERROR_NOT_FOUND, "the mesh layer is no longer in its document");
     // A mesh LAYER's geometry is being rewritten, so the same protection every
     // other edit respects applies — and a ghosted or locked layer refuses this
