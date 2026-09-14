@@ -2406,10 +2406,30 @@ Tracked honestly rather than assumed done:
   and a new opcode is exactly what a CPU-only parity run cannot vouch for).
   The v0.25.0 re-run isolates the case that actually loops the registry rather
   than reading the whole gate's total, which is dominated by tests that do not:
-  `parity: every registered backend matches the scalar reference` reports **204**
-  assertions CPU-only and **612** with both devices registered — exactly 3x, one
-  pass each for cpu, cuda and opencl, all matching the scalar reference. Prefer
-  that measurement to the aggregate below; it cannot be diluted. Validated on an
+  `parity: every registered backend matches the scalar reference` is the case to
+  read, because the aggregate below can be diluted and this cannot.
+  **Re-measured 2026-09-13 at `e8ca6d59` on an RTX 5060 / driver 580.95 /
+  nvcc 12.0:**
+
+  | registered | assertions |
+  |---|---|
+  | cpu only | **543** |
+  | + cuda | **1082** |
+  | + cuda and opencl | **1621** |
+
+  **Read the differences, not a multiplier.** The figures this note carried
+  until today were 204 and 612, described as "exactly 3x" — and the case has
+  grown since v0.25.0, so a releaser following the old note would see 543 with
+  no way to tell "grown" from "wrong". A multiplier is what let a stale number
+  keep looking true. CUDA and OpenCL contribute **539 each**, not 543: four
+  assertions are CPU-only, presumably the `is_cpu` tolerance branches.
+
+  **Hide ONE backend at a time, and know what your switch hides.**
+  `CUDA_VISIBLE_DEVICES=` also hides NVIDIA's OpenCL platform, because both come
+  from the same driver — `clGetPlatformIDs` returns `CL_PLATFORM_NOT_FOUND_KHR`
+  with it set. A "cuda hidden" run made that way is really "both hidden" and
+  equals the cpu-only row, which reads exactly like OpenCL having contributed
+  nothing. `OCL_ICD_VENDORS` touches only the ICD loader and is the clean one. Validated on an
   RTX 5060 / driver 580 / nvcc 12.0, configuring one build directory with
   `-DCLAY_BACKEND_CUDA=ON -DCLAY_BACKEND_OPENCL=ON` and pointing
   `tools/release_check.py --build-dir` at it. Both backends register and match

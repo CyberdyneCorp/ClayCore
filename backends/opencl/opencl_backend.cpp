@@ -53,7 +53,18 @@ class OpenClBackend final : public Backend {
 
     Status eval_points(const scene::Tape& tape, const PointQuery& q,
                        const PointResults& out) override {
-        if (!q.points_xyz || !out.distances) return Status::InvalidInput;
+        // `out` says what is WANTED, and a null buffer means "not this one" —
+        // the interface's own words. This used to require `out.distances`, so a
+        // caller after ONLY the gradient was refused here and served by the CPU
+        // backend, which is the shape the interface explicitly allows. Asking
+        // for nothing at all is still refused.
+        //
+        // Metal and Vulkan were corrected when the gradient comparison was
+        // added; these two were not, because CI stopped building them on
+        // 2026-08-07 and nothing has asked them since (issue #578).
+        if (!q.points_xyz) return Status::InvalidInput;
+        if (!out.distances && !out.gradients_xyz && !out.colors_rgb)
+            return Status::InvalidInput;
         if (q.count == 0) return Status::Ok;
 
         TapeBuffers tb;
@@ -82,7 +93,7 @@ class OpenClBackend final : public Backend {
         err |= clSetKernelArg(kernel_points_, a++, sizeof(unsigned int), &has_colors);
 
         if (err == CL_SUCCESS) err = run(kernel_points_, q.count);
-        if (err == CL_SUCCESS)
+        if (err == CL_SUCCESS && out.distances)
             err = clEnqueueReadBuffer(queue_, dist, CL_TRUE, 0, q.count * sizeof(float),
                                       out.distances, 0, nullptr, nullptr);
         if (err == CL_SUCCESS && out.colors_rgb)

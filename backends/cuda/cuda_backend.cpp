@@ -88,7 +88,18 @@ class CudaBackend final : public Backend {
 
     Status eval_points(const scene::Tape& tape, const PointQuery& q,
                        const PointResults& out) override {
-        if (!q.points_xyz || !out.distances) return Status::InvalidInput;
+        // `out` says what is WANTED, and a null buffer means "not this one" —
+        // the interface's own words. This used to require `out.distances`, so a
+        // caller after ONLY the gradient was refused here and served by the CPU
+        // backend, which is the shape the interface explicitly allows. Asking
+        // for nothing at all is still refused.
+        //
+        // Metal and Vulkan were corrected when the gradient comparison was
+        // added; these two were not, because CI stopped building them on
+        // 2026-08-07 and nothing has asked them since (issue #578).
+        if (!q.points_xyz) return Status::InvalidInput;
+        if (!out.distances && !out.gradients_xyz && !out.colors_rgb)
+            return Status::InvalidInput;
         if (q.count == 0) return Status::Ok;
 
         TapeBuffers tb;
@@ -108,7 +119,8 @@ class CudaBackend final : public Backend {
                                          dist.as<float>(), cols.as<float>(), u) != 0)
             return Status::DeviceError;
 
-        if (!dist.download(out.distances, q.count * sizeof(float))) return Status::DeviceError;
+        if (out.distances && !dist.download(out.distances, q.count * sizeof(float)))
+            return Status::DeviceError;
         if (out.colors_rgb && !cols.download(out.colors_rgb, q.count * 3 * sizeof(float)))
             return Status::DeviceError;
         if (out.gradients_xyz) {  // tetrahedron taps on the host tape
