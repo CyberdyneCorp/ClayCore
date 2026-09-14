@@ -17,12 +17,13 @@ forward-refuse).
    ```
 
    It gates: version agreement, configure/build, the whole ctest suite,
-   backend parity for every backend registered in that build, module
-   layering, kernel dialect (CPU + CUDA profiles), the license manifest, C
-   ABI hygiene + declared-symbol resolution + ctypes FFI, binding parity
-   against a **built** pyclay, `openspec validate --all --strict`, benchmark
-   floors, the **device gate** (see below), and a real `pip install .`
-   quickstart in a throwaway venv.
+   backend parity for every backend registered in that build **and which ones
+   those were**, module layering, kernel dialect (CPU + CUDA profiles), the
+   license manifest, C ABI hygiene + declared-symbol resolution + ctypes FFI,
+   binding parity against a **built** pyclay, `openspec validate --all
+   --strict`, benchmark floors, the **device gate** (see below), the **four
+   manual hardware gates** (step 3), and a real `pip install .` quickstart in a
+   throwaway venv.
 
    It configures with `-DCLAY_BUILD_PYTHON=ON`, which is not an incidental
    extra: `check_binding_parity.py` falls back to comparing the parsed
@@ -35,7 +36,52 @@ forward-refuse).
    waved through. `--pyclay` is authoritative: no other build tree, virtualenv
    or installed wheel may answer for it, because the same gate went false-RED on
    v0.49.0 against a stale module a different tree happened to hold.
-3. On a minor/patch release, read the `clay.h` diff for symbol and
+3. **Answer the four manual hardware gates**, beside the device gate and for
+   the same reason: no runner here has the silicon, so the checklist cannot run
+   them and must instead refuse to release while they are unanswered. They are
+   CUDA device parity, the nvcc build including its architecture auto-detection,
+   OpenCL on a real device, and Vulkan on real silicon — the four listed under
+   "CI no longer builds CUDA or OpenCL at all" in *Open items*, which is also
+   where the numbers to read live.
+
+   Each is either **run**, on hardware, with its numbers written down, or
+   **waived**, with a reason. Record the answer in
+   `tests/hardware/manual-gates.json`:
+
+   ```json
+   "opencl-device": {
+     "status": "run",
+     "commit": "e8ca6d5935187443dbb6c0fc8bd66f69c4bcf663",
+     "date": "2026-09-13",
+     "evidence": "RTX 5060, NVIDIA ICD: 1621 assertions with CUDA and OpenCL, +539 over the CUDA-only run, 0 failed."
+   }
+   ```
+
+   `release_check.py` prints one `hardware/<gate>` row per gate and fails any
+   that is unrecorded, that names no commit, that says nothing, or whose commit
+   predates a change to the kernels (`release_check.KERNEL_SOURCES`) or — for
+   the three parity gates, not the build one — to the parity corpus
+   (`PARITY_CORPUS`, currently `tests/unit/test_parity.cpp`). A **waiver
+   passes**: the row exists to make a release state which of the four it ran and
+   which it is shipping without, not to conjure a GPU that is not in the
+   building. What it will not do is stay quiet.
+
+   That is the whole of #578. v0.113.0 was tagged with a 16/16 PASS table and
+   none of the four behind it, because the `parity` row asserts "every backend
+   **registered in this build** matches CPU scalar" and the release build
+   registered `cpu` and `metal`. An absent backend passes vacuously. So the row
+   now names what it compared, and names what it did not:
+
+   ```
+   [PASS] parity: compared cpu | 46 cases | 1411932 assertions | NOT BUILT, so this row says nothing about them: cuda, opencl, vulkan
+   ```
+
+   On a machine with the devices attached the same row reads `compared
+   cpu,cuda,opencl`, which is the only form of it that is evidence a GPU took
+   part. A run that prints no `PARITY_BACKENDS_CHECKED:` line **fails** the row
+   rather than passing on a case count: silence about what was compared is not a
+   result.
+4. On a minor/patch release, read the `clay.h` diff for symbol and
    struct-layout breaks (the ABI gate checks that every declared symbol
    resolves and that the header is bindgen-clean, not history). Below 1.0
    a break is allowed on a minor bump under SemVer's 0.x rule, but it is never
@@ -2470,7 +2516,11 @@ Tracked honestly rather than assumed done:
 
   The consequence is that **four things are now manual and hardware-dependent**
   rather than gated, and all four must be run before a release that touches
-  kernels:
+  kernels — or waived in writing. Since #578 they are not prose only: each has a
+  `hardware/<gate>` row in `release_check.py`, answered from
+  `tests/hardware/manual-gates.json`, and a release that leaves one unanswered
+  or stale fails the checklist. See step 3 of *Before tagging* for the shape of
+  an entry. The four are:
   1. CUDA device parity (as below).
   2. The nvcc build of the backend, including its architecture auto-detection.
   3. That the OpenCL backend registers and passes parity on a real device.
@@ -2495,8 +2545,11 @@ Tracked honestly rather than assumed done:
      the `vulkan-plumbing` job and by the unit suite; this one is not.
 
   `python3 tools/release_check.py` run on a machine with those devices present
-  covers the first four, because it runs parity against every backend registered in
-  that build. What per-push CI still gates for Vulkan is
+  covers the first four, because it runs parity against every backend registered
+  in that build — and the `parity` row now prints which backends those were, so
+  a reader can tell that run from one where nothing but the CPU was there.
+  Record the result in `tests/hardware/manual-gates.json` afterwards: the run
+  itself leaves no trace the next release can read. What per-push CI still gates for Vulkan is
   `check_kernel_dialect.py`, which compiles the generated GLSL with glslang and
   needs no device — the strictest of the five profiles, so it usually fails
   first when a kernel gains something new.
