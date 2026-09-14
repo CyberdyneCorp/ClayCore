@@ -679,7 +679,8 @@ TEST_CASE("c stroke: the appended controls are behind struct_size") {
     const std::vector<clay_stamp> expected = resolve_wide(samples, before);
 
     clay_stroke_preset old_host = before;
-    old_host.struct_size = offsetof(clay_stroke_preset, rotate_to_azimuth);
+    old_host.struct_size =
+        static_cast<std::uint32_t>(offsetof(clay_stroke_preset, rotate_to_azimuth));
     REQUIRE(old_host.struct_size < sizeof(clay_stroke_preset));
     // Everything past what it declared asks loudly for both controls.
     old_host.rotate_to_azimuth = 1;
