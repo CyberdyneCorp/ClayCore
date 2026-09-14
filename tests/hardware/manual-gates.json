@@ -1,0 +1,31 @@
+{
+  "_what": "The four hardware gates CI cannot run, and what the project last did about each. tools/release_check.py reads this file and fails a release that cannot say, for every one of them, that it was run or waived since the kernels last changed.",
+  "_status": "'run' needs an 'evidence' line naming the hardware and the numbers. 'waived' needs a 'reason'. Both need the 'commit' the statement is about: a gate goes stale when anything in release_check.KERNEL_RELEVANT has changed between that commit and HEAD.",
+  "_history": "Added for #578, where v0.113.0 was tagged with a 16/16 PASS table and none of these four had been run. The parity row asserted 'every backend registered in this build matches CPU scalar' and the build registered cpu and metal, so CUDA and OpenCL passed by being absent.",
+  "gates": {
+    "cuda-parity": {
+      "status": "run",
+      "commit": "e8ca6d5935187443dbb6c0fc8bd66f69c4bcf663",
+      "date": "2026-09-13",
+      "evidence": "RTX 5060 / driver 580.95 / nvcc 12.0, configured -DCLAY_BACKEND_CUDA=ON -DCLAY_BACKEND_OPENCL=ON. 'parity: every registered backend matches the scalar reference' reports 543 assertions cpu-only and 1082 with CUDA (+539, 0 failed). Caveat: PTX JIT to Blackwell only; a cubin for sm_120 needs CUDA >= 12.8 and stays unexercised."
+    },
+    "nvcc-build": {
+      "status": "run",
+      "commit": "e8ca6d5935187443dbb6c0fc8bd66f69c4bcf663",
+      "date": "2026-09-13",
+      "evidence": "Same build: nvcc 12.0 compiled backends/cuda/clay_kernels.cu and cmake/ClayCudaArch.cmake's auto-detection selected an architecture the RTX 5060 runs. It ran through PTX JIT, so the cubin half of the auto-detection is still unexercised at sm_120."
+    },
+    "opencl-device": {
+      "status": "run",
+      "commit": "e8ca6d5935187443dbb6c0fc8bd66f69c4bcf663",
+      "date": "2026-09-13",
+      "evidence": "Same RTX 5060 host, NVIDIA ICD: 1621 assertions with CUDA and OpenCL both registered, +539 over the CUDA-only run, 0 failed. Controlled with OCL_ICD_VENDORS=/nonexistent; CUDA_VISIBLE_DEVICES= is NOT a control here, because it hides NVIDIA's OpenCL platform too."
+    },
+    "vulkan-device": {
+      "status": "waived",
+      "commit": "e8ca6d5935187443dbb6c0fc8bd66f69c4bcf663",
+      "date": "2026-09-13",
+      "reason": "No host in the fleet runs the Vulkan backend on real silicon. The vulkan-plumbing CI job covers shader compilation, registration, dispatch and readback on lavapipe, which executes on the CPU: plumbing, not arithmetic. Shipping without arithmetic coverage on a real Vulkan device, stated rather than implied."
+    }
+  }
+}

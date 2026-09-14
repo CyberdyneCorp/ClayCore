@@ -46,10 +46,46 @@ normally are not.
 3. **Run the device gate** — see the `claycore-device-gate` skill. ~40 minutes,
    plus 30 minutes of idle iPad before you start. Commit
    `tests/device/last-gate.json`.
-4. **Run the checklist**: `python3 tools/release_check.py`. ~15 min plus the
+4. **Answer the four manual hardware gates**, which sit beside the device gate
+   for the same reason — no runner has the silicon — and which the checklist
+   fails on until each is answered:
+
+   | gate | what it is |
+   |---|---|
+   | `cuda-parity` | CUDA device parity against the scalar reference |
+   | `nvcc-build` | the nvcc build, including its architecture auto-detection |
+   | `opencl-device` | OpenCL registers and passes parity on a real device |
+   | `vulkan-device` | Vulkan passes parity on real silicon — **lavapipe is not a substitute**, it runs the arithmetic on the CPU |
+
+   Each is either **run**, on hardware, with its numbers, or **waived**, with a
+   reason. Write the answer into `tests/hardware/manual-gates.json` (`status`,
+   `commit`, `date`, and `evidence` or `reason`) and commit it. A waiver passes
+   the row: the point is that the release SAYS which of the four it ran and
+   which it is shipping without. v0.113.0 shipped a kernel change with a 16/16
+   PASS table and none of the four behind it (#578) — the `parity` row asserted
+   "every backend registered in this build", and the build registered `cpu` and
+   `metal`.
+
+   A gate goes stale when the kernels change under it
+   (`release_check.KERNEL_SOURCES`), and the three parity ones also when the
+   corpus does (`tests/unit/test_parity.cpp`) — so this step comes after every
+   `backends/`, `include/clay/kernel/` and parity-case edit is committed, as the
+   device gate above does.
+
+   **Read assertions, never test cases.** `-tc=*parity*,*registry*` reports the
+   same case count with two GPUs attached and with none. On an RTX 5060 at
+   `e8ca6d59`: **543** cpu-only, **1082** with CUDA, **1621** with CUDA and
+   OpenCL — the GPUs contribute **539 each**, not 543, because four assertions
+   are CPU-only tolerance branches. There is no clean multiplier; read the
+   differences. Hide **one** backend at a time to take a control, with
+   `OCL_ICD_VENDORS=/nonexistent` — `CUDA_VISIBLE_DEVICES=` hides NVIDIA's
+   OpenCL platform too, so it is not a CUDA-only control.
+5. **Run the checklist**: `python3 tools/release_check.py`. ~15 min plus the
    benchmark and wheel gates. Start it in the background and write while it
-   runs — it only reads the tree.
-5. **Open the release PR**, get it merged, then tag `main`.
+   runs — it only reads the tree. Its `parity` row names the backends it
+   compared and names the hardware ones it did not: a row reading `compared cpu`
+   is not GPU coverage, whatever colour it is.
+6. **Open the release PR**, get it merged, then tag `main`.
 
 ## 3. The release notes
 
@@ -101,7 +137,7 @@ a breaking change that must be called out by name.
 
 ## 4. The RELEASE.md history entry
 
-`docs/RELEASE.md` step 3 carries a per-minor entry saying, for every version,
+`docs/RELEASE.md` step 4 carries a per-minor entry saying, for every version,
 whether it **IS** a release a caller can observe without calling anything new.
 Add one block per new minor. This is the single most-read part of the doc and
 the convention is strict:
