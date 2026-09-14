@@ -2539,10 +2539,24 @@ Tracked honestly rather than assumed done:
      `MTLDevice` and `MTLCommandQueue` the caller made, then
      `clay_eval_grid_device` into a caller-owned `MTLBuffer`, compared against
      the host-memory path. Added with `add-device-interop` and written on a
-     Linux machine with no metal-cpp toolchain: CI compiles it on every push
-     and the Metal parity job exercises the ordinary path, but the ADOPTION
-     path has never run on Apple hardware. The Vulkan equivalent is covered by
-     the `vulkan-plumbing` job and by the unit suite; this one is not.
+     Linux machine with no metal-cpp toolchain, so for its whole life CI
+     compiled it on every push and the Metal parity job exercised the ordinary
+     path while the ADOPTION path had never run on Apple hardware at all.
+
+     **RUN 2026-09-14 and it passes.** `cmake --preset metal`, then
+     `clay_unit_tests -tc="metal interop*"` on an **Apple M2 Max, macOS 26.6.2,
+     Metal 4**: 4 cases, **46,897 assertions, 0 failed**.
+
+     Checked that it did not pass vacuously, because three of the four cases
+     carry a `MESSAGE("no Metal device; skipping"); return;` and a fourth
+     returns on `adoption_refused_by_the_compiler()`. Neither message appears
+     in a `-s` run, so the adoption genuinely happened rather than being
+     stepped over. That check is the point: a gate that skips and a gate that
+     passes are the same green.
+
+     Re-run it on the release machine rather than trusting this line — it is a
+     record of one run on one Mac, not a standing guarantee. The Vulkan
+     equivalent is covered by the `vulkan-plumbing` job and by the unit suite.
 
   `python3 tools/release_check.py` run on a machine with those devices present
   covers the first four, because it runs parity against every backend registered
