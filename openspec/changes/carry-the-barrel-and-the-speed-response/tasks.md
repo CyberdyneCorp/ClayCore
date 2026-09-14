@@ -51,8 +51,12 @@
 - [x] 4.9 `Rake` crosses as a rake, and it is the only library preset that does
 - [x] 4.10 The 0.115.0 `clay_brush_preset` layout is refused with a message
       naming the change
-- [x] 4.11 Proof: with the four mappings removed from `clay_c.cpp`, 6 of the
-      21 cases fail on 43 assertions; restored, 21/21 pass
+- [x] 4.11 On the flat count*5 packing the barrel resolves to the IDENTITY,
+      so it is inert there rather than wrong — every stamp's quaternion is
+      (0,0,0,1)
+- [x] 4.12 Proof: with the four mappings removed from `clay_c.cpp`, 6 of the
+      21 cases fail on 43 assertions; restored, 22/22 pass with the flat-packing
+      case added
 
 ## 5. Landing
 
