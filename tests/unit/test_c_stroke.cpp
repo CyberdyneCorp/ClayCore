@@ -580,6 +580,33 @@ TEST_CASE("c stroke: the barrel crosses the ABI, and wins over the path") {
     }
 }
 
+TEST_CASE("c stroke: on the flat sample packing the barrel is inert, not wrong") {
+    // The flat count*5 packing reports no azimuth, so azimuth is 0 — which
+    // points a stamp at +X and is the IDENTITY rotation. Worth pinning because
+    // the header claims it: a host applying a barrel preset through
+    // clay_layer_apply_stroke gets the stroke it got before, not a stroke
+    // rotated into a wall.
+    clay_stroke_preset p = defaults();
+    p.radius = 0.1f;
+    p.spacing = 0.5f;
+    p.rotate_to_azimuth = 1;
+
+    const std::vector<float> flat = packed(line(1.0f, 0.05f));
+    std::size_t count = 0;
+    REQUIRE(clay_stroke_resolve(flat.data(), flat.size() / 5, &p, nullptr, &count) == CLAY_OK);
+    std::vector<clay_stamp> stamps(count);
+    std::size_t capacity = count;
+    REQUIRE(clay_stroke_resolve(flat.data(), flat.size() / 5, &p, stamps.data(), &capacity) ==
+            CLAY_OK);
+    for (std::size_t i = 0; i < count; ++i) {
+        CAPTURE(i);
+        CHECK(stamps[i].rotation[0] == doctest::Approx(0.0f));
+        CHECK(stamps[i].rotation[1] == doctest::Approx(0.0f));
+        CHECK(stamps[i].rotation[2] == doctest::Approx(0.0f));
+        CHECK(stamps[i].rotation[3] == doctest::Approx(1.0f));
+    }
+}
+
 TEST_CASE("c stroke: the speed response crosses the ABI, signed") {
     // Reference 2.0 with samples at 2.0 units per second: the response is fully
     // applied, so the radius moves by the whole of velocity_size.

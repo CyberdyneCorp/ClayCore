@@ -6513,8 +6513,12 @@ typedef struct clay_stroke_preset {
      * WHERE THESE TWO ACT, AND WHERE THEY CANNOT. Both read channels that only
      * clay_stroke_sample_full carries. The count*5 float packing every other
      * stroke entry point takes reports no azimuth and no velocity, so on that
-     * packing azimuth is 0 (every stamp faces +x) and the speed response is
-     * off at every sample. To get either, resolve with clay_stroke_resolve_full
+     * packing azimuth is 0 and the speed response is off at every sample. An
+     * azimuth of 0 points a stamp at +X, which IS the identity rotation, so
+     * setting rotate_to_azimuth there is inert rather than wrong — with one
+     * exception worth knowing: a preset setting BOTH rotations resolves to the
+     * identity on the flat packing, because the barrel branch is taken and has
+     * no barrel to read. To get either, resolve with clay_stroke_resolve_full
      * and consume the stamps — clay_layer_place_stamps is the consumer that
      * takes them directly. Widening the flat packing in place would change the
      * stride under every host already compiled against it, which is why the
