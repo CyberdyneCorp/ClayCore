@@ -800,6 +800,16 @@ clay_result read_preset(const clay_stroke_preset* src, brush::StrokePreset* out)
         d.accumulation > static_cast<std::int32_t>(brush::Accumulation::Clamped))
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     "unknown accumulation: " + std::to_string(d.accumulation));
+    // A SPEED RESPONSE WITH NO REFERENCE SPEED describes no stroke: the engine
+    // reads a non-positive reference as "speed changes nothing" and would run
+    // the stroke with both channels silently inert. Refused on the same footing
+    // as a radius of zero, and only when a channel is actually asking for it —
+    // a caller compiled against the shorter layout declares neither channel nor
+    // reference, so its zeroes stay legal.
+    if ((d.velocity_size != 0.0f || d.velocity_strength != 0.0f) && !(d.velocity_reference > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "preset velocity_reference must be > 0 when velocity_size or "
+                    "velocity_strength is non-zero");
     out->radius = d.radius;
     out->spacing = d.spacing;
     out->strength = d.strength;
@@ -811,6 +821,14 @@ clay_result read_preset(const clay_stroke_preset* src, brush::StrokePreset* out)
     out->jitter_rotation = d.jitter_rotation;
     out->seed = d.seed;
     out->rotate_along_stroke = d.rotate_along_stroke != 0;
+    // Passed through with no exclusion check: the barrel and the path are two
+    // answers to one question and `resolve_stroke` already decides between
+    // them, with the barrel winning. Refusing the pair here would make a brush
+    // library unloadable the moment a preset in it set both.
+    out->rotate_to_azimuth = d.rotate_to_azimuth != 0;
+    out->velocity_response.size = d.velocity_size;
+    out->velocity_response.strength = d.velocity_strength;
+    out->velocity_response.reference = d.velocity_reference;
     out->taper_start = d.taper_start;
     out->taper_end = d.taper_end;
     out->steady = d.steady;
@@ -11687,6 +11705,10 @@ clay_stroke_preset preset_fields(const brush::StrokePreset& d) {
     filled.jitter_rotation = d.jitter_rotation;
     filled.seed = d.seed;
     filled.rotate_along_stroke = d.rotate_along_stroke ? 1 : 0;
+    filled.rotate_to_azimuth = d.rotate_to_azimuth ? 1 : 0;
+    filled.velocity_size = d.velocity_response.size;
+    filled.velocity_strength = d.velocity_response.strength;
+    filled.velocity_reference = d.velocity_response.reference;
     filled.taper_start = d.taper_start;
     filled.taper_end = d.taper_end;
     filled.steady = d.steady;
@@ -17009,6 +17031,36 @@ constexpr std::size_t kBrushPresetOriginal =
 static_assert(kBrushPresetOriginal <= sizeof(clay_brush_preset),
               "the frozen original cannot exceed the layout this build declares");
 
+// THE ONE DESCRIPTOR THE PREFIX RULE CANNOT CARRY FORWARD, and the size that
+// names the break. clay_brush_preset embeds clay_stroke_preset BY VALUE with
+// `model` and `brush` after it, so when the stroke preset grew at ABI 0.116.0
+// both moved. struct_size negotiates a tail, not a shift.
+//
+// What that buys is a REFUSAL rather than a misread: the size a 0.115.0 host
+// declares is below the layout above, so read_desc already rejects it. This
+// constant exists only so the rejection can say WHY, since read_desc's own
+// message — "set it to the sizeof of the struct you compiled against" — is
+// exactly the thing such a host already did.
+//
+// Derived, not written down: it is the original layout computed with the stroke
+// preset at ITS frozen original size, so it stays correct when either
+// descriptor is appended to again.
+constexpr std::size_t kBrushPresetBeforeStrokeGrew =
+    kBrushPresetOriginal - (sizeof(clay_stroke_preset) - kStrokePresetOriginal);
+
+clay_result read_brush_preset_desc(const clay_brush_preset* src, clay_brush_preset* out) {
+    if (!src) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brush preset");
+    if (src->struct_size >= kBrushPresetBeforeStrokeGrew &&
+        src->struct_size < kBrushPresetOriginal)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "clay_brush_preset declares " + std::to_string(src->struct_size) +
+                        ", the layout it had before ABI 0.116.0 appended the barrel and "
+                        "velocity controls to the clay_stroke_preset it embeds by value. "
+                        "`model` and `brush` moved, so the older layout cannot be read as a "
+                        "prefix: recompile against this header");
+    return read_desc(src, kBrushPresetOriginal, out);
+}
+
 clay_brush_model to_c_model(const mesh::BrushModel& m) {
     clay_brush_model out{};
     out.verb = static_cast<std::int32_t>(m.verb);
@@ -17082,7 +17134,7 @@ clay_brush_preset to_c_preset(const brush::BrushPreset& p) {
 clay_result read_brush_preset(const clay_brush_preset* src, brush::BrushPreset* out) {
     if (!src) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brush preset");
     clay_brush_preset d;
-    clay_result r = read_desc(src, kBrushPresetOriginal, &d);
+    clay_result r = read_brush_preset_desc(src, &d);
     if (r != CLAY_OK) return r;
     d.name[CLAY_BRUSH_PRESET_NAME_MAX - 1] = '\0';
     out->name = d.name;
@@ -17316,7 +17368,7 @@ clay_result clay_brush_model_of(int32_t verb, clay_brush_model* out_model) {
 clay_result clay_brush_preset_defaults(clay_brush_preset* out_preset) {
     if (!out_preset) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null preset");
     clay_brush_preset probe;
-    clay_result r = read_desc(out_preset, kBrushPresetOriginal, &probe);
+    clay_result r = read_brush_preset_desc(out_preset, &probe);
     if (r != CLAY_OK) return r;
     brush::BrushPreset d;
     d.name = "Standard";
@@ -17340,7 +17392,7 @@ clay_result clay_brush_preset_deserialize(const uint8_t* data, size_t size,
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null or empty brush preset data");
     if (!out_preset) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null preset");
     clay_brush_preset probe;
-    clay_result r = read_desc(out_preset, kBrushPresetOriginal, &probe);
+    clay_result r = read_brush_preset_desc(out_preset, &probe);
     if (r != CLAY_OK) return r;
     const std::optional<brush::BrushPreset> p = brush::BrushPreset::deserialize(data, size);
     if (!p)
@@ -17361,7 +17413,7 @@ size_t clay_brush_preset_library_count(void) { return brush::reference_presets()
 clay_result clay_brush_preset_library_at(size_t index, clay_brush_preset* out_preset) {
     if (!out_preset) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null preset");
     clay_brush_preset probe;
-    clay_result r = read_desc(out_preset, kBrushPresetOriginal, &probe);
+    clay_result r = read_brush_preset_desc(out_preset, &probe);
     if (r != CLAY_OK) return r;
     const std::vector<brush::BrushPreset> lib = brush::reference_presets();
     if (index >= lib.size())
@@ -17375,7 +17427,7 @@ clay_result clay_brush_preset_by_name(const char* name, clay_brush_preset* out_p
     if (!name) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null preset name");
     if (!out_preset) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null preset");
     clay_brush_preset probe;
-    clay_result r = read_desc(out_preset, kBrushPresetOriginal, &probe);
+    clay_result r = read_brush_preset_desc(out_preset, &probe);
     if (r != CLAY_OK) return r;
     const std::optional<brush::BrushPreset> p = brush::reference_preset(name);
     if (!p) return fail(CLAY_ERROR_NOT_FOUND, std::string("no preset named ") + name);

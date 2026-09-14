@@ -966,10 +966,23 @@ mask's resolution instead of the brush's radius.
 | Pressure | `pressure.size`, `.strength`, `.curve` | Exponents on normalized pressure. 0 disables a channel — that is what "size only" and "flow only" brushes are. On an SDF layer the **strength** channel reaches relief, incise and add only — see below |
 | Jitter | `jitter_position`, `jitter_size`, `jitter_rotation`, `seed` | Derived from the stamp index and seed, **never from a random source**, so a stroke resolves identically everywhere |
 | Rotate along stroke | `rotate_along_stroke` | Turns each stamp to follow the path; only matters for stamps that are not rotationally symmetric |
+| Rotate to azimuth | `rotate_to_azimuth` | Turns each stamp to follow the **stylus barrel** instead of the path — the rake and chisel brushes, where the tool's own angle is the point. Mutually exclusive with the row above *by construction*, and **it wins where both are set**: a caller that asked for the barrel meant the barrel |
+| Velocity | `velocity_response.size`, `.strength`, `.reference` | How **speed** drives a stamp, in the shape pressure already has. The two channels are **signed**: positive size means a fast stroke is wider (a dry brush), negative means thinner (an ink pen). `reference` is the speed in world units per second that reads as "fast" |
 | Taper | `taper_start`, `taper_end` | Fraction of stroke length over which the radius ramps in and out |
 | Steady stroke | `steady` | "Lazy mouse" — the emission point trails the cursor, smoothing a shaky path |
 | Accumulation | `accumulation` | `Buildup`: passing twice acts twice. `Clamped`: the stroke reaches its strength once, however many stamps overlap. Same caveat as strength on an SDF layer |
 | Base | `radius`, `strength` | What pressure, taper and jitter modulate |
+
+**The last two rows read channels only the wider sample carries.** Azimuth and
+velocity arrive on `brush::StrokeSample` and on `clay_stroke_sample_full`; the
+`count*5` float packing every other C stroke entry point takes reports neither,
+so on that packing a barrel-following stamp faces a constant +x and the speed
+response is off at every sample. In C the path that carries them is
+`clay_stroke_resolve_full` into `clay_layer_place_stamps`; pyclay and C++ take
+`StrokeSample` directly and are unaffected. Both controls crossed into the C
+descriptor at **ABI 0.116.0** — before that `clay_brush_preset_by_name("Rake")`
+returned a preset with the one field that makes Rake a rake dropped on the way
+out.
 
 Presets serialize with a **schema version from the first release** rather than
 one retrofitted later: presets outlive engine versions, and a library of them
