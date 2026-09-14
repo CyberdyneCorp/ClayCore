@@ -133,6 +133,25 @@ form at three target counts, with requested against actual printed for each.
 Whichever produced it, the readback below is identical — a mesh does not
 remember where it came from.
 
+**A mesh generated from a FIELD is not byte-identical across builds.** Meshing
+reads a floating-point field, so what it emits depends on floating-point
+contraction, and therefore on the compiler, the architecture and the
+optimisation level that built the library you are calling. Measured: the same
+unit sphere at voxel 0.02 meshes to **281,568** triangles by default and
+**281,544** with `-ffp-contract=off` — one machine, one compiler, one flag
+apart (#581). So a triangle count, a vertex position and a digest over either
+are properties of one build, and anything that pins them across machines — a
+golden mesh in your test suite, a hash a client and a server each compute, a
+vertex count asserted in a fixture — is resting on something that moves. Ship
+the MESH between machines if they have to agree, not the field and a promise
+that both will mesh it the same way.
+
+What this does *not* touch is the topology guarantee on a mesh layer:
+`indices` and `quads` come back byte for byte from a sculpt, because that is a
+statement about one process and not about two builds. Nor does it touch the
+counts you read back from the mesh you are holding — `Mesh::triangle_count()`
+and the C accessors below describe *that* mesh, whatever build produced it.
+
 ## Python
 
 ```python
