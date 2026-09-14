@@ -234,3 +234,72 @@ def test_the_checked_in_record_answers_every_gate_in_a_readable_shape():
         # an entry against its OWN commit, with nothing changed, must be valid
         ok, detail = rc.hardware_gate_verdict(entry, [])
         assert ok, f"{name}: {detail}"
+
+
+# -- the WIRING, which the cases above do not reach ---------------------------
+#
+# Every case above tests a pure function. An adversarial review of the PR that
+# added them deleted `check_hardware_gates(cl)` from `main()` AND reverted the
+# parity row to the old case-count form, and this file still reported
+# `31 passed`. The requirement #578 states is about the printed checklist
+# TABLE, and that was exactly the part nothing held.
+#
+# So these two drive `main()` itself. They stub every subprocess and both
+# file-backed gates, because what is under test is which rows main ASKS FOR,
+# not whether this machine can pass them.
+
+
+def _drive_main(monkeypatch, tmp_path):
+    """Run main() with every external dependency stubbed, and return its rows."""
+    rows: list[tuple[str, bool, str]] = []
+
+    def fake_run(cmd, cwd=None, stdout_only=False):
+        # The parity invocation is the one whose OUTPUT matters: it has to reach
+        # parity_row, which is what turns a marker line into a backend list.
+        if any("clay_unit_tests" in str(c) and "parity" in str(c) for c in cmd):
+            return True, GPU_RUN
+        return True, "ok\n[doctest] assertions: 1 | 1 passed | 0 failed |\n"
+
+    monkeypatch.setattr(rc, "run", fake_run)
+    monkeypatch.setattr(rc, "check_versions", lambda cl: cl.add("version", True, "stub"))
+    monkeypatch.setattr(rc, "check_device_gate", lambda cl: cl.add("device", True, "stub"))
+
+    real_add = rc.Checklist.add
+
+    def recording_add(self, name, ok, detail=""):
+        rows.append((name, ok, detail))
+        real_add(self, name, ok, detail)
+
+    monkeypatch.setattr(rc.Checklist, "add", recording_add)
+    monkeypatch.setattr(sys, "argv", ["release_check.py", "--skip-slow",
+                                      "--build-dir", str(tmp_path)])
+    rc.main()
+    return rows
+
+
+def test_main_asks_for_the_hardware_rows_at_all(monkeypatch, tmp_path):
+    """The gate is the printed table, so the table is what this asserts.
+
+    Deleting `check_hardware_gates(cl)` from main() must fail here. Nothing
+    else in this file notices, because every other case calls the function
+    directly.
+    """
+    rows = _drive_main(monkeypatch, tmp_path)
+    names = {name for name, _, _ in rows}
+    for expected in ("hardware/cuda-parity", "hardware/opencl-device",
+                     "hardware/vulkan-device"):
+        assert expected in names, f"{expected} is not on the checklist: {sorted(names)}"
+
+
+def test_the_parity_row_main_prints_names_the_backends(monkeypatch, tmp_path):
+    """Reverting main's parity row to the old case count must fail here.
+
+    The old form printed `46 | 46 passed`, which reads identically whether two
+    GPUs were compared or none were present — the reading failure #578 is
+    about. The row main actually prints has to carry the backend list.
+    """
+    rows = _drive_main(monkeypatch, tmp_path)
+    parity = [detail for name, _, detail in rows if name == "parity"]
+    assert parity, "main() printed no parity row"
+    assert "cuda" in parity[0] and "opencl" in parity[0], (
+        f"the parity row does not name what was compared: {parity[0]!r}")
