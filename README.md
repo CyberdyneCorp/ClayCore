@@ -617,8 +617,10 @@ Recorded as decisions rather than gaps, with the reasoning in
   `quads` still come back byte for byte from a sculpt, because that is a
   statement about one process. What moves is a mesh **generated** from a field
   on two different builds. `tests/unit/test_mesh_sculpt_parity.cpp` already
-  treats hashes this way, keeping one golden table per toolchain and gating the
-  portable half — the moved counts — everywhere; anything else pinning a
+  treats hashes this way, keeping one golden table per toolchain, gating the
+  portable half — the moved counts — everywhere, and recording the
+  floating-point configuration each table was baselined under so that a build
+  with different flags is told it has different flags; anything else pinning a
   triangle count or a vertex position across platforms is resting on something
   that moves.
 - **No PBR channels.** Polypaint works on all three representations; roughness
