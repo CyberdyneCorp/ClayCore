@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 115
+#define CLAY_ABI_MINOR 116
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -6461,6 +6461,71 @@ typedef struct clay_stroke_preset {
     float taper_end;
     float steady;        /* lazy-mouse lag; 0 follows exactly, ->1 lags more */
     int32_t accumulation; /* clay_accumulation */
+
+    /* -- appended at ABI 0.116.0 (issue #530) -------------------------------
+     *
+     * The two stroke controls the engine had and this descriptor did not, so
+     * the C ABI could not express a rake and could not express a speed-driven
+     * brush. `brush::StrokePreset` has carried both since the preset schema
+     * reached version 2; nothing but this struct was missing, which is also
+     * why clay_brush_preset_by_name("Rake") used to hand back a preset with
+     * the one field that makes it a rake dropped on the way out.
+     *
+     * ALL FOUR DEFAULT TO ZERO, and zero is the behaviour that shipped before
+     * them: no barrel rotation, and a velocity reference of 0 that switches
+     * the speed response off whatever the two channels say. A caller compiled
+     * against the shorter layout declares the shorter struct_size, never sets
+     * them, and resolves exactly the strokes it resolved before.
+     *
+     * clay_stroke_preset_defaults fills velocity_reference with the engine's
+     * preferred 1.0 rather than the struct's zero, which is the split the
+     * descriptor convention asks for: a field's own zero may never be read as
+     * "the caller did not declare this", so the zero stays inert and the
+     * _defaults call is where a preferred value comes from. */
+
+    /* Turn each stamp to follow the STYLUS BARREL instead of the path — the
+     * rake and chisel brushes, where the tool's own angle is the point and the
+     * direction of travel is not. Non-zero enables it.
+     *
+     * MUTUALLY EXCLUSIVE WITH rotate_along_stroke BY CONSTRUCTION rather than
+     * by validation: they are two answers to one question and a stamp cannot
+     * face two ways. Setting both is accepted and THE BARREL WINS, because a
+     * caller that asked for the barrel meant the barrel. Refusing the pair
+     * instead would make a brush library unloadable the moment a preset in it
+     * set both, which is a worse answer than a stated precedence. */
+    int32_t rotate_to_azimuth;
+
+    /* How SPEED drives a stamp, in the shape the pressure triple already has.
+     *
+     * velocity_size is SIGNED ON PURPOSE: positive means a fast stroke is
+     * WIDER (a dry-brush sweep), negative means thinner (an ink pen). Both are
+     * things artists ask for and picking one would be wrong half the time.
+     * velocity_strength is the same signed scale on the deposit.
+     *
+     * velocity_reference is the speed, in WORLD UNITS PER SECOND, that reads
+     * as "fast": at it the response is fully applied and below it
+     * proportionally less. It is REFUSED with CLAY_ERROR_INVALID_ARGUMENT
+     * when it is not > 0 and either channel is non-zero — a response with no
+     * reference to measure against describes no stroke, and silently doing
+     * nothing is the failure a host cannot see. Both channels zero leaves the
+     * reference unread, which is what keeps an older caller's zeroes legal.
+     *
+     * WHERE THESE TWO ACT, AND WHERE THEY CANNOT. Both read channels that only
+     * clay_stroke_sample_full carries. The count*5 float packing every other
+     * stroke entry point takes reports no azimuth and no velocity, so on that
+     * packing azimuth is 0 and the speed response is off at every sample. An
+     * azimuth of 0 points a stamp at +X, which IS the identity rotation, so
+     * setting rotate_to_azimuth there is inert rather than wrong — with one
+     * exception worth knowing: a preset setting BOTH rotations resolves to the
+     * identity on the flat packing, because the barrel branch is taken and has
+     * no barrel to read. To get either, resolve with clay_stroke_resolve_full
+     * and consume the stamps — clay_layer_place_stamps is the consumer that
+     * takes them directly. Widening the flat packing in place would change the
+     * stride under every host already compiled against it, which is why the
+     * wider sample is a second struct; see clay_stroke_sample_full. */
+    float velocity_size;
+    float velocity_strength;
+    float velocity_reference;
 } clay_stroke_preset;
 
 /* Fill a descriptor with the engine's defaults: the one way to get a valid
@@ -8015,6 +8080,28 @@ clay_result clay_brush_model_of(int32_t verb, clay_brush_model* out_model);
  * host has to free is a lifetime question for a string. */
 #define CLAY_BRUSH_PRESET_NAME_MAX 64
 
+/* THIS DESCRIPTOR RE-LAID OUT AT ABI 0.116.0, and a host compiled against
+ * 0.115.0 or earlier MUST RECOMPILE. It is the one descriptor in this ABI that
+ * embeds another BY VALUE with fields after it, so when clay_stroke_preset
+ * gained the barrel and velocity controls, `model` and `brush` moved.
+ * struct_size negotiates a TAIL, not a shift, and there is nothing it could
+ * have done about the middle.
+ *
+ * WHAT AN OLD HOST GETS IS A REFUSAL, NOT A MISREAD. The size a 0.115.0 caller
+ * declares is below the layout this build calls original, so every entry point
+ * taking one returns CLAY_ERROR_INVALID_ARGUMENT and clay_last_error() names
+ * this change. That is the whole of the mitigation and it is the point: the
+ * alternative — reading `model` and `brush` sixteen bytes early and handing
+ * back a brush whose verb is half a float — is the silent corruption this ABI
+ * works hardest to avoid.
+ *
+ * WHY NOT A SECOND STRUCT, the way clay_stroke_sample_full avoided exactly this
+ * for the sample packing. A sample is an ARRAY ELEMENT with no struct_size at
+ * all, so the corruption there could not be detected and a second struct was
+ * the only honest answer. Here the prefix rule detects it, and the cost of the
+ * alternative is a parallel clay_brush_preset_full plus a parallel entry point
+ * for each of the four calls that take one, forever, so that a stroke preset
+ * could never again be appended to. A loud break at a 0.x minor is cheaper. */
 typedef struct clay_brush_preset {
     uint32_t struct_size; /* = sizeof(clay_brush_preset); required */
     /* NUL-terminated; truncated rather than refused if the source is longer. */

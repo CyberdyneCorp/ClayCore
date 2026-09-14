@@ -260,3 +260,75 @@ TEST_CASE("c brush preset: a preset sized as it shipped survives the brush growi
     stunted.struct_size = 8;
     CHECK(clay_brush_preset_serialize(&stunted, nullptr, &needed) == CLAY_ERROR_INVALID_ARGUMENT);
 }
+
+TEST_CASE("c brush preset: Rake crosses as a rake (issue #530)") {
+    // The one field that makes Rake a rake is `stroke.rotate_to_azimuth`, and
+    // until ABI 0.116.0 clay_stroke_preset did not carry it: every C host asking
+    // the library for Rake got a Draw brush with a tighter spacing and a
+    // stamp that followed the path rather than the stylus barrel.
+    clay_brush_preset rake{};
+    rake.struct_size = sizeof(rake);
+    REQUIRE(clay_brush_preset_by_name("Rake", &rake) == CLAY_OK);
+    CHECK(rake.stroke.rotate_to_azimuth != 0);
+    CHECK(rake.stroke.rotate_along_stroke == 0);
+    CHECK(rake.brush.verb == CLAY_MESH_BRUSH_DRAW);
+
+    SUBCASE("and survives the byte round trip, which is what a library does") {
+        size_t needed = 0;
+        REQUIRE(clay_brush_preset_serialize(&rake, nullptr, &needed) == CLAY_OK);
+        std::vector<uint8_t> bytes(needed);
+        size_t written = needed;
+        REQUIRE(clay_brush_preset_serialize(&rake, bytes.data(), &written) == CLAY_OK);
+
+        clay_brush_preset back{};
+        back.struct_size = sizeof(back);
+        REQUIRE(clay_brush_preset_deserialize(bytes.data(), bytes.size(), &back) == CLAY_OK);
+        CHECK(back.stroke.rotate_to_azimuth != 0);
+    }
+
+    SUBCASE("every other library preset still follows the path, not the barrel") {
+        const size_t count = clay_brush_preset_library_count();
+        size_t rakes = 0;
+        for (size_t i = 0; i < count; ++i) {
+            clay_brush_preset p{};
+            p.struct_size = sizeof(p);
+            REQUIRE(clay_brush_preset_library_at(i, &p) == CLAY_OK);
+            if (p.stroke.rotate_to_azimuth != 0) ++rakes;
+        }
+        CHECK(rakes == 1);
+    }
+}
+
+TEST_CASE("c brush preset: the 0.115.0 layout is refused, not misread (issue #530)") {
+    // THE ONE DESCRIPTOR THE PREFIX RULE CANNOT CARRY FORWARD. clay_brush_preset
+    // embeds clay_stroke_preset BY VALUE with `model` and `brush` after it, so
+    // appending to the stroke preset moved both. struct_size negotiates a tail,
+    // not a shift — what it can still do is notice, and it must, because reading
+    // `model` sixteen bytes early hands back a brush whose verb is half a float.
+    const size_t before_growth = offsetof(clay_brush_preset, brush) +
+                                 offsetof(clay_mesh_brush_desc, seed_revision) -
+                                 (sizeof(clay_stroke_preset) -
+                                  offsetof(clay_stroke_preset, rotate_to_azimuth));
+    const size_t shipped = offsetof(clay_brush_preset, brush) +
+                           offsetof(clay_mesh_brush_desc, seed_revision);
+    REQUIRE(before_growth < shipped);
+
+    clay_brush_preset old_host{};
+    old_host.struct_size = static_cast<uint32_t>(before_growth);
+    CHECK(clay_brush_preset_by_name("Standard", &old_host) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_brush_preset_library_at(0, &old_host) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_brush_preset_defaults(&old_host) == CLAY_ERROR_INVALID_ARGUMENT);
+    // Nothing was written into the buffer it declared.
+    CHECK(old_host.name[0] == '\0');
+
+    size_t needed = 0;
+    CHECK(clay_brush_preset_serialize(&old_host, nullptr, &needed) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    // The refusal names the change rather than telling a host to do what it
+    // already did — read_desc's own message is "set it to the sizeof of the
+    // struct you compiled against", which is exactly what this caller set.
+    const std::string detail = clay_last_error();
+    INFO("refusal reads: " << detail);
+    CHECK(detail.find("0.116.0") != std::string::npos);
+    CHECK(detail.find("recompile") != std::string::npos);
+}
