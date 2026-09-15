@@ -100,6 +100,12 @@ and Relax at 61.2/57.2 ms;
 eight release medians remain above 16 ms. These results are tracked in
 [desktop PR #137](https://github.com/CyberdyneCorp/ClaySpaceDesktop/pull/137).
 
+A follow-up investigation checks measurement noise on performance cores and
+profiles complete Smooth/Relax preparation. The GPU-buffer reuse experiment is
+deferred because application results remain mixed. Preview initialization still
+costs about 24 ms and its full mesh rebuild about 30 ms; see the
+[latency investigation](latency-investigation-531.md) for scope and evidence.
+
 ## Regional consolidation follow-up — issue #595
 
 Repeated Move maintenance now has a retained-volume path: isolated additive

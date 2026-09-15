@@ -40,6 +40,7 @@ add_executable(clay_unit_tests
   unit/test_brick_samples.cpp
   unit/test_brick_edge_ownership.cpp
   unit/test_ring_cells.cpp
+  unit/test_sample_bounds.cpp
   unit/test_mesh.cpp
   unit/test_lattice_gizmo.cpp
   unit/test_mesh_lattice.cpp
