@@ -8353,6 +8353,13 @@ clay_sdf_move_tx* clay_sdf_move_begin(clay_document* doc, clay_layer_id layer,
     settings.radius = p.radius;
     settings.ease = static_cast<std::uint8_t>(p.ease);
     settings.front_only = p.front_only != 0;
+    // The live door has to carry this for the same reason the one-shot door
+    // does (#533, #603). Dropped, every drag through here is unnamed, and
+    // `continues_gesture` falls back to bit-equality on centre and radius --
+    // so two SEPARATE presses at the same anchor compare equal, the second
+    // REPLACES the first rather than stacking, and the first pull is lost.
+    // Not a cost regression: a gesture the artist finished is discarded.
+    settings.gesture_id = p.gesture_id;
 
     std::optional<session::SdfMoveTransaction> tx = session::SdfMoveTransaction::begin(
         doc->doc.document, layer, kernel::cf3(centre[0], centre[1], centre[2]), settings, sp,
