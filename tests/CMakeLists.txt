@@ -157,6 +157,7 @@ add_executable(clay_unit_tests
   unit/test_move_brush.cpp
   unit/test_move_topological.cpp
   unit/test_shading_gates.cpp
+  unit/test_measure_step.cpp
   unit/test_c_move_brush.cpp
   unit/test_c_sdf_sculpt.cpp
   unit/test_c_sdf_prefix_cache.cpp

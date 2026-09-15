@@ -28,7 +28,7 @@ CPU evaluation now batches compatible grab chains while retaining exact field
 normals, including hard edges. The measured deep-chain throughput gain is
 3.1–3.7×; the six-frame engine drag improves about 16% on the validation host.
 Mixed chains and repetition retain the general path. This addresses engine work;
-the wider application's 16 ms target still needs a same-device host trace.
+the wider application's 16 ms target remains unmet in Linux application traces.
 See `batch-grab-chains-without-changing-the-field` for the implementation,
 regressions and measurement scope.
 
@@ -46,6 +46,24 @@ preserves the complete preview and reduces median pointer-down latency from
 comparisons. See `skip-zero-strength-relax-stencils` for exactness, cancellation,
 regressions and the remaining materialization/meshing costs. The 16 ms target
 is still unmet.
+
+Source fills now batch exact grid coordinates, and global edge welding uses
+contiguous transient storage. The welding probe reduces full gradient/color
+sphere meshing from 36.6 to 27.5 ms while preserving complete mesh output.
+Rehashing increases peak scratch memory; application results remain mixed and
+need further verification. See `batch-brick-grid-position-generation` and
+`use-contiguous-edge-welding` for tests, memory measurements and current scope.
+
+## Regional consolidation follow-up — issue #595
+
+Repeated Move maintenance now has a retained-volume path: isolated additive
+volumes with identity placement and compactly supported grab deformers rebuild
+only a lattice-aligned patch. This prevents the stationary maintenance closure
+from growing into neighbouring subtools. Unsupported combinations retain the
+whole-root closure. Sampling and redistancing are local; copying retained
+storage and recomputing its bounds remain proportional to retained storage.
+See `keep-regional-volume-bakes-local` for compatibility, regression coverage,
+and measured results. This does not add an automatic maintenance trigger.
 
 ## Where the engine is (2026-09-06, v0.87.0)
 

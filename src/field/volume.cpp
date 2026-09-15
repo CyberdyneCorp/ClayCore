@@ -1017,6 +1017,181 @@ FieldVolume::ResampleTally FieldVolume::resample_region(const Region& region,
     return tally;
 }
 
+namespace {
+
+float patch_weight(cfloat3 p, const math::Aabb& core, float feather) {
+    const cfloat3 outside = kernel::cmax(kernel::cmax(core.min - p, p - core.max), cf3(0, 0, 0));
+    const float distance = std::max({outside.x, outside.y, outside.z});
+    const float t = std::clamp(1.0f - distance / feather, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+int volume_slot(const int* p, const std::int32_t* count) {
+    for (int a = 0; a < 3; ++a)
+        if (p[a] < 0 || p[a] >= count[a]) return -1;
+    return (p[2] * count[1] + p[1]) * count[0] + p[0];
+}
+
+}  // namespace
+
+// Owns assembly scratch separately from the immutable source and patch. Each
+// stage has one job: align storage, copy retained bricks, or stitch a sample.
+struct VolumePatchBuilder {
+    const FieldVolume& source;
+    const FieldVolume& patch;
+    math::Aabb core;
+    float feather;
+    FieldVolume result;
+    int offset[3] = {}, lo[3] = {};
+
+    bool initialize() {
+        if (source.empty() || patch.empty() || core.empty() || !(feather > 0.0f) ||
+            source.cell_size_ != patch.cell_size_ || source.band_ != patch.band_ ||
+            source.has_color() != patch.has_color()) return false;
+        const std::size_t patch_slots = static_cast<std::size_t>(patch.bcount_[0]) *
+                                       patch.bcount_[1] * patch.bcount_[2];
+        // A sparse far value is a lower bound, never a stitching sample.
+        if (patch.brick_count() != patch_slots) return false;
+        result.cell_size_ = source.cell_size_;
+        result.band_ = source.band_;
+        result.feather_ = source.feather_;
+        if (!align_lattice()) return false;
+        const auto required = core.dilated(feather);
+        const auto coverage = patch.bounds().dilated(source.cell_size_ * 1e-4f);
+        if (!coverage.contains(required.min) || !coverage.contains(required.max)) return false;
+        const std::size_t total = static_cast<std::size_t>(result.bcount_[0]) *
+                                 result.bcount_[1] * result.bcount_[2];
+        // The sparse offsets and slot arithmetic use signed 32-bit integers.
+        if (total > static_cast<std::size_t>(INT32_MAX) / kBrickSamples) return false;
+        result.index_.assign(total, kBrickEmpty);
+        result.far_.assign(total, 1.0f);
+        result.data_.reserve(source.data_.size() + patch.data_.size());
+        if (source.has_color()) result.colors_.reserve(source.colors_.size() + patch.colors_.size());
+        return true;
+    }
+
+    bool align_lattice() {
+        const float brick = kBrickDim * source.cell_size_;
+        const cfloat3 delta = (patch.origin_ - source.origin_) / brick;
+        const float components[3] = {delta.x, delta.y, delta.z};
+        for (int a = 0; a < 3; ++a) {
+            if (!std::isfinite(components[a]) || std::abs(components[a]) > 1000000.0f)
+                return false;
+            offset[a] = static_cast<int>(std::round(components[a]));
+            if (std::abs(components[a] - offset[a]) > 1e-4f) return false;
+            lo[a] = std::min(0, offset[a]);
+            result.bcount_[a] = std::max(source.bcount_[a], offset[a] + patch.bcount_[a]) - lo[a];
+        }
+        result.origin_ = source.origin_ + cf3(static_cast<float>(lo[0]), static_cast<float>(lo[1]),
+                                             static_cast<float>(lo[2])) * brick;
+        return true;
+    }
+
+    void copy_old(std::size_t slot, int old_slot) {
+        if (old_slot < 0) return;
+        result.far_[slot] = source.far_[old_slot];
+        const int entry = source.index_[old_slot];
+        if (entry < 0) return;
+        result.index_[slot] = static_cast<std::int32_t>(result.data_.size());
+        result.data_.insert(result.data_.end(), source.data_.begin() + entry,
+                            source.data_.begin() + entry + kBrickSamples);
+        if (source.has_color())
+            result.colors_.insert(result.colors_.end(), source.colors_.begin() + entry,
+                                   source.colors_.begin() + entry + kBrickSamples);
+    }
+
+    int source_sample_index(const FieldVolume::BrickGrid& grid, std::size_t slot,
+                            int i, int old_entry) const {
+        if (old_entry >= 0) return old_entry + i;
+        int cell[3];
+        grid.sample_cell(slot, i, cell);
+        for (int a = 0; a < 3; ++a) cell[a] += lo[a] * kBrickDim;
+        const AxisSlot x = locate(cell[0], source.bcount_[0]);
+        const AxisSlot y = locate(cell[1], source.bcount_[1]);
+        const AxisSlot z = locate(cell[2], source.bcount_[2]);
+        for (int iz = 0; iz < z.count; ++iz)
+            for (int iy = 0; iy < y.count; ++iy)
+                for (int ix = 0; ix < x.count; ++ix) {
+                    const int coord[3] = {x.brick[ix], y.brick[iy], z.brick[iz]};
+                    const int entry = source.index_[volume_slot(coord, source.bcount_)];
+                    if (entry >= 0)
+                        return entry + static_cast<int>(sample_index(x.local[ix], y.local[iy], z.local[iz]));
+                }
+        return kBrickEmpty;
+    }
+
+    std::uint32_t blend_color(int before, int after, float weight) const {
+        if (before < 0 || weight == 1.0f) return patch.colors_[after];
+        if (weight == 0.0f) return source.colors_[before];
+        const auto a = unpack_color(source.colors_[before]);
+        const auto b = unpack_color(patch.colors_[after]);
+        return pack_color(a + (b - a) * weight);
+    }
+
+    void assemble(const FieldVolume::BrickGrid& grid, std::size_t slot,
+                  int old_slot, int patch_slot) {
+        float block[kBrickSamples];
+        std::uint32_t color[kBrickSamples];
+        const int old_entry = old_slot < 0 ? kBrickEmpty : source.index_[old_slot];
+        const int patch_entry = patch.index_[patch_slot];
+        for (int i = 0; i < kBrickSamples; ++i) {
+            const float weight = patch_weight(grid.sample_position(slot, i), core, feather);
+            const float after = patch.data_[patch_entry + i];
+            const int before_index = source_sample_index(grid, slot, i, old_entry);
+            // Sparse far values are lower bounds, never stitching samples.
+            // Use the dense distance where no retained sample (or halo) exists.
+            const float before = before_index < 0 ? after : source.data_[before_index];
+            block[i] = weight == 0.0f ? before : weight == 1.0f ? after :
+                       before + (after - before) * weight;
+            if (source.has_color()) color[i] = blend_color(before_index, patch_entry + i, weight);
+        }
+        const BrickScan scan = scan_block(block, result.band_);
+        // A caller may skip redistancing. A steep sign-changing block still
+        // contains a surface even when no sample falls inside the narrow band.
+        const bool crosses = scan.any_inside && std::any_of(block, block + kBrickSamples,
+                                                            [](float d) { return d >= 0.0f; });
+        if (!scan.near_surface && !crosses) {
+            result.far_[slot] = scan.any_inside ? -1.0f : 1.0f;
+            return;
+        }
+        result.index_[slot] = static_cast<std::int32_t>(result.data_.size());
+        result.data_.insert(result.data_.end(), block, block + kBrickSamples);
+        if (source.has_color()) result.colors_.insert(result.colors_.end(), color, color + kBrickSamples);
+    }
+
+    void build() {
+        const FieldVolume::BrickGrid grid{result.origin_, result.cell_size_, result.band_,
+                            {result.bcount_[0], result.bcount_[1], result.bcount_[2]}};
+        const auto required = core.dilated(feather);
+        for (std::size_t slot = 0; slot < result.index_.size(); ++slot) {
+            const int x = static_cast<int>(slot % result.bcount_[0]);
+            const int y = static_cast<int>(slot / result.bcount_[0] % result.bcount_[1]);
+            const int z = static_cast<int>(slot / result.bcount_[0] / result.bcount_[1]);
+            const int old_coord[3] = {x + lo[0], y + lo[1], z + lo[2]};
+            const int patch_coord[3] = {old_coord[0] - offset[0], old_coord[1] - offset[1],
+                                       old_coord[2] - offset[2]};
+            const int old_slot = volume_slot(old_coord, source.bcount_);
+            const int patch_slot = volume_slot(patch_coord, patch.bcount_);
+            if (patch_slot < 0 || !grid.brick_box(slot).intersects(required))
+                copy_old(slot, old_slot);
+            else
+                assemble(grid, slot, old_slot, patch_slot);
+        }
+        result.build_far_bounds();
+        result.set_sample_lipschitz(result.measure_sample_lipschitz());
+        result.data_.shrink_to_fit();
+        result.colors_.shrink_to_fit();
+    }
+};
+
+std::optional<FieldVolume> FieldVolume::patched(const FieldVolume& patch,
+                                                const math::Aabb& core, float feather) const {
+    VolumePatchBuilder builder{*this, patch, core, feather, FieldVolume{}, {}, {}};
+    if (!builder.initialize()) return std::nullopt;
+    builder.build();
+    return std::move(builder.result);
+}
+
 float FieldVolume::measure_sample_lipschitz() const {
     if (empty()) return 1.0f;
 

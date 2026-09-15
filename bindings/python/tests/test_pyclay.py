@@ -4283,6 +4283,25 @@ def test_a_region_merge_is_one_undo_step():
     assert np.array_equal(doc.eval(probes), before)
 
 
+def test_regional_move_maintenance_keeps_neighbours_and_reports_its_actual_box():
+    """#595: the host binding must preserve locality after real edits, not just rebakes."""
+    doc, layer = _ball_row(count=8, spacing=1.4)
+    region = ((-0.81, -0.31, -0.31), (-0.19, 0.31, 0.31))
+    far = np.array([[i * 1.4, 0, 0] for i in range(1, 8)], np.float32)
+    before = doc.eval(far)
+    for _ in range(6):
+        for dab in range(4):
+            layer.move_surface((-0.5, 0, 0), (-0.09 if dab % 2 else 0.09, 0, 0),
+                               radius=0.22, ease=0)
+        plan = layer.plan_region_merge(region)
+        done = layer.consolidate_region(region, cell=0.04, band=0.12)
+        assert done["whole_layer"] is False
+        assert done["absorbed"] == 1
+        assert done["box"] == plan["box"]
+        assert layer.field_report()["item_count"] == 8
+        np.testing.assert_array_equal(doc.eval(far), before)
+
+
 def test_a_polish_chain_holds_its_bound_once_consolidated():
     """The claim the change exists to make true."""
     cell, band = 0.03, 0.12

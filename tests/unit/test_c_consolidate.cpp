@@ -331,6 +331,46 @@ TEST_CASE("the C ABI keeps one baked item however many gestures work the patch")
     clay_document_destroy(doc);
 }
 
+TEST_CASE("the C ABI reports a local retained-volume plan after repeated Move gestures") {
+    clay_layer_id layer = 0;
+    clay_document* doc = fresh_document(&layer);
+    for (int i = 0; i < 8; ++i) add_sphere(doc, layer, 0.5f, i * 1.4f);
+    REQUIRE(clay_document_enable_undo(doc) == CLAY_OK);
+    const auto params = params_at(0.04f, 0.12f);
+    const float lo[3] = {-0.81f, -0.31f, -0.31f}, hi[3] = {-0.19f, 0.31f, 0.31f};
+    const float centre[3] = {-0.5f, 0, 0};
+    clay_move_params move{};
+    move.struct_size = sizeof(move);
+    move.radius = 0.22f;
+    for (int bake = 0; bake < 6; ++bake) {
+        for (int dab = 0; dab < 4; ++dab) {
+            const float displacement[3] = {dab % 2 ? -0.09f : 0.09f, 0, 0};
+            size_t applied = 0;
+            REQUIRE(clay_layer_move_surface(doc, layer, centre, displacement, &move, &applied) == CLAY_OK);
+            REQUIRE(applied > 0);
+        }
+        clay_region_merge planned{}, actual{};
+        planned.struct_size = sizeof(planned);
+        actual.struct_size = sizeof(actual);
+        REQUIRE(clay_layer_plan_region_merge(doc, layer, lo, hi, &planned) == CLAY_OK);
+        size_t before = 0, after = 0;
+        REQUIRE(clay_document_undo_state(doc, nullptr, &before, nullptr) == CLAY_OK);
+        REQUIRE(clay_layer_consolidate_region(doc, layer, lo, hi, &params, nullptr, &actual) == CLAY_OK);
+        REQUIRE(clay_document_undo_state(doc, nullptr, &after, nullptr) == CLAY_OK);
+        CHECK(after == before + 1);
+        CHECK(actual.absorbed == 1);
+        CHECK(actual.whole_layer == 0);
+        for (int axis = 0; axis < 3; ++axis) {
+            CHECK(actual.box_min[axis] == planned.box_min[axis]);
+            CHECK(actual.box_max[axis] == planned.box_max[axis]);
+        }
+        size_t nodes = 0;
+        REQUIRE(clay_layer_node_count(doc, layer, &nodes) == CLAY_OK);
+        CHECK(nodes == 8);
+    }
+    clay_document_destroy(doc);
+}
+
 TEST_CASE("the C ABI refuses a region merge it cannot make sense of") {
     clay_layer_id layer = 0;
     clay_document* doc = fresh_document(&layer);

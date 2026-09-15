@@ -1244,3 +1244,75 @@ TEST_CASE("resample_region drops the colour channel rather than inventing one") 
     CHECK_FALSE(v.has_color());
     CHECK(v.brick_count() > 0);
 }
+TEST_CASE("volume patch: retained bricks and shared halo samples stay exact") {
+    const auto sphere = [](kernel::cfloat3 p) { return kernel::clength(p) - 0.8f; };
+    const math::Aabb bounds{kernel::cf3(-1.28f, -1.28f, -1.28f), kernel::cf3(1.28f, 1.28f, 1.28f)};
+    const auto source = field::FieldVolume::sample(sphere, bounds, 0.04f, 0.12f);
+    const math::Aabb patch_box{kernel::cf3(-1.6f, -0.64f, -0.64f), kernel::cf3(-0.32f, 0.64f, 0.64f)};
+    auto patch = field::FieldVolume::empty_lattice(patch_box, 0.04f, 0.12f);
+    patch.materialize_region(patch_box, [&](const field::FieldVolume::BrickGrid& grid,
+        std::size_t first, std::size_t count, float* out) {
+        for (std::size_t slot = 0; slot < count; ++slot)
+            for (int i = 0; i < field::kBrickSamples; ++i)
+                out[slot * field::kBrickSamples + i] = sphere(grid.sample_position(first + slot, i));
+    });
+    const math::Aabb core{kernel::cf3(-1.04f, -0.24f, -0.24f), kernel::cf3(-0.56f, 0.24f, 0.24f)};
+    const auto result = source.patched(patch, core, 0.16f);
+    REQUIRE(result);
+    int checked = 0;
+    for (int z = 0; z < 8; ++z)
+        for (int y = 0; y < 8; ++y)
+            for (int x = 4; x < 8; ++x) {
+                float before[field::kBrickSamples], after[field::kBrickSamples];
+                if (!source.read_brick({x, y, z}, before)) continue;
+                REQUIRE(result->read_brick({x + 1, y, z}, after));
+                CHECK(std::equal(before, before + field::kBrickSamples, after));
+                ++checked;
+            }
+    CHECK(checked > 10);
+    int shared = 0;
+    constexpr int n = field::kBrickDim + 1;
+    for (int z = 0; z < 8; ++z)
+        for (int y = 0; y < 8; ++y)
+            for (int x = 0; x < 8; ++x) {
+                float a[field::kBrickSamples], b[field::kBrickSamples];
+                if (!result->read_brick({x, y, z}, a) || !result->read_brick({x + 1, y, z}, b)) continue;
+                for (int k = 0; k < n; ++k)
+                    for (int j = 0; j < n; ++j)
+                        CHECK(a[(k * n + j) * n + n - 1] == b[(k * n + j) * n]);
+                ++shared;
+            }
+    CHECK(shared > 10);
+    SUBCASE("a sparse patch has bounds rather than distance samples") {
+        const auto sparse = field::FieldVolume::sample(sphere, patch_box, 0.04f, 0.12f);
+        CHECK_FALSE(source.patched(sparse, core, 0.16f));
+    }
+    SUBCASE("the transition must be covered") {
+        CHECK_FALSE(source.patched(patch, core, 2.0f));
+    }
+    SUBCASE("the fade width must be positive") {
+        CHECK_FALSE(source.patched(patch, core, 0.0f));
+    }
+    SUBCASE("a different sampling lattice is refused") {
+        const auto different = field::FieldVolume::sample(sphere, bounds, 0.08f, 0.12f);
+        CHECK_FALSE(different.patched(patch, core, 0.16f));
+    }
+}
+
+TEST_CASE("volume patch: a steep sign crossing survives sparse assembly") {
+    const math::Aabb box{cf3(-1, -1, -1), cf3(1, 1, 1)};
+    const auto source = FieldVolume::sample(sphere_field(0.7f), box, 0.125f, 0.25f);
+    auto patch = FieldVolume::empty_lattice(box, 0.125f, 0.25f);
+    patch.materialize_region(box, [](const FieldVolume::BrickGrid& grid,
+        std::size_t first, std::size_t count, float* out) {
+        for (std::size_t s = 0; s < count; ++s)
+            for (int i = 0; i < field::kBrickSamples; ++i)
+                out[s * field::kBrickSamples + i] =
+                    grid.sample_position(first + s, i).x < 0.06f ? -10.0f : 10.0f;
+    });
+    const math::Aabb core{cf3(-0.75f, -0.75f, -0.75f), cf3(0.75f, 0.75f, 0.75f)};
+    const auto result = source.patched(patch, core, 0.25f);
+    REQUIRE(result);
+    CHECK(result->eval(cf3(0, 0, 0)) < 0.0f);
+    CHECK(result->eval(cf3(0.125f, 0, 0)) > 0.0f);
+}

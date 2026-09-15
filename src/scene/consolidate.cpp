@@ -235,7 +235,8 @@ std::optional<field::FieldVolume> bake_tape_with(const Tape& tape,
                                                  bool want_color, ConsolidationCost* out_cost,
                                                  const BakePointEval& point_eval,
                                                  parallel::CancelToken* token,
-                                                 parallel::ProgressScope& progress);
+                                                 parallel::ProgressScope& progress,
+                                                 bool dense = false);
 }  // namespace
 
 std::optional<field::FieldVolume> bake_layer(const Layer& layer,
@@ -279,7 +280,7 @@ std::optional<field::FieldVolume> bake_tape_with(const Tape& tape,
                                                  bool want_color, ConsolidationCost* out_cost,
                                                  const BakePointEval& point_eval,
                                                  parallel::CancelToken* token,
-                                                 parallel::ProgressScope& progress) {
+                                                 parallel::ProgressScope& progress, bool dense) {
     const float band = params.band > 0.0f ? params.band : params.cell_size * 3.0f;
     const float padding = params.padding > 0.0f ? params.padding : band;
 
@@ -295,11 +296,20 @@ std::optional<field::FieldVolume> bake_tape_with(const Tape& tape,
 
     progress.phase(0);
     bool cancelled = false;
-    field::FieldVolume volume = field::FieldVolume::sample_blocks(
-        [&tape, &point_eval](const field::FieldVolume::BrickGrid& grid, std::size_t first,
+    const auto fill = [&tape, &point_eval](const field::FieldVolume::BrickGrid& grid, std::size_t first,
                              std::size_t count,
-                             float* out) { fill_window(tape, point_eval, grid, first, count, out); },
-        region, params.cell_size, band, token, &cancelled);
+                             float* out) { fill_window(tape, point_eval, grid, first, count, out); };
+    field::FieldVolume volume;
+    if (dense) {
+        // A stitching transition needs distances, not the discontinuous lower
+        // bounds a compact sparse volume returns outside its stored shell.
+        volume = field::FieldVolume::empty_lattice(region, params.cell_size, band);
+        if (parallel::cancelled(token)) return std::nullopt;
+        volume.materialize_region(region, fill);
+    } else {
+        volume = field::FieldVolume::sample_blocks(fill, region, params.cell_size, band,
+                                                   token, &cancelled);
+    }
     if (cancelled) return std::nullopt;
     // brick_count rather than empty(): a volume covering only empty space
     // still has a full brick index, it just stores no samples, and handing one
@@ -314,7 +324,7 @@ std::optional<field::FieldVolume> bake_tape_with(const Tape& tape,
     // growing a brick of stored shell per bake.
     progress.phase(1);
     if (parallel::cancelled(token)) return std::nullopt;
-    if (!params.skip_redistance && field::redistance(volume)) volume.compact();
+    if (!params.skip_redistance && field::redistance(volume) && !dense) volume.compact();
     progress.phase(2);
     if (parallel::cancelled(token)) return std::nullopt;
 
@@ -515,7 +525,100 @@ bool replace_layer_with_volume(Document& doc, LayerId layer_id, field::FieldVolu
     return added;
 }
 
-RegionMerge plan_region_merge(const Layer& layer, const math::Aabb& region) {
+namespace {
+
+struct VolumePatchPlan {
+    NodeId node = kNoNode;
+    math::Aabb core;
+    math::Aabb box;
+    float feather = 0.0f;
+};
+
+bool identity_transform(const math::Transform& t) {
+    return t.position.x == 0.0f && t.position.y == 0.0f && t.position.z == 0.0f &&
+           t.rotation.x == 0.0f && t.rotation.y == 0.0f && t.rotation.z == 0.0f &&
+           t.rotation.w == 1.0f && t.scale == 1.0f;
+}
+
+bool patchable_volume(const Node& n, const Layer& layer) {
+    return is_volume_item(n) && n.visible && n.op == Op::Add && n.blend.k == 0.0f &&
+           n.rounding == 0.0f && !n.gated() && n.repeat.type == kernel::crepeat_none &&
+           identity_transform(n.xform) && n.scale_axes.x == 1.0f &&
+           n.scale_axes.y == 1.0f && n.scale_axes.z == 1.0f &&
+           (!n.mirror || (layer.mirror_axes == 0 && layer.radial_count < 2));
+}
+
+bool include_local_warps(const Node& n, math::Aabb& core) {
+    for (const Deformer& d : n.deformers) {
+        // A nonzero easing endpoint is a GLOBAL translation, however small.
+        // It cannot be removed by replacing a finite patch (#595).
+        if (d.type != kernel::cdeform_grab || !(d.c > 0.0f) ||
+            kernel::cease(d.ease, 0.0f) != 0.0f) return false;
+        const kernel::cfloat3 c = kernel::cf3(d.k, d.a, d.b);
+        const kernel::cfloat3 r = kernel::cf3(d.c, d.c, d.c);
+        core.expand(math::Aabb{c - r, c + r});
+    }
+    return true;
+}
+
+math::Aabb aligned_patch_box(const field::FieldVolume& volume, const math::Aabb& box) {
+    const float brick = field::kBrickDim * volume.cell_size();
+    const kernel::cfloat3 origin = volume.origin();
+    const kernel::cfloat3 low = (box.min - origin) / brick;
+    const kernel::cfloat3 high = (box.max - origin) / brick;
+    return {origin + kernel::cf3(std::floor(low.x), std::floor(low.y), std::floor(low.z)) * brick,
+            origin + kernel::cf3(std::ceil(high.x), std::ceil(high.y), std::ceil(high.z)) * brick};
+}
+
+bool isolated_patch(const Layer& layer, NodeId selected, const math::Aabb& box) {
+    for (NodeId id : layer.sdf->roots) {
+        if (id == selected) continue;
+        const Node* n = layer.sdf->find(id);
+        if (n && n->visible && node_influence_bound(*layer.sdf, id, layer).intersects(box))
+            return false;
+    }
+    return true;
+}
+
+std::optional<VolumePatchPlan> plan_volume_patch(const Layer& layer, const math::Aabb& region) {
+    if (layer.kind != LayerKind::Sdf || !layer.sdf || region.empty() || region.is_infinite() ||
+        !identity_transform(layer.xform) || layer_is_squashed(layer)) return std::nullopt;
+    for (NodeId id : layer.sdf->roots) {
+        const Node* n = layer.sdf->find(id);
+        if (!n || !patchable_volume(*n, layer)) continue;
+        if (!node_influence_bound(*layer.sdf, id, layer).intersects(region)) continue;
+        VolumePatchPlan plan;
+        plan.node = id;
+        plan.core = region;
+        if (!include_local_warps(*n, plan.core)) continue;
+        plan.feather = std::max(n->volume->band(), 4.0f * n->volume->cell_size());
+        plan.box = aligned_patch_box(*n->volume,
+            plan.core.dilated(plan.feather + 2.0f * n->volume->cell_size()));
+        if (isolated_patch(layer, id, plan.box)) return plan;
+    }
+    return std::nullopt;
+}
+
+bool expand_root_closure(math::Aabb& box, std::vector<bool>& taken,
+                         const std::vector<math::Aabb>& reach) {
+    bool grew = false;
+    for (std::size_t i = 0; i < reach.size(); ++i) {
+        if (taken[i] || reach[i].empty()) continue;
+        if (!reach[i].is_infinite() && !box.intersects(reach[i])) continue;
+        taken[i] = true;
+        grew = true;
+        if (!reach[i].is_infinite()) {
+            box.expand(reach[i]);
+            continue;
+        }
+        // A global operand takes every finite extent, as in a whole-layer bake.
+        for (const math::Aabb& r : reach)
+            if (!r.empty() && !r.is_infinite()) box.expand(r);
+    }
+    return grew;
+}
+
+RegionMerge whole_root_plan(const Layer& layer, const math::Aabb& region) {
     RegionMerge out;
     if (layer.kind != LayerKind::Sdf || !layer.sdf) return out;
     if (region.empty()) return out;
@@ -541,31 +644,7 @@ RegionMerge plan_region_merge(const Layer& layer, const math::Aabb& region) {
     // nothing.
     math::Aabb box = region;
     std::vector<bool> taken(ids.size(), false);
-    bool grew = true;
-    while (grew) {
-        grew = false;
-        for (std::size_t i = 0; i < ids.size(); ++i) {
-            if (taken[i]) continue;
-            // An INFINITE reach meets every box and is contained by none, so an
-            // item carrying one pulls the closure out to the whole layer. That
-            // is the correct answer rather than a special case: an item that
-            // can change the field anywhere can change it inside the box, so
-            // leaving it behind would break the property this exists for.
-            if (reach[i].empty()) continue;  // reaches nothing, so it meets nothing
-            if (!reach[i].is_infinite() && !box.intersects(reach[i])) continue;
-            taken[i] = true;
-            grew = true;
-            if (reach[i].is_infinite()) {
-                // "Everywhere" has no box, so it resolves to the union of every
-                // FINITE reach in the layer — which is where the field can
-                // actually differ, and is what a whole-layer bake samples.
-                for (const math::Aabb& r : reach)
-                    if (!r.empty() && !r.is_infinite()) box.expand(r);
-            } else {
-                box.expand(reach[i]);
-            }
-        }
-    }
+    while (expand_root_closure(box, taken, reach)) {}
 
     for (std::size_t i = 0; i < ids.size(); ++i)
         if (taken[i]) out.absorb.push_back(ids[i]);
@@ -573,6 +652,40 @@ RegionMerge plan_region_merge(const Layer& layer, const math::Aabb& region) {
     out.box = box;
     out.whole_layer = out.absorb.size() == ids.size();
     return out;
+}
+
+std::optional<field::FieldVolume> bake_retained_volume(const Layer& layer,
+    const VolumePatchPlan& patch, const ConsolidationParams& params,
+    ConsolidationCost* out_cost, const BakePointEval& point_eval,
+    parallel::CancelToken* token) {
+    parallel::ProgressScope progress(token, 5);
+    Layer view = local_view(layer);
+    view.sdf = std::make_shared<SdfContent>();
+    const Node& source = *layer.sdf->find(patch.node);
+    view.sdf->insert(source);
+    auto volume = bake_tape_with(compile_layer(view), params, source.volume->has_color(),
+                                 nullptr, point_eval, token, progress, true);
+    if (!volume || parallel::cancelled(token)) return std::nullopt;
+    volume = source.volume->patched(*volume, patch.core, patch.feather);
+    if (!volume || parallel::cancelled(token)) return std::nullopt;
+    if (out_cost) fill_cost(*volume, *out_cost);
+    return volume;
+}
+
+bool matching_patch_lattice(const Layer& layer, const VolumePatchPlan& patch,
+                            const ConsolidationParams& params) {
+    const auto& source = *layer.sdf->find(patch.node)->volume;
+    const float band = std::max(params.band > 0.0f ? params.band : params.cell_size * 3.0f,
+                               params.cell_size * 2.0f);
+    return params.cell_size == source.cell_size() && band == source.band();
+}
+
+}  // namespace
+
+RegionMerge plan_region_merge(const Layer& layer, const math::Aabb& region) {
+    if (const auto patch = plan_volume_patch(layer, region))
+        return RegionMerge{patch->box, {patch->node}, false};
+    return whole_root_plan(layer, region);
 }
 
 bool consolidate_region(Document& doc, LayerId layer_id, const math::Aabb& region,
@@ -587,7 +700,10 @@ bool consolidate_region(Document& doc, LayerId layer_id, const math::Aabb& regio
     if (!absorbable_roots(doc, layer_id, &all)) return false;
     const Layer* layer = doc.find_layer(layer_id);
 
-    const RegionMerge plan = plan_region_merge(*layer, region);
+    auto patch = plan_volume_patch(*layer, region);
+    if (patch && !matching_patch_lattice(*layer, *patch, params)) patch.reset();
+    const RegionMerge plan = patch ? RegionMerge{patch->box, {patch->node}, false} :
+                                     whole_root_plan(*layer, region);
     if (out_plan) *out_plan = plan;
     if (plan.absorb.empty()) return false;
 
@@ -595,13 +711,13 @@ bool consolidate_region(Document& doc, LayerId layer_id, const math::Aabb& regio
     // leave the absorbed items' contribution outside it in nothing at all.
     ConsolidationParams over_closure = params;
     over_closure.region = plan.box;
-    std::optional<field::FieldVolume> volume =
-        bake_layer(*layer, over_closure, out_cost, point_eval, token);
-    if (!volume && parallel::cancelled(token)) {
-        if (out_cancelled) *out_cancelled = true;
-        return false;  // untouched: the bake had not been installed
+    auto volume = patch ? bake_retained_volume(*layer, *patch, over_closure, out_cost,
+                                                point_eval, token) :
+                          bake_layer(*layer, over_closure, out_cost, point_eval, token);
+    if (!volume) {
+        if (out_cancelled) *out_cancelled = parallel::cancelled(token);
+        return false;  // sampling and assembly publish nothing on failure
     }
-    if (!volume) return false;
 
     auto run = [&doc, undo](const Command& cmd) {
         if (undo) return undo->perform(doc, cmd);

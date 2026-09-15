@@ -1,4 +1,6 @@
-// CAN A REAL SCULPT PRODUCE A LOCAL CLOSURE AT ALL? NOT a gated benchmark.
+// Regional consolidation locality and repeated-maintenance regression probe.
+// --maintenance-only runs 48 gestures; --maintenance-long runs 192.
+// ARM C gates root count and retained extent after every bake (#595).
 //
 // THE QUESTION, AND WHY IT IS NOT THE ONE move_regional_probe ASKED. That probe
 // established the Move cure -- periodic consolidation keeps interactive cost
@@ -49,7 +51,7 @@
 // prints both. A local closure that still costs whole-layer time would mean the
 // cost is in redistancing the result rather than in absorbing the items.
 //
-// WHAT IT FOUND, so a reader does not have to run it: a local closure IS
+// HISTORICAL BASELINE (before #595), retained for comparison: a local closure IS
 // reachable -- the cliff is at a gap of exactly zero, and 0.005 of clear air
 // takes the bake from 8 roots to 2 and from 340 ms to 94 -- but it does not
 // SURVIVE BEING USED. Maintaining a patch grows the closure ~1.76 a bake with
@@ -372,7 +374,101 @@ void patch_expand(Patch* acc, const Patch& p, bool* seeded) {
 
 }  // namespace
 
-int main() {
+int run_maintenance(int gestures = 48) {
+    int failures = 0;
+    // ------------------------------------------------------------------ ARM C
+    //
+    // The arm that decides the architecture. Arm A planned ONE merge after a
+    // chain had already been allowed to grow, and watched the closure widen
+    // from 1 root to 3 as it did. The question a host actually faces is the
+    // other one: if you MAINTAIN, does the closure stay at one root and the
+    // bake stay cheap, gesture after gesture? That is the O(1) property at
+    // LOCAL prices, which is the only thing that would make the regional path
+    // worth binding over the whole-layer one.
+    std::printf("=== ARM C: %d gestures on one subtool, regional maintenance every 4 ===\n", gestures);
+    std::printf("  gap 0.40 (the assembly arm A found local). The box passed to each bake is\n"
+                "  the union since the LAST bake, reset after it.\n");
+    std::printf("  If `bake ms` grows while `absorbed` does not, the driver is not the root\n"
+                "  COUNT but the extent of the baked volume the previous bake left behind --\n"
+                "  a different defect with a different fix, so both are reported.\n");
+    std::printf("   gesture | items  step     | absorbed  whole | closure X  baked X | bake ms | hits\n");
+    {
+        float first_width = 0.0f;
+        Doc e;
+        if (!build_spaced(&e, 2.0f * kSubtoolRadius + 0.40f, 0.0f)) { std::printf("  FAIL build\n"); return 1; }
+        const float x0 = subtool_x_at(2.0f * kSubtoolRadius + 0.40f, 0);
+        Patch acc{};
+        bool seeded = false;
+        double last_bake = 0.0;
+        float last_baked_x = 0.0f;
+        Plan last_plan;
+        for (int g = 1; g <= gestures; ++g) {
+            Patch gd{};
+            if (!dab_at(&e, x0, g, &gd)) { std::printf("  FAIL dab %d\n", g); return 1; }
+            patch_expand(&acc, gd, &seeded);
+            if ((g % 4) == 0 && seeded) {
+                last_plan = plan_at(e, acc);
+                clay_consolidation_params cp;
+                params_at(&cp, kCell);
+                clay_consolidation_cost cost;
+                std::memset(&cost, 0, sizeof cost);
+                cost.struct_size = sizeof cost;
+                const Clock::time_point t0 = Clock::now();
+                const bool ok = clay_layer_consolidate_region(e.doc, e.layer, acc.min, acc.max,
+                                                              &cp, &cost, nullptr) == CLAY_OK;
+                last_bake = ms_since(t0);
+                last_baked_x = cost.bounds_max[0] - cost.bounds_min[0];
+                if (g == 4) first_width = last_baked_x;
+                if (last_plan.whole || last_plan.absorbed != 1 ||
+                    last_baked_x > first_width + 4.0f * 8.0f * kCell ||
+                    item_count(e.doc, e.layer, nullptr) != kSubtools) {
+                    std::printf("  FAIL: local maintenance grew beyond its subtool at gesture %d\n", g);
+                    ++failures;
+                }
+                // Every bake, not only the sampled rows: the growth per bake is
+                // the mechanism, and six sampled rows cannot show it.
+                std::printf("      bake %2d after gesture %2d | requested X [%7.3f %7.3f] w=%6.3f"
+                            " | LAYER w=%6.3f | closure w=%6.3f | baked w=%6.3f"
+                            " | roots %llu%s | %7.1f ms | %llu samples %llu bytes\n",
+                            g / 4, g, static_cast<double>(acc.min[0]),
+                            static_cast<double>(acc.max[0]),
+                            static_cast<double>(acc.max[0] - acc.min[0]),
+                            static_cast<double>(layer_width_x(e.doc, e.layer)),
+                            static_cast<double>(last_plan.span_x),
+                            static_cast<double>(last_baked_x), last_plan.absorbed,
+                            last_plan.whole ? " W" : "  ", last_bake,
+                            static_cast<unsigned long long>(cost.sample_count),
+                            static_cast<unsigned long long>(cost.bytes));
+                if (!ok) { std::printf("  FAIL: maintenance bake refused at gesture %d\n", g); ++failures; break; }
+                seeded = false;
+            }
+            if (g == 4 || g == 8 || g == 16 || g == 24 || g == 32 || g == 48 || g == gestures) {
+                float st = -1.0f;
+                const int it = item_count(e.doc, e.layer, &st);
+                const Rays r = raycast(e.doc, kGap);
+                std::printf("   %7d | %5d %8.6f | %8llu  %5s | %9.3f %8.3f | %7.1f | %4d\n", g,
+                            it, static_cast<double>(st), last_plan.absorbed,
+                            last_plan.whole ? "YES" : "no",
+                            static_cast<double>(last_plan.span_x),
+                            static_cast<double>(last_baked_x), last_bake, r.hits);
+                if (r.hits == 0) {
+                    std::printf("  FAIL: maintenance lost the surface at gesture %d.\n", g);
+                    ++failures;
+                }
+            }
+        }
+        clay_document_destroy(e.doc);
+    }
+    std::printf("\n");
+
+    return failures ? 1 : 0;
+}
+
+int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--maintenance-only") == 0)
+        return run_maintenance();
+    if (argc == 2 && std::strcmp(argv[1], "--maintenance-long") == 0)
+        return run_maintenance(192);
     std::printf("move_subtool_closure_probe: can a multi-subtool form keep the closure local?\n");
     std::printf("  %d subtools of r=%.2f in a row, patch on subtool 0, move radius %.2f, cell %.3f\n",
                 kSubtools, static_cast<double>(kSubtoolRadius), static_cast<double>(kMoveRadius),
@@ -515,80 +611,7 @@ int main() {
     }
     std::printf("\n");
 
-    // ------------------------------------------------------------------ ARM C
-    //
-    // The arm that decides the architecture. Arm A planned ONE merge after a
-    // chain had already been allowed to grow, and watched the closure widen
-    // from 1 root to 3 as it did. The question a host actually faces is the
-    // other one: if you MAINTAIN, does the closure stay at one root and the
-    // bake stay cheap, gesture after gesture? That is the O(1) property at
-    // LOCAL prices, which is the only thing that would make the regional path
-    // worth binding over the whole-layer one.
-    std::printf("=== ARM C: 48 gestures on one subtool, regional maintenance every 4 ===\n");
-    std::printf("  gap 0.40 (the assembly arm A found local). The box passed to each bake is\n"
-                "  the union since the LAST bake, reset after it.\n");
-    std::printf("  If `bake ms` grows while `absorbed` does not, the driver is not the root\n"
-                "  COUNT but the extent of the baked volume the previous bake left behind --\n"
-                "  a different defect with a different fix, so both are reported.\n");
-    std::printf("   gesture | items  step     | absorbed  whole | closure X  baked X | bake ms | hits\n");
-    {
-        Doc e;
-        if (!build_spaced(&e, 2.0f * kSubtoolRadius + 0.40f, 0.0f)) { std::printf("  FAIL build\n"); return 1; }
-        const float x0 = subtool_x_at(2.0f * kSubtoolRadius + 0.40f, 0);
-        Patch acc{};
-        bool seeded = false;
-        double last_bake = 0.0;
-        float last_baked_x = 0.0f;
-        Plan last_plan;
-        for (int g = 1; g <= 48; ++g) {
-            Patch gd{};
-            if (!dab_at(&e, x0, g, &gd)) { std::printf("  FAIL dab %d\n", g); return 1; }
-            patch_expand(&acc, gd, &seeded);
-            if ((g % 4) == 0 && seeded) {
-                last_plan = plan_at(e, acc);
-                clay_consolidation_params cp;
-                params_at(&cp, kCell);
-                clay_consolidation_cost cost;
-                std::memset(&cost, 0, sizeof cost);
-                cost.struct_size = sizeof cost;
-                const Clock::time_point t0 = Clock::now();
-                const bool ok = clay_layer_consolidate_region(e.doc, e.layer, acc.min, acc.max,
-                                                              &cp, &cost, nullptr) == CLAY_OK;
-                last_bake = ms_since(t0);
-                last_baked_x = cost.bounds_max[0] - cost.bounds_min[0];
-                // Every bake, not only the sampled rows: the growth per bake is
-                // the mechanism, and six sampled rows cannot show it.
-                std::printf("      bake %2d after gesture %2d | requested X [%7.3f %7.3f] w=%6.3f"
-                            " | LAYER w=%6.3f | closure w=%6.3f | baked w=%6.3f"
-                            " | roots %llu%s | %7.1f ms\n",
-                            g / 4, g, static_cast<double>(acc.min[0]),
-                            static_cast<double>(acc.max[0]),
-                            static_cast<double>(acc.max[0] - acc.min[0]),
-                            static_cast<double>(layer_width_x(e.doc, e.layer)),
-                            static_cast<double>(last_plan.span_x),
-                            static_cast<double>(last_baked_x), last_plan.absorbed,
-                            last_plan.whole ? " W" : "  ", last_bake);
-                if (!ok) { std::printf("  FAIL: maintenance bake refused at gesture %d\n", g); ++failures; break; }
-                seeded = false;
-            }
-            if (g == 4 || g == 8 || g == 16 || g == 24 || g == 32 || g == 48) {
-                float st = -1.0f;
-                const int it = item_count(e.doc, e.layer, &st);
-                const Rays r = raycast(e.doc, kGap);
-                std::printf("   %7d | %5d %8.6f | %8llu  %5s | %9.3f %8.3f | %7.1f | %4d\n", g,
-                            it, static_cast<double>(st), last_plan.absorbed,
-                            last_plan.whole ? "YES" : "no",
-                            static_cast<double>(last_plan.span_x),
-                            static_cast<double>(last_baked_x), last_bake, r.hits);
-                if (r.hits == 0) {
-                    std::printf("  FAIL: maintenance lost the surface at gesture %d.\n", g);
-                    ++failures;
-                }
-            }
-        }
-        clay_document_destroy(e.doc);
-    }
-    std::printf("\n");
+    failures += run_maintenance();
 
     // ------------------------------------------------------------------ ARM D
     //

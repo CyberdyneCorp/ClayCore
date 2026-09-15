@@ -6825,14 +6825,11 @@ NB_MODULE(pyclay, m) {
                  return out;
              },
              "region"_a,
-             "What `consolidate_region` WOULD absorb, and over what box, without\n"
-             "baking anything — so you can show the region whose parameters are\n"
-             "about to be lost before committing to it.\n\n"
-             "`box` is the INFLUENCE CLOSURE of your region, not the region: it\n"
-             "grows until every item that can reach inside it is wholly inside\n"
-             "it. `whole_layer` says the closure took everything, in which case\n"
-             "this is `consolidate()` and the promise to leave items outside\n"
-             "parametric is vacuous.")
+             "Preview what `consolidate_region` would absorb and sample.\n"
+             "Analytic operands use their influence closure. Compatible volumes\n"
+             "retain samples outside a local patch and report whole_layer=False.\n"
+             "A retained-volume plan assumes its current spacing/band; changing\n"
+             "those settings may enlarge the executing call's returned box.")
         .def("consolidate_region",
              [](PyLayer& l, nb::handle region, float cell, nb::handle band, nb::handle padding,
                 bool redistance) {
@@ -6855,6 +6852,9 @@ NB_MODULE(pyclay, m) {
                  nb::dict out = cost_dict(cost);
                  out["absorbed"] = plan.absorb.size();
                  out["whole_layer"] = plan.whole_layer;
+                 out["box"] = nb::make_tuple(
+                     nb::make_tuple(plan.box.min.x, plan.box.min.y, plan.box.min.z),
+                     nb::make_tuple(plan.box.max.x, plan.box.max.y, plan.box.max.z));
                  return out;
              },
              "region"_a, "cell"_a, "band"_a = nb::none(), "padding"_a = nb::none(),
@@ -6873,9 +6873,14 @@ NB_MODULE(pyclay, m) {
              "the region, and the difference is not cosmetic — absorb only those\n"
              "and a subtract straddling the edge stays behind, the material it\n"
              "carved comes back, and the volume cannot take it away again.\n\n"
-             "The second gesture on a patch has the first gesture's volume in its\n"
-             "closure, so it is absorbed rather than stacked on: a patch stays at\n"
-             "ONE baked item however many times it is worked.\n\n"
+             "An isolated hard-Add volume with identity placement, no gate or\n"
+             "replication, and only finite-support grabs can retain unaffected\n"
+             "samples. With unchanged spacing and band, only the patch, removed\n"
+             "grab supports and a transition halo are baked. Other cases use the\n"
+             "whole-root closure. Retained storage is copied, not re-evaluated.\n"
+             "The returned `box` is the actual sampled region; `bounds` and the\n"
+             "cost fields describe the installed volume, including retained data.\n"
+             "`whole_layer` is false when samples are retained outside the bake.\n\n"
              "ONE undo step, as `consolidate()` is. Use `plan_region_merge()`\n"
              "first to see what it would take.")
         .def("consolidate",
