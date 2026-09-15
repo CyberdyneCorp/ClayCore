@@ -3,6 +3,8 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -23,6 +25,46 @@ using field::FieldVolume;
 using kernel::cf3;
 
 namespace {
+
+void check_bulk_grid_positions(const FieldVolume::BrickGrid& grid, std::size_t first,
+                               std::size_t count) {
+    constexpr std::uint32_t canary = 0x7fc01234u;
+    const std::size_t size = count * field::kBrickSamples * 3 + 2;
+    std::vector<float> actual(size, std::bit_cast<float>(canary));
+    std::vector<std::uint32_t> expected(size, canary);
+    grid.sample_positions(first, count, actual.data() + 1);
+    for (std::size_t s = 0; s < count; ++s)
+        for (int i = 0; i < field::kBrickSamples; ++i) {
+            const auto p = grid.sample_position(first + s, i);
+            const std::size_t at = (s * field::kBrickSamples + i) * 3 + 1;
+            expected[at] = std::bit_cast<std::uint32_t>(p.x);
+            expected[at + 1] = std::bit_cast<std::uint32_t>(p.y);
+            expected[at + 2] = std::bit_cast<std::uint32_t>(p.z);
+        }
+    std::vector<std::uint32_t> actual_bits(size);
+    std::transform(actual.begin(), actual.end(), actual_bits.begin(),
+                   [](float value) { return std::bit_cast<std::uint32_t>(value); });
+    CHECK(actual_bits == expected);
+}
+
+TEST_CASE("bulk brick positions preserve scalar bits and output bounds") {
+    for (const auto shape : {std::array{1, 1, 1}, std::array{3, 5, 2},
+                             std::array{17, 13, 11}}) {
+        const std::size_t total = static_cast<std::size_t>(shape[0] * shape[1] * shape[2]);
+        const std::size_t plane = static_cast<std::size_t>(shape[0] * shape[1]);
+        for (const auto origin : {cf3(-0.0f, -0.0f, 0.0f), cf3(-1.24f, 0.17f, -3.25f),
+                                  cf3(50.0f, -52.7f, 98.0f), cf3(1e9f, -1e9f, 1e-9f)})
+            for (const float cell : {0.02f, 0.013f, 0.125f, std::nextafter(0.02f, 1.0f)}) {
+                const FieldVolume::BrickGrid grid{
+                    origin, cell, 3.0f, {shape[0], shape[1], shape[2]}};
+                for (const std::size_t first : {std::size_t{0}, total / 2, plane - 1, total - 1}) {
+                    grid.sample_positions(first, 0, nullptr);
+                    check_bulk_grid_positions(grid, first, 0);
+                    check_bulk_grid_positions(grid, first, std::min(std::size_t{7}, total - first));
+                }
+            }
+    }
+}
 
 auto sphere_field(float r) {
     return [r](kernel::cfloat3 p) { return kernel::clength(p) - r; };
@@ -1202,6 +1244,63 @@ TEST_CASE("resample_region drops the colour channel rather than inventing one") 
     CHECK_FALSE(v.has_color());
     CHECK(v.brick_count() > 0);
 }
+
+TEST_CASE("materialization adopts initial samples and preserves later fill observations") {
+    const math::Aabb bounds{cf3(-0.4f, -0.4f, -0.4f), cf3(0.4f, 0.4f, 0.4f)};
+    auto volume = FieldVolume::empty_lattice(bounds, 0.04f, 0.12f);
+    auto first_region = FieldVolume::Region{bounds};
+    SUBCASE("one complete initial run") {}
+    SUBCASE("partial initial runs followed by incremental filling") {
+        first_region = FieldVolume::Region::ball(cf3(0, 0, 0), 0.1f);
+    }
+    constexpr std::uint32_t patterns[] = {
+        0, 0x80000000u, 0x3c123456u, 0xbc234567u, 0x7fc01234u, 0x7f800000u};
+    std::optional<FieldVolume::BrickGrid> lattice;
+    std::vector<bool> filled;
+    std::size_t expected_samples = 0;
+    std::size_t calls = 0;
+    const FieldVolume::BrickBlockFill fill = [&](const auto& grid, std::size_t first,
+                                                std::size_t count, float* out) {
+        CHECK(volume.sample_count() == expected_samples);
+        ++calls;
+        if (!lattice) {
+            lattice = grid;
+            filled.resize(static_cast<std::size_t>(grid.bcount[0]) * grid.bcount[1] *
+                          grid.bcount[2]);
+        }
+        for (std::size_t k = 0; k < count; ++k) {
+            REQUIRE_FALSE(filled[first + k]);
+            filled[first + k] = true;
+            for (int sample = 0; sample < field::kBrickSamples; ++sample)
+                out[k * field::kBrickSamples + sample] =
+                    std::bit_cast<float>(patterns[(first + k + sample) % std::size(patterns)]);
+        }
+        expected_samples += count * field::kBrickSamples;
+    };
+    std::vector<FieldVolume::BrickCoord> added;
+    const auto initial = volume.materialize_region(first_region, fill, &added);
+    REQUIRE(initial.added > 0);
+    CHECK(volume.sample_count() == expected_samples);
+    const auto rest = volume.materialize_region(FieldVolume::Region{bounds}, fill, &added);
+    CHECK(rest.kept == initial.added);
+    CHECK(volume.brick_count() == initial.added + rest.added);
+    const auto before_repeat = calls;
+    const auto repeated = volume.materialize_region(FieldVolume::Region{bounds}, fill, &added);
+    CHECK(repeated.added == 0);
+    CHECK(calls == before_repeat);
+    REQUIRE(lattice);
+    CHECK(added.size() == volume.brick_count());
+    for (const auto& coord : added) {
+        const auto slot = static_cast<std::size_t>(
+            (coord.z * lattice->bcount[1] + coord.y) * lattice->bcount[0] + coord.x);
+        float actual[field::kBrickSamples];
+        REQUIRE(volume.read_brick(coord, actual));
+        for (int sample = 0; sample < field::kBrickSamples; ++sample)
+            CHECK(std::bit_cast<std::uint32_t>(actual[sample]) ==
+                  patterns[(slot + sample) % std::size(patterns)]);
+    }
+}
+
 TEST_CASE("volume patch: retained bricks and shared halo samples stay exact") {
     const auto sphere = [](kernel::cfloat3 p) { return kernel::clength(p) - 0.8f; };
     const math::Aabb bounds{kernel::cf3(-1.28f, -1.28f, -1.28f), kernel::cf3(1.28f, 1.28f, 1.28f)};

@@ -101,6 +101,10 @@ class FieldVolume {
         // Sample `i` (x-fastest over (kBrickDim+1)^3, halo included) of the
         // brick at linear `slot` (x-fastest over bcount).
         kernel::cfloat3 sample_position(std::size_t slot, int i) const;
+        // The same positions for `count` consecutive bricks starting at `first`.
+        // Writes count * kBrickSamples * 3 floats (xyz, x-fastest samples).
+        // A zero count accesses no output memory and permits a null pointer.
+        void sample_positions(std::size_t first, std::size_t count, float* out_xyz) const;
         // The GLOBAL cell coordinate of the same sample -- the integers
         // sample_position turns into a world point. A fill that wants to ask
         // the volume what it already stores there needs them, and deriving

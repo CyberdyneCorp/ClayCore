@@ -22,6 +22,98 @@ Last reconciled against `3dcoat_study/MISSING_FEATURES.md` and
 caught five items this file had dropped. Every ClayCore-owned row in their
 catalogue is now represented here or in the deferred list below.
 
+## Stroke latency follow-up — issue #531
+
+CPU evaluation now batches compatible grab chains while retaining exact field
+normals, including hard edges. The measured deep-chain throughput gain is
+3.1–3.7×; the six-frame engine drag improves about 16% on the validation host.
+Mixed chains and repetition retain the general path. This addresses engine work;
+the wider application's 16 ms target remains unmet in Linux application traces.
+See `batch-grab-chains-without-changing-the-field` for the implementation,
+regressions and measurement scope.
+
+The meshing follow-up deduplicates local edge records before global welding.
+The paired probe measures a further 10–16% reduction for whole meshes with
+field normals and colour across its sphere, hard-box and deep-chain fixtures.
+Exact-output regressions cover subsets, straddlers, LODs and bounded fallback.
+See `deduplicate-brick-edge-recordings`; the full application latency goal
+remains open, and these are engine measurements rather than a frame-time claim.
+
+The live Smooth/Relax investigation also found full-field stencil calculations
+inside a zero-strength preview-priming update. Skipping those unused calculations
+preserves the complete preview and reduces median pointer-down latency from
+257 to 110 ms for Smooth and 240 to 97 ms for Relax in three alternating live
+comparisons. See `skip-zero-strength-relax-stencils` for exactness, cancellation,
+regressions and the remaining materialization/meshing costs. The 16 ms target
+is still unmet.
+
+Source fills now batch exact grid coordinates, and global edge welding uses
+contiguous transient storage. The welding probe reduces full gradient/color
+sphere meshing from 36.6 to 27.5 ms while preserving complete mesh output.
+Rehashing increases peak scratch memory. A same-base, ten-pair application
+comparison improves non-Mask release medians, but still exceeds 16 ms for
+several brushes. See `batch-brick-grid-position-generation` and
+`use-contiguous-edge-welding` for tests, memory measurements and current scope.
+
+Exact shared lattice samples are now reused within each ordinary brick.
+Production full-sphere meshing falls from 23.7 to 20.0 ms without attributes,
+with byte-identical output and a bounded 19,652-byte sample buffer per active
+worker. All eleven CPU test suites and focused sanitizer tests pass. Ten
+alternating application pairs measure Smooth/Relax pointer-down medians of
+63.9/69.0 ms and Move release at 44.3 ms; other release changes are mixed.
+See `reuse-brick-lattice-samples` for complete evidence and pending platform
+CI. The 16 ms target across all brushes remains unmet.
+
+Initial source materialization now adopts its first filled sample block instead
+of allocating a second complete payload. The allocation regression falls from
+2,008,560 to 1,008,372 requested bytes while preserving callback observations
+and every sample bit. All eleven CPU suites and 88 sanitizer cases pass.
+All 90 combined application cases also pass. A quiet component comparison
+reduces initial materialization from 6.60 to 5.12 ms. Ten application pairs
+measure Smooth preparation at 60.7 ms, while Relax remains around 71 ms and
+eight release medians exceed 16 ms. See `adopt-initial-source-sample-storage`
+for complete comparisons and pending platform CI.
+
+Global welding now skips proven exclusive ordinary brick edges, preserving
+boundary welding and all fallback paths. Production full-sphere meshing falls
+from 19.62 to 13.44 ms without attributes, with exact complete output. All
+eleven CPU suites and 43 focused sanitizer cases pass on the implementation.
+Production allocation requests fall by about 11 MB in that fixture, at the
+cost of temporary key-uniqueness allocations. All 90 combined application
+cases pass. Ten application pairs reduce Move release from 45.0 to 37.9 ms
+and Smooth release from 65.4 to 60.6 ms. Other results are mixed and the
+16 ms target remains unmet; see `skip-welding-exclusive-brick-edges`.
+
+Boundary-cell enumeration now reuses row classifications while preserving exact
+cell and mesh order. All eleven CPU suites and 44 sanitizer cases pass. The
+production 48-brick sphere subset improves 3.88→3.17 ms; attributed results
+are mixed. See `classify-boundary-cell-rows` for exactness and timing evidence;
+all 93 combined application cases pass. Ten paired application runs reduce
+Move release from 38.5 to 34.0 ms, Smooth preparation from 56.7 to 54.5 ms
+and Relax release from 59.5 to 57.2 ms. Other results are mixed.
+
+The companion desktop changes now borrow vertex keys and read mesh attributes
+directly into renderer storage. Both the pinned and combined engine builds
+pass 93 enabled desktop cases. The latest completed application comparison
+with row classification measures Smooth preparation/release at 54.5/58.1 ms
+and Relax at 61.2/57.2 ms;
+eight release medians remain above 16 ms. These results are tracked in
+[desktop PR #137](https://github.com/CyberdyneCorp/ClaySpaceDesktop/pull/137).
+
+A follow-up investigation checks measurement noise on performance cores and
+profiles complete Smooth/Relax preparation. The GPU-buffer reuse experiment is
+deferred because application results remain mixed. Preview initialization still
+costs about 24 ms and its full mesh rebuild about 30 ms; see the
+[latency investigation](latency-investigation-531.md) for scope and evidence.
+
+The field sample-bound reduction now uses four independent float accumulators.
+Initial materialization improves 5.12→2.94 ms with exact serialized output;
+all eleven CPU suites, 105 sanitizer cases and 93 combined application cases
+pass. A performance-core comparison reduces Smooth preparation 54.5→51.0 ms
+and Relax 59.3→56.6 ms; other action results remain mixed, and the 16 ms target
+is still open. See `reduce-sample-bound-dependencies` for both complete
+application comparisons and pending platform CI.
+
 ## Regional consolidation follow-up — issue #595
 
 Repeated Move maintenance now has a retained-volume path: isolated additive

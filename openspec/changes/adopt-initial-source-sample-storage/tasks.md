@@ -1,0 +1,7 @@
+- [x] Compare a private adoption prototype against full, partial, repeated and incremental reference output.
+- [x] Add allocation and materialization regressions; verify the allocation gate fails before the fix.
+- [x] Implement initial block adoption and measure changed-function complexity.
+- [x] Run CPU, sanitizer and strict OpenSpec checks.
+- [x] Complete combined native/rendered application correctness verification.
+- [x] Measure isolated and application impact in a quiet CPU window; update PR evidence without closing #531.
+- [ ] Complete platform CI and continue the remaining all-brush latency work.

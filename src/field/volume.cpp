@@ -4,6 +4,8 @@
 
 #include "clay/field/volume.h"
 
+#include "sample_bounds.h"
+
 #include "clay/bytes.h"
 
 #include "clay/parallel/thread_pool.h"
@@ -104,6 +106,28 @@ cfloat3 FieldVolume::BrickGrid::sample_position(std::size_t slot, int i) const {
     return origin +
            cf3(static_cast<float>(g[0]), static_cast<float>(g[1]), static_cast<float>(g[2])) *
                cell_size;
+}
+
+void FieldVolume::BrickGrid::sample_positions(std::size_t first, std::size_t count,
+                                             float* out_xyz) const {
+    std::size_t at = 0;
+    for (std::size_t s = 0; s < count; ++s) {
+        int base[3];
+        sample_cell(first + s, 0, base);
+        for (int z = 0; z <= kBrickDim; ++z)
+            for (int y = 0; y <= kBrickDim; ++y)
+                for (int x = 0; x <= kBrickDim; ++x) {
+                    // Add in integer cell space before converting, as the scalar
+                    // path does. A rounded world-space brick origin is not exact.
+                    const cfloat3 p =
+                        origin + cf3(static_cast<float>(base[0] + x),
+                                     static_cast<float>(base[1] + y),
+                                     static_cast<float>(base[2] + z)) * cell_size;
+                    out_xyz[at++] = p.x;
+                    out_xyz[at++] = p.y;
+                    out_xyz[at++] = p.z;
+                }
+    }
 }
 
 math::Aabb FieldVolume::BrickGrid::brick_box(std::size_t slot) const {
@@ -594,30 +618,7 @@ math::Aabb brick_box_of(const kernel::cfloat3& origin, float cell, int bx, int b
     return math::Aabb{lo, lo + kernel::cf3(brick, brick, brick)};
 }
 
-// The steepest difference between neighbouring samples inside ONE brick's
-// block. Shared by the whole-volume measurement and by a region-limited
-// resample, which measures only the blocks it wrote -- two callers that must
-// not come to different answers about the same block.
-//
-// One sweep per axis, each stopping a sample short along that axis so the
-// forward neighbour is always in the block. Only the three FORWARD neighbours:
-// the reverse ones are the same pairs seen from the other end.
-float steepest_in_block(const float* block) {
-    constexpr int n = kBrickDim + 1;
-    constexpr int kStride[3] = {1, n, n * n};
-    float steepest = 0.0f;
-    for (int axis = 0; axis < 3; ++axis) {
-        const int stride = kStride[axis];
-        const int last[3] = {axis == 0 ? n - 1 : n, axis == 1 ? n - 1 : n, axis == 2 ? n - 1 : n};
-        for (int z = 0; z < last[2]; ++z)
-            for (int y = 0; y < last[1]; ++y) {
-                const float* row = block + (z * n + y) * n;
-                for (int x = 0; x < last[0]; ++x)
-                    steepest = std::max(steepest, std::abs(row[x + stride] - row[x]));
-            }
-    }
-    return steepest;
-}
+using detail::steepest_in_block;
 
 bool region_brick_range(const kernel::cfloat3& origin, const std::int32_t* bcount, float brick,
                         const math::Aabb& region, int* lo, int* hi) {
@@ -884,15 +885,21 @@ FieldVolume::ResampleTally FieldVolume::materialize_region(const Region& region,
         while (i + run < wanted.size() && wanted[i + run] == wanted[i] + run) ++run;
         block.resize(run * kBrickSamples);
         fill(grid, wanted[i], run, block.data());
+        // The first filled block can become the store itself. Fill before
+        // transferring ownership so callbacks still see only earlier runs.
+        const bool adopt = data_.empty();
+        const std::size_t base = data_.size();
+        if (adopt) data_.swap(block);
+        const float* samples = adopt ? data_.data() : block.data();
         for (std::size_t k = 0; k < run; ++k) {
             const std::size_t slot = wanted[i] + k;
-            const float* one = block.data() + k * kBrickSamples;
+            const float* one = samples + k * kBrickSamples;
             // APPENDED, not rebuilt. Each stored brick owns a contiguous run of
             // `data_` and nothing before it moves, so a new brick is a
             // push_back and an index write -- which is what makes this a dab's
             // cost rather than the model's.
-            index_[slot] = static_cast<std::int32_t>(data_.size());
-            data_.insert(data_.end(), one, one + kBrickSamples);
+            index_[slot] = static_cast<std::int32_t>(base + k * kBrickSamples);
+            if (!adopt) data_.insert(data_.end(), one, one + kBrickSamples);
             sample_lipschitz_ =
                 std::max(sample_lipschitz_, steepest_in_block(one) / cell_size_);
             if (out_added) {

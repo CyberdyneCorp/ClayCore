@@ -1,0 +1,7 @@
+# Design
+
+The current maximum begins at positive zero. Each operand is an absolute sample difference, so a non-NaN operand is nonnegative. std::max keeps its first operand when the second is NaN; consequently every accumulator remains nonnegative and non-NaN. Partitioning the same differences among four zero-initialized accumulators and taking their maximum preserves the result bits, including positive zero and infinity.
+
+Process four adjacent differences per iteration and handle the remaining row tail explicitly. Keep ordinary floating-point subtraction, absolute value and comparison. An integer-bit reduction prototype preserved returned bits but changed floating-point exception flags on the Linux probe; it is not selected. The float-lane prototype preserves both returned bits and exception flags over 2,148 blocks and four rounding modes in the local probe. That check is evidence for the tested compiler/platform, not a portable claim about enabled traps or alternate math flags.
+
+The private helper has constant stack storage and no heap allocations, persistent state, threads or architecture-specific intrinsics. All volume callers continue using the same bound helper. An independent flattened-neighbor oracle and impulse fixtures cover all sample coordinates, including the ninth sample in rows and each forward-neighbor direction. Compare actual production volume output and performance as well as the isolated reduction.

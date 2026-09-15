@@ -1,0 +1,8 @@
+- [x] Attribute live pointer-down phases before proposing the change.
+- [x] Add and reproduce zero-strength sampling regression on the prior code.
+- [x] Skip unused stencil and sample reads without bypassing preview materialization.
+- [x] Verify relax, cancellation, transaction, and rendered host behavior.
+- [x] Measure live before/after latency; run complexity and OpenSpec checks.
+- [x] Update PR validation and verify platform CI.
+- [x] Reproduce sample-buffer allocation regressions and implement bounded priming allocation.
+- [x] Verify exact output, cancellation, later local dabs, complexity and final host behavior after allocation changes.

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <vector>
 
 #include "clay/field/relax.h"
@@ -494,4 +495,63 @@ TEST_CASE("relax_in_place: the measured slope stays a usable Lipschitz bound") {
     // Averaging can only SHRINK the bound — see field/relax.h — so a repeatedly
     // relaxed volume must never be steeper than the one it came from.
     CHECK(v.measure_sample_lipschitz() <= base.measure_sample_lipschitz() + 1e-4f);
+}
+
+TEST_CASE("relax_in_place: zero strength does not sample masks or alter sample bits") {
+    const FieldVolume base = FieldVolume::sample(
+        [](kernel::cfloat3) { return -0.0f; },
+        math::Aabb{cf3(-0.2f, -0.2f, -0.2f), cf3(0.2f, 0.2f, 0.2f)},
+        0.05f, 0.2f);
+    REQUIRE(base.brick_count() > 0);
+    for (const float strength : {0.0f, -0.0f, -0.5f}) {
+        for (const float region_radius : {0.0f, 0.1f}) {
+            CAPTURE(strength);
+            CAPTURE(region_radius);
+            RelaxSettings settings;
+            settings.strength = strength;
+            settings.region_radius = region_radius;
+            settings.iterations = 3;
+            std::size_t mask_calls = 0;
+            settings.mask = [&mask_calls](kernel::cfloat3) {
+                ++mask_calls;
+                return 0.0f;
+            };
+            FieldVolume volume = base;
+            const auto report = field::relax_in_place(volume, settings);
+            CHECK(mask_calls == 0);
+            CHECK_FALSE(report.changed);
+            CHECK_FALSE(report.cancelled);
+            CHECK(report.touched_bricks > 0);
+            const auto before = base.sample_at(1, 1, 1);
+            const auto after = volume.sample_at(1, 1, 1);
+            REQUIRE(before);
+            REQUIRE(after);
+            CHECK(std::memcmp(&*before, &*after, sizeof(float)) == 0);
+            CHECK(std::signbit(*after));
+            FieldVolume expected = base;
+            expected.shrink_band(3.0f * base.cell_size());
+            CHECK(volume.band() == expected.band());
+            const auto expected_blob = expected.to_blob();
+            const auto actual_blob = volume.to_blob();
+            REQUIRE(actual_blob.size() == expected_blob.size());
+            CHECK(std::memcmp(actual_blob.data(), expected_blob.data(),
+                              actual_blob.size() * sizeof(float)) == 0);
+        }
+    }
+}
+
+TEST_CASE("relax_in_place: cancelled zero strength preserves samples and band") {
+    FieldVolume volume = bumpy_volume();
+    const float band = volume.band();
+    const auto sample = volume.sample_at(20, 20, 20);
+    parallel::CancelToken token;
+    token.cancel();
+    RelaxSettings settings;
+    settings.strength = 0.0f;
+    const auto report = field::relax_in_place(volume, settings, &token);
+    CHECK(report.cancelled);
+    CHECK_FALSE(report.changed);
+    CHECK(report.touched_bricks == 0);
+    CHECK(volume.band() == band);
+    CHECK(volume.sample_at(20, 20, 20) == sample);
 }

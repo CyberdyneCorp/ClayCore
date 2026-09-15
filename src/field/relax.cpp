@@ -46,6 +46,23 @@ Stencil build_stencil(int radius_cells) {
     return s;
 }
 
+// Average only samples present in the volume; a missing brick is not zero.
+template <typename SampleAt>
+std::optional<float> stencil_average(const Stencil& stencil, const SampleAt& sample_at,
+                                     int gx, int gy, int gz) {
+    float averaged = 0.0f;
+    float total = 0.0f;
+    for (std::size_t i = 0; i < stencil.offsets.size(); ++i) {
+        const auto& d = stencil.offsets[i];
+        const std::optional<float> tap = sample_at(gx + d[0], gy + d[1], gz + d[2]);
+        if (!tap) continue;
+        averaged += stencil.weights[i] * *tap;
+        total += stencil.weights[i];
+    }
+    if (total <= 0.0f) return std::nullopt;
+    return averaged / total;
+}
+
 // How much of the smoothed value to take at `p`. Outside the region this is
 // zero and the field is left exactly as it was.
 float region_weight(const RelaxSettings& settings, cfloat3 p) {
@@ -77,6 +94,99 @@ float mask_gate(const MaskGate& mask, cfloat3 p) {
     return 1.0f - std::clamp(mask(p), 0.0f, 1.0f);
 }
 
+// One complete pass; cancellation belongs to the caller's pass boundary.
+RelaxResult relax_pass(FieldVolume& current, const RelaxSettings& tuned,
+                       const Stencil& stencil,
+                       const std::optional<FieldVolume::Region>& region_bounds,
+                       float strength, std::vector<FieldVolume::BrickCoord>* out_changed) {
+    RelaxResult result;
+    // The pass's INPUT, for the bricks the pass will overwrite. Copying the
+    // whole volume for that -- which is what this was -- costs six
+    // megabytes at an interactive cell to protect a few hundred kilobytes,
+    // and put a term that scales with the model back into a dab that had
+    // just been made to scale with itself. Reads outside the snapshotted
+    // bricks come from `current`, which still holds what it held, because
+    // those bricks are not written. The region must be the SAME one the
+    // rewrite uses, and below it is.
+    const std::optional<FieldVolume::RegionSnapshot> snapshot =
+        region_bounds && strength != 0.0f
+            ? std::optional<FieldVolume::RegionSnapshot>(current.snapshot_region(*region_bounds))
+            : std::nullopt;
+    const FieldVolume previous = region_bounds || strength == 0.0f ? FieldVolume() : current;
+    auto blend = [&previous, &snapshot, &current, &stencil, &tuned, strength](
+                     int gx, int gy, int gz, float old) {
+        // Preview priming uses zero strength over the entire field. Keep
+        // its reporting pass, but do not evaluate an unused neighborhood.
+        if (strength == 0.0f) return old;
+        auto tap_at = [&](int x, int y, int z) {
+            return snapshot ? snapshot->sample_at(x, y, z) : previous.sample_at(x, y, z);
+        };
+        // `old` is what a lookup of this sample would return, so there is
+        // no lookup. rewrite_region hands over the value held in the brick
+        // it is writing, and that brick has not been written yet this pass;
+        // the snapshot holds the same coordinate's value from before the
+        // pass; and the two copies of a sample shared across a brick face
+        // cannot disagree, because every writer is a function of the GLOBAL
+        // coordinate. So they are the same number.
+        //
+        // Worth removing rather than tidying: it ran once per sample, and
+        // most samples a brush is handed are outside it — the selection is
+        // whole bricks from a box around a sphere.
+        const float here = old;
+        const cfloat3 at = current.cell_position(gx, gy, gz);
+        const float weight = region_weight(tuned, at) * mask_gate(tuned.mask, at);
+        if (weight <= 0.0f) return here;
+
+        // Only taps that EXIST count. A brick with no samples is not a
+        // measurement of zero, it is the absence of one, and renormalizing
+        // over the taps that are there smooths with the data rather than
+        // dragging the edge of the band inward.
+        const auto averaged = stencil_average(stencil, tap_at, gx, gy, gz);
+        if (!averaged) return here;
+        return here + (*averaged - here) * (strength * weight);
+    };
+    // A dab should cost what it moves. Outside the region `blend` returns
+    // the sample it was handed — that is the `weight <= 0` line above — so
+    // walking the rest of the band only to be told so is the whole of what
+    // made a five-cell brush cost what the model cost. The region is the
+    // sphere the weight is non-zero in, which is the taper's outer edge and
+    // not the brush radius; `rewrite_region` rounds it outward to whole
+    // bricks and requires exactly the identity `blend` already has.
+    //
+    // No margin for the STENCIL is needed, and that is worth being explicit
+    // about because it looks as though it should be: the taps are read from
+    // `previous`, which is the whole volume and is not being written, so a
+    // sample inside the region may read neighbours outside it freely. What
+    // the region bounds is where values CHANGE, and that is exactly where
+    // the weight is non-zero, on this pass and on every later one.
+    if (region_bounds) {
+        const FieldVolume::RewriteTally tally =
+            current.rewrite_region_tallied(*region_bounds, blend, out_changed);
+        result.dirty_bounds.expand(tally.bounds);
+        // The same region every pass selects the same bricks, so this is
+        // the pass's count rather than a sum over passes -- which is what a
+        // host invalidating a preview and a scaling test both want.
+        result.touched_bricks = std::max(result.touched_bricks, tally.touched_bricks);
+        result.changed = result.changed || tally.changed;
+    } else {
+        // The unregioned path is a FILTER over the whole volume, and
+        // `rewrite` has no tally to give because there is no selection to
+        // report: everything stored is written. The dirty region is the
+        // volume, and whether anything moved is the one question left.
+        bool moved = false;
+        auto watched = [&blend, &moved](int gx, int gy, int gz, float old) {
+            const float now = blend(gx, gy, gz, old);
+            if (now != old) moved = true;
+            return now;
+        };
+        if (strength != 0.0f) current.rewrite(watched);
+        result.dirty_bounds.expand(current.bounds());
+        result.touched_bricks = current.brick_count();
+        result.changed = result.changed || moved;
+    }
+    return result;
+}
+
 }  // namespace
 
 RelaxResult relax_in_place(FieldVolume& volume, const RelaxSettings& settings,
@@ -89,7 +199,7 @@ RelaxResult relax_in_place(FieldVolume& volume, const RelaxSettings& settings,
     const float strength = std::clamp(settings.strength, 0.0f, 1.0f);
     const int iterations = std::max(1, settings.iterations);
     const int radius = std::max(1, settings.radius_cells);
-    const Stencil stencil = build_stencil(radius);
+    const Stencil stencil = strength == 0.0f ? Stencil{} : build_stencil(radius);
 
     RelaxSettings tuned = settings;
     // A taper narrower than the kernel cannot hide the seam the kernel makes,
@@ -123,95 +233,11 @@ RelaxResult relax_in_place(FieldVolume& volume, const RelaxSettings& settings,
             break;  // whole passes only: nothing is half-written to unwind
         }
         progress.phase(static_cast<std::uint32_t>(pass));
-        // The pass's INPUT, for the bricks the pass will overwrite. Copying the
-        // whole volume for that -- which is what this was -- costs six
-        // megabytes at an interactive cell to protect a few hundred kilobytes,
-        // and put a term that scales with the model back into a dab that had
-        // just been made to scale with itself. Reads outside the snapshotted
-        // bricks come from `current`, which still holds what it held, because
-        // those bricks are not written. The region must be the SAME one the
-        // rewrite uses, and below it is.
-        const std::optional<FieldVolume::RegionSnapshot> snapshot =
-            region_bounds ? std::optional<FieldVolume::RegionSnapshot>(
-                                current.snapshot_region(*region_bounds))
-                          : std::nullopt;
-        const FieldVolume previous = region_bounds ? FieldVolume() : current;
-        auto blend = [&previous, &snapshot, &current, &stencil, &tuned, strength](
-                         int gx, int gy, int gz, float old) {
-            auto tap_at = [&](int x, int y, int z) {
-                return snapshot ? snapshot->sample_at(x, y, z) : previous.sample_at(x, y, z);
-            };
-            // `old` is what a lookup of this sample would return, so there is
-            // no lookup. rewrite_region hands over the value held in the brick
-            // it is writing, and that brick has not been written yet this pass;
-            // the snapshot holds the same coordinate's value from before the
-            // pass; and the two copies of a sample shared across a brick face
-            // cannot disagree, because every writer is a function of the GLOBAL
-            // coordinate. So they are the same number.
-            //
-            // Worth removing rather than tidying: it ran once per sample, and
-            // most samples a brush is handed are outside it — the selection is
-            // whole bricks from a box around a sphere.
-            const float here = old;
-            const cfloat3 at = current.cell_position(gx, gy, gz);
-            const float weight = region_weight(tuned, at) * mask_gate(tuned.mask, at);
-            if (weight <= 0.0f) return here;
-
-            // Only taps that EXIST count. A brick with no samples is not a
-            // measurement of zero, it is the absence of one, and renormalizing
-            // over the taps that are there smooths with the data rather than
-            // dragging the edge of the band inward.
-            float averaged = 0.0f;
-            float total = 0.0f;
-            for (std::size_t i = 0; i < stencil.offsets.size(); ++i) {
-                const auto& d = stencil.offsets[i];
-                std::optional<float> tap = tap_at(gx + d[0], gy + d[1], gz + d[2]);
-                if (!tap) continue;
-                averaged += stencil.weights[i] * *tap;
-                total += stencil.weights[i];
-            }
-            if (total <= 0.0f) return here;
-            return here + (averaged / total - here) * (strength * weight);
-        };
-        // A dab should cost what it moves. Outside the region `blend` returns
-        // the sample it was handed — that is the `weight <= 0` line above — so
-        // walking the rest of the band only to be told so is the whole of what
-        // made a five-cell brush cost what the model cost. The region is the
-        // sphere the weight is non-zero in, which is the taper's outer edge and
-        // not the brush radius; `rewrite_region` rounds it outward to whole
-        // bricks and requires exactly the identity `blend` already has.
-        //
-        // No margin for the STENCIL is needed, and that is worth being explicit
-        // about because it looks as though it should be: the taps are read from
-        // `previous`, which is the whole volume and is not being written, so a
-        // sample inside the region may read neighbours outside it freely. What
-        // the region bounds is where values CHANGE, and that is exactly where
-        // the weight is non-zero, on this pass and on every later one.
-        if (region_bounds) {
-            const FieldVolume::RewriteTally tally =
-                current.rewrite_region_tallied(*region_bounds, blend, out_changed);
-            result.dirty_bounds.expand(tally.bounds);
-            // The same region every pass selects the same bricks, so this is
-            // the pass's count rather than a sum over passes -- which is what a
-            // host invalidating a preview and a scaling test both want.
-            result.touched_bricks = std::max(result.touched_bricks, tally.touched_bricks);
-            result.changed = result.changed || tally.changed;
-        } else {
-            // The unregioned path is a FILTER over the whole volume, and
-            // `rewrite` has no tally to give because there is no selection to
-            // report: everything stored is written. The dirty region is the
-            // volume, and whether anything moved is the one question left.
-            bool moved = false;
-            auto watched = [&blend, &moved](int gx, int gy, int gz, float old) {
-                const float now = blend(gx, gy, gz, old);
-                if (now != old) moved = true;
-                return now;
-            };
-            current.rewrite(watched);
-            result.dirty_bounds.expand(current.bounds());
-            result.touched_bricks = current.brick_count();
-            result.changed = result.changed || moved;
-        }
+        const RelaxResult report =
+            relax_pass(current, tuned, stencil, region_bounds, strength, out_changed);
+        result.dirty_bounds.expand(report.dirty_bounds);
+        result.touched_bricks = std::max(result.touched_bricks, report.touched_bricks);
+        result.changed = result.changed || report.changed;
         ++completed;
     }
 

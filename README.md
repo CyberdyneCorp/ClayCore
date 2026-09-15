@@ -676,6 +676,27 @@ Backend availability changes speed, never results: every registered backend
 is checked against the CPU scalar reference by the parity suite (1e-4
 relative on distances, 1e-6 for the CPU batch path).
 
+CPU batches process grab-only Move chains one deformer at a time across the
+points, preserving scalar distances, colours and all four field-normal taps
+bit-for-bit. Mixed chains and repetition retain the general evaluator. The
+`grab_chain_batch_probe` measures shallow/deep, hard-surface and volume workloads;
+see `openspec/changes/batch-grab-chains-without-changing-the-field/validation.md`
+for results and the separate application-latency limits.
+
+Brick meshing records repeated local lattice edges once before global welding,
+preserving exact vertices, triangle order, attributes and brick ranges. Scratch
+is bounded per active brick; larger internal dimensions retain general recording.
+`brick_recording_probe` compares both paths, checks exact output and reports
+paired timings for full meshes and small subsets.
+
+Zero-strength relax preserves stored sample bits and skips temporary sample
+copies, mask reads and smoothing stencil evaluation. Full initial source
+materialization reserves its sample payload once. Live Smooth preview priming still materializes its complete
+source field and reports the selected bricks; it no longer computes averages
+whose contribution is zero. See
+`openspec/changes/skip-zero-strength-relax-stencils/validation.md` for live timings
+and remaining application costs.
+
 **Read "registered" literally.** A backend that was not compiled into the build
 cannot fail that suite, so the sentence above is a statement about the build in
 front of you and not about the table. CI compiles CPU on three platforms, Metal

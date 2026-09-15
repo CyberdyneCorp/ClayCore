@@ -1,0 +1,5 @@
+- [x] Attribute live preparation and meshing costs; benchmark an isolated welding prototype.
+- [x] Implement a private contiguous edge table with collision/growth regression tests.
+- [x] Verify complete mesh output against the existing builder, including subset and attribute cases.
+- [x] Measure allocation, peak scratch storage and isolated/live latency; select or reject the implementation from the evidence.
+- [ ] Run relevant CPU, sanitizer, complexity, layering and strict OpenSpec checks; update PR documentation.

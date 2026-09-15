@@ -42,7 +42,8 @@ using MaskGate = std::function<float(kernel::cfloat3)>;
 
 struct RelaxSettings {
     // How much of the smoothed value to take, per iteration. 1 replaces the
-    // field with the average; 0 changes nothing.
+    // field with the average; 0 preserves stored sample bits and skips mask
+    // and stencil sampling. Geometric reporting and pass accounting still run.
     float strength = 1.0f;
 
     // The averaging radius, in cells. Larger smooths coarser features. The

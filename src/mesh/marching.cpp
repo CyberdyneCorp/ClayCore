@@ -1,4 +1,9 @@
 #include "clay/mesh/marching.h"
+#include "brick_recording.h"
+#include "brick_edge_ownership.h"
+#include "brick_samples.h"
+#include "ring_cells.h"
+#include "edge_welding.h"
 
 #include "clay/parallel/thread_pool.h"
 
@@ -40,16 +45,7 @@ inline std::uint64_t pack_point(int i, int j, int k) {
            (static_cast<std::uint64_t>(k) + bias);
 }
 
-struct EdgeKey {
-    std::uint64_t a, b;
-    bool operator==(const EdgeKey&) const = default;
-};
-struct EdgeKeyHash {
-    std::size_t operator()(const EdgeKey& e) const {
-        return static_cast<std::size_t>(e.a * 0x9E3779B185EBCA87ull ^
-                                        (e.b + 0xC2B2AE3D27D4EB4Full + (e.a << 6)));
-    }
-};
+using detail::EdgeKey;
 
 // HOW CLOSE A CROSSING MAY SIT TO A LATTICE POINT (issue #549).
 //
@@ -96,7 +92,8 @@ class Builder {
         : origin_(origin), spacing_(spacing), edge_guard_(edge_guard) {}
 
     // Vertex on the crossing of lattice edge (p0, p1); welded by canonical key.
-    std::uint32_t edge_vertex(LatticePoint p0, float f0, LatticePoint p1, float f1) {
+    std::uint32_t edge_vertex(LatticePoint p0, float f0, LatticePoint p1, float f1,
+                              bool weld = true) {
         std::uint64_t id0 = pack_point(p0.i, p0.j, p0.k);
         std::uint64_t id1 = pack_point(p1.i, p1.j, p1.k);
         if (id0 > id1) {
@@ -105,14 +102,16 @@ class Builder {
             std::swap(f0, f1);
         }
         EdgeKey key{id0, id1};
-        auto it = vertex_map_.find(key);
-        if (it != vertex_map_.end()) return it->second;
+        if (weld) {
+            const auto [existing, inserted] = vertex_map_.intern(
+                key, static_cast<std::uint32_t>(out.positions.size()));
+            if (!inserted) return existing;
+        }
         float t = edge_t(f0, f1, edge_guard_);  // opposite signs; see kEdgeGuard
         cfloat3 a = origin_ + cf3((float)p0.i, (float)p0.j, (float)p0.k) * spacing_;
         cfloat3 b = origin_ + cf3((float)p1.i, (float)p1.j, (float)p1.k) * spacing_;
         std::uint32_t idx = static_cast<std::uint32_t>(out.positions.size());
         out.positions.push_back(a + (b - a) * t);
-        vertex_map_.emplace(key, idx);
         return idx;
     }
 
@@ -128,7 +127,7 @@ class Builder {
     kernel::cfloat3 origin_;
     float spacing_;
     float edge_guard_ = 0.0f;
-    std::unordered_map<EdgeKey, std::uint32_t, EdgeKeyHash> vertex_map_;
+    detail::EdgeVertexMap<> vertex_map_;
 };
 
 // March one tetrahedron with exact combinatorial winding.
@@ -195,8 +194,8 @@ void march_tet(Sink& b, const LatticePoint corners[4], const float f[4]) {
     }
 }
 
-template <class Sink>
-void march_cell(Sink& b, const std::function<float(int, int, int)>& sample, int i, int j, int k) {
+template <class Sink, class Sample>
+void march_cell(Sink& b, const Sample& sample, int i, int j, int k) {
     LatticePoint pts[8];
     float f[8];
     bool any_neg = false, any_pos = false;
@@ -213,8 +212,8 @@ void march_cell(Sink& b, const std::function<float(int, int, int)>& sample, int 
     }
 }
 
-template <class Sink>
-void march_cells(Sink& b, const std::function<float(int, int, int)>& sample,
+template <class Sink, class Sample>
+void march_cells(Sink& b, const Sample& sample,
                  const int cell_min[3], const int cell_max[3]) {
     for (int k = cell_min[2]; k < cell_max[2]; ++k)
         for (int j = cell_min[1]; j < cell_max[1]; ++j)
@@ -256,6 +255,80 @@ struct ShellCollector {
         tris.push_back({v0, v1, v2});
     }
 };
+
+// A tetrahedron repeats edges already encountered in its brick. Keep their
+// first records, so replay pays the global welding lookup once per local edge.
+// Seven monotone unit directions cover Freudenthal's edges. Other inputs keep
+// the general recorder; this lookup never changes the global welding key.
+class LocalCollector {
+  public:
+    LocalCollector(ShellCollector& output, int dim, brick::BrickKey key)
+        : output_(output), origin_{key.x * dim, key.y * dim, key.z * dim},
+          width_(dim + 1) {
+        // At most 17^3 * 7 indices (134 KiB) per active brick, independent of
+        // document size. Larger dimensions retain ordinary recording.
+        if (dim > 0 && dim <= 16)
+            seen_.resize(static_cast<std::size_t>(width_) * width_ * width_ * 7);
+    }
+
+    std::uint32_t edge_vertex(LatticePoint p0, float f0, LatticePoint p1, float f1) {
+        auto* recorded = slot(p0, p1);
+        if (recorded && *recorded) return *recorded - 1;
+        const auto index = output_.edge_vertex(p0, f0, p1, f1);
+        if (recorded) *recorded = index + 1;
+        return index;
+    }
+
+    void triangle(std::uint32_t a, std::uint32_t b, std::uint32_t c) {
+        output_.triangle(a, b, c);
+    }
+
+  private:
+    std::uint32_t* slot(LatticePoint a, LatticePoint b) {
+        if (seen_.empty()) return nullptr;
+        if (std::tie(a.i, a.j, a.k) > std::tie(b.i, b.j, b.k)) std::swap(a, b);
+        const int dx = b.i - a.i, dy = b.j - a.j, dz = b.k - a.k;
+        const int x = a.i - origin_.i, y = a.j - origin_.j, z = a.k - origin_.k;
+        if (dx < 0 || dx > 1 || dy < 0 || dy > 1 || dz < 0 || dz > 1 ||
+            x < 0 || x >= width_ || y < 0 || y >= width_ || z < 0 || z >= width_)
+            return nullptr;
+        const int direction = dx + 2 * dy + 4 * dz;
+        if (direction == 0) return nullptr;
+        const auto point = (static_cast<std::size_t>(x) * width_ + y) * width_ + z;
+        return &seen_[point * 7 + static_cast<std::size_t>(direction - 1)];
+    }
+
+    ShellCollector& output_;
+    LatticePoint origin_;
+    int width_;
+    std::vector<std::uint32_t> seen_;
+};
+
+void record_brick(ShellCollector& rec, brick::BrickKey key, int dim,
+                  const std::function<float(int, int, int)>& sample,
+                  const std::unordered_map<brick::BrickKey, std::vector<ShellTriangle>,
+                                           brick::BrickKeyHash>& straddlers,
+                  bool deduplicate) {
+    int cmin[3] = {key.x * dim, key.y * dim, key.z * dim};
+    int cmax[3] = {key.x * dim + dim, key.y * dim + dim, key.z * dim + dim};
+    if (deduplicate && dim > 0 && dim <= 16) {
+        LocalCollector local(rec, dim, key);
+        const detail::BrickSamples samples(dim, cmin, sample);
+        march_cells(local, samples, cmin, cmax);
+    } else {
+        march_cells(rec, sample, cmin, cmax);
+    }
+    // The key's straddlers are recorded after its own cells, which is
+    // where the serial loop emitted them, so the replay below lands
+    // them inside this key's range exactly as before.
+    if (auto it = straddlers.find(key); it != straddlers.end())
+        for (const ShellTriangle& tri : it->second) {
+            std::uint32_t v[3];
+            for (int c = 0; c < 3; ++c)
+                v[c] = rec.edge_vertex(tri[c].p0, tri[c].f0, tri[c].p1, tri[c].f1);
+            rec.triangle(v[0], v[1], v[2]);
+        }
+}
 
 struct BrickKeyLess {
     bool operator()(const brick::BrickKey& a, const brick::BrickKey& b) const {
@@ -363,54 +436,18 @@ std::vector<brick::BrickKey> ring_owners(const std::vector<brick::BrickKey>& key
     return owners;
 }
 
-// Whether any neighbour a cell reaches was requested. `wanted` is the owner's
-// 3x3x3 neighbourhood flattened as (dz+1)*9 + (dy+1)*3 + dx+1; the three offset
-// lists are what that cell's index reaches on each axis.
-bool reaches_request(const bool wanted[27], const int* ax, int nx, const int* ay, int ny,
-                     const int* az, int nz) {
-    for (int a = 0; a < nz; ++a)
-        for (int b = 0; b < ny; ++b)
-            for (int c = 0; c < nx; ++c)
-                if (wanted[(az[a] + 1) * 9 + (ay[b] + 1) * 3 + ax[c] + 1]) return true;
-    return false;
-}
-
-// The cells `owner` owns that touch a requested brick, appended in z, y, x
-// order.
+// The owner's local ring cells, translated and packed in their existing order.
 void append_ring_cells(brick::BrickKey owner, int dim, const RequestedSet& requested,
                        std::vector<std::uint64_t>& out) {
-    bool wanted[27];
+    detail::RingNeighbors wanted{};
     for (int n = 0; n < 27; ++n)
         wanted[n] = n != 13 && requested.count(brick::BrickKey{owner.x + n % 3 - 1,
                                                               owner.y + n / 3 % 3 - 1,
                                                               owner.z + n / 9 - 1});
-    // Which neighbours one cell index reaches on its axis: always the owner
-    // itself, plus the brick below when the index is on the owner's FIRST plane
-    // — that brick's closed box includes it — and the brick above on its last.
-    auto offsets = [dim](int c, int base, int* into) {
-        int n = 0;
-        if (c == base) into[n++] = -1;
-        into[n++] = 0;
-        if (c == base + dim - 1) into[n++] = 1;
-        return n;
-    };
     const int ox = owner.x * dim, oy = owner.y * dim, oz = owner.z * dim;
-    int ax[3], ay[3], az[3];
-    for (int k = oz; k < oz + dim; ++k) {
-        const int nz = offsets(k, oz, az);
-        for (int j = oy; j < oy + dim; ++j) {
-            const int ny = offsets(j, oy, ay);
-            // When y and z reach nobody, only x's two face planes can, so the
-            // row's interior is stepped straight over rather than tested cell
-            // by cell — most of a brick's cells are interior.
-            const int step = (ny == 1 && nz == 1) ? std::max(dim - 1, 1) : 1;
-            for (int i = ox; i < ox + dim; i += step) {
-                const int nx = offsets(i, ox, ax);
-                if (reaches_request(wanted, ax, nx, ay, ny, az, nz))
-                    out.push_back(pack_point(i, j, k));
-            }
-        }
-    }
+    detail::for_each_ring_cell(dim, wanted, [&](int x, int y, int z) {
+        out.push_back(pack_point(ox + x, oy + y, oz + z));
+    });
 }
 
 // The ring cells to test: every cell whose closed span can touch a requested
@@ -752,10 +789,13 @@ void apply_brick_attributes(Mesh& m, const brick::BrickCache& cache, const scene
 
 }  // namespace
 
-Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_attributes,
-                 const MeshingOptions& options, const std::vector<brick::BrickKey>* keys,
-                 std::vector<BrickMeshRange>* out_ranges, const scene::CullIndex* cull_index,
-                 int lod) {
+Mesh detail::mesh_bricks_recorded(const brick::BrickCache& cache,
+                                 const scene::Document* doc_for_attributes,
+                                 const MeshingOptions& options,
+                                 const std::vector<brick::BrickKey>* keys,
+                                 std::vector<BrickMeshRange>* out_ranges,
+                                 const scene::CullIndex* cull_index, int lod,
+                                 bool deduplicate) {
     // There is one mip level. A level the cache cannot hold has no bricks and
     // no lattice, so it meshes to nothing rather than to whichever level is
     // nearest — answering level 0 for a request for level 4 would put geometry
@@ -818,26 +858,25 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_
     // concatenating would duplicate every seam vertex and open the mesh along
     // every brick boundary.
     //
-    // So phase one records what each brick WOULD emit, into the same
-    // ShellCollector the straddler pass already uses for exactly this reason —
-    // "no welding, since every recorded edge is re-emitted through the Builder
-    // that welds" — and phase two replays those recordings through the single
-    // Builder, in key order, calling edge_vertex in the same order the serial
-    // loop called it.
+    // Phase one records each brick into a ShellCollector, reusing its first
+    // record of an ordinary local edge. Phase two replays those recordings
+    // through the single Builder in key order. Straddler records still follow
+    // ordinary cells, and global welding still joins all brick boundaries.
     //
-    // That last sentence is the correctness argument: the Builder sees an
-    // identical call sequence, so it produces an identical vertex array, an
-    // identical index array and identical ranges. Byte-identity with the serial
-    // path is by construction rather than by tolerance, which is the house rule
-    // for anything the pool touches.
+    // Removing a repeated local edge lookup cannot introduce a global vertex.
+    // Every global edge's FIRST occurrence remains in the same order, with
+    // the same sampled endpoints, and every triangle retains its order. This
+    // preserves vertex/index arrays and ranges exactly; the reference recorder
+    // comparison tests the argument without a geometric tolerance.
     // Bound const so the parallel phase below cannot write to it, and so a
     // reader can see that it does not: every thread looks this map up and none
     // of them touches it.
     const auto& shared_straddlers = straddlers;
+    const bool skip_interior = deduplicate && straddlers.empty() &&
+                               detail::unique_bounded_bricks(*keys, dim);
     // IN WAVES, because the recordings are transient memory that scales with
-    // the model. Each brick's recorder holds one entry per edge_vertex call —
-    // three per triangle, undeduplicated, since the welding it feeds is what
-    // deduplicates — which measured ~40 KB per surface brick. Recording every
+    // the model. The general recorder holds three edges per triangle, which
+    // measured ~40 KB per surface brick before local deduplication. Recording every
     // brick before welding any of them cost 94 MB on a 2,327-brick sphere and
     // would cost several hundred on a dense model, on a device that kills apps
     // for memory and whose brick budget is already a named concern.
@@ -863,19 +902,7 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_
             const std::size_t ki = wave + w;
             const brick::BrickKey& key = (*keys)[ki];
             ShellCollector& rec = recorded[w];
-            int cmin[3] = {key.x * dim, key.y * dim, key.z * dim};
-            int cmax[3] = {key.x * dim + dim, key.y * dim + dim, key.z * dim + dim};
-            march_cells(rec, global_sample, cmin, cmax);
-            // The key's straddlers are recorded after its own cells, which is
-            // where the serial loop emitted them, so the replay below lands
-            // them inside this key's range exactly as before.
-            if (auto it = shared_straddlers.find(key); it != shared_straddlers.end())
-                for (const ShellTriangle& tri : it->second) {
-                    std::uint32_t v[3];
-                    for (int c = 0; c < 3; ++c)
-                        v[c] = rec.edge_vertex(tri[c].p0, tri[c].f0, tri[c].p1, tri[c].f1);
-                    rec.triangle(v[0], v[1], v[2]);
-                }
+            record_brick(rec, key, dim, global_sample, shared_straddlers, deduplicate);
         }
     });
 
@@ -884,13 +911,15 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_
         const std::uint32_t v0 = static_cast<std::uint32_t>(b.out.positions.size());
         const std::uint32_t i0 = static_cast<std::uint32_t>(b.out.indices.size());
         const ShellCollector& rec = recorded[w];
-        // ShellCollector does not weld, so one lattice edge used by several
-        // tets appears several times here; the Builder dedups them exactly as
-        // it deduped the repeated calls the serial march made.
+        // Local recording may omit repeated edges, but retains every first
+        // occurrence in order. Proven interior edges cannot occur in another
+        // brick; boundary edges and unsupported requests retain global welding.
         remap.assign(rec.edges.size(), 0);
         for (std::size_t v = 0; v < rec.edges.size(); ++v) {
             const ShellEdge& e = rec.edges[v];
-            remap[v] = b.edge_vertex(e.p0, e.f0, e.p1, e.f1);
+            const bool weld = !skip_interior || !detail::interior_edge(
+                {e.p0.i, e.p0.j, e.p0.k}, {e.p1.i, e.p1.j, e.p1.k}, (*keys)[ki], dim);
+            remap[v] = b.edge_vertex(e.p0, e.f0, e.p1, e.f1, weld);
         }
         for (const std::array<std::uint32_t, 3>& tri : rec.tris)
             b.triangle(remap[tri[0]], remap[tri[1]], remap[tri[2]]);
@@ -918,6 +947,14 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_
     // normals at all and a host shaded it flat black.
     if (options.normals == NormalMode::Face) compute_face_normals(m);
     return m;
+}
+
+Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_attributes,
+                 const MeshingOptions& options, const std::vector<brick::BrickKey>* keys,
+                 std::vector<BrickMeshRange>* out_ranges, const scene::CullIndex* cull_index,
+                 int lod) {
+    return detail::mesh_bricks_recorded(cache, doc_for_attributes, options, keys,
+                                       out_ranges, cull_index, lod, true);
 }
 
 namespace {

@@ -1,5 +1,9 @@
 #include <doctest/doctest.h>
 
+#include "../../src/mesh/brick_recording.h"
+#include <algorithm>
+#include <array>
+
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -704,4 +708,101 @@ TEST_CASE("decimation reports a pinch it was handed rather than claiming it") {
     // And it does not spend retries trying to clean up something it did not
     // break -- an input that arrives pinched is simplified once and returned.
     CHECK(report.attempts == 1);
+}
+
+namespace {
+
+template <class T>
+void check_recording_bytes(const std::vector<T>& a, const std::vector<T>& b) {
+    REQUIRE(a.size() == b.size());
+    if (!a.empty()) CHECK(std::memcmp(a.data(), b.data(), a.size() * sizeof(T)) == 0);
+}
+
+void check_brick_recording(const brick::BrickCache& cache, const scene::Document& doc,
+                           const std::vector<brick::BrickKey>* keys, int lod,
+                           mesh::NormalMode normals) {
+    mesh::MeshingOptions options{normals, lod == 0, 1e-4f};
+    std::vector<mesh::BrickMeshRange> expected_ranges, actual_ranges;
+    const auto expected = mesh::detail::mesh_bricks_recorded(
+        cache, &doc, options, keys, &expected_ranges, nullptr, lod, false);
+    const auto actual = mesh::mesh_bricks(cache, &doc, options, keys, &actual_ranges, nullptr, lod);
+    check_recording_bytes(expected.positions, actual.positions);
+    check_recording_bytes(expected.indices, actual.indices);
+    check_recording_bytes(expected.normals, actual.normals);
+    check_recording_bytes(expected.colors, actual.colors);
+    check_recording_bytes(expected.uvs, actual.uvs);
+    check_recording_bytes(expected_ranges, actual_ranges);
+}
+
+}  // namespace
+
+TEST_CASE("brick-local edge recording preserves exact geometry attributes and ranges") {
+    scene::Document doc;
+    auto& layer = doc.add_sdf_layer("recording parity");
+    auto sphere = item(scene::Prim::sphere(0.7f), cf3(-0.2f, 0.1f, 0.1f));
+    sphere.color = cf3(0.2f, 0.6f, 0.9f);
+    layer.sdf->insert(sphere);
+    auto box = item(scene::Prim::box(cf3(0.4f, 0.6f, 0.15f)), cf3(0.2f, -0.2f, -0.3f));
+    box.color = cf3(0.8f, 0.3f, 0.1f);
+    layer.sdf->insert(box);
+    auto* cpu = eval::Registry::instance().find("cpu");
+    REQUIRE(cpu != nullptr);
+    const auto tape = scene::compile_document(doc);
+
+    // 8 and 16 are public configurations; 1 and 2 stress frequent seams, while
+    // the internal cache at 32 exercises the bounded lookup's general fallback.
+    for (int dim : {1, 2, 8, 16, 32}) {
+        CAPTURE(dim);
+        brick::BrickCache cache(brick::BrickConfig{dim, 0.1f, 3, 0});
+        const float extent = std::max(1.6f, 0.2f * static_cast<float>(dim));
+        cache.mark_dirty(math::Aabb{cf3(-extent, -extent, -extent), cf3(extent, extent, extent)});
+        for (const auto& request : cache.take_dirty()) {
+            std::vector<float> values(cache.config().sample_count());
+            REQUIRE(cpu->eval_grid(tape, request.grid, values.data()) == eval::Status::Ok);
+            cache.submit(request, values.data());
+        }
+        REQUIRE(!cache.surface_bricks().empty());
+        if (dim == 8) {
+            // Nested dispatch runs the inner march serially. Compare both
+            // simultaneous results against ordinary unoptimized recording.
+            std::array<Mesh, 2> nested;
+            parallel::ThreadPool outer(2);
+            outer.parallel_for(nested.size(), 1, [&](std::size_t first, std::size_t last) {
+                for (std::size_t i = first; i < last; ++i)
+                    nested[i] = mesh::mesh_bricks(cache, &doc);
+            });
+            const auto reference = mesh::detail::mesh_bricks_recorded(
+                cache, &doc, {}, nullptr, nullptr, nullptr, 0, false);
+            for (const auto& result : nested) {
+                check_recording_bytes(reference.positions, result.positions);
+                check_recording_bytes(reference.indices, result.indices);
+                check_recording_bytes(reference.normals, result.normals);
+                check_recording_bytes(reference.colors, result.colors);
+            }
+        }
+        for (int x = -1; x <= 0; ++x)
+            for (int y = -1; y <= 0; ++y)
+                for (int z = -1; z <= 0; ++z)
+                    REQUIRE(cache.build_mip({x, y, z}));
+
+        for (int lod : {0, 1}) {
+            CAPTURE(lod);
+            auto keys = cache.surface_bricks_lod(lod);
+            REQUIRE(!keys.empty());
+            std::reverse(keys.begin(), keys.end());
+            std::vector<brick::BrickKey> subset;
+            for (std::size_t i = 0; i < keys.size(); i += 2) subset.push_back(keys[i]);
+            auto repeated = subset;
+            repeated.insert(repeated.end(), subset.begin(), subset.end());
+            const std::vector<brick::BrickKey> empty;
+            for (auto normals : {mesh::NormalMode::None, mesh::NormalMode::Face,
+                                 mesh::NormalMode::Gradient}) {
+                check_brick_recording(cache, doc, nullptr, lod, normals);
+                check_brick_recording(cache, doc, &keys, lod, normals);
+                check_brick_recording(cache, doc, &subset, lod, normals);
+                check_brick_recording(cache, doc, &repeated, lod, normals);
+                check_brick_recording(cache, doc, &empty, lod, normals);
+            }
+        }
+    }
 }
