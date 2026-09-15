@@ -67,8 +67,9 @@ CI. The 16 ms target across all brushes remains unmet.
 Initial source materialization now adopts its first filled sample block instead
 of allocating a second complete payload. The allocation regression falls from
 2,008,560 to 1,008,372 requested bytes while preserving callback observations
-and every sample bit. Full CPU/sanitizer verification and quiet application
-timing remain in progress; see `adopt-initial-source-sample-storage`.
+and every sample bit. All eleven CPU suites and 88 sanitizer cases pass.
+Combined application verification and quiet timing remain in progress; see
+`adopt-initial-source-sample-storage`.
 
 ## Regional consolidation follow-up — issue #595
 
