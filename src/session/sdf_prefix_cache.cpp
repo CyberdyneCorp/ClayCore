@@ -462,14 +462,7 @@ field::FieldVolume::BrickBlockFill SdfSourceField::block_fill() const {
         const std::size_t per = static_cast<std::size_t>(field::kBrickSamples);
         const std::size_t n = count * per;
         std::vector<float> points(n * 3);
-        for (std::size_t s = 0; s < count; ++s)
-            for (int i = 0; i < field::kBrickSamples; ++i) {
-                const kernel::cfloat3 p = grid.sample_position(first + s, i);
-                const std::size_t at = (s * per + static_cast<std::size_t>(i)) * 3;
-                points[at] = p.x;
-                points[at + 1] = p.y;
-                points[at + 2] = p.z;
-            }
+        grid.sample_positions(first, count, points.data());
 
         // ONE CALL FOR THE WHOLE WINDOW where there is no coverage question to
         // ask. Splitting a window into per-brick evaluations costs far more

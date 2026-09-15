@@ -3,6 +3,8 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -23,6 +25,46 @@ using field::FieldVolume;
 using kernel::cf3;
 
 namespace {
+
+void check_bulk_grid_positions(const FieldVolume::BrickGrid& grid, std::size_t first,
+                               std::size_t count) {
+    constexpr std::uint32_t canary = 0x7fc01234u;
+    const std::size_t size = count * field::kBrickSamples * 3 + 2;
+    std::vector<float> actual(size, std::bit_cast<float>(canary));
+    std::vector<std::uint32_t> expected(size, canary);
+    grid.sample_positions(first, count, actual.data() + 1);
+    for (std::size_t s = 0; s < count; ++s)
+        for (int i = 0; i < field::kBrickSamples; ++i) {
+            const auto p = grid.sample_position(first + s, i);
+            const std::size_t at = (s * field::kBrickSamples + i) * 3 + 1;
+            expected[at] = std::bit_cast<std::uint32_t>(p.x);
+            expected[at + 1] = std::bit_cast<std::uint32_t>(p.y);
+            expected[at + 2] = std::bit_cast<std::uint32_t>(p.z);
+        }
+    std::vector<std::uint32_t> actual_bits(size);
+    std::transform(actual.begin(), actual.end(), actual_bits.begin(),
+                   [](float value) { return std::bit_cast<std::uint32_t>(value); });
+    CHECK(actual_bits == expected);
+}
+
+TEST_CASE("bulk brick positions preserve scalar bits and output bounds") {
+    for (const auto shape : {std::array{1, 1, 1}, std::array{3, 5, 2},
+                             std::array{17, 13, 11}}) {
+        const std::size_t total = static_cast<std::size_t>(shape[0] * shape[1] * shape[2]);
+        const std::size_t plane = static_cast<std::size_t>(shape[0] * shape[1]);
+        for (const auto origin : {cf3(-0.0f, -0.0f, 0.0f), cf3(-1.24f, 0.17f, -3.25f),
+                                  cf3(50.0f, -52.7f, 98.0f), cf3(1e9f, -1e9f, 1e-9f)})
+            for (const float cell : {0.02f, 0.013f, 0.125f, std::nextafter(0.02f, 1.0f)}) {
+                const FieldVolume::BrickGrid grid{
+                    origin, cell, 3.0f, {shape[0], shape[1], shape[2]}};
+                for (const std::size_t first : {std::size_t{0}, total / 2, plane - 1, total - 1}) {
+                    grid.sample_positions(first, 0, nullptr);
+                    check_bulk_grid_positions(grid, first, 0);
+                    check_bulk_grid_positions(grid, first, std::min(std::size_t{7}, total - first));
+                }
+            }
+    }
+}
 
 auto sphere_field(float r) {
     return [r](kernel::cfloat3 p) { return kernel::clength(p) - r; };

@@ -106,6 +106,28 @@ cfloat3 FieldVolume::BrickGrid::sample_position(std::size_t slot, int i) const {
                cell_size;
 }
 
+void FieldVolume::BrickGrid::sample_positions(std::size_t first, std::size_t count,
+                                             float* out_xyz) const {
+    std::size_t at = 0;
+    for (std::size_t s = 0; s < count; ++s) {
+        int base[3];
+        sample_cell(first + s, 0, base);
+        for (int z = 0; z <= kBrickDim; ++z)
+            for (int y = 0; y <= kBrickDim; ++y)
+                for (int x = 0; x <= kBrickDim; ++x) {
+                    // Add in integer cell space before converting, as the scalar
+                    // path does. A rounded world-space brick origin is not exact.
+                    const cfloat3 p =
+                        origin + cf3(static_cast<float>(base[0] + x),
+                                     static_cast<float>(base[1] + y),
+                                     static_cast<float>(base[2] + z)) * cell_size;
+                    out_xyz[at++] = p.x;
+                    out_xyz[at++] = p.y;
+                    out_xyz[at++] = p.z;
+                }
+    }
+}
+
 math::Aabb FieldVolume::BrickGrid::brick_box(std::size_t slot) const {
     math::Aabb box;
     box.expand(sample_position(slot, 0));
