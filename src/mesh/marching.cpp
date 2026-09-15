@@ -1,5 +1,6 @@
 #include "clay/mesh/marching.h"
 #include "brick_recording.h"
+#include "edge_welding.h"
 
 #include "clay/parallel/thread_pool.h"
 
@@ -41,16 +42,7 @@ inline std::uint64_t pack_point(int i, int j, int k) {
            (static_cast<std::uint64_t>(k) + bias);
 }
 
-struct EdgeKey {
-    std::uint64_t a, b;
-    bool operator==(const EdgeKey&) const = default;
-};
-struct EdgeKeyHash {
-    std::size_t operator()(const EdgeKey& e) const {
-        return static_cast<std::size_t>(e.a * 0x9E3779B185EBCA87ull ^
-                                        (e.b + 0xC2B2AE3D27D4EB4Full + (e.a << 6)));
-    }
-};
+using detail::EdgeKey;
 
 // HOW CLOSE A CROSSING MAY SIT TO A LATTICE POINT (issue #549).
 //
@@ -106,14 +98,14 @@ class Builder {
             std::swap(f0, f1);
         }
         EdgeKey key{id0, id1};
-        auto it = vertex_map_.find(key);
-        if (it != vertex_map_.end()) return it->second;
+        const auto [existing, inserted] = vertex_map_.intern(
+            key, static_cast<std::uint32_t>(out.positions.size()));
+        if (!inserted) return existing;
         float t = edge_t(f0, f1, edge_guard_);  // opposite signs; see kEdgeGuard
         cfloat3 a = origin_ + cf3((float)p0.i, (float)p0.j, (float)p0.k) * spacing_;
         cfloat3 b = origin_ + cf3((float)p1.i, (float)p1.j, (float)p1.k) * spacing_;
         std::uint32_t idx = static_cast<std::uint32_t>(out.positions.size());
         out.positions.push_back(a + (b - a) * t);
-        vertex_map_.emplace(key, idx);
         return idx;
     }
 
@@ -129,7 +121,7 @@ class Builder {
     kernel::cfloat3 origin_;
     float spacing_;
     float edge_guard_ = 0.0f;
-    std::unordered_map<EdgeKey, std::uint32_t, EdgeKeyHash> vertex_map_;
+    detail::EdgeVertexMap<> vertex_map_;
 };
 
 // March one tetrahedron with exact combinatorial winding.
