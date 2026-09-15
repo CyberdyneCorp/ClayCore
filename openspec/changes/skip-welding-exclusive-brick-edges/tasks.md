@@ -2,4 +2,5 @@
 - [x] Implement private eligibility and ownership helpers with boundary/duplicate regressions.
 - [x] Extend exact mesh/reference comparisons and verify all fallback paths.
 - [x] Run CPU, sanitizer, complexity and strict OpenSpec checks.
-- [ ] Measure production memory and same-base application latency; update PR evidence while keeping #531 open.
+- [x] Measure production memory and same-base application latency; update PR evidence while keeping #531 open.
+- [ ] Complete platform CI and continue the remaining all-brush latency work.

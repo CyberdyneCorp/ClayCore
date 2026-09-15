@@ -75,12 +75,14 @@ eight release medians exceed 16 ms. See `adopt-initial-source-sample-storage`
 for complete comparisons and pending platform CI.
 
 Global welding now skips proven exclusive ordinary brick edges, preserving
-boundary welding and all fallback paths. Prototype full-sphere meshing falls
-from 19.54 to 13.36 ms without attributes, with exact complete output. All
+boundary welding and all fallback paths. Production full-sphere meshing falls
+from 19.62 to 13.44 ms without attributes, with exact complete output. All
 eleven CPU suites and 43 focused sanitizer cases pass on the implementation.
 Production allocation requests fall by about 11 MB in that fixture, at the
-cost of temporary key-uniqueness allocations. Production/application timing
-remains pending; see `skip-welding-exclusive-brick-edges`.
+cost of temporary key-uniqueness allocations. All 90 combined application
+cases pass. Ten application pairs reduce Move release from 45.0 to 37.9 ms
+and Smooth release from 65.4 to 60.6 ms. Other results are mixed and the
+16 ms target remains unmet; see `skip-welding-exclusive-brick-edges`.
 
 ## Regional consolidation follow-up — issue #595
 
