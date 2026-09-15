@@ -70,9 +70,17 @@ of allocating a second complete payload. The allocation regression falls from
 and every sample bit. All eleven CPU suites and 88 sanitizer cases pass.
 All 90 combined application cases also pass. A quiet component comparison
 reduces initial materialization from 6.60 to 5.12 ms. Ten application pairs
-measure Smooth preparation at 60.7 ms, while Relax remains around71 ms and
-eight release medians exceed16ms. See `adopt-initial-source-sample-storage`
+measure Smooth preparation at 60.7 ms, while Relax remains around 71 ms and
+eight release medians exceed 16 ms. See `adopt-initial-source-sample-storage`
 for complete comparisons and pending platform CI.
+
+Global welding now skips proven exclusive ordinary brick edges, preserving
+boundary welding and all fallback paths. Prototype full-sphere meshing falls
+from 19.54 to 13.36 ms without attributes, with exact complete output. All
+eleven CPU suites and 43 focused sanitizer cases pass on the implementation.
+Production allocation requests fall by about 11 MB in that fixture, at the
+cost of temporary key-uniqueness allocations. Production/application timing
+remains pending; see `skip-welding-exclusive-brick-edges`.
 
 ## Regional consolidation follow-up — issue #595
 

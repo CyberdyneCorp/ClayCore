@@ -1,5 +1,6 @@
 #include "clay/mesh/marching.h"
 #include "brick_recording.h"
+#include "brick_edge_ownership.h"
 #include "brick_samples.h"
 #include "edge_welding.h"
 
@@ -90,7 +91,8 @@ class Builder {
         : origin_(origin), spacing_(spacing), edge_guard_(edge_guard) {}
 
     // Vertex on the crossing of lattice edge (p0, p1); welded by canonical key.
-    std::uint32_t edge_vertex(LatticePoint p0, float f0, LatticePoint p1, float f1) {
+    std::uint32_t edge_vertex(LatticePoint p0, float f0, LatticePoint p1, float f1,
+                              bool weld = true) {
         std::uint64_t id0 = pack_point(p0.i, p0.j, p0.k);
         std::uint64_t id1 = pack_point(p1.i, p1.j, p1.k);
         if (id0 > id1) {
@@ -99,9 +101,11 @@ class Builder {
             std::swap(f0, f1);
         }
         EdgeKey key{id0, id1};
-        const auto [existing, inserted] = vertex_map_.intern(
-            key, static_cast<std::uint32_t>(out.positions.size()));
-        if (!inserted) return existing;
+        if (weld) {
+            const auto [existing, inserted] = vertex_map_.intern(
+                key, static_cast<std::uint32_t>(out.positions.size()));
+            if (!inserted) return existing;
+        }
         float t = edge_t(f0, f1, edge_guard_);  // opposite signs; see kEdgeGuard
         cfloat3 a = origin_ + cf3((float)p0.i, (float)p0.j, (float)p0.k) * spacing_;
         cfloat3 b = origin_ + cf3((float)p1.i, (float)p1.j, (float)p1.k) * spacing_;
@@ -903,6 +907,8 @@ Mesh detail::mesh_bricks_recorded(const brick::BrickCache& cache,
     // reader can see that it does not: every thread looks this map up and none
     // of them touches it.
     const auto& shared_straddlers = straddlers;
+    const bool skip_interior = deduplicate && straddlers.empty() &&
+                               detail::unique_bounded_bricks(*keys, dim);
     // IN WAVES, because the recordings are transient memory that scales with
     // the model. The general recorder holds three edges per triangle, which
     // measured ~40 KB per surface brick before local deduplication. Recording every
@@ -941,11 +947,14 @@ Mesh detail::mesh_bricks_recorded(const brick::BrickCache& cache,
         const std::uint32_t i0 = static_cast<std::uint32_t>(b.out.indices.size());
         const ShellCollector& rec = recorded[w];
         // Local recording may omit repeated edges, but retains every first
-        // occurrence in order. Builder still welds across bricks and straddlers.
+        // occurrence in order. Proven interior edges cannot occur in another
+        // brick; boundary edges and unsupported requests retain global welding.
         remap.assign(rec.edges.size(), 0);
         for (std::size_t v = 0; v < rec.edges.size(); ++v) {
             const ShellEdge& e = rec.edges[v];
-            remap[v] = b.edge_vertex(e.p0, e.f0, e.p1, e.f1);
+            const bool weld = !skip_interior || !detail::interior_edge(
+                {e.p0.i, e.p0.j, e.p0.k}, {e.p1.i, e.p1.j, e.p1.k}, (*keys)[ki], dim);
+            remap[v] = b.edge_vertex(e.p0, e.f0, e.p1, e.f1, weld);
         }
         for (const std::array<std::uint32_t, 3>& tri : rec.tris)
             b.triangle(remap[tri[0]], remap[tri[1]], remap[tri[2]]);

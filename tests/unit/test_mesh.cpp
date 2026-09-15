@@ -749,9 +749,9 @@ TEST_CASE("brick-local edge recording preserves exact geometry attributes and ra
     REQUIRE(cpu != nullptr);
     const auto tape = scene::compile_document(doc);
 
-    // 8 and 16 are public configurations; 2 stresses frequent seams, while
+    // 8 and 16 are public configurations; 1 and 2 stress frequent seams, while
     // the internal cache at 32 exercises the bounded lookup's general fallback.
-    for (int dim : {2, 8, 16, 32}) {
+    for (int dim : {1, 2, 8, 16, 32}) {
         CAPTURE(dim);
         brick::BrickCache cache(brick::BrickConfig{dim, 0.1f, 3, 0});
         const float extent = std::max(1.6f, 0.2f * static_cast<float>(dim));
@@ -792,12 +792,15 @@ TEST_CASE("brick-local edge recording preserves exact geometry attributes and ra
             std::reverse(keys.begin(), keys.end());
             std::vector<brick::BrickKey> subset;
             for (std::size_t i = 0; i < keys.size(); i += 2) subset.push_back(keys[i]);
+            auto repeated = subset;
+            repeated.insert(repeated.end(), subset.begin(), subset.end());
             const std::vector<brick::BrickKey> empty;
             for (auto normals : {mesh::NormalMode::None, mesh::NormalMode::Face,
                                  mesh::NormalMode::Gradient}) {
                 check_brick_recording(cache, doc, nullptr, lod, normals);
                 check_brick_recording(cache, doc, &keys, lod, normals);
                 check_brick_recording(cache, doc, &subset, lod, normals);
+                check_brick_recording(cache, doc, &repeated, lod, normals);
                 check_brick_recording(cache, doc, &empty, lod, normals);
             }
         }

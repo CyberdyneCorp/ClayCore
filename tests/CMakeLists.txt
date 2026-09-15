@@ -38,6 +38,7 @@ add_executable(clay_unit_tests
   unit/test_stroke_engine.cpp
   unit/test_edge_welding.cpp
   unit/test_brick_samples.cpp
+  unit/test_brick_edge_ownership.cpp
   unit/test_mesh.cpp
   unit/test_lattice_gizmo.cpp
   unit/test_mesh_lattice.cpp
