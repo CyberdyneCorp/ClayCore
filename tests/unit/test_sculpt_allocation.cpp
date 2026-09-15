@@ -979,7 +979,7 @@ TEST_CASE("allocation gate: whole-field zero-strength relax needs no sample copi
     CHECK(volume.to_blob() == before);
 }
 
-TEST_CASE("allocation gate: full source priming reserves its sample payload once") {
+TEST_CASE("allocation gate: full source priming adopts its filled sample payload") {
     const math::Aabb region{cf3(0, 0, 0), cf3(1.0f, 1.0f, 1.0f)};
     auto volume = field::FieldVolume::empty_lattice(region, 0.02f, 0.06f);
     const field::FieldVolume::BrickBlockFill fill = [](
@@ -997,8 +997,8 @@ TEST_CASE("allocation gate: full source priming reserves its sample payload once
     CHECK(result.kept == 0);
     CHECK(volume.brick_count() == result.added);
     const auto payload = result.added * static_cast<std::size_t>(field::kBrickSamples) * sizeof(float);
-    // One source block plus final storage, with room for wanted-slot bookkeeping.
-    // Repeatedly growing sample storage exceeds this even with a 2x growth policy.
-    CHECK(bytes < 3 * payload);
+    // Adopt the filled block, with room for wanted-slot bookkeeping. Keeping
+    // both a complete source block and a copied final payload exceeds this.
+    CHECK(bytes < 2 * payload);
     CHECK(volume.sample_at(1, 1, 1) == 0.01f);
 }

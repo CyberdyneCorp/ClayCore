@@ -64,6 +64,12 @@ alternating application pairs measure Smooth/Relax pointer-down medians of
 See `reuse-brick-lattice-samples` for complete evidence and pending platform
 CI. The 16 ms target across all brushes remains unmet.
 
+Initial source materialization now adopts its first filled sample block instead
+of allocating a second complete payload. The allocation regression falls from
+2,008,560 to 1,008,372 requested bytes while preserving callback observations
+and every sample bit. Full CPU/sanitizer verification and quiet application
+timing remain in progress; see `adopt-initial-source-sample-storage`.
+
 ## Regional consolidation follow-up — issue #595
 
 Repeated Move maintenance now has a retained-volume path: isolated additive

@@ -900,25 +900,27 @@ FieldVolume::ResampleTally FieldVolume::materialize_region(const Region& region,
             }
     if (wanted.empty()) return tally;
 
-    // Full initial priming knows its final size. Local dabs keep the vector's
-    // amortized growth rather than reserving exact capacity on every update.
-    if (data_.empty() && wanted.size() == index_.size())
-        data_.reserve(wanted.size() * static_cast<std::size_t>(kBrickSamples));
     std::vector<float> block;
     for (std::size_t i = 0; i < wanted.size();) {
         std::size_t run = 1;
         while (i + run < wanted.size() && wanted[i + run] == wanted[i] + run) ++run;
         block.resize(run * kBrickSamples);
         fill(grid, wanted[i], run, block.data());
+        // The first filled block can become the store itself. Fill before
+        // transferring ownership so callbacks still see only earlier runs.
+        const bool adopt = data_.empty();
+        const std::size_t base = data_.size();
+        if (adopt) data_.swap(block);
+        const float* samples = adopt ? data_.data() : block.data();
         for (std::size_t k = 0; k < run; ++k) {
             const std::size_t slot = wanted[i] + k;
-            const float* one = block.data() + k * kBrickSamples;
+            const float* one = samples + k * kBrickSamples;
             // APPENDED, not rebuilt. Each stored brick owns a contiguous run of
             // `data_` and nothing before it moves, so a new brick is a
             // push_back and an index write -- which is what makes this a dab's
             // cost rather than the model's.
-            index_[slot] = static_cast<std::int32_t>(data_.size());
-            data_.insert(data_.end(), one, one + kBrickSamples);
+            index_[slot] = static_cast<std::int32_t>(base + k * kBrickSamples);
+            if (!adopt) data_.insert(data_.end(), one, one + kBrickSamples);
             sample_lipschitz_ =
                 std::max(sample_lipschitz_, steepest_in_block(one) / cell_size_);
             if (out_added) {

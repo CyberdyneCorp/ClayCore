@@ -1244,6 +1244,63 @@ TEST_CASE("resample_region drops the colour channel rather than inventing one") 
     CHECK_FALSE(v.has_color());
     CHECK(v.brick_count() > 0);
 }
+
+TEST_CASE("materialization adopts initial samples and preserves later fill observations") {
+    const math::Aabb bounds{cf3(-0.4f, -0.4f, -0.4f), cf3(0.4f, 0.4f, 0.4f)};
+    auto volume = FieldVolume::empty_lattice(bounds, 0.04f, 0.12f);
+    auto first_region = FieldVolume::Region{bounds};
+    SUBCASE("one complete initial run") {}
+    SUBCASE("partial initial runs followed by incremental filling") {
+        first_region = FieldVolume::Region::ball(cf3(0, 0, 0), 0.1f);
+    }
+    constexpr std::uint32_t patterns[] = {
+        0, 0x80000000u, 0x3c123456u, 0xbc234567u, 0x7fc01234u, 0x7f800000u};
+    std::optional<FieldVolume::BrickGrid> lattice;
+    std::vector<bool> filled;
+    std::size_t expected_samples = 0;
+    std::size_t calls = 0;
+    const FieldVolume::BrickBlockFill fill = [&](const auto& grid, std::size_t first,
+                                                std::size_t count, float* out) {
+        CHECK(volume.sample_count() == expected_samples);
+        ++calls;
+        if (!lattice) {
+            lattice = grid;
+            filled.resize(static_cast<std::size_t>(grid.bcount[0]) * grid.bcount[1] *
+                          grid.bcount[2]);
+        }
+        for (std::size_t k = 0; k < count; ++k) {
+            REQUIRE_FALSE(filled[first + k]);
+            filled[first + k] = true;
+            for (int sample = 0; sample < field::kBrickSamples; ++sample)
+                out[k * field::kBrickSamples + sample] =
+                    std::bit_cast<float>(patterns[(first + k + sample) % std::size(patterns)]);
+        }
+        expected_samples += count * field::kBrickSamples;
+    };
+    std::vector<FieldVolume::BrickCoord> added;
+    const auto initial = volume.materialize_region(first_region, fill, &added);
+    REQUIRE(initial.added > 0);
+    CHECK(volume.sample_count() == expected_samples);
+    const auto rest = volume.materialize_region(FieldVolume::Region{bounds}, fill, &added);
+    CHECK(rest.kept == initial.added);
+    CHECK(volume.brick_count() == initial.added + rest.added);
+    const auto before_repeat = calls;
+    const auto repeated = volume.materialize_region(FieldVolume::Region{bounds}, fill, &added);
+    CHECK(repeated.added == 0);
+    CHECK(calls == before_repeat);
+    REQUIRE(lattice);
+    CHECK(added.size() == volume.brick_count());
+    for (const auto& coord : added) {
+        const auto slot = static_cast<std::size_t>(
+            (coord.z * lattice->bcount[1] + coord.y) * lattice->bcount[0] + coord.x);
+        float actual[field::kBrickSamples];
+        REQUIRE(volume.read_brick(coord, actual));
+        for (int sample = 0; sample < field::kBrickSamples; ++sample)
+            CHECK(std::bit_cast<std::uint32_t>(actual[sample]) ==
+                  patterns[(slot + sample) % std::size(patterns)]);
+    }
+}
+
 TEST_CASE("volume patch: retained bricks and shared halo samples stay exact") {
     const auto sphere = [](kernel::cfloat3 p) { return kernel::clength(p) - 0.8f; };
     const math::Aabb bounds{kernel::cf3(-1.28f, -1.28f, -1.28f), kernel::cf3(1.28f, 1.28f, 1.28f)};
