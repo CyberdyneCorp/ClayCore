@@ -21,6 +21,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -29,6 +30,7 @@
 
 #include <cmath>
 
+#include "clay/field/relax.h"
 #include "clay/mesh/dynamic_sculpt.h"
 #include "clay/mesh/multires_sculpt.h"
 #include "clay/mesh/sculpt.h"
@@ -951,4 +953,52 @@ TEST_CASE("allocation gate: a warm multiresolution stamp allocates nothing") {
         count = scope.count();
     }
     CHECK(count == 0);
+}
+
+TEST_CASE("allocation gate: whole-field zero-strength relax needs no sample copies") {
+    auto volume = field::FieldVolume::sample(
+        [](cfloat3 p) { return clength(p) - 0.5f; },
+        math::Aabb{cf3(-0.8f, -0.8f, -0.8f), cf3(0.8f, 0.8f, 0.8f)},
+        0.04f, 0.08f);
+    REQUIRE(volume.brick_count() > 0);
+    const auto before = volume.to_blob();
+    field::RelaxSettings settings;
+    settings.strength = 0.0f;
+    settings.iterations = 3;
+    field::RelaxResult result;
+    std::size_t bytes = 0;
+    {
+        CountingScope scope;
+        result = field::relax_in_place(volume, settings);
+        bytes = scope.bytes();
+    }
+    CHECK(bytes == 0);
+    CHECK_FALSE(result.changed);
+    CHECK_FALSE(result.cancelled);
+    CHECK(result.touched_bricks == volume.brick_count());
+    CHECK(volume.to_blob() == before);
+}
+
+TEST_CASE("allocation gate: full source priming reserves its sample payload once") {
+    const math::Aabb region{cf3(0, 0, 0), cf3(1.0f, 1.0f, 1.0f)};
+    auto volume = field::FieldVolume::empty_lattice(region, 0.02f, 0.06f);
+    const field::FieldVolume::BrickBlockFill fill = [](
+        const field::FieldVolume::BrickGrid&, std::size_t, std::size_t count, float* out) {
+        std::fill(out, out + count * static_cast<std::size_t>(field::kBrickSamples), 0.01f);
+    };
+    std::size_t bytes = 0;
+    field::FieldVolume::ResampleTally result;
+    {
+        CountingScope scope;
+        result = volume.materialize_region(field::FieldVolume::Region{region}, fill);
+        bytes = scope.bytes();
+    }
+    REQUIRE(result.added > 0);
+    CHECK(result.kept == 0);
+    CHECK(volume.brick_count() == result.added);
+    const auto payload = result.added * static_cast<std::size_t>(field::kBrickSamples) * sizeof(float);
+    // One source block plus final storage, with room for wanted-slot bookkeeping.
+    // Repeatedly growing sample storage exceeds this even with a 2x growth policy.
+    CHECK(bytes < 3 * payload);
+    CHECK(volume.sample_at(1, 1, 1) == 0.01f);
 }

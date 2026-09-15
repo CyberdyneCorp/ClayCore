@@ -9,7 +9,9 @@ stencil and mask before multiplying the average displacement by zero.
 ## What Changes
 
 Return the stored sample immediately when clamped strength is zero, and avoid
-constructing an unused stencil. Preserve priming materialization, geometric
+constructing an unused stencil. Avoid unused input snapshots and whole-volume
+identity rewrites; reserve sample storage once for full initial materialization.
+Preserve priming materialization, geometric
 tallies, pass cancellation, band handling, and all nonzero smoothing arithmetic.
 
 ## Capabilities

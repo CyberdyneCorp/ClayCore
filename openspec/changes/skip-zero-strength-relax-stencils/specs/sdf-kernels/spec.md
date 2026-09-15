@@ -24,3 +24,24 @@ materialize its requested source region and provide the corresponding preview de
 #### Scenario: Nonzero strength
 - **WHEN** clamped strength is nonzero
 - **THEN** existing smoothing arithmetic and mask behavior are preserved
+
+### Requirement: Preview priming avoids redundant sample-buffer allocation
+A zero-strength relax pass SHALL NOT copy sample buffers that it cannot read.
+Whole-volume zero-strength relaxation SHALL report the stored set without an
+identity rewrite. Initial materialization covering every slot of an empty lattice
+SHALL reserve final sample storage once; partial and subsequent requests SHALL
+retain amortized storage growth.
+
+#### Scenario: Repeated whole-volume zero-strength passes
+- **GIVEN** a populated volume whose band is already at its minimum and no mask
+- **WHEN** whole-volume zero-strength relaxation runs for multiple iterations
+- **THEN** it allocates no temporary buffers and preserves its samples and reports
+
+#### Scenario: Full initial source materialization
+- **WHEN** one request materializes every slot of an empty lattice
+- **THEN** sample storage is allocated before appending the source blocks
+- **AND** the stored field and materialization report remain unchanged
+
+#### Scenario: Later local source materialization
+- **WHEN** a gesture materializes additional local bricks
+- **THEN** existing materialized values are retained and storage growth remains amortized

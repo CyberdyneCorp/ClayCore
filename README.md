@@ -683,8 +683,9 @@ is bounded per active brick; larger internal dimensions retain general recording
 `brick_recording_probe` compares both paths, checks exact output and reports
 paired timings for full meshes and small subsets.
 
-Zero-strength relax preserves stored sample bits and skips mask and smoothing
-stencil evaluation. Live Smooth preview priming still materializes its complete
+Zero-strength relax preserves stored sample bits and skips temporary sample
+copies, mask reads and smoothing stencil evaluation. Full initial source
+materialization reserves its sample payload once. Live Smooth preview priming still materializes its complete
 source field and reports the selected bricks; it no longer computes averages
 whose contribution is zero. See
 `openspec/changes/skip-zero-strength-relax-stencils/validation.md` for live timings

@@ -878,6 +878,10 @@ FieldVolume::ResampleTally FieldVolume::materialize_region(const Region& region,
             }
     if (wanted.empty()) return tally;
 
+    // Full initial priming knows its final size. Local dabs keep the vector's
+    // amortized growth rather than reserving exact capacity on every update.
+    if (data_.empty() && wanted.size() == index_.size())
+        data_.reserve(wanted.size() * static_cast<std::size_t>(kBrickSamples));
     std::vector<float> block;
     for (std::size_t i = 0; i < wanted.size();) {
         std::size_t run = 1;

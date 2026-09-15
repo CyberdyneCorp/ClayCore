@@ -39,6 +39,14 @@ Exact-output regressions cover subsets, straddlers, LODs and bounded fallback.
 See `deduplicate-brick-edge-recordings`; the full application latency goal
 remains open, and these are engine measurements rather than a frame-time claim.
 
+The live Smooth/Relax investigation also found full-field stencil calculations
+inside a zero-strength preview-priming update. Skipping those unused calculations
+preserves the complete preview and reduces median pointer-down latency from
+257 to 110 ms for Smooth and 240 to 97 ms for Relax in three alternating live
+comparisons. See `skip-zero-strength-relax-stencils` for exactness, cancellation,
+regressions and the remaining materialization/meshing costs. The 16 ms target
+is still unmet.
+
 ## Where the engine is (2026-09-06, v0.87.0)
 
 21 capabilities, 205 archived changes, 19 still open. Complete enough that the

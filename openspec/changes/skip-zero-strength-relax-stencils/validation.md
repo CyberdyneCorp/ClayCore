@@ -10,7 +10,7 @@ and rest composition showed under 1 ms for transaction begin, 187–197 ms for
 zero-strength update, 5–6 ms for absorb, and no material rest cost on this fixture.
 The temporary instrumentation is not part of the implementation.
 
-## Final alternating live comparison
+## Alternating live comparison for the stencil shortcut at 69d07a54
 
 Three alternating before/fixed pairs, fresh isolated application state per run,
 Smooth, Relax and Standard; undo to history depth zero between tools. Radius 1
@@ -76,8 +76,59 @@ openspec validate --all --strict
 This machine requires `LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6`
 when running Python/CTest with its Conda runtime.
 
+## Combined application validation
+
+Host e99ace5b was built against Core 69d07a54 in Release with CPU fields and
+RTX 5060/Vulkan rendering. All 12 tests passed without adapter skips: native
+MCP E2E (3), sculpt latency (4), settlement (3), and rendered brushes (2).
+This checks all three Core optimizations together with the companion host fixes.
+The host's committed v0.113.0 engine pin was restored after the experiment.
+
+## Additional all-brush action check
+
+A subsequent comparison used the complete combined builds: host e99ace5b with
+Core `477f1b23` versus Core `69d07a54`, three alternating pairs across all 13 tools.
+All 78 tool/run cases completed successfully. Tracked uploaded-byte counts
+matched in all 117 paired begin/continue/end comparisons. These counts verify
+consistent submitted workload, not byte equality of the uploaded contents.
+
+Heavy concurrent analysis jobs from another project slowed both applications
+substantially during this run. Its timings are not evidence of a speedup or
+regression and do not replace the controlled priming comparison above.
+A retry after those jobs ended encountered a new set of concurrent Rust builds; per-run process/load snapshots confirmed the renewed contention. Both
+attempts completed all 78 cases, but neither is used as a latency gate. The
+rendered assertions are covered separately by the 12 integration tests.
+
+## Allocation follow-up
+
+A finer phase probe found that zero-strength relaxation still copied and
+rewrote its input after the stencil shortcut. The follow-up avoids snapshots
+for zero strength and reports the whole-volume selection without rewriting
+identical values. Full initial materialization reserves the known final sample
+payload once. Local/subsequent materialization keeps amortized vector growth.
+
+Two regression tests use the existing allocation counter and fail on 69d07a54:
+
+| Regression fixture | Allocated bytes before | Allocated bytes fixed |
+| --- | ---: | ---: |
+| Three whole-volume zero-strength passes at the band floor | 702,840 | 0 |
+| Full initial source materialization (1,000,188-byte sample payload) | 3,991,440 | 2,008,560 |
+
+These are cumulative allocation counts inside the tested calls, not whole-app
+resident-memory measurements. Reports and samples are checked alongside them.
+Both allocation gates pass ASan/UBSan with leak detection. All 11 CPU CTest
+targets pass again (97.71 seconds), including 2,756 C++ cases and 756 Python
+tests with one skip. The 128-case nonzero-output comparison remains byte-identical
+with the original main implementation after separating the atomic pass helper.
+
+Cognitive complexity: atomic pass 22, orchestration 7, materialization 30 (main:
+28). A local phase prototype also reduced copying time, but ran under machine
+contention; the allocation regressions are the deterministic performance evidence.
+Full sanitizer and combined-host verification for the allocation follow-up are
+still pending; the earlier live timings and combined tests concern 69d07a54.
+
 ## Remaining validation
 
-Final combined host rendered tests and platform CI must cover this new change;
-the earlier green Core revision 477f1b23 predates it. Issue #531 remains open for
-its broader latency goal and field degradation at depth.
+Platform CI must cover this new change; the earlier green Core revision
+477f1b23 predates it. Issue #531 remains open for its broader latency goal and
+field degradation at depth.
