@@ -494,6 +494,11 @@ if(CLAY_BUILD_BENCHMARKS)
   target_include_directories(grab_jacobian_chain_probe PRIVATE bindings/c)
   clay_apply_warnings(grab_jacobian_chain_probe)
 
+  add_executable(move_subtool_closure_probe benchmarks/move_subtool_closure_probe.cpp)
+  target_link_libraries(move_subtool_closure_probe PRIVATE claycore)
+  target_include_directories(move_subtool_closure_probe PRIVATE bindings/c)
+  clay_apply_warnings(move_subtool_closure_probe)
+
   add_executable(move_regional_probe benchmarks/move_regional_probe.cpp)
   target_link_libraries(move_regional_probe PRIVATE claycore)
   target_include_directories(move_regional_probe PRIVATE bindings/c)
