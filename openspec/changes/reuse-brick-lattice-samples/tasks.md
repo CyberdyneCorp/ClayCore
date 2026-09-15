@@ -1,0 +1,5 @@
+- [x] Profile remaining engine stages and compare a sample-reuse prototype.
+- [x] Implement bounded private storage and direct regression coverage.
+- [x] Verify complete meshes, subset boundaries, dimensions, attributes, LOD and worker configurations.
+- [ ] Run CPU, sanitizer, complexity and strict OpenSpec checks.
+- [ ] Measure production/application timing and memory; update PR evidence without closing #531 prematurely.

@@ -1,5 +1,6 @@
 #include "clay/mesh/marching.h"
 #include "brick_recording.h"
+#include "brick_samples.h"
 #include "edge_welding.h"
 
 #include "clay/parallel/thread_pool.h"
@@ -188,8 +189,8 @@ void march_tet(Sink& b, const LatticePoint corners[4], const float f[4]) {
     }
 }
 
-template <class Sink>
-void march_cell(Sink& b, const std::function<float(int, int, int)>& sample, int i, int j, int k) {
+template <class Sink, class Sample>
+void march_cell(Sink& b, const Sample& sample, int i, int j, int k) {
     LatticePoint pts[8];
     float f[8];
     bool any_neg = false, any_pos = false;
@@ -206,8 +207,8 @@ void march_cell(Sink& b, const std::function<float(int, int, int)>& sample, int 
     }
 }
 
-template <class Sink>
-void march_cells(Sink& b, const std::function<float(int, int, int)>& sample,
+template <class Sink, class Sample>
+void march_cells(Sink& b, const Sample& sample,
                  const int cell_min[3], const int cell_max[3]) {
     for (int k = cell_min[2]; k < cell_max[2]; ++k)
         for (int j = cell_min[1]; j < cell_max[1]; ++j)
@@ -307,7 +308,8 @@ void record_brick(ShellCollector& rec, brick::BrickKey key, int dim,
     int cmax[3] = {key.x * dim + dim, key.y * dim + dim, key.z * dim + dim};
     if (deduplicate && dim > 0 && dim <= 16) {
         LocalCollector local(rec, dim, key);
-        march_cells(local, sample, cmin, cmax);
+        const detail::BrickSamples samples(dim, cmin, sample);
+        march_cells(local, samples, cmin, cmax);
     } else {
         march_cells(rec, sample, cmin, cmax);
     }
