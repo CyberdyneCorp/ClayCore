@@ -33,11 +33,18 @@ The half-full prototype peaked at 18,874,368 bytes and retained 12,582,912; it i
 
 ## Remaining gates
 
-- Full CPU suite and targeted sanitizer results.
-- Combined application correctness and alternating live latency measurement.
+- Alternating live latency measurement.
 - Platform CI and final PR evidence.
 - The broader #531 target remains 16 ms across all reported brushes and is not yet met.
 
 ## CPU verification
 
-All 11 CPU CTest targets pass in 85.82 seconds: 2,759 C++ cases / 16,672,231 assertions, plus 756 Python tests and one intentional skip. A final declaration-only change prevents copying/moving the private lookup; the complete build is repeated afterward and focused meshing tests are rerun. Sanitizer and combined application verification remain pending.
+All 11 CPU CTest targets pass in 85.82 seconds: 2,759 C++ cases / 16,672,231 assertions, plus 756 Python tests and one intentional skip. A final declaration-only change prevents copying/moving the private lookup; the complete build is repeated afterward and focused meshing tests are rerun. The final focused rerun passes 72 cases / 1,303,476 assertions. ASan/UBSan with leak detection passes the same 72 cases and assertion count. Combined application results are recorded below.
+
+## Combined application correctness
+
+The combined application uses host production `4e8d1af` and Core `db802faa`. After correcting the visual Clay fixture to touch the starting radius-1 sphere at z=1, all 85 enabled cases pass: 68 library and 17 native/rendered integration cases. The informational library timing test is ignored, with no adapter skips. Windowed tests run on an isolated virtual X display; these are correctness results, not latency evidence. The application's committed engine pin is restored afterward.
+
+The original fixture at z=0.6 placed a radius-0.25 dab inside the sphere. Its image-change assertion passed only two of three repetitions with each of the previous and new engine builds. The actual main-branch test (9a7ec9c with Core v0.113.0) passed that image assertion and later failed a different export-gate assertion, so the image failure is not claimed as reproduced on main. The fixture now requests a visible surface change and retains the image-difference assertion. A subsequent active-desktop run passed that assertion but failed its consent-gate expectation; the complete isolated run passes both.
+
+The corrected surface-touching end-to-end test also passes all six isolated alternating repeats (three each against Core `abd87b0b` and `db802faa`, with identical application production code). Assertions for visible pixel change, measurement synchronization, history and consent remain enabled.
