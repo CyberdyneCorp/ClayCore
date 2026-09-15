@@ -1007,6 +1007,148 @@ TEST_CASE("an unset gesture id leaves the old rule exactly as it was") {
     CHECK(fa == fb);
 }
 
+namespace {
+
+// A plain unit sphere, and where its surface sits along +y, found by bisection
+// on the field. Every assertion below is about THIS number.
+clay_layer_id unit_ball(clay_document* doc) {
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "form", &layer) == CLAY_OK);
+    const float r = 1.0f;
+    clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+    REQUIRE(it != nullptr);
+    clay_node_id n = 0;
+    const clay_result res = clay_layer_add_item(doc, layer, it, &n);
+    clay_item_destroy(it);
+    REQUIRE(res == CLAY_OK);
+    return layer;
+}
+
+double surface_y(clay_document* doc, clay_layer_id layer) {
+    float lo = 0.5f, hi = 2.5f;
+    for (int i = 0; i < 40; ++i) {
+        const float mid = 0.5f * (lo + hi);
+        const float p[3] = {0.0f, mid, 0.0f};
+        float dist = 0.0f;
+        REQUIRE(clay_layer_eval_points(doc, layer, "cpu", p, 1, &dist, nullptr) == CLAY_OK);
+        if (dist > 0.0f) hi = mid; else lo = mid;
+    }
+    return 0.5 * static_cast<double>(lo + hi);
+}
+
+float step_scale(clay_document* doc, clay_layer_id layer) {
+    clay_field_report fr;
+    std::memset(&fr, 0, sizeof fr);
+    fr.struct_size = static_cast<uint32_t>(sizeof fr);
+    REQUIRE(clay_layer_field_report(doc, layer, 0.5f, &fr) == CLAY_OK);
+    return fr.safe_step_scale;
+}
+
+// One segmented drag up the +y axis, in `slices` calls.
+//
+// The three things a caller can get wrong are independent, so they are three
+// separate parameters rather than one "correct" flag: the id, whether the
+// centre stays at the gesture's ANCHOR or follows the cursor, and whether the
+// displacement is the TOTAL from the anchor or the step since the last call.
+constexpr float kTotalY = 0.30f;
+constexpr float kGrabRadius = 0.70f;
+
+void segmented_drag(clay_document* doc, clay_layer_id layer, std::uint64_t id, int slices,
+                    bool anchored_centre, bool cumulative) {
+    for (int s = 0; s < slices; ++s) {
+        const float done = static_cast<float>(s) / static_cast<float>(slices);
+        const float next = static_cast<float>(s + 1) / static_cast<float>(slices);
+        const float centre[3] = {0.0f, anchored_centre ? 1.0f : 1.0f + kTotalY * done, 0.0f};
+        const float dy = cumulative ? kTotalY * next : kTotalY * (next - done);
+        const float disp[3] = {0.0f, dy, 0.0f};
+        clay_move_params p = move_params_id(kGrabRadius, id);
+        p.front_only = 1;
+        std::size_t applied = 0;
+        REQUIRE(clay_layer_move_surface(doc, layer, centre, disp, &p, &applied) == CLAY_OK);
+    }
+}
+
+}  // namespace
+
+TEST_CASE("a named gesture is judged on where the surface ENDS UP") {
+    // WHY THIS EXISTS (issue #596). Every other gate on the named-gesture path
+    // asserts a COST metric -- warp counts, and one field comparison between
+    // two drags that both pass id 0. clay.h:6641 says in as many words why that
+    // is not enough, of a caller taking two of the three requirements:
+    //
+    //   "its warp count, declared Lipschitz and step scale are IDENTICAL to the
+    //    correct row to every digit. Every cost metric a host would check to
+    //    confirm the change says it worked, and only the surface says
+    //    otherwise. Assert where the surface ENDS UP, not that the chain
+    //    collapsed."
+    //
+    // So this asserts the surface.
+
+    SUBCASE("segmenting a drag does not change where it lands") {
+        // THE INVARIANT AN ENGINE DEFECT WOULD BREAK. A named gesture restates
+        // the drag, so N cumulative slices from a fixed anchor must reach
+        // exactly where ONE call carrying the full displacement reaches. If the
+        // surviving grab ever kept a stale centre or a partial displacement,
+        // this is the assertion that moves.
+        CDoc one;
+        const clay_layer_id l1 = unit_ball(one.doc);
+        segmented_drag(one.doc, l1, 7, 1, true, true);
+
+        CDoc many;
+        const clay_layer_id lm = unit_ball(many.doc);
+        segmented_drag(many.doc, lm, 7, 6, true, true);
+
+        const double single = surface_y(one.doc, l1);
+        const double sliced = surface_y(many.doc, lm);
+        CAPTURE(single);
+        CAPTURE(sliced);
+        // It must actually have moved, or two identical failures would agree.
+        CHECK(single > 1.05);
+        CHECK(sliced == doctest::Approx(single).epsilon(1e-4));
+    }
+
+    SUBCASE("the misuse every cost metric calls correct") {
+        // A caller that names the gesture and passes cumulative displacement
+        // but lets the centre FOLLOW the cursor. clay.h records this row as
+        // reaching y = 1.0000 against the correct 1.1569, with every cost
+        // metric identical.
+        CDoc good;
+        const clay_layer_id lg = unit_ball(good.doc);
+        segmented_drag(good.doc, lg, 9, 6, true, true);
+
+        CDoc bad;
+        const clay_layer_id lb = unit_ball(bad.doc);
+        segmented_drag(bad.doc, lb, 9, 6, false, true);
+
+        // The cost metrics agree -- which is the whole point, and is asserted
+        // rather than described so that this stays true of the code and not
+        // only of the comment.
+        CHECK(warp_count(good.doc, lg) == warp_count(bad.doc, lb));
+        CHECK(step_scale(good.doc, lg) == doctest::Approx(step_scale(bad.doc, lb)));
+
+        // And the surfaces do not.
+        const double moved = surface_y(good.doc, lg);
+        const double stuck = surface_y(bad.doc, lb);
+        CAPTURE(moved);
+        CAPTURE(stuck);
+        CHECK(moved > 1.05);
+        CHECK(stuck < moved - 0.05);
+    }
+
+    SUBCASE("an unnamed drag still lands its slices") {
+        // The contract is on the ID, not on segmentation as such: with id 0
+        // each slice appends, so per-slice deltas are the CORRECT calling
+        // convention and the surface must move. This is what stops the fixture
+        // from passing merely because nothing ever moves.
+        CDoc d;
+        const clay_layer_id l = unit_ball(d.doc);
+        segmented_drag(d.doc, l, 0, 6, false, false);
+        const double y = surface_y(d.doc, l);
+        CAPTURE(y);
+        CHECK(y > 1.05);
+    }
+}
+
 // -- lazy-mouse lag on a live drag (issue #532) -------------------------------
 //
 // `steady` is the ONLY stroke-preset setting a grab can use. A grab is one
