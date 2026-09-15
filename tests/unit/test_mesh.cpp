@@ -2,6 +2,7 @@
 
 #include "../../src/mesh/brick_recording.h"
 #include <algorithm>
+#include <array>
 
 #include <cmath>
 #include <cstring>
