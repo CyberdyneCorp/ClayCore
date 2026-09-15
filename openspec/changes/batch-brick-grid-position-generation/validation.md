@@ -85,3 +85,13 @@ The benchmark allocates outside the timer, alternates scalar/bulk order, and fai
 ## Remaining issue scope
 
 The requested goal remains 16 ms across all reported brush actions. Linux application measurements are the working reference; this coordinate change is one tested increment and does not complete #531. Further work must measure and reduce preparation, meshing and release costs without hiding work outside the measured action or changing field/mesh correctness. Platform CI for this increment remains pending.
+
+## Attribution for the remaining 16 ms goal
+
+Temporary instrumentation of the combined Linux application (three runs of Smooth, Relax and Standard, CPU field backend) separates costs beyond coordinate generation. These are diagnostic timings, not a new before/after performance claim. Instrumentation and the experimental vendor checkout were removed after preserving the executables.
+
+- Six Smooth/Relax whole-preview preparations: materialization median 17.062 ms (13.221–20.737), preview transfer/submission median 4.632 ms (4.428–5.128). Marking 2,744 bricks takes under 1 ms; it is not the dominant cost.
+- Six live full-preview meshes: engine meshing median 30.562 ms, mesh readback/conversion 3.218 ms, application per-brick splitting 11.930 ms.
+- Nine non-live full meshes (startup and releases combined): engine meshing median 35.298 ms, readback/conversion 2.057 ms, splitting 10.810 ms. This mixed sample must not be presented as a release-only median.
+
+The next investigation targets global edge welding and application mesh splitting. Preparation and complete rendering still exceed the budget; these results do not justify claiming #531 fixed.
