@@ -93,6 +93,45 @@ float inner_surface_y(const FieldVolume& v) {
     return 0.0f;
 }
 
+
+// A cap whose border is SERRATED: the radius steps between two values with
+// angle, so the boundary zig-zags by about two cells. A round border cannot
+// show what border_smooth does -- it is already smooth.
+MaskField serrated_cap(int teeth, float cell = 0.03f) {
+    MaskField m(cell);
+    const cfloat3 pole = cf3(0, kRadius, 0);
+    const auto to_cell = [cell](float w) { return static_cast<std::int32_t>(std::floor(w / cell)); };
+    for (std::int32_t z = to_cell(pole.z - 0.5f); z <= to_cell(pole.z + 0.5f); ++z)
+        for (std::int32_t y = to_cell(pole.y - 0.5f); y <= to_cell(pole.y + 0.5f); ++y)
+            for (std::int32_t x = to_cell(pole.x - 0.5f); x <= to_cell(pole.x + 0.5f); ++x) {
+                const cfloat3 c = cf3(static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f,
+                                      static_cast<float>(z) + 0.5f) * cell;
+                const float dx = c.x - pole.x, dy = c.y - pole.y, dz = c.z - pole.z;
+                const float ang = std::atan2(dz, dx);
+                const float rad = 0.26f + 0.05f * (std::sin(ang * static_cast<float>(teeth)) > 0.0f
+                                                       ? 1.0f : 0.0f);
+                if (std::sqrt(dx * dx + dz * dz) <= rad && std::fabs(dy) <= 0.25f)
+                    m.set({x, y, z}, 1.0f);
+            }
+    return m;
+}
+
+// How RAGGED the plate's rim is: the total variation of the field around a
+// circle that crosses the teeth. A serrated rim swings in and out of material
+// and accumulates; a smoothed one does not.
+double rim_variation(const FieldVolume& v, float radius, float y) {
+    const int kSteps = 720;
+    double tv = 0.0;
+    float prev = 0.0f;
+    for (int i = 0; i <= kSteps; ++i) {
+        const float a = 6.2831853f * static_cast<float>(i) / static_cast<float>(kSteps);
+        const float f = v.eval(cf3(std::cos(a) * radius, y, std::sin(a) * radius));
+        if (i) tv += std::fabs(static_cast<double>(f) - static_cast<double>(prev));
+        prev = f;
+    }
+    return tv;
+}
+
 }  // namespace
 
 // -- the mask, measured -------------------------------------------------------
@@ -415,5 +454,62 @@ TEST_CASE("mask_to_field: the same mask measures the same way twice") {
                               kRadius + static_cast<float>((i / 4) % 4 - 2) * 0.15f,
                               static_cast<float>((i / 16) % 4 - 2) * 0.2f);
         REQUIRE(a->eval(q) == b->eval(q));  // exactly: same input, same measurement
+    }
+}
+
+TEST_CASE("mask extrude: border_smooth rounds the rim it is asked to round") {
+    // WHY (issue #596). The two places that set this field assert only that the
+    // CALLER'S MASK survives -- `painted_count == before`, here and in
+    // bindings/python/tests/test_pyclay.py:2905. The comment there says what it
+    // is for: "the setting most likely to write back". The field is a VEHICLE
+    // for a non-consumption check, not its subject, so nothing asserted that
+    // any smoothing happens.
+    //
+    // Measured rather than assumed: deleting both `shaped.smooth(...)` calls in
+    // src/brush/mask_extrude.cpp fails ZERO of the suite's 16,633,178
+    // assertions.
+    const auto variation_at = [](int passes) {
+        MaskExtrudeSettings s = plate_settings(0.12f);
+        s.border_smooth = passes;
+        MaskField m = serrated_cap(9);
+        const std::optional<FieldVolume> plate = brush::mask_extrude(sphere_field(), m, s);
+        REQUIRE(plate.has_value());
+        return rim_variation(*plate, 0.28f, kRadius + 0.05f);
+    };
+
+    const double ragged = variation_at(0);
+    const double smoothed = variation_at(8);
+    CAPTURE(ragged);
+    CAPTURE(smoothed);
+
+    // The fixture has to BE ragged, or two smooth rims would agree and the
+    // comparison below would pass for the wrong reason.
+    CHECK(ragged > 0.3);
+    CHECK(smoothed < 0.75 * ragged);
+
+    // And it is a dial rather than a switch: more passes never read rougher.
+    //
+    // The tolerance is not decoration. Measured at this cell size:
+    //
+    //     0 passes   0.434444031562
+    //     1 pass     0.434444074461   <- UP by 4.3e-8
+    //     2 passes   0.431344956305
+    //     4 passes   0.365491159202
+    //     8 passes   0.254901115055
+    //
+    // A single pass moves the rim by nothing -- one part in ten million -- and
+    // the sign of that nothing is arbitrary, because `MaskField::smooth` is a
+    // seven-point integer average and one pass flips almost no cell across the
+    // 0.5 threshold (4576 cells above it, 4560 after). Demanding a strict
+    // decrease from every step would assert the kernel's STRENGTH, which is not
+    // what this field promises; the tolerance is set far above that noise and
+    // far below the real steps, which are three to four orders larger.
+    double last = 1e9;
+    for (const int passes : {0, 1, 2, 4, 8}) {
+        const double v = variation_at(passes);
+        CAPTURE(passes);
+        CAPTURE(v);
+        CHECK(v <= last * (1.0 + 1e-4));
+        last = v;
     }
 }
