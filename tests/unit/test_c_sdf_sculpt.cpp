@@ -740,3 +740,75 @@ TEST_CASE("c abi: a layer that cannot carry a warp reports none") {
     // things a host acts on differently.
     CHECK(clay_layer_warp_cost_get(d.doc, 99999u, &cost) == CLAY_ERROR_NOT_FOUND);
 }
+
+TEST_CASE("c abi: the live door carries the gesture id, so two presses both land") {
+    // Issue #603, reported by a host. `clay_layer_move_surface` copies
+    // gesture_id into MoveSettings; `clay_sdf_move_begin` copied radius, ease,
+    // front_only and steady and DROPPED it, so every drag through the live door
+    // was unnamed however the host labelled it.
+    //
+    // WHY THAT LOSES WORK RATHER THAN COSTING TIME. Unnamed, `continues_gesture`
+    // falls back to comparing centre and radius bit for bit. Two SEPARATE
+    // presses at the same anchor and radius then compare equal, so `moved_chain`
+    // REPLACES the first drag's grab with the second's instead of stacking, and
+    // the first pull is silently gone.
+    //
+    // #598 gates exactly this property -- but on the one-shot door, which is why
+    // it could not see this. That is #596's rule in miniature: covering the
+    // quantity on one path the field travels is not covering the field.
+    CDoc d;
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(d.doc, "form", &layer) == CLAY_OK);
+    clay_item_desc item;
+    std::memset(&item, 0, sizeof item);
+    item.struct_size = static_cast<uint32_t>(sizeof item);
+    item.prim = CLAY_PRIM_SPHERE;
+    item.params[0] = 1.0f;
+    item.op = CLAY_OP_ADD;
+    clay_node_id node = 0;
+    REQUIRE(clay_add_item(d.doc, layer, &item, &node) == CLAY_OK);
+
+    // Where the surface sits along +x, by bisection: the only thing asserted.
+    const auto surface_x = [&d, layer]() {
+        float lo = 0.5f, hi = 2.5f;
+        for (int i = 0; i < 40; ++i) {
+            const float mid = 0.5f * (lo + hi);
+            const float p[3] = {mid, 0.0f, 0.0f};
+            float dist = 0.0f;
+            REQUIRE(clay_layer_eval_points(d.doc, layer, "cpu", p, 1, &dist, nullptr) == CLAY_OK);
+            if (dist > 0.0f) hi = mid; else lo = mid;
+        }
+        return 0.5 * static_cast<double>(lo + hi);
+    };
+
+    // Two drags that a host DISTINGUISHES, at one anchor and radius -- the case
+    // the bit-equality fallback cannot tell apart on its own.
+    const auto press = [&d, layer](std::uint64_t id, float pull) {
+        clay_move_params mp = move_params(0.35f);
+        mp.gesture_id = id;
+        const float anchor[3] = {1.0f, 0.0f, 0.0f};
+        clay_sdf_move_tx* tx = clay_sdf_move_begin(d.doc, layer, anchor, &mp, nullptr);
+        REQUIRE(tx != nullptr);
+        const float total[3] = {pull, 0.0f, 0.0f};
+        clay_sculpt_dirty dirty = dirty_out();
+        REQUIRE(clay_sdf_move_update(tx, total, &dirty) == CLAY_OK);
+        clay_sculpt_budget budget = budget_out();
+        REQUIRE(clay_sdf_move_commit(tx, &budget) == CLAY_OK);
+        clay_sdf_move_destroy(tx);
+    };
+
+    const double start = surface_x();
+    press(1, 0.25f);
+    const double after_one = surface_x();
+    press(2, 0.25f);
+    const double after_two = surface_x();
+
+    CAPTURE(start);
+    CAPTURE(after_one);
+    CAPTURE(after_two);
+    // The first press must land...
+    CHECK(after_one > start + 0.05);
+    // ...and the second must ADD to it rather than replace it. Dropping the id
+    // pins after_two back at after_one, which is the reported defect.
+    CHECK(after_two > after_one + 0.05);
+}
