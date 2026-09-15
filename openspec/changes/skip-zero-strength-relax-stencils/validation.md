@@ -124,11 +124,25 @@ with the original main implementation after separating the atomic pass helper.
 Cognitive complexity: atomic pass 22, orchestration 7, materialization 30 (main:
 28). A local phase prototype also reduced copying time, but ran under machine
 contention; the allocation regressions are the deterministic performance evidence.
-Full sanitizer and combined-host verification for the allocation follow-up are
-still pending; the earlier live timings and combined tests concern 69d07a54.
+Expanded ASan/UBSan with leak detection passes 94 relax/sculpt/cancellation/volume
+cases (9,996,718 assertions), plus the two allocation gates (11 assertions).
+The final combined host e99ace5b / Core 9cc0d181 build passes all 12 native MCP,
+sculpt-latency, settlement and rendered-brush tests without adapter skips.
+The earlier live timings concern 69d07a54; these allocation counts are not an
+additional whole-application latency measurement.
 
-## Remaining validation
+## Final platform and host validation
 
-Platform CI must cover this new change; the earlier green Core revision
-477f1b23 predates it. Issue #531 remains open for its broader latency goal and
-field degradation at depth.
+All 16 GitHub checks pass at production revision `9cc0d181`, including Linux,
+Windows/MSVC, macOS CPU/Metal, the older Apple toolchain, Swift smoke,
+ASan/UBSan, ThreadSanitizer, Python, examples and the performance regression gate.
+The final validation commit changes documentation only.
+
+The later host release-compaction implementation `b47c2633` also passes all 84
+enabled library/native/rendered cases with this Core revision (67 library and
+17 integration), with no adapter skips. Its informational library timing probe
+is intentionally ignored in that correctness run. Host PR #137 retains its
+independent v0.113.0 engine pin.
+
+Issue #531 remains open for its broader latency goal and field degradation at
+depth. These verified fixes do not establish a universal 16 ms result.
