@@ -84,6 +84,22 @@ cases pass. Ten application pairs reduce Move release from 45.0 to 37.9 ms
 and Smooth release from 65.4 to 60.6 ms. Other results are mixed and the
 16 ms target remains unmet; see `skip-welding-exclusive-brick-edges`.
 
+Boundary-cell enumeration now reuses row classifications while preserving exact
+cell and mesh order. All eleven CPU suites and 44 sanitizer cases pass. The
+production 48-brick sphere subset improves 3.88→3.17 ms; attributed results
+are mixed. See `classify-boundary-cell-rows` for exactness and timing evidence;
+all 93 combined application cases pass. Ten paired application runs reduce
+Move release from 38.5 to 34.0 ms, Smooth preparation from 56.7 to 54.5 ms
+and Relax release from 59.5 to 57.2 ms. Other results are mixed.
+
+The companion desktop changes now borrow vertex keys and read mesh attributes
+directly into renderer storage. Both the pinned and combined engine builds
+pass 93 enabled desktop cases. The latest completed application comparison
+with row classification measures Smooth preparation/release at 54.5/58.1 ms
+and Relax at 61.2/57.2 ms;
+eight release medians remain above 16 ms. These results are tracked in
+[desktop PR #137](https://github.com/CyberdyneCorp/ClaySpaceDesktop/pull/137).
+
 ## Regional consolidation follow-up — issue #595
 
 Repeated Move maintenance now has a retained-volume path: isolated additive
