@@ -598,6 +598,17 @@ class FieldVolume {
     // reach.
     std::optional<FieldVolume> cropped(const math::Aabb& region) const;
 
+    // Assemble a dense, redistanced, lattice-aligned patch into this volume. The
+    // patch wins inside core and fades to the retained samples over feather
+    // outside it. Both volumes must have identical spacing and colour layout;
+    // patch must cover the transition. Untouched stored bricks are copied,
+    // never resampled. Storage may grow to include the patch, on the original
+    // brick lattice. Rebuilds sparse bounds and measures the assembled slope.
+    // O(retained storage + patch samples), with no field evaluation or global
+    // redistance. Invalid alignment/settings return nullopt.
+    std::optional<FieldVolume> patched(const FieldVolume& patch, const math::Aabb& core,
+                                        float feather) const;
+
     std::vector<float> to_blob() const;
     // How long that blob is, without building it. What a volume COSTS is a
     // question a host asks while deciding, and often repeatedly; materialising
@@ -614,6 +625,7 @@ class FieldVolume {
     static std::optional<FieldVolume> deserialize(const std::uint8_t* data, std::size_t size);
 
   private:
+    friend struct VolumePatchBuilder;
     void build_far_bounds();
     // The half of resample_region that only READS: which bricks meet the
     // region, and what `fill` produced for each. Split out so the half that

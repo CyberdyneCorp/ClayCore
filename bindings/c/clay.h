@@ -3463,7 +3463,7 @@ typedef struct clay_region_merge {
     float box_min[3];     /* the closure: what gets sampled */
     float box_max[3];
     uint64_t absorbed;    /* how many roots it takes */
-    int32_t whole_layer;  /* the closure reached every visible root */
+    int32_t whole_layer;  /* every visible root fully absorbed; false when samples are retained */
 } clay_region_merge;
 
 /* Bake a REGION of a layer into one volume and put it back where the items it
@@ -3477,7 +3477,7 @@ typedef struct clay_region_merge {
  * nowhere near the stroke. Measured on a real form, twelve gestures on one
  * patch: 22 ms and 2 items at the first, 244 ms and 13 at the twelfth.
  *
- * `region_min`/`region_max` say where you worked. What gets SAMPLED is the
+ * `region_min`/`region_max` say where you worked. For analytic operands, what gets SAMPLED is the
  * INFLUENCE CLOSURE of that: the region grown until every item that can reach
  * inside it is wholly inside it. That is not the same as "the items overlapping
  * the region", and the difference is not cosmetic — absorb only those and a
@@ -3490,10 +3490,19 @@ typedef struct clay_region_merge {
  * the rest — and then this IS clay_layer_consolidate. That is the honest
  * fallback, not a failure; `whole_layer` in the report says when it happened.
  *
- * WHAT IT BUYS: the second gesture on a patch has the first gesture's volume
- * inside its closure, so it is absorbed rather than stacked on. A patch stays
- * at ONE baked item however many times it is worked — O(1) in gestures where
- * appending was O(n).
+ * A compatible volume instead retains its unaffected samples (#595): only the
+ * requested patch, all removed grab supports, and a transition halo are baked.
+ * The rebuilt patch is stitched into the original lattice without adding
+ * roots. It requires an isolated hard-Add volume with identity node/layer
+ * transforms and scales, no active replication/gate, only finite-support grabs
+ * with zero easing endpoint, and unchanged cell size/band. Other cases retain
+ * the conservative whole-root closure. Retaining samples copies storage but
+ * does not evaluate or redistance the whole retained extent.
+ *
+ * The plan's box is the SAMPLED region. out_cost describes the INSTALLED volume,
+ * including retained storage. whole_layer is false for a retained-volume patch
+ * even on a single-root layer. The preview planner assumes the existing spacing
+ * and band; changed sampling settings can require a larger actual out_merge.
  *
  * `params.region` is ignored; the closure replaces it. `out_merge` may be NULL.
  * Refused, with the document unchanged, on a missing, non-SDF, protected or

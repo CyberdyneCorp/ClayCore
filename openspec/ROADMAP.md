@@ -22,6 +22,17 @@ Last reconciled against `3dcoat_study/MISSING_FEATURES.md` and
 caught five items this file had dropped. Every ClayCore-owned row in their
 catalogue is now represented here or in the deferred list below.
 
+## Regional consolidation follow-up — issue #595
+
+Repeated Move maintenance now has a retained-volume path: isolated additive
+volumes with identity placement and compactly supported grab deformers rebuild
+only a lattice-aligned patch. This prevents the stationary maintenance closure
+from growing into neighbouring subtools. Unsupported combinations retain the
+whole-root closure. Sampling and redistancing are local; copying retained
+storage and recomputing its bounds remain proportional to retained storage.
+See `keep-regional-volume-bakes-local` for compatibility, regression coverage,
+and measured results. This does not add an automatic maintenance trigger.
+
 ## Where the engine is (2026-09-06, v0.87.0)
 
 21 capabilities, 205 archived changes, 19 still open. Complete enough that the

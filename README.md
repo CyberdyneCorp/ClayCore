@@ -258,6 +258,12 @@ protecting.
   its working field lazily around the brush rather than sampling the whole layer
   at pointer-down, and the C ABI hands a host only the preview bricks that
   changed instead of the whole volume every frame
+- **Local maintenance of baked SDF volumes**: regional consolidation can bake
+  an isolated volume's local Move edits while retaining its untouched samples.
+  Repeated maintenance keeps one volume and a bounded sampling region rather
+  than absorbing neighbouring subtools. Global modifiers, overlapping operands,
+  changed sampling settings, and transformed volumes use the conservative
+  whole-root path; see `include/clay/scene/consolidate.h` for the exact conditions.
 - The stroke engine: spacing, pressure, jitter, taper, steady stroke, buildup
   vs clamped — a stroke resolves into ordinary edit items
 - **Masking that gates any operation**, a boolean included: an item carries the
