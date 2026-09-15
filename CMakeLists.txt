@@ -494,6 +494,11 @@ if(CLAY_BUILD_BENCHMARKS)
   target_include_directories(grab_jacobian_chain_probe PRIVATE bindings/c)
   clay_apply_warnings(grab_jacobian_chain_probe)
 
+  add_executable(feather_roughness_probe benchmarks/feather_roughness_probe.cpp)
+  target_link_libraries(feather_roughness_probe PRIVATE claycore)
+  target_include_directories(feather_roughness_probe PRIVATE bindings/c)
+  clay_apply_warnings(feather_roughness_probe)
+
   add_executable(move_subtool_closure_probe benchmarks/move_subtool_closure_probe.cpp)
   target_link_libraries(move_subtool_closure_probe PRIVATE claycore)
   target_include_directories(move_subtool_closure_probe PRIVATE bindings/c)
