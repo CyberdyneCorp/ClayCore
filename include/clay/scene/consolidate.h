@@ -359,7 +359,7 @@ bool replace_layer_with_volume(Document& doc, LayerId layer, field::FieldVolume 
 // twelve gestures on one patch: 22 ms and 2 items at the first, 244 ms and 13
 // at the twelfth — 11x, one appended volume each (issue #390).
 //
-// THE SCOPE IS AN INFLUENCE CLOSURE, and the reason is the same one that made
+// Analytic operands use an INFLUENCE CLOSURE, and the reason is the same one that made
 // the scope a LAYER above. An edit list is ordered and its operators are
 // relative, so "absorb the items near the stroke" has no well-defined field of
 // its own. What DOES is a region no remaining item can reach into:
@@ -388,27 +388,35 @@ bool replace_layer_with_volume(Document& doc, LayerId layer, field::FieldVolume 
 // everything pulls in all the rest — and then this IS `consolidate_layer`,
 // which is the honest fallback rather than a failure.
 //
-// WHAT IT BUYS. The second gesture on a patch has the first gesture's volume
-// inside its closure, so that volume is absorbed rather than stacked on. A
-// patch that gets worked stays at ONE baked item however many times it is
-// worked, which is O(1) in gestures where appending was O(n).
+// A compatible sampled volume can instead retain its unaffected samples
+// (#595). Only the requested patch, all grabs being removed, and a transition
+// halo are resampled and redistanced; the result is stitched into the original
+// lattice. This avoids both accumulating roots and growing a bake's next
+// closure from the conservative extent of its last deformer chain.
+//
+// Compatibility is deliberately explicit: an isolated hard-Add volume with
+// identity node/layer placement and scale, no active replication or mask gate,
+// and only grabs whose easing is exactly zero outside their support. Other
+// operands reaching the patch, global modifiers, or a different requested
+// spacing/band use the whole-root closure above. Retaining a volume copies its
+// storage; this is local EVALUATION, not O(patch) total memory traffic.
 struct RegionMerge {
-    // The closure: what will be sampled, which is the caller's region grown
-    // until it is self-contained. Empty when there is nothing to merge.
+    // What will be sampled: a whole-root closure or a retained-volume patch
+    // including its halo. Empty when there is nothing to merge.
     math::Aabb box;
     // The roots it absorbs, in edit-list order. The bake lands where the first
     // of them was, so the result keeps its place in the list.
     std::vector<NodeId> absorb;
-    // The closure reached every visible root, so this is a whole-layer
-    // consolidation wearing a region's clothes. Worth telling a host, because
-    // it is the case where the promise "items outside are left parametric"
-    // becomes vacuous.
+    // Every visible root is fully absorbed. False for a retained-volume patch,
+    // even on a one-root layer: its unaffected samples survive outside the bake.
     bool whole_layer = false;
 };
 
 // What `consolidate_region` would absorb and over what box, without baking
 // anything. Pure: a host can show the region it is about to lose the
-// parameters of before the artist commits to it.
+// parameters of before the artist commits to it. Assumes the source volume's
+// cell size/band; different requested settings may require a larger execution
+// plan, returned by consolidate_region's out_plan.
 RegionMerge plan_region_merge(const Layer& layer, const math::Aabb& region);
 
 // Bake the influence closure of `region` into one volume and put it back in
@@ -416,8 +424,9 @@ RegionMerge plan_region_merge(const Layer& layer, const math::Aabb& region);
 //
 // `params.region` is IGNORED and replaced by the closure — the caller says
 // where it worked, and what has to be sampled follows from the layer.
-// Everything `consolidate_layer` guarantees holds here for the same reason: it
-// is the same installer.
+// The cost describes the INSTALLED volume, retained storage included; out_plan
+// describes the sampled region. The installer and undo semantics are shared
+// with consolidate_layer.
 //
 // Returns false, with the document unchanged, when the layer cannot be baked
 // (missing, not SDF, protected, empty), when the region reaches nothing, or on

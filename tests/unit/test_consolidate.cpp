@@ -1442,6 +1442,278 @@ TEST_CASE("region merge: working one patch again does not stack a second volume"
     CHECK(volumes == 1);
 }
 
+TEST_CASE("region merge: stationary Move maintenance does not absorb its neighbours") {
+    // #595: counting roots after a no-edit re-bake missed the conservative
+    // extent added by each new grab chain. Keep the requested patch fixed and
+    // alternate the displacement so geometric travel cannot explain growth.
+    scene::Document doc = ball_row(8, 1.4f);
+    const scene::LayerId layer_id = doc.layers.front().id;
+    const math::Aabb patch = around(cf3(-0.5f, 0, 0), 0.31f);
+    float first_width = 0.0f;
+    for (int bake = 0; bake < 12; ++bake) {
+        CAPTURE(bake);
+        scene::Layer& layer = *doc.find_layer(layer_id);
+        const scene::Node* node = layer.sdf->find(layer.sdf->roots.front());
+        REQUIRE(node);
+        auto chain = node->deformers;
+        for (int dab = 0; dab < 4; ++dab)
+            chain.push_back(scene::Deformer::grab(cf3(-0.5f, 0, 0), 0.22f,
+                cf3(dab % 2 ? -0.09f : 0.09f, 0, 0), 0));
+        REQUIRE(scene::apply(doc, scene::Command{scene::SetDeformersCmd{
+            layer_id, node->id, chain}}).has_value());
+        scene::RegionMerge plan;
+        scene::ConsolidationCost cost;
+        REQUIRE(scene::consolidate_region(doc, layer_id, patch, params_at(0.04f, 0.12f),
+                                          nullptr, &cost, {}, nullptr, nullptr, &plan));
+        if (bake == 0) first_width = cost.bounds.extent().x;
+        CHECK_FALSE(plan.whole_layer);
+        CHECK(plan.absorb.size() == 1);
+        CHECK(root_count(doc) == 8);
+        CHECK(cost.bounds.extent().x <= first_width + 0.64f);
+        const scene::Tape tape = scene::compile_document(doc);
+        CHECK(tape.eval(cf3(0, 0, 0)).d < 0.0f);
+        CHECK(tape.eval(cf3(1.4f, 0, 0)).d < 0.0f);
+    }
+}
+
+namespace {
+
+scene::Document patch_document(bool colored = false) {
+    const auto distance = [](kernel::cfloat3 p) { return kernel::clength(p) - 0.8f; };
+    const math::Aabb box = around(cf3(0, 0, 0), 1.28f);
+    FieldVolume v = colored ? FieldVolume::sample_colored(distance,
+        [](kernel::cfloat3 p) { return cf3(p.x > 0 ? 1.0f : 0.0f, 0.2f, 0.8f); },
+        box, 0.04f, 0.12f) : FieldVolume::sample(distance, box, 0.04f, 0.12f);
+    return wrap(v);
+}
+
+void append_patch_grab(scene::Document& doc, kernel::cfloat3 centre) {
+    const scene::Layer& layer = doc.layers.front();
+    const scene::Node& n = *layer.sdf->find(layer.sdf->roots.front());
+    auto chain = n.deformers;
+    chain.push_back(scene::Deformer::grab(centre, 0.24f, cf3(-0.08f, 0.02f, 0), 0));
+    REQUIRE(scene::apply(doc, scene::Command{scene::SetDeformersCmd{
+        layer.id, n.id, chain}}).has_value());
+}
+
+kernel::cfloat3 patch_gradient(const scene::Tape& tape, kernel::cfloat3 p) {
+    constexpr float h = 0.002f;
+    return kernel::cnormalize(cf3(
+        tape.eval(p + cf3(h, 0, 0)).d - tape.eval(p - cf3(h, 0, 0)).d,
+        tape.eval(p + cf3(0, h, 0)).d - tape.eval(p - cf3(0, h, 0)).d,
+        tape.eval(p + cf3(0, 0, h)).d - tape.eval(p - cf3(0, 0, h)).d));
+}
+
+}  // namespace
+
+TEST_CASE("region merge: partial bake retains samples colour and surface outside its patch") {
+    scene::Document doc = patch_document(true);
+    const auto source = doc.layers.front().sdf->find(doc.layers.front().sdf->roots.front())->volume;
+    append_patch_grab(doc, cf3(-0.8f, 0, 0));
+    const scene::Tape before = scene::compile_document(doc);
+    scene::RegionMerge plan;
+    REQUIRE(scene::consolidate_region(doc, doc.layers.front().id, around(cf3(-0.8f, 0, 0), 0.25f),
+        params_at(0.04f, 0.12f), nullptr, nullptr, {}, nullptr, nullptr, &plan));
+    REQUIRE_FALSE(plan.whole_layer);
+    const auto result = doc.layers.front().sdf->find(doc.layers.front().sdf->roots.front())->volume;
+    REQUIRE(result->has_color());
+    const scene::Tape after = scene::compile_document(doc);
+    int retained = 0;
+    REQUIRE(source->eval(cf3(-0.84f, 0, 0)) > 0.0f);
+    REQUIRE(before.eval(cf3(-0.84f, 0, 0)).d < 0.0f);
+    CHECK(after.eval(cf3(-0.84f, 0, 0)).d < 0.0f);
+    for (int z = 0; z < source->sample_extent(2); ++z)
+        for (int y = 0; y < source->sample_extent(1); ++y)
+            for (int x = 0; x < source->sample_extent(0); ++x) {
+                const auto value = source->sample_at(x, y, z);
+                const auto p = source->cell_position(x, y, z);
+                if (!value || p.x < 0.0f || std::abs(*value) > 0.08f) continue;
+                ++retained;
+                CHECK(after.eval(p).d == doctest::Approx(before.eval(p).d).epsilon(1e-5));
+                const auto a = before.eval(p).color, b = after.eval(p).color;
+                CHECK(kernel::clength(a - b) < 1e-5f);
+            }
+    REQUIRE(retained > 100);
+    // Surface-normal agreement through the transition, using the analytic
+    // radial direction as an independent oracle outside the grab's support.
+    float worst_dot = 1.0f;
+    for (int i = 0; i < 32; ++i) {
+        const float theta = 0.42f + i * 0.025f;
+        const auto u = cf3(-std::cos(theta), std::sin(theta), 0.0f);
+        const auto p = u * 0.8f;
+        CHECK(std::abs(after.eval(p).d) < 0.02f);
+        worst_dot = std::min(worst_dot, kernel::cdot(patch_gradient(after, p), u));
+    }
+    CHECK(worst_dot > 0.99f);
+    CHECK(result->sample_lipschitz() == result->measure_sample_lipschitz());
+    CHECK(result->sample_lipschitz() < 2.0f);
+}
+
+TEST_CASE("region merge: repeated local maintenance preserves the unedited transition surface") {
+    scene::Document doc = patch_document();
+    const auto region = around(cf3(-0.8f, 0, 0), 0.25f);
+    for (int bake = 0; bake < 12; ++bake) {
+        auto& layer = doc.layers.front();
+        const auto* n = layer.sdf->find(layer.sdf->roots.front());
+        auto chain = n->deformers;
+        for (int gesture = 0; gesture < 4; ++gesture)
+            chain.push_back(scene::Deformer::grab(cf3(-0.8f, 0, 0), 0.24f,
+                cf3(gesture % 2 ? 0.08f : -0.08f, 0, 0), 0));
+        REQUIRE(scene::apply(doc, scene::Command{scene::SetDeformersCmd{
+            layer.id, n->id, chain}}).has_value());
+        REQUIRE(scene::consolidate_region(doc, layer.id, region, params_at(0.04f, 0.12f)));
+        const auto tape = scene::compile_document(doc);
+        for (int i = 0; i < 32; ++i) {
+            const float theta = 0.42f + i * 0.025f;
+            const auto u = cf3(-std::cos(theta), std::sin(theta), 0);
+            const auto p = u * 0.8f;
+            CAPTURE(bake);
+            CAPTURE(i);
+            CHECK(std::abs(tape.eval(p).d) < 0.02f);
+            CHECK(kernel::cdot(patch_gradient(tape, p), u) > 0.98f);
+        }
+    }
+}
+
+TEST_CASE("region merge: partial bake includes every removed grab and survives history and reload") {
+    scene::Document doc = patch_document();
+    append_patch_grab(doc, cf3(-0.8f, 0, 0));
+    append_patch_grab(doc, cf3(0, 0.8f, 0));
+    scene::UndoStack undo;
+    const auto original = scene::serialize_document(doc);
+    const scene::Tape before = scene::compile_document(doc);
+    scene::RegionMerge plan;
+    REQUIRE(scene::consolidate_region(doc, doc.layers.front().id,
+        around(cf3(0, 0.8f, 0), 0.1f), params_at(0.04f, 0.12f), &undo,
+        nullptr, {}, nullptr, nullptr, &plan));
+    CHECK(plan.box.contains(cf3(-1.04f, 0, 0)));
+    CHECK(plan.box.contains(cf3(0, 1.04f, 0)));
+    const scene::Tape after = scene::compile_document(doc);
+    for (const auto centre : {cf3(-0.8f, 0, 0), cf3(0, 0.8f, 0)})
+        for (int i = -4; i <= 4; ++i) {
+            const auto p = centre + cf3(i * 0.025f, 0, 0);
+            CHECK(std::abs(after.eval(p).d - before.eval(p).d) < 0.04f);
+        }
+    const auto baked = scene::serialize_document(doc);
+    auto loaded = scene::deserialize_document(baked.data(), baked.size());
+    REQUIRE(loaded);
+    CHECK(scene::serialize_document(*loaded) == baked);
+    CHECK(undo.undo_depth() == 1);
+    REQUIRE(undo.undo(doc));
+    CHECK(scene::serialize_document(doc) == original);
+    REQUIRE(undo.redo(doc));
+    CHECK(scene::serialize_document(doc) == baked);
+}
+
+TEST_CASE("region merge: partial plans fall back for global modifiers and changed resolution") {
+    scene::Document doc = patch_document();
+    const auto layer_id = doc.layers.front().id;
+    const auto node_id = doc.layers.front().sdf->roots.front();
+    const auto region = around(cf3(-0.8f, 0, 0), 0.25f);
+    SUBCASE("a global modifier cannot be removed by a local patch") {
+        REQUIRE(scene::apply(doc, scene::Command{scene::SetDeformersCmd{
+            layer_id, node_id, {scene::Deformer::twist(0.2f)}}}).has_value());
+        CHECK(scene::plan_region_merge(doc.layers.front(), region).whole_layer);
+    }
+    SUBCASE("a different lattice requires resampling the retained data") {
+        CHECK_FALSE(scene::plan_region_merge(doc.layers.front(), region).whole_layer);
+        scene::RegionMerge actual;
+        REQUIRE(scene::consolidate_region(doc, layer_id, region, params_at(0.08f, 0.24f),
+            nullptr, nullptr, {}, nullptr, nullptr, &actual));
+        CHECK(actual.whole_layer);
+    }
+    SUBCASE("a translated layer is not mistaken for its local lattice") {
+        doc.layers.front().xform.position = cf3(2, 0, 0);
+        CHECK(scene::plan_region_merge(doc.layers.front(),
+            around(cf3(1.2f, 0, 0), 0.25f)).whole_layer);
+    }
+    SUBCASE("a squashed layer is not mistaken for its local lattice") {
+        doc.layers.front().scale_axes = cf3(1, 2, 1);
+        CHECK(scene::plan_region_merge(doc.layers.front(), region).whole_layer);
+    }
+    SUBCASE("an intersect still forces a conservative closure") {
+        scene::Node cut;
+        cut.prim = scene::Prim::sphere(0.6f);
+        cut.op = scene::Op::Intersect;
+        doc.layers.front().sdf->insert(cut);
+        CHECK(scene::plan_region_merge(doc.layers.front(), region).whole_layer);
+    }
+}
+
+TEST_CASE("region merge: cancelling a local bake publishes no samples or history") {
+    scene::Document doc = patch_document();
+    append_patch_grab(doc, cf3(-0.8f, 0, 0));
+    scene::UndoStack undo;
+    parallel::CancelToken token;
+    const auto before = scene::serialize_document(doc);
+    bool cancelled = false;
+    std::size_t evaluated = 0;
+    scene::BakePointEval cancel_during_sample = [&](const scene::Tape& tape, const float* xyz,
+        std::size_t count, float* distances, float*) {
+        evaluated += count;
+        for (std::size_t i = 0; i < count; ++i)
+            distances[i] = tape.eval(cf3(xyz[i * 3], xyz[i * 3 + 1], xyz[i * 3 + 2])).d;
+        token.cancel();
+        return true;
+    };
+    CHECK_FALSE(scene::consolidate_region(doc, doc.layers.front().id,
+        around(cf3(-0.8f, 0, 0), 0.25f), params_at(0.04f, 0.12f), &undo,
+        nullptr, cancel_during_sample, &token, &cancelled));
+    CHECK(evaluated > 0);
+    CHECK(cancelled);
+    CHECK(scene::serialize_document(doc) == before);
+    CHECK(undo.undo_depth() == 0);
+}
+
+TEST_CASE("region merge: local bake detaches shared content and undo restores sharing") {
+    scene::Document doc = patch_document();
+    append_patch_grab(doc, cf3(-0.8f, 0, 0));
+    const auto original = doc.layers.front().sdf;
+    const auto source_id = doc.layers.front().id;
+    auto* instance = doc.instance_layer(source_id, "instance");
+    REQUIRE(instance);
+    const auto instance_id = instance->id;
+    scene::UndoStack undo;
+    REQUIRE(scene::consolidate_region(doc, source_id, around(cf3(-0.8f, 0, 0), 0.25f),
+        params_at(0.04f, 0.12f), &undo));
+    CHECK(doc.find_layer(instance_id)->sdf.get() == original.get());
+    CHECK(doc.find_layer(source_id)->sdf.get() != original.get());
+    REQUIRE(undo.undo(doc));
+    CHECK(doc.find_layer(source_id)->sdf.get() == doc.find_layer(instance_id)->sdf.get());
+}
+
+TEST_CASE("region merge: local evaluation count ignores a retained volume's distant extent") {
+    std::size_t counts[2] = {};
+    for (int wide = 0; wide < 2; ++wide) {
+        // Identical lattice origin and local surface; the wide volume also
+        // holds a distant subtool. The source really grows, not just its label.
+        const math::Aabb box{cf3(-1.28f, -1.28f, -1.28f),
+                            cf3(wide ? 7.68f : 1.28f, 1.28f, 1.28f)};
+        const auto distance = [](kernel::cfloat3 p) {
+            return std::min(kernel::clength(p) - 0.8f,
+                            kernel::clength(p - cf3(6, 0, 0)) - 0.8f);
+        };
+        auto volume = FieldVolume::sample(distance, box, 0.04f, 0.12f);
+        scene::Document doc = wrap(volume);
+        append_patch_grab(doc, cf3(-0.8f, 0, 0));
+        const scene::BakePointEval count_samples = [&](const scene::Tape& tape,
+            const float* xyz, std::size_t count, float* distances, float*) {
+            counts[wide] += count;
+            for (std::size_t i = 0; i < count; ++i)
+                distances[i] = tape.eval(cf3(xyz[i * 3], xyz[i * 3 + 1], xyz[i * 3 + 2])).d;
+            return true;
+        };
+        scene::RegionMerge plan;
+        REQUIRE(scene::consolidate_region(doc, doc.layers.front().id,
+            around(cf3(-0.8f, 0, 0), 0.25f), params_at(0.04f, 0.12f), nullptr,
+            nullptr, count_samples, nullptr, nullptr, &plan));
+        REQUIRE_FALSE(plan.whole_layer);
+        if (wide) CHECK(scene::compile_document(doc).eval(cf3(6, 0, 0)).d < 0.0f);
+    }
+    REQUIRE(counts[0] > 0);
+    CHECK(counts[0] == counts[1]);
+}
+
 TEST_CASE("region merge: a whole-layer closure is consolidation, and says so") {
     scene::Document doc = sphere_document(0.6f);
     scene::RegionMerge plan;
