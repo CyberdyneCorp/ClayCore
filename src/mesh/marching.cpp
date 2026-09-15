@@ -2,6 +2,7 @@
 #include "brick_recording.h"
 #include "brick_edge_ownership.h"
 #include "brick_samples.h"
+#include "ring_cells.h"
 #include "edge_welding.h"
 
 #include "clay/parallel/thread_pool.h"
@@ -435,54 +436,18 @@ std::vector<brick::BrickKey> ring_owners(const std::vector<brick::BrickKey>& key
     return owners;
 }
 
-// Whether any neighbour a cell reaches was requested. `wanted` is the owner's
-// 3x3x3 neighbourhood flattened as (dz+1)*9 + (dy+1)*3 + dx+1; the three offset
-// lists are what that cell's index reaches on each axis.
-bool reaches_request(const bool wanted[27], const int* ax, int nx, const int* ay, int ny,
-                     const int* az, int nz) {
-    for (int a = 0; a < nz; ++a)
-        for (int b = 0; b < ny; ++b)
-            for (int c = 0; c < nx; ++c)
-                if (wanted[(az[a] + 1) * 9 + (ay[b] + 1) * 3 + ax[c] + 1]) return true;
-    return false;
-}
-
-// The cells `owner` owns that touch a requested brick, appended in z, y, x
-// order.
+// The owner's local ring cells, translated and packed in their existing order.
 void append_ring_cells(brick::BrickKey owner, int dim, const RequestedSet& requested,
                        std::vector<std::uint64_t>& out) {
-    bool wanted[27];
+    detail::RingNeighbors wanted{};
     for (int n = 0; n < 27; ++n)
         wanted[n] = n != 13 && requested.count(brick::BrickKey{owner.x + n % 3 - 1,
                                                               owner.y + n / 3 % 3 - 1,
                                                               owner.z + n / 9 - 1});
-    // Which neighbours one cell index reaches on its axis: always the owner
-    // itself, plus the brick below when the index is on the owner's FIRST plane
-    // — that brick's closed box includes it — and the brick above on its last.
-    auto offsets = [dim](int c, int base, int* into) {
-        int n = 0;
-        if (c == base) into[n++] = -1;
-        into[n++] = 0;
-        if (c == base + dim - 1) into[n++] = 1;
-        return n;
-    };
     const int ox = owner.x * dim, oy = owner.y * dim, oz = owner.z * dim;
-    int ax[3], ay[3], az[3];
-    for (int k = oz; k < oz + dim; ++k) {
-        const int nz = offsets(k, oz, az);
-        for (int j = oy; j < oy + dim; ++j) {
-            const int ny = offsets(j, oy, ay);
-            // When y and z reach nobody, only x's two face planes can, so the
-            // row's interior is stepped straight over rather than tested cell
-            // by cell — most of a brick's cells are interior.
-            const int step = (ny == 1 && nz == 1) ? std::max(dim - 1, 1) : 1;
-            for (int i = ox; i < ox + dim; i += step) {
-                const int nx = offsets(i, ox, ax);
-                if (reaches_request(wanted, ax, nx, ay, ny, az, nz))
-                    out.push_back(pack_point(i, j, k));
-            }
-        }
-    }
+    detail::for_each_ring_cell(dim, wanted, [&](int x, int y, int z) {
+        out.push_back(pack_point(ox + x, oy + y, oz + z));
+    });
 }
 
 // The ring cells to test: every cell whose closed span can touch a requested
