@@ -1090,3 +1090,39 @@ TEST_CASE("sculpt: a bare consolidated layer is still not re-baked") {
     CHECK(report_layer(after).longest_deformer_chain == 0);
     CHECK(snapshot(doc) != first_bytes);  // the second stroke did something
 }
+
+TEST_CASE("sculpt: zero-strength priming still delivers the full preview") {
+    Document doc = two_balls();
+    const auto before = snapshot(doc);
+    auto tx = SdfSmoothTransaction::begin(doc, doc.layers.front().id, smooth_policy());
+    REQUIRE(tx);
+    field::RelaxSettings settings;
+    settings.strength = 0.0f;
+    std::size_t mask_calls = 0;
+    settings.mask = [&mask_calls](cfloat3) {
+        ++mask_calls;
+        return 0.0f;
+    };
+    const auto report = tx->update(settings);
+    CHECK(mask_calls == 0);
+    CHECK_FALSE(report.changed);
+    const auto& preview = tx->preview_volume();
+    const auto nx = static_cast<std::size_t>((preview.sample_extent(0) - 1) / field::kBrickDim);
+    const auto ny = static_cast<std::size_t>((preview.sample_extent(1) - 1) / field::kBrickDim);
+    const auto nz = static_cast<std::size_t>((preview.sample_extent(2) - 1) / field::kBrickDim);
+    REQUIRE(preview.brick_count() == nx * ny * nz);
+    CHECK(report.touched_bricks == preview.brick_count());
+    CHECK(tx->preview_delta().size() == preview.brick_count());
+    CHECK(snapshot(doc) == before);
+    std::vector<field::FieldVolume::BrickCoord> delta;
+    tx->take_preview_delta(&delta);
+    CHECK(delta.size() == preview.brick_count());
+    const auto generation = tx->preview_generation();
+    tx->update(settings);
+    CHECK(tx->preview_delta().empty());
+    CHECK(tx->preview_generation() == generation);
+    const auto edited = tx->update(dab(cf3(0, 0.4f, 0)));
+    CHECK(edited.changed);
+    CHECK_FALSE(tx->preview_delta().empty());
+    CHECK(snapshot(doc) == before);
+}

@@ -683,6 +683,13 @@ is bounded per active brick; larger internal dimensions retain general recording
 `brick_recording_probe` compares both paths, checks exact output and reports
 paired timings for full meshes and small subsets.
 
+Zero-strength relax preserves stored sample bits and skips mask and smoothing
+stencil evaluation. Live Smooth preview priming still materializes its complete
+source field and reports the selected bricks; it no longer computes averages
+whose contribution is zero. See
+`openspec/changes/skip-zero-strength-relax-stencils/validation.md` for live timings
+and remaining application costs.
+
 **Read "registered" literally.** A backend that was not compiled into the build
 cannot fail that suite, so the sentence above is a statement about the build in
 front of you and not about the table. CI compiles CPU on three platforms, Metal

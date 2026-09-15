@@ -46,6 +46,23 @@ Stencil build_stencil(int radius_cells) {
     return s;
 }
 
+// Average only samples present in the volume; a missing brick is not zero.
+template <typename SampleAt>
+std::optional<float> stencil_average(const Stencil& stencil, const SampleAt& sample_at,
+                                     int gx, int gy, int gz) {
+    float averaged = 0.0f;
+    float total = 0.0f;
+    for (std::size_t i = 0; i < stencil.offsets.size(); ++i) {
+        const auto& d = stencil.offsets[i];
+        const std::optional<float> tap = sample_at(gx + d[0], gy + d[1], gz + d[2]);
+        if (!tap) continue;
+        averaged += stencil.weights[i] * *tap;
+        total += stencil.weights[i];
+    }
+    if (total <= 0.0f) return std::nullopt;
+    return averaged / total;
+}
+
 // How much of the smoothed value to take at `p`. Outside the region this is
 // zero and the field is left exactly as it was.
 float region_weight(const RelaxSettings& settings, cfloat3 p) {
@@ -89,7 +106,7 @@ RelaxResult relax_in_place(FieldVolume& volume, const RelaxSettings& settings,
     const float strength = std::clamp(settings.strength, 0.0f, 1.0f);
     const int iterations = std::max(1, settings.iterations);
     const int radius = std::max(1, settings.radius_cells);
-    const Stencil stencil = build_stencil(radius);
+    const Stencil stencil = strength == 0.0f ? Stencil{} : build_stencil(radius);
 
     RelaxSettings tuned = settings;
     // A taper narrower than the kernel cannot hide the seam the kernel makes,
@@ -138,6 +155,9 @@ RelaxResult relax_in_place(FieldVolume& volume, const RelaxSettings& settings,
         const FieldVolume previous = region_bounds ? FieldVolume() : current;
         auto blend = [&previous, &snapshot, &current, &stencil, &tuned, strength](
                          int gx, int gy, int gz, float old) {
+            // Preview priming uses zero strength over the entire field. Keep
+            // its reporting pass, but do not evaluate an unused neighborhood.
+            if (strength == 0.0f) return old;
             auto tap_at = [&](int x, int y, int z) {
                 return snapshot ? snapshot->sample_at(x, y, z) : previous.sample_at(x, y, z);
             };
@@ -161,17 +181,9 @@ RelaxResult relax_in_place(FieldVolume& volume, const RelaxSettings& settings,
             // measurement of zero, it is the absence of one, and renormalizing
             // over the taps that are there smooths with the data rather than
             // dragging the edge of the band inward.
-            float averaged = 0.0f;
-            float total = 0.0f;
-            for (std::size_t i = 0; i < stencil.offsets.size(); ++i) {
-                const auto& d = stencil.offsets[i];
-                std::optional<float> tap = tap_at(gx + d[0], gy + d[1], gz + d[2]);
-                if (!tap) continue;
-                averaged += stencil.weights[i] * *tap;
-                total += stencil.weights[i];
-            }
-            if (total <= 0.0f) return here;
-            return here + (averaged / total - here) * (strength * weight);
+            const auto averaged = stencil_average(stencil, tap_at, gx, gy, gz);
+            if (!averaged) return here;
+            return here + (*averaged - here) * (strength * weight);
         };
         // A dab should cost what it moves. Outside the region `blend` returns
         // the sample it was handed — that is the `weight <= 0` line above — so
