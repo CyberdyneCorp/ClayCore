@@ -106,6 +106,14 @@ deferred because application results remain mixed. Preview initialization still
 costs about 24 ms and its full mesh rebuild about 30 ms; see the
 [latency investigation](latency-investigation-531.md) for scope and evidence.
 
+The field sample-bound reduction now uses four independent float accumulators.
+Initial materialization improves 5.12→2.94 ms with exact serialized output;
+all eleven CPU suites, 105 sanitizer cases and 93 combined application cases
+pass. A performance-core comparison reduces Smooth preparation 54.5→51.0 ms
+and Relax 59.3→56.6 ms; other action results remain mixed, and the 16 ms target
+is still open. See `reduce-sample-bound-dependencies` for both complete
+application comparisons and pending platform CI.
+
 ## Regional consolidation follow-up — issue #595
 
 Repeated Move maintenance now has a retained-volume path: isolated additive

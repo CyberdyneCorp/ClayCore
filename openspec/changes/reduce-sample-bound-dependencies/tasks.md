@@ -4,6 +4,6 @@
 
 ## Validation
 - [x] Run actual-volume parity and controlled performance probes.
-- [ ] Run full CPU checks, focused sanitizers, complexity and strict OpenSpec.
-- [ ] Run combined application correctness and paired brush timing.
-- [ ] Document results, limits and remaining 16 ms work in the PR.
+- [x] Run full CPU checks, focused sanitizers, complexity and strict OpenSpec.
+- [x] Run combined application correctness and paired brush timing.
+- [x] Document results, limits and remaining 16 ms work in the PR.
