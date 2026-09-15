@@ -677,6 +677,12 @@ bit-for-bit. Mixed chains and repetition retain the general evaluator. The
 see `openspec/changes/batch-grab-chains-without-changing-the-field/validation.md`
 for results and the separate application-latency limits.
 
+Brick meshing records repeated local lattice edges once before global welding,
+preserving exact vertices, triangle order, attributes and brick ranges. Scratch
+is bounded per active brick; larger internal dimensions retain general recording.
+`brick_recording_probe` compares both paths, checks exact output and reports
+paired timings for full meshes and small subsets.
+
 **Read "registered" literally.** A backend that was not compiled into the build
 cannot fail that suite, so the sentence above is a statement about the build in
 front of you and not about the table. CI compiles CPU on three platforms, Metal

@@ -32,6 +32,13 @@ the wider application's 16 ms target still needs a same-device host trace.
 See `batch-grab-chains-without-changing-the-field` for the implementation,
 regressions and measurement scope.
 
+The meshing follow-up deduplicates local edge records before global welding.
+The paired probe measures a further 10–16% reduction for whole meshes with
+field normals and colour across its sphere, hard-box and deep-chain fixtures.
+Exact-output regressions cover subsets, straddlers, LODs and bounded fallback.
+See `deduplicate-brick-edge-recordings`; the full application latency goal
+remains open, and these are engine measurements rather than a frame-time claim.
+
 ## Where the engine is (2026-09-06, v0.87.0)
 
 21 capabilities, 205 archived changes, 19 still open. Complete enough that the
