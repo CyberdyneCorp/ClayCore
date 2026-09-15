@@ -23,3 +23,7 @@ Layering and all 65 strict OpenSpec items pass. Clang-tidy reports cognitive com
 The final exact-coordinate regression passes 384 checks, including a window crossing a brick plane boundary. All 11 CPU CTest targets pass (100.71 seconds), including 2,757 C++ cases (16,647,615 assertions) and 756 Python tests with one intentional skip. The complete CPU build, including the shared library and Python module, succeeds. Sanitizer and live performance validation remain pending.
 
 Both Clang and GCC also pass all 112 exact-output comparisons with `-O3 -march=native -ffp-contract=fast`, using the actual grid method definitions. Those concurrent runs are correctness checks only; their timings are not performance evidence. The final table-driven regression still scores 10 in Clang-tidy, the check helper scores 8, and the source-fill callback scores 9.
+
+## Combined host verification
+
+Host `c665af3` built against Core production revision `abd87b0b` passes all 85 enabled combined cases: 68 library and 17 native/rendered integration tests (three command-interface, four sculpt-latency, five settlement, two rendered-brush and three rendered-incremental). No adapter skips occur. The informational library timing test is intentionally ignored. The host engine pin is restored to v0.113.0 after preserving the combined executable. Sanitizer execution and uncontended production/live timing remain pending.
