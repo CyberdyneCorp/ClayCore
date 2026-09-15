@@ -23,7 +23,7 @@ Three alternating process pairs, three timed repetitions per case, complete 216 
 | 48-Grab sphere | 1044 | None | 30.382 | 23.627 |
 | 48-Grab sphere | 1044 | Gradient/color | 39.351 | 30.877 |
 
-The six 48-key cases improve by approximately 0.08–0.50 ms in median. Complete application measurements remain pending.
+The six 48-key cases improve by approximately 0.08–0.50 ms in median. The same-base application comparison is recorded below.
 
 ## Memory tradeoff
 
@@ -33,7 +33,6 @@ The half-full prototype peaked at 18,874,368 bytes and retained 12,582,912; it i
 
 ## Remaining gates
 
-- Alternating live latency measurement.
 - Platform CI and final PR evidence.
 - The broader #531 target remains 16 ms across all reported brushes and is not yet met.
 
@@ -48,3 +47,31 @@ The combined application uses host production `4e8d1af` and Core `db802faa`. Aft
 The original fixture at z=0.6 placed a radius-0.25 dab inside the sphere. Its image-change assertion passed only two of three repetitions with each of the previous and new engine builds. The actual main-branch test (9a7ec9c with Core v0.113.0) passed that image assertion and later failed a different export-gate assertion, so the image failure is not claimed as reproduced on main. The fixture now requests a visible surface change and retains the image-difference assertion. A subsequent active-desktop run passed that assertion but failed its consent-gate expectation; the complete isolated run passes both.
 
 The corrected surface-touching end-to-end test also passes all six isolated alternating repeats (three each against Core `abd87b0b` and `db802faa`, with identical application production code). Assertions for visible pixel change, measurement synchronization, history and consent remain enabled.
+
+## Validation after merging main
+
+Main `b86627b2` (the #595 regional consolidation fix and #596 regression additions) is merged at `cd215a7a`. All 11 CPU CTest targets pass: 2,772 C++ cases / 16,738,800 assertions and 757 Python tests with one intentional skip. All 85 enabled combined application cases pass on the isolated display, with no adapter skips. The merged exact-mesh comparison again matches all 36,019,240 bytes and the same SHA-256 above. The merged ASan/UBSan run with leak detection passes the same 72 cases / 1,303,476 assertions. All 67 strict OpenSpec items pass. The same-base live comparison is complete below.
+
+The first pre-merge live welding comparison completed 78 cases across all 13 tools, with matching paired uploads and no sustained CPU contention detected. Its medians were mixed: Move release 65.402→56.615 ms, Smooth release 80.874→77.809 ms and Relax release 83.667→77.500 ms; Polish 43.476→46.994 ms and Planar 35.228→38.365 ms. Smooth/Relax preparation did not consistently improve. These results do not establish an across-brush application gain. A planned focused repeat was stopped before measurement so that final validation could include the newly merged base.
+
+## Same-base application comparison after merging main
+
+Ten alternating pairs across 13 brushes complete 260 cases. Both applications use the same host code and merged Core base; the control restores only the original welding builder from `b9387a23`. All paired uploaded byte counts match. The CPU guard detects no sustained contention; one-minute load is 2.967–3.617 on 24 logical CPUs. Values below are action medians, not per-run guarantees.
+
+| Brush | Begin before / fixed ms | Continue before / fixed ms | Release before / fixed ms | Faster release pairs / 10 |
+|---|---:|---:|---:|---:|
+| mask | 5.676 / 5.729 | 0.017 / 0.018 | 7.341 / 7.504 | 3 |
+| crease | 1.241 / 1.199 | 0.014 / 0.014 | 23.098 / 22.337 | 7 |
+| clay | 2.724 / 2.515 | 0.014 / 0.014 | 23.437 / 17.253 | 9 |
+| inflate | 2.823 / 2.485 | 0.016 / 0.014 | 18.175 / 16.949 | 8 |
+| layer | 1.200 / 1.116 | 0.015 / 0.014 | 22.165 / 16.338 | 9 |
+| standard | 1.283 / 1.238 | 0.017 / 0.013 | 21.772 / 16.216 | 10 |
+| polish | 0.022 / 0.018 | 0.012 / 0.012 | 40.392 / 34.778 | 10 |
+| planar | 0.020 / 0.022 | 0.012 / 0.011 | 36.207 / 34.931 | 7 |
+| move-topological | 0.017 / 0.021 | 0.012 / 0.012 | 52.457 / 47.023 | 9 |
+| move | 0.017 / 0.019 | 3.736 / 3.559 | 62.234 / 56.519 | 10 |
+| relax | 86.774 / 78.639 | 0.025 / 0.026 | 83.408 / 76.057 | 10 |
+| smooth | 80.217 / 72.679 | 0.026 / 0.028 | 84.623 / 78.051 | 10 |
+| snake-hook | 0.019 / 0.019 | 17.617 / 15.911 | 30.497 / 29.033 | 8 |
+
+All non-Mask release medians improve in this same-base repeat, including Polish and Planar, whose first comparison was mixed. Mask release changes from 7.341 to 7.504 ms. Smooth/Relax preparation and many releases still exceed 16 ms; this improvement does not complete #531. Raw measurements, CPU samples and paired summaries are retained locally under `/tmp/clay-531-welding-merged-live*`.
