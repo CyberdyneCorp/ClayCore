@@ -133,3 +133,27 @@ TEST_CASE("move topological: it declares the steepness it measured") {
     CHECK(after.sample_lipschitz() > 0.0f);
     CHECK(after.sample_lipschitz() == doctest::Approx(after.measure_sample_lipschitz()));
 }
+
+TEST_CASE("move topological: the source volume's feather survives the rebuild") {
+    // This verb is the only volume operation that REBUILDS its result: `relax`
+    // starts from a copy and `flatten` edits in place, so both carry the
+    // feather without trying, while this one re-samples through a callable that
+    // knows nothing about the volume it came from. Reported by a host whose
+    // user saw a hard box of visible lattice around a move that had otherwise
+    // worked -- the displacement was correct throughout.
+    FieldVolume before = FieldVolume::sample(two_prongs, region(), 0.02f, 0.07f);
+    before.set_feather(0.05f);
+    REQUIRE(before.feather() == doctest::Approx(0.05f));
+
+    TopologicalMoveSettings s;
+    s.anchor = cf3(-0.26f, 0.45f, 0);
+    s.radius = 0.3f;
+    s.displacement = cf3(0, 0.12f, 0);
+    CHECK(field::move_topological(before, s).feather() == doctest::Approx(before.feather()));
+
+    // The drag-that-touches-nothing path re-samples too rather than handing
+    // back the source, so it drops the feather by the same mechanism.
+    TopologicalMoveSettings still = s;
+    still.displacement = cf3(0, 0, 0);
+    CHECK(field::move_topological(before, still).feather() == doctest::Approx(before.feather()));
+}
