@@ -326,7 +326,8 @@ TEST_CASE("tape block: batched grab chains preserve every easing and front gate 
             for (int i = 0; i < 48; ++i)
                 n.deformers.push_back(scene::Deformer::grab(
                     kernel::cf3(0.15f * std::cos(float(i)), 0.12f * std::sin(float(i)), 0.55f),
-                    0.35f, kernel::cf3(0.001f, -0.002f, 0.012f), ease, front));
+                    0.35f, kernel::cf3(0.001f, -0.002f, 0.012f),
+                    static_cast<std::uint8_t>(ease), front));
             layer.sdf->insert(n);
             const auto tape = scene::compile_document(doc);
             const auto want = scalar(tape, xyz);
