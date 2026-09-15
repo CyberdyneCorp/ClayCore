@@ -46,3 +46,25 @@ Three alternating process pairs complete 216 timings against the corrected produ
 | 2 / 48 / 1 | 4.763 | 5.041 |
 
 Fixture IDs 0/1/2 denote sphere, box and 48-Grab sphere; attributes 1 means gradient/color. Most medians improve, but the 48-key Grab attribute case increases slightly. These component results do not prove an across-brush application gain. The same-base live comparison is running with diagnostics enabled for command timeouts.
+
+## Same-base application timing
+
+Ten alternating pairs complete 260 cases across 13 brushes, with identical host code and only the engine sample-reuse increment differing. All paired uploaded byte counts match for begin, continue and end. The quiet-start guard reports no sustained contention, and no command timeout occurs. This successful run does not establish the cause of the earlier remapping-run undo timeout.
+
+| Brush | Begin before / fixed ms | Continue before / fixed ms | Release before / fixed ms |
+|---|---:|---:|---:|
+| mask | 5.868 / 6.162 | 0.033 / 0.031 | 7.521 / 7.841 |
+| crease | 1.060 / 0.920 | 0.014 / 0.014 | 22.935 / 23.525 |
+| clay | 2.377 / 2.026 | 0.018 / 0.018 | 17.410 / 17.125 |
+| inflate | 2.116 / 1.852 | 0.017 / 0.015 | 17.232 / 16.735 |
+| layer | 1.165 / 0.972 | 0.016 / 0.016 | 16.550 / 16.350 |
+| standard | 1.159 / 0.966 | 0.016 / 0.016 | 16.583 / 16.558 |
+| polish | 0.033 / 0.020 | 0.016 / 0.012 | 35.243 / 34.272 |
+| planar | 0.023 / 0.024 | 0.012 / 0.017 | 35.200 / 37.073 |
+| move-topological | 0.024 / 0.019 | 0.012 / 0.013 | 48.834 / 48.872 |
+| move | 0.023 / 0.019 | 3.304 / 2.867 | 51.858 / 44.328 |
+| relax | 74.126 / 68.979 | 0.025 / 0.027 | 71.561 / 67.727 |
+| smooth | 69.764 / 63.928 | 0.025 / 0.024 | 70.885 / 67.232 |
+| snake-hook | 0.027 / 0.025 | 14.893 / 13.311 | 28.910 / 28.000 |
+
+These are fixture medians, not per-run guarantees. Smooth/Relax preparation and Move release improve; other release results are mixed, including a higher Planar median. The 16 ms goal remains unmet. Raw measurements and the summary are retained locally under `/tmp/clay-531-brick-samples-live*`. Platform CI remains pending.

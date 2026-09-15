@@ -55,11 +55,14 @@ comparison improves non-Mask release medians, but still exceeds 16 ms for
 several brushes. See `batch-brick-grid-position-generation` and
 `use-contiguous-edge-welding` for tests, memory measurements and current scope.
 
-The next increment reuses exact shared lattice samples within each ordinary
-brick. Its prototype reduces full-sphere meshing from 24.2 to 19.9 ms without
-attributes, with byte-identical output and a bounded 19,652-byte sample buffer
-per active worker. Production CPU and application verification are in progress;
-see `reuse-brick-lattice-samples`. This does not complete the 16 ms target.
+Exact shared lattice samples are now reused within each ordinary brick.
+Production full-sphere meshing falls from 23.7 to 20.0 ms without attributes,
+with byte-identical output and a bounded 19,652-byte sample buffer per active
+worker. All eleven CPU test suites and focused sanitizer tests pass. Ten
+alternating application pairs measure Smooth/Relax pointer-down medians of
+63.9/69.0 ms and Move release at 44.3 ms; other release changes are mixed.
+See `reuse-brick-lattice-samples` for complete evidence and pending platform
+CI. The 16 ms target across all brushes remains unmet.
 
 ## Regional consolidation follow-up — issue #595
 
