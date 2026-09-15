@@ -1,5 +1,5 @@
 - [x] Add bulk grid-coordinate generation and use it for source fills.
 - [x] Add exact scalar-reference and bounds regressions.
-- [ ] Verify field, prefix-cache and Smooth behavior, including sanitizers and unchanged samples.
+- [x] Verify field, prefix-cache and Smooth behavior, including sanitizers and unchanged samples.
 - [ ] Measure isolated and live preparation performance.
 - [ ] Complete complexity, layering, OpenSpec and platform validation; update PR evidence.
