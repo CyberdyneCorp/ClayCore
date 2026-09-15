@@ -57,9 +57,41 @@ struct PrimHeader {
     // absent-feature checks at 1.6x on a tape that uses none of them.
     bool has_deformers;
     bool is_volume;
+    int grab_count;
 };
 
-PrimHeader decode_prim(const float* pr, CLAY_UINT_T op) {
+// Only a pure grab chain can take this path. Its authored order remains the
+// same for every point; the loop over points moves inside the deformer loop.
+int grab_chain_count(const float* deform) {
+    const int count = CLAY_INT(deform[0]);
+    for (int i = 0; i < count; ++i)
+        if (CLAY_INT(deform[1 + i * CLAY_TAPE_DEFORM_FLOATS]) != kernel::cdeform_grab)
+            return 0;
+    return count;
+}
+
+void apply_grab_block(const float* rec, cfloat3* points, std::size_t count) {
+    const auto centre = cf3(rec[1], rec[2], rec[3]);
+    const auto displacement = cf3(rec[6], rec[7], rec[8]);
+    const float radius = kernel::cmax(rec[4], 1e-6f);
+    const int ease = CLAY_INT(rec[5]);
+    const float length = kernel::clength(displacement);
+    const bool front = rec[9] != 0.0f && !(length < 1e-9f);
+    const auto unit = front ? displacement * (1.0f / length) : cf3(0, 0, 0);
+    const float band = kernel::cmax(rec[4] * 0.5f, 1e-6f);
+    for (std::size_t i = 0; i < count; ++i) {
+        auto& p = points[i];
+        float weight = kernel::cease(ease, kernel::cclamp(
+            1.0f - kernel::clength(p - centre) / radius, 0.0f, 1.0f));
+        if (weight == 0.0f) continue;
+        if (front)
+            weight = weight * kernel::cclamp(
+                kernel::cdot(p - centre, unit) / band * 0.5f + 0.5f, 0.0f, 1.0f);
+        p = p - displacement * weight;
+    }
+}
+
+PrimHeader decode_prim(const float* pr, CLAY_UINT_T op, bool batch_grabs) {
     PrimHeader h;
     h.is_volume = (op == kernel::ctape_volume);
     h.inv.c0 = cf4(pr[0], pr[1], pr[2], 0.0f);
@@ -75,6 +107,8 @@ PrimHeader decode_prim(const float* pr, CLAY_UINT_T op) {
     const float* deform = pr + CLAY_TAPE_PRIM_HEADER + CLAY_TAPE_PRIM_PARAMS +
                           CLAY_TAPE_REPEAT_FLOATS;
     h.has_deformers = CLAY_INT(deform[0]) != 0;
+    h.grab_count = batch_grabs && h.has_deformers && !h.repeat_active ?
+                       grab_chain_count(deform) : 0;
     return h;
 }
 
@@ -215,6 +249,68 @@ struct SlotOf<false> {
 // "no mid-walk snapshot"; a caller asking for the stack without naming an
 // instruction gets it at the end.
 constexpr std::size_t kNoSnapshot = static_cast<std::size_t>(-1);
+
+template <bool WithColour, typename Point>
+void grab_primitive_block(CLAY_UINT_T op, const float* pr, const float* blob,
+                          const PrimHeader& h, const Point& point, std::size_t count,
+                          typename SlotOf<WithColour>::type* out) {
+    static thread_local std::vector<cfloat3> local;
+    if (local.size() < count) local.resize(count);
+    for (std::size_t i = 0; i < count; ++i)
+        local[i] = kernel::cmul_point(h.inv, point(i));
+    const float* deform = pr + CLAY_TAPE_PRIM_HEADER + CLAY_TAPE_PRIM_PARAMS +
+                          CLAY_TAPE_REPEAT_FLOATS + 1;
+    for (int i = 0; i < h.grab_count; ++i)
+        apply_grab_block(deform + i * CLAY_TAPE_DEFORM_FLOATS, local.data(), count);
+    for (std::size_t i = 0; i < count; ++i) {
+        auto color = h.color;
+        const float value = h.is_volume ? kernel::ctape_volume_dist(
+            pr + CLAY_TAPE_PRIM_HEADER, blob, local[i], CLAY_OUTARG(color)) :
+            kernel::ctape_prim_dist(op, pr + CLAY_TAPE_PRIM_HEADER, blob, local[i]);
+        // Grabs add no distance offset. Keep the scalar +0 and scale order.
+        const float distance = (value + 0.0f) * h.scale - h.round;
+        if constexpr (WithColour)
+            out[i] = CTapeValue{distance, color};
+        else
+            out[i] = distance;
+    }
+}
+
+template <bool WithColour, typename Point>
+void primitive_block(CLAY_UINT_T op, const float* pr, const float* blob,
+                     const Point& point, std::size_t n,
+                     typename SlotOf<WithColour>::type* s) {
+    const PrimHeader h = decode_prim(pr, op, n >= 4);
+    if (h.grab_count > 0) {
+        grab_primitive_block<WithColour>(op, pr, blob, h, point, n, s);
+    } else if (!h.repeat_active && !h.has_deformers && !h.is_volume) {
+        for (std::size_t j = 0; j < n; ++j) {
+            const cfloat3 lp = kernel::cmul_point(h.inv, point(j));
+            // `+ 0.0f` is the deformer offset the general path adds.
+            // Kept, not folded: dropping it turns a -0.0f into +0.0f,
+            // a different bit pattern, and the identity test says so.
+            const float d = (kernel::ctape_prim_dist(
+                                 op, pr + CLAY_TAPE_PRIM_HEADER, blob, lp) +
+                             0.0f) *
+                                h.scale -
+                            h.round;
+            if constexpr (WithColour) {
+                s[j].color = h.color;
+                s[j].d = d;
+            } else {
+                s[j] = d;
+            }
+        }
+    } else {
+        for (std::size_t j = 0; j < n; ++j) {
+            const CTapeValue v = prim_at(op, pr, blob, h, point(j));
+            if constexpr (WithColour)
+                s[j] = v;
+            else
+                s[j] = v.d;
+        }
+    }
+}
 
 template <bool WithColour>
 // `levels` is how many stack slots the walk STARTS holding, and `stack_out`
@@ -380,35 +476,7 @@ void walk_blocked(const kernel::CTapeInstr* in, std::size_t ni, const float* par
                 }
             } else {
                 if (top >= static_cast<std::size_t>(CLAY_TAPE_MAX_STACK)) continue;
-                const PrimHeader h = decode_prim(pr, instr.op);  // once per block
-                Slot* s = &stack[top * block];
-                if (!h.repeat_active && !h.has_deformers && !h.is_volume) {
-                    for (std::size_t j = 0; j < n; ++j) {
-                        const cfloat3 lp = kernel::cmul_point(h.inv, point(j));
-                        // `+ 0.0f` is the deformer offset the general path adds.
-                        // Kept, not folded: dropping it turns a -0.0f into +0.0f,
-                        // a different bit pattern, and the identity test says so.
-                        const float d = (kernel::ctape_prim_dist(
-                                             instr.op, pr + CLAY_TAPE_PRIM_HEADER, blob, lp) +
-                                         0.0f) *
-                                            h.scale -
-                                        h.round;
-                        if constexpr (WithColour) {
-                            s[j].color = h.color;
-                            s[j].d = d;
-                        } else {
-                            s[j] = d;
-                        }
-                    }
-                } else {
-                    for (std::size_t j = 0; j < n; ++j) {
-                        const CTapeValue v = prim_at(instr.op, pr, blob, h, point(j));
-                        if constexpr (WithColour)
-                            s[j] = v;
-                        else
-                            s[j] = v.d;
-                    }
-                }
+                primitive_block<WithColour>(instr.op, pr, blob, point, n, &stack[top * block]);
                 ++top;
             }
         }

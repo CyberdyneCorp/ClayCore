@@ -299,3 +299,86 @@ TEST_CASE("tape block: the stack depth is the tape's, not the maximum") {
     CHECK(depth >= 1);
     CHECK(depth <= 2);
 }
+
+TEST_CASE("tape block: batched grab chains preserve every easing and front gate bit for bit") {
+    std::vector<float> xyz;
+    for (int i = 0; i < 137; ++i) {
+        xyz.push_back((i % 7 - 3) * 0.13f);
+        xyz.push_back((i / 7 % 7 - 3) * 0.17f);
+        xyz.push_back(0.45f + (i / 49) * 0.15f);
+    }
+    // The transformed box's edge and corner, including both sides of each
+    // gradient discontinuity: smooth-sphere agreement alone is insufficient.
+    for (float x : {0.5299f, 0.53f, 0.5301f})
+        for (float y : {-0.03f, 0.63f})
+            for (float z : {0.7299f, 0.73f, 0.7301f})
+                xyz.insert(xyz.end(), {x, y, z});
+    for (int ease = 0; ease < 33; ++ease) {
+        for (bool front : {false, true}) {
+            scene::Document doc;
+            auto& layer = doc.add_sdf_layer("grab parity");
+            scene::Node n;
+            n.prim = ease % 2 ? scene::Prim::sphere(0.65f) :
+                               scene::Prim::box(kernel::cf3(0.4f, 0.55f, 0.6f));
+            n.color = kernel::cf3(0.2f, 0.6f, 0.9f);
+            n.xform.position = kernel::cf3(0.05f, -0.03f, 0.01f);
+            n.xform.scale = 1.2f;
+            for (int i = 0; i < 48; ++i)
+                n.deformers.push_back(scene::Deformer::grab(
+                    kernel::cf3(0.15f * std::cos(float(i)), 0.12f * std::sin(float(i)), 0.55f),
+                    0.35f, kernel::cf3(0.001f, -0.002f, 0.012f), ease, front));
+            layer.sdf->insert(n);
+            const auto tape = scene::compile_document(doc);
+            const auto want = scalar(tape, xyz);
+            for (std::size_t size : {std::size_t(3), std::size_t(4), std::size_t(64), std::size_t(512)}) {
+                CAPTURE(ease);
+                CAPTURE(front);
+                CAPTURE(size);
+                const auto got = blocked(tape, xyz, size);
+                CHECK(identical(want.distances, got.distances));
+                CHECK(identical(want.colors, got.colors));
+                CHECK(identical(want.gradients, got.gradients));
+                CHECK(identical(want.distances, blocked_distances(tape, xyz, size)));
+            }
+        }
+    }
+}
+
+TEST_CASE("tape block: grab batches preserve degenerate parameters volumes and mixed chains") {
+    const math::Aabb bounds{kernel::cf3(-1, -1, -1), kernel::cf3(1, 1, 1)};
+    const auto volume = std::make_shared<const field::FieldVolume>(field::FieldVolume::sample_colored(
+        [](kernel::cfloat3 p) { return kernel::clength(p) - 0.6f; },
+        [](kernel::cfloat3 p) { return kernel::cf3(0.5f + p.x * 0.2f, 0.3f, 0.7f); },
+        bounds, 0.1f, 0.3f));
+    for (int variant = 0; variant < 7; ++variant) {
+        scene::Document doc;
+        auto& layer = doc.add_sdf_layer("volume grabs");
+        scene::Node n;
+        n.prim = scene::Prim::volume();
+        n.volume = volume;
+        const auto displacement = variant == 0 ? kernel::cf3(0, 0, 0) :
+            variant == 1 ? kernel::cf3(1e-10f, -1e-10f, 0) : kernel::cf3(0.01f, -0.02f, 0.03f);
+        const float radius = variant == 2 ? 0.0f : variant == 3 ? -0.1f : 0.3f;
+        n.deformers.push_back(scene::Deformer::grab(kernel::cf3(0, 0, 0.6f), radius,
+                                                   displacement, 0, true));
+        if (variant == 5) n.deformers.push_back(scene::Deformer::twist(0.2f));
+        if (variant == 6) n.repeat = scene::Repeat::radial(7, 0.35f);
+        n.deformers.push_back(scene::Deformer::grab(kernel::cf3(0.03f, 0, 0.6f), 0.35f,
+                                                   kernel::cf3(-0.02f, 0.01f, 0), 24, false));
+        layer.sdf->insert(n);
+        std::vector<float> xyz{0, 0, 0.6f, 1e-7f, 0, 0.6f, -0.0f, -0.0f, 0.6f};
+        for (int i = 0; i < 129; ++i) {
+            xyz.push_back((i % 7 - 3) * 0.1f);
+            xyz.push_back((i / 7 % 7 - 3) * 0.1f);
+            xyz.push_back(0.45f + i / 49 * 0.1f);
+        }
+        const auto tape = scene::compile_document(doc);
+        const auto want = scalar(tape, xyz);
+        const auto got = blocked(tape, xyz, 64);
+        CAPTURE(variant);
+        CHECK(identical(want.distances, got.distances));
+        CHECK(identical(want.colors, got.colors));
+        CHECK(identical(want.gradients, got.gradients));
+        CHECK(identical(want.distances, blocked_distances(tape, xyz, 64)));
+    }
+}

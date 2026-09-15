@@ -22,6 +22,16 @@ Last reconciled against `3dcoat_study/MISSING_FEATURES.md` and
 caught five items this file had dropped. Every ClayCore-owned row in their
 catalogue is now represented here or in the deferred list below.
 
+## Stroke latency follow-up — issue #531
+
+CPU evaluation now batches compatible grab chains while retaining exact field
+normals, including hard edges. The measured deep-chain throughput gain is
+3.1–3.7×; the six-frame engine drag improves about 16% on the validation host.
+Mixed chains and repetition retain the general path. This addresses engine work;
+the wider application's 16 ms target still needs a same-device host trace.
+See `batch-grab-chains-without-changing-the-field` for the implementation,
+regressions and measurement scope.
+
 ## Where the engine is (2026-09-06, v0.87.0)
 
 21 capabilities, 205 archived changes, 19 still open. Complete enough that the
