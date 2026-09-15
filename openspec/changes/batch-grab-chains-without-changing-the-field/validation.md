@@ -110,13 +110,31 @@ ASAN_OPTIONS=detect_leaks=1 build/asan-ubsan/tests/clay_unit_tests \
   --source-file='*test_tape_block.cpp,*test_points_batch.cpp,*test_group_resume.cpp,*test_grid_batch.cpp,*test_backend*.cpp'
 ```
 
-## What remains in the wider issue
+## Application findings and remaining scope
 
-The latest host source inspected was ClaySpaceDesktop `origin/main` at `9a7ec9c`,
-which pins ClayCore v0.113.0. It already removes the obsolete whole-document
-settle workaround and defers final work. Its upload/read/split costs and surface
-lifecycle still belong to the host; this patch does not change them. The original
-16 ms wall-clock goal requires a new same-device application trace with this
-engine build. Issue #531 should remain open for that validation; this patch
-addresses the measured engine bottleneck without claiming the full application
-stall is resolved.
+The original common floor was reproduced through the running host's MCP
+measurement path. It forced a whole-surface rebuild even for unchanged tool
+selection: the regression uploaded 10,982,672 bytes before the host fix and
+zero afterward. Measured edits still update geometry, and mask attribute
+refreshes are included in measurement. The correction is in
+CyberdyneCorp/ClaySpaceDesktop#137, alongside faster exact triangle pruning
+and removal of redundant release settlement after complete replacements.
+
+On the same v0.113.0 engine, three alternating host-only comparisons reduced
+median release time from 92.324 to 8.058 ms for Mask, 161.910 to 86.118 ms for
+Move, 185.545 to 112.092 ms for Relax, and 169.388 to 99.610 ms for Smooth.
+Standard retained its required settlement and stayed approximately unchanged
+(78.212 to 79.371 ms). These are host improvements, not engine speedup ratios.
+The host PR records all 13 tools, fixture settings, commands, and limitations.
+
+All 16 Core checks pass at `477f1b23`. The final combined host `e99ace5b` /
+engine `477f1b23` application run passed all 12 native MCP, sculpt latency,
+settlement, and visual brush tests on RTX 5060/Vulkan without adapter skips.
+
+The common measurement floor is corrected, but required whole-surface
+settlement and expensive region operations still exceed 16 ms. Smooth/Relax
+also deliberately prime the full preview field at pointer-down; simply removing
+that host pass would omit the untouched surface from its preview cache.
+Compatible grab batching preserves every warp and does not bound arbitrary
+chain depth or cure accumulated field degradation. Issue #531 remains open;
+these changes do not establish a universal 16 ms application budget.

@@ -76,9 +76,21 @@ ASAN_OPTIONS=detect_leaks=1 build/asan-ubsan/tests/clay_unit_tests --source-file
 This machine needs `LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6` for its
 Conda Python/CTest runtime to load the GCC-built module.
 
-## Remaining validation
+## Final platform and application validation
 
-Platform CI and a fresh host run must cover this additional meshing change.
-The earlier six host tests on an RTX 5060/Vulkan renderer covered the grab-chain
-change at bd451bab; they are not evidence for this later implementation.
-The broader application-level 16 ms goal in #531 remains open.
+All 16 GitHub checks passed at production revision `477f1b23`, including
+Windows MSVC /WX, Linux and macOS CPU builds, Metal parity, ASan/UBSan,
+ThreadSanitizer, Python, and the benchmark regression gate.
+
+ClaySpaceDesktop `e99ace5b` was built against that exact engine revision in
+Release with CPU fields and an RTX 5060 Vulkan renderer. All 12 tests passed
+without adapter skips: native MCP E2E (3), sculpt latency (4), settlement (3),
+and visual brushes (2). This covers both engine changes together with the host
+fixes in CyberdyneCorp/ClaySpaceDesktop#137. The host's committed engine pin
+remains v0.113.0; its PR also contains independent pinned-engine verification.
+
+The broader application-level 16 ms goal in #531 remains open. The companion
+host fixes remove the unconditional measurement rebuild, accelerate exact
+triangle pruning, include deferred mask uploads in measurement, and avoid a
+second release rebuild when synchronization already replaced the full surface.
+Required settlement and expensive region operations remain above budget.
