@@ -17,3 +17,32 @@ The final production library also reproduces all 60 complete reference vectors b
 The first UBSan run caught signed overflow in coordinate indexing at the new extreme-origin fixture: an intermediate sum used a global y coordinate before subtracting the origin. Both the test callback and production lookup now parenthesize each coordinate difference before scaling/adding local offsets. The extreme-origin regression is retained; sanitizer and final CPU verification must be rerun after this correction.
 
 After the index-order correction, ASan/UBSan with leak detection passes all 72 focused cases / 1,448,790 assertions. The initial CPU suite was intentionally interrupted after its first three shards passed because it used the earlier build; a final CPU rebuild and complete rerun are required. Changed marching helpers (`march_cell`, `march_cells`, `record_brick`) each score 6 with assertion macros excluded.
+
+The corrected CPU library again matches all 36,019,240 reference bytes. The combined application build succeeds with Core `264eed46` and the dense-remapping host code. Its preserved binary has SHA-256 `827a40489b1d33083d50adcd801e91e9f7d17b0076ca70f983f585fee48d29a1`; the application vendor checkout is restored to its committed v0.113.0 pin. Combined correctness and same-base application timing remain pending.
+
+## Final CPU verification
+
+All 11 CTest targets pass in 237.99 seconds on the corrected build: 2,774 C++ cases / 16,908,730 assertions and 757 Python tests with one intentional skip. The earlier interrupted suite is not counted. Together with the corrected 72-case sanitizer run, this covers final index arithmetic rather than the superseded implementation.
+
+All 87 enabled combined application cases pass in one isolated-display run (70 library and 17 native/rendered cases), with one informational timing test ignored and no adapter skips.
+
+## Final production component timing
+
+Three alternating process pairs complete 216 timings against the corrected production library. All six complete serialized outputs match the same 60-vector reference exactly. The CPU guard reports no sustained contention.
+
+| Fixture / keys / attributes | Before ms | Production ms |
+|---|---:|---:|
+| 0 / 1043 / 0 | 23.712 | 20.047 |
+| 0 / 1043 / 1 | 27.885 | 22.925 |
+| 0 / 48 / 0 | 4.182 | 3.872 |
+| 0 / 48 / 1 | 4.904 | 4.412 |
+| 1 / 336 / 0 | 8.345 | 6.282 |
+| 1 / 336 / 1 | 9.416 | 8.032 |
+| 1 / 48 / 0 | 3.456 | 3.131 |
+| 1 / 48 / 1 | 3.675 | 3.460 |
+| 2 / 1044 / 0 | 24.647 | 19.078 |
+| 2 / 1044 / 1 | 29.029 | 25.000 |
+| 2 / 48 / 0 | 4.131 | 3.884 |
+| 2 / 48 / 1 | 4.763 | 5.041 |
+
+Fixture IDs 0/1/2 denote sphere, box and 48-Grab sphere; attributes 1 means gradient/color. Most medians improve, but the 48-key Grab attribute case increases slightly. These component results do not prove an across-brush application gain. The same-base live comparison is running with diagnostics enabled for command timeouts.
