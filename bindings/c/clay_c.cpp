@@ -717,6 +717,37 @@ clay_result check_ease(std::int32_t ease) {
     return CLAY_OK;
 }
 
+// Every field of clay_move_params that BOTH move doors mean the same way.
+//
+// IT EXISTS BECAUSE THEY DRIFTED. clay_sdf_move_begin copied radius, ease and
+// front_only and missed gesture_id, while clay_layer_move_surface carried it --
+// so a host that named its gesture got an unnamed drag through the live door,
+// and two separate presses at one anchor folded into one with the first pull
+// lost (#603). A field added to this struct must not be able to reach one door
+// and miss the other, and the only way to guarantee that is to have one place
+// that reads it.
+//
+// `steady` is deliberately NOT here. The one-shot door REFUSES a nonzero value
+// because it keeps nothing between calls to trail from (#532); the live door
+// stores it. That is a real difference between the doors rather than
+// duplication, so it stays at each call site where the reason can be read.
+clay_result read_move_settings(const clay_move_params* params, clay_move_params* out_params,
+                               brush::MoveSettings* out_settings) {
+    if (!params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null move parameters");
+    clay_result r = read_desc(params, kMoveParamsOriginal, out_params);
+    if (r != CLAY_OK) return r;
+    if (!(out_params->radius > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "radius must be > 0");
+    if ((r = check_ease(out_params->ease)) != CLAY_OK) return r;
+    out_settings->radius = out_params->radius;
+    out_settings->ease = static_cast<std::uint8_t>(out_params->ease);
+    out_settings->front_only = out_params->front_only != 0;
+    // Zero-filled by read_desc for a caller compiled against the older struct,
+    // which is exactly "the host did not say" (#533).
+    out_settings->gesture_id = out_params->gesture_id;
+    return CLAY_OK;
+}
+
 // The one argument this boundary cannot check against the caller's memory is
 // a count, and several entry points size a working buffer from one. A count
 // that is not a count — a byte length where an element count belongs, a
@@ -7612,25 +7643,16 @@ clay_result resolve_move(const clay_document* doc, clay_layer_id layer, const fl
                          float* out_radius = nullptr) {
     if (!doc || !centre || !displacement)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document, centre or displacement");
-    if (!params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null move parameters");
     clay_move_params p;
-    clay_result r = read_desc(params, kMoveParamsOriginal, &p);
+    brush::MoveSettings settings;
+    clay_result r = read_move_settings(params, &p, &settings);
     if (r != CLAY_OK) return r;
-    if (!(p.radius > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "radius must be > 0");
-    if ((r = check_ease(p.ease)) != CLAY_OK) return r;
 
     const scene::Layer* l = doc->doc.document.find_layer(layer);
     if (!l) return fail(CLAY_ERROR_NOT_FOUND, "no layer with id " + std::to_string(layer));
     if (l->kind != scene::LayerKind::Sdf || !l->sdf)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "this layer holds no SDF content to move");
 
-    brush::MoveSettings settings;
-    settings.radius = p.radius;
-    settings.ease = static_cast<std::uint8_t>(p.ease);
-    settings.front_only = p.front_only != 0;
-    // Zero-filled by read_desc for a caller compiled against the older struct,
-    // which is exactly "the host did not say" (#533).
-    settings.gesture_id = p.gesture_id;
     // Refused rather than ignored (#532). This entry point applies a whole drag
     // in one call and keeps nothing between calls, so it has no previous
     // position to trail from -- and a control that silently does nothing is
@@ -8331,12 +8353,8 @@ clay_sdf_move_tx* clay_sdf_move_begin(clay_document* doc, clay_layer_id layer,
         return nullptr;
     }
     clay_move_params p;
-    if (read_desc(params, kMoveParamsOriginal, &p) != CLAY_OK) return nullptr;
-    if (!(p.radius > 0.0f)) {
-        fail(CLAY_ERROR_INVALID_ARGUMENT, "radius must be > 0");
-        return nullptr;
-    }
-    if (check_ease(p.ease) != CLAY_OK) return nullptr;
+    brush::MoveSettings settings;
+    if (read_move_settings(params, &p, &settings) != CLAY_OK) return nullptr;
     // THE SAME CEILING EVERY LAZY-MOUSE PATH USES (issue #564). brush::
     // steady_path clamps a stroke's lag to 0.95; this refuses above it, so a
     // host setting 0.99 cannot get 0.95 on a stroke and 0.99 on a drag. One
@@ -8348,18 +8366,6 @@ clay_sdf_move_tx* clay_sdf_move_begin(clay_document* doc, clay_layer_id layer,
     }
     session::SdfSculptPolicy sp;
     if (read_sculpt_policy(policy, &sp) != CLAY_OK) return nullptr;
-
-    brush::MoveSettings settings;
-    settings.radius = p.radius;
-    settings.ease = static_cast<std::uint8_t>(p.ease);
-    settings.front_only = p.front_only != 0;
-    // The live door has to carry this for the same reason the one-shot door
-    // does (#533, #603). Dropped, every drag through here is unnamed, and
-    // `continues_gesture` falls back to bit-equality on centre and radius --
-    // so two SEPARATE presses at the same anchor compare equal, the second
-    // REPLACES the first rather than stacking, and the first pull is lost.
-    // Not a cost regression: a gesture the artist finished is discarded.
-    settings.gesture_id = p.gesture_id;
 
     std::optional<session::SdfMoveTransaction> tx = session::SdfMoveTransaction::begin(
         doc->doc.document, layer, kernel::cf3(centre[0], centre[1], centre[2]), settings, sp,
