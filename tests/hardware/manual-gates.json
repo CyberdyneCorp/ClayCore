@@ -1,31 +1,31 @@
 {
   "_what": "The four hardware gates CI cannot run, and what the project last did about each. tools/release_check.py reads this file and fails a release that cannot say, for every one of them, that it was run or waived since the kernels last changed.",
   "_status": "'run' needs an 'evidence' line naming the hardware and the numbers. 'waived' needs a 'reason'. Both need the 'commit' the statement is about: a gate goes stale when anything in release_check.KERNEL_RELEVANT has changed between that commit and HEAD.",
-  "_history": "Added for #578, where v0.113.0 was tagged with a 16/16 PASS table and none of these four had been run. The parity row asserted 'every backend registered in this build matches CPU scalar' and the build registered cpu and metal, so CUDA and OpenCL passed by being absent.",
+  "_history": "Added for #578, where v0.113.0 was tagged with a 16/16 PASS table and none of these four had been run. The parity row asserted 'every backend registered in this build matches CPU scalar' and the build registered cpu and metal, so CUDA and OpenCL passed by being absent. v0.116.0 is the first release where all four are RUN: vulkan-device had been waived since the file was created for want of a host with real Vulkan silicon, and the fleet acquired one. The waiver was NOT reworded to fit -- its premise was re-checked and had stopped being true.",
   "gates": {
     "cuda-parity": {
       "status": "run",
-      "commit": "e8ca6d5935187443dbb6c0fc8bd66f69c4bcf663",
-      "date": "2026-09-13",
-      "evidence": "RTX 5060 / driver 580.95 / nvcc 12.0, configured -DCLAY_BACKEND_CUDA=ON -DCLAY_BACKEND_OPENCL=ON. 'parity: every registered backend matches the scalar reference' reports 543 assertions cpu-only and 1082 with CUDA (+539, 0 failed). Caveat: PTX JIT to Blackwell only; a cubin for sm_120 needs CUDA >= 12.8 and stays unexercised."
+      "commit": "0c3a392cba28a570fe79da2c622e6a28d97c5330",
+      "date": "2026-09-15",
+      "evidence": "RTX 5060 / driver 580.95.05 / nvcc 12.0.140, fresh worktree, configured -DCLAY_BACKEND_CUDA=ON -DCLAY_BACKEND_OPENCL=ON -DCLAY_BACKEND_VULKAN=ON. 'parity: every registered backend matches the scalar reference' reports 565 assertions cpu-only and 1125 with CUDA (+560, 0 failed), OpenCL and Vulkan hidden (OCL_ICD_VENDORS=/nonexistent, VK_DRIVER_FILES=/nonexistent). Every backend adds the same +560, against +539 at e8ca6d59 -- the corpus grew, so the per-backend DIFFERENCE is the comparable quantity and the totals are not. Caveat: PTX JIT to Blackwell only; a cubin for sm_120 needs CUDA >= 12.8 and stays unexercised."
     },
     "nvcc-build": {
       "status": "run",
-      "commit": "e8ca6d5935187443dbb6c0fc8bd66f69c4bcf663",
-      "date": "2026-09-13",
-      "evidence": "Same build: nvcc 12.0 compiled backends/cuda/clay_kernels.cu and cmake/ClayCudaArch.cmake's auto-detection selected an architecture the RTX 5060 runs. It ran through PTX JIT, so the cubin half of the auto-detection is still unexercised at sm_120."
+      "commit": "0c3a392cba28a570fe79da2c622e6a28d97c5330",
+      "date": "2026-09-15",
+      "evidence": "Same build: nvcc 12.0.140 compiled backends/cuda/clay_kernels.cu; cmake/ClayCudaArch.cmake reported 'GPU arch 120-real is newer than this toolkit; building 90-virtual PTX for the driver to JIT', and the RTX 5060 ran it. Self-proving rather than taken from the status line: the compile line in flags.make carries --generate-code=arch=compute_90,code=[compute_90]. CMAKE_CUDA_ARCHITECTURES:STRING=52 in the cache is enable_language(CUDA)'s toolkit default (CLAY_CUDA_ARCH_TOOLKIT_DEFAULT=52), which ClayCudaArch.cmake overrode by setting CUDA_ARCHITECTURES on the TARGET rather than the variable; it never compiled the kernels. It ran through PTX JIT, so the cubin half of the auto-detection is still unexercised at sm_120."
     },
     "opencl-device": {
       "status": "run",
-      "commit": "e8ca6d5935187443dbb6c0fc8bd66f69c4bcf663",
-      "date": "2026-09-13",
-      "evidence": "Same RTX 5060 host, NVIDIA ICD: 1621 assertions with CUDA and OpenCL both registered, +539 over the CUDA-only run, 0 failed. Controlled with OCL_ICD_VENDORS=/nonexistent; CUDA_VISIBLE_DEVICES= is NOT a control here, because it hides NVIDIA's OpenCL platform too."
+      "commit": "0c3a392cba28a570fe79da2c622e6a28d97c5330",
+      "date": "2026-09-15",
+      "evidence": "Same RTX 5060 host, NVIDIA ICD: 1685 assertions with CUDA and OpenCL registered, +560 over the CUDA-only run, 0 failed. Controlled with OCL_ICD_VENDORS=/nonexistent, verified BEFORE the runs to hide only what it claims (clGetPlatformIDs 1 platform -> 0, /nonexistent -> -1001). CUDA_VISIBLE_DEVICES= is NOT a control here, because it hides NVIDIA's OpenCL platform too -- it also returns -1001."
     },
     "vulkan-device": {
-      "status": "waived",
-      "commit": "e8ca6d5935187443dbb6c0fc8bd66f69c4bcf663",
-      "date": "2026-09-13",
-      "reason": "No host in the fleet runs the Vulkan backend on real silicon. The vulkan-plumbing CI job covers shader compilation, registration, dispatch and readback on lavapipe, which executes on the CPU: plumbing, not arithmetic. Shipping without arithmetic coverage on a real Vulkan device, stated rather than implied."
+      "status": "run",
+      "commit": "0c3a392cba28a570fe79da2c622e6a28d97c5330",
+      "date": "2026-09-15",
+      "evidence": "NO LONGER WAIVED. Real silicon, two devices, each pinned with VK_DRIVER_FILES/VK_ICD_FILENAMES to one ICD: NVIDIA GeForce RTX 5060 (driver 580.95.05, Vulkan 1.4.312) and Intel UHD Graphics 770 (Mesa 25.2.8, Vulkan 1.4.318). Each reports 1125 assertions with Vulkan registered, +560 over cpu-only, 0 failed; all four backends together 2245 = 565 + 3x560, 0 failed. SPIR-V built with glslangValidator (glslc absent), loader headers 1.3.275. lavapipe/llvmpipe was present on the host and EXCLUDED by the pinned ICD, so neither run's arithmetic was on the CPU -- which is the whole reason this gate existed as a waiver until now."
     }
   }
 }

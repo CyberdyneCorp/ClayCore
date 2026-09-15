@@ -801,6 +801,64 @@ forward-refuse).
    bit-identical -- a global clamp broke 15 assertions in fixtures that produce
    degenerate triangles on purpose to exercise the welder.
 
+   **0.114.0 through 0.116.0 are additive, and one of them fixes a refusal.**
+   0.114.0 lets CUDA and OpenCL serve a gradients-only `eval_points` (#580):
+   both tested `!q.points_xyz || !out.distances` where CPU, Metal and Vulkan
+   accept a request for gradients or colours without distances, so a host asking
+   those two backends for normals alone got `InvalidInput` and no explanation.
+   IS a release a caller observes: code branching on that error stops taking the
+   error branch. Found while auditing why the checklist's `parity` row passed
+   vacuously for a backend absent from the build (#578, #583). 0.115.0 adds
+   `clay_mesh_decimate_report` (#584), which is how a host learns its export is
+   one of the ratios #575 pinches; `clay_mesh_weld` forgets a stale report rather
+   than letting it describe triangles it no longer matches (#587). 0.116.0
+   appends `rotate_to_azimuth` and the three `velocity_*` fields to
+   `clay_stroke_preset` (#586) — the two engine controls #530's corrected count
+   found missing, four scalars, not the nine the issue's title claimed. All three
+   are APPENDS under `struct_size`; the symbol diff against v0.113.0 is one
+   addition and zero removals.
+
+   **AND TWO CHANGES THAT A CALLER OBSERVES WITHOUT CALLING ANYTHING NEW.**
+
+   **`clay_region_merge.whole_layer` means something narrower** (#601 — issue
+   #595). It was "the closure reached every visible root"; it is now "every
+   visible root fully absorbed", and reads **false for a retained-volume patch
+   even on a one-root layer**, because that root's unaffected samples survive
+   outside the bake. A host branching on it to detect a degenerate region merge
+   now takes the other branch on documents it used to take the first on. The
+   change behind it: `plan_region_merge` grew its closure by every absorbed
+   root's full influence bound, and a previous bake is a root like any other, so
+   re-baking a patch re-absorbed the whole of the previous one and the closure
+   could only widen. With the requested box held IDENTICAL, eight subtools with
+   disjoint bounds: bake 1 took 1 root over width 1.72 in 80 ms, bake 8 took the
+   whole layer over 13.68 in 2127 ms, bake 12 reached 16.88 in 4098 ms — the
+   twelfth bake costing fifty times the first for the same request. A volume is a
+   sampled field, so unlike a parametric Subtract it can be partially
+   re-absorbed; the planner did not distinguish them. Now 3396.9 ms -> 33.6 ms at
+   gesture 48 on that fixture (Linux, GCC 13, Release CPU), scene roots 1 -> 8.
+   The local path is deliberately narrow — isolated visible hard-Add volume,
+   identity placement, unit scale axes, grab-only deformers with zero easing
+   outside support — and everything else keeps the conservative whole-root path.
+
+   **`clay_sdf_move_begin` now honours `gesture_id`** (#604 — issue #603). It
+   copied radius, ease, front_only and steady and not that one, while
+   `clay_layer_move_surface` carried it, so every drag through the live door was
+   unnamed however the host labelled it. That loses work rather than costing
+   time: unnamed, `continues_gesture` compares centre and radius bit for bit, so
+   two SEPARATE presses at one anchor compare equal and `moved_chain` REPLACES
+   the first drag's grab instead of stacking. Two 0.25 pulls reached 1.1460
+   instead of 1.2310, chain 0->1->1 rather than 0->1->2, measured by the
+   reporting host. IS a release a caller observes, and in the awkward direction:
+   a host that was compensating for the fold will now get two stacked grabs.
+   Both doors read `clay_move_params` through one function as of #606, so a
+   field added to that struct reaches both or neither — the class fix, after the
+   instance.
+
+   **0.116.0 was reached by three separate bumps and tagged once.** 0.114.0,
+   0.115.0 and 0.116.0 each merged with their feature; v0.116.0 is the tag cut at
+   whatever the line had reached, exactly as v0.113.0 covered 0.104.0-0.113.0.
+   No minor in this range was skipped and none was ever tagged on its own.
+
    **0.113.0 stops decimation breaking a manifold it was given** (#567).
    meshoptimizer chooses its own collapses and does not apply the link condition
    collapse_edge refuses on, so clay_document_mesh -- documented as the
