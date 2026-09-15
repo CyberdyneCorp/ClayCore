@@ -11,3 +11,9 @@ The changed materialization function has cognitive complexity 35 under clang-tid
 ## Production component timing
 
 Three alternating process pairs run the actual production library against the previous library across six full/partial/repeated/incremental fixtures, seven repeats each (252 timings). All six serialized comparisons match the complete 143,293,584-byte reference output and callback observations. Excluding warm-up, full initial materialization improves 6.600→5.117 ms; filling the full region after a smaller initial region improves 8.864→8.161 ms. Small partial-region medians improve by about 0.005 ms, which is not a substantial latency claim. The quiet-start guard reports no sustained CPU contention. This uses a deterministic sample callback and isolates materialization; application timing remains pending. CSV, summary and source are in `/tmp/clay-531-adopt-source-block/`.
+
+## Completed application comparison
+
+The all-brush run completes 260 cases across ten alternating process pairs. The initial run was interrupted by sustained CPU contention after four complete pairs (126 cases total); its incomplete 22-case pair is excluded. The remaining six pairs complete without sustained contention or command timeouts. Every paired begin/continue/end upload count matches.
+
+Smooth preparation improves 63.383→60.725 ms. Relax preparation is slightly higher, 70.746→71.243 ms, and its release changes 64.980→64.336 ms. Smooth release is approximately unchanged at 66.734→66.827 ms. Other brush changes are mixed and are not attributed directly to this materialization-only change. These are fixture medians, not per-run guarantees; the summary also records empirical p90, maxima and counts above16ms. Eight release medians and Smooth/Relax preparation still exceed16ms. The goal remains open. Complete rows and summary are `/tmp/clay-531-adoption-live-{complete,summary}.json`.

@@ -69,8 +69,10 @@ of allocating a second complete payload. The allocation regression falls from
 2,008,560 to 1,008,372 requested bytes while preserving callback observations
 and every sample bit. All eleven CPU suites and 88 sanitizer cases pass.
 All 90 combined application cases also pass. A quiet component comparison
-reduces initial materialization from 6.60 to 5.12 ms; application timing remains
-in progress. See `adopt-initial-source-sample-storage`.
+reduces initial materialization from 6.60 to 5.12 ms. Ten application pairs
+measure Smooth preparation at 60.7 ms, while Relax remains around71 ms and
+eight release medians exceed16ms. See `adopt-initial-source-sample-storage`
+for complete comparisons and pending platform CI.
 
 ## Regional consolidation follow-up — issue #595
 
