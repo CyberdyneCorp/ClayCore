@@ -1,7 +1,8 @@
 # Brush latency and coverage — what we have, what it costs, and what has to get faster
 
-[07](07-brushes-and-features.md) says what every brush *does*. This says what
-each one **costs on a real iPad**, which of them fit an interactive frame, how
+[07](07-brushes-and-features.md) says what every brush *does*, and
+[10](10-what-a-gate-covers.md) says how to tell whether a gate covers what it
+claims. This says what each one **costs on a real iPad**, which of them fit an interactive frame, how
 much faster the rest have to get, and whether each is covered by a test and a
 committed render.
 
