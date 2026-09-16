@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 116
+#define CLAY_ABI_MINOR 117
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -5113,6 +5113,26 @@ typedef struct clay_brush_params {
      * older caller's stamp lands exactly where it always did. The mask is
      * borrowed for the duration of the call and must outlive it. */
     const clay_mask* mask;
+    /* HOW the mask is read, appended at ABI 0.117.0 (issue #609).
+     *
+     * At 0 -- the default, and what a caller passing the older struct_size
+     * gets -- the mask is a DIMMER: the effective weight is scaled by
+     * (1 - mask) and the dither spends what is left as coverage. Exact at the
+     * ends, probabilistic between them, so a cell at mask 0.5 is written half
+     * the time and a mask painted with a falloff is mostly "in between". A
+     * freeze then leaks through its own skirt -- measured at 25 cells written
+     * at mask >= 0.5 on one solid stroke across a six-cell ramp.
+     *
+     * Above 0 it is a STENCIL: a cell at or above this value is refused
+     * outright, and a cell below it is written AS THOUGH UNMASKED. That second
+     * half is not a detail -- the threshold REPLACES the scaling rather than
+     * putting a floor under it. Keeping the scaling below the cutoff would
+     * leave a dithered band the threshold does not cover, which is the speckle
+     * a stencil exists to remove. If you want attenuation, leave this at 0.
+     *
+     * REFUSED outside [0, 1] rather than clamped: a clamp would quietly answer
+     * a different question than the one you asked. */
+    float mask_threshold;
 } clay_brush_params;
 
 /* A standalone grid, owned by the caller. voxel_size is world units per cell

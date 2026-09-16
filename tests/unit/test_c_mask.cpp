@@ -1,6 +1,9 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <cstddef>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include "clay.h"
@@ -58,6 +61,7 @@ voxel::BrushParams engine_brush(const clay_brush_params& b, const voxel::MaskFie
     p.falloff = static_cast<voxel::BrushFalloff>(b.falloff);
     p.strength = b.strength;
     p.seed = b.seed;
+    p.mask_threshold = b.mask_threshold;
     p.mask = mask;
     return p;
 }
@@ -290,4 +294,151 @@ TEST_CASE("c mask: invalid arguments are rejected") {
     b.struct_size = 4;  // below the original layout
     CGridOwned g;
     CHECK(clay_voxel_erase_brush(g.grid, cell, &b) == CLAY_ERROR_INVALID_ARGUMENT);
+}
+
+TEST_CASE("c mask: a threshold refuses a cell instead of dithering it") {
+    // Issue #609, reported by a host. A mask gates an edit by scaling the
+    // dither's weight -- `weight *= 1 - mask` -- which is exact at the ends and
+    // probabilistic everywhere between. A cell at mask 0.5 is written half the
+    // time, and a mask painted with a falloff is mostly "in between", so a
+    // freeze leaks through its own SKIRT rather than through its middle.
+    //
+    // Measured before the fix on a slab with a six-cell ramp: 25 cells at
+    // mask >= 0.5 erased by one solid stroke. A fully masked cell was never at
+    // risk; the skirt was the whole of it.
+    //
+    // The host cannot fix this from outside: MaskField exposes per-point
+    // sampling and no bulk cell read, so binarising a mask per stroke means
+    // sampling every footprint cell and rebuilding a second mask per dab.
+    CMask c;
+    voxel::MaskField engine(0.1f);
+    // A RAMP, not a step: the defect lives where the mask is neither 0 nor 1.
+    for (int x = -8; x <= 8; ++x) {
+        const float t = std::clamp((static_cast<float>(x) + 4.0f) / 8.0f, 0.0f, 1.0f);
+        if (t <= 0.0f) continue;
+        for (int y = -4; y <= 4; ++y)
+            for (int z = -4; z <= 4; ++z) {
+                std::int32_t cell[3] = {x, y, z};
+                REQUIRE(clay_mask_set(c.mask, cell, t) == CLAY_OK);
+                engine.set({x, y, z}, t);
+            }
+    }
+
+    const auto erase_with = [&](float threshold) {
+        CGridOwned cg;
+        std::int32_t index = 0;
+        REQUIRE(clay_voxel_palette_add(cg.grid, kWhite, &index) == CLAY_OK);
+        fill_block(cg.grid, -8, 8, index);
+        clay_brush_params b =
+            brush(14, CLAY_BRUSH_SHAPE_SPHERE, CLAY_BRUSH_FALLOFF_CONSTANT, 1.0f, 0, c.mask);
+        b.mask_threshold = threshold;
+        std::int32_t centre[3] = {0, 0, 0};
+        REQUIRE(clay_voxel_erase_brush(cg.grid, centre, &b) == CLAY_OK);
+        // Leakage is counted over a FIXED band -- cells the mask calls at least
+        // half frozen -- so the dimmer and the stencil are judged on the same
+        // set. Counting "at or above the threshold" would make the threshold
+        // define its own exam, and at threshold 0 that degenerates to the
+        // fully masked cells, which were never the defect.
+        int leaked = 0;
+        for (int x = -8; x <= 8; ++x) {
+            const float t = std::clamp((static_cast<float>(x) + 4.0f) / 8.0f, 0.0f, 1.0f);
+            if (t < 0.5f) continue;
+            for (int y = -4; y <= 4; ++y)
+                for (int z = -4; z <= 4; ++z) {
+                    std::int32_t cell[3] = {x, y, z};
+                    std::int32_t at = -1;
+                    REQUIRE(clay_voxel_get(cg.grid, cell, &at) == CLAY_OK);
+                    if (at == 0) ++leaked;
+                }
+        }
+        return leaked;
+    };
+
+    // The default is a dimmer and the skirt leaks. Asserted rather than
+    // described, so this test fails if the dimmer is ever quietly replaced --
+    // and so the two lines below are known to be measuring something.
+    const int dimmer = erase_with(0.0f);
+    CAPTURE(dimmer);
+    CHECK(dimmer > 0);
+
+    // A threshold makes it a stencil: nothing in the band is written.
+    CHECK(erase_with(0.5f) == 0);
+    // ...and a lower threshold refuses a superset, so still nothing.
+    CHECK(erase_with(0.25f) == 0);
+}
+
+TEST_CASE("c mask: the threshold default is the behaviour that shipped") {
+    // The field is APPENDED, so a caller passing the older struct_size must get
+    // exactly what it got before the field existed -- not merely something
+    // similar. Compared cell by cell against the engine driven with a
+    // default-constructed BrushParams, which cannot see the new field at all.
+    CMask c;
+    voxel::MaskField engine(0.1f);
+    for (int x = -8; x <= 8; ++x) {
+        const float t = std::clamp((static_cast<float>(x) + 4.0f) / 8.0f, 0.0f, 1.0f);
+        if (t <= 0.0f) continue;
+        for (int y = -4; y <= 4; ++y)
+            for (int z = -4; z <= 4; ++z) {
+                std::int32_t cell[3] = {x, y, z};
+                REQUIRE(clay_mask_set(c.mask, cell, t) == CLAY_OK);
+                engine.set({x, y, z}, t);
+            }
+    }
+
+    CGridOwned cg;
+    std::int32_t index = 0;
+    REQUIRE(clay_voxel_palette_add(cg.grid, kWhite, &index) == CLAY_OK);
+    fill_block(cg.grid, -8, 8, index);
+    voxel::VoxelGrid eg(0.1f);
+    const std::uint8_t eidx = eg.palette_add(kernel::cf3(1, 1, 1));
+    eg.fill_box({-8, -8, -8}, {8, 8, 8}, eidx);
+
+    clay_brush_params b =
+        brush(14, CLAY_BRUSH_SHAPE_SPHERE, CLAY_BRUSH_FALLOFF_SMOOTH, 0.65f, 7, c.mask);
+    // A caller from before the field existed: the older size, and the field
+    // never written.
+    b.struct_size = static_cast<std::uint32_t>(offsetof(clay_brush_params, mask_threshold));
+    std::int32_t centre[3] = {0, 0, 0};
+    REQUIRE(clay_voxel_erase_brush(cg.grid, centre, &b) == CLAY_OK);
+
+    voxel::BrushParams p;  // default-constructed: threshold 0
+    p.size = 14;
+    p.shape = voxel::BrushShape::Sphere;
+    p.falloff = voxel::BrushFalloff::Smooth;
+    p.strength = 0.65f;
+    p.seed = 7;
+    p.mask = &engine;
+    eg.erase_brush({0, 0, 0}, p);
+
+    for (int x = -8; x <= 8; ++x)
+        for (int y = -4; y <= 4; ++y)
+            for (int z = -4; z <= 4; ++z) {
+                std::int32_t cell[3] = {x, y, z};
+                std::int32_t at = -1;
+                REQUIRE(clay_voxel_get(cg.grid, cell, &at) == CLAY_OK);
+                CAPTURE(x); CAPTURE(y); CAPTURE(z);
+                REQUIRE(static_cast<std::uint8_t>(at) == eg.get({x, y, z}));
+            }
+}
+
+TEST_CASE("c mask: a threshold outside [0, 1] is refused, not clamped") {
+    // Clamping would quietly answer a different question than the caller asked.
+    CMask c;
+    CGridOwned cg;
+    std::int32_t index = 0;
+    REQUIRE(clay_voxel_palette_add(cg.grid, kWhite, &index) == CLAY_OK);
+    fill_block(cg.grid, -4, 4, index);
+    std::int32_t centre[3] = {0, 0, 0};
+    for (const float bad : {-0.1f, 1.5f, std::numeric_limits<float>::quiet_NaN()}) {
+        clay_brush_params b =
+            brush(6, CLAY_BRUSH_SHAPE_SPHERE, CLAY_BRUSH_FALLOFF_CONSTANT, 1.0f, 0, c.mask);
+        b.mask_threshold = bad;
+        CAPTURE(bad);
+        CHECK(clay_voxel_erase_brush(cg.grid, centre, &b) == CLAY_ERROR_INVALID_ARGUMENT);
+    }
+    // ...and the grid is untouched.
+    std::int32_t cell[3] = {0, 0, 0};
+    std::int32_t at = -1;
+    REQUIRE(clay_voxel_get(cg.grid, cell, &at) == CLAY_OK);
+    CHECK(at == index);
 }

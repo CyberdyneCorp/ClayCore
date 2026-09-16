@@ -962,11 +962,17 @@ clay_result read_brush(const clay_brush_params* src, voxel::BrushParams* out) {
                     "unknown brush falloff: " + std::to_string(b.falloff));
     if (!(b.strength > 0.0f))  // also rejects NaN
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "brush strength must be > 0");
+    // Zero-filled by read_desc for a caller compiled against the older struct,
+    // which is exactly the dimmer behaviour it already has (#609).
+    if (!(b.mask_threshold >= 0.0f && b.mask_threshold <= 1.0f))  // also rejects NaN
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "brush mask_threshold must be in [0, 1]");
     out->size = b.size;
     out->shape = static_cast<voxel::BrushShape>(b.shape);
     out->falloff = static_cast<voxel::BrushFalloff>(b.falloff);
     out->strength = b.strength;
     out->seed = b.seed;
+    out->mask_threshold = b.mask_threshold;
     out->mask = nullptr;
     if (b.mask) {
         voxel::MaskField* m = nullptr;
