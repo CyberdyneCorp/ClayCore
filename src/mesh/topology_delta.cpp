@@ -267,10 +267,21 @@ void put_face(std::vector<std::uint8_t>& out, const DynamicFace& f) {
 // Bytes per entry, which the decoder needs BEFORE it allocates anything: a
 // count larger than the buffer could hold is a malformed or hostile record, and
 // sizing from it is how a reader gets asked for a gigabyte.
-constexpr std::size_t kVertexBytes = 8 + 2 + 4 * (3 + 3 + 3 + 1 + 2 + 1) * 2;
-constexpr std::size_t kHalfEdgeBytes = 8 + 2 + 4 * (2 * 5 + 2) * 2;
-constexpr std::size_t kEdgeBytes = 8 + 2 + 4 * (2 + 1) * 2;
-constexpr std::size_t kFaceBytes = 8 + 2 + 4 * (2 + 3 + 1) * 2;
+//
+// An entry is TWO handles (16 bytes), two flags, and the element twice. These
+// constants used to count one handle, so they were 8 bytes short per entry --
+// harmless for a valid record, and a bound looser than it said for a hostile
+// one. `encoded_size` is now computed from them, and a test holds that equal to
+// `encode().size()`, so they cannot drift from the writer again.
+constexpr std::size_t kEntryPrefixBytes = 2 * 8 + 2;
+constexpr std::size_t kVertexBytes = kEntryPrefixBytes + 2 * (4 * (3 + 3 + 3 + 1) + 8 + 4);
+constexpr std::size_t kHalfEdgeBytes = kEntryPrefixBytes + 2 * (5 * 8 + 4 * 2);
+constexpr std::size_t kEdgeBytes = kEntryPrefixBytes + 2 * (8 + 4);
+constexpr std::size_t kFaceBytes = kEntryPrefixBytes + 2 * (8 + 4 * 3 + 4);
+constexpr std::size_t kDeltaHeaderBytes = 4 + 2 + 2 + 4 * 4;
+static_assert(kVertexBytes == 122 && kHalfEdgeBytes == 114 && kEdgeBytes == 42 &&
+                  kFaceBytes == 66 && kDeltaHeaderBytes == 24,
+              "the documented per-entry sizes in topology_delta.h and clay.h");
 
 struct Reader {
     const std::uint8_t* data;
@@ -355,8 +366,14 @@ struct Reader {
 
 }  // namespace
 
+std::size_t TopologyDelta::encoded_size() const {
+    return kDeltaHeaderBytes + vertices_.size() * kVertexBytes + halfedges_.size() * kHalfEdgeBytes +
+           edges_.size() * kEdgeBytes + faces_.size() * kFaceBytes;
+}
+
 std::vector<std::uint8_t> TopologyDelta::encode() const {
     std::vector<std::uint8_t> out;
+    out.reserve(encoded_size());
     put_u32(out, kMagic);
     out.push_back(static_cast<std::uint8_t>(kVersion));
     out.push_back(static_cast<std::uint8_t>(kVersion >> 8));
@@ -485,6 +502,112 @@ bool TopologyDelta::decode(const std::uint8_t* data, std::size_t size, TopologyD
     if (!r.ok) return false;
     *out = std::move(built);
     return true;
+}
+
+// -- RecordedGesture ------------------------------------------------------------
+
+bool RecordedGesture::can_capture_on(const DynamicSurface& surface) const {
+    return delta_.empty() || after_ == surface.mark();
+}
+
+void RecordedGesture::begin_capture(const DynamicSurface& surface) {
+    if (delta_.empty()) before_ = surface.mark();
+}
+
+void RecordedGesture::end_capture(const DynamicSurface& surface) {
+    after_ = surface.mark();
+    // A stamp that recorded nothing leaves the record unbound in effect: it
+    // binds again, at whatever state the next capture finds.
+    if (delta_.empty()) before_ = after_;
+}
+
+ReplayResult RecordedGesture::guard(const DynamicSurface& surface,
+                                    ReplayDirection direction) const {
+    // An empty record writes nothing whichever state it is handed, so it cannot
+    // corrupt one.
+    if (delta_.empty()) return ReplayResult::NoOp;
+    const bool revert = direction == ReplayDirection::Revert;
+    const SurfaceMark target = revert ? before_ : after_;
+    const SurfaceMark source = revert ? after_ : before_;
+    // TARGET FIRST: a record whose gesture changed nothing has both ends equal,
+    // and a replay of it must be the no-op rather than a rewrite that advances
+    // every revision.
+    if (surface.mark() == target) return ReplayResult::NoOp;
+    if (surface.mark() != source) return ReplayResult::Mismatch;
+    return ReplayResult::Applied;
+}
+
+void RecordedGesture::clear() {
+    delta_.clear();
+    before_ = SurfaceMark{};
+    after_ = SurfaceMark{};
+}
+
+namespace {
+
+constexpr std::uint32_t kGestureMagic = 0x52474443u;  // 'CDGR'
+constexpr std::uint16_t kGestureVersion = 1;
+
+void put_u64(std::vector<std::uint8_t>& out, std::uint64_t v) {
+    put_u32(out, static_cast<std::uint32_t>(v));
+    put_u32(out, static_cast<std::uint32_t>(v >> 32));
+}
+
+std::uint16_t read_u16(const std::uint8_t* p) {
+    return static_cast<std::uint16_t>(p[0] | (static_cast<std::uint16_t>(p[1]) << 8));
+}
+
+std::uint32_t read_u32(const std::uint8_t* p) {
+    return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) |
+           (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24);
+}
+
+std::uint64_t read_u64(const std::uint8_t* p) {
+    return static_cast<std::uint64_t>(read_u32(p)) |
+           (static_cast<std::uint64_t>(read_u32(p + 4)) << 32);
+}
+
+}  // namespace
+
+std::vector<std::uint8_t> RecordedGesture::encode() const {
+    std::vector<std::uint8_t> out;
+    out.reserve(encoded_size());
+    put_u32(out, kGestureMagic);
+    out.push_back(static_cast<std::uint8_t>(kGestureVersion));
+    out.push_back(static_cast<std::uint8_t>(kGestureVersion >> 8));
+    out.push_back(0);
+    out.push_back(0);
+    put_u64(out, after_.lineage);
+    put_u64(out, before_.epoch);
+    put_u64(out, after_.epoch);
+    const std::vector<std::uint8_t> inner = delta_.encode();
+    out.insert(out.end(), inner.begin(), inner.end());
+    return out;
+}
+
+GestureDecode RecordedGesture::decode(const std::uint8_t* data, std::size_t size,
+                                      RecordedGesture* out) {
+    if (!data || !out || size < kHeaderBytes + 8) return GestureDecode::Malformed;
+    if (read_u32(data) != kGestureMagic) return GestureDecode::Malformed;
+    if (read_u16(data + 4) > kGestureVersion) return GestureDecode::ForwardVersion;
+    if (read_u16(data + 4) != kGestureVersion) return GestureDecode::Malformed;
+    // The inner version is read here rather than inferred from a failed
+    // decode, because "newer" and "damaged" are different answers to a host:
+    // one says upgrade, the other says the bytes are gone.
+    const std::uint8_t* inner = data + kHeaderBytes;
+    if (read_u32(inner) != kMagic) return GestureDecode::Malformed;
+    if (read_u16(inner + 4) > kVersion) return GestureDecode::ForwardVersion;
+
+    RecordedGesture built;
+    if (!TopologyDelta::decode(inner, size - kHeaderBytes, &built.delta_))
+        return GestureDecode::Malformed;
+    // Exactly sized: trailing bytes are a buffer that is not one record.
+    if (built.delta_.encoded_size() != size - kHeaderBytes) return GestureDecode::Malformed;
+    const std::uint64_t lineage = read_u64(data + 8);
+    built.before_ = SurfaceMark{lineage, read_u64(data + 16)};
+    built.after_ = SurfaceMark{lineage, read_u64(data + 24)};
+    *out = std::move(built);
+    return GestureDecode::Ok;
 }
 
 }  // namespace mesh

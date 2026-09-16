@@ -32,6 +32,9 @@ using mesh::DynamicSculptor;
 using mesh::DynamicSurface;
 using mesh::DynamicTopologySettings;
 using mesh::Mesh;
+using mesh::RecordedGesture;
+using mesh::ReplayDirection;
+using mesh::ReplayResult;
 using mesh::TopologyDelta;
 
 namespace {
@@ -168,6 +171,55 @@ bool same_export(const Mesh& a, const Mesh& b) {
     return normal_differences(a, b) == 0;
 }
 
+// Every live face is in exactly one chunk, and the index holds nothing else.
+struct IndexCoverage {
+    std::size_t live_missing = 0;
+    std::size_t dead_indexed = 0;
+};
+
+[[maybe_unused]] IndexCoverage index_coverage(const DynamicSculptor& sculptor) {
+    IndexCoverage out;
+    const DynamicSurface& s = sculptor.surface();
+    const mesh::DynamicBvh& bvh = sculptor.bvh();
+    s.faces().for_each_live([&](mesh::FaceId f, const mesh::DynamicFace&) {
+        if (bvh.leaf_of(f) == mesh::DynamicBvh::kNoLeaf) ++out.live_missing;
+    });
+    for (std::size_t i = 0; i < bvh.leaf_count(); ++i) {
+        const mesh::SurfaceLeaf* leaf = bvh.leaf(static_cast<std::uint32_t>(i));
+        if (!leaf) continue;
+        for (mesh::FaceId f : leaf->faces)
+            if (!s.live(f)) ++out.dead_indexed;
+    }
+    return out;
+}
+
+std::size_t run_recorded(DynamicSculptor& sculptor, const StrokeShape& shape,
+                         RecordedGesture* record) {
+    const DynamicTopologySettings topo = stroke_topology(shape);
+    std::size_t ops = 0;
+    for (int i = 0; i < shape.stamps; ++i) {
+        const auto r = sculptor.stamp_recorded(mesh::MeshBrush::Draw, stroke_brush(shape, i), topo,
+                                               {}, *record);
+        REQUIRE(r.has_value());
+        ops += r->remesh.total();
+    }
+    return ops;
+}
+
+struct Revisions {
+    std::uint64_t topology, geometry, attributes;
+    bool operator==(const Revisions& o) const {
+        return topology == o.topology && geometry == o.geometry && attributes == o.attributes;
+    }
+};
+
+Revisions revisions_of(const DynamicSurface& s) {
+    return {s.topology_revision(), s.geometry_revision(), s.attribute_revision()};
+}
+
+const StrokeShape kNorth{16, 0.35f, 0.3f, 8.0f, cf3(0, 0, 1)};
+const StrokeShape kSouth{16, 0.35f, 0.3f, 8.0f, cf3(0, 0, -1)};
+
 }  // namespace
 
 TEST_CASE("dynamic replay: a stroke with relax on leaves an exact record, normals included") {
@@ -240,4 +292,275 @@ TEST_CASE("dynamic replay: eight strokes undo in reverse and redo in order, norm
     CHECK(undo_wrong == 0);
     CHECK(redo_wrong == 0);
     CHECK(mesh::validate_dynamic_surface(*surface).ok);
+}
+
+TEST_CASE("dynamic replay: the same stroke after an undo repeats the first, index in step") {
+    auto surface = DynamicSurface::from_mesh(cube_sphere(24, 1.0f));
+    REQUIRE(surface.has_value());
+    const DynamicSurface pristine = *surface;
+    DynamicSculptor sculptor(*surface);
+    const Mesh before = surface->to_mesh();
+
+    RecordedGesture record;
+    REQUIRE(run_recorded(sculptor, kNorth, &record) > 0);
+    const Mesh first = surface->to_mesh();
+
+    REQUIRE(sculptor.replay(record, ReplayDirection::Revert) == ReplayResult::Applied);
+    CHECK(same_export(surface->to_mesh(), before));
+    CHECK(mesh::validate_dynamic_surface(*surface).ok);
+    // EVERY LIVE FACE IS REACHABLE, and nothing dead is indexed. Without the
+    // reindex this read 200 missing on this fixture.
+    IndexCoverage cov = index_coverage(sculptor);
+    CHECK(cov.live_missing == 0);
+    CHECK(cov.dead_indexed == 0);
+
+    // The same stroke again, on the SAME sculptor, lands where a fresh one does.
+    RecordedGesture again;
+    run_recorded(sculptor, kNorth, &again);
+    DynamicSurface reference = pristine;
+    DynamicSculptor fresh(reference);
+    RecordedGesture unused;
+    run_recorded(fresh, kNorth, &unused);
+    CHECK(same_export(reference.to_mesh(), first));
+    CHECK(same_export(surface->to_mesh(), first));
+    cov = index_coverage(sculptor);
+    CHECK(cov.live_missing == 0);
+    CHECK(cov.dead_indexed == 0);
+
+    // Redo of the second record after undoing it, for the apply direction.
+    REQUIRE(sculptor.replay(again, ReplayDirection::Revert) == ReplayResult::Applied);
+    REQUIRE(sculptor.replay(again, ReplayDirection::Apply) == ReplayResult::Applied);
+    CHECK(same_export(surface->to_mesh(), first));
+    cov = index_coverage(sculptor);
+    CHECK(cov.live_missing == 0);
+    CHECK(cov.dead_indexed == 0);
+}
+
+TEST_CASE("dynamic replay: an undo marks the chunks it changed dirty") {
+    auto surface = DynamicSurface::from_mesh(cube_sphere(24, 1.0f));
+    REQUIRE(surface.has_value());
+    DynamicSculptor sculptor(*surface);
+    RecordedGesture record;
+    run_recorded(sculptor, kNorth, &record);
+    sculptor.bvh().clear_dirty();
+    REQUIRE(sculptor.bvh().dirty_leaves().empty());
+    REQUIRE(sculptor.replay(record, ReplayDirection::Revert) == ReplayResult::Applied);
+    // Local: some chunks, not all of them.
+    CHECK_FALSE(sculptor.bvh().dirty_leaves().empty());
+    CHECK(sculptor.bvh().dirty_leaves().size() < sculptor.bvh().leaf_count());
+}
+
+TEST_CASE("dynamic replay: a replay out of order is refused and changes nothing") {
+    // Two strokes on OPPOSITE hemispheres. They do not overlap in space, and
+    // they still share slots: the later reuses what the earlier freed.
+    auto surface = DynamicSurface::from_mesh(cube_sphere(24, 1.0f));
+    REQUIRE(surface.has_value());
+    DynamicSculptor sculptor(*surface);
+    const Mesh start = surface->to_mesh();
+    RecordedGesture a, b;
+    run_recorded(sculptor, kNorth, &a);
+    const Mesh after_a = surface->to_mesh();
+    run_recorded(sculptor, kSouth, &b);
+    const Mesh after_b = surface->to_mesh();
+
+    const Revisions revs = revisions_of(*surface);
+    CHECK(sculptor.replay(a, ReplayDirection::Revert) == ReplayResult::Mismatch);
+    CHECK(sculptor.replay(b, ReplayDirection::Apply) == ReplayResult::NoOp);
+    CHECK(sculptor.replay(a, ReplayDirection::Apply) == ReplayResult::Mismatch);
+    CHECK(revisions_of(*surface) == revs);
+    CHECK(same_export(surface->to_mesh(), after_b));
+    CHECK(mesh::validate_dynamic_surface(*surface).ok);
+
+    // Last in, first out works.
+    REQUIRE(sculptor.replay(b, ReplayDirection::Revert) == ReplayResult::Applied);
+    CHECK(same_export(surface->to_mesh(), after_a));
+    REQUIRE(sculptor.replay(a, ReplayDirection::Revert) == ReplayResult::Applied);
+    CHECK(same_export(surface->to_mesh(), start));
+    CHECK(mesh::validate_dynamic_surface(*surface).ok);
+    REQUIRE(sculptor.replay(a, ReplayDirection::Apply) == ReplayResult::Applied);
+    REQUIRE(sculptor.replay(b, ReplayDirection::Apply) == ReplayResult::Applied);
+    CHECK(same_export(surface->to_mesh(), after_b));
+    const IndexCoverage cov = index_coverage(sculptor);
+    CHECK(cov.live_missing == 0);
+    CHECK(cov.dead_indexed == 0);
+}
+
+TEST_CASE("dynamic replay: an unrecorded edit in between is refused, capture included") {
+    auto surface = DynamicSurface::from_mesh(cube_sphere(24, 1.0f));
+    REQUIRE(surface.has_value());
+    DynamicSculptor sculptor(*surface);
+    RecordedGesture record;
+    run_recorded(sculptor, kNorth, &record);
+
+    // A stamp with no record.
+    const DynamicTopologySettings topo = stroke_topology(kSouth);
+    REQUIRE(sculptor.stamp(mesh::MeshBrush::Draw, stroke_brush(kSouth, 0), topo, {}, nullptr)
+                .changed());
+    const Mesh edited = surface->to_mesh();
+    const Revisions revs = revisions_of(*surface);
+    CHECK(sculptor.replay(record, ReplayDirection::Revert) == ReplayResult::Mismatch);
+    CHECK(revisions_of(*surface) == revs);
+    CHECK(same_export(surface->to_mesh(), edited));
+
+    // Capturing more into the record now would join two unrelated histories.
+    CHECK_FALSE(sculptor
+                    .stamp_recorded(mesh::MeshBrush::Draw, stroke_brush(kNorth, 0), topo, {},
+                                    record)
+                    .has_value());
+    CHECK(revisions_of(*surface) == revs);
+
+    // A record from ANOTHER surface in the same state is refused too.
+    auto other = DynamicSurface::from_mesh(cube_sphere(24, 1.0f));
+    REQUIRE(other.has_value());
+    DynamicSculptor other_sculptor(*other);
+    CHECK(other_sculptor.replay(record, ReplayDirection::Revert) == ReplayResult::Mismatch);
+    CHECK_FALSE(other_sculptor
+                    .stamp_recorded(mesh::MeshBrush::Draw, stroke_brush(kNorth, 0), topo, {},
+                                    record)
+                    .has_value());
+
+    // A cleared record binds afresh.
+    record.clear();
+    CHECK(sculptor
+              .stamp_recorded(mesh::MeshBrush::Draw, stroke_brush(kNorth, 0), topo, {}, record)
+              .has_value());
+}
+
+TEST_CASE("dynamic replay: an undone stroke's epochs are never handed out again") {
+    // THE MARK MUST NOT BE A COUNTER THAT REWINDS WITH THE UNDO. Revert A puts
+    // the surface back at A's `before`; a different stroke B from there takes
+    // as many bumps as A did. Were the epoch `before + bumps`, B would end on
+    // A's `after`, and reverting A would "match" a surface that is B.
+    auto surface = DynamicSurface::from_mesh(cube_sphere(24, 1.0f));
+    REQUIRE(surface.has_value());
+    DynamicSculptor sculptor(*surface);
+    // Deformation only, so each stamp is exactly one bump and the two strokes
+    // below take the same number: the case a rewinding counter gets wrong.
+    DynamicTopologySettings topo = stroke_topology(kNorth);
+    topo.enabled = false;
+    auto stroke = [&](float strength, RecordedGesture* record) {
+        for (int i = 0; i < kNorth.stamps; ++i) {
+            mesh::MeshBrushSettings brush = stroke_brush(kNorth, i);
+            brush.strength = strength;
+            REQUIRE(sculptor.stamp_recorded(mesh::MeshBrush::Draw, brush, topo, {}, *record)
+                        ->moved_vertices > 0);
+        }
+    };
+    RecordedGesture a;
+    stroke(0.3f, &a);
+    REQUIRE(sculptor.replay(a, ReplayDirection::Revert) == ReplayResult::Applied);
+
+    // B: as many stamps and bumps as A, and a different surface.
+    RecordedGesture b;
+    stroke(0.1f, &b);
+    CHECK(surface->mark() != a.after());
+    CHECK(sculptor.replay(a, ReplayDirection::Revert) == ReplayResult::Mismatch);
+    CHECK(sculptor.replay(a, ReplayDirection::Apply) == ReplayResult::Mismatch);
+    // And the two records still compose last in, first out.
+    REQUIRE(sculptor.replay(b, ReplayDirection::Revert) == ReplayResult::Applied);
+    REQUIRE(sculptor.replay(a, ReplayDirection::Apply) == ReplayResult::Applied);
+    CHECK(mesh::validate_dynamic_surface(*surface).ok);
+}
+
+TEST_CASE("dynamic replay: reverting twice is reverting once") {
+    auto surface = DynamicSurface::from_mesh(cube_sphere(16, 1.0f));
+    REQUIRE(surface.has_value());
+    DynamicSculptor sculptor(*surface);
+    RecordedGesture record;
+    run_recorded(sculptor, kNorth, &record);
+    REQUIRE(sculptor.replay(record, ReplayDirection::Revert) == ReplayResult::Applied);
+    const Revisions revs = revisions_of(*surface);
+    sculptor.bvh().clear_dirty();
+    CHECK(sculptor.replay(record, ReplayDirection::Revert) == ReplayResult::NoOp);
+    CHECK(revisions_of(*surface) == revs);
+    CHECK(sculptor.bvh().dirty_leaves().empty());
+
+    // A stamp that changed nothing advances no epoch, so it does not break the
+    // history either.
+    mesh::MeshBrushSettings miss = stroke_brush(kNorth, 0);
+    miss.center = cf3(0, 0, 5);
+    const mesh::SurfaceMark mark = surface->mark();
+    CHECK_FALSE(sculptor.stamp(mesh::MeshBrush::Draw, miss, stroke_topology(kNorth), {}, nullptr)
+                    .changed());
+    CHECK(surface->mark() == mark);
+    CHECK(sculptor.replay(record, ReplayDirection::Apply) == ReplayResult::Applied);
+
+    // An empty record replays as nothing, bound or not.
+    RecordedGesture empty;
+    CHECK(sculptor.replay(empty, ReplayDirection::Revert) == ReplayResult::NoOp);
+}
+
+TEST_CASE("dynamic replay: a record spills to bytes and replays identically") {
+    auto surface = DynamicSurface::from_mesh(cube_sphere(16, 1.0f));
+    REQUIRE(surface.has_value());
+    DynamicSculptor sculptor(*surface);
+    const Mesh start = surface->to_mesh();
+    RecordedGesture record;
+    run_recorded(sculptor, kNorth, &record);
+    const Mesh stroked = surface->to_mesh();
+
+    // THE BYTE COST IS A COUNT: exact, and the documented formula.
+    const TopologyDelta& d = record.delta();
+    const std::vector<std::uint8_t> bytes = record.encode();
+    CHECK(bytes.size() == record.encoded_size());
+    CHECK(d.encode().size() == d.encoded_size());
+    CHECK(bytes.size() == 56 + 122 * d.vertex_count() + 114 * d.halfedge_count() +
+                              42 * d.edge_count() + 66 * d.face_count());
+    // Resident is a floor, not an exact figure: every entry in memory, before
+    // any capacity slack or slot map.
+    const std::size_t entries_in_memory =
+        d.vertex_count() * sizeof(d.vertex_entries().front()) +
+        d.halfedge_count() * sizeof(d.halfedge_entries().front()) +
+        d.edge_count() * sizeof(d.edge_entries().front()) +
+        d.face_count() * sizeof(d.face_entries().front());
+    CHECK(record.bytes() >= entries_in_memory);
+
+    RecordedGesture loaded;
+    REQUIRE(RecordedGesture::decode(bytes.data(), bytes.size(), &loaded) ==
+            mesh::GestureDecode::Ok);
+    CHECK(loaded.before() == record.before());
+    CHECK(loaded.after() == record.after());
+    CHECK(loaded.encode() == bytes);
+    REQUIRE(sculptor.replay(loaded, ReplayDirection::Revert) == ReplayResult::Applied);
+    CHECK(same_export(surface->to_mesh(), start));
+    REQUIRE(sculptor.replay(record, ReplayDirection::Apply) == ReplayResult::Applied);
+    CHECK(same_export(surface->to_mesh(), stroked));
+
+    // Refusals: truncated, trailing, wrong magic, and newer versions of either
+    // layer -- which are told apart from damage.
+    RecordedGesture untouched;
+    CHECK(RecordedGesture::decode(bytes.data(), bytes.size() - 1, &untouched) ==
+          mesh::GestureDecode::Malformed);
+    CHECK(RecordedGesture::decode(bytes.data(), 20, &untouched) ==
+          mesh::GestureDecode::Malformed);
+    std::vector<std::uint8_t> longer = bytes;
+    longer.push_back(0);
+    CHECK(RecordedGesture::decode(longer.data(), longer.size(), &untouched) ==
+          mesh::GestureDecode::Malformed);
+    std::vector<std::uint8_t> bad = bytes;
+    bad[0] ^= 0xff;
+    CHECK(RecordedGesture::decode(bad.data(), bad.size(), &untouched) ==
+          mesh::GestureDecode::Malformed);
+    std::vector<std::uint8_t> newer = bytes;
+    newer[4] = 2;
+    CHECK(RecordedGesture::decode(newer.data(), newer.size(), &untouched) ==
+          mesh::GestureDecode::ForwardVersion);
+    std::vector<std::uint8_t> newer_inner = bytes;
+    newer_inner[RecordedGesture::kHeaderBytes + 4] = 2;
+    CHECK(RecordedGesture::decode(newer_inner.data(), newer_inner.size(), &untouched) ==
+          mesh::GestureDecode::ForwardVersion);
+    // A hostile count is refused before anything is sized from it.
+    std::vector<std::uint8_t> hostile = bytes;
+    hostile[RecordedGesture::kHeaderBytes + 8] = 0xff;
+    hostile[RecordedGesture::kHeaderBytes + 11] = 0x7f;
+    CHECK(RecordedGesture::decode(hostile.data(), hostile.size(), &untouched) ==
+          mesh::GestureDecode::Malformed);
+    CHECK(untouched.empty());
+
+    // A surface decoded from bytes is a new lineage: no record replays onto it.
+    const std::vector<std::uint8_t> surface_bytes = surface->encode();
+    DynamicSurface reloaded;
+    REQUIRE(DynamicSurface::decode(surface_bytes.data(), surface_bytes.size(), &reloaded));
+    DynamicSculptor reloaded_sculptor(reloaded);
+    CHECK(reloaded_sculptor.replay(record, ReplayDirection::Revert) == ReplayResult::Mismatch);
 }

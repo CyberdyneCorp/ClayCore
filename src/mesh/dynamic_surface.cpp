@@ -1,8 +1,11 @@
 #include "clay/mesh/dynamic_surface.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
+#include <random>
 #include <unordered_map>
 
 namespace clay {
@@ -52,7 +55,42 @@ CellKey cell_of(kernel::cfloat3 p, float eps) {
                    static_cast<std::int64_t>(std::floor(p.z * inv))};
 }
 
+std::uint64_t splitmix64(std::uint64_t x) {
+    x += 0x9E3779B97F4A7C15ull;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+    return x ^ (x >> 31);
+}
+
+// Once per process. `random_device` alone is allowed to be deterministic on
+// some standard libraries, so the clock is mixed in: the requirement is only
+// that two processes are overwhelmingly unlikely to draw the same lineage.
+std::uint64_t process_seed() {
+    static const std::uint64_t seed = [] {
+        std::random_device rd;
+        const std::uint64_t entropy = (static_cast<std::uint64_t>(rd()) << 32) ^ rd();
+        const auto now = static_cast<std::uint64_t>(
+            std::chrono::high_resolution_clock::now().time_since_epoch().count());
+        return splitmix64(entropy ^ splitmix64(now));
+    }();
+    return seed;
+}
+
 }  // namespace
+
+SurfaceMark SurfaceMark::fresh() {
+    static std::atomic<std::uint64_t> counter{0};
+    SurfaceMark out;
+    out.lineage = splitmix64(process_seed() ^ counter.fetch_add(1, std::memory_order_relaxed));
+    if (out.lineage == 0) out.lineage = 1;  // zero is "no surface" in a record
+    out.epoch = next_epoch();
+    return out;
+}
+
+std::uint64_t SurfaceMark::next_epoch() {
+    static std::atomic<std::uint64_t> counter{1};
+    return counter.fetch_add(1, std::memory_order_relaxed);
+}
 
 // -- traversal ----------------------------------------------------------------
 

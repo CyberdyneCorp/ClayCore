@@ -20,6 +20,7 @@
 // declines is declined for a reason rather than left silently partial.
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include "clay/field/relax.h"  // MaskGate
@@ -86,6 +87,52 @@ class DynamicSculptor {
     DynamicStampResult stamp(MeshBrush verb, const MeshBrushSettings& brush,
                              const DynamicTopologySettings& topology,
                              const field::MaskGate& gate = {}, TopologyDelta* record = nullptr);
+
+    // The same stamp, captured into a REPLAYABLE record: the delta plus the
+    // surface marks it runs between (see `RecordedGesture`). Returns nullopt,
+    // having stamped nothing, when the record is non-empty and the surface is
+    // no longer where the record left it -- another surface, or an unrecorded
+    // stamp or a replay in between.
+    //
+    // A separate name rather than an overload of `stamp`: `stamp(..., nullptr)`
+    // is spelled at every existing call site, and a second pointer overload
+    // would make each of them ambiguous.
+    std::optional<DynamicStampResult> stamp_recorded(MeshBrush verb,
+                                                     const MeshBrushSettings& brush,
+                                                     const DynamicTopologySettings& topology,
+                                                     const field::MaskGate& gate,
+                                                     RecordedGesture& record);
+
+    // UNDO AND REDO THROUGH THE SCULPTOR, because the sculptor owns the index
+    // and the dirty-chunk stream that have to follow the surface.
+    //
+    // `TopologyDelta::revert` on the surface alone is not enough: it restores
+    // the pools and tells the index nothing, so faces the stroke deleted come
+    // back as live faces in no chunk, faces it created stay in their chunks as
+    // dead entries, and no chunk is marked dirty. Measured on a 49,152-face
+    // cube-sphere: 2,638 live faces missing from the index after one revert,
+    // and the same stroke stamped again produced a different surface.
+    //
+    // So a replay is, in order and writing nothing before the first passes:
+    //   1. the GUARD -- the surface mark against the record's ends. At the
+    //      target: `NoOp`. At neither end: `Mismatch`.
+    //   2. the RESTORE -- every recorded face slot leaves the index, then the
+    //      delta runs unchanged and the mark is set to the target.
+    //   3. the REINDEX -- every recorded face live at the target is inserted,
+    //      which marks its chunk topology-dirty and refits its ancestors, and
+    //      any other face around a vertex that moved is refitted.
+    //
+    // COST follows the record, not the surface: 0.106 / 0.295 / 2.067 ms of
+    // index work at 49k / 197k / 786k faces on the proposal's fixture, against
+    // 39 / 189 / 896 ms for `rebuild_index`, which is not needed afterwards.
+    // Calling it anyway is correct and CLEARS the dirty set and renumbers the
+    // chunks, so a host doing so re-uploads everything.
+    //
+    // NOT PROMISED: that the partition matches the one before the stroke (a
+    // re-insert places a face by centroid, so a chunk may split and the chunk
+    // count may grow), or that the pools shrink (dead slots stay; a pool never
+    // compacts, because compacting renumbers the handles records are keyed on).
+    ReplayResult replay(const RecordedGesture& record, ReplayDirection direction);
 
     // Where this sculptor publishes the peaks only it can see — the topology
     // operations one stamp ran, and the adaptive surface's workset. Borrowed
@@ -195,6 +242,10 @@ class DynamicSculptor {
     // AND by a path budget, which is what keeps a brush on the upper lip from
     // dragging the chin through a closed mouth.
     void geodesic_region(kernel::cfloat3 centre, float radius, VertexId seed);
+    // The replay's second and third halves; see `replay`.
+    void unindex_recorded_faces(const TopologyDelta& delta);
+    void reindex_recorded_faces(const TopologyDelta& delta, bool to_before);
+    void refit_around_moved_vertices(const TopologyDelta& delta, bool to_before);
     void euclidean_region(kernel::cfloat3 centre, float radius);
 
     DynamicSurface& surface_;
