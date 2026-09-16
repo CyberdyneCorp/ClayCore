@@ -1,6 +1,7 @@
 ## Context
 
-`ccombine_relief` evaluates `a - k * w(b)` with
+`ccombine_relief` evaluates `a - k * w(b)` (and `ccombine_incise` the same
+with `-k`, in the same branch) with
 `w = smoothstep(1 - clamp(b / W, 0, 1))` and `b` the region's rounded field
 (`include/clay/kernel/tape.h`, `ctape_combine_dist`). It is a function of the
 accumulated value `a` at the sample point and of the region, which is why it
@@ -39,7 +40,7 @@ Distance to draw_ref, as a fraction of `k`, at the standard mapping:
 |---|---|---|---|---|
 | Relief (engine) | 0.017 | 0.077 / 0.204 | 0.027 | 0.568 / 1.091 |
 | warp `a(p - k w N)` (model) | 0.000 | 0.000 / 0.000 | 0.000 | 0.000 / 0.000 |
-| first order `a - k w (grad a . N)` (model) | 0.002 | 0.012 / 0.043 | 0.004 | 0.129 / 0.733 |
+| first order `a - k w (n . N)`, `n` the normalized gradient (model) | 0.002 | 0.012 / 0.043 | 0.004 | 0.129 / 0.733 |
 | `move_surface`, smoothstep ease, mesh profile (engine) | — | — | — | identical to the warp model with that profile |
 
 Stroke cost, 24-item blockout:
@@ -81,8 +82,10 @@ conclusion for grab — one deformation per stroke, never per dab.
 
 Relief stays the SDF Inflate and is documented as such. Standard on an SDF is
 Relief with a measured, stated error that grows with the spread of normals
-under the stamp: under 0.08k mean on surfaces smooth at the brush's scale, the
-whole amplitude on a feature narrower than the stamp.
+under the stamp: 0.02-0.10k mean on the sphere, saddle and bowl at the standard
+reach (k = 0.05 and 0.15), about 0.57k mean on the saddle and bowl once region,
+rounding and amplitude are all doubled, and the whole amplitude on a feature
+narrower than the stamp.
 
 ## Alternatives recorded for a later proposal
 

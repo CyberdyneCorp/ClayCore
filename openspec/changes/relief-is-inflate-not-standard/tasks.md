@@ -2,15 +2,18 @@
 
 - [ ] 1.1 Add `relief: each point moves along its own normal, which is Inflate`
       to `tests/unit/test_relief.cpp`: a fin 0.1 thick under one relief stamp
-      at `k = rounding = radius = 0.15` gains `k` of half-thickness below its
-      top (within 2e-3) and `k` of height, and a point `v + k*w*n(v)` on each
+      at `k = rounding = radius = 0.15` gains `k` of half-thickness at
+      y = 0.4, where the weight is full (within 2e-3) and `k` of height, and a point `v + k*w*n(v)` on each
       face lies on the displaced surface.
 - [ ] 1.2 In the same test, the shared-direction reference `v + k*w*N` on the
       fin's faces lies at least `0.5k` from the relief surface — the assertion
       that separates the two frames.
 - [ ] 1.3 Mutate before trusting it: run the 1.1 thickness assertion against
       the same fin under `move_surface(c, k*N, reach, smoothstep)` (the draw
-      frame) and confirm it fails; record the numbers.
+      frame) and confirm it fails; record the numbers. Review probe, same
+      fin: relief half-thickness at y = 0.4 goes 0.05 -> 0.20 and the top
+      0.50 -> 0.65; `move_surface` leaves the half-thickness at 0.05 and
+      lifts the top to 0.6225, so the assertion can fail.
 
 ## 2. Correct the mapping
 
