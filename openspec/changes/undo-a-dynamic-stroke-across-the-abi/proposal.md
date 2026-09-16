@@ -187,6 +187,61 @@ therefore `to_mesh` plus `validate`, not `serialize`.
   `History::undo`. No ABI caller can reach that path. It is recorded in
   `design.md` as a follow-up.
 
+## What building it found
+
+- **The capture could not be a `stamp` overload.** Every existing call site
+  spells `stamp(..., nullptr)` for the record, and a second pointer overload
+  makes each of those calls ambiguous. It is `DynamicSculptor::stamp_recorded`,
+  which returns `std::optional` and gives nullopt, having stamped nothing, when
+  the capture guard refuses.
+- **A per-surface epoch counter would have been unsound, so the epoch comes
+  from a process-wide counter.** A counter that restarts from the restored
+  epoch after an undo hands the undone stroke's epochs out again. The next
+  stamp then lands on the undone record's `after` mark, and that record would
+  "match" a surface it no longer describes. Epochs are therefore drawn from a
+  process-wide counter that never rewinds; `set_mark` is the only way back to
+  an old one. A test checks this: mutating `bump_*` to `epoch + 1` fails
+  `an undone stroke's epochs are never handed out again`.
+- **The decoder's per-entry byte constants were 8 bytes short.** They counted
+  one handle where every entry carries two (122 / 114 / 42 / 66, not 114 / 106 /
+  34 / 58). A valid record was unaffected, but the pre-allocation bound against
+  a hostile count was looser than stated. `encoded_size()` is now computed from
+  those constants, a `static_assert` pins them to the documented widths, and the
+  C test holds `encoded_bytes` equal to what serialize writes.
+- **The relax fix did not grow the record.** The expected growth did not show
+  up: with the fix and without it, the stroke from `test_dyntopo.py` recorded the
+  same 4,410 V / 25,880 H / 12,652 E / 8,531 F entries (4,582,826 encoded bytes)
+  on a 34,655-face sphere, and the same 15,379 / 91,084 / 45,013 / 30,227
+  (16,145,398) on 138,162 faces. The vertices the relax pass moves sit around
+  remesh operations whose faces and corners were already noted. The fix changes
+  the values recorded, not which elements are recorded.
+- **The audit (task 3.2) found no writer that skips a bump.** Every writer of
+  the four pools bumps a revision after its last write, with no return in
+  between: split / collapse / flip in `topology_ops.cpp`, the relax pass,
+  `write_positions`, `write_colors`, and `TopologyDelta::revert` / `apply`.
+  `clay_dynamic_sculptor_trim` compacts only the chunk arena, never the pools.
+  No C ABI or pyclay entry point writes the pools directly.
+- **A second sculptor over the same surface is not kept in step.** This is not
+  new: a stamp through one sculptor already leaves the other's index stale. The
+  header now says so beside the replay calls.
+- **Mutation checks, each run against a freshly rebuilt binary:**
+  - reverting `remesh_local.cpp` to `origin/main` fails the normals assertions
+    in both new test files;
+  - dropping the erase and re-insert steps, or only the erase before the
+    restore, fails the chunk-stream, repeat-stroke and index-coverage cases;
+  - dropping the replay guard fails every refusal case, and `validate` fails
+    after the out-of-order revert;
+  - dropping the capture guard fails the capture-refusal cases.
+- **Cognitive complexity** (clang-tidy): `replay` 4, `reindex_recorded_faces` 8,
+  `refit_around_moved_vertices` 14, `RecordedGesture::decode` 9, `guard` 5,
+  `clay_dynamic_sculptor_stamp_recorded` 10, `read_dynamic_topology` 11.
+  `relax_region` is 39, down from 45 on `origin/main`. It was already above the
+  target and is not made worse.
+- **Swift:** the new checks pass when `smoke.swift` is built against the
+  cpu-only `libclaycore.a` (432 of 433; the one failure is the Metal-backend
+  registration check, which a cpu-only library cannot pass). The xcframework
+  run was not repeated.
+
 ## Impact
 
 - `bindings/c/clay.h`, `bindings/c/clay_c.cpp`: 9 new entry points, 1 new struct
@@ -198,8 +253,8 @@ therefore `to_mesh` plus `validate`, not `serialize`.
   encoding around the unchanged `CTDL` bytes), and a const view of the face and
   vertex entries for index maintenance.
 - `include/clay/mesh/dynamic_sculpt.h`, `src/mesh/dynamic_sculpt.cpp`:
-  `DynamicSculptor::replay(const RecordedGesture&, direction)` and a
-  `stamp` overload that captures into a `RecordedGesture`.
+  `DynamicSculptor::replay(const RecordedGesture&, direction)` and
+  `DynamicSculptor::stamp_recorded`, which captures into a `RecordedGesture`.
 - `src/mesh/remesh_local.cpp`: the relax pass notes and syncs its normals.
 - `bindings/python/pyclay_module.cpp`, `tools/check_binding_parity.py`
   (`TopologyDelta` -> `clay_dynamic_delta_`), `tests/swift/smoke.swift`.
