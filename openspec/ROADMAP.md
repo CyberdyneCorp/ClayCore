@@ -119,7 +119,10 @@ bricks. On a 13³ grid this removes 27.7% of source evaluations while preserving
 sample bits and volume bounds. The one-item engine initialization probe improves
 10.68→8.96 ms; full CPU, 104 sanitizer and 93 enabled combined desktop cases pass. See
 [reuse-source-grid-samples](changes/reuse-source-grid-samples/validation.md)
-for measurement scope and the remaining application timing.
+for measurement scope. The current-main performance-core comparison improves
+Smooth preparation 61.19→57.67 ms; Relax preparation and other action changes
+remain mixed. All 260 paired application cases preserve upload counts, and the
+16 ms target stays open.
 
 ## Regional consolidation follow-up — issue #595
 
