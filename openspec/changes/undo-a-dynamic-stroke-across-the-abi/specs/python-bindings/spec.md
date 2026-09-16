@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Adaptive-surface undo from Python
-The module SHALL expose a `TopologyDelta` class with `revert(sculptor)`, `apply(sculptor)`, `clear()`, a `stats` mapping carrying the same fields as the C statistics struct, `serialize()` and a static `deserialize(bytes)`. `DynamicSculptor.stamp` SHALL accept a `record` argument that accumulates into a `TopologyDelta`. The binding parity gate SHALL map the class to the `clay_dynamic_delta_` calls and `record` to `clay_dynamic_sculptor_stamp_recorded`.
+The module SHALL expose a `TopologyDelta` class with `revert(sculptor)`, `apply(sculptor)`, `clear()`, a `stats` mapping carrying the same fields as the C statistics struct, `serialize()` and a static `deserialize(bytes)`. `DynamicSculptor.stamp` SHALL accept a `record` argument that accumulates into a `TopologyDelta`. The binding parity gate SHALL map the class to the `clay_dynamic_delta_` calls. The gate reads members, not keyword arguments, so the pairing of `record` with `clay_dynamic_sculptor_stamp_recorded` SHALL be held by tests on both sides instead.
 
 A replay the engine refuses SHALL raise, and SHALL leave the surface unchanged.
 

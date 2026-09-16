@@ -418,6 +418,11 @@ TEST_CASE("c dynamic delta: the byte cost is a count") {
           CLAY_ERROR_BUFFER_TOO_SMALL);
     CHECK(cap == s.encoded_bytes);
     CHECK(tiny[0] == 0xAB);
+    // No count to report into is a malformed call, not a size answer.
+    CHECK(clay_dynamic_delta_serialize(record.delta, tiny.data(), nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_dynamic_delta_serialize(record.delta, nullptr, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
 
     // The stats struct is negotiated by size, and a short one is refused.
     clay_dynamic_delta_stats shorter{};

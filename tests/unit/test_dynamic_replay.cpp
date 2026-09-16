@@ -557,6 +557,21 @@ TEST_CASE("dynamic replay: a record spills to bytes and replays identically") {
           mesh::GestureDecode::Malformed);
     CHECK(untouched.empty());
 
+    // THE LINEAGE HALF OF THE GUARD. Epochs are unique within a process, so every
+    // in-process refusal above is decided by the epoch alone; the lineage is what
+    // stops a record from matching a surface in ANOTHER process whose epoch
+    // counter happens to reach the same values. A record identical in every byte
+    // but its lineage must not replay onto the surface it was captured on.
+    std::vector<std::uint8_t> foreign = bytes;
+    foreign[8] ^= 0x01;  // u64 lineage at offset 8
+    RecordedGesture stranger;
+    REQUIRE(RecordedGesture::decode(foreign.data(), foreign.size(), &stranger) ==
+            mesh::GestureDecode::Ok);
+    CHECK(stranger.before().epoch == record.before().epoch);
+    CHECK(stranger.after().epoch == record.after().epoch);
+    CHECK(sculptor.replay(stranger, ReplayDirection::Revert) == ReplayResult::Mismatch);
+    CHECK(same_export(surface->to_mesh(), stroked));
+
     // A surface decoded from bytes is a new lineage: no record replays onto it.
     const std::vector<std::uint8_t> surface_bytes = surface->encode();
     DynamicSurface reloaded;

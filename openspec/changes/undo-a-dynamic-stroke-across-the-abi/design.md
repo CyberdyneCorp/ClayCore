@@ -192,7 +192,9 @@ The fix follows the same pattern `DynamicSculptor::write_positions` already uses
 3. Write the positions and refresh the normals.
 4. Sync the faces and vertices.
 
-The record grows by the one-ring of the relaxed vertices. The regression test is
+The record was expected to grow by the one-ring of the relaxed vertices.
+Measured, it did not: the entry counts and encoded bytes were identical with and
+without the fix (see the proposal's "What building it found"). The regression test is
 the proposal's measurement turned into an assertion: with `relax_after_remesh`
 on, the record's `after` equals the live surface immediately after capture, and
 undo and redo match `to_mesh` normals exactly.

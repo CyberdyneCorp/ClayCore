@@ -1633,8 +1633,12 @@ pass had never recorded the normals it recomputes. Every record captured with
 `relax_after_remesh` on (the default) held stale normals: redo got up to 2,785
 vertex normals wrong, and undo got up to 2,910 wrong across eight strokes.
 Positions and indices were exact, which is all the existing history tests
-compared. The pass now records the faces around each vertex it moves, and their
-corners, so records grow by that one-ring.
+compared. The pass now notes the faces around each vertex it moves, and their
+corners, before the write and syncs them after the normals are recomputed. That
+changed the values a record holds, not how many entries it has: the same stroke
+recorded identical entry counts and encoded bytes with and without the fix, on
+34,655 and on 138,162 faces, because those faces were already noted by the
+remesh operations around them.
 
 What the calls do not promise, and the header says so beside them:
 `clay_dynamic_surface_serialize` bytes differ after an undo, because slots stay

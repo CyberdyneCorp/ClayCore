@@ -8773,8 +8773,9 @@ typedef struct clay_dynamic_delta_stats {
     uint64_t encoded_bytes;
     /* What the record holds in memory, capacities and slot maps included. It
      * depends on the allocator's growth policy, so it is the number to BUDGET
-     * against and the wrong one to assert. Measured 1,884,384 resident beside a
-     * 1,233,636-byte encoding for one 30-stamp stroke on a 12,288-face sphere. */
+     * against and the wrong one to assert. Measured on the engine's delta for
+     * one 30-stamp stroke on a 12,288-face sphere: 1,884,384 bytes resident
+     * beside a 1,233,636-byte encoding. This record adds 32 bytes to each. */
     uint64_t resident_bytes;
 } clay_dynamic_delta_stats;
 

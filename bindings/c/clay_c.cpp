@@ -18798,10 +18798,11 @@ clay_result clay_dynamic_delta_apply(const clay_dynamic_delta* delta,
 clay_result clay_dynamic_delta_serialize(const clay_dynamic_delta* delta, uint8_t* out_data,
                                          size_t* count) {
     if (!delta) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic delta");
+    if (!count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null count");
     // The size is exact from the counts, so neither the size query nor a short
     // buffer pays for an encoding.
     const std::size_t need = delta->gesture.encoded_size();
-    if (!out_data || (count && *count < need))
+    if (!out_data || *count < need)
         return write_sized(nullptr, need, out_data, count, "dynamic delta");
     const std::vector<std::uint8_t> bytes = delta->gesture.encode();
     return write_sized(bytes.data(), bytes.size(), out_data, count, "dynamic delta");
