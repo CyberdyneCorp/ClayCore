@@ -1265,6 +1265,39 @@ do {
     check(clay_dynamic_sculptor_stamp(sculptor, &raked, &topo, nil, nil) == CLAY_OK,
           "a turned stamp is the same descriptor, not a second entry point")
 
+    // ABI 0.118.0: a whole stroke, in the wide sample struct that carries the
+    // stylus azimuth, resolved and stamped by the library.
+    var strokePreset = clay_stroke_preset()
+    strokePreset.struct_size = UInt32(MemoryLayout<clay_stroke_preset>.size)
+    check(clay_stroke_preset_defaults(&strokePreset) == CLAY_OK, "took the stroke preset defaults")
+    strokePreset.radius = 0.6
+    var strokeSamples = (0..<12).map { k -> clay_stroke_sample_full in
+        var s = clay_stroke_sample_full()
+        let t = Float(k) / 11
+        s.position = (-0.4 + 0.8 * t, 0, 1)
+        s.pressure = 1
+        s.azimuth = 0.5
+        return s
+    }
+    var strokeReport = clay_dynamic_stamp_report()
+    strokeReport.struct_size = UInt32(MemoryLayout<clay_dynamic_stamp_report>.size)
+    var strokeApplied = 0
+    strokeSamples.withUnsafeMutableBufferPointer { samples in
+        check(clay_dynamic_sculptor_apply_stroke(sculptor, samples.baseAddress, samples.count,
+                                                 &strokePreset, &brush, &topo, nil, 0,
+                                                 &strokeApplied, &strokeReport) == CLAY_OK,
+              "stroked the adaptive surface")
+        check(strokeApplied > 0 && strokeReport.moved_vertices > 0,
+              "the stroke changed the surface and its report says so")
+        var layerApplied = 99
+        check(clay_dynamic_sculptor_apply_stroke(sculptor, samples.baseAddress, samples.count,
+                                                 &strokePreset, &layerBrush, &topo, nil, 0,
+                                                 &layerApplied, nil)
+                  == CLAY_ERROR_INVALID_ARGUMENT,
+              "a Layer stroke is refused as a Layer stamp is")
+        check(layerApplied == 0, "a refused stroke applies nothing")
+    }
+
     // What the stroke's scratch cost. Read rather than tuned: the ABI offers no
     // reserve and no cap, on purpose.
     var arena = clay_brush_arena_stats()
