@@ -1,0 +1,4 @@
+- [x] Weight the grab's inverse map with `falloff_weight` rather than an ease.
+- [x] Gate outside the ball explicitly, since `Constant` clamps rather than falls.
+- [x] Regression: `Constant` is rigid, differs from `Linear`, and `Linear` still tapers.
+- [x] Record the before/after curve table and the measured rise.
