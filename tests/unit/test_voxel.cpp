@@ -750,11 +750,18 @@ TEST_CASE("voxel grab translates occupancy through the same map") {
         CHECK(g.occupied_count() > 0);
         CHECK(before > 0);
         // The span moved bodily in +x: the leading face advanced from 5 to 6
-        // and the trailing face vacated -5. Nearest-cell resampling means whole
+        // and the trailing face vacated. Nearest-cell resampling means whole
         // cells, which is the documented behaviour of a binary representation.
+        //
+        // "Bodily" is now literal. The default falloff is Constant, which means
+        // NO taper, so the whole ball translates rather than shearing — and the
+        // trailing face vacates two cells rather than one. Before #610 this
+        // read -5 vacated and -4 still occupied, because the falloff was cast
+        // into the EASE table and Constant delivered Linear's curve: the prose
+        // here said "bodily" while the numbers under it described a shear.
         CHECK(g.get({6, 0, 0}) == c);
         CHECK(g.get({-5, 0, 0}) == 0);
-        CHECK(g.get({-4, 0, 0}) == c);
+        CHECK(g.get({-4, 0, 0}) == 0);
         // colour travels with the material
         CHECK(g.palette_color(g.get({6, 0, 0})).y == doctest::Approx(0.7f).epsilon(1e-3));
     }
@@ -793,6 +800,14 @@ TEST_CASE("voxel grab translates occupancy through the same map") {
         g.set_brush({0, 0, 0}, 15, c, voxel::BrushShape::Sphere);
 
         voxel::BrushParams p;
+        // Linear, NOT the default. The SDF side below asks for ease 0, which is
+        // ease_linear, and BrushFalloff::Linear is exactly that curve, (1 - d).
+        // The two representations can only be compared through a falloff an
+        // ease can express; Constant and Gaussian have none, because
+        // cregion_weight always carries the (1 - d) factor. Before #610 this
+        // agreed at the DEFAULT, but only because Constant was being cast into
+        // ease 0 — the agreement WAS the defect, not evidence against it.
+        p.falloff = voxel::BrushFalloff::Linear;
         p.size = 21;
         p.shape = voxel::BrushShape::Sphere;
         const kernel::cfloat3 disp = cf3(0.3f, 0.0f, 0.0f);
@@ -911,6 +926,15 @@ TEST_CASE("a sub-cell drag is a valid edit that changes nothing, and reports so"
         // 0.5625 of the ungated pull once the falloff is folded in, so a
         // displacement that moves material ungated can still move none with
         // the gate on. 0.75 of a cell is inside that band.
+        //
+        // The arithmetic above only holds for a falloff that TAPERS, so this
+        // asks for Linear rather than taking the default (#610). Under a
+        // Constant falloff the ball translates rigidly and the dead zone is
+        // genuinely narrower — that is a true consequence of the curve, not a
+        // gate that stopped working, and it is why the margin is stated
+        // against a named falloff now instead of an implied one.
+        voxel::BrushParams tapered = wide;
+        tapered.falloff = voxel::BrushFalloff::Linear;
         VoxelGrid gated(voxel), open(voxel);
         ball(gated);
         ball(open);
@@ -920,8 +944,8 @@ TEST_CASE("a sub-cell drag is a valid edit that changes nothing, and reports so"
         const std::uint64_t open_before = open.change_count();
         const kernel::cfloat3 marginal = cf3(0.09f, 0.0f, 0.0f);
 
-        open.sculpt_grab({0, 0, 0}, wide, marginal, false);
-        gated.sculpt_grab({0, 0, 0}, wide, marginal, true);
+        open.sculpt_grab({0, 0, 0}, tapered, marginal, false);
+        gated.sculpt_grab({0, 0, 0}, tapered, marginal, true);
         CHECK(open.change_count() > open_before);
         CHECK(gated.change_count() == gated_before);
     }
@@ -1244,4 +1268,73 @@ TEST_CASE("grab gesture: a malformed brush is refused") {
     VoxelGrid g = solid_ball();
     voxel::BrushParams p = drag_brush(0);
     CHECK_FALSE(voxel::GrabTransaction::begin(g, {0, 0, 0}, p, true).has_value());
+}
+
+TEST_CASE("voxel grab: a falloff means the curve it is named after") {
+    // Issue #610, reported by a host. sculpt_grab handed p.falloff to
+    // cgrab_point as an EASE INDEX. The two enums do not line up --
+    // BrushFalloff is Constant/Linear/Smooth/Gaussian = 0..3 and CEase is
+    // linear/smoothstep/smootherstep/in_quad = 0..3 -- and cregion_weight
+    // applies the ease to (1 - d), so every falloff delivered the NEXT one's
+    // curve. Measured at d = 0, 0.25, 0.5, 0.75:
+    //
+    //     falloff     the name's curve            what the cast delivered
+    //     Constant    1.000 1.000 1.000 1.000     1.000 0.750 0.500 0.250
+    //     Linear      1.000 0.750 0.500 0.250     1.000 0.844 0.500 0.156
+    //     Smooth      1.000 0.844 0.500 0.156     1.000 0.896 0.500 0.104
+    //     Gaussian    1.000 0.755 0.325 0.080     1.000 0.562 0.250 0.062
+    //
+    // All four still ran 1 at the centre to 0 at the rim, so a grab still
+    // tapered and nothing looked broken. What it cost was the MEANING of the
+    // control: one BrushParams field meant two different things depending on
+    // which verb read it, and every other voxel verb reads the falloff table.
+    const float vs = 0.05f;
+    const auto slab = [&](std::uint8_t* idx) {
+        VoxelGrid g(vs);
+        *idx = g.palette_add(cf3(0.8f, 0.5f, 0.3f));
+        for (int z = -20; z <= 20; ++z)
+            for (int y = -8; y <= 0; ++y)
+                for (int x = -20; x <= 20; ++x) g.set({x, y, z}, *idx);
+        return g;
+    };
+    const auto top_at = [](const VoxelGrid& g, int x) {
+        for (int y = 12; y >= -8; --y)
+            if (g.get({x, y, 0})) return y;
+        return -99;
+    };
+    // Rise at the centre and at half the radius, after one upward pull.
+    const auto pull = [&](voxel::BrushFalloff f, int* centre, int* half) {
+        std::uint8_t idx = 0;
+        VoxelGrid g = slab(&idx);
+        const int base = top_at(g, 0);
+        voxel::BrushParams p;
+        p.size = 8;
+        p.shape = voxel::BrushShape::Sphere;
+        p.falloff = f;
+        p.strength = 1.0f;
+        p.seed = 0;
+        g.sculpt_grab({0, base, 0}, p, cf3(0.0f, 0.25f, 0.0f), false);
+        *centre = top_at(g, 0) - base;
+        *half = top_at(g, 2) - base;
+    };
+
+    int c_const = 0, h_const = 0, c_lin = 0, h_lin = 0;
+    pull(voxel::BrushFalloff::Constant, &c_const, &h_const);
+    pull(voxel::BrushFalloff::Linear, &c_lin, &h_lin);
+    CAPTURE(c_const); CAPTURE(h_const); CAPTURE(c_lin); CAPTURE(h_lin);
+
+    // CONSTANT means no taper, so the pull is rigid inside the ball: half way
+    // out must rise as far as the centre, give or take a cell of quantisation.
+    // Under the cast this read 2 and 1 -- Linear's curve, not Constant's.
+    CHECK(c_const >= 3);
+    CHECK(h_const >= c_const - 1);
+
+    // ...and it must be plainly different from Linear, which DOES taper. This
+    // is the assertion the cast failed: the two were indistinguishable.
+    CHECK(c_const > c_lin);
+    CHECK(h_const > h_lin);
+
+    // Linear still tapers, so the rim end of the ball moves less than the
+    // centre. Guards against "fix" by making every falloff rigid.
+    CHECK(c_lin > h_lin);
 }

@@ -171,6 +171,47 @@ inline float mask_at(const MaskField& mask, VoxelCoord c, float voxel_size) {
                                    (c.z + 0.5f) * voxel_size));
 }
 
+// The grab's inverse map, weighted by the VOXEL falloff table (issue #610).
+//
+// It used to hand `p.falloff` to cgrab_point as an EASE INDEX. The two enums do
+// not line up -- BrushFalloff is Constant/Linear/Smooth/Gaussian = 0..3, CEase
+// is linear/smoothstep/smootherstep/in_quad = 0..3 -- and cregion_weight
+// applies the ease to (1 - d), so every falloff delivered the NEXT one's curve:
+//
+//     falloff     the name's curve            what the cast delivered
+//     Constant    1.000 1.000 1.000 1.000     1.000 0.750 0.500 0.250
+//     Linear      1.000 0.750 0.500 0.250     1.000 0.844 0.500 0.156
+//     Smooth      1.000 0.844 0.500 0.156     1.000 0.896 0.500 0.104
+//     Gaussian    1.000 0.755 0.325 0.080     1.000 0.562 0.250 0.062
+//
+// (at d = 0, 0.25, 0.5, 0.75). All four still ran 1 at the centre to 0 at the
+// rim, so a grab still tapered and nothing looked broken -- what it cost was
+// the MEANING of the control, and one BrushParams field meant two different
+// things depending on which verb read it. Constant's own curve was unreachable
+// through the grab at all, which is the one a host asking for a rigid pull
+// wants.
+//
+// Remapping the four names onto nearest eases cannot be done faithfully:
+// Constant and Gaussian have no ease that reproduces them, since cregion_weight
+// always carries the (1 - d) factor. So the grab reads the same table every
+// other voxel verb reads, and `falloff` means one thing.
+//
+// The structure is cgrab_point's, term for term, so the two stay comparable:
+// weight, an early-out at zero, the front gate, and the same inverse map.
+// Only the weight function differs, which is the whole point.
+kernel::cfloat3 grab_point_falloff(kernel::cfloat3 p, kernel::cfloat3 centre, float radius,
+                                   kernel::cfloat3 displacement, bool front_only,
+                                   BrushFalloff falloff) {
+    const float d = kernel::clength(p - centre) / kernel::cmax(radius, 1e-6f);
+    // Outside the ball is untouched. falloff_weight clamps rather than gating,
+    // and Constant would otherwise return 1 everywhere -- an unbounded drag.
+    if (d > 1.0f) return p;
+    float w = falloff_weight(falloff, d);
+    if (w == 0.0f) return p;
+    if (front_only) w = w * kernel::cfront_gate(p, centre, radius, displacement);
+    return p - displacement * w;
+}
+
 // How the mask is read at one cell (issue #609).
 //
 // A DIMMER at threshold 0 — scale the weight, exactly the expression this had
@@ -514,9 +555,8 @@ void VoxelGrid::sculpt_grab(VoxelCoord c, const BrushParams& p, kernel::cfloat3 
                                             static_cast<float>(w.y - c.y),
                                             static_cast<float>(w.z - c.z));
         kernel::cfloat3 cells = displacement * (1.0f / kernel::cmax(voxel_size(), 1e-6f));
-        kernel::cfloat3 src = cgrab_point(local, centre, radius, cells,
-                                          front_only ? 1.0f : 0.0f,
-                                          static_cast<int>(p.falloff));
+        kernel::cfloat3 src = grab_point_falloff(local, centre, radius, cells,
+                                                 front_only, p.falloff);
         VoxelCoord from{c.x + static_cast<std::int32_t>(cnearest(src.x)),
                         c.y + static_cast<std::int32_t>(cnearest(src.y)),
                         c.z + static_cast<std::int32_t>(cnearest(src.z))};
@@ -687,9 +727,8 @@ void GrabTransaction::update(kernel::cfloat3 total_displacement) {
         const kernel::cfloat3 local = kernel::cf3(static_cast<float>(w.x - c.x),
                                                   static_cast<float>(w.y - c.y),
                                                   static_cast<float>(w.z - c.z));
-        const kernel::cfloat3 src = cgrab_point(local, centre, radius, cells,
-                                                front ? 1.0f : 0.0f,
-                                                static_cast<int>(brush_.falloff));
+        const kernel::cfloat3 src = grab_point_falloff(local, centre, radius, cells,
+                                                       front, brush_.falloff);
         const VoxelCoord from{c.x + static_cast<std::int32_t>(cnearest(src.x)),
                               c.y + static_cast<std::int32_t>(cnearest(src.y)),
                               c.z + static_cast<std::int32_t>(cnearest(src.z))};
