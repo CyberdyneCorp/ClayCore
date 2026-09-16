@@ -57,6 +57,7 @@ add_executable(clay_unit_tests
   unit/test_dynamic_history.cpp
   unit/test_c_dynamic_topology.cpp
   unit/test_dynamic_replay.cpp
+  unit/test_c_dynamic_delta.cpp
   unit/test_dynamic_scale.cpp
   unit/test_dynamic_stress.cpp
   unit/test_subdivide.cpp
