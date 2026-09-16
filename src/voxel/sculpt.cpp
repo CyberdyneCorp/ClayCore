@@ -171,6 +171,23 @@ inline float mask_at(const MaskField& mask, VoxelCoord c, float voxel_size) {
                                    (c.z + 0.5f) * voxel_size));
 }
 
+// How the mask is read at one cell (issue #609).
+//
+// A DIMMER at threshold 0 — scale the weight, exactly the expression this had
+// before the field existed, so an existing caller's writes and dither sequence
+// are untouched. A STENCIL above it — refuse at or above, and leave the weight
+// alone below, because a floor under the scaling would keep the dithered band
+// the stencil is there to remove.
+//
+// Returns false when the cell is refused outright.
+inline bool mask_allows(const BrushParams& p, float mask, float* weight) {
+    if (!(p.mask_threshold > 0.0f)) {
+        *weight *= 1.0f - mask;
+        return true;
+    }
+    return mask < p.mask_threshold;
+}
+
 // Iterate the footprint, handing the callback each in-shape cell together
 // with its world coordinate and dithered pass/fail. Keeps the verbs flat.
 //
@@ -191,7 +208,8 @@ void for_each_brush_cell(VoxelCoord c, const BrushParams& p, float voxel_size, F
                 VoxelCoord w{c.x + x, c.y + y, c.z + z};
                 float weight = falloff_weight(p.falloff, normalized_distance(x, y, z, p.size, e)) *
                                p.strength;
-                if (p.mask) weight *= 1.0f - mask_at(*p.mask, w, voxel_size);
+                if (p.mask && !mask_allows(p, mask_at(*p.mask, w, voxel_size), &weight))
+                    continue;
                 if (passes(w, weight, p.seed)) fn(w);
             }
 }
@@ -236,7 +254,8 @@ void brush_pass(VoxelGrid& grid, VoxelCoord c, const BrushParams& p, float voxel
                 VoxelCoord w{c.x + x, c.y + y, c.z + z};
                 float weight = falloff_weight(p.falloff, normalized_distance(x, y, z, p.size, e)) *
                                p.strength;
-                if (p.mask) weight *= 1.0f - mask_at(*p.mask, w, voxel_size);
+                if (p.mask && !mask_allows(p, mask_at(*p.mask, w, voxel_size), &weight))
+                    continue;
                 if (passes(w, weight, p.seed)) decide(w, *sink);
             }
     };
@@ -469,7 +488,8 @@ bool VoxelGrid::sculpt_carve_alpha(VoxelCoord c, const BrushParams& p, const flo
 
                 float weight = falloff_weight(p.falloff, normalized_distance(x, y, z, p.size, e)) *
                                p.strength * a;
-                if (p.mask) weight *= 1.0f - mask_at(*p.mask, w, voxel_size());
+                if (p.mask && !mask_allows(p, mask_at(*p.mask, w, voxel_size()), &weight))
+                    continue;
                 if (passes(w, weight, p.seed)) set(w, index);
             }
     return true;

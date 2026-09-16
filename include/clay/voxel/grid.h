@@ -106,6 +106,25 @@ struct BrushParams {
     // below rather than by a hand-picked few. Borrowed, not owned: BrushParams
     // is a transient call-site struct.
     const MaskField* mask = nullptr;
+    // HOW the mask is read (issue #609).
+    //
+    // At 0 — the default — it is a DIMMER: the line above scales the weight and
+    // the dither spends what is left as coverage. That is exact at the ends and
+    // probabilistic between them, so a cell at mask 0.5 is written half the
+    // time and a mask painted with a falloff is mostly "in between". A freeze
+    // then leaks through its own skirt: measured at 25 cells written at mask
+    // >= 0.5 on one solid stroke across a six-cell ramp.
+    //
+    // Above 0 it is a STENCIL: a cell at or above this value is refused
+    // outright, and a cell below it is written AS THOUGH UNMASKED. The second
+    // half is the part worth reading twice — the threshold does not put a floor
+    // under the scaling, it replaces it. Keeping the scaling below the cutoff
+    // would leave a dithered band the threshold does not cover, which is the
+    // speckle a stencil exists to remove.
+    //
+    // Refused outside [0, 1] rather than clamped: a clamp would quietly answer
+    // a different question than the caller asked.
+    float mask_threshold = 0.0f;
 };
 
 class VoxelGrid {
