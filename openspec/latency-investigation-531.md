@@ -38,3 +38,25 @@ Temporary diagnostic timers covered preview initialization and full rebuilds, wh
 | Rebuild total | 30.295 | 30.602 |
 
 Subphase medians need not sum to the total median. These diagnostic samples are evidence of where time is spent, not a before/after performance claim. Roughly 24 ms of whole-preview initialization followed by 30 ms of whole-mesh rebuilding explains the remaining delay even with low CPU load. Further work must reduce those phases while preserving complete previews, boundary correctness and all brush actions; postponing the same work to the next event would not meet the goal.
+
+
+## Shared source-grid samples on updated main
+
+The next engine change evaluates each unique source-grid position once during
+eligible full preview initialization, then restores the existing brick sample
+layout. On a 13³ grid this removes 27.7% of source evaluations. Against main
+`8ab1659d`, the engine materialization probe improves 10.685→8.964 ms for a
+one-item source and 214.076→156.149 ms for 32 items, with identical complete
+serialized output.
+
+The application comparison keeps desktop `4663b68` unchanged and restricts both
+builds to the same performance cores. All 260 paired brush cases complete with
+matching uploads. Smooth preparation improves 61.189→57.669 ms; Relax preparation
+is nearly flat, and other actions are mixed. CPU idle during the measured sweep
+is 85.5% median and 73.9% minimum. A contended partial attempt is excluded.
+These current-baseline results do not establish a cross-release trend from the
+earlier timings above. Full preview preparation and mesh rebuilding still need
+substantial work to meet 16 ms across all actions.
+
+See [source-grid validation](changes/reuse-source-grid-samples/validation.md)
+for all brush medians, observed tails, exactness checks and build identities.

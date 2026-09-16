@@ -13,6 +13,7 @@
 #include "clay/eval/backend.h"
 
 #include "layer_digest.h"
+#include "source_grid.h"
 
 namespace clay {
 namespace session {
@@ -459,6 +460,11 @@ void SdfSourceField::fill_points(const float* points_xyz, std::size_t count, flo
 field::FieldVolume::BrickBlockFill SdfSourceField::block_fill() const {
     return [this](const field::FieldVolume::BrickGrid& grid, std::size_t first, std::size_t count,
                   float* out) {
+        if (!composed_ && detail::fill_unique_source_grid(
+                grid, first, count, out,
+                [this](const float* points, std::size_t n, float* values) {
+                    fill_span(points, n, values, false);
+                })) return;
         const std::size_t per = static_cast<std::size_t>(field::kBrickSamples);
         const std::size_t n = count * per;
         std::vector<float> points(n * 3);
