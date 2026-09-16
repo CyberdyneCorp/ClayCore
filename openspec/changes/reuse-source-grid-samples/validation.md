@@ -20,7 +20,7 @@ coverage, sample coordinates, brick storage and file formats retain their existi
   27 assertions in the new regression (45 still pass). This demonstrates the count
   gate detects losing sample reuse; it is not a claim about an old coverage gap.
 - Clang-tidy cognitive complexity, IgnoreMacros=true: shape guard 11, fill helper 13,
-  source callback 12; test functions at most 14. Layering check passes.
+  source callback 12; test functions at most 14; retained probe main 22. Layering check passes.
 
 ## Controlled engine probe
 
@@ -42,5 +42,26 @@ engine probes alone do not establish the 16 ms application target.
 
 ## Remaining validation
 
-Full CPU suites, focused sanitizers and paired current-main application validation
-are in progress. Issue #531 remains open.
+- All 11 CPU suites pass (108.15 s): 2,787 C++ cases / 17,880,581 assertions and
+  757 Python tests, one skipped. This was a correctness run alongside builds,
+  not a performance comparison.
+- All 93 enabled combined desktop cases pass: 76 library and 17 agent/sculpt/
+  settling/rendered cases. Two library tests remain ignored; no adapter skip.
+- Strict OpenSpec: all 74 items pass.
+- Focused unoptimized ASan/UBSan with leak detection: all 104 cases /
+  10,080,171 assertions pass across source-grid, prefix-cache, sculpt, volume and
+  relax tests; no sanitizer diagnostics. The unoptimized cached-prefix fixtures
+  make this a long correctness check, not a performance measurement.
+- Paired current-main application timing is pending a quiet CPU window.
+  Issue #531 remains open.
+
+Desktop comparisons use host `4663b68` from PR #137 unchanged in both builds.
+Baseline engine `8ab1659d`; candidate engine `7eb59930`.
+Preserved executable SHA-256:
+- Baseline: `453c6fb129228e5ebfa84ce822986868fe5f64ae9cd87518a48c1a918d86dcc5`
+- Candidate: `19ebedd79a4a94fe315c62899c042b77072aba037ed569fb92d94864d6e06903`
+
+For a 13×13×13 grid, evaluated samples fall from 1,601,613 to 1,157,625 (27.7%).
+Requested scratch payload falls from 19,219,356 to 18,522,000 bytes (3.6%). The
+new path uses two temporary allocations instead of one; these payload calculations
+exclude allocator metadata, backend allocations and process RSS.

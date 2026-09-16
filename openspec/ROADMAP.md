@@ -114,6 +114,13 @@ and Relax 59.3→56.6 ms; other action results remain mixed, and the 16 ms targe
 is still open. See `reduce-sample-bound-dependencies` for both complete
 application comparisons and pending platform CI.
 
+Full-grid source sampling now reuses boundary samples shared by neighboring
+bricks. On a 13³ grid this removes 27.7% of source evaluations while preserving
+sample bits and volume bounds. The one-item engine initialization probe improves
+10.68→8.96 ms; full CPU, 104 sanitizer and 93 enabled combined desktop cases pass. See
+[reuse-source-grid-samples](changes/reuse-source-grid-samples/validation.md)
+for measurement scope and the remaining application timing.
+
 ## Regional consolidation follow-up — issue #595
 
 Repeated Move maintenance now has a retained-volume path: isolated additive

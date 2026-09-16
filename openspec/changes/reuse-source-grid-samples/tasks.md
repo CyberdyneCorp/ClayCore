@@ -5,6 +5,6 @@
 ## Validation
 - [x] Demonstrate that disabling sharing fails the evaluation-count regression.
 - [ ] Run controlled probes on simple and worked source fields.
-- [ ] Run CPU suites, focused sanitizers, complexity and strict OpenSpec validation.
+- [x] Run CPU suites, focused sanitizers, complexity and strict OpenSpec validation.
 - [ ] Measure combined application correctness and brush latency against current main.
 - [ ] Record evidence and remaining work in documentation and a new PR.
