@@ -1,0 +1,38 @@
+[doctest] doctest version is "2.5.3"
+[doctest] run with "--help" for options
+===============================================================================
+/home/leonardo/work/ClayCore/tests/unit/test_dynamic_stress.cpp:194:
+TEST CASE:  dyntopo stress: a stroke under utility load gives the same surface
+
+/home/leonardo/work/ClayCore/tests/unit/test_dynamic_stress.cpp:220: MESSAGE: idle      P50 3.20369 ms  P95 3.66924 ms  P99 3.8343 ms
+
+/home/leonardo/work/ClayCore/tests/unit/test_dynamic_stress.cpp:223: MESSAGE: contended P50 4.43081 ms  P95 5.42803 ms  P99 5.46118 ms
+
+/home/leonardo/work/ClayCore/tests/unit/test_dynamic_stress.cpp:226: MESSAGE: utility passes completed: 4537
+
+/home/leonardo/work/ClayCore/tests/unit/test_dynamic_stress.cpp:232: MESSAGE: P95 contended / P95 idle = 1.47933  (reported, not gated -- see guide 55)
+
+===============================================================================
+/home/leonardo/work/ClayCore/tests/unit/test_dynamic_stress.cpp:236:
+TEST CASE:  dyntopo stress: a long session does not drift
+
+/home/leonardo/work/ClayCore/tests/unit/test_dynamic_stress.cpp:373: MESSAGE: probe 0: 1.85353 ms at 398 verts
+
+/home/leonardo/work/ClayCore/tests/unit/test_dynamic_stress.cpp:373: MESSAGE: probe 1: 2.56888 ms at 1112 verts
+
+/home/leonardo/work/ClayCore/tests/unit/test_dynamic_stress.cpp:373: MESSAGE: probe 2: 1.70541 ms at 1328 verts
+
+/home/leonardo/work/ClayCore/tests/unit/test_dynamic_stress.cpp:373: MESSAGE: probe 3: 1.77415 ms at 942 verts
+
+/home/leonardo/work/ClayCore/tests/unit/test_dynamic_stress.cpp:373: MESSAGE: probe 4: 1.20806 ms at 1146 verts
+
+/home/leonardo/work/ClayCore/tests/unit/test_dynamic_stress.cpp:373: MESSAGE: probe 5: 2.45963 ms at 1320 verts
+
+/home/leonardo/work/ClayCore/tests/unit/test_dynamic_stress.cpp:377: MESSAGE: probe first 1.85353 ms -> last 2.45963 ms, ratio 1.327
+
+/home/leonardo/work/ClayCore/tests/unit/test_dynamic_stress.cpp:379: MESSAGE: final surface: 1203 vertices, 2402 faces
+
+===============================================================================
+[doctest] test cases: 12 | 12 passed | 0 failed | 2773 skipped
+[doctest] assertions: 99 | 99 passed | 0 failed |
+[doctest] Status: SUCCESS!

@@ -1,0 +1,26 @@
+# bench_extreme_poly: the 7.1 matrix with 7.2's separable stages
+# `stage breakdown` is the library's own per-stage timing inside
+#   MeshSculptor::stamp (mesh::StageTelemetry). No clock is read when the
+#   telemetry pointer is null, which is what let 7.2's remaining stages be
+#   timed without perturbing a stamp outside this program.
+# spacing 0.0100, 12 repetitions per cell after 4 warm-up stamps
+== 100000 vertices ==============================================
+  hierarchy: cage 6241, level 2 with 97969 vertices, 761 chunks, setup 0.07 s, rss 31 MB
+    footprint   1000  dirty chunks    19  upload     93.7 KB
+      stamp          p50    612.16  p95    733.32  p99    733.32  max    739.85  mean    630.94 us
+      detail write   p50    214.67  p95    229.95  p99    229.95  max    235.65  mean    215.34 us
+      readback       p50    116.28  p95    143.05  p99    143.05  max    144.48  mean    122.39 us
+        stage breakdown (mean us/stamp, 12 reps):
+          seed        154.167  (26.2%)
+          query        90.478  (15.4%)
+          weight      123.376  (21.0%)
+          alpha         0.022  ( 0.0%)
+          automask      0.013  ( 0.0%)
+          snapshot      0.018  ( 0.0%)
+          neighbors     0.014  ( 0.0%)
+          kernel        0.415  ( 0.1%)
+          writeback    50.171  ( 8.5%)
+          normals     154.045  (26.2%)
+          chunkmark    15.161  ( 2.6%)
+
+# peak rss 43 MB
