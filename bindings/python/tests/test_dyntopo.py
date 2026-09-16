@@ -439,3 +439,65 @@ def test_preflight_prices_the_export_before_it_is_paid():
     refused = s.preflight_to_mesh(budget=1024)
     assert refused["allowed"] is False
     assert refused["peak_bytes"] == priced["peak_bytes"]
+
+
+# -- a whole stroke (stroke-an-adaptive-surface) -----------------------------
+
+def drag(x0, x1, n=24, azimuth=0.0, tilt=0.0):
+    """(N, 6) samples along +X over the +Z pole: position, pressure, tilt,
+    azimuth — the sixth column is the one the flat C packing cannot carry."""
+    t = np.linspace(0.0, 1.0, n, dtype=np.float32)
+    out = np.zeros((n, 6), dtype=np.float32)
+    out[:, 0] = x0 + (x1 - x0) * t
+    out[:, 2] = 1.0
+    out[:, 3] = 1.0
+    out[:, 4] = tilt
+    out[:, 5] = azimuth
+    return out
+
+
+def test_an_adaptive_stroke_runs_and_reports_the_whole_stroke():
+    s = surface(8)
+    sculptor = clay.DynamicSculptor(s)
+    preset = clay.StrokePreset()
+    preset.radius = 0.3
+    preset.spacing = 0.25
+
+    r = sculptor.apply_stroke(drag(-0.4, 0.4), preset, "clay", topology=topology_on(6.0),
+                              strength=0.5)
+
+    assert r["applied"] > 0
+    assert r["moved"] > 0
+    assert r["split"] > 0, "the stroke never remeshed; the fixture is wrong"
+    assert s.validate()["ok"]
+    # The revisions are the surface's after the LAST stamp, which a host
+    # re-uploading on a revision change depends on.
+    assert r["topology_revision"] == s.topology_revision
+    assert r["geometry_revision"] == s.geometry_revision
+
+
+def test_a_layer_stroke_raises_and_leaves_the_surface_alone():
+    s = surface(6)
+    sculptor = clay.DynamicSculptor(s)
+    pristine = s.serialize()
+    with pytest.raises(ValueError, match="does not offer"):
+        sculptor.apply_stroke(drag(-0.3, 0.3), clay.StrokePreset(), "layer",
+                              topology=topology_on())
+    assert s.serialize() == pristine
+
+
+def test_the_azimuth_column_reaches_the_alpha_only_when_oriented():
+    alpha = np.zeros((8, 8), dtype=np.float32)
+    alpha[:, :4] = 1.0
+    rake = clay.BrushPreset.by_name("Rake")
+
+    def run(azimuth, orient):
+        s = surface(12)
+        r = clay.DynamicSculptor(s).apply_preset(
+            drag(-0.1, 0.1, n=8, azimuth=azimuth, tilt=0.5), rake,
+            topology=topology_on(6.0), alpha=alpha, orient_alpha_by_stamp=orient)
+        assert r["applied"] > 0
+        return s.serialize()
+
+    assert run(0.0, True) != run(math.pi / 2, True)
+    assert run(0.0, False) == run(math.pi / 2, False)

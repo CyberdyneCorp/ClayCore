@@ -1232,6 +1232,33 @@ mesh::MeshBrushSettings mesh_brush_settings(
     return settings;
 }
 
+// -- the adaptive sculptor's shared answers ---------------------------------------
+
+// ONE WORDING for a verb an adaptive surface does not offer, so a stamp and a
+// stroke refuse Layer with the same reason.
+void refuse_unless_dynamic_offers(mesh::MeshBrush verb, const std::string& name) {
+    if (!mesh::dynamic_offers(verb))
+        throw std::invalid_argument(
+            "an adaptive surface does not offer '" + name +
+            "': its reference is the surface as the STROKE found it, and half the "
+            "vertices under the brush at the end of an adaptive stroke did not "
+            "exist at the start");
+}
+
+// A stamp's or a stroke's result as the dict `DynamicSculptor.stamp` returns.
+nb::dict dynamic_result_dict(const mesh::DynamicStampResult& r) {
+    nb::dict out;
+    out["moved"] = r.moved_vertices;
+    out["split"] = r.remesh.split;
+    out["collapsed"] = r.remesh.collapsed;
+    out["flipped"] = r.remesh.flipped;
+    out["relaxed"] = r.remesh.relaxed;
+    out["hit_budget"] = r.remesh.hit_budget;
+    out["topology_revision"] = r.topology_revision;
+    out["geometry_revision"] = r.geometry_revision;
+    return out;
+}
+
 // -- stroke engine helpers -----------------------------------------------------
 
 // (N, 3) positions, or (N, 4) with pressure, or (N, 5) with pressure and
@@ -8470,12 +8497,7 @@ NB_MODULE(pyclay, m) {
                     nb::cast(geodesic), nb::none(), nb::none(), "two_sided", nb::none(),
                     nb::none(), 0.2f, smooth_iterations, 0.0f, nb::none(), nb::none(), nb::none(),
                     0.0f, nb::none(), automask, stamp_azimuth, &chosen);
-                if (!mesh::dynamic_offers(chosen))
-                    throw std::invalid_argument(
-                        "an adaptive surface does not offer '" + verb +
-                        "': its reference is the surface as the STROKE found it, and half the "
-                        "vertices under the brush at the end of an adaptive stroke did not "
-                        "exist at the start");
+                refuse_unless_dynamic_offers(chosen, verb);
                 const voxel::MaskField* field_mask = borrow_mask(mask);
                 field::MaskGate gate;
                 if (field_mask)
@@ -8485,16 +8507,7 @@ NB_MODULE(pyclay, m) {
                     nb::gil_scoped_release release;
                     r = self.stamp(chosen, settings, topology, gate, nullptr);
                 }
-                nb::dict out;
-                out["moved"] = r.moved_vertices;
-                out["split"] = r.remesh.split;
-                out["collapsed"] = r.remesh.collapsed;
-                out["flipped"] = r.remesh.flipped;
-                out["relaxed"] = r.remesh.relaxed;
-                out["hit_budget"] = r.remesh.hit_budget;
-                out["topology_revision"] = r.topology_revision;
-                out["geometry_revision"] = r.geometry_revision;
-                return out;
+                return dynamic_result_dict(r);
             },
             "verb"_a, "center"_a, "radius"_a, "strength"_a = 0.5f, "falloff"_a = "smooth",
             "topology"_a = mesh::DynamicTopologySettings{}, "direction"_a = nb::none(),
@@ -8503,6 +8516,95 @@ NB_MODULE(pyclay, m) {
             "One stamp: remesh where the verb's timing says, deform through the\n"
             "shared kernels, recompute the normals of what moved, and keep the\n"
             "chunked index in step.")
+        .def(
+            "apply_stroke",
+            [](PyDynamicSculptor& self, nb::handle samples, const brush::StrokePreset& preset,
+               const std::string& verb, const mesh::DynamicTopologySettings& topology,
+               const std::string& falloff, float strength, nb::handle geodesic,
+               int smooth_iterations, nb::handle mask, nb::handle automask, float stamp_azimuth,
+               bool orient_alpha_by_stamp) {
+                mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
+                // The radius is the STAMP's, so a placeholder goes in here.
+                mesh::MeshBrushSettings settings = mesh_brush_settings(
+                    verb, nb::none(), 1.0f, strength, falloff, nb::none(), nb::none(), geodesic,
+                    nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
+                    smooth_iterations, 0.0f, nb::none(), nb::none(), nb::none(), 0.0f, nb::none(),
+                    automask, stamp_azimuth, &chosen);
+                refuse_unless_dynamic_offers(chosen, verb);
+                const std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
+                const voxel::MaskField* field_mask = borrow_mask(mask);
+                brush::MeshStrokeOptions options;
+                options.orient_alpha_by_stamp = orient_alpha_by_stamp;
+                mesh::DynamicStampResult summary;
+                std::size_t applied = 0;
+                {
+                    nb::gil_scoped_release release;
+                    applied = brush::apply_to_dynamic(self, brush::resolve_stroke(in, preset),
+                                                      chosen, settings, topology, field_mask,
+                                                      nullptr, options, &summary);
+                }
+                nb::dict out = dynamic_result_dict(summary);
+                out["applied"] = applied;
+                return out;
+            },
+            "samples"_a, "preset"_a, "verb"_a,
+            "topology"_a = mesh::DynamicTopologySettings{}, "falloff"_a = "smooth",
+            "strength"_a = 1.0f, "geodesic"_a = nb::none(), "smooth_iterations"_a = 1,
+            "mask"_a = nb::none(), "automask"_a = nb::none(), "stamp_azimuth"_a = 0.0f,
+            "orient_alpha_by_stamp"_a = false,
+            "Resolve a stroke and apply it to the adaptive surface, one stamp per\n"
+            "resolved stamp, each with its verb's own remesh timing.\n\n"
+            "`samples` is (N, K) with K from 3 to 8, so column 6 is the stylus\n"
+            "azimuth. Each stamp brings its own radius and strength; `strength`\n"
+            "multiplies them. 'grab' centres on the first stamp; 'snakehook' on\n"
+            "the vertex it drags, re-found near the previous stamp when the\n"
+            "remesher retired it.\n\n"
+            "Returns `stamp`'s dict summed over the stroke (revisions after the\n"
+            "last stamp) plus `applied`, the stamps that changed the surface.\n\n"
+            "Raises for 'layer', which an adaptive surface does not offer. No\n"
+            "undo record and no normal deferral; costs the sum of its stamps.")
+        .def(
+            "apply_preset",
+            [](PyDynamicSculptor& self, nb::handle samples, const brush::BrushPreset& preset,
+               const mesh::DynamicTopologySettings& topology, nb::handle alpha,
+               float alpha_extent, nb::handle mask, bool orient_alpha_by_stamp) {
+                const mesh::MeshBrush verb = preset.model.verb;
+                refuse_unless_dynamic_offers(verb, preset.name);
+                mesh::MeshBrushSettings settings = preset.settings;
+                if (!alpha.is_none()) {
+                    auto arr =
+                        nb::cast<nb::ndarray<const float, nb::ndim<2>, nb::c_contig>>(alpha);
+                    if (arr.shape(0) < 2 || arr.shape(1) < 2)
+                        throw std::invalid_argument(
+                            "an alpha needs at least 2x2 samples; there is nothing to "
+                            "interpolate below that");
+                    settings.alpha = arr.data();
+                    settings.alpha_height = static_cast<int>(arr.shape(0));
+                    settings.alpha_width = static_cast<int>(arr.shape(1));
+                    settings.alpha_extent = alpha_extent;
+                }
+                const std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
+                const voxel::MaskField* field_mask = borrow_mask(mask);
+                brush::MeshStrokeOptions options;
+                options.orient_alpha_by_stamp = orient_alpha_by_stamp;
+                mesh::DynamicStampResult summary;
+                std::size_t applied = 0;
+                {
+                    nb::gil_scoped_release release;
+                    applied = brush::apply_to_dynamic(self, brush::resolve_stroke(in, preset.stroke),
+                                                      verb, settings, topology, field_mask,
+                                                      nullptr, options, &summary);
+                }
+                nb::dict out = dynamic_result_dict(summary);
+                out["applied"] = applied;
+                return out;
+            },
+            "samples"_a, "preset"_a, "topology"_a = mesh::DynamicTopologySettings{},
+            "alpha"_a = nb::none(), "alpha_extent"_a = 0.0f, "mask"_a = nb::none(),
+            "orient_alpha_by_stamp"_a = false,
+            "`apply_stroke` driven by a BRUSH preset, which carries the stroke\n"
+            "preset, the verb and the brush's settings. The alpha is borrowed for\n"
+            "the call, never stored in the preset. Raises for a Layer preset.")
         .def("rebuild_index", [](PyDynamicSculptor& s) { s.rebuild_index(); },
              "Rebuild the chunked index. BETWEEN strokes, never mid-drag: a refit\n"
              "stays correct and does not stay fast, and a rebuild is not\n"
