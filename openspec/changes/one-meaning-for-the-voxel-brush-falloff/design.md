@@ -33,3 +33,25 @@ the representation, not the fix.
 would wreck the Lipschitz bound sphere tracing depends on; on a voxel grid
 occupancy is already binary and nearest-cell, and every other voxel verb's
 `Constant` already behaves this way. The grab was the odd one out.
+
+## What moves under a host, in the words of the one who found it
+
+Reported back by ClaySpaceDesktop after the fix merged, and recorded here
+because the release notes are written from these changes rather than from the
+commit log.
+
+A host that passes `Constant` to a **grab** in order to get full coverage will
+lose its taper on 0.117.0. Theirs does: their fix for a speckled-crust defect
+writes grid dabs solid by passing `Constant`, and their voxel drag inherited it.
+Under the cast that meant `ease_linear`, so the drag tapered — which is also the
+accident that let them believe their own change had made the drag rigid when it
+had not.
+
+The remedy is the correspondence this change names: use `Linear` for the grab.
+Both are (1 - d), so it is the same curve the cast was accidentally delivering,
+asked for by its right name. Coverage and pull profile are separate questions
+for a drag — every cell still resamples, and the taper is what makes it read as
+Move rather than as a translation.
+
+So the release-note line is: **a `Constant` voxel grab now pulls rigidly**, and a
+host that wanted the old taper should ask for `Linear`.
