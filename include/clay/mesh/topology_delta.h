@@ -95,7 +95,22 @@ class TopologyDelta {
         return vertices_.size() + halfedges_.size() + edges_.size() + faces_.size();
     }
     std::size_t vertex_count() const { return vertices_.size(); }
+    std::size_t halfedge_count() const { return halfedges_.size(); }
+    std::size_t edge_count() const { return edges_.size(); }
     std::size_t face_count() const { return faces_.size(); }
+
+    // The entries themselves, READ-ONLY. For what has to follow a replay
+    // without being part of the surface -- the sculptor's chunked index keeps
+    // itself in step from the face and vertex entries alone -- and for a test
+    // asserting that a record's `after` end is the live surface.
+    const std::vector<ElementDelta<DynamicVertex, VertexId>>& vertex_entries() const {
+        return vertices_;
+    }
+    const std::vector<ElementDelta<DynamicHalfEdge, HalfEdgeId>>& halfedge_entries() const {
+        return halfedges_;
+    }
+    const std::vector<ElementDelta<DynamicEdge, EdgeId>>& edge_entries() const { return edges_; }
+    const std::vector<ElementDelta<DynamicFace, FaceId>>& face_entries() const { return faces_; }
 
     void clear();
 
