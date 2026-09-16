@@ -629,10 +629,22 @@ class BrushParamsV0_11_0(ctypes.Structure):
     ]
 
 
+class BrushParamsV0_116_0(ctypes.Structure):
+    """clay_brush_params as it shipped before the mask threshold was appended.
+
+    Kept for the same reason BrushParamsV0_11_0 is: this is what a caller built
+    against 0.116.0 actually passes, and the prefix rule has to zero-fill the
+    threshold for it — which is exactly the value that means "read the mask as
+    a dimmer", the behaviour that caller already has (#609).
+    """
+
+    _fields_ = BrushParamsV0_11_0._fields_ + [("mask", ctypes.c_void_p)]
+
+
 class BrushParams(ctypes.Structure):
     """clay_brush_params as a bindings generator would emit it."""
 
-    _fields_ = BrushParamsV0_11_0._fields_ + [("mask", ctypes.c_void_p)]
+    _fields_ = BrushParamsV0_116_0._fields_ + [("mask_threshold", ctypes.c_float)]
 
 
 class FutureBrushParams(ctypes.Structure):
@@ -694,6 +706,17 @@ def brush_struct_size_exercise(lib, grid) -> list[str]:
     as_current = ctypes.cast(ctypes.byref(old), ctypes.POINTER(BrushParams))
     if lib.clay_voxel_set_brush(grid, at, as_current, 1) != 0:
         errors.append("clay_voxel_set_brush rejected a pre-0.12.0 brush descriptor")
+
+    # ...and a caller from 0.116.0, before the threshold existed. It must be
+    # zero-filled rather than read past the end of what that caller wrote: the
+    # threshold is REFUSED outside [0, 1], so a byte of whatever happened to
+    # follow would turn an older caller's ordinary stamp into an error (#609).
+    before_threshold = BrushParamsV0_116_0()
+    before_threshold.struct_size = ctypes.sizeof(BrushParamsV0_116_0)
+    before_threshold.size, before_threshold.strength = 3, 1.0
+    as_current = ctypes.cast(ctypes.byref(before_threshold), ctypes.POINTER(BrushParams))
+    if lib.clay_voxel_set_brush(grid, at, as_current, 1) != 0:
+        errors.append("clay_voxel_set_brush rejected a pre-0.117.0 brush descriptor")
     return errors
 
 
