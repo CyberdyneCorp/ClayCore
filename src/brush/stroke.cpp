@@ -704,6 +704,102 @@ std::size_t apply_to_multires(mesh::MultiresSculptor& sculptor, const std::vecto
     return applied;
 }
 
+namespace {
+
+// Where a Snakehook stamp on an adaptive surface lands: on the vertex it drags.
+//
+// THE ANCHOR CAN DIE, which is the one thing the fixed and hierarchy consumers
+// never had to handle: they anchor on a weld class, and a class outlives every
+// stamp. Here the remesher runs before and after every Snakehook stamp and a
+// collapse retires vertex ids, so the anchor is revalidated first.
+//
+// A retired anchor is re-found at the PREVIOUS STAMP's position, not at the
+// dead vertex's last position. Measured over sixteen detail-4/8 rows: never
+// worse, better in eight, by up to 24 points of reach (57% -> 81%). Not
+// re-finding at all — stamping where the dead vertex was — kept 15-18%.
+kernel::cfloat3 dynamic_snakehook_centre(const mesh::DynamicSculptor& sculptor,
+                                         mesh::VertexId* anchor, kernel::cfloat3 previous) {
+    if (sculptor.surface().vertex(*anchor) == nullptr) *anchor = sculptor.nearest_vertex(previous);
+    const mesh::DynamicVertex* v = sculptor.surface().vertex(*anchor);
+    return v != nullptr ? v->position : previous;
+}
+
+// One stamp's result folded into the stroke's: counts summed, the budget flag
+// OR-ed, the dirty bounds united, and the revisions whatever the last stamp
+// left.
+void accumulate_dynamic(const mesh::DynamicStampResult& r, mesh::DynamicStampResult* out) {
+    out->moved_vertices += r.moved_vertices;
+    out->remesh.split += r.remesh.split;
+    out->remesh.collapsed += r.remesh.collapsed;
+    out->remesh.flipped += r.remesh.flipped;
+    out->remesh.relaxed += r.remesh.relaxed;
+    out->remesh.refused_constrained += r.remesh.refused_constrained;
+    out->remesh.refused_topology += r.remesh.refused_topology;
+    out->remesh.refused_geometry += r.remesh.refused_geometry;
+    out->remesh.hit_budget = out->remesh.hit_budget || r.remesh.hit_budget;
+    out->dirty_bounds.expand(r.dirty_bounds);
+    out->topology_revision = r.topology_revision;
+    out->geometry_revision = r.geometry_revision;
+    out->attribute_revision = r.attribute_revision;
+}
+
+// What the adaptive consumer refuses outright, before anything is touched.
+bool dynamic_stroke_refused(const std::vector<Stamp>& stamps, mesh::MeshBrush verb,
+                            const MeshStrokeOptions& options) {
+    return stamps.empty() || !mesh::dynamic_offers(verb) || options.defer_normals;
+}
+
+}  // namespace
+
+std::size_t apply_to_dynamic(mesh::DynamicSculptor& sculptor, const std::vector<Stamp>& stamps,
+                             mesh::MeshBrush verb, const mesh::MeshBrushSettings& settings,
+                             const mesh::DynamicTopologySettings& topology,
+                             const voxel::MaskField* mask, mesh::TopologyDelta* record,
+                             const MeshStrokeOptions& options,
+                             mesh::DynamicStampResult* summary) {
+    if (summary != nullptr) {
+        *summary = mesh::DynamicStampResult{};
+        const mesh::DynamicSurface& surface = sculptor.surface();
+        summary->topology_revision = surface.topology_revision();
+        summary->geometry_revision = surface.geometry_revision();
+        summary->attribute_revision = surface.attribute_revision();
+    }
+    if (dynamic_stroke_refused(stamps, verb, options)) return 0;
+
+    // Built once for the stroke and shared with the other two consumers, for
+    // the reasons given at `apply_to_mesh`.
+    const field::MaskGate mask_gate = mesh_mask_gate(mask, options);
+    mesh::AutomaskInputs automask;
+    if (mesh_automask_inputs(options, &automask)) sculptor.set_automask_inputs(std::move(automask));
+
+    const MeshStrokeDrag drag = drag_of(verb);
+    const bool walks = drag.dragging && !drag.anchored;
+    mesh::VertexId anchor;
+    if (walks) anchor = sculptor.nearest_vertex(stamps.front().position);
+
+    std::size_t applied = 0;
+    kernel::cfloat3 previous = stamps.front().position;
+    for (const Stamp& s : stamps) {
+        if (mask && mask->sample(options.mesh_to_world.apply(s.position)) >= 1.0f) {
+            previous = s.position;
+            continue;
+        }
+        const kernel::cfloat3 anchor_position =
+            walks ? dynamic_snakehook_centre(sculptor, &anchor, previous) : kernel::cf3(0, 0, 0);
+        mesh::MeshBrushSettings stamp_settings = mesh_stamp_settings(
+            settings, s, drag, previous, stamps.front().position, anchor_position);
+        previous = s.position;
+        if (options.orient_alpha_by_stamp && settings.has_alpha())
+            stamp_settings.alpha_tangent = s.rotation.rotate(kernel::cf3(1, 0, 0));
+
+        const mesh::DynamicStampResult r =
+            sculptor.stamp(verb, stamp_settings, topology, mask_gate, record);
+        if (r.changed()) ++applied;
+        if (summary != nullptr) accumulate_dynamic(r, summary);
+    }
+    return applied;
+}
+
 std::vector<scene::Node> stamps_to_nodes(scene::SdfContent& content,
                                          const std::vector<Stamp>& stamps,
                                          const scene::Node& templ,

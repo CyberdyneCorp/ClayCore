@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "clay/math/transform.h"
+#include "clay/mesh/dynamic_sculpt.h"
 #include "clay/mesh/multires_sculpt.h"
 #include "clay/mesh/sculpt.h"
 #include "clay/scene/document.h"
@@ -413,6 +414,60 @@ std::size_t apply_to_multires(mesh::MultiresSculptor& sculptor, const std::vecto
                               const voxel::MaskField* mask = nullptr,
                               mesh::MultiresDelta* deltas = nullptr,
                               const MeshStrokeOptions& options = {});
+
+// The same stroke, onto an ADAPTIVE surface (stroke-an-adaptive-surface) — the
+// third mesh representation, and until this the one a stroke could not reach.
+//
+// WHAT A STROKE MEANS IS SHARED with the two consumers above: radius and
+// strength come from each stamp, the mask is placed once and gates every verb,
+// the cavity and group estimators are wired once from `options`, and
+// `options.orient_alpha_by_stamp` turns the alpha exactly as it does there.
+// GRAB centres every stamp on the FIRST stamp and drags by the motion between
+// stamps, as `apply_to_mesh` does.
+//
+// SNAKEHOOK centres every stamp on the VERTEX it is dragging, and that vertex
+// can die: the adaptive surface remeshes before AND after every Snakehook stamp,
+// and a collapse retires vertex ids (measured: up to 14 deaths in a 61-stamp
+// stroke at detail 4). So the anchor is revalidated before every stamp, and a
+// retired one is re-found as `DynamicSculptor::nearest_vertex` of the PREVIOUS
+// stamp's position. Keeping a dead anchor's last position lost 82-85% of a
+// pull-out; re-finding at that position instead reached 57-96% where this rule
+// reached 81-98%, never worse in sixteen measured rows.
+//
+// ONE `DynamicSculptor::stamp` PER STAMP, so every stamp keeps its verb's own
+// remesh timing (`default_timing`: Grab after, Clay before, Snakehook before and
+// after) and a stroke is bit-identical to its stamps applied one by one. Cost is
+// the sum of those stamps; nothing here is a latency change.
+//
+// `record`, when given, accumulates the whole call — deformation and topology —
+// into one reversible gesture. `summary`, when given, is RESET and then
+// accumulates moved vertices and remesh counts (summed), `hit_budget` (OR-ed)
+// and the dirty bounds (union); its revisions are the surface's after the last
+// stamp. Returns the number of stamps that CHANGED the surface — moved a vertex
+// or remeshed — because either is something a host must re-upload.
+//
+// WHAT IT DOES NOT DO, each for a reason:
+//   - `MeshBrush::Layer` is REFUSED: returns 0 and touches nothing (not the
+//     surface, the record, the automask inputs nor `summary` beyond its reset).
+//     See `mesh::dynamic_offers` for why an adaptive surface cannot offer it; it
+//     is never remapped to another verb.
+//   - `options.defer_normals` is REFUSED the same way. The adaptive sculptor
+//     refreshes normals locally per stamp and has no deferral, and a flag that
+//     was accepted and ignored would be a promise nothing keeps.
+//   - `settings.seed_class` is NOT consulted, for any verb: the adaptive walk
+//     seeds at `nearest_vertex(center)` on every path, and a class index does
+//     not name a vertex of a surface whose slots move.
+//   - Grab's AFTER remesh runs around the first stamp's centre, not the
+//     stretched tip; the tip is refined by later stamps whose balls reach it.
+//   - The index is refitted, never rebuilt — call `rebuild_index` between
+//     strokes, as for single stamps.
+std::size_t apply_to_dynamic(mesh::DynamicSculptor& sculptor, const std::vector<Stamp>& stamps,
+                             mesh::MeshBrush verb, const mesh::MeshBrushSettings& settings,
+                             const mesh::DynamicTopologySettings& topology,
+                             const voxel::MaskField* mask = nullptr,
+                             mesh::TopologyDelta* record = nullptr,
+                             const MeshStrokeOptions& options = {},
+                             mesh::DynamicStampResult* summary = nullptr);
 
 // -- snakehook ----------------------------------------------------------------
 //
