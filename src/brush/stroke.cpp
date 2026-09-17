@@ -828,6 +828,24 @@ std::size_t apply_to_dynamic(mesh::DynamicSculptor& sculptor, const std::vector<
     return applied;
 }
 
+std::optional<std::size_t> apply_to_dynamic_recorded(
+    mesh::DynamicSculptor& sculptor, const std::vector<Stamp>& stamps, mesh::MeshBrush verb,
+    const mesh::MeshBrushSettings& settings, const mesh::DynamicTopologySettings& topology,
+    const voxel::MaskField* mask, mesh::RecordedGesture& record, const MeshStrokeOptions& options,
+    mesh::DynamicStampResult* summary) {
+    if (summary != nullptr) reset_dynamic_summary(sculptor, summary);
+    // Refusals before the mark, so a malformed stroke is never a mismatch and
+    // never re-binds an empty record.
+    if (dynamic_stroke_refused(stamps, verb, options)) return 0;
+    // Once: inside the stroke only `stamp` writes the surface, into this record.
+    if (!record.can_capture_on(sculptor.surface())) return std::nullopt;
+    record.begin_capture(sculptor.surface());
+    const std::size_t applied = apply_to_dynamic(sculptor, stamps, verb, settings, topology, mask,
+                                                 &record.delta_mutable(), options, summary);
+    record.end_capture(sculptor.surface());
+    return applied;
+}
+
 std::vector<scene::Node> stamps_to_nodes(scene::SdfContent& content,
                                          const std::vector<Stamp>& stamps,
                                          const scene::Node& templ,
