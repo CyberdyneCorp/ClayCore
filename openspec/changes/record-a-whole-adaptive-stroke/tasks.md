@@ -2,7 +2,7 @@ ABI 0.119.0 -> 0.120.0.
 
 ## 1. Measured before building
 
-- [x] 1.1 Gap confirmed on `origin/main` at `a60d8c16`: `apply_to_dynamic` takes a
+- [x] 1.1 Gap confirmed on origin/main at `a60d8c16`: `apply_to_dynamic` takes a
       raw `TopologyDelta*` (no marks), the C stroke calls and pyclay take no record
 - [x] 1.2 C host loop of `stamp_recorded` vs the C stroke, `cube_sphere(16)`:
       Draw identical (664,260 encoded bytes both); Snakehook and Grab surfaces
@@ -117,7 +117,7 @@ ABI 0.119.0 -> 0.120.0.
 
 - [ ] 7b.1 `clay_unit_tests` full, sharded, in the background; counts in the PR
 - [ ] 7b.2 `python3 tools/release_check.py --skip-slow`; diff any failure
-      against `origin/main` (known machine-level: `dialect`, `device`)
+      against origin/main (known machine-level: `dialect`, `device`)
 - [ ] 7b.3 `npx -y @fission-ai/openspec@1.12.0 validate --all --strict`
 - [ ] 7b.4 PR body: why, what lands, what measuring refuted, suite counts, gates,
       ABI 0.119.0 -> 0.120.0
