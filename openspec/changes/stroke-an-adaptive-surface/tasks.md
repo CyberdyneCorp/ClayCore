@@ -101,8 +101,8 @@
 - [x] 6.3 `openspec/ROADMAP.md`: close the two rows naming the gap
 - [x] 6.4 Remove the "no `apply_to_dynamic`" statements from `stroke.h` and the
       estimator requirement (this change's REMOVED + ADDED delta)
-- [ ] 6.5 Open the follow-up issue for fixed-path Grab anchoring with the 41% vs
-      66% measurement
+- [x] 6.5 Open the follow-up issue for fixed-path Grab anchoring with the 41% vs
+      66% measurement — #620
 - [x] 6.6 GCC -Werror flags reproduced where possible; `release_check.py
       --skip-slow` green; `openspec@1.12.0 validate --all --strict`
       — no GCC on the machine; the build's own `-Wall -Wextra -Wpedantic
