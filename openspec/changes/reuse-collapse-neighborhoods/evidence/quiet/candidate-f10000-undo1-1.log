@@ -1,0 +1,40 @@
+# bench_extreme_poly: the 7.1 matrix with 7.2's separable stages
+# `stage breakdown` is the library's own per-stage timing inside
+#   MeshSculptor::stamp (mesh::StageTelemetry). No clock is read when the
+#   telemetry pointer is null, which is what let 7.2's remaining stages be
+#   timed without perturbing a stamp outside this program.
+# spacing 0.0100, 20 repetitions per cell after 4 warm-up stamps
+== 100000 vertices ==============================================
+  adaptive surface: 99856 vertices, 198450 faces, 2048 chunks, setup 0.44 s, rss 86 MB
+OPS 0 88 1065 985 296 0 21 1027 0
+OPS 1 18 3481 571 276 0 66 1061 0
+OPS 2 13 3744 339 429 0 12 428 1
+OPS 3 5 4091 0 421 0 1 100 1
+OPS 4 2 2546 496 259 0 17 745 0
+OPS 5 9 20 17 287 0 2 211 0
+OPS 6 7 34 29 257 0 0 241 0
+OPS 7 13 350 220 259 0 7 416 0
+OPS 8 10 1325 487 248 0 24 560 0
+OPS 9 4 51 44 241 0 3 245 0
+OPS 10 19 10 7 278 0 0 203 0
+OPS 11 2 10 2 248 0 0 164 0
+OPS 12 4 7 11 238 0 2 205 0
+OPS 13 5 48 37 248 0 0 232 0
+OPS 14 5 25 26 233 0 3 227 0
+OPS 15 11 6 5 243 0 0 196 0
+OPS 16 1 2 0 240 0 0 152 0
+OPS 17 2 5 3 227 0 0 132 0
+OPS 18 2 22 22 237 0 2 204 0
+OPS 19 7 18 12 222 0 3 232 0
+    footprint  10000  dirty chunks    57  upload    113.0 KB  topology ops 20400
+      stamp+remesh*  p50   7566.80  p95  50093.73  p99  50093.73  max  52487.90  mean  17387.45 us
+        stage breakdown (mean us/stamp, 20 reps):
+          query       407.198  ( 2.3%)
+          snapshot      0.029  ( 0.0%)
+          kernel        0.341  ( 0.0%)
+          writeback   404.948  ( 2.3%)
+          normals     212.781  ( 1.2%)
+          topology   16573.399  (94.2%)
+      readback       p50     85.09  p95    195.42  p99    195.42  max    207.11  mean    107.25 us
+
+# peak rss 61 MB
