@@ -140,6 +140,56 @@ void count_refusal(TopologyResult r, RemeshStats* stats) {
     }
 }
 
+// Which relaxed vertices actually move, and the faces around them, deduplicated
+// in slot order -- all gathered BEFORE any position is written. A vertex whose
+// target equals its position is left out, so a converged region records
+// nothing. `targets` is compacted in step with `moved`.
+void collect_relaxed(const DynamicSurface& surface, const std::vector<VertexId>& verts,
+                     std::vector<kernel::cfloat3>* targets, std::vector<VertexId>* moved,
+                     std::vector<FaceId>* faces) {
+    std::vector<FaceId> incident;
+    std::size_t kept = 0;
+    for (std::size_t i = 0; i < verts.size(); ++i) {
+        const DynamicVertex* rec = surface.vertex(verts[i]);
+        const kernel::cfloat3 t = (*targets)[i];
+        if (!rec || (rec->position.x == t.x && rec->position.y == t.y && rec->position.z == t.z))
+            continue;
+        moved->push_back(verts[i]);
+        (*targets)[kept++] = t;
+        if (surface.incident_faces(verts[i], &incident))
+            faces->insert(faces->end(), incident.begin(), incident.end());
+    }
+    targets->resize(kept);
+    std::sort(faces->begin(), faces->end(), [](FaceId a, FaceId b) { return a.slot < b.slot; });
+    faces->erase(std::unique(faces->begin(), faces->end(),
+                             [](FaceId a, FaceId b) { return a.slot == b.slot; }),
+                 faces->end());
+}
+
+// A face's normal and the normals of its three corners are what
+// `refresh_normals` rewrites, so those are what the record notes and syncs.
+// `note_*` keeps the first sighting and `sync_*` the last, so a vertex already
+// noted by an earlier operator keeps its true `before`.
+void note_faces_and_corners(const DynamicSurface& surface, const std::vector<FaceId>& faces,
+                            TopologyDelta* delta) {
+    for (FaceId f : faces) {
+        delta->note_face(surface, f);
+        VertexId v[3];
+        if (!surface.face_vertices(f, v)) continue;
+        for (VertexId c : v) delta->note_vertex(surface, c);
+    }
+}
+
+void sync_faces_and_corners(const DynamicSurface& surface, const std::vector<FaceId>& faces,
+                            TopologyDelta* delta) {
+    for (FaceId f : faces) {
+        delta->sync_face(surface, f);
+        VertexId v[3];
+        if (!surface.face_vertices(f, v)) continue;
+        for (VertexId c : v) delta->sync_vertex(surface, c);
+    }
+}
+
 }  // namespace
 
 RemeshStats remesh_region(DynamicSurface& surface, DynamicBvh* bvh, kernel::cfloat3 centre,
@@ -342,7 +392,6 @@ std::size_t relax_region(DynamicSurface& surface, DynamicBvh* bvh, kernel::cfloa
     // change when an unrelated edit renumbered nothing at all.
     std::vector<kernel::cfloat3> targets(verts.size());
     std::vector<VertexId> ring;
-    std::size_t moved = 0;
     for (std::size_t i = 0; i < verts.size(); ++i) {
         const VertexId v = verts[i];
         targets[i] = surface.position_of(v);
@@ -376,33 +425,43 @@ std::size_t relax_region(DynamicSurface& surface, DynamicBvh* bvh, kernel::cfloa
         targets[i] = rec->position + tangent * strength;
     }
 
+    // THE RECORD COVERS THE NORMALS THIS PASS REWRITES, and covering them means
+    // noting BEFORE the first write and syncing AFTER the recompute -- the rule
+    // `DynamicSculptor::write_positions` already follows.
+    //
+    // What was here noted and synced each moved vertex around its position
+    // write, then called `refresh_normals` over the incident faces: every face
+    // normal and every vertex normal of the ring was rewritten after the last
+    // sync, and the faces and the unmoved ring vertices were never noted at
+    // all. So the record's `after` normals were the pre-relax ones, and for the
+    // ring its `before` was missing. Measured on a 12,288-face cube-sphere with
+    // the topology defaults: right after capture the record disagreed with the
+    // live surface on 346 vertex and 669 face normals, redo restored 16 to
+    // 2,785 wrong vertex normals across six stroke shapes, and eight strokes
+    // undone in reverse left 2,910 wrong. Positions and indices were exact,
+    // which is why a comparison of those two never saw it.
+    std::vector<VertexId> moved;
     std::vector<FaceId> touched;
-    for (std::size_t i = 0; i < verts.size(); ++i) {
-        DynamicVertex* rec = surface.vertex(verts[i]);
-        if (!rec) continue;
-        if (rec->position.x == targets[i].x && rec->position.y == targets[i].y &&
-            rec->position.z == targets[i].z)
-            continue;
-        if (delta) delta->note_vertex(surface, verts[i]);
-        rec->position = targets[i];
-        if (delta) delta->sync_vertex(surface, verts[i]);
-        ++moved;
-        std::vector<FaceId> incident;
-        if (surface.incident_faces(verts[i], &incident))
-            touched.insert(touched.end(), incident.begin(), incident.end());
+    collect_relaxed(surface, verts, &targets, &moved, &touched);
+    if (moved.empty()) return 0;
+    if (delta) {
+        // The moved vertices by name as well as through their faces: a vertex
+        // whose ring does not close has no incident face to be reached by.
+        for (VertexId v : moved) delta->note_vertex(surface, v);
+        note_faces_and_corners(surface, touched, delta);
     }
-
-    if (!touched.empty()) {
-        std::sort(touched.begin(), touched.end(),
-                  [](FaceId a, FaceId b) { return a.slot < b.slot; });
-        touched.erase(std::unique(touched.begin(), touched.end(),
-                                  [](FaceId a, FaceId b) { return a.slot == b.slot; }),
-                      touched.end());
-        surface.refresh_normals(touched);
-        if (bvh) bvh->update_many(surface, touched);
-        surface.bump_geometry();
+    for (std::size_t i = 0; i < moved.size(); ++i) surface.vertex(moved[i])->position = targets[i];
+    surface.refresh_normals(touched);
+    if (delta) {
+        for (VertexId v : moved) delta->sync_vertex(surface, v);
+        sync_faces_and_corners(surface, touched, delta);
     }
-    return moved;
+    if (bvh) bvh->update_many(surface, touched);
+    // Bumped on MOVED, not on "found an incident face": a vertex whose ring
+    // failed to close still moved, and a write that advanced no revision is a
+    // write the undo guard cannot see.
+    surface.bump_geometry();
+    return moved.size();
 }
 
 }  // namespace mesh

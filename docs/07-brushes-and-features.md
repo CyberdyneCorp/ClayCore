@@ -1597,6 +1597,57 @@ the chunks it touched, and chunk data is **copied into caller-owned buffers**
 behind a capacity query: a mutation can move or free anything, so a borrowed
 pointer held across one would be a use-after-free with no generation to check.
 
+### Undo from a host (ABI 0.118.0)
+
+A `clay_dynamic_surface` lives beside a document, not inside one, so the
+document's history never reached it and a host had no undo for an adaptive
+stroke. It has one now: `clay_dynamic_delta`, a record of one gesture that the
+host owns, captured with `clay_dynamic_sculptor_stamp_recorded` and replayed with
+`clay_dynamic_delta_revert` / `_apply`. pyclay spells it
+`DynamicSculptor.stamp(..., record=clay.TopologyDelta())` and
+`record.revert(sculptor)`.
+
+**Replay goes through the sculptor, not the surface.** Reverting the surface's
+pools alone left the sculptor's chunk index describing the stroke that had just
+been undone: on a 49,152-face sphere 2,638 live faces were in no chunk, no chunk
+was marked dirty, and the same stroke stamped again produced a different
+surface. A replay erases the faces the record names from the index, restores the
+pools, re-inserts the faces that exist afterwards and marks their chunks dirty.
+The index work costs 0.1 / 0.3 / 2.1 ms at 49k / 197k / 786k faces, against
+39 / 189 / 896 ms for `clay_dynamic_sculptor_rebuild_index`. A rebuild is not
+needed afterwards. It is still allowed, but it clears the dirty set and
+renumbers the chunks, so a host that calls it re-uploads everything.
+
+**Last in, first out, and nothing else.** Two strokes on opposite sides of a
+sphere are not independent: the later one reuses slots the earlier one freed
+(322 on the measured pair), so reverting the earlier one first broke the
+half-edge structure. Every surface therefore carries a `{lineage, epoch}` mark.
+A replay checks it in O(1), and a record whose end state is not the surface's
+current state gets `CLAY_ERROR_SNAPSHOT_MISMATCH` with nothing written. That
+covers an out-of-order revert, an unrecorded stamp in between and a record from
+another surface. A content comparison was measured at 0.051 ms and rejected,
+because an unrecorded edit to an element the record does not name gets past it.
+
+**A record is exact, normals included.** Building this showed that the relax
+pass had never recorded the normals it recomputes. Every record captured with
+`relax_after_remesh` on (the default) held stale normals: redo got up to 2,785
+vertex normals wrong, and undo got up to 2,910 wrong across eight strokes.
+Positions and indices were exact, which is all the existing history tests
+compared. The pass now notes the faces around each vertex it moves, and their
+corners, before the write and syncs them after the normals are recomputed. That
+changed the values a record holds, not how many entries it has: the same stroke
+recorded identical entry counts and encoded bytes with and without the fix, on
+34,655 and on 138,162 faces, because those faces were already noted by the
+remesh operations around them.
+
+What the calls do not promise, and the header says so beside them:
+`clay_dynamic_surface_serialize` bytes differ after an undo, because slots stay
+allocated and `dead_slots` grows. A record replays only onto the surface handle
+it was captured on, so a surface reloaded from bytes matches no record. The
+memory ledger does not count records; budget them with
+`clay_dynamic_delta_stats.resident_bytes`, and assert counts against
+`encoded_bytes`, which is exactly `56 + 122V + 114H + 42E + 66F`.
+
 Runnable: [`examples/66_dynamic_topology.py`](../examples/66_dynamic_topology.py)
 — a 1,200-triangle sphere becomes a nose, an ear and a horn, with the locality
 of the refinement measured rather than illustrated.

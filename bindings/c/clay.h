@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 117
+#define CLAY_ABI_MINOR 118
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -8672,6 +8672,165 @@ clay_result clay_dynamic_surface_copy_chunk(const clay_dynamic_sculptor* sculpto
                                             float* out_normals, size_t normal_capacity,
                                             uint32_t* out_indices, size_t index_capacity,
                                             clay_dynamic_chunk_info* out_written);
+
+/* -- UNDO FOR AN ADAPTIVE STROKE (ABI 0.118.0) --------------------------------
+ *
+ * A clay_dynamic_surface lives beside a document rather than inside one, so the
+ * document's history cannot reach it. This is its undo: an opaque RECORD of one
+ * gesture -- every vertex, half-edge, edge and face it created, deleted or
+ * rewrote, with the state at both ends -- which the host captures while
+ * stamping and replays through the sculptor.
+ *
+ * THE HOST OWNS THE SEQUENCE. Which record is next, how deep the stack goes,
+ * when one is dropped and how it interleaves with the host's own document edits
+ * are the host's. The engine owns one thing: proving that a record matches the
+ * surface before writing it.
+ *
+ * COALESCED. An element touched by forty stamps of one stroke appears once, so
+ * a record's size follows what the stroke REACHED, not how many stamps it took.
+ * One record per stroke is one undo step, however many splits it ran.
+ *
+ * WHAT A REPLAY PROMISES, and it is BIT-EXACT over live elements:
+ * clay_dynamic_surface_to_mesh after a revert returns positions, normals and
+ * indices byte-identical to the export taken before the stroke, and after an
+ * apply byte-identical to the export taken after it.
+ *
+ * WHAT IT DOES NOT PROMISE:
+ *
+ *   - LAST IN, FIRST OUT ONLY. Revert requires the surface to be exactly where
+ *     the record left it, and apply exactly where the record found it. Anything
+ *     else -- an older record reverted under a newer one, a stamp made without
+ *     a record in between, a record from another surface -- is refused with
+ *     CLAY_ERROR_SNAPSHOT_MISMATCH before anything is written. Spatially
+ *     separate strokes are NOT independent: a later stroke reuses the slots an
+ *     earlier one freed, so an out-of-order revert corrupts the surface even
+ *     when the two never touched the same region. Measured: two strokes on
+ *     opposite sides of a sphere shared 322 slots, and reverting the first
+ *     under the second broke the half-edge structure. No reordering is
+ *     offered.
+ *   - clay_dynamic_surface_serialize IS NOT BYTE-IDENTICAL after an undo. Slots
+ *     the stroke created and the undo retired stay allocated with bumped
+ *     generations; a surface never compacts, because compacting renumbers the
+ *     handles every record the host holds is keyed on. Use to_mesh and
+ *     clay_dynamic_surface_validate to check a restore, not the bytes.
+ *   - clay_dynamic_surface_stats.dead_slots GROWS across an undo and does not
+ *     return to its pre-stroke value. Measured: face slots 12,288 -> 14,964 and
+ *     surface bytes 3.64 MB -> 6.68 MB after three strokes were undone.
+ *   - A RECORD NEVER OUTLIVES ITS SURFACE HANDLE. A surface from
+ *     clay_dynamic_surface_deserialize or _from_mesh is a new identity, even
+ *     when its content is identical, and no record replays onto it.
+ *   - clay_dynamic_sculptor_memory_ledger DOES NOT COUNT RECORDS. The host
+ *     holds them and budgets them with clay_dynamic_delta_stats.resident_bytes.
+ *   - ONLY THE SCULPTOR A REPLAY RUNS THROUGH FOLLOWS IT. A second sculptor
+ *     over the same surface keeps an index of the state before the replay, as
+ *     it already does after a stamp made through the first; destroy and
+ *     recreate it, or rebuild its index.
+ *
+ * THE INDEX FOLLOWS BY ITSELF. A replay erases the recorded faces from the
+ * sculptor's chunked index, restores the surface, re-inserts the faces that
+ * exist at the target and marks their chunks dirty, so draining
+ * clay_dynamic_surface_dirty_chunks after an undo reconstructs the surface.
+ * clay_dynamic_sculptor_rebuild_index is NOT needed, and its cost is the
+ * surface rather than the record: measured 39 / 189 / 896 ms at 49k / 197k /
+ * 786k faces against 0.1 / 0.3 / 2.1 ms for the replay's own index work.
+ * Calling it anyway is correct, and it CLEARS the dirty set and RENUMBERS the
+ * chunks (measured 88 -> 64), so a host that rebuilds after an undo must
+ * re-upload every chunk whatever the dirty list says. The chunk count may grow
+ * after a replay, as it may after a stamp.
+ *
+ * REVISIONS. A replay advances all three clay_surface_revision counters. A
+ * replay onto the state the record already describes returns CLAY_OK, writes
+ * nothing and advances none: reverting twice is reverting once. A stamp that
+ * changed nothing advances nothing either, so a dab that missed the surface
+ * does not invalidate the history.
+ *
+ * THREADING. As the sculptor's: the host serializes calls on one sculptor,
+ * and a capture into a record is a call on that record too. A replay only
+ * READS its record, so a record may be serialized or queried on another thread
+ * while it is not being captured into. */
+
+typedef struct clay_dynamic_delta clay_dynamic_delta;
+
+/* An empty, unbound record. Destroy with clay_dynamic_delta_destroy. */
+clay_dynamic_delta* clay_dynamic_delta_create(void);
+void clay_dynamic_delta_destroy(clay_dynamic_delta* delta);
+
+/* Empties the record and unbinds it from any surface, so the next stamp
+ * captured into it starts a new gesture. KEEPS its capacity: a host reusing one
+ * record per stroke allocates on its first stroke only. Destroy releases it. */
+clay_result clay_dynamic_delta_clear(clay_dynamic_delta* delta);
+
+typedef struct clay_dynamic_delta_stats {
+    uint32_t struct_size; /* = sizeof(clay_dynamic_delta_stats); required */
+    /* Entries per element kind: one per element the gesture reached. */
+    uint64_t vertices;
+    uint64_t halfedges;
+    uint64_t edges;
+    uint64_t faces;
+    /* EXACT and platform-independent: the size clay_dynamic_delta_serialize
+     * writes, 56 + 122*vertices + 114*halfedges + 42*edges + 66*faces. The
+     * number to assert a count against. */
+    uint64_t encoded_bytes;
+    /* What the record holds in memory, capacities and slot maps included. It
+     * depends on the allocator's growth policy, so it is the number to BUDGET
+     * against and the wrong one to assert. Measured on the engine's delta for
+     * one 30-stamp stroke on a 12,288-face sphere: 1,884,384 bytes resident
+     * beside a 1,233,636-byte encoding. This record adds 32 bytes to each. */
+    uint64_t resident_bytes;
+} clay_dynamic_delta_stats;
+
+clay_result clay_dynamic_delta_stats_get(const clay_dynamic_delta* delta,
+                                         clay_dynamic_delta_stats* out_stats);
+
+/* clay_dynamic_sculptor_stamp, accumulating into `record`. A NEW ENTRY POINT
+ * rather than a new argument, because changing the shipped stamp's signature
+ * would break every host; clay_dynamic_sculptor_stamp is unchanged.
+ *
+ * `record` NULL behaves exactly like clay_dynamic_sculptor_stamp. An empty
+ * record binds to the surface as it is now. A non-empty one accepts the stamp
+ * only when the surface is still where the record left it; otherwise the call
+ * returns CLAY_ERROR_SNAPSHOT_MISMATCH and STAMPS NOTHING, because continuing
+ * would join two unrelated histories into one undo step. That happens after an
+ * unrecorded stamp, after a replay, or with a record from another surface --
+ * clear the record, or start a new one. */
+clay_result clay_dynamic_sculptor_stamp_recorded(clay_dynamic_sculptor* sculptor,
+                                                 const clay_mesh_brush_desc* brush,
+                                                 const clay_dynamic_topology_desc* topology,
+                                                 const clay_mask* mask,
+                                                 clay_dynamic_delta* record,
+                                                 clay_dynamic_stamp_report* out_report);
+
+/* Undo and redo, through the SCULPTOR, because the sculptor owns the chunked
+ * index and the dirty-chunk stream that have to follow the surface.
+ *
+ * Revert puts the surface back as the record found it; apply puts it back as
+ * the record left it. CLAY_ERROR_SNAPSHOT_MISMATCH when the surface is at
+ * neither end, with NOTHING written and no revision advanced -- it is
+ * retryable, in the right order, where CLAY_ERROR_INVALID_ARGUMENT (a null
+ * handle) is not. CLAY_OK with nothing written when the surface is already at
+ * the target, and for an empty record. */
+clay_result clay_dynamic_delta_revert(const clay_dynamic_delta* delta,
+                                      clay_dynamic_sculptor* sculptor);
+clay_result clay_dynamic_delta_apply(const clay_dynamic_delta* delta,
+                                     clay_dynamic_sculptor* sculptor);
+
+/* Record <-> bytes, on the size-query pattern: call with out_data NULL for the
+ * size in *count; a buffer that is too small gets CLAY_ERROR_BUFFER_TOO_SMALL
+ * with the needed size in *count and writes nothing.
+ *
+ * FOR SPILLING, NOT FOR CRASH RECOVERY. A host over its undo budget may write
+ * the oldest record out and read it back later, and the result replays exactly
+ * as the original -- onto the SAME surface handle it was captured on. A surface
+ * reloaded from its own bytes is a different identity and matches no record.
+ *
+ * Deserialize refuses a truncated, oversized or hostile buffer with
+ * CLAY_ERROR_INVALID_ARGUMENT before allocating from any count in it, and a
+ * record written by a newer format version with CLAY_ERROR_FORWARD_VERSION.
+ * *out_delta is NULL on any refusal. */
+clay_result clay_dynamic_delta_serialize(const clay_dynamic_delta* delta, uint8_t* out_data,
+                                         size_t* count);
+clay_result clay_dynamic_delta_deserialize(const uint8_t* data, size_t size,
+                                           clay_dynamic_delta** out_delta);
 
 /* -- multiresolution surfaces (mesh-multires spec, add-mesh-multires) ---------
  *
