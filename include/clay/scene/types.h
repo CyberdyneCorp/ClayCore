@@ -142,6 +142,11 @@ enum class Op : std::uint8_t {
     //
     // A pair rather than one signed amplitude, because blend.k cannot be
     // negative — and because add/subtract and engrave/emboss are pairs too.
+    //
+    // Each point moves along its OWN normal: Relief is the SDF Inflate, and
+    // only approximates ZBrush Standard, whose mesh Draw shares one averaged
+    // normal per stamp. On a ridge narrower than the stamp the two differ by
+    // the whole amplitude (see ccombine_relief in kernel/tape.h).
     Relief = kernel::ccombine_relief,  // build up
     Incise = kernel::ccombine_incise,  // cut in
     // Spatial morphs (Node::transition carries their parameters). NON-LOCAL:
