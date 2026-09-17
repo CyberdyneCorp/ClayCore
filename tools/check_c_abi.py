@@ -333,6 +333,9 @@ BOUNDED_FILLS = (
     # The five preflight entry points end here, so they cannot fill the
     # descriptor five different ways.
     "write_preflight",
+    # The adaptive stamp and both adaptive stroke calls, so a stamp's report and
+    # a stroke's accumulated one are the same bounded fill.
+    "write_dynamic_report",
 )
 
 

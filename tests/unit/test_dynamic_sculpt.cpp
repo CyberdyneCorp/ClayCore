@@ -251,6 +251,63 @@ TEST_CASE("dynamic sculpt: the mask gate means what it means on the fixed path")
     CHECK(mesh::validate_dynamic_surface(*surface).ok);
 }
 
+TEST_CASE("dynamic sculpt: a stamp that remeshed and reached nothing reports it once and current") {
+    // REGRESSION (stroke-an-adaptive-surface). A stamp whose gather keeps no
+    // vertex — here a fully frozen one — still runs its verb's remesh, and the
+    // early return that path takes reported the revisions from BEFORE the
+    // remesh, and published the remesh counters twice (once on that path, once
+    // in `stamp`). Found by summing a stroke's results: the last stamp's
+    // revisions were not the surface's. A host re-uploading on a revision
+    // change missed the topology that stamp created.
+    auto surface = DynamicSurface::from_mesh(cube_sphere(6, 1.0f));
+    REQUIRE(surface.has_value());
+    DynamicSculptor sculptor(*surface);
+    mesh::SculptCounters counters;
+    sculptor.set_counters(&counters);
+
+    MeshBrushSettings s;
+    s.center = cf3(0, 0, 1);
+    s.radius = 0.5f;
+    s.strength = 0.5f;
+    DynamicTopologySettings topo;  // enabled; Clay remeshes BEFORE
+    const field::MaskGate frozen = [](cfloat3) { return 1.0f; };
+
+    const std::uint64_t topology_before = surface->topology_revision();
+    const mesh::DynamicStampResult r = sculptor.stamp(MeshBrush::Clay, s, topo, frozen);
+    REQUIRE(r.moved_vertices == 0);
+    REQUIRE(r.remesh.split > 0);  // the precondition: it did remesh
+    REQUIRE(surface->topology_revision() != topology_before);
+
+    CHECK(r.topology_revision == surface->topology_revision());
+    CHECK(r.geometry_revision == surface->geometry_revision());
+    CHECK(r.attribute_revision == surface->attribute_revision());
+    CHECK(counters.splits == r.remesh.split);
+    CHECK(counters.collapses == r.remesh.collapsed);
+    CHECK(counters.flips == r.remesh.flipped);
+}
+
+TEST_CASE("dynamic sculpt: an AFTER remesh that ran out of budget says so") {
+    // REGRESSION (stroke-an-adaptive-surface). The AFTER remesh's counts were
+    // added to the result field by field, and `hit_budget` was not one of the
+    // fields, so a Grab whose remesh stopped at its operation bound reported a
+    // region that had converged.
+    auto surface = DynamicSurface::from_mesh(cube_sphere(6, 1.0f));
+    REQUIRE(surface.has_value());
+    DynamicSculptor sculptor(*surface);
+    MeshBrushSettings s;
+    s.center = cf3(0, 0, 1);
+    s.radius = 0.5f;
+    s.strength = 0.5f;
+    s.direction = cf3(0, 0, 0.2f);
+    DynamicTopologySettings topo;
+    topo.max_ops_per_stamp = 1;
+    REQUIRE(mesh::default_timing(MeshBrush::Grab) == mesh::RemeshTiming::AfterBrush);
+    const mesh::DynamicStampResult r = sculptor.stamp(MeshBrush::Grab, s, topo);
+    REQUIRE(r.moved_vertices > 0);
+    REQUIRE(r.remesh.total() == 1);
+    CHECK(r.remesh.hit_budget);
+}
+
 TEST_CASE("dynamic sculpt: the same stroke twice gives the same surface") {
     // DETERMINISM, which for an adaptive surface includes the topology: the
     // same verbs on the same input must give the same connectivity, or every

@@ -540,7 +540,15 @@ std::size_t DynamicSculptor::write_colors(TopologyDelta* record) {
 DynamicStampResult DynamicSculptor::stamp(MeshBrush verb, const MeshBrushSettings& brush,
                                           const DynamicTopologySettings& topology,
                                           const field::MaskGate& gate, TopologyDelta* record) {
-    const DynamicStampResult out = stamp_impl(verb, brush, topology, gate, record);
+    DynamicStampResult out = stamp_impl(verb, brush, topology, gate, record);
+    // THE REVISIONS AFTER THE WHOLE STAMP, read here once rather than at each of
+    // `stamp_impl`'s exits. The exit for a stamp that reached nothing used to
+    // return the revisions it read on entry, so a stamp whose remesh changed
+    // the surface reported that nothing had — and a host re-uploading on a
+    // revision change missed the topology that stamp made.
+    out.topology_revision = surface_.topology_revision();
+    out.geometry_revision = surface_.geometry_revision();
+    out.attribute_revision = surface_.attribute_revision();
     // ONE observation point for a call with several early returns. Splitting the
     // body out is what makes that possible without repeating the publish at
     // every `return`, where a later edit would eventually forget one.
@@ -689,9 +697,26 @@ void dispatch_displacement(MeshBrush verb, const SculptSnapshot& snapshot,
     }
 }
 
-// The three topology counters, in one place: `stamp_impl` has two exits and a
-// remesh can run at either, and two copies of this would drift the first time a
-// fourth operation was added.
+// An AFTER remesh's stats folded into the BEFORE one's. One function for both
+// of `stamp_impl`'s exits: they were two field-by-field copies, one of which
+// forgot `relaxed`, and both of which forgot `hit_budget` — so a stamp whose
+// late remesh stopped at its operation bound reported a converged region.
+namespace {
+void add_late_remesh(const RemeshStats& late, RemeshStats* into) {
+    into->split += late.split;
+    into->collapsed += late.collapsed;
+    into->flipped += late.flipped;
+    into->relaxed += late.relaxed;
+    into->refused_constrained += late.refused_constrained;
+    into->refused_topology += late.refused_topology;
+    into->refused_geometry += late.refused_geometry;
+    into->hit_budget = into->hit_budget || late.hit_budget;
+}
+}  // namespace
+
+// The three topology counters, in ONE place, published once per stamp by
+// `stamp`. `stamp_impl`'s reached-nothing exit used to publish them as well,
+// so every stamp that remeshed and moved nothing counted its operations twice.
 void DynamicSculptor::count_remesh(const RemeshStats& stats) {
     count(counters_, &SculptCounters::splits, stats.split);
     count(counters_, &SculptCounters::collapses, stats.collapsed);
@@ -703,9 +728,6 @@ DynamicStampResult DynamicSculptor::stamp_impl(MeshBrush verb, const MeshBrushSe
                                                const field::MaskGate& gate,
                                                TopologyDelta* record) {
     DynamicStampResult out;
-    out.topology_revision = surface_.topology_revision();
-    out.geometry_revision = surface_.geometry_revision();
-    out.attribute_revision = surface_.attribute_revision();
     if (!dynamic_offers(verb) || brush.radius <= 0.0f) return out;
 
     const RemeshTiming timing = default_timing(verb);
@@ -732,13 +754,10 @@ DynamicStampResult DynamicSculptor::stamp_impl(MeshBrush verb, const MeshBrushSe
     if (!reached) {
         if (after) {
             StageTimer topology_timer(stages_, SculptStage::Topology);
-            const RemeshStats late =
-                remesh_region(surface_, &bvh_, brush.center, brush.radius, topology, record);
-            out.remesh.split += late.split;
-            out.remesh.collapsed += late.collapsed;
-            out.remesh.flipped += late.flipped;
+            add_late_remesh(
+                remesh_region(surface_, &bvh_, brush.center, brush.radius, topology, record),
+                &out.remesh);
         }
-        count_remesh(out.remesh);
         return out;
     }
 
@@ -785,17 +804,10 @@ DynamicStampResult DynamicSculptor::stamp_impl(MeshBrush verb, const MeshBrushSe
 
     if (after) {
         StageTimer topology_timer(stages_, SculptStage::Topology);
-        const RemeshStats late =
-            remesh_region(surface_, &bvh_, brush.center, brush.radius, topology, record);
-        out.remesh.split += late.split;
-        out.remesh.collapsed += late.collapsed;
-        out.remesh.flipped += late.flipped;
-        out.remesh.relaxed += late.relaxed;
+        add_late_remesh(
+            remesh_region(surface_, &bvh_, brush.center, brush.radius, topology, record),
+            &out.remesh);
     }
-
-    out.topology_revision = surface_.topology_revision();
-    out.geometry_revision = surface_.geometry_revision();
-    out.attribute_revision = surface_.attribute_revision();
     return out;
 }
 

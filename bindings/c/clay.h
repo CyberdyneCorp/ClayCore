@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 118
+#define CLAY_ABI_MINOR 119
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -8659,6 +8659,96 @@ clay_result clay_dynamic_sculptor_stamp(clay_dynamic_sculptor* sculptor,
                                         const clay_dynamic_topology_desc* topology,
                                         const clay_mask* mask,
                                         clay_dynamic_stamp_report* out_report);
+
+/* A WHOLE STROKE onto the adaptive surface (ABI 0.119.0) -- the stroke engine's
+ * consumer for the third mesh representation, beside
+ * clay_mesh_sculptor_apply_stroke and clay_multires_sculptor_apply_stroke.
+ *
+ * WHY A CALL AND NOT A HOST LOOP of clay_stroke_resolve_full plus one
+ * clay_dynamic_sculptor_stamp per stamp: the loop a host writes from the headers
+ * centres each stamp on the cursor, and a SNAKEHOOK written that way falls
+ * behind its own pull -- measured on a unit cube-sphere, 42% of a 0.8 pull-out
+ * against 96% here, with the last stamps moving nothing. What a stroke MEANS is
+ * the library's:
+ *   - each stamp brings its own radius and strength; the descriptor's `radius`
+ *     is IGNORED and its `strength` multiplies the stamp's;
+ *   - GRAB centres every stamp on the FIRST stamp and drags by the motion
+ *     between stamps, exactly as on a fixed mesh;
+ *   - SNAKEHOOK centres every stamp on the VERTEX it drags. The remesher retires
+ *     vertex ids, so that vertex is revalidated before every stamp and, when a
+ *     collapse removed it, re-found nearest the previous stamp's position;
+ *   - the mask is placed once and gates every stamp; a stamp whose centre is
+ *     fully masked is skipped, remesh included.
+ * Every stamp runs its verb's own remesh timing, so the surface is identical to
+ * the same resolved stamps stamped one by one with those rules.
+ *
+ * SAMPLES ARE clay_stroke_sample_full, not the count*5 float packing the fixed
+ * and hierarchy stroke calls take: that packing carries no azimuth, and a new
+ * entry point has no older stride to protect. `orient_alpha_by_stamp` non-zero
+ * lets each stamp's rotation (the path, or with the preset's rotate_to_azimuth,
+ * the stylus barrel) turn the alpha; zero keeps the alpha tangent exactly as the
+ * descriptor set it.
+ *
+ * NO PER-CALL FRAME. Positions, radii and directions are in the space the
+ * handle declares with clay_dynamic_sculptor_set_world_frame (world when one is
+ * declared, the surface's own otherwise), and the mask and automask sources are
+ * placed through that frame. A second spelling here would be a conflict the call
+ * then had to refuse.
+ *
+ * `topology` NULL means the defaults, decoded by the same code
+ * clay_dynamic_sculptor_stamp uses. `mask` may be NULL. `out_applied` receives
+ * the number of stamps that CHANGED the surface (moved a vertex or remeshed),
+ * and 0 on any failure. `out_report`, when given, accumulates the whole stroke
+ * honouring its struct_size: counts summed, `hit_budget` if any stamp hit it,
+ * the dirty bounds' union, and the revision after the last stamp. Its size is
+ * checked BEFORE any stamp runs.
+ *
+ * WHAT THESE DO NOT DO:
+ *   - A LAYER brush is refused with CLAY_ERROR_INVALID_ARGUMENT before any stamp
+ *     or remesh runs, never remapped (see clay_dynamic_sculptor_stamp).
+ *   - NO UNDO RECORD: these take no clay_dynamic_delta. A record is captured
+ *     only one stamp at a time, by clay_dynamic_sculptor_stamp_recorded (see
+ *     UNDO FOR AN ADAPTIVE STROKE below). The C++ entry point
+ *     brush::apply_to_dynamic takes one for a whole stroke.
+ *   - NO NORMAL DEFERRAL: the adaptive sculptor refreshes normals locally per
+ *     stamp, so there is no `defer_normals` argument to accept and ignore.
+ *   - NOT FASTER. A stroke costs the sum of its stamps: measured at 1.004x the
+ *     host loop of clay_stroke_resolve_full plus one clay_dynamic_sculptor_stamp
+ *     per stamp (46.221 vs 46.048 ms median of 30, Release, 14 remeshing Draw
+ *     stamps on a 48x48 cube-sphere, identical split counts), and that host
+ *     loop at 1.001x a C++ loop. The call is about getting the stroke right,
+ *     not latency.
+ *   - Grab's after-remesh runs around the first stamp's centre, not the
+ *     stretched tip; later stamps whose balls reach the tip refine it.
+ *   - The chunked index is refitted, never rebuilt; rebuild between strokes. */
+clay_result clay_dynamic_sculptor_apply_stroke(clay_dynamic_sculptor* sculptor,
+                                               const clay_stroke_sample_full* samples,
+                                               size_t sample_count,
+                                               const clay_stroke_preset* preset,
+                                               const clay_mesh_brush_desc* brush,
+                                               const clay_dynamic_topology_desc* topology,
+                                               const clay_mask* mask,
+                                               int32_t orient_alpha_by_stamp,
+                                               size_t* out_applied,
+                                               clay_dynamic_stamp_report* out_report);
+
+/* THE SAME STROKE, DRIVEN BY A BRUSH PRESET, which carries the stroke preset,
+ * the verb and the brush's settings. A preset whose verb is Layer is refused as
+ * above. `alpha` is alpha_width * alpha_height samples in [0,1], BORROWED for
+ * the call and never stored, or NULL for none; below 2x2 is
+ * CLAY_ERROR_INVALID_ARGUMENT. Everything the paragraph above says about
+ * samples, the frame, the report and what is not provided applies here. */
+clay_result clay_dynamic_sculptor_apply_preset(clay_dynamic_sculptor* sculptor,
+                                               const clay_stroke_sample_full* samples,
+                                               size_t sample_count,
+                                               const clay_brush_preset* preset,
+                                               const float* alpha, int32_t alpha_width,
+                                               int32_t alpha_height,
+                                               const clay_dynamic_topology_desc* topology,
+                                               const clay_mask* mask,
+                                               int32_t orient_alpha_by_stamp,
+                                               size_t* out_applied,
+                                               clay_dynamic_stamp_report* out_report);
 
 /* Rebuild the chunked index. BETWEEN STROKES, never mid-drag: a refit stays
  * correct and does not stay fast, and a rebuild is not automatically an
