@@ -1,0 +1,71 @@
+--- a/benchmarks/bench_extreme_poly.cpp
++++ b/benchmarks/bench_extreme_poly.cpp
+@@ -73,0 +74,20 @@
++mesh::MeshBrush selected_brush() {
++    const char* name = std::getenv("MESH_PROBE_BRUSH");
++    if (name && std::strcmp(name, "smooth") == 0) return mesh::MeshBrush::Smooth;
++    if (name && std::strcmp(name, "relax") == 0) return mesh::MeshBrush::Relax;
++    return mesh::MeshBrush::Draw;
++}
++
++void copy_payload(const mesh::SurfaceView& view, std::uint32_t id,
++                  const mesh::ChunkReadback& sized) {
++    if (!std::getenv("MESH_PROBE_COPY")) return;
++    static std::vector<float> positions, normals;
++    static std::vector<std::uint32_t> indices;
++    positions.resize(std::size_t(sized.vertex_count) * 3);
++    normals.resize(positions.size());
++    indices.resize(sized.index_count);
++    const auto result = view.copy_chunk(id, &sized.current, positions.data(), positions.size(),
++        normals.data(), normals.size(), indices.data(), indices.size());
++    if (!result.ok || result.truncated || result.stale) std::abort();
++}
++
+@@ -227 +247 @@
+-        brush.geodesic = mesh::default_geodesic(mesh::MeshBrush::Draw);
++        brush.geodesic = mesh::default_geodesic(selected_brush());
+@@ -265 +285 @@
+-            sculptor.stamp(mesh::MeshBrush::Draw, brush);
++            sculptor.stamp(selected_brush(), brush);
+@@ -279,0 +300 @@
++                copy_payload(view, id, sized);
+@@ -325,0 +347,3 @@
++    mesh::TopologyDelta record;
++    mesh::StageTelemetry stages;
++    sculptor.set_stage_telemetry(&stages);
+@@ -351,0 +376 @@
++            if (rep == 0) stages.reset();
+@@ -354 +379,2 @@
+-                sculptor.stamp(mesh::MeshBrush::Draw, brush, topology);
++                sculptor.stamp(selected_brush(), brush, topology, {},
++                    std::getenv("MESH_PROBE_UNDO") ? &record : nullptr);
+@@ -362,0 +389 @@
++                copy_payload(view, id, sized);
+@@ -373,0 +401,2 @@
++            std::printf("OPS %d %zu %zu %zu %zu %zu %zu %zu %d\n",rep,r.remesh.split,r.remesh.collapsed,r.remesh.flipped,r.remesh.relaxed,r.remesh.refused_constrained,r.remesh.refused_topology,r.remesh.refused_geometry,r.remesh.hit_budget);
++
+@@ -376,0 +406,11 @@
++        if (const char* path = std::getenv("MESH_PROBE_OUTPUT")) {
++            FILE* file = std::fopen(path,"wb");
++            if (!file) std::abort();
++            const auto mesh = surface->to_mesh();
++            for (const auto& vector : {mesh.positions, mesh.normals, mesh.colors}) {
++                const std::size_t count=vector.size(); std::fwrite(&count,sizeof(count),1,file);
++                for (const auto& p : vector) { const float xyz[]={p.x,p.y,p.z}; std::fwrite(xyz,sizeof(float),3,file); }
++            }
++            std::fwrite(mesh.indices.data(),sizeof(std::uint32_t),mesh.indices.size(),file);
++            std::fclose(file);
++        }
+@@ -377,0 +418 @@
++        print_stages(stages, static_cast<double>(stamp.size()));
+@@ -462 +503 @@
+-        brush.geodesic = mesh::default_geodesic(mesh::MeshBrush::Draw);
++        brush.geodesic = mesh::default_geodesic(selected_brush());
+@@ -486 +527 @@
+-                layered_sculptor.stamp(mesh::MeshBrush::Draw, brush);
++                layered_sculptor.stamp(selected_brush(), brush);
+@@ -488 +529 @@
+-                sculptor.stamp(mesh::MeshBrush::Draw, brush);
++                sculptor.stamp(selected_brush(), brush);
+@@ -499,0 +541 @@
++                copy_payload(view, id, sized);

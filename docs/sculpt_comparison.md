@@ -103,24 +103,18 @@ in [`07-brushes-and-features.md`](07-brushes-and-features.md).
 | Polypaint / Smear on a MESH | `mesh::MeshSculptor` `paint`, `smear` | ✅ the only two verbs that move no vertex; they refuse a mesh with no colour attribute rather than creating one |
 | Elastic (Blender), ZProject | — | 🟡 Elastic was filed "does not survive the representation change", which was true for fields and is no longer true on a mesh layer. Undecided rather than rejected; it is the one entry that is new *math* rather than a new composition of the eleven |
 | DynaMesh / global voxel remesh | `mesh::voxel_remesh` | ✅ **and this is the row where the comparison is closest.** A whole surface sampled into a signed narrow-band field at an explicit world voxel size and rebuilt from it: overlaps fuse, self-intersections resolve, density comes out uniform, the result is validated watertight before it is returned, and the cost is preflighted so an oversized request is refused before it allocates. **Where it differs from DynaMesh:** the sampling domain follows the surface and its band rather than the bounding box, so the expensive work scales with area and not volume; the resolution is a WORLD VOXEL SIZE with longest-axis as a convenience over it, rather than a unitless slider; and the failure modes are typed rather than silent — an open surface takes an explicit policy, and a resolution over budget is refused rather than quietly lowered. **What it does not do:** preserve UVs (dropped, and the API says dropped), infer edge loops, or keep anything thinner than the voxel size |
-| Dyntopo, LiveClay, multires | — | ❌ **absent, and no longer deliberate.** The reasoning — an SDF sidesteps topology, and dynamic tessellation is not this engine's fight — held until fixed-topology mesh brushes shipped and made the stretch below a reason to leave the engine rather than a boundary. Reversed 2026-08-29 and scoped as separate representations beside the fixed-topology one (`openspec/ROADMAP.md` Phase 5). None of it is implemented; this row moves when it is |
+| Adaptive topology and multires | `mesh::DynamicSculptor`, `mesh::MultiresSculptor` | ✅ shipped as separate representations. Adaptive stamps remesh locally; multires supports sculpt layers and regional refinement with cross-level neighborhoods and watertight mixed-depth export. The adaptive path still lacks the shared `brush::apply_to_dynamic` stroke consumer. See the [mesh investigation](../openspec/investigations/2026-09-16-mesh-sculpt/README.md) for measured costs and remaining work. |
 
 ### Surface brushes: the row that moved
 
 This is the one line of the comparison that changed direction, so it is worth
 stating rather than leaving to a table cell.
 
-**What ZBrush's ~36 surface brushes and claycore's fourteen mesh verbs have in
-common** is that both move vertices on a mesh. **Where they part** is that
-ZBrush's re-tessellate as they go — that is what Dyntopo, LiveClay and multires
-are for, and it is what lets a Move brush draw a lobe out of a sheet
-indefinitely. claycore's do not: `indices` and `quads` come out byte for byte,
-and a large grab stretches the triangles it has instead. That stretch is the
-signal the mesh wants retopo — the same signal Blender gives with Dyntopo off —
-and it is where this stops today. **The word that changed on 2026-08-29 is
-"purpose":** the stretch is still what happens and is still documented, but it
-is now the reason an adaptive representation is scoped rather than the reason
-one is not. See `openspec/ROADMAP.md` Phase 5.
+`MeshSculptor` preserves the input indices and quads. Large grabs stretch its
+existing triangles; this is useful when an imported mesh must keep its topology.
+`DynamicSculptor` provides local adaptive remeshing, while `MultiresSculptor`
+provides coarse-to-fine sculpting and stored detail. These are shipped choices,
+with different topology and detail-preservation contracts.
 
 So the honest position is neither "we have surface brushes now" nor the old
 "❌ out of scope":
@@ -145,9 +139,10 @@ So the honest position is neither "we have surface brushes now" nor the old
   one that could not stamp one. The stamp multiplies the brush's weight, so it
   composes with every verb and falloff at once, and it is sampled by the kernel
   function the SDF alpha uses, so one stamp reads the same on both.
-- **The topology tier is not, and will not be.** No brush here adds a polygon,
-  so detail beyond what the mesh already carries needs a retopo pass — which
-  is the pipeline this exists to serve rather than a workaround for it.
+- **Fixed-topology brushes preserve polygons.** Choose the adaptive representation
+  when a stroke should change local density, or multires for sculpting at several
+  detail levels. Adaptive Layer remains unsupported because newly split vertices
+  have no defined stroke-start reference.
 - **The use it earns is the RETURN TRIP**, not free-form sculpting. Sculpt on
   SDF or voxels, quad-export, retopo and UV elsewhere, then refine on the mesh
   that came back — which was impossible before, because the only way in was

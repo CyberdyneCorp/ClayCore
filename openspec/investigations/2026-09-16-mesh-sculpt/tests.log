@@ -1,0 +1,12 @@
+[doctest] doctest version is "2.5.3"
+[doctest] run with "--help" for options
+===============================================================================
+/home/leonardo/work/ClayCore/tests/unit/test_mesh_sculpt_parity.cpp:605:
+TEST CASE:  mesh sculpt parity: every verb on every fixture is byte-identical
+
+/home/leonardo/work/ClayCore/tests/unit/test_mesh_sculpt_parity.cpp:755: MESSAGE: golden table: x86-64 Linux [contract=off subnormals=keep fast-math=off]
+
+===============================================================================
+[doctest] test cases:   62 |   62 passed | 0 failed | 2723 skipped
+[doctest] assertions: 9006 | 9006 passed | 0 failed |
+[doctest] Status: SUCCESS!

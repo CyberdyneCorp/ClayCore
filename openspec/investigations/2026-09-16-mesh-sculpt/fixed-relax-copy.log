@@ -1,0 +1,89 @@
+# bench_extreme_poly: the 7.1 matrix with 7.2's separable stages
+# `stage breakdown` is the library's own per-stage timing inside
+#   MeshSculptor::stamp (mesh::StageTelemetry). No clock is read when the
+#   telemetry pointer is null, which is what let 7.2's remaining stages be
+#   timed without perturbing a stamp outside this program.
+# spacing 0.0100, 20 repetitions per cell after 4 warm-up stamps
+== 100000 vertices ==============================================
+  fixed mesh: 99856 vertices, 198450 triangles, 2048 chunks, setup 0.20 s, rss 42 MB
+    footprint   1000 (r 0.1784)  workset     999  chunks    35  upload     57.3 KB
+      seed           p50      1.32  p95      2.42  p99      2.42  max      2.97  mean      1.45 us
+      chunk query    p50      0.98  p95      1.55  p99      1.55  max      2.67  mean      1.07 us
+      stamp          p50    354.45  p95    392.05  p99    392.05  max    396.66  mean    360.82 us
+      index update   p50    114.34  p95    129.50  p99    129.50  max    136.52  mean    117.36 us
+      readback       p50    138.35  p95    158.76  p99    158.76  max    160.96  mean    137.32 us
+      TOTAL          p50    612.43  p95    656.10  p99    656.10  max    695.17  mean    618.02 us
+        stage breakdown (mean us/stamp, 20 reps):
+          seed          0.016  ( 0.0%)
+          query        81.624  (23.7%)
+          weight      112.438  (32.6%)
+          alpha         0.015  ( 0.0%)
+          automask      0.014  ( 0.0%)
+          snapshot      0.013  ( 0.0%)
+          neighbors     0.022  ( 0.0%)
+          kernel       12.090  ( 3.5%)
+          writeback    17.794  ( 5.2%)
+          normals     113.374  (32.9%)
+          chunkmark     7.614  ( 2.2%)
+    footprint  10000 (r 0.5642)  workset   10004  chunks   288  upload    464.0 KB
+      seed           p50      1.62  p95      2.92  p99      2.92  max      3.78  mean      1.86 us
+      chunk query    p50      4.75  p95     11.27  p99     11.27  max     16.86  mean      5.84 us
+      stamp          p50   4048.99  p95   4311.49  p99   4311.49  max   4342.47  mean   3990.19 us
+      index update   p50   1388.44  p95   1731.33  p99   1731.33  max   1852.12  mean   1432.35 us
+      readback       p50    967.13  p95   1031.60  p99   1031.60  max   1032.20  mean    954.31 us
+      TOTAL          p50   6442.55  p95   6840.98  p99   6840.98  max   6992.28  mean   6384.54 us
+        stage breakdown (mean us/stamp, 20 reps):
+          seed          0.030  ( 0.0%)
+          query       911.328  (24.2%)
+          weight     1246.003  (33.1%)
+          alpha         0.034  ( 0.0%)
+          automask      0.026  ( 0.0%)
+          snapshot      0.041  ( 0.0%)
+          neighbors     0.084  ( 0.0%)
+          kernel      116.656  ( 3.1%)
+          writeback   192.609  ( 5.1%)
+          normals    1216.040  (32.3%)
+          chunkmark    77.665  ( 2.1%)
+
+== 1000000 vertices ==============================================
+  fixed mesh: 1000000 vertices, 1996002 triangles, 16384 chunks, setup 2.80 s, rss 364 MB
+    footprint   1000 (r 0.1784)  workset     999  chunks    36  upload     63.2 KB
+      seed           p50      1.62  p95      2.88  p99      2.88  max      3.42  mean      1.73 us
+      chunk query    p50      1.21  p95      1.66  p99      1.66  max      1.89  mean      1.29 us
+      stamp          p50    404.45  p95    426.14  p99    426.14  max    438.90  mean    408.98 us
+      index update   p50    111.60  p95    128.20  p99    128.20  max    128.58  mean    115.39 us
+      readback       p50    135.39  p95    149.23  p99    149.23  max    152.17  mean    133.24 us
+      TOTAL          p50    659.37  p95    698.63  p99    698.63  max    702.79  mean    660.63 us
+        stage breakdown (mean us/stamp, 20 reps):
+          seed          0.016  ( 0.0%)
+          query        93.885  (24.1%)
+          weight      122.776  (31.5%)
+          alpha         0.015  ( 0.0%)
+          automask      0.018  ( 0.0%)
+          snapshot      0.014  ( 0.0%)
+          neighbors     0.033  ( 0.0%)
+          kernel       13.150  ( 3.4%)
+          writeback    20.787  ( 5.3%)
+          normals     130.055  (33.4%)
+          chunkmark     8.863  ( 2.3%)
+    footprint  10000 (r 0.5642)  workset   10004  chunks   256  upload    461.7 KB
+      seed           p50      1.63  p95      3.30  p99      3.30  max      3.32  mean      1.90 us
+      chunk query    p50      4.73  p95      8.08  p99      8.08  max      9.49  mean      5.10 us
+      stamp          p50   3719.64  p95   4421.82  p99   4421.82  max   4628.03  mean   3888.51 us
+      index update   p50   1070.04  p95   1420.68  p99   1420.68  max   2165.25  mean   1188.20 us
+      readback       p50    709.18  p95    827.06  p99    827.06  max    830.58  mean    721.97 us
+      TOTAL          p50   5490.96  p95   6643.01  p99   6643.01  max   7632.94  mean   5805.67 us
+        stage breakdown (mean us/stamp, 20 reps):
+          seed          0.018  ( 0.0%)
+          query       888.187  (24.3%)
+          weight     1183.883  (32.4%)
+          alpha         0.030  ( 0.0%)
+          automask      0.027  ( 0.0%)
+          snapshot      0.046  ( 0.0%)
+          neighbors     0.069  ( 0.0%)
+          kernel      110.882  ( 3.0%)
+          writeback   199.262  ( 5.5%)
+          normals    1183.343  (32.4%)
+          chunkmark    85.938  ( 2.4%)
+
+# peak rss 136 MB

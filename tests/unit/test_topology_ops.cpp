@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "../../src/mesh/topology_ops_internal.h"
 #include "clay/mesh/dynamic_surface.h"
 #include "clay/mesh/dynamic_validate.h"
 #include "clay/mesh/topology_ops.h"
@@ -617,4 +618,92 @@ TEST_CASE("topology ops: a material boundary refuses to collapse and to flip") {
     CHECK(after.vertices == before.vertices);
     CHECK(after.edges == before.edges);
     CHECK(after.faces == before.faces);
+}
+
+namespace {
+void check_vector_exact(cfloat3 a, cfloat3 b) {
+    CHECK(a.x == b.x);
+    CHECK(a.y == b.y);
+    CHECK(a.z == b.z);
+}
+
+void check_surface_exact(const DynamicSurface& a, const DynamicSurface& b) {
+    REQUIRE(a.stats().vertices == b.stats().vertices);
+    REQUIRE(a.stats().faces == b.stats().faces);
+    CHECK(a.to_mesh().indices == b.to_mesh().indices);
+    a.vertices().for_each_live([&](mesh::VertexId id, const mesh::DynamicVertex& v) {
+        const auto* other = b.vertex(id);
+        REQUIRE(other != nullptr);
+        check_vector_exact(v.position, other->position);
+        check_vector_exact(v.normal, other->normal);
+        check_vector_exact(v.color, other->color);
+        CHECK(v.mask == other->mask);
+    });
+    a.faces().for_each_live([&](mesh::FaceId id, const mesh::DynamicFace& f) {
+        const auto* other = b.face(id);
+        REQUIRE(other != nullptr);
+        check_vector_exact(f.normal, other->normal);
+    });
+}
+
+TopologyResult normal_batch_operation(DynamicSurface& surface, EdgeId edge, int op,
+                                      mesh::TopologyDelta& delta,
+                                      mesh::detail::NormalUpdates* normals) {
+    switch (op) {
+        case 0:
+            return mesh::detail::split_edge(surface, edge, 0.37f, {}, &delta, normals).result;
+        case 1:
+            return mesh::detail::collapse_edge(surface, edge, {}, &delta, normals).result;
+        default:
+            return mesh::detail::flip_edge(surface, edge, {}, &delta, true, normals).result;
+    }
+}
+}  // namespace
+
+TEST_CASE(
+    "topology ops: batched normals preserve interleaved edits and "
+    "gesture replay") {
+    for (std::uint64_t seed : {1u, 2u, 3u, 4u}) {
+        CAPTURE(seed);
+        const Mesh base = seed % 2 ? cube_sphere(3, 1.0f) : plane_grid(5, 1.0f);
+        auto immediate = DynamicSurface::from_mesh(base);
+        auto batched = DynamicSurface::from_mesh(base);
+        auto original = DynamicSurface::from_mesh(base);
+        REQUIRE(immediate.has_value());
+        REQUIRE(batched.has_value());
+        REQUIRE(original.has_value());
+        mesh::TopologyDelta immediate_delta, batched_delta;
+        mesh::detail::NormalUpdates normals;
+        Rng rng(seed);
+        int successes[3]{};
+        for (int step = 0; step < 300; ++step) {
+            const auto edges = live_edges(*immediate);
+            REQUIRE_FALSE(edges.empty());
+            const EdgeId edge = edges[rng.below(static_cast<std::uint32_t>(edges.size()))];
+            const int op = step % 3;
+            const auto result =
+                normal_batch_operation(*immediate, edge, op, immediate_delta, nullptr);
+            REQUIRE(result == normal_batch_operation(*batched, edge, op, batched_delta, &normals));
+            if (result == TopologyResult::Ok) ++successes[op];
+        }
+        for (int count : successes) CHECK(count > 0);
+        std::size_t recycled = 0;
+        batched->vertices().for_each_live([&](mesh::VertexId id, const mesh::DynamicVertex&) {
+            if (id.generation > 0) ++recycled;
+        });
+        CHECK(recycled > 0);
+        normals.flush(*batched, &batched_delta);
+        check_surface_exact(*immediate, *batched);
+        REQUIRE(mesh::validate_dynamic_surface(*batched).ok);
+        // Replay the encoded gesture, including recycled slots and stored normals.
+        const auto bytes = batched_delta.encode();
+        mesh::TopologyDelta decoded;
+        REQUIRE(mesh::TopologyDelta::decode(bytes.data(), bytes.size(), &decoded));
+        REQUIRE(decoded.revert(*batched));
+        check_surface_exact(*original, *batched);
+        REQUIRE(decoded.apply(*batched));
+        check_surface_exact(*immediate, *batched);
+        normals.flush(*batched, &batched_delta);
+        check_surface_exact(*immediate, *batched);
+    }
 }

@@ -1,4 +1,5 @@
 #include "clay/mesh/remesh_local.h"
+#include "topology_ops_internal.h"
 
 #include <algorithm>
 #include <cmath>
@@ -165,6 +166,7 @@ RemeshStats remesh_region(DynamicSurface& surface, DynamicBvh* bvh, kernel::cflo
 
     int budget = settings.max_ops_per_stamp;
     std::vector<EdgeId> edges;
+    detail::NormalUpdates normals;
 
     for (int pass = 0; pass < settings.max_passes && budget > 0; ++pass) {
         const std::size_t before = stats.total();
@@ -179,7 +181,8 @@ RemeshStats remesh_region(DynamicSurface& surface, DynamicBvh* bvh, kernel::cflo
                 }
                 if (!surface.live(e)) continue;
                 if (surface.edge_length(e) <= split_above) continue;
-                const SplitResult r = split_edge(surface, e, 0.5f, op, delta);
+                const SplitResult r =
+                    detail::split_edge(surface, e, 0.5f, op, delta, &normals);
                 if (r.result == TopologyResult::Ok) {
                     ++stats.split;
                     --budget;
@@ -247,7 +250,8 @@ RemeshStats remesh_region(DynamicSurface& surface, DynamicBvh* bvh, kernel::cflo
                 const HalfEdgeId h = surface.halfedge_of(e);
                 const FaceId dying[2] = {surface.face_of(h),
                                          surface.face_of(surface.twin_of(h))};
-                const CollapseResult r = collapse_edge(surface, e, op, delta);
+                const CollapseResult r =
+                    detail::collapse_edge(surface, e, op, delta, &normals);
                 if (r.result == TopologyResult::Ok) {
                     ++stats.collapsed;
                     --budget;
@@ -273,7 +277,8 @@ RemeshStats remesh_region(DynamicSurface& surface, DynamicBvh* bvh, kernel::cflo
                     break;
                 }
                 if (!surface.live(e)) continue;
-                const FlipResult r = flip_edge(surface, e, op, delta, /*force=*/false);
+                const FlipResult r = detail::flip_edge(
+                    surface, e, op, delta, /*force=*/false, &normals);
                 if (r.result == TopologyResult::Ok) {
                     ++stats.flipped;
                     --budget;
@@ -292,6 +297,9 @@ RemeshStats remesh_region(DynamicSurface& surface, DynamicBvh* bvh, kernel::cflo
         // same questions.
         if (stats.total() == before) break;
     }
+
+    // Topology decisions read geometry; relaxation and the brush read stored normals.
+    normals.flush(surface, delta);
 
     if (settings.relax_after_remesh && settings.relax_strength > 0.0f)
         stats.relaxed =

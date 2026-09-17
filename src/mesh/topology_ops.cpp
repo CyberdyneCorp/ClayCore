@@ -1,4 +1,4 @@
-#include "clay/mesh/topology_ops.h"
+#include "topology_ops_internal.h"
 
 #include <algorithm>
 #include <array>
@@ -9,6 +9,14 @@
 namespace clay {
 namespace mesh {
 namespace {
+
+void update_normals(DynamicSurface& surface, const std::vector<FaceId>& faces,
+                    detail::NormalUpdates* normals) {
+    if (normals)
+        normals->update(surface, faces);
+    else
+        surface.refresh_normals(faces);
+}
 
 kernel::cfloat3 lerp3(kernel::cfloat3 a, kernel::cfloat3 b, float t) {
     // Exact at both ends, for the reason `blend_color` already records:
@@ -208,8 +216,9 @@ float edge_pair_quality(const DynamicSurface& surface, EdgeId edge) {
 
 // -- split --------------------------------------------------------------------
 
-SplitResult split_edge(DynamicSurface& surface, EdgeId edge, float t,
-                       const TopologyOpOptions& options, TopologyDelta* delta) {
+SplitResult detail::split_edge(DynamicSurface& surface, EdgeId edge, float t,
+                               const TopologyOpOptions& options, TopologyDelta* delta,
+                               NormalUpdates* normals) {
     SplitResult out;
     if (!surface.live(edge)) return out;
 
@@ -475,7 +484,7 @@ SplitResult split_edge(DynamicSurface& surface, EdgeId edge, float t,
     // surface is not the surface's normal, and every later operator would
     // inherit the error.
     std::vector<FaceId> touched(out.faces, out.faces + out.face_count);
-    surface.refresh_normals(touched);
+    update_normals(surface, touched, normals);
 
     // Sync everything the write phase touched, over the list the scribe kept —
     // which is the neighbourhood, not the surface.
@@ -751,8 +760,9 @@ TopologyResult plan_collapse(const DynamicSurface& surface, EdgeId edge,
 
 }  // namespace
 
-CollapseResult collapse_edge(DynamicSurface& surface, EdgeId edge,
-                             const TopologyOpOptions& options, TopologyDelta* delta) {
+CollapseResult detail::collapse_edge(DynamicSurface& surface, EdgeId edge,
+                                     const TopologyOpOptions& options, TopologyDelta* delta,
+                                     NormalUpdates* normals) {
     CollapseResult out;
     CollapsePlan plan;
     out.result = plan_collapse(surface, edge, options, &plan);
@@ -888,7 +898,7 @@ CollapseResult collapse_edge(DynamicSurface& surface, EdgeId edge,
         if (surface.live(v)) reseat_outgoing(surface, v, neighbourhood);
 
     out.faces.clear();
-    if (surface.incident_faces(v0, &out.faces)) surface.refresh_normals(out.faces);
+    if (surface.incident_faces(v0, &out.faces)) update_normals(surface, out.faces, normals);
 
     scribe.sync_all();
 
@@ -902,8 +912,8 @@ CollapseResult collapse_edge(DynamicSurface& surface, EdgeId edge,
 
 // -- flip ---------------------------------------------------------------------
 
-FlipResult flip_edge(DynamicSurface& surface, EdgeId edge, const TopologyOpOptions& options,
-                     TopologyDelta* delta, bool force) {
+FlipResult detail::flip_edge(DynamicSurface& surface, EdgeId edge, const TopologyOpOptions& options,
+                             TopologyDelta* delta, bool force, NormalUpdates* normals) {
     FlipResult out;
     if (!surface.live(edge)) return out;
 
@@ -1025,7 +1035,7 @@ FlipResult flip_edge(DynamicSurface& surface, EdgeId edge, const TopologyOpOptio
     out.faces[0] = f0;
     out.faces[1] = f1;
     std::vector<FaceId> touched{f0, f1};
-    surface.refresh_normals(touched);
+    update_normals(surface, touched, normals);
 
     scribe.sync_all();
 
@@ -1033,6 +1043,70 @@ FlipResult flip_edge(DynamicSurface& surface, EdgeId edge, const TopologyOpOptio
     surface.bump_geometry();
     out.result = TopologyResult::Ok;
     return out;
+}
+
+void detail::NormalUpdates::update(DynamicSurface& surface, const std::vector<FaceId>& faces) {
+    // Small edits do not amortize collection, sorting and a second history sync.
+    // Keep the first 64 updates immediate; only topology-heavy sequences batch.
+    if (++operations_ <= 64) {
+        surface.refresh_normals(faces);
+        return;
+    }
+    for (FaceId f : faces) {
+        VertexId vertices[3];
+        if (!surface.face_vertices(f, vertices)) continue;
+        faces_.push_back(f);
+        vertices_.insert(vertices_.end(), vertices, vertices + 3);
+    }
+}
+
+namespace {
+template <typename Id>
+void unique_handles(std::vector<Id>& ids) {
+    // SlotId ordering alone ignores generation; recycled slots must remain distinct.
+    std::sort(ids.begin(), ids.end(), [](Id a, Id b) {
+        return a.slot < b.slot || (a.slot == b.slot && a.generation < b.generation);
+    });
+    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+}
+}  // namespace
+
+void detail::NormalUpdates::flush(DynamicSurface& surface, TopologyDelta* delta) {
+    unique_handles(faces_);
+    unique_handles(vertices_);
+    for (FaceId f : faces_) {
+        DynamicFace* rec = surface.face(f);
+        if (!rec) continue;
+        if (delta) delta->note_face(surface, f);
+        rec->normal = surface.face_normal(f);
+        if (delta) delta->sync_face(surface, f);
+    }
+    std::vector<HalfEdgeId> fan;
+    for (VertexId v : vertices_) {
+        DynamicVertex* rec = surface.vertex(v);
+        if (!rec) continue;
+        if (delta) delta->note_vertex(surface, v);
+        rec->normal = surface.compute_vertex_normal(v, &fan);
+        if (delta) delta->sync_vertex(surface, v);
+    }
+    faces_.clear();
+    vertices_.clear();
+    operations_ = 0;
+}
+
+SplitResult split_edge(DynamicSurface& surface, EdgeId edge, float t,
+                       const TopologyOpOptions& options, TopologyDelta* delta) {
+    return detail::split_edge(surface, edge, t, options, delta, nullptr);
+}
+
+CollapseResult collapse_edge(DynamicSurface& surface, EdgeId edge, const TopologyOpOptions& options,
+                             TopologyDelta* delta) {
+    return detail::collapse_edge(surface, edge, options, delta, nullptr);
+}
+
+FlipResult flip_edge(DynamicSurface& surface, EdgeId edge, const TopologyOpOptions& options,
+                     TopologyDelta* delta, bool force) {
+    return detail::flip_edge(surface, edge, options, delta, force, nullptr);
 }
 
 }  // namespace mesh
