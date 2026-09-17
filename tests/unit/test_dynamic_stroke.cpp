@@ -272,8 +272,14 @@ TEST_CASE("dynamic stroke: Layer is refused, not remapped, and runs no remesh") 
     DynamicStampResult summary;
     const DynamicTopologySettings topo;
     REQUIRE(topo.enabled);
+    // An estimator in the options, so "touches nothing" includes the sculptor's
+    // automask inputs: `DynamicSculptor::stamp` refuses Layer per stamp as well,
+    // and the surface alone could not tell a stroke-level refusal from that.
+    brush::MeshStrokeOptions options;
+    options.cavity_field = [](cfloat3 p) { return clength(p) - 1.0f; };
     CHECK(brush::apply_to_dynamic(sc, stamps, MeshBrush::Layer, base_for(MeshBrush::Layer, 0.5f),
-                                  topo, nullptr, &record, {}, &summary) == 0);
+                                  topo, nullptr, &record, options, &summary) == 0);
+    CHECK_FALSE(static_cast<bool>(sc.automask_inputs().cavity));
     CHECK(record.empty());
     CHECK(surface->topology_revision() == topology_before);
     CHECK(surface->geometry_revision() == geometry_before);
@@ -291,9 +297,11 @@ TEST_CASE("dynamic stroke: a request to defer normals is refused rather than ign
     DynamicSculptor sc(*surface);
     brush::MeshStrokeOptions options;
     options.defer_normals = true;
+    options.cavity_field = [](cfloat3 p) { return clength(p) - 1.0f; };
     mesh::TopologyDelta record;
     CHECK(brush::apply_to_dynamic(sc, stamps, MeshBrush::Draw, base_for(MeshBrush::Draw, 0.5f),
                                   DynamicTopologySettings{}, nullptr, &record, options) == 0);
+    CHECK_FALSE(static_cast<bool>(sc.automask_inputs().cavity));
     CHECK(record.empty());
     CHECK(same_surface(*surface, *pristine));
 

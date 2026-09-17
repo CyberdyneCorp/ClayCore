@@ -749,6 +749,43 @@ bool dynamic_stroke_refused(const std::vector<Stamp>& stamps, mesh::MeshBrush ve
     return stamps.empty() || !mesh::dynamic_offers(verb) || options.defer_normals;
 }
 
+// The summary a stroke starts from: no counts, and the surface's revisions as
+// they are now, so a stroke that applies nothing still reports current ones.
+void reset_dynamic_summary(const mesh::DynamicSculptor& sculptor,
+                           mesh::DynamicStampResult* summary) {
+    *summary = mesh::DynamicStampResult{};
+    const mesh::DynamicSurface& surface = sculptor.surface();
+    summary->topology_revision = surface.topology_revision();
+    summary->geometry_revision = surface.geometry_revision();
+    summary->attribute_revision = surface.attribute_revision();
+}
+
+// The early-out every mesh consumer takes: a stamp whose centre is frozen costs
+// nothing, remesh included, rather than gathering a region it may not move.
+bool dynamic_stamp_frozen(const voxel::MaskField* mask, const MeshStrokeOptions& options,
+                          const Stamp& s) {
+    return mask != nullptr && mask->sample(options.mesh_to_world.apply(s.position)) >= 1.0f;
+}
+
+// One resolved stamp as adaptive brush settings: the shared resolution, with
+// the Snakehook centre on its revalidated anchor and the alpha turned by the
+// stamp when the stroke asks for it.
+mesh::MeshBrushSettings dynamic_stamp_settings(const mesh::DynamicSculptor& sculptor,
+                                               const mesh::MeshBrushSettings& settings,
+                                               const Stamp& s, const MeshStrokeDrag& drag,
+                                               kernel::cfloat3 previous, kernel::cfloat3 first,
+                                               const MeshStrokeOptions& options,
+                                               mesh::VertexId* anchor) {
+    const bool walks = drag.dragging && !drag.anchored;
+    const kernel::cfloat3 anchor_position =
+        walks ? dynamic_snakehook_centre(sculptor, anchor, previous) : kernel::cf3(0, 0, 0);
+    mesh::MeshBrushSettings out =
+        mesh_stamp_settings(settings, s, drag, previous, first, anchor_position);
+    if (options.orient_alpha_by_stamp && settings.has_alpha())
+        out.alpha_tangent = s.rotation.rotate(kernel::cf3(1, 0, 0));
+    return out;
+}
+
 }  // namespace
 
 std::size_t apply_to_dynamic(mesh::DynamicSculptor& sculptor, const std::vector<Stamp>& stamps,
@@ -757,13 +794,7 @@ std::size_t apply_to_dynamic(mesh::DynamicSculptor& sculptor, const std::vector<
                              const voxel::MaskField* mask, mesh::TopologyDelta* record,
                              const MeshStrokeOptions& options,
                              mesh::DynamicStampResult* summary) {
-    if (summary != nullptr) {
-        *summary = mesh::DynamicStampResult{};
-        const mesh::DynamicSurface& surface = sculptor.surface();
-        summary->topology_revision = surface.topology_revision();
-        summary->geometry_revision = surface.geometry_revision();
-        summary->attribute_revision = surface.attribute_revision();
-    }
+    if (summary != nullptr) reset_dynamic_summary(sculptor, summary);
     if (dynamic_stroke_refused(stamps, verb, options)) return 0;
 
     // Built once for the stroke and shared with the other two consumers, for
@@ -773,24 +804,20 @@ std::size_t apply_to_dynamic(mesh::DynamicSculptor& sculptor, const std::vector<
     if (mesh_automask_inputs(options, &automask)) sculptor.set_automask_inputs(std::move(automask));
 
     const MeshStrokeDrag drag = drag_of(verb);
-    const bool walks = drag.dragging && !drag.anchored;
+    const kernel::cfloat3 first = stamps.front().position;
     mesh::VertexId anchor;
-    if (walks) anchor = sculptor.nearest_vertex(stamps.front().position);
+    if (drag.dragging && !drag.anchored) anchor = sculptor.nearest_vertex(first);
 
     std::size_t applied = 0;
-    kernel::cfloat3 previous = stamps.front().position;
+    kernel::cfloat3 previous = first;
     for (const Stamp& s : stamps) {
-        if (mask && mask->sample(options.mesh_to_world.apply(s.position)) >= 1.0f) {
+        if (dynamic_stamp_frozen(mask, options, s)) {
             previous = s.position;
             continue;
         }
-        const kernel::cfloat3 anchor_position =
-            walks ? dynamic_snakehook_centre(sculptor, &anchor, previous) : kernel::cf3(0, 0, 0);
-        mesh::MeshBrushSettings stamp_settings = mesh_stamp_settings(
-            settings, s, drag, previous, stamps.front().position, anchor_position);
+        const mesh::MeshBrushSettings stamp_settings =
+            dynamic_stamp_settings(sculptor, settings, s, drag, previous, first, options, &anchor);
         previous = s.position;
-        if (options.orient_alpha_by_stamp && settings.has_alpha())
-            stamp_settings.alpha_tangent = s.rotation.rotate(kernel::cf3(1, 0, 0));
 
         const mesh::DynamicStampResult r =
             sculptor.stamp(verb, stamp_settings, topology, mask_gate, record);
