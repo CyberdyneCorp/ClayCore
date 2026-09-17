@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 119
+#define CLAY_ABI_MINOR 120
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -8706,10 +8706,12 @@ clay_result clay_dynamic_sculptor_stamp(clay_dynamic_sculptor* sculptor,
  * WHAT THESE DO NOT DO:
  *   - A LAYER brush is refused with CLAY_ERROR_INVALID_ARGUMENT before any stamp
  *     or remesh runs, never remapped (see clay_dynamic_sculptor_stamp).
- *   - NO UNDO RECORD: these take no clay_dynamic_delta. A record is captured
- *     only one stamp at a time, by clay_dynamic_sculptor_stamp_recorded (see
- *     UNDO FOR AN ADAPTIVE STROKE below). The C++ entry point
- *     brush::apply_to_dynamic takes one for a whole stroke.
+ *   - NO UNDO RECORD: these take no clay_dynamic_delta. To record the whole
+ *     stroke as one undo step, call clay_dynamic_sculptor_apply_stroke_recorded
+ *     or clay_dynamic_sculptor_apply_preset_recorded (ABI 0.120.0, below UNDO
+ *     FOR AN ADAPTIVE STROKE). A host loop of clay_dynamic_sculptor_stamp_recorded
+ *     is NOT the same stroke for Grab and Snakehook: it centres the drag on the
+ *     cursor (see WHY A CALL above).
  *   - NO NORMAL DEFERRAL: the adaptive sculptor refreshes normals locally per
  *     stamp, so there is no `defer_normals` argument to accept and ignore.
  *   - NOT FASTER. A stroke costs the sum of its stamps: measured at 1.004x the
@@ -8928,6 +8930,89 @@ clay_result clay_dynamic_sculptor_stamp_recorded(clay_dynamic_sculptor* sculptor
                                                  const clay_mask* mask,
                                                  clay_dynamic_delta* record,
                                                  clay_dynamic_stamp_report* out_report);
+
+/* A WHOLE ADAPTIVE STROKE, recorded as ONE undo step (ABI 0.120.0):
+ * clay_dynamic_sculptor_apply_stroke and clay_dynamic_sculptor_apply_preset,
+ * accumulating into `record`. New entry points rather than new arguments, as
+ * clay_dynamic_sculptor_stamp_recorded is; the shipped calls are unchanged and
+ * everything their header says (the stroke's meaning, samples, frame, report,
+ * Layer refusal) applies here.
+ *
+ * WHY NOT A HOST LOOP of clay_dynamic_sculptor_stamp_recorded: that loop centres
+ * a Grab or a Snakehook on the cursor, so its record is a faithful undo of a
+ * DIFFERENT surface. Measured on a unit cube-sphere, 6 stamps: Draw's loop and
+ * stroke agree to the byte (664,260 encoded each), while Snakehook's surfaces
+ * differ (1,107,948 vs 1,205,836 bytes) and Grab's too (1,069,644 vs 448,280).
+ *
+ * `record` NULL behaves exactly as the unrecorded call. A recorded stroke leaves
+ * the surface bit-identical to the unrecorded stroke with the same inputs, and
+ * clay_dynamic_delta_revert / _apply then restore the surface before / after it
+ * exactly (see WHAT A REPLAY PROMISES above), Snakehook anchor re-finds and
+ * relax_after_remesh included.
+ *
+ * THE ORDER OF REFUSALS, which is the contract:
+ *   1. Every CLAY_ERROR_INVALID_ARGUMENT the unrecorded call returns -- a null
+ *      handle, brush, preset or samples, a malformed report size, a Layer verb,
+ *      a bad topology descriptor or mask -- is returned FIRST, whatever state
+ *      the record is in. A malformed call is never reported as retryable.
+ *   2. Then the record: a non-empty record the surface is no longer where it
+ *      left (an unrecorded stamp or a replay in between, or a record from
+ *      another surface) is CLAY_ERROR_SNAPSHOT_MISMATCH.
+ * On either, NOTHING is stamped, `*out_applied` is 0, the report is not
+ * written, and the record is untouched (clay_dynamic_delta_stats unchanged).
+ *
+ * THE MARK IS CHECKED ONCE, before the first stamp. Inside the stroke only the
+ * stroke's own stamps write the surface, each into this record, so no later
+ * stamp can find it moved -- measured, zero refusals after the first stamp over
+ * 97 stamps on seven fixtures. There is no partial stroke to report.
+ *
+ * ACCUMULATES. A non-empty record whose end is the current surface is
+ * continued, as clay_dynamic_sculptor_stamp_recorded continues one, and one
+ * revert undoes everything captured into it. For one undo step per stroke,
+ * clay_dynamic_delta_clear the record (or create a new one) first. A stroke
+ * that changes nothing (every stamp misses or is masked) leaves a non-empty
+ * record unchanged.
+ *
+ * COST: recording a stroke costs what recording its stamps costs. Measured
+ * 1.046x / 1.065x the unrecorded stroke at 27,648 / 110,592 faces (14 remeshing
+ * Draw stamps, median of 61 / 21, Release), against 1.049x / 1.061x for the
+ * same stamps through clay_dynamic_sculptor_stamp_recorded; a reused, cleared
+ * record saves under 1%. The record's size follows what the stroke reached
+ * (clay_dynamic_delta_stats.encoded_bytes), not how many stamps it took.
+ *
+ * WHAT THESE DO NOT DO:
+ *   - They do not check the record per stamp, and do not compact or reorder
+ *     anything: replay stays last in, first out, as above.
+ *   - They do not bind a record on a refused call: an empty record stays
+ *     unbound after an INVALID_ARGUMENT.
+ *   - They add no latency guarantee beyond the unrecorded call's. */
+clay_result clay_dynamic_sculptor_apply_stroke_recorded(clay_dynamic_sculptor* sculptor,
+                                                        const clay_stroke_sample_full* samples,
+                                                        size_t sample_count,
+                                                        const clay_stroke_preset* preset,
+                                                        const clay_mesh_brush_desc* brush,
+                                                        const clay_dynamic_topology_desc* topology,
+                                                        const clay_mask* mask,
+                                                        int32_t orient_alpha_by_stamp,
+                                                        clay_dynamic_delta* record,
+                                                        size_t* out_applied,
+                                                        clay_dynamic_stamp_report* out_report);
+
+/* clay_dynamic_sculptor_apply_preset, accumulating into `record`: everything the
+ * paragraph above says applies, and everything clay_dynamic_sculptor_apply_preset
+ * says about the preset and the borrowed alpha. */
+clay_result clay_dynamic_sculptor_apply_preset_recorded(clay_dynamic_sculptor* sculptor,
+                                                        const clay_stroke_sample_full* samples,
+                                                        size_t sample_count,
+                                                        const clay_brush_preset* preset,
+                                                        const float* alpha, int32_t alpha_width,
+                                                        int32_t alpha_height,
+                                                        const clay_dynamic_topology_desc* topology,
+                                                        const clay_mask* mask,
+                                                        int32_t orient_alpha_by_stamp,
+                                                        clay_dynamic_delta* record,
+                                                        size_t* out_applied,
+                                                        clay_dynamic_stamp_report* out_report);
 
 /* Undo and redo, through the SCULPTOR, because the sculptor owns the chunked
  * index and the dirty-chunk stream that have to follow the surface.

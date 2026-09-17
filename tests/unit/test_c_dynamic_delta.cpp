@@ -607,3 +607,216 @@ TEST_CASE("c dynamic delta: a null record stamps exactly like the shipped stamp"
     }
     CHECK(same_export(export_of(a.surface, a.sculptor), export_of(b.surface, b.sculptor)));
 }
+
+// -- a whole stroke as one record (record-a-whole-adaptive-stroke) ------------
+
+namespace {
+
+std::vector<clay_stroke_sample_full> samples_along(const float from[3], const float to[3], int n) {
+    std::vector<clay_stroke_sample_full> out(static_cast<std::size_t>(n));
+    for (int k = 0; k < n; ++k) {
+        const float t = static_cast<float>(k) / static_cast<float>(n - 1);
+        clay_stroke_sample_full& s = out[static_cast<std::size_t>(k)];
+        s = clay_stroke_sample_full{};
+        for (int a = 0; a < 3; ++a) s.position[a] = from[a] + (to[a] - from[a]) * t;
+        s.pressure = 1.0f;
+    }
+    return out;
+}
+
+// A remeshing Draw across the pole, and a Snakehook pulling out of it: the drag
+// whose meaning (the re-found anchor) a host loop of stamps does not keep.
+struct AbiStroke {
+    std::vector<clay_stroke_sample_full> samples;
+    clay_stroke_preset preset{};
+    clay_mesh_brush_desc brush{};
+};
+
+AbiStroke abi_stroke(int32_t verb) {
+    AbiStroke s;
+    s.preset.struct_size = sizeof(s.preset);
+    REQUIRE(clay_stroke_preset_defaults(&s.preset) == CLAY_OK);
+    s.preset.radius = 0.3f;
+    s.brush.struct_size = sizeof(s.brush);
+    REQUIRE(clay_mesh_brush_defaults(&s.brush) == CLAY_OK);
+    s.brush.verb = verb;
+    if (verb == CLAY_MESH_BRUSH_SNAKEHOOK) {
+        const float from[3] = {0.0f, 0.0f, 1.0f}, to[3] = {0.0f, 0.0f, 1.8f};
+        s.samples = samples_along(from, to, 32);
+        s.preset.spacing = 0.1f;
+        s.brush.strength = 1.0f;
+    } else {
+        const float from[3] = {-0.4f, 0.0f, 1.0f}, to[3] = {0.4f, 0.1f, 1.0f};
+        s.samples = samples_along(from, to, 24);
+        s.preset.spacing = 0.25f;
+        s.brush.strength = 0.4f;
+    }
+    return s;
+}
+
+clay_result run_abi(clay_dynamic_sculptor* sculptor, const AbiStroke& s,
+                    const clay_dynamic_topology_desc* topo, clay_dynamic_delta* record,
+                    size_t* applied, clay_dynamic_stamp_report* report) {
+    return clay_dynamic_sculptor_apply_stroke_recorded(sculptor, s.samples.data(), s.samples.size(),
+                                                       &s.preset, &s.brush, topo, nullptr, 0,
+                                                       record, applied, report);
+}
+
+bool same_stats(const clay_dynamic_delta_stats& a, const clay_dynamic_delta_stats& b) {
+    return a.vertices == b.vertices && a.halfedges == b.halfedges && a.edges == b.edges &&
+           a.faces == b.faces && a.encoded_bytes == b.encoded_bytes;
+}
+
+}  // namespace
+
+TEST_CASE("c dynamic delta: a recorded ABI stroke is the stroke, and undoes as one step") {
+    const clay_dynamic_topology_desc topo = stroke_topology();
+    for (int32_t verb : {int32_t{CLAY_MESH_BRUSH_DRAW}, int32_t{CLAY_MESH_BRUSH_SNAKEHOOK}}) {
+        CAPTURE(verb);
+        const AbiStroke s = abi_stroke(verb);
+        Fixture recorded, plain;
+        const Export before = export_of(recorded.surface, recorded.sculptor);
+
+        Record record;
+        size_t applied = 0, plain_applied = 0;
+        clay_dynamic_stamp_report report{}, plain_report{};
+        report.struct_size = plain_report.struct_size = sizeof(report);
+        REQUIRE(run_abi(recorded.sculptor, s, &topo, record.delta, &applied, &report) == CLAY_OK);
+        REQUIRE(clay_dynamic_sculptor_apply_stroke(plain.sculptor, s.samples.data(),
+                                                   s.samples.size(), &s.preset, &s.brush, &topo,
+                                                   nullptr, 0, &plain_applied, &plain_report) ==
+                CLAY_OK);
+        const Export after = export_of(recorded.surface, recorded.sculptor);
+        REQUIRE(report.split_edges > 0);
+        CHECK(applied == plain_applied);
+        CHECK(report.moved_vertices == plain_report.moved_vertices);
+        CHECK(report.split_edges == plain_report.split_edges);
+        CHECK(report.collapsed_edges == plain_report.collapsed_edges);
+        CHECK(same_export(after, export_of(plain.surface, plain.sculptor)));
+        CHECK(stats_of(record.delta).encoded_bytes > 0);
+
+        REQUIRE(clay_dynamic_delta_revert(record.delta, recorded.sculptor) == CLAY_OK);
+        CHECK(same_export(export_of(recorded.surface, recorded.sculptor), before));
+        CHECK(valid(recorded.surface));
+        REQUIRE(clay_dynamic_delta_apply(record.delta, recorded.sculptor) == CLAY_OK);
+        CHECK(same_export(export_of(recorded.surface, recorded.sculptor), after));
+        CHECK(valid(recorded.surface));
+    }
+}
+
+TEST_CASE("c dynamic delta: a recorded preset stroke undoes exactly") {
+    clay_brush_preset preset{};
+    preset.struct_size = sizeof(preset);
+    REQUIRE(clay_brush_preset_by_name("Standard", &preset) == CLAY_OK);
+    const clay_dynamic_topology_desc topo = stroke_topology();
+    const float from[3] = {-0.4f, 0.0f, 1.0f}, to[3] = {0.4f, 0.1f, 1.0f};
+    const std::vector<clay_stroke_sample_full> samples = samples_along(from, to, 24);
+
+    Fixture recorded, plain;
+    const Export before = export_of(recorded.surface, recorded.sculptor);
+    Record record;
+    size_t applied = 0, plain_applied = 0;
+    REQUIRE(clay_dynamic_sculptor_apply_preset_recorded(recorded.sculptor, samples.data(),
+                                                        samples.size(), &preset, nullptr, 0, 0,
+                                                        &topo, nullptr, 0, record.delta, &applied,
+                                                        nullptr) == CLAY_OK);
+    REQUIRE(clay_dynamic_sculptor_apply_preset(plain.sculptor, samples.data(), samples.size(),
+                                               &preset, nullptr, 0, 0, &topo, nullptr, 0,
+                                               &plain_applied, nullptr) == CLAY_OK);
+    REQUIRE(applied > 0);
+    CHECK(applied == plain_applied);
+    const Export after = export_of(recorded.surface, recorded.sculptor);
+    CHECK(same_export(after, export_of(plain.surface, plain.sculptor)));
+    REQUIRE_FALSE(same_export(after, before));
+
+    REQUIRE(clay_dynamic_delta_revert(record.delta, recorded.sculptor) == CLAY_OK);
+    CHECK(same_export(export_of(recorded.surface, recorded.sculptor), before));
+    CHECK(valid(recorded.surface));
+    REQUIRE(clay_dynamic_delta_apply(record.delta, recorded.sculptor) == CLAY_OK);
+    CHECK(same_export(export_of(recorded.surface, recorded.sculptor), after));
+    CHECK(valid(recorded.surface));
+}
+
+TEST_CASE("c dynamic delta: a recorded stroke onto a moved surface is a mismatch, applied nothing") {
+    const clay_dynamic_topology_desc topo = stroke_topology();
+    const AbiStroke s = abi_stroke(CLAY_MESH_BRUSH_DRAW);
+    Fixture fx;
+    Record record;
+    REQUIRE(run_abi(fx.sculptor, s, &topo, record.delta, nullptr, nullptr) == CLAY_OK);
+    // An unrecorded stamp in between.
+    const clay_mesh_brush_desc dab = stamp_brush(kSouth, 0);
+    REQUIRE(clay_dynamic_sculptor_stamp(fx.sculptor, &dab, &topo, nullptr, nullptr) == CLAY_OK);
+
+    const clay_dynamic_delta_stats held = stats_of(record.delta);
+    const Export was = export_of(fx.surface, fx.sculptor);
+    const clay_surface_revision revision = revision_of(fx.surface);
+    size_t applied = 99;
+    clay_dynamic_stamp_report report{};
+    report.struct_size = sizeof(report);
+    report.moved_vertices = 12345;
+    CHECK(run_abi(fx.sculptor, s, &topo, record.delta, &applied, &report) ==
+          CLAY_ERROR_SNAPSHOT_MISMATCH);
+    CHECK(applied == 0);
+    CHECK(report.moved_vertices == 12345);  // not written
+    CHECK(same_stats(stats_of(record.delta), held));
+    CHECK(same_export(export_of(fx.surface, fx.sculptor), was));
+    CHECK(same_revision(revision_of(fx.surface), revision));
+
+    // The preset sibling checks the same mark.
+    clay_brush_preset preset{};
+    preset.struct_size = sizeof(preset);
+    REQUIRE(clay_brush_preset_by_name("Standard", &preset) == CLAY_OK);
+    CHECK(clay_dynamic_sculptor_apply_preset_recorded(fx.sculptor, s.samples.data(),
+                                                      s.samples.size(), &preset, nullptr, 0, 0,
+                                                      &topo, nullptr, 0, record.delta, &applied,
+                                                      nullptr) == CLAY_ERROR_SNAPSHOT_MISMATCH);
+    CHECK(applied == 0);
+    CHECK(same_stats(stats_of(record.delta), held));
+    CHECK(same_revision(revision_of(fx.surface), revision));
+}
+
+TEST_CASE("c dynamic delta: a malformed recorded stroke is INVALID_ARGUMENT even with a stale record") {
+    const clay_dynamic_topology_desc topo = stroke_topology();
+    Fixture fx;
+    Record record;
+    REQUIRE(run_abi(fx.sculptor, abi_stroke(CLAY_MESH_BRUSH_DRAW), &topo, record.delta, nullptr,
+                    nullptr) == CLAY_OK);
+    const clay_mesh_brush_desc dab = stamp_brush(kSouth, 0);
+    REQUIRE(clay_dynamic_sculptor_stamp(fx.sculptor, &dab, &topo, nullptr, nullptr) == CLAY_OK);
+    // The record is stale now: a well-formed call would be a mismatch.
+    const clay_dynamic_delta_stats held = stats_of(record.delta);
+    const clay_surface_revision revision = revision_of(fx.surface);
+
+    SUBCASE("Layer") {
+        AbiStroke layer = abi_stroke(CLAY_MESH_BRUSH_DRAW);
+        layer.brush.verb = CLAY_MESH_BRUSH_LAYER;
+        size_t applied = 99;
+        CHECK(run_abi(fx.sculptor, layer, &topo, record.delta, &applied, nullptr) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(applied == 0);
+    }
+    SUBCASE("a short report") {
+        clay_dynamic_stamp_report shortened{};
+        shortened.struct_size = 4;
+        size_t applied = 99;
+        CHECK(run_abi(fx.sculptor, abi_stroke(CLAY_MESH_BRUSH_DRAW), &topo, record.delta,
+                      &applied, &shortened) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(applied == 0);
+    }
+    CHECK(same_stats(stats_of(record.delta), held));
+    CHECK(same_revision(revision_of(fx.surface), revision));
+}
+
+TEST_CASE("c dynamic delta: a null record strokes exactly like the shipped stroke") {
+    const clay_dynamic_topology_desc topo = stroke_topology();
+    const AbiStroke s = abi_stroke(CLAY_MESH_BRUSH_DRAW);
+    Fixture a, b;
+    size_t applied_a = 0, applied_b = 0;
+    REQUIRE(clay_dynamic_sculptor_apply_stroke(a.sculptor, s.samples.data(), s.samples.size(),
+                                               &s.preset, &s.brush, &topo, nullptr, 0, &applied_a,
+                                               nullptr) == CLAY_OK);
+    REQUIRE(run_abi(b.sculptor, s, &topo, nullptr, &applied_b, nullptr) == CLAY_OK);
+    CHECK(applied_a > 0);
+    CHECK(applied_a == applied_b);
+    CHECK(same_export(export_of(a.surface, a.sculptor), export_of(b.surface, b.sculptor)));
+}

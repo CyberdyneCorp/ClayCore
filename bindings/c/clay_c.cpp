@@ -18730,7 +18730,8 @@ clay_result apply_dynamic_stroke(clay_dynamic_sculptor* sculptor, mesh::MeshBrus
                                  brush::StrokePreset stroke,
                                  const clay_dynamic_topology_desc* topology,
                                  const clay_mask* mask, int32_t orient_alpha_by_stamp,
-                                 std::size_t* applied, mesh::DynamicStampResult* summary) {
+                                 clay_dynamic_delta* record, std::size_t* applied,
+                                 mesh::DynamicStampResult* summary) {
     // Refused BEFORE a stamp or a remesh runs, as the single stamp refuses it.
     if (!mesh::dynamic_offers(verb)) return fail(CLAY_ERROR_INVALID_ARGUMENT, kDynamicLayerRefusal);
     mesh::DynamicTopologySettings topo;
@@ -18750,8 +18751,22 @@ clay_result apply_dynamic_stroke(clay_dynamic_sculptor* sculptor, mesh::MeshBrus
     brush_settings_to_local(*sculptor, &settings);
     stroke_to_local(*sculptor, &samples, &stroke);
 
-    *applied = brush::apply_to_dynamic(*sculptor->sculptor, brush::resolve_stroke(samples, stroke),
-                                       verb, settings, topo, field_mask, nullptr, options, summary);
+    const std::vector<brush::Stamp> stamps = brush::resolve_stroke(samples, stroke);
+    if (!record) {
+        *applied = brush::apply_to_dynamic(*sculptor->sculptor, stamps, verb, settings, topo,
+                                           field_mask, nullptr, options, summary);
+        return CLAY_OK;
+    }
+    // THE MARK LAST, after every INVALID_ARGUMENT above, so a malformed call is
+    // never reported as retryable. Checked once: see apply_to_dynamic_recorded.
+    const std::optional<std::size_t> recorded = brush::apply_to_dynamic_recorded(
+        *sculptor->sculptor, stamps, verb, settings, topo, field_mask, record->gesture, options,
+        summary);
+    if (!recorded)
+        return fail(CLAY_ERROR_SNAPSHOT_MISMATCH,
+                    "the record does not end where this surface is: another surface, or an "
+                    "unrecorded stamp or a replay since its last capture. Nothing applied");
+    *applied = *recorded;
     return CLAY_OK;
 }
 
@@ -18898,6 +18913,23 @@ clay_result clay_dynamic_sculptor_apply_stroke(clay_dynamic_sculptor* sculptor,
                                                int32_t orient_alpha_by_stamp,
                                                size_t* out_applied,
                                                clay_dynamic_stamp_report* out_report) {
+    return clay_dynamic_sculptor_apply_stroke_recorded(sculptor, samples, sample_count, preset,
+                                                       brush, topology, mask,
+                                                       orient_alpha_by_stamp, nullptr,
+                                                       out_applied, out_report);
+}
+
+clay_result clay_dynamic_sculptor_apply_stroke_recorded(clay_dynamic_sculptor* sculptor,
+                                                        const clay_stroke_sample_full* samples,
+                                                        size_t sample_count,
+                                                        const clay_stroke_preset* preset,
+                                                        const clay_mesh_brush_desc* brush,
+                                                        const clay_dynamic_topology_desc* topology,
+                                                        const clay_mask* mask,
+                                                        int32_t orient_alpha_by_stamp,
+                                                        clay_dynamic_delta* record,
+                                                        size_t* out_applied,
+                                                        clay_dynamic_stamp_report* out_report) {
     if (out_applied) *out_applied = 0;
     if (!sculptor || !sculptor->sculptor)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
@@ -18915,7 +18947,7 @@ clay_result clay_dynamic_sculptor_apply_stroke(clay_dynamic_sculptor* sculptor,
     std::size_t applied = 0;
     mesh::DynamicStampResult summary;
     r = apply_dynamic_stroke(sculptor, verb, settings, std::move(in), stroke, topology, mask,
-                             orient_alpha_by_stamp, &applied, &summary);
+                             orient_alpha_by_stamp, record, &applied, &summary);
     if (r != CLAY_OK) return r;
     if (out_applied) *out_applied = applied;
     return write_dynamic_report(*sculptor, summary, out_report);
@@ -18932,6 +18964,23 @@ clay_result clay_dynamic_sculptor_apply_preset(clay_dynamic_sculptor* sculptor,
                                                int32_t orient_alpha_by_stamp,
                                                size_t* out_applied,
                                                clay_dynamic_stamp_report* out_report) {
+    return clay_dynamic_sculptor_apply_preset_recorded(
+        sculptor, samples, sample_count, preset, alpha, alpha_width, alpha_height, topology, mask,
+        orient_alpha_by_stamp, nullptr, out_applied, out_report);
+}
+
+clay_result clay_dynamic_sculptor_apply_preset_recorded(clay_dynamic_sculptor* sculptor,
+                                                        const clay_stroke_sample_full* samples,
+                                                        size_t sample_count,
+                                                        const clay_brush_preset* preset,
+                                                        const float* alpha, int32_t alpha_width,
+                                                        int32_t alpha_height,
+                                                        const clay_dynamic_topology_desc* topology,
+                                                        const clay_mask* mask,
+                                                        int32_t orient_alpha_by_stamp,
+                                                        clay_dynamic_delta* record,
+                                                        size_t* out_applied,
+                                                        clay_dynamic_stamp_report* out_report) {
     if (out_applied) *out_applied = 0;
     if (!sculptor || !sculptor->sculptor)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
@@ -18958,7 +19007,7 @@ clay_result clay_dynamic_sculptor_apply_preset(clay_dynamic_sculptor* sculptor,
     std::size_t applied = 0;
     mesh::DynamicStampResult summary;
     r = apply_dynamic_stroke(sculptor, p.model.verb, p.settings, std::move(in), p.stroke, topology,
-                             mask, orient_alpha_by_stamp, &applied, &summary);
+                             mask, orient_alpha_by_stamp, record, &applied, &summary);
     if (r != CLAY_OK) return r;
     if (out_applied) *out_applied = applied;
     return write_dynamic_report(*sculptor, summary, out_report);
