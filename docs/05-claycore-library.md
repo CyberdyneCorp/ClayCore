@@ -2305,7 +2305,8 @@ differences from the fixed calls, each deliberate:
 `out_report` accumulates the whole stroke (counts summed, `hit_budget` OR-ed,
 dirty bounds united, the revision after the last stamp) and its size is checked
 before any stamp runs. A Layer brush is `CLAY_ERROR_INVALID_ARGUMENT` before any
-remesh. The stroke costs the sum of its stamps (1.001x a C++ loop): use it for
+remesh. The stroke costs the sum of its stamps (1.004x the host's
+resolve-then-stamp loop, which is itself 1.001x a C++ loop): use it for
 what a stroke means — Snakehook's anchor surviving the remesher, Grab's anchor,
 the azimuth reaching the alpha — not for speed.
 

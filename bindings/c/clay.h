@@ -8672,10 +8672,12 @@ clay_result clay_dynamic_sculptor_stamp(clay_dynamic_sculptor* sculptor,
  *     brush::apply_to_dynamic takes one.
  *   - NO NORMAL DEFERRAL: the adaptive sculptor refreshes normals locally per
  *     stamp, so there is no `defer_normals` argument to accept and ignore.
- *   - NOT FASTER. A stroke costs the sum of its stamps: measured at 1.001x a C++
- *     loop of the same stamps (73.065 vs 72.975 ms median, 14 remeshing Draw
- *     stamps on a 48x48 cube-sphere). The call is about getting the stroke
- *     right, not latency.
+ *   - NOT FASTER. A stroke costs the sum of its stamps: measured at 1.004x the
+ *     host loop of clay_stroke_resolve_full plus one clay_dynamic_sculptor_stamp
+ *     per stamp (46.221 vs 46.048 ms median of 30, Release, 14 remeshing Draw
+ *     stamps on a 48x48 cube-sphere, identical split counts), and that host
+ *     loop at 1.001x a C++ loop. The call is about getting the stroke right,
+ *     not latency.
  *   - Grab's after-remesh runs around the first stamp's centre, not the
  *     stretched tip; later stamps whose balls reach the tip refine it.
  *   - The chunked index is refitted, never rebuilt; rebuild between strokes. */

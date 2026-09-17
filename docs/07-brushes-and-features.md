@@ -1651,8 +1651,10 @@ would be a promise nothing keeps.
 **Not provided.** No topology undo record crosses the C ABI (the C++ call takes
 a `TopologyDelta` and a whole stroke reverts as one step). Grab's after-remesh
 runs around the first stamp's centre. And no latency change: a stroke costs its
-stamps, measured at **1.001x** a C++ loop of the same stamps — the call exists
-for the stroke's meaning, not speed.
+stamps, measured at **1.004x** the host's `clay_stroke_resolve_full` plus
+per-stamp loop (46.2 vs 46.0 ms median of 30, 14 remeshing Draw stamps on
+`cube_sphere(48)`), which is itself 1.001x a C++ loop — the call exists for the
+stroke's meaning, not speed.
 
 **A known question left open.** Anchored on the first stamp, a 0.6 pull-out Grab
 reaches 41% of the drag on BOTH representations, where a cursor-following loop

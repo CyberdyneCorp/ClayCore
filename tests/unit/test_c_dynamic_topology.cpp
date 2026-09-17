@@ -644,8 +644,8 @@ TEST_CASE("c dynamic stroke: a short report is refused before the stroke is appl
     shortened.struct_size = 4;
     size_t applied = 99;
     CHECK(clay_dynamic_sculptor_apply_stroke(fx.sculptor, samples.data(), samples.size(), &preset,
-                                             &brush, &topo, nullptr, 0, &applied, &shortened) !=
-          CLAY_OK);
+                                             &brush, &topo, nullptr, 0, &applied, &shortened) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
     CHECK(applied == 0);
     CHECK(export_surface(fx.surface) == pristine);
 }

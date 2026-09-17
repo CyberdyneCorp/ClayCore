@@ -73,7 +73,7 @@
 - [x] 4.2 `clay_dynamic_sculptor_apply_stroke` and `_apply_preset`, documented
       in `clay.h` beside `_stamp`: full samples and why, session frame only and
       why, no undo record, no deferral, Layer refused, cost is the stamps', the
-      1.001x measurement
+      measured cost (1.004x the host loop, re-measured against the built call)
 - [x] 4.3 Accumulated `clay_dynamic_stamp_report` (sum, OR, union, final
       revision), honouring its `struct_size`
 - [x] 4.4 Bump `CMakeLists.txt`, `CLAY_ABI_MINOR`, `pyproject.toml`

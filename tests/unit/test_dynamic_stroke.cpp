@@ -543,3 +543,58 @@ TEST_CASE("dynamic stroke: the stroke wires the cavity estimator from its option
     CHECK(same_surface(*wired, *by_hand));
     CHECK_FALSE(same_surface(*wired, *unwired));
 }
+
+TEST_CASE("dynamic stroke: the summary ORs the budget flag and unites the dirty bounds") {
+    // The LAST stamp lands far off the surface, so it moves nothing, remeshes
+    // nothing and reports no budget hit and empty bounds. A summary that kept
+    // the last stamp's flag or bounds instead of folding them would read
+    // "converged, nothing dirty" for a stroke that stopped at its bound.
+    std::vector<Stamp> stamps = shaped_stroke();
+    stamps.resize(3);
+    Stamp away = stamps.back();
+    away.position = cf3(0.0f, 0.0f, 10.0f);
+    stamps.push_back(away);
+
+    DynamicTopologySettings topo;
+    topo.max_ops_per_stamp = 1;
+    const MeshBrushSettings base = base_for(MeshBrush::Clay, 0.5f);
+
+    auto a = DynamicSurface::from_mesh(cube_sphere(8, 1.0f));
+    auto b = DynamicSurface::from_mesh(cube_sphere(8, 1.0f));
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+    DynamicSculptor sa(*a);
+    DynamicSculptor sb(*b);
+
+    DynamicStampResult summary;
+    REQUIRE(brush::apply_to_dynamic(sa, stamps, MeshBrush::Clay, base, topo, nullptr, nullptr, {},
+                                    &summary) == 3);
+
+    // The expectation, stamp by stamp on an identical surface.
+    bool any_budget = false;
+    math::Aabb united;
+    DynamicStampResult last;
+    for (const Stamp& s : stamps) {
+        MeshBrushSettings stamp_settings = base;
+        stamp_settings.center = s.position;
+        stamp_settings.radius = s.radius;
+        stamp_settings.strength = base.strength * s.strength;
+        last = sb.stamp(MeshBrush::Clay, stamp_settings, topo, {}, nullptr);
+        any_budget = any_budget || last.remesh.hit_budget;
+        united.expand(last.dirty_bounds);
+    }
+    // The preconditions: the flag and the bounds come from EARLIER stamps.
+    REQUIRE(any_budget);
+    REQUIRE_FALSE(last.remesh.hit_budget);
+    REQUIRE(last.dirty_bounds.empty());
+    REQUIRE_FALSE(united.empty());
+
+    CHECK(summary.remesh.hit_budget);
+    CHECK(summary.dirty_bounds.min.x == united.min.x);
+    CHECK(summary.dirty_bounds.min.y == united.min.y);
+    CHECK(summary.dirty_bounds.min.z == united.min.z);
+    CHECK(summary.dirty_bounds.max.x == united.max.x);
+    CHECK(summary.dirty_bounds.max.y == united.max.y);
+    CHECK(summary.dirty_bounds.max.z == united.max.z);
+    CHECK(same_surface(*a, *b));
+}

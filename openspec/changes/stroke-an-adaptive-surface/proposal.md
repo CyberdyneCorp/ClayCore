@@ -110,6 +110,15 @@ justified by the stroke's MEANING (the drag anchor, the azimuth, the strength
 composition) and by the parity gate, not by speed, and the proposal does not
 claim otherwise.
 
+That number was taken BEFORE the entry point existed, so it prices the host's
+loop, not the call. Re-measured once the call was built (review): Draw at
+strength 0.4, 60 samples resolving to 14 stamps, radius 0.15, detail 6,
+`cube_sphere(48)`, Release `libclay_shared`, a fresh surface per run, the two
+paths alternated per iteration, median of 30 after a warm-up (absolute times are
+not comparable with the row above, whose brush settings differed): `clay_dynamic_sculptor_apply_stroke` 46.221 ms,
+the resolve-then-stamp host loop 46.048 ms — **1.004x**, identical split counts
+(1107). The call is the host loop's cost, as designed.
+
 ### Preconditions measured, so the tests can be exact
 
 - **Determinism.** The same stroke run twice over identical surfaces with
