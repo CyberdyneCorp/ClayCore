@@ -1,0 +1,86 @@
+[
+  {
+    "kind": "0",
+    "keys": "1043",
+    "attributes": "0",
+    "before": 13.4132415,
+    "fixed": 12.5933025
+  },
+  {
+    "kind": "0",
+    "keys": "1043",
+    "attributes": "1",
+    "before": 16.8287985,
+    "fixed": 16.2874335
+  },
+  {
+    "kind": "0",
+    "keys": "48",
+    "attributes": "0",
+    "before": 3.1854095,
+    "fixed": 2.984895
+  },
+  {
+    "kind": "0",
+    "keys": "48",
+    "attributes": "1",
+    "before": 3.5450855,
+    "fixed": 3.3333205
+  },
+  {
+    "kind": "1",
+    "keys": "336",
+    "attributes": "0",
+    "before": 3.6985695,
+    "fixed": 3.3911179999999996
+  },
+  {
+    "kind": "1",
+    "keys": "336",
+    "attributes": "1",
+    "before": 4.9931135,
+    "fixed": 4.8081675
+  },
+  {
+    "kind": "1",
+    "keys": "48",
+    "attributes": "0",
+    "before": 2.5721705,
+    "fixed": 2.4287975
+  },
+  {
+    "kind": "1",
+    "keys": "48",
+    "attributes": "1",
+    "before": 2.8812585000000004,
+    "fixed": 2.698163
+  },
+  {
+    "kind": "2",
+    "keys": "1044",
+    "attributes": "0",
+    "before": 12.232109999999999,
+    "fixed": 11.6031585
+  },
+  {
+    "kind": "2",
+    "keys": "1044",
+    "attributes": "1",
+    "before": 19.1294395,
+    "fixed": 18.512698999999998
+  },
+  {
+    "kind": "2",
+    "keys": "48",
+    "attributes": "0",
+    "before": 3.212348,
+    "fixed": 2.9877465
+  },
+  {
+    "kind": "2",
+    "keys": "48",
+    "attributes": "1",
+    "before": 3.6731214999999997,
+    "fixed": 3.4824815
+  }
+]
