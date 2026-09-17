@@ -8,9 +8,9 @@ is that the surface already accumulated moves along its own normal. The item
 contributes no geometry of its own at all.
 
 Moving each point along its OWN normal is exactly ZBrush's Inflate. ZBrush's
-Standard (and ClayBuildup, built on the same deposit) raises a stamp along ONE
-averaged normal instead, so relief is Standard's closest SDF spelling but an
-approximation of it: a few percent of the amplitude on a form that is smooth at
+Standard raises a stamp along ONE averaged normal instead, so relief is
+Standard's closest SDF spelling but an approximation of it (ClayBuildup maps to
+relief along a stroke and is not measured against either): a few percent of the amplitude on a form that is smooth at
 the brush's scale, the whole amplitude on a ridge narrower than the stamp, which
 relief thickens where Standard would lift it. Incise is the same frame cutting
 in, for Crease and DamStandard. Either way you do not union a sphere onto a face
