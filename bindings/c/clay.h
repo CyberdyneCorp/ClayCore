@@ -273,18 +273,18 @@ typedef enum clay_op {
      * and the bowl reach 0.57 mean as well.
      *
      * The exact draw frame for ONE stamp is clay_layer_move_surface with a
-     * smoothstep ease (ease index 1; displacement blend_k * N, radius =
-     * radius + 2*rounding). Its DIRECTION is exact; its profile is not
-     * relief's: the weight falls off across the whole radius and a warp reads
-     * it at the displaced point, so the stamp's peak rises 0.82 * blend_k
-     * (0.1226 on the fin above) where relief's rises blend_k. A STROKE of
-     * them is not an option: each dab is one warp per item it reaches, and
+     * smoothstep ease (ease index 1; displacement blend_k * N, radius = radius
+     * + 2*rounding). Its DIRECTION is exact; its profile is not relief's: the
+     * weight falls off across the whole radius and a warp reads it at the
+     * displaced point, so at this mapping the stamp's peak rises 0.82 *
+     * blend_k (0.1226 on the fin above) where relief's rises blend_k. A STROKE
+     * of them is not an option: each dab is one warp per item it reaches, and
      * warp bounds multiply where relief's add — 30 dabs over a 24-item
      * blockout measured 700 warps, 76.2 ms against relief's 8.8 ms for 200k
      * points, and a safe step scale of 5e-6 (1.5 per overlapping dab) against
-     * 1/46. A shared-
-     * direction combine op cannot exist either: it needs the accumulated field
-     * at another point, and a combine record has it only at this one.
+     * 1/46. A shared-direction combine op cannot exist either: it needs the
+     * accumulated field at another point, and a combine record has it only at
+     * this one.
      *
      * CLAY_OP_INCISE is the same kernel branch with the sign flipped, so the
      * same holds cutting in: on a ridge narrower than the stamp it severs
