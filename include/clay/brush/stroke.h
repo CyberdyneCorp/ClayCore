@@ -430,9 +430,10 @@ std::size_t apply_to_multires(mesh::MultiresSculptor& sculptor, const std::vecto
 // and a collapse retires vertex ids (measured: up to 14 deaths in a 61-stamp
 // stroke at detail 4). So the anchor is revalidated before every stamp, and a
 // retired one is re-found as `DynamicSculptor::nearest_vertex` of the PREVIOUS
-// stamp's position. Keeping a dead anchor's last position lost 82-85% of a
-// pull-out; re-finding at that position instead reached 57-96% where this rule
-// reached 81-98%, never worse in sixteen measured rows.
+// stamp's position. Keeping a dead anchor's last position reached 15-18% of a
+// pull-out where the anchor died 6-14 times, and 41-88% where it died 1-3 times
+// (10-42 points below this rule); re-finding at that position instead reached
+// 57-96% where this rule reached 81-98%, never worse in sixteen measured rows.
 //
 // ONE `DynamicSculptor::stamp` PER STAMP, so every stamp keeps its verb's own
 // remesh timing (`default_timing`: Grab after, Clay before, Snakehook before and

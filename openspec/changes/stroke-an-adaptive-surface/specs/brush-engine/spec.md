@@ -7,7 +7,7 @@ It SHALL apply exactly one `DynamicSculptor::stamp` per resolved stamp, with eac
 
 `grab` SHALL centre every stamp on the first stamp and drag by the motion between consecutive stamps, as `apply_to_mesh` does. `snakehook` SHALL centre every stamp on the surface VERTEX it is dragging, so the brush keeps up with the pull.
 
-Because the adaptive surface retires vertex identities when it collapses an edge, a `snakehook` stroke SHALL revalidate its anchor before every stamp and, when the anchor no longer exists, SHALL re-find it as the vertex nearest the previous stamp's position, using the same nearest-vertex estimator the sculptor seeds its walk with. A stroke SHALL NOT keep stamping at a retired anchor's last position: measured, that loses 82–85% of a pull-out.
+Because the adaptive surface retires vertex identities when it collapses an edge, a `snakehook` stroke SHALL revalidate its anchor before every stamp and, when the anchor no longer exists, SHALL re-find it as the vertex nearest the previous stamp's position, using the same nearest-vertex estimator the sculptor seeds its walk with. A stroke SHALL NOT keep stamping at a retired anchor's last position: measured, that reaches only 15–18% of a pull-out where the anchor dies often, and 41–88% where it dies one to three times.
 
 A mask SHALL gate the stroke as it gates the other mesh consumers: a stamp centred in a fully masked region SHALL be skipped, and each vertex SHALL be weighed by the mask at its placed position. The cavity and surface-group estimators in the stroke options SHALL be wired once for the stroke. With `orient_alpha_by_stamp` set, each stamp's rotation SHALL orient the alpha; without it the alpha's tangent SHALL be exactly what the caller set.
 

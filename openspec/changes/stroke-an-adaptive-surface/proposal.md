@@ -64,7 +64,7 @@ Two readings:
 one. The adaptive surface remeshes BEFORE and AFTER every Snakehook stamp, and a
 collapse retires vertex ids. Counted with the PROTO loop, radius 0.25:
 
-| path | detail | spacing | stamps | anchor died | reach, re-found at last anchor position | reach, re-found at cursor | reach, never re-found |
+| path | detail | spacing | stamps | anchor died | reach, re-found at last anchor position | reach, re-found at previous stamp position | reach, never re-found |
 |---|---|---|---|---|---|---|---|
 | out 1.5 | 4 | 0.05 | 61 | 14 | 79% | 81% | **15%** |
 | out 1.5 | 4 | 0.25 | 13 | 6 | 57% | 81% | 15% |
@@ -81,7 +81,9 @@ paths. "anchor died" is the first column's policy; the other policies see
 slightly different counts because they sculpt a different surface.)
 
 So an adaptive Snakehook stroke **must revalidate its anchor every stamp**, and
-a stroke that keeps a dead anchor's last position stops pulling (15–18% reach).
+a stroke that keeps a dead anchor's last position stops pulling: 15–18% reach
+in the three rows where the anchor died 6–14 times, 41–88% in the rows where it
+died 1–3 times.
 Re-finding the nearest vertex to the previous STAMP position was never worse
 than re-finding it at the dead anchor's last position in any of the sixteen
 detail-4/8 rows (equal in eight, better in eight), by up to 24 points (57% -> 81%). That is the
@@ -235,6 +237,17 @@ stroke and the stamp cannot fill it two ways meant naming that helper in
 A short report on a stroke would otherwise leave a whole stroke applied under a
 call that returned an error. `clay_dynamic_sculptor_stamp` keeps its existing
 order; changing it is not this change's to make.
+
+**Review found three claims and one gap the tests did not cover.** The
+1.001x cited beside the call priced the host's loop, taken before the call
+existed; re-measured against the call it is 1.004x (above). "Keeping a dead
+anchor loses 82–85%" held only for the rows where the anchor died 6–14 times;
+the rows with 1–3 deaths reach 41–88%, and the headers, docs and spec now say
+both. And no test could fail if the stroke summary kept the LAST stamp's
+`hit_budget` instead of OR-ing it: a new case ends on a stamp that reaches
+nothing, and that mutation fails it (the bounds mutation fails it and the
+equality test). The short-report C case asserted any failure; it now asserts
+`CLAY_ERROR_INVALID_ARGUMENT`.
 
 ## Capabilities
 

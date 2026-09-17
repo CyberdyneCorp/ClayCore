@@ -1639,7 +1639,7 @@ revalidated before every stamp and a retired one is re-found with
 
 | policy for a retired anchor | reach, detail 4-8 rows |
 |---|---|
-| keep stamping where it was | 15-18% |
+| keep stamping where it was | 15-18% where it died 6-14 times; 41-88% where it died 1-3 times |
 | re-find at its last position | 57-96% |
 | re-find at the previous stamp position (adopted) | 81-98%, never worse in 16 rows |
 

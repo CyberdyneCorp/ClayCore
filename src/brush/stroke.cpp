@@ -716,7 +716,8 @@ namespace {
 // A retired anchor is re-found at the PREVIOUS STAMP's position, not at the
 // dead vertex's last position. Measured over sixteen detail-4/8 rows: never
 // worse, better in eight, by up to 24 points of reach (57% -> 81%). Not
-// re-finding at all — stamping where the dead vertex was — kept 15-18%.
+// re-finding at all — stamping where the dead vertex was — kept 15-18% where
+// the anchor died 6-14 times, and 41-88% where it died 1-3 times.
 kernel::cfloat3 dynamic_snakehook_centre(const mesh::DynamicSculptor& sculptor,
                                          mesh::VertexId* anchor, kernel::cfloat3 previous) {
     if (sculptor.surface().vertex(*anchor) == nullptr) *anchor = sculptor.nearest_vertex(previous);

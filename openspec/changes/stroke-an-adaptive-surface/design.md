@@ -64,7 +64,8 @@ The fixed path anchors on a class that cannot die. Here a collapse retires ids
 2. The stamp's centre is the anchor's CURRENT position.
 
 Measured alternatives, all deterministic: never re-finding (freeze the dead
-anchor's last position) collapses reach to 15–18%; re-finding at the dead
+anchor's last position) collapses reach to 15–18% where the anchor dies 6–14
+times, and still costs 10–42 points (41–88%) where it dies 1–3 times; re-finding at the dead
 anchor's last position gave 57–96%; re-finding at the previous stamp position
 gave 81–98% and was never worse in the sixteen detail-4/8 rows. Adopted.
 

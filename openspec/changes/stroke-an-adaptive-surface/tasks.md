@@ -6,7 +6,8 @@
       Snakehook reach 42% vs 96% (fixed: 50% vs 98%); Grab 56% vs 41% (fixed:
       66% vs 41%) — the adaptive result agrees with `apply_to_mesh` to 1e-3
 - [x] 1.3 Snakehook anchor deaths under BEFORE+AFTER remesh: up to 14 in 61
-      stamps at detail 4; never re-finding gives 15–18% reach; re-finding at the
+      stamps at detail 4; never re-finding gives 15–18% reach where the anchor
+      dies 6–14 times (41–88% at 1–3 deaths); re-finding at the
       previous stamp position 81–98%, never worse than at the dead anchor's
       last position in sixteen rows
 - [x] 1.4 Azimuth: surfaces bit-identical across azimuth 0 / pi/2 without
