@@ -939,3 +939,43 @@ TEST_CASE("dynamic stroke: a refused or mismatched recorded stroke leaves the re
         CHECK(surface->mark() == mark);
     }
 }
+
+TEST_CASE("dynamic stroke: a malformed stroke into a stale record is refused, not a mismatch") {
+    // The order the header promises: the stroke's own refusals come BEFORE the
+    // mark, so a host is never told to retry a call that can never succeed.
+    // With a matching record both orders return 0; only a stale one tells them
+    // apart.
+    const std::vector<Stamp> stamps = shaped_stroke();
+    auto surface = DynamicSurface::from_mesh(cube_sphere(16, 1.0f));
+    REQUIRE(surface.has_value());
+    DynamicSculptor sc(*surface);
+    mesh::RecordedGesture record;
+    REQUIRE(brush::apply_to_dynamic_recorded(sc, stamps, MeshBrush::Draw,
+                                             base_for(MeshBrush::Draw, 0.5f),
+                                             DynamicTopologySettings{}, nullptr, record));
+    MeshBrushSettings dab = base_for(MeshBrush::Draw, 0.5f);
+    dab.radius = 0.3f;
+    dab.center = cf3(0, 0, -1);
+    REQUIRE(sc.stamp(MeshBrush::Draw, dab, DynamicTopologySettings{}).changed());
+    REQUIRE_FALSE(record.can_capture_on(*surface));  // stale
+    const RecordState held = state_of(record);
+    const Exact was = exact_of(*surface);
+
+    auto refused = [&](const std::vector<Stamp>& s, MeshBrush verb,
+                       const brush::MeshStrokeOptions& options) {
+        const std::optional<std::size_t> r = brush::apply_to_dynamic_recorded(
+            sc, s, verb, base_for(verb, 0.5f), DynamicTopologySettings{}, nullptr, record,
+            options);
+        CHECK(r.has_value());
+        CHECK(r.value_or(1) == 0);
+        CHECK(same_state(state_of(record), held));
+        CHECK(same_exact(exact_of(*surface), was));
+    };
+    SUBCASE("Layer") { refused(stamps, MeshBrush::Layer, {}); }
+    SUBCASE("defer_normals") {
+        brush::MeshStrokeOptions defer;
+        defer.defer_normals = true;
+        refused(stamps, MeshBrush::Draw, defer);
+    }
+    SUBCASE("no stamps") { refused({}, MeshBrush::Draw, {}); }
+}

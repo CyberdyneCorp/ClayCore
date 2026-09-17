@@ -29,6 +29,10 @@ The surface a recorded stroke produces SHALL be bit-identical to the unrecorded 
 - **WHEN** a Layer stroke, a stroke asking to defer normals, or an empty stroke is applied into a non-empty record
 - **THEN** the call applies nothing and the record's size and both marks are unchanged
 
+#### Scenario: A refused stroke into a stale record is a refusal, not a mismatch
+- **WHEN** a Layer stroke, a stroke asking to defer normals, or an empty stroke is applied into a record the surface has moved away from
+- **THEN** the call reports the stroke's own refusal rather than a mismatch, applies nothing, and the record's size and both marks are unchanged
+
 #### Scenario: Strokes accumulate into one step
 - **WHEN** a recorded stamp and two recorded strokes are captured into one record and the record is reverted once
 - **THEN** the surface equals the one before the stamp

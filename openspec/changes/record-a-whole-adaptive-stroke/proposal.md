@@ -239,6 +239,20 @@ it found was about the tests, and one of them would have shipped inert.
   `apply_dynamic_stroke` runs, so that half of design D4's order is structural.
 - **pyclay mutation** (the record never reaches the engine): all 5 new pytest
   cases fail.
+- **Review found the refusal ORDER untested in the engine.** The header and the
+  brush-engine requirement say the stroke's own refusals (Layer,
+  `defer_normals`, no stamps) are decided before the mark, yet every refusal row
+  ran against a MATCHING record, where both orders return 0. Moving the mark
+  check above `dynamic_stroke_refused` failed 0 of 499 engine assertions and 0 of
+  the C ABI's (the C entry refuses Layer before the engine is reached). A case
+  that strokes into a STALE record now fails 6 assertions under that mutation.
+  Two further review mutations were already caught: clearing the delta before
+  every stamp (a fresh record per stamp) fails 20 engine and 3 C ABI assertions;
+  dropping the Snakehook anchor re-find fails 12 engine assertions, including
+  the recorded-stroke case, whose anchor-death fixture is compared bit-exactly
+  to a loop that re-finds. The per-fixture encoded sizes in docs/07 were
+  re-read from the test (the six-stamp Snakehook also re-finds its anchor,
+  twice).
 - **A first-draft assertion was wrong, not the code:** comparing the recorded
   stroke's `before()` with the per-stamp loop's across two surfaces fails,
   because every surface has its own lineage. The byte equality (task 3.3) is the

@@ -1733,22 +1733,23 @@ one unrecorded stamp made it fire at exactly that stamp. The stroke's own
 refusals (Layer, `defer_normals`, no stamps) come before the mark, so a malformed
 call is never reported as a mismatch.
 
-| fixture, `cube_sphere(16)`, relax on | stamps | undo exact | redo exact | == unrecorded | encoded bytes, stroke = per-stamp loop |
+| fixture (`test_dynamic_stroke.cpp`), `cube_sphere(16)`, relax on | stamps | undo exact | redo exact | == unrecorded | encoded bytes, stroke = per-stamp loop |
 |---|---|---|---|---|---|
 | Draw | 6 | yes | yes | yes | 851,178 |
 | Clay | 6 | yes | yes | yes | 853,306 |
 | Smooth | 6 | yes | yes | yes | 904,378 |
 | Flatten | 6 | yes | yes | yes | 899,058 |
 | Grab | 6 | yes | yes | yes | 870,094 |
-| Snakehook | 6 | yes | yes | yes | 1,488,796 |
+| Snakehook, anchor died 2 times | 6 | yes | yes | yes | 1,488,796 |
 | Snakehook, anchor died 11 times (`cube_sphere(24)`, detail 4) | 61 | yes | yes | yes | 221,506 |
 
 Recording costs 1.046x / 1.065x the unrecorded stroke at 27,648 / 110,592 faces,
 against 1.049x / 1.061x for the same stamps recorded one by one.
 
-**Not provided.** Grab's after-remesh runs around the first stamp's centre. And no latency change: a stroke costs its
-stamps, measured at **1.004x** the host's `clay_stroke_resolve_full` plus
-per-stamp loop (46.2 vs 46.0 ms median of 30, 14 remeshing Draw stamps on
+**Not provided.** Grab's after-remesh runs around the first stamp's centre. And
+no latency change: a stroke costs its stamps, measured at **1.004x** the host's
+`clay_stroke_resolve_full` plus per-stamp loop (46.2 vs 46.0 ms median of 30, 14
+remeshing Draw stamps on
 `cube_sphere(48)`), which is itself 1.001x a C++ loop — the call exists for the
 stroke's meaning, not speed.
 

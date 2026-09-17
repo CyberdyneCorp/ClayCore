@@ -124,5 +124,8 @@ ABI 0.119.0 -> 0.120.0.
       — FAIL rows: dialect and device (known), hardware/* (tape.h changed on origin/main in 9c5419ec, untouched here); every other row PASS, bindings imported the built pyclay
 - [x] 7b.3 `npx -y @fission-ai/openspec@1.12.0 validate --all --strict`
       — 80 passed, 0 failed
+- [x] 7b.5 Review: the refusal-before-mark order had no failing test in the
+      engine (mutation: 0 failures); added a stale-record refusal case (6 fail
+      under the mutation) and its brush-engine scenario
 - [ ] 7b.4 PR body: why, what lands, what measuring refuted, suite counts, gates,
       ABI 0.119.0 -> 0.120.0
