@@ -1,6 +1,6 @@
 ## 1. Measured before building
 
-- [x] 1.1 Gap confirmed on `origin/main` `aafeccb6`: no `apply_to_dynamic`, no
+- [x] 1.1 Gap confirmed on main at `aafeccb6`: no `apply_to_dynamic`, no
       `clay_dynamic_sculptor_apply_stroke`, no `DynamicSculptor.apply_stroke`
 - [x] 1.2 Host loop vs transplanted drag rules, `cube_sphere(24)`, detail 8:
       Snakehook reach 42% vs 96% (fixed: 50% vs 98%); Grab 56% vs 41% (fixed:
@@ -91,7 +91,7 @@
       alpha
 - [x] 5.3 `check_binding_parity.py --pyclay <build>/bindings/python
       --require-import` prints `imported`, and passes
-- [x] 5.4 `tests/swift/smoke.swift` drives `_apply_stroke` and the Layer refusal
+- [x] 5.4 `tests/swift/smoke.swift` drives `clay_dynamic_sculptor_apply_stroke` and the Layer refusal
 
 ## 6. Docs and gates
 
@@ -102,5 +102,9 @@
       estimator requirement (this change's REMOVED + ADDED delta)
 - [ ] 6.5 Open the follow-up issue for fixed-path Grab anchoring with the 41% vs
       66% measurement
-- [ ] 6.6 GCC -Werror flags reproduced where possible; `release_check.py
+- [x] 6.6 GCC -Werror flags reproduced where possible; `release_check.py
       --skip-slow` green; `openspec@1.12.0 validate --all --strict`
+      — no GCC on the machine; the build's own `-Wall -Wextra -Wpedantic
+      -Wshadow -Werror` (AppleClang) is clean. release_check: every row green
+      but `dialect` (no Metal Toolchain) and `device` (iPad gate stale), the
+      two machine-level rows that fail on main too
