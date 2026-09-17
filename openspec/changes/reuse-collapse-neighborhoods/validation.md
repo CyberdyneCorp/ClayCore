@@ -124,3 +124,30 @@ sites; the absolute profile timings include instrumentation overhead. Retain thi
 candidate for its deterministic allocation reduction, exact output, passing
 correctness checks and repeatable sample-tail improvement. Broader geometry and
 application latency remain follow-up work.
+
+## Integration with #619 and Windows allocation gate
+
+Updated local main to `a60d8c16` (v0.119.0) and merged it into this branch without
+conflicts. It adds the shared adaptive stroke consumer and its C/Python APIs.
+The timing table above remains the comparison of `8a9d04e3` against `18bbfd15`;
+it is not a new measurement of the stroke consumer introduced by #619.
+
+The [initial Windows job](https://github.com/CyberdyneCorp/ClayCore/actions/runs/35203273075/job/105142872808)
+compiled successfully, then failed only the two allocation-budget assertions:
+MSVC STL used **112 allocations** at both fixture sizes, exceeding the Linux
+limit of 96. The test now selects a budget of **128 for MSVC STL**, retaining
+**96 for the other tested libraries**. It detects the standard library, not the
+operating system, and reports the selected limit on failure. The measured
+candidate counts are 112 with MSVC STL and 80 with libstdc++.
+
+A separate [Windows main-baseline check](https://github.com/CyberdyneCorp/ClayCore/actions/runs/35206341100)
+builds unoptimized `a60d8c16` with the revised allocation test and requires both
+fixtures to exceed 128. This checks that the platform adjustment still rejects
+the repeated-traversal implementation. The probe workflow is confined to a
+scratch branch; it is not added to this PR's regular CI.
+
+After integration, the focused release run passed **154 cases / 69,035
+assertions**, including the new dynamic stroke tests. All **80 OpenSpec items**
+and the layering check passed. The test's loop/branch structure is unchanged;
+clang-tidy parses the updated test successfully. Windows and other platform
+results for the final revision are reported by the PR's CI checks.

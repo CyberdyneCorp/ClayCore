@@ -1004,6 +1004,14 @@ TEST_CASE("allocation gate: full source priming adopts its filled sample payload
 }
 
 TEST_CASE("allocation gate: collapse planning reuses endpoint neighborhoods") {
+    // Allocation counts depend on the standard library's container policies.
+    // Keep separate measured budgets so those differences do not fail the gate
+    // while redundant neighborhood walks still do.
+#if defined(_MSVC_STL_VERSION)
+    constexpr std::size_t allocation_limit = 128;
+#else
+    constexpr std::size_t allocation_limit = 96;
+#endif
     for (int size : {20, 80}) {
         auto surface = mesh::DynamicSurface::from_mesh(flat_patch(size, 0.02f));
         REQUIRE(surface.has_value());
@@ -1021,9 +1029,9 @@ TEST_CASE("allocation gate: collapse planning reuses endpoint neighborhoods") {
         REQUIRE(result.result == mesh::TopologyResult::Ok);
         CAPTURE(size);
         CAPTURE(allocations);
-        // Main used 126 allocations at both sizes; shared planning fans use
-        // 80 here. Leave room for allocator/library variation while detecting
-        // the repeated traversal buffers that this change removes.
-        CHECK(allocations <= 96);
+        CAPTURE(allocation_limit);
+        // Shared planning fans use 80 allocations with libstdc++ and 112 with
+        // MSVC STL. Both budgets leave room for modest library variation.
+        CHECK(allocations <= allocation_limit);
     }
 }
