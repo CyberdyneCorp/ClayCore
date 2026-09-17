@@ -1245,6 +1245,33 @@ void refuse_unless_dynamic_offers(mesh::MeshBrush verb, const std::string& name)
             "exist at the start");
 }
 
+// A resolved stroke onto the adaptive surface, recorded into `record` when one
+// is given, with the GIL released. A mismatched record raises ValueError, with
+// nothing applied -- the same contract `stamp(record=)` keeps. Shared by
+// `apply_stroke` and `apply_preset`, as the C calls share apply_dynamic_stroke.
+std::size_t stroke_dynamic(mesh::DynamicSculptor& sculptor, const std::vector<brush::Stamp>& stamps,
+                           mesh::MeshBrush verb, const mesh::MeshBrushSettings& settings,
+                           const mesh::DynamicTopologySettings& topology,
+                           const voxel::MaskField* mask, const brush::MeshStrokeOptions& options,
+                           mesh::RecordedGesture* record, mesh::DynamicStampResult* summary) {
+    std::optional<std::size_t> applied;
+    {
+        nb::gil_scoped_release release;
+        if (record)
+            applied = brush::apply_to_dynamic_recorded(sculptor, stamps, verb, settings, topology,
+                                                       mask, *record, options, summary);
+        else
+            applied = brush::apply_to_dynamic(sculptor, stamps, verb, settings, topology, mask,
+                                              nullptr, options, summary);
+    }
+    if (!applied)
+        throw std::invalid_argument(
+            "snapshot mismatch: the record does not end where this surface is (another "
+            "surface, or an unrecorded stamp or a replay since its last capture); nothing was "
+            "applied. Clear it or start a new one");
+    return *applied;
+}
+
 // A stamp's or a stroke's result as the dict `DynamicSculptor.stamp` returns.
 nb::dict dynamic_result_dict(const mesh::DynamicStampResult& r) {
     nb::dict out;
@@ -8622,7 +8649,7 @@ NB_MODULE(pyclay, m) {
                const std::string& verb, const mesh::DynamicTopologySettings& topology,
                const std::string& falloff, float strength, nb::handle geodesic,
                int smooth_iterations, nb::handle mask, nb::handle automask, float stamp_azimuth,
-               bool orient_alpha_by_stamp) {
+               bool orient_alpha_by_stamp, mesh::RecordedGesture* record) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 // The radius is the STAMP's, so a placeholder goes in here.
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
@@ -8636,13 +8663,9 @@ NB_MODULE(pyclay, m) {
                 brush::MeshStrokeOptions options;
                 options.orient_alpha_by_stamp = orient_alpha_by_stamp;
                 mesh::DynamicStampResult summary;
-                std::size_t applied = 0;
-                {
-                    nb::gil_scoped_release release;
-                    applied = brush::apply_to_dynamic(self, brush::resolve_stroke(in, preset),
-                                                      chosen, settings, topology, field_mask,
-                                                      nullptr, options, &summary);
-                }
+                const std::size_t applied =
+                    stroke_dynamic(self, brush::resolve_stroke(in, preset), chosen, settings,
+                                   topology, field_mask, options, record, &summary);
                 nb::dict out = dynamic_result_dict(summary);
                 out["applied"] = applied;
                 return out;
@@ -8651,7 +8674,7 @@ NB_MODULE(pyclay, m) {
             "topology"_a = mesh::DynamicTopologySettings{}, "falloff"_a = "smooth",
             "strength"_a = 1.0f, "geodesic"_a = nb::none(), "smooth_iterations"_a = 1,
             "mask"_a = nb::none(), "automask"_a = nb::none(), "stamp_azimuth"_a = 0.0f,
-            "orient_alpha_by_stamp"_a = false,
+            "orient_alpha_by_stamp"_a = false, "record"_a = nb::none(),
             "Resolve a stroke and apply it to the adaptive surface, one stamp per\n"
             "resolved stamp, each with its verb's own remesh timing.\n\n"
             "`samples` is (N, K) with K from 3 to 8, so column 6 is the stylus\n"
@@ -8661,13 +8684,21 @@ NB_MODULE(pyclay, m) {
             "remesher retired it.\n\n"
             "Returns `stamp`'s dict summed over the stroke (revisions after the\n"
             "last stamp) plus `applied`, the stamps that changed the surface.\n\n"
-            "Raises for 'layer', which an adaptive surface does not offer. No\n"
-            "undo record and no normal deferral; costs the sum of its stamps.")
+            "`record`, a `TopologyDelta`, captures the WHOLE stroke as one undo\n"
+            "step (`TopologyDelta.revert` / `.apply`), keeping the stroke's Grab\n"
+            "and Snakehook centres, which a loop of `stamp(record=)` does not. It\n"
+            "accumulates into a non-empty record whose end is this surface's\n"
+            "state; any other non-empty record raises ValueError and applies\n"
+            "nothing. Recording costs about 1.05-1.07x.\n\n"
+            "Raises for 'layer', which an adaptive surface does not offer, before\n"
+            "the record is looked at. No normal deferral; costs the sum of its\n"
+            "stamps.")
         .def(
             "apply_preset",
             [](PyDynamicSculptor& self, nb::handle samples, const brush::BrushPreset& preset,
                const mesh::DynamicTopologySettings& topology, nb::handle alpha,
-               float alpha_extent, nb::handle mask, bool orient_alpha_by_stamp) {
+               float alpha_extent, nb::handle mask, bool orient_alpha_by_stamp,
+               mesh::RecordedGesture* record) {
                 const mesh::MeshBrush verb = preset.model.verb;
                 refuse_unless_dynamic_offers(verb, preset.name);
                 mesh::MeshBrushSettings settings = preset.settings;
@@ -8688,23 +8719,20 @@ NB_MODULE(pyclay, m) {
                 brush::MeshStrokeOptions options;
                 options.orient_alpha_by_stamp = orient_alpha_by_stamp;
                 mesh::DynamicStampResult summary;
-                std::size_t applied = 0;
-                {
-                    nb::gil_scoped_release release;
-                    applied = brush::apply_to_dynamic(self, brush::resolve_stroke(in, preset.stroke),
-                                                      verb, settings, topology, field_mask,
-                                                      nullptr, options, &summary);
-                }
+                const std::size_t applied =
+                    stroke_dynamic(self, brush::resolve_stroke(in, preset.stroke), verb, settings,
+                                   topology, field_mask, options, record, &summary);
                 nb::dict out = dynamic_result_dict(summary);
                 out["applied"] = applied;
                 return out;
             },
             "samples"_a, "preset"_a, "topology"_a = mesh::DynamicTopologySettings{},
             "alpha"_a = nb::none(), "alpha_extent"_a = 0.0f, "mask"_a = nb::none(),
-            "orient_alpha_by_stamp"_a = false,
+            "orient_alpha_by_stamp"_a = false, "record"_a = nb::none(),
             "`apply_stroke` driven by a BRUSH preset, which carries the stroke\n"
             "preset, the verb and the brush's settings. The alpha is borrowed for\n"
-            "the call, never stored in the preset. Raises for a Layer preset.")
+            "the call, never stored in the preset. Raises for a Layer preset.\n"
+            "`record` is as for `apply_stroke`.")
         .def("rebuild_index", [](PyDynamicSculptor& s) { s.rebuild_index(); },
              "Rebuild the chunked index. BETWEEN strokes, never mid-drag: a refit\n"
              "stays correct and does not stay fast, and a rebuild is not\n"

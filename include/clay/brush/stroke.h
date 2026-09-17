@@ -441,7 +441,11 @@ std::size_t apply_to_multires(mesh::MultiresSculptor& sculptor, const std::vecto
 // the sum of those stamps; nothing here is a latency change.
 //
 // `record`, when given, accumulates the whole call — deformation and topology —
-// into one reversible gesture. `summary`, when given, is RESET and then
+// into one reversible gesture. It is the UNGUARDED record, the raw form
+// `DynamicSculptor::stamp` takes: it carries no surface marks, so
+// `DynamicSculptor::replay` cannot check it and its owner must sequence its own
+// history. For a record the replay guards, use `apply_to_dynamic_recorded`
+// below. `summary`, when given, is RESET and then
 // accumulates moved vertices and remesh counts (summed), `hit_budget` (OR-ed)
 // and the dirty bounds (union); its revisions are the surface's after the last
 // stamp. Returns the number of stamps that CHANGED the surface — moved a vertex
@@ -469,6 +473,47 @@ std::size_t apply_to_dynamic(mesh::DynamicSculptor& sculptor, const std::vector<
                              mesh::TopologyDelta* record = nullptr,
                              const MeshStrokeOptions& options = {},
                              mesh::DynamicStampResult* summary = nullptr);
+
+// The same stroke, captured into a REPLAYABLE record
+// (record-a-whole-adaptive-stroke): the whole stroke becomes ONE step
+// `DynamicSculptor::replay` reverts and re-applies exactly, with the stroke's
+// own meaning kept (Grab on the first stamp, Snakehook on its re-found anchor),
+// which a host loop of `DynamicSculptor::stamp_recorded` does not keep.
+//
+// Returns the number of stamps that changed the surface, exactly as
+// `apply_to_dynamic` does, and the surface it leaves is bit-identical to the
+// unrecorded stroke's. Returns nullopt, having stamped NOTHING and leaving the
+// record untouched, when the record is non-empty and the surface is no longer
+// where the record left it -- another surface, or an unrecorded stamp or a
+// replay in between.
+//
+// A separate name, for the reason `stamp_recorded` is one: an overload on the
+// pointer would make every `apply_to_dynamic(..., nullptr, ...)` call site
+// ambiguous, and `std::size_t` has no value left to say "mismatch".
+//
+// WHAT IT DOES AND DOES NOT PROMISE:
+//   - The mark is checked ONCE, before the first stamp. Inside the stroke the
+//     only writer to the surface is `DynamicSculptor::stamp`, each into this
+//     same record, so no later stamp can find the surface moved; measured, 0
+//     refusals at k>0 over 97 stamps on seven fixtures. There is no per-stamp
+//     check, and no partial stroke can be left unreported.
+//   - The stroke's own refusals (Layer, `defer_normals`, no stamps) come FIRST
+//     and return 0, not nullopt, with the record untouched -- not even re-bound
+//     -- so a malformed call is never reported as a retryable mismatch.
+//   - A non-empty record whose end is the current surface is CONTINUED: the
+//     stroke accumulates into it, and one revert undoes everything captured.
+//     Clear the record first for one step per stroke; `clear` keeps capacity.
+//   - A stroke that changes nothing leaves a non-empty record unchanged, marks
+//     included; into an EMPTY record it re-binds the record to the current
+//     state, as `RecordedGesture::end_capture` does for any empty capture.
+//   - `summary` is reset on every path, nullopt included.
+//   - Cost is the delta capture inside each stamp, what the same stamps cost
+//     through `stamp_recorded`: 1.05-1.07x the unrecorded stroke (Release).
+std::optional<std::size_t> apply_to_dynamic_recorded(
+    mesh::DynamicSculptor& sculptor, const std::vector<Stamp>& stamps, mesh::MeshBrush verb,
+    const mesh::MeshBrushSettings& settings, const mesh::DynamicTopologySettings& topology,
+    const voxel::MaskField* mask, mesh::RecordedGesture& record,
+    const MeshStrokeOptions& options = {}, mesh::DynamicStampResult* summary = nullptr);
 
 // -- snakehook ----------------------------------------------------------------
 //

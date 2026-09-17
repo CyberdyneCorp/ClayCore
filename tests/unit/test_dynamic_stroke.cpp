@@ -15,7 +15,9 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <functional>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -24,6 +26,7 @@
 #include "clay/mesh/dynamic_sculpt.h"
 #include "clay/mesh/dynamic_validate.h"
 #include "clay/mesh/remesh_local.h"
+#include "clay/mesh/topology_delta.h"
 #include "clay/voxel/mask.h"
 
 using namespace clay;
@@ -597,4 +600,382 @@ TEST_CASE("dynamic stroke: the summary ORs the budget flag and unites the dirty 
     CHECK(summary.dirty_bounds.max.y == united.max.y);
     CHECK(summary.dirty_bounds.max.z == united.max.z);
     CHECK(same_surface(*a, *b));
+}
+
+// -- a whole stroke as one replayable record (record-a-whole-adaptive-stroke) --
+//
+// "EXACT" below is stronger than `same_surface`: the export's positions, normals
+// and indices AND the stored positions and normals of every live vertex and
+// face, bit for bit. A replay restores slots, so live elements compare in slot
+// order.
+
+namespace {
+
+bool same_bits(const cfloat3& a, const cfloat3& b) {
+    return std::memcmp(&a, &b, sizeof(cfloat3)) == 0;
+}
+
+bool same_points(const std::vector<cfloat3>& a, const std::vector<cfloat3>& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        if (!same_bits(a[i], b[i])) return false;
+    return true;
+}
+
+struct Exact {
+    std::vector<cfloat3> vertex_positions, vertex_normals, face_normals;
+    Mesh exported;
+};
+
+Exact exact_of(const DynamicSurface& s) {
+    Exact out;
+    s.vertices().for_each_live([&](VertexId, const mesh::DynamicVertex& v) {
+        out.vertex_positions.push_back(v.position);
+        out.vertex_normals.push_back(v.normal);
+    });
+    s.faces().for_each_live(
+        [&](mesh::FaceId, const mesh::DynamicFace& f) { out.face_normals.push_back(f.normal); });
+    out.exported = s.to_mesh();
+    return out;
+}
+
+bool same_exact(const Exact& a, const Exact& b) {
+    return same_mesh(a.exported, b.exported) &&
+           same_points(a.exported.normals, b.exported.normals) &&
+           same_points(a.vertex_positions, b.vertex_positions) &&
+           same_points(a.vertex_normals, b.vertex_normals) &&
+           same_points(a.face_normals, b.face_normals);
+}
+
+// Live faces the sculptor's index does not hold: a replay must keep it in step.
+std::size_t unindexed_faces(const DynamicSculptor& sc) {
+    std::size_t n = 0;
+    sc.surface().faces().for_each_live([&](mesh::FaceId f, const mesh::DynamicFace&) {
+        if (sc.bvh().leaf_of(f) == mesh::DynamicBvh::kNoLeaf) ++n;
+    });
+    return n;
+}
+
+// The stroke's rules, one `stamp_recorded` per stamp, every one REQUIRED to
+// succeed: a mismatch at stamp k>0 is exactly what checking the mark once
+// assumes cannot happen.
+std::size_t recorded_loop(DynamicSculptor& sc, const std::vector<Stamp>& stamps, MeshBrush verb,
+                          const MeshBrushSettings& base, const DynamicTopologySettings& topo,
+                          mesh::RecordedGesture& record) {
+    std::size_t deaths = 0;
+    const bool dragging = verb == MeshBrush::Grab || verb == MeshBrush::Snakehook;
+    VertexId anchor;
+    if (verb == MeshBrush::Snakehook) anchor = sc.nearest_vertex(stamps.front().position);
+    cfloat3 previous = stamps.front().position;
+    for (const Stamp& s : stamps) {
+        MeshBrushSettings b = base;
+        b.radius = s.radius;
+        b.strength = base.strength * s.strength;
+        b.center = s.position;
+        if (dragging) {
+            b.direction = s.position - previous;
+            if (verb == MeshBrush::Grab) {
+                b.center = stamps.front().position;
+            } else {
+                if (sc.surface().vertex(anchor) == nullptr) {
+                    ++deaths;
+                    anchor = sc.nearest_vertex(previous);
+                }
+                b.center = sc.surface().position_of(anchor);
+            }
+        }
+        previous = s.position;
+        REQUIRE(sc.stamp_recorded(verb, b, topo, {}, record).has_value());
+    }
+    return deaths;
+}
+
+struct RecordFixture {
+    MeshBrush verb;
+    std::vector<Stamp> stamps;
+    MeshBrushSettings base;
+    DynamicTopologySettings topo;
+    int grid;
+    bool expects_deaths;
+};
+
+// The six verbs over the shaped stroke, and the anchor-death Snakehook of
+// "re-finds an anchor the remesher retired". Default topology: relax ON.
+std::vector<RecordFixture> record_fixtures() {
+    std::vector<RecordFixture> out;
+    const MeshBrush verbs[] = {MeshBrush::Draw,    MeshBrush::Clay, MeshBrush::Smooth,
+                               MeshBrush::Flatten, MeshBrush::Grab, MeshBrush::Snakehook};
+    for (MeshBrush verb : verbs)
+        out.push_back({verb, shaped_stroke(), base_for(verb, 0.5f), DynamicTopologySettings{}, 16,
+                       false});
+    StrokePreset preset;
+    preset.radius = 0.25f;
+    preset.spacing = 0.05f;
+    DynamicTopologySettings topo;
+    topo.detail_resolution = 4.0f;
+    out.push_back({MeshBrush::Snakehook,
+                   brush::resolve_stroke(line(cf3(0, 0, 1.0f), cf3(0, 0, 2.5f), 64), preset),
+                   base_for(MeshBrush::Snakehook, 1.0f), topo, 24, true});
+    return out;
+}
+
+struct RecordState {
+    std::size_t encoded;
+    mesh::SurfaceMark before, after;
+};
+
+RecordState state_of(const mesh::RecordedGesture& r) {
+    return {r.encoded_size(), r.before(), r.after()};
+}
+
+bool same_state(const RecordState& a, const RecordState& b) {
+    return a.encoded == b.encoded && a.before == b.before && a.after == b.after;
+}
+
+}  // namespace
+
+TEST_CASE("dynamic stroke: a recorded stroke is the unrecorded stroke, and undoes exactly") {
+    for (const RecordFixture& f : record_fixtures()) {
+        CAPTURE(static_cast<int>(f.verb));
+        CAPTURE(f.expects_deaths);
+        REQUIRE(f.topo.relax_after_remesh);
+        auto recorded = DynamicSurface::from_mesh(cube_sphere(f.grid, 1.0f));
+        auto plain = DynamicSurface::from_mesh(cube_sphere(f.grid, 1.0f));
+        auto looped = DynamicSurface::from_mesh(cube_sphere(f.grid, 1.0f));
+        REQUIRE(recorded.has_value());
+        REQUIRE(plain.has_value());
+        REQUIRE(looped.has_value());
+        DynamicSculptor sr(*recorded);
+        DynamicSculptor sp(*plain);
+        DynamicSculptor sl(*looped);
+        const Exact before = exact_of(*recorded);
+
+        mesh::RecordedGesture record;
+        DynamicStampResult summary;
+        const std::optional<std::size_t> applied = brush::apply_to_dynamic_recorded(
+            sr, f.stamps, f.verb, f.base, f.topo, nullptr, record, {}, &summary);
+        REQUIRE(applied.has_value());
+        CHECK(*applied > 0);
+        const Exact after = exact_of(*recorded);
+
+        // RECORDING CHANGES NOTHING: surface, applied count and summary.
+        DynamicStampResult plain_summary;
+        const std::size_t plain_applied = brush::apply_to_dynamic(
+            sp, f.stamps, f.verb, f.base, f.topo, nullptr, nullptr, {}, &plain_summary);
+        CHECK(same_exact(after, exact_of(*plain)));
+        CHECK(*applied == plain_applied);
+        CHECK(summary.moved_vertices == plain_summary.moved_vertices);
+        CHECK(summary.remesh.split == plain_summary.remesh.split);
+        CHECK(summary.remesh.collapsed == plain_summary.remesh.collapsed);
+        CHECK(summary.remesh.flipped == plain_summary.remesh.flipped);
+        CHECK(summary.remesh.relaxed == plain_summary.remesh.relaxed);
+
+        // THE SAME RECORD as the stamps captured one by one with the stroke's
+        // rules, every `stamp_recorded` required to pass the mark.
+        mesh::RecordedGesture loop_record;
+        const std::size_t deaths = recorded_loop(sl, f.stamps, f.verb, f.base, f.topo, loop_record);
+        if (f.expects_deaths) REQUIRE(deaths >= 1);  // measured 11
+        CHECK(same_exact(after, exact_of(*looped)));
+        CHECK(record.encoded_size() == loop_record.encoded_size());
+
+        // ONE UNDO STEP, exact at both ends, index in step.
+        REQUIRE(sr.replay(record, mesh::ReplayDirection::Revert) == mesh::ReplayResult::Applied);
+        CHECK(same_exact(exact_of(*recorded), before));
+        CHECK(mesh::validate_dynamic_surface(*recorded).ok);
+        CHECK(unindexed_faces(sr) == 0);
+        REQUIRE(sr.replay(record, mesh::ReplayDirection::Apply) == mesh::ReplayResult::Applied);
+        CHECK(same_exact(exact_of(*recorded), after));
+        CHECK(mesh::validate_dynamic_surface(*recorded).ok);
+        CHECK(unindexed_faces(sr) == 0);
+    }
+}
+
+TEST_CASE("dynamic stroke: strokes accumulate into one record and revert as one step") {
+    StrokePreset preset;
+    preset.radius = 0.3f;
+    preset.spacing = 0.2f;
+    const std::vector<Stamp> grab =
+        brush::resolve_stroke(line(cf3(0.0f, -0.4f, 1.0f), cf3(0.2f, 0.4f, 1.0f), 30), preset);
+    auto surface = DynamicSurface::from_mesh(cube_sphere(16, 1.0f));
+    REQUIRE(surface.has_value());
+    DynamicSculptor sc(*surface);
+    const Exact pristine = exact_of(*surface);
+
+    mesh::RecordedGesture record;
+    MeshBrushSettings dab = base_for(MeshBrush::Draw, 0.5f);
+    dab.radius = 0.3f;
+    dab.center = cf3(0.3f, 0.3f, 0.9f);
+    REQUIRE(sc.stamp_recorded(MeshBrush::Draw, dab, DynamicTopologySettings{}, {}, record));
+    const std::size_t after_dab = record.encoded_size();
+    REQUIRE(brush::apply_to_dynamic_recorded(sc, shaped_stroke(), MeshBrush::Clay,
+                                             base_for(MeshBrush::Clay, 0.5f),
+                                             DynamicTopologySettings{}, nullptr, record));
+    const std::size_t after_clay = record.encoded_size();
+    REQUIRE(brush::apply_to_dynamic_recorded(sc, grab, MeshBrush::Grab,
+                                             base_for(MeshBrush::Grab, 0.5f),
+                                             DynamicTopologySettings{}, nullptr, record));
+    CHECK(after_dab < after_clay);
+    CHECK(after_clay < record.encoded_size());
+    const Exact end = exact_of(*surface);
+
+    REQUIRE(sc.replay(record, mesh::ReplayDirection::Revert) == mesh::ReplayResult::Applied);
+    CHECK(same_exact(exact_of(*surface), pristine));
+    CHECK(mesh::validate_dynamic_surface(*surface).ok);
+    REQUIRE(sc.replay(record, mesh::ReplayDirection::Apply) == mesh::ReplayResult::Applied);
+    CHECK(same_exact(exact_of(*surface), end));
+    CHECK(mesh::validate_dynamic_surface(*surface).ok);
+}
+
+TEST_CASE("dynamic stroke: a recorded stroke binds where it began, so older records still undo") {
+    // Two records, last in first out: a dab, then a stroke. Undoing the stroke
+    // must leave the surface at the mark the DAB's record ends at, or the dab can
+    // no longer be undone. A stroke into an empty record that failed to bind its
+    // start would restore an unnamed state here and strand every older record.
+    auto surface = DynamicSurface::from_mesh(cube_sphere(16, 1.0f));
+    REQUIRE(surface.has_value());
+    DynamicSculptor sc(*surface);
+    const Exact pristine = exact_of(*surface);
+
+    mesh::RecordedGesture dab_record;
+    MeshBrushSettings dab = base_for(MeshBrush::Draw, 0.5f);
+    dab.radius = 0.3f;
+    dab.center = cf3(0.3f, 0.3f, 0.9f);
+    REQUIRE(sc.stamp_recorded(MeshBrush::Draw, dab, DynamicTopologySettings{}, {}, dab_record));
+    const mesh::SurfaceMark after_dab = surface->mark();
+
+    mesh::RecordedGesture stroke_record;
+    REQUIRE(brush::apply_to_dynamic_recorded(sc, shaped_stroke(), MeshBrush::Grab,
+                                             base_for(MeshBrush::Grab, 0.5f),
+                                             DynamicTopologySettings{}, nullptr, stroke_record));
+    CHECK(stroke_record.before() == after_dab);
+    CHECK(stroke_record.after() == surface->mark());
+
+    REQUIRE(sc.replay(stroke_record, mesh::ReplayDirection::Revert) ==
+            mesh::ReplayResult::Applied);
+    CHECK(surface->mark() == after_dab);
+    CHECK(sc.replay(dab_record, mesh::ReplayDirection::Revert) == mesh::ReplayResult::Applied);
+    CHECK(same_exact(exact_of(*surface), pristine));
+    CHECK(mesh::validate_dynamic_surface(*surface).ok);
+}
+
+TEST_CASE("dynamic stroke: a refused or mismatched recorded stroke leaves the record untouched") {
+    const std::vector<Stamp> stamps = shaped_stroke();
+    const MeshBrushSettings draw = base_for(MeshBrush::Draw, 0.5f);
+    auto surface = DynamicSurface::from_mesh(cube_sphere(16, 1.0f));
+    REQUIRE(surface.has_value());
+    DynamicSculptor sc(*surface);
+    mesh::RecordedGesture record;
+    REQUIRE(brush::apply_to_dynamic_recorded(sc, stamps, MeshBrush::Draw, draw,
+                                             DynamicTopologySettings{}, nullptr, record));
+    const RecordState held = state_of(record);
+
+    // Everything the stroke refuses by itself returns 0, not a mismatch.
+    auto refused = [&](const std::vector<Stamp>& s, MeshBrush verb,
+                       const brush::MeshStrokeOptions& options) {
+        const Exact was = exact_of(*surface);
+        const std::uint64_t topology = surface->topology_revision();
+        const std::uint64_t geometry = surface->geometry_revision();
+        const std::optional<std::size_t> r = brush::apply_to_dynamic_recorded(
+            sc, s, verb, base_for(verb, 0.5f), DynamicTopologySettings{}, nullptr, record,
+            options);
+        CHECK(r.has_value());
+        CHECK(r.value_or(1) == 0);
+        CHECK(same_state(state_of(record), held));
+        CHECK(same_exact(exact_of(*surface), was));
+        CHECK(surface->topology_revision() == topology);
+        CHECK(surface->geometry_revision() == geometry);
+    };
+    SUBCASE("Layer") { refused(stamps, MeshBrush::Layer, {}); }
+    SUBCASE("defer_normals") {
+        brush::MeshStrokeOptions defer;
+        defer.defer_normals = true;
+        refused(stamps, MeshBrush::Draw, defer);
+    }
+    SUBCASE("no stamps") { refused({}, MeshBrush::Draw, {}); }
+
+    SUBCASE("an unrecorded stamp in between is a mismatch, and nothing is stamped") {
+        MeshBrushSettings dab = draw;
+        dab.radius = 0.3f;
+        dab.center = cf3(0, 0, -1);
+        REQUIRE(sc.stamp(MeshBrush::Draw, dab, DynamicTopologySettings{}).changed());
+        const Exact was = exact_of(*surface);
+        const std::uint64_t geometry = surface->geometry_revision();
+        DynamicStampResult summary;
+        summary.moved_vertices = 99;
+        CHECK_FALSE(brush::apply_to_dynamic_recorded(sc, stamps, MeshBrush::Draw, draw,
+                                                     DynamicTopologySettings{}, nullptr, record,
+                                                     {}, &summary)
+                        .has_value());
+        CHECK(summary.moved_vertices == 0);  // reset on every path
+        CHECK(same_state(state_of(record), held));
+        CHECK(same_exact(exact_of(*surface), was));
+        CHECK(surface->geometry_revision() == geometry);
+        // And the replay still refuses it: the record was not re-bound.
+        CHECK(sc.replay(record, mesh::ReplayDirection::Revert) == mesh::ReplayResult::Mismatch);
+    }
+
+    SUBCASE("a record from another surface is a mismatch") {
+        auto other = DynamicSurface::from_mesh(cube_sphere(16, 1.0f));
+        REQUIRE(other.has_value());
+        DynamicSculptor so(*other);
+        const Exact was = exact_of(*other);
+        const std::uint64_t geometry = other->geometry_revision();
+        CHECK_FALSE(brush::apply_to_dynamic_recorded(so, stamps, MeshBrush::Draw, draw,
+                                                     DynamicTopologySettings{}, nullptr, record)
+                        .has_value());
+        CHECK(same_state(state_of(record), held));
+        CHECK(same_exact(exact_of(*other), was));
+        CHECK(other->geometry_revision() == geometry);
+    }
+
+    SUBCASE("a stroke that misses the surface leaves a non-empty record and the mark alone") {
+        std::vector<Stamp> far = stamps;
+        for (Stamp& s : far) s.position = s.position + cf3(0, 0, 50);
+        const mesh::SurfaceMark mark = surface->mark();
+        const std::optional<std::size_t> r = brush::apply_to_dynamic_recorded(
+            sc, far, MeshBrush::Draw, draw, DynamicTopologySettings{}, nullptr, record);
+        CHECK(r.value_or(1) == 0);
+        CHECK(same_state(state_of(record), held));
+        CHECK(surface->mark() == mark);
+    }
+}
+
+TEST_CASE("dynamic stroke: a malformed stroke into a stale record is refused, not a mismatch") {
+    // The order the header promises: the stroke's own refusals come BEFORE the
+    // mark, so a host is never told to retry a call that can never succeed.
+    // With a matching record both orders return 0; only a stale one tells them
+    // apart.
+    const std::vector<Stamp> stamps = shaped_stroke();
+    auto surface = DynamicSurface::from_mesh(cube_sphere(16, 1.0f));
+    REQUIRE(surface.has_value());
+    DynamicSculptor sc(*surface);
+    mesh::RecordedGesture record;
+    REQUIRE(brush::apply_to_dynamic_recorded(sc, stamps, MeshBrush::Draw,
+                                             base_for(MeshBrush::Draw, 0.5f),
+                                             DynamicTopologySettings{}, nullptr, record));
+    MeshBrushSettings dab = base_for(MeshBrush::Draw, 0.5f);
+    dab.radius = 0.3f;
+    dab.center = cf3(0, 0, -1);
+    REQUIRE(sc.stamp(MeshBrush::Draw, dab, DynamicTopologySettings{}).changed());
+    REQUIRE_FALSE(record.can_capture_on(*surface));  // stale
+    const RecordState held = state_of(record);
+    const Exact was = exact_of(*surface);
+
+    auto refused = [&](const std::vector<Stamp>& s, MeshBrush verb,
+                       const brush::MeshStrokeOptions& options) {
+        const std::optional<std::size_t> r = brush::apply_to_dynamic_recorded(
+            sc, s, verb, base_for(verb, 0.5f), DynamicTopologySettings{}, nullptr, record,
+            options);
+        CHECK(r.has_value());
+        CHECK(r.value_or(1) == 0);
+        CHECK(same_state(state_of(record), held));
+        CHECK(same_exact(exact_of(*surface), was));
+    };
+    SUBCASE("Layer") { refused(stamps, MeshBrush::Layer, {}); }
+    SUBCASE("defer_normals") {
+        brush::MeshStrokeOptions defer;
+        defer.defer_normals = true;
+        refused(stamps, MeshBrush::Draw, defer);
+    }
+    SUBCASE("no stamps") { refused({}, MeshBrush::Draw, {}); }
 }
