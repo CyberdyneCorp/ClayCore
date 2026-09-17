@@ -107,7 +107,9 @@ Four consequences worth knowing before using them:
   by 0.01. Doubling region, rounding and amplitude takes the saddle and bowl
   to 0.57k too. Incise shares the branch, so on the same fin it severs the
   ridge rather than denting it. The exact draw frame for one stamp is
-  `clay_layer_move_surface` with a smoothstep ease; a stroke of those is one
+  `clay_layer_move_surface` with a smoothstep ease — exact in direction, not in
+  profile: its weight spans the whole radius and is read at the displaced
+  point, so it rises 0.82k where relief rises k; a stroke of those is one
   warp per reached item per dab (700 warps, 8.7× relief's evaluation cost at
   30 dabs over 24 items), and a shared-direction *combine op* cannot exist,
   because it needs the accumulated field at a point other than the sample.

@@ -55,6 +55,11 @@ Stroke cost, 24-item blockout:
 | 30 dabs relief | +30 items | 0.0217 | 8.8 ms | +0.352 |
 | 30 dabs move_surface | 700 warps | 0.0000 (1.5^-30) | 76.2 ms | +0.304 |
 
+The 30-dab step scale prints as 0.0000. Read back at full precision on a unit
+sphere under 1, 10 and 30 overlapping `move_surface` dabs (reach 0.45,
+smoothstep) it is 0.6667, 0.017342 and 5.2151e-6: 1.5^-n to six figures, so
+the `5e-6` quoted in `clay.h` is measured, not extrapolated.
+
 ## Decisions
 
 ### Do not add a draw-frame combine op

@@ -133,7 +133,7 @@ representation, `s` the SDF one, `m` a mesh layer's own triangles.
 |---|---|---|---|---|---|---|
 | Standard | Brush | `Op::Relief` — approximated: relief is Inflate's frame ([07 § 9](07-brushes-and-features.md#9-zbrush-equivalents)) | s | `sdf_stamp_cpu` | 2.62 | interactive |
 | ClayBuildup | Clay / Clay Strips | `Op::Relief` along a stroke | s | `stroke_build` | 0.298 | gesture |
-| Crease, DamStandard | Crease | `Op::Incise` | s | `stroke_carve` | 0.382 | gesture |
+| Crease, DamStandard | Crease | `Op::Incise` — approximated, relief's frame cutting in ([07 § 9](07-brushes-and-features.md#9-zbrush-equivalents)) | s | `stroke_carve` | 0.382 | gesture |
 | Inflate | Inflate | `Op::Relief`, `sculpt_inflate` | s v | `voxel_inflate` | 0.0043 | interactive |
 | Move | Move | `brush::move_brush` | s | `sdf_move` | 0.0791 | gesture |
 | Move | Move (elastic) | `sculpt_grab` | v | `voxel_grab` | 0.0078 | gesture |

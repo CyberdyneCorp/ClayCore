@@ -10,7 +10,7 @@ The library SHALL NOT describe Relief as a faithful Standard. Where the normals 
 - **THEN** where the stamp's weight is full, each face of the fin moves outward by k, as well as the top rising by k
 
 #### Scenario: The per-point-normal displacement lies on the relief surface
-- **WHEN** each surface point in a relief stamp's support is moved along its own normal by the relief's amplitude times its weight
+- **WHEN** each surface point in a relief stamp's support, away from the form's corners, is moved along its own normal by the relief's amplitude times its weight
 - **THEN** the moved point lies on the displaced surface
 
 #### Scenario: A shared-direction displacement does not
