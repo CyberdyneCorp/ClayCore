@@ -131,7 +131,7 @@ representation, `s` the SDF one, `m` a mesh layer's own triangles.
 
 | ZBrush | Nomad | claycore | rep | device case | p95 (ms) | class |
 |---|---|---|---|---|---|---|
-| Standard | Brush | `Op::Relief` | s | `sdf_stamp_cpu` | 2.62 | interactive |
+| Standard | Brush | `Op::Relief` — approximated: relief is Inflate's frame ([07 § 9](07-brushes-and-features.md#9-zbrush-equivalents)) | s | `sdf_stamp_cpu` | 2.62 | interactive |
 | ClayBuildup | Clay / Clay Strips | `Op::Relief` along a stroke | s | `stroke_build` | 0.298 | gesture |
 | Crease, DamStandard | Crease | `Op::Incise` | s | `stroke_carve` | 0.382 | gesture |
 | Inflate | Inflate | `Op::Relief`, `sculpt_inflate` | s v | `voxel_inflate` | 0.0043 | interactive |
@@ -2045,7 +2045,7 @@ Audited at 0.29.0, per brush:
 | voxel grab | 2 | 2 | 4 | 1 |
 | voxel fill cavities | 3 | 3 | 2 | 1 |
 | voxel carve alpha | 2 | 2 | 2 | 1 |
-| Standard / relief | 4 | 4 | 7 | 1 |
+| Standard (approximated) / relief | 4 | 4 | 7 | 1 |
 | DamStandard / incise | 3 | 3 | 3 | 1 |
 | Move (SDF) | 4 | 4 | 3 | 1 |
 | Move topological | 1 | 1 | 1 | 1 |

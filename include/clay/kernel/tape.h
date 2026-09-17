@@ -150,8 +150,18 @@ enum CCombineMode {
     // nowhere to live. It is also the convention already here: add/subtract and
     // engrave/emboss are pairs of ops, not one op with a sign. They share the
     // branch below so they cannot drift apart.
-    ccombine_relief = 14,  // build the surface up  (ZBrush Standard, ClayBuildup)
-    ccombine_incise = 15,  // cut into it           (Crease, DamStandard)
+    //
+    // THE FRAME IS INFLATE. `a - k*w` moves each point of the accumulated
+    // surface along its OWN normal, so relief is the field counterpart of the
+    // mesh Inflate brush, and ZBrush Standard (mesh Draw: one averaged normal
+    // per stamp) only an approximation of it. The error grows with how far
+    // the normals under the stamp spread: a few percent of k on smooth forms,
+    // the whole of k on a ridge narrower than the stamp, which relief thickens
+    // (clay.h at CLAY_OP_RELIEF has the numbers). A shared-direction variant
+    // cannot be a combine op: it needs `a` at p - k*w*N, and a record has `a`
+    // at p only. tests/unit/test_relief.cpp pins the frame.
+    ccombine_relief = 14,  // build the surface up  (Inflate; approximates Standard)
+    ccombine_incise = 15,  // cut into it           (Crease, DamStandard, approximated)
     // FEATHERED replace of a sampled volume (add-feathered-volume-replace).
     // Emitted by the tape COMPILER when a volume item placed with Replace
     // carries a feather; it is not a public op — the node's op stays Replace,

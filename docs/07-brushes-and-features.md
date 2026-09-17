@@ -75,7 +75,7 @@ item in an empty layer produces nothing.
 from it — but paint moves colour and leaves the field untouched, where relief
 moves the field and leaves colour alone.
 
-Three consequences worth knowing before using them:
+Four consequences worth knowing before using them:
 
 - The **rounding does double duty**: it is the falloff width *and* it rounds the
   region's own field, exactly as it does for groove and tongue. So the reach is
@@ -95,6 +95,23 @@ Three consequences worth knowing before using them:
   **`k` = rounding = stamp radius**: the stamp raises the surface by exactly
   `k` with a soft rim, reaching no further than 2·rounding outside the item.
   `tests/unit/test_relief.cpp` pins these numbers.
+- **The frame is Inflate, not Standard.** Every point moves along *its own*
+  normal, which is the mesh `Inflate` brush. ZBrush Standard — the mesh `Draw`
+  brush and the `Standard` preset — moves everything under a stamp along *one*
+  averaged normal, so relief only approximates it, and the error is set by how
+  far the normals under the stamp spread. At the standard clay mapping (0.15)
+  the shared-direction displacement sits 0.02k (sphere), 0.03k (bowl) and
+  0.08k (torus saddle) from the relief surface on average, but 0.57k on a fin
+  narrower than the stamp — which relief **thickens**: a fin 0.1 thick gains
+  0.15 of half-thickness on each face, where a mesh Draw stamp moves its faces
+  by 0.01. Doubling region, rounding and amplitude takes the saddle and bowl
+  to 0.57k too. Incise shares the branch, so on the same fin it severs the
+  ridge rather than denting it. The exact draw frame for one stamp is
+  `clay_layer_move_surface` with a smoothstep ease; a stroke of those is one
+  warp per reached item per dab (700 warps, 8.7× relief's evaluation cost at
+  30 dabs over 24 items), and a shared-direction *combine op* cannot exist,
+  because it needs the accumulated field at a point other than the sample.
+  `openspec/changes/relief-is-inflate-not-standard` has the measurement.
 
 `TransitionLinear`/`TransitionRadial` are **non-local**: their weight is
 non-zero arbitrarily far from both operands, so those items report infinite
@@ -2663,10 +2680,10 @@ parity — the mechanism usually differs even where the result matches.
 
 | ZBrush | claycore | Note |
 |---|---|---|
-| Standard | `Op::Relief` | Displaces the accumulated surface along its normal |
-| ClayBuildup | `Op::Relief` along a stroke | Buildup accumulation scales each stamp's amplitude, so overlapping stamps deposit twice |
-| Crease, DamStandard | `Op::Incise` | The same op, cutting in — a thin region gives the line |
-| Inflate | `Op::Relief`, `sculpt_inflate` | Moving the surface along its own normal *is* relief; the voxel verb dilates and erodes by cells |
+| Standard | `Op::Relief` — **an approximation** | Standard moves a stamp along **one** averaged normal; relief moves each point along its own. Close where the normals under the stamp agree (0.02–0.08k mean on a sphere, bowl and saddle), the whole amplitude on a ridge narrower than the stamp, which relief thickens. One exact draw-frame stamp is `clay_layer_move_surface` with a smoothstep ease; a stroke of them is not affordable (§ 1) |
+| ClayBuildup | `Op::Relief` along a stroke | Buildup accumulation scales each stamp's amplitude, so overlapping stamps deposit twice. Inherits relief's per-point frame; not measured against the mesh `Clay`, which clamps Draw's deposit to a plane |
+| Crease, DamStandard | `Op::Incise` — **an approximation** | The same op, cutting in — a thin region gives the line. Same frame as relief, so on a ridge narrower than the stamp it severs rather than dents |
+| Inflate | `Op::Relief`, `sculpt_inflate` | Moving the surface along its own normal *is* relief — the faithful mapping; the voxel verb dilates and erodes by cells |
 | Move Topological | `field::move_topological` | Geodesic falloff — the radius is travel across the surface, so it cannot step over a gap. Bakes |
 | Move | `brush::move_brush` | Drags the assembled surface. Nudges form rather than growing it: a large pull buds rather than stretches. Drags that OVERLAP compound the step scale — use `snakehook` to pull a lobe out — but disjoint ones no longer do (see below) |
 | Rotate | `pose` / `pose_line` | Radial, or ramped along a line |
@@ -2825,7 +2842,7 @@ difference:
 | Booleans, blends, the 17 combine ops under 5 profiles | **SDF** | Composition needs a signed distance from any point to each operand. A grid has occupancy and a mesh has neither — see the README's "Why composing needs a distance field" |
 | Cut / trim (rect, circle, polygon, lasso, trim-curve) | **SDF** | Each is an exact prism combined into the edit list. On a grid it would be a cell write and on a mesh it would change topology |
 | Armatures (ZSpheres) | **SDF** | A tree of spheres whose links are swept cones and whose skin is the blend. It is a *primitive*, not a gesture |
-| `Draw` | **Mesh** | Displacement along the region's **averaged** normal — one shared direction per stamp. `Op::Relief` is the SDF analogue but is per-point along the accumulated normal, not per-stamp |
+| `Draw` | **Mesh** | Displacement along the region's **averaged** normal — one shared direction per stamp. `Op::Relief` is **not** its SDF analogue: it moves each point along the accumulated field's own normal, which is `Inflate`, and approximates `Draw` only where the normals under the stamp agree. On a ridge narrower than the stamp the two differ by the whole amplitude. A single exact draw-frame stamp is `clay_layer_move_surface` with a smoothstep ease |
 | `Layer` | **Mesh** | Deposits up to a ceiling above the surface **as the stroke found it**. Every other deposit verb acts on the surface as it is now, so this one needs the stroke's starting snapshot |
 | `Relax` | **Mesh** | Slides vertices *along* the surface to even their spacing. There is nothing to even on a grid, and an SDF has no vertices. **It recovers a stretched grab and not a deformation** — after a taper, six passes move edge-length variation 0.2929 → 0.3050, slightly worse, because the damage is anisotropy and no slide changes how many vertices a ring has |
 | `sculpt_fill_cavities`, `repair_close_holes`, `repair_fill_voids`, `repair_report` | **Voxel** | Questions about occupancy and enclosure. `fill_voids` *decides* enclosure rather than guessing locally |

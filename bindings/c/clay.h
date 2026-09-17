@@ -252,9 +252,43 @@ typedef enum clay_op {
      * than 2*rounding outside the item.
      *
      * A pair rather than one signed amplitude, because blend_k is required
-     * non-negative — and because add/subtract and engrave/emboss are pairs. */
-    CLAY_OP_RELIEF = 14, /* build up: ZBrush Standard, ClayBuildup */
-    CLAY_OP_INCISE = 15, /* cut in:   Crease, DamStandard */
+     * non-negative — and because add/subtract and engrave/emboss are pairs.
+     *
+     * RELIEF IS INFLATE, NOT STANDARD. Offsetting a distance moves each point
+     * of the surface along ITS OWN normal, which is the mesh Inflate brush
+     * (CLAY_BRUSH_FRAME_VERTEX_NORMAL). ZBrush Standard — the mesh Draw brush
+     * and the Standard preset built on it — moves every point under a stamp
+     * along ONE averaged normal (CLAY_BRUSH_FRAME_REGION_NORMAL). Binding
+     * Inflate to CLAY_OP_RELIEF is faithful; binding Standard to it is an
+     * APPROXIMATION, and one thing decides how far off it is: how far the
+     * normals under the stamp spread. Measured at blend_k = rounding = radius
+     * = 0.15, as the distance from the shared-direction displacement to the
+     * relief surface in units of blend_k: 0.02 mean on a sphere, 0.03 in a
+     * concave bowl, 0.08 on a torus saddle — a few percent where the surface
+     * is smooth at the brush's scale — but 0.57 mean on a fin narrower than
+     * the stamp. On such a ridge relief THICKENS it by the whole amplitude:
+     * a fin 0.1 thick gains 0.15 of half-thickness on each face (0.05 becomes
+     * 0.20) where a Draw stamp moves its faces by 0.01. With region, rounding
+     * and amplitude all doubled (a stamp wide against the form) the saddle
+     * and the bowl reach 0.57 mean as well.
+     *
+     * The exact draw frame for ONE stamp is clay_layer_move_surface with a
+     * smoothstep ease (displacement blend_k * N, radius = radius + 2*rounding).
+     * A STROKE of them is not an option: each dab is one warp per item it
+     * reaches, and warp bounds multiply where relief's add — 30 dabs over a
+     * 24-item blockout measured 700 warps, 76.2 ms against relief's 8.8 ms for
+     * 200k points, and a safe step scale of 5e-6 against 1/46. A shared-
+     * direction combine op cannot exist either: it needs the accumulated field
+     * at another point, and a combine record has it only at this one.
+     *
+     * CLAY_OP_INCISE is the same kernel branch with the sign flipped, so the
+     * same holds cutting in: on a ridge narrower than the stamp it severs
+     * rather than dents (the fin above loses its top down to y = 0.11), where
+     * a mesh Crease cuts along one shared direction. ClayBuildup maps to relief
+     * along a stroke with buildup accumulation and is NOT measured against the
+     * mesh Clay brush, which clamps Draw's deposit to a plane. */
+    CLAY_OP_RELIEF = 14, /* build up: ZBrush Inflate (Standard, ClayBuildup: see above) */
+    CLAY_OP_INCISE = 15, /* cut in:   Crease, DamStandard (see above) */
     /* GROUPS ONLY (clay_layer_add_group): the group's children apply inline to
      * the chain outside it, exactly as if they had been added there. Every
      * other op makes the group a sub-expression that combines as a unit. An

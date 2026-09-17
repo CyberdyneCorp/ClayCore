@@ -7,10 +7,15 @@ field is read as a **region** — a weight saying *where* — and what happens t
 is that the surface already accumulated moves along its own normal. The item
 contributes no geometry of its own at all.
 
-That is what ZBrush's Standard and ClayBuildup do when they build a surface up,
-and what Crease and DamStandard do when they cut a line into one. You do not
-union a sphere onto a face to raise a bump; you say "raise the surface here, by
-this much, tapering out over this distance."
+Moving each point along its OWN normal is exactly ZBrush's Inflate. ZBrush's
+Standard (and ClayBuildup, built on the same deposit) raises a stamp along ONE
+averaged normal instead, so relief is Standard's closest SDF spelling but an
+approximation of it: a few percent of the amplitude on a form that is smooth at
+the brush's scale, the whole amplitude on a ridge narrower than the stamp, which
+relief thickens where Standard would lift it. Incise is the same frame cutting
+in, for Crease and DamStandard. Either way you do not union a sphere onto a face
+to raise a bump; you say "raise the surface here, by this much, tapering out
+over this distance."
 
 Three things are worth reading before looking.
 
