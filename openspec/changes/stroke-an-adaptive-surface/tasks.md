@@ -19,59 +19,66 @@
 
 ## 2. Engine
 
-- [ ] 2.1 Make `DynamicSculptor::nearest_vertex` public, header comment stating
+- [x] 2.1 Make `DynamicSculptor::nearest_vertex` public, header comment stating
       it is the walk's seed estimator
-- [ ] 2.2 Declare `brush::apply_to_dynamic` in `stroke.h` with what it does NOT
+- [x] 2.2 Declare `brush::apply_to_dynamic` in `stroke.h` with what it does NOT
       promise: no normal deferral, Layer refused, `seed_class` not consulted,
       Grab's AFTER remesh at the first centre, cost = the sum of its stamps
-- [ ] 2.3 Implement over `mesh_stamp_settings`, `mesh_mask_gate`,
+- [x] 2.3 Implement over `mesh_stamp_settings`, `mesh_mask_gate`,
       `mesh_automask_inputs`; Snakehook centre in `dynamic_snakehook_centre`
       (revalidate, re-find at the previous stamp position)
-- [ ] 2.4 Refuse Layer, `defer_normals`, empty stamps before touching the
+- [x] 2.4 Refuse Layer, `defer_normals`, empty stamps before touching the
       surface, the record or the automask inputs
-- [ ] 2.5 Accumulate the optional `DynamicStampResult` summary
-- [ ] 2.6 Cognitive complexity of both new functions <= 15 (measure; state
-      scores in the PR)
+- [x] 2.5 Accumulate the optional `DynamicStampResult` summary
+- [x] 2.6 Cognitive complexity of both new functions <= 15 (measure; state
+      scores in the PR) — first cut 18; after extracting helpers
+      `apply_to_dynamic` 12, `dynamic_stamp_settings` 4,
+      `dynamic_snakehook_centre` 2
 
 ## 3. Engine tests (`tests/unit/test_dynamic_stroke.cpp`)
 
-- [ ] 3.1 A stroke equals its stamps: for Draw, Clay, Smooth, Flatten and Grab,
+- [x] 3.1 A stroke equals its stamps: for Draw, Clay, Smooth, Flatten and Grab,
       with taper, jitter and a pressure ramp, `apply_to_dynamic` on one surface
       and a hand loop of `DynamicSculptor::stamp` on an identical one are
       bit-identical, topology included; applied count equals the loop's
-- [ ] 3.2 The remesh schedule runs per stamp: summary split/collapse counts
+- [x] 3.2 The remesh schedule runs per stamp: summary split/collapse counts
       equal the hand loop's summed `DynamicStampResult`s, and a Clay stroke with
       topology on splits before its first deposit (same counts as the loop)
-- [ ] 3.3 Layer refused: returns 0, surface bit-identical, record empty,
+- [x] 3.3 Layer refused: returns 0, surface bit-identical, record empty,
       revisions unchanged
-- [ ] 3.4 Azimuth reaches the alpha: rotate_to_azimuth + half-on alpha, azimuth
+- [x] 3.4 Azimuth reaches the alpha: rotate_to_azimuth + half-on alpha, azimuth
       0 vs pi/2 differ with `orient_alpha_by_stamp`, bit-identical without
-- [ ] 3.5 Snakehook keeps pulling: pull-out reach >= 90% of the drag at detail 8
+- [x] 3.5 Snakehook keeps pulling: pull-out reach >= 90% of the drag at detail 8
       (host-style following loop asserted < 60% in the same test so the
       assertion cannot pass vacuously); surface validates
-- [ ] 3.6 Snakehook survives anchor death: detail 4 fixture where the anchor is
+- [x] 3.6 Snakehook survives anchor death: detail 4 fixture where the anchor is
       retired at least once (assert the precondition by counting), reach >= 75%
-- [ ] 3.7 One stroke is one undo step: whole stroke into one `TopologyDelta`,
+- [x] 3.7 One stroke is one undo step: whole stroke into one `TopologyDelta`,
       revert is bit-identical and validates
-- [ ] 3.8 A mask gates the stroke: a fully masked stamp centre is skipped, a
+- [x] 3.8 A mask gates the stroke: a fully masked stamp centre is skipped, a
       half-masked region moves on one side only
-- [ ] 3.9 `defer_normals` refused: returns 0, surface bit-identical
-- [ ] 3.10 Mutation: break the anchor re-find (never re-find) and the Grab
-      anchor (follow the cursor); confirm 3.5/3.6 and 3.1 fail; restore
+- [x] 3.9 `defer_normals` refused: returns 0, surface bit-identical
+- [x] 3.10 Mutation: break the anchor re-find (never re-find) and the Grab
+      anchor (follow the cursor); confirm 3.5/3.6 and 3.1 fail; restore —
+      never re-finding fails 3.6 (reach 15.1%, 11 deaths) and 3.1's Snakehook
+      row, NOT 3.5 (see "What building it found"); Grab following the cursor
+      fails 3.1's Grab row. Also: dropping `defer_normals` fails 3.9, skipping
+      no frozen stamp fails 3.8, dropping Layer from the stroke refusal fails
+      3.3's automask-inputs check
 
 ## 4. C ABI (0.117.0 -> 0.118.0)
 
-- [ ] 4.1 Extract the topology descriptor decode from
+- [x] 4.1 Extract the topology descriptor decode from
       `clay_dynamic_sculptor_stamp` into one helper
-- [ ] 4.2 `clay_dynamic_sculptor_apply_stroke` and `_apply_preset`, documented
+- [x] 4.2 `clay_dynamic_sculptor_apply_stroke` and `_apply_preset`, documented
       in `clay.h` beside `_stamp`: full samples and why, session frame only and
       why, no undo record, no deferral, Layer refused, cost is the stamps', the
       1.001x measurement
-- [ ] 4.3 Accumulated `clay_dynamic_stamp_report` (sum, OR, union, final
+- [x] 4.3 Accumulated `clay_dynamic_stamp_report` (sum, OR, union, final
       revision), honouring its `struct_size`
-- [ ] 4.4 Bump `CMakeLists.txt`, `CLAY_ABI_MINOR`, `pyproject.toml`
-- [ ] 4.5 `tools/check_c_abi.py` passes against a rebuilt `libclay_shared.dylib`
-- [ ] 4.6 C tests in `test_c_dynamic_topology.cpp`: stroke equals the C
+- [x] 4.4 Bump `CMakeLists.txt`, `CLAY_ABI_MINOR`, `pyproject.toml`
+- [x] 4.5 `tools/check_c_abi.py` passes against a rebuilt `libclay_shared.dylib`
+- [x] 4.6 C tests in `test_c_dynamic_topology.cpp`: stroke equals the C
       per-stamp loop with the same resolved stamps; Layer refused with
       INVALID_ARGUMENT and nothing applied; declared world frame places the
       stroke; NULL/short report handled; apply_preset with the "Rake" preset
@@ -79,19 +86,19 @@
 
 ## 5. Bindings
 
-- [ ] 5.1 pyclay `DynamicSculptor.apply_stroke` / `.apply_preset`
-- [ ] 5.2 pyclay test: stroke runs, Layer raises, azimuth column reaches the
+- [x] 5.1 pyclay `DynamicSculptor.apply_stroke` / `.apply_preset`
+- [x] 5.2 pyclay test: stroke runs, Layer raises, azimuth column reaches the
       alpha
-- [ ] 5.3 `check_binding_parity.py --pyclay <build>/bindings/python
+- [x] 5.3 `check_binding_parity.py --pyclay <build>/bindings/python
       --require-import` prints `imported`, and passes
-- [ ] 5.4 `tests/swift/smoke.swift` drives `_apply_stroke` and the Layer refusal
+- [x] 5.4 `tests/swift/smoke.swift` drives `_apply_stroke` and the Layer refusal
 
 ## 6. Docs and gates
 
-- [ ] 6.1 `docs/07` §8b: the adaptive stroke, the anchor rule and its numbers
-- [ ] 6.2 `docs/05`: the two entry points
-- [ ] 6.3 `openspec/ROADMAP.md`: close the two rows naming the gap
-- [ ] 6.4 Remove the "no `apply_to_dynamic`" statements from `stroke.h` and the
+- [x] 6.1 `docs/07` §8b: the adaptive stroke, the anchor rule and its numbers
+- [x] 6.2 `docs/05`: the two entry points
+- [x] 6.3 `openspec/ROADMAP.md`: close the two rows naming the gap
+- [x] 6.4 Remove the "no `apply_to_dynamic`" statements from `stroke.h` and the
       estimator requirement (this change's REMOVED + ADDED delta)
 - [ ] 6.5 Open the follow-up issue for fixed-path Grab anchoring with the 41% vs
       66% measurement

@@ -170,6 +170,63 @@ claim otherwise.
 - **No device latency case.** The per-stamp path the device gate measures is
   untouched; the new call adds a loop around it.
 
+## What building it found
+
+**The sum of a stroke's stamps exposed a defect in the single stamp.** The
+first "a stroke's summary equals its stamps" run did not agree on the last
+stamp's revisions. `DynamicSculptor::stamp_impl`'s reached-nothing exit (a
+fully masked or empty gather) returned the revisions it read on ENTRY, so a
+Clay stamp whose BEFORE remesh changed the topology reported that nothing had,
+and it published the remesh counters a second time on top of `stamp()`'s
+publish. The AFTER remesh was folded in field by field on both exits, and
+neither carried `hit_budget` (one also dropped `relaxed`), so a Grab whose
+remesh stopped at its budget reported a converged region. Fixed in its own
+commit with two regressions in `test_dynamic_sculpt.cpp`; restoring the old
+`dynamic_sculpt.cpp` fails both (stale revisions, doubled counters, missing
+`hit_budget`). A host re-uploading on a revision change was the one who paid.
+
+**The re-find is caught by one test, not two.** Task 3.10 expected both
+Snakehook tests to fail with the re-find broken. Mutated to keep the dead
+anchor's last position, the detail-4 test fails (reach **15.1%**, 11 anchor
+deaths counted in the hand loop, surfaces differ) and so does the Snakehook row
+of "a stroke equals its stamps" (surfaces differ, 2653 vs 3021 splits) — but
+the detail-8 reach test still passes: at detail 8 deaths are rare (the table
+above: 2 in 13 stamps at spacing 0.25) and a stroke that loses its anchor late
+still clears 90%. The test was kept for what it asserts — that the anchor rule
+beats a following loop — and the death precondition lives only in the detail-4
+test, which counts it.
+
+**The other mutations, each caught:** Grab centred on the cursor fails the Grab
+row of the equality test; dropping `defer_normals` from the refusal fails its
+test (surface, record and count); skipping no fully masked stamp fails the mask
+test with topology on. **Dropping Layer from the stroke-level refusal was
+invisible to the surface**, because `DynamicSculptor::stamp` refuses Layer per
+stamp as well: the stroke's refusal is only observable in what it would have
+set up first. The Layer and `defer_normals` tests now pass a cavity estimator
+and assert the sculptor's automask inputs stayed empty, and the Layer mutation
+fails that check.
+
+**The first cut of `apply_to_dynamic` scored 18**, over the backend target.
+Moved the summary reset, the frozen-centre early-out and the per-stamp settings
+(anchor revalidation, alpha orientation) into helpers: `apply_to_dynamic` 12,
+`dynamic_stamp_settings` 4, `dynamic_snakehook_centre` 2, the rest 1 (clang-tidy
+`readability-function-cognitive-complexity`). For reference, on `main` and
+untouched here, `apply_to_mesh` scores 19 and `apply_to_multires` 21. In the C
+ABI: `clay_dynamic_sculptor_apply_preset` 13, `clay_dynamic_sculptor_stamp` 11,
+`read_dynamic_topology` 11,
+`clay_dynamic_sculptor_apply_stroke` 9, `apply_dynamic_stroke` 6.
+
+**`check_c_abi.py` needed to learn the shared report fill.** Its bounded-fill
+rule looks for a `write_desc` bounded by the caller's `struct_size` at each
+entry point; moving the stamp's report fill into `write_dynamic_report` so the
+stroke and the stamp cannot fill it two ways meant naming that helper in
+`BOUNDED_FILLS`, as `write_preflight` already is.
+
+**A stroke checks its report BEFORE running, a stamp still checks it after.**
+A short report on a stroke would otherwise leave a whole stroke applied under a
+call that returned an error. `clay_dynamic_sculptor_stamp` keeps its existing
+order; changing it is not this change's to make.
+
 ## Capabilities
 
 ### New Capabilities
