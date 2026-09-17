@@ -152,7 +152,7 @@ the resolve-then-stamp host loop 46.048 ms — **1.004x**, identical split count
 - **`DynamicSculptor::nearest_vertex` becomes public**, so the stroke re-finds a
   dead anchor with the SAME estimator the sculptor seeds its walk with, rather
   than a second copy in `brush`.
-- **C ABI (0.117.0 -> 0.118.0):** `clay_dynamic_sculptor_apply_stroke` and
+- **C ABI (0.118.0 -> 0.119.0, after #617 took 0.118.0):** `clay_dynamic_sculptor_apply_stroke` and
   `clay_dynamic_sculptor_apply_preset`. Both take `clay_stroke_sample_full` (the
   azimuth-carrying packing), the session frame the handle declares, a topology
   descriptor, an optional mask, `orient_alpha_by_stamp`, and accumulate a

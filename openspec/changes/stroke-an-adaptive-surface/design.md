@@ -178,7 +178,9 @@ alias or exemption is needed. The gate must be read from a BUILT module
   `nearest_vertex` already carries for every stamp's seed. Not new; not
   mitigated here.
 - **[ABI minor collision]** → another branch in flight may take 0.118.0 first;
-  this one rebases and takes the next number, per `claycore-change`.
+  this one rebases and takes the next number, per `claycore-change`. It
+  happened: `undo-a-dynamic-stroke-across-the-abi` (#617) landed at 0.118.0,
+  so this change merged main and moved to 0.119.0.
 - **[Cognitive complexity]** → `apply_to_mesh` is already a long loop. The
   anchor revalidation goes in its own function
   (`dynamic_snakehook_centre`) so `apply_to_dynamic` stays within 15; the
@@ -187,7 +189,8 @@ alias or exemption is needed. The gate must be read from a BUILT module
 ## Migration Plan
 
 Additive. No existing call changes behaviour, no descriptor is re-laid out, no
-format moves. ABI 0.117.0 -> 0.118.0 in the implementing PR.
+format moves. ABI 0.118.0 -> 0.119.0 in the implementing PR (planned as
+0.117.0 -> 0.118.0; #617 took 0.118.0 first).
 
 ## Open Questions
 

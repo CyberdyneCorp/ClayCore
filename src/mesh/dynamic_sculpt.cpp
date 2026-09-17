@@ -571,6 +571,80 @@ DynamicStampResult DynamicSculptor::stamp(MeshBrush verb, const MeshBrushSetting
     return out;
 }
 
+// -- capture and replay ---------------------------------------------------------
+
+std::optional<DynamicStampResult> DynamicSculptor::stamp_recorded(
+    MeshBrush verb, const MeshBrushSettings& brush, const DynamicTopologySettings& topology,
+    const field::MaskGate& gate, RecordedGesture& record) {
+    if (!record.can_capture_on(surface_)) return std::nullopt;
+    record.begin_capture(surface_);
+    DynamicStampResult out = stamp(verb, brush, topology, gate, &record.delta_mutable());
+    record.end_capture(surface_);
+    return out;
+}
+
+ReplayResult DynamicSculptor::replay(const RecordedGesture& record, ReplayDirection direction) {
+    const ReplayResult verdict = record.guard(surface_, direction);
+    if (verdict != ReplayResult::Applied) return verdict;
+    const bool to_before = direction == ReplayDirection::Revert;
+    unindex_recorded_faces(record.delta());
+    if (to_before)
+        record.delta().revert(surface_);
+    else
+        record.delta().apply(surface_);
+    surface_.set_mark(to_before ? record.before() : record.after());
+    reindex_recorded_faces(record.delta(), to_before);
+    return ReplayResult::Applied;
+}
+
+// BEFORE the restore, and by slot. `DynamicBvh::insert` returns early for a slot
+// that already has a leaf, so a face whose generation changed inside the
+// gesture would otherwise keep a stale entry in its old chunk. Erasing marks
+// that chunk topology-dirty, which is what tells the host a face left it.
+void DynamicSculptor::unindex_recorded_faces(const TopologyDelta& delta) {
+    // An entry's two handles share a slot, and `erase` is by slot.
+    for (const auto& e : delta.face_entries()) bvh_.erase(e.before_id);
+}
+
+void DynamicSculptor::reindex_recorded_faces(const TopologyDelta& delta, bool to_before) {
+    for (const auto& e : delta.face_entries()) {
+        const bool exists = to_before ? e.existed_before : e.exists_after;
+        if (exists) bvh_.insert(surface_, to_before ? e.before_id : e.after_id);
+    }
+    refit_around_moved_vertices(delta, to_before);
+}
+
+namespace {
+
+// A vertex live at both ends of the record, at a different position.
+bool moved_within(const ElementDelta<DynamicVertex, VertexId>& e) {
+    if (!e.existed_before || !e.exists_after) return false;
+    const kernel::cfloat3 a = e.before.position, b = e.after.position;
+    return a.x != b.x || a.y != b.y || a.z != b.z;
+}
+
+}  // namespace
+
+// A face the record does not name can still have a corner that moved. The
+// capture notes every face around a moved vertex, so this finds nothing on a
+// record this library wrote; it is kept because an index whose bounds no longer
+// contain a face answers ball queries wrongly, and it costs one fan walk per
+// moved vertex.
+void DynamicSculptor::refit_around_moved_vertices(const TopologyDelta& delta, bool to_before) {
+    touched_faces_.clear();
+    for (const auto& e : delta.vertex_entries()) {
+        if (!moved_within(e)) continue;
+        if (!surface_.outgoing_halfedges(to_before ? e.before_id : e.after_id, &fan_scratch_))
+            continue;
+        for (HalfEdgeId h : fan_scratch_) {
+            const FaceId f = surface_.face_of(h);
+            if (surface_.live(f) && bvh_.leaf_of(f) != DynamicBvh::kNoLeaf)
+                touched_faces_.push_back(f);
+        }
+    }
+    if (!touched_faces_.empty()) bvh_.update_many(surface_, touched_faces_);
+}
+
 // THE SHARED KERNELS. Not one line of deformation math lives in this file,
 // which is the property `add-shared-brush-kernels` exists to make possible and
 // the reason Clay means one thing here and on a fixed mesh.

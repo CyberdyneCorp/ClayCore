@@ -62,6 +62,8 @@ CLASS_PREFIX = {
     "DynamicSurface": ("clay_dynamic_surface_",),
     "DynamicSculptor": ("clay_dynamic_sculptor_", "clay_dynamic_surface_"),
     "TopologySettings": ("clay_dynamic_topology_",),
+    # Undo for an adaptive stroke (undo-a-dynamic-stroke-across-the-abi).
+    "TopologyDelta": ("clay_dynamic_delta_",),
     # The surface tier (add-extreme-poly-runtime): one transport over all three
     # representations, and the budget a host fills for them.
     "SurfaceView": ("clay_surface_view_",),
@@ -235,6 +237,11 @@ ALIASES = {
     "DynamicSurface.geometry_revision": "clay_dynamic_surface_revision",
     "DynamicSurface.attribute_revision": "clay_dynamic_surface_revision",
     "DynamicSculptor.stamp": "clay_dynamic_sculptor_stamp",
+    # The per-kind counts and both byte figures cross in one descriptor. The
+    # capture is `stamp(..., record=)` in Python and its own entry point in C,
+    # clay_dynamic_sculptor_stamp_recorded; this gate reads members rather than
+    # keyword arguments, so that pairing is held by the tests on both sides.
+    "TopologyDelta.stats": "clay_dynamic_delta_stats_get",
     # Multiresolution (add-mesh-multires). The names that differ do so because
     # the C side reads several fields out of one descriptor where Python reads
     # a property each — the same reading DynamicSurface's stats already get.
@@ -413,6 +420,7 @@ CLASS_CTOR = {
     "BrushPreset": "clay_brush_preset_defaults",
     "DynamicSurface": "clay_dynamic_surface_from_mesh",
     "DynamicSculptor": "clay_dynamic_sculptor_create",
+    "TopologyDelta": "clay_dynamic_delta_create",
     "TopologySettings": "clay_dynamic_topology_defaults",
     "MultiresSurface": "clay_multires_from_mesh",
     # The surface tier (add-extreme-poly-runtime).

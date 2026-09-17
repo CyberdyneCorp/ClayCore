@@ -75,7 +75,7 @@ item in an empty layer produces nothing.
 from it — but paint moves colour and leaves the field untouched, where relief
 moves the field and leaves colour alone.
 
-Three consequences worth knowing before using them:
+Four consequences worth knowing before using them:
 
 - The **rounding does double duty**: it is the falloff width *and* it rounds the
   region's own field, exactly as it does for groove and tongue. So the reach is
@@ -95,6 +95,25 @@ Three consequences worth knowing before using them:
   **`k` = rounding = stamp radius**: the stamp raises the surface by exactly
   `k` with a soft rim, reaching no further than 2·rounding outside the item.
   `tests/unit/test_relief.cpp` pins these numbers.
+- **The frame is Inflate, not Standard.** Every point moves along *its own*
+  normal, which is the mesh `Inflate` brush. ZBrush Standard — the mesh `Draw`
+  brush and the `Standard` preset — moves everything under a stamp along *one*
+  averaged normal, so relief only approximates it, and the error is set by how
+  far the normals under the stamp spread. At the standard clay mapping (0.15)
+  the shared-direction displacement sits 0.02k (sphere), 0.03k (bowl) and
+  0.08k (torus saddle) from the relief surface on average, but 0.57k on a fin
+  narrower than the stamp — which relief **thickens**: a fin 0.1 thick gains
+  0.15 of half-thickness on each face, where a mesh Draw stamp moves its faces
+  by 0.01. Doubling region, rounding and amplitude takes the saddle and bowl
+  to 0.57k too. Incise shares the branch, so on the same fin it severs the
+  ridge rather than denting it. The exact draw frame for one stamp is
+  `clay_layer_move_surface` with a smoothstep ease — exact in direction, not in
+  profile: its weight spans the whole radius and is read at the displaced
+  point, so at this mapping it rises 0.82k where relief rises k; a stroke of those is one
+  warp per reached item per dab (700 warps, 8.7× relief's evaluation cost at
+  30 dabs over 24 items), and a shared-direction *combine op* cannot exist,
+  because it needs the accumulated field at a point other than the sample.
+  `openspec/changes/relief-is-inflate-not-standard` has the measurement.
 
 `TransitionLinear`/`TransitionRadial` are **non-local**: their weight is
 non-zero arbitrarily far from both operands, so those items report infinite
@@ -1597,11 +1616,62 @@ the chunks it touched, and chunk data is **copied into caller-owned buffers**
 behind a capacity query: a mutation can move or free anything, so a borrowed
 pointer held across one would be a use-after-free with no generation to check.
 
+### Undo from a host (ABI 0.118.0)
+
+A `clay_dynamic_surface` lives beside a document, not inside one, so the
+document's history never reached it and a host had no undo for an adaptive
+stroke. It has one now: `clay_dynamic_delta`, a record of one gesture that the
+host owns, captured with `clay_dynamic_sculptor_stamp_recorded` and replayed with
+`clay_dynamic_delta_revert` / `_apply`. pyclay spells it
+`DynamicSculptor.stamp(..., record=clay.TopologyDelta())` and
+`record.revert(sculptor)`.
+
+**Replay goes through the sculptor, not the surface.** Reverting the surface's
+pools alone left the sculptor's chunk index describing the stroke that had just
+been undone: on a 49,152-face sphere 2,638 live faces were in no chunk, no chunk
+was marked dirty, and the same stroke stamped again produced a different
+surface. A replay erases the faces the record names from the index, restores the
+pools, re-inserts the faces that exist afterwards and marks their chunks dirty.
+The index work costs 0.1 / 0.3 / 2.1 ms at 49k / 197k / 786k faces, against
+39 / 189 / 896 ms for `clay_dynamic_sculptor_rebuild_index`. A rebuild is not
+needed afterwards. It is still allowed, but it clears the dirty set and
+renumbers the chunks, so a host that calls it re-uploads everything.
+
+**Last in, first out, and nothing else.** Two strokes on opposite sides of a
+sphere are not independent: the later one reuses slots the earlier one freed
+(322 on the measured pair), so reverting the earlier one first broke the
+half-edge structure. Every surface therefore carries a `{lineage, epoch}` mark.
+A replay checks it in O(1), and a record whose end state is not the surface's
+current state gets `CLAY_ERROR_SNAPSHOT_MISMATCH` with nothing written. That
+covers an out-of-order revert, an unrecorded stamp in between and a record from
+another surface. A content comparison was measured at 0.051 ms and rejected,
+because an unrecorded edit to an element the record does not name gets past it.
+
+**A record is exact, normals included.** Building this showed that the relax
+pass had never recorded the normals it recomputes. Every record captured with
+`relax_after_remesh` on (the default) held stale normals: redo got up to 2,785
+vertex normals wrong, and undo got up to 2,910 wrong across eight strokes.
+Positions and indices were exact, which is all the existing history tests
+compared. The pass now notes the faces around each vertex it moves, and their
+corners, before the write and syncs them after the normals are recomputed. That
+changed the values a record holds, not how many entries it has: the same stroke
+recorded identical entry counts and encoded bytes with and without the fix, on
+34,655 and on 138,162 faces, because those faces were already noted by the
+remesh operations around them.
+
+What the calls do not promise, and the header says so beside them:
+`clay_dynamic_surface_serialize` bytes differ after an undo, because slots stay
+allocated and `dead_slots` grows. A record replays only onto the surface handle
+it was captured on, so a surface reloaded from bytes matches no record. The
+memory ledger does not count records; budget them with
+`clay_dynamic_delta_stats.resident_bytes`, and assert counts against
+`encoded_bytes`, which is exactly `56 + 122V + 114H + 42E + 66F`.
+
 Runnable: [`examples/66_dynamic_topology.py`](../examples/66_dynamic_topology.py)
 — a 1,200-triangle sphere becomes a nose, an ear and a horn, with the locality
 of the refinement measured rather than illustrated.
 
-### A whole stroke (ABI 0.118.0)
+### A whole stroke (ABI 0.119.0)
 
 `brush::apply_to_dynamic` is the adaptive surface's stroke consumer, beside
 `apply_to_mesh` and `apply_to_multires`, and reaches C as
@@ -1648,8 +1718,10 @@ before any remesh runs. `MeshStrokeOptions::defer_normals` is refused too: this
 sculptor refreshes normals locally per stamp, and a flag accepted and ignored
 would be a promise nothing keeps.
 
-**Not provided.** No topology undo record crosses the C ABI (the C++ call takes
-a `TopologyDelta` and a whole stroke reverts as one step). Grab's after-remesh
+**Not provided.** The stroke calls take no undo record. The C++ call takes a
+`TopologyDelta`, and a whole stroke reverts as one step. Across the C ABI the
+adaptive record (`clay_dynamic_delta`, "Undo from a host" above) is captured
+only by `clay_dynamic_sculptor_stamp_recorded`, one stamp at a time. Grab's after-remesh
 runs around the first stamp's centre. And no latency change: a stroke costs its
 stamps, measured at **1.004x** the host's `clay_stroke_resolve_full` plus
 per-stamp loop (46.2 vs 46.0 ms median of 30, 14 remeshing Draw stamps on
@@ -2725,10 +2797,10 @@ parity — the mechanism usually differs even where the result matches.
 
 | ZBrush | claycore | Note |
 |---|---|---|
-| Standard | `Op::Relief` | Displaces the accumulated surface along its normal |
-| ClayBuildup | `Op::Relief` along a stroke | Buildup accumulation scales each stamp's amplitude, so overlapping stamps deposit twice |
-| Crease, DamStandard | `Op::Incise` | The same op, cutting in — a thin region gives the line |
-| Inflate | `Op::Relief`, `sculpt_inflate` | Moving the surface along its own normal *is* relief; the voxel verb dilates and erodes by cells |
+| Standard | `Op::Relief` — **an approximation** | Standard moves a stamp along **one** averaged normal; relief moves each point along its own. Close where the normals under the stamp agree (0.02–0.08k mean on a sphere, bowl and saddle), the whole amplitude on a ridge narrower than the stamp, which relief thickens. One exact draw-frame stamp is `clay_layer_move_surface` with a smoothstep ease; a stroke of them is not affordable (§ 1) |
+| ClayBuildup | `Op::Relief` along a stroke | Buildup accumulation scales each stamp's amplitude, so overlapping stamps deposit twice. Inherits relief's per-point frame; not measured against the mesh `Clay`, which clamps Draw's deposit to a plane |
+| Crease, DamStandard | `Op::Incise` — **an approximation** | The same op, cutting in — a thin region gives the line. Same frame as relief, so on a ridge narrower than the stamp it severs rather than dents |
+| Inflate | `Op::Relief`, `sculpt_inflate` | Moving the surface along its own normal *is* relief — the faithful mapping; the voxel verb dilates and erodes by cells |
 | Move Topological | `field::move_topological` | Geodesic falloff — the radius is travel across the surface, so it cannot step over a gap. Bakes |
 | Move | `brush::move_brush` | Drags the assembled surface. Nudges form rather than growing it: a large pull buds rather than stretches. Drags that OVERLAP compound the step scale — use `snakehook` to pull a lobe out — but disjoint ones no longer do (see below) |
 | Rotate | `pose` / `pose_line` | Radial, or ramped along a line |
@@ -2888,7 +2960,7 @@ difference:
 | Booleans, blends, the 17 combine ops under 5 profiles | **SDF** | Composition needs a signed distance from any point to each operand. A grid has occupancy and a mesh has neither — see the README's "Why composing needs a distance field" |
 | Cut / trim (rect, circle, polygon, lasso, trim-curve) | **SDF** | Each is an exact prism combined into the edit list. On a grid it would be a cell write and on a mesh it would change topology |
 | Armatures (ZSpheres) | **SDF** | A tree of spheres whose links are swept cones and whose skin is the blend. It is a *primitive*, not a gesture |
-| `Draw` | **Mesh** | Displacement along the region's **averaged** normal — one shared direction per stamp. `Op::Relief` is the SDF analogue but is per-point along the accumulated normal, not per-stamp |
+| `Draw` | **Mesh** | Displacement along the region's **averaged** normal — one shared direction per stamp. `Op::Relief` is **not** its SDF analogue: it moves each point along the accumulated field's own normal, which is `Inflate`, and approximates `Draw` only where the normals under the stamp agree. On a ridge narrower than the stamp the two differ by the whole amplitude. A single exact draw-frame stamp is `clay_layer_move_surface` with a smoothstep ease |
 | `Layer` | **Mesh** | Deposits up to a ceiling above the surface **as the stroke found it**. Every other deposit verb acts on the surface as it is now, so this one needs the stroke's starting snapshot |
 | `Relax` | **Mesh** | Slides vertices *along* the surface to even their spacing. There is nothing to even on a grid, and an SDF has no vertices. **It recovers a stretched grab and not a deformation** — after a taper, six passes move edge-length variation 0.2929 → 0.3050, slightly worse, because the damage is anisotropy and no slide changes how many vertices a ring has |
 | `sculpt_fill_cavities`, `repair_close_holes`, `repair_fill_voids`, `repair_report` | **Voxel** | Questions about occupancy and enclosure. `fill_voids` *decides* enclosure rather than guessing locally |

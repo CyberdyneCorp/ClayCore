@@ -7,7 +7,7 @@ Both SHALL take samples as `clay_stroke_sample_full`, because the flat five-floa
 
 Both SHALL read the WORLD FRAME the handle declares and SHALL NOT take a per-call frame, so a stroke cannot spell its placement twice. Both SHALL accumulate a `clay_dynamic_stamp_report` over the stroke, honouring its `struct_size`: summed moved vertices and topology operations, the budget flag if any stamp hit it, the union of the dirty bounds, and the revisions after the last stamp.
 
-A Layer brush SHALL be refused with `CLAY_ERROR_INVALID_ARGUMENT` before any stamp runs. The header SHALL state what the calls do not provide: no topology undo record crosses the ABI, there is no normal deferral, and a stroke costs the sum of its stamps — measured at 1.004x the host's resolve-then-stamp loop over the same stamps.
+A Layer brush SHALL be refused with `CLAY_ERROR_INVALID_ARGUMENT` before any stamp runs. The header SHALL state what the calls do not provide: the stroke calls take no undo record (a `clay_dynamic_delta` is captured only per stamp, by `clay_dynamic_sculptor_stamp_recorded`), there is no normal deferral, and a stroke costs the sum of its stamps — measured at 1.004x the host's resolve-then-stamp loop over the same stamps.
 
 Existing adaptive, fixed and multiresolution entry points SHALL keep their semantics unchanged.
 

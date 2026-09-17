@@ -1,0 +1,54 @@
+--- a/benchmarks/bench_extreme_poly.cpp
++++ b/benchmarks/bench_extreme_poly.cpp
+@@ -73,0 +74,20 @@
++mesh::MeshBrush selected_brush() {
++    const char* name = std::getenv("MESH_PROBE_BRUSH");
++    if (name && std::strcmp(name, "smooth") == 0) return mesh::MeshBrush::Smooth;
++    if (name && std::strcmp(name, "relax") == 0) return mesh::MeshBrush::Relax;
++    return mesh::MeshBrush::Draw;
++}
++
++void copy_payload(const mesh::SurfaceView& view, std::uint32_t id,
++                  const mesh::ChunkReadback& sized) {
++    if (!std::getenv("MESH_PROBE_COPY")) return;
++    static std::vector<float> positions, normals;
++    static std::vector<std::uint32_t> indices;
++    positions.resize(std::size_t(sized.vertex_count) * 3);
++    normals.resize(positions.size());
++    indices.resize(sized.index_count);
++    const auto result = view.copy_chunk(id, &sized.current, positions.data(), positions.size(),
++        normals.data(), normals.size(), indices.data(), indices.size());
++    if (!result.ok || result.truncated || result.stale) std::abort();
++}
++
+@@ -227 +247 @@
+-        brush.geodesic = mesh::default_geodesic(mesh::MeshBrush::Draw);
++        brush.geodesic = mesh::default_geodesic(selected_brush());
+@@ -265 +285 @@
+-            sculptor.stamp(mesh::MeshBrush::Draw, brush);
++            sculptor.stamp(selected_brush(), brush);
+@@ -279,0 +300 @@
++                copy_payload(view, id, sized);
+@@ -325,0 +347,2 @@
++    mesh::StageTelemetry stages;
++    sculptor.set_stage_telemetry(&stages);
+@@ -351,0 +375 @@
++            if (rep == 0) stages.reset();
+@@ -354 +378 @@
+-                sculptor.stamp(mesh::MeshBrush::Draw, brush, topology);
++                sculptor.stamp(selected_brush(), brush, topology);
+@@ -362,0 +387 @@
++                copy_payload(view, id, sized);
+@@ -377,0 +403 @@
++        print_stages(stages, static_cast<double>(stamp.size()));
+@@ -462 +488 @@
+-        brush.geodesic = mesh::default_geodesic(mesh::MeshBrush::Draw);
++        brush.geodesic = mesh::default_geodesic(selected_brush());
+@@ -486 +512 @@
+-                layered_sculptor.stamp(mesh::MeshBrush::Draw, brush);
++                layered_sculptor.stamp(selected_brush(), brush);
+@@ -488 +514 @@
+-                sculptor.stamp(mesh::MeshBrush::Draw, brush);
++                sculptor.stamp(selected_brush(), brush);
+@@ -499,0 +526 @@
++                copy_payload(view, id, sized);

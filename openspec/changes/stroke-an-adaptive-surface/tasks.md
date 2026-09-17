@@ -67,7 +67,7 @@
       no frozen stamp fails 3.8, dropping Layer from the stroke refusal fails
       3.3's automask-inputs check
 
-## 4. C ABI (0.117.0 -> 0.118.0)
+## 4. C ABI (0.118.0 -> 0.119.0; planned from 0.117.0, #617 took 0.118.0)
 
 - [x] 4.1 Extract the topology descriptor decode from
       `clay_dynamic_sculptor_stamp` into one helper

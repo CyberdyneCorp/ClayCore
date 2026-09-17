@@ -1265,7 +1265,7 @@ do {
     check(clay_dynamic_sculptor_stamp(sculptor, &raked, &topo, nil, nil) == CLAY_OK,
           "a turned stamp is the same descriptor, not a second entry point")
 
-    // ABI 0.118.0: a whole stroke, in the wide sample struct that carries the
+    // ABI 0.119.0: a whole stroke, in the wide sample struct that carries the
     // stylus azimuth, resolved and stamped by the library.
     var strokePreset = clay_stroke_preset()
     strokePreset.struct_size = UInt32(MemoryLayout<clay_stroke_preset>.size)
@@ -1308,6 +1308,51 @@ do {
           "stamps have been made, so the arena owns bytes and has used some")
     check(arena.high_water_bytes <= arena.capacity_bytes,
           "the high-water mark cannot exceed what the arena holds")
+
+    // UNDO FOR AN ADAPTIVE STROKE (ABI 0.118.0). A record the host owns,
+    // captured through its own stamp entry point and replayed through the
+    // sculptor, which keeps the chunk index in step with the surface.
+    var strokedStats = clay_dynamic_surface_stats()
+    strokedStats.struct_size = UInt32(MemoryLayout<clay_dynamic_surface_stats>.size)
+    check(clay_dynamic_surface_stats_get(surface, &strokedStats) == CLAY_OK,
+          "read the surface before a recorded stamp")
+    let record = clay_dynamic_delta_create()
+    check(record != nil, "created an adaptive undo record")
+    var recorded = brush
+    recorded.center = (1, 0, 0)
+    check(clay_dynamic_sculptor_stamp_recorded(sculptor, &recorded, &topo, nil, record, nil)
+              == CLAY_OK,
+          "captured a stamp into the record")
+
+    var deltaStats = clay_dynamic_delta_stats()
+    deltaStats.struct_size = UInt32(MemoryLayout<clay_dynamic_delta_stats>.size)
+    check(clay_dynamic_delta_stats_get(record, &deltaStats) == CLAY_OK, "read the record's cost")
+    check(deltaStats.vertices > 0, "the record names what the stamp reached")
+    check(deltaStats.encoded_bytes == 56 + 122 * deltaStats.vertices
+              + 114 * deltaStats.halfedges + 42 * deltaStats.edges + 66 * deltaStats.faces,
+          "the encoded size is the documented formula, exactly")
+    var spilled = 0
+    check(clay_dynamic_delta_serialize(record, nil, &spilled) == CLAY_OK
+              && UInt64(spilled) == deltaStats.encoded_bytes,
+          "the serialize size query agrees with the stats")
+
+    check(clay_dynamic_delta_revert(record, sculptor) == CLAY_OK, "undid the recorded stamp")
+    var undone = clay_dynamic_surface_stats()
+    undone.struct_size = UInt32(MemoryLayout<clay_dynamic_surface_stats>.size)
+    check(clay_dynamic_surface_stats_get(surface, &undone) == CLAY_OK, "read the undone surface")
+    check(undone.faces == strokedStats.faces && undone.vertices == strokedStats.vertices,
+          "the undo restored the surface's live counts")
+    ok = 0
+    check(clay_dynamic_surface_validate(surface, &ok, nil, &messageLen) == CLAY_OK && ok == 1,
+          "the undone surface is valid")
+    check(clay_dynamic_delta_revert(record, sculptor) == CLAY_OK,
+          "reverting twice is reverting once")
+    check(clay_dynamic_delta_apply(record, sculptor) == CLAY_OK, "redid the recorded stamp")
+    check(clay_dynamic_sculptor_stamp(sculptor, &brush, &topo, nil, nil) == CLAY_OK,
+          "an unrecorded stamp after the redo")
+    check(clay_dynamic_delta_revert(record, sculptor) == CLAY_ERROR_SNAPSHOT_MISMATCH,
+          "an undo past an unrecorded stamp is refused as a mismatch")
+    clay_dynamic_delta_destroy(record)
 
     var exported: OpaquePointer? = nil
     check(clay_dynamic_surface_to_mesh(surface, &exported) == CLAY_OK,

@@ -16577,6 +16577,12 @@ struct clay_dynamic_surface {
     mesh::DynamicSurface surface;
 };
 
+// One replayable adaptive gesture (undo-a-dynamic-stroke-across-the-abi). The
+// host owns it; the engine only checks it against a surface before writing.
+struct clay_dynamic_delta {
+    mesh::RecordedGesture gesture;
+};
+
 struct clay_dynamic_sculptor : SessionFrame {
     clay_dynamic_surface* owner = nullptr;
     std::unique_ptr<mesh::DynamicSculptor> sculptor;
@@ -18406,6 +18412,9 @@ constexpr std::size_t kDynReportOriginal =
     offsetof(clay_dynamic_stamp_report, revision) + sizeof(clay_surface_revision);
 constexpr std::size_t kChunkInfoOriginal =
     offsetof(clay_dynamic_chunk_info, bounds_max) + sizeof(float) * 3;
+// Original layout (ABI 0.118.0), named by its last field.
+constexpr std::size_t kDynDeltaStatsOriginal =
+    offsetof(clay_dynamic_delta_stats, resident_bytes) + sizeof(std::uint64_t);
 
 clay_surface_revision to_c_revision(const mesh::DynamicSurface& s) {
     clay_surface_revision r{};
@@ -18614,12 +18623,26 @@ clay_result clay_dynamic_sculptor_reset_peak_telemetry(clay_dynamic_sculptor* sc
 
 namespace {
 
-// THE ONE DECODE of a topology descriptor. `clay_dynamic_sculptor_stamp` and the
-// two stroke calls read the same descriptor, and two copies of this would be two
-// readings of it the first time a field was appended. NULL is the defaults.
+// The descriptors one adaptive stamp reads before it writes, validated. Shared
+// by clay_dynamic_sculptor_stamp and clay_dynamic_sculptor_stamp_recorded so the
+// two cannot drift on what a descriptor means. The mask gate is NOT here: it is
+// built in the entry point from mask_gate_for, where check_c_abi.py checks it.
+struct DynamicStampInputs {
+    mesh::MeshBrush verb = mesh::MeshBrush::Draw;
+    mesh::MeshBrushSettings settings;
+    mesh::DynamicTopologySettings topology;
+};
+
+const char* const kDynamicLayerRefusal =
+    "an adaptive surface does not offer this verb; see dynamic_offers";
+
+// THE ONE DECODE of a topology descriptor. The stamp, the recorded stamp and
+// the two stroke calls read the same descriptor, and two copies of this would
+// be two readings of it the first time a field was appended. NULL is the
+// defaults.
 clay_result read_dynamic_topology(const clay_dynamic_topology_desc* topology,
-                                  mesh::DynamicTopologySettings* out) {
-    *out = mesh::DynamicTopologySettings{};
+                                  mesh::DynamicTopologySettings* topo) {
+    *topo = mesh::DynamicTopologySettings{};
     if (!topology) return CLAY_OK;
     clay_dynamic_topology_desc d;
     clay_result r = read_desc(topology, kDynTopologyOriginal, &d);
@@ -18627,30 +18650,61 @@ clay_result read_dynamic_topology(const clay_dynamic_topology_desc* topology,
     if (d.detail_mode < 0 || d.detail_mode > 2)
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     "unknown detail mode: " + std::to_string(d.detail_mode));
-    mesh::DynamicTopologySettings& topo = *out;
-    topo.enabled = d.enabled != 0;
-    topo.detail_mode = static_cast<mesh::DynamicDetailMode>(d.detail_mode);
-    if (d.target_edge_length > 0.0f) topo.target_edge_length = d.target_edge_length;
-    if (d.detail_resolution > 0.0f) topo.detail_resolution = d.detail_resolution;
-    if (d.split_factor > 0.0f) topo.split_factor = d.split_factor;
-    if (d.collapse_factor > 0.0f) topo.collapse_factor = d.collapse_factor;
-    if (d.max_passes > 0) topo.max_passes = d.max_passes;
-    if (d.max_ops_per_stamp > 0) topo.max_ops_per_stamp = d.max_ops_per_stamp;
-    topo.allow_split = d.allow_split != 0;
-    topo.allow_collapse = d.allow_collapse != 0;
-    topo.allow_flip = d.allow_flip != 0;
-    topo.relax_after_remesh = d.relax_after_remesh != 0;
-    if (d.relax_strength > 0.0f) topo.relax_strength = d.relax_strength;
-    topo.preserve_boundaries = d.preserve_boundaries != 0;
-    topo.preserve_uv_seams = d.preserve_uv_seams != 0;
-    topo.preserve_sharp_edges = d.preserve_sharp_edges != 0;
+    topo->enabled = d.enabled != 0;
+    topo->detail_mode = static_cast<mesh::DynamicDetailMode>(d.detail_mode);
+    if (d.target_edge_length > 0.0f) topo->target_edge_length = d.target_edge_length;
+    if (d.detail_resolution > 0.0f) topo->detail_resolution = d.detail_resolution;
+    if (d.split_factor > 0.0f) topo->split_factor = d.split_factor;
+    if (d.collapse_factor > 0.0f) topo->collapse_factor = d.collapse_factor;
+    if (d.max_passes > 0) topo->max_passes = d.max_passes;
+    if (d.max_ops_per_stamp > 0) topo->max_ops_per_stamp = d.max_ops_per_stamp;
+    topo->allow_split = d.allow_split != 0;
+    topo->allow_collapse = d.allow_collapse != 0;
+    topo->allow_flip = d.allow_flip != 0;
+    topo->relax_after_remesh = d.relax_after_remesh != 0;
+    if (d.relax_strength > 0.0f) topo->relax_strength = d.relax_strength;
+    topo->preserve_boundaries = d.preserve_boundaries != 0;
+    topo->preserve_uv_seams = d.preserve_uv_seams != 0;
+    topo->preserve_sharp_edges = d.preserve_sharp_edges != 0;
     return CLAY_OK;
+}
+
+clay_result read_dynamic_stamp(const clay_dynamic_sculptor& sculptor,
+                               const clay_mesh_brush_desc* brush,
+                               const clay_dynamic_topology_desc* topology,
+                               DynamicStampInputs* in) {
+    clay_result r = read_mesh_brush(brush, &in->verb, &in->settings);
+    if (r != CLAY_OK) return r;
+    if (!mesh::dynamic_offers(in->verb))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, kDynamicLayerRefusal);
+    r = read_dynamic_topology(topology, &in->topology);
+    if (r != CLAY_OK) return r;
+
+    // WORLD IN, LOCAL AT THE SURFACE, and both halves or neither: a placed mask
+    // gate beside a local stamp centre would be a NEW disagreement of exactly
+    // the kind this frame exists to remove.
+    brush_settings_to_local(sculptor, &in->settings);
+    return CLAY_OK;
+}
+
+// A report's declared size. The stroke calls check it BEFORE the stroke: a
+// malformed report must not leave a stroke applied that the call then reports
+// as failed. The single stamp still checks it after, which is its behaviour on
+// main and is recorded in stroke-an-adaptive-surface.
+clay_result check_dynamic_report(clay_dynamic_stamp_report* out_report) {
+    if (!out_report) return CLAY_OK;
+    clay_dynamic_stamp_report probe;
+    return read_desc(out_report, kDynReportOriginal, &probe);
 }
 
 // A stamp's or a stroke's result into the caller's report, honouring the size
 // it declared. The revision is the owner's, read now.
-void write_dynamic_report(const clay_dynamic_sculptor& sculptor,
-                          const mesh::DynamicStampResult& res, clay_dynamic_stamp_report* dst) {
+clay_result write_dynamic_report(const clay_dynamic_sculptor& sculptor,
+                                 const mesh::DynamicStampResult& res,
+                                 clay_dynamic_stamp_report* out_report) {
+    if (!out_report) return CLAY_OK;
+    clay_result r = check_dynamic_report(out_report);
+    if (r != CLAY_OK) return r;
     clay_dynamic_stamp_report out{};
     out.moved_vertices = res.moved_vertices;
     out.split_edges = res.remesh.split;
@@ -18663,19 +18717,8 @@ void write_dynamic_report(const clay_dynamic_sculptor& sculptor,
         write_f3(out.dirty_max, res.dirty_bounds.max);
     }
     out.revision = to_c_revision(sculptor.owner->surface);
-    write_desc(dst, dst->struct_size, out);
-}
-
-const char* const kDynamicLayerRefusal =
-    "an adaptive surface does not offer this verb; see dynamic_offers";
-
-// A report's declared size, checked BEFORE a stroke rather than after it: a
-// malformed report must not leave a stroke applied that the call then reports
-// as failed.
-clay_result check_dynamic_report(clay_dynamic_stamp_report* out_report) {
-    if (!out_report) return CLAY_OK;
-    clay_dynamic_stamp_report probe;
-    return read_desc(out_report, kDynReportOriginal, &probe);
+    write_desc(out_report, out_report->struct_size, out);
+    return CLAY_OK;
 }
 
 // What the two stroke calls share once each has its verb and settings: the
@@ -18719,23 +18762,21 @@ clay_result clay_dynamic_sculptor_stamp(clay_dynamic_sculptor* sculptor,
                                         const clay_dynamic_topology_desc* topology,
                                         const clay_mask* mask,
                                         clay_dynamic_stamp_report* out_report) {
+    return clay_dynamic_sculptor_stamp_recorded(sculptor, brush, topology, mask, nullptr,
+                                                out_report);
+}
+
+clay_result clay_dynamic_sculptor_stamp_recorded(clay_dynamic_sculptor* sculptor,
+                                                 const clay_mesh_brush_desc* brush,
+                                                 const clay_dynamic_topology_desc* topology,
+                                                 const clay_mask* mask,
+                                                 clay_dynamic_delta* record,
+                                                 clay_dynamic_stamp_report* out_report) {
     if (!sculptor || !sculptor->sculptor)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
-    mesh::MeshBrush verb = mesh::MeshBrush::Draw;
-    mesh::MeshBrushSettings settings;
-    clay_result r = read_mesh_brush(brush, &verb, &settings);
+    DynamicStampInputs in;
+    clay_result r = read_dynamic_stamp(*sculptor, brush, topology, &in);
     if (r != CLAY_OK) return r;
-    if (!mesh::dynamic_offers(verb)) return fail(CLAY_ERROR_INVALID_ARGUMENT, kDynamicLayerRefusal);
-
-    mesh::DynamicTopologySettings topo;
-    r = read_dynamic_topology(topology, &topo);
-    if (r != CLAY_OK) return r;
-
-    // WORLD IN, LOCAL AT THE SURFACE, and both halves or neither: a placed mask
-    // gate beside a local stamp centre would be a NEW disagreement of exactly
-    // the kind this frame exists to remove.
-    brush_settings_to_local(*sculptor, &settings);
-
     field::MaskGate gate;
     if (mask) {
         voxel::MaskField* field_mask = nullptr;
@@ -18744,14 +18785,106 @@ clay_result clay_dynamic_sculptor_stamp(clay_dynamic_sculptor* sculptor,
         gate = mask_gate_for(*sculptor, field_mask);
     }
 
-    const mesh::DynamicStampResult res =
-        sculptor->sculptor->stamp(verb, settings, topo, gate, nullptr);
-
-    if (out_report) {
-        r = check_dynamic_report(out_report);
-        if (r != CLAY_OK) return r;
-        write_dynamic_report(*sculptor, res, out_report);
+    mesh::DynamicStampResult res;
+    if (record) {
+        const std::optional<mesh::DynamicStampResult> recorded = sculptor->sculptor->stamp_recorded(
+            in.verb, in.settings, in.topology, gate, record->gesture);
+        if (!recorded)
+            return fail(CLAY_ERROR_SNAPSHOT_MISMATCH,
+                        "the record does not end where this surface is: another surface, or an "
+                        "unrecorded stamp or a replay since its last capture. Nothing stamped");
+        res = *recorded;
+    } else {
+        res = sculptor->sculptor->stamp(in.verb, in.settings, in.topology, gate, nullptr);
     }
+    return write_dynamic_report(*sculptor, res, out_report);
+}
+
+clay_dynamic_delta* clay_dynamic_delta_create(void) { return new clay_dynamic_delta(); }
+
+void clay_dynamic_delta_destroy(clay_dynamic_delta* delta) { delete delta; }
+
+clay_result clay_dynamic_delta_clear(clay_dynamic_delta* delta) {
+    if (!delta) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic delta");
+    delta->gesture.clear();
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_delta_stats_get(const clay_dynamic_delta* delta,
+                                         clay_dynamic_delta_stats* out_stats) {
+    if (!delta) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic delta");
+    if (!out_stats) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_stats");
+    clay_dynamic_delta_stats probe;
+    clay_result r = read_desc(out_stats, kDynDeltaStatsOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const mesh::TopologyDelta& d = delta->gesture.delta();
+    clay_dynamic_delta_stats out{};
+    out.vertices = d.vertex_count();
+    out.halfedges = d.halfedge_count();
+    out.edges = d.edge_count();
+    out.faces = d.face_count();
+    out.encoded_bytes = delta->gesture.encoded_size();
+    out.resident_bytes = delta->gesture.bytes();
+    write_desc(out_stats, out_stats->struct_size, out);
+    return CLAY_OK;
+}
+
+namespace {
+
+clay_result replay_dynamic_delta(const clay_dynamic_delta* delta, clay_dynamic_sculptor* sculptor,
+                                 mesh::ReplayDirection direction) {
+    if (!delta) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic delta");
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    if (sculptor->sculptor->replay(delta->gesture, direction) == mesh::ReplayResult::Mismatch)
+        return fail(CLAY_ERROR_SNAPSHOT_MISMATCH,
+                    "the surface is at neither end of this record: replay is last in, first "
+                    "out, on the surface it was captured on. Nothing written");
+    return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_dynamic_delta_revert(const clay_dynamic_delta* delta,
+                                      clay_dynamic_sculptor* sculptor) {
+    return replay_dynamic_delta(delta, sculptor, mesh::ReplayDirection::Revert);
+}
+
+clay_result clay_dynamic_delta_apply(const clay_dynamic_delta* delta,
+                                     clay_dynamic_sculptor* sculptor) {
+    return replay_dynamic_delta(delta, sculptor, mesh::ReplayDirection::Apply);
+}
+
+clay_result clay_dynamic_delta_serialize(const clay_dynamic_delta* delta, uint8_t* out_data,
+                                         size_t* count) {
+    if (!delta) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic delta");
+    if (!count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null count");
+    // The size is exact from the counts, so neither the size query nor a short
+    // buffer pays for an encoding.
+    const std::size_t need = delta->gesture.encoded_size();
+    if (!out_data || *count < need)
+        return write_sized(nullptr, need, out_data, count, "dynamic delta");
+    const std::vector<std::uint8_t> bytes = delta->gesture.encode();
+    return write_sized(bytes.data(), bytes.size(), out_data, count, "dynamic delta");
+}
+
+clay_result clay_dynamic_delta_deserialize(const uint8_t* data, size_t size,
+                                           clay_dynamic_delta** out_delta) {
+    if (!out_delta) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_delta");
+    *out_delta = nullptr;
+    if (!data || size == 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null or empty data");
+    mesh::RecordedGesture built;
+    switch (mesh::RecordedGesture::decode(data, size, &built)) {
+        case mesh::GestureDecode::Ok:
+            break;
+        case mesh::GestureDecode::ForwardVersion:
+            return fail(CLAY_ERROR_FORWARD_VERSION,
+                        "a dynamic delta written by a newer format version");
+        case mesh::GestureDecode::Malformed:
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "not a dynamic delta: malformed, truncated or trailing bytes");
+    }
+    *out_delta = new clay_dynamic_delta{std::move(built)};
     return CLAY_OK;
 }
 
@@ -18785,8 +18918,7 @@ clay_result clay_dynamic_sculptor_apply_stroke(clay_dynamic_sculptor* sculptor,
                              orient_alpha_by_stamp, &applied, &summary);
     if (r != CLAY_OK) return r;
     if (out_applied) *out_applied = applied;
-    if (out_report) write_dynamic_report(*sculptor, summary, out_report);
-    return CLAY_OK;
+    return write_dynamic_report(*sculptor, summary, out_report);
 }
 
 clay_result clay_dynamic_sculptor_apply_preset(clay_dynamic_sculptor* sculptor,
@@ -18829,8 +18961,7 @@ clay_result clay_dynamic_sculptor_apply_preset(clay_dynamic_sculptor* sculptor,
                              mask, orient_alpha_by_stamp, &applied, &summary);
     if (r != CLAY_OK) return r;
     if (out_applied) *out_applied = applied;
-    if (out_report) write_dynamic_report(*sculptor, summary, out_report);
-    return CLAY_OK;
+    return write_dynamic_report(*sculptor, summary, out_report);
 }
 
 clay_result clay_dynamic_sculptor_rebuild_index(clay_dynamic_sculptor* sculptor) {

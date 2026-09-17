@@ -174,6 +174,40 @@ struct DynamicSurfaceStats {
     std::size_t dead_slots = 0;
 };
 
+// WHICH STATE A SURFACE IS IN, as an O(1) token a replay can check
+// (undo-a-dynamic-stroke-across-the-abi).
+//
+// `lineage` names the surface INSTANCE: drawn fresh by every constructor,
+// `from_mesh` and `decode`, from a per-process random seed mixed with a
+// counter, so a record taken on another surface or in another process does not
+// match. A C++ COPY KEEPS it, because a copy is the same state.
+//
+// `epoch` names the state WITHIN the lineage. Every `bump_*` draws a new one
+// from a process-wide counter that never rewinds, and `set_mark` puts back one
+// that was seen before. So two different states never share an epoch: after an
+// undo rewinds a surface to epoch 10, the next stamp takes a number no earlier
+// state has had, rather than counting 11, 12... back into the epochs of the
+// stroke that was undone -- which is what would let that stroke's record
+// "match" a surface it no longer describes. Copies diverge the same way, since
+// the counter is shared.
+//
+// NOT SERIALIZED. A decoded surface is a new lineage, so no record outlives the
+// instance it was captured on.
+struct SurfaceMark {
+    std::uint64_t lineage = 0;
+    std::uint64_t epoch = 0;
+
+    // A fresh lineage at a fresh epoch.
+    static SurfaceMark fresh();
+    // The next epoch from the process-wide counter.
+    static std::uint64_t next_epoch();
+
+    friend bool operator==(const SurfaceMark& a, const SurfaceMark& b) {
+        return a.lineage == b.lineage && a.epoch == b.epoch;
+    }
+    friend bool operator!=(const SurfaceMark& a, const SurfaceMark& b) { return !(a == b); }
+};
+
 // -- the surface --------------------------------------------------------------
 
 class DynamicSurface {
@@ -337,9 +371,29 @@ class DynamicSurface {
     std::uint64_t geometry_revision() const { return geometry_revision_; }
     std::uint64_t attribute_revision() const { return attribute_revision_; }
 
-    void bump_topology() { ++topology_revision_; }
-    void bump_geometry() { ++geometry_revision_; }
-    void bump_attributes() { ++attribute_revision_; }
+    // Each also advances the surface's MARK, so every write that a host can see
+    // through a revision is a write the undo guard sees too. A writer that
+    // bumps nothing slips past both, which is why every pool writer bumps.
+    void bump_topology() {
+        ++topology_revision_;
+        mark_.epoch = SurfaceMark::next_epoch();
+    }
+    void bump_geometry() {
+        ++geometry_revision_;
+        mark_.epoch = SurfaceMark::next_epoch();
+    }
+    void bump_attributes() {
+        ++attribute_revision_;
+        mark_.epoch = SurfaceMark::next_epoch();
+    }
+
+    // -- the state mark ------------------------------------------------------
+    //
+    // See `SurfaceMark`. `set_mark` is for a replay that has just restored the
+    // state a record names, and for nothing else: setting a mark the surface
+    // is not in makes the guard vouch for a state that does not exist.
+    SurfaceMark mark() const { return mark_; }
+    void set_mark(SurfaceMark mark) { mark_ = mark; }
 
     // -- mutation, for the operators -----------------------------------------
     //
@@ -384,6 +438,7 @@ class DynamicSurface {
     std::uint64_t topology_revision_ = 1;
     std::uint64_t geometry_revision_ = 1;
     std::uint64_t attribute_revision_ = 1;
+    SurfaceMark mark_ = SurfaceMark::fresh();
 
     // Whether the source mesh carried these, so an export does not manufacture
     // an attribute the layer never had.

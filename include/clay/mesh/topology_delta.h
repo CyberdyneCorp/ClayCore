@@ -95,14 +95,36 @@ class TopologyDelta {
         return vertices_.size() + halfedges_.size() + edges_.size() + faces_.size();
     }
     std::size_t vertex_count() const { return vertices_.size(); }
+    std::size_t halfedge_count() const { return halfedges_.size(); }
+    std::size_t edge_count() const { return edges_.size(); }
     std::size_t face_count() const { return faces_.size(); }
+
+    // The entries themselves, READ-ONLY. For what has to follow a replay
+    // without being part of the surface -- the sculptor's chunked index keeps
+    // itself in step from the face and vertex entries alone -- and for a test
+    // asserting that a record's `after` end is the live surface.
+    const std::vector<ElementDelta<DynamicVertex, VertexId>>& vertex_entries() const {
+        return vertices_;
+    }
+    const std::vector<ElementDelta<DynamicHalfEdge, HalfEdgeId>>& halfedge_entries() const {
+        return halfedges_;
+    }
+    const std::vector<ElementDelta<DynamicEdge, EdgeId>>& edge_entries() const { return edges_; }
+    const std::vector<ElementDelta<DynamicFace, FaceId>>& face_entries() const { return faces_; }
 
     void clear();
 
     // What this record OWNS, for a memory budget. Not `sizeof`: the arrays are
     // the payload, and a record following one dab costs nothing like one
-    // following a stroke.
+    // following a stroke. Capacities included, so it depends on the allocator's
+    // growth policy and is right for a BUDGET, wrong for an exact assertion.
     std::size_t bytes() const;
+
+    // Exactly `encode().size()`, without encoding: a 24-byte header, then 122 /
+    // 114 / 42 / 66 bytes per vertex / half-edge / edge / face entry. Fixed-width,
+    // so it is the same on every platform and is the number to assert a count
+    // against.
+    std::size_t encoded_size() const;
 
     // -- encoding -------------------------------------------------------------
     //
@@ -129,6 +151,96 @@ class TopologyDelta {
     // element rather than one per generation.
     std::unordered_map<std::uint32_t, std::uint32_t> vertex_slot_, halfedge_slot_, edge_slot_,
         face_slot_;
+};
+
+// -- a gesture a host can replay -----------------------------------------------
+//
+// (undo-a-dynamic-stroke-across-the-abi.) A `TopologyDelta` plus the two
+// `SurfaceMark`s that say which state it was taken from and which it left.
+//
+// WHY THE MARKS. `TopologyDelta::revert` trusts its caller: it writes whatever
+// it holds into whatever surface it is given, and returns true. Replayed out of
+// order that corrupts the surface -- and not only when the two gestures
+// overlap in space. A later stroke on the far side of a sphere reuses the slots
+// an earlier one freed, so reverting the earlier one under it rewrites elements
+// the later one owns. Measured: 27 vertex, 161 half-edge, 80 edge and 54 face
+// slots shared by two strokes on opposite hemispheres, and `validate` failing
+// after the out-of-order revert.
+//
+// A content comparison (each recorded element against the record's end state)
+// catches every overlap it can see, in 0.051 ms over 13,759 elements, and was
+// rejected: an UNRECORDED edit in between can rewrite an element the record
+// does not name while a named one still points at it, and the check then
+// passes on a replay that is not sound. The mark is exact for the contract
+// actually offered -- last in, first out, nothing unrecorded in between -- and
+// costs two integer compares.
+
+enum class ReplayDirection { Revert, Apply };
+
+// What a replay did.
+enum class ReplayResult {
+    Applied,
+    // The surface was already at the target: nothing written, no revision
+    // advanced. Reverting twice is reverting once.
+    NoOp,
+    // The surface is at neither end of the record. Nothing written.
+    Mismatch,
+};
+
+// What decoding refused, when it did.
+enum class GestureDecode { Ok, Malformed, ForwardVersion };
+
+class RecordedGesture {
+   public:
+    const TopologyDelta& delta() const { return delta_; }
+    // For the sculptor's capture only. Writing entries here without moving the
+    // marks makes a record that describes a state no surface was ever in.
+    TopologyDelta& delta_mutable() { return delta_; }
+
+    SurfaceMark before() const { return before_; }
+    SurfaceMark after() const { return after_; }
+    bool empty() const { return delta_.empty(); }
+
+    // CAPTURE. An empty record binds to whatever state the surface is in; a
+    // non-empty one accepts a further stamp only when the surface is still
+    // where the record left it. Anything else would coalesce two unrelated
+    // histories -- a record from another surface, or one with an unrecorded
+    // stamp or a replay in between -- into one step.
+    bool can_capture_on(const DynamicSurface& surface) const;
+    void begin_capture(const DynamicSurface& surface);
+    void end_capture(const DynamicSurface& surface);
+
+    // The replay guard, read-only. `Applied` here means "may proceed".
+    ReplayResult guard(const DynamicSurface& surface, ReplayDirection direction) const;
+
+    // Empties and unbinds. KEEPS the capacity, so a host reusing one record per
+    // stroke allocates on the first stroke only.
+    void clear();
+
+    // Resident: the delta's `bytes()` plus this wrapper. Allocator-dependent.
+    std::size_t bytes() const { return sizeof(*this) - sizeof(TopologyDelta) + delta_.bytes(); }
+    // Exact: `kHeaderBytes + delta().encoded_size()`, which is
+    // 56 + 122V + 114H + 42E + 66F.
+    static constexpr std::size_t kHeaderBytes = 32;
+    std::size_t encoded_size() const { return kHeaderBytes + delta_.encoded_size(); }
+
+    //   u32 'CDGR'  u16 version  u16 reserved
+    //   u64 lineage  u64 epoch_before  u64 epoch_after
+    //   then TopologyDelta::encode(), unchanged.
+    //
+    // For SPILLING a record out of memory while the surface it was captured on
+    // is still alive. Not crash recovery: a surface's lineage is not in its own
+    // encoding, so a reloaded surface matches no record.
+    std::vector<std::uint8_t> encode() const;
+    // Refuses a truncated or hostile buffer before allocating, and reports a
+    // wrapper or inner version above this build's as `ForwardVersion`. Leaves
+    // `out` untouched unless it returns `Ok`.
+    static GestureDecode decode(const std::uint8_t* data, std::size_t size, RecordedGesture* out);
+
+   private:
+    TopologyDelta delta_;
+    SurfaceMark before_;
+    SurfaceMark after_;
 };
 
 }  // namespace mesh

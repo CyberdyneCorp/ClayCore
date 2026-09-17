@@ -8472,6 +8472,90 @@ NB_MODULE(pyclay, m) {
             "The same for serialization, where the blob is a second copy of\n"
             "everything and exists while the surface still does.");
 
+    nb::class_<mesh::RecordedGesture>(
+        m, "TopologyDelta",
+        "Undo for an adaptive stroke: a replayable record of one gesture.\n\n"
+        "Every vertex, half-edge, edge and face the gesture created, deleted or\n"
+        "rewrote, with the state at both ends, plus the two surface marks it runs\n"
+        "between. Capture with `DynamicSculptor.stamp(..., record=delta)`; one\n"
+        "record per stroke is one undo step, however many stamps it took.\n\n"
+        "LAST IN, FIRST OUT ONLY. `revert` needs the surface exactly where the\n"
+        "record left it and `apply` exactly where the record found it; anything\n"
+        "else -- an older record under a newer one, an unrecorded stamp in\n"
+        "between, another surface -- raises ValueError with nothing written.\n"
+        "Spatially separate strokes are NOT independent: a later stroke reuses\n"
+        "the slots an earlier one freed.\n\n"
+        "Replay runs through the SCULPTOR, which keeps its chunked index and the\n"
+        "dirty-chunk stream in step; `rebuild_index` is not needed afterwards.\n"
+        "The surface's `serialize` bytes are not identical after an undo (dead\n"
+        "slots stay), so compare `to_mesh` and `validate` instead.")
+        .def("__init__", [](mesh::RecordedGesture* self) { new (self) mesh::RecordedGesture(); })
+        .def(
+            "revert",
+            [](const mesh::RecordedGesture& d, PyDynamicSculptor& s) {
+                if (s.replay(d, mesh::ReplayDirection::Revert) == mesh::ReplayResult::Mismatch)
+                    throw std::invalid_argument(
+                        "snapshot mismatch: the surface is at neither end of this record; "
+                        "replay is last in, first out, on the surface it was captured on");
+            },
+            "sculptor"_a,
+            "Undo: put the surface back as the gesture found it. A surface already\n"
+            "there is left alone, so reverting twice is reverting once.")
+        .def(
+            "apply",
+            [](const mesh::RecordedGesture& d, PyDynamicSculptor& s) {
+                if (s.replay(d, mesh::ReplayDirection::Apply) == mesh::ReplayResult::Mismatch)
+                    throw std::invalid_argument(
+                        "snapshot mismatch: the surface is at neither end of this record; "
+                        "replay is last in, first out, on the surface it was captured on");
+            },
+            "sculptor"_a, "Redo: put the surface back as the gesture left it.")
+        .def("clear", &mesh::RecordedGesture::clear,
+             "Empty and unbind, keeping the capacity, so the next capture starts a\n"
+             "new gesture.")
+        .def_prop_ro(
+            "stats",
+            [](const mesh::RecordedGesture& d) {
+                nb::dict out;
+                out["vertices"] = d.delta().vertex_count();
+                out["halfedges"] = d.delta().halfedge_count();
+                out["edges"] = d.delta().edge_count();
+                out["faces"] = d.delta().face_count();
+                out["encoded_bytes"] = d.encoded_size();
+                out["resident_bytes"] = d.bytes();
+                return out;
+            },
+            "Entries per kind, `encoded_bytes` (exact: 56 + 122V + 114H + 42E +\n"
+            "66F, what `serialize` returns) and `resident_bytes` (what the record\n"
+            "holds in memory, allocator-dependent: the number to budget against).")
+        .def(
+            "serialize",
+            [](const mesh::RecordedGesture& d) {
+                const std::vector<std::uint8_t> bytes = d.encode();
+                return nb::bytes(bytes.data(), bytes.size());
+            },
+            "For spilling a record out of memory. It replays only onto the surface\n"
+            "object it was captured on: a surface reloaded from bytes matches no\n"
+            "record, so this is not crash recovery.")
+        .def_static(
+            "deserialize",
+            [](nb::bytes data) {
+                mesh::RecordedGesture out;
+                switch (mesh::RecordedGesture::decode(
+                    reinterpret_cast<const std::uint8_t*>(data.c_str()), data.size(), &out)) {
+                    case mesh::GestureDecode::Ok:
+                        break;
+                    case mesh::GestureDecode::ForwardVersion:
+                        throw std::invalid_argument(
+                            "a topology delta written by a newer format version");
+                    case mesh::GestureDecode::Malformed:
+                        throw std::invalid_argument(
+                            "not a topology delta: malformed, truncated or trailing bytes");
+                }
+                return out;
+            },
+            "data"_a);
+
     nb::class_<PyDynamicSculptor>(
         m, "DynamicSculptor",
         "The brush engine over an adaptive surface: the same verbs, the same\n"
@@ -8490,7 +8574,7 @@ NB_MODULE(pyclay, m) {
                float radius, float strength, const std::string& falloff,
                const mesh::DynamicTopologySettings& topology, nb::handle direction,
                nb::handle mask, bool geodesic, int smooth_iterations, nb::handle automask,
-               float stamp_azimuth) {
+               float stamp_azimuth, mesh::RecordedGesture* record) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, center, radius, strength, falloff, direction, nb::none(),
@@ -8503,19 +8587,35 @@ NB_MODULE(pyclay, m) {
                 if (field_mask)
                     gate = [field_mask](kernel::cfloat3 p) { return field_mask->sample(p); };
                 mesh::DynamicStampResult r;
+                bool captured = true;
                 {
                     nb::gil_scoped_release release;
-                    r = self.stamp(chosen, settings, topology, gate, nullptr);
+                    if (record) {
+                        const auto recorded =
+                            self.stamp_recorded(chosen, settings, topology, gate, *record);
+                        captured = recorded.has_value();
+                        if (captured) r = *recorded;
+                    } else {
+                        r = self.stamp(chosen, settings, topology, gate, nullptr);
+                    }
                 }
+                if (!captured)
+                    throw std::invalid_argument(
+                        "snapshot mismatch: the record does not end where this surface is "
+                        "(another surface, or an unrecorded stamp or a replay since its last "
+                        "capture); nothing was stamped. Clear it or start a new one");
                 return dynamic_result_dict(r);
             },
             "verb"_a, "center"_a, "radius"_a, "strength"_a = 0.5f, "falloff"_a = "smooth",
             "topology"_a = mesh::DynamicTopologySettings{}, "direction"_a = nb::none(),
             "mask"_a = nb::none(), "geodesic"_a = true, "smooth_iterations"_a = 1,
-            "automask"_a = nb::none(), "stamp_azimuth"_a = 0.0f,
+            "automask"_a = nb::none(), "stamp_azimuth"_a = 0.0f, "record"_a = nb::none(),
             "One stamp: remesh where the verb's timing says, deform through the\n"
             "shared kernels, recompute the normals of what moved, and keep the\n"
-            "chunked index in step.")
+            "chunked index in step.\n\n"
+            "`record`, a `TopologyDelta`, accumulates the stamp as an undo step. A\n"
+            "non-empty record whose end is not this surface's state raises\n"
+            "ValueError and stamps nothing.")
         .def(
             "apply_stroke",
             [](PyDynamicSculptor& self, nb::handle samples, const brush::StrokePreset& preset,

@@ -28,9 +28,12 @@
 # index-buffer upload it needed. Same standard as test_c_abi_parity.py — do the
 # work, then check the two readings of it agree.
 #
-# UNDO/REDO IS DELIBERATELY ABSENT. `revert`/`apply` over a TopologyDelta wedge
-# the next stamp on a known open defect; parity for them belongs with that fix
-# and is deferred to it, not forgotten.
+# UNDO AND REDO (undo-a-dynamic-stroke-across-the-abi). `TopologyDelta` is the
+# same record `clay_dynamic_delta` is in C: captured by `stamp(record=)`,
+# replayed through the sculptor, refused with ValueError when the surface is at
+# neither end. The cases at the bottom hold the same claims the C tests do --
+# exports byte-identical at both ends, normals included, last in first out,
+# and the byte cost as a count.
 
 import math
 
@@ -501,3 +504,131 @@ def test_the_azimuth_column_reaches_the_alpha_only_when_oriented():
 
     assert run(0.0, True) != run(math.pi / 2, True)
     assert run(0.0, False) == run(math.pi / 2, False)
+
+
+# -- undo and redo -----------------------------------------------------------
+
+def export_arrays(s, sculptor):
+    """What a host sees, as bytes. `to_mesh` carries no normals for a surface
+    built from a mesh that had none, so the stored normals are read where a host
+    draws them from: every chunk's triangles as position and normal floats,
+    sorted so the chunk partition does not matter."""
+    m = s.to_mesh()
+    view = clay.SurfaceView.over_dynamic(sculptor)
+    shaded = []
+    for chunk in range(view.chunk_count):
+        got = view.copy_chunk(chunk)
+        idx = np.asarray(got["indices"], dtype=np.int64)
+        if idx.size:
+            p = np.asarray(got["positions"], dtype=np.float32)[idx]
+            n = np.asarray(got["normals"], dtype=np.float32)[idx]
+            shaded.append(np.concatenate([p, n], axis=1))
+    rows = np.concatenate(shaded).reshape(-1, 18).view(np.uint32)
+    rows = rows[np.lexsort(rows.T[::-1])]
+    return (np.asarray(m.positions).tobytes(), np.asarray(m.indices).tobytes(), rows.tobytes())
+
+
+def recorded_stroke(sculptor, record, pole=1.0, steps=6):
+    """The determinism stroke with the topology defaults' relax pass on, which
+    is the configuration whose record used to hold stale normals."""
+    topology = topology_on(8.0)
+    assert topology.relax_after_remesh is True
+    for i in range(steps):
+        centre = (-0.3 + 0.12 * i, 0.0, 0.95 * pole)
+        sculptor.stamp("draw", centre, 0.35, 0.3, topology=topology, record=record)
+
+
+def test_undo_and_redo_give_back_both_exports_bit_for_bit():
+    s = surface(16)
+    sculptor = clay.DynamicSculptor(s)
+    before = export_arrays(s, sculptor)
+    record = clay.TopologyDelta()
+    recorded_stroke(sculptor, record)
+    after = export_arrays(s, sculptor)
+    assert after != before
+
+    record.revert(sculptor)
+    assert export_arrays(s, sculptor) == before
+    assert s.validate()["ok"] is True
+    record.apply(sculptor)
+    assert export_arrays(s, sculptor) == after
+    assert s.validate()["ok"] is True
+
+
+def test_a_record_reports_its_byte_cost_as_a_count():
+    s = surface(12)
+    sculptor = clay.DynamicSculptor(s)
+    record = clay.TopologyDelta()
+    assert record.stats["encoded_bytes"] == 56
+    recorded_stroke(sculptor, record)
+    st = record.stats
+    assert min(st["vertices"], st["halfedges"], st["edges"], st["faces"]) > 0
+    assert st["encoded_bytes"] == (56 + 122 * st["vertices"] + 114 * st["halfedges"]
+                                   + 42 * st["edges"] + 66 * st["faces"])
+    assert len(record.serialize()) == st["encoded_bytes"]
+    assert st["resident_bytes"] >= st["encoded_bytes"] - 56
+    record.clear()
+    assert record.stats["encoded_bytes"] == 56
+
+
+def test_a_replay_out_of_order_is_refused_and_writes_nothing():
+    s = surface(12)
+    sculptor = clay.DynamicSculptor(s)
+    start = export_arrays(s, sculptor)
+    a, b = clay.TopologyDelta(), clay.TopologyDelta()
+    recorded_stroke(sculptor, a, pole=1.0)
+    after_a = export_arrays(s, sculptor)
+    recorded_stroke(sculptor, b, pole=-1.0)
+    after_b = export_arrays(s, sculptor)
+    revisions = (s.topology_revision, s.geometry_revision, s.attribute_revision)
+
+    with pytest.raises(ValueError, match="snapshot mismatch"):
+        a.revert(sculptor)
+    assert (s.topology_revision, s.geometry_revision, s.attribute_revision) == revisions
+    assert export_arrays(s, sculptor) == after_b
+
+    # An unrecorded capture onto a record that no longer ends here is refused
+    # too, and stamps nothing.
+    with pytest.raises(ValueError, match="snapshot mismatch"):
+        sculptor.stamp("draw", (0, 0, 1), 0.3, 0.3, topology=topology_on(), record=a)
+    assert (s.topology_revision, s.geometry_revision, s.attribute_revision) == revisions
+
+    b.revert(sculptor)
+    assert export_arrays(s, sculptor) == after_a
+    a.revert(sculptor)
+    assert export_arrays(s, sculptor) == start
+    a.revert(sculptor)  # reverting twice is reverting once
+    assert export_arrays(s, sculptor) == start
+    assert s.validate()["ok"] is True
+
+    # The same stroke again on the same sculptor repeats the first: the index
+    # followed the undo.
+    again = clay.TopologyDelta()
+    recorded_stroke(sculptor, again, pole=1.0)
+    assert export_arrays(s, sculptor) == after_a
+
+
+def test_a_record_round_trips_through_bytes_and_refuses_damage():
+    s = surface(12)
+    sculptor = clay.DynamicSculptor(s)
+    start = export_arrays(s, sculptor)
+    record = clay.TopologyDelta()
+    recorded_stroke(sculptor, record)
+
+    blob = record.serialize()
+    loaded = clay.TopologyDelta.deserialize(blob)
+    assert loaded.serialize() == blob
+    loaded.revert(sculptor)
+    assert export_arrays(s, sculptor) == start
+
+    with pytest.raises(ValueError, match="malformed"):
+        clay.TopologyDelta.deserialize(blob[:-1])
+    newer = bytearray(blob)
+    newer[4] = 2
+    with pytest.raises(ValueError, match="newer format version"):
+        clay.TopologyDelta.deserialize(bytes(newer))
+
+    # A surface reloaded from its own bytes is another surface.
+    other = clay.DynamicSurface.deserialize(s.serialize())
+    with pytest.raises(ValueError, match="snapshot mismatch"):
+        loaded.apply(clay.DynamicSculptor(other))
