@@ -45,9 +45,17 @@
 ## 3. Verify
 
 - [x] 3.1 `npx -y @fission-ai/openspec@1.12.0 validate --all --strict`.
-- [ ] 3.2 Build cpu-only with tests and run `'-sf=*test_relief.cpp'`, then the
+- [x] 3.2 Build cpu-only with tests and run `'-sf=*test_relief.cpp'`, then the
       full suite.
-- [ ] 3.3 `python3 tools/check_c_abi.py` (header touched) and
+- [x] 3.3 `python3 tools/check_c_abi.py` (header touched) and
       `python3 tools/release_check.py --skip-slow`.
+      c-abi OK against `build/cpu-only/libclay_shared.dylib` (hygiene + FFI);
+      `clay.h`, `kernel/tape.h` and `scene/types.h` compare identical to
+      origin/main with comments stripped (`gcc -fpreprocessed -dD -E -P`), so
+      `CLAY_ABI_*` stays at 0.117.0. release_check: every row passes except
+      `dialect` (no Metal Toolchain on this machine) and `device` (stale on
+      main too), plus the four manual hardware rows, which pass on origin/main
+      and fail here because ANY byte in `include/clay/kernel/` expires them —
+      the `tape.h` comment does. Comment-only, so a waiver at release names it.
 - [ ] 3.4 PR body: the measurement tables, the three refuted spellings, no ABI
       transition.
