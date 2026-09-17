@@ -1354,6 +1354,41 @@ do {
           "an undo past an unrecorded stamp is refused as a mismatch")
     clay_dynamic_delta_destroy(record)
 
+    // ABI 0.120.0: a WHOLE stroke recorded as one undo step, with the stroke's
+    // own meaning, replayed through the sculptor.
+    let strokeRecord = clay_dynamic_delta_create()
+    check(strokeRecord != nil, "created a record for a whole stroke")
+    var recordedApplied = 0
+    strokeSamples.withUnsafeMutableBufferPointer { samples in
+        check(clay_dynamic_sculptor_apply_stroke_recorded(sculptor, samples.baseAddress,
+                                                          samples.count, &strokePreset, &brush,
+                                                          &topo, nil, 0, strokeRecord,
+                                                          &recordedApplied, nil) == CLAY_OK,
+              "recorded a whole stroke")
+    }
+    check(recordedApplied > 0, "the recorded stroke changed the surface")
+    check(clay_dynamic_delta_revert(strokeRecord, sculptor) == CLAY_OK, "undid the whole stroke")
+    ok = 0
+    check(clay_dynamic_surface_validate(surface, &ok, nil, &messageLen) == CLAY_OK && ok == 1,
+          "the surface is valid after undoing a stroke")
+    check(clay_dynamic_delta_apply(strokeRecord, sculptor) == CLAY_OK, "redid the whole stroke")
+    ok = 0
+    check(clay_dynamic_surface_validate(surface, &ok, nil, &messageLen) == CLAY_OK && ok == 1,
+          "the surface is valid after redoing a stroke")
+    check(clay_dynamic_sculptor_stamp(sculptor, &brush, &topo, nil, nil) == CLAY_OK,
+          "an unrecorded stamp after the recorded stroke")
+    strokeSamples.withUnsafeMutableBufferPointer { samples in
+        var refusedApplied = 99
+        check(clay_dynamic_sculptor_apply_stroke_recorded(sculptor, samples.baseAddress,
+                                                          samples.count, &strokePreset, &brush,
+                                                          &topo, nil, 0, strokeRecord,
+                                                          &refusedApplied, nil)
+                  == CLAY_ERROR_SNAPSHOT_MISMATCH,
+              "a recorded stroke past an unrecorded stamp is a mismatch")
+        check(refusedApplied == 0, "a mismatched stroke applies nothing")
+    }
+    clay_dynamic_delta_destroy(strokeRecord)
+
     var exported: OpaquePointer? = nil
     check(clay_dynamic_surface_to_mesh(surface, &exported) == CLAY_OK,
           "exported the adaptive surface back to a mesh")

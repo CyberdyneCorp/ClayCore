@@ -632,3 +632,94 @@ def test_a_record_round_trips_through_bytes_and_refuses_damage():
     other = clay.DynamicSurface.deserialize(s.serialize())
     with pytest.raises(ValueError, match="snapshot mismatch"):
         loaded.apply(clay.DynamicSculptor(other))
+
+
+# -- a whole stroke as one undo step (record-a-whole-adaptive-stroke) --------
+#
+# `apply_stroke(record=)` / `apply_preset(record=)` are the Python halves of
+# clay_dynamic_sculptor_apply_stroke_recorded / _apply_preset_recorded. The
+# binding parity gate reads members, not keywords, so this pairing is held here
+# and in test_c_dynamic_delta.cpp.
+
+def pull(n=32):
+    """(N, 4) samples pulling straight out of the +Z pole: a Snakehook, whose
+    centre (the dragged vertex) a loop of `stamp(record=)` would not keep."""
+    out = np.zeros((n, 4), dtype=np.float32)
+    out[:, 2] = np.linspace(1.0, 1.8, n, dtype=np.float32)
+    out[:, 3] = 1.0
+    return out
+
+
+@pytest.mark.parametrize("verb", ["draw", "grab", "snakehook"])
+def test_a_recorded_stroke_is_the_stroke_and_one_undo_step(verb):
+    preset = clay.StrokePreset()
+    preset.radius = 0.3
+    preset.spacing = 0.1 if verb == "snakehook" else 0.25
+    samples = pull() if verb == "snakehook" else drag(-0.4, 0.4)
+    strength = 1.0 if verb == "snakehook" else 0.5
+
+    s, plain = surface(16), surface(16)
+    sculptor, plain_sculptor = clay.DynamicSculptor(s), clay.DynamicSculptor(plain)
+    before = export_arrays(s, sculptor)
+    record = clay.TopologyDelta()
+    r = sculptor.apply_stroke(samples, preset, verb, topology=topology_on(6.0),
+                              strength=strength, record=record)
+    p = plain_sculptor.apply_stroke(samples, preset, verb, topology=topology_on(6.0),
+                                    strength=strength)
+    after = export_arrays(s, sculptor)
+    assert r["split"] > 0, "the stroke never remeshed; the fixture is wrong"
+    assert r["applied"] == p["applied"] and r["moved"] == p["moved"]
+    assert after == export_arrays(plain, plain_sculptor)
+    assert record.stats["encoded_bytes"] > 56
+
+    record.revert(sculptor)
+    assert export_arrays(s, sculptor) == before
+    assert s.validate()["ok"] is True
+    record.apply(sculptor)
+    assert export_arrays(s, sculptor) == after
+    assert s.validate()["ok"] is True
+
+
+def test_a_recorded_preset_stroke_accumulates_and_reverts_as_one_step():
+    s = surface(16)
+    sculptor = clay.DynamicSculptor(s)
+    before = export_arrays(s, sculptor)
+    record = clay.TopologyDelta()
+    recorded_stroke(sculptor, record, steps=2)
+    after_stamps = record.stats["encoded_bytes"]
+    r = sculptor.apply_preset(drag(-0.4, 0.4), clay.BrushPreset.by_name("Standard"),
+                              topology=topology_on(6.0), record=record)
+    assert r["applied"] > 0
+    assert record.stats["encoded_bytes"] > after_stamps
+    record.revert(sculptor)
+    assert export_arrays(s, sculptor) == before
+    assert s.validate()["ok"] is True
+
+
+def test_a_mismatched_record_raises_and_the_stroke_applies_nothing():
+    s = surface(12)
+    sculptor = clay.DynamicSculptor(s)
+    preset = clay.StrokePreset()
+    preset.radius = 0.3
+    preset.spacing = 0.25
+    record = clay.TopologyDelta()
+    sculptor.apply_stroke(drag(-0.4, 0.4), preset, "draw", topology=topology_on(),
+                          record=record)
+    sculptor.stamp("draw", (0, 0, -1), 0.3, 0.3, topology=topology_on())  # unrecorded
+    held = record.stats
+    revisions = (s.topology_revision, s.geometry_revision, s.attribute_revision)
+    exported = export_arrays(s, sculptor)
+
+    with pytest.raises(ValueError, match="snapshot mismatch"):
+        sculptor.apply_stroke(drag(-0.4, 0.4), preset, "draw", topology=topology_on(),
+                              record=record)
+    with pytest.raises(ValueError, match="snapshot mismatch"):
+        sculptor.apply_preset(drag(-0.4, 0.4), clay.BrushPreset.by_name("Standard"),
+                              topology=topology_on(), record=record)
+    # A Layer stroke is refused for the verb, not reported as a mismatch.
+    with pytest.raises(ValueError, match="does not offer"):
+        sculptor.apply_stroke(drag(-0.4, 0.4), preset, "layer", topology=topology_on(),
+                              record=record)
+    assert (s.topology_revision, s.geometry_revision, s.attribute_revision) == revisions
+    assert export_arrays(s, sculptor) == exported
+    assert record.stats == held
