@@ -70,8 +70,9 @@ ABI 0.119.0 -> 0.120.0.
       `clay_dynamic_sculptor_apply_stroke` to point at the recorded siblings
 - [x] 4.4 Move the version lines: `CMakeLists.txt`, `clay.h`
       (`CLAY_ABI_MINOR 120`), `pyproject.toml`
-- [ ] 4.5 `tools/check_c_abi.py` passes against a rebuilt `libclay_shared`
+- [x] 4.5 `tools/check_c_abi.py` passes against a rebuilt `libclay_shared`
       (update its mirror only if it lists signatures)
+      — release_check `abi` row: c-abi OK (hygiene + ctypes FFI); no mirror change needed
 
 ## 5. C ABI tests
 
@@ -86,7 +87,8 @@ ABI 0.119.0 -> 0.120.0.
       mismatch); short report -> `CLAY_ERROR_INVALID_ARGUMENT`; both leave delta
       stats unchanged
 - [x] 5.5 NULL record behaves as `clay_dynamic_sculptor_apply_stroke`
-- [ ] 5.6 Swift smoke: recorded stroke, revert, apply, validate
+- [x] 5.6 Swift smoke: recorded stroke, revert, apply, validate
+      — `check_swift_smoke.sh typecheck` OK; the `macos` run cannot build the xcframework on this machine (no Metal Toolchain, same as `dialect`)
 
 ## 6. pyclay
 
@@ -115,9 +117,12 @@ ABI 0.119.0 -> 0.120.0.
 
 ## 7b. Verify
 
-- [ ] 7b.1 `clay_unit_tests` full, sharded, in the background; counts in the PR
-- [ ] 7b.2 `python3 tools/release_check.py --skip-slow`; diff any failure
+- [x] 7b.1 `clay_unit_tests` full, sharded, in the background; counts in the PR
+      — prefix 14 cases / 200 assertions, cull 29 / 1,032,985, heavy 154 / 387,472, rest 2,638 / 16,507,103, pyclay 769 passed 1 skipped
+- [x] 7b.2 `python3 tools/release_check.py --skip-slow`; diff any failure
       against origin/main (known machine-level: `dialect`, `device`)
-- [ ] 7b.3 `npx -y @fission-ai/openspec@1.12.0 validate --all --strict`
+      — FAIL rows: dialect and device (known), hardware/* (tape.h changed on origin/main in 9c5419ec, untouched here); every other row PASS, bindings imported the built pyclay
+- [x] 7b.3 `npx -y @fission-ai/openspec@1.12.0 validate --all --strict`
+      — 80 passed, 0 failed
 - [ ] 7b.4 PR body: why, what lands, what measuring refuted, suite counts, gates,
       ABI 0.119.0 -> 0.120.0
