@@ -214,7 +214,43 @@ counts across arms are the assertion; the clock is the header's statement.
 
 ## What building it found
 
-_To be written during implementation: what the plan above got wrong._
+The design held: `apply_to_dynamic_recorded` is the four-line prototype behind
+the stroke's own refusals, and the C and pyclay halves are thin. What building
+it found was about the tests, and one of them would have shipped inert.
+
+- **Undo/redo exactness cannot see an unbound start.** Mutation (a) of tasks 3.6,
+  deleting `begin_capture`, passed all 489 assertions of the first draft of the
+  C++ tests: an empty record then keeps `before = {0, 0}`, a revert restores the
+  surface bit-exactly and stamps it with that zero mark, and the apply accepts
+  the zero mark as the start. Every export, normal and index check agreed. The
+  host-visible damage is elsewhere — the surface is left at a mark no OLDER
+  record ends at, so the undo stack below the stroke is stranded. The test that
+  catches it records a dab, then a stroke, reverts both last in first out, and
+  checks the stroke's `before()` is the dab's end: 4 assertions fail under the
+  mutation, 0 without it.
+- **(b) dropping the mark check** fails 10 assertions in the refusal test (both
+  mismatch rows: the stroke ran, the record grew, revisions advanced, and the
+  replay no longer refused). **(c) checking the mark after the stroke** fails 6
+  (surface and revisions moved, summary written, record changed).
+- **C ABI mutations:** ignoring the record fails 11 assertions over 3 cases;
+  returning `CLAY_OK` on a mismatch fails 3; checking the mark before the Layer
+  refusal fails 1 — the Layer row. The short-report row cannot fail under that
+  mutation, because the report size is checked in the entry point before
+  `apply_dynamic_stroke` runs, so that half of design D4's order is structural.
+- **pyclay mutation** (the record never reaches the engine): all 5 new pytest
+  cases fail.
+- **A first-draft assertion was wrong, not the code:** comparing the recorded
+  stroke's `before()` with the per-stamp loop's across two surfaces fails,
+  because every surface has its own lineage. The byte equality (task 3.3) is the
+  comparison that means something.
+- **The parity gate lists neither the Python stroke methods nor the C stroke
+  calls by name**; it passed with 766 capabilities before and after. The
+  `record=` pairing is held by `test_dyntopo.py` and `test_c_dynamic_delta.cpp`,
+  and the gate's comment beside `TopologyDelta.stats` now says so.
+- **Cognitive complexity** (clang-tidy): `apply_to_dynamic_recorded` 3,
+  `apply_dynamic_stroke` 8, `clay_dynamic_sculptor_apply_stroke_recorded` 8,
+  `clay_dynamic_sculptor_apply_preset_recorded` 12, pyclay `stroke_dynamic` 1
+  (clang-tidy's figure; 3 by hand).
 
 ## Capabilities
 
