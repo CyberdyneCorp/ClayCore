@@ -1002,3 +1002,28 @@ TEST_CASE("allocation gate: full source priming adopts its filled sample payload
     CHECK(bytes < 2 * payload);
     CHECK(volume.sample_at(1, 1, 1) == 0.01f);
 }
+
+TEST_CASE("allocation gate: collapse planning reuses endpoint neighborhoods") {
+    for (int size : {20, 80}) {
+        auto surface = mesh::DynamicSurface::from_mesh(flat_patch(size, 0.02f));
+        REQUIRE(surface.has_value());
+        const auto middle = static_cast<std::uint32_t>(size / 2);
+        const auto stride = static_cast<std::uint32_t>(size + 1);
+        mesh::EdgeId edge;
+        REQUIRE(middle_edge(*surface, middle * stride + middle, &edge));
+        mesh::CollapseResult result;
+        std::size_t allocations = 0;
+        {
+            CountingScope scope;
+            result = mesh::collapse_edge(*surface, edge);
+            allocations = scope.count();
+        }
+        REQUIRE(result.result == mesh::TopologyResult::Ok);
+        CAPTURE(size);
+        CAPTURE(allocations);
+        // Main used 126 allocations at both sizes; shared planning fans use
+        // 80 here. Leave room for allocator/library variation while detecting
+        // the repeated traversal buffers that this change removes.
+        CHECK(allocations <= 96);
+    }
+}

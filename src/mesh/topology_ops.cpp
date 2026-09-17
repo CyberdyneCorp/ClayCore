@@ -512,9 +512,10 @@ struct CollapsePlan {
     HalfEdgeId h0, h1;
     VertexId v0, v1;
     std::vector<VertexId> ring0, ring1;
-    // The faces incident to each endpoint. Gathered by the geometric refusal
-    // and kept, because the write phase has to note every one of them and
-    // walking both fans a second time would be the same work twice.
+    // Planning does not mutate connectivity. Keep its two ordered fans for
+    // all refusal checks and pre-write bookkeeping, then discard them after
+    // rewiring rather than treating them as a persistent topology cache.
+    std::vector<HalfEdgeId> fan0, fan1;
     std::vector<FaceId> faces0, faces1;
     std::uint32_t edge_constraints = 0;
     kernel::cfloat3 target = kernel::cf3(0, 0, 0);
@@ -522,6 +523,16 @@ struct CollapsePlan {
     // is still alive. See the note at the call site.
     HalfEdgeId border_pred, border_succ;
 };
+
+void faces_from_fan(const DynamicSurface& surface, const std::vector<HalfEdgeId>& fan,
+                    std::vector<FaceId>* faces) {
+    faces->clear();
+    faces->reserve(fan.size());
+    for (HalfEdgeId h : fan) {
+        const FaceId f = surface.face_of(h);
+        if (surface.live(f)) faces->push_back(f);
+    }
+}
 
 // THE TOPOLOGICAL test, and the reason a geometric one is not enough: a
 // collapse whose endpoints share a neighbour that is NOT opposite the edge
@@ -572,21 +583,19 @@ TopologyResult collapse_link_refusal(const DynamicSurface& surface, HalfEdgeId h
 // So the surviving faces are enumerated with the merge applied and checked for
 // repeats. This is the "duplicate triangle" refusal the requirement names, and
 // it is not reachable from the link condition alone.
-TopologyResult collapse_duplicate_face_refusal(const DynamicSurface& surface, HalfEdgeId h0,
-                                               HalfEdgeId h1, VertexId v0, VertexId v1) {
-    std::vector<FaceId> around;
+TopologyResult collapse_duplicate_face_refusal(const DynamicSurface& surface,
+                                               const CollapsePlan& plan) {
     std::vector<std::array<std::uint32_t, 3>> triples;
-    for (VertexId v : {v0, v1}) {
-        if (!surface.incident_faces(v, &around)) return TopologyResult::InvalidInput;
-        for (FaceId f : around) {
+    for (const auto* faces : {&plan.faces0, &plan.faces1}) {
+        for (FaceId f : *faces) {
             bool dies = false;
-            for (HalfEdgeId h : {h0, h1})
+            for (HalfEdgeId h : {plan.h0, plan.h1})
                 if (surface.face_of(h) == f) dies = true;
             if (dies) continue;
             VertexId tri[3];
             if (!surface.face_vertices(f, tri)) return TopologyResult::InvalidInput;
             std::array<std::uint32_t, 3> key{};
-            for (int i = 0; i < 3; ++i) key[i] = (tri[i] == v1) ? v0.slot : tri[i].slot;
+            for (int i = 0; i < 3; ++i) key[i] = (tri[i] == plan.v1) ? plan.v0.slot : tri[i].slot;
             std::sort(key.begin(), key.end());
             triples.push_back(key);
         }
@@ -615,18 +624,18 @@ constexpr std::uint32_t kPinningConstraints =
 // Which pinning constraints hold `v`, as the union over its incident edges.
 //
 // The boundary flag is taken from the incidence rather than only from the edge
-// flags, because `is_boundary_vertex` is the authority the rest of the file
-// trusts and a vertex can sit on a border whose flags a caller never set.
-std::uint32_t pinning_constraints(const DynamicSurface& surface, VertexId v) {
-    std::uint32_t flags = surface.is_boundary_vertex(v)
-                              ? static_cast<std::uint32_t>(EdgeConstraint::Boundary)
-                              : 0u;
-    std::vector<HalfEdgeId> fan;
-    if (surface.outgoing_halfedges(v, &fan))
-        for (HalfEdgeId h : fan) {
-            const EdgeId e = surface.edge_of(h);
-            if (surface.live(e)) flags |= surface.edges().at(e).constraints;
-        }
+// flags: a vertex can sit on a border whose flags a caller never set. The
+// successfully gathered fan gives the same incidence as `is_boundary_vertex`.
+std::uint32_t pinning_constraints(const DynamicSurface& surface,
+                                  const std::vector<HalfEdgeId>& fan) {
+    // The fan was successfully walked during planning. Its boundary incidence
+    // and edge flags therefore answer both questions without walking it again.
+    std::uint32_t flags = 0;
+    for (HalfEdgeId h : fan) {
+        if (surface.is_boundary_halfedge(h)) flags |= EdgeConstraint::Boundary;
+        const EdgeId e = surface.edge_of(h);
+        if (surface.live(e)) flags |= surface.edges().at(e).constraints;
+    }
     return flags & kPinningConstraints;
 }
 
@@ -641,9 +650,11 @@ std::uint32_t pinning_constraints(const DynamicSurface& surface, VertexId v) {
 // unit sphere before the fix: a crease endpoint landed 0.137 away from where it
 // started, exactly on the midpoint.
 TopologyResult collapse_target(const DynamicSurface& surface, EdgeId edge, VertexId v0, VertexId v1,
-                               std::uint32_t edge_constraints, kernel::cfloat3* out) {
-    const std::uint32_t c0 = pinning_constraints(surface, v0);
-    const std::uint32_t c1 = pinning_constraints(surface, v1);
+                               std::uint32_t edge_constraints,
+                               const std::vector<HalfEdgeId>& fan0,
+                               const std::vector<HalfEdgeId>& fan1, kernel::cfloat3* out) {
+    const std::uint32_t c0 = pinning_constraints(surface, fan0);
+    const std::uint32_t c1 = pinning_constraints(surface, fan1);
     if (c0 && c1) {
         // Both endpoints held. Allowed only where the edge ITSELF carries a
         // constraint both of them share, which is the feature collapsing along
@@ -670,11 +681,8 @@ TopologyResult collapse_geometric_refusal(const DynamicSurface& surface, HalfEdg
                                           HalfEdgeId h1, VertexId v0, VertexId v1,
                                           kernel::cfloat3 target,
                                           const TopologyOpOptions& options,
-                                          std::vector<FaceId>* faces0_out,
-                                          std::vector<FaceId>* faces1_out) {
-    std::vector<FaceId>&faces0 = *faces0_out, &faces1 = *faces1_out;
-    if (!surface.incident_faces(v0, &faces0) || !surface.incident_faces(v1, &faces1))
-        return TopologyResult::InvalidInput;
+                                          const std::vector<FaceId>& faces0,
+                                          const std::vector<FaceId>& faces1) {
 
     std::vector<FaceId> dying;
     for (HalfEdgeId h : {h0, h1}) {
@@ -727,18 +735,22 @@ TopologyResult plan_collapse(const DynamicSurface& surface, EdgeId edge,
     plan->v0 = surface.origin_of(plan->h0);
     plan->v1 = surface.origin_of(plan->h1);
     if (!surface.live(plan->v0) || !surface.live(plan->v1)) return TopologyResult::InvalidInput;
-    if (!surface.one_ring(plan->v0, &plan->ring0) || !surface.one_ring(plan->v1, &plan->ring1))
+    if (!surface.one_ring(plan->v0, &plan->ring0, &plan->fan0) ||
+        !surface.one_ring(plan->v1, &plan->ring1, &plan->fan1))
         return TopologyResult::InvalidInput;
 
     TopologyResult r =
         collapse_link_refusal(surface, plan->h0, plan->h1, plan->ring0, plan->ring1);
     if (r != TopologyResult::Ok) return r;
-    r = collapse_duplicate_face_refusal(surface, plan->h0, plan->h1, plan->v0, plan->v1);
+    faces_from_fan(surface, plan->fan0, &plan->faces0);
+    faces_from_fan(surface, plan->fan1, &plan->faces1);
+    r = collapse_duplicate_face_refusal(surface, *plan);
     if (r != TopologyResult::Ok) return r;
-    r = collapse_target(surface, edge, plan->v0, plan->v1, plan->edge_constraints, &plan->target);
+    r = collapse_target(surface, edge, plan->v0, plan->v1, plan->edge_constraints,
+                        plan->fan0, plan->fan1, &plan->target);
     if (r != TopologyResult::Ok) return r;
     r = collapse_geometric_refusal(surface, plan->h0, plan->h1, plan->v0, plan->v1, plan->target,
-                                   options, &plan->faces0, &plan->faces1);
+                                   options, plan->faces0, plan->faces1);
     if (r != TopologyResult::Ok) return r;
 
     // THE BORDER LOOP, captured before anything is written.
@@ -795,27 +807,25 @@ CollapseResult detail::collapse_edge(DynamicSurface& surface, EdgeId edge,
     // Every half-edge in the two-ring, which is exactly what a collapse rewires
     // and exactly where a surviving outgoing handle can come from.
     std::vector<HalfEdgeId> neighbourhood;
-    std::vector<HalfEdgeId> ring_h;
-    for (VertexId v : {v0, v1}) {
-        if (surface.outgoing_halfedges(v, &ring_h))
-            for (HalfEdgeId h : ring_h) {
-                neighbourhood.push_back(h);
-                neighbourhood.push_back(surface.twin_of(h));
-                neighbourhood.push_back(surface.next_of(h));
-                neighbourhood.push_back(surface.next_of(surface.next_of(h)));
-                scribe.note(h);
-                scribe.note(surface.twin_of(h));
-                scribe.note(surface.next_of(h));
-                scribe.note(surface.edge_of(h));
-                scribe.note(surface.face_of(h));
-                // The far side of the fan's faces too.
-                const HalfEdgeId n = surface.next_of(h);
-                scribe.note(surface.twin_of(n));
-                const HalfEdgeId nn = surface.next_of(n);
-                scribe.note(nn);
-                scribe.note(surface.twin_of(nn));
-                scribe.note(surface.edge_of(nn));
-            }
+    for (const auto* fan : {&plan.fan0, &plan.fan1}) {
+        for (HalfEdgeId h : *fan) {
+            neighbourhood.push_back(h);
+            neighbourhood.push_back(surface.twin_of(h));
+            neighbourhood.push_back(surface.next_of(h));
+            neighbourhood.push_back(surface.next_of(surface.next_of(h)));
+            scribe.note(h);
+            scribe.note(surface.twin_of(h));
+            scribe.note(surface.next_of(h));
+            scribe.note(surface.edge_of(h));
+            scribe.note(surface.face_of(h));
+            // The far side of the fan's faces too.
+            const HalfEdgeId n = surface.next_of(h);
+            scribe.note(surface.twin_of(n));
+            const HalfEdgeId nn = surface.next_of(n);
+            scribe.note(nn);
+            scribe.note(surface.twin_of(nn));
+            scribe.note(surface.edge_of(nn));
+        }
     }
 
     // v0 survives; v1's half-edges are re-originated onto it.
@@ -825,9 +835,8 @@ CollapseResult detail::collapse_edge(DynamicSurface& surface, EdgeId edge,
     surface.vertices_mutable().at(v0).mask =
         (surface.vertices().at(v0).mask + surface.vertices().at(v1).mask) * 0.5f;
 
-    if (surface.outgoing_halfedges(v1, &ring_h))
-        for (HalfEdgeId h : ring_h)
-            if (surface.live(h)) surface.halfedges_mutable().at(h).origin = v0;
+    for (HalfEdgeId h : plan.fan1)
+        if (surface.live(h)) surface.halfedges_mutable().at(h).origin = v0;
 
     // Each dying face welds its two remaining edges into one: the half-edges
     // opposite the collapsed edge become twins of each other.

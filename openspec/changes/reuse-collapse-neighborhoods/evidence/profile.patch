@@ -1,0 +1,23 @@
+--- a/src/mesh/topology_ops.cpp
++++ b/src/mesh/topology_ops.cpp
+@@ -7,0 +8,2 @@
++#include <chrono>
++#include <cstdio>
+@@ -11,0 +14,3 @@
++struct Profile { double t[6]{}; ~Profile(){for(double v:t) std::fprintf(stderr," %.3f",v); std::fprintf(stderr,"\n");} } profile;
++struct Lap { std::chrono::steady_clock::time_point last=std::chrono::steady_clock::now(); void mark(int i){auto now=std::chrono::steady_clock::now();profile.t[i]+=std::chrono::duration<double,std::micro>(now-last).count();last=now;} };
++
+@@ -765,0 +771 @@
++    Lap lap;
+@@ -768,0 +775 @@
++    lap.mark(0);
+@@ -820,0 +828 @@
++    lap.mark(1);
+@@ -885,0 +894 @@
++    lap.mark(2);
+@@ -899,0 +909 @@
++    lap.mark(3);
+@@ -901,0 +912 @@
++    lap.mark(4);
+@@ -906,0 +918 @@
++    lap.mark(5);

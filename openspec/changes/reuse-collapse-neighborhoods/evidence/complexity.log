@@ -1,0 +1,596 @@
+[1/2] Processing file /home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp.
+67 warnings generated.
+[2/2] Processing file /home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp.
+173 warnings generated.
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:13:6: warning: function 'update_normals' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+   13 | void update_normals(DynamicSurface& surface, const std::vector<FaceId>& faces,
+      |      ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:21:17: warning: function 'lerp3' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+   21 | kernel::cfloat3 lerp3(kernel::cfloat3 a, kernel::cfloat3 b, float t) {
+      |                 ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:30:17: warning: function 'lerp2' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+   30 | kernel::cfloat2 lerp2(kernel::cfloat2 a, kernel::cfloat2 b, float t) {
+      |                 ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:36:7: warning: function 'lerp1' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+   36 | float lerp1(float a, float b, float t) {
+      |       ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:44:7: warning: function 'min_angle' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+   44 | float min_angle(kernel::cfloat3 a, kernel::cfloat3 b, kernel::cfloat3 c) {
+      |       ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:45:21: warning: lambda has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+   45 |     auto angle_at = [](kernel::cfloat3 p, kernel::cfloat3 q, kernel::cfloat3 r) {
+      |                     ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:58:17: warning: function 'triangle_normal' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+   58 | kernel::cfloat3 triangle_normal(kernel::cfloat3 a, kernel::cfloat3 b, kernel::cfloat3 c) {
+      |                 ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:81:10: warning: function 'note' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+   81 |     void note(VertexId id) {
+      |          ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:86:10: warning: function 'note' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+   86 |     void note(HalfEdgeId id) {
+      |          ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:91:10: warning: function 'note' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+   91 |     void note(EdgeId id) {
+      |          ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:96:10: warning: function 'note' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+   96 |     void note(FaceId id) {
+      |          ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:105:10: warning: function 'note_new' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+  105 |     void note_new(VertexId id) {
+      |          ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:110:10: warning: function 'note_new' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+  110 |     void note_new(HalfEdgeId id) {
+      |          ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:115:10: warning: function 'note_new' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+  115 |     void note_new(EdgeId id) {
+      |          ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:120:10: warning: function 'note_new' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+  120 |     void note_new(FaceId id) {
+      |          ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:127:10: warning: function 'sync_all' has cognitive complexity of 5 (threshold 0) [readability-function-cognitive-complexity]
+  127 |     void sync_all() {
+      |          ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:134:10: warning: function 'sync' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  134 |     void sync(VertexId id) {
+      |          ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:137:10: warning: function 'sync' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  137 |     void sync(HalfEdgeId id) {
+      |          ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:140:10: warning: function 'sync' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  140 |     void sync(EdgeId id) {
+      |          ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:143:10: warning: function 'sync' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  143 |     void sync(FaceId id) {
+      |          ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:153:12: warning: function 'boundary_predecessor' has cognitive complexity of 5 (threshold 0) [readability-function-cognitive-complexity]
+  153 | HalfEdgeId boundary_predecessor(const DynamicSurface& s, HalfEdgeId ghost) {
+      |            ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:173:6: warning: function 'reseat_outgoing' has cognitive complexity of 18 (threshold 0) [readability-function-cognitive-complexity]
+  173 | void reseat_outgoing(DynamicSurface& s, VertexId v, const std::vector<HalfEdgeId>& candidates) {
+      |      ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:201:7: warning: function 'edge_pair_quality' has cognitive complexity of 5 (threshold 0) [readability-function-cognitive-complexity]
+  201 | float edge_pair_quality(const DynamicSurface& surface, EdgeId edge) {
+      |       ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:219:21: warning: function 'split_edge' has cognitive complexity of 38 (threshold 0) [readability-function-cognitive-complexity]
+  219 | SplitResult detail::split_edge(DynamicSurface& surface, EdgeId edge, float t,
+      |                     ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:527:6: warning: function 'faces_from_fan' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+  527 | void faces_from_fan(const DynamicSurface& surface, const std::vector<HalfEdgeId>& fan,
+      |      ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:546:16: warning: function 'collapse_link_refusal' has cognitive complexity of 18 (threshold 0) [readability-function-cognitive-complexity]
+  546 | TopologyResult collapse_link_refusal(const DynamicSurface& surface, HalfEdgeId h0, HalfEdgeId h1,
+      |                ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:586:16: warning: function 'collapse_duplicate_face_refusal' has cognitive complexity of 24 (threshold 0) [readability-function-cognitive-complexity]
+  586 | TopologyResult collapse_duplicate_face_refusal(const DynamicSurface& surface,
+      |                ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:629:15: warning: function 'pinning_constraints' has cognitive complexity of 5 (threshold 0) [readability-function-cognitive-complexity]
+  629 | std::uint32_t pinning_constraints(const DynamicSurface& surface,
+      |               ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:652:16: warning: function 'collapse_target' has cognitive complexity of 7 (threshold 0) [readability-function-cognitive-complexity]
+  652 | TopologyResult collapse_target(const DynamicSurface& surface, EdgeId edge, VertexId v0, VertexId v1,
+      |                ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:680:16: warning: function 'collapse_geometric_refusal' has cognitive complexity of 31 (threshold 0) [readability-function-cognitive-complexity]
+  680 | TopologyResult collapse_geometric_refusal(const DynamicSurface& surface, HalfEdgeId h0,
+      |                ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:692:21: warning: lambda has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+  692 |     auto is_dying = [&](FaceId f) {
+      |                     ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:719:16: warning: function 'plan_collapse' has cognitive complexity of 15 (threshold 0) [readability-function-cognitive-complexity]
+  719 | TopologyResult plan_collapse(const DynamicSurface& surface, EdgeId edge,
+      |                ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:775:24: warning: function 'collapse_edge' has cognitive complexity of 39 (threshold 0) [readability-function-cognitive-complexity]
+  775 | CollapseResult detail::collapse_edge(DynamicSurface& surface, EdgeId edge,
+      |                        ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:924:20: warning: function 'flip_edge' has cognitive complexity of 24 (threshold 0) [readability-function-cognitive-complexity]
+  924 | FlipResult detail::flip_edge(DynamicSurface& surface, EdgeId edge, const TopologyOpOptions& options,
+      |                    ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:1057:29: warning: function 'update' has cognitive complexity of 4 (threshold 0) [readability-function-cognitive-complexity]
+ 1057 | void detail::NormalUpdates::update(DynamicSurface& surface, const std::vector<FaceId>& faces) {
+      |                             ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:1074:6: warning: function 'unique_handles' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+ 1074 | void unique_handles(std::vector<Id>& ids) {
+      |      ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:1076:39: warning: lambda has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+ 1076 |     std::sort(ids.begin(), ids.end(), [](Id a, Id b) {
+      |                                       ^
+/home/leonardo/work/ClayCore/src/mesh/topology_ops.cpp:1083:29: warning: function 'flush' has cognitive complexity of 14 (threshold 0) [readability-function-cognitive-complexity]
+ 1083 | void detail::NormalUpdates::flush(DynamicSurface& surface, TopologyDelta* delta) {
+      |                             ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:73:6: warning: function 'plane_grid' has cognitive complexity of 9 (threshold 0) [readability-function-cognitive-complexity]
+   73 | Mesh plane_grid(int n, float half) {
+      |      ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:112:13: warning: function 'allocations_for_warm_stamp' has cognitive complexity of 4 (threshold 0) [readability-function-cognitive-complexity]
+  112 | std::size_t allocations_for_warm_stamp(MeshBrush verb, bool with_colors, bool with_record) {
+      |             ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:152:7: warning: function 'operator new' has cognitive complexity of 4 (threshold 0) [readability-function-cognitive-complexity]
+  152 | void* operator new(std::size_t n) {
+      |       ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:160:7: warning: function 'operator new' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+  160 | void* operator new(std::size_t n, const std::nothrow_t&) noexcept {
+      |       ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:186:1: warning: function 'DOCTEST_ANON_FUNC_186' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  186 | TEST_CASE("allocation gate: a warm local stamp allocates nothing") {
+      | ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:3749:25: note: expanded from macro 'TEST_CASE'
+ 3749 | #define TEST_CASE(name) DOCTEST_TEST_CASE(name)
+      |                         ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:2973:42: note: expanded from macro 'DOCTEST_TEST_CASE'
+ 2973 |     DOCTEST_CREATE_AND_REGISTER_FUNCTION(DOCTEST_ANONYMOUS(DOCTEST_ANON_FUNC_), decorators)
+      |                                          ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:548:30: note: expanded from macro 'DOCTEST_ANONYMOUS'
+  548 | #define DOCTEST_ANONYMOUS(x) DOCTEST_CAT(x, DOCTEST_COUNTER)
+      |                              ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:547:29: note: expanded from macro 'DOCTEST_CAT'
+  547 | #define DOCTEST_CAT(s1, s2) DOCTEST_CAT_IMPL(s1, s2)
+      |                             ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:546:34: note: expanded from macro 'DOCTEST_CAT_IMPL'
+note: expanded from here
+  546 | #define DOCTEST_CAT_IMPL(s1, s2) s1##s2
+      |                                  ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:208:1: warning: function 'DOCTEST_ANON_FUNC_208' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  208 | TEST_CASE("allocation gate: a repeated stamp does not grow the undo record") {
+      | ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:3749:25: note: expanded from macro 'TEST_CASE'
+ 3749 | #define TEST_CASE(name) DOCTEST_TEST_CASE(name)
+      |                         ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:2973:42: note: expanded from macro 'DOCTEST_TEST_CASE'
+ 2973 |     DOCTEST_CREATE_AND_REGISTER_FUNCTION(DOCTEST_ANONYMOUS(DOCTEST_ANON_FUNC_), decorators)
+      |                                          ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:548:30: note: expanded from macro 'DOCTEST_ANONYMOUS'
+  548 | #define DOCTEST_ANONYMOUS(x) DOCTEST_CAT(x, DOCTEST_COUNTER)
+      |                              ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:547:29: note: expanded from macro 'DOCTEST_CAT'
+  547 | #define DOCTEST_CAT(s1, s2) DOCTEST_CAT_IMPL(s1, s2)
+      |                             ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:546:34: note: expanded from macro 'DOCTEST_CAT_IMPL'
+note: expanded from here
+  546 | #define DOCTEST_CAT_IMPL(s1, s2) s1##s2
+      |                                  ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:240:12: warning: function 'flat_patch' has cognitive complexity of 6 (threshold 0) [readability-function-cognitive-complexity]
+  240 | mesh::Mesh flat_patch(int n, float spacing) {
+      |            ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:262:6: warning: function 'middle_edge' has cognitive complexity of 5 (threshold 0) [readability-function-cognitive-complexity]
+  262 | bool middle_edge(const mesh::DynamicSurface& surface, std::uint32_t vertex, mesh::EdgeId* out) {
+      |      ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:264:35: warning: lambda has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+  264 |     surface.edges().for_each_live([&](mesh::EdgeId id, const mesh::DynamicEdge&) {
+      |                                   ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:277:6: warning: function 'split_collapse_round' has cognitive complexity of 7 (threshold 0) [readability-function-cognitive-complexity]
+  277 | bool split_collapse_round(mesh::DynamicSurface& surface, std::uint32_t vertex) {
+      |      ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:300:13: warning: function 'bytes_for_warm_split_and_collapse' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  300 | std::size_t bytes_for_warm_split_and_collapse(int n) {
+      |             ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:363:18: warning: function 'remesh_ball' has cognitive complexity of 8 (threshold 0) [readability-function-cognitive-complexity]
+  363 | clay::mesh::Mesh remesh_ball(int rings = 24, int segments = 48) {
+      |                  ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:487:1: warning: function 'DOCTEST_ANON_FUNC_487' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  487 | TEST_CASE("allocation gate: a surface drag's cost per warped item is bounded") {
+      | ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:3749:25: note: expanded from macro 'TEST_CASE'
+ 3749 | #define TEST_CASE(name) DOCTEST_TEST_CASE(name)
+      |                         ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:2973:42: note: expanded from macro 'DOCTEST_TEST_CASE'
+ 2973 |     DOCTEST_CREATE_AND_REGISTER_FUNCTION(DOCTEST_ANONYMOUS(DOCTEST_ANON_FUNC_), decorators)
+      |                                          ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:548:30: note: expanded from macro 'DOCTEST_ANONYMOUS'
+  548 | #define DOCTEST_ANONYMOUS(x) DOCTEST_CAT(x, DOCTEST_COUNTER)
+      |                              ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:547:29: note: expanded from macro 'DOCTEST_CAT'
+  547 | #define DOCTEST_CAT(s1, s2) DOCTEST_CAT_IMPL(s1, s2)
+      |                             ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:546:34: note: expanded from macro 'DOCTEST_CAT_IMPL'
+note: expanded from here
+  546 | #define DOCTEST_CAT_IMPL(s1, s2) s1##s2
+      |                                  ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:561:6: warning: function 'centred_plane' has cognitive complexity of 9 (threshold 0) [readability-function-cognitive-complexity]
+  561 | Mesh centred_plane(int n, float spacing) {
+      |      ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:590:11: warning: function 'warm_stamp_on' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  590 | WarmStamp warm_stamp_on(int n, MeshBrush verb) {
+      |           ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:622:1: warning: function 'DOCTEST_ANON_FUNC_622' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+  622 | TEST_CASE("allocation gate: a stack chunk costs its bytes, not the levels it names") {
+      | ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:3749:25: note: expanded from macro 'TEST_CASE'
+ 3749 | #define TEST_CASE(name) DOCTEST_TEST_CASE(name)
+      |                         ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:2973:42: note: expanded from macro 'DOCTEST_TEST_CASE'
+ 2973 |     DOCTEST_CREATE_AND_REGISTER_FUNCTION(DOCTEST_ANONYMOUS(DOCTEST_ANON_FUNC_), decorators)
+      |                                          ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:548:30: note: expanded from macro 'DOCTEST_ANONYMOUS'
+  548 | #define DOCTEST_ANONYMOUS(x) DOCTEST_CAT(x, DOCTEST_COUNTER)
+      |                              ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:547:29: note: expanded from macro 'DOCTEST_CAT'
+  547 | #define DOCTEST_CAT(s1, s2) DOCTEST_CAT_IMPL(s1, s2)
+      |                             ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:546:34: note: expanded from macro 'DOCTEST_CAT_IMPL'
+note: expanded from here
+  546 | #define DOCTEST_CAT_IMPL(s1, s2) s1##s2
+      |                                  ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:647:22: warning: lambda has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  647 |     const auto u32 = [&chunk](std::uint32_t v) {
+      |                      ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:701:13: warning: function 'allocations_for_warm_automasked_stamp' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+  701 | std::size_t allocations_for_warm_automasked_stamp(MeshBrush verb) {
+      |             ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:738:1: warning: function 'DOCTEST_ANON_FUNC_738' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  738 | TEST_CASE("allocation gate: a warm stamp's cost does not follow the model") {
+      | ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:3749:25: note: expanded from macro 'TEST_CASE'
+ 3749 | #define TEST_CASE(name) DOCTEST_TEST_CASE(name)
+      |                         ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:2973:42: note: expanded from macro 'DOCTEST_TEST_CASE'
+ 2973 |     DOCTEST_CREATE_AND_REGISTER_FUNCTION(DOCTEST_ANONYMOUS(DOCTEST_ANON_FUNC_), decorators)
+      |                                          ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:548:30: note: expanded from macro 'DOCTEST_ANONYMOUS'
+  548 | #define DOCTEST_ANONYMOUS(x) DOCTEST_CAT(x, DOCTEST_COUNTER)
+      |                              ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:547:29: note: expanded from macro 'DOCTEST_CAT'
+  547 | #define DOCTEST_CAT(s1, s2) DOCTEST_CAT_IMPL(s1, s2)
+      |                             ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:546:34: note: expanded from macro 'DOCTEST_CAT_IMPL'
+note: expanded from here
+  546 | #define DOCTEST_CAT_IMPL(s1, s2) s1##s2
+      |                                  ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:764:1: warning: function 'DOCTEST_ANON_FUNC_764' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  764 | TEST_CASE("allocation gate: a warm AUTOMASKED stamp allocates nothing") {
+      | ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:3749:25: note: expanded from macro 'TEST_CASE'
+ 3749 | #define TEST_CASE(name) DOCTEST_TEST_CASE(name)
+      |                         ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:2973:42: note: expanded from macro 'DOCTEST_TEST_CASE'
+ 2973 |     DOCTEST_CREATE_AND_REGISTER_FUNCTION(DOCTEST_ANONYMOUS(DOCTEST_ANON_FUNC_), decorators)
+      |                                          ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:548:30: note: expanded from macro 'DOCTEST_ANONYMOUS'
+  548 | #define DOCTEST_ANONYMOUS(x) DOCTEST_CAT(x, DOCTEST_COUNTER)
+      |                              ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:547:29: note: expanded from macro 'DOCTEST_CAT'
+  547 | #define DOCTEST_CAT(s1, s2) DOCTEST_CAT_IMPL(s1, s2)
+      |                             ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:546:34: note: expanded from macro 'DOCTEST_CAT_IMPL'
+note: expanded from here
+  546 | #define DOCTEST_CAT_IMPL(s1, s2) s1##s2
+      |                                  ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:817:1: warning: function 'DOCTEST_ANON_FUNC_817' has cognitive complexity of 5 (threshold 0) [readability-function-cognitive-complexity]
+  817 | TEST_CASE("allocation gate: a warm adaptive stamp allocates nothing") {
+      | ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:3749:25: note: expanded from macro 'TEST_CASE'
+ 3749 | #define TEST_CASE(name) DOCTEST_TEST_CASE(name)
+      |                         ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:2973:42: note: expanded from macro 'DOCTEST_TEST_CASE'
+ 2973 |     DOCTEST_CREATE_AND_REGISTER_FUNCTION(DOCTEST_ANONYMOUS(DOCTEST_ANON_FUNC_), decorators)
+      |                                          ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:548:30: note: expanded from macro 'DOCTEST_ANONYMOUS'
+  548 | #define DOCTEST_ANONYMOUS(x) DOCTEST_CAT(x, DOCTEST_COUNTER)
+      |                              ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:547:29: note: expanded from macro 'DOCTEST_CAT'
+  547 | #define DOCTEST_CAT(s1, s2) DOCTEST_CAT_IMPL(s1, s2)
+      |                             ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:546:34: note: expanded from macro 'DOCTEST_CAT_IMPL'
+note: expanded from here
+  546 | #define DOCTEST_CAT_IMPL(s1, s2) s1##s2
+      |                                  ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:861:1: warning: function 'DOCTEST_ANON_FUNC_861' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+  861 | TEST_CASE("allocation gate: a warm AUTOMASKED adaptive stamp allocates nothing") {
+      | ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:3749:25: note: expanded from macro 'TEST_CASE'
+ 3749 | #define TEST_CASE(name) DOCTEST_TEST_CASE(name)
+      |                         ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:2973:42: note: expanded from macro 'DOCTEST_TEST_CASE'
+ 2973 |     DOCTEST_CREATE_AND_REGISTER_FUNCTION(DOCTEST_ANONYMOUS(DOCTEST_ANON_FUNC_), decorators)
+      |                                          ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:548:30: note: expanded from macro 'DOCTEST_ANONYMOUS'
+  548 | #define DOCTEST_ANONYMOUS(x) DOCTEST_CAT(x, DOCTEST_COUNTER)
+      |                              ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:547:29: note: expanded from macro 'DOCTEST_CAT'
+  547 | #define DOCTEST_CAT(s1, s2) DOCTEST_CAT_IMPL(s1, s2)
+      |                             ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:546:34: note: expanded from macro 'DOCTEST_CAT_IMPL'
+note: expanded from here
+  546 | #define DOCTEST_CAT_IMPL(s1, s2) s1##s2
+      |                                  ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:898:1: warning: function 'DOCTEST_ANON_FUNC_898' has cognitive complexity of 8 (threshold 0) [readability-function-cognitive-complexity]
+  898 | TEST_CASE("allocation gate: a warm multiresolution stamp allocates nothing") {
+      | ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:3749:25: note: expanded from macro 'TEST_CASE'
+ 3749 | #define TEST_CASE(name) DOCTEST_TEST_CASE(name)
+      |                         ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:2973:42: note: expanded from macro 'DOCTEST_TEST_CASE'
+ 2973 |     DOCTEST_CREATE_AND_REGISTER_FUNCTION(DOCTEST_ANONYMOUS(DOCTEST_ANON_FUNC_), decorators)
+      |                                          ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:548:30: note: expanded from macro 'DOCTEST_ANONYMOUS'
+  548 | #define DOCTEST_ANONYMOUS(x) DOCTEST_CAT(x, DOCTEST_COUNTER)
+      |                              ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:547:29: note: expanded from macro 'DOCTEST_CAT'
+  547 | #define DOCTEST_CAT(s1, s2) DOCTEST_CAT_IMPL(s1, s2)
+      |                             ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:546:34: note: expanded from macro 'DOCTEST_CAT_IMPL'
+note: expanded from here
+  546 | #define DOCTEST_CAT_IMPL(s1, s2) s1##s2
+      |                                  ^
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:1006:1: warning: function 'DOCTEST_ANON_FUNC_1006' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+ 1006 | TEST_CASE("allocation gate: collapse planning reuses endpoint neighborhoods") {
+      | ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:3749:25: note: expanded from macro 'TEST_CASE'
+ 3749 | #define TEST_CASE(name) DOCTEST_TEST_CASE(name)
+      |                         ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:2973:42: note: expanded from macro 'DOCTEST_TEST_CASE'
+ 2973 |     DOCTEST_CREATE_AND_REGISTER_FUNCTION(DOCTEST_ANONYMOUS(DOCTEST_ANON_FUNC_), decorators)
+      |                                          ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:548:30: note: expanded from macro 'DOCTEST_ANONYMOUS'
+  548 | #define DOCTEST_ANONYMOUS(x) DOCTEST_CAT(x, DOCTEST_COUNTER)
+      |                              ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:547:29: note: expanded from macro 'DOCTEST_CAT'
+  547 | #define DOCTEST_CAT(s1, s2) DOCTEST_CAT_IMPL(s1, s2)
+      |                             ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:546:34: note: expanded from macro 'DOCTEST_CAT_IMPL'
+note: expanded from here
+  546 | #define DOCTEST_CAT_IMPL(s1, s2) s1##s2
+      |                                  ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:936:11: warning: function 'c_str' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  936 |     char *c_str() {
+      |           ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:1183:17: warning: function 'fill' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+ 1183 |     static void fill(std::ostream *stream, const T (&in)[N]) {
+      |                 ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:1201:17: warning: function 'fill' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+ 1201 |     static void fill(std::ostream *stream, const char (&in)[N]) {
+      |                 ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:1251:17: warning: function 'fill' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+ 1251 |     static void fill(std::ostream *stream, const DOCTEST_REF_WRAP(T) in) {
+      |                 ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:1647:14: warning: function 'check' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+ 1647 |         bool check(const String &str) {
+      |              ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:1871:27: warning: function 'binary_assert' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+ 1871 |     DOCTEST_NOINLINE bool binary_assert(const DOCTEST_REF_WRAP(L) lhs, const DOCTEST_REF_WRAP(R) rhs) {
+      |                           ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:1880:27: warning: function 'unary_assert' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+ 1880 |     DOCTEST_NOINLINE bool unary_assert(const DOCTEST_REF_WRAP(L) val) {
+      |                           ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:1981:22: warning: function 'operator Result' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+ 1981 |     DOCTEST_NOINLINE operator Result() {
+      |                      ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:2347:10: warning: function 'translate' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+ 2347 |     bool translate(String &res) const override {
+      |          ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:2451:5: warning: function '~ContextScope<L>' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+ 2451 |     ~ContextScope() override {
+      |     ^
+build/cpu-only/_deps/doctest-src/doctest/doctest.h:2701:1: warning: function 'unary_assert' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+ 2701 | unary_assert(assertType::Enum at, const char *file, int line, const char *expr, const DOCTEST_REF_WRAP(L) val) {
+      | ^
+include/clay/field/volume.h:174:10: warning: function 'set_sample_lipschitz' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  174 |     void set_sample_lipschitz(float v) { sample_lipschitz_ = v > 1.0f ? v : 1.0f; }
+      |          ^
+include/clay/field/volume.h:183:10: warning: function 'set_feather' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  183 |     void set_feather(float v) { feather_ = v > 0.0f ? v : 0.0f; }
+      |          ^
+include/clay/kernel/shim.h:111:15: warning: function 'cmin' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  111 | CLAY_FN float cmin(float a, float b) { return a < b ? a : b; }
+      |               ^
+include/clay/kernel/shim.h:112:15: warning: function 'cmax' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  112 | CLAY_FN float cmax(float a, float b) { return a > b ? a : b; }
+      |               ^
+include/clay/kernel/shim.h:115:15: warning: function 'csign' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+  115 | CLAY_FN float csign(float v) { return (v > 0.0f) ? 1.0f : ((v < 0.0f) ? -1.0f : 0.0f); }
+      |               ^
+include/clay/math/geom.h:29:10: warning: function 'empty' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+   29 |     bool empty() const { return min.x > max.x || min.y > max.y || min.z > max.z; }
+      |          ^
+include/clay/math/geom.h:30:10: warning: function 'is_infinite' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+   30 |     bool is_infinite() const { return !empty() && (min.x == -FLT_MAX || max.x == FLT_MAX); }
+      |          ^
+include/clay/math/geom.h:39:10: warning: function 'expand' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+   39 |     void expand(const Aabb& b) {
+      |          ^
+include/clay/math/geom.h:45:10: warning: function 'dilated' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+   45 |     Aabb dilated(float r) const {
+      |          ^
+include/clay/math/geom.h:50:10: warning: function 'intersects' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+   50 |     bool intersects(const Aabb& b) const {
+      |          ^
+include/clay/math/geom.h:56:10: warning: function 'contains' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+   56 |     bool contains(cfloat3 p) const {
+      |          ^
+include/clay/math/geom.h:68:10: warning: function 'transformed' has cognitive complexity of 9 (threshold 0) [readability-function-cognitive-complexity]
+   68 |     Aabb transformed(const cfloat4x4& m) const {
+      |          ^
+include/clay/math/geom.h:87:13: warning: function 'ray_aabb' has cognitive complexity of 12 (threshold 0) [readability-function-cognitive-complexity]
+   87 | inline bool ray_aabb(const Ray& r, const Aabb& b, float* t0, float* t1) {
+      |             ^
+include/clay/math/geom.h:127:10: warning: function 'intersects' has cognitive complexity of 10 (threshold 0) [readability-function-cognitive-complexity]
+  127 |     bool intersects(const Aabb& b) const {
+      |          ^
+include/clay/memory/budget.h:248:5: warning: function '~MemoryPin' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+  248 |     ~MemoryPin() {
+      |     ^
+include/clay/memory/budget.h:260:13: warning: function 'trim_blocked' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  260 | inline bool trim_blocked(const TrimGate* gate) { return gate != nullptr && gate->pinned(); }
+      |             ^
+include/clay/mesh/adjacency.h:63:17: warning: function 'class_count' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+   63 |     std::size_t class_count() const {
+      |                 ^
+include/clay/mesh/adjacency.h:92:10: warning: function 'matches' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+   92 |     bool matches(const Mesh& m) const {
+      |          ^
+include/clay/mesh/automask.h:127:10: warning: function 'empty' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  127 |     bool empty() const { return !cavity && !group; }
+      |          ^
+include/clay/mesh/brush_arena.h:82:10: warning: function 'push_back' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+   82 |     bool push_back(const T& value) {
+      |          ^
+include/clay/mesh/brush_arena.h:113:10: warning: function 'assign_all' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  113 |     void assign_all(const T& value) {
+      |          ^
+include/clay/mesh/brush_arena.h:155:8: warning: function 'allocate' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  155 |     T* allocate(std::size_t count) {
+      |        ^
+include/clay/mesh/bvh.h:103:11: warning: function 'signed_distance' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  103 |     float signed_distance(kernel::cfloat3 p, float beta = 2.0f) const {
+      |           ^
+include/clay/mesh/chunk_tree.h:54:16: warning: function 'bounds' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+   54 |     math::Aabb bounds() const { return nodes_.empty() ? math::Aabb{} : nodes_[0].bounds; }
+      |                ^
+include/clay/mesh/cross_level.h:141:21: warning: function 'position' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  141 |     kernel::cfloat3 position(const std::vector<kernel::cfloat3>& own,
+      |                     ^
+include/clay/mesh/cross_level.h:170:33: warning: function 'span' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  170 |     static const std::uint32_t* span(const std::vector<std::uint32_t>& offsets,
+      |                                 ^
+include/clay/mesh/detail_field.h:57:10: warning: function 'zero' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+   57 |     bool zero() const { return tangent == 0.0f && bitangent == 0.0f && normal == 0.0f; }
+      |          ^
+include/clay/mesh/detail_field.h:58:10: warning: function 'operator==' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+   58 |     bool operator==(const LocalDetail& o) const {
+      |          ^
+include/clay/mesh/dynamic_sculpt.h:71:10: warning: function 'changed' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+   71 |     bool changed() const { return moved_vertices > 0 || remesh.total() > 0; }
+      |          ^
+include/clay/mesh/dynamic_surface.h:205:17: warning: function 'operator==' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  205 |     friend bool operator==(const SurfaceMark& a, const SurfaceMark& b) {
+      |                 ^
+include/clay/mesh/multires_sculpt.h:58:10: warning: function 'empty' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+   58 |     bool empty() const { return detail_.empty() && base_vertices_.empty(); }
+      |          ^
+include/clay/mesh/remesh_local.h:98:11: warning: function 'target_for' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+   98 |     float target_for(float brush_radius) const {
+      |           ^
+include/clay/mesh/sculpt_common.h:260:10: warning: function 'has_alpha' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  260 |     bool has_alpha() const { return alpha != nullptr && alpha_width >= 2 && alpha_height >= 2; }
+      |          ^
+include/clay/mesh/sculpt_common.h:316:10: warning: function 'add' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  316 |     void add(SculptStage stage, std::uint64_t ns) {
+      |          ^
+include/clay/mesh/sculpt_common.h:385:13: warning: function 'count' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  385 | inline void count(SculptCounters* counters, std::uint64_t SculptCounters::*field,
+      |             ^
+include/clay/mesh/sculpt_common.h:395:5: warning: function 'StageTimer' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  395 |     StageTimer(StageTelemetry* telemetry, SculptStage stage)
+      |     ^
+include/clay/mesh/sculpt_common.h:402:10: warning: function 'stop' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  402 |     void stop() {
+      |          ^
+include/clay/mesh/sculpt_layer.h:220:11: warning: function 'composition_factor' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  220 |     float composition_factor() const { return visible ? strength : 0.0f; }
+      |           ^
+include/clay/mesh/sculpt_layer.h:532:10: warning: function 'empty' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  532 |     bool empty() const { return detail_.empty() && mask_.empty(); }
+      |          ^
+include/clay/mesh/slot_pool.h:60:17: warning: function 'operator==' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+   60 |     friend bool operator==(const SlotId& a, const SlotId& b) {
+      |                 ^
+include/clay/mesh/slot_pool.h:94:8: warning: function 'create' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+   94 |     Id create(const T& value) {
+      |        ^
+include/clay/mesh/slot_pool.h:115:10: warning: function 'erase' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  115 |     bool erase(Id id) {
+      |          ^
+include/clay/mesh/slot_pool.h:129:10: warning: function 'live' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  129 |     bool live(Id id) const {
+      |          ^
+include/clay/mesh/slot_pool.h:134:8: warning: function 'get' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  134 |     T* get(Id id) { return live(id) ? &slots_[id.slot].value : nullptr; }
+      |        ^
+include/clay/mesh/slot_pool.h:135:14: warning: function 'get' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  135 |     const T* get(Id id) const { return live(id) ? &slots_[id.slot].value : nullptr; }
+      |              ^
+include/clay/mesh/slot_pool.h:146:8: warning: function 'id_at' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+  146 |     Id id_at(std::uint32_t slot) const {
+      |        ^
+include/clay/mesh/slot_pool.h:151:10: warning: function 'live_at' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  151 |     bool live_at(std::uint32_t slot) const { return slot < slots_.size() && slots_[slot].live; }
+      |          ^
+include/clay/mesh/slot_pool.h:165:10: warning: function 'free_list_intact' has cognitive complexity of 10 (threshold 0) [readability-function-cognitive-complexity]
+  165 |     bool free_list_intact(std::size_t* out_visited = nullptr, bool* out_cycle = nullptr,
+      |          ^
+include/clay/mesh/slot_pool.h:193:10: warning: function 'for_each_live' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+  193 |     void for_each_live(Fn&& fn) const {
+      |          ^
+include/clay/mesh/slot_pool.h:198:10: warning: function 'for_each_live_mutable' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+  198 |     void for_each_live_mutable(Fn&& fn) {
+      |          ^
+include/clay/mesh/slot_pool.h:227:10: warning: function 'restore' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+  227 |     bool restore(Id id, const T& value) {
+      |          ^
+include/clay/mesh/slot_pool.h:245:10: warning: function 'retire' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+  245 |     bool retire(Id id) {
+      |          ^
+include/clay/mesh/slot_pool.h:276:10: warning: function 'rebuild_free_list' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+  276 |     void rebuild_free_list() {
+      |          ^
+include/clay/mesh/slot_pool.h:290:10: warning: function 'ensure_slots' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  290 |     void ensure_slots(std::size_t count) {
+      |          ^
+include/clay/mesh/slot_pool.h:320:10: warning: function 'decode_finish' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+  320 |     void decode_finish() {
+      |          ^
+include/clay/mesh/subdivide.h:121:19: warning: function 'face_begin' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  121 |     std::uint32_t face_begin(std::uint32_t f) const {
+      |                   ^
+include/clay/mesh/subdivide.h:124:19: warning: function 'face_arity' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  124 |     std::uint32_t face_arity(std::uint32_t f) const {
+      |                   ^
+include/clay/mesh/subdivide.h:131:19: warning: function 'patch_of' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  131 |     std::uint32_t patch_of(std::uint32_t f) const { return face_patch.empty() ? f : face_patch[f]; }
+      |                   ^
+include/clay/mesh/subdivide.h:223:23: warning: function 'origin_of' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+  223 |     SubdivisionOrigin origin_of(std::uint32_t child) const {
+      |                       ^
+include/clay/mesh/subdivide.h:230:19: warning: function 'source_of' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+  230 |     std::uint32_t source_of(std::uint32_t child) const {
+      |                   ^
+include/clay/mesh/subdivide.h:248:19: warning: function 'full' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  248 |     std::uint32_t full(std::uint32_t stored) const { return dense() ? stored : full_of[stored]; }
+      |                   ^
+include/clay/mesh/subdivide.h:254:23: warning: function 'of' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  254 |     static ChildIndex of(const LevelTopology& child) {
+      |                       ^
+include/clay/mesh/surface_chunks.h:184:10: warning: function 'operator==' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  184 |     bool operator==(const ChunkRevisions& o) const {
+      |          ^
+include/clay/mesh/topology_delta.h:91:10: warning: function 'empty' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+   91 |     bool empty() const {
+      |          ^
+include/clay/mesh/work_item.h:89:17: warning: function 'operator<' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+   89 |     friend bool operator<(WorkItemId a, WorkItemId b) {
+      |                 ^
+include/clay/parallel/cancel.h:118:14: warning: function 'progress' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  118 |     Progress progress() const {
+      |              ^
+include/clay/parallel/cancel.h:143:13: warning: function 'cancelled' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  143 | inline bool cancelled(const CancelToken* token) {
+      |             ^
+include/clay/parallel/cancel.h:151:5: warning: function 'ProgressScope' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  151 |     ProgressScope(CancelToken* token, std::uint32_t phase_count) : token_(token) {
+      |     ^
+include/clay/parallel/cancel.h:154:5: warning: function '~ProgressScope' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  154 |     ~ProgressScope() {
+      |     ^
+include/clay/parallel/cancel.h:160:10: warning: function 'phase' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  160 |     void phase(std::uint32_t index, std::uint64_t total = 0) {
+      |          ^
+include/clay/parallel/cancel.h:163:10: warning: function 'advance' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  163 |     void advance(std::uint64_t done, float fraction) {
+      |          ^

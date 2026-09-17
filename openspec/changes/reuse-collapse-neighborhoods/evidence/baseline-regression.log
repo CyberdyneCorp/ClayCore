@@ -1,0 +1,20 @@
+[doctest] doctest version is "2.5.3"
+[doctest] run with "--help" for options
+===============================================================================
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:1006:
+TEST CASE:  allocation gate: collapse planning reuses endpoint neighborhoods
+
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:1027: ERROR: CHECK( allocations <= 96 ) is NOT correct!
+  values: CHECK( 126 <= 96 )
+  logged: size := 20
+          allocations := 126
+
+/home/leonardo/work/ClayCore/tests/unit/test_sculpt_allocation.cpp:1027: ERROR: CHECK( allocations <= 96 ) is NOT correct!
+  values: CHECK( 126 <= 96 )
+  logged: size := 80
+          allocations := 126
+
+===============================================================================
+[doctest] test cases: 1 | 0 passed | 1 failed | 2808 skipped
+[doctest] assertions: 8 | 6 passed | 2 failed |
+[doctest] Status: FAILURE!

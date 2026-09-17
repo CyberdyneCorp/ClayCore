@@ -1,0 +1,199 @@
+66 warnings generated.
+/tmp/clay-collapse-20260917/main-topology.cpp:13:6: warning: function 'update_normals' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+   13 | void update_normals(DynamicSurface& surface, const std::vector<FaceId>& faces,
+      |      ^
+/tmp/clay-collapse-20260917/main-topology.cpp:21:17: warning: function 'lerp3' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+   21 | kernel::cfloat3 lerp3(kernel::cfloat3 a, kernel::cfloat3 b, float t) {
+      |                 ^
+/tmp/clay-collapse-20260917/main-topology.cpp:30:17: warning: function 'lerp2' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+   30 | kernel::cfloat2 lerp2(kernel::cfloat2 a, kernel::cfloat2 b, float t) {
+      |                 ^
+/tmp/clay-collapse-20260917/main-topology.cpp:36:7: warning: function 'lerp1' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+   36 | float lerp1(float a, float b, float t) {
+      |       ^
+/tmp/clay-collapse-20260917/main-topology.cpp:44:7: warning: function 'min_angle' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+   44 | float min_angle(kernel::cfloat3 a, kernel::cfloat3 b, kernel::cfloat3 c) {
+      |       ^
+/tmp/clay-collapse-20260917/main-topology.cpp:45:21: warning: lambda has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+   45 |     auto angle_at = [](kernel::cfloat3 p, kernel::cfloat3 q, kernel::cfloat3 r) {
+      |                     ^
+/tmp/clay-collapse-20260917/main-topology.cpp:58:17: warning: function 'triangle_normal' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+   58 | kernel::cfloat3 triangle_normal(kernel::cfloat3 a, kernel::cfloat3 b, kernel::cfloat3 c) {
+      |                 ^
+/tmp/clay-collapse-20260917/main-topology.cpp:81:10: warning: function 'note' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+   81 |     void note(VertexId id) {
+      |          ^
+/tmp/clay-collapse-20260917/main-topology.cpp:86:10: warning: function 'note' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+   86 |     void note(HalfEdgeId id) {
+      |          ^
+/tmp/clay-collapse-20260917/main-topology.cpp:91:10: warning: function 'note' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+   91 |     void note(EdgeId id) {
+      |          ^
+/tmp/clay-collapse-20260917/main-topology.cpp:96:10: warning: function 'note' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+   96 |     void note(FaceId id) {
+      |          ^
+/tmp/clay-collapse-20260917/main-topology.cpp:105:10: warning: function 'note_new' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+  105 |     void note_new(VertexId id) {
+      |          ^
+/tmp/clay-collapse-20260917/main-topology.cpp:110:10: warning: function 'note_new' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+  110 |     void note_new(HalfEdgeId id) {
+      |          ^
+/tmp/clay-collapse-20260917/main-topology.cpp:115:10: warning: function 'note_new' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+  115 |     void note_new(EdgeId id) {
+      |          ^
+/tmp/clay-collapse-20260917/main-topology.cpp:120:10: warning: function 'note_new' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+  120 |     void note_new(FaceId id) {
+      |          ^
+/tmp/clay-collapse-20260917/main-topology.cpp:127:10: warning: function 'sync_all' has cognitive complexity of 5 (threshold 0) [readability-function-cognitive-complexity]
+  127 |     void sync_all() {
+      |          ^
+/tmp/clay-collapse-20260917/main-topology.cpp:134:10: warning: function 'sync' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  134 |     void sync(VertexId id) {
+      |          ^
+/tmp/clay-collapse-20260917/main-topology.cpp:137:10: warning: function 'sync' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  137 |     void sync(HalfEdgeId id) {
+      |          ^
+/tmp/clay-collapse-20260917/main-topology.cpp:140:10: warning: function 'sync' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  140 |     void sync(EdgeId id) {
+      |          ^
+/tmp/clay-collapse-20260917/main-topology.cpp:143:10: warning: function 'sync' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  143 |     void sync(FaceId id) {
+      |          ^
+/tmp/clay-collapse-20260917/main-topology.cpp:153:12: warning: function 'boundary_predecessor' has cognitive complexity of 5 (threshold 0) [readability-function-cognitive-complexity]
+  153 | HalfEdgeId boundary_predecessor(const DynamicSurface& s, HalfEdgeId ghost) {
+      |            ^
+/tmp/clay-collapse-20260917/main-topology.cpp:173:6: warning: function 'reseat_outgoing' has cognitive complexity of 18 (threshold 0) [readability-function-cognitive-complexity]
+  173 | void reseat_outgoing(DynamicSurface& s, VertexId v, const std::vector<HalfEdgeId>& candidates) {
+      |      ^
+/tmp/clay-collapse-20260917/main-topology.cpp:201:7: warning: function 'edge_pair_quality' has cognitive complexity of 5 (threshold 0) [readability-function-cognitive-complexity]
+  201 | float edge_pair_quality(const DynamicSurface& surface, EdgeId edge) {
+      |       ^
+/tmp/clay-collapse-20260917/main-topology.cpp:219:21: warning: function 'split_edge' has cognitive complexity of 38 (threshold 0) [readability-function-cognitive-complexity]
+  219 | SplitResult detail::split_edge(DynamicSurface& surface, EdgeId edge, float t,
+      |                     ^
+/tmp/clay-collapse-20260917/main-topology.cpp:535:16: warning: function 'collapse_link_refusal' has cognitive complexity of 18 (threshold 0) [readability-function-cognitive-complexity]
+  535 | TopologyResult collapse_link_refusal(const DynamicSurface& surface, HalfEdgeId h0, HalfEdgeId h1,
+      |                ^
+/tmp/clay-collapse-20260917/main-topology.cpp:575:16: warning: function 'collapse_duplicate_face_refusal' has cognitive complexity of 26 (threshold 0) [readability-function-cognitive-complexity]
+  575 | TopologyResult collapse_duplicate_face_refusal(const DynamicSurface& surface, HalfEdgeId h0,
+      |                ^
+/tmp/clay-collapse-20260917/main-topology.cpp:620:15: warning: function 'pinning_constraints' has cognitive complexity of 4 (threshold 0) [readability-function-cognitive-complexity]
+  620 | std::uint32_t pinning_constraints(const DynamicSurface& surface, VertexId v) {
+      |               ^
+/tmp/clay-collapse-20260917/main-topology.cpp:643:16: warning: function 'collapse_target' has cognitive complexity of 7 (threshold 0) [readability-function-cognitive-complexity]
+  643 | TopologyResult collapse_target(const DynamicSurface& surface, EdgeId edge, VertexId v0, VertexId v1,
+      |                ^
+/tmp/clay-collapse-20260917/main-topology.cpp:669:16: warning: function 'collapse_geometric_refusal' has cognitive complexity of 33 (threshold 0) [readability-function-cognitive-complexity]
+  669 | TopologyResult collapse_geometric_refusal(const DynamicSurface& surface, HalfEdgeId h0,
+      |                ^
+/tmp/clay-collapse-20260917/main-topology.cpp:684:21: warning: lambda has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+  684 |     auto is_dying = [&](FaceId f) {
+      |                     ^
+/tmp/clay-collapse-20260917/main-topology.cpp:711:16: warning: function 'plan_collapse' has cognitive complexity of 15 (threshold 0) [readability-function-cognitive-complexity]
+  711 | TopologyResult plan_collapse(const DynamicSurface& surface, EdgeId edge,
+      |                ^
+/tmp/clay-collapse-20260917/main-topology.cpp:763:24: warning: function 'collapse_edge' has cognitive complexity of 39 (threshold 0) [readability-function-cognitive-complexity]
+  763 | CollapseResult detail::collapse_edge(DynamicSurface& surface, EdgeId edge,
+      |                        ^
+/tmp/clay-collapse-20260917/main-topology.cpp:915:20: warning: function 'flip_edge' has cognitive complexity of 24 (threshold 0) [readability-function-cognitive-complexity]
+  915 | FlipResult detail::flip_edge(DynamicSurface& surface, EdgeId edge, const TopologyOpOptions& options,
+      |                    ^
+/tmp/clay-collapse-20260917/main-topology.cpp:1048:29: warning: function 'update' has cognitive complexity of 4 (threshold 0) [readability-function-cognitive-complexity]
+ 1048 | void detail::NormalUpdates::update(DynamicSurface& surface, const std::vector<FaceId>& faces) {
+      |                             ^
+/tmp/clay-collapse-20260917/main-topology.cpp:1065:6: warning: function 'unique_handles' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+ 1065 | void unique_handles(std::vector<Id>& ids) {
+      |      ^
+/tmp/clay-collapse-20260917/main-topology.cpp:1067:39: warning: lambda has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+ 1067 |     std::sort(ids.begin(), ids.end(), [](Id a, Id b) {
+      |                                       ^
+/tmp/clay-collapse-20260917/main-topology.cpp:1074:29: warning: function 'flush' has cognitive complexity of 14 (threshold 0) [readability-function-cognitive-complexity]
+ 1074 | void detail::NormalUpdates::flush(DynamicSurface& surface, TopologyDelta* delta) {
+      |                             ^
+include/clay/kernel/shim.h:111:15: warning: function 'cmin' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  111 | CLAY_FN float cmin(float a, float b) { return a < b ? a : b; }
+      |               ^
+include/clay/kernel/shim.h:112:15: warning: function 'cmax' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  112 | CLAY_FN float cmax(float a, float b) { return a > b ? a : b; }
+      |               ^
+include/clay/kernel/shim.h:115:15: warning: function 'csign' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+  115 | CLAY_FN float csign(float v) { return (v > 0.0f) ? 1.0f : ((v < 0.0f) ? -1.0f : 0.0f); }
+      |               ^
+include/clay/mesh/adjacency.h:63:17: warning: function 'class_count' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+   63 |     std::size_t class_count() const {
+      |                 ^
+include/clay/mesh/adjacency.h:92:10: warning: function 'matches' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+   92 |     bool matches(const Mesh& m) const {
+      |          ^
+include/clay/mesh/dynamic_surface.h:205:17: warning: function 'operator==' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  205 |     friend bool operator==(const SurfaceMark& a, const SurfaceMark& b) {
+      |                 ^
+include/clay/mesh/slot_pool.h:60:17: warning: function 'operator==' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+   60 |     friend bool operator==(const SlotId& a, const SlotId& b) {
+      |                 ^
+include/clay/mesh/slot_pool.h:94:8: warning: function 'create' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+   94 |     Id create(const T& value) {
+      |        ^
+include/clay/mesh/slot_pool.h:115:10: warning: function 'erase' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  115 |     bool erase(Id id) {
+      |          ^
+include/clay/mesh/slot_pool.h:129:10: warning: function 'live' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  129 |     bool live(Id id) const {
+      |          ^
+include/clay/mesh/slot_pool.h:134:8: warning: function 'get' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  134 |     T* get(Id id) { return live(id) ? &slots_[id.slot].value : nullptr; }
+      |        ^
+include/clay/mesh/slot_pool.h:135:14: warning: function 'get' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  135 |     const T* get(Id id) const { return live(id) ? &slots_[id.slot].value : nullptr; }
+      |              ^
+include/clay/mesh/slot_pool.h:146:8: warning: function 'id_at' has cognitive complexity of 2 (threshold 0) [readability-function-cognitive-complexity]
+  146 |     Id id_at(std::uint32_t slot) const {
+      |        ^
+include/clay/mesh/slot_pool.h:151:10: warning: function 'live_at' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  151 |     bool live_at(std::uint32_t slot) const { return slot < slots_.size() && slots_[slot].live; }
+      |          ^
+include/clay/mesh/slot_pool.h:165:10: warning: function 'free_list_intact' has cognitive complexity of 10 (threshold 0) [readability-function-cognitive-complexity]
+  165 |     bool free_list_intact(std::size_t* out_visited = nullptr, bool* out_cycle = nullptr,
+      |          ^
+include/clay/mesh/slot_pool.h:193:10: warning: function 'for_each_live' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+  193 |     void for_each_live(Fn&& fn) const {
+      |          ^
+include/clay/mesh/slot_pool.h:198:10: warning: function 'for_each_live_mutable' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+  198 |     void for_each_live_mutable(Fn&& fn) {
+      |          ^
+include/clay/mesh/slot_pool.h:227:10: warning: function 'restore' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+  227 |     bool restore(Id id, const T& value) {
+      |          ^
+include/clay/mesh/slot_pool.h:245:10: warning: function 'retire' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+  245 |     bool retire(Id id) {
+      |          ^
+include/clay/mesh/slot_pool.h:276:10: warning: function 'rebuild_free_list' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+  276 |     void rebuild_free_list() {
+      |          ^
+include/clay/mesh/slot_pool.h:290:10: warning: function 'ensure_slots' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  290 |     void ensure_slots(std::size_t count) {
+      |          ^
+include/clay/mesh/slot_pool.h:320:10: warning: function 'decode_finish' has cognitive complexity of 3 (threshold 0) [readability-function-cognitive-complexity]
+  320 |     void decode_finish() {
+      |          ^
+include/clay/mesh/topology_delta.h:91:10: warning: function 'empty' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+   91 |     bool empty() const {
+      |          ^
+include/clay/parallel/cancel.h:118:14: warning: function 'progress' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  118 |     Progress progress() const {
+      |              ^
+include/clay/parallel/cancel.h:143:13: warning: function 'cancelled' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  143 | inline bool cancelled(const CancelToken* token) {
+      |             ^
+include/clay/parallel/cancel.h:151:5: warning: function 'ProgressScope' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  151 |     ProgressScope(CancelToken* token, std::uint32_t phase_count) : token_(token) {
+      |     ^
+include/clay/parallel/cancel.h:154:5: warning: function '~ProgressScope' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  154 |     ~ProgressScope() {
+      |     ^
+include/clay/parallel/cancel.h:160:10: warning: function 'phase' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  160 |     void phase(std::uint32_t index, std::uint64_t total = 0) {
+      |          ^
+include/clay/parallel/cancel.h:163:10: warning: function 'advance' has cognitive complexity of 1 (threshold 0) [readability-function-cognitive-complexity]
+  163 |     void advance(std::uint64_t done, float fraction) {
+      |          ^
