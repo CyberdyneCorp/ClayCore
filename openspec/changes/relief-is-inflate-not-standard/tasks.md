@@ -49,7 +49,7 @@
       full suite.
 - [x] 3.3 `python3 tools/check_c_abi.py` (header touched) and
       `python3 tools/release_check.py --skip-slow`.
-      c-abi OK against `build/cpu-only/libclay_shared.dylib` (hygiene + FFI);
+      c-abi OK against the cpu-only build's shared library (hygiene + FFI);
       `clay.h`, `kernel/tape.h` and `scene/types.h` compare identical to
       origin/main with comments stripped (`gcc -fpreprocessed -dD -E -P`), so
       `CLAY_ABI_*` stays at 0.117.0. release_check: every row passes except
@@ -57,5 +57,16 @@
       main too), plus the four manual hardware rows, which pass on origin/main
       and fail here because ANY byte in `include/clay/kernel/` expires them —
       the `tape.h` comment does. Comment-only, so a waiver at release names it.
-- [ ] 3.4 PR body: the measurement tables, the three refuted spellings, no ABI
+- [x] 3.4 PR body: the measurement tables, the three refuted spellings, no ABI
       transition.
+- [x] 3.5 Review. Mutated the kernel itself (`ctape_combine_dist`), not only
+      the test's tape: dropping relief's smoothstep fails 6 own-normal points
+      (0.0065-0.0086 against 1e-3); scaling its amplitude to 0.95k fails the
+      thickness and top checks (0.0075 against 2e-3). Corrected: the
+      `move_surface` stamp is the draw frame's direction but not relief's
+      profile (it rises 0.82k at this mapping, 0.1226 on the fin); docs/09 and
+      sculpt_comparison now carry the frame caveat on Crease/DamStandard and
+      ClayBuildup; the spec scenario excludes corners (0.093k measured there);
+      the 30-dab step scale is read back at full precision (5.2151e-6); and
+      3.3 no longer names a build artifact, which the task-symbols gate cannot
+      resolve in a clean tree.
