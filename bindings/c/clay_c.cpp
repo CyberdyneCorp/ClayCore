@@ -895,16 +895,14 @@ clay_result read_stroke(const float* samples_xyzpt, std::size_t sample_count,
     return read_samples(samples_xyzpt, sample_count, out_samples);
 }
 
-// The same, from the struct array that carries the channels a tablet reports.
-clay_result read_stroke_full(const clay_stroke_sample_full* samples, std::size_t sample_count,
-                             const clay_stroke_preset* preset,
-                             std::vector<brush::StrokeSample>* out_samples,
-                             brush::StrokePreset* out_preset) {
+// The samples alone, from the struct array that carries the channels a tablet
+// reports. Split out for the reason `read_samples` is: a BRUSH preset carries
+// its own stroke half.
+clay_result read_samples_full(const clay_stroke_sample_full* samples, std::size_t sample_count,
+                              std::vector<brush::StrokeSample>* out_samples) {
     if (sample_count > 0 && !samples)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null stroke samples");
     clay_result r = check_batch("stroke samples", sample_count);
-    if (r != CLAY_OK) return r;
-    r = read_preset(preset, out_preset);
     if (r != CLAY_OK) return r;
     out_samples->resize(sample_count);
     for (std::size_t i = 0; i < sample_count; ++i) {
@@ -918,6 +916,16 @@ clay_result read_stroke_full(const clay_stroke_sample_full* samples, std::size_t
         out.timestamp = in.timestamp;
     }
     return CLAY_OK;
+}
+
+// The same, with the stroke preset.
+clay_result read_stroke_full(const clay_stroke_sample_full* samples, std::size_t sample_count,
+                             const clay_stroke_preset* preset,
+                             std::vector<brush::StrokeSample>* out_samples,
+                             brush::StrokePreset* out_preset) {
+    clay_result r = read_samples_full(samples, sample_count, out_samples);
+    if (r != CLAY_OK) return r;
+    return read_preset(preset, out_preset);
 }
 
 clay_stamp to_c_stamp(const brush::Stamp& s) {
@@ -18625,8 +18633,16 @@ struct DynamicStampInputs {
     mesh::DynamicTopologySettings topology;
 };
 
+const char* const kDynamicLayerRefusal =
+    "an adaptive surface does not offer this verb; see dynamic_offers";
+
+// THE ONE DECODE of a topology descriptor. The stamp, the recorded stamp and
+// the two stroke calls read the same descriptor, and two copies of this would
+// be two readings of it the first time a field was appended. NULL is the
+// defaults.
 clay_result read_dynamic_topology(const clay_dynamic_topology_desc* topology,
                                   mesh::DynamicTopologySettings* topo) {
+    *topo = mesh::DynamicTopologySettings{};
     if (!topology) return CLAY_OK;
     clay_dynamic_topology_desc d;
     clay_result r = read_desc(topology, kDynTopologyOriginal, &d);
@@ -18660,8 +18676,7 @@ clay_result read_dynamic_stamp(const clay_dynamic_sculptor& sculptor,
     clay_result r = read_mesh_brush(brush, &in->verb, &in->settings);
     if (r != CLAY_OK) return r;
     if (!mesh::dynamic_offers(in->verb))
-        return fail(CLAY_ERROR_INVALID_ARGUMENT,
-                    "an adaptive surface does not offer this verb; see dynamic_offers");
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, kDynamicLayerRefusal);
     r = read_dynamic_topology(topology, &in->topology);
     if (r != CLAY_OK) return r;
 
@@ -18672,12 +18687,23 @@ clay_result read_dynamic_stamp(const clay_dynamic_sculptor& sculptor,
     return CLAY_OK;
 }
 
+// A report's declared size. The stroke calls check it BEFORE the stroke: a
+// malformed report must not leave a stroke applied that the call then reports
+// as failed. The single stamp still checks it after, which is its behaviour on
+// main and is recorded in stroke-an-adaptive-surface.
+clay_result check_dynamic_report(clay_dynamic_stamp_report* out_report) {
+    if (!out_report) return CLAY_OK;
+    clay_dynamic_stamp_report probe;
+    return read_desc(out_report, kDynReportOriginal, &probe);
+}
+
+// A stamp's or a stroke's result into the caller's report, honouring the size
+// it declared. The revision is the owner's, read now.
 clay_result write_dynamic_report(const clay_dynamic_sculptor& sculptor,
                                  const mesh::DynamicStampResult& res,
                                  clay_dynamic_stamp_report* out_report) {
     if (!out_report) return CLAY_OK;
-    clay_dynamic_stamp_report probe;
-    clay_result r = read_desc(out_report, kDynReportOriginal, &probe);
+    clay_result r = check_dynamic_report(out_report);
     if (r != CLAY_OK) return r;
     clay_dynamic_stamp_report out{};
     out.moved_vertices = res.moved_vertices;
@@ -18692,6 +18718,40 @@ clay_result write_dynamic_report(const clay_dynamic_sculptor& sculptor,
     }
     out.revision = to_c_revision(sculptor.owner->surface);
     write_desc(out_report, out_report->struct_size, out);
+    return CLAY_OK;
+}
+
+// What the two stroke calls share once each has its verb and settings: the
+// refusal, the descriptor, the frame, the mask and the consumer. `samples` and
+// `stroke` are in the caller's space on entry.
+clay_result apply_dynamic_stroke(clay_dynamic_sculptor* sculptor, mesh::MeshBrush verb,
+                                 mesh::MeshBrushSettings settings,
+                                 std::vector<brush::StrokeSample> samples,
+                                 brush::StrokePreset stroke,
+                                 const clay_dynamic_topology_desc* topology,
+                                 const clay_mask* mask, int32_t orient_alpha_by_stamp,
+                                 std::size_t* applied, mesh::DynamicStampResult* summary) {
+    // Refused BEFORE a stamp or a remesh runs, as the single stamp refuses it.
+    if (!mesh::dynamic_offers(verb)) return fail(CLAY_ERROR_INVALID_ARGUMENT, kDynamicLayerRefusal);
+    mesh::DynamicTopologySettings topo;
+    clay_result r = read_dynamic_topology(topology, &topo);
+    if (r != CLAY_OK) return r;
+    voxel::MaskField* field_mask = nullptr;
+    if (mask) {
+        r = resolve_mask(mask, &field_mask);
+        if (r != CLAY_OK) return r;
+    }
+
+    // THE FRAME THE HANDLE DECLARES, and only that one: both halves of the
+    // stroke into local, and the mask and estimators placed through it.
+    brush::MeshStrokeOptions options;
+    options.orient_alpha_by_stamp = orient_alpha_by_stamp != 0;
+    if (sculptor->has_frame) options.mesh_to_world = sculptor->frame;
+    brush_settings_to_local(*sculptor, &settings);
+    stroke_to_local(*sculptor, &samples, &stroke);
+
+    *applied = brush::apply_to_dynamic(*sculptor->sculptor, brush::resolve_stroke(samples, stroke),
+                                       verb, settings, topo, field_mask, nullptr, options, summary);
     return CLAY_OK;
 }
 
@@ -18826,6 +18886,82 @@ clay_result clay_dynamic_delta_deserialize(const uint8_t* data, size_t size,
     }
     *out_delta = new clay_dynamic_delta{std::move(built)};
     return CLAY_OK;
+}
+
+clay_result clay_dynamic_sculptor_apply_stroke(clay_dynamic_sculptor* sculptor,
+                                               const clay_stroke_sample_full* samples,
+                                               size_t sample_count,
+                                               const clay_stroke_preset* preset,
+                                               const clay_mesh_brush_desc* brush,
+                                               const clay_dynamic_topology_desc* topology,
+                                               const clay_mask* mask,
+                                               int32_t orient_alpha_by_stamp,
+                                               size_t* out_applied,
+                                               clay_dynamic_stamp_report* out_report) {
+    if (out_applied) *out_applied = 0;
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    mesh::MeshBrush verb = mesh::MeshBrush::Draw;
+    mesh::MeshBrushSettings settings;
+    clay_result r = read_mesh_brush(brush, &verb, &settings);
+    if (r != CLAY_OK) return r;
+    std::vector<brush::StrokeSample> in;
+    brush::StrokePreset stroke;
+    r = read_stroke_full(samples, sample_count, preset, &in, &stroke);
+    if (r != CLAY_OK) return r;
+    r = check_dynamic_report(out_report);
+    if (r != CLAY_OK) return r;
+
+    std::size_t applied = 0;
+    mesh::DynamicStampResult summary;
+    r = apply_dynamic_stroke(sculptor, verb, settings, std::move(in), stroke, topology, mask,
+                             orient_alpha_by_stamp, &applied, &summary);
+    if (r != CLAY_OK) return r;
+    if (out_applied) *out_applied = applied;
+    return write_dynamic_report(*sculptor, summary, out_report);
+}
+
+clay_result clay_dynamic_sculptor_apply_preset(clay_dynamic_sculptor* sculptor,
+                                               const clay_stroke_sample_full* samples,
+                                               size_t sample_count,
+                                               const clay_brush_preset* preset,
+                                               const float* alpha, int32_t alpha_width,
+                                               int32_t alpha_height,
+                                               const clay_dynamic_topology_desc* topology,
+                                               const clay_mask* mask,
+                                               int32_t orient_alpha_by_stamp,
+                                               size_t* out_applied,
+                                               clay_dynamic_stamp_report* out_report) {
+    if (out_applied) *out_applied = 0;
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    brush::BrushPreset p;
+    clay_result r = read_brush_preset(preset, &p);
+    if (r != CLAY_OK) return r;
+    // Borrowed for the call, as clay_mesh_sculptor_apply_preset borrows it.
+    if (alpha) {
+        if (alpha_width < 2 || alpha_height < 2)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "an alpha needs at least 2x2 samples; there is nothing to interpolate "
+                        "below that");
+        p.settings.alpha = alpha;
+        p.settings.alpha_width = alpha_width;
+        p.settings.alpha_height = alpha_height;
+    }
+    // The preset carries its own stroke half; only the samples are read here.
+    std::vector<brush::StrokeSample> in;
+    r = read_samples_full(samples, sample_count, &in);
+    if (r != CLAY_OK) return r;
+    r = check_dynamic_report(out_report);
+    if (r != CLAY_OK) return r;
+
+    std::size_t applied = 0;
+    mesh::DynamicStampResult summary;
+    r = apply_dynamic_stroke(sculptor, p.model.verb, p.settings, std::move(in), p.stroke, topology,
+                             mask, orient_alpha_by_stamp, &applied, &summary);
+    if (r != CLAY_OK) return r;
+    if (out_applied) *out_applied = applied;
+    return write_dynamic_report(*sculptor, summary, out_report);
 }
 
 clay_result clay_dynamic_sculptor_rebuild_index(clay_dynamic_sculptor* sculptor) {

@@ -483,3 +483,255 @@ TEST_CASE("c dynamic: a stamp reports where its time went and what it did") {
     REQUIRE(clay_dynamic_sculptor_stamp(fx.sculptor, &brush, &topo, nullptr, nullptr) == CLAY_OK);
     CHECK(dynamic_report(fx.sculptor).vertices_considered == 0);
 }
+
+// -- a whole stroke across the ABI (stroke-an-adaptive-surface) ---------------
+
+namespace {
+
+// The surface as flat arrays, positions then indices, for a bit-exact compare.
+struct Export {
+    std::vector<float> positions;
+    std::vector<uint32_t> indices;
+    bool operator==(const Export& o) const {
+        return positions == o.positions && indices == o.indices;
+    }
+};
+
+Export export_surface(const clay_dynamic_surface* surface) {
+    clay_mesh* m = nullptr;
+    REQUIRE(clay_dynamic_surface_to_mesh(surface, &m) == CLAY_OK);
+    Export out;
+    const float* p = clay_mesh_positions(m);
+    out.positions.assign(p, p + clay_mesh_vertex_count(m) * 3);
+    const uint32_t* i = clay_mesh_indices(m);
+    out.indices.assign(i, i + clay_mesh_index_count(m));
+    clay_mesh_destroy(m);
+    return out;
+}
+
+std::vector<clay_stroke_sample_full> stroke_line(float x0, float x1, float z, int n,
+                                                 float azimuth = 0.0f, float tilt = 0.0f) {
+    std::vector<clay_stroke_sample_full> out(static_cast<std::size_t>(n));
+    for (int k = 0; k < n; ++k) {
+        const float t = static_cast<float>(k) / static_cast<float>(n - 1);
+        clay_stroke_sample_full& s = out[static_cast<std::size_t>(k)];
+        s = clay_stroke_sample_full{};
+        s.position[0] = x0 + (x1 - x0) * t;
+        s.position[1] = 0.1f * t;
+        s.position[2] = z;
+        s.pressure = 0.5f + 0.5f * t;
+        s.tilt = tilt;
+        s.azimuth = azimuth;
+    }
+    return out;
+}
+
+clay_stroke_preset stroke_preset() {
+    clay_stroke_preset p{};
+    p.struct_size = sizeof(p);
+    REQUIRE(clay_stroke_preset_defaults(&p) == CLAY_OK);
+    p.radius = 0.3f;
+    p.spacing = 0.25f;
+    p.taper_end = 0.3f;
+    return p;
+}
+
+clay_dynamic_stamp_report empty_report() {
+    clay_dynamic_stamp_report r{};
+    r.struct_size = sizeof(r);
+    return r;
+}
+
+}  // namespace
+
+TEST_CASE("c dynamic stroke: the ABI stroke equals the stamps it resolves") {
+    Fixture stroke(8);
+    Fixture loop(8);
+    const std::vector<clay_stroke_sample_full> samples = stroke_line(-0.4f, 0.4f, 1.0f, 24);
+    const clay_stroke_preset preset = stroke_preset();
+    const clay_mesh_brush_desc brush = draw_brush();
+    const clay_dynamic_topology_desc topo = topology(true);
+
+    size_t applied = 99;
+    clay_dynamic_stamp_report report = empty_report();
+    REQUIRE(clay_dynamic_sculptor_apply_stroke(stroke.sculptor, samples.data(), samples.size(),
+                                               &preset, &brush, &topo, nullptr, 0, &applied,
+                                               &report) == CLAY_OK);
+
+    // The same samples resolved by the host and stamped one call at a time.
+    size_t count = 0;
+    REQUIRE(clay_stroke_resolve_full(samples.data(), samples.size(), &preset, nullptr, &count) ==
+            CLAY_OK);
+    std::vector<clay_stamp> stamps(count);
+    REQUIRE(clay_stroke_resolve_full(samples.data(), samples.size(), &preset, stamps.data(),
+                                     &count) == CLAY_OK);
+    REQUIRE(count > 2);
+    size_t loop_applied = 0;
+    uint64_t moved = 0, split = 0, collapsed = 0, flipped = 0;
+    for (const clay_stamp& s : stamps) {
+        clay_mesh_brush_desc b = brush;
+        std::memcpy(b.center, s.position, sizeof(b.center));
+        b.radius = s.radius;
+        b.strength = brush.strength * s.strength;
+        clay_dynamic_stamp_report r = empty_report();
+        REQUIRE(clay_dynamic_sculptor_stamp(loop.sculptor, &b, &topo, nullptr, &r) == CLAY_OK);
+        moved += r.moved_vertices;
+        split += r.split_edges;
+        collapsed += r.collapsed_edges;
+        flipped += r.flipped_edges;
+        if (r.moved_vertices > 0 || r.split_edges + r.collapsed_edges + r.flipped_edges > 0)
+            ++loop_applied;
+    }
+
+    CHECK(applied == loop_applied);
+    CHECK(applied > 0);
+    CHECK(export_surface(stroke.surface) == export_surface(loop.surface));
+    CHECK(report.moved_vertices == moved);
+    CHECK(report.split_edges == split);
+    CHECK(report.collapsed_edges == collapsed);
+    CHECK(report.flipped_edges == flipped);
+    CHECK(split > 0);
+    CHECK(report.dirty_min[0] < report.dirty_max[0]);
+
+    clay_surface_revision rev{};
+    rev.struct_size = sizeof(rev);
+    REQUIRE(clay_dynamic_surface_revision(stroke.surface, &rev) == CLAY_OK);
+    CHECK(report.revision.topology == rev.topology);
+    CHECK(report.revision.geometry == rev.geometry);
+
+    // NULL report and NULL topology are both accepted.
+    CHECK(clay_dynamic_sculptor_apply_stroke(stroke.sculptor, samples.data(), samples.size(),
+                                             &preset, &brush, nullptr, nullptr, 0, nullptr,
+                                             nullptr) == CLAY_OK);
+}
+
+TEST_CASE("c dynamic stroke: Layer is refused before any stamp runs") {
+    Fixture fx(6);
+    const std::vector<clay_stroke_sample_full> samples = stroke_line(-0.3f, 0.3f, 1.0f, 12);
+    const clay_stroke_preset preset = stroke_preset();
+    clay_mesh_brush_desc brush = draw_brush();
+    brush.verb = CLAY_MESH_BRUSH_LAYER;
+    const clay_dynamic_topology_desc topo = topology(true);
+
+    clay_surface_revision before{};
+    before.struct_size = sizeof(before);
+    REQUIRE(clay_dynamic_surface_revision(fx.surface, &before) == CLAY_OK);
+    const Export pristine = export_surface(fx.surface);
+
+    size_t applied = 99;
+    CHECK(clay_dynamic_sculptor_apply_stroke(fx.sculptor, samples.data(), samples.size(), &preset,
+                                             &brush, &topo, nullptr, 0, &applied, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(applied == 0);
+
+    clay_surface_revision after{};
+    after.struct_size = sizeof(after);
+    REQUIRE(clay_dynamic_surface_revision(fx.surface, &after) == CLAY_OK);
+    CHECK(after.topology == before.topology);
+    CHECK(after.geometry == before.geometry);
+    CHECK(export_surface(fx.surface) == pristine);
+}
+
+TEST_CASE("c dynamic stroke: a short report is refused before the stroke is applied") {
+    Fixture fx(6);
+    const std::vector<clay_stroke_sample_full> samples = stroke_line(-0.3f, 0.3f, 1.0f, 12);
+    const clay_stroke_preset preset = stroke_preset();
+    const clay_mesh_brush_desc brush = draw_brush();
+    const clay_dynamic_topology_desc topo = topology(true);
+    const Export pristine = export_surface(fx.surface);
+
+    clay_dynamic_stamp_report shortened = empty_report();
+    shortened.struct_size = 4;
+    size_t applied = 99;
+    CHECK(clay_dynamic_sculptor_apply_stroke(fx.sculptor, samples.data(), samples.size(), &preset,
+                                             &brush, &topo, nullptr, 0, &applied, &shortened) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(applied == 0);
+    CHECK(export_surface(fx.surface) == pristine);
+}
+
+TEST_CASE("c dynamic stroke: a declared world frame places the stroke") {
+    // The same surface stroked twice: once in its own space with no frame, once
+    // in WORLD with a frame that moves it. Identical results, or one of the two
+    // halves (the samples, the preset radius) was not converted.
+    Fixture local(8);
+    Fixture placed(8);
+    clay_mesh_frame frame{};
+    frame.struct_size = sizeof(frame);
+    frame.position[0] = 5.0f;
+    frame.position[1] = -2.0f;
+    frame.rotation[3] = 1.0f;
+    frame.scale = 2.0f;
+    REQUIRE(clay_dynamic_sculptor_set_world_frame(placed.sculptor, &frame) == CLAY_OK);
+
+    const std::vector<clay_stroke_sample_full> local_samples =
+        stroke_line(-0.4f, 0.4f, 1.0f, 24);
+    std::vector<clay_stroke_sample_full> world_samples = local_samples;
+    for (clay_stroke_sample_full& s : world_samples) {
+        s.position[0] = s.position[0] * 2.0f + 5.0f;
+        s.position[1] = s.position[1] * 2.0f - 2.0f;
+        s.position[2] = s.position[2] * 2.0f;
+    }
+    clay_stroke_preset local_preset = stroke_preset();
+    clay_stroke_preset world_preset = local_preset;
+    world_preset.radius = local_preset.radius * 2.0f;
+    const clay_mesh_brush_desc brush = draw_brush();
+    const clay_dynamic_topology_desc topo = topology(true);
+
+    size_t a = 0, b = 0;
+    REQUIRE(clay_dynamic_sculptor_apply_stroke(local.sculptor, local_samples.data(),
+                                               local_samples.size(), &local_preset, &brush, &topo,
+                                               nullptr, 0, &a, nullptr) == CLAY_OK);
+    REQUIRE(clay_dynamic_sculptor_apply_stroke(placed.sculptor, world_samples.data(),
+                                               world_samples.size(), &world_preset, &brush, &topo,
+                                               nullptr, 0, &b, nullptr) == CLAY_OK);
+    CHECK(a > 0);
+    CHECK(a == b);
+    const Export ea = export_surface(local.surface);
+    const Export eb = export_surface(placed.surface);
+    REQUIRE(ea.positions.size() == eb.positions.size());
+    CHECK(ea.indices == eb.indices);
+    for (std::size_t k = 0; k < ea.positions.size(); ++k)
+        CHECK(ea.positions[k] == doctest::Approx(eb.positions[k]).epsilon(1e-4));
+}
+
+TEST_CASE("c dynamic stroke: the Rake preset's barrel reaches the surface when oriented") {
+    clay_brush_preset rake{};
+    rake.struct_size = sizeof(rake);
+    REQUIRE(clay_brush_preset_by_name("Rake", &rake) == CLAY_OK);
+    REQUIRE(rake.stroke.rotate_to_azimuth != 0);
+    std::vector<float> alpha(64, 0.0f);
+    for (int v = 0; v < 8; ++v)
+        for (int u = 0; u < 4; ++u) alpha[static_cast<std::size_t>(v * 8 + u)] = 1.0f;
+    const clay_dynamic_topology_desc topo = topology(true);
+
+    auto run = [&](float azimuth, int32_t orient) {
+        Fixture fx(12);
+        const std::vector<clay_stroke_sample_full> samples =
+            stroke_line(-0.1f, 0.1f, 1.0f, 8, azimuth, 0.5f);
+        size_t applied = 0;
+        clay_dynamic_stamp_report report = empty_report();
+        REQUIRE(clay_dynamic_sculptor_apply_preset(fx.sculptor, samples.data(), samples.size(),
+                                                   &rake, alpha.data(), 8, 8, &topo, nullptr,
+                                                   orient, &applied, &report) == CLAY_OK);
+        CHECK(applied > 0);
+        CHECK(report.moved_vertices > 0);
+        return export_surface(fx.surface);
+    };
+    CHECK_FALSE(run(0.0f, 1) == run(1.5707964f, 1));
+    CHECK(run(0.0f, 0) == run(1.5707964f, 0));
+
+    // A Layer preset is refused on this path too, and an alpha below 2x2.
+    Fixture fx(6);
+    const std::vector<clay_stroke_sample_full> samples = stroke_line(-0.1f, 0.1f, 1.0f, 8);
+    clay_brush_preset layer = rake;
+    layer.model.verb = CLAY_MESH_BRUSH_LAYER;
+    size_t applied = 99;
+    CHECK(clay_dynamic_sculptor_apply_preset(fx.sculptor, samples.data(), samples.size(), &layer,
+                                             nullptr, 0, 0, &topo, nullptr, 0, &applied,
+                                             nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(applied == 0);
+    CHECK(clay_dynamic_sculptor_apply_preset(fx.sculptor, samples.data(), samples.size(), &rake,
+                                             alpha.data(), 1, 8, &topo, nullptr, 0, &applied,
+                                             nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+}

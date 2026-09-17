@@ -201,6 +201,22 @@ class DynamicSculptor {
     void set_automask_inputs(AutomaskInputs inputs) { automask_inputs_ = std::move(inputs); }
     const AutomaskInputs& automask_inputs() const { return automask_inputs_; }
 
+    // The vertex nearest `p`: the corner of the closest face that is nearest it.
+    // THE WALK'S SEED ESTIMATOR — the adaptive counterpart of
+    // `MeshSculptor::nearest_class`, and the one answer the walk's seed, the
+    // connectivity automask's anchor and the fallback facing all share.
+    //
+    // Public for `brush::apply_to_dynamic`, which re-finds a Snakehook anchor a
+    // collapse retired: a second estimator in `brush` would be two answers to
+    // one question, the defect this function exists to have removed.
+    //
+    // NOT PROMISED: that the vertex lies within any distance of `p` (it is the
+    // nearest corner of the nearest face, however far), nor that it is on the
+    // sheet a caller meant when two surfaces lie close together. An invalid id
+    // on an empty surface or an unbuilt index. Cost: one index closest-point
+    // query.
+    VertexId nearest_vertex(kernel::cfloat3 p) const;
+
     // What the per-stamp scratch arena owns and how far it has had to grow.
     // One per sculptor and never a process-global — see `brush_arena.h`.
     const BrushScratchArena& arena() const { return arena_; }
@@ -225,10 +241,6 @@ class DynamicSculptor {
     // stamp and never taken from the region — the region's average normal is
     // weighted by the very weights the automask is shaping.
     kernel::cfloat3 automask_reference(const MeshBrushSettings& brush);
-    // The corner of the closest face nearest `p` — the adaptive counterpart of
-    // `MeshSculptor::nearest_class`, shared by the walk's seed, the
-    // connectivity automask's anchor and the fallback facing.
-    VertexId nearest_vertex(kernel::cfloat3 p) const;
     // The two answers `compose_workset` cannot work out for itself. Function
     // pointers with a `this` context, for the reason `WorkItemReader` gives.
     static kernel::cfloat3 normal_of_item(const void* context, WorkItemId item);
