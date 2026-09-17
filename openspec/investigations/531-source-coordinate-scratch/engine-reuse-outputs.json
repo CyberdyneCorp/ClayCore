@@ -1,0 +1,86 @@
+[
+  {
+    "items": 1,
+    "pair": 0,
+    "version": "main",
+    "sha256": "eca8045a12d6b86d7db57f2b918562b22c29cb4b10ba0f1835cb78daee5267bf",
+    "bytes": 143271576
+  },
+  {
+    "items": 1,
+    "pair": 0,
+    "version": "reuse",
+    "sha256": "eca8045a12d6b86d7db57f2b918562b22c29cb4b10ba0f1835cb78daee5267bf",
+    "bytes": 143271576
+  },
+  {
+    "items": 1,
+    "pair": 1,
+    "version": "reuse",
+    "sha256": "eca8045a12d6b86d7db57f2b918562b22c29cb4b10ba0f1835cb78daee5267bf",
+    "bytes": 143271576
+  },
+  {
+    "items": 1,
+    "pair": 1,
+    "version": "main",
+    "sha256": "eca8045a12d6b86d7db57f2b918562b22c29cb4b10ba0f1835cb78daee5267bf",
+    "bytes": 143271576
+  },
+  {
+    "items": 1,
+    "pair": 2,
+    "version": "main",
+    "sha256": "eca8045a12d6b86d7db57f2b918562b22c29cb4b10ba0f1835cb78daee5267bf",
+    "bytes": 143271576
+  },
+  {
+    "items": 1,
+    "pair": 2,
+    "version": "reuse",
+    "sha256": "eca8045a12d6b86d7db57f2b918562b22c29cb4b10ba0f1835cb78daee5267bf",
+    "bytes": 143271576
+  },
+  {
+    "items": 32,
+    "pair": 0,
+    "version": "main",
+    "sha256": "aafe30edecee2c7ad0301365d817a3b6ef7aacea84f103354d3cfb4f02da1c2d",
+    "bytes": 143271576
+  },
+  {
+    "items": 32,
+    "pair": 0,
+    "version": "reuse",
+    "sha256": "aafe30edecee2c7ad0301365d817a3b6ef7aacea84f103354d3cfb4f02da1c2d",
+    "bytes": 143271576
+  },
+  {
+    "items": 32,
+    "pair": 1,
+    "version": "reuse",
+    "sha256": "aafe30edecee2c7ad0301365d817a3b6ef7aacea84f103354d3cfb4f02da1c2d",
+    "bytes": 143271576
+  },
+  {
+    "items": 32,
+    "pair": 1,
+    "version": "main",
+    "sha256": "aafe30edecee2c7ad0301365d817a3b6ef7aacea84f103354d3cfb4f02da1c2d",
+    "bytes": 143271576
+  },
+  {
+    "items": 32,
+    "pair": 2,
+    "version": "main",
+    "sha256": "aafe30edecee2c7ad0301365d817a3b6ef7aacea84f103354d3cfb4f02da1c2d",
+    "bytes": 143271576
+  },
+  {
+    "items": 32,
+    "pair": 2,
+    "version": "reuse",
+    "sha256": "aafe30edecee2c7ad0301365d817a3b6ef7aacea84f103354d3cfb4f02da1c2d",
+    "bytes": 143271576
+  }
+]

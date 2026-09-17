@@ -1,0 +1,41 @@
+diff --git a/crates/clayspace-app/src/geometry.rs b/crates/clayspace-app/src/geometry.rs
+index d702749..8934ae5 100644
+--- a/crates/clayspace-app/src/geometry.rs
++++ b/crates/clayspace-app/src/geometry.rs
+@@ -1180,8 +1180,12 @@ impl SurfaceGeometry {
+             document.take_dirty_keys();
+             return Ok(());
+         }
++        let probe_start = std::time::Instant::now();
+         self.remesh(document, &keys, None, shading, lod)?;
++        let probe_mesh = probe_start.elapsed();
++        eprintln!("SDF_PROBE mesh engine={:.3} read={:.3} split={:.3}", self.last_engine_mesh.as_secs_f64()*1000.0, self.last_read.as_secs_f64()*1000.0, self.last_split.as_secs_f64()*1000.0);
+         self.upload(gpu);
++        eprintln!("SDF_PROBE rebuild keys={} remesh={:.3} upload={:.3}", keys.len(), probe_mesh.as_secs_f64()*1000.0, (probe_start.elapsed()-probe_mesh).as_secs_f64()*1000.0);
+         document.record_geometry(self.triangle_count(), self.vertex_count(), self.detail);
+         // Drained, because everything it could name has just been meshed.
+         //
+diff --git a/crates/clayspace-engine/src/live.rs b/crates/clayspace-engine/src/live.rs
+index 803394e..5efdf3e 100644
+--- a/crates/clayspace-engine/src/live.rs
++++ b/crates/clayspace-engine/src/live.rs
+@@ -177,6 +177,7 @@ impl LiveSmooth {
+     /// over every brick. This is the pointer-down cost, paid once, and it buys
+     /// a preview that is the whole form from the first frame.
+     fn prime(&mut self, document: &Document) -> Result<(), ModelError> {
++        let probe_start = std::time::Instant::now();
+         self.transaction
+             .update(RelaxParams {
+                 strength: 0.0,
+@@ -188,8 +189,11 @@ impl LiveSmooth {
+                 mask: None,
+             })
+             .map_err(ModelError::engine)?;
++        let probe_fill = probe_start.elapsed();
+         self.absorb(document)?;
++        let probe_absorb = probe_start.elapsed();
+         self.widen_over_the_rest(document)?;
++        eprintln!("SDF_PROBE prime fill={:.3} absorb={:.3} rest={:.3}", probe_fill.as_secs_f64()*1000.0, (probe_absorb-probe_fill).as_secs_f64()*1000.0, (probe_start.elapsed()-probe_absorb).as_secs_f64()*1000.0);
+         // Primed, not drawn: nothing has been asked for yet, so the keys this
+         // filled are the surface's starting state rather than an edit to it.
+         self.dirty.clear();

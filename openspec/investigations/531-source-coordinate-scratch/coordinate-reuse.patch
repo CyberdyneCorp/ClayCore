@@ -1,0 +1,110 @@
+diff --git a/src/session/source_grid.h b/src/session/source_grid.h
+index 04f619e2..7020a00d 100644
+--- a/src/session/source_grid.h
++++ b/src/session/source_grid.h
+@@ -55,7 +55,10 @@ bool fill_unique_source_grid(const field::FieldVolume::BrickGrid &grid, std::siz
+     const auto by_count = static_cast<std::size_t>(grid.bcount[1]);
+     constexpr auto dim = field::kBrickDim;
+     constexpr auto n = dim + 1;
+-    std::vector<float> points(unique * 3);
++    // Source evaluation consumes coordinates synchronously. Reuse the caller's
++    // workspace across fills, but regenerate every coordinate for this grid.
++    static thread_local std::vector<float> points;
++    points.resize(unique * 3);
+     std::vector<float> values(unique);
+     std::size_t at = 0;
+     for (std::size_t z = 0; z < nz; ++z)
+diff --git a/tests/unit/test_sculpt_allocation.cpp b/tests/unit/test_sculpt_allocation.cpp
+index 706c07bf..415bfb13 100644
+--- a/tests/unit/test_sculpt_allocation.cpp
++++ b/tests/unit/test_sculpt_allocation.cpp
+@@ -37,6 +37,7 @@
+ #include "clay/mesh/voxel_remesh.h"
+ #include "clay/mesh/topology_ops.h"
+ #include "clay/mesh/sculpt_layer.h"
++#include "clay/session/sdf_prefix_cache.h"
+
+ #include "clay.h"
+
+@@ -1035,3 +1036,33 @@ TEST_CASE("allocation gate: collapse planning reuses endpoint neighborhoods") {
+         CHECK(allocations <= allocation_limit);
+     }
+ }
++
++TEST_CASE("allocation gate: full source grids reuse their XYZ scratch array") {
++    scene::Document doc;
++    auto& layer = doc.add_sdf_layer("source");
++    scene::Node node;
++    node.prim = scene::Prim::sphere(1.0f);
++    layer.sdf->insert(node);
++    const auto source = session::SdfSourceField::open(doc, layer.id, nullptr);
++    REQUIRE(source);
++    const field::FieldVolume::BrickGrid grid{
++        cf3(-1.06f, -1.06f, -1.06f), .02f, .06f, {13, 13, 13}};
++    constexpr std::size_t bricks = 13 * 13 * 13;
++    constexpr std::size_t unique = 105 * 105 * 105;
++    std::vector<float> out(bricks * field::kBrickSamples);
++    const auto fill = source->block_fill();
++    fill(grid, 0, bricks, out.data());
++    // Worker-local scratch can grow when scheduling gives a worker a larger
++    // chunk. Measure the best of four warm fills to exclude that startup cost;
++    // a whole XYZ array, unlike worker-local storage, is allocated every time.
++    std::size_t least_bytes = static_cast<std::size_t>(-1);
++    for (int trial = 0; trial < 4; ++trial) {
++        CountingScope scope;
++        fill(grid, 0, bricks, out.data());
++        least_bytes = std::min(least_bytes, scope.bytes());
++    }
++    CAPTURE(least_bytes);
++    // One float per unique value, with another value array's worth of room for
++    // backend bookkeeping. XYZ plus values needs four and must fail this gate.
++    CHECK(least_bytes < unique * 2 * sizeof(float));
++}
+diff --git a/tests/unit/test_source_grid.cpp b/tests/unit/test_source_grid.cpp
+index 0b13bb3b..5d1b712d 100644
+--- a/tests/unit/test_source_grid.cpp
++++ b/tests/unit/test_source_grid.cpp
+@@ -6,6 +6,7 @@
+ #include <bit>
+ #include <cstdint>
+ #include <cstring>
++#include <future>
+
+ using namespace clay;
+ using field::FieldVolume;
+@@ -125,3 +126,35 @@ TEST_CASE("source grid materialization matches duplicate-point source evaluation
+         CHECK(std::memcmp(ab.data(), eb.data(), ab.size() * sizeof(ab[0])) == 0);
+     }
+ }
++
++TEST_CASE("source coordinate scratch stays exact across grids and caller threads") {
++    scene::Document doc;
++    auto& layer = doc.add_sdf_layer("source");
++    scene::Node node;
++    node.prim = scene::Prim::sphere(1.0f);
++    layer.sdf->insert(node);
++    const auto source = session::SdfSourceField::open(doc, layer.id, nullptr);
++    REQUIRE(source);
++    std::vector<std::future<bool>> runs;
++    for (int worker = 0; worker < 4; ++worker) {
++        runs.push_back(std::async(std::launch::async, [&, worker] {
++            const auto fill = source->block_fill();
++            for (int pass = 0; pass < 3; ++pass) {
++                const int bx = pass == 1 ? 8 : 6;
++                const FieldVolume::BrickGrid grid{
++                    cf3(-1.137f + float(worker) * .17f, .0123f, -.9f),
++                    .017f + float(pass) * .003f, .051f, {bx, 6, 6}};
++                const std::size_t bricks = std::size_t(bx) * 6 * 6;
++                const std::size_t samples = bricks * field::kBrickSamples;
++                std::vector<float> actual(samples), expected(samples), xyz(samples * 3);
++                fill(grid, 0, bricks, actual.data());
++                grid.sample_positions(0, bricks, xyz.data());
++                source->fill_points(xyz.data(), samples, expected.data());
++                if (std::memcmp(actual.data(), expected.data(), samples * sizeof(float)) != 0)
++                    return false;
++            }
++            return true;
++        }));
++    }
++    for (auto& run : runs) CHECK(run.get());
++}
