@@ -2300,9 +2300,8 @@ differences from the fixed calls, each deliberate:
 - **No per-call frame.** The stroke speaks whatever space the handle declared
   with `clay_dynamic_sculptor_set_world_frame` — world with one, the surface's
   own without — and the mask and automask sources are placed through it.
-- **No `defer_normals` and no undo record.** The adaptive sculptor has no normal
-  deferral, and the stroke calls take no `clay_dynamic_delta`: a record is
-  captured only by `clay_dynamic_sculptor_stamp_recorded`, one stamp at a time.
+- **No `defer_normals`.** The adaptive sculptor has no normal deferral. These
+  two calls take no undo record; their `_recorded` siblings do (below).
 
 `out_report` accumulates the whole stroke (counts summed, `hit_budget` OR-ed,
 dirty bounds united, the revision after the last stamp) and its size is checked
@@ -2311,6 +2310,26 @@ remesh. The stroke costs the sum of its stamps (1.004x the host's
 resolve-then-stamp loop, which is itself 1.001x a C++ loop): use it for
 what a stroke means — Snakehook's anchor surviving the remesher, Grab's anchor,
 the azimuth reaching the alpha — not for speed.
+
+**A whole stroke as one undo step (ABI 0.120.0).**
+`clay_dynamic_sculptor_apply_stroke_recorded` and
+`clay_dynamic_sculptor_apply_preset_recorded` take the same arguments plus a
+`clay_dynamic_delta* record` before the outputs, over
+`brush::apply_to_dynamic_recorded`. `record` NULL is the unrecorded call. The
+surface is bit-identical to the unrecorded stroke's, and
+`clay_dynamic_delta_revert` / `_apply` restore the before / after exports
+exactly. A host loop of `clay_dynamic_sculptor_stamp_recorded` is not a
+substitute: it centres Grab and Snakehook on the cursor, so it records a
+different surface (Snakehook 1,107,948 vs 1,205,836 encoded bytes, Grab
+1,069,644 vs 448,280 on a unit cube-sphere; Draw agrees to the byte). Every
+`CLAY_ERROR_INVALID_ARGUMENT` refusal comes first; then a non-empty record the
+surface has moved away from is `CLAY_ERROR_SNAPSHOT_MISMATCH`. Either way nothing
+is applied and the record is untouched. The mark is checked once, before the
+first stamp, because only the stroke's own stamps write the surface inside it.
+A stroke continues a non-empty record that ends at the current state, so clear
+the record first for one step per stroke. Recording costs 1.05-1.07x the
+unrecorded stroke, the same as recording its stamps one by one. pyclay:
+`DynamicSculptor.apply_stroke(..., record=)` / `.apply_preset(..., record=)`.
 
 ### What "latency-critical" costs, measured
 

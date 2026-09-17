@@ -241,6 +241,10 @@ ALIASES = {
     # capture is `stamp(..., record=)` in Python and its own entry point in C,
     # clay_dynamic_sculptor_stamp_recorded; this gate reads members rather than
     # keyword arguments, so that pairing is held by the tests on both sides.
+    # The same holds for a whole stroke: `apply_stroke(..., record=)` and
+    # `apply_preset(..., record=)` pair with
+    # clay_dynamic_sculptor_apply_stroke_recorded / _apply_preset_recorded
+    # (test_dyntopo.py and test_c_dynamic_delta.cpp).
     "TopologyDelta.stats": "clay_dynamic_delta_stats_get",
     # Multiresolution (add-mesh-multires). The names that differ do so because
     # the C side reads several fields out of one descriptor where Python reads
