@@ -127,5 +127,5 @@ ABI 0.119.0 -> 0.120.0.
 - [x] 7b.5 Review: the refusal-before-mark order had no failing test in the
       engine (mutation: 0 failures); added a stale-record refusal case (6 fail
       under the mutation) and its brush-engine scenario
-- [ ] 7b.4 PR body: why, what lands, what measuring refuted, suite counts, gates,
+- [x] 7b.4 PR body: why, what lands, what measuring refuted, suite counts, gates,
       ABI 0.119.0 -> 0.120.0
