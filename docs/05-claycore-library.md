@@ -2203,6 +2203,38 @@ honour the per-axis scale either way.
 The lattice and the deformer stay **local-only** and say so: a cage is authored
 against the model, not against the world.
 
+### Stroking an adaptive surface (ABI 0.118.0)
+
+```c
+clay_dynamic_stamp_report report = { .struct_size = sizeof report };
+size_t applied = 0;
+clay_dynamic_sculptor_apply_stroke(sculptor, samples, count, &stroke_preset, &brush,
+                                   &topology /* or NULL */, mask /* or NULL */,
+                                   /*orient_alpha_by_stamp=*/0, &applied, &report);
+clay_dynamic_sculptor_apply_preset(sculptor, samples, count, &brush_preset,
+                                   alpha, alpha_w, alpha_h, &topology, mask,
+                                   /*orient_alpha_by_stamp=*/1, &applied, &report);
+```
+
+The adaptive surface's counterparts to `clay_mesh_sculptor_apply_stroke` /
+`_apply_preset`, over `brush::apply_to_dynamic` (docs/07 §8b). Three
+differences from the fixed calls, each deliberate:
+
+- **Samples are `clay_stroke_sample_full`**, which carries the stylus azimuth;
+  the fixed calls' `count*5` float packing cannot.
+- **No per-call frame.** The stroke speaks whatever space the handle declared
+  with `clay_dynamic_sculptor_set_world_frame` — world with one, the surface's
+  own without — and the mask and automask sources are placed through it.
+- **No `defer_normals` and no undo record.** The adaptive sculptor has no normal
+  deferral, and the ABI has no handle for a topology delta.
+
+`out_report` accumulates the whole stroke (counts summed, `hit_budget` OR-ed,
+dirty bounds united, the revision after the last stamp) and its size is checked
+before any stamp runs. A Layer brush is `CLAY_ERROR_INVALID_ARGUMENT` before any
+remesh. The stroke costs the sum of its stamps (1.001x a C++ loop): use it for
+what a stroke means — Snakehook's anchor surviving the remesher, Grab's anchor,
+the azimuth reaching the alpha — not for speed.
+
 **The topology cache IS in this report, and it is the one sculptor-adjacent
 figure a document can account for by itself** (ABI 0.89.0). Building the weld
 classes and the neighbourhood CSR a brush walks is the whole of what a sculptor

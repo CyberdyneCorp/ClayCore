@@ -1600,6 +1600,66 @@ pointer held across one would be a use-after-free with no generation to check.
 Runnable: [`examples/66_dynamic_topology.py`](../examples/66_dynamic_topology.py)
 — a 1,200-triangle sphere becomes a nose, an ear and a horn, with the locality
 of the refinement measured rather than illustrated.
+
+### A whole stroke (ABI 0.118.0)
+
+`brush::apply_to_dynamic` is the adaptive surface's stroke consumer, beside
+`apply_to_mesh` and `apply_to_multires`, and reaches C as
+`clay_dynamic_sculptor_apply_stroke` / `_apply_preset` and Python as
+`DynamicSculptor.apply_stroke` / `.apply_preset`. Spacing, the pressure curve,
+taper, jitter, steady stroke, accumulation, the stylus azimuth and the brush
+presets now reach all three mesh representations.
+
+**What a stroke means is shared, not copied.** Each stamp brings its own radius
+and strength, the mask is placed once, the cavity and group estimators are wired
+once, Grab centres on the first stamp, and `orient_alpha_by_stamp` turns the
+alpha — the same per-stamp resolution the other two consumers use. Every stamp
+goes through `DynamicSculptor::stamp`, so each keeps its verb's remesh timing,
+and a stroke is **bit-identical** to its resolved stamps applied one at a time.
+
+**Why a host loop is not enough.** Resolving the stroke and centring each stamp
+on the cursor loses Snakehook, on this representation as on the fixed one: the
+dragged vertex moves by its falloff weight rather than the whole delta, the brush
+falls behind, and a few stamps later it reaches nothing. On a unit
+`cube_sphere(24)`, a 0.8 pull-out, radius 0.3, detail 8:
+
+| Snakehook path | reach of the drag |
+|---|---|
+| adaptive, cursor-following host loop | 42% (last stamp moved nothing) |
+| adaptive, `apply_to_dynamic` | 96% |
+| fixed, cursor-following host loop | 50% |
+| fixed, `apply_to_mesh` | 98% |
+
+**The anchor can die, and the fixed path never had to care.** `apply_to_mesh`
+anchors Snakehook on a weld class, which outlives every stamp. The adaptive
+surface remeshes before and after every Snakehook stamp and a collapse retires
+vertex ids — up to 14 times in a 61-stamp stroke at detail 4. So the anchor is
+revalidated before every stamp and a retired one is re-found with
+`DynamicSculptor::nearest_vertex` at the **previous stamp's** position:
+
+| policy for a retired anchor | reach, detail 4-8 rows |
+|---|---|
+| keep stamping where it was | 15-18% |
+| re-find at its last position | 57-96% |
+| re-find at the previous stamp position (adopted) | 81-98%, never worse in 16 rows |
+
+**Refused, not remapped.** Layer is refused for a whole stroke as for one stamp,
+before any remesh runs. `MeshStrokeOptions::defer_normals` is refused too: this
+sculptor refreshes normals locally per stamp, and a flag accepted and ignored
+would be a promise nothing keeps.
+
+**Not provided.** No topology undo record crosses the C ABI (the C++ call takes
+a `TopologyDelta` and a whole stroke reverts as one step). Grab's after-remesh
+runs around the first stamp's centre. And no latency change: a stroke costs its
+stamps, measured at **1.001x** a C++ loop of the same stamps — the call exists
+for the stroke's meaning, not speed.
+
+**A known question left open.** Anchored on the first stamp, a 0.6 pull-out Grab
+reaches 41% of the drag on BOTH representations, where a cursor-following loop
+reaches 56% (adaptive) and 66% (fixed). That is `apply_to_mesh`'s behaviour on
+`main`; the adaptive stroke matches it so the two agree, and changing it is a
+follow-up for both with their goldens.
+
 ---
 
 ## 8d. Multiresolution — the fourth mesh mode
@@ -1699,8 +1759,8 @@ hierarchy's counterpart to `apply_to_mesh`, and the two share the per-stamp
 resolution rather than each having their own — where a stamp lands, how far it
 reaches, how hard it presses, and how Grab and Snakehook consume the motion
 between stamps are facts about a *stroke* and not about a surface, so they are
-one implementation. An adaptive surface is now the only mesh representation
-without a stroke entry point.
+one implementation. `brush::apply_to_dynamic` (§8b) gives the adaptive surface
+the same stroke, so all three mesh representations share it.
 
 ### What a level costs, and why adding one is priced first
 
@@ -2739,6 +2799,7 @@ Names differ between bindings, so this lists them rather than ticking boxes.
 | Lattice cage on an SDF item | `scene::Deformer::lattice` | `p.lattice(...)` | `clay_item_add_lattice`, `CLAY_DEFORM_LATTICE` |
 | One cage over a LAYER (the gizmo) | `brush::lattice_gizmo`, `brush::caged_chain` | `Layer.lattice_gizmo(...)` | `clay_layer_lattice_gizmo`, `clay_layer_lattice_gizmo_preview` |
 | A mesh stroke | `brush::apply_to_mesh` | `MeshSculptor.apply_stroke(...)` | `clay_mesh_sculptor_apply_stroke` |
+| A stroke on an adaptive surface | `brush::apply_to_dynamic` | `DynamicSculptor.apply_stroke(...)`, `.apply_preset(...)` | `clay_dynamic_sculptor_apply_stroke`, `clay_dynamic_sculptor_apply_preset` |
 | Mesh vertex adjacency | `mesh::Adjacency` | `MeshSculptor.class_count` | `clay_mesh_sculptor_class_count` |
 | Mesh stroke undo | `mesh::VertexDeltas` | `clay.VertexDeltas` | `clay_mesh_deltas_*` |
 | Picking a mesh layer | `pick::raycast_mesh`, `mesh::Bvh::raycast` | `MeshSculptor.raycast(...)` | `clay_mesh_sculptor_raycast` |
