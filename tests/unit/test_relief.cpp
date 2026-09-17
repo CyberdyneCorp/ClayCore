@@ -6,6 +6,7 @@
 #include <cmath>
 #include <vector>
 
+#include "clay/brush/move.h"
 #include "clay/kernel/exactness.h"
 #include "clay/scene/commands.h"
 #include "clay/scene/tape.h"
@@ -329,4 +330,178 @@ TEST_CASE("relief: it survives a round trip") {
     scene::Tape after = scene::compile_document(*back);
     for (float y = 0.2f; y <= 1.2f; y += 0.07f)
         CHECK(after.eval(cf3(0, y, 0)).d == doctest::Approx(before.eval(cf3(0, y, 0)).d));
+}
+
+// -- the frame: relief is Inflate, not Standard (relief-is-inflate-not-standard)
+
+namespace {
+
+// A fin 0.1 thick and 1.0 tall (y in [-0.5, 0.5]) standing on a slab, long in
+// z so the xy plane through z = 0 sees a 2D ridge narrower than the stamp.
+const kernel::cfloat3 kFinTop = cf3(0, 0.5f, 0);
+constexpr float kFinHalf = 0.05f;
+// The standard clay mapping: blend.k = rounding = region radius.
+constexpr float kStamp = 0.15f;
+
+scene::Document fin(bool with_relief) {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("fin");
+    scene::Node blade;
+    blade.prim = scene::Prim::box(cf3(kFinHalf, 0.5f, 1.0f));
+    l.sdf->insert(std::move(blade));
+    scene::Node slab;
+    slab.prim = scene::Prim::box(cf3(1.0f, 0.1f, 1.0f));
+    slab.xform.position = cf3(0, -0.6f, 0);
+    l.sdf->insert(std::move(slab));
+    if (with_relief) {
+        scene::Node region;
+        region.prim = scene::Prim::sphere(kStamp);
+        region.xform.position = kFinTop;
+        region.op = scene::Op::Relief;
+        region.blend = scene::Blend{scene::BlendProfile::Quadratic, kStamp};
+        region.rounding = kStamp;
+        l.sdf->insert(std::move(region));
+    }
+    return doc;
+}
+
+// The relief weight the kernel applies at p: smoothstep over the rounded
+// region's field b = |p - c| - radius - rounding, full inside, zero past one
+// rounding width (ctape_combine_dist).
+float relief_weight(kernel::cfloat3 p) {
+    const float b = kernel::clength(p - kFinTop) - kStamp - kStamp;
+    const float t = 1.0f - std::clamp(b / kStamp, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+// v + k * w * dir with the weight read at the MOVED point, as the field reads
+// it. A damped fixed point: the undamped map's slope reaches k * 1.5 / W = 1.5.
+kernel::cfloat3 moved(kernel::cfloat3 v, kernel::cfloat3 dir) {
+    kernel::cfloat3 q = v;
+    for (int i = 0; i < 200; ++i) q = (q + v + dir * (kStamp * relief_weight(q))) * 0.5f;
+    return q;
+}
+
+// How far p is from the zero set: |f| / |grad f|, central differences.
+float distance_to_surface(const scene::Tape& t, kernel::cfloat3 p) {
+    const float h = 1e-3f;
+    const float gx = t.eval(p + cf3(h, 0, 0)).d - t.eval(p - cf3(h, 0, 0)).d;
+    const float gy = t.eval(p + cf3(0, h, 0)).d - t.eval(p - cf3(0, h, 0)).d;
+    const float gz = t.eval(p + cf3(0, 0, h)).d - t.eval(p - cf3(0, 0, h)).d;
+    const float grad = std::sqrt(gx * gx + gy * gy + gz * gz) / (2 * h);
+    return std::abs(t.eval(p).d) / std::max(grad, 1e-6f);
+}
+
+// Where the field first turns positive walking from `from` along `dir`,
+// bracketed at 1e-3 and bisected.
+float exit_along(const scene::Tape& t, kernel::cfloat3 from, kernel::cfloat3 dir) {
+    float inside = 0.0f;
+    float outside = 0.0f;
+    for (float s = 0.0f; s < 1.5f; s += 1e-3f) {
+        if (t.eval(from + dir * s).d > 0.0f) {
+            outside = s;
+            break;
+        }
+        inside = s;
+    }
+    REQUIRE(outside > 0.0f);
+    for (int i = 0; i < 30; ++i) {
+        const float mid = 0.5f * (inside + outside);
+        (t.eval(from + dir * mid).d > 0.0f ? outside : inside) = mid;
+    }
+    return 0.5f * (inside + outside);
+}
+
+// Half-thickness at height y and the top on the axis: the fin's two numbers.
+float half_thickness(const scene::Tape& t, float y) { return exit_along(t, cf3(0, y, 0), cf3(1, 0, 0)); }
+float fin_top(const scene::Tape& t) { return exit_along(t, cf3(0, 0, 0), cf3(0, 1, 0)); }
+
+}  // namespace
+
+TEST_CASE("relief: each point moves along its own normal, which is Inflate") {
+    // The mesh Draw brush (the Standard preset) moves every vertex under a
+    // stamp along ONE averaged normal; Inflate along each vertex's own.
+    // Offsetting a distance moves each point of the isosurface along the
+    // field's own gradient, so relief is Inflate. A future "fix" that turns it
+    // into a Standard has to fail here, on a ridge narrower than the stamp,
+    // where the two frames differ by the whole amplitude.
+    const scene::Tape plain = scene::compile_document(fin(false));
+    const scene::Tape relief = scene::compile_document(fin(true));
+    REQUIRE(std::abs(half_thickness(plain, 0.4f) - kFinHalf) < 2e-3f);
+    REQUIRE(std::abs(fin_top(plain) - 0.5f) < 2e-3f);
+    // y = 0.4 on the face is 0.11 from the stamp centre: full weight, well
+    // inside radius + rounding = 0.3, and so is the face after it moves.
+    REQUIRE(relief_weight(cf3(kFinHalf, 0.4f, 0)) == 1.0f);
+    REQUIRE(relief_weight(cf3(kFinHalf + kStamp, 0.4f, 0)) == 1.0f);
+
+    SUBCASE("the fin gains k of half-thickness where the weight is full, and k of height") {
+        const float thick = half_thickness(relief, 0.4f);
+        const float up = fin_top(relief);
+        INFO("half-thickness at y = 0.4: " << thick << ", top: " << up);
+        CHECK(std::abs(thick - (kFinHalf + kStamp)) < 2e-3f);
+        CHECK(std::abs(up - (0.5f + kStamp)) < 2e-3f);
+    }
+
+    SUBCASE("v + k*w*n(v) on each face lies on the displaced surface") {
+        int checked = 0;
+        for (float side : {-1.0f, 1.0f})
+            for (float y = 0.05f; y <= 0.451f; y += 0.05f) {
+                const kernel::cfloat3 v = cf3(side * kFinHalf, y, 0);
+                const kernel::cfloat3 q = moved(v, cf3(side, 0, 0));
+                CAPTURE(side);
+                CAPTURE(y);
+                CAPTURE(q.x);
+                CHECK(distance_to_surface(relief, q) < 1e-3f);
+                ++checked;
+            }
+        // ...and the top, along its own normal.
+        CHECK(distance_to_surface(relief, moved(kFinTop, cf3(0, 1, 0))) < 1e-3f);
+        REQUIRE(checked == 18);
+    }
+
+    SUBCASE("v + k*w*N, one shared direction, lies at least k/2 off it") {
+        // The draw frame's reference on the same faces. N is the stamp's
+        // averaged normal, straight up by symmetry. Points whose weight is
+        // full, before and after the move: y in [0.25, 0.4].
+        for (float side : {-1.0f, 1.0f})
+            for (float y = 0.25f; y <= 0.401f; y += 0.05f) {
+                const kernel::cfloat3 v = cf3(side * kFinHalf, y, 0);
+                const kernel::cfloat3 q = moved(v, cf3(0, 1, 0));
+                REQUIRE(relief_weight(v) == 1.0f);
+                REQUIRE(relief_weight(q) == 1.0f);
+                CAPTURE(side);
+                CAPTURE(y);
+                CHECK(distance_to_surface(relief, q) >= 0.5f * kStamp);
+            }
+    }
+}
+
+TEST_CASE("relief: the draw frame, spelled as move_surface, leaves the fin's faces put") {
+    // Keeps the test above able to fail. clay_layer_move_surface with a
+    // smoothstep ease is the exact draw frame for one stamp: the same fin under
+    // move_surface(c, k*N, reach, smoothstep) keeps its half-thickness at 0.05
+    // and lifts its top to 0.6225 (a warp reads its weight at the displaced
+    // point), where relief reads 0.20 and 0.65. Measured with the thickness
+    // assertion pointed at this tape: it fails by the whole amplitude.
+    scene::Document doc = fin(false);
+    scene::Layer& layer = doc.layers.front();
+    brush::MoveSettings settings;
+    settings.radius = 3.0f * kStamp;  // radius + rounding + falloff
+    settings.ease = kernel::ease_smoothstep;
+    const std::vector<brush::MoveWarp> warps =
+        brush::move_brush(layer, kFinTop, cf3(0, kStamp, 0), settings);
+    REQUIRE_FALSE(warps.empty());
+    for (const brush::MoveWarp& w : warps) {
+        const scene::Node* n = layer.sdf->find(w.node);
+        REQUIRE(n != nullptr);
+        REQUIRE(scene::apply(doc, scene::Command{scene::SetDeformersCmd{
+                                      layer.id, w.node, brush::moved_chain(*n, w)}}));
+    }
+    const scene::Tape draw = scene::compile_document(doc);
+    const float thick = half_thickness(draw, 0.4f);
+    const float up = fin_top(draw);
+    INFO("draw frame: half-thickness at y = 0.4: " << thick << ", top: " << up);
+    CHECK(std::abs(thick - kFinHalf) < 2e-3f);
+    CHECK(up > 0.5f + 0.5f * kStamp);
+    CHECK(up < 0.5f + kStamp - 0.02f);
 }
