@@ -257,15 +257,27 @@ class DynamicSculptor {
         std::size_t inserted_one_parent = 0;  // …and with exactly one carried parent
         std::size_t retired = 0;     // entries a collapse retired — zero, under the rule
         std::size_t moved = 0;       // captured positions the REMESHER shifted
-        // COLLAPSES AVOIDED, NOT REFUSAL EVENTS. The remesher's passes re-ask
-        // about the same edge on every stamp, so the raw event count runs an
-        // order of magnitude above the operations it prevented; this counts a
-        // carried vertex once per stamp however often that stamp re-asks.
+        // COLLAPSES AVOIDED, NOT REFUSAL EVENTS. The remesher asks about the
+        // same edge on each of its passes on each stamp, so the raw event count
+        // runs an order of magnitude above the operations it prevented. This is
+        // the CARRIED VERTICES a collapse was refused on, counted once each for
+        // the gesture, so it is bounded by the region itself.
         std::size_t collapses_refused = 0;
+        // WHAT THE GESTURE ENDED HOLDING, snapshotted by `end_carried_region`
+        // so a caller can read it after the stroke that built it has returned.
+        // While a capture is open, `carried_entries` and `carried_top_weight`
+        // answer the same two questions about the region as it stands.
+        std::size_t carried = 0;
+        // THE LARGEST WEIGHT STILL CARRIED, reported beside the counts because
+        // the reach follows it and not them: a region kept numerically alive
+        // while its weight-1 centre was retired loses the drag.
+        float top_weight = 0.0f;
     };
     const CarriedRegionCounters& carried_counters() const { return carry_counters_; }
-    // Entries in the carry, and how many of them are still on the surface. The
-    // two differ only if something retired a carried vertex behind the rule.
+    // Entries in the carry RIGHT NOW, and how many of them are still on the
+    // surface. The two differ only if something retired a carried vertex behind
+    // the rule. Both are zero once the capture is closed; the counters hold the
+    // snapshot taken as it closed.
     std::size_t carried_entries() const { return carry_items_.size(); }
     std::size_t carried_live() const;
     // The largest falloff weight still carried. The reach follows THIS and not
@@ -355,11 +367,10 @@ class DynamicSculptor {
     // handed out again when the pool retires an id, so the GENERATION is
     // compared too — otherwise a vertex born this stamp inherits a dead entry.
     std::vector<std::uint32_t> carry_slot_;
-    // The stamp a carried entry was last counted as a refused collapse at, so
-    // the remesher's repeated passes over one edge count once. `kNoClass` means
-    // never.
-    std::vector<std::uint32_t> carry_refused_at_;
-    std::uint32_t carry_stamp_ = 0;
+    // Whether a carried entry has already been counted as a refused collapse,
+    // so the remesher's repeated passes over the same edge count it once for the
+    // gesture rather than once per ask.
+    std::vector<std::uint8_t> carry_refused_;
     bool carry_open_ = false;
     bool carry_taken_ = false;
     CarriedRegionCounters carry_counters_;

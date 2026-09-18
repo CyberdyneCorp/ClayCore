@@ -404,6 +404,11 @@ void DynamicSculptor::begin_carried_region() {
 }
 
 void DynamicSculptor::end_carried_region() {
+    // WHAT THE GESTURE ENDED HOLDING, before the carry is emptied: the stroke
+    // consumer closes the capture on its way out, and a caller reading what the
+    // gesture did reads it after that.
+    carry_counters_.carried = carry_items_.size();
+    carry_counters_.top_weight = carried_top_weight();
     // The slot map is retired through the entries it holds, never wholesale:
     // it is a per-vertex array and clearing it would cost the surface.
     for (VertexId v : carry_items_)
@@ -411,7 +416,7 @@ void DynamicSculptor::end_carried_region() {
     carry_items_.clear();
     carry_captured_.clear();
     carry_weights_.clear();
-    carry_refused_at_.clear();
+    carry_refused_.clear();
     carry_open_ = false;
     carry_taken_ = false;
 }
@@ -434,7 +439,7 @@ void DynamicSculptor::carry_append(VertexId v, kernel::cfloat3 captured, float w
     carry_items_.push_back(v);
     carry_captured_.push_back(captured);
     carry_weights_.push_back(weight);
-    carry_refused_at_.push_back(kNoClass);
+    carry_refused_.push_back(0);
 }
 
 void DynamicSculptor::take_carry() {
@@ -534,13 +539,13 @@ void DynamicSculptor::carry_on_collapse(void* ctx, VertexId, VertexId removed) {
         self->carry_items_[i] = self->carry_items_[last];
         self->carry_captured_[i] = self->carry_captured_[last];
         self->carry_weights_[i] = self->carry_weights_[last];
-        self->carry_refused_at_[i] = self->carry_refused_at_[last];
+        self->carry_refused_[i] = self->carry_refused_[last];
         self->carry_slot_[self->carry_items_[i].slot] = i;
     }
     self->carry_items_.pop_back();
     self->carry_captured_.pop_back();
     self->carry_weights_.pop_back();
-    self->carry_refused_at_.pop_back();
+    self->carry_refused_.pop_back();
     ++self->carry_counters_.retired;
 }
 
@@ -562,15 +567,16 @@ void DynamicSculptor::carry_on_move(void* ctx, VertexId v, kernel::cfloat3 befor
 // the MEAN of its parents' weights, so once the weight-1 centre is collapsed
 // nothing can recreate it and the gesture loses a quarter of the drag.
 //
-// Counted ONCE PER STAMP per carried vertex. The remesher's passes re-ask about
-// the same edge within a stamp, so counting every refusal would report an order
-// of magnitude more collapses than it actually prevented.
+// Counted ONCE PER CARRIED VERTEX for the gesture. The remesher asks about the
+// same edge on each of its passes on each stamp, so counting every refusal would
+// report an order of magnitude more collapses than it prevented — and would be
+// bounded by nothing a test could name. This count is bounded by the region.
 bool DynamicSculptor::carry_may_collapse(void* ctx, VertexId, VertexId removed) {
     DynamicSculptor* self = static_cast<DynamicSculptor*>(ctx);
     const std::uint32_t i = self->carry_index_of(removed);
     if (i == kNoClass) return true;
-    if (self->carry_refused_at_[i] != self->carry_stamp_) {
-        self->carry_refused_at_[i] = self->carry_stamp_;
+    if (self->carry_refused_[i] == 0) {
+        self->carry_refused_[i] = 1;
         ++self->carry_counters_.collapses_refused;
     }
     return false;
@@ -945,7 +951,6 @@ DynamicStampResult DynamicSculptor::stamp_impl(MeshBrush verb, const MeshBrushSe
     // first one with a region to maintain, and hooks read before the gather
     // would leave exactly that remesh unmaintained. Null unless a grab is
     // carrying, which is every stamp of every other verb.
-    if (carry_open_) ++carry_stamp_;
     RemeshHooks hooks;
     auto hooks_now = [&]() -> const RemeshHooks* {
         hooks = carry_hooks();
