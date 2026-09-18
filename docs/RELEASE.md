@@ -859,6 +859,201 @@ forward-refuse).
    whatever the line had reached, exactly as v0.113.0 covered 0.104.0-0.113.0.
    No minor in this range was skipped and none was ever tagged on its own.
 
+   **0.117.0 through 0.120.0 are additive at the ABI, and the adaptive surface
+   is where all three additions land.** 0.117.0 appends one field,
+   `clay_brush_params.mask_threshold` (#611): above zero the mask stops being a
+   dimmer and becomes a STENCIL, refusing a cell at or above the threshold
+   outright and writing one below it AS THOUGH UNMASKED. 0.118.0 adds the
+   opaque `clay_dynamic_delta` and nine entry points -- `_create`, `_destroy`,
+   `_clear`, `_stats_get`, `_revert`, `_apply`, `_serialize`, `_deserialize` and
+   `clay_dynamic_sculptor_stamp_recorded` (#617) -- which is the first undo a
+   host holding a `clay_dynamic_surface` has ever had. 0.119.0 adds
+   `clay_dynamic_sculptor_apply_stroke` and `_apply_preset` (#619), the adaptive
+   surface's first stroke consumer. 0.120.0 adds their `_recorded` siblings
+   (#622), so a whole stroke is ONE guarded undo step. Thirteen symbols added,
+   **zero removed**, one appended field, and no struct re-laid out: every `-`
+   line in the `clay.h` diff against v0.116.0 is a comment or the
+   `CLAY_ABI_MINOR` define, and none of them is inside a `typedef struct`.
+
+   **AND THREE CHANGES A CALLER OBSERVES WITHOUT CALLING ANYTHING NEW, one of
+   which no version gate can announce at all.**
+
+   **A mesh GRAB now reaches the whole drag, and every preset changes by a
+   different amount** (#624 -- issue #620). This is the largest behavioural
+   break in the release and NOTHING in the ABI says so: no symbol was added, no
+   descriptor re-laid out, and no version number moved for it. A grab used to
+   re-gather its region around the stroke's first sample on every stamp; the
+   surface leaves that point, so the weights shrank and the pull fell short. It
+   now gathers ONCE and carries the items, their captured positions and their
+   weights: each stamp writes `captured + weight * (p_k - p_0)`. The old
+   shortfall depended on the brush radius AND compounded with the drag, so there
+   is no single factor to divide by -- on a unit `cube_sphere(24)`, spacing 0.1,
+   driving `origin/main`'s own `brush::apply_to_mesh`, a 0.6 drag reached
+   **22.66% at radius 0.15, 41.10% at 0.30 and 60.56% at 0.50**, and a 1.5 drag
+   **9.22% and 18.21%**. Shipped reach is 100.00-100.03% on all eight fixtures
+   on the fixed and the adaptive path, the two agreeing to **0.0 - 1.6e-4**. It
+   is also CHEAPER, not dearer -- one gather per gesture -- at **1.95x and
+   1.87x** on the fixed path and 1.52x / 1.88x / 1.89x on the adaptive one
+   (macOS arm64, Release, `cpu-only`; 201 fixed and 22 adaptive repeats,
+   interleaved, first discarded; an independent re-derivation read 1.93x / 1.86x
+   and 1.53x / 1.88x / 1.88x, so read the fixed saving as 1.8-1.9x). Two limits
+   are measured rather than fixed: on a CURVE the surface moves the CHORD, so
+   the fixed path reaches 100.00% of the chord and 90.22% of the path while the
+   adaptive path reaches **115.79%** of it, and a fixed mesh has no mitigation
+   for a captured region a long drag stretched -- longest edge **0.1174 ->
+   0.8176** on a 1.5 pull. **Mac numbers only; the mesh brushes are not in the
+   device suite and no device measurement was taken.**
+
+   **Every voxel GRAB falloff delivered the NEXT one's curve, and Constant was
+   unreachable** (#612, documented for hosts by #614 -- issue #610).
+   `VoxelGrid::sculpt_grab` passed `p.falloff` to `cgrab_point` as a `CEase`
+   index. The enums do not line up -- `BrushFalloff` is
+   Constant/Linear/Smooth/Gaussian, `CEase` is
+   linear/smoothstep/smootherstep/in_quad -- and `cregion_weight` applies the
+   ease to `(1 - d)`. Sampled at d = 0, 0.25, 0.5, 0.75, `Constant` delivered
+   1.000 0.750 0.500 0.250 (Linear's curve), `Linear` delivered 1.000 0.844
+   0.500 0.156 (Smooth's), and `Gaussian` delivered 1.000 0.562 0.250 0.062. All
+   four still ran 1 at the centre to 0 at the rim, so nothing looked broken;
+   what it cost was the MEANING of the control, one `BrushParams` field meaning
+   two different things depending on which verb read it. A host keeping the
+   curve it had shifts its request one step down the list. No ABI surface
+   change, no new field, no document format.
+
+   **`clay_dynamic_sculptor_stamp`'s report was wrong on a stamp that reached
+   nothing** (#619). `stamp_impl`'s reached-nothing exit returned the revisions
+   it read on ENTRY, so a Clay stamp whose BEFORE remesh changed the topology
+   reported that nothing had, and published the remesh counters a second time on
+   top of `stamp()`'s publish. Neither exit carried `hit_budget` and one dropped
+   `relaxed`, so a Grab whose remesh stopped at its budget reported a converged
+   region. A host re-uploading on a revision change was the one who paid. Found
+   by asserting that a stroke's summary equals its stamps applied one by one.
+
+   **AND ONE DEFECT IN WHAT A HOST READS BACK, fixed with the undo it was found
+   under** (#617). The relax pass in `remesh_local.cpp` refreshed normals over
+   the incident faces and never noted or re-synced them, so a `TopologyDelta`'s
+   `after` normals were stale: 346 vertex and 669 face normals disagreed with
+   the live surface immediately after capture. **Redo restored up to 2,785 wrong
+   vertex normals** on a 16-stamp stroke at detail 16; undo was wrong on two
+   fixtures (14 on one, 2,910 summed over eight strokes reversed then redone).
+   Positions and indices were exact in every row, which is why it survived:
+   `test_dynamic_history.cpp` compared positions and indices, and
+   `test_topology_delta.cpp` drives the operators without the relax pass. With
+   `relax_after_remesh = false` there was never a discrepancy. Measured on
+   `origin/main` at `aafeccb6`, cpu-only Release, Apple arm64.
+
+   **0.118.0 also says what a record COSTS, exactly.**
+   `clay_dynamic_delta_stats_get` reports `encoded_bytes` as
+   `56 + 122V + 114H + 42E + 66F`, pinned by a `static_assert` and held equal to
+   what `_serialize` writes by a C test. For one stroke on `cube_sphere(32)` it
+   is **1,233,636 bytes**, against **3,195,040** for the
+   `clay_dynamic_surface_serialize` a host had to use instead. `bytes()` is a
+   budget and not an assertion: it returned 1,884,384 against a 1,261,256-byte
+   payload. Undo does not shrink the surface -- face slots went 12,288 ->
+   14,964 and surface bytes 3,637,376 -> 6,684,928 after three undos -- so
+   `serialize` is NOT the comparison for "undo restored the surface";
+   `to_mesh` plus `validate` is.
+
+   **0.119.0 REFUSES what it cannot honour rather than accepting it.**
+   `brush::apply_to_dynamic` applies nothing and returns 0 for
+   `MeshBrush::Layer`, and refuses `MeshStrokeOptions::defer_normals` outright,
+   because the adaptive sculptor has no normal deferral and accepting a flag and
+   ignoring it is the failure the brush-engine spec forbids. It also needed one
+   rule the fixed path never did: a fixed mesh never loses a weld class, but the
+   adaptive surface remeshes around every Snakehook stamp and a collapse retires
+   vertex ids, so an adaptive Snakehook revalidates its anchor every stamp and
+   re-finds it at the PREVIOUS STAMP position -- never worse than re-finding at
+   the dead anchor's last position in any of the sixteen detail-4/8 rows
+   measured, equal in eight and better in eight, by up to 24 points (57% ->
+   81%). A host's own resolve-then-stamp loop reaches **42%** of a 0.8 Snakehook
+   pull-out against the stroke's **96%**, on a `cube_sphere(24)` at detail 8. The
+   call itself buys no latency and does not claim to: **1.004x** a host
+   resolve-then-stamp loop (46.221 ms against 46.048 ms, Draw, 60 samples to 14
+   stamps, radius 0.15, detail 6, `cube_sphere(48)`, Release `libclay_shared`,
+   median of 30 after a warm-up, identical split counts). An earlier 1.001x
+   figure priced the host loop before the call existed; 1.004x is the
+   re-measurement. **Neither proposal names its host.**
+
+   **0.120.0 closes a correctness gap, not an ergonomic one** (#622). Recording
+   a stroke per stamp gave a DIFFERENT stroke for the two drags, because the
+   stroke centres Grab on the first stamp and Snakehook on the vertex it drags
+   while a host loop centres both on the cursor: on a `cube_sphere(16)` through
+   the C ABI, 24 samples, Draw agreed with the stroke to the byte (664,260 both
+   ways) and Grab and Snakehook did not (1,069,644 against 448,280, and
+   1,107,948 against 1,205,836). So the loop's record was a faithful undo of the
+   wrong surface, and a host had to choose between the right stroke and an undo
+   step. The mark is checked ONCE, before the first stamp: across seven fixtures
+   and 97 stamps a per-stamp loop recorded **zero** refusals at k > 0, and
+   injecting one unrecorded stamp before k = 3 made the counter fire three
+   times, so a per-stamp check would be a check that cannot fire. Recording
+   costs what recording its stamps costs -- **1.046x and 1.065x** at 27,648 and
+   110,592 faces, against 1.049x and 1.061x for the per-stamp loop, with a
+   reused record saving under 1% (Release, arm64, 14 Draw stamps, fresh surface
+   per run, arms interleaved, median of 61 and 21; the proposal names no host
+   further). **The record ACCUMULATES**, as `stamp_recorded` allows: a dab then
+   a Clay stroke then a Grab stroke grew one record 707,358 -> 1,263,002 ->
+   1,647,616 encoded bytes and ONE revert restored the pristine surface. One
+   undo step per stroke therefore means the HOST clears the record, or makes a
+   new one, before each stroke.
+
+   **NO KERNEL MATH CHANGED, and the one kernel-header edit is a comment**
+   (#615 and #618). `CLAY_OP_RELIEF` and `CLAY_OP_INCISE` keep the values 14 and
+   15 and every field value is bit-identical, so a host pinning
+   `claycore-kernels.zip` re-baselines nothing. What changed is that the header
+   stopped claiming something that was measured to be false: Relief is the SDF
+   **Inflate**, and ZBrush **Standard** is only approximated by it. Four
+   fixtures at voxel 0.01 at the standard clay mapping (`k` = rounding = region
+   radius = 0.15): an Inflate-frame reference sits **0.000k** from the relief
+   surface on the sphere, the saddle and the bowl and 0.001k mean on a thin fin,
+   where a Draw-frame reference sits 0.017k / 0.077k / 0.027k / **0.568k**. The
+   error is governed by one quantity -- how far the normals under the stamp
+   spread -- and on a ridge narrower than the stamp it is the whole amplitude:
+   one stamp at k = 0.15 thickens the fin's half-thickness by **+0.1500** where
+   the mesh Draw gives +0.0115. Corrected in `clay.h`,
+   `include/clay/kernel/tape.h`, `include/clay/scene/types.h`, `docs/07` §9,
+   `docs/09`, `docs/sculpt_comparison.md` and `examples/25_relief.py`, and
+   pinned by `tests/unit/test_relief.cpp` so a future "fix" that turns Relief
+   into a Standard is seen to have changed Inflate. **The faithful Standard was
+   measured and NOT shipped**: it cannot be a combine op (it needs the
+   accumulated field at `p - k*w*N` and a record has `a` at `p` only), and the
+   spelling that does exist, `Layer.move_surface` with a smoothstep ease, is one
+   warp per dab -- 700 warps and 76.2 ms against relief's 8.8 ms over 30 dabs on
+   a 24-item blockout, at a safe step scale of 1.5^-30 against relief's 1/46.
+   **That one comment edit to `tape.h` expires all four manual hardware gates**,
+   because `release_check.py` diffs paths and not semantics. That is deliberate
+   and it is the cost of a gate nobody learns to re-stamp without reading.
+
+   **FOUR PERFORMANCE CHANGES, and not one of them closes #531.** Each says so
+   in its own PR and this entry repeats it. #613 evaluates each unique
+   source-grid position once for complete uncomposed grids: evaluated samples
+   **1,601,613 -> 1,157,625 (27.7%)** on a 13x13x13 grid, first full
+   materialization **214.076 -> 156.149 ms (27.1%)** at 32 source items, output
+   blobs byte-identical (Intel Core i9-12900K, Linux, Release, one logical CPU
+   per performance core). #616 batches the normal refreshes in adaptive
+   remeshing after the first 64 updates: with undo, sampled **p95 -14.1% and
+   -22.9%** (20.283 -> 17.429 ms at footprint 1,000 and 74.363 -> 57.310 at
+   10,000), medians mixed and broadly flat, exported geometry identical in all
+   twelve process pairs; p95 there is the median of three per-process statistics
+   over twenty stamps and NOT a population tail, and the slowest candidate
+   stamps are still 24.899 and 71.785 ms (same Intel host). #621 reuses the
+   endpoint fans `one_ring` already walked across the collapse checks: its claim
+   is an ALLOCATION COUNT and not a time -- **126 -> 80 (36.5%)** on 20x20 and
+   80x80 planar grids -- and its paired timing run was under CPU contention and
+   is explicitly correctness evidence only. #623 caches the boundary lattice
+   reads during extraction: **3-8%** across all twelve fixture medians (13.413
+   -> 12.593 ms on a full sphere), 720 timings, all 20 output blobs matching the
+   36,019,240-byte reference byte for byte (same Intel host); its desktop
+   application comparison is mixed outside Smooth/Relax and is not a CPU-only
+   run.
+
+   **None of 0.117.0, 0.118.0, 0.119.0 or 0.120.0 was ever tagged on its own.**
+   Each merged with its feature -- #611, #617, #619 and #622 respectively --
+   and v0.120.0 is the tag cut at whatever the line had reached, exactly as
+   v0.116.0 covered 0.114.0-0.116.0 and v0.113.0 covered 0.104.0-0.113.0. No
+   minor in this range was skipped. **And no commit carries the already-released
+   0.116.0 version line into this release**: #611 is the first merge after the
+   v0.116.0 tag and its first commit is the bump, so the gap that produced the
+   0.78.0 and 0.103.0 stragglers below did not open this time.
+
    **0.113.0 stops decimation breaking a manifold it was given** (#567).
    meshoptimizer chooses its own collapses and does not apply the link condition
    collapse_edge refuses on, so clay_document_mesh -- documented as the
