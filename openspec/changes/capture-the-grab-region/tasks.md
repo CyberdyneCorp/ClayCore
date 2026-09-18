@@ -126,7 +126,9 @@ exactly two cases fail, both in one file; under C a third does.
       `test_multires_shared_brush_parity.cpp` all pass under every rule
 - [x] 5.6 Confirmed on the FULL suite and not only the targeted shard: under the
       captured-set rule it is **2837 of 2839 cases, 8 of 17,931,111 assertions
-      failing**, and they are exactly 5.1 and 5.2. Nothing else in the tree moves
+      failing**, and they are exactly 5.1 and 5.2; under a following centre
+      **2836 of 2839, 9 assertions**, adding exactly 5.3. Nothing else in the
+      tree moves under either rule
 - [ ] 5.7 Still to run before the PR: the pyclay tests from a build that actually
       has pyclay (the cpu-only preset does not enable it), the Swift surface, and
       the device suite, none of which this measurement could reach
