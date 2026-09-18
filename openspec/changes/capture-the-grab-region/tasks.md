@@ -289,7 +289,7 @@ exactly two cases fail, both in one file; under C a third does.
       with its primary header missing and the scores it printed were of a
       degraded AST: it reported `remesh_region` at 15 both with the hooks and
       without them, which is what sent me looking. Re-run against a real
-      `compile_commands.json` (`-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`), with
+      compile database (`-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`), with
       `clang-diagnostic-error` counted and zero on both trees:
 
       | function | origin/main | first spelling | shipped | target |
@@ -332,7 +332,16 @@ exactly two cases fail, both in one file; under C a third does.
       including three that predate this stage on this branch. Backticks around
       origin/main, RemeshObserver, probe_ and build/ make the checker look for
       files and symbols that do not exist; unquoted, it reads
-      `task symbols resolve in 62 change(s), 5 baselined`
+      `task symbols resolve in 62 change(s), 5 baselined`. Run separately as
+      well: `check_test_shards.py --binary build/cpu-only/tests/clay_unit_tests`
+      reads **2847 cases partitioned across 4 shards, none duplicated, none
+      unrun** — the new file joined the exclusion-defined shard and needed no wiring —
+      and `check_gallery.py`, `check_doc_latency.py`, `check_licenses.py` and
+      `check_layering.py` are all OK. `check_kernel_dialect.py` fails on the
+      missing Metal Toolchain alone, and this branch touches no kernel header.
+      The six standing failures name `CMakeLists.txt`, `bindings/c/clay_c.cpp`
+      and `include/clay/kernel/tape.h`; `git diff origin/main --name-only` names
+      none of the three (only `tests/CMakeLists.txt`, which is a different file)
 - [x] 7.8 The two REFUTATIONS this stage produced are in `proposal.md` §16 and
       §17 and are reflected back into `design.md` D2 (2) and its open questions,
       `docs/07` and `include/clay/brush/stroke.h`, rather than left in the
