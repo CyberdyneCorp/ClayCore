@@ -2,6 +2,7 @@
 #include "brick_recording.h"
 #include "brick_edge_ownership.h"
 #include "brick_samples.h"
+#include "boundary_samples.h"
 #include "ring_cells.h"
 #include "edge_welding.h"
 
@@ -11,6 +12,7 @@
 #include <array>
 #include <cmath>
 #include <optional>
+#include <span>
 #include <tuple>
 
 #include <unordered_map>
@@ -482,13 +484,36 @@ std::vector<std::uint64_t> shell_cells(const std::vector<brick::BrickKey>& keys,
     return cells;
 }
 
+// Each recording range owns bounded sample scratch and disjoint outputs.
+void record_shell_cells(std::span<const std::uint64_t> cells,
+                        std::span<ShellCollector> recorded,
+                        const std::function<float(int, int, int)>& sample,
+                        int dim, bool reuse_samples) {
+    constexpr std::uint64_t mask21 = (1u << 21) - 1;
+    constexpr std::int64_t bias = 1u << 20;
+    detail::BoundarySamples samples(std::clamp(dim, 1, 16), sample);
+    const bool cached = reuse_samples && dim > 0 && dim <= decltype(samples)::max_dimension;
+    for (std::size_t c = 0; c < cells.size(); ++c) {
+        const auto packed = cells[c];
+        const int i = static_cast<int>(static_cast<std::int64_t>(packed >> 42) - bias);
+        const int j = static_cast<int>(static_cast<std::int64_t>((packed >> 21) & mask21) - bias);
+        const int k = static_cast<int>(static_cast<std::int64_t>(packed & mask21) - bias);
+        if (cached) {
+            samples.select_cell(i, j, k);
+            march_cell(recorded[c], samples, i, j, k);
+        } else {
+            march_cell(recorded[c], sample, i, j, k);
+        }
+    }
+}
+
 // Every straddler a request owes, bucketed by the requested key each one is
 // attributed to. Run for a subset AND for the whole surface: a subset owes the
 // cells of the surface bricks it did not ask for, and both owe the cells of
 // bricks that store no lattice at all (issue #292).
 std::unordered_map<brick::BrickKey, std::vector<ShellTriangle>, brick::BrickKeyHash>
 collect_straddlers(const brick::BrickCache& cache, const std::vector<brick::BrickKey>& keys,
-                   const std::function<float(int, int, int)>& sample, int lod) {
+                   const std::function<float(int, int, int)>& sample, int lod, bool reuse_samples) {
     const int dim = cache.config().dim;
     RequestedSet requested(keys.begin(), keys.end());
     std::unordered_map<brick::BrickKey, std::vector<ShellTriangle>, brick::BrickKeyHash> buckets;
@@ -514,14 +539,9 @@ collect_straddlers(const brick::BrickCache& cache, const std::vector<brick::Bric
         recorded.clear();
         recorded.resize(wave_n);
         parallel::for_range(wave_n, 1, [&](std::size_t first, std::size_t last) {
-            for (std::size_t c = first; c < last; ++c) {
-                const std::uint64_t packed = cells[wave + c];
-                const int i = static_cast<int>(static_cast<std::int64_t>(packed >> 42) - bias);
-                const int j =
-                    static_cast<int>(static_cast<std::int64_t>((packed >> 21) & mask21) - bias);
-                const int k = static_cast<int>(static_cast<std::int64_t>(packed & mask21) - bias);
-                march_cell(recorded[c], sample, i, j, k);
-            }
+            record_shell_cells(std::span{cells}.subspan(wave + first, last - first),
+                               std::span{recorded}.subspan(first, last - first),
+                               sample, dim, reuse_samples);
         });
         for (std::size_t c = 0; c < wave_n; ++c) {
             const ShellCollector& shell = recorded[c];
@@ -842,7 +862,7 @@ Mesh detail::mesh_bricks_recorded(const brick::BrickCache& cache,
     // them once, attributed to the lowest requested key they touch; for a field
     // the band does bracket there are none and the mesh is unchanged.
     std::unordered_map<brick::BrickKey, std::vector<ShellTriangle>, brick::BrickKeyHash>
-        straddlers = collect_straddlers(cache, *keys, global_sample, lod);
+        straddlers = collect_straddlers(cache, *keys, global_sample, lod, deduplicate);
 
     // MARCH IN PARALLEL, WELD SERIALLY — and the split is forced by what makes
     // this mesh watertight rather than chosen for convenience.

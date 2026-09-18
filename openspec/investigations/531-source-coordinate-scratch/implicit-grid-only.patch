@@ -1,0 +1,176 @@
+diff --git a/src/session/sdf_prefix_cache.cpp b/src/session/sdf_prefix_cache.cpp
+index 78e83f5e..c3ec350c 100644
+--- a/src/session/sdf_prefix_cache.cpp
++++ b/src/session/sdf_prefix_cache.cpp
+@@ -20,6 +20,21 @@ namespace session {
+
+ namespace {
+
++// Keep regular source lattices implicit. The CPU grid evaluator generates
++// coordinates in worker-local row buffers, using the same float expression.
++void fill_source_lattice(const scene::Tape& tape, const eval::GridQuery& grid, float* out) {
++    eval::Backend* cpu = eval::Registry::instance().find("cpu");
++    if (cpu && cpu->eval_grid(tape, grid, out, nullptr) == eval::Status::Ok) return;
++    std::size_t at = 0;
++    for (int z = 0; z < grid.nz; ++z)
++        for (int y = 0; y < grid.ny; ++y)
++            for (int x = 0; x < grid.nx; ++x) {
++                const auto p = grid.origin + kernel::cf3(static_cast<float>(x),
++                    static_cast<float>(y), static_cast<float>(z)) * grid.spacing;
++                out[at++] = tape.eval(p).d;
++            }
++}
++
+ // The layer as `bake_layer` samples it: visible whatever the artist hid, and
+ // its own transform identity so the frame is the layer's own. Every other layer
+ // is hidden, because `compile_layer_prefix` and `compile_layer_suffix` work on
+@@ -462,8 +477,8 @@ field::FieldVolume::BrickBlockFill SdfSourceField::block_fill() const {
+                   float* out) {
+         if (!composed_ && detail::fill_unique_source_grid(
+                 grid, first, count, out,
+-                [this](const float* points, std::size_t n, float* values) {
+-                    fill_span(points, n, values, false);
++                [this](const eval::GridQuery& query, std::size_t, float* values) {
++                    fill_source_lattice(full_, query, values);
+                 })) return;
+         const std::size_t per = static_cast<std::size_t>(field::kBrickSamples);
+         const std::size_t n = count * per;
+diff --git a/src/session/source_grid.h b/src/session/source_grid.h
+index 04f619e2..9d6ceb8e 100644
+--- a/src/session/source_grid.h
++++ b/src/session/source_grid.h
+@@ -8,11 +8,13 @@
+ #include <vector>
+
+ #include "clay/field/volume.h"
++#include "clay/eval/backend.h"
+
+ namespace clay::session::detail {
+
+-// Decline before allocating or touching output. The old path holds three floats
+-// per brick sample; the unique path holds three coordinates plus one value.
++// Retain the established eligibility and overflow bounds: the point path held
++// three floats per brick sample and the shared path held four per unique sample.
++// Implicit coordinates reduce scratch without broadening the eligible domain.
+ inline std::optional<std::array<std::size_t, 3>>
+ unique_source_shape(const field::FieldVolume::BrickGrid &grid, std::size_t first,
+                     std::size_t count) {
+@@ -55,21 +57,10 @@ bool fill_unique_source_grid(const field::FieldVolume::BrickGrid &grid, std::siz
+     const auto by_count = static_cast<std::size_t>(grid.bcount[1]);
+     constexpr auto dim = field::kBrickDim;
+     constexpr auto n = dim + 1;
+-    std::vector<float> points(unique * 3);
+     std::vector<float> values(unique);
+-    std::size_t at = 0;
+-    for (std::size_t z = 0; z < nz; ++z)
+-        for (std::size_t y = 0; y < ny; ++y)
+-            for (std::size_t x = 0; x < nx; ++x) {
+-                const auto p =
+-                    grid.origin + kernel::cf3(static_cast<float>(x), static_cast<float>(y),
+-                                              static_cast<float>(z)) *
+-                                      grid.cell_size;
+-                points[at++] = p.x;
+-                points[at++] = p.y;
+-                points[at++] = p.z;
+-            }
+-    fill(points.data(), unique, values.data());
++    const eval::GridQuery query{grid.origin, grid.cell_size,
++                               static_cast<int>(nx), static_cast<int>(ny), static_cast<int>(nz)};
++    fill(query, unique, values.data());
+     for (std::size_t brick = 0; brick < count; ++brick) {
+         const auto bx = brick % bx_count;
+         const auto by = brick / bx_count % by_count;
+diff --git a/tests/unit/test_sculpt_allocation.cpp b/tests/unit/test_sculpt_allocation.cpp
+index 706c07bf..1859a984 100644
+--- a/tests/unit/test_sculpt_allocation.cpp
++++ b/tests/unit/test_sculpt_allocation.cpp
+@@ -37,6 +37,7 @@
+ #include "clay/mesh/voxel_remesh.h"
+ #include "clay/mesh/topology_ops.h"
+ #include "clay/mesh/sculpt_layer.h"
++#include "clay/session/sdf_prefix_cache.h"
+
+ #include "clay.h"
+
+@@ -1035,3 +1036,33 @@ TEST_CASE("allocation gate: collapse planning reuses endpoint neighborhoods") {
+         CHECK(allocations <= allocation_limit);
+     }
+ }
++
++TEST_CASE("allocation gate: full source grids avoid a whole XYZ scratch array") {
++    scene::Document doc;
++    auto& layer = doc.add_sdf_layer("source");
++    scene::Node node;
++    node.prim = scene::Prim::sphere(1.0f);
++    layer.sdf->insert(node);
++    const auto source = session::SdfSourceField::open(doc, layer.id, nullptr);
++    REQUIRE(source);
++    const field::FieldVolume::BrickGrid grid{
++        cf3(-1.06f, -1.06f, -1.06f), .02f, .06f, {13, 13, 13}};
++    constexpr std::size_t bricks = 13 * 13 * 13;
++    constexpr std::size_t unique = 105 * 105 * 105;
++    std::vector<float> out(bricks * field::kBrickSamples);
++    const auto fill = source->block_fill();
++    fill(grid, 0, bricks, out.data());
++    // Worker-local scratch can grow when scheduling gives a worker a larger
++    // chunk. Measure the best of four warm fills to exclude that startup cost;
++    // a whole XYZ array, unlike worker-local storage, is allocated every time.
++    std::size_t least_bytes = static_cast<std::size_t>(-1);
++    for (int trial = 0; trial < 4; ++trial) {
++        CountingScope scope;
++        fill(grid, 0, bricks, out.data());
++        least_bytes = std::min(least_bytes, scope.bytes());
++    }
++    CAPTURE(least_bytes);
++    // One float per unique value, with another value array's worth of room for
++    // backend bookkeeping. XYZ plus values needs four and must fail this gate.
++    CHECK(least_bytes < unique * 2 * sizeof(float));
++}
+diff --git a/tests/unit/test_source_grid.cpp b/tests/unit/test_source_grid.cpp
+index 0b13bb3b..9d740a07 100644
+--- a/tests/unit/test_source_grid.cpp
++++ b/tests/unit/test_source_grid.cpp
+@@ -11,6 +11,20 @@ using namespace clay;
+ using field::FieldVolume;
+ using kernel::cf3;
+
++namespace {
++void fill_coordinate_axis(const eval::GridQuery& grid, int axis, float* values) {
++    std::size_t at = 0;
++    for (int z = 0; z < grid.nz; ++z)
++        for (int y = 0; y < grid.ny; ++y)
++            for (int x = 0; x < grid.nx; ++x) {
++                const auto p = grid.origin + cf3(static_cast<float>(x), static_cast<float>(y),
++                                                static_cast<float>(z)) * grid.spacing;
++                const float coordinates[]{p.x, p.y, p.z};
++                values[at++] = coordinates[axis];
++            }
++}
++}  // namespace
++
+ TEST_CASE("source grid evaluates unique coordinates once and reconstructs every sample bit") {
+     const std::array<std::array<int, 3>, 3> shapes{{{6, 6, 6}, {7, 8, 9}, {13, 13, 13}}};
+     for (const auto &shape : shapes) {
+@@ -24,11 +38,10 @@ TEST_CASE("source grid evaluates unique coordinates once and reconstructs every
+             std::size_t evaluated = 0;
+             const bool filled = session::detail::fill_unique_source_grid(
+                 grid, 0, bricks, out.data() + 1,
+-                [&](const float *points, std::size_t count, float *values) {
++                [&](const eval::GridQuery& query, std::size_t count, float *values) {
+                     ++calls;
+                     evaluated += count;
+-                    for (std::size_t i = 0; i < count; ++i)
+-                        values[i] = points[i * 3 + axis];
++                    fill_coordinate_axis(query, axis, values);
+                 });
+             REQUIRE(filled);
+             CHECK(calls == 1);
+@@ -79,7 +92,7 @@ TEST_CASE("source grid declines ineligible windows without calling or writing")
+         bool called = false;
+         CHECK_FALSE(session::detail::fill_unique_source_grid(
+             grid, c.first, c.count, &output,
+-            [&](const float *, std::size_t, float *) { called = true; }));
++            [&](const eval::GridQuery&, std::size_t, float *) { called = true; }));
+         CHECK_FALSE(called);
+         CHECK(output == 123.0f);
+     }

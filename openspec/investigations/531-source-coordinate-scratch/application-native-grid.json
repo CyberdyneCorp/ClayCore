@@ -1,0 +1,197 @@
+[
+  {
+    "tool": "mask",
+    "begin": {
+      "before": 5.964,
+      "fixed": 5.998
+    },
+    "continue": {
+      "before": 0.023,
+      "fixed": 0.024
+    },
+    "end": {
+      "before": 7.736,
+      "fixed": 7.683
+    }
+  },
+  {
+    "tool": "crease",
+    "begin": {
+      "before": 0.89,
+      "fixed": 1.077
+    },
+    "continue": {
+      "before": 0.015,
+      "fixed": 0.014
+    },
+    "end": {
+      "before": 12.652,
+      "fixed": 12.68
+    }
+  },
+  {
+    "tool": "clay",
+    "begin": {
+      "before": 1.797,
+      "fixed": 1.781
+    },
+    "continue": {
+      "before": 0.017,
+      "fixed": 0.017
+    },
+    "end": {
+      "before": 13.318,
+      "fixed": 13.003
+    }
+  },
+  {
+    "tool": "inflate",
+    "begin": {
+      "before": 1.794,
+      "fixed": 1.76
+    },
+    "continue": {
+      "before": 0.018,
+      "fixed": 0.017
+    },
+    "end": {
+      "before": 12.745,
+      "fixed": 12.855
+    }
+  },
+  {
+    "tool": "layer",
+    "begin": {
+      "before": 1.005,
+      "fixed": 0.894
+    },
+    "continue": {
+      "before": 0.015,
+      "fixed": 0.016
+    },
+    "end": {
+      "before": 12.718,
+      "fixed": 12.272
+    }
+  },
+  {
+    "tool": "standard",
+    "begin": {
+      "before": 1.02,
+      "fixed": 0.923
+    },
+    "continue": {
+      "before": 0.016,
+      "fixed": 0.016
+    },
+    "end": {
+      "before": 12.664,
+      "fixed": 12.582
+    }
+  },
+  {
+    "tool": "polish",
+    "begin": {
+      "before": 0.02,
+      "fixed": 0.022
+    },
+    "continue": {
+      "before": 0.017,
+      "fixed": 0.012
+    },
+    "end": {
+      "before": 30.124,
+      "fixed": 29.989
+    }
+  },
+  {
+    "tool": "planar",
+    "begin": {
+      "before": 0.023,
+      "fixed": 0.036
+    },
+    "continue": {
+      "before": 0.014,
+      "fixed": 0.016
+    },
+    "end": {
+      "before": 29.77,
+      "fixed": 31.035
+    }
+  },
+  {
+    "tool": "move-topological",
+    "begin": {
+      "before": 0.039,
+      "fixed": 0.025
+    },
+    "continue": {
+      "before": 0.013,
+      "fixed": 0.012
+    },
+    "end": {
+      "before": 41.188,
+      "fixed": 41.732
+    }
+  },
+  {
+    "tool": "move",
+    "begin": {
+      "before": 0.025,
+      "fixed": 0.022
+    },
+    "continue": {
+      "before": 3.082,
+      "fixed": 2.732
+    },
+    "end": {
+      "before": 34.238,
+      "fixed": 34.073
+    }
+  },
+  {
+    "tool": "relax",
+    "begin": {
+      "before": 51.12,
+      "fixed": 50.194
+    },
+    "continue": {
+      "before": 0.024,
+      "fixed": 0.026
+    },
+    "end": {
+      "before": 55.895,
+      "fixed": 58.455
+    }
+  },
+  {
+    "tool": "smooth",
+    "begin": {
+      "before": 48.688,
+      "fixed": 46.292
+    },
+    "continue": {
+      "before": 0.025,
+      "fixed": 0.044
+    },
+    "end": {
+      "before": 57.538,
+      "fixed": 59.927
+    }
+  },
+  {
+    "tool": "snake-hook",
+    "begin": {
+      "before": 0.021,
+      "fixed": 0.023
+    },
+    "continue": {
+      "before": 12.523,
+      "fixed": 12.94
+    },
+    "end": {
+      "before": 22.963,
+      "fixed": 24.233
+    }
+  }
+]

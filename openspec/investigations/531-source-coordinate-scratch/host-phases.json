@@ -1,0 +1,326 @@
+[
+  {
+    "run": "current-0",
+    "tool": "move",
+    "phase": "end",
+    "kind": "mesh",
+    "engine": 16.375,
+    "read": 1.481,
+    "split": 4.107
+  },
+  {
+    "run": "current-0",
+    "tool": "move",
+    "phase": "end",
+    "kind": "rebuild",
+    "keys": 1043.0,
+    "remesh": 22.002,
+    "upload": 9.848
+  },
+  {
+    "run": "current-0",
+    "tool": "relax",
+    "phase": "begin",
+    "kind": "prime",
+    "fill": 7.925,
+    "absorb": 5.216,
+    "rest": 0.0
+  },
+  {
+    "run": "current-0",
+    "tool": "relax",
+    "phase": "begin",
+    "kind": "mesh",
+    "engine": 12.923,
+    "read": 1.731,
+    "split": 4.983
+  },
+  {
+    "run": "current-0",
+    "tool": "relax",
+    "phase": "begin",
+    "kind": "rebuild",
+    "keys": 1023.0,
+    "remesh": 19.684,
+    "upload": 8.539
+  },
+  {
+    "run": "current-0",
+    "tool": "relax",
+    "phase": "end",
+    "kind": "mesh",
+    "engine": 19.663,
+    "read": 1.474,
+    "split": 4.04
+  },
+  {
+    "run": "current-0",
+    "tool": "relax",
+    "phase": "end",
+    "kind": "rebuild",
+    "keys": 1043.0,
+    "remesh": 25.221,
+    "upload": 8.491
+  },
+  {
+    "run": "current-0",
+    "tool": "smooth",
+    "phase": "begin",
+    "kind": "prime",
+    "fill": 7.645,
+    "absorb": 4.846,
+    "rest": 0.0
+  },
+  {
+    "run": "current-0",
+    "tool": "smooth",
+    "phase": "begin",
+    "kind": "mesh",
+    "engine": 12.849,
+    "read": 1.624,
+    "split": 5.084
+  },
+  {
+    "run": "current-0",
+    "tool": "smooth",
+    "phase": "begin",
+    "kind": "rebuild",
+    "keys": 1023.0,
+    "remesh": 19.603,
+    "upload": 8.9
+  },
+  {
+    "run": "current-0",
+    "tool": "smooth",
+    "phase": "end",
+    "kind": "mesh",
+    "engine": 19.348,
+    "read": 1.737,
+    "split": 4.473
+  },
+  {
+    "run": "current-0",
+    "tool": "smooth",
+    "phase": "end",
+    "kind": "rebuild",
+    "keys": 1043.0,
+    "remesh": 25.604,
+    "upload": 8.628
+  },
+  {
+    "run": "current-1",
+    "tool": "move",
+    "phase": "end",
+    "kind": "mesh",
+    "engine": 17.523,
+    "read": 1.527,
+    "split": 5.335
+  },
+  {
+    "run": "current-1",
+    "tool": "move",
+    "phase": "end",
+    "kind": "rebuild",
+    "keys": 1043.0,
+    "remesh": 24.437,
+    "upload": 11.017
+  },
+  {
+    "run": "current-1",
+    "tool": "relax",
+    "phase": "begin",
+    "kind": "prime",
+    "fill": 14.75,
+    "absorb": 8.587,
+    "rest": 0.0
+  },
+  {
+    "run": "current-1",
+    "tool": "relax",
+    "phase": "begin",
+    "kind": "mesh",
+    "engine": 14.493,
+    "read": 1.845,
+    "split": 5.303
+  },
+  {
+    "run": "current-1",
+    "tool": "relax",
+    "phase": "begin",
+    "kind": "rebuild",
+    "keys": 1023.0,
+    "remesh": 21.687,
+    "upload": 9.37
+  },
+  {
+    "run": "current-1",
+    "tool": "relax",
+    "phase": "end",
+    "kind": "mesh",
+    "engine": 17.376,
+    "read": 1.467,
+    "split": 4.217
+  },
+  {
+    "run": "current-1",
+    "tool": "relax",
+    "phase": "end",
+    "kind": "rebuild",
+    "keys": 1043.0,
+    "remesh": 23.1,
+    "upload": 8.732
+  },
+  {
+    "run": "current-1",
+    "tool": "smooth",
+    "phase": "begin",
+    "kind": "prime",
+    "fill": 7.412,
+    "absorb": 5.611,
+    "rest": 0.0
+  },
+  {
+    "run": "current-1",
+    "tool": "smooth",
+    "phase": "begin",
+    "kind": "mesh",
+    "engine": 12.944,
+    "read": 1.518,
+    "split": 5.685
+  },
+  {
+    "run": "current-1",
+    "tool": "smooth",
+    "phase": "begin",
+    "kind": "rebuild",
+    "keys": 1023.0,
+    "remesh": 20.191,
+    "upload": 8.941
+  },
+  {
+    "run": "current-1",
+    "tool": "smooth",
+    "phase": "end",
+    "kind": "mesh",
+    "engine": 17.124,
+    "read": 1.463,
+    "split": 4.052
+  },
+  {
+    "run": "current-1",
+    "tool": "smooth",
+    "phase": "end",
+    "kind": "rebuild",
+    "keys": 1043.0,
+    "remesh": 22.686,
+    "upload": 8.543
+  },
+  {
+    "run": "current-2",
+    "tool": "move",
+    "phase": "end",
+    "kind": "mesh",
+    "engine": 15.397,
+    "read": 1.427,
+    "split": 4.006
+  },
+  {
+    "run": "current-2",
+    "tool": "move",
+    "phase": "end",
+    "kind": "rebuild",
+    "keys": 1043.0,
+    "remesh": 20.871,
+    "upload": 9.252
+  },
+  {
+    "run": "current-2",
+    "tool": "relax",
+    "phase": "begin",
+    "kind": "prime",
+    "fill": 8.038,
+    "absorb": 5.484,
+    "rest": 0.0
+  },
+  {
+    "run": "current-2",
+    "tool": "relax",
+    "phase": "begin",
+    "kind": "mesh",
+    "engine": 15.815,
+    "read": 1.904,
+    "split": 4.735
+  },
+  {
+    "run": "current-2",
+    "tool": "relax",
+    "phase": "begin",
+    "kind": "rebuild",
+    "keys": 1023.0,
+    "remesh": 22.506,
+    "upload": 9.333
+  },
+  {
+    "run": "current-2",
+    "tool": "relax",
+    "phase": "end",
+    "kind": "mesh",
+    "engine": 24.811,
+    "read": 2.093,
+    "split": 4.638
+  },
+  {
+    "run": "current-2",
+    "tool": "relax",
+    "phase": "end",
+    "kind": "rebuild",
+    "keys": 1043.0,
+    "remesh": 31.596,
+    "upload": 12.787
+  },
+  {
+    "run": "current-2",
+    "tool": "smooth",
+    "phase": "begin",
+    "kind": "prime",
+    "fill": 7.373,
+    "absorb": 5.055,
+    "rest": 0.0
+  },
+  {
+    "run": "current-2",
+    "tool": "smooth",
+    "phase": "begin",
+    "kind": "mesh",
+    "engine": 14.305,
+    "read": 1.588,
+    "split": 5.3
+  },
+  {
+    "run": "current-2",
+    "tool": "smooth",
+    "phase": "begin",
+    "kind": "rebuild",
+    "keys": 1023.0,
+    "remesh": 21.243,
+    "upload": 8.8
+  },
+  {
+    "run": "current-2",
+    "tool": "smooth",
+    "phase": "end",
+    "kind": "mesh",
+    "engine": 19.804,
+    "read": 1.457,
+    "split": 3.988
+  },
+  {
+    "run": "current-2",
+    "tool": "smooth",
+    "phase": "end",
+    "kind": "rebuild",
+    "keys": 1043.0,
+    "remesh": 25.291,
+    "upload": 9.121
+  }
+]

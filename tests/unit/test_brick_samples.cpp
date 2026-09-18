@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "../../src/mesh/brick_samples.h"
+#include "../../src/mesh/boundary_samples.h"
 
 #include <array>
 #include <bit>
@@ -62,4 +63,49 @@ TEST_CASE("brick sample blocks have bounded independent storage") {
     CHECK(second(-8, 0, 8) == 1.0f);
     CHECK(std::bit_cast<std::uint32_t>(first(0, 8, 16)) == 0x80000000u);
     CHECK(second(0, 8, 16) == 1.0f);
+}
+
+TEST_CASE("boundary sample cache reuses only requested points and resets by owner") {
+    for (int dim = 1; dim <= 16; ++dim) {
+        CAPTURE(dim);
+        unsigned visits = 0;
+        const auto sample = [&](int x, int y, int z) {
+            ++visits;
+            return std::bit_cast<float>(sample_bits(x, y, z));
+        };
+        clay::mesh::detail::BoundarySamples cached(dim, sample);
+        for (int owner : {-2, 1, -2}) {
+            const int low = owner * dim;
+            const auto before = visits;
+            // Walk one row of cells on the owner's high Y/Z corner. Shared
+            // corners must be read only once, even across neighboring cells.
+            for (int x = 0; x < dim; ++x) {
+                cached.select_cell(low + x, low + dim - 1, low + dim - 1);
+                for (int corner = 0; corner < 8; ++corner) {
+                    const int i = low + x + (corner & 1);
+                    const int j = low + dim - 1 + ((corner >> 1) & 1);
+                    const int k = low + dim - 1 + ((corner >> 2) & 1);
+                    CHECK(std::bit_cast<std::uint32_t>(cached(i, j, k)) == sample_bits(i, j, k));
+                }
+            }
+            CHECK(visits - before == unsigned((dim + 1) * 4));
+        }
+    }
+}
+
+TEST_CASE("boundary sample validity is private to each recording range") {
+    unsigned first_reads = 0, second_reads = 0;
+    const auto first_source = [&](int, int, int) { ++first_reads; return -0.0f; };
+    const auto second_source = [&](int, int, int) { ++second_reads; return 1.0f; };
+    clay::mesh::detail::BoundarySamples first(8, first_source);
+    clay::mesh::detail::BoundarySamples second(8, second_source);
+    first.select_cell(-1, -1, -1);
+    second.select_cell(-1, -1, -1);
+    CHECK(first_reads == 0);
+    CHECK(second_reads == 0);
+    CHECK(std::bit_cast<std::uint32_t>(first(0, 0, 0)) == 0x80000000u);
+    CHECK(second(0, 0, 0) == 1.0f);
+    CHECK(std::bit_cast<std::uint32_t>(first(0, 0, 0)) == 0x80000000u);
+    CHECK(first_reads == 1);
+    CHECK(second_reads == 1);
 }
