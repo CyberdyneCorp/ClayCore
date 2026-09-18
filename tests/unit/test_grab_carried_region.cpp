@@ -155,6 +155,27 @@ float travel_of(const Mesh& after, const Mesh& before, cfloat3 origin, cfloat3 d
     return best;
 }
 
+// The longest edge among the edges with BOTH endpoints inside a ball — "is the
+// surface refined HERE", which a whole-surface maximum cannot answer.
+float longest_edge_near(const DynamicSurface& surface, cfloat3 centre, float radius,
+                        std::size_t* vertices) {
+    const float r2 = radius * radius;
+    float best = 0.0f;
+    if (vertices != nullptr) {
+        *vertices = 0;
+        surface.vertices().for_each_live([&](mesh::VertexId, const mesh::DynamicVertex& v) {
+            if (cdot2(v.position - centre) <= r2) ++*vertices;
+        });
+    }
+    surface.edges().for_each_live([&](mesh::EdgeId e, const mesh::DynamicEdge&) {
+        const mesh::HalfEdgeId h = surface.halfedge_of(e);
+        if (cdot2(surface.position_of(surface.origin_of(h)) - centre) > r2) return;
+        if (cdot2(surface.position_of(surface.target_of(h)) - centre) > r2) return;
+        best = std::max(best, surface.edge_length(e));
+    });
+    return best;
+}
+
 float longest_edge(const DynamicSurface& surface) {
     float best = 0.0f;
     surface.edges().for_each_live([&](mesh::EdgeId e, const mesh::DynamicEdge&) {
@@ -197,10 +218,14 @@ FixedRun run_fixed(const Fixture& f) {
 }
 
 // A grab on an ADAPTIVE surface, with everything the maintenance is asserted on.
+// `tip_*` are measured around the LAST stamp, because that is where the remesh
+// centre following the stamp is visible and the surface-wide maximum is not.
 struct AdaptiveRun {
     float travel = 0.0f;
     float top_weight = 0.0f;
     float max_edge = 0.0f;
+    float tip_edge = 0.0f;
+    std::size_t tip_vertices = 0;
     std::size_t applied = 0;
     std::size_t entries = 0, stamps = 0;
     std::size_t splits = 0, collapses = 0, relaxed = 0;
@@ -226,6 +251,8 @@ AdaptiveRun run_adaptive(const Fixture& f, bool topology_enabled = true) {
     out.travel = travel_of(*surface, stamps.front().position,
                            stamps.back().position - stamps.front().position);
     out.max_edge = longest_edge(*surface);
+    out.tip_edge = longest_edge_near(*surface, stamps.back().position, f.radius,
+                                     &out.tip_vertices);
     out.splits = summary.remesh.split;
     out.collapses = summary.remesh.collapsed;
     out.relaxed = summary.remesh.relaxed;
@@ -429,10 +456,32 @@ TEST_CASE("grab: the remesh follows the stamp rather than the gesture's first sa
     REQUIRE(r.splits > 0);
     const float drag = drag_of(f);
     REQUIRE(drag > 1.4f);
-    // The stretched corridor is remeshed as the gesture passes through it, so
-    // the longest edge left is a small fraction of the drag rather than most of
-    // it. Measured 0.147; left at the anchor it is 1.12.
-    CHECK(r.max_edge < drag * 0.25f);
+
+    // ASSERTED AT THE TIP, and that is the whole of what this case learned.
+    // The SURFACE-WIDE longest edge does not gate this rule: it is in the NECK
+    // behind the tip either way, and it reads 0.1466 with the centre following
+    // and 0.1450 without — so a case written against it passes with the rule
+    // removed. It was, and it did.
+    //
+    // At the tip the two are 3x apart, because a ball left at the gesture's
+    // first sample never reaches five brush radii away: the tip's longest edge
+    // is 0.0487 with the centre following and 0.1450 without, and there are 65
+    // vertices within a brush radius of the tip against 25.
+    //
+    // The threshold is the REMESHER'S OWN: an edge above `target * split_factor`
+    // is one it would have split, so "the tip is refined" is exactly "no edge
+    // there is one the remesher still owes a split".
+    DynamicTopologySettings topo;
+    topo.detail_resolution = f.detail;
+    CHECK(r.tip_edge <= topo.target_for(f.radius) * topo.split_factor);
+    CHECK(r.tip_edge < r.max_edge);
+    CHECK(r.tip_vertices > 40);
+    MESSAGE("tip_edge=" << r.tip_edge << " tip_vertices=" << r.tip_vertices
+                        << " max_edge=" << r.max_edge << " splits=" << r.splits
+                        << " collapses=" << r.collapses << " entries=" << r.entries
+                        << " inserted=" << r.carry.inserted << "/"
+                        << r.carry.inserted_one_parent << " refused="
+                        << r.carry.collapses_refused << " travel=" << r.travel);
 }
 
 TEST_CASE("grab: a carried vertex the remesher moved keeps that move") {

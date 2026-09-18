@@ -2308,8 +2308,9 @@ dirty bounds united, the revision after the last stamp) and its size is checked
 before any stamp runs. A Layer brush is `CLAY_ERROR_INVALID_ARGUMENT` before any
 remesh. The stroke costs the sum of its stamps (1.004x the host's
 resolve-then-stamp loop, which is itself 1.001x a C++ loop): use it for
-what a stroke means — Snakehook's anchor surviving the remesher, Grab's anchor,
-the azimuth reaching the alpha — not for speed.
+what a stroke means — Snakehook's anchor surviving the remesher, Grab carrying
+the region it captured across the remesh, the azimuth reaching the alpha — not
+for speed.
 
 **A whole stroke as one undo step (ABI 0.120.0).**
 `clay_dynamic_sculptor_apply_stroke_recorded` and
@@ -2319,9 +2320,11 @@ the azimuth reaching the alpha — not for speed.
 surface is bit-identical to the unrecorded stroke's, and
 `clay_dynamic_delta_revert` / `_apply` restore the before / after exports
 exactly. A host loop of `clay_dynamic_sculptor_stamp_recorded` is not a
-substitute: it centres Grab and Snakehook on the cursor, so it records a
-different surface (Snakehook 1,107,948 vs 1,205,836 encoded bytes, Grab
-1,069,644 vs 448,280 on a unit cube-sphere; Draw agrees to the byte). Every
+substitute: it centres Grab and Snakehook on the cursor and drags by the motion
+between stamps, where a stroke's Grab carries the region it captured and moves
+it by the motion since the FIRST sample, so it records a different surface
+(Snakehook 1,107,948 vs 1,205,836 encoded bytes, Grab 1,069,644 vs 448,280 on a
+unit cube-sphere; Draw agrees to the byte). Every
 `CLAY_ERROR_INVALID_ARGUMENT` refusal comes first; then a non-empty record the
 surface has moved away from is `CLAY_ERROR_SNAPSHOT_MISMATCH`. Either way nothing
 is applied and the record is untouched. The mark is checked once, before the
@@ -2623,7 +2626,10 @@ clay.StrokePreset.deserialize(brush.serialize())   # versioned: newer is refused
 # outermost warp on the geometry. One undo step however many items it touches.
 layer.move_surface((0, 0, 0), (0, 0.4, 0), radius=0.8)   # -> the nodes warped
 # The surface moves LESS than you ask for: grab weights at the sample point
-# rather than at its preimage. Monotonic, so a UI can calibrate.
+# rather than at its preimage. Monotonic, so a UI can calibrate. NOTE that the
+# MESH Grab no longer does this — since the carried-region change it moves
+# exactly as far as the cursor — so the two brushes an artist thinks of as one
+# disagree about reach. Different mechanism, not fixed here. See docs/07.
 # mask extrude: mask a patch of a surface and pull it off as a solid — ZBrush's
 # Extract. THE MASK IS THE REGION, so unlike relax and flatten there is no
 # region_radius: the painted region bounds itself. The one new mechanism is
