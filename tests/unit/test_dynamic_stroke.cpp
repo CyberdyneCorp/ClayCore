@@ -122,8 +122,16 @@ struct LoopRun {
 
 // THE STROKE WRITTEN OUT BY HAND, one `DynamicSculptor::stamp` per stamp, with
 // the rules the stroke engine documents: radius and strength from the stamp,
-// Grab centred on the first stamp, Snakehook on the vertex it drags and
-// re-found at the previous stamp's position when a collapse retired it.
+// Grab carries the region it captured — one gather for the gesture, the whole
+// drag on every stamp, and the remesh following the stamp once there is a
+// region to maintain. Snakehook anchors on the vertex it drags, re-found at the
+// previous stamp's position when a collapse retired it.
+//
+// THIS LOOP IS A MIRROR OF THE RULE, not a pin on a number: it exists so the
+// stroke consumer can be checked against the stamps it claims to be. When the
+// rule moved from "re-gather around the first sample, drag by the motion between
+// stamps" to the carried region, this moved with it — the case means what it
+// meant, which is that a stroke equals its stamps.
 //
 // `follow_cursor` is instead the loop a host writes from the headers alone:
 // every stamp centred on its own position.
@@ -134,6 +142,8 @@ LoopRun hand_loop(DynamicSculptor& sc, const std::vector<Stamp>& stamps, MeshBru
     const bool dragging = verb == MeshBrush::Grab || verb == MeshBrush::Snakehook;
     VertexId anchor;
     if (verb == MeshBrush::Snakehook) anchor = sc.nearest_vertex(stamps.front().position);
+    const bool carries = verb == MeshBrush::Grab && !follow_cursor;
+    if (carries) sc.begin_carried_region();
     cfloat3 previous = stamps.front().position;
     for (const Stamp& s : stamps) {
         MeshBrushSettings b = base;
@@ -145,7 +155,10 @@ LoopRun hand_loop(DynamicSculptor& sc, const std::vector<Stamp>& stamps, MeshBru
             if (follow_cursor) {
                 b.center = s.position;
             } else if (verb == MeshBrush::Grab) {
-                b.center = stamps.front().position;
+                // The whole drag, onto the captured region; and the remesh
+                // centre follows the stamp once that region exists.
+                b.direction = s.position - stamps.front().position;
+                b.center = sc.carrying() ? s.position : stamps.front().position;
             } else {
                 if (sc.surface().vertex(anchor) == nullptr) {
                     ++out.anchor_deaths;
@@ -163,6 +176,7 @@ LoopRun hand_loop(DynamicSculptor& sc, const std::vector<Stamp>& stamps, MeshBru
         out.summed.remesh.flipped += r.remesh.flipped;
         out.summed.remesh.relaxed += r.remesh.relaxed;
     }
+    if (carries) sc.end_carried_region();
     return out;
 }
 
@@ -658,7 +672,8 @@ std::size_t unindexed_faces(const DynamicSculptor& sc) {
 
 // The stroke's rules, one `stamp_recorded` per stamp, every one REQUIRED to
 // succeed: a mismatch at stamp k>0 is exactly what checking the mark once
-// assumes cannot happen.
+// assumes cannot happen. Grab carries its region here for the same reason
+// `hand_loop` does — this is a mirror of the rule, not a pin on a number.
 std::size_t recorded_loop(DynamicSculptor& sc, const std::vector<Stamp>& stamps, MeshBrush verb,
                           const MeshBrushSettings& base, const DynamicTopologySettings& topo,
                           mesh::RecordedGesture& record) {
@@ -666,6 +681,8 @@ std::size_t recorded_loop(DynamicSculptor& sc, const std::vector<Stamp>& stamps,
     const bool dragging = verb == MeshBrush::Grab || verb == MeshBrush::Snakehook;
     VertexId anchor;
     if (verb == MeshBrush::Snakehook) anchor = sc.nearest_vertex(stamps.front().position);
+    const bool carries = verb == MeshBrush::Grab;
+    if (carries) sc.begin_carried_region();
     cfloat3 previous = stamps.front().position;
     for (const Stamp& s : stamps) {
         MeshBrushSettings b = base;
@@ -675,7 +692,8 @@ std::size_t recorded_loop(DynamicSculptor& sc, const std::vector<Stamp>& stamps,
         if (dragging) {
             b.direction = s.position - previous;
             if (verb == MeshBrush::Grab) {
-                b.center = stamps.front().position;
+                b.direction = s.position - stamps.front().position;
+                b.center = sc.carrying() ? s.position : stamps.front().position;
             } else {
                 if (sc.surface().vertex(anchor) == nullptr) {
                     ++deaths;
@@ -687,6 +705,7 @@ std::size_t recorded_loop(DynamicSculptor& sc, const std::vector<Stamp>& stamps,
         previous = s.position;
         REQUIRE(sc.stamp_recorded(verb, b, topo, {}, record).has_value());
     }
+    if (carries) sc.end_carried_region();
     return deaths;
 }
 

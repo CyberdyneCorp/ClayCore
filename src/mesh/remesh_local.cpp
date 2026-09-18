@@ -190,11 +190,75 @@ void sync_faces_and_corners(const DynamicSurface& surface, const std::vector<Fac
     }
 }
 
+// -- the hooks, kept out of the operator loops ---------------------------------
+//
+// Each of these answers "hooks are absent" for itself, so the passes below read
+// as the remeshing they are rather than as four null tests per operator. That is
+// a readability decision with a number behind it: spelled inline, the guards
+// added 38 to `remesh_region`'s cognitive complexity, which is the highest in
+// this file before anything is added to it.
+
+struct SplitEnds {
+    VertexId a, b;
+};
+
+// The edge's two endpoints, read BEFORE the operator rewires anything, and only
+// when somebody asked for them.
+SplitEnds split_ends(const DynamicSurface& surface, EdgeId e, const RemeshHooks* hooks) {
+    if (hooks == nullptr || hooks->on_split == nullptr) return {};
+    const HalfEdgeId h = surface.halfedge_of(e);
+    return {surface.origin_of(h), surface.target_of(h)};
+}
+
+void notify_split(const RemeshHooks* hooks, SplitEnds ends, VertexId child) {
+    if (hooks != nullptr && hooks->on_split != nullptr)
+        hooks->on_split(hooks->context, ends.a, ends.b, child);
+}
+
+// A caller may refuse a collapse that would retire `gone`. `collapse_edge` keeps
+// the origin of the edge's half-edge and removes its target
+// (`topology_ops.cpp` sets `out.kept = v0`), so both ends are known before the
+// operator runs and the refusal is one comparison.
+bool may_collapse(const RemeshHooks* hooks, VertexId keep, VertexId gone) {
+    if (hooks == nullptr || hooks->may_collapse == nullptr) return true;
+    return hooks->may_collapse(hooks->context, keep, gone);
+}
+
+kernel::cfloat3 position_if_watched(const DynamicSurface& surface, VertexId v,
+                                    const RemeshHooks* hooks) {
+    if (hooks == nullptr || hooks->on_move == nullptr) return kernel::cf3(0, 0, 0);
+    return surface.position_of(v);
+}
+
+// The survivor is placed at the midpoint, so it MOVED — reported as a move as
+// well as a collapse, because a caller carrying a captured position needs both.
+void notify_collapse(const DynamicSurface& surface, const RemeshHooks* hooks,
+                     VertexId kept, VertexId removed, kernel::cfloat3 kept_before) {
+    if (hooks == nullptr) return;
+    if (hooks->on_collapse != nullptr) hooks->on_collapse(hooks->context, kept, removed);
+    if (hooks->on_move != nullptr)
+        hooks->on_move(hooks->context, kept, kept_before, surface.position_of(kept));
+}
+
+// The relaxation's writes, told to a caller carrying captured positions before
+// each slide happens: it slides a vertex ALONG the surface, and a next write
+// from an unshifted captured position would put it back.
+void commit_relaxed_positions(DynamicSurface& surface, const std::vector<VertexId>& moved,
+                              const std::vector<kernel::cfloat3>& targets,
+                              const RemeshHooks* hooks) {
+    for (std::size_t i = 0; i < moved.size(); ++i) {
+        DynamicVertex* rec = surface.vertex(moved[i]);
+        if (hooks != nullptr && hooks->on_move != nullptr)
+            hooks->on_move(hooks->context, moved[i], rec->position, targets[i]);
+        rec->position = targets[i];
+    }
+}
+
 }  // namespace
 
 RemeshStats remesh_region(DynamicSurface& surface, DynamicBvh* bvh, kernel::cfloat3 centre,
                           float radius, const DynamicTopologySettings& settings,
-                          TopologyDelta* delta) {
+                          TopologyDelta* delta, const RemeshHooks* hooks) {
     RemeshStats stats;
     if (!settings.enabled || radius <= 0.0f) return stats;
     const float target = settings.target_for(radius);
@@ -231,11 +295,13 @@ RemeshStats remesh_region(DynamicSurface& surface, DynamicBvh* bvh, kernel::cflo
                 }
                 if (!surface.live(e)) continue;
                 if (surface.edge_length(e) <= split_above) continue;
+                const SplitEnds ends = split_ends(surface, e, hooks);
                 const SplitResult r =
                     detail::split_edge(surface, e, 0.5f, op, delta, &normals);
                 if (r.result == TopologyResult::Ok) {
                     ++stats.split;
                     --budget;
+                    notify_split(hooks, ends, r.vertex);
                     feed_index(surface, bvh, r.faces, r.face_count);
                 } else {
                     count_refusal(r.result, &stats);
@@ -298,6 +364,12 @@ RemeshStats remesh_region(DynamicSurface& surface, DynamicBvh* bvh, kernel::cflo
                 // The faces about to disappear have to leave the index before
                 // they leave the surface, or it holds handles to dead faces.
                 const HalfEdgeId h = surface.halfedge_of(e);
+                // A CALLER MAY REFUSE THIS ONE, and its refusal is NOT counted
+                // in `stats`: nothing about the SURFACE refused it, and the
+                // caller that did is the one that counts it.
+                if (!may_collapse(hooks, surface.origin_of(h), surface.target_of(h))) continue;
+                const kernel::cfloat3 kept_before =
+                    position_if_watched(surface, surface.origin_of(h), hooks);
                 const FaceId dying[2] = {surface.face_of(h),
                                          surface.face_of(surface.twin_of(h))};
                 const CollapseResult r =
@@ -305,6 +377,7 @@ RemeshStats remesh_region(DynamicSurface& surface, DynamicBvh* bvh, kernel::cflo
                 if (r.result == TopologyResult::Ok) {
                     ++stats.collapsed;
                     --budget;
+                    notify_collapse(surface, hooks, r.kept, r.removed, kept_before);
                     if (bvh) {
                         for (FaceId f : dying) bvh->erase(f);
                         for (FaceId f : r.faces) {
@@ -352,15 +425,15 @@ RemeshStats remesh_region(DynamicSurface& surface, DynamicBvh* bvh, kernel::cflo
     normals.flush(surface, delta);
 
     if (settings.relax_after_remesh && settings.relax_strength > 0.0f)
-        stats.relaxed =
-            relax_region(surface, bvh, centre, radius, settings.relax_strength, settings, delta);
+        stats.relaxed = relax_region(surface, bvh, centre, radius, settings.relax_strength,
+                                     settings, delta, hooks);
 
     return stats;
 }
 
 std::size_t relax_region(DynamicSurface& surface, DynamicBvh* bvh, kernel::cfloat3 centre,
                          float radius, float strength, const DynamicTopologySettings& settings,
-                         TopologyDelta* delta) {
+                         TopologyDelta* delta, const RemeshHooks* hooks) {
     if (radius <= 0.0f || strength <= 0.0f) return 0;
     const float r2 = radius * radius;
     const std::uint32_t blockers = blockers_for(settings);
@@ -450,7 +523,7 @@ std::size_t relax_region(DynamicSurface& surface, DynamicBvh* bvh, kernel::cfloa
         for (VertexId v : moved) delta->note_vertex(surface, v);
         note_faces_and_corners(surface, touched, delta);
     }
-    for (std::size_t i = 0; i < moved.size(); ++i) surface.vertex(moved[i])->position = targets[i];
+    commit_relaxed_positions(surface, moved, targets, hooks);
     surface.refresh_normals(touched);
     if (delta) {
         for (VertexId v : moved) delta->sync_vertex(surface, v);

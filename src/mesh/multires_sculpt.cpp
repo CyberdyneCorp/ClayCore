@@ -145,6 +145,17 @@ void MultiresSculptor::flush_normals() {
     if (sculptor_) sculptor_->flush_normals(&level_deltas_);
 }
 
+void MultiresSculptor::begin_carried_region() {
+    carry_open_ = true;
+    ++capture_generation_;
+    if (sculptor_) sculptor_->begin_carried_region();
+}
+
+void MultiresSculptor::end_carried_region() {
+    carry_open_ = false;
+    if (sculptor_) sculptor_->end_carried_region();
+}
+
 MeshSculptor* MultiresSculptor::level_sculptor() {
     bind();
     return sculptor_.get();
@@ -215,6 +226,14 @@ void MultiresSculptor::bind() {
     // Rebound with the sculptor, so a level or generation change cannot leave a
     // table describing a different mesh in the hands of a live sculptor.
     sculptor_->set_chunks(&surface_.level_chunks(level));
+    // A GESTURE CARRYING A REGION GETS A FRESH CAPTURE, never a dropped one:
+    // the sculptor this replaced held the level's own positions and this level
+    // is numbered differently. `capture_generation_` moving is what tells
+    // `brush::apply_to_multires` to re-anchor the drag it measures from.
+    if (carry_open_) {
+        sculptor_->begin_carried_region();
+        ++capture_generation_;
+    }
     // AND THE LEVELS BELOW THAT ARE PART OF THE SAME SURFACE. On a regionally
     // refined hierarchy the patches beside the refined region have no vertex
     // here at all, so a stamp reaching past the region has to write them where

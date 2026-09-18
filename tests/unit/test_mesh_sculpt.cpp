@@ -747,6 +747,26 @@ TEST_CASE("grab anchors and snakehook walks") {
     // The snakehook's region travels with the drag, so it touches vertices far
     // to the right that the anchored grab never reaches.
     CHECK(reach(MeshBrush::Snakehook) > reach(MeshBrush::Grab) + 0.1f);
+
+    // HOW FAR, BESIDE WHICH. The check above measures WHICH vertices moved and
+    // is what says a grab ANCHORS — a following centre breaks it. It says
+    // nothing about how far they went, and re-gathering around a point the
+    // surface had already left passed it while reaching 41% of the drag. The
+    // pair is what says a grab anchors AND pulls.
+    auto travel = [&](MeshBrush verb) {
+        Mesh m = base;
+        MeshSculptor sculptor(m);
+        brush::apply_to_mesh(sculptor, stamps, verb, centred(cf3(0, 0, 0), 0.25f, 1.0f));
+        float furthest = 0.0f;
+        for (std::size_t v = 0; v < m.positions.size(); ++v)
+            furthest = std::max(furthest, m.positions[v].x - base.positions[v].x);
+        return furthest;
+    };
+    // The carried region's weight-1 centre is the vertex at the first stamp, so
+    // it moves by exactly the drag.
+    const float drag = stamps.back().position.x - stamps.front().position.x;
+    REQUIRE(drag > 0.5f);
+    CHECK(travel(MeshBrush::Grab) == doctest::Approx(drag).epsilon(0.02));
 }
 
 TEST_CASE("a stroke's stamps carry the radius and strength, not the settings") {

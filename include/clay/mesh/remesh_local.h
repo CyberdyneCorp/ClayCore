@@ -127,6 +127,42 @@ struct RemeshStats {
     std::size_t total() const { return split + collapsed + flipped; }
 };
 
+// WHAT THE REMESH DID TO A CALLER'S OWN SET OF VERTICES, and the one veto it
+// accepts.
+//
+// `remesh_region` retires vertex ids when it collapses and creates them when it
+// splits, and it does so BETWEEN the stamps of a gesture. A caller that is
+// carrying a set of vertices across a gesture — `DynamicSculptor`'s carried grab
+// region is the one in the tree — cannot rebuild that set from the surface
+// afterwards, because a vertex born mid-gesture has no captured position to read
+// off it. So the remesh tells it, as it goes.
+//
+// BORROWED, NULL BY DEFAULT, AND NOTHING IN THE TREE HAS TO PASS ONE. Every
+// hook is independently optional; a null pointer here costs one predictable
+// branch per operator on a path that is about to allocate a vertex.
+//
+// Function pointers with a context, never `std::function`: `may_collapse` is
+// consulted once per candidate edge on a per-dab path, and a `std::function`
+// that fits its small buffer today allocates on the day somebody captures a
+// second thing. `WorkItemReader` in `sculpt_workset.h` gives the same reason.
+struct RemeshHooks {
+    void* context = nullptr;
+    // The edge (`a`, `b`) was split at its midpoint, producing `child`.
+    void (*on_split)(void*, VertexId a, VertexId b, VertexId child) = nullptr;
+    // `removed` was retired by a collapse; `kept` survived it.
+    void (*on_collapse)(void*, VertexId kept, VertexId removed) = nullptr;
+    // THE REMESHER ITSELF moved `v` — a collapse placing its survivor at the
+    // midpoint, or the relaxation sliding a vertex tangentially. Never the
+    // brush: a caller carrying captured positions has to follow this shift or
+    // its next write puts the vertex back where the remesh moved it from.
+    void (*on_move)(void*, VertexId v, kernel::cfloat3 before, kernel::cfloat3 after) = nullptr;
+    // Consulted BEFORE a collapse that would retire `removed`; false refuses it
+    // and the pass moves to the next edge. `collapse_edge` keeps the origin of
+    // `halfedge_of(edge)` and removes its target, so both ends are known before
+    // the operator runs.
+    bool (*may_collapse)(void*, VertexId kept, VertexId removed) = nullptr;
+};
+
 // Adapt the surface under a brush toward the settings' target edge length.
 //
 // `bvh`, when given, is kept in step: every face an operator creates, destroys
@@ -134,7 +170,7 @@ struct RemeshStats {
 // stamp. Passing null is supported and means the caller maintains it.
 RemeshStats remesh_region(DynamicSurface& surface, DynamicBvh* bvh, kernel::cfloat3 centre,
                           float radius, const DynamicTopologySettings& settings,
-                          TopologyDelta* delta = nullptr);
+                          TopologyDelta* delta = nullptr, const RemeshHooks* hooks = nullptr);
 
 // Slide the vertices in a region ALONG the surface toward the centroid of their
 // neighbours, without moving the surface itself.
@@ -147,7 +183,7 @@ RemeshStats remesh_region(DynamicSurface& surface, DynamicBvh* bvh, kernel::cflo
 std::size_t relax_region(DynamicSurface& surface, DynamicBvh* bvh, kernel::cfloat3 centre,
                          float radius, float strength,
                          const DynamicTopologySettings& settings,
-                         TopologyDelta* delta = nullptr);
+                         TopologyDelta* delta = nullptr, const RemeshHooks* hooks = nullptr);
 
 }  // namespace mesh
 }  // namespace clay

@@ -292,6 +292,42 @@ class MeshSculptor {
     // that wants to know what the brush REACHED rather than what it changed.
     const SculptWorkset& workset() const { return region_; }
 
+    // -- THE CARRIED REGION --------------------------------------------------
+    //
+    // A `grab` is ONE GESTURE MOVING ONE PIECE OF SURFACE, so it gathers its
+    // region once, at its first stamp, and carries the items, the positions they
+    // were gathered at and their falloff weights for the whole gesture. Every
+    // stamp then writes `captured + weight * (p_k - p_0)`: `write` adds the
+    // displacement to the workset's GATHERED positions, so with the region held
+    // the whole drag lands with no accumulation error and the weight-1 centre
+    // follows the cursor exactly.
+    //
+    // Re-gathering around the first sample on every stamp is what this replaces,
+    // and it is replaced because the surface has already left that point: the
+    // falloff weights shrink as the gesture goes on and a grab reached 41% of a
+    // 0.6 drag and 18% of a 1.5 one. It is also CHEAPER — a gesture walks the
+    // surface once instead of once per stamp.
+    //
+    // THE FIXED MESH HAS NO REMESHER, so a captured region here is exactly the
+    // classes the first gather found and nothing maintains it, because nothing
+    // can: a fixed topology has no new vertices to give. A long drag therefore
+    // stretches those classes rather than swelling a neck, which is what a
+    // fixed-topology move brush is. `DynamicSculptor` is the representation
+    // where the region is maintained.
+    //
+    // Opened and closed by `brush::apply_to_mesh` and `brush::apply_to_multires`
+    // for the length of one gesture. With no capture open this class behaves
+    // exactly as it did before: every other verb re-gathers per stamp, which is
+    // what every other verb means.
+    void begin_carried_region();
+    void end_carried_region();
+    // A capture is open AND has been taken. False until the first stamp that
+    // actually reached the surface, so a stroke that applies nothing captures
+    // nothing without a special case for it.
+    bool carrying() const { return carry_open_ && carry_taken_; }
+    // Entries in the carried region. Zero unless one is open and taken.
+    std::size_t carried_entries() const { return carrying() ? region_.size() : 0; }
+
     // The automask factors `mesh` may not compute for itself — the cavity
     // estimator and the surface-group field, both of which live in modules that
     // depend on this one. Set once for a STROKE: they hold `std::function`s,
@@ -569,6 +605,11 @@ class MeshSculptor {
     // and the normal-angle reference so the two cannot disagree about where the
     // brush landed.
     std::uint32_t automask_seed_ = kNoClass;
+    // The carried region (see the public block above). A fixed mesh's weld
+    // classes outlive every stamp, so "carry the region" here is exactly "do
+    // not gather again" — there is nothing to maintain and no id to retire.
+    bool carry_open_ = false;
+    bool carry_taken_ = false;
     // This sculptor's identity in the seed-token space, and how many seeds it
     // has turned away. Assigned once at construction; see `seed_revision`.
     std::uint64_t seed_revision_ = 0;

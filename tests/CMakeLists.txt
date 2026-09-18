@@ -55,6 +55,7 @@ add_executable(clay_unit_tests
   unit/test_remesh_local.cpp
   unit/test_dynamic_sculpt.cpp
   unit/test_dynamic_stroke.cpp
+  unit/test_grab_carried_region.cpp
   unit/test_dynamic_history.cpp
   unit/test_c_dynamic_topology.cpp
   unit/test_dynamic_replay.cpp

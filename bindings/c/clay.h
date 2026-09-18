@@ -7840,8 +7840,9 @@ typedef struct clay_mesh_brush_desc {
     float strength;
     int32_t falloff; /* clay_mesh_falloff */
     /* GRAB and SNAKEHOOK: the motion this stamp applies. Ignored by the rest,
-     * and ignored by clay_mesh_sculptor_apply_stroke, which takes it from the
-     * motion between stamps. */
+     * and ignored by clay_mesh_sculptor_apply_stroke, which derives it: for
+     * SNAKEHOOK from the motion between stamps, for GRAB from the motion since
+     * the stroke's FIRST sample, onto the region the gesture captured there. */
     float direction[3];
     /* DRAW, CLAY and CREASE: an explicit deposit direction. All zeroes — the
      * default — means the region's averaged normal, which is what makes draw a
@@ -8444,8 +8445,24 @@ clay_result clay_mesh_sculptor_lattice(clay_mesh_sculptor* sculptor,
  * from the preset, which is what makes pressure and taper shape a mesh stroke
  * exactly as they shape a voxel one.
  *
- * GRAB anchors on the first stamp and drags by the motion between stamps;
- * SNAKEHOOK re-anchors on every stamp, so its region walks with the pull.
+ * GRAB CARRIES THE REGION IT CAPTURED: it gathers once, at the first stamp, and
+ * every stamp places each captured vertex at its captured position offset by its
+ * weight times the motion SINCE THE STROKE BEGAN. So the vertex at the centre
+ * follows the cursor exactly and the gesture moves the surface as far as it was
+ * dragged. SNAKEHOOK re-anchors on every stamp and drags by the motion between
+ * them, so its region walks with the pull.
+ *
+ * ON A CURVE A GRAB MOVES THE CHORD, not the path the cursor travelled — a
+ * quarter arc of length 0.6 displaces the surface by 0.5402 — because one piece
+ * of surface carried from the first sample to the last has moved by the net
+ * displacement. A host measuring the surface against the cursor's trail will see
+ * a shortfall that is not one.
+ *
+ * THIS BEHAVIOUR CHANGED WITHOUT AN ABI CHANGE. Grab used to re-gather its
+ * region around the first sample on every stamp and reached 41% of a 0.6 drag
+ * and 18% of a 1.5 one. A host feel tuned against that reaches further now, by
+ * an amount that depends on the brush radius and the drag; see the release
+ * notes for the per-preset table.
  *
  * `mesh_to_world` is the layer transform, and it places each vertex onto EVERY
  * world-addressed lattice this call samples: the painted mask, the cavity
@@ -8672,8 +8689,14 @@ clay_result clay_dynamic_sculptor_stamp(clay_dynamic_sculptor* sculptor,
  * the library's:
  *   - each stamp brings its own radius and strength; the descriptor's `radius`
  *     is IGNORED and its `strength` multiplies the stamp's;
- *   - GRAB centres every stamp on the FIRST stamp and drags by the motion
- *     between stamps, exactly as on a fixed mesh;
+ *   - GRAB gathers its region ONCE, at the FIRST stamp, and carries it for the
+ *     gesture: every stamp places each captured vertex at its captured position
+ *     offset by its weight times the motion since the stroke began, exactly as
+ *     on a fixed mesh. Here the remesh MAINTAINS that region — a split inside it
+ *     joins it, a collapse may not retire one of its vertices for the gesture's
+ *     length, and a vertex the remesher moved takes the same shift in its
+ *     captured position — and the remesh centre follows the stamp once the
+ *     region has been captured;
  *   - SNAKEHOOK centres every stamp on the VERTEX it drags. The remesher retires
  *     vertex ids, so that vertex is revalidated before every stamp and, when a
  *     collapse removed it, re-found nearest the previous stamp's position;
@@ -8720,8 +8743,16 @@ clay_result clay_dynamic_sculptor_stamp(clay_dynamic_sculptor* sculptor,
  *     stamps on a 48x48 cube-sphere, identical split counts), and that host
  *     loop at 1.001x a C++ loop. The call is about getting the stroke right,
  *     not latency.
- *   - Grab's after-remesh runs around the first stamp's centre, not the
- *     stretched tip; later stamps whose balls reach the tip refine it.
+ *   - Grab's after-remesh runs around THIS stamp's centre once the gesture has
+ *     captured its region, so it passes through the stretched corridor with the
+ *     gesture. Left at the first stamp's centre it never reaches a tip five
+ *     brush radii away: the longest edge within a brush radius of the tip is
+ *     0.145 against 0.049, and 25 vertices are there against 65.
+ *   - That carried region is MAINTAINED across the remesh rather than rebuilt,
+ *     and a collapse may not retire one of its vertices for the length of the
+ *     gesture. Unmaintained it decays: 7 to 13 of 45 captured vertices survived
+ *     an eleven-stamp stroke, and at radius 0.15 against detail 4 the remesher
+ *     retired all of them and the grab reached less than re-gathering did.
  *   - The chunked index is refitted, never rebuilt; rebuild between strokes. */
 clay_result clay_dynamic_sculptor_apply_stroke(clay_dynamic_sculptor* sculptor,
                                                const clay_stroke_sample_full* samples,

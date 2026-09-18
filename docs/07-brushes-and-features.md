@@ -1682,8 +1682,9 @@ presets now reach all three mesh representations.
 
 **What a stroke means is shared, not copied.** Each stamp brings its own radius
 and strength, the mask is placed once, the cavity and group estimators are wired
-once, Grab centres on the first stamp, and `orient_alpha_by_stamp` turns the
-alpha — the same per-stamp resolution the other two consumers use. Every stamp
+once, Grab carries the region it captured at its first stamp, and
+`orient_alpha_by_stamp` turns the alpha — the same per-stamp resolution the
+other two consumers use. Every stamp
 goes through `DynamicSculptor::stamp`, so each keeps its verb's remesh timing,
 and a stroke is **bit-identical** to its resolved stamps applied one at a time.
 
@@ -1746,18 +1747,100 @@ call is never reported as a mismatch.
 Recording costs 1.046x / 1.065x the unrecorded stroke at 27,648 / 110,592 faces,
 against 1.049x / 1.061x for the same stamps recorded one by one.
 
-**Not provided.** Grab's after-remesh runs around the first stamp's centre. And
-no latency change: a stroke costs its stamps, measured at **1.004x** the host's
-`clay_stroke_resolve_full` plus per-stamp loop (46.2 vs 46.0 ms median of 30, 14
+**Not provided.** No latency change for the other verbs: a stroke costs its
+stamps, measured at **1.004x** the host's `clay_stroke_resolve_full` plus
+per-stamp loop (46.2 vs 46.0 ms median of 30, 14
 remeshing Draw stamps on
 `cube_sphere(48)`), which is itself 1.001x a C++ loop — the call exists for the
 stroke's meaning, not speed.
 
-**A known question left open.** Anchored on the first stamp, a 0.6 pull-out Grab
-reaches 41% of the drag on BOTH representations, where a cursor-following loop
-reaches 56% (adaptive) and 66% (fixed). That is `apply_to_mesh`'s behaviour on
-`main`; the adaptive stroke matches it so the two agree, and changing it is a
-follow-up for both with their goldens.
+### A grab carries the region it captured (#620)
+
+**Answered, and the answer changed the brush.** Anchored on the first stamp and
+RE-GATHERED there every stamp, a 0.6 pull-out Grab reached 41% of the drag on
+both representations — and 18% of a 1.5 drag, because the surface leaves the
+anchor and the falloff weights shrink as the gesture goes on. It is a decay
+rather than a discount, so there was no drag length at which a host could
+predict what the brush would do. A cursor-following loop reached 56% (adaptive)
+and 66% (fixed), and lost the mesh outright on a long drag — 11 of 26 stamps
+applied — which is the failure this file already records for a Snakehook
+anchored on the cursor.
+
+A grab now gathers its region ONCE, at its first stamp, and carries the items,
+their captured positions and their falloff weights for the whole gesture. Every
+stamp writes `captured + weight * (p_k − p_0)`, so the weight-1 centre follows
+the cursor exactly and the gesture reaches the whole drag on every
+representation. It is also CHEAPER: the surface is walked once for the gesture
+instead of once per stamp, 1.8–1.9x on the fixed path.
+
+**A FIXED MESH HAS NO MITIGATION for a captured region a long drag stretched**,
+and cannot have one: nothing maintains it, because nothing can — a fixed
+topology has no new vertices to give. The same weld classes are carried however
+far the gesture goes, so a 1.5 pull leaves a longest edge of **0.8176** from a
+starting 0.1174 on `cube_sphere(24)`. That is what a fixed-topology move brush
+is, and only the adaptive path grows its region. The multiresolution path is the
+fixed path per level and inherits the same limit; rules two to five below are
+the ADAPTIVE path's alone.
+
+**On a curve that is the NET DISPLACEMENT, not the path length**, and a host
+measuring the surface against the cursor's trail will read the difference as a
+shortfall. It is not one: a quarter arc of length 0.6 has a chord of 0.5402, the
+kernel is handed `p_n − p_0`, and one piece of surface carried from the first
+sample to the last has moved by the chord. Measured, 0.5402 of 0.5402.
+
+**The adaptive surface maintains the region rather than rebuilding it**, and
+that is four more rules rather than one. It retires vertex ids when it collapses
+and creates them when it splits, BETWEEN the stamps of a gesture, so a carried
+region left alone decays: 7 to 13 of 45 captured vertices survived an 11-stamp
+stroke, and at a brush radius of 0.15 against detail 4 the remesher retired ALL
+of them and the reach fell to 2.8–7.0%, BELOW what re-gathering reached on the
+same fixtures. So:
+
+| | rule | measured without it |
+|---|---|---|
+| the remesh centre | follows the stamp, not the anchor | the TIP keeps the edges the drag stretched: longest edge there 0.145 against 0.049, and 25 vertices within a brush radius of it against 65 |
+| a collapse | may not retire a carried vertex, for the gesture's length | reach 73–97%, the two representations 0.017–0.375 apart |
+| a split, both parents carried | inserts its child at the midpoint of their CAPTURED positions, with the mean of their weights | the child is dragged twice |
+| a split, ONE carried parent | inserts too, at the midpoint of that parent's captured position and the other endpoint's current one, with half its weight | longest edge 0.56 against 0.27, and four times as many collapses to refuse |
+| a carried vertex the REMESHER moved | takes the same shift in its captured position | the relaxation inside a grab does nothing at all |
+
+**The remesh centre is measured at the TIP, and the surface-wide maximum does
+not show it.** With the region maintained and protected, a remesh ball left at
+the gesture's first sample leaves the same surface-wide longest edge (0.145
+against 0.147) and does 40% MORE work (1381 splits against 980) — because it
+keeps refining the NECK, which is where that maximum lives either way. What it
+never reaches is the tip, five brush radii away. The 1.12-against-0.36 figure
+this section reported before the change was built was measured on an
+UNMAINTAINED carried region, where a handful of surviving vertices were dragged
+away alone; it is not what the shipped rule leaves.
+
+**Refusing those collapses leaves the surface FINER, not coarser**, which is the
+opposite of what was expected and is why the rule is affordable. The collapses
+refused are the ones eating the gesture's own region, so the region stays dense
+and the splits refine what the gesture stretched: longest edge **0.27** after a
+1.5 push-in with the refusal, 0.62 without it, 0.12 before the gesture reached
+that far, and 1.32 with no remesher at all. On four of six fixtures it leaves
+the surface exactly as fine as re-gathering did. The gesture runs at
+**0.39x–0.89x** of re-gathering.
+
+Over twelve fixtures the shipped rule reaches 99.99–100.03% of the drag and the
+two representations agree to 1.6e-4, against today's 2.9e-4–3.6e-3 — so it
+tightens the agreement `apply_to_dynamic` exists to keep rather than spending it.
+
+**Two brushes an artist thinks of as one now disagree about reach.** The SDF
+Move brush still moves LESS than the displacement asked for, because its region
+weight is taken at the sample point rather than at its preimage (see "Grab, pose
+and magnify are per item, and local" above, and `layer.move_surface`). That is a
+field-inversion problem and not an anchoring one, so this change does not touch
+it: after it, the mesh Grab moves exactly as far as the cursor and the SDF Move
+does not. The divergence is real and is stated here rather than left to be
+discovered.
+
+**This is a behaviour change to shipped entry points and no version gate
+announces it** — no symbol moved, no descriptor was re-laid out, `CLAY_ABI_*`
+did not move. See `docs/release-notes` for the per-preset table: the shortfall
+depended on the brush radius and on the drag, so every preset changes by a
+different amount.
 
 ---
 
