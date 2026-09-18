@@ -221,6 +221,29 @@ class MultiresSculptor {
     // Called implicitly when the sculpt level changes.
     void begin_stroke();
 
+    // -- THE CARRIED REGION, ACROSS A REBIND ---------------------------------
+    //
+    // A `grab` carries the region it captured for the whole gesture; see
+    // `MeshSculptor`'s block for what that is and why. The hierarchy adds one
+    // wrinkle and it is the reason these two calls exist here rather than being
+    // made on the level sculptor directly: THE LEVEL SCULPTOR CAN BE REPLACED
+    // MID-GESTURE — by a host changing the sculpt level, or by a cache
+    // generation change after a trim released the level meshes under memory
+    // pressure — and a fresh sculptor has no capture.
+    //
+    // So the capture is a property of the HIERARCHY while it is open, and
+    // `bind` re-opens it on whatever sculptor it just built. What it cannot do
+    // is carry the old capture over: the positions it held are the level's, and
+    // that numbering is what the rebind changed. The new capture is therefore
+    // taken from where the surface NOW is, and `capture_generation` moves so
+    // that `brush::apply_to_multires` re-anchors the drag it measures from —
+    // without which the stamp after a rebind would write the whole drag onto a
+    // region that has already taken most of it.
+    void begin_carried_region();
+    void end_carried_region();
+    // Bumped every time a fresh capture is opened, including by a rebind.
+    std::uint64_t capture_generation() const { return capture_generation_; }
+
     // The level this sculptor is currently bound to, and the underlying fixed
     // sculptor over it — for a caller that wants the BVH for picking, the write
     // region for an upload, or the plan-compilation count a stroke asserts on.
@@ -362,6 +385,10 @@ class MultiresSculptor {
 
     MultiresSurface& surface_;
     std::unique_ptr<MeshSculptor> sculptor_;
+    // A carried region is open for the length of a gesture; `bind` re-opens it
+    // on a sculptor it has just replaced. See the public block.
+    bool carry_open_ = false;
+    std::uint64_t capture_generation_ = 0;
     std::uint32_t bound_level_ = 0xffffffffu;
     std::uint64_t bound_generation_ = 0;
     AutomaskInputs automask_;

@@ -753,10 +753,29 @@ void MeshSculptor::build_fixed_mesh_workset(const MeshBrushSettings& settings) {
     }
 }
 
+// -- the carried region --------------------------------------------------------
+//
+// See the header. A fixed mesh retires no identity, so carrying its region is
+// exactly not gathering it again.
+
+void MeshSculptor::begin_carried_region() {
+    carry_open_ = true;
+    carry_taken_ = false;
+}
+
+void MeshSculptor::end_carried_region() {
+    carry_open_ = false;
+    carry_taken_ = false;
+}
+
 void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGate& gate) {
     // Every transient this stamp asks the arena for is dead when the stamp
     // ends, so the arena starts each one at zero and keeps its storage.
     arena_.reset();
+    // ONE GATHER PER GESTURE, NOT ONE PER STAMP. A grab carrying its region
+    // keeps the items, the CAPTURED positions and the weights the first stamp
+    // found, which is what `write` adds this stamp's displacement to.
+    if (carrying()) return;
     build_fixed_mesh_workset(settings);
 
     // The alpha's frame, once for the whole stamp rather than per vertex. Its
@@ -817,6 +836,9 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
     // measurement did not.
     if (telemetry_ != nullptr) telemetry_->observe_workset(region_.size());
 
+    // A gesture with a capture OPEN takes it here, on the first gather that
+    // reached something — so a stroke that applies nothing captures nothing.
+    if (carry_open_ && !region_.empty()) carry_taken_ = true;
 }
 
 // THE PLAN IS COMPILED ONCE PER STROKE, not per stamp.

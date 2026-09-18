@@ -217,6 +217,62 @@ class DynamicSculptor {
     // query.
     VertexId nearest_vertex(kernel::cfloat3 p) const;
 
+    // -- THE CARRIED REGION, and the remesh that maintains it ----------------
+    //
+    // A `grab` is ONE GESTURE MOVING ONE PIECE OF SURFACE, so it gathers its
+    // region once, at its first stamp, and carries the items, the positions
+    // they were gathered at and their falloff weights for the whole gesture.
+    // Every stamp then writes `captured + weight * (p_k - p_0)`: the workset's
+    // positions are the CAPTURED ones and `write_positions` adds the
+    // displacement to them, so the whole drag lands with no accumulation error
+    // and the weight-1 centre follows the cursor exactly.
+    //
+    // THE ADAPTIVE SURFACE IS THE ONE THAT NEEDS MORE THAN THAT. It retires
+    // vertex ids when it collapses and creates them when it splits, BETWEEN the
+    // stamps of a gesture, so a carried region left alone decays: measured, 7 to
+    // 13 of 45 captured vertices survived an eleven-stamp stroke, and at a brush
+    // radius of 0.15 against a detail resolution of 4 the remesher retired all
+    // of them. So the remesh MAINTAINS the region instead — see
+    // `openspec/specs/brush-engine`, "An adaptive surface maintains a carried
+    // region rather than losing it", for the five rules and the numbers behind
+    // each.
+    //
+    // Opened and closed by `brush::apply_to_dynamic` for the length of one
+    // gesture. A sculptor with no capture open behaves exactly as it did before
+    // this existed: every other verb re-gathers per stamp, which is what every
+    // other verb means.
+    void begin_carried_region();
+    void end_carried_region();
+    // A capture is open AND has been taken. False until the first stamp that
+    // actually reached the surface, which is what makes "a stroke that applies
+    // nothing captures nothing" true without a special case.
+    bool carrying() const { return carry_open_ && carry_taken_; }
+
+    // WHAT THE MAINTENANCE DID, AS COUNTS. A maintenance that silently does
+    // nothing and one that works look identical from the surface, so the tests
+    // gate these rather than a reach or a duration.
+    struct CarriedRegionCounters {
+        std::size_t captured = 0;    // entries the first gather captured
+        std::size_t inserted = 0;    // entries a split inserted, both parents carried
+        std::size_t inserted_one_parent = 0;  // …and with exactly one carried parent
+        std::size_t retired = 0;     // entries a collapse retired — zero, under the rule
+        std::size_t moved = 0;       // captured positions the REMESHER shifted
+        // COLLAPSES AVOIDED, NOT REFUSAL EVENTS. The remesher's passes re-ask
+        // about the same edge on every stamp, so the raw event count runs an
+        // order of magnitude above the operations it prevented; this counts a
+        // carried vertex once per stamp however often that stamp re-asks.
+        std::size_t collapses_refused = 0;
+    };
+    const CarriedRegionCounters& carried_counters() const { return carry_counters_; }
+    // Entries in the carry, and how many of them are still on the surface. The
+    // two differ only if something retired a carried vertex behind the rule.
+    std::size_t carried_entries() const { return carry_items_.size(); }
+    std::size_t carried_live() const;
+    // The largest falloff weight still carried. The reach follows THIS and not
+    // the entry count: a region kept numerically alive while its weight-1 centre
+    // was retired loses the drag, which is the whole reason it is reported.
+    float carried_top_weight() const;
+
     // What the per-stamp scratch arena owns and how far it has had to grow.
     // One per sculptor and never a process-global — see `brush_arena.h`.
     const BrushScratchArena& arena() const { return arena_; }
@@ -286,6 +342,41 @@ class DynamicSculptor {
     // automask and the normal-angle reference so the two cannot disagree about
     // where the brush landed.
     VertexId automask_seed_;
+
+    // -- the carried region (see the public block above) ---------------------
+    //
+    // Parallel arrays rather than a vector of structs, for the reason the
+    // workset is: the maintenance appends to all three together and the
+    // rebuild reads them in order.
+    std::vector<VertexId> carry_items_;
+    std::vector<kernel::cfloat3> carry_captured_;
+    std::vector<float> carry_weights_;
+    // vertex slot -> index into the carry, `kNoClass` outside it. A slot is
+    // handed out again when the pool retires an id, so the GENERATION is
+    // compared too — otherwise a vertex born this stamp inherits a dead entry.
+    std::vector<std::uint32_t> carry_slot_;
+    // The stamp a carried entry was last counted as a refused collapse at, so
+    // the remesher's repeated passes over one edge count once. `kNoClass` means
+    // never.
+    std::vector<std::uint32_t> carry_refused_at_;
+    std::uint32_t carry_stamp_ = 0;
+    bool carry_open_ = false;
+    bool carry_taken_ = false;
+    CarriedRegionCounters carry_counters_;
+
+    // Take the gathered workset as the gesture's captured region.
+    void take_carry();
+    // Rebuild the workset from the carry instead of walking the surface.
+    bool rebuild_from_carry();
+    std::uint32_t carry_index_of(VertexId v) const;
+    void carry_append(VertexId v, kernel::cfloat3 captured, float weight);
+    // The hooks the remesh is handed while a capture is open, and null
+    // otherwise — which is every stamp of every other verb.
+    RemeshHooks carry_hooks();
+    static void carry_on_split(void*, VertexId a, VertexId b, VertexId child);
+    static void carry_on_collapse(void*, VertexId kept, VertexId removed);
+    static void carry_on_move(void*, VertexId v, kernel::cfloat3 before, kernel::cfloat3 after);
+    static bool carry_may_collapse(void*, VertexId kept, VertexId removed);
 
     std::vector<std::uint32_t> nb_offsets_, nb_slots_;
     std::vector<kernel::cfloat3> nb_positions_, nb_normals_, nb_colors_;

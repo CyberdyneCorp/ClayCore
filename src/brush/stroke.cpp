@@ -485,12 +485,14 @@ field::MaskGate mesh_mask_gate(const voxel::MaskField* mask, const MeshStrokeOpt
 
 namespace {
 
-// How a verb consumes the motion between stamps.
+// How a verb consumes the motion of the stroke.
 //
-// GRAB is anchored and SNAKEHOOK walks. Both drag by the motion BETWEEN stamps,
-// so a stroke that stops moving stops pulling — and that one difference is the
-// whole of the difference between them. It lives here rather than in either
-// verb because it is a fact about a STROKE.
+// GRAB IS ONE GESTURE AND SNAKEHOOK IS A WALK, and that is the whole of the
+// difference between them. A grab carries the region it captured at its first
+// stamp and moves it by the motion since the stroke BEGAN; a snakehook
+// re-anchors on the surface it is dragging and moves it by the motion between
+// consecutive stamps. It lives here rather than in either verb because it is a
+// fact about a STROKE.
 struct MeshStrokeDrag {
     bool dragging = false;
     bool anchored = false;
@@ -503,6 +505,32 @@ MeshStrokeDrag drag_of(mesh::MeshBrush verb) {
     d.anchored = verb == mesh::MeshBrush::Grab;
     return d;
 }
+
+// A CAPTURE IS OPEN FOR EXACTLY ONE GESTURE, and closing it is not optional: a
+// sculptor left carrying would reuse this stroke's region for the next one. So
+// it is scoped rather than closed at each exit, which is the shape that survives
+// somebody adding an early return above the close.
+//
+// Opened only for `grab`. Every other verb re-gathers per stamp, which is what
+// every other verb means.
+template <typename Sculptor>
+class CarriedRegionScope {
+   public:
+    CarriedRegionScope(Sculptor& sculptor, mesh::MeshBrush verb)
+        : sculptor_(sculptor), open_(verb == mesh::MeshBrush::Grab) {
+        if (open_) sculptor_.begin_carried_region();
+    }
+    ~CarriedRegionScope() {
+        if (open_) sculptor_.end_carried_region();
+    }
+    CarriedRegionScope(const CarriedRegionScope&) = delete;
+    CarriedRegionScope& operator=(const CarriedRegionScope&) = delete;
+    bool open() const { return open_; }
+
+   private:
+    Sculptor& sculptor_;
+    bool open_;
+};
 
 // What one stamp of a mesh stroke resolves to.
 //
@@ -527,11 +555,28 @@ mesh::MeshBrushSettings mesh_stamp_settings(const mesh::MeshBrushSettings& setti
         out.center = s.position;
         return out;
     }
-    out.direction = s.position - previous;
     if (drag.anchored) {
+        // THE MOTION SINCE THE STROKE BEGAN, onto the region the gesture
+        // captured at its first stamp. The sculptors hold that region and write
+        // `captured + weight * direction`, so the weight-1 centre lands exactly
+        // where the cursor did and no accumulation error can build up over the
+        // gesture.
+        //
+        // On a CURVE this is the NET DISPLACEMENT and not the path length: a
+        // quarter arc of length 0.6 has a chord of 0.5402, and the gesture moves
+        // the chord. That is what carrying one piece of surface means — a host
+        // measuring the surface against the cursor's PATH will read it as a
+        // shortfall and it is not one.
+        //
+        // The motion between consecutive stamps is what this replaces. It
+        // re-gathered around a point the surface had already left, so the
+        // falloff weights shrank as the gesture went on: a grab reached 41% of a
+        // 0.6 drag and 18% of a 1.5 one, on every representation.
+        out.direction = s.position - first;
         out.center = first;
         out.seed_class = settings.seed_class;
     } else {
+        out.direction = s.position - previous;
         out.center = anchor_position;
         out.seed_class = drag.anchor;
     }
@@ -560,6 +605,8 @@ std::size_t apply_to_mesh(mesh::MeshSculptor& sculptor, const std::vector<Stamp>
     sculptor.set_defer_normals(options.defer_normals);
 
     MeshStrokeDrag drag = drag_of(verb);
+    // ONE GATHER FOR THE GESTURE. See `MeshSculptor`'s carried-region block.
+    const CarriedRegionScope<mesh::MeshSculptor> carry(sculptor, verb);
 
     // SNAKEHOOK re-anchors ON THE SURFACE IT IS DRAGGING, not on the cursor.
     //
@@ -671,8 +718,18 @@ std::size_t apply_to_multires(mesh::MultiresSculptor& sculptor, const std::vecto
         if (drag.anchor >= level->adjacency().class_count())
             drag.anchor = level->nearest_class(stamps.front().position);
     }
+    // ONE GATHER FOR THE GESTURE, on whichever level sculptor is bound. The
+    // hierarchy owns the capture because it can REPLACE that sculptor
+    // mid-stroke; see `MultiresSculptor`'s carried-region block.
+    const CarriedRegionScope<mesh::MultiresSculptor> carry(sculptor, verb);
+    std::uint64_t capture = sculptor.capture_generation();
 
     std::size_t applied = 0;
+    // WHERE THE GESTURE IS MEASURED FROM. The stroke's first sample, until a
+    // rebind takes a fresh capture from where the surface now is — after which
+    // the remaining drag is measured from THAT stamp, because the region it
+    // captured has already taken everything before it.
+    kernel::cfloat3 origin = stamps.front().position;
     kernel::cfloat3 previous = stamps.front().position;
     for (const Stamp& s : stamps) {
         // The same early-out the other consumers take: a stamp whose centre is
@@ -686,11 +743,15 @@ std::size_t apply_to_multires(mesh::MultiresSculptor& sculptor, const std::vecto
         // mid-stroke — so the anchor's position has to come from whatever is
         // bound NOW rather than from a pointer taken before the loop.
         level = sculptor.level_sculptor();
+        if (carry.open() && sculptor.capture_generation() != capture) {
+            capture = sculptor.capture_generation();
+            origin = s.position;
+        }
         const kernel::cfloat3 anchor_position =
             (drag.dragging && !drag.anchored && level) ? level->class_position(drag.anchor)
                                                        : kernel::cf3(0, 0, 0);
-        mesh::MeshBrushSettings stamp_settings = mesh_stamp_settings(
-            settings, s, drag, previous, stamps.front().position, anchor_position);
+        mesh::MeshBrushSettings stamp_settings =
+            mesh_stamp_settings(settings, s, drag, previous, origin, anchor_position);
         previous = s.position;
 
         if (options.orient_alpha_by_stamp && settings.has_alpha())
@@ -809,6 +870,10 @@ std::size_t apply_to_dynamic(mesh::DynamicSculptor& sculptor, const std::vector<
     mesh::VertexId anchor;
     if (drag.dragging && !drag.anchored) anchor = sculptor.nearest_vertex(first);
 
+    // ONE GATHER FOR THE GESTURE, and the remesh maintains what it captured.
+    // See `DynamicSculptor`'s carried-region block.
+    const CarriedRegionScope<mesh::DynamicSculptor> carry(sculptor, verb);
+
     std::size_t applied = 0;
     kernel::cfloat3 previous = first;
     for (const Stamp& s : stamps) {
@@ -816,9 +881,20 @@ std::size_t apply_to_dynamic(mesh::DynamicSculptor& sculptor, const std::vector<
             previous = s.position;
             continue;
         }
-        const mesh::MeshBrushSettings stamp_settings =
+        mesh::MeshBrushSettings stamp_settings =
             dynamic_stamp_settings(sculptor, settings, s, drag, previous, first, options, &anchor);
         previous = s.position;
+        // THE GRAB REMESH FOLLOWS THE STAMP, once there is a captured region to
+        // maintain. A remesh left at the first sample while the surface is
+        // dragged away refines nothing the gesture stretched: measured after a
+        // 1.5 drag it left a longest edge of 1.12 against 0.36 with the centre
+        // following, which is worse than not remeshing at all.
+        //
+        // Only once the region HAS been captured. The capturing stamp's own
+        // remesh belongs where the gather is, which is the anchor — and on that
+        // stamp the two are the same point anyway unless a mask held the stroke
+        // back first.
+        if (carry.open() && sculptor.carrying()) stamp_settings.center = s.position;
 
         const mesh::DynamicStampResult r =
             sculptor.stamp(verb, stamp_settings, topology, mask_gate, record);

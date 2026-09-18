@@ -331,6 +331,10 @@ bool DynamicSculptor::gather(const MeshBrushSettings& brush, const field::MaskGa
     // Every transient this stamp asks the arena for is dead when the stamp
     // ends, so the arena starts each one at zero and keeps its storage.
     arena_.reset();
+    // ONE GATHER PER GESTURE, NOT ONE PER STAMP. A grab carrying its region
+    // rebuilds the workset from what it captured instead of walking the surface
+    // around a point the surface has already left.
+    if (carrying()) return rebuild_from_carry();
     build_dynamic_surface_workset(brush, geodesic);
     if (region_.items.empty()) return false;
 
@@ -380,7 +384,207 @@ bool DynamicSculptor::gather(const MeshBrushSettings& brush, const field::MaskGa
     last_region_.resize(kept);
     for (std::size_t i = 0; i < kept; ++i)
         last_region_[i] = region_.items[i].as_surface_vertex();
+    // A gesture with a capture OPEN takes it here, on the first gather that
+    // reached something — so a stroke that applies nothing captures nothing.
+    if (carry_open_ && !carry_taken_) take_carry();
     return true;
+}
+
+// -- the carried region --------------------------------------------------------
+//
+// The rules and the measurements behind each are in
+// `openspec/specs/brush-engine`; the header says what this is for. Nothing here
+// runs unless `begin_carried_region` was called, which `brush::apply_to_dynamic`
+// does for `grab` and for no other verb.
+
+void DynamicSculptor::begin_carried_region() {
+    end_carried_region();
+    carry_open_ = true;
+    carry_counters_ = CarriedRegionCounters{};
+}
+
+void DynamicSculptor::end_carried_region() {
+    // The slot map is retired through the entries it holds, never wholesale:
+    // it is a per-vertex array and clearing it would cost the surface.
+    for (VertexId v : carry_items_)
+        if (v.slot < carry_slot_.size()) carry_slot_[v.slot] = kNoClass;
+    carry_items_.clear();
+    carry_captured_.clear();
+    carry_weights_.clear();
+    carry_refused_at_.clear();
+    carry_open_ = false;
+    carry_taken_ = false;
+}
+
+std::uint32_t DynamicSculptor::carry_index_of(VertexId v) const {
+    if (!v.valid() || v.slot >= carry_slot_.size()) return kNoClass;
+    const std::uint32_t i = carry_slot_[v.slot];
+    if (i == kNoClass || i >= carry_items_.size()) return kNoClass;
+    // THE GENERATION HAS TO MATCH. A slot is handed out again when the pool
+    // retires an id, so comparing slots alone lets a vertex born this stamp
+    // inherit a dead entry's captured position.
+    return carry_items_[i] == v ? i : kNoClass;
+}
+
+void DynamicSculptor::carry_append(VertexId v, kernel::cfloat3 captured, float weight) {
+    const std::size_t want = std::max<std::size_t>(surface_.vertices().capacity_slots(),
+                                                   static_cast<std::size_t>(v.slot) + 1);
+    if (carry_slot_.size() < want) carry_slot_.resize(want, kNoClass);
+    carry_slot_[v.slot] = static_cast<std::uint32_t>(carry_items_.size());
+    carry_items_.push_back(v);
+    carry_captured_.push_back(captured);
+    carry_weights_.push_back(weight);
+    carry_refused_at_.push_back(kNoClass);
+}
+
+void DynamicSculptor::take_carry() {
+    for (std::size_t i = 0; i < region_.size(); ++i)
+        carry_append(region_.items[i].as_surface_vertex(), region_.positions[i],
+                     region_.weights[i]);
+    carry_counters_.captured = carry_items_.size();
+    carry_taken_ = true;
+}
+
+// The carry, live entries only, put back into the workset the kernels read.
+// `positions` are the CAPTURED positions and `weights` the captured weights, so
+// `kernel_grab` followed by `write_positions` spells exactly
+// `captured + w * (p_k - p_0)` when the consumer hands it the whole drag.
+bool DynamicSculptor::rebuild_from_carry() {
+    SculptWorkset& r = region_;
+    for (WorkItemId item : r.items)
+        if (item.key() < r.slot.size()) r.slot[item.key()] = kNoClass;
+    r.clear_keep_capacity();
+    if (r.slot.size() < surface_.vertices().capacity_slots())
+        r.slot.resize(surface_.vertices().capacity_slots(), kNoClass);
+
+    for (std::size_t i = 0; i < carry_items_.size(); ++i) {
+        const DynamicVertex* rec = surface_.vertex(carry_items_[i]);
+        if (rec == nullptr) continue;
+        r.slot[carry_items_[i].slot] = static_cast<std::uint32_t>(r.items.size());
+        r.items.push_back(WorkItemId::surface_vertex(carry_items_[i]));
+        r.positions.push_back(carry_captured_[i]);
+        r.weights.push_back(carry_weights_[i]);
+        r.normals.push_back(rec->normal);
+    }
+    if (r.items.empty()) return false;
+    last_region_.resize(r.items.size());
+    for (std::size_t i = 0; i < r.items.size(); ++i)
+        last_region_[i] = r.items[i].as_surface_vertex();
+    return true;
+}
+
+std::size_t DynamicSculptor::carried_live() const {
+    std::size_t live = 0;
+    for (VertexId v : carry_items_)
+        if (surface_.vertex(v) != nullptr) ++live;
+    return live;
+}
+
+float DynamicSculptor::carried_top_weight() const {
+    float top = 0.0f;
+    for (std::size_t i = 0; i < carry_items_.size(); ++i)
+        if (surface_.vertex(carry_items_[i]) != nullptr) top = std::max(top, carry_weights_[i]);
+    return top;
+}
+
+// A SPLIT INSIDE THE REGION JOINS IT. With both parents carried the child takes
+// the MIDPOINT OF THEIR CAPTURED POSITIONS and the mean of their weights —
+// reconstructed, never read off the surface, because its parents have already
+// taken part of the drag and reading the surface would give it that part twice.
+//
+// With exactly ONE carried parent it joins too, at the midpoint of that parent's
+// captured position and the other endpoint's CURRENT one, with half the carried
+// weight. The uncarried parent took no part of the drag, so where it is now is
+// where it was captured, and the child is exactly reconstructible — the same
+// arithmetic with the second weight at zero.
+void DynamicSculptor::carry_on_split(void* ctx, VertexId a, VertexId b, VertexId child) {
+    DynamicSculptor* self = static_cast<DynamicSculptor*>(ctx);
+    if (!child.valid()) return;
+    const std::uint32_t ia = self->carry_index_of(a);
+    const std::uint32_t ib = self->carry_index_of(b);
+    if (ia == kNoClass && ib == kNoClass) return;  // the split was outside the region
+    if (ia != kNoClass && ib != kNoClass) {
+        self->carry_append(child,
+                           (self->carry_captured_[ia] + self->carry_captured_[ib]) * 0.5f,
+                           (self->carry_weights_[ia] + self->carry_weights_[ib]) * 0.5f);
+        ++self->carry_counters_.inserted;
+        return;
+    }
+    const std::uint32_t in = ia != kNoClass ? ia : ib;
+    const DynamicVertex* out = self->surface_.vertex(ia != kNoClass ? b : a);
+    if (out == nullptr) return;
+    self->carry_append(child, (self->carry_captured_[in] + out->position) * 0.5f,
+                       self->carry_weights_[in] * 0.5f);
+    ++self->carry_counters_.inserted_one_parent;
+}
+
+// A collapse that retired a carried vertex. Under the rule this never fires —
+// `carry_may_collapse` refuses that collapse — and it is kept because the
+// refusal is the rule's and the bookkeeping must not depend on it: a collapse
+// reaching a carried vertex by any other route would otherwise leave a dead id
+// in the carry.
+void DynamicSculptor::carry_on_collapse(void* ctx, VertexId, VertexId removed) {
+    DynamicSculptor* self = static_cast<DynamicSculptor*>(ctx);
+    const std::uint32_t i = self->carry_index_of(removed);
+    if (i == kNoClass) return;
+    self->carry_slot_[removed.slot] = kNoClass;
+    // Swap-erase: nothing depends on the carry's order.
+    const std::size_t last = self->carry_items_.size() - 1;
+    if (i != last) {
+        self->carry_items_[i] = self->carry_items_[last];
+        self->carry_captured_[i] = self->carry_captured_[last];
+        self->carry_weights_[i] = self->carry_weights_[last];
+        self->carry_refused_at_[i] = self->carry_refused_at_[last];
+        self->carry_slot_[self->carry_items_[i].slot] = i;
+    }
+    self->carry_items_.pop_back();
+    self->carry_captured_.pop_back();
+    self->carry_weights_.pop_back();
+    self->carry_refused_at_.pop_back();
+    ++self->carry_counters_.retired;
+}
+
+// THE REMESHER MOVED A CARRIED VERTEX, so its captured position takes the same
+// shift. Without this the next stamp writes `captured + w * total` and puts the
+// vertex back where the remesh moved it from, and the relaxation inside a grab
+// has no effect at all.
+void DynamicSculptor::carry_on_move(void* ctx, VertexId v, kernel::cfloat3 before,
+                                    kernel::cfloat3 after) {
+    DynamicSculptor* self = static_cast<DynamicSculptor*>(ctx);
+    const std::uint32_t i = self->carry_index_of(v);
+    if (i == kNoClass) return;
+    self->carry_captured_[i] = self->carry_captured_[i] + (after - before);
+    ++self->carry_counters_.moved;
+}
+
+// A COLLAPSE MAY NOT RETIRE A CARRIED VERTEX for the length of the gesture.
+// Maintaining the region is necessary and not sufficient: a split's child takes
+// the MEAN of its parents' weights, so once the weight-1 centre is collapsed
+// nothing can recreate it and the gesture loses a quarter of the drag.
+//
+// Counted ONCE PER STAMP per carried vertex. The remesher's passes re-ask about
+// the same edge within a stamp, so counting every refusal would report an order
+// of magnitude more collapses than it actually prevented.
+bool DynamicSculptor::carry_may_collapse(void* ctx, VertexId, VertexId removed) {
+    DynamicSculptor* self = static_cast<DynamicSculptor*>(ctx);
+    const std::uint32_t i = self->carry_index_of(removed);
+    if (i == kNoClass) return true;
+    if (self->carry_refused_at_[i] != self->carry_stamp_) {
+        self->carry_refused_at_[i] = self->carry_stamp_;
+        ++self->carry_counters_.collapses_refused;
+    }
+    return false;
+}
+
+RemeshHooks DynamicSculptor::carry_hooks() {
+    RemeshHooks h;
+    if (!carrying()) return h;  // null at every stamp of every other verb
+    h.context = this;
+    h.on_split = &DynamicSculptor::carry_on_split;
+    h.on_collapse = &DynamicSculptor::carry_on_collapse;
+    h.on_move = &DynamicSculptor::carry_on_move;
+    h.may_collapse = &DynamicSculptor::carry_may_collapse;
+    return h;
 }
 
 void DynamicSculptor::build_neighbors(bool want_normals, bool want_colors) {
@@ -736,9 +940,22 @@ DynamicStampResult DynamicSculptor::stamp_impl(MeshBrush verb, const MeshBrushSe
     const bool after = topology.enabled && (timing == RemeshTiming::AfterBrush ||
                                             timing == RemeshTiming::BeforeAndAfter);
 
+    // THE HOOKS ARE READ AT EACH REMESH SITE, not once at the top: the capture
+    // is taken inside the gather BELOW, so the first stamp's after-remesh is the
+    // first one with a region to maintain, and hooks read before the gather
+    // would leave exactly that remesh unmaintained. Null unless a grab is
+    // carrying, which is every stamp of every other verb.
+    if (carry_open_) ++carry_stamp_;
+    RemeshHooks hooks;
+    auto hooks_now = [&]() -> const RemeshHooks* {
+        hooks = carry_hooks();
+        return hooks.context != nullptr ? &hooks : nullptr;
+    };
+
     if (before) {
         StageTimer topology_timer(stages_, SculptStage::Topology);
-        out.remesh = remesh_region(surface_, &bvh_, brush.center, brush.radius, topology, record);
+        out.remesh = remesh_region(surface_, &bvh_, brush.center, brush.radius, topology, record,
+                                   hooks_now());
     }
 
     const BrushModel model = model_of(verb);
@@ -754,9 +971,9 @@ DynamicStampResult DynamicSculptor::stamp_impl(MeshBrush verb, const MeshBrushSe
     if (!reached) {
         if (after) {
             StageTimer topology_timer(stages_, SculptStage::Topology);
-            add_late_remesh(
-                remesh_region(surface_, &bvh_, brush.center, brush.radius, topology, record),
-                &out.remesh);
+            add_late_remesh(remesh_region(surface_, &bvh_, brush.center, brush.radius, topology,
+                                          record, hooks_now()),
+                            &out.remesh);
         }
         return out;
     }
@@ -804,9 +1021,9 @@ DynamicStampResult DynamicSculptor::stamp_impl(MeshBrush verb, const MeshBrushSe
 
     if (after) {
         StageTimer topology_timer(stages_, SculptStage::Topology);
-        add_late_remesh(
-            remesh_region(surface_, &bvh_, brush.center, brush.radius, topology, record),
-            &out.remesh);
+        add_late_remesh(remesh_region(surface_, &bvh_, brush.center, brush.radius, topology,
+                                      record, hooks_now()),
+                        &out.remesh);
     }
     return out;
 }
