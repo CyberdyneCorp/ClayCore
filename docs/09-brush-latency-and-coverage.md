@@ -18,10 +18,10 @@ iPadOS 26.5.2, thermally nominal start to end:
 
 | what it is | device case | p95 (ms) | class |
 |---|---|---|---|
-| one adaptive dab, remesher on | `dyntopo_stamp` | 0.630 | interactive |
-| the same dab, adaptation off | `dyntopo_stamp_fixed` | 0.078 | interactive |
-| the same dab at twice the detail | `dyntopo_stamp_fine` | **5.397** † | interactive |
-| one dirty chunk copied to the host | `dyntopo_chunk_copy` | 0.0026 | interactive |
+| one adaptive dab, remesher on | `dyntopo_stamp` | 0.5921 | interactive |
+| the same dab, adaptation off | `dyntopo_stamp_fixed` | 0.08049 | interactive |
+| the same dab at twice the detail | `dyntopo_stamp_fine` | **5.507** † | interactive |
+| one dirty chunk copied to the host | `dyntopo_chunk_copy` | 0.002538 | interactive |
 
 Per application, as every row in this document is: the cases batch 8, 8, 4 and
 256 dabs into one timed body so their figures clear the gate's 0.05 ms floor.
@@ -131,52 +131,52 @@ representation, `s` the SDF one, `m` a mesh layer's own triangles.
 
 | ZBrush | Nomad | claycore | rep | device case | p95 (ms) | class |
 |---|---|---|---|---|---|---|
-| Standard | Brush | `Op::Relief` — approximated: relief is Inflate's frame ([07 § 9](07-brushes-and-features.md#9-zbrush-equivalents)) | s | `sdf_stamp_cpu` | 2.62 | interactive |
-| ClayBuildup | Clay / Clay Strips | `Op::Relief` along a stroke | s | `stroke_build` | 0.298 | gesture |
-| Crease, DamStandard | Crease | `Op::Incise` — approximated, relief's frame cutting in ([07 § 9](07-brushes-and-features.md#9-zbrush-equivalents)) | s | `stroke_carve` | 0.382 | gesture |
-| Inflate | Inflate | `Op::Relief`, `sculpt_inflate` | s v | `voxel_inflate` | 0.0043 | interactive |
-| Move | Move | `brush::move_brush` | s | `sdf_move` | 0.0791 | gesture |
-| Move | Move (elastic) | `sculpt_grab` | v | `voxel_grab` | 0.0078 | gesture |
+| Standard | Brush | `Op::Relief` — approximated: relief is Inflate's frame ([07 § 9](07-brushes-and-features.md#9-zbrush-equivalents)) | s | `sdf_stamp_cpu` | 3.224 | interactive |
+| ClayBuildup | Clay / Clay Strips | `Op::Relief` along a stroke | s | `stroke_build` | 0.4338 | gesture |
+| Crease, DamStandard | Crease | `Op::Incise` — approximated, relief's frame cutting in ([07 § 9](07-brushes-and-features.md#9-zbrush-equivalents)) | s | `stroke_carve` | 0.3995 | gesture |
+| Inflate | Inflate | `Op::Relief`, `sculpt_inflate` | s v | `voxel_inflate` | 0.004802 | interactive |
+| Move | Move | `brush::move_brush` | s | `sdf_move` | 0.1245 | gesture |
+| Move | Move (elastic) | `sculpt_grab` | v | `voxel_grab` | 0.007995 | gesture |
 | Move Topological | — | `field::move_topological` | s | *(exempt — see below)* | — | — |
-| Smooth | Smooth | `field::relax` | s | `sdf_relax` | **0.548** ‡ | operation |
-| Smooth | Smooth | `sculpt_smooth` | v | `voxel_smooth` | **0.0045** | interactive |
-| Flatten | Flatten | `field::flatten` (two-sided) | s | `sdf_flatten` | 0.410 ‡§ | operation |
-| Flatten | Flatten | `sculpt_flatten` | v | `voxel_flatten` | 0.0040 | interactive |
-| hPolish, Planar, Trim | Scrape / Planar | `field::flatten` cut-only | s | `volume_hpolish` | 3.37 ‡§ | operation |
+| Smooth | Smooth | `field::relax` | s | `sdf_relax` | **0.5271** ‡ | operation |
+| Smooth | Smooth | `sculpt_smooth` | v | `voxel_smooth` | **0.004496** | interactive |
+| Flatten | Flatten | `field::flatten` (two-sided) | s | `sdf_flatten` | 0.4031 ‡§ | operation |
+| Flatten | Flatten | `sculpt_flatten` | v | `voxel_flatten` | 0.00402 | interactive |
+| hPolish, Planar, Trim | Scrape / Planar | `field::flatten` cut-only | s | `volume_hpolish` | 3.325 ‡§ | operation |
 | The surface brushes, on a mesh LAYER (Standard, Move, Inflate, Smooth, Pinch, Flatten, Clay, DamStandard, Trim Dynamic, hPolish, SnakeHook, Layer, Nudge, Relax) | — | `mesh::MeshSculptor`, 14 verbs, with alphas | m | *(unmeasured — see Named gaps)* | — | — |
-| — | Scrape | `sculpt_scrape` | v | `voxel_scrape` | 0.0046 | interactive |
-| Pinch | Pinch | `magnify` (negative), `sculpt_pinch` | s v | `voxel_pinch` | 0.0041 | interactive |
-| Magnify | Inflate (local) | `magnify` (positive), `sculpt_magnify` | s v | `voxel_magnify` | 0.0041 | interactive |
-| Magnify / Pinch (SDF) | — | `magnify` deformer | s | `magnify_pinch` | 0.289 | gesture |
-| Rotate | Twist | `pose` / `pose_line` | s | `pose_region` | 0.0005 | gesture |
-| SnakeHook | Tube / SnakeHook | `brush::snakehook` | s | `snakehook_tendrils` | 0.289 | gesture |
-| — | Tube | `brush::tube` | s | `tube_create` | 0.0009 | gesture |
+| — | Scrape | `sculpt_scrape` | v | `voxel_scrape` | 0.004514 | interactive |
+| Pinch | Pinch | `magnify` (negative), `sculpt_pinch` | s v | `voxel_pinch` | 0.004498 | interactive |
+| Magnify | Inflate (local) | `magnify` (positive), `sculpt_magnify` | s v | `voxel_magnify` | 0.003998 | interactive |
+| Magnify / Pinch (SDF) | — | `magnify` deformer | s | `magnify_pinch` | 0.301 | gesture |
+| Rotate | Twist | `pose` / `pose_line` | s | `pose_region` | 0.0004756 | gesture |
+| SnakeHook | Tube / SnakeHook | `brush::snakehook` | s | `snakehook_tendrils` | 0.3163 | gesture |
+| — | Tube | `brush::tube` | s | `tube_create` | 0.0008248 | gesture |
 | Trim (Rect/Circle/Lasso) | Trim | `cut::cut_item` | s | `cut_create` / `cut_passes` | 0.0001 / 0.077 | gesture |
-| Trim Curve | Trim (curve) | `CutShape::from_open_curve` | s | `trim_curve` | 0.0002 | gesture |
-| Clip | Trim | `cut::cut_item` | s | `cut_passes` | 0.207 | gesture |
-| Surface Noise | Noise | `noise` deformer | s | `noise_detail` | 0.161 | gesture |
-| Mask | Mask | mask fields + stroke engine | s v | `mask_paint` | 0.0035 | interactive |
-| Mask (freeze effect) | Mask | mask-gated verbs | s v | `mask_freeze` | 0.0076 | interactive |
-| Extract | Split / Extract | `brush::mask_extrude` | s v | `mask_extrude` | 4223 ‡ | operation |
-| ZSpheres | — | `Prim::armature` | s | `armature_edit` | 0.0006 | gesture |
-| Alphas | Alphas | `sculpt_carve_alpha` | v | `voxel_carve_alpha` | 0.0011 | interactive |
-| — | Paint | `voxel_paint_brush` | v | `voxel_paint` | 0.0023 | interactive |
-| — | Smudge | `sculpt_smudge` | v | `voxel_smudge` | 0.0072 | gesture |
-| — | (fill holes) | `sculpt_fill_cavities` | v | `voxel_fill_cavities` | 0.217 | operation |
-| Dynamesh | Voxel Remesh | `Layer.consolidate` | s | `sdf_consolidate` | 249.2 ‡ | operation |
-| — | Multires | `VoxelGrid::add_level` | v | `voxel_add_level` | 4.86 | operation |
+| Trim Curve | Trim (curve) | `CutShape::from_open_curve` | s | `trim_curve` | 0.0001584 | gesture |
+| Clip | Trim | `cut::cut_item` | s | `cut_passes` | 0.2679 | gesture |
+| Surface Noise | Noise | `noise` deformer | s | `noise_detail` | 0.1623 | gesture |
+| Mask | Mask | mask fields + stroke engine | s v | `mask_paint` | 0.003504 | interactive |
+| Mask (freeze effect) | Mask | mask-gated verbs | s v | `mask_freeze` | 0.007822 | interactive |
+| Extract | Split / Extract | `brush::mask_extrude` | s v | `mask_extrude` | 4040 ‡ | operation |
+| ZSpheres | — | `Prim::armature` | s | `armature_edit` | 0.0005808 | gesture |
+| Alphas | Alphas | `sculpt_carve_alpha` | v | `voxel_carve_alpha` | 0.001006 | interactive |
+| — | Paint | `voxel_paint_brush` | v | `voxel_paint` | 0.002541 | interactive |
+| — | Smudge | `sculpt_smudge` | v | `voxel_smudge` | 0.008271 | gesture |
+| — | (fill holes) | `sculpt_fill_cavities` | v | `voxel_fill_cavities` | 0.221 | operation |
+| Dynamesh | Voxel Remesh | `Layer.consolidate` | s | `sdf_consolidate` | 352 ‡ | operation |
+| — | Multires | `VoxelGrid::add_level` | v | `voxel_add_level` | 4.927 | operation |
 | — | Multires (over a region) | `VoxelGrid::add_level(region)` | v | — | — | operation |
-| — | Multires (editing under one) | `sculpt_smooth`, one level finer | v | `voxel_smooth_l2` | 0.0045 | interactive |
-| — | (large brush) | `sculpt_smooth` at radius 32 | v | `voxel_smooth_r32` | 0.153 | interactive |
-| — | (display) | `VoxelGrid::mesh_greedy` | v | `voxel_mesh_whole` | 13.23 | operation |
-| — | (display, incremental) | `mesh_greedy_chunks` | v | `voxel_mesh_dirty` | **2.12** | interactive |
-| Move / Rotate / Scale (gizmo, one item) | Gizmo | `clay_layer_set_transform` | s | `sdf_node_transform_bricks` | **17.27** ‡ | interactive |
-| Move / Rotate / Scale (item inside a group) | Gizmo | `clay_layer_set_transform` | s | `sdf_group_transform_bricks` | **19.2** ‡ | interactive |
-| Move / Rotate / Scale (whole layer) | Gizmo (object) | `clay_document_set_layer_transform` | s | `sdf_layer_transform_bricks` | **27.81** ‡ | interactive |
-| — | (a stamp after a drag) | `sdf_stamp` in the state a drag left | s | `sdf_stamp_after_drag_bricks` | 1.08 | interactive |
-| — | (a stamp after a drag, grouped) | as above, in a grouped document | s | `sdf_stamp_after_group_drag_bricks` | 1.15 | interactive |
-| ClayBuildup etc., dabs INSIDE A GROUP | Clay / Clay Strips | `Op::Relief` along a stroke, in a group | s | `sdf_stroke_in_group_bricks` | 2.102 ¶ | interactive |
-| ClayBuildup etc., SMOOTH-blended | Clay / Clay Strips | `Op::Relief` along a stroke, quadratic blend | s | `sdf_stroke_smooth_bricks` | 0.161 | interactive |
+| — | Multires (editing under one) | `sculpt_smooth`, one level finer | v | `voxel_smooth_l2` | 0.004486 | interactive |
+| — | (large brush) | `sculpt_smooth` at radius 32 | v | `voxel_smooth_r32` | 0.1384 | interactive |
+| — | (display) | `VoxelGrid::mesh_greedy` | v | `voxel_mesh_whole` | 14.13 | operation |
+| — | (display, incremental) | `mesh_greedy_chunks` | v | `voxel_mesh_dirty` | **2.25** | interactive |
+| Move / Rotate / Scale (gizmo, one item) | Gizmo | `clay_layer_set_transform` | s | `sdf_node_transform_bricks` | **19.5** ‡ | interactive |
+| Move / Rotate / Scale (item inside a group) | Gizmo | `clay_layer_set_transform` | s | `sdf_group_transform_bricks` | **19.25** ‡ | interactive |
+| Move / Rotate / Scale (whole layer) | Gizmo (object) | `clay_document_set_layer_transform` | s | `sdf_layer_transform_bricks` | **36.12** ‡ | interactive |
+| — | (a stamp after a drag) | `sdf_stamp` in the state a drag left | s | `sdf_stamp_after_drag_bricks` | 1.464 | interactive |
+| — | (a stamp after a drag, grouped) | as above, in a grouped document | s | `sdf_stamp_after_group_drag_bricks` | 1.414 | interactive |
+| ClayBuildup etc., dabs INSIDE A GROUP | Clay / Clay Strips | `Op::Relief` along a stroke, in a group | s | `sdf_stroke_in_group_bricks` | 2.342 ¶ | interactive |
+| ClayBuildup etc., SMOOTH-blended | Clay / Clay Strips | `Op::Relief` along a stroke, quadratic blend | s | `sdf_stroke_smooth_bricks` | 0.1713 | interactive |
 | Blob | — | *not implemented* | | | | |
 | Slice / Knife | Split | *not implemented* | | | | |
 | surface-mode mesh brushes | — | *out of scope* | | | | |
