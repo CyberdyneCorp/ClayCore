@@ -885,10 +885,19 @@ std::size_t apply_to_dynamic(mesh::DynamicSculptor& sculptor, const std::vector<
             dynamic_stamp_settings(sculptor, settings, s, drag, previous, first, options, &anchor);
         previous = s.position;
         // THE GRAB REMESH FOLLOWS THE STAMP, once there is a captured region to
-        // maintain. A remesh left at the first sample while the surface is
-        // dragged away refines nothing the gesture stretched: measured after a
-        // 1.5 drag it left a longest edge of 1.12 against 0.36 with the centre
-        // following, which is worse than not remeshing at all.
+        // maintain. A ball left at the gesture's first sample never reaches a
+        // tip five brush radii away, so the tip keeps the edges the drag
+        // stretched: measured after a 1.5 drag, the longest edge within a brush
+        // radius of the tip is 0.1450 anchored against 0.0487 following, and 25
+        // vertices are there against 65.
+        //
+        // NOT the surface-wide longest edge, which cannot see this rule: that
+        // maximum lives in the neck behind the tip either way and reads 0.1450
+        // anchored against 0.1466 following. The anchored arm also does 40% MORE
+        // topology work (1381 splits against 980). What the rule buys is the tip
+        // and the work, and the 1.12-against-0.36 figure this comment used to
+        // carry was measured on an UNMAINTAINED carried region, before the rules
+        // below existed.
         //
         // Only once the region HAS been captured. The capturing stamp's own
         // remesh belongs where the gather is, which is the anchor — and on that

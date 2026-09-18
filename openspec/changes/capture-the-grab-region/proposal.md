@@ -568,8 +568,11 @@ stretched — 0.1450 against 0.0487, three times coarser, and 25 vertices agains
 
 So D2 (2) stands, on a different number and for a different reason: **the same
 surface-wide result for 40% less work, and a refined tip instead of a coarse
-one.** The 1.12-against-0.36 figure has been corrected in `docs/07` and in
-`include/clay/brush/stroke.h`.
+one.** The 1.12-against-0.36 figure is corrected in `docs/07`,
+`include/clay/brush/stroke.h`, `src/brush/stroke.cpp`, the brush-engine spec
+delta and the test's own comment. The first stage of this change claimed the
+correction had landed in `stroke.h` while that file was in fact unmodified; the
+independent review found it and carried it through all five sites. See §18.
 
 ### 17. NEW: on a curve the adaptive surface reaches PAST the chord
 
@@ -801,3 +804,70 @@ single 1.85x, and B is not cheaper on the adaptive path, as stated.
 What did NOT match is recorded above where it belongs: the curved fixture's
 denominator (the chord, not the arc), unmaintained B's floor (2.8%, not 44%),
 A's dependence on the brush radius, and C's dependence on the spacing.
+
+### 18. Independent review: what a second measurement found
+
+Every headline number below was re-derived by a reviewer who did not write the
+change, against a freshly built `cpu-only` library and — for the A side — against
+a real `origin/main` build exported with `git archive origin/main`, not against
+a hand-spelling of the old rule inside the new library.
+
+**Reproduced to the digit.** Old-rule reach on `origin/main`'s own
+`brush::apply_to_mesh` / `apply_to_dynamic`: 22.66% / 22.24% at radius 0.15,
+41.10% / 41.34% at 0.30 and 60.56% / 60.56% at 0.50 on a 0.6 drag; 9.22% / 9.20%
+and 18.21% / 18.06% on a 1.5 one. Shipped reach 100.00–100.03% on all eight
+fixtures on both paths, agreement **0.0 – 1.6e-4**. Counters on the baseline 1.5
+pull-out: 45 captured becoming 811, 980 splits, 660 two-parent and 106
+one-parent insertions, 533 refusals, **0 retired**, top weight 1.0000; on the
+1.5 push-in at r0.15, 9 becoming 195 with 276 splits and 12 collapses. The
+curve: fixed 100.00% of the chord and 90.22% of the path, adaptive 115.79%,
+disagreement 0.2221. The fixed mesh's stretch: longest edge 0.1174 → 0.8176.
+Cost, 201 fixed and 22 adaptive repeats, interleaved, first discarded: fixed
+1.93x and 1.86x; adaptive 1.53x, 1.88x and 1.88x.
+
+**One cell did not reproduce.** §1 and the first release-note table read
+**17.99%** for the fixed path at radius 0.30 on a 1.5 drag. Driven through
+`origin/main`'s own `apply_to_mesh` on the same fixture it reads **18.21%**, and
+the hand-spelled old rule inside the new library agrees with `origin/main` to the
+digit on all nine fixtures — so the gap is in the original measurement and not in
+the arm it was measured against. The release-note table now carries 18.21% and
+the factor 5.49x, and says which path the column is.
+
+**One claim was false.** §16 said the refuted 1.12-against-0.36 figure "has been
+corrected in `docs/07` and in `include/clay/brush/stroke.h`", and tasks 3.2 and
+6.1 said the same. `include/clay/brush/stroke.h` was never modified by this
+change: it still documented "GRAB anchors on the FIRST stamp and drags by the
+motion between stamps", "Grab's AFTER remesh runs around the first stamp's
+centre" and "Grab on the first stamp" — the rule this change replaces, in the
+header a C++ host reads first. The figure also survived as fact in
+`src/brush/stroke.cpp`, in the brush-engine spec delta's own REQUIREMENT text
+and in the new test's comment. All five sites are corrected.
+
+**Each of the five rules is pinned, re-checked independently.** Seven mutations
+were cut from the shipped source, each rebuilt with the build's success AND a
+changed binary asserted before the result was read, and the tree restored to a
+binary identical to the baseline afterwards:
+
+| mutation | cases failing | assertions failing |
+|---|---|---|
+| rule 1, the adaptive region is re-gathered | 5 | 23 |
+| rule 1, the fixed region is re-gathered | 5 | 21 |
+| rule 2, the remesh centre stays at the anchor | 3 | 11 |
+| rule 3, a collapse may retire a carried vertex | 3 | 26 |
+| rule 4, a one-parent split is dropped | 2 | 4 |
+| rule 5, the remesher's move is not followed | 1 | 1 |
+| the deformation rule itself | 8 | 34 |
+
+Rule 2's mutation also fails `test_dynamic_stroke`'s two hand-loop cases, which
+is the mirror working: a loop that follows the stamp no longer equals a consumer
+that does not.
+
+**Also verified rather than trusted.** `CLAY_ABI_MAJOR/MINOR/PATCH` unmoved and
+`bindings/c/clay.h`'s diff is comments only — no declaration line changed.
+`git diff origin/main -- src include bindings tests | grep -cE
+'^\+.*(probe_|RemeshObserver|getenv|CLAY_PROBE)'` is 0. No
+`mesh_sculpt_goldens_*.inc` is in the diff, and `test_mesh_sculpt_parity.cpp`'s
+`run_case` sets `s.center` per step and calls `MeshSculptor::stamp`, so no
+capture can reach it. The fixed and multiresolution paths carry rule 1 only:
+`MeshSculptor` has no hooks and `MultiresSculptor` delegates to it, and the
+adaptive-only scope is now stated in `docs/07` as well as in the headers.

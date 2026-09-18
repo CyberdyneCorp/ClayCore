@@ -1683,7 +1683,8 @@ presets now reach all three mesh representations.
 **What a stroke means is shared, not copied.** Each stamp brings its own radius
 and strength, the mask is placed once, the cavity and group estimators are wired
 once, Grab carries the region it captured at its first stamp, and
-`orient_alpha_by_stamp` turns the alpha — the same per-stamp resolution the other two consumers use. Every stamp
+`orient_alpha_by_stamp` turns the alpha — the same per-stamp resolution the
+other two consumers use. Every stamp
 goes through `DynamicSculptor::stamp`, so each keeps its verb's remesh timing,
 and a stroke is **bit-identical** to its resolved stamps applied one at a time.
 
@@ -1747,8 +1748,8 @@ Recording costs 1.046x / 1.065x the unrecorded stroke at 27,648 / 110,592 faces,
 against 1.049x / 1.061x for the same stamps recorded one by one.
 
 **Not provided.** No latency change for the other verbs: a stroke costs its
-stamps, measured at **1.004x** the host's
-`clay_stroke_resolve_full` plus per-stamp loop (46.2 vs 46.0 ms median of 30, 14
+stamps, measured at **1.004x** the host's `clay_stroke_resolve_full` plus
+per-stamp loop (46.2 vs 46.0 ms median of 30, 14
 remeshing Draw stamps on
 `cube_sphere(48)`), which is itself 1.001x a C++ loop — the call exists for the
 stroke's meaning, not speed.
@@ -1771,6 +1772,15 @@ stamp writes `captured + weight * (p_k − p_0)`, so the weight-1 centre follows
 the cursor exactly and the gesture reaches the whole drag on every
 representation. It is also CHEAPER: the surface is walked once for the gesture
 instead of once per stamp, 1.8–1.9x on the fixed path.
+
+**A FIXED MESH HAS NO MITIGATION for a captured region a long drag stretched**,
+and cannot have one: nothing maintains it, because nothing can — a fixed
+topology has no new vertices to give. The same weld classes are carried however
+far the gesture goes, so a 1.5 pull leaves a longest edge of **0.8176** from a
+starting 0.1174 on `cube_sphere(24)`. That is what a fixed-topology move brush
+is, and only the adaptive path grows its region. The multiresolution path is the
+fixed path per level and inherits the same limit; rules two to five below are
+the ADAPTIVE path's alone.
 
 **On a curve that is the NET DISPLACEMENT, not the path length**, and a host
 measuring the surface against the cursor's trail will read the difference as a

@@ -380,10 +380,34 @@ struct MeshStrokeOptions {
 // own, which is what makes pressure and taper shape a mesh stroke exactly as
 // they shape a voxel one. Everything else in `settings` is the brush.
 //
-// GRAB anchors on the FIRST stamp and drags by the motion between stamps;
-// SNAKEHOOK re-anchors on every stamp, so its region walks with the pull. That
-// one difference is the whole of the difference between them, and it lives
-// here rather than in the verb because it is a fact about a STROKE.
+// GRAB IS ONE GESTURE AND SNAKEHOOK IS A WALK, and that one difference is the
+// whole of the difference between them. It lives here rather than in either
+// verb because it is a fact about a STROKE.
+//
+// A grab gathers its region ONCE, at its first stamp, and carries the items,
+// their captured positions and their falloff weights for the gesture; every
+// stamp writes `captured + weight * (p_k - p_0)`, the motion since the stroke
+// BEGAN. So the weight-1 centre follows the cursor exactly and the gesture
+// reaches the whole drag. A snakehook re-anchors on the surface it is dragging
+// and moves it by the motion between consecutive stamps, so its region walks
+// with the pull.
+//
+// ON A CURVE A GRAB MOVES THE CHORD, not the path the cursor travelled: a
+// quarter arc of length 0.6 has a net displacement of 0.5402 and the surface
+// moves by 0.5402. That is what carrying one piece of surface means, and a host
+// measuring the surface against the cursor's trail will read it as a shortfall
+// it is not. Calibrate against `last - first`, never the accumulated path.
+//
+// Re-gathering around the first sample on every stamp is what this replaced. The
+// surface leaves that point, so the falloff weights shrank as the gesture went
+// on: a grab reached 41% of a 0.6 drag and 18% of a 1.5 one, on every
+// representation. The behaviour changed with NO ABI change; see
+// `docs/release-notes/v0.120.0.md` for the per-preset table.
+//
+// A FIXED MESH HAS NO MITIGATION for a captured region a long drag stretched,
+// and cannot have one: the same weld classes are carried however far the gesture
+// goes, so a 1.5 pull leaves a longest edge of 0.82 from a starting 0.09. Only
+// the adaptive surface grows its region, by maintaining it across the remesh.
 //
 // `deltas`, when given, accumulates the whole call into one coalesced record —
 // one gesture, one undo step.
@@ -397,8 +421,8 @@ std::size_t apply_to_mesh(mesh::MeshSculptor& sculptor, const std::vector<Stamp>
 //
 // A SEPARATE ENTRY POINT AND NOT A SEPARATE STROKE. Everything above about
 // what a stroke MEANS — that radius and strength come from each stamp, that
-// Grab anchors on the first and Snakehook re-anchors on the class it is
-// dragging, that the mask becomes a gate once here rather than per verb, that
+// Grab carries the region it captured and Snakehook re-anchors on the class it
+// is dragging, that the mask becomes a gate once here rather than per verb, that
 // an alpha's tangent turns with the stylus only when the caller asks — is the
 // same code, because those are facts about a stroke rather than about a
 // representation. What differs is only where the result is stored: the cage's
@@ -462,8 +486,19 @@ std::size_t apply_to_multires(mesh::MultiresSculptor& sculptor, const std::vecto
 //   - `settings.seed_class` is NOT consulted, for any verb: the adaptive walk
 //     seeds at `nearest_vertex(center)` on every path, and a class index does
 //     not name a vertex of a surface whose slots move.
-//   - Grab's AFTER remesh runs around the first stamp's centre, not the
-//     stretched tip; the tip is refined by later stamps whose balls reach it.
+//   - Grab's AFTER remesh runs around THIS stamp's centre once the gesture has
+//     captured its region, so it passes through the stretched corridor with the
+//     gesture. Left at the first sample it never reaches a tip five brush radii
+//     away: the longest edge within a brush radius of the tip reads 0.145
+//     against 0.049, and 25 vertices are there against 65. It does NOT buy the
+//     surface-wide longest edge — that maximum lives in the neck behind the tip
+//     either way (0.1450 anchored against 0.1466 following) — and the anchored
+//     arm does 40% MORE topology work. The rule buys the tip, and the work.
+//   - That carried region is MAINTAINED across the remesh rather than rebuilt,
+//     and a collapse may not retire one of its vertices for the length of the
+//     gesture. Unmaintained it decays: 7 to 13 of 45 captured vertices survived
+//     an eleven-stamp stroke, and at radius 0.15 against detail 4 the remesher
+//     retired all of them and the grab reached less than re-gathering did.
 //   - The index is refitted, never rebuilt — call `rebuild_index` between
 //     strokes, as for single stamps.
 std::size_t apply_to_dynamic(mesh::DynamicSculptor& sculptor, const std::vector<Stamp>& stamps,
@@ -477,7 +512,7 @@ std::size_t apply_to_dynamic(mesh::DynamicSculptor& sculptor, const std::vector<
 // The same stroke, captured into a REPLAYABLE record
 // (record-a-whole-adaptive-stroke): the whole stroke becomes ONE step
 // `DynamicSculptor::replay` reverts and re-applies exactly, with the stroke's
-// own meaning kept (Grab on the first stamp, Snakehook on its re-found anchor),
+// own meaning kept (Grab's carried region, Snakehook on its re-found anchor),
 // which a host loop of `DynamicSculptor::stamp_recorded` does not keep.
 //
 // Returns the number of stamps that changed the surface, exactly as

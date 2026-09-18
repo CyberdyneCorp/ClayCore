@@ -7840,8 +7840,9 @@ typedef struct clay_mesh_brush_desc {
     float strength;
     int32_t falloff; /* clay_mesh_falloff */
     /* GRAB and SNAKEHOOK: the motion this stamp applies. Ignored by the rest,
-     * and ignored by clay_mesh_sculptor_apply_stroke, which takes it from the
-     * motion between stamps. */
+     * and ignored by clay_mesh_sculptor_apply_stroke, which derives it: for
+     * SNAKEHOOK from the motion between stamps, for GRAB from the motion since
+     * the stroke's FIRST sample, onto the region the gesture captured there. */
     float direction[3];
     /* DRAW, CLAY and CREASE: an explicit deposit direction. All zeroes — the
      * default — means the region's averaged normal, which is what makes draw a
@@ -8688,8 +8689,14 @@ clay_result clay_dynamic_sculptor_stamp(clay_dynamic_sculptor* sculptor,
  * the library's:
  *   - each stamp brings its own radius and strength; the descriptor's `radius`
  *     is IGNORED and its `strength` multiplies the stamp's;
- *   - GRAB centres every stamp on the FIRST stamp and drags by the motion
- *     between stamps, exactly as on a fixed mesh;
+ *   - GRAB gathers its region ONCE, at the FIRST stamp, and carries it for the
+ *     gesture: every stamp places each captured vertex at its captured position
+ *     offset by its weight times the motion since the stroke began, exactly as
+ *     on a fixed mesh. Here the remesh MAINTAINS that region — a split inside it
+ *     joins it, a collapse may not retire one of its vertices for the gesture's
+ *     length, and a vertex the remesher moved takes the same shift in its
+ *     captured position — and the remesh centre follows the stamp once the
+ *     region has been captured;
  *   - SNAKEHOOK centres every stamp on the VERTEX it drags. The remesher retires
  *     vertex ids, so that vertex is revalidated before every stamp and, when a
  *     collapse removed it, re-found nearest the previous stamp's position;

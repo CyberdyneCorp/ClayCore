@@ -448,9 +448,11 @@ TEST_CASE("grab: refusing those collapses leaves the surface finer, not coarser"
 }
 
 TEST_CASE("grab: the remesh follows the stamp rather than the gesture's first sample") {
-    // A remesh left at the first sample while the surface is dragged five brush
-    // radii away refines nothing the gesture stretched: measured, it left a
-    // longest edge of 1.12 against 0.36 with the centre following.
+    // A ball left at the gesture's first sample never reaches a tip five brush
+    // radii away, so the tip keeps the edges the drag stretched. What this case
+    // does NOT assert is the surface-wide longest edge: see below, it cannot see
+    // this rule, and the 1.12-against-0.36 figure the design justified the rule
+    // on was measured on an UNMAINTAINED carried region.
     const Fixture f = baseline("baseline pull-out 1.5", cf3(0, 0, 1.0f), cf3(0, 0, 2.5f));
     const AdaptiveRun r = run_adaptive(f);
     REQUIRE(r.splits > 0);
@@ -522,6 +524,18 @@ TEST_CASE("grab: a carried vertex the remesher moved keeps that move") {
     REQUIRE(relaxed > 0);
     REQUIRE(sculptor.carried_counters().moved > 0);
     REQUIRE(sculptor.carrying());
+
+    // THE REGION AS IT STANDS, read while the capture is still OPEN — which is
+    // the only place `carried_entries`, `carried_live` and `carried_top_weight`
+    // answer about a live region rather than about the snapshot the close takes.
+    // The header says the first two differ only if something retired a carried
+    // vertex behind the rule, and rule 3 says nothing may: so they are equal,
+    // and the weight-1 centre is still there. Asserted here rather than left to
+    // the counters, because the counters are read after the carry is empty.
+    CHECK(sculptor.carried_entries() > 0);
+    CHECK(sculptor.carried_live() == sculptor.carried_entries());
+    CHECK(sculptor.carried_top_weight() == doctest::Approx(1.0f).epsilon(0.001));
+    CHECK(sculptor.carried_counters().retired == 0);
 
     // The same write, one more time, with nothing new to drag and no remesh.
     std::vector<cfloat3> before;

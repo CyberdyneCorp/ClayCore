@@ -131,9 +131,12 @@
       remesh left at the anchor does NOT leave a coarser surface once the region
       is maintained: same surface-wide longest edge (0.1450 against 0.1466) and
       40% MORE work (1381 splits against 980). What it costs is the TIP — longest
-      edge there 0.1450 against 0.0487, 25 vertices against 65. `stroke.h` and
-      `clay.h` carry the replacement, `design.md` D2 (2) is corrected, and
-      `proposal.md` §16 has the table
+      edge there 0.1450 against 0.0487, 25 vertices against 65. `clay.h` carries
+      the replacement, `design.md` D2 (2) is corrected, and `proposal.md` §16 has
+      the table. **`stroke.h` did NOT carry it**: this line was written while
+      `include/clay/brush/stroke.h` was unmodified. The independent review found
+      that and corrected all four of its sites, plus `src/brush/stroke.cpp`, the
+      spec delta and the test comment. See §8
 - [x] 3.3 `DynamicSculptor::CarriedRegionCounters`: `captured`, `inserted`,
       `inserted_one_parent`, `retired`, `moved`, `collapses_refused`, plus
       `carried` and `top_weight` snapshotted as the capture closes so a caller can
@@ -251,7 +254,11 @@ exactly two cases fail, both in one file; under C a third does.
 
 - [x] 6.1 All three, plus the curve's chord, plus the statement that a FIXED
       mesh has no mitigation for a stretched captured region and cannot have one
-      (longest edge 0.82 after a 1.5 pull from a starting 0.09)
+      (longest edge **0.8176** after a 1.5 pull from a starting **0.1174** — the
+      "0.09" this line carried is the grid edge, not the surface's longest).
+      **Recorded as done while `include/clay/brush/stroke.h` was unmodified**;
+      the review corrected its four sites and put the fixed-mesh statement into
+      `docs/07` as well, where it was missing. See §8
 - [x] 6.2 Both, at :8447 and :8723, with the chord and an explicit note that
       the behaviour changed without an ABI change
 - [x] 6.3 The Grab sentence, the "Not provided" note, and the "known question
@@ -275,10 +282,10 @@ exactly two cases fail, both in one file; under C a third does.
 
 ## 7. Verification
 
-- [x] 7.1 Full unit suite **2847 of 2847 cases, 17,931,271 of 17,931,271
+- [x] 7.1 Full unit suite **2847 of 2847 cases, 17,931,275 of 17,931,275
       assertions**, from 2839 / 17,931,111 on origin/main — the eight new cases
-      and 160 new assertions, with the two that moved passing under the updated
-      rule
+      and 164 new assertions (160 at the implementation stage plus the four §8.6
+      added), with the two that moved passing under the updated rule
 - [x] 7.2 Run through `release_check.py`; see §7.4 for the table and for the two
       rows that fail on this machine for reasons that predate the branch
 - [x] 7.3 `validate --all --strict` at the pinned 1.12.0
@@ -344,8 +351,9 @@ exactly two cases fail, both in one file; under C a third does.
       none of the three (only `tests/CMakeLists.txt`, which is a different file)
 - [x] 7.8 The two REFUTATIONS this stage produced are in `proposal.md` §16 and
       §17 and are reflected back into `design.md` D2 (2) and its open questions,
-      `docs/07` and `include/clay/brush/stroke.h`, rather than left in the
-      proposal only: the remesh centre does not buy the surface-wide edge it was
+      `docs/07` and — after the independent review, which found the header
+      untouched — `include/clay/brush/stroke.h`, `src/brush/stroke.cpp` and the
+      brush-engine spec delta, rather than left in the proposal only: the remesh centre does not buy the surface-wide edge it was
       justified on, and a curved drag on the adaptive surface reaches past the
       chord
 
@@ -353,3 +361,63 @@ exactly two cases fail, both in one file; under C a third does.
       and no `getenv`. The shipped publication interface is `mesh::RemeshHooks`
       and the shipped carry is `DynamicSculptor`'s own, neither behind a switch.
       build/ is gitignored and the probe drivers stay there
+
+## 8. Independent review (a second pair of hands, on the shipped code)
+
+- [x] 8.1 **The headline numbers re-derived against a real origin/main build**
+      (`git archive origin/main` into a scratch tree, configured `cpu-only`,
+      `claycore` built there) rather than against a hand-spelling of the old rule
+      inside the new library. origin/main's own `apply_to_mesh` /
+      `apply_to_dynamic` read 22.66/22.24, 41.10/41.34 and 60.56/60.56 on a 0.6
+      drag and 9.22/9.20, 18.21/18.06 on a 1.5 one; the hand-spelled arm agrees
+      with it to the digit on all nine fixtures, which is what makes the cost
+      harness's A side trustworthy. Shipped: 100.00-100.03% on eight fixtures on
+      both paths, agreement 0.0 - 1.6e-4; counters 45 -> 811 with 980 splits, 660
+      two-parent and 106 one-parent insertions, 533 refusals, 0 retired, top
+      weight 1.0000, and 9 -> 195 with 276 splits on the hard 1.5 push-in; the
+      curve 115.79% of the chord against the fixed path's 100.00%, disagreement
+      0.2221; the fixed stretch 0.1174 -> 0.8176; cost fixed 1.93x / 1.86x at
+      n=201 and adaptive 1.53x / 1.88x / 1.88x at n=22. `proposal.md` §18
+- [x] 8.2 **One cell did not reproduce and is corrected.** The fixed path at
+      radius 0.30 on a 1.5 drag is **18.21%** on origin/main, not 17.99%. The
+      release-note table and its derived factor (5.49x, not 5.56x) carry the
+      measured number, and the table now says which representation the column is
+- [x] 8.3 **One claim was false and is corrected.** 3.2, 6.1, 7.8 and
+      `proposal.md` §16 said `include/clay/brush/stroke.h` carried the
+      corrections; it was never modified. It still documented "GRAB anchors on
+      the FIRST stamp and drags by the motion between stamps" (:383), "Grab
+      anchors on the first" (:400), "Grab's AFTER remesh runs around the first
+      stamp's centre" (:465) and "Grab on the first stamp" (:480). The refuted
+      1.12-against-0.36 figure also survived as fact in `src/brush/stroke.cpp`,
+      in the brush-engine spec delta's REQUIREMENT text — the artifact that
+      becomes the living spec on archive — and in the new test's comment. All
+      five sites corrected
+- [x] 8.4 **Every rule re-mutated independently**, each cut from the shipped
+      source, rebuilt with the build's success AND a changed binary asserted
+      before the result was read, and the restored tree's binary asserted
+      identical to the baseline afterwards. Rule 1 adaptive **5 cases / 23
+      assertions**; rule 1 fixed **5 / 21**; rule 2 **3 / 11**; rule 3 **3 / 26**;
+      rule 4 **2 / 4**; rule 5 **1 / 1**; the deformation rule **8 / 34**. No rule
+      is unpinned. Rule 2's mutation also fails `test_dynamic_stroke`'s two
+      hand-loop cases, which is the mirror working
+- [x] 8.5 Scope re-checked in the diff rather than trusted: `CLAY_ABI_*` unmoved,
+      `bindings/c/clay.h` comments only (no declaration line changed), no
+      `mesh_sculpt_goldens_*.inc` in the diff, `test_mesh_sculpt_parity.cpp`'s
+      `run_case` read and proven to drive `MeshSculptor::stamp` with an explicit
+      centre, zero probe_ / RemeshObserver / getenv additions, and the
+      fixed and multiresolution paths carrying rule 1 alone
+- [x] 8.6 **A new public accessor with no caller**, found by grepping the diff's
+      own API: `DynamicSculptor::carried_live()` and `carried_entries()` were
+      announced in the release notes and called by nothing in src, tests or
+      bindings — the cases all read `carried_counters()` AFTER the capture closes,
+      which is the snapshot and not the live region. The rule-5 case now asserts
+      them while the capture is open: entries > 0, live == entries (the header's
+      own invariant, which rule 3 is what makes true), top weight 1.000 and
+      retired 0
+- [x] 8.7 Two more live C ABI sites stated the replaced rule and were missed by
+      the list: `bindings/c/clay.h`'s `clay_mesh_brush_desc.direction` comment
+      ("ignored by clay_mesh_sculptor_apply_stroke, which takes it from the
+      motion between stamps") and the adaptive apply_stroke's "what a stroke
+      MEANS" block ("GRAB centres every stamp on the FIRST stamp and drags by the
+      motion between stamps"), which sits immediately above the block the change
+      did update. Both corrected
