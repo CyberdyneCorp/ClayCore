@@ -35,11 +35,15 @@
       0.1174 under A, **1.1227** under B with the remesh left at the anchor
       (worse than not remeshing), 0.3571 with it following, 0.8176 under Q
       (exactly the fixed mesh's)
-- [x] 1.12 Probe validity: mode A over the probe patch passes 275 of 275 targeted
-      cases and 113031 of 113031 assertions, so the switch is inert at its
-      default; the first two probe spellings were wrong and were caught by the
-      counters (a cached `getenv` made all four modes byte-identical; a
-      re-gather on Q's last stamp read 180% reach)
+- [x] 1.12 Probe validity: with the probe patch applied and its switch at the
+      default, the FULL unit suite passes **2839 of 2839 cases and 17,931,111 of
+      17,931,111 assertions** — the scaffolding is inert at mode A, so every
+      difference below is the rule and not the patch. The first two probe
+      spellings were wrong and were caught by the counters, not by the eye: a
+      `getenv` cached in a function-local static made all four modes
+      byte-identical (`vertices_considered` equal across modes was the tell),
+      and a re-gather on Q's last stamp applied the accumulated drag twice and
+      read 180% reach
 
 ## 2. Engine — the captured region
 
@@ -120,9 +124,12 @@ exactly two cases fail, both in one file; under C a third does.
       `test_dynamic_replay.cpp`, `test_dynamic_history.cpp`,
       `test_sculpt_kernels.cpp`, `test_dynamic_shared_brush_parity.cpp`,
       `test_multires_shared_brush_parity.cpp` all pass under every rule
-- [ ] 5.6 Confirm on the FULL suite, not the targeted shard, before the PR; and
-      run the pyclay tests from a build that actually has pyclay, since the
-      cpu-only preset does not enable it
+- [x] 5.6 Confirmed on the FULL suite and not only the targeted shard: under the
+      captured-set rule it is **2837 of 2839 cases, 8 of 17,931,111 assertions
+      failing**, and they are exactly 5.1 and 5.2. Nothing else in the tree moves
+- [ ] 5.7 Still to run before the PR: the pyclay tests from a build that actually
+      has pyclay (the cpu-only preset does not enable it), the Swift surface, and
+      the device suite, none of which this measurement could reach
 
 ## 6. Documentation and spec
 

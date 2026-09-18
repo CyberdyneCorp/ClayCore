@@ -259,6 +259,11 @@ retire the set, and 44–100% with a 0.34 disagreement when it can.
   the cheapest thing measured (2.7 ms against 128 ms, 47x), rejected as the
   proposal because it makes an adaptive surface behave like a fixed one for the
   length of a Grab: max edge 0.8176, identical to the fixed mesh.
+- **The scaffolding is inert at its default.** With the probe patch applied and
+  the switch unset, the full unit suite passes 2839 of 2839 cases and 17,931,111
+  of 17,931,111 assertions, so every difference in the tables above is the rule
+  and not the patch. Under the captured-set rule the same suite fails 2 cases
+  and 8 assertions, and they are the two named in `tasks.md` §5.
 - **A probe bug worth recording.** The first version of the mode switch cached
   the environment variable in a function-local static, so all four rules
   measured as bit-identical — the classic "the probe never reached the code".
