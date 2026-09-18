@@ -56,7 +56,12 @@ Measured, on six fixtures and both paths, against the alternatives
 | A, today | 18–41% | 18–42% | 1.0e-3 – 5.4e-3 |
 | B, remesher unable to touch the set | **100%** | **100%** | **0.0 – 2.0e-5** |
 | B, remesher as today | 100% | 2.8–100% | 0.0 – 3.4e-1 |
+| B, set maintained (D2 (1)+(2) only) | 100% | 73–97% | 1.7e-2 – 3.7e-1 |
+| **B, D2 in full (the rule below)** | **100%** | **99.99–100.03%** | **0.0 – 1.6e-4** |
 | C, following centre | 26–67% | 22–69% | 7.5e-3 – 6.2e-2 |
+
+The last two rows are `tasks.md` §2.0's, measured on twelve fixtures rather than
+inferred; the rest are §1–§7's, on six.
 
 Reach is a share of the NET DISPLACEMENT `|p_n − p_0|`, which on the curved
 fixture is the 0.5402 chord and not the 0.6 arc; see `proposal.md`. A's range
