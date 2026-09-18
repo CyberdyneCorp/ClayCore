@@ -54,6 +54,18 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+        # REQUIRED, not decoration. Linked against the iOS 26+ SDK, an app
+        # without this manifest is terminated during launch and the test
+        # runner never connects -- "Early unexpected exit, operation never
+        # finished bootstrapping", with no test run and no thermal event.
+        # The reference iPad moved to iOS 27.0 on 2026-09-18 and took the
+        # 27.0 SDK with it; see Host/AppDelegate.swift.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: Default Configuration
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).SceneDelegate
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.cyberdyne.claycore.devicehost
