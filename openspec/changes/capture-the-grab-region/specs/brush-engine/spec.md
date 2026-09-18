@@ -42,7 +42,7 @@ Centring each stamp on the CURSOR and re-gathering SHALL NOT be adopted, and the
 
 #### Scenario: A curved drag carries the same region
 - **WHEN** a grab stroke follows a curve rather than a straight line
-- **THEN** the captured region is carried along the whole path and arrives at the last sample, rather than being re-gathered around the first
+- **THEN** the captured region is carried along the whole path and arrives at the last sample — displaced by the motion from the first sample to the last, which on a curve is shorter than the path the cursor travelled — rather than being re-gathered around the first
 
 #### Scenario: A grab is one gather, not one per stamp
 - **WHEN** a grab stroke of many stamps is applied to a fixed mesh
@@ -53,7 +53,9 @@ An adaptive surface retires vertex identities when it collapses an edge and crea
 
 A new vertex's captured position SHALL be reconstructed from its parents' captured positions and SHALL NOT be read from the surface, because its parents have already taken part of the drag and reading the surface would apply that part to it twice.
 
-A region left unmaintained is not a smaller region, it is a different answer per fixture: measured, 7 to 13 of 45 captured vertices survived an eleven-stamp stroke, and the reach followed whether the weight-1 centre happened to be among them — the whole drag pulling one pole of a sphere and 44% of it pulling the other, with the two representations 57% of the drag apart. With the remesher unable to touch the region the same rule reaches the whole drag on both representations and they agree to within 2e-5.
+A region left unmaintained is not a smaller region, it is a different answer per fixture, and on some brushes it is worse than re-gathering: measured, 7 to 13 of 45 captured vertices survived an eleven-stamp stroke, and the reach followed whether the weight-1 centre happened to be among them — the whole drag pulling one pole of a sphere and 44% of it pulling the other, with the two representations 57% of the drag apart. At a brush radius of 0.15 against a detail resolution of 4 the remesher retired ALL of the captured entries inside one stroke and the reach fell to between 2.8% and 7.0%, below the 9.3% to 22.3% that re-gathering reaches on the same fixtures. With the remesher unable to touch the region the same rule reaches the whole drag on both representations and they agree to within 2e-5.
+
+Because no maintenance operation can create a weight above the one it inherits — a split's child takes the MEAN of its parents' weights — the maintenance SHALL be verified by the weight it preserves and not only by the entries it counts: the largest weight carried at the end of a gesture SHALL be reported alongside the entry counts, so that a region which is numerically maintained while its high-weight core has been retired is visible as a number rather than as a surface that looks about right.
 
 A `grab` stamp's remesh SHALL run at that stamp's own centre and SHALL NOT stay at the gesture's first sample. A remesh left at the first sample while the surface is dragged away refines nothing the gesture stretched: measured after a 1.5 drag, it left a longest edge of 1.12 against 0.36 with the centre following and 0.12 before the gesture reached that far.
 
@@ -62,6 +64,10 @@ The maintenance SHALL be reported as counts — entries carried, entries inserte
 #### Scenario: A carried region survives the remesher
 - **WHEN** a long grab stroke drags an adaptive surface far enough that the remesher splits and collapses inside the carried region, with the split count asserted to be non-zero
 - **THEN** the region still carried at the end of the gesture accounts for every entry captured, plus those a split inserted, minus those a collapse retired
+
+#### Scenario: A maintained region keeps the weight that carries the drag
+- **WHEN** the same stroke is run on a brush small enough against the detail resolution that an unmaintained region loses every entry it captured
+- **THEN** the largest weight still carried at the last stamp is near the one captured at the first, rather than a region that is maintained in number while the vertices that carry the whole drag have been retired
 
 #### Scenario: A vertex born mid-gesture is not dragged twice
 - **WHEN** the remesher splits an edge whose endpoints are both carried, partway through a grab

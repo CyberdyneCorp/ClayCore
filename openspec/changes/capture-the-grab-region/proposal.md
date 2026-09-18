@@ -34,6 +34,17 @@ the drag from the first stamp, as a share of the drag. Taking the surface's
 extent along the axis — the issue's phrasing — agrees with this on a pull-out and
 measures nothing at all on a push-in, whose dent never touches the ball's extent.
 
+**THE DENOMINATOR IS THE NET DISPLACEMENT `|p_n − p_0|`, not the path length**,
+and on the curved fixture those differ: a quarter arc of length 0.6 has a chord
+of 0.5402. This is the right denominator, because `kernel_grab` is handed
+`p_n − p_0` and the weight-1 vertex therefore moves by the CHORD; a rule that
+carried a region round an arc and put it 0.6 from where it started would be
+wrong. It does mean the curved rows below are normalised by 0.5402 and the
+straight ones by 0.6000, so the two are not directly comparable — against the
+0.6 path length the curved fixture reads A 41.34% / 41.12% and B 90.03%. Any
+test written from §1 must assert the DISPLACEMENT and not the drag's length, or
+it will demand 111% of a curve.
+
 The candidates:
 
 | | centre | region | displacement written |
@@ -65,13 +76,23 @@ did not behave, and they are what identified why.
 | | adaptive | 18.48% | 66.58% | 66.58% | 100.00% | 25.93% |
 
 The issue's table is reproduced exactly: **41% / 41%** for A and **66% / 56%**
-for C, 10 of 11 stamps moving a vertex on both paths. Flipping the sign of the
-drag (push-in) and mirroring the fixture to the other pole move A by at most
-0.46 points and C by 0.00 / 0.49 points, so those numbers are the mechanism's.
+for C. On the fixed path 10 of 11 stamps move a vertex; on the adaptive path
+`apply_to_dynamic` returns 11 of 11, because its return counts stamps that
+CHANGED the surface and a remesh is a change. Flipping the sign of the drag
+(push-in) and mirroring the fixture to the other pole move A by at most
+0.46 points and C by 0.00 / 0.49 points.
 
-Note what A does as the drag gets longer: 41% at 0.6, **18% at 1.5**. The
-shortfall is not a constant discount; it compounds, because each stamp gathers a
-weaker region than the last.
+**What that invariance does and does not prove.** Re-measured across grid (16,
+24, 32) and spacing (0.25, 0.1, 0.05) as well, A stays put — 40.67–43.23% on the
+0.6 drag and 18.01–18.46% on the 1.5 one — so the shortfall is genuinely the
+mechanism's and not the tessellation's. It is NOT independent of the brush,
+however: at the same drag of 0.6 A reaches **22.66% at radius 0.15, 41.10% at
+0.30 and 60.56% at 0.50**. "41%" is the number for this preset. The claim that
+survives every fixture is the DECAY, not the constant:
+
+Note what A does as the drag gets longer: 41% at 0.6, **18% at 1.5** (and
+22.66% → 9.22% at radius 0.15). The shortfall is not a constant discount; it
+compounds, because each stamp gathers a weaker region than the last.
 
 ### 2. Cross-representation agreement — the constraint #619 holds
 
@@ -112,6 +133,23 @@ vertex ids. **76–84% of the captured set is retired inside one 11-stamp stroke
 and the reach follows whether the weight-1 centre happened to survive. That is
 the whole of B's fixture dependence, and it is not a tuning problem.
 
+**And 44% is not the floor.** Re-measured over grid, spacing, radius and detail,
+unmaintained B goes much further down, and past today:
+
+| fixture | preset | live of captured | top weight | B | A, same fixture |
+|---|---|---|---|---|---|
+| push-in −Z 0.6 | grid 32, spacing 0.05, r 0.30, detail 8 | 8 of 69 | 0.070 | 29.02% | 40.99% |
+| pull-out −Z 0.6 (mirror) | grid 24, spacing 0.1, r 0.15, detail 4 | **0 of 9** | 0.000 | **5.56%** | 22.24% |
+| push-in −Z 0.6 | grid 24, spacing 0.1, r 0.15, detail 4 | **0 of 9** | 0.000 | **6.97%** | 22.30% |
+| long push-in −Z 1.5 | grid 24, spacing 0.1, r 0.15, detail 4 | **0 of 9** | 0.000 | **2.81%** | 9.34% |
+
+So an unmaintained captured set does not merely become fixture-dependent, it can
+be **worse than shipping today's brush** — 2.8% against 9.3% — and at a small
+radius against a coarse detail the remesher retires the set ENTIRELY inside one
+stroke. This does not change the proposal; it raises the stake on the
+maintenance in §"What this proposes" (2), and it is the evidence behind the open
+question recorded in `design.md`.
+
 The control settles it. With `DynamicTopologySettings::enabled = false`:
 
 | fixture | path | A | B | C |
@@ -149,7 +187,18 @@ moving anything — the centre vertex moves by its falloff weight rather than th
 whole delta, the brush falls behind the cursor, and a few stamps later it is
 outside its own radius. This is the failure `src/brush/stroke.cpp` already
 documents for Snakehook-anchored-on-the-cursor, reproduced here for Grab. A and
-B apply 25 of 26.
+B apply 25 of 26 on the fixed path (26 of 26 on the adaptive one, where the
+count includes the remesh).
+
+**C's percentage is a property of the spacing, not of the rule**, which is worth
+saying because the table above prints it as though it were a rule's number. On
+the same 0.6 pull-out C reads 16.41% at spacing 0.25, 65.84% at 0.1 and 94.49%
+at 0.05; on the 1.5 one, 6.56%, 26.49% and 60.33%. Denser stamps mean a smaller
+delta per stamp, so the centre falls behind more slowly — it still falls behind.
+The stable number is the stamps it manages before it loses the mesh: 2 of 5 at
+spacing 0.25, 11 of 26 at 0.1, 40 of 51 at 0.05. C is refuted on the agreement
+and on losing the mesh; it is not refuted by "66%", and nothing here should be
+read as though it were.
 
 ### 6. Cost per stroke
 
@@ -220,7 +269,22 @@ remesher that runs over the captured set retires it.
 
 §3 and §4 are the evidence for (2) being mandatory rather than an optimisation:
 the same rule reaches 100% and agrees bit-exactly when the remesher cannot
-retire the set, and 44–100% with a 0.34 disagreement when it can.
+retire the set, and 2.8–100% with a 0.34 disagreement when it can.
+
+**What is measured and what is inferred, stated plainly.** Every number in §1–§7
+is a measurement of A, B, P, Q or C. **The recommendation — B with the
+maintenance — is none of those, and its reach and its agreement are therefore
+NOT measured; they are inferred from Q**, which reaches the whole drag and
+agrees to 2e-5 with the identical deformation rule and a remesher that cannot
+touch the set. The inference is sound only if the maintenance keeps a HIGH-WEIGHT
+entry alive, and the rules in (2) do not guarantee one: a split inserts its child
+with the MEAN of its parents' weights, so no maintenance operation can ever
+create a weight above the surviving maximum, and a collapse that retires the
+weight-1 centre is not recoverable. In the fixtures where unmaintained B fails,
+the top surviving weight is 0.090 or 0.000 — the whole high-weight core is gone,
+not only its centre. Whether the splits repopulate that core faster than the
+collapses eat it is the one quantity this measurement could not reach, and
+`tasks.md` §2.0 makes it the first thing the implementing work measures.
 
 ## What it costs and what it breaks
 
@@ -240,8 +304,18 @@ retire the set, and 44–100% with a 0.34 disagreement when it can.
   After this change the mesh Grab and the SDF move disagree about reach. That is
   a real divergence between two brushes an artist thinks of as one, and the
   change must state it rather than leave it to be discovered.
-- **Goldens.** See `tasks.md` §1 for the list, measured by running the suite
-  under each rule rather than guessed.
+- **Goldens.** See `tasks.md` §5 for the list, measured by running the suite
+  under each rule rather than guessed, and re-measured independently: with the
+  captured-set rule made the default in all three consumers, the full suite is
+  **2837 of 2839 cases and 17,931,103 of 17,931,111 assertions**, the eight
+  failures being `test_dynamic_stroke.cpp:224–232` and `:778–779` and nothing
+  else.
+- **Prose.** Three sites beyond the ones first listed also state today's rule
+  and must move with it: `include/clay/brush/stroke.h:383` (the `apply_to_mesh`
+  sentence itself), and `bindings/python/pyclay_module.cpp:5671` and `:8682`,
+  which spell "'grab' anchors on the first stamp and drags by the motion between
+  stamps" into the Python docstrings. pyclay's BEHAVIOUR does not move; its
+  documented rule does.
 
 ## What was tried and refuted
 
@@ -271,3 +345,40 @@ retire the set, and 44–100% with a 0.34 disagreement when it can.
   accumulated drag twice, reading 180% reach. Both were caught by the counters
   (`vertices_considered` identical across modes; reach above 100%) and not by
   the eye.
+
+## Independently re-derived
+
+Every number above was re-measured by a second probe written from the headers
+rather than from the first probe, linked against a library rebuilt from a clean
+`origin/main` tree in the same worktree, macOS arm64, Release, cpu-only.
+
+A, B-as-one-stamp and C need NO source patch at all and were measured without
+one: `kernel_grab` writes `direction * weight` onto the GATHERED position with
+no accumulation clamp, so with the region held, `Σ w·(p_k − p_{k−1})` is exactly
+`w·(p_n − p_0)` and one stamp carrying the whole drag IS candidate B on a fixed
+mesh. The multi-stamp B, P and Q needed one: a `probe_freeze_region` flag that
+makes `stamp` reuse the workset it holds. A hand-written re-spelling of A was run
+beside `apply_to_mesh` in every row as the probe's own control, and matched it to
+every printed digit — a loop that did not match would not have been measuring the
+rule it named.
+
+What matched, to the digit: A's 41.10 / 41.34 / 17.99 / 18.06 and every
+sign-flipped and mirrored row; C's 65.84 / 55.82 / 26.49 / 22.33; the agreements
+(A 3.2e-4 – 5.4e-3, C 7.5e-3 – 6.2e-2, P 4.8e-2 – 5.2e-1, unmaintained B up to
+3.4e-1); the topology-off control (B and C bit-exact, A 1.6e-3 and 5.4e-3);
+unmaintained B's survivors and their top weights (11/0.090/13/0.661/7/1.000);
+P's 79.54 / 66.27 / 79.52 / 65.66 / 66.58; Q at 100% on all six; the longest
+edges 0.1174, 1.1227, 0.3571, 0.8176 and 0.3541; C applying 11 of 26; the
+gathered-entry counts 402 against 495; and the full-suite totals 2839 cases and
+17,931,111 assertions at the default and 2837 / 8 failing under the rule.
+
+The cost was re-measured in a third process, 200 interleaved samples on the fixed
+path and 50 on the adaptive one with the first repeat of each discarded, medians:
+fixed 0.146 / 0.076 / 0.083 ms for A / B / C on the 0.6 drag (**1.92x**) and
+0.299 / 0.162 / 0.118 ms on the 1.5 one (**1.84x**); adaptive 58.4 / 60.0 / 30.4
+and 128.2 / 119.8 / 30.7 ms. So the fixed-path saving is 1.8–1.9x rather than a
+single 1.85x, and B is not cheaper on the adaptive path, as stated.
+
+What did NOT match is recorded above where it belongs: the curved fixture's
+denominator (the chord, not the arc), unmaintained B's floor (2.8%, not 44%),
+A's dependence on the brush radius, and C's dependence on the spacing.

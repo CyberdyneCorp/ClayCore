@@ -53,10 +53,17 @@ Measured, on six fixtures and both paths, against the alternatives
 
 | | reach, fixed | reach, adaptive | fixed vs adaptive |
 |---|---|---|---|
-| A, today | 18–46% | 18–46% | 1.0e-3 – 5.4e-3 |
+| A, today | 18–41% | 18–42% | 1.0e-3 – 5.4e-3 |
 | B, remesher unable to touch the set | **100%** | **100%** | **0.0 – 2.0e-5** |
-| B, remesher as today | 100% | 44–100% | 0.0 – 3.4e-1 |
-| C, following centre | 26–74% | 22–77% | 7.5e-3 – 6.2e-2 |
+| B, remesher as today | 100% | 2.8–100% | 0.0 – 3.4e-1 |
+| C, following centre | 26–67% | 22–69% | 7.5e-3 – 6.2e-2 |
+
+Reach is a share of the NET DISPLACEMENT `|p_n − p_0|`, which on the curved
+fixture is the 0.5402 chord and not the 0.6 arc; see `proposal.md`. A's range
+here is for a brush radius of 0.3 — it reads 22.66% at 0.15 and 60.56% at 0.50,
+so the constant is the decay with drag length and not the 41%. The B row's
+adaptive floor is the whole point of D2 below, and it is a floor measured at
+radius 0.15 / detail 4, where the remesher retires the captured set ENTIRELY.
 
 The centre of a captured set has weight 1, so it follows the cursor exactly;
 that is what "100%" means and it is what a Move brush is for. It is also 1.85x
@@ -84,6 +91,12 @@ vertex ids. Counted at the end of an 11-stamp stroke: **7 to 13 of 45 captured
 vertices are still live**. Reach then depends on whether the weight-1 centre
 happened to survive — 100% on one pole of the sphere, 44% on the other. A rule
 with that property is not a rule.
+
+Widened over grid, spacing, radius and detail it is worse than that: at radius
+0.15 against detail 4 the remesher retires **all 9** captured entries inside one
+stroke and the reach falls to 2.8–7.0%, against today's 9.3–22.3% on the same
+fixtures. An unmaintained captured set is not a degraded version of the fix; on
+some presets it is a regression.
 
 The control proves the cause is the remesher and nothing else. With
 `DynamicTopologySettings::enabled = false`, B is BIT-EXACT between the two
@@ -178,6 +191,21 @@ them, which in this tree is where a host integrator actually reads it.
   this the mesh Grab moves exactly as far as asked. Two brushes an artist thinks
   of as one. Not fixed here — the SDF shortfall is a field-inversion problem, not
   an anchoring one — but stated in `docs/07` beside both.
+- **[THE MAINTENANCE IS NOT MEASURED, AND THE INFERENCE TO IT HAS A HOLE]** →
+  100% reach and the 2e-5 agreement are Q's and the topology-off control's, with
+  the identical deformation rule and a remesher that cannot touch the region.
+  They are not the recommendation's, because the recommendation does not exist
+  yet. The step from Q to D2 assumes the maintenance keeps a HIGH-WEIGHT entry
+  alive, and the rules above do not guarantee one: a split inserts its child with
+  the MEAN of its parents' weights, so no maintenance operation can create a
+  weight above the surviving maximum, and a collapse of the weight-1 centre is
+  irreversible. Where unmaintained B fails, the top surviving weight is 0.090 or
+  0.000 — the high-weight core is gone, not only its centre — so the question is
+  quantitative: do the splits inside the region repopulate the core faster than
+  the collapses retire it? `tasks.md` §2.0 measures that BEFORE the rest of the
+  work is built, and names what to do if the answer is no (pin the carried
+  region against collapse, or fall back to D3). This is the decision the change
+  cannot make on its own evidence.
 - **[The remesh maintenance is where the bugs will be]** → a split whose parents
   are not both in the set, a collapse of a vertex that is the weight-1 centre, a
   flip that changes no vertex. Each is a counted case, and the tests assert the
@@ -206,3 +234,13 @@ that works and a brush that does not and asking the host to pick.
 - Does the captured set want an upper bound? On the fixed path it is whatever
   the first gather found (45 here); on the adaptive path D2 lets it grow with
   the splits. Unbounded growth over a very long gesture has not been measured.
+- Should a carried entry be PROTECTED from collapse for the length of the
+  gesture? That is the other shape of D2 and it was not measured. It would make
+  the region's survival structural rather than statistical, at the cost of a
+  remesher that refuses work inside a moving ball — which is a smaller version of
+  what D3 was rejected for. It becomes the leading alternative if §2.0 shows the
+  maintenance cannot hold a high weight.
+- Does D2 leave the adaptive surface as refined as P does? P, which is D2's
+  centre-follows half without the maintenance, leaves a longest edge of 0.3571
+  after the 1.5 drag. D2 adds vertices to the carried region, which is a
+  different surface, so 0.3571 is an indication and not a prediction.

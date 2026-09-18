@@ -7,13 +7,24 @@
       issue's 41 / 41 / 66 / 56 to the point.
 - [x] 1.2 The number is the mechanism's, not the fixture's: flipping the drag's
       sign (push-in) moves A by 0.06 points and mirroring the fixture to the
-      other pole by 0.00; C by 0.00 and 0.49
+      other pole by 0.00; C by 0.00 and 0.49. Re-checked over grid (16/24/32)
+      and spacing (0.25/0.1/0.05): A holds at 40.67–43.23% and 18.01–18.46%.
+      A does NOT hold over the brush radius — 22.66% at 0.15, 41.10% at 0.30,
+      60.56% at 0.50 — and C does not hold over the spacing: 16.41% / 65.84% /
+      94.49% on one drag. What is invariant for A is the decay; what is
+      invariant for C is that it loses the mesh (2 of 5, 11 of 26, 40 of 51
+      stamps applied)
 - [x] 1.3 A decays rather than discounts: 41% at a 0.6 drag, **18% at 1.5**
 - [x] 1.4 Cross-representation agreement |fixed − adaptive|: A 3.2e-4 – 5.4e-3;
       B (remesher as today) **up to 3.4e-1**; C **up to 6.2e-2**; B with the
       remesher unable to touch the set **0.0 – 2.0e-5**
 - [x] 1.5 Why B is fixture-dependent, counted: 7–13 of 45 captured vertices
       still live after 11 stamps; reach follows the largest surviving weight
+- [x] 1.5b And 44% is not the floor: at radius 0.15 against detail 4 the
+      remesher retires ALL 9 captured entries inside one stroke and unmaintained
+      B reaches 2.81–6.97%, BELOW today's 9.34–22.30% on the same fixtures. At
+      grid 32 / spacing 0.05 the push-in reads 29.02%. An unmaintained captured
+      set can be a regression, not a weaker fix
 - [x] 1.6 Control — topology OFF: B and C are BIT-EXACT across the two
       representations (0.000000), A is not (1.6e-3, 5.4e-3). The deformation
       rule is not what breaks the agreement; the remesher is
@@ -47,6 +58,20 @@
 
 ## 2. Engine — the captured region
 
+- [ ] 2.0 **MEASURE THE MAINTENANCE BEFORE BUILDING THE REST.** 100% reach and
+      the 2e-5 agreement belong to candidate Q, not to the recommendation, which
+      does not exist yet; the step from one to the other assumes the maintenance
+      keeps a HIGH-WEIGHT entry alive through the collapses, and D2's rules
+      cannot create a weight above the surviving maximum. Build 3.1 FIRST, on
+      its own, and report, on the fixtures of 1.5b (radius 0.15 / detail 4,
+      where the unmaintained set goes to zero, and grid 32 / spacing 0.05):
+      entries carried, inserted by a split, retired by a collapse, the top
+      surviving weight at every stamp, and the reach. If the top surviving
+      weight still falls away, say so and take one of the two named
+      alternatives — protect a carried entry from collapse for the gesture, or
+      `design.md` D3 — rather than carrying on. This is the change's one
+      unverified inference and it is cheap to settle
+
 - [ ] 2.1 A gesture-scoped captured region in `MeshSculptor`: the items, their
       captured positions and their weights, gathered once and reused, with the
       header stating that the write is `captured + w * total` and therefore
@@ -77,10 +102,16 @@
 
 - [ ] 4.1 Reach: a 0.6 pull-out Grab reaches the whole drag on the fixed mesh and
       on the adaptive surface, and the two agree to 1e-3 — the #619 constraint,
-      re-asserted rather than dropped. Measured headroom: 2.0e-5
+      re-asserted rather than dropped. Headroom 2.0e-5 — measured for candidate
+      Q, which shares the deformation rule, NOT for the maintenance; 2.0 is the
+      number to re-derive under 2.0 before this threshold is trusted
 - [ ] 4.2 The same assertion with the drag's sign flipped and on the mirrored
       pole, so the threshold cannot be met by one fixture's luck
-- [ ] 4.3 A curved drag and a 1.5 drag, both paths, both reaching the drag
+- [ ] 4.3 A curved drag and a 1.5 drag, both paths, both reaching the drag.
+      **On the curve, assert the NET DISPLACEMENT and not the path length**: a
+      quarter arc of length 0.6 has a chord of 0.5402, `kernel_grab` is handed
+      `p_n − p_0`, and a case that demands 0.6 is demanding 111% of what the rule
+      promises. Measured, B carries the region to 0.5402 of 0.5402
 - [ ] 4.4 The maintenance is asserted as a COUNT: over the 1.5 pull-out the
       captured set is maintained rather than decaying — assert live entries at
       the end against entries at capture plus splits minus collapses, and assert
@@ -128,7 +159,13 @@ exactly two cases fail, both in one file; under C a third does.
       captured-set rule it is **2837 of 2839 cases, 8 of 17,931,111 assertions
       failing**, and they are exactly 5.1 and 5.2; under a following centre
       **2836 of 2839, 9 assertions**, adding exactly 5.3. Nothing else in the
-      tree moves under either rule
+      tree moves under either rule. Re-run independently, with the captured-set
+      rule made the DEFAULT in all three consumers rather than switched on:
+      2839/2839 and 17,931,111 assertions at `origin/main`, then 2837/2839 and
+      17,931,103, the eight failures being `test_dynamic_stroke.cpp:224, 228,
+      229, 230, 231, 232, 778, 779` and nothing else. 5.4 re-checked by reading:
+      `run_case` sets `s.center` per step and calls `MeshSculptor::stamp`, so no
+      stroke consumer and no capture reaches it
 - [ ] 5.7 Still to run before the PR: the pyclay tests from a build that actually
       has pyclay (the cpu-only preset does not enable it), the Swift surface, and
       the device suite, none of which this measurement could reach
@@ -145,8 +182,13 @@ exactly two cases fail, both in one file; under C a third does.
       paragraph, which this change closes with numbers
 - [ ] 6.4 `docs/07` also states, beside both, that the SDF move brush still moves
       less than asked and why the two now differ
-- [ ] 6.5 `CLAY_ABI_*`, `kSceneMinor`, pyclay and the Swift surface do not move.
-      Comment and behaviour only
+- [ ] 6.5 `CLAY_ABI_*` and `kSceneMinor` do not move; no pyclay or Swift
+      SIGNATURE moves. pyclay's DOCSTRINGS do:
+      `bindings/python/pyclay_module.cpp:5671` ("'grab' anchors on the first
+      stamp and drags by the motion between stamps") and `:8682` ("'grab'
+      centres on the first stamp"). So does
+      `include/clay/brush/stroke.h:383`, the `apply_to_mesh` sentence itself,
+      which 6.1's list omitted
 - [ ] 6.6 Release notes: the reach changes from 41% to the whole drag, which is
       5.6x further on a 1.5 drag, and any host feel tuned against 41% changes
 
