@@ -58,19 +58,35 @@
 
 ## 2. Engine — the captured region
 
-- [ ] 2.0 **MEASURE THE MAINTENANCE BEFORE BUILDING THE REST.** 100% reach and
-      the 2e-5 agreement belong to candidate Q, not to the recommendation, which
-      does not exist yet; the step from one to the other assumes the maintenance
-      keeps a HIGH-WEIGHT entry alive through the collapses, and D2's rules
-      cannot create a weight above the surviving maximum. Build 3.1 FIRST, on
-      its own, and report, on the fixtures of 1.5b (radius 0.15 / detail 4,
-      where the unmaintained set goes to zero, and grid 32 / spacing 0.05):
-      entries carried, inserted by a split, retired by a collapse, the top
-      surviving weight at every stamp, and the reach. If the top surviving
-      weight still falls away, say so and take one of the two named
-      alternatives — protect a carried entry from collapse for the gesture, or
-      `design.md` D3 — rather than carrying on. This is the change's one
-      unverified inference and it is cheap to settle
+- [x] 2.0 **MEASURED BEFORE BUILDING THE REST, AND IT CHANGED THE DESIGN.** 3.1
+      was built on its own, behind a probe switch, on twelve fixtures (the six
+      of 1.5b with the drag's sign flipped on each). Full numbers in
+      `proposal.md` §8–§11; the verdict: **the maintenance keeps A high-weight
+      entry alive but not THE one, and D2 as written is not sufficient.** The
+      splits DO repopulate the core — 9 captured entries become 59–64 live, 45
+      become 434–538 — and the top surviving weight floors at **0.710** against
+      unmaintained B's **0.000**. But the weight-1 centre is collapsed in the
+      first half of the gesture and a split's MEAN can never recreate it, so
+      D2's rules alone reach **72.98–97.10%** and leave the two representations
+      disagreeing by **1.7e-2 – 3.7e-1** — worse than today's A (2.9e-4 – 3.6e-3)
+      and outside 4.1's 1e-3. The named alternative closes it: with a collapse
+      forbidden to retire a carried vertex, reach is **99.99–100.03% on all
+      twelve**, the top surviving weight **1.000 on all twelve**, and the
+      agreement **0.0 – 1.6e-4**. The feared cost did not appear — the surface it
+      leaves is FINER than the unprotected maintenance (max edge 0.2689 against
+      0.6215 on the 1.5 push-in, and equal to today's A on four of six fixtures)
+      and the stroke runs at **0.39x–0.89x of A**. Two rules D2 did not have were
+      found by the counters and are now in it: a split with ONE carried parent
+      inserts too, and a carried vertex the REMESHER moved takes the same shift
+      in its captured position (1–291 of them per stamp, every stamp; without it
+      the relaxation inside a Grab does nothing). `design.md` D2 is revised to
+      five parts and D3 is no longer the fallback. Probe validity: preconditions
+      asserted per fixture and green on all twelve (something captured, 220–1357
+      splits, one row per stamp, the surface validates, M both inserted and
+      retired, the protected arms refused a collapse and retired none, the arms
+      are not byte-identical, mode 0 still matches the unpatched fixed path);
+      with the switch unset the full suite is **2839 of 2839 cases and
+      17,931,111 of 17,931,111 assertions**, so the scaffolding is inert
 
 - [ ] 2.1 A gesture-scoped captured region in `MeshSculptor`: the items, their
       captured positions and their weights, gathered once and reused, with the
@@ -90,21 +106,50 @@
 - [ ] 3.1 `DynamicSculptor` carries the captured region across its own remesh: a
       split inside the set inserts its new vertex at the midpoint of its
       parents' CAPTURED positions with the mean of their weights; a collapse
-      removes the retired entry
+      removes the retired entry. 2.0 built this and it is NECESSARY AND NOT
+      SUFFICIENT — 3.1a, 3.1b and 3.1c are the rest of `design.md` D2
+- [ ] 3.1a **A collapse may not retire a carried vertex** for the length of the
+      gesture (D2 (3)). `collapse_edge` keeps the origin of the edge's half-edge
+      and removes its target, so the vertex at risk is known before the operator
+      runs. This is what takes the reach from 72.98–97.10% to 100%
+- [ ] 3.1b A split with exactly ONE carried parent inserts too, at the midpoint
+      of the carried parent's CAPTURED position and the uncarried parent's
+      CURRENT one, with half the carried parent's weight (D2 (4)). Not for the
+      reach — for the surface (max edge 0.2689 against 0.5635) and because it
+      cuts the collapses 3.1a has to refuse from 53 to 12 on the long push-in
+- [ ] 3.1c A carried vertex the REMESHER moved — a collapse placing its survivor,
+      `relax_region` sliding one tangentially — takes the same shift in its
+      captured position (D2 (5)). Without it the next stamp writes
+      `captured + w * total` and undoes the remesher. 1–291 carried vertices per
+      stamp on every fixture measured, so this is correctness and not tuning
+- [ ] 3.1d The remesh needs to publish its splits, collapses and relaxations to
+      the sculptor. 2.0 did it with a borrowed observer struct on `remesh_region`
+      and `relax_region`, defaulted to null; the PR decides whether that is the
+      shipped shape or whether the carry moves behind the remesher's own
+      interface. Whatever it is, NO shipped caller may have to pass one
 - [ ] 3.2 The Grab remesh centre follows the stamp rather than staying at the
       first stamp's; `stroke.h` and `clay.h` lose the "runs around the first
       stamp's centre" caveat and gain what replaced it
 - [ ] 3.3 Counters for the maintenance: entries carried, inserted by a split,
-      retired by a collapse. The tests gate these counts, not a duration
+      inserted from a one-parent split, retired by a collapse, moved by the
+      remesher, and COLLAPSES REFUSED by 3.1a. The tests gate these counts, not
+      a duration. `refused` must be reported as collapses avoided and not as
+      refusal EVENTS: the remesher's three passes re-ask about the same edge on
+      every stamp, so the event count (381–3936) is an order above the collapses
+      it actually prevented
 - [ ] 3.4 `validate_dynamic_surface().ok` after every fixture in §4
 
 ## 4. Tests
 
-- [ ] 4.1 Reach: a 0.6 pull-out Grab reaches the whole drag on the fixed mesh and
-      on the adaptive surface, and the two agree to 1e-3 — the #619 constraint,
-      re-asserted rather than dropped. Headroom 2.0e-5 — measured for candidate
-      Q, which shares the deformation rule, NOT for the maintenance; 2.0 is the
-      number to re-derive under 2.0 before this threshold is trusted
+- [x] 4.1 (threshold derived; the case still to write) Reach: a 0.6 pull-out Grab
+      reaches the whole drag on the fixed mesh and on the adaptive surface, and
+      the two agree to 1e-3 — the #619 constraint, re-asserted rather than
+      dropped. **Re-derived under 2.0 for the rule that will actually ship**
+      rather than for candidate Q: over twelve fixtures the maintained,
+      protected rule agrees to **0.0 – 1.6e-4**, so 1e-3 has 6x headroom and is
+      the right threshold. Assert reach >= 0.99 and not == 1.0: the rows read
+      99.99–100.03%, and the 100.03 is a real overshoot — D2 (5) lets the
+      weight-1 vertex keep the tangential slide the relaxation gave it
 - [ ] 4.2 The same assertion with the drag's sign flipped and on the mirrored
       pole, so the threshold cannot be met by one fixture's luck
 - [ ] 4.3 A curved drag and a 1.5 drag, both paths, both reaching the drag.
@@ -116,10 +161,25 @@
       captured set is maintained rather than decaying — assert live entries at
       the end against entries at capture plus splits minus collapses, and assert
       the precondition (splits > 0) so the case cannot pass on a surface that
-      never remeshed
-- [ ] 4.5 Mutate before trusting: revert 3.1 and watch 4.4 fail; revert 3.2 and
-      watch the longest-edge case fail. A test that passes with the fix reverted
-      is not a test
+      never remeshed. Measured envelopes to write the case against: the captured
+      set GROWS (45 -> 792 on the 1.5 pull-out, 9 -> 195 on the 1.5 push-in),
+      splits per stroke 220–1357, and under 3.1a **entries retired is exactly
+      zero** — which is the sharpest assertion available and the one a broken
+      protection fails first
+- [ ] 4.4a The TOP SURVIVING WEIGHT is asserted, not only the count: it is 1.000
+      at every stamp of every fixture under the full D2, and a maintenance that
+      drops 3.1a reads 0.710–1.000. A count alone cannot tell those apart —
+      D2 without 3.1a keeps MORE entries live at some stamps and still loses the
+      drag, which is the whole finding of 2.0
+- [ ] 4.4b The longest edge is asserted for 3.1a rather than assumed: refusing
+      collapses must not coarsen the surface. Measured, max edge after the 1.5
+      push-in is 0.2689 with the protection and 0.6215 without it, against a
+      starting 0.0917 and a fixed mesh's 1.3150
+- [ ] 4.5 Mutate before trusting: revert 3.1 and watch 4.4 fail; revert 3.1a and
+      watch 4.4a fail (4.4 alone will NOT — see 2.0); revert 3.1c and watch the
+      relaxation inside a Grab stop having any effect; revert 3.2 and watch the
+      longest-edge case fail. A test that passes with the fix reverted is not a
+      test
 - [ ] 4.6 A Grab through `apply_to_multires` — the first in the tree
 
 ## 5. The goldens that move, and what each becomes
@@ -200,7 +260,12 @@ exactly two cases fail, both in one file; under C a third does.
       `check_gallery.py`, `check_doc_latency.py`
 - [ ] 7.3 `npx -y @fission-ai/openspec@1.12.0 validate --all --strict`
 - [ ] 7.4 `python3 tools/release_check.py --skip-slow`
-- [ ] 7.5 The probe patch in `src/brush/stroke.cpp`, `src/mesh/sculpt.cpp`,
+- [ ] 7.5 The probe patch is measurement scaffolding and is NOT in the PR.
+      §1's patch touched `src/brush/stroke.cpp`, `src/mesh/sculpt.cpp`,
       `src/mesh/dynamic_sculpt.cpp`, `include/clay/mesh/sculpt.h` and
-      `include/clay/mesh/dynamic_sculpt.h` is measurement scaffolding and is NOT
-      in the PR; confirm `git diff origin/main` names no `probe_` symbol
+      `include/clay/mesh/dynamic_sculpt.h`; §2.0's touches
+      `include/clay/mesh/remesh_local.h`, `src/mesh/remesh_local.cpp`,
+      `include/clay/mesh/dynamic_sculpt.h`, `src/mesh/dynamic_sculpt.cpp` and
+      `src/brush/stroke.cpp`, and its driver is `build/probe20.cpp` (untracked).
+      Confirm `git diff origin/main` names no `probe_` symbol and no
+      `RemeshObserver`

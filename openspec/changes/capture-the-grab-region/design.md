@@ -82,7 +82,14 @@ this failure for a Snakehook centred on the cursor; it is the same failure.
 1.5, because each stamp gathers a weaker region than the last. There is no drag
 length at which a host can predict what the brush will do.
 
-### D2. On an adaptive surface the captured set is MAINTAINED, not merely held
+### D2. On an adaptive surface the captured set is MAINTAINED, PROTECTED, and follows
+
+**REVISED after `tasks.md` §2.0 built it and measured it.** What follows is the
+rule; `proposal.md` §8–§11 is the evidence, on twelve fixtures with the drag's
+sign flipped on each. The short version of what changed: the maintenance below
+is NECESSARY and is NOT SUFFICIENT, so the collapse protection this document
+listed as an open question is now part of the rule, and two rules the original
+D2 did not have are now in it.
 
 This is the part the issue does not name and the measurements insist on.
 
@@ -105,13 +112,64 @@ A, which disagrees by 1.6e-3 to 5.4e-3 because the two gathers differ. With the
 remesh held off only inside the gesture (candidate Q), B agrees to 1.0e-6 –
 2.0e-5 on all six fixtures and leaves a surface that validates.
 
-So:
+So, the rule, in five parts. (1) and (2) were D2 before §2.0; (3), (4) and (5)
+are what building it added.
 
 1. The remesh publishes its splits and collapses into the workset the gesture is
    carrying. A split inside the captured set inserts the new vertex with the
    midpoint of its parents' CAPTURED positions and the mean of their weights; a
-   collapse removes the entry whose vertex it retired. Nothing else changes.
+   collapse removes the entry whose vertex it retired.
 2. The remesh centre follows the stamp rather than staying at the anchor.
+3. **A COLLAPSE MAY NOT RETIRE A CARRIED VERTEX** for the length of the gesture.
+   `collapse_edge` keeps the origin of the edge's half-edge and removes its
+   target, so the vertex at risk is known before the operator runs and the
+   refusal is one comparison.
+4. **A SPLIT WITH ONE CARRIED PARENT INSERTS TOO**, with the midpoint of the
+   carried parent's CAPTURED position and the uncarried parent's CURRENT one, and
+   half the carried parent's weight. The uncarried parent took no part of the
+   drag, so its current position IS its captured position; this is (1)'s
+   arithmetic with the second weight at zero.
+5. **A CARRIED VERTEX THE REMESHER MOVED TAKES THE SAME SHIFT IN ITS CAPTURED
+   POSITION.** A collapse places its survivor at the midpoint and `relax_region`
+   slides vertices tangentially. Without this, the next stamp writes
+   `captured + w · total` and puts the vertex back, so the relaxation inside a
+   Grab does nothing at all. Measured: 1 to 291 carried vertices are moved by the
+   remesher on EVERY stamp of every fixture.
+
+**Why (3), and why it is not D3 in miniature.** With (1) and (2) alone the
+splits do repopulate the region — the carried set GROWS, 9 captured entries
+becoming 59–64 live, 45 becoming 434–538 — and the top surviving weight never
+reaches zero, flooring at **0.710** over twelve fixtures against unmaintained B's
+**0.000**. But it is not 1.000: the weight-1 centre is collapsed in the first
+half of the gesture and, because a split's child takes the MEAN of its parents,
+nothing can create a weight above the surviving maximum. Reach lands at
+**72.98–97.10%** and the two representations disagree by **1.7e-2 – 3.7e-1** —
+worse than today's A (2.9e-4 – 3.6e-3) and one to two orders outside the 1e-3
+this design promises. With (3), reach is **99.99–100.03% on all twelve fixtures**,
+the top surviving weight is **1.000 on all twelve**, and the disagreement is
+**0.0 – 1.6e-4**.
+
+This document rejected (3) in advance, as "a remesher that refuses work inside a
+moving ball, which is a smaller version of what D3 was rejected for". That is
+refuted on D3's own number. Longest edge left after the 1.5 push-in: **0.2689
+with (3) and (4), against 0.6215 with (1) and (2) alone**, 0.1174 under today's
+A, and 1.3150 on a fixed mesh. On four of the six fixtures (3) leaves the
+surface exactly as fine as A does, which is the ceiling — A barely moves the tip.
+The collapses being refused are the ones eating the gesture's own region; the set
+therefore stays dense and the splits refine as they were going to. D3 refuses
+every operation and leaves the fixed mesh's own 0.8176; (3) refuses roughly a
+tenth of the collapses and leaves a finer surface than not refusing them.
+
+**Why (4).** It does not move the reach (71.39–97.93% against 72.98–97.10%,
+inside the fixture spread). It moves the surface — max edge 0.3622 against 0.6215
+on the long push-in, 0.2689 against 0.5635 with (3) — and it cuts the collapses
+(3) has to refuse from 53 to 12. It is in the rule for those two reasons.
+
+**Cost.** Cheaper than today, not dearer: median of 21 interleaved strokes, the
+whole rule runs at **0.39x–0.89x of A** (24.3 → 12.2 ms, 129.0 → 68.3 ms), because
+a gesture walks the surface once instead of once per stamp. `proposal.md` §6's
+"B is not cheaper on the adaptive path" was measured on unmaintained B with the
+remesh left at the anchor.
 
 (2) is mandatory on its own evidence. Longest edge left on the surface after a
 1.5 pull-out: 0.1174 under A, **1.1227 under B with the remesh left at the
@@ -126,8 +184,9 @@ drag, so its captured position must be reconstructed from its parents' captured
 positions, not read off the surface. Reading the surface would give it the drag
 twice.
 
-Cost: O(splits + collapses) per stamp, which the remesh already walks. Asserted
-as a count — captured entries in, entries retired, entries inserted — not as a
+Cost: O(splits + collapses + relaxed) per stamp, which the remesh already walks,
+plus one comparison per candidate collapse. Asserted as a count — captured
+entries in, entries inserted, entries retired, collapses refused — not as a
 duration.
 
 ### D3. Rejected: suppress the remesh inside a Grab gesture (candidate Q)
@@ -143,10 +202,12 @@ into a fixed one for the length of the gesture has given up the thing the
 representation exists for, and the single remesh at the tip on the last stamp
 refines a ball at the tip and not the stretched corridor behind it.
 
-It is named here rather than dropped because it is the fallback if D2's
-maintenance proves larger than it looks, and because it is the second control
-that isolates the remesher as B's only problem. If it is ever taken, it must be
-taken with that 0.8176 in the release notes.
+It is named here rather than dropped because it is the second control that
+isolates the remesher as B's only problem. **It is no longer the fallback.**
+`tasks.md` §2.0 built D2 and measured it: with D2's rules (3) and (4) the reach
+is 100% on twelve fixtures, the agreement is 1.6e-4, the surface is FINER than
+D2 without them and as fine as today's A on four of six, and the stroke is
+cheaper than today. The thing D3 was the fallback for now works.
 
 ### D4. Rejected: move the remesh centre and leave the set unmaintained (P)
 
@@ -155,6 +216,11 @@ The cheap half of D2. It recovers the refinement (max edge 0.3571 against
 drag, because following the cursor is what retires the captured vertices
 fastest — 16 to 19 of 45 survive instead of 5 to 11. Half of D2 is not half the
 benefit.
+
+Re-measured under §2.0 with the maintenance built: P's centre-follows half is in
+every maintained arm, and on its own it is still not enough — D2's rules (1) and
+(2) together reach 72.98–97.10% and disagree by up to 0.375. It takes rule (3)
+to close it.
 
 ### D5. The multiresolution path follows, and is not separately measured
 
@@ -191,7 +257,15 @@ them, which in this tree is where a host integrator actually reads it.
   this the mesh Grab moves exactly as far as asked. Two brushes an artist thinks
   of as one. Not fixed here — the SDF shortfall is a field-inversion problem, not
   an anchoring one — but stated in `docs/07` beside both.
-- **[THE MAINTENANCE IS NOT MEASURED, AND THE INFERENCE TO IT HAS A HOLE]** →
+- **[THE MAINTENANCE IS NOW MEASURED; THE INFERENCE HAD A HOLE AND THE HOLE WAS
+  REAL]** → settled by `tasks.md` §2.0 and recorded in `proposal.md` §8–§11. The
+  splits DO repopulate the core and the top surviving weight floors at 0.710
+  rather than falling to zero, but the weight-1 centre is collapsed and cannot be
+  recreated, so D2's original rules land at 72.98–97.10% reach and disagree by up
+  to 0.375. The named alternative — protecting a carried entry from collapse —
+  is what closes it, at 99.99–100.03% and 1.6e-4, and it costs LESS than not
+  doing it. It is now D2 (3). The paragraph below is what was believed before
+  that measurement and is kept for the record:
   100% reach and the 2e-5 agreement are Q's and the topology-off control's, with
   the identical deformation rule and a remesher that cannot touch the region.
   They are not the recommendation's, because the recommendation does not exist
@@ -234,13 +308,21 @@ that works and a brush that does not and asking the host to pick.
 - Does the captured set want an upper bound? On the fixed path it is whatever
   the first gather found (45 here); on the adaptive path D2 lets it grow with
   the splits. Unbounded growth over a very long gesture has not been measured.
-- Should a carried entry be PROTECTED from collapse for the length of the
-  gesture? That is the other shape of D2 and it was not measured. It would make
-  the region's survival structural rather than statistical, at the cost of a
-  remesher that refuses work inside a moving ball — which is a smaller version of
-  what D3 was rejected for. It becomes the leading alternative if §2.0 shows the
-  maintenance cannot hold a high weight.
-- Does D2 leave the adaptive surface as refined as P does? P, which is D2's
-  centre-follows half without the maintenance, leaves a longest edge of 0.3571
-  after the 1.5 drag. D2 adds vertices to the carried region, which is a
-  different surface, so 0.3571 is an indication and not a prediction.
+- ~~Should a carried entry be PROTECTED from collapse for the length of the
+  gesture?~~ **ANSWERED — yes, and it is D2 (3).** §2.0 measured it: without it
+  the maintenance holds 0.710–1.000 of the weight and 72.98–97.10% of the drag;
+  with it, 1.000 and 99.99–100.03% on twelve fixtures. The feared cost did not
+  appear: the surface it leaves is FINER than the unprotected maintenance
+  (0.2689 against 0.6215 on the 1.5 push-in) and the stroke is cheaper than
+  today's.
+- ~~Does D2 leave the adaptive surface as refined as P does?~~ **ANSWERED —
+  better than P.** Measured: 0.1466 after the 1.5 pull-out and 0.2689 after the
+  1.5 push-in, against P's 0.3571 and the fixed mesh's 0.8176. On the four
+  shorter fixtures it is 0.0882–0.1174, which is today's A exactly.
+
+- STILL OPEN, and new: is the collapse protection safe on a gesture whose
+  carried set covers a whole region the artist then wants thinned? The twelve
+  fixtures are all Grab, all on a sphere, all 11–51 stamps. A protection that
+  refuses roughly a tenth of a stroke's collapses was measured to leave a finer
+  surface here; a very long gesture over an already-dense region has not been.
+  §4.4's count assertion is where that would first show.

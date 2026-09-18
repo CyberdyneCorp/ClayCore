@@ -254,27 +254,272 @@ So the answer to the issue's "should the AFTER remesh move with the anchor" is
 1.5 away refines nothing — **and moving it is not sufficient**, because a
 remesher that runs over the captured set retires it.
 
+## What building it found
+
+`tasks.md` §2.0 said to build the maintenance FIRST, on its own, and measure it
+before the rest. It is built, behind a probe switch that is inert at its default,
+and it is measured on twelve fixtures — the four §1.5b names, where the
+unmaintained set dies, plus §1's two baseline pull-outs as controls, each with
+its drag's sign flipped so a number is the mechanism's and not the fixture's.
+**The inference in the section above was wrong, and the fix is the alternative
+`design.md` named and did not measure.**
+
+The arms, all on `apply_to_dynamic`:
+
+| | region | remesh centre | the captured set across the remesh |
+|---|---|---|---|
+| **A** | re-gathered every stamp | first stamp | — |
+| **B** | captured once | first stamp | nothing maintains it |
+| **M** | captured once | follows the stamp | `design.md` D2 exactly as written |
+| **MP** | captured once | follows the stamp | D2, plus a collapse may not retire a carried vertex |
+| **M+** | captured once | follows the stamp | D2, plus a split with ONE carried parent inserts too |
+| **M+P** | captured once | follows the stamp | M+ and MP together |
+
+The fixed path is NOT patched. Candidate B there is one stamp carrying the whole
+drag, which is the identity §"Independently re-derived" records, so `fixed B` in
+the tables below is measured through the public entry points on an unmodified
+`MeshSculptor`.
+
+### 8. The maintenance keeps A high-weight entry alive. It does not keep THE one
+
+Reach, as a share of the drag. Every row is the adaptive path except the last
+column:
+
+| fixture (r / detail) | A | B | **M** | **MP** | **M+P** | fixed B |
+|---|---|---|---|---|---|---|
+| mirror pole −Z 0.6 (0.15 / 4) | 22.24 | **5.56** | 76.38 | 100.02 | **100.02** | 100.00 |
+| …sign-flipped | 22.40 | 15.53 | 76.40 | 100.03 | **100.03** | 100.00 |
+| push-in −Z 0.6 (0.15 / 4) | 22.30 | **6.97** | 79.44 | 100.01 | **100.01** | 100.00 |
+| …sign-flipped | 22.27 | 100.00 | 72.98 | 100.01 | **100.01** | 100.00 |
+| long push-in −Z 1.5 (0.15 / 4) | 9.34 | **2.81** | 76.20 | 100.01 | **100.01** | 100.00 |
+| …sign-flipped | 9.20 | 100.00 | 75.01 | 100.01 | **100.01** | 100.00 |
+| g32 s.05 push-in 0.6 (0.30 / 8) | 41.04 | 29.02 | 97.10 | 100.00 | **100.00** | 100.00 |
+| …sign-flipped | 40.99 | 100.00 | 96.09 | 100.00 | **100.00** | 100.00 |
+| baseline pull-out 0.6 (0.30 / 8) | 41.34 | 100.00 | 95.54 | 100.00 | **100.00** | 100.00 |
+| …sign-flipped | 41.56 | 67.26 | 96.63 | 99.99 | **99.99** | 100.00 |
+| baseline pull-out 1.5 (0.30 / 8) | 18.06 | 100.00 | 91.66 | 100.00 | **100.00** | 100.00 |
+| …sign-flipped | 18.48 | 66.58 | 93.34 | 100.00 | **100.00** | 100.00 |
+
+A and unmaintained B reproduce §1 and §1.5b to the printed digit — 22.24, 22.30,
+9.34, 41.04, 41.34, 18.06 for A and 5.56, 6.97, 2.81, 29.02, 100.00, 67.26,
+66.58 for B — from a probe written against the patched engine rather than
+against the frozen-workset trick the earlier stage used. That agreement is the
+evidence that the switch reaches the code; the counters below are the evidence
+that the maintenance does.
+
+**Top surviving weight at the last stamp**, which is the quantity §2.0 asked for
+and the one reach follows:
+
+| fixture | B | **M** | **MP** | **M+** | **M+P** |
+|---|---|---|---|---|---|
+| mirror pole −Z 0.6 | **0.000** | 0.781 | 1.000 | 0.727 | **1.000** |
+| push-in −Z 0.6 | **0.000** | 0.805 | 1.000 | 0.782 | **1.000** |
+| long push-in −Z 1.5 | **0.000** | 0.752 | 1.000 | 0.781 | **1.000** |
+| g32 s.05 push-in 0.6 | 0.070 | 1.000 | 1.000 | 1.000 | **1.000** |
+| baseline pull-out 0.6 | 1.000 | 0.953 | 1.000 | 1.000 | **1.000** |
+| baseline pull-out 1.5 | 1.000 | 0.915 | 1.000 | 0.958 | **1.000** |
+
+Sign-flipped: M 0.781 / 0.764 / 0.764 / 0.948 / 0.958 / 0.919; MP and M+P 1.000
+on all six.
+
+So the answer to §2.0's question is **half yes**. The splits DO repopulate the
+core: the carried set grows rather than decaying — 9 entries captured become 59
+to 64 live at the end on the radius-0.15 fixtures, 45 become 434 to 538 on the
+baseline — and the top surviving weight never goes to zero and never goes near
+it. It floors at **0.710** over the twelve fixtures against unmaintained B's
+**0.000**. But it is not 1.000: the weight-1 centre IS collapsed, in the first
+half of the gesture, and because a split's child takes the MEAN of its parents
+nothing can ever put it back. The per-stamp trace of the long push-in shows
+exactly that shape — a stair, not a slide, and then a flat line:
+
+```
+  stamp   carried in   carry   inserted   retired   moved   top weight
+      0            0      40         32         1      42        1.000
+      4           38      37          5         6      38        1.000
+     12           52      57          7         2      16        1.000
+     13           57      57          4         4      14        0.891
+     18           64      62          4         6      10        0.805
+     21           63      64          2         1       2        0.752
+     25..50       64      64          0         0       0        0.752
+```
+
+D2's maintenance therefore lands at **72.98–97.10%** reach, not at 100%, and the
+cross-representation agreement it leaves is **0.017 – 0.375** in world units —
+5x to 1000x WORSE than today's A on the same fixtures (2.9e-4 – 3.6e-3), and one
+to two orders outside the 1e-3 §2's constraint and `tasks.md` §4.1 demand. On its
+own evidence **D2 as written is not sufficient**.
+
+### 9. The protection settles it, and it costs the opposite of what was feared
+
+Refusing a collapse that would retire a carried vertex — `design.md`'s "other
+shape of D2", which it named and did not measure — reaches **99.99–100.03% on
+all twelve fixtures**, holds the top surviving weight at **1.000 on all twelve**,
+and agrees with the unpatched fixed path to **0.0 – 1.6e-4**:
+
+Agreement, as the absolute difference in world units between the fixed path's
+travel and the adaptive path's, over all twelve fixtures:
+
+| arm | agreement, `abs(fixed − adaptive)` |
+|---|---|
+| A, today (fixed A vs adaptive A) | 2.9e-4 – 3.6e-3 |
+| B, unmaintained | 0.0 – 1.46 |
+| M, D2 as written | 1.7e-2 – 3.7e-1 |
+| **MP and M+P** | **0.0 – 1.6e-4** |
+
+(B, M, MP and M+P are all measured against the same unpatched `fixed B`.)
+
+`design.md` rejected this shape in advance — "a remesher that refuses work inside
+a moving ball, which is a smaller version of what D3 was rejected for". **That is
+refuted, and by the same number D3 was rejected on.** Longest triangle edge left
+on the surface (the sphere starts uniform at 0.0917):
+
+| fixture | A | M | MP | M+ | **M+P** | fixed mesh, no remesher |
+|---|---|---|---|---|---|---|
+| mirror pole −Z 0.6 | 0.1174 | 0.1891 | 0.1940 | 0.1203 | **0.1174** | 0.5462 |
+| push-in −Z 0.6 | 0.1174 | 0.1829 | 0.1867 | 0.1364 | **0.1174** | 0.5328 |
+| long push-in −Z 1.5 | 0.1174 | 0.6215 | 0.5635 | 0.3622 | **0.2689** | 1.3150 |
+| g32 s.05 push-in 0.6 | 0.0882 | 0.0882 | 0.0882 | 0.0882 | **0.0882** | 0.2524 |
+| baseline pull-out 0.6 | 0.1174 | 0.1174 | 0.1174 | 0.1174 | **0.1174** | 0.3541 |
+| baseline pull-out 1.5 | 0.1174 | 0.3170 | 0.2218 | 0.2058 | **0.1466** | 0.8176 |
+
+Refusing collapses leaves the surface FINER, not coarser, and on four of the six
+fixtures it leaves it exactly as fine as today's A — which is the ceiling,
+because A barely moves the tip. The mechanism is visible in the counters: the
+collapses being refused are the ones eating the gesture's own region, the carried
+set therefore stays dense, and the splits do the refining they were going to do
+anyway. It is nothing like D3, which refuses EVERY operation.
+
+What it actually costs, per stroke:
+
+| fixture | collapses performed A / M / MP / **M+P** | refusal events (MP) |
+|---|---|---|
+| mirror pole −Z 0.6 | 49 / 161 / 66 / **18** | 456 |
+| push-in −Z 0.6 | 40 / 140 / 53 / **12** | 381 |
+| long push-in −Z 1.5 | 48 / 144 / 53 / **12** | 891 |
+| g32 s.05 push-in 0.6 | 126 / 327 / 66 / **68** | 2248 |
+| baseline pull-out 0.6 | 254 / 428 / 153 / **96** | 1317 |
+| baseline pull-out 1.5 | 325 / 562 / 153 / **96** | 3283 |
+
+The refusal EVENTS are larger than the collapses avoided because the remesher's
+three passes re-ask about the same edge on every stamp; the count that means
+something is the collapses performed, and it falls to roughly a tenth of D2's.
+
+And the stroke gets **cheaper, not dearer** — one gather per gesture instead of
+one per stamp. Median of 21 interleaved strokes, first repeat discarded (21 and
+not 200 because one adaptive stroke here is 12–130 ms and the claim is a ratio
+between arms on one box, not a latency budget):
+
+| fixture | A | M | **M+P** | M+P / A |
+|---|---|---|---|---|
+| mirror pole −Z 0.6 | 24.32 | 13.29 | **12.20** | 0.50x |
+| push-in −Z 0.6 | 21.57 | 14.29 | **14.77** | 0.68x |
+| long push-in −Z 1.5 | 44.16 | 16.74 | **23.29** | 0.53x |
+| g32 s.05 push-in 0.6 | 90.95 | 86.49 | **79.11** | 0.87x |
+| baseline pull-out 0.6 | 58.30 | 43.86 | **38.14** | 0.65x |
+| baseline pull-out 1.5 | 129.04 | 69.78 | **68.34** | 0.53x |
+
+Over all twelve fixtures M+P is **0.39x–0.89x of A**. §6's "B is not cheaper on
+the adaptive path" was measured on unmaintained B with the remesh left at the
+anchor; with the centre following the stamp and the set maintained, it is.
+
+### 10. Two rules D2 does not have, and the counters found both
+
+**(a) A split with ONE carried parent.** D2 says "a split inside the set". The
+counters say a large minority of the splits the remesher runs inside a Grab
+region have exactly one carried parent — 42 of the 74 on the first stamp of the
+mirror-pole fixture, 100 of 342 on the baseline — and D2 as written drops every
+one of them. It need not: the uncarried parent never took any part of the drag,
+so its CURRENT position is its captured position, and the child is exactly
+reconstructible as the midpoint of `captured_in` and `position_out` with weight
+`w_in / 2` — which is D2's own arithmetic with the second weight at zero.
+
+Measured, it does NOT move the reach (M+ 71.39–97.93% against M's 72.98–97.10%,
+inside the fixture-to-fixture spread and worse on two rows). What it moves is
+the SURFACE and the protection's bill: max edge on the long push-in 0.3622
+against M's 0.6215 and, with the protection, **0.2689 against 0.5635**; and the
+collapses the protection has to refuse fall from 53 to 12. It is worth having for
+those two reasons and not for the reach.
+
+**(b) A carried vertex the REMESHER moved.** This one is not an improvement, it
+is a correctness rule D2 is missing. A collapse places its survivor at the
+midpoint and `relax_region` slides vertices tangentially; both move vertices that
+the gesture is carrying. Without telling the carry, the next stamp writes
+`captured + w · drag` and silently undoes the remesher's work. The probe counts
+it: **1 to 291 carried vertices are moved by the remesher on every stamp of every
+fixture** — 42 on the first stamp of the mirror pole, 291 on the first stamp of
+the baseline. The rule is one line (`captured += after − before`) and without it
+the relaxation inside a Grab does nothing at all.
+
+### 11. What could and could not be compared
+
+- **Compared.** Adaptive A / B / M / MP / M+ / M+P against each other on twelve
+  fixtures, and each against the FIXED path's A and B, both measured through the
+  public entry points on an unpatched `MeshSculptor`. The analytic expectation —
+  the captured set's weight-1 vertex moves by exactly `|p_n − p_0|`, so reach is
+  100.00% and `travel` equals the drag — is met by fixed B on all twelve
+  (`travel` = 0.6000 / 1.5000 exactly) and by adaptive M+P to 1.6e-4.
+- **Not compared.** `apply_to_multires`, the C ABI, pyclay, the Swift surface and
+  the device suite: none is touched by this probe and none should be believed
+  from it. The fixed path's 1.85x saving is §6's and is not re-measured here,
+  because no fixed-path source changed. And the 100.02 / 100.03 rows are a real
+  and tiny OVERSHOOT, not noise: rule (b) lets the weight-1 vertex keep the
+  tangential slide the relaxation gave it, so it ends 1.6e-4 past the drag.
+- **Probe validity, asserted rather than eyeballed.** Every fixture asserts that
+  something was captured, that the remesher split (220–1357 splits per stroke),
+  that one row was emitted per stamp, that the surface validates, that M both
+  inserted AND retired entries, that MP and M+P refused at least one collapse and
+  retired none, that B, M and MP are not byte-identical, and that mode 0 still
+  agrees with the unpatched fixed path. All twelve print `PRECONDITIONS ok`.
+  With the switch unset the full unit suite passes **2839 of 2839 cases and
+  17,931,111 of 17,931,111 assertions** — the same totals §"What was tried and
+  refuted" records for the previous stage's patch — so the scaffolding is inert
+  at its default and every number above is the rule and not the patch.
+
+### 12. What this section changes in the proposal
+
+`design.md` D2 is corrected rather than kept: the maintenance is necessary and is
+not sufficient, and the collapse protection it listed as an open question is
+promoted to part of the rule. `design.md` D3 stays rejected and is no longer the
+fallback, because the thing it was the fallback FOR now works.
+
 ## What this proposes
 
-**Candidate B, with the captured set maintained across the remesh.**
+**Candidate B, with the captured set maintained across the remesh AND protected
+from it.** (2) below is revised by §8–§11, which built it and measured it.
 
 1. Grab gathers its region ONCE, at the first stamp, and carries the captured
    items, their captured positions and their weights for the whole gesture. Each
    stamp writes `captured_position + weight * (p_k − p_0)`. Both `apply_to_mesh`
    and `apply_to_dynamic`, together, so the representations keep agreeing.
 2. On the adaptive path the captured set is MAINTAINED by the remesh rather than
-   rebuilt: a split inside the set inserts its new vertex with the midpoint of
-   its parents' captured positions and the mean of their weights; a collapse
-   removes the vertex it retires. The remesh centre follows the stamp.
+   rebuilt, and the remesh centre follows the stamp:
+   - a split inside the set inserts its new vertex with the midpoint of its
+     parents' captured positions and the mean of their weights;
+   - a split with exactly ONE carried parent inserts too, at the midpoint of the
+     carried parent's captured position and the uncarried parent's current one,
+     with half the carried parent's weight;
+   - **a collapse may not retire a carried vertex for the length of the
+     gesture**, and a collapse of an edge with one carried endpoint therefore
+     places its survivor as usual;
+   - a carried vertex the REMESHER moved — a collapse's survivor, a relaxation's
+     tangential slide — takes the same shift in its captured position.
 
 §3 and §4 are the evidence for (2) being mandatory rather than an optimisation:
 the same rule reaches 100% and agrees bit-exactly when the remesher cannot
-retire the set, and 2.8–100% with a 0.34 disagreement when it can.
+retire the set, and 2.8–100% with a 0.34 disagreement when it can. §8 and §9 are
+the evidence that the maintenance alone is not enough and the protection is what
+closes it: 72.98–97.10% and a 0.375 disagreement without it, 99.99–100.03% and a
+1.6e-4 disagreement with it, at a lower cost and on a finer surface.
 
-**What is measured and what is inferred, stated plainly.** Every number in §1–§7
-is a measurement of A, B, P, Q or C. **The recommendation — B with the
-maintenance — is none of those, and its reach and its agreement are therefore
-NOT measured; they are inferred from Q**, which reaches the whole drag and
+**What is measured and what is inferred, stated plainly.** This paragraph was
+written before §8–§11 existed; the hole it names has since been measured and it
+was real. **The recommendation's reach and agreement are now measured directly,
+in §8 and §9, and the answer was NOT the one inferred here.** What follows is
+kept because it is the reasoning the measurement was built to test.
+
+Every number in §1–§7 is a measurement of A, B, P, Q or C. The recommendation —
+B with the maintenance — is none of those, and its reach and its agreement are
+therefore not measured there; they are inferred from Q, which reaches the whole drag and
 agrees to 2e-5 with the identical deformation rule and a remesher that cannot
 touch the set. The inference is sound only if the maintenance keeps a HIGH-WEIGHT
 entry alive, and the rules in (2) do not guarantee one: a split inserts its child
@@ -326,6 +571,20 @@ collapses eat it is the one quantity this measurement could not reach, and
   refuted: 44–100% reach depending on which pole of the sphere is pulled, and a
   0.34 disagreement between the paths. The diagnosis is measured, not assumed:
   7–13 of 45 captured vertices survive the stroke.
+- **M, `design.md` D2 exactly as it was written** (captured set, maintained,
+  centre following) — refuted by §8, and this is the finding §2.0 existed to
+  produce. It does keep a high-weight entry alive (top surviving weight floors at
+  0.710 over twelve fixtures against unmaintained B's 0.000) and the carried set
+  GROWS rather than decaying, and it still loses a quarter of the drag —
+  72.98–97.10% reach — because the weight-1 centre is collapsed and a split's
+  MEAN cannot recreate it. It leaves the two representations 1.7e-2 to 3.7e-1
+  apart, worse than today's A. Necessary, not sufficient.
+- **The collapse protection was rejected in advance on a cost it does not have.**
+  `design.md` called it "a smaller version of what D3 was rejected for". Measured,
+  the surface it leaves is FINER than the unprotected maintenance (longest edge
+  0.2689 against 0.6215 after a 1.5 push-in) and as fine as today's A on four of
+  six fixtures, and the stroke runs at 0.39x–0.89x of A. Checked, refuted,
+  recorded — and the rejection is reversed.
 - **P, moving the remesh centre to the cursor** — refuted as a fix on its own: it
   restores the refinement (max edge 0.3571 vs 1.1227) and still disagrees by up
   to 0.52.
