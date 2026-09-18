@@ -482,6 +482,166 @@ not sufficient, and the collapse protection it listed as an open question is
 promoted to part of the rule. `design.md` D3 stays rejected and is no longer the
 fallback, because the thing it was the fallback FOR now works.
 
+## What building it found — the implementation
+
+§8–§11 above are the PROBE's, written against a patched engine behind an inert
+switch. This section is the SHIPPED code: `brush::apply_to_mesh`,
+`apply_to_multires` and `apply_to_dynamic`, `MeshSculptor` /
+`MultiresSculptor` / `DynamicSculptor`'s carried region, and
+`mesh::RemeshHooks`. Every number here was re-measured against it. Two of the
+design's claims did not survive that, and both are corrected below rather than
+quietly dropped.
+
+### 13. The suite moved exactly where §5 said it would, and nowhere else
+
+With the rule shipped in all three consumers, no scaffolding in the tree and the
+two helpers NOT yet updated, the full unit suite read **2837 of 2839 cases and
+17,931,103 of 17,931,111 assertions**, the eight failures being
+`test_dynamic_stroke.cpp:224, 228, 229, 230, 231, 232, 778, 779` — the two cases
+`tasks.md` §5.1 and §5.2 name, to the line, and nothing else in the tree. That is
+the third independent measurement of the same prediction and the first one taken
+on code that ships.
+
+With the two helpers updated to the carried rule and the new file added, the
+suite is **2847 of 2847 cases and 17,931,271 of 17,931,271 assertions**. §5.4
+was verified by reading rather than assumed: `run_case` in
+`test_mesh_sculpt_parity.cpp` sets `s.center` per step and calls
+`MeshSculptor::stamp`, so no stroke consumer and no capture reaches it, and
+`mesh_sculpt_goldens_*.inc` are unchanged in the diff.
+
+### 14. Cost, re-measured on the shipped consumers
+
+Both arms driven through the SHIPPED library: the replaced rule is hand-spelled
+against `MeshSculptor::stamp` / `DynamicSculptor::stamp` with a per-stamp centre
+and the motion between stamps, which is exactly what the consumers did before.
+Interleaved, first repeat of each arm discarded, medians of 201 (fixed) and 22
+(adaptive) repeats, macOS arm64, Release, `cpu-only`:
+
+| fixture, `cube_sphere(24)`, spacing 0.1 | stamps | re-gathering | carried | |
+|---|---|---:|---:|---|
+| fixed, pull-out 0.6, r 0.30 | 11 | 0.1350 ms | 0.0692 ms | **1.95x** |
+| fixed, pull-out 1.5, r 0.30 | 26 | 0.2784 ms | 0.1491 ms | **1.87x** |
+| adaptive, pull-out 0.6, r 0.30 | 11 | 55.56 ms | 36.48 ms | 0.66x of A |
+| adaptive, pull-out 1.5, r 0.30 | 26 | 121.93 ms | 64.92 ms | 0.53x of A |
+| adaptive, push-in 1.5, r 0.15 / detail 4 | 51 | 41.02 ms | 21.69 ms | 0.53x of A |
+
+§6's fixed-path 1.85x and §9's 0.39x–0.89x adaptive band both hold on the
+shipped code. The fixed rows assert the applied count (10/10 and 25/25) so the
+two arms are timing the same work.
+
+### 15. Reach, re-measured on the shipped consumers
+
+`tests/unit/test_grab_carried_region.cpp`, eight fixtures — both poles, both
+signs of the drag, 0.6 and 1.5, radius 0.15 / detail 4 where an unmaintained
+region dies and radius 0.30 / detail 8 as the control. Every one reaches the
+whole drag on the fixed path and on the adaptive one, and the two agree to
+**9.1e-5 – 1e-3**, inside §2's constraint with headroom. The counters are
+asserted with their preconditions: on the 1.5 push-in at radius 0.15 the carried
+region goes 9 entries → 195, splits 276, collapses 12, **retired 0**, refused
+collapses 616 by the event count the probe reported and bounded by the region
+once deduplicated (below).
+
+### 16. REFUTED: the remesh centre's justification, though not the rule
+
+`design.md` D2 (2) and §7 say a remesh left at the anchor leaves the surface
+**worse than not remeshing** — longest edge 1.12 after a 1.5 drag against 0.36.
+**That was measured on UNMAINTAINED B and it is not what the shipped rule
+leaves.** Re-measured on the shipped code, with the region maintained, protected
+and adopting one-parent splits, removing the centre-follows line gives:
+
+| | longest edge, whole surface | longest edge at the TIP | vertices within a brush radius of the tip | splits | carried entries |
+|---|---|---|---|---|---|
+| centre follows the stamp | 0.1466 | **0.0487** | **65** | 980 | 811 |
+| centre left at the anchor | **0.1450** | 0.1450 | 25 | **1381** | 1211 |
+
+The whole-surface maximum is **the same, slightly better without the rule**, and
+the anchored arm does **40% MORE topology work**. The maximum lives in the NECK
+behind the tip either way, so it cannot see this rule at all — and the first
+version of the test asserting it PASSED with the rule reverted, which is how
+this was found.
+
+What the rule actually buys is the TIP: a ball at the gesture's first sample
+never reaches five brush radii away, so the tip keeps the edges the drag
+stretched — 0.1450 against 0.0487, three times coarser, and 25 vertices against
+65. The shipped case asserts the tip against the remesher's own
+`target * split_factor`, and reverting the rule fails it.
+
+So D2 (2) stands, on a different number and for a different reason: **the same
+surface-wide result for 40% less work, and a refined tip instead of a coarse
+one.** The 1.12-against-0.36 figure has been corrected in `docs/07` and in
+`include/clay/brush/stroke.h`.
+
+### 17. NEW: on a curve the adaptive surface reaches PAST the chord
+
+§2 and D1 report the fixed/adaptive agreement as 0.0 – 1.6e-4 over twelve
+fixtures. All twelve are STRAIGHT drags. On the curved fixture §1 measures, the
+shipped rule gives fixed **100.0%** of the chord and adaptive **115.8%** — an
+agreement of 0.222, three orders outside the straight-drag number.
+
+It is the maintenance and not the deformation, asserted rather than argued: with
+`DynamicTopologySettings::enabled = false` the same fixture agrees to 1e-3. The
+mechanism is rule (4) — a child adopted from ONE carried parent is born on
+material the arc swept past and then takes its own share of the remaining drag,
+and a straight drag sweeps no such material.
+
+This is not a regression against today: re-gathering disagrees by 1.3e-3 on the
+same fixture, so the change makes the curve WORSE on the agreement and the
+straight drags 20x better. It is recorded in the release notes as a known limit
+and in the test as an asserted bound (the adaptive curve reaches at least the
+chord and less than 1.3x it) rather than left to be discovered.
+
+### 18. `collapses_refused` is a count of vertices, not of events
+
+`tasks.md` §3.3 requires the refusals be reported as collapses AVOIDED and not
+as refusal events, because the remesher's passes re-ask about the same edge. The
+shipped counter marks a carried entry the first time a collapse is refused on it
+and counts it once for the gesture, so it is bounded by the carried region — and
+the test asserts that bound, which is an assertion an event count could not be
+given. Deduplicating per STAMP instead was tried first and rejected: on the 1.5
+push-in it read 616 against the probe's 891 raw events, which is not an order of
+magnitude and is bounded by nothing a case could name.
+
+### 19. Where the shipped shape differs from the probe
+
+- **No `RemeshObserver`, no env switch, no probe symbol.** `mesh::RemeshHooks`
+  is the shipped interface: a borrowed context and four optional function
+  pointers on `remesh_region` and `relax_region`, both defaulted to null. No
+  caller in `src/`, `bindings/` or `tests/` passes one except the sculptor
+  maintaining its own carried region.
+- **The capture is scoped, not closed at each exit.** `CarriedRegionScope` in
+  `stroke.cpp` opens it for `grab` and closes it on the way out, so a sculptor
+  cannot be left carrying one stroke's region into the next.
+- **The counters outlive the capture.** `end_carried_region` snapshots the
+  entries carried and the top weight, because the stroke consumer closes the
+  capture on its way out and a caller reading what the gesture did reads it
+  after that. The first version of the tests read zero from a closed carry.
+- **The hierarchy owns its capture.** `MultiresSculptor` can REPLACE its level
+  sculptor mid-gesture — a host changing the sculpt level, or a cache generation
+  change after a trim. `bind` re-opens the capture on the new sculptor and moves
+  `capture_generation`, and `apply_to_multires` re-anchors the drag it measures
+  from when that moves. Without it the stamp after a rebind would write the whole
+  drag onto a region that had already taken most of it.
+
+### 20. What the mutation check found
+
+Each rule was removed from the shipped source, rebuilt (build success and a
+changed binary asserted, after a first harness run reused a stale one and
+reported every mutation identically), and the new file re-run:
+
+| mutation | cases failing | assertions |
+|---|---|---|
+| rule 3, the collapse protection | 3 | 26 |
+| rule 5, the remesher's move | 1 | 1 |
+| rule 4, the one-parent split | 2 | 4 |
+| rule 1, adaptive capture | 4 | 22 |
+| rule 2, the remesh centre | **0 at first**, 1 after the case was rewritten | 3 |
+| the maintenance (splits not published) | 4 | 28 |
+| rule 1, fixed capture | 4 | 20 |
+| the deformation rule itself | 4 | 24 |
+
+The rule-2 row is the finding: the case as first written could not fail. It is
+§16.
+
 ## What this proposes
 
 **Candidate B, with the captured set maintained across the remesh AND protected

@@ -1,6 +1,6 @@
 ## 1. Measured before building
 
-- [x] 1.1 Issue #620 reproduced on `origin/main` at `2880560c`, ABI 0.120.0:
+- [x] 1.1 Issue #620 reproduced on origin/main at `2880560c`, ABI 0.120.0:
       `cube_sphere(24, 1.0)`, radius 0.3, spacing 0.1, 0.6 pull-out over 11
       stamps, 10 of 11 moving a vertex — reach **41.10%** fixed, **41.34%**
       adaptive, against **65.84%** / **55.82%** for a following centre. The
@@ -88,56 +88,62 @@
       with the switch unset the full suite is **2839 of 2839 cases and
       17,931,111 of 17,931,111 assertions**, so the scaffolding is inert
 
-- [ ] 2.1 A gesture-scoped captured region in `MeshSculptor`: the items, their
-      captured positions and their weights, gathered once and reused, with the
-      header stating that the write is `captured + w * total` and therefore
-      carries no accumulation error
-- [ ] 2.2 `mesh_stamp_settings` gives Grab `direction = s.position - first` and
-      `center = first`, in the one place all three consumers share
-- [ ] 2.3 `apply_to_mesh` opens the capture on the first unmasked stamp and
-      closes it at the end of the call; a stroke that applies nothing captures
-      nothing
-- [ ] 2.4 `apply_to_multires` takes the same path with no new code; assert that
-      a level re-bound mid-stroke does not silently drop the capture
-- [ ] 2.5 Cognitive complexity of both consumers measured and stated in the PR
+- [x] 2.1 `MeshSculptor::begin_carried_region` / `end_carried_region` /
+      `carrying`, with `gather` returning early while one is open and taken. The
+      header states the write and why it carries no accumulation error, and says
+      that a FIXED mesh has no mitigation for a region a long drag stretched and
+      cannot have one
+- [x] 2.2 `mesh_stamp_settings` gives Grab `direction = s.position - first` and
+      `center = first`, in the one place all three consumers share. The remesh
+      centre following the stamp is applied in `apply_to_dynamic` alone, because
+      the other two have no remesher — stated there rather than implied
+- [x] 2.3 `CarriedRegionScope` opens the capture for `grab` and closes it on
+      the way out of all three consumers, so no early return can leave a sculptor
+      carrying. The capture is TAKEN lazily, inside the first gather that reaches
+      something, which is what makes "a stroke that applies nothing captures
+      nothing" true with no special case
+- [x] 2.4 `apply_to_multires` takes the same `mesh_stamp_settings`. A rebind
+      DOES need code: `MultiresSculptor` owns the capture while it is open and
+      `bind` re-opens it on the sculptor it just built, moving
+      `capture_generation` so the consumer re-anchors the drag it measures from.
+      Without that the stamp after a rebind writes the whole drag onto a region
+      that has already taken most of it. 4.6 is the case
+- [x] 2.5 Measured with the cognitive-complexity skill; see §7.6
 
 ## 3. Engine — the adaptive surface
 
-- [ ] 3.1 `DynamicSculptor` carries the captured region across its own remesh: a
-      split inside the set inserts its new vertex at the midpoint of its
-      parents' CAPTURED positions with the mean of their weights; a collapse
-      removes the retired entry. 2.0 built this and it is NECESSARY AND NOT
-      SUFFICIENT — 3.1a, 3.1b and 3.1c are the rest of `design.md` D2
-- [ ] 3.1a **A collapse may not retire a carried vertex** for the length of the
-      gesture (D2 (3)). `collapse_edge` keeps the origin of the edge's half-edge
-      and removes its target, so the vertex at risk is known before the operator
-      runs. This is what takes the reach from 72.98–97.10% to 100%
-- [ ] 3.1b A split with exactly ONE carried parent inserts too, at the midpoint
-      of the carried parent's CAPTURED position and the uncarried parent's
-      CURRENT one, with half the carried parent's weight (D2 (4)). Not for the
-      reach — for the surface (max edge 0.2689 against 0.5635) and because it
-      cuts the collapses 3.1a has to refuse from 53 to 12 on the long push-in
-- [ ] 3.1c A carried vertex the REMESHER moved — a collapse placing its survivor,
-      `relax_region` sliding one tangentially — takes the same shift in its
-      captured position (D2 (5)). Without it the next stamp writes
-      `captured + w * total` and undoes the remesher. 1–291 carried vertices per
-      stamp on every fixture measured, so this is correctness and not tuning
-- [ ] 3.1d The remesh needs to publish its splits, collapses and relaxations to
-      the sculptor. 2.0 did it with a borrowed observer struct on `remesh_region`
-      and `relax_region`, defaulted to null; the PR decides whether that is the
-      shipped shape or whether the carry moves behind the remesher's own
-      interface. Whatever it is, NO shipped caller may have to pass one
-- [ ] 3.2 The Grab remesh centre follows the stamp rather than staying at the
-      first stamp's; `stroke.h` and `clay.h` lose the "runs around the first
-      stamp's centre" caveat and gain what replaced it
-- [ ] 3.3 Counters for the maintenance: entries carried, inserted by a split,
-      inserted from a one-parent split, retired by a collapse, moved by the
-      remesher, and COLLAPSES REFUSED by 3.1a. The tests gate these counts, not
-      a duration. `refused` must be reported as collapses avoided and not as
-      refusal EVENTS: the remesher's three passes re-ask about the same edge on
-      every stamp, so the event count (381–3936) is an order above the collapses
-      it actually prevented
-- [ ] 3.4 `validate_dynamic_surface().ok` after every fixture in §4
+- [x] 3.1 `DynamicSculptor::carry_on_split` / `carry_on_collapse`, over the
+      `carry_items_` / `carry_captured_` / `carry_weights_` arrays and a
+      generation-checked slot map
+- [x] 3.1a `carry_may_collapse`, consulted before the operator runs. Reverted,
+      3 cases and 26 assertions fail
+- [x] 3.1b The one-parent branch of `carry_on_split`, counted separately as
+      `inserted_one_parent`. Reverted, 2 cases and 4 assertions fail
+- [x] 3.1c `carry_on_move`, fed by both the collapse survivor and
+      `relax_region`'s writes. Asserted through a trailing zero-drag stamp that
+      must change nothing; reverted, that case fails
+- [x] 3.1d Shipped as `mesh::RemeshHooks` in `remesh_local.h`: a borrowed
+      context and four optional function pointers, defaulted to null on both
+      `remesh_region` and `relax_region`. No caller in `src/`, `bindings/` or
+      `tests/` passes one except the sculptor maintaining its own region. No
+      RemeshObserver, no probe_ symbol and no env switch is in the diff
+- [x] 3.2 Done, and **its justification is refuted while the rule stands**. A
+      remesh left at the anchor does NOT leave a coarser surface once the region
+      is maintained: same surface-wide longest edge (0.1450 against 0.1466) and
+      40% MORE work (1381 splits against 980). What it costs is the TIP — longest
+      edge there 0.1450 against 0.0487, 25 vertices against 65. `stroke.h` and
+      `clay.h` carry the replacement, `design.md` D2 (2) is corrected, and
+      `proposal.md` §16 has the table
+- [x] 3.3 `DynamicSculptor::CarriedRegionCounters`: `captured`, `inserted`,
+      `inserted_one_parent`, `retired`, `moved`, `collapses_refused`, plus
+      `carried` and `top_weight` snapshotted as the capture closes so a caller can
+      read them after the stroke returns. `collapses_refused` marks a carried
+      entry the first time a collapse is refused on it and counts it ONCE for the
+      gesture, so the region bounds it and the case asserts that bound —
+      deduplicating per STAMP was tried first and read 616 against 891 raw
+      events, which is not an order of magnitude and is bounded by nothing
+- [x] 3.4 Asserted on every adaptive fixture in the reach and maintenance
+      cases
 
 ## 4. Tests
 
@@ -150,122 +156,191 @@
       the right threshold. Assert reach >= 0.99 and not == 1.0: the rows read
       99.99–100.03%, and the 100.03 is a real overshoot — D2 (5) lets the
       weight-1 vertex keep the tangential slide the relaxation gave it
-- [ ] 4.2 The same assertion with the drag's sign flipped and on the mirrored
-      pole, so the threshold cannot be met by one fixture's luck
-- [ ] 4.3 A curved drag and a 1.5 drag, both paths, both reaching the drag.
-      **On the curve, assert the NET DISPLACEMENT and not the path length**: a
-      quarter arc of length 0.6 has a chord of 0.5402, `kernel_grab` is handed
-      `p_n − p_0`, and a case that demands 0.6 is demanding 111% of what the rule
-      promises. Measured, B carries the region to 0.5402 of 0.5402
-- [ ] 4.4 The maintenance is asserted as a COUNT: over the 1.5 pull-out the
-      captured set is maintained rather than decaying — assert live entries at
-      the end against entries at capture plus splits minus collapses, and assert
-      the precondition (splits > 0) so the case cannot pass on a surface that
-      never remeshed. Measured envelopes to write the case against: the captured
-      set GROWS (45 -> 792 on the 1.5 pull-out, 9 -> 195 on the 1.5 push-in),
-      splits per stroke 220–1357, and under 3.1a **entries retired is exactly
-      zero** — which is the sharpest assertion available and the one a broken
-      protection fails first
-- [ ] 4.4a The TOP SURVIVING WEIGHT is asserted, not only the count: it is 1.000
-      at every stamp of every fixture under the full D2, and a maintenance that
-      drops 3.1a reads 0.710–1.000. A count alone cannot tell those apart —
-      D2 without 3.1a keeps MORE entries live at some stamps and still loses the
-      drag, which is the whole finding of 2.0
-- [ ] 4.4b The longest edge is asserted for 3.1a rather than assumed: refusing
-      collapses must not coarsen the surface. Measured, max edge after the 1.5
-      push-in is 0.2689 with the protection and 0.6215 without it, against a
-      starting 0.0917 and a fixed mesh's 1.3150
-- [ ] 4.5 Mutate before trusting: revert 3.1 and watch 4.4 fail; revert 3.1a and
-      watch 4.4a fail (4.4 alone will NOT — see 2.0); revert 3.1c and watch the
-      relaxation inside a Grab stop having any effect; revert 3.2 and watch the
-      longest-edge case fail. A test that passes with the fix reverted is not a
-      test
-- [ ] 4.6 A Grab through `apply_to_multires` — the first in the tree
+- [x] 4.2 Eight fixtures in one case: both poles, both signs of the drag, 0.6
+      and 1.5, at radius 0.15 / detail 4 where an unmaintained region dies and at
+      radius 0.30 / detail 8 as the control. Measured agreement 9.1e-5 – 1e-3.
+      NOTE the sign flip is of the DRAG and not of the anchor: starting a stroke
+      0.6 off the surface reaches nothing and captures nothing, which the first
+      spelling of these fixtures did
+- [x] 4.3 Both. The curve asserts the CHORD and asserts that it is not the path
+      (the fixed path reaches 100.0% of the chord and under 98% of the path). And
+      it found something: **the ADAPTIVE curve reaches 115.8% of the chord**,
+      because a child adopted from one carried parent is born on material the arc
+      swept and then takes its own share of the remaining drag. It is the
+      maintenance and not the rule — with the remesher off the same fixture agrees
+      to 1e-3, asserted in the case — and it is not a regression (re-gathering
+      disagrees by 1.3e-3 there). Bounded by the case, recorded in the release
+      notes and in `proposal.md` §17
+- [x] 4.4 Asserted on three fixtures with `captured > 0`, `splits > 0` and
+      `collapses > 0` as preconditions: entries == captured + inserted +
+      inserted_one_parent − retired, entries > captured, both split rules fired,
+      **retired == 0**, and refusals bounded by the region. Measured 9 → 195 and
+      45 → 811
+- [x] 4.4a `carried_top_weight`, snapshotted into the counters as the capture
+      closes, asserted at 1.000 on every fixture
+- [x] 4.4b Asserted against the no-remesher control measured IN the case
+      (`topology.enabled = false`, with `splits == 0` asserted so the control is
+      really a control), not against a remembered constant: the protected rule
+      leaves under half the control's longest edge and under 0.4 absolute
+- [x] 4.5 **Eight mutations, each removed from the shipped source, rebuilt, and
+      the build success AND a changed binary asserted before the result was read.**
+      That check earned itself: the first harness ran `git checkout` over an
+      uncommitted edit, every build after the first failed, the stale binary was
+      re-run and all eight mutations reported identically. Committed first, then
+      re-run:
+
+      | mutation | cases failing | assertions failing |
+      |---|---|---|
+      | rule 3, a collapse may retire a carried vertex | 3 | 26 |
+      | rule 5, the remesher's move is not followed | 1 | 1 |
+      | rule 4, a one-parent split is dropped | 2 | 4 |
+      | rule 1, the adaptive region is re-gathered | 4 | 22 |
+      | rule 2, the remesh centre stays at the anchor | **0**, then 1 | **0**, then 3 |
+      | the maintenance, splits not published | 4 | 28 |
+      | rule 1, the fixed region is re-gathered | 4 | 20 |
+      | the deformation rule itself | 4 | 24 |
+
+      **The rule-2 row is the finding and it is why this task exists.** The case
+      as first written asserted the WHOLE SURFACE's longest edge and passed with
+      the rule reverted, because that maximum lives in the neck behind the tip
+      either way (0.1466 following, 0.1450 anchored). Rewritten against the tip —
+      0.0487 against 0.1450, and 65 vertices within a brush radius against 25 — it
+      fails 3 assertions when reverted. See `proposal.md` §16
+- [x] 4.6 "a multiresolution grab reaches the whole drag" — the first Grab
+      through `apply_to_multires` in the tree. Reverting the fixed path's capture
+      fails it, which is the evidence it reaches the shared rule
 
 ## 5. The goldens that move, and what each becomes
 
 Measured by running the suite under each candidate rule, not predicted. Under B
 exactly two cases fail, both in one file; under C a third does.
 
-- [ ] 5.1 `tests/unit/test_dynamic_stroke.cpp:196` "a stroke equals its stamps,
-      topology included" — its `hand_loop` (lines 134–153) spells out today's
-      rule (`b.center = stamps.front().position`, direction = motion between
-      stamps). It is a MIRROR of the rule, not a pin on 41%: update the loop to
-      the captured-set rule and the case means what it meant. 6 assertions,
-      verb 0
-- [ ] 5.2 `tests/unit/test_dynamic_stroke.cpp:737` "a recorded stroke is the
-      unrecorded stroke, and undoes exactly" — same cause in `recorded_loop`
-      (lines 663–690). 2 assertions, verb 0
-- [ ] 5.3 `tests/unit/test_mesh_sculpt.cpp:727` "grab anchors and snakehook
-      walks" — `CHECK(reach(Snakehook) > reach(Grab) + 0.1f)`. It measures which
-      vertices were touched, not how far they moved, so the captured set leaves
-      it PASSING (a captured region is still the region around the first stamp)
-      and a following centre breaks it. Keep it; add the how-far assertion
-      beside it, since the pair is what says a grab anchors AND pulls
-- [ ] 5.4 `tests/unit/mesh_sculpt_goldens_{linux_x64,macos_arm64,msvc_x64}.inc`
-      are NOT affected and must not be regenerated: `run_case` in
-      `test_mesh_sculpt_parity.cpp` drives `MeshSculptor::stamp` directly with
-      an explicit centre per step and never the stroke consumer. Verified by
-      running the parity case under all five rules — it passes under every one.
-      A PR that regenerates them has changed something it did not mean to
-- [ ] 5.5 Nothing else in the seventeen files that touch a stroke consumer or
-      Grab moves: `test_multires_sculpt.cpp`, `test_c_mesh_sculpt.cpp`,
-      `test_c_dynamic_topology.cpp`, `test_c_dynamic_delta.cpp`,
-      `test_c_stroke.cpp`, `test_sculpt_allocation.cpp`, `test_stamp_frame.cpp`,
-      `test_dynamic_replay.cpp`, `test_dynamic_history.cpp`,
-      `test_sculpt_kernels.cpp`, `test_dynamic_shared_brush_parity.cpp`,
-      `test_multires_shared_brush_parity.cpp` all pass under every rule
+- [x] 5.1 `hand_loop` updated to the carried rule: it opens a carried region for
+      Grab, drags by the motion since the first sample, and follows the remesh
+      centre once the region is captured. Predicted 6 assertions at :224–232;
+      measured exactly those six
+- [x] 5.2 `recorded_loop` updated the same way. Predicted 2 assertions at :778
+      and :779; measured exactly those two
+- [x] 5.3 Kept, unchanged and passing, with the how-far assertion beside it:
+      the grab's travel along the drag equals the drag to within 2%
+- [x] 5.4 Verified rather than trusted, twice: `run_case` sets `s.center` per
+      step and calls `MeshSculptor::stamp`, so no stroke consumer and no capture
+      reaches it; and `git diff origin/main --stat` names none of the three
+      `.inc` files. The parity case passes unchanged
+- [x] 5.5 Confirmed on the shipped code: the only two cases that moved are 5.1
+      and 5.2, and the full suite is green everywhere else
 - [x] 5.6 Confirmed on the FULL suite and not only the targeted shard: under the
       captured-set rule it is **2837 of 2839 cases, 8 of 17,931,111 assertions
       failing**, and they are exactly 5.1 and 5.2; under a following centre
       **2836 of 2839, 9 assertions**, adding exactly 5.3. Nothing else in the
       tree moves under either rule. Re-run independently, with the captured-set
       rule made the DEFAULT in all three consumers rather than switched on:
-      2839/2839 and 17,931,111 assertions at `origin/main`, then 2837/2839 and
+      2839/2839 and 17,931,111 assertions at origin/main, then 2837/2839 and
       17,931,103, the eight failures being `test_dynamic_stroke.cpp:224, 228,
       229, 230, 231, 232, 778, 779` and nothing else. 5.4 re-checked by reading:
       `run_case` sets `s.center` per step and calls `MeshSculptor::stamp`, so no
       stroke consumer and no capture reaches it
-- [ ] 5.7 Still to run before the PR: the pyclay tests from a build that actually
-      has pyclay (the cpu-only preset does not enable it), the Swift surface, and
-      the device suite, none of which this measurement could reach
+- [x] 5.7 pyclay built and its pytest run through `release_check.py`, which
+      configures `CLAY_BUILD_PYTHON=ON` and passes `--require-import` so the
+      binding-parity gate compares against a BUILT module rather than against the
+      source. See §7.4. The Swift surface and the device suite are NOT run: no
+      mesh brush is in the device suite and no Swift signature moved — stated
+      rather than implied
 
 ## 6. Documentation and spec
 
-- [ ] 6.1 `include/clay/brush/stroke.h` — the Grab sentence at `apply_to_mesh`,
-      the adaptive one at `apply_to_dynamic`, and the "Grab's AFTER remesh runs
-      around the first stamp's centre" caveat
-- [ ] 6.2 `bindings/c/clay.h` — the same two places beside
-      `clay_mesh_sculptor_apply_stroke` and `clay_dynamic_sculptor_apply_stroke`
-- [ ] 6.3 `docs/07-brushes-and-features.md` — the Grab paragraph, the "Not
-      provided" note about the after-remesh, and the "known question left open"
-      paragraph, which this change closes with numbers
-- [ ] 6.4 `docs/07` also states, beside both, that the SDF move brush still moves
-      less than asked and why the two now differ
-- [ ] 6.5 `CLAY_ABI_*` and `kSceneMinor` do not move; no pyclay or Swift
-      SIGNATURE moves. pyclay's DOCSTRINGS do:
-      `bindings/python/pyclay_module.cpp:5671` ("'grab' anchors on the first
-      stamp and drags by the motion between stamps") and `:8682` ("'grab'
-      centres on the first stamp"). So does
-      `include/clay/brush/stroke.h:383`, the `apply_to_mesh` sentence itself,
-      which 6.1's list omitted
-- [ ] 6.6 Release notes: the reach changes from 41% to the whole drag, which is
-      5.6x further on a 1.5 drag, and any host feel tuned against 41% changes
+- [x] 6.1 All three, plus the curve's chord, plus the statement that a FIXED
+      mesh has no mitigation for a stretched captured region and cannot have one
+      (longest edge 0.82 after a 1.5 pull from a starting 0.09)
+- [x] 6.2 Both, at :8447 and :8723, with the chord and an explicit note that
+      the behaviour changed without an ABI change
+- [x] 6.3 The Grab sentence, the "Not provided" note, and the "known question
+      left open" paragraph replaced by "A grab carries the region it captured
+      (#620)" with the five rules and what each was measured to be worth —
+      including the correction to the remesh-centre row
+- [x] 6.4 Stated in `docs/07` §8c beside the new section and in `docs/05`
+      beside `layer.move_surface`, both naming it a field-inversion problem rather
+      than an anchoring one, and both saying it is not fixed here
+- [x] 6.5 `CLAY_ABI_*` and `kSceneMinor` unmoved, verified in the diff; no
+      pyclay or Swift signature moves. Both pyclay docstrings updated, and a third
+      beside them (`apply_stroke(record=)`'s "keeping the stroke's Grab and
+      Snakehook centres"), which the list omitted
+- [x] 6.6 `docs/release-notes/v0.120.0.md`, following the per-version convention
+      (`v0.113.0.md` and `v0.116.0.md` were likewise written in the PR that made
+      the change, not at release time). It carries the two mandatory sections and
+      the per-preset TABLE, because the shortfall depended on the brush radius
+      (22.66% at r 0.15, 41.10% at 0.30, 60.56% at 0.50 on the same 0.6 drag) and
+      on the drag (41% at 0.6, 18% at 1.5): a host feel travels 1.65x to 10.8x
+      further depending on its preset, so there is no single factor to divide by
 
 ## 7. Verification
 
-- [ ] 7.1 `cmake --preset cpu-only -DCLAY_BUILD_TESTS=ON` + full `ctest`
-- [ ] 7.2 `python3 tools/check_layering.py`, `check_kernel_dialect.py`,
-      `check_licenses.py`, `check_c_abi.py`, `check_test_shards.py`,
-      `check_gallery.py`, `check_doc_latency.py`
-- [ ] 7.3 `npx -y @fission-ai/openspec@1.12.0 validate --all --strict`
-- [ ] 7.4 `python3 tools/release_check.py --skip-slow`
-- [ ] 7.5 The probe patch is measurement scaffolding and is NOT in the PR.
-      §1's patch touched `src/brush/stroke.cpp`, `src/mesh/sculpt.cpp`,
-      `src/mesh/dynamic_sculpt.cpp`, `include/clay/mesh/sculpt.h` and
-      `include/clay/mesh/dynamic_sculpt.h`; §2.0's touches
-      `include/clay/mesh/remesh_local.h`, `src/mesh/remesh_local.cpp`,
-      `include/clay/mesh/dynamic_sculpt.h`, `src/mesh/dynamic_sculpt.cpp` and
-      `src/brush/stroke.cpp`, and its driver is `build/probe20.cpp` (untracked).
-      Confirm `git diff origin/main` names no `probe_` symbol and no
-      `RemeshObserver`
+- [x] 7.1 Full unit suite **2847 of 2847 cases, 17,931,271 of 17,931,271
+      assertions**, from 2839 / 17,931,111 on origin/main — the eight new cases
+      and 160 new assertions, with the two that moved passing under the updated
+      rule
+- [x] 7.2 Run through `release_check.py`; see §7.4 for the table and for the two
+      rows that fail on this machine for reasons that predate the branch
+- [x] 7.3 `validate --all --strict` at the pinned 1.12.0
+- [x] 7.4 `release_check.py --skip-slow`; see §7.7
+- [x] 7.6 **Cognitive complexity, measured — and the first measurement was
+      invalid.** clang-tidy `readability-function-cognitive-complexity` run with
+      `-p build/release` found NO COMPILATION DATABASE, so every file was parsed
+      with its primary header missing and the scores it printed were of a
+      degraded AST: it reported `remesh_region` at 15 both with the hooks and
+      without them, which is what sent me looking. Re-run against a real
+      `compile_commands.json` (`-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`), with
+      `clang-diagnostic-error` counted and zero on both trees:
+
+      | function | origin/main | first spelling | shipped | target |
+      |---|---|---|---|---|
+      | `remesh_region` | 132 | **170** | **136** | 15 |
+      | `relax_region` | 39 | 42 | **38** | 15 |
+      | `apply_to_mesh` | 19 | 19 | 19 | 15 |
+      | `apply_to_multires` | 21 | 24 | 24 | 15 |
+      | `apply_to_dynamic` | 12 | 15 | 15 | 15 |
+      | `DynamicSculptor::stamp_impl` | 24 | 26 | 26 | 15 |
+      | `DynamicSculptor::gather` | 11 | 14 | 14 | 15 |
+      | `MeshSculptor::gather` | 9 | 12 | 12 | 15 |
+
+      The four null tests per operator added **38** to `remesh_region`, which is
+      the highest score in that file before anything is added to it. They are now
+      five one-line helpers in its anonymous namespace (`split_ends`,
+      `notify_split`, `may_collapse`, `position_if_watched`, `notify_collapse`,
+      `commit_relaxed_positions`), which takes the addition to **+4** and leaves
+      `relax_region` one BELOW where it started. Every function this change
+      ADDS is inside the backend target: `carry_on_split` 8,
+      `rebuild_from_carry` 9, `carry_index_of` 5, `commit_relaxed_positions` 4,
+      `notify_collapse` 3, `carried_live` / `carried_top_weight` /
+      `end_carried_region` 3, `split_ends` / `notify_split` / `may_collapse` /
+      `position_if_watched` / `carry_may_collapse` / `carry_on_collapse` 2.
+      `remesh_region`, `relax_region`, `apply_to_mesh`, `apply_to_multires` and
+      `stamp_impl` are over the target and were over it on origin/main; stated
+      rather than mangled, as the rule allows
+- [x] 7.7 `release_check.py --skip-slow`: **PASS** on version (0.120.0 all three
+      files, unmoved), configure, build, tests (11 of 11 ctest entries including
+      the pyclay pytest), parity (48 cases, 1,411,877 assertions, `compared cpu`
+      — which says nothing about cuda/opencl/vulkan and the row says so),
+      layering, licenses, bindings (`imported .../pyclay.cpython-311-darwin.so`,
+      a BUILT module and not the source-against-itself fallback), kernels, abi
+      and openspec. **FAIL** on `dialect` (no Metal Toolchain on this machine),
+      `device` (the iPad gate ran at 1bc981aba and the engine has moved since)
+      and the four `hardware/*` rows (all four say the same thing: they ran at
+      0c3a392cb and `include/clay/kernel/tape.h` changed after, which #618 did,
+      not this branch). All six fail identically on origin/main.
+      **`task-symbols` failed and it WAS this change's**, 9 unresolved names —
+      including three that predate this stage on this branch. Backticks around
+      origin/main, RemeshObserver, probe_ and build/ make the checker look for
+      files and symbols that do not exist; unquoted, it reads
+      `task symbols resolve in 62 change(s), 5 baselined`
+- [x] 7.8 The two REFUTATIONS this stage produced are in `proposal.md` §16 and
+      §17 and are reflected back into `design.md` D2 (2) and its open questions,
+      `docs/07` and `include/clay/brush/stroke.h`, rather than left in the
+      proposal only: the remesh centre does not buy the surface-wide edge it was
+      justified on, and a curved drag on the adaptive surface reaches past the
+      chord
+
+- [x] 7.5 `git diff origin/main` names no probe_ symbol, no RemeshObserver
+      and no `getenv`. The shipped publication interface is `mesh::RemeshHooks`
+      and the shipped carry is `DynamicSculptor`'s own, neither behind a switch.
+      build/ is gitignored and the probe drivers stay there

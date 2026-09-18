@@ -176,12 +176,24 @@ a gesture walks the surface once instead of once per stamp. `proposal.md` §6's
 "B is not cheaper on the adaptive path" was measured on unmaintained B with the
 remesh left at the anchor.
 
-(2) is mandatory on its own evidence. Longest edge left on the surface after a
-1.5 pull-out: 0.1174 under A, **1.1227 under B with the remesh left at the
-anchor** — worse than no remesh at all, because the tip is 1.5 away and the ball
-never reaches it — 0.3571 with the centre following. A remesh at the first
-stamp's centre is only defensible while the surface barely moves, which is
-precisely the behaviour this change removes.
+**(2) is mandatory, and NOT on the number this document first gave.** What is
+above — 1.1227 under B with the remesh left at the anchor against 0.3571 with it
+following — was measured on an UNMAINTAINED carried region, where a handful of
+surviving vertices are dragged away alone. Re-measured on the SHIPPED code, with
+the region maintained, protected and adopting one-parent splits, a remesh left
+at the anchor leaves the same surface-wide longest edge (**0.1450** against
+0.1466) and does **40% MORE** topology work (1381 splits against 980). The
+surface-wide maximum lives in the NECK behind the tip either way and cannot see
+this rule at all; the first version of the test asserting it PASSED with the rule
+reverted.
+
+What (2) buys is the TIP, where a ball at the gesture's first sample never
+reaches: the longest edge within a brush radius of the tip is **0.0487 with the
+centre following and 0.1450 without**, and there are 65 vertices there against
+25. So the rule stands on "the same surface for 40% less work, and a refined tip
+instead of a coarse one" rather than on "otherwise worse than not remeshing".
+`proposal.md` §16 has the table and the shipped case asserts the tip against the
+remesher's own `target * split_factor`.
 
 The midpoint-of-captured-positions rule is the only one that composes: a vertex
 born mid-gesture is born between two parents that have ALREADY taken part of the
@@ -324,6 +336,17 @@ that works and a brush that does not and asking the host to pick.
   better than P.** Measured: 0.1466 after the 1.5 pull-out and 0.2689 after the
   1.5 push-in, against P's 0.3571 and the fixed mesh's 0.8176. On the four
   shorter fixtures it is 0.0882–0.1174, which is today's A exactly.
+
+- ANSWERED BY BUILDING IT, and new: **on a CURVE the adaptive surface reaches
+  past the chord.** The twelve fixtures behind the 0.0 – 1.6e-4 agreement are all
+  STRAIGHT drags. On the curved fixture `proposal.md` §1 measures, the shipped
+  rule gives the fixed path 100.0% of the chord and the adaptive one 115.8%, an
+  agreement of 0.222. It is the maintenance and not the deformation — with the
+  remesher off the same fixture agrees to 1e-3 — and the mechanism is (4): a
+  child adopted from ONE carried parent is born on material the arc swept past
+  and then takes its own share of the remaining drag, which a straight drag has
+  none of. Not a regression (re-gathering disagrees by 1.3e-3 there) and not
+  fixed; recorded in the release notes and bounded by a case. See §17.
 
 - STILL OPEN, and new: is the collapse protection safe on a gesture whose
   carried set covers a whole region the artist then wants thinned? The twelve
