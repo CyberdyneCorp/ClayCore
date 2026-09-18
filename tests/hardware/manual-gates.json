@@ -4,28 +4,48 @@
   "_history": "Added for #578, where v0.113.0 was tagged with a 16/16 PASS table and none of these four had been run. The parity row asserted 'every backend registered in this build matches CPU scalar' and the build registered cpu and metal, so CUDA and OpenCL passed by being absent. v0.116.0 is the first release where all four are RUN: vulkan-device had been waived since the file was created for want of a host with real Vulkan silicon, and the fleet acquired one. The waiver was NOT reworded to fit -- its premise was re-checked and had stopped being true.",
   "gates": {
     "cuda-parity": {
-      "status": "run",
-      "commit": "0c3a392cba28a570fe79da2c622e6a28d97c5330",
-      "date": "2026-09-15",
-      "evidence": "RTX 5060 / driver 580.95.05 / nvcc 12.0.140, fresh worktree, configured -DCLAY_BACKEND_CUDA=ON -DCLAY_BACKEND_OPENCL=ON -DCLAY_BACKEND_VULKAN=ON. 'parity: every registered backend matches the scalar reference' reports 565 assertions cpu-only and 1125 with CUDA (+560, 0 failed), OpenCL and Vulkan hidden (OCL_ICD_VENDORS=/nonexistent, VK_DRIVER_FILES=/nonexistent). Every backend adds the same +560, against +539 at e8ca6d59 -- the corpus grew, so the per-backend DIFFERENCE is the comparable quantity and the totals are not. Caveat: PTX JIT to Blackwell only; a cubin for sm_120 needs CUDA >= 12.8 and stays unexercised."
+      "status": "waived",
+      "commit": "59e42ccf9e088234a6cc7da99b54910429c1f9f4",
+      "date": "2026-09-18",
+      "prior_run": {
+        "commit": "0c3a392cba28a570fe79da2c622e6a28d97c5330",
+        "date": "2026-09-15",
+        "evidence": "RTX 5060 / driver 580.95.05 / nvcc 12.0.140, fresh worktree, configured -DCLAY_BACKEND_CUDA=ON -DCLAY_BACKEND_OPENCL=ON -DCLAY_BACKEND_VULKAN=ON. 'parity: every registered backend matches the scalar reference' reports 565 assertions cpu-only and 1125 with CUDA (+560, 0 failed), OpenCL and Vulkan hidden (OCL_ICD_VENDORS=/nonexistent, VK_DRIVER_FILES=/nonexistent). Every backend adds the same +560, against +539 at e8ca6d59 -- the corpus grew, so the per-backend DIFFERENCE is the comparable quantity and the totals are not. Caveat: PTX JIT to Blackwell only; a cubin for sm_120 needs CUDA >= 12.8 and stays unexercised."
+      },
+      "reason": "Not re-run for v0.120.0, and no kernel arithmetic changed in the release. This gate was RUN at 0c3a392cb on RTX 5060 / driver 580.95.05 / nvcc 12.0.140; that record is kept under prior_run. It expired only because 9c5419ec (#618) edited include/clay/kernel/tape.h, and that diff is two trailing comments on ccombine_relief and ccombine_incise, whose values stay 14 and 15: `git diff 0c3a392cb..HEAD -- include/clay/kernel backends` is 12 insertions and 2 deletions in that one file, with no non-comment line changed. release_check's `kernels` row (15 headers byte-identical) says the same thing from the other side. What this release therefore does NOT claim: that CUDA, OpenCL or Vulkan ran against v0.120.0's tree. The cpu `parity` row covers cpu alone."
     },
     "nvcc-build": {
-      "status": "run",
-      "commit": "0c3a392cba28a570fe79da2c622e6a28d97c5330",
-      "date": "2026-09-15",
-      "evidence": "Same build: nvcc 12.0.140 compiled backends/cuda/clay_kernels.cu; cmake/ClayCudaArch.cmake reported 'GPU arch 120-real is newer than this toolkit; building 90-virtual PTX for the driver to JIT', and the RTX 5060 ran it. Self-proving rather than taken from the status line: the compile line in flags.make carries --generate-code=arch=compute_90,code=[compute_90]. CMAKE_CUDA_ARCHITECTURES:STRING=52 in the cache is enable_language(CUDA)'s toolkit default (CLAY_CUDA_ARCH_TOOLKIT_DEFAULT=52), which ClayCudaArch.cmake overrode by setting CUDA_ARCHITECTURES on the TARGET rather than the variable; it never compiled the kernels. It ran through PTX JIT, so the cubin half of the auto-detection is still unexercised at sm_120."
+      "status": "waived",
+      "commit": "59e42ccf9e088234a6cc7da99b54910429c1f9f4",
+      "date": "2026-09-18",
+      "prior_run": {
+        "commit": "0c3a392cba28a570fe79da2c622e6a28d97c5330",
+        "date": "2026-09-15",
+        "evidence": "Same build: nvcc 12.0.140 compiled backends/cuda/clay_kernels.cu; cmake/ClayCudaArch.cmake reported 'GPU arch 120-real is newer than this toolkit; building 90-virtual PTX for the driver to JIT', and the RTX 5060 ran it. Self-proving rather than taken from the status line: the compile line in flags.make carries --generate-code=arch=compute_90,code=[compute_90]. CMAKE_CUDA_ARCHITECTURES:STRING=52 in the cache is enable_language(CUDA)'s toolkit default (CLAY_CUDA_ARCH_TOOLKIT_DEFAULT=52), which ClayCudaArch.cmake overrode by setting CUDA_ARCHITECTURES on the TARGET rather than the variable; it never compiled the kernels. It ran through PTX JIT, so the cubin half of the auto-detection is still unexercised at sm_120."
+      },
+      "reason": "Not re-run for v0.120.0, and no kernel arithmetic changed in the release. This gate was RUN at 0c3a392cb on nvcc 12.0.140 compiling backends/cuda/clay_kernels.cu, PTX JIT to Blackwell; that record is kept under prior_run. It expired only because 9c5419ec (#618) edited include/clay/kernel/tape.h, and that diff is two trailing comments on ccombine_relief and ccombine_incise, whose values stay 14 and 15: `git diff 0c3a392cb..HEAD -- include/clay/kernel backends` is 12 insertions and 2 deletions in that one file, with no non-comment line changed. release_check's `kernels` row (15 headers byte-identical) says the same thing from the other side. What this release therefore does NOT claim: that CUDA, OpenCL or Vulkan ran against v0.120.0's tree. The cpu `parity` row covers cpu alone."
     },
     "opencl-device": {
-      "status": "run",
-      "commit": "0c3a392cba28a570fe79da2c622e6a28d97c5330",
-      "date": "2026-09-15",
-      "evidence": "Same RTX 5060 host, NVIDIA ICD: 1685 assertions with CUDA and OpenCL registered, +560 over the CUDA-only run, 0 failed. Controlled with OCL_ICD_VENDORS=/nonexistent, verified BEFORE the runs to hide only what it claims (clGetPlatformIDs 1 platform -> 0, /nonexistent -> -1001). CUDA_VISIBLE_DEVICES= is NOT a control here, because it hides NVIDIA's OpenCL platform too -- it also returns -1001."
+      "status": "waived",
+      "commit": "59e42ccf9e088234a6cc7da99b54910429c1f9f4",
+      "date": "2026-09-18",
+      "prior_run": {
+        "commit": "0c3a392cba28a570fe79da2c622e6a28d97c5330",
+        "date": "2026-09-15",
+        "evidence": "Same RTX 5060 host, NVIDIA ICD: 1685 assertions with CUDA and OpenCL registered, +560 over the CUDA-only run, 0 failed. Controlled with OCL_ICD_VENDORS=/nonexistent, verified BEFORE the runs to hide only what it claims (clGetPlatformIDs 1 platform -> 0, /nonexistent -> -1001). CUDA_VISIBLE_DEVICES= is NOT a control here, because it hides NVIDIA's OpenCL platform too -- it also returns -1001."
+      },
+      "reason": "Not re-run for v0.120.0, and no kernel arithmetic changed in the release. This gate was RUN at 0c3a392cb on the same RTX 5060 host on the NVIDIA ICD; that record is kept under prior_run. It expired only because 9c5419ec (#618) edited include/clay/kernel/tape.h, and that diff is two trailing comments on ccombine_relief and ccombine_incise, whose values stay 14 and 15: `git diff 0c3a392cb..HEAD -- include/clay/kernel backends` is 12 insertions and 2 deletions in that one file, with no non-comment line changed. release_check's `kernels` row (15 headers byte-identical) says the same thing from the other side. What this release therefore does NOT claim: that CUDA, OpenCL or Vulkan ran against v0.120.0's tree. The cpu `parity` row covers cpu alone."
     },
     "vulkan-device": {
-      "status": "run",
-      "commit": "0c3a392cba28a570fe79da2c622e6a28d97c5330",
-      "date": "2026-09-15",
-      "evidence": "NO LONGER WAIVED. Real silicon, two devices, each pinned with VK_DRIVER_FILES/VK_ICD_FILENAMES to one ICD: NVIDIA GeForce RTX 5060 (driver 580.95.05, Vulkan 1.4.312) and Intel UHD Graphics 770 (Mesa 25.2.8, Vulkan 1.4.318). Each reports 1125 assertions with Vulkan registered, +560 over cpu-only, 0 failed; all four backends together 2245 = 565 + 3x560, 0 failed. SPIR-V built with glslangValidator (glslc absent), loader headers 1.3.275. lavapipe/llvmpipe was present on the host and EXCLUDED by the pinned ICD, so neither run's arithmetic was on the CPU -- which is the whole reason this gate existed as a waiver until now."
+      "status": "waived",
+      "commit": "59e42ccf9e088234a6cc7da99b54910429c1f9f4",
+      "date": "2026-09-18",
+      "prior_run": {
+        "commit": "0c3a392cba28a570fe79da2c622e6a28d97c5330",
+        "date": "2026-09-15",
+        "evidence": "NO LONGER WAIVED. Real silicon, two devices, each pinned with VK_DRIVER_FILES/VK_ICD_FILENAMES to one ICD: NVIDIA GeForce RTX 5060 (driver 580.95.05, Vulkan 1.4.312) and Intel UHD Graphics 770 (Mesa 25.2.8, Vulkan 1.4.318). Each reports 1125 assertions with Vulkan registered, +560 over cpu-only, 0 failed; all four backends together 2245 = 565 + 3x560, 0 failed. SPIR-V built with glslangValidator (glslc absent), loader headers 1.3.275. lavapipe/llvmpipe was present on the host and EXCLUDED by the pinned ICD, so neither run's arithmetic was on the CPU -- which is the whole reason this gate existed as a waiver until now."
+      },
+      "reason": "Not re-run for v0.120.0, and no kernel arithmetic changed in the release. This gate was RUN at 0c3a392cb on real silicon, RTX 5060 (580.95.05) and Intel UHD 770 (Mesa 25.2.8), each pinned to one ICD; that record is kept under prior_run. It expired only because 9c5419ec (#618) edited include/clay/kernel/tape.h, and that diff is two trailing comments on ccombine_relief and ccombine_incise, whose values stay 14 and 15: `git diff 0c3a392cb..HEAD -- include/clay/kernel backends` is 12 insertions and 2 deletions in that one file, with no non-comment line changed. release_check's `kernels` row (15 headers byte-identical) says the same thing from the other side. What this release therefore does NOT claim: that CUDA, OpenCL or Vulkan ran against v0.120.0's tree. The cpu `parity` row covers cpu alone."
     }
   }
 }
