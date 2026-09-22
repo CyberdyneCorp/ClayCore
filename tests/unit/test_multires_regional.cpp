@@ -2159,4 +2159,41 @@ TEST_CASE("regional boundary: an edit below the rim re-derives the frames the de
     // scratch that would be right whatever the halo did.
     CHECK(part.eval_stats().full_level_rebuilds == full_before);
     CHECK(part.eval_stats().partial_level_updates > 0);
+
+    // ONE LEVEL-2 VERTEX AT A TIME, which is the case a halo can get wrong. A
+    // cage move on this cage marks nearly every level-3 vertex dirty, so the
+    // loop above would pass with no halo at all; a single level-2 coefficient
+    // marks exactly the children of its own faces, and a vertex one face beyond
+    // them has a frame that moved and a subdivided position that did not.
+    //
+    // TWO ORACLES, because each is blind where the other sees. The dense
+    // hierarchy runs the SAME partial path, so a halo that stops short stops
+    // short in both and the two agree; the regional hierarchy's own full
+    // evaluation — every cache dropped and rebuilt — is what a stale frame is
+    // measured against. The dense one is still what says the rim is right.
+    const std::vector<std::uint32_t> ids2 = dense_ids(cage, 2);
+    std::vector<std::uint32_t> self(ids.size());
+    for (std::uint32_t v = 0; v < self.size(); ++v) self[v] = v;
+    std::size_t edits = 0, stale_edits = 0, stale_partial = 0;
+    double worst_edit = 0.0, worst_partial = 0.0;
+    for (std::uint32_t v = 0; v < static_cast<std::uint32_t>(ids2.size()); ++v) {
+        part.set_detail(2, v, kBoundaryCoefficient);
+        dense.set_detail(2, ids2[v], kBoundaryCoefficient);
+        const std::vector<cfloat3> partial = part.positions_at(3);
+        const Disagreement d = compare(dense.positions_at(3), partial, ids, rim);
+        const Disagreement n = compare(dense.normals_at(3), part.normals_at(3), ids, rim);
+        ++edits;
+        if (d.count > 0 || n.count > 0) ++stale_edits;
+        worst_edit = std::max({worst_edit, d.worst, n.worst});
+        part.drop_all_caches();
+        const Disagreement f = compare(part.positions_at(3), partial, self, rim);
+        if (f.count > 0) ++stale_partial;
+        worst_partial = std::max(worst_partial, f.worst);
+    }
+    INFO(stale_edits << " of " << edits << " level-2 edits disagree with the dense hierarchy, worst "
+                     << worst_edit << "; " << stale_partial
+                     << " disagree with a full re-evaluation, worst " << worst_partial);
+    CHECK(edits == 289);
+    CHECK(stale_edits == 0);
+    CHECK(stale_partial == 0);
 }
