@@ -65,8 +65,13 @@
       input. The frame input nulled (both `level_normals` calls that feed
       `transport_frames`): 10 assertions fail across all 3 cases, and the first
       is a moved POSITION — 60 of 289 level-3 vertices, worst 0.00536766. The
-      partial frame input alone: exactly 1 assertion, 49 of 49 cage moves stale,
-      worst 183 vertices. The display input alone (the four display sites): 6
+      partial frame input alone (`partial_evaluate`'s `level_normals_partial`
+      over `c.subdivided`): 3 assertions — 49 of 49 cage moves stale, and 97 of
+      289 single level-2 edits wrong against both the dense hierarchy and a full
+      re-evaluation (1 assertion before the level-2 loop existed). Truncating the
+      derived ring to its first face in `cross_newell_sum`, a partial port rather
+      than a missing one: 14 assertions across all 3 cases, first a moved
+      position, 64 of 289. The display input alone (the four display sites): 6
       assertions, display normals only — 64 of 289, worst 0.581 — with every
       position and frame still agreeing, which is the separation 1.4 asks for
 - [x] 1.5 The existing bit-identity case, "a refined patch holds the dense
@@ -946,6 +951,12 @@
   the input nulled at all six evaluation sites the whole suite — 2850 cases,
   17932966 assertions — fails 14 assertions, every one of them in the three
   new cases.
+- AND ON THE REAL PRE-FIX TREE, not only a revert: the three cases appended to
+  `2a727e7b` (main's merge of #490, the last main commit without the
+  neighbourhood) compile unchanged and fail the same 14 assertions — 60 of 289
+  moved positions, 40 / 58 / 60 frame normals at levels 1 / 2 / 3 on the 10x10
+  cage, 49 of 49 cage moves and 289 of 289 level-2 edits. The revert and the
+  history agree.
 - BEFORE AND AFTER, re-measured with the input reverted and restored rather than
   quoted. Every "before" number the audit recorded reproduces to the digits it
   printed, which is what says the revert IS the pre-fix tree:
