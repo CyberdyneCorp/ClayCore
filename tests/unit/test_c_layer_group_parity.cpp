@@ -173,11 +173,13 @@ TapeFacts facts(const clay_document* doc) {
     return f;
 }
 
-void same_facts(const TapeFacts& a, const TapeFacts& b, bool compare_bounds) {
+// The extent is compared for EVERY composition, narrowing and ringed ones
+// included: combine_extent is the one rule at every level, and the group's own
+// ring (which it lacked until task 3.1) is what makes the smooth ones agree.
+void same_facts(const TapeFacts& a, const TapeFacts& b) {
     CHECK(a.exact == b.exact);
     CHECK(a.lipschitz == doctest::Approx(b.lipschitz));
     CHECK(a.step == doctest::Approx(b.step));
-    if (!compare_bounds) return;
     for (int i = 0; i < 3; ++i) {
         CAPTURE(i);
         CHECK(a.lo[i] == doctest::Approx(b.lo[i]));
@@ -197,11 +199,6 @@ TEST_CASE("c abi: a composed layer of several items is one group of them, not a 
     // booleans are associative over this chain -- max(max(a, -c1), -c2) is
     // max(a, -min(c1, c2)) -- so for them the flat chain is the same field and
     // the parity above is the whole claim.
-    // Whether the two forms' extents are compared. Only where the composition
-    // has no support of its own: a GROUP adds no ring for its own combine, so a
-    // smooth or extended group reports the plain union of its children where
-    // the layer fold reports that union dilated (tape_build.cpp, compile_group).
-    bool compare_bounds = true;
     SUBCASE("union") {}
     SUBCASE("smooth union") {
         c = {CLAY_OP_ADD, CLAY_BLEND_QUADRATIC, 0.25f, 0.0f};
@@ -233,7 +230,6 @@ TEST_CASE("c abi: a composed layer of several items is one group of them, not a 
     SUBCASE("incise, with a rounding") {
         c = {CLAY_OP_INCISE, CLAY_BLEND_HARD, 0.2f, 0.25f};
     }
-    compare_bounds = c.k == 0.0f && c.rounding == 0.0f;
     const bool flat_differs = c.k > 0.0f;
     CAPTURE(c.op);
     CAPTURE(c.blend);
@@ -246,7 +242,7 @@ TEST_CASE("c abi: a composed layer of several items is one group of them, not a 
     const std::vector<float> layered_f = field(layered.doc, pts);
     const std::vector<float> grouped_f = field(grouped.doc, pts);
     CHECK(differing(layered_f, grouped_f) == 0);
-    same_facts(facts(layered.doc), facts(grouped.doc), compare_bounds);
+    same_facts(facts(layered.doc), facts(grouped.doc));
 
     // THE TEETH. The flat chain is what a flattening binding would have built on
     // BOTH sides; if it were the same document as the group, the check above
@@ -325,10 +321,8 @@ TEST_CASE("c abi: three composed layers fold in order, as nested groups do") {
     const std::vector<float> b = field(l_cut_last.doc, pts);
     CHECK(differing(a, field(g_cut_first.doc, pts)) == 0);
     CHECK(differing(b, field(g_cut_last.doc, pts)) == 0);
-    // Extents not compared: B is a SMOOTH subtract, and a group adds no ring
-    // for its own combine where the layer fold does.
-    same_facts(facts(l_cut_first.doc), facts(g_cut_first.doc), false);
-    same_facts(facts(l_cut_last.doc), facts(g_cut_last.doc), false);
+    same_facts(facts(l_cut_first.doc), facts(g_cut_first.doc));
+    same_facts(facts(l_cut_last.doc), facts(g_cut_last.doc));
     // Teeth: the order is the modelling decision, so the two must differ.
     CHECK(differing(a, b) > 0);
 }

@@ -506,16 +506,29 @@ struct Compiler {
 
     Transition default_transition_{};
 
-    // The geometric extent of the LAYER being compiled: the same union
-    // `tape.bounds` collects, restarted at every layer, so that the fold
-    // between layers can dilate by its own combine's support the way an item's
-    // geometry bound already carries its own. Groups need no part in it -- a
-    // group's children expand it themselves, which is exactly how they reach
-    // tape.bounds, rolled-back subtrees included.
+    // The geometric extent of the LAYER being compiled: the plain union of its
+    // items, restarted at every layer, which `fold_layer_bounds` dilates by the
+    // fold's ring into `reach_`. Groups need no part in it -- a group's children
+    // expand it themselves.
     //
     // Written by compile_list; reset and read only by run()/run_part(), so
     // every other entry point leaves it alone and none of them looks.
     math::Aabb layer_extent_{};
+
+    // THE PLAIN UNION of every item geometry this compile emitted, plus the
+    // ring each composed layer fold adds -- what `tape.bounds` was before a
+    // combine could narrow it. Kept because two readers still want exactly
+    // that and not the material extent: a transition's field info bounds
+    // |d1 - d2| by the diagonal of the region both surfaces live in, and
+    // `compile_layer_suffix` reports the appended items rather than a field.
+    math::Aabb reach_{};
+
+    // WHERE THE RUNNING VALUE CAN HOLD MATERIAL, folded combine by combine
+    // through `combine_extent`: the chain being compiled (`chain_bound_`,
+    // saved and restored around every group) and the layers already folded
+    // (`doc_bound_`). What an entry point finally reports as `tape.bounds`.
+    math::Aabb chain_bound_{};
+    math::Aabb doc_bound_{};
 
     // The gated item's own reach, set immediately before fold_info by the
     // caller that already computed it, so the bound is not recomputed and
@@ -579,7 +592,7 @@ struct Compiler {
             // union of their influence bounds, so its diagonal is a safe
             // bound. The weight's slope is the easing curve's steepest
             // measured rise over the transition's span.
-            const math::Aabb& region = tape.bounds;  // already includes this item
+            const math::Aabb& region = reach_;  // already includes this item
             float diff_bound = region.empty() || region.is_infinite()
                                    ? 1e3f
                                    : kernel::clength(region.extent());
@@ -1106,9 +1119,9 @@ struct Compiler {
                     cull_dropped = true;
                     continue;
                 }
-                // tape.bounds is the geometric extent meshing and raycast
-                // clipping use — never infinite, even for non-local ops
-                tape.bounds.expand(geometry);
+                // The plain union, which a transition's field info reads --
+                // never infinite, even for non-local ops.
+                reach_.expand(geometry);
                 // ...and the same union restricted to the layer being
                 // compiled, which is what the fold between layers dilates by
                 // its own combine's support. Only run()/run_part() read it,
@@ -1134,6 +1147,10 @@ struct Compiler {
                 gate_reach_ = geometry;
                 fold_info(*n, (have_acc || seeded) ? n->op : Op::Add, smooth && have_acc,
                           n->rounding * placed_distance_scale(layer, *n));
+                // Where the chain can hold material now. No ring: the item's
+                // geometry bound already carries its own combine's support.
+                chain_bound_ = combine_extent((have_acc || seeded) ? n->op : Op::Add, chain_bound_,
+                                              geometry, 0.0f, n->gated());
                 have_acc = true;
             }
         }
@@ -1158,11 +1175,17 @@ struct Compiler {
         bool seeded = !have_acc && group.op != Op::Add;
         if (seeded) emit_empty(group.color);
         const bool group_on_tail = on_tail_path_;
+        // The chain outside is the left operand of this group's combine; the
+        // children start a chain of their own.
+        const math::Aabb outer = chain_bound_;
+        chain_bound_ = math::Aabb{};
         bool sub = compile_list(group.children, content, layer, false);
+        const math::Aabb inner = chain_bound_;
         if (!sub) {  // empty subtree: roll back any partial emission
             tape.instrs.resize(saved_instrs);
             tape.params.resize(saved_params);
             tape.blob.resize(saved_strokes);
+            chain_bound_ = outer;
             // Nothing survives here, so nothing may be resumed from INSIDE
             // the rolled-back chain — a checkpoint naming lengths the tape no
             // longer has. But the position in FRONT of it is still a position,
@@ -1181,6 +1204,8 @@ struct Compiler {
                 // The chain INSIDE the group produced nothing, so the stack
                 // stops at the plane outside it.
                 checkpoint.layer_have_acc = false;
+                checkpoint.chain_bound = math::Aabb{};
+                checkpoint.reach = reach_;
                 checkpoint.frames.clear();
                 TapeCheckpointFrame f;
                 f.group = group.id;
@@ -1190,6 +1215,7 @@ struct Compiler {
                 f.op = group.op;
                 f.blend = group.blend;
                 f.rounding = group.rounding * layer_distance_scale(layer);
+                f.outer_bound = outer;
                 checkpoint.frames.push_back(f);
                 tail_checkpoint_taken_ = true;
             }
@@ -1205,6 +1231,8 @@ struct Compiler {
                 checkpoint.params = tape.params.size();
                 checkpoint.blob = tape.blob.size();
                 checkpoint.layer_have_acc = sub;
+                checkpoint.chain_bound = inner;
+                checkpoint.reach = reach_;
                 checkpoint.frames.clear();
                 tail_checkpoint_taken_ = true;
             }
@@ -1218,23 +1246,30 @@ struct Compiler {
             f.op = group.op;
             f.blend = group.blend;
             f.rounding = group.rounding * layer_distance_scale(layer);
+            f.outer_bound = outer;
             checkpoint.frames.push_back(f);
         }
         if (have_acc || seeded)
             emit_chain_combine(group.op, group.blend,
                                group.rounding * layer_distance_scale(layer));
-        // A GROUP does NOT add its combine's own ring to tape.bounds, and this
-        // is where it would go. It is a real gap -- a smooth group bulges past
-        // the union of its children exactly as a smooth layer fold bulges past
-        // the union of the layers beneath it -- and it predates layer
-        // composition, so it is not this change's to close: `resume` unwinds
-        // these frames from a TapeCheckpointFrame carrying op, blend and
-        // rounding and NO extent, so a ring added here lands in a full compile
-        // and not in a resumed one, and compile_document_append's
-        // require-identical goes 0.2 short in x on the first group append.
-        // Closing it means giving the checkpoint the subtree's extent, which
-        // is the resumable-checkpoint schema and not a bounds question.
+        chain_bound_ = group_extent(group, layer, outer, inner, have_acc || seeded);
         return true;
+    }
+
+    // WHERE A GROUP'S RESULT CAN HOLD MATERIAL, and the one place its own
+    // combine's RING reaches the tape's extent. A smooth group bulges past the
+    // union of its children exactly as a smooth layer fold bulges past the
+    // layers beneath it, and until each TapeCheckpointFrame carried the outer
+    // chain's extent this ring could not be added: a resume would have unwound
+    // the frame without it and gone short of the full compile. `resume` now
+    // applies the same expression per frame, so both paths add it.
+    //
+    // `emits` false is a group entered with nothing beneath it: no combine is
+    // emitted, its children's value IS the chain's, and so is their extent.
+    static math::Aabb group_extent(const Node& group, const Layer& layer, const math::Aabb& outer,
+                                   const math::Aabb& inner, bool emits) {
+        if (!emits) return inner;
+        return combine_extent(group.op, outer, inner, group_blend_support(group, layer), false);
     }
 
     // Where a resumed compile would pick up: overwritten as each visible SDF
@@ -1278,7 +1313,8 @@ struct Compiler {
     // up.
     //
     // The INSTRUCTIONS are `emit_layer_fold`, which a resume also calls; what
-    // stays here is the one thing a resume cannot do, the ring on tape.bounds.
+    // stays here is the one thing a resume cannot do, the ring on the plain
+    // union `reach_`.
     //
     // `have_acc` IS NOT THE FIRST-VISIBLE TEST and must not be read as one --
     // see `compile_and_fold_layer`, which is the only caller and which decides
@@ -1287,12 +1323,32 @@ struct Compiler {
     // a question about the tape and is answered by the tape.
     bool fold_layer(const Layer& layer, LayerLeftValue layer_val, bool have_acc) {
         emit_layer_fold(layer, layer_val, have_acc);
-        // The ring the fold adds to the tape's geometric extent, which only the
-        // whole-layer walk can add: it dilates the LAYER's extent, and a resume
-        // holds the appended items' extent rather than the layer's. Not added
-        // for a chain that produced nothing -- see fold_layer_bounds.
+        // The ring the fold adds to the plain union, which only the whole-layer
+        // walk can add: it dilates the LAYER's extent, and a resume holds the
+        // appended items' extent rather than the layer's. Not added for a chain
+        // that produced nothing -- see fold_layer_bounds.
         if (layer_val.value && have_acc) fold_layer_bounds(layer);
+        doc_bound_ = layer_fold_extent(layer, doc_bound_, chain_bound_, layer_val, have_acc);
         return layer_val.value || have_acc;
+    }
+
+    // WHERE THE DOCUMENT CAN HOLD MATERIAL once `layer` has folded in: the
+    // combine_extent rule a group applies, one level up, with the layer's own
+    // composition and ring. `below` is the extent of the layers beneath it and
+    // `chain` the layer's own chain's. A resume calls this with the extents its
+    // checkpoint carries, so the two paths report one box.
+    //
+    // A layer whose chain left nothing changes nothing here, whatever it is
+    // composed with. An EMPTY intersecting layer does empty the field, and the
+    // box is deliberately not emptied with it: that is the harmless direction,
+    // and an empty box on a tape that is not empty reads as unbounded.
+    static math::Aabb layer_fold_extent(const Layer& layer, const math::Aabb& below,
+                                        const math::Aabb& chain, LayerLeftValue layer_val,
+                                        bool have_acc) {
+        if (!layer_val.value) return below;
+        if (!have_acc) return combine_extent(Op::Add, below, chain, 0.0f, false);
+        return combine_extent(layer.composition.op, below, chain, layer_blend_support(layer),
+                              false);
     }
 
     // THE FOLD AT A LAYER BOUNDARY, AS INSTRUCTIONS. One spelling, because
@@ -1335,49 +1391,23 @@ struct Compiler {
         emit_chain_combine(comp.op, comp.blend, round_world);
     }
 
-    // WHAT THE FOLD ADDS TO THE TAPE'S GEOMETRIC EXTENT.
+    // WHAT THE FOLD ADDS TO THE PLAIN UNION (`reach_`), and only to that.
     //
-    // tape.bounds is what meshing marches and what a raycast clips against, so
-    // the only failure that matters here is a bound too SMALL -- it renders as
-    // missing surface rather than as an error. A combine can put the result's
-    // surface outside BOTH operands' boxes, by up to its own support: a smooth
-    // union bulges outward where the two fields come within the blend of each
-    // other, and an extended mode deviates within the support kernel/tape.h
-    // documents for it. Until layers could carry a combine at all, the fold
-    // between them was a hard Add, whose support is zero, and so the union of
-    // the item bounds was the whole answer.
-    //
-    // The ring goes on the LAYER's own extent and not on the accumulated box,
-    // because that is exactly where the item path puts it: `geometry_bound`
-    // dilates the item by `rounding + chain_blend_support` and unions THAT into
-    // tape.bounds, leaving what is already accumulated alone. The two forms of
-    // one shape -- two layers, or one layer of two items -- have to produce the
-    // same box, and they only do while both spell the dilation the same way.
-    //
-    // WHAT IS DELIBERATELY NOT DONE HERE, and it is design.md 3's narrowing.
-    // `Subtract` cannot create material outside its left operand and
-    // `Intersect` is confined to the intersection, so both could take a box
-    // strictly smaller than this union. Neither is taken, for one reason: the
-    // item path does not take it either, and the parity this change stands on
-    // is that a subtracting LAYER and a subtracting ITEM produce the same
-    // document. Narrowing one side alone breaks that; narrowing both is a
-    // change to the meshing region of every document that already carries a
-    // subtract or a paint, and it has to be threaded through compile_group's
-    // rollback and through every resumable entry point that copies a prefix's
-    // bounds -- the same wall the group ring above runs into, measured, not
-    // guessed. It belongs in its own change with its own measurement. Being
-    // wider than necessary costs a larger march; being narrower than the
-    // surface costs the surface.
+    // The MATERIAL extent a fold leaves is `layer_fold_extent`, through
+    // combine_extent, which is where the ring goes for `tape.bounds` and where
+    // a subtract or an intersect narrows it (task 3.1). This keeps the plain
+    // union exactly what `tape.bounds` was before that narrowing existed --
+    // every item's box, plus each composed fold's ring on its layer's extent --
+    // because a transition's field info reads the region both of its surfaces
+    // live in, and a narrowed box would change a safe step nobody asked to
+    // change.
     //
     // Not called for a layer whose chain produced nothing: the extent is empty
-    // there and dilating an empty box leaves it empty. An INTERSECT against an
-    // empty layer empties the document and could shrink the box to nothing --
-    // deliberately not taken, for the same reason as the rest of the
-    // narrowing, and it is the harmless direction.
+    // there and dilating an empty box leaves it empty.
     void fold_layer_bounds(const Layer& layer) {
         const float support = layer_blend_support(layer);
         if (support <= 0.0f) return;  // a hard fold adds no extent
-        tape.bounds.expand(layer_extent_.dilated(support));
+        reach_.expand(layer_extent_.dilated(support));
     }
 
     // ONE VISIBLE SDF LAYER: its chain, its checkpoint and its fold. The whole
@@ -1430,6 +1460,7 @@ struct Compiler {
         on_tail_path_ = true;
         tail_checkpoint_taken_ = false;
         layer_extent_ = math::Aabb{};
+        chain_bound_ = math::Aabb{};
         // TYPED at the point it is produced rather than wrapped at the call
         // below, so that transposing the two arguments of `fold_layer` is a
         // compile error with no brace to move along with them.
@@ -1451,7 +1482,10 @@ struct Compiler {
             checkpoint = TapeCheckpoint{tape.instrs.size(), tape.params.size(), tape.blob.size(),
                                         layer.id,           layer_val.value,    acc,
                                         true,               {}};
+            checkpoint.chain_bound = chain_bound_;
+            checkpoint.reach = reach_;
         }
+        checkpoint.below_bound = doc_bound_;
         return fold_layer(layer, layer_val, acc);
     }
 
@@ -1494,6 +1528,7 @@ struct Compiler {
             have_acc = compile_and_fold_layer(layer, first, have_acc);
             first = FirstVisibleLayer{false};
         }
+        tape.bounds = doc_bound_;
     }
 
     void run(const Document& doc, const CullRegion* cull_region) {
@@ -1507,6 +1542,7 @@ struct Compiler {
             have_acc = compile_and_fold_layer(layer, first, have_acc);
             first = FirstVisibleLayer{false};
         }
+        tape.bounds = doc_bound_;
     }
 
     // Carry on from a checkpoint: the chain of `layer` continues with
@@ -1522,7 +1558,8 @@ struct Compiler {
         begin_cull(cull_region, pad);
         // The appended nodes continue the chain the checkpoint ends in, which
         // is the innermost frame's group when there is one and the layer's
-        // root list when there is not.
+        // root list when there is not -- and so does that chain's extent.
+        chain_bound_ = cp.chain_bound;
         bool chain_val = compile_list(appended, *layer.sdf, layer, cp.layer_have_acc);
         // Recorded exactly where run() records it — after the chain, before
         // anything the checkpoint sat in front of — so the NEXT append resumes
@@ -1530,6 +1567,9 @@ struct Compiler {
         // first dab and the slow one on every dab after it.
         checkpoint = TapeCheckpoint{tape.instrs.size(), tape.params.size(), tape.blob.size(),
                                     cp.layer, chain_val, cp.doc_have_acc, true, cp.frames};
+        checkpoint.chain_bound = chain_bound_;
+        checkpoint.below_bound = cp.below_bound;
+        checkpoint.reach = reach_;
         // UNWIND THE STACK the checkpoint sat in front of: each enclosing
         // group's combine, innermost first, then the layer's own fold. This is
         // compile_group's tail followed by run()'s, restated, and it has to
@@ -1554,6 +1594,7 @@ struct Compiler {
         bool have_acc = chain_val || cp.layer_have_acc;
         for (const TapeCheckpointFrame& f : cp.frames) {
             if (f.emits) emit_chain_combine(f.op, f.blend, f.rounding);
+            chain_bound_ = frame_extent(f, chain_bound_);
             have_acc = true;
         }
         // ...and then the fold into the layers beneath, which is the same
@@ -1565,14 +1606,26 @@ struct Compiler {
         // than deriving them, and an asserted operator that stops being true
         // still compiles.
         //
-        // NO RING IS ADDED TO tape.bounds for this fold, unlike `fold_layer`:
-        // a suffix describes the appended items rather than the layer, so the
-        // extent the ring dilates is not in hand here. compile_document_append
-        // is unaffected -- it refuses a composed seam, and a hard Add's ring is
-        // zero -- and compile_layer_suffix promises no standalone bounds at all
-        // (tape.h). It stays the gap TapeCheckpoint's missing extent already
-        // is, one level up from the group ring compile_group leaves open.
+        // NO RING IS ADDED TO THE PLAIN UNION for this fold, unlike
+        // `fold_layer`: a suffix describes the appended items rather than the
+        // layer, so the extent that ring dilates is not in hand. The MATERIAL
+        // extent is finished below from the checkpoint's own extents, ring
+        // included, and compile_document_append refuses a composed seam anyway.
         emit_layer_fold(layer, LayerLeftValue{have_acc}, cp.doc_have_acc);
+        // ...and the extent the same stack ends at, which is the full compile's
+        // `tape.bounds` wherever the checkpoint's own extents are the full
+        // compile's -- which they are for every checkpoint a compile recorded,
+        // and which compile_document_append is the only caller to rely on.
+        doc_bound_ = layer_fold_extent(layer, cp.below_bound, chain_bound_,
+                                       LayerLeftValue{have_acc}, cp.doc_have_acc);
+    }
+
+    // `group_extent` for a frame: the same combine, from the fields the frame
+    // carries rather than from a Node the resume does not walk.
+    static math::Aabb frame_extent(const TapeCheckpointFrame& f, const math::Aabb& inner) {
+        if (!f.emits) return inner;
+        return combine_extent(f.op, f.outer_bound, inner,
+                              chain_blend_support(f.op, f.blend, f.rounding), false);
     }
 };
 
@@ -1763,13 +1816,19 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& cp, const
     c.tape.params.assign(prefix.params.begin(), prefix.params.begin() + (std::ptrdiff_t)cp.params);
     c.tape.blob.assign(prefix.blob.begin(), prefix.blob.begin() + (std::ptrdiff_t)cp.blob);
     // The fold the checkpoint sits in front of folds neither of these: a hard
-    // Add is exact and adds no extent, so the prefix's are the chain's. True
-    // wherever this line is reached because the refusal above is what makes it
-    // true -- a composed seam never gets here.
+    // Add is exact, so the prefix's are the chain's. True wherever this line is
+    // reached because the refusal above is what makes it true -- a composed
+    // seam never gets here.
     c.tape.info = prefix.info;
     c.tape.lipschitz_bounds_gradient = prefix.lipschitz_bounds_gradient;
-    c.tape.bounds = prefix.bounds;
+    // NOT prefix.bounds. That is the finished material extent, and a combine
+    // can narrow it: an appended subtract or intersect, or one inside a
+    // group, folds against the extent at the CHECKPOINT, which the checkpoint
+    // carries. The plain union is what a transition's field info reads, and
+    // the checkpoint carries that too.
+    c.reach_ = cp.reach;
     c.resume(cp, *layer, appended);
+    c.tape.bounds = c.doc_bound_;
     c.tape.compile_id = next_compile_id();  // different bytes, so a different identity
     // The lineage, set HERE and nowhere else: the checkpoint is the point up
     // to which this tape and `prefix` agree, because the bytes below it were
@@ -1822,6 +1881,9 @@ bool compile_layer_suffix(const TapeCheckpoint& cp, const Document& doc,
     // against. The header says so, because a tape that cannot stand alone is
     // not what a reader expects to be handed.
     c.resume(cp, *layer, appended, cull, pad);
+    // The appended items' own union, which is what the consumer culls against
+    // and what this has always reported -- not the field's material extent.
+    c.tape.bounds = c.reach_;
     c.tape.compile_id = next_compile_id();
     if (out_checkpoint) *out_checkpoint = c.checkpoint;
     *out = std::move(c.tape);
@@ -1848,6 +1910,7 @@ bool compile_layer_prefix(const Document& doc, std::size_t count, Tape* out,
     c.begin_cull(cull, pad);
     std::vector<NodeId> prefix(roots.begin(), roots.begin() + static_cast<std::ptrdiff_t>(count));
     c.compile_list(prefix, *layer->sdf, *layer, false);
+    c.tape.bounds = c.chain_bound_;
     c.tape.compile_id = next_compile_id();
     *out = std::move(c.tape);
     return true;
@@ -1896,6 +1959,7 @@ Tape compile_layer(const Layer& layer, const CullRegion* cull) {
     bool usable = layer.visible && layer.kind == LayerKind::Sdf && layer.sdf;
     c.begin_cull(cull, cull && usable ? cull_pad(*layer.sdf, layer) : 0.0f);
     if (usable) c.compile_list(layer.sdf->roots, *layer.sdf, layer, false);
+    c.tape.bounds = c.chain_bound_;
     c.tape.compile_id = next_compile_id();
     return std::move(c.tape);
 }
@@ -1915,11 +1979,12 @@ Tape compile_item(const Layer& layer, const Node& item) {
     alone.children.clear();
     // The same three steps compile_list takes for a first Add item, in the
     // same order, with the same arguments: the bound before the emit (a
-    // transition fold reads tape.bounds, and it must include this item), the
+    // transition fold reads the plain union, and it must include this item), the
     // gate reach before the fold. Adding a step here that compile_list does
     // not take, or skipping one it does, breaks the byte-identity the header
     // promises, and test_pick.cpp holds it over the gnarly corpus.
     const math::Aabb geometry = item_geometry_bound(alone, layer);
+    c.reach_.expand(geometry);
     c.tape.bounds.expand(geometry);
     c.emit_item(alone, layer);
     c.gate_reach_ = geometry;

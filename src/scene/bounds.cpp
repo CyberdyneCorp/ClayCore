@@ -1521,6 +1521,20 @@ float chain_blend_support(Op op, const Blend& blend, float round_world) {
                               : kernel::cmax(blend.support(), blend.k);
 }
 
+math::Aabb combine_extent(Op op, const Aabb& left, const Aabb& right, float right_ring,
+                          bool gated) {
+    if (op == Op::Subtract) return left;
+    if (op == Op::Intersect) {
+        if (gated || left.empty() || right.empty()) return left;
+        const Aabb reach = right_ring > 0.0f ? right.dilated(right_ring) : right;
+        const Aabb both{kernel::cmax(left.min, reach.min), kernel::cmin(left.max, reach.max)};
+        return both.empty() ? left : both;
+    }
+    Aabb out = left;
+    out.expand(right_ring > 0.0f ? right.dilated(right_ring) : right);
+    return out;
+}
+
 float group_blend_support(const Node& group, const Layer& layer) {
     return chain_blend_support(group.op, group.blend, group.rounding * layer_distance_scale(layer));
 }

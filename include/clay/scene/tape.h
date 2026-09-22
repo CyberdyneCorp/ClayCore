@@ -43,19 +43,21 @@ struct Tape {
     // another's prefix. The cull applies: a brick whose region no such item
     // reaches compiles a tape without it, and keeps the flag.
     bool lipschitz_bounds_gradient = true;
-    // Union of the item geometry bounds, each already dilated by its own
-    // rounding and combine support, and then -- where a visible SDF layer folds
-    // into the ones beneath it with a composition of its own -- that layer's
-    // extent dilated once more by THAT combine's support. What meshing marches
-    // and what a raycast clips against; never infinite, even for a non-local
-    // op. A hard fold has zero support and adds nothing, so a document that
-    // predates layer composition keeps exactly the box it had.
+    // Where the field can hold material: what meshing marches and what a
+    // raycast clips against; never infinite, even for a non-local op. Folded
+    // combine by combine through `combine_extent` (bounds.h), at every level a
+    // combine happens -- item, group, layer -- so it is conservative in the
+    // one direction that matters and NARROWED where the kernel proves it may
+    // be: a subtract keeps its left operand's extent, an intersect the
+    // overlap of both. Every other operator unions, each item already dilated
+    // by its own rounding and combine support, and a group or layer fold with
+    // a support of its own dilates its operand's extent by that ring.
     //
-    // Conservative in one direction only. It is not narrowed per operator: a
-    // subtract cannot create material outside its left operand and an intersect
-    // is confined to the intersection, but the item path unions for both too
-    // and the two forms of one shape have to report the same box. See
-    // Compiler::fold_layer_bounds.
+    // A document with neither a subtract nor an intersect, and no smooth
+    // group, keeps exactly the box it had before narrowing existed.
+    //
+    // Not a promise for `compile_layer_suffix`, which reports the union of the
+    // appended items' own bounds (see there).
     math::Aabb bounds;
 
     // Content identity for backend upload caching. compile_document and
@@ -289,6 +291,11 @@ struct TapeCheckpointFrame {
     Op op = Op::Add;
     Blend blend{};
     float rounding = 0.0f;  // already scaled by the layer transform
+    // Where the chain CONTAINING this group could hold material when the group
+    // was entered: the left operand of the combine this frame re-emits, which
+    // `combine_extent` needs to reproduce the full compile's `tape.bounds`
+    // (an intersect is bounded by it, a subtract IS it).
+    math::Aabb outer_bound{};
 };
 
 // How many stack planes a walk holds when it reaches the checkpoint: the
@@ -324,6 +331,17 @@ struct TapeCheckpoint {
     // which is what every checkpoint was before group appends existed — so an
     // empty stack is exactly the old behaviour and not a special case.
     std::vector<TapeCheckpointFrame> frames;
+    // THE EXTENTS A RESUME NEEDS to finish `tape.bounds` the way the full
+    // compile does, now that a combine can NARROW it (combine_extent): the
+    // innermost chain's material extent at the checkpoint, the extent of every
+    // layer beneath this one, and the plain union of everything compiled so far
+    // -- which is what a transition's field info reads, and what the prefix's
+    // own `bounds` used to be before a subtract stopped widening it. Empty on a
+    // hand-built checkpoint, which only `compile_layer_suffix` accepts, and that
+    // promises no standalone bounds.
+    math::Aabb chain_bound{};
+    math::Aabb below_bound{};
+    math::Aabb reach{};
 };
 
 // The whole-document compile, plus the checkpoint an append can resume from.
