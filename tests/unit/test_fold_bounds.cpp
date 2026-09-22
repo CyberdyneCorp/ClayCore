@@ -293,3 +293,69 @@ TEST_CASE("fold bounds: composed layers narrow as the group they equal does") {
         check_sound(doc, 56);
     }
 }
+
+// AN INFINITE GRID'S GEOMETRY BOUND IS ONE CELL, while its copies fill space.
+// As a union operand that cell is the box tape.bounds has always marched; as a
+// narrowing one it is wrong -- an intersect bounded by it kept one sphere of a
+// lattice the field holds everywhere inside the box: 936 material samples
+// outside the reported bounds on this fixture before item_material_extent.
+TEST_CASE("fold bounds: an intersect with an infinite grid keeps the whole left operand") {
+    Node lattice = sphere_at(cf3(0, 0, 0), 0.3f);
+    lattice.repeat = Repeat::grid_infinite(cf3(1, 1, 1));
+    SUBCASE("as an item") {
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        l.sdf->insert(box_at(cf3(0, 0, 0), cf3(2, 2, 2)));
+        lattice.op = Op::Intersect;
+        l.sdf->insert(lattice);
+        check_sound(doc);
+    }
+    SUBCASE("inside an intersecting group") {
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        l.sdf->insert(box_at(cf3(0, 0, 0), cf3(2, 2, 2)));
+        const NodeId g = l.sdf->insert(group_of(Op::Intersect));
+        l.sdf->insert(lattice, g);
+        check_sound(doc);
+    }
+    SUBCASE("as an intersecting layer") {
+        Document doc;
+        doc.add_sdf_layer("base").sdf->insert(box_at(cf3(0, 0, 0), cf3(2, 2, 2)));
+        Layer& over = doc.add_sdf_layer("over");
+        over.sdf->insert(lattice);
+        over.composition.op = Op::Intersect;
+        check_sound(doc);
+    }
+    SUBCASE("resumed: an append into the intersecting group reports the full compile's box") {
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        l.sdf->insert(box_at(cf3(0, 0, 0), cf3(2, 2, 2)));
+        const NodeId g = l.sdf->insert(group_of(Op::Intersect));
+        l.sdf->insert(sphere_at(cf3(0, 0, 0), 0.4f), g);
+        TapeCheckpoint cp;
+        const Tape prefix = compile_document_resumable(doc, &cp);
+        const NodeId added = l.sdf->insert(lattice, g);
+        Tape reused;
+        REQUIRE(compile_document_append(prefix, cp, doc, {added}, &reused, nullptr));
+        const Tape full = compile_document(doc);
+        CHECK(reused.bounds.min.x == full.bounds.min.x);
+        CHECK(reused.bounds.max.x == full.bounds.max.x);
+        CHECK(full.bounds.max.x == doctest::Approx(2.0f));
+        check_sound(doc);
+    }
+}
+
+// ...and where nothing confines the lattice, the box is the one-cell union it
+// always was rather than an infinite one the mesher would refuse outright.
+TEST_CASE("fold bounds: an unconfined infinite grid keeps the box it always reported") {
+    Document doc;
+    Layer& l = doc.add_sdf_layer("l");
+    Node lattice = box_at(cf3(0, 0, 0), cf3(2, 2, 2));
+    lattice.repeat = Repeat::grid_infinite(cf3(5, 5, 5));
+    l.sdf->insert(lattice);
+    l.sdf->insert(sphere_at(cf3(0, 0, 0), 1.0f, Op::Subtract));
+    const Tape t = compile_document(doc);
+    REQUIRE_FALSE(t.bounds.empty());
+    CHECK_FALSE(t.bounds.is_infinite());
+    CHECK(t.bounds.max.x == doctest::Approx(2.0f));
+}

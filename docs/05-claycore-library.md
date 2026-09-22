@@ -826,7 +826,11 @@ samples in the fixture carry material outside the box the tape reports, which is
 a dropped brick and a lost ray hit rather than an error; a smooth GROUP now adds
 its ring too, which it did not until bounds were narrowed per operator. A large cutter carving a small shape
 no longer makes the meshing region the cutter's box — the measurement is in the
-change's proposal. `TapeCheckpoint` carries the extents a resume needs
+change's proposal. An **infinite grid** never narrows anything: its geometry bound
+is one cell while its copies fill space, so `scene::item_material_extent` takes it
+as unbounded — an intersect with it keeps the left operand — and where an
+unbounded extent reaches the result the tape reports the plain union of item
+bounds, the one-cell box such a document always had. `TapeCheckpoint` carries the extents a resume needs
 (`chain_bound`, `below_bound`, per-frame `outer_bound`, and the plain union
 `reach` a transition's field info still reads), so an appended subtract reports
 the full compile's box. The same

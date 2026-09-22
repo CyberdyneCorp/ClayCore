@@ -485,6 +485,16 @@ float chain_blend_support(Op op, const Blend& blend, float round_world);
 math::Aabb combine_extent(Op op, const math::Aabb& left, const math::Aabb& right,
                           float right_ring, bool gated);
 
+// WHAT `combine_extent` MAY TAKE AS WHERE AN ITEM HOLDS MATERIAL: its geometry
+// bound, except for an INFINITE GRID, whose geometry bound is one cell -- the
+// box `tape.bounds` has always marched for it -- while its copies fill space.
+// That cell is harmless as a union operand and wrong as a narrowing one: an
+// intersect bounded by it keeps one copy of a lattice the field holds
+// everywhere inside the left operand. So it is infinite here, which an
+// intersect ignores and a union or subtract carries up to the entry point, and
+// there `tape.bounds` falls back to the plain union it always reported.
+math::Aabb item_material_extent(const Node& item, const math::Aabb& geometry);
+
 // How far a GROUP's combine spreads a change in one of its operands. Shared by
 // node_influence_bound, which applies it to the union of the children, and
 // node_reach_bound, which applies it to one child — two spellings of the same

@@ -1535,6 +1535,10 @@ math::Aabb combine_extent(Op op, const Aabb& left, const Aabb& right, float righ
     return out;
 }
 
+math::Aabb item_material_extent(const Node& item, const Aabb& geometry) {
+    return item.repeat.is_infinite_grid() ? Aabb::infinite() : geometry;
+}
+
 float group_blend_support(const Node& group, const Layer& layer) {
     return chain_blend_support(group.op, group.blend, group.rounding * layer_distance_scale(layer));
 }

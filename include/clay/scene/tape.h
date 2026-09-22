@@ -54,7 +54,10 @@ struct Tape {
     // a support of its own dilates its operand's extent by that ring.
     //
     // A document with neither a subtract nor an intersect, and no smooth
-    // group, keeps exactly the box it had before narrowing existed.
+    // group, keeps exactly the box it had before narrowing existed. An
+    // infinite grid narrows nothing (item_material_extent), and where one
+    // reaches the result unconfined this is the plain union of item bounds
+    // -- one cell for the grid -- exactly as before narrowing existed.
     //
     // Not a promise for `compile_layer_suffix`, which reports the union of the
     // appended items' own bounds (see there).

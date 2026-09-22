@@ -136,6 +136,20 @@ keeps its box to the cell.
   The field has no material there, but an empty box on a non-empty tape reads as
   "unbounded" to every consumer and `clay_document_mesh` refuses it. The same
   harmless direction is kept for an empty intersecting LAYER.
+- **An infinite grid's geometry bound is not a material bound, and narrowing
+  found out.** The bound of an infinitely repeated item is ONE cell -- the box
+  `tape.bounds` has always marched for it, harmless as a union operand. As an
+  intersect's right operand it narrowed a 4-unit box to a 0.6-unit cell and lost
+  every other copy of the lattice: 936 material samples outside the reported box
+  on a 40^3 probe lattice, as an item, in an intersecting group and as an
+  intersecting layer, against 0 on `origin/main`. Review caught it with a
+  sampling probe the fold tests did not have; 5,000 randomly generated documents
+  (nested groups, five profiles, rounding, mirrors, composed layers, 4,873
+  resumed appends, 1,327 of them into groups) found nothing else.
+  `scene::item_material_extent` takes such an item as unbounded, and an entry
+  point that ends on an unbounded extent reports the plain union, so a
+  lattice minus a sphere keeps its one-cell box instead of turning into an
+  "unbounded scene" the mesher refuses.
 - **Not narrowed, deliberately:** paint, relief, incise and the morphs. Paint and
   incise are provably inside their left operand too (the distance is `a`, or
   `a + k w`), but the task named subtract and intersect and each extra row is one

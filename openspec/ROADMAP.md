@@ -1053,7 +1053,9 @@ needs them, and listed so they are not mistaken for oversights:
   goes from 9.64 M cells to 125 k (77x), 20,956 bricks at 0.16 m to 512 (41x),
   42.2 ms to 5.3 ms (8.0x, median of 200); two offset unit spheres intersected,
   1.6 M to 400 k cells, 4,116 to 1,176 bricks, 14.3 to 9.6 ms; a union-only
-  document is unchanged to the cell.
+  document is unchanged to the cell. An infinitely repeated item narrows nothing
+  (`scene::item_material_extent`): its bound is one cell, and an intersect
+  bounded by it lost every other copy of the lattice until review sampled it.
 
 - **Deformers on a mesh layer.** `Deformer` has twenty-one entries and every
   one applies to an SDF item; a mesh layer takes a lattice cage and nothing

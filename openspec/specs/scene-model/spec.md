@@ -1934,6 +1934,12 @@ protects a region or the two do not overlap; every other operator SHALL report
 the union of the two, the right operand dilated by the combine's own support —
 so a smooth or extended join, at any level, cannot bulge past the box. A GROUP's
 own combine SHALL contribute that support as a layer fold's does.
+An operand whose geometry bound does not contain its material — an INFINITE
+GRID, whose bound is one cell while its copies fill space — SHALL NOT narrow
+anything: it SHALL be taken as unbounded, so an intersect with it keeps the left
+operand's extent, and where an unbounded extent reaches the result the reported
+extent SHALL be the plain union of item bounds the engine has always reported
+for such a document rather than an infinite box the mesher refuses.
 
 Exactness and the Lipschitz bound SHALL fold exactly as the item-level combine
 folds them, so that a document expressing a shape as two layers and a document
@@ -2032,6 +2038,10 @@ unioning, and SHALL render exactly as it did.
 #### Scenario: A subtract does not widen the box, an intersect narrows it
 - **WHEN** a large cutter subtracts a small region from a shape, or two offset shapes intersect, as items, as a group or as composed layers
 - **THEN** the reported extent is the shape's own, or the overlap, rather than the union of both; no sampled point with material lies outside it; and a compile resumed from a checkpoint reports the same extent as the full compile
+
+#### Scenario: An infinite lattice does not narrow what it intersects
+- **WHEN** a box is intersected with an infinitely repeated sphere, as an item, inside an intersecting group or as an intersecting layer
+- **THEN** the reported extent is the box's, not the one repeated cell; no sampled point with material lies outside it; and a compile resumed from a checkpoint reports the same extent
 
 #### Scenario: A smooth group's own blend is inside the box
 - **WHEN** a group with a smooth combine joins material that abuts the chain outside it
