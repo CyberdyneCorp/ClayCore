@@ -564,7 +564,7 @@ mislabelled, and multi-layer documents take the full walk here. The host-memory
 form keeps the two halves apart and resumes them fine.
 
 The shape this **did not** take, and why, is measured rather than argued
-(`openspec/changes/resume-the-device-refill/design.md`): making the seed
+(`openspec/changes/archive/2026-09-02-resume-the-device-refill/design.md`): making the seed
 device-resident so the suffix evaluates on the GPU cannot win on the windows a
 sculpt actually submits. A seeded kernel still has to dispatch, and one dispatch
 of the emptiest possible tape costs **23 µs a brick** on that GPU, where the
