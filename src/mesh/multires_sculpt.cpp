@@ -170,12 +170,18 @@ std::uint64_t MultiresSculptor::seed_revision() {
 void MultiresSculptor::bind() {
     const std::uint32_t level = surface_.sculpt_level();
     const std::uint64_t generation = surface_.cache_generation();
+    const std::uint64_t structure = surface_.structure_revision();
     // Rebound on a level change AND on a cache generation change. The second is
     // what makes this safe against a host that released the caches under memory
     // pressure while a sculptor existed: the level's `Mesh` is inside the cache,
     // so a stale `MeshSculptor` would hold a reference into storage that is
     // gone.
-    if (sculptor_ && bound_level_ == level && bound_generation_ == generation) {
+    //
+    // AND ON A STRUCTURE CHANGE, which is the one that can hide from the other
+    // two: a cage replaced under a live sculptor starts a fresh state whose
+    // generation can equal the one this sculptor saw last.
+    const bool same_numbering = bound_level_ == level && bound_structure_ == structure;
+    if (sculptor_ && same_numbering && bound_generation_ == generation) {
         // THE ONE THING THAT IS RE-READ ON A BINDING THAT IS STILL GOOD. The
         // faces this level does not store are positioned by the level BELOW,
         // and a stroke down there moves them without invalidating anything up
@@ -194,9 +200,10 @@ void MultiresSculptor::bind() {
     // its ceiling from where the STROKE found the surface, so the records have
     // to outlive a cache drop the host made under memory pressure; only a LEVEL
     // change makes them meaningless, because they are indexed by a numbering
-    // that changed with it.
-    const bool same_level = bound_level_ == level;
-    if (!same_level) level_deltas_.clear();
+    // that changed with it. A level of the same NUMBER is not always the same
+    // numbering: removing the top level and refining a different region
+    // renumbers it in place, and `structure_revision` is what says so.
+    if (!same_numbering) level_deltas_.clear();
 
     Mesh& mesh = surface_.level_mesh(level);
     // SHARED rather than copied. `MeshSculptor(Mesh&, Adjacency)` takes the
@@ -238,10 +245,11 @@ void MultiresSculptor::bind() {
     // refined hierarchy the patches beside the refined region have no vertex
     // here at all, so a stamp reaching past the region has to write them where
     // they live. See `stamp`.
-    bind_coarse(level, same_level);
+    bind_coarse(level, same_numbering);
     // Read AFTER every call above: any of them may have built a cache and moved
     // the generation on.
     bound_generation_ = surface_.cache_generation();
+    bound_structure_ = structure;
 }
 
 void MultiresSculptor::bind_coarse(std::uint32_t level, bool keep_records) {

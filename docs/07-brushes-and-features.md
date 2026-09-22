@@ -2596,8 +2596,16 @@ hierarchy that record lives per level: the sculpt level's, and one for each
 coarse level a crossing stamp writes beside the refined region. A trim at
 `Urgent` or `Critical` rebinds the sculptor, and the rebind keeps every one of
 those records, so the stroke after the trim is byte-identical to the stroke
-without it. Only a change of sculpt level drops them, because that renumbers
-the vertices they are indexed by. Before v0.97.0 the coarse records were dropped
+without it. Only a change of the level's NUMBERING drops them, because the
+records are indexed by vertex: a change of sculpt level, and also a restructure
+that leaves the level number where it was -- removing the top level and refining
+a different region, or replacing the cage. `MultiresSurface::structure_revision()`
+moves on exactly those, and the sculptor compares it at every bind. Through
+v0.120.0 the sculptor compared the level number alone, so a restructure mid-stroke
+read the old level's record against the new numbering, and a cage replaced
+under a live sculptor could leave it stamping through the freed level mesh,
+because the fresh state's cache generation started over and landed on the
+value the sculptor had last seen. Before v0.97.0 the coarse records were dropped
 on any rebind, and the coarse side deposited its ceiling a second time: 0.116 of
 travel against a 0.08 ceiling at the seam. Held in C++, through
 `clay_multires_trim`, and through pyclay, where `MultiresSculptor.stamp` now

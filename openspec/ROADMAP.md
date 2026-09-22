@@ -2425,6 +2425,19 @@ of zero, so `stamp("layer", ...)` moved nothing and returned 0 (243 classes for
 `draw` at the same settings). It now takes `layer_height`, default 0.05 as
 `MeshSculptor.stamp` does.
 
+Reviewing that fix found its other edge open. "Only a level change drops the
+records" keyed the drop on the level NUMBER, and removing the top level then
+refining a different region lands back on the same number with every vertex
+renumbered (289 -> 81 on the regional cage): the stroke's record was read
+against the new numbering, 0.078 of difference from a stroke begun afresh. The
+same key let a sculptor survive `set_base_mesh` without rebinding, because the
+replacement state's cache generation started over at the value it had last
+seen (2 and 2), leaving it holding the freed level mesh. Both are closed by
+`MultiresSurface::structure_revision()`, a process-wide counter that moves on
+every add, removal, cage replacement and decode, and that the sculptor compares
+at every bind; gated in C++ and through `clay_multires_remove_highest_level` +
+`clay_multires_add_level_for_patches`.
+
 ### A fixture whose normals all point the same way hides a wrong normal
 
 The clearest instance yet of the fixture class, and it arrived by a route worth

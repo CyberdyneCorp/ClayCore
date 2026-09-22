@@ -3,9 +3,10 @@
 // `clay_multires_trim` landing between two dabs of one gesture, which is what an
 // operating-system memory warning does to a live stroke.
 //
-// The C ABI has no regional refinement of its own, so the hierarchy is built in
-// C++ and handed over as the bytes `clay_multires_deserialize` reads -- the same
-// route a hierarchy authored in pyclay and saved takes into a host.
+// The hierarchy is built in C++ and handed over as the bytes
+// `clay_multires_deserialize` reads -- the route a hierarchy authored elsewhere
+// and saved takes into a host -- so every case starts from the same bytes. The
+// restructure case at the bottom then refines through the C calls themselves.
 
 #include <doctest/doctest.h>
 
@@ -189,4 +190,49 @@ TEST_CASE("c regression: a trim mid-stroke does not lift the Layer ceiling at a 
         CHECK(travel <= 0.08f);
         CHECK(trimmed.coarse == kept.coarse);
     }
+}
+
+namespace {
+
+// Two LAYER dabs in one gesture with the top level removed and level 3 refined
+// again over ONE of the four patches between them, through the C calls a host
+// makes. Returns level 3 after the second dab.
+std::vector<float> layer_across_restructure(const std::vector<std::uint8_t>& bytes, bool restart) {
+    clay_multires* surface = open_regional(bytes);
+    const clay_mesh_brush_desc brush = rim_layer_brush(surface);
+    clay_multires_sculptor* sculptor = nullptr;
+    must(clay_multires_sculptor_create(surface, &sculptor));
+    must(clay_multires_sculptor_begin_stroke(sculptor));
+    stamp(sculptor, brush);
+
+    const std::size_t before = level_positions(surface, 3).size();
+    int32_t err = 0;
+    must(clay_multires_remove_highest_level(surface, &err));
+    const uint32_t patch = 14;
+    must(clay_multires_add_level_for_patches(surface, &patch, 1, nullptr, &err));
+    // THE PRECONDITION: level 3 again, numbered differently.
+    REQUIRE(level_positions(surface, 3).size() != before);
+    if (restart) must(clay_multires_sculptor_begin_stroke(sculptor));
+    clay_multires_stamp_report report{};
+    report.struct_size = sizeof(report);
+    must(clay_multires_sculptor_stamp(sculptor, &brush, nullptr, &report));
+
+    std::vector<float> out = level_positions(surface, 3);
+    clay_multires_sculptor_destroy(sculptor);
+    clay_multires_destroy(surface);
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("c regression: a restructure mid-stroke does not carry the old level's Layer record") {
+    // The other side of the case above. Removing the top level and refining a
+    // different region leaves the sculpt level's NUMBER at 3 and renumbers every
+    // vertex under it; the stroke's record must go with the old numbering, so
+    // the dab after the restructure is byte-identical to one that began a
+    // gesture of its own.
+    const std::vector<std::uint8_t> bytes = regional_bytes();
+    const std::vector<float> fresh = layer_across_restructure(bytes, true);
+    const std::vector<float> carried = layer_across_restructure(bytes, false);
+    CHECK(fresh == carried);
 }
