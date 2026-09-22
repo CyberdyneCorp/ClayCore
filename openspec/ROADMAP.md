@@ -135,6 +135,27 @@ storage and recomputing its bounds remain proportional to retained storage.
 See `keep-regional-volume-bakes-local` for compatibility, regression coverage,
 and measured results. This does not add an automatic maintenance trigger.
 
+## Follow-ups filed 2026-09-22, from the v0.120.0 work
+
+Each was found while building or measuring a change that has now been archived,
+and each was left out of that change on purpose. They are issues rather than rows
+because none has a proposal yet:
+
+- #629: a `session::History` undo of a DynamicMesh step leaves a C++-held
+  `DynamicSculptor` with a stale index (200 of 6,912 and 2,638 of 49,152 live
+  faces unindexed, measured in #617). No C ABI path reaches it.
+- #630: `refit_around_moved_vertices` (#617) finds nothing on any record this
+  library writes. Keep it with a test that can fail, or delete it.
+- #631: the mesh Draw brush's averaged normal tilts 16.8 deg on a symmetric fin
+  (#618). Cause not investigated.
+- #632: per-dab `move_surface`, the exact draw frame, divides the safe step scale
+  by 1.5 per overlapping dab: 0.6667, 0.017342 and 5.2151e-6 at 1, 10 and 30 dabs
+  (#618). Relief's own bound adds rather than multiplies.
+- #633: a faithful SDF Standard cannot be a combine op. It needs its own
+  proposal: one deformation per stroke, or a stamp baked into the working volume.
+- #634: device watch item. `stroke_build` read 0.298 -> 0.488 ms (1.64x) across
+  iOS 26.5.2 -> 27.0, and cannot be attributed until a same-OS gate runs.
+
 ## Where the engine is (2026-09-22, v0.120.0)
 
 21 capabilities, 232 archived changes, 44 still open. v0.120.0 was published
