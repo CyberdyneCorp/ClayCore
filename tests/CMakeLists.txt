@@ -193,6 +193,7 @@ add_executable(clay_unit_tests
   unit/test_c_pick_eval.cpp
   unit/test_c_point_cull.cpp
   unit/test_c_eval_excluding.cpp
+  unit/test_c_layer_group_parity.cpp
   unit/test_c_tape_cache.cpp
   unit/test_c_frontier_resume.cpp
   unit/test_c_prefetch_seed.cpp
