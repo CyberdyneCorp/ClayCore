@@ -1145,12 +1145,12 @@ struct Compiler {
                                      &n->transition, n);
                 }
                 gate_reach_ = geometry;
-                fold_info(*n, (have_acc || seeded) ? n->op : Op::Add, smooth && have_acc,
+                const Op applied = (have_acc || seeded) ? n->op : Op::Add;
+                fold_info(*n, applied, smooth && have_acc,
                           n->rounding * placed_distance_scale(layer, *n));
                 // Where the chain can hold material now. No ring: the item's
                 // geometry bound already carries its own combine's support.
-                chain_bound_ = combine_extent((have_acc || seeded) ? n->op : Op::Add, chain_bound_,
-                                              geometry, 0.0f, n->gated());
+                chain_bound_ = combine_extent(applied, chain_bound_, geometry, 0.0f, n->gated());
                 have_acc = true;
             }
         }
@@ -1249,10 +1249,11 @@ struct Compiler {
             f.outer_bound = outer;
             checkpoint.frames.push_back(f);
         }
-        if (have_acc || seeded)
+        const bool emits = have_acc || seeded;
+        if (emits)
             emit_chain_combine(group.op, group.blend,
                                group.rounding * layer_distance_scale(layer));
-        chain_bound_ = group_extent(group, layer, outer, inner, have_acc || seeded);
+        chain_bound_ = group_extent(group, layer, outer, inner, emits);
         return true;
     }
 
