@@ -7,7 +7,7 @@ algorithm was changed during this investigation.
 ## Implementation progress
 
 The first optimization batches repeated remesh normal refreshes while preserving
-small-edit immediate refresh. See [design and measured validation](../../changes/reduce-adaptive-remesh-latency/validation.md):
+small-edit immediate refresh. See [design and measured validation](../../changes/archive/2026-09-22-reduce-adaptive-remesh-latency/validation.md):
 with undo, sampled p95 improved by 14.1% at the 1k footprint and 22.9% at 10k,
 with exact matching exported output and operation counts. Some stamps still
 exceed 16 ms. Shared adaptive stroke handling remains the next feature priority.

@@ -680,7 +680,7 @@ CPU batches process grab-only Move chains one deformer at a time across the
 points, preserving scalar distances, colours and all four field-normal taps
 bit-for-bit. Mixed chains and repetition retain the general evaluator. The
 `grab_chain_batch_probe` measures shallow/deep, hard-surface and volume workloads;
-see `openspec/changes/batch-grab-chains-without-changing-the-field/validation.md`
+see `openspec/changes/archive/2026-09-22-batch-grab-chains-without-changing-the-field/validation.md`
 for results and the separate application-latency limits.
 
 Brick meshing records repeated local lattice edges once before global welding,
@@ -694,7 +694,7 @@ copies, mask reads and smoothing stencil evaluation. Full initial source
 materialization reserves its sample payload once. Live Smooth preview priming still materializes its complete
 source field and reports the selected bricks; it no longer computes averages
 whose contribution is zero. See
-`openspec/changes/skip-zero-strength-relax-stencils/validation.md` for live timings
+`openspec/changes/archive/2026-09-22-skip-zero-strength-relax-stencils/validation.md` for live timings
 and remaining application costs.
 
 **Read "registered" literally.** A backend that was not compiled into the build
