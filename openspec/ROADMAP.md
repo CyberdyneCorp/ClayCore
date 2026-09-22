@@ -2402,6 +2402,29 @@ Of the three majors the review confirmed, that is the one with a user behind it.
 The other two are a corrupted display normal and a silent no-op; both are real
 and neither is reachable by anyone we know of yet.
 
+**CLOSED, and it had been since v0.97.0 without this section saying so** (#627).
+The engine fix landed in 142010b6, ten minutes after this section was written:
+`bind_coarse(level, keep_records)` carries each coarse level's record across a
+rebind in which only `cache_generation` moved, and still drops them on a change
+of sculpt level, because a level change is the one rebind that renumbers the
+vertices a record is indexed by. A generation-only rebind rebuilds the same
+level's topology bit-identically, so its records stay valid. What was missing
+was a gate on the path a host takes: the shipped case releases with
+`drop_all_caches`, which no binding exposes. A host releases with
+`clay_multires_trim`, and both `urgent` — which drops exactly the coarse levels a
+crossing stamp writes — and `critical` rebind a live stroke. Both are now gated
+through the C ABI (`test_c_multires_layer_ceiling.cpp`), in C++ with and without
+an unrevisioned seed, and through pyclay; each asserts the rebind happened
+(the seed token moved) before it asserts the ceiling. Measured on the regional
+6x6 cage, two Layer dabs with a trim between them: **0.116** of coarse travel
+against a 0.08 ceiling with the records emptied, **0.0583** with them kept,
+byte-identical to the stroke that was never trimmed.
+
+pyclay could not reach any of it: `MultiresSculptor.stamp` passed a layer height
+of zero, so `stamp("layer", ...)` moved nothing and returned 0 (243 classes for
+`draw` at the same settings). It now takes `layer_height`, default 0.05 as
+`MeshSculptor.stamp` does.
+
 ### A fixture whose normals all point the same way hides a wrong normal
 
 The clearest instance yet of the fixture class, and it arrived by a route worth
@@ -2544,7 +2567,9 @@ to hold a record at all. So whatever those rows show is not level-dependent and
 is not the seam: if the defect were reachable this way, 1 and 2 would have to
 diverge from 0, and they do not by a digit.
 
-**It rules out one path and nothing else, and #1 is NOT downgraded on it.** The
+**It rules out one path and nothing else, and #1 is NOT downgraded on it.**
+(The defect was in fact already fixed when this was written; see the section
+above, which now records the fix and the host-path gates.) The
 defect needs something that bumps `cache_generation` MID-STROKE, and their probe
 drove segments within a gesture without ever rebinding. An absence of evidence
 from a probe that never induces the precondition is not evidence of absence.
