@@ -826,7 +826,10 @@ samples in the fixture carry material outside the box the tape reports, which is
 a dropped brick and a lost ray hit rather than an error; a smooth GROUP now adds
 its ring too, which it did not until bounds were narrowed per operator. A large cutter carving a small shape
 no longer makes the meshing region the cutter's box — the measurement is in the
-change's proposal. An **infinite grid** never narrows anything: its geometry bound
+change's proposal. A mesh sized by `resolution` (pyclay's `Document.mesh`, cells along the longest
+side of `tape.bounds`) is finer wherever the box narrowed: the gallery's grouped
+plate model meshed 2.3x the triangles at the same resolution, and now asks for
+58 where it asked for 88. An **infinite grid** never narrows anything: its geometry bound
 is one cell while its copies fill space, so `scene::item_material_extent` takes it
 as unbounded — an intersect with it keeps the left operand — and where an
 unbounded extent reaches the result the tape reports the plain union of item
