@@ -21,38 +21,44 @@
 
 namespace {
 
-// The 6x6 cage `test_multires_sculpt.cpp`'s regional gates use, refined over
-// its middle 2x2 patches to level 3.
-std::vector<std::uint8_t> regional_bytes() {
+// Every C call below is expected to succeed; one line per call keeps the
+// helpers readable rather than one REQUIRE per argument list.
+void must(clay_result r) { REQUIRE(r == CLAY_OK); }
+
+// The 6x6 cage `test_multires_sculpt.cpp`'s regional gates use.
+clay::mesh::Mesh bumpy_quads() {
     using clay::kernel::cf3;
     clay::mesh::Mesh cage;
-    const int n = 6;
-    const float half = 1.0f, step = 2.0f * half / static_cast<float>(n);
-    for (int z = 0; z <= n; ++z)
-        for (int x = 0; x <= n; ++x)
-            cage.positions.push_back(cf3(-half + step * static_cast<float>(x),
+    constexpr std::uint32_t n = 6;
+    constexpr float step = 2.0f / static_cast<float>(n);
+    for (std::uint32_t z = 0; z <= n; ++z)
+        for (std::uint32_t x = 0; x <= n; ++x)
+            cage.positions.push_back(cf3(-1.0f + step * static_cast<float>(x),
                                          0.15f * static_cast<float>((x * 7 + z * 3) % 5),
-                                         -half + step * static_cast<float>(z)));
-    const std::uint32_t stride = n + 1;
-    for (std::uint32_t z = 0; z < static_cast<std::uint32_t>(n); ++z)
-        for (std::uint32_t x = 0; x < static_cast<std::uint32_t>(n); ++x) {
+                                         -1.0f + step * static_cast<float>(z)));
+    constexpr std::uint32_t stride = n + 1;
+    for (std::uint32_t z = 0; z < n; ++z)
+        for (std::uint32_t x = 0; x < n; ++x) {
             const std::uint32_t a = z * stride + x, b = a + 1, c = a + stride + 1, d = a + stride;
             cage.quads.insert(cage.quads.end(), {a, b, c, d});
             cage.indices.insert(cage.indices.end(), {a, b, c, a, c, d});
         }
+    return cage;
+}
+
+// That cage refined over its middle 2x2 patches to level 3, as bytes.
+std::vector<std::uint8_t> regional_bytes() {
     clay::mesh::MultiresError err = clay::mesh::MultiresError::None;
-    auto s = clay::mesh::MultiresSurface::from_mesh(cage, {}, &err);
+    auto s = clay::mesh::MultiresSurface::from_mesh(bumpy_quads(), {}, &err);
     REQUIRE(s.has_value());
-    std::vector<std::uint32_t> block;
-    for (std::uint32_t z = 2; z < 4; ++z)
-        for (std::uint32_t x = 2; x < 4; ++x) block.push_back(z * 6 + x);
+    const std::vector<std::uint32_t> block = {14, 15, 20, 21};  // z * 6 + x, z and x in {2, 3}
     REQUIRE(s->refine_patches_to_level(block, 3));
     return s->encode();
 }
 
 std::vector<float> level_positions(clay_multires* surface, uint32_t level) {
     clay_mesh* m = nullptr;
-    REQUIRE(clay_multires_copy_level_mesh(surface, level, &m) == CLAY_OK);
+    must(clay_multires_copy_level_mesh(surface, level, &m));
     const float* p = clay_mesh_positions(m);
     std::vector<float> out(p, p + clay_mesh_vertex_count(m) * 3);
     clay_mesh_destroy(m);
@@ -83,6 +89,42 @@ void rim_center(clay_multires* surface, float out[3]) {
     }
 }
 
+// A regional hierarchy a host opened from bytes, at its sculpt level.
+clay_multires* open_regional(const std::vector<std::uint8_t>& bytes) {
+    clay_multires* surface = nullptr;
+    must(clay_multires_deserialize(bytes.data(), bytes.size(), &surface));
+    must(clay_multires_set_sculpt_level(surface, 3));
+    int32_t uniform = 1;
+    must(clay_multires_uniform_depth(surface, &uniform));
+    REQUIRE(uniform == 0);  // regional, or there is no coarse side to cross onto
+    return surface;
+}
+
+clay_mesh_brush_desc rim_layer_brush(clay_multires* surface) {
+    clay_mesh_brush_desc brush{};
+    brush.struct_size = sizeof(brush);
+    must(clay_mesh_brush_defaults(&brush));
+    brush.verb = CLAY_MESH_BRUSH_LAYER;
+    rim_center(surface, brush.center);
+    brush.radius = 0.50f;  // anchored on the rim and reaching well past it
+    brush.strength = 1.0f;
+    brush.layer_height = 0.08f;
+    return brush;
+}
+
+void stamp(clay_multires_sculptor* sculptor, const clay_mesh_brush_desc& brush) {
+    clay_multires_stamp_report report{};
+    report.struct_size = sizeof(report);
+    must(clay_multires_sculptor_stamp(sculptor, &brush, nullptr, &report));
+    REQUIRE(report.moved_vertices > 0);
+}
+
+uint64_t seed_token(clay_multires_sculptor* sculptor) {
+    uint64_t token = 0;
+    must(clay_multires_sculptor_seed_revision(sculptor, &token));
+    return token;
+}
+
 struct Run {
     std::vector<float> coarse;
     bool rebound = false;
@@ -91,46 +133,25 @@ struct Run {
 // Two LAYER dabs in one gesture, with a trim at `pressure` between them when
 // `trim` is set.
 Run layer_stroke(const std::vector<std::uint8_t>& bytes, bool trim, int32_t pressure) {
-    clay_multires* surface = nullptr;
-    REQUIRE(clay_multires_deserialize(bytes.data(), bytes.size(), &surface) == CLAY_OK);
-    REQUIRE(clay_multires_set_sculpt_level(surface, 3) == CLAY_OK);
-    int32_t uniform = 1;
-    REQUIRE(clay_multires_uniform_depth(surface, &uniform) == CLAY_OK);
-    REQUIRE(uniform == 0);  // regional, or there is no coarse side to cross onto
-
-    clay_mesh_brush_desc brush{};
-    brush.struct_size = sizeof(brush);
-    REQUIRE(clay_mesh_brush_defaults(&brush) == CLAY_OK);
-    brush.verb = CLAY_MESH_BRUSH_LAYER;
-    rim_center(surface, brush.center);
-    brush.radius = 0.50f;  // anchored on the rim and reaching well past it
-    brush.strength = 1.0f;
-    brush.layer_height = 0.08f;
-
+    clay_multires* surface = open_regional(bytes);
+    const clay_mesh_brush_desc brush = rim_layer_brush(surface);
     clay_multires_sculptor* sculptor = nullptr;
-    REQUIRE(clay_multires_sculptor_create(surface, &sculptor) == CLAY_OK);
-    REQUIRE(clay_multires_sculptor_begin_stroke(sculptor) == CLAY_OK);
-    clay_multires_stamp_report report{};
-    report.struct_size = sizeof(report);
-    REQUIRE(clay_multires_sculptor_stamp(sculptor, &brush, nullptr, &report) == CLAY_OK);
-    REQUIRE(report.moved_vertices > 0);
+    must(clay_multires_sculptor_create(surface, &sculptor));
+    must(clay_multires_sculptor_begin_stroke(sculptor));
+    stamp(sculptor, brush);
 
-    uint64_t token = 0;
-    REQUIRE(clay_multires_sculptor_seed_revision(sculptor, &token) == CLAY_OK);
+    const uint64_t token = seed_token(sculptor);
     if (trim) {
         clay_trim_report trimmed{};
         trimmed.struct_size = sizeof(trimmed);
-        REQUIRE(clay_multires_trim(surface, pressure, nullptr, &trimmed) == CLAY_OK);
+        must(clay_multires_trim(surface, pressure, nullptr, &trimmed));
     }
-    REQUIRE(clay_multires_sculptor_stamp(sculptor, &brush, nullptr, &report) == CLAY_OK);
-    REQUIRE(report.moved_vertices > 0);
+    stamp(sculptor, brush);
 
     Run out;
     // Read after the second dab: the token is minted when the level sculptor is
     // rebuilt, so a changed one is the rebind itself and not the probe's.
-    uint64_t after = 0;
-    REQUIRE(clay_multires_sculptor_seed_revision(sculptor, &after) == CLAY_OK);
-    out.rebound = after != token;
+    out.rebound = seed_token(sculptor) != token;
     out.coarse = level_positions(surface, 2);
     clay_multires_sculptor_destroy(sculptor);
     clay_multires_destroy(surface);
@@ -148,7 +169,7 @@ TEST_CASE("c regression: a trim mid-stroke does not lift the Layer ceiling at a 
     const std::vector<std::uint8_t> bytes = regional_bytes();
 
     clay_multires* fresh = nullptr;
-    REQUIRE(clay_multires_deserialize(bytes.data(), bytes.size(), &fresh) == CLAY_OK);
+    must(clay_multires_deserialize(bytes.data(), bytes.size(), &fresh));
     const std::vector<float> pristine = level_positions(fresh, 2);
     clay_multires_destroy(fresh);
 

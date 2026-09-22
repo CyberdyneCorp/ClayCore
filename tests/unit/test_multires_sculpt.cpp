@@ -1791,34 +1791,45 @@ struct AcrossTrim {
 // `trim_surface` at a stated pressure, which is what `clay_multires_trim` and
 // pyclay's `MultiresSurface.trim` call -- and optionally an UNREVISIONED seed
 // picked off the sculpt level before the first dab.
+// The rim-anchored Layer dab both regional ceiling cases stamp.
+MeshBrushSettings rim_layer_settings(MultiresSurface& s) {
+    MeshBrushSettings settings;
+    const std::vector<cfloat3>& p = s.positions_at(3);
+    settings.center = p[nearest_vertex(p, cf3(-1.0f / 3.0f, 0.0f, 0.0f))];
+    settings.radius = 0.50f;  // anchored on the rim and reaching well past it
+    settings.strength = 1.0f;
+    settings.layer_height = 0.08f;
+    return settings;
+}
+
+// An UNREVISIONED seed off the bound level: the class only, trusted verbatim.
+void seed_unrevisioned(MultiresSculptor& sculptor, MeshBrushSettings* settings) {
+    settings->seed_class = sculptor.level_sculptor()->nearest_class(settings->center);
+    REQUIRE(settings->seed_class != mesh::kNoClass);
+    REQUIRE(settings->seed_revision == mesh::kNoSeedRevision);
+}
+
+void layer_dab(MultiresSculptor& sculptor, const MeshBrushSettings& settings) {
+    REQUIRE(sculptor.stamp(MeshBrush::Layer, settings) > 0);
+}
+
 AcrossTrim layer_stroke_across_trim(const Mesh& cage, bool trim, memory::Pressure pressure,
                                     bool seeded) {
     MultiresSurface s = build_regional(cage);
     REQUIRE(s.set_sculpt_level(3));
-    MeshBrushSettings settings;
-    {
-        const std::vector<cfloat3>& p = s.positions_at(3);
-        settings.center = p[nearest_vertex(p, cf3(-1.0f / 3.0f, 0.0f, 0.0f))];
-    }
-    settings.radius = 0.50f;
-    settings.strength = 1.0f;
-    settings.layer_height = 0.08f;
+    MeshBrushSettings settings = rim_layer_settings(s);
 
     MultiresSculptor sculptor(s);
     sculptor.begin_stroke();
-    if (seeded) {
-        settings.seed_class = sculptor.level_sculptor()->nearest_class(settings.center);
-        REQUIRE(settings.seed_class != mesh::kNoClass);
-        REQUIRE(settings.seed_revision == mesh::kNoSeedRevision);
-    }
-    REQUIRE(sculptor.stamp(MeshBrush::Layer, settings) > 0);
+    if (seeded) seed_unrevisioned(sculptor, &settings);
+    layer_dab(sculptor, settings);
 
     AcrossTrim out;
     const std::uint64_t generation = s.cache_generation();
     const std::uint64_t token = sculptor.seed_revision();
     if (trim) mesh::trim_surface(s, pressure, nullptr);
     out.generation_moved = s.cache_generation() != generation;
-    REQUIRE(sculptor.stamp(MeshBrush::Layer, settings) > 0);
+    layer_dab(sculptor, settings);
     out.second_dab_levels = sculptor.last_write_levels();
     // Read AFTER the second dab, so the probe cannot be what rebinds: a bound
     // level sculptor mints a new token at construction and only there.
