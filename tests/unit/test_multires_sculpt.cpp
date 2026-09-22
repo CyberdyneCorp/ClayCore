@@ -1838,6 +1838,46 @@ AcrossTrim layer_stroke_across_trim(const Mesh& cage, bool trim, memory::Pressur
     return out;
 }
 
+// The untrimmed stroke: no rebind, both levels written, settled within the
+// ceiling -- the stroke really reached the coarse level.
+void require_untrimmed(const AcrossTrim& kept) {
+    REQUIRE_FALSE(kept.rebound);
+    REQUIRE(kept.second_dab_levels == std::vector<std::uint32_t>{2u, 3u});
+}
+
+void check_untrimmed_stroke(const std::vector<cfloat3>& pristine, const AcrossTrim& kept) {
+    require_untrimmed(kept);
+    const float settled = worst_travel(pristine, kept.coarse);
+    CHECK((settled > 0.01f && settled <= 0.08f));
+}
+
+// THE PRECONDITION the host's own negative repro never induced: the generation
+// moved between the dabs, and the sculptor really rebound on it rather than
+// stamping through a binding it kept.
+//
+// And the second dab still reached the coarse side. With an unrevisioned seed
+// this is the silent-empty-dab hazard: a coarse sculptor handed the sculpt
+// level's class would walk from the wrong vertex and write nothing.
+void require_rebound_and_reached(const AcrossTrim& trimmed) {
+    REQUIRE(trimmed.generation_moved);
+    REQUIRE(trimmed.rebound);
+    CHECK(trimmed.second_dab_levels == std::vector<std::uint32_t>{2u, 3u});
+}
+
+// One trimmed stroke against the untrimmed one, at `pressure`, optionally seeded.
+void check_trimmed_stroke(const Mesh& cage, const std::vector<cfloat3>& pristine,
+                          const AcrossTrim& kept, memory::Pressure pressure, bool seeded) {
+    const std::string name = memory::pressure_name(pressure);
+    CAPTURE(name);
+    CAPTURE(seeded);
+    const AcrossTrim trimmed = layer_stroke_across_trim(cage, true, pressure, seeded);
+    require_rebound_and_reached(trimmed);
+    const float travel = worst_travel(pristine, trimmed.coarse);
+    MESSAGE("coarse travel " << travel << " after a " << name << " trim mid-stroke, ceiling 0.08");
+    CHECK(travel <= 0.08f);
+    CHECK(same_bytes(kept.coarse, trimmed.coarse));
+}
+
 }  // namespace
 
 TEST_CASE("multires: a host's trim mid-stroke does not lift the coarse side's layer ceiling") {
@@ -1850,35 +1890,10 @@ TEST_CASE("multires: a host's trim mid-stroke does not lift the coarse side's la
     const Mesh cage = bumpy_quads(6, 1.0f);
     const std::vector<cfloat3> pristine = build_regional(cage).positions_at(2);
     const AcrossTrim kept = layer_stroke_across_trim(cage, false, memory::Pressure::None, false);
-    REQUIRE_FALSE(kept.rebound);
-    REQUIRE(kept.second_dab_levels == std::vector<std::uint32_t>{2u, 3u});
-    const float settled = worst_travel(pristine, kept.coarse);
-    CHECK(settled > 0.01f);
-    CHECK(settled <= 0.08f);
+    check_untrimmed_stroke(pristine, kept);
 
-    for (memory::Pressure pressure : {memory::Pressure::Urgent, memory::Pressure::Critical}) {
-        for (bool seeded : {false, true}) {
-            const std::string name = memory::pressure_name(pressure);
-            CAPTURE(name);
-            CAPTURE(seeded);
-            const AcrossTrim trimmed = layer_stroke_across_trim(cage, true, pressure, seeded);
-            // THE PRECONDITION the host's own negative repro never induced:
-            // the generation moved between the dabs, and the sculptor really
-            // rebound on it rather than stamping through a binding it kept.
-            REQUIRE(trimmed.generation_moved);
-            REQUIRE(trimmed.rebound);
-            // The second dab still reached the coarse side. With an
-            // unrevisioned seed this is the silent-empty-dab hazard: a coarse
-            // sculptor handed the sculpt level's class would walk from the
-            // wrong vertex and write nothing.
-            CHECK(trimmed.second_dab_levels == std::vector<std::uint32_t>{2u, 3u});
-            const float travel = worst_travel(pristine, trimmed.coarse);
-            MESSAGE("coarse travel " << travel << " after a " << name
-                                     << " trim mid-stroke, ceiling 0.08");
-            CHECK(travel <= 0.08f);
-            CHECK(same_bytes(kept.coarse, trimmed.coarse));
-        }
-    }
+    for (memory::Pressure pressure : {memory::Pressure::Urgent, memory::Pressure::Critical})
+        for (bool seeded : {false, true}) check_trimmed_stroke(cage, pristine, kept, pressure, seeded);
 }
 
 namespace {
@@ -1928,6 +1943,16 @@ struct Restructured {
     bool structure_moved = false;
 };
 
+// Remove the top level and refine level 3 again over one patch of the four.
+// Returns whether the surface said its numbering moved.
+bool restructure_to_one_patch(MultiresSurface& s) {
+    const std::uint64_t structure = s.structure_revision();
+    REQUIRE(s.remove_highest_level());
+    REQUIRE(s.add_level_for_patches({14u}));
+    REQUIRE(s.sculpt_level() == 3);
+    return s.structure_revision() != structure;
+}
+
 // Two `Layer` dabs of one gesture with the hierarchy RESTRUCTURED between them:
 // the top level removed and level 3 refined again over one patch of the four.
 // The sculpt level's NUMBER is 3 on both sides of that and its numbering is
@@ -1942,11 +1967,7 @@ Restructured layer_across_restructure(const Mesh& cage, bool restart) {
 
     Restructured out;
     out.vertices_before = s.positions_at(3).size();
-    const std::uint64_t structure = s.structure_revision();
-    REQUIRE(s.remove_highest_level());
-    REQUIRE(s.add_level_for_patches({14u}));
-    REQUIRE(s.sculpt_level() == 3);
-    out.structure_moved = s.structure_revision() != structure;
+    out.structure_moved = restructure_to_one_patch(s);
     out.vertices_after = s.positions_at(3).size();
     if (restart) sculptor.begin_stroke();
     sculptor.stamp(MeshBrush::Layer, settings);

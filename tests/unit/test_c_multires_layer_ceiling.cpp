@@ -159,6 +159,24 @@ Run layer_stroke(const std::vector<std::uint8_t>& bytes, bool trim, int32_t pres
     return out;
 }
 
+// A trimmed stroke, with THE PRECONDITION asserted: the trim really rebound it.
+Run rebound_stroke(const std::vector<std::uint8_t>& bytes, int32_t pressure) {
+    Run trimmed = layer_stroke(bytes, true, pressure);
+    REQUIRE(trimmed.rebound);
+    return trimmed;
+}
+
+// One trimmed stroke against the untrimmed one, at `pressure`.
+void check_trimmed_stroke(const std::vector<std::uint8_t>& bytes,
+                          const std::vector<float>& pristine, const Run& kept, int32_t pressure) {
+    CAPTURE(pressure);
+    const Run trimmed = rebound_stroke(bytes, pressure);
+    const float travel = worst_travel(pristine, trimmed.coarse);
+    MESSAGE("coarse travel " << travel << " after trim(" << pressure << ") mid-stroke, ceiling 0.08");
+    CHECK(travel <= 0.08f);
+    CHECK(trimmed.coarse == kept.coarse);
+}
+
 }  // namespace
 
 TEST_CASE("c regression: a trim mid-stroke does not lift the Layer ceiling at a depth boundary") {
@@ -177,19 +195,10 @@ TEST_CASE("c regression: a trim mid-stroke does not lift the Layer ceiling at a 
     const Run kept = layer_stroke(bytes, false, CLAY_PRESSURE_NONE);
     REQUIRE_FALSE(kept.rebound);
     const float settled = worst_travel(pristine, kept.coarse);
-    CHECK(settled > 0.01f);  // the stroke reached the coarse side at all
-    CHECK(settled <= 0.08f);
+    CHECK((settled > 0.01f && settled <= 0.08f));  // reached the coarse side, within the ceiling
 
-    for (int32_t pressure : {CLAY_PRESSURE_URGENT, CLAY_PRESSURE_CRITICAL}) {
-        CAPTURE(pressure);
-        const Run trimmed = layer_stroke(bytes, true, pressure);
-        REQUIRE(trimmed.rebound);
-        const float travel = worst_travel(pristine, trimmed.coarse);
-        MESSAGE("coarse travel " << travel << " after trim(" << pressure
-                                 << ") mid-stroke, ceiling 0.08");
-        CHECK(travel <= 0.08f);
-        CHECK(trimmed.coarse == kept.coarse);
-    }
+    for (int32_t pressure : {CLAY_PRESSURE_URGENT, CLAY_PRESSURE_CRITICAL})
+        check_trimmed_stroke(bytes, pristine, kept, pressure);
 }
 
 namespace {
