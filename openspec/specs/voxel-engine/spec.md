@@ -113,6 +113,8 @@ The voxel engine SHALL provide a grab verb taking the same centre, radius, displ
 
 Because occupancy is binary, resampling SHALL be nearest-cell, and the spec SHALL state plainly that a displacement larger than a cell aliases: material moves in whole cells, and a slow drag will step rather than flow. This is a property of the representation, not a defect to be hidden.
 
+The grab SHALL weight its map with the SAME falloff table every other voxel verb reads, so a `BrushFalloff` names one curve across the whole voxel engine. It SHALL NOT reinterpret the falloff as an easing index: the two enumerations do not correspond, and doing so gave each falloff the next one's curve while leaving `Constant` unreachable.
+
 #### Scenario: Material moves with the pull
 - **WHEN** a voxel grab displaces a region
 - **THEN** cells in the direction of the displacement become occupied and cells behind it are vacated, with colour carried along
@@ -122,8 +124,22 @@ Because occupancy is binary, resampling SHALL be nearest-cell, and the spec SHAL
 - **THEN** no cell beyond the radius from the centre changes occupancy or index
 
 #### Scenario: Grab agrees with the SDF deformer in shape
+- **GIVEN** a falloff an easing curve can express — `Linear` is ease_linear and `Smooth` is ease_smoothstep, both exactly
 - **WHEN** the same centre, radius, displacement and falloff are applied to a voxelized sphere and to the equivalent SDF sphere
 - **THEN** the displaced surfaces agree to within the voxel size
+
+#### Scenario: Two falloffs have no SDF equivalent, and that is stated rather than implied
+- **GIVEN** `Constant` or `Gaussian`, which no easing curve reproduces because the SDF region weight always carries the (1 - d) factor
+- **WHEN** a host compares the two representations
+- **THEN** it is told they cannot correspond for those two, instead of being given a curve that silently belongs to a different falloff
+
+#### Scenario: A constant falloff pulls rigidly
+- **WHEN** a grab with a constant falloff displaces a region
+- **THEN** material half way to the rim moves as far as material at the centre, within a cell of quantisation
+
+#### Scenario: A tapering falloff is distinguishable from a constant one
+- **WHEN** the same grab is applied with a constant and with a linear falloff
+- **THEN** the constant one moves material at half the radius measurably further, and the linear one still moves the centre further than the rim
 
 ### Requirement: A paintable mask field
 The module SHALL provide a sparse scalar mask field in [0,1] on a chunked lattice, addressed in world units. It SHALL be paintable with the same brush vocabulary as voxel edits — footprint size, cube or sphere shape, falloff curve and strength — and SHALL support invert, clear, expand, contract and smooth over the painted region. Because the lattice is sparse and unbounded, invert is defined as flipping what has been painted rather than over an infinite complement.
@@ -149,6 +165,10 @@ The mask SHALL be sampleable at an arbitrary world position, so a consumer at an
 ### Requirement: Masked voxel edits
 Voxel edits SHALL accept an optional mask, and where one is given the effective edit strength at a cell SHALL be scaled by one minus the mask value there. A fully masked cell SHALL be left untouched by any edit.
 
+Voxel edits SHALL also accept a mask THRESHOLD. At zero — the default — the mask scales the strength exactly as above, bit for bit. Above zero the mask SHALL be read as a stencil instead: a cell whose mask value is at or above the threshold SHALL be refused outright, and a cell below it SHALL be edited as though no mask were present. A threshold outside [0, 1] SHALL be refused rather than clamped, because a clamp would silently answer a different question than the caller asked.
+
+The two readings are exclusive on purpose. Scaling below the threshold would leave a dithered band the threshold does not cover, which is the defect a stencil exists to remove.
+
 #### Scenario: A frozen region survives an edit
 - **WHEN** a region is fully masked and a brush is stamped across it
 - **THEN** cells inside the masked region are unchanged and cells outside it are edited
@@ -156,6 +176,19 @@ Voxel edits SHALL accept an optional mask, and where one is given the effective 
 #### Scenario: Partial masking attenuates
 - **WHEN** a region is half masked and a brush is stamped across it
 - **THEN** fewer cells change there than in the unmasked region, and more than in the fully masked one
+
+#### Scenario: The default changes nothing
+- **WHEN** an edit is made without setting a threshold
+- **THEN** every written cell is the one the same edit wrote before the threshold existed
+
+#### Scenario: A threshold refuses rather than attenuates
+- **GIVEN** a mask whose value ramps across a skirt
+- **WHEN** a solid brush is stamped across it with a threshold inside that ramp
+- **THEN** no cell at or above the threshold is written, and cells below it are written as though unmasked
+
+#### Scenario: The boundary is inclusive
+- **WHEN** a cell's mask value equals the threshold exactly
+- **THEN** the cell is refused
 
 ### Requirement: Masks survive resolution and representation changes
 The mask SHALL be addressed in world units rather than in a layer's cell indices, so that changing a layer's resolution, or moving content between the SDF and voxel representations, cannot silently discard or misalign it. This SHALL be verified by a regression test, not merely documented.

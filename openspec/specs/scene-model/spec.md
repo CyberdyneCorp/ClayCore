@@ -9,7 +9,9 @@ to, and the one undo history that reverses every representation through it.
 The layer between the arithmetic below and everything that consumes it. A
 document is the only thing a host, a file, a binding and a renderer all agree
 about, so what it is has to be stated in one place rather than assumed in five.
+
 ## Requirements
+
 ### Requirement: Document structure
 `clay::scene` SHALL model a document as a list of layers, each `voxel`, `sdf` or `mesh` kind, with per-layer transform, visibility, resolution, and material. SDF layers SHALL hold an ordered edit list where each item applies to the combined result of all preceding items. Groups SHALL nest to depth ≥ 4 and carry group ops (including None). Layer instancing SHALL share content by reference such that editing the source updates all instances.
 
@@ -1036,15 +1038,15 @@ Comparing counts is not sufficient and neither is comparing the address of the l
 ### Requirement: A bake can be merged into a region of a layer
 A host SHALL be able to bake a REGION of a layer into one volume and put it back where the items it absorbed were, leaving every item outside parametric. Collapsing the whole layer SHALL NOT be the only way to install a bake.
 
-The region a merge absorbs and samples SHALL be the INFLUENCE CLOSURE of the caller's region: the region grown, to a fixed point, until every item whose influence bound meets it is wholly inside it. Absorbing merely the items that overlap the caller's region is NOT sufficient — an item straddling the edge remains, and material it had carved returns where the installed volume cannot remove it again.
+Except for a compatible retained-volume patch as specified below, the region a merge absorbs and samples SHALL be the INFLUENCE CLOSURE of the caller's region: the region grown, to a fixed point, until every item whose influence bound meets it is wholly inside it. Absorbing merely the items that overlap the caller's region is NOT sufficient — an item straddling the edge remains, and material it had carved returns where the installed volume cannot remove it again.
 
 At the closure, the field outside the box SHALL be unchanged, and inside the box the bake SHALL be the whole answer, because no remaining item contributes there.
 
-An item whose influence is unbounded SHALL pull the closure out to the whole layer. Where the closure reaches every visible root the operation IS a whole-layer consolidation, and that SHALL be reported rather than hidden.
+An item whose influence is unbounded SHALL pull the closure out to the whole layer. Where a whole-root closure reaches every visible root the operation IS a whole-layer consolidation, and that SHALL be reported rather than hidden. A retained-volume patch SHALL report `whole_layer = false`, including on a single-root layer, because unaffected samples remain outside the bake.
 
 The merge SHALL be ONE undo step whose inverse restores the absorbed items with their ids, parameters, colours and deformers, SHALL leave hidden items alone, and SHALL be refused on a protected layer before anything is sampled.
 
-A host SHALL be able to ask what a merge would absorb, and over what box, without baking anything.
+A host SHALL be able to ask what a merge would absorb, and over what box, without baking anything. The preview planner SHALL assume the existing volume spacing and band; if the actual request changes these settings, the returned execution report SHALL describe its conservative whole-root fallback. The cost report SHALL describe the installed volume, including retained storage; the merge box SHALL describe the sampled patch.
 
 #### Scenario: The closure takes what the region reaches and no more
 - **WHEN** a region is planned over one of several well-separated items
@@ -1063,7 +1065,7 @@ A host SHALL be able to ask what a merge would absorb, and over what box, withou
 - **THEN** the layer holds one baked item for that patch, not one per gesture
 
 #### Scenario: A whole-layer closure says so
-- **WHEN** the closure reaches every visible root
+- **WHEN** a whole-root closure reaches every visible root
 - **THEN** the merge reports that it consolidated the layer
 
 #### Scenario: It undoes to the parametric form
@@ -1883,3 +1885,39 @@ field does not honour.
 - **THEN** no surface-delta bound is reported, because the node's influence bound
   is already that box
 
+### Requirement: Regional volume maintenance does not expand its own workload
+
+Regional consolidation SHALL retain unaffected samples when a compatible
+additive volume's local edits can be replaced independently. The rebuilt
+region SHALL include the requested region, the support of every removed
+deformer, and the sampling transition halo. It SHALL NOT expand merely to
+include the retained volume's conservative deformed extent.
+
+#### Scenario: Repeated maintenance of a stationary patch
+- **GIVEN** disjoint subtools and local Move edits on one previously baked subtool
+- **WHEN** the same patch is consolidated repeatedly at the same resolution
+- **THEN** field sampling and redistancing remain bounded by that patch and its local edit support
+- **AND** unrelated parametric roots remain unchanged and scene roots do not accumulate
+
+#### Scenario: A retained volume crosses the patch boundary
+- **WHEN** a compatible volume is partially consolidated
+- **THEN** untouched stored samples and colours are retained
+- **AND** a transition outside the edited support joins the rebuilt field without introducing an artificial box surface
+- **AND** the resulting sampled field declares a conservative slope bound
+
+#### Scenario: Removing edits outside the last stroke
+- **GIVEN** several finite-support deformers on a retained volume
+- **WHEN** the caller requests only the last stroke's region
+- **THEN** the bake includes every removed deformer’s support
+
+#### Scenario: Partial replacement cannot preserve the fold
+- **GIVEN** incompatible modifiers, sampling settings, or overlapping operands
+- **WHEN** a regional consolidation is requested
+- **THEN** the operation uses the conservative whole-root closure and reports the plan it executes
+
+#### Scenario: A partial bake is reversible and cancellable
+- **WHEN** a partial bake completes
+- **THEN** one undo restores the original samples, deformers, and sharing, and redo restores the result
+- **AND** saving and reloading preserves the resulting volume
+- **WHEN** a bake is cancelled before publication
+- **THEN** the document and its undo history remain unchanged
