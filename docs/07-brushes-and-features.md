@@ -2520,7 +2520,7 @@ second one.
 vertex plane against query time, false-positive touched vertices, normal
 recompute, upload bytes, locality and split/merge cost; the table and the one
 place the decision departs from the rule that chose it are in
-[`design.md`](../openspec/changes/add-extreme-poly-runtime/design.md) D2a and
+[`design.md`](../openspec/changes/archive/2026-09-05-add-extreme-poly-runtime/design.md) D2a and
 the numbers are in
 [`docs/09`](09-brush-latency-and-coverage.md#the-extreme-poly-runtime-measured-add-extreme-poly-runtime).
 
