@@ -32,22 +32,23 @@ A layer's own symmetry SHALL be resolved BEFORE it combines with what is beneath
 it. Combining each mirrored or radial copy separately changes the result wherever
 the blend is smooth, because a smooth combine does not associate.
 
-A fold's reported extent SHALL cover the surface the fold can produce: the
-layer's own extent dilated by the FOLD's support, taken from the same expression
-the item-level combine uses, so a smooth or extended layer join cannot bulge past
-the box the tape reports. A bound that is too small loses ray hits and drops
-bricks from a plan, and both render as missing surface rather than as an error,
-which is why this half is required rather than advisory.
+A tape's reported extent SHALL cover every point where its field can hold
+material, and SHALL be folded combine by combine by ONE rule applied at every
+level a combine happens — an item onto its chain, a group onto the chain outside
+it, a layer onto the layers beneath it, and a resumed compile unwinding the same
+stack — so a layer boolean and the item or group boolean it is spelled as report
+the same box. A bound that is too small loses ray hits and drops bricks from a
+plan, and both render as missing surface rather than as an error, which is why
+this is required rather than advisory.
 
-Bounds are NOT required to be narrowed per operator, and this is a deliberate
-limit rather than an omission. A subtract cannot create material outside its left
-operand and an intersect is contained by the intersection, so both could report
-less than the union — but the ITEM path unions for every operator too, and the
-requirement above that a layer boolean and an item boolean express the same
-document means narrowing one side alone would break it. Narrowing both changes
-the meshing region of every document that already carries a subtract or a paint,
-so it belongs to a change that can measure that. Until then a fold's extent is
-conservative in the direction that cannot lose surface.
+Per operator: a SUBTRACT SHALL report its left operand's extent, because every
+blend profile's smooth minimum is no larger than the hard one, so a subtract
+cannot create material outside what it cuts; an INTERSECT SHALL report the
+overlap of its two operands' extents, or its left operand's where a mask gate
+protects a region or the two do not overlap; every other operator SHALL report
+the union of the two, the right operand dilated by the combine's own support —
+so a smooth or extended join, at any level, cannot bulge past the box. A GROUP's
+own combine SHALL contribute that support as a layer fold's does.
 
 Exactness and the Lipschitz bound SHALL fold exactly as the item-level combine
 folds them, so that a document expressing a shape as two layers and a document
@@ -142,6 +143,14 @@ unioning, and SHALL render exactly as it did.
 #### Scenario: Two layers and one layer agree
 - **WHEN** a shape is expressed as layer A with layer B subtracting, and as one layer holding A then B subtracting, under equivalent transforms
 - **THEN** the two documents agree in distance, colour, bounds and safe-step scale over many sampled points
+
+#### Scenario: A subtract does not widen the box, an intersect narrows it
+- **WHEN** a large cutter subtracts a small region from a shape, or two offset shapes intersect, as items, as a group or as composed layers
+- **THEN** the reported extent is the shape's own, or the overlap, rather than the union of both; no sampled point with material lies outside it; and a compile resumed from a checkpoint reports the same extent as the full compile
+
+#### Scenario: A smooth group's own blend is inside the box
+- **WHEN** a group with a smooth combine joins material that abuts the chain outside it
+- **THEN** the bulge its blend adds lies inside the reported extent, as it does for the same join spelled as a layer composition
 
 #### Scenario: The stack's order is part of the shape
 - **WHEN** the same three layers are ordered A−B+C and A+C−B

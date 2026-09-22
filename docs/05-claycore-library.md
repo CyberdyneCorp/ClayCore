@@ -813,12 +813,23 @@ combines **once**, with the shape its symmetry made. Combining each copy
 separately would change the result wherever the blend is smooth, because a
 smooth combine does not associate.
 
-**Bounds and the cull pad follow the fold.** A smooth or extended fold bulges
-past the union of both operands, so the layer's extent enters `tape.bounds`
-dilated by the fold's OWN support — `scene::chain_blend_support`, the single
-expression `group_blend_support` and the item path already use. Without it 11,618
-lattice samples in the fixture carry material outside the box the tape reports,
-which is a dropped brick and a lost ray hit rather than an error. The same
+**Bounds and the cull pad follow the fold.** `tape.bounds` is folded combine by
+combine through `scene::combine_extent`, one rule at every level — item, group,
+layer, and a resume unwinding the same stack. A **subtract** keeps its left
+operand's extent (every profile's smooth minimum is ≤ the hard one, so it cannot
+make material outside what it cuts); an **intersect** keeps the overlap, or the
+left operand's where a mask gate protects a region or the boxes do not meet;
+everything else unions, the right operand dilated by the combine's OWN support —
+`scene::chain_blend_support`, the single expression `group_blend_support`,
+`layer_blend_support` and the item path use. Without the ring 11,618 lattice
+samples in the fixture carry material outside the box the tape reports, which is
+a dropped brick and a lost ray hit rather than an error; a smooth GROUP now adds
+its ring too, which it did not until bounds were narrowed per operator. A large cutter carving a small shape
+no longer makes the meshing region the cutter's box — the measurement is in the
+change's proposal. `TapeCheckpoint` carries the extents a resume needs
+(`chain_bound`, `below_bound`, per-frame `outer_bound`, and the plain union
+`reach` a transition's field info still reads), so an appended subtract reports
+the full compile's box. The same
 support enters `cull_pad_terms` as a per-layer constant, so `document_pad` and
 `CullIndex::refresh_pad` — a maximum over layers of that, each — pick up the
 inter-layer term they had no slot for; without it 11 of 21 samples in the
