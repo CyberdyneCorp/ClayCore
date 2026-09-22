@@ -1953,13 +1953,15 @@ struct Disagreement {
     double worst = 0.0;
 };
 
-// The bound sits between the two measured numbers the ROADMAP's "put the bound
-// between the noise floor and the wrong answer" records: a correct port differs
-// only by summation order, 4.5e-07 on a unit normal and far less on a position
-// scaled by a 0.05 coefficient, and the defect reads 7.1e-02 on the normal and
-// 5.7e-03 on the position. Exact equality is NOT asked for — the dense level
-// sums one contiguous ring and the regional level sums its own faces and then
-// the derived ones, and float addition is not associative.
+// The bound sits between two measured numbers, as the ROADMAP's "put the
+// bound between the noise floor and the wrong answer" asks. A correct port
+// differs only by summation order: worst 4.1e-07 on a unit normal and 6.0e-08
+// on a position, on these grids and on a cube-sphere. The defect, with the
+// neighbourhood input reverted, reads 0.154 on a level-3 frame normal and
+// 0.0054 on a position on the 6x6 cage, and 0.029 and 0.0012 on a
+// cube-sphere. Exact equality is NOT asked for: the dense level sums one
+// contiguous ring and the regional level sums its own faces and then the
+// derived ones, and float addition is not associative.
 constexpr double kBoundaryBound = 1e-5;
 
 Disagreement compare(const std::vector<cfloat3>& dense, const std::vector<cfloat3>& part,
@@ -2107,7 +2109,7 @@ TEST_CASE("regional boundary: an edit below the rim re-derives the frames the de
     // corner is a corner of the kept face on the rim's other side — stored,
     // dirty (it is a child of a face incident to the moved parent), and one
     // stored face away from the rim vertex. So the level's own face ring
-    // already reaches it. This gate is that argument measured: 0 of 49 moves.
+    // already reaches it. The single level-2 edits below measure that argument.
     const Mesh cage = grid_quads(6, 1.0f);
     const std::vector<std::uint32_t> ids = dense_ids(cage, 3);
 

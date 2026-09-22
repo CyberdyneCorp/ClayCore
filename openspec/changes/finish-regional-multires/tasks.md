@@ -34,29 +34,43 @@
 
 ## 1. The frame at a transition — ships first, has users today
 
-- [ ] 1.1 REGRESSION GATE FIRST, because it fails today. A new case in
-      `tests/unit/test_multires_regional.cpp`: build a dense and a regional
-      hierarchy over the same cage, write identical `LocalDetail` into every
-      vertex of the top level of BOTH, and assert the count of differing
-      positions is 0 over every vertex the regional hierarchy shares with the
-      dense one. It is 63 of 289 today. Assert the COUNT, not a tolerance
-- [ ] 1.2 Fix the cause, which is one input and not a branch. `child_frame_of`
-      takes `target_normal` from the child's own level normal, and
-      `level_normals` sums only the faces THIS level has. Feed it the complete
-      face ring from section 2 so the normal at a boundary vertex is the
-      dense hierarchy's. Both `transport_frames` and `transport_frames_partial`
-      go through it
-- [ ] 1.3 The display normal takes the same input, in both forms:
-      `level_normals` at `full_evaluate` and `level_normals_partial` at
-      `partial_evaluate`. The partial form is the one a stamp actually takes, so
-      a transition normal is re-derived on every dab and must be re-derived
-      completely
-- [ ] 1.4 PROVE 1.1 by reverting 1.2 and watching it fail. The revert must
-      COMPILE, and the failure must be a moved POSITION rather than a moved
-      normal — a frame fix that only changes shading has not fixed the storage
-- [ ] 1.5 Do not weaken `tests/unit/test_multires_regional.cpp`'s existing
-      bit-identity case. It authors no detail and therefore cannot see this bug;
-      it encodes a true and separate claim about stored positions
+- [x] 1.1 REGRESSION GATE FIRST. Three cases in
+      `tests/unit/test_multires_regional.cpp`, under "regional boundary:".
+      Identical `LocalDetail` is written into every vertex the regional level
+      stores — CORRECTED from "every vertex of the top level of BOTH": a dense
+      vertex the regional level does not store has no coefficient on the regional
+      side, so detail there moves the dense display normal at the rim for a
+      reason that is not the defect (measured: 64 display normals, worst 0.533,
+      with the frame and positions agreeing). Asserted as COUNTS against a bound
+      of 1e-5 between the correct port's summation-order noise (worst 4.1e-07
+      on a normal, 6.0e-08 on a position) and the defect (0.029 and 0.0012 at
+      the smallest). Preconditions asserted: 64 of 289 level-3 vertices have a
+      short face ring, every one of them carries nonzero detail, and each graded
+      level of the per-level case has a rim. IT DID NOT FAIL ON MAIN, and that
+      is the finding recorded below: the fix had landed on 2026-09-07 without
+      the gate
+- [x] 1.2 The cause is fixed by one input, as planned, and it was ALREADY ON
+      MAIN: `complete-regional-multires-neighbours` (commit f40ee3fe) threads the
+      neighbourhood into `level_normals` / `level_normals_partial` at every
+      evaluation site, so the `target_normal` `child_frame_of` receives through
+      `transport_frames` and `transport_frames_partial` is summed over the
+      complete face ring in raw Newell. Nothing in `surface_frame.cpp` needed to
+      change here; this change adds the gate that proves it
+- [x] 1.3 The display normal takes the same input in both forms, also already
+      on main: `full_evaluate`, `partial_evaluate`, `drain_normals_pending` and
+      `reapply_recomposed` all pass the neighbourhood. Gated on both paths — the
+      full evaluation, `set_detail` after evaluation (the pending drain), 49 cage
+      moves and 289 single level-2 edits (the partial path)
+- [x] 1.4 PROVED BY REVERT, three reverts, each compiling, each isolating one
+      input. The frame input nulled (both `level_normals` calls that feed
+      `transport_frames`): 10 assertions fail across all 3 cases, and the first
+      is a moved POSITION — 60 of 289 level-3 vertices, worst 0.00536766. The
+      partial frame input alone: exactly 1 assertion, 49 of 49 cage moves stale,
+      worst 183 vertices. The display input alone (the four display sites): 6
+      assertions, display normals only — 64 of 289, worst 0.581 — with every
+      position and frame still agreeing, which is the separation 1.4 asks for
+- [x] 1.5 The existing bit-identity case, "a refined patch holds the dense
+      hierarchy's own numbers", is untouched
 
 ## 2. One cross-level topology helper
 
@@ -92,14 +106,18 @@
       level-3 vertices have a smaller face ring than the dense hierarchy's
 - [x] 2.7 GATE: the cached helper rebuilds bit-identically after
       `drop_all_caches`, and `cache_generation` differs across the drop
-- [ ] 2.8 `expand_by_face_ring` uses it, so the propagation halo no longer stops
-      at the region rim. This is the walk that exists precisely because a vertex
-      whose position did not move still has a changed normal, frame and detail.
-      LEFT FOR SECTION 1, deliberately: the halo decides which vertices have
-      their normals and frames redone, and while that normal is still summed
-      over the level's own faces alone a wider halo writes the same numbers to
-      the same vertices and no test can see it. It becomes observable in the
-      same change that makes the normal complete
+- [x] 2.8 DECIDED, AND MEASURED: `expand_by_face_ring` does NOT need the
+      neighbourhood, and it was not given it. `dirty_children` marks every child
+      of every parent face incident to a moved parent vertex. A rim vertex whose
+      normal moved only because an OUTSIDE vertex moved shares a derived quad with
+      it, and that quad's vertex-point corner is a corner of the kept face on the
+      rim's other side — stored, dirty, and one stored face away. So the level's
+      own face ring already reaches it. GATED rather than argued: 289 single
+      level-2 edits, each compared against the same hierarchy's own full
+      re-evaluation, disagree at 0. The gate can fail — shrinking the frame halo
+      to the dirty set fails it at 122 of 289 edits, worst 0.00179 — and a first
+      version that compared only against the dense hierarchy could NOT, because
+      the dense one runs the same partial path and a short halo is short in both
 
 ## 3. The brush-side readers, kept separate
 
@@ -909,3 +927,53 @@
   having opened no file. A named change with no directory now fails. The
   self-test is 16 checks, and every one of the six added here was shown to fail
   with its own fix reverted
+
+### What section 1 found: the fix was on main, the gate was not
+
+- THE DEFECT WAS ALREADY FIXED WHEN THIS SECTION STARTED. Commit f40ee3fe
+  ("Build the regional frame on the cross-level neighbourhood #481 landed",
+  2026-09-07, change `complete-regional-multires-neighbours`) threaded the
+  neighbourhood into every normal the evaluation builds, frame input and display
+  alike. It did not tick these boxes and did not update the ROADMAP, so the
+  record went on saying the frame was wrong for two weeks after it was right.
+- THE GATES THAT CHANGE CLAIMED WERE NOT IN THE TREE. Its tasks 5.1 ("boundary
+  normals against the dense oracle at levels 1-3") and 5.2 ("the
+  coefficient-reconstruction gate") are ticked; no test in `tests/unit` compares
+  a regional normal, frame or detail-bearing position with a dense hierarchy's.
+  What survived of its gates is "a released neighbourhood rebuilds rather than
+  reading as absent", which compares a regional hierarchy with ITSELF. So the fix
+  was on main with nothing that would fail if it were removed. MEASURED: with
+  the input nulled at all six evaluation sites the whole suite — 2850 cases,
+  17932966 assertions — fails 14 assertions, every one of them in the three
+  new cases.
+- BEFORE AND AFTER, re-measured with the input reverted and restored rather than
+  quoted. Every "before" number the audit recorded reproduces to the digits it
+  printed, which is what says the revert IS the pre-fix tree:
+
+  | fixture | level | rim vertices | frame differs (worst) before | after |
+  |---|---:|---:|---:|---:|
+  | A: 96-patch cube-sphere, 2x2 to level 3 | 1 | 32 of 145 | 32 (0.104052) | 0 (1.3e-07) |
+  | A | 2 | 64 of 289 | 64 (0.0485619) | 0 (3.0e-07) |
+  | A | 3 | 64 of 289 | 64 (0.0293633) | 0 (4.1e-07) |
+  | B: 6x6 grid, middle 2x2 to level 3 | 2 | 64 of 289 | 58 (0.170116) | 0 (1.1e-07) |
+  | B | 3 | 64 of 289 | 60 (0.154028) | 0 (1.3e-07) |
+  | C: 10x10 grid, middle 2x2 to level 3 | 1 | 48 of 169 | 40 (0.443103) | 0 (1.9e-07) |
+
+  Emitted corners carrying a different frame: fixture A 124 of 1024 at levels 2
+  and 3 before, 0 after; fixture B 112 and 116 of 1024 before, 0 after. The
+  display normal differs at the same vertices by the same amounts before, and
+  at none after. With `LocalDetail{0.013, -0.021, 0.034}` on every stored
+  level-3 vertex, positions that land elsewhere: A 64 of 289 (worst 0.00123),
+  B 60 (worst 0.00537), C 60 (worst 0.00918) before; 0 of 289 after at every
+  fixture, worst 6.0e-08. Every disagreement before was on the short-ring rim
+  and none off it. Fixture B has no rim at level 1 — the grading covers the
+  whole cage there — which is why the per-level gate runs on C.
+- THE RECORD'S "124 of 1024 corners, worst |dnormal| 0.170116" MIXED TWO
+  FIXTURES: 124 of 1024 is fixture A's corner count and 0.170116 is fixture B's
+  worst. Both numbers are real; they were never one measurement.
+- NO SOURCE FILE CHANGED IN THIS SECTION. Its whole diff is three test cases and
+  this record, so no complexity figure moves.
+- STILL OPEN, and not section 1's: 3.7 (smoothing coefficients and `S(n)` over a
+  short ring in `smooth_detail` / `form_shift`), 5.7 and 6.1 (the C export entry
+  point), 6.3-6.5 (docs and the example).
+

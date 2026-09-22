@@ -938,7 +938,7 @@ Three changes raised by `ClayCore_Field_Stamps_Regional_Multires_Layer_Boolean_I
 | Order | Change | Why here |
 |---|---|---|
 | 1 | `stamp-a-captured-field` **landed 2026-09-05** | **Smaller than the guide describes**, because three of its four pillars already exist: `PrimType::Volume` compiles through the tape, the Node holds a volume by `shared_ptr` so "a thousand uses of one 4 MB asset must not consume ~4 GB" is already true, and `clay_item_volume_from_document` already captures a finite world region with redistance. What is missing is an ORIENTED capture frame (today's region is world-axis-aligned), an asset IDENTITY with a standalone form, a placement helper on `calpha_frame`, and stroke integration. First because it is the smallest and touches nothing the other two need |
-| 2 | `refine-one-region-of-a-hierarchy` **landed; three residuals subsequently closed** | Mixed-depth export, cross-level neighborhoods and crossing brushes are implemented and exercised by `test_multires_regional.cpp`. See the [2026-09-16 mesh investigation](investigations/2026-09-16-mesh-sculpt/README.md). The following host discussion records the earlier prioritization; hierarchy persistence has also since landed (see the host section). **The host does not need any of the three** — it exports no hierarchies — and names a different multires gap as its rank 2: a `.clayspace` carries no hierarchy and the engine reports a hierarchy's layer as a MESH layer, so a host's side-car is the only record that a row ever was one. See the host section. Originally: the gap `add-mesh-multires` recorded in its own row. Depth becomes a property of a base patch, with 2:1 balance in stable patch-id order, transitions watertight by construction rather than by repair, and refinement monotonic in v1 — removal needs a policy for the detail authored there, and picking one silently is worse than not offering it. Reuses the extreme-poly chunk identity; adds no second table |
+| 2 | `refine-one-region-of-a-hierarchy` **landed; its three residuals closed in code by `finish-regional-multires`, one piece of the second still open** | Checked against the tree on 2026-09-22 rather than repeated. **2.3, export transitions:** `mixed_mesh_at_level` and `build_mixed_block` (finish-regional-multires section 5), gated by "regional export: a mixed-depth export closes what the per-patch loop leaves open" (0 open edges where the per-patch loop leaves 72 / 168 / 264). **3.4, cross-level neighbours:** `CrossLevelNeighborhood` (sections 2-3), gated for the brush's normal, relax, smooth, the normal recompute and boundary automasking in `test_multires_sculpt.cpp` ("a smoothing verb is not dragged inward at a depth transition", "relax and a normal-steered verb agree with the uniform hierarchy at a seam", "a depth transition is not a border of the model"); and for the FRAME and display normal — the half with a user — by commit f40ee3fe, gated only since 2026-09-22 by the "regional boundary:" cases in `test_multires_regional.cpp`, which author nonzero detail on the rim and fail at 60 of 289 moved positions with the input reverted. **Still open under 3.4:** the layered sculptor's coefficient and form smoothing (`smooth_detail`, `form_shift`) read `level_adjacency` and so still average a short ring at the rim — finish-regional-multires 3.7. **5.3, crossing brushes:** `stamp_coarse` / `partition_coarse_write` (section 4), gated by "a stamp crossing a depth boundary writes the coarse side too". The boxes in `refine-one-region-of-a-hierarchy/tasks.md` are still unticked; they are closed by the other change's work, not by their own. Earlier text of this row: Mixed-depth export, cross-level neighborhoods and crossing brushes are implemented and exercised by `test_multires_regional.cpp`. See the [2026-09-16 mesh investigation](investigations/2026-09-16-mesh-sculpt/README.md). The following host discussion records the earlier prioritization; hierarchy persistence has also since landed (see the host section). **The host does not need any of the three** — it exports no hierarchies — and names a different multires gap as its rank 2: a `.clayspace` carries no hierarchy and the engine reports a hierarchy's layer as a MESH layer, so a host's side-car is the only record that a row ever was one. See the host section. Originally: the gap `add-mesh-multires` recorded in its own row. Depth becomes a property of a base patch, with 2:1 balance in stable patch-id order, transitions watertight by construction rather than by repair, and refinement monotonic in v1 — removal needs a policy for the detail authored there, and picking one silently is worse than not offering it. Reuses the extreme-poly chunk identity; adds no second table |
 | 3 | `fold-the-layers-with-an-operator` **not started (0/27) — now P0** | **Ordered last here and first by the host, and the host wins.** It is the only open row that changes what an application built on this engine can ship: a subtool IS a layer there, so a subtractive item does not reach the workflow and what ships instead is a resolved boolean that stops tracking its operands. Also where the intersect-drag measurement belongs — `BoundedByLayer` poses per item exactly the question a non-union layer fold poses per layer. Last, and the audit sharpened the reason. The inter-layer hard union is not one line in `compile_document`: it is **eight sites**, including `compile_document_part`'s "the union to fold them with is a HARD Add … anything else is a different field" and the brick refill's own multi-layer fold in `clay_c.cpp`. A layer fold that is not a hard Add breaks the multi-layer resume unless each is taught the operator, and the failure is SILENT — a refill folding wrongly returns a field that never existed. The change decides what each site does before writing any of them, and leans toward REFUSING the split on a non-union fold because it is the only option that cannot be quietly wrong |
 
 ## Deferred, but recorded
@@ -1811,6 +1811,19 @@ is evidence nothing in this repository can produce for itself.
 
 ### Regional multires: the bit-identity gate passes because the fixture has no boundary detail
 
+**FIXED ON MAIN 2026-09-07, GATED 2026-09-22.** Commit f40ee3fe
+(`complete-regional-multires-neighbours`) sums the cross-level neighbourhood into
+every normal the evaluation builds, frame input and display alike, and it landed
+without a gate that could fail: its ticked "dense oracle" and
+"coefficient-reconstruction" gates are not in `tests/unit`, and reverting the
+input left every pre-existing case green. `finish-regional-multires` section 1
+now carries three "regional boundary:" cases that author nonzero detail on the
+rim. Reverting the input reproduces every number below to the printed digits
+(0.104052 / 0.0485619 / 0.0293633 on the cube-sphere, 0.170116 / 0.154028 on
+the 6x6 grid) and moves 60 of 289 level-3 positions, worst 0.00537; restored, it
+is 0 of 289 with the worst frame difference 4.1e-07, which is summation order.
+What follows is the audit as it was written, kept for the reasoning.
+
 Found by auditing `finish-regional-multires` against the tree, and it is a defect
 in SHIPPED code rather than in the change that found it.
 
@@ -2568,6 +2581,20 @@ induce, because a bare "could not reproduce" would have downgraded a real defect
 that a live host can still reach.
 
 ### The frame at a region boundary: what it costs to land it unfixed
+
+**It did not land unfixed.** The input fix reached main on 2026-09-07 through
+`complete-regional-multires-neighbours` (commit f40ee3fe) and this section went on
+stating the cost for two weeks afterwards, because the change that fixed it
+ticked no box here and left no gate. Measured 2026-09-22: 0 of 1024 emitted
+corners carry a different frame on either audited fixture (124 of 1024 before on
+the cube-sphere; the "0.170116" below is the 6x6 grid's worst, a different
+fixture from the 124), and a coefficient authored at a boundary vertex
+reconstructs where the dense hierarchy puts it — 0 of 289 positions, worst
+6.0e-08. The host's condition is honoured the other way round: the frame was
+fixable, it was fixed, and sections 1.1-1.5 of `finish-regional-multires` are
+now the gate and the record. The halo half (2.8) was measured to need no
+cross-level walk; the coefficient-smoothing half (3.7) is still open and is the
+one residual this section's cost statement still applies to. Original text:
 
 The host reviewed the regional-multires residual and asked for one thing, on the
 row that is theirs: **if the boundary frame is fixable inside the change, fix it
