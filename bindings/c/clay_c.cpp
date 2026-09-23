@@ -13068,6 +13068,25 @@ clay_result resolve_sculpt_layer(const clay_voxel_grid* grid, std::size_t layer,
     return CLAY_OK;
 }
 
+// A stack operation is an undo step when the grid belongs to a document with
+// undo on (unify-the-undo-history 3.3). The grid fills the record; this hands
+// it to the history. A standalone grid has no history, exactly as VoxelStep.
+struct LayerOpStep {
+    const clay_voxel_grid* handle = nullptr;
+    voxel::VoxelGrid::SculptLayerOp op;
+
+    explicit LayerOpStep(const clay_voxel_grid* h) {
+        if (h && h->doc && h->doc->undo) handle = h;
+    }
+    // What the grid operation takes: the record, or null when nothing records.
+    voxel::VoxelGrid::SculptLayerOp* record() { return handle ? &op : nullptr; }
+    ~LayerOpStep() {
+        if (handle) handle->doc->undo->record_voxel_layer_property(handle->layer, std::move(op));
+    }
+    LayerOpStep(const LayerOpStep&) = delete;
+    LayerOpStep& operator=(const LayerOpStep&) = delete;
+};
+
 }  // namespace
 
 clay_result clay_voxel_begin_sculpt_layer(clay_voxel_grid* grid, const char* name,
@@ -13155,7 +13174,8 @@ clay_result clay_voxel_set_sculpt_layer_strength(clay_voxel_grid* grid, size_t l
     voxel::VoxelGrid* g = nullptr;
     clay_result r = resolve_sculpt_layer(grid, layer, &g);
     if (r != CLAY_OK) return r;
-    g->set_sculpt_layer_strength(layer, strength);
+    LayerOpStep step(grid);
+    g->set_sculpt_layer_strength(layer, strength, step.record());
     return CLAY_OK;
 }
 
@@ -13174,7 +13194,8 @@ clay_result clay_voxel_set_sculpt_layer_visible(clay_voxel_grid* grid, size_t la
     voxel::VoxelGrid* g = nullptr;
     clay_result r = resolve_sculpt_layer(grid, layer, &g);
     if (r != CLAY_OK) return r;
-    g->set_sculpt_layer_visible(layer, visible != 0);
+    LayerOpStep step(grid);
+    g->set_sculpt_layer_visible(layer, visible != 0, step.record());
     return CLAY_OK;
 }
 
@@ -13182,7 +13203,8 @@ clay_result clay_voxel_remove_sculpt_layer(clay_voxel_grid* grid, size_t layer) 
     voxel::VoxelGrid* g = nullptr;
     clay_result r = resolve_sculpt_layer(grid, layer, &g);
     if (r != CLAY_OK) return r;
-    g->remove_sculpt_layer(layer);
+    LayerOpStep step(grid);
+    g->remove_sculpt_layer(layer, step.record());
     return CLAY_OK;
 }
 
@@ -13192,7 +13214,8 @@ clay_result clay_voxel_move_sculpt_layer(clay_voxel_grid* grid, size_t from, siz
     if (r != CLAY_OK) return r;
     if (to >= g->sculpt_layer_count())
         return fail(CLAY_ERROR_NOT_FOUND, "no sculpt layer " + std::to_string(to));
-    g->move_sculpt_layer(from, to);
+    LayerOpStep step(grid);
+    g->move_sculpt_layer(from, to, step.record());
     return CLAY_OK;
 }
 
@@ -13219,7 +13242,8 @@ clay_result clay_voxel_merge_sculpt_layer_down(clay_voxel_grid* grid, size_t lay
     voxel::VoxelGrid* g = nullptr;
     clay_result r = resolve_sculpt_layer(grid, layer, &g);
     if (r != CLAY_OK) return r;
-    if (!g->merge_sculpt_layer_down(layer))
+    LayerOpStep step(grid);
+    if (!g->merge_sculpt_layer_down(layer, step.record()))
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "the bottom sculpt layer has nothing below it");
     return CLAY_OK;
 }

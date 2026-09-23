@@ -73,10 +73,13 @@ struct World {
 
     // One sculpt-layer pass, recorded the way both bindings record a verb: the
     // pass joins the artist's layer AND becomes one undo step.
-    void pass(const char* name, voxel::VoxelCoord at, int amount) {
+    // `also`, when given, is a second inflate inside the same pass.
+    void pass(const char* name, voxel::VoxelCoord at, int amount,
+              std::optional<voxel::VoxelCoord> also = std::nullopt) {
         grid.begin_sculpt_layer(name);
         REQUIRE(h.begin_voxel_step(voxel_layer, grid));
         grid.sculpt_inflate(at, dab(9), amount);
+        if (also) grid.sculpt_inflate(*also, dab(9), 2);
         h.end_voxel_step(grid);
         grid.end_sculpt_layer();
     }
@@ -172,7 +175,9 @@ TEST_CASE("voxel layer history: undoing a merge-down restores BOTH layers") {
     // Overlapping, so the fold overwrites afters in the lower layer — the part
     // of a merge that is not an append and that an undo has to put back.
     w.pass("lower", {0, 6, 0}, 2);
-    w.pass("upper", {0, 7, 0}, -1);
+    // The upper pass carves into cells the lower one wrote AND inflates
+    // somewhere the lower never reached.
+    w.pass("upper", {0, 7, 0}, -1, voxel::VoxelCoord{5, 3, 0});
     REQUIRE(w.grid.set_sculpt_layer_strength(1, 0.5f));  // unrecorded: set-up only
     const Bytes before = w.grid.serialize();
     const std::size_t lower = w.grid.sculpt_layer_cell_count(0);
@@ -180,7 +185,10 @@ TEST_CASE("voxel layer history: undoing a merge-down restores BOTH layers") {
 
     VoxelGrid::SculptLayerOp op;
     REQUIRE(w.grid.merge_sculpt_layer_down(1, &op));
-    CHECK_FALSE(op.lower_afters.empty());  // the overlap really was exercised
+    // Both halves of a fold really were exercised: cells the lower layer
+    // already owned (afters overwritten) and cells it did not (appended).
+    CHECK_FALSE(op.lower_afters.empty());
+    CHECK(op.held.changes.size() > op.lower_afters.size());
     w.record(op);
     const Bytes merged = w.grid.serialize();
     REQUIRE(w.grid.sculpt_layer_count() == 1);

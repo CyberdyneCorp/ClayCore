@@ -1225,11 +1225,28 @@ clay_result clay_remove_node(clay_document* doc, clay_layer_id layer, clay_node_
  * a redo bring the content back rather than an empty layer; the payload is not
  * reachable while the layer is absent, and is not saved.
  *
+ * A VOXEL SCULPT-LAYER OPERATION IS A STEP: clay_voxel_set_sculpt_layer_strength,
+ * _visible, clay_voxel_move_sculpt_layer, clay_voxel_remove_sculpt_layer and
+ * clay_voxel_merge_sculpt_layer_down each record one, carrying the property AND
+ * the cells the recompose rewrote, so an undo restores the slider and the grid
+ * together, bit-exact. Through 0.120.0 none of them recorded anything, and an
+ * undo after a dial reverted the PASS onto cells the dial had moved.
+ *
  * WHAT IS STILL NOT A STEP, because nothing records it: creating a MASK — mask
- * EDITS record, since 0.47.0, but the mask's existence does not — and the
- * operations that destroy history itself (dropping a resolution level, removing
- * a sculpt layer, merging one down). Consolidate IS undoable and is worth
- * naming because it is the one most often assumed otherwise.
+ * EDITS record, since 0.47.0, but the mask's existence does not — creating a
+ * voxel SCULPT LAYER (clay_voxel_begin_sculpt_layer; the pass's cells are steps,
+ * the layer's record is not), and dropping a resolution level, which destroys
+ * history itself. Consolidate IS undoable and is worth naming because it is the
+ * one most often assumed otherwise.
+ *
+ * ENABLING MID-SESSION starts an EMPTY history and is never refused: what the
+ * document holds is the starting state, and a second enable keeps the history
+ * it has. clay_document_end_undo_group with no bracket open is a no-op — through
+ * 0.120.0 it folded every step since the session began into one, which a host
+ * reached by enabling undo mid-gesture. The crash journal a mid-session enable
+ * starts is paired with the snapshot the document was last loaded from or saved
+ * to; if it was edited since, save once after enabling, or a recovery onto the
+ * older snapshot will lack those edits.
  *
  * The depths reported by clay_document_undo_state count steps that will
  * actually reverse something, so a host greying a menu item from one never
