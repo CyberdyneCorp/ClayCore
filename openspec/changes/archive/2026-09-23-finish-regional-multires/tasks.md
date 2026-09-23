@@ -492,11 +492,14 @@
       `clay_multires_copy_block` in shape. The cross-level helper of section 2
       is internal and gets no C entry point unless a host asks for one. MOVED
       to `expose-the-mixed-depth-export` (tasks 1.1-2.4) rather than built,
-      for the reason 6.5 records: no host exports a hierarchy, and
-      `clay_multires_copy_level_mesh` itself has no caller outside tests,
-      bindings and examples. ABI surface nobody calls is maintenance with no
-      user; the C++ export is finished and gated, and the follow-up change is
-      where the entry point waits for the host that asks
+      for the reason 6.5 records: no host builds a regional hierarchy (neither
+      ClaySpace nor ClaySpaceDesktop calls
+      `clay_multires_refine_patches_to_level`), so no host can meet a
+      mixed-depth seam. ClaySpaceDesktop DOES bake hierarchies through
+      `clay_multires_copy_level_mesh`, but uniform ones, where that call is
+      already watertight. ABI surface no caller can reach is maintenance with
+      no user; the C++ export is finished and gated, and the follow-up change
+      is where the entry point waits for the host that refines a region
 - [x] 6.2 VERSION LINES move together, and they moved for a reason this task did
       not anticipate: not the new entry point of 6.1, which is still unbuilt,
       but a field of an EXISTING one that means something new.
@@ -527,13 +530,16 @@
 - [x] 6.4 `examples/74_regional_multires.py` repeats the gap in the artist's
       vocabulary and calls the polygons "the next piece of this change". Update
       it, and say plainly there that the export half had no host waiting.
-      DONE: the engine builds the polygons, pyclay does not reach them, and the
-      export half had no host waiting while the storage half is finished
-- [x] 6.5 Say in the docs who each half is for. `mesh_at_level` and
-      `clay_multires_copy_level_mesh` are called only from tests, bindings and
-      examples — no host loop — and the one host we can check does not export
-      hierarchies at all. The frame and neighbourhood half is storage and does
-      have users today. DONE in
+      DONE: the engine builds the polygons, pyclay does not reach them, and no
+      host refines a region yet, while the storage half is finished
+- [x] 6.5 Say in the docs who each half is for. CORRECTED at review on
+      2026-09-23: the earlier reading here ("called only from tests, bindings
+      and examples ... the one host we can check does not export hierarchies")
+      was wrong — ClaySpaceDesktop bakes a hierarchy's display level through
+      `clay_multires_copy_level_mesh`. What holds is narrower: no host calls
+      `clay_multires_refine_patches_to_level`, so every hierarchy a host bakes
+      is uniform and the mixed export has no seam to close for it. The frame
+      and neighbourhood half is storage and does have users today. DONE in
       `docs/09-brush-latency-and-coverage.md`, beside the export it describes
 - [x] 6.6 `python3 tools/check_task_symbols.py` and the OpenSpec strict
       validation both pass on this change before it is opened — and so does

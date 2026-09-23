@@ -2345,10 +2345,10 @@ SmoothOutcome smooth_both(mesh::MultiresSmoothMode mode) {
 }
 
 // PRECONDITIONS: the fixture has the 64-vertex rim, the dab covers all of
-    // it, and the stroke wrote there — a stroke that never reached the rim
-    // would agree for free. Written is not asserted at 64: with the complete
-    // ring one rim vertex comes out of preserve-detail unchanged — and so does
-    // its dense twin, which the comparison below is what says.
+// it, and the stroke wrote there — a stroke that never reached the rim would
+// agree for free. Written is not asserted at 64: with the complete ring one rim
+// vertex comes out of preserve-detail unchanged — and so does its dense twin,
+// which the comparison below is what says.
 void require_rim_reached(const SmoothOutcome& o) {
     INFO("rim " << o.rim << ", " << o.rim_reached << " inside the dab, " << o.rim_moved
                 << " written");

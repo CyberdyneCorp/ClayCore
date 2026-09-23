@@ -747,10 +747,11 @@ pretend they do.
   middle 2x2 at level 3, one dab over the region left all 64 rim vertices
   somewhere other than the dense hierarchy leaves them, worst 0.0035
   (detail-only) and 0.0196 (preserve-detail), and 0 afterwards.
-- **The export half has no host waiting.** `mesh_at_level`,
-  `clay_multires_copy_level_mesh` and the mixed export above are called from
-  tests, bindings and examples and from no host loop, and the one host we can
-  check exports no hierarchies at all. So the mixed export is finished in C++
+- **The export half has no host waiting.** A host does bake hierarchies —
+  ClaySpaceDesktop's mesh conversion calls `clay_multires_copy_level_mesh` at
+  the display level — but no host calls `clay_multires_refine_patches_to_level`,
+  so every hierarchy a host bakes is uniform and already watertight through
+  that call. So the mixed export is finished in C++
   and gated there, and its C entry point is NOT built: nothing in `clay.h`
   reaches it, and a host on the C ABI or on pyclay that assembles per patch
   still meets the open-edge counts above. That work — the descriptor, the

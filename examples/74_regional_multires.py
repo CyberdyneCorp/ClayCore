@@ -41,7 +41,8 @@ step than the coarse neighbour's has, and the two are a step apart rather than a
 hairline apart. The engine builds those polygons now
 (`MultiresSurface::mixed_mesh_at_level` in C++), but pyclay does not reach them
 yet, so this example cannot show them. Said plainly: the export half had no
-host waiting for it — no host exports a hierarchy — while the storage half, the
+host waiting for it — no host refines a region yet, so every hierarchy a host
+bakes is uniform — while the storage half, the
 frames and the brushes at a boundary, is what an artist sculpting a region is
 using, and that half is finished.
 

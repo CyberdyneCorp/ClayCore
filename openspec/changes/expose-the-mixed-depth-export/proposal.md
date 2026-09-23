@@ -11,14 +11,20 @@ loop `clay.h` tells a host to write leaves 72 / 168 / 264 at display levels
 host on any binding still assembles per patch and still meets those counts.
 
 That change carried the entry point as its tasks 5.7 and 6.1 and did not build
-it, for a reason recorded there: the export half has no host waiting. The one
-host we can check exports no hierarchies, and `clay_multires_copy_level_mesh`
-itself is called only from tests, bindings and examples. Adding ABI surface no
-caller exercises is maintenance with no user, so the two tasks were moved here
-rather than built, and `finish-regional-multires` archived with them named.
+it, for a reason recorded there: no host can meet a mixed-depth seam. Neither
+host checked on 2026-09-23 (ClaySpace, ClaySpaceDesktop) calls
+`clay_multires_refine_patches_to_level`, so neither ever holds a regional
+hierarchy. ClaySpaceDesktop does bake one — its mesh conversion calls
+`clay_multires_copy_level_mesh` at the display level — but on a UNIFORM
+hierarchy, where that call is already the level's own watertight mesh. Adding
+ABI surface no caller can exercise is maintenance with no user, so the two tasks
+were moved here rather than built, and `finish-regional-multires` archived with
+them named.
 
 This change is the place that work waits. It is not scheduled; it starts when a
-host asks for a watertight mixed-depth export through the ABI.
+host refines a region through the ABI and bakes the result — the first host to
+call `clay_multires_refine_patches_to_level` and then `clay_multires_copy_level_mesh`
+meets the open edges below.
 
 ## What Changes
 
