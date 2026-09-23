@@ -158,7 +158,8 @@ because none has a proposal yet:
 
 ## Where the engine is (2026-09-23, v0.120.0)
 
-21 capabilities, 238 archived changes, 41 still open. v0.120.0 was published
+21 capabilities, 240 archived changes, 41 still open (recounted for v0.120.1;
+no open change has zero open tasks). v0.120.0 was published
 2026-09-18. On 2026-09-23 `unify-the-undo-history` finished — voxel
 sculpt-layer operations became undo steps, the mid-session enable was decided,
 and the device half of its measurement was re-scoped to #644 — and archived
