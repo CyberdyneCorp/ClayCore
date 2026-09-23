@@ -773,24 +773,33 @@ TEST_CASE("c sculpt layers: the stats are what makes both scale claims measureme
 
 namespace {
 
-// Classes one full-strength stamp of `verb` moves through a layered stroke on
-// a fresh fixture, with `layer_height` as the descriptor carries it.
-size_t layer_stroke_moved(clay_mesh_brush verb, float layer_height) {
-    Fixture f;
+// A stroke opened on the fixture's active layer, ready to stamp.
+clay_multires_sculpt_layer_stroke* open_layer_stroke(Fixture& f) {
     const uint64_t id = f.add("pass");
     int32_t err = -1;
     REQUIRE(clay_multires_set_active_sculpt_layer(f.surface, id, &err) == CLAY_OK);
     clay_multires_sculpt_layer_stroke* stroke = nullptr;
     REQUIRE(clay_multires_sculpt_layer_stroke_create(f.surface, &stroke) == CLAY_OK);
     REQUIRE(clay_multires_sculpt_layer_stroke_begin(stroke, &err) == CLAY_OK);
+    return stroke;
+}
+
+// Classes one full-strength stamp of `verb` moves through a layered stroke on
+// a fresh fixture, with `layer_height` as the descriptor carries it.
+size_t layer_stroke_moved(clay_mesh_brush verb, float layer_height) {
+    Fixture f;
+    clay_multires_sculpt_layer_stroke* stroke = open_layer_stroke(f);
     clay_mesh_brush_desc brush = draw_brush(0.0f, 0.6f, 1.0f);
     brush.verb = verb;
     brush.layer_height = layer_height;
     clay_multires_stamp_report report{};
     report.struct_size = sizeof(report);
-    REQUIRE(clay_multires_sculpt_layer_stroke_stamp(stroke, &brush, nullptr, &report) == CLAY_OK);
-    REQUIRE(clay_multires_sculpt_layer_stroke_commit(stroke, nullptr) == CLAY_OK);
+    const clay_result stamped =
+        clay_multires_sculpt_layer_stroke_stamp(stroke, &brush, nullptr, &report);
+    const clay_result committed = clay_multires_sculpt_layer_stroke_commit(stroke, nullptr);
     clay_multires_sculpt_layer_stroke_destroy(stroke);
+    REQUIRE(stamped == CLAY_OK);
+    REQUIRE(committed == CLAY_OK);
     return static_cast<size_t>(report.moved_vertices);
 }
 

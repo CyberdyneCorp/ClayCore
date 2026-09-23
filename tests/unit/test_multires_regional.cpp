@@ -2237,18 +2237,30 @@ struct SmoothPair {
 // regional level does NOT store carry zero, because that is what the regional
 // surface holds there: a vertex the level does not store has nowhere to put a
 // coefficient.
+void refine_pair(SmoothPair* p) {
+    for (int l = 0; l < 3; ++l) REQUIRE(p->dense.add_level());
+    REQUIRE(p->part.refine_patches_to_level(region_of(6), 3));
+}
+
+void author_pattern(SmoothPair* p) {
+    for (std::uint32_t v = 0; v < p->ids.size(); ++v) {
+        p->part.set_detail(3, v, rim_pattern(v));
+        p->dense.set_detail(3, p->ids[v], rim_pattern(v));
+    }
+}
+
+void sculpt_at_three(SmoothPair* p) {
+    REQUIRE(p->dense.set_sculpt_level(3));
+    REQUIRE(p->part.set_sculpt_level(3));
+}
+
 SmoothPair smooth_pair() {
     const Mesh cage = grid_quads(6, 1.0f);
     SmoothPair p{build(cage), build(cage), dense_ids(cage, 3), {}};
-    for (int l = 0; l < 3; ++l) REQUIRE(p.dense.add_level());
-    REQUIRE(p.part.refine_patches_to_level(region_of(6), 3));
+    refine_pair(&p);
     p.rim = short_ring(p.dense, p.part, 3, p.ids);
-    for (std::uint32_t v = 0; v < p.ids.size(); ++v) {
-        p.part.set_detail(3, v, rim_pattern(v));
-        p.dense.set_detail(3, p.ids[v], rim_pattern(v));
-    }
-    REQUIRE(p.dense.set_sculpt_level(3));
-    REQUIRE(p.part.set_sculpt_level(3));
+    author_pattern(&p);
+    sculpt_at_three(&p);
     return p;
 }
 
@@ -2332,22 +2344,26 @@ SmoothOutcome smooth_both(mesh::MultiresSmoothMode mode) {
     return o;
 }
 
-void check_smooth_agrees(mesh::MultiresSmoothMode mode) {
-    const SmoothOutcome o = smooth_both(mode);
-    INFO("rim " << o.rim << ", " << o.rim_reached << " inside the dab, " << o.rim_moved
-                << " written");
-    INFO("coefficients: " << o.detail.count << " differ (" << o.detail.off_rim
-                          << " off the rim), worst " << o.detail.worst);
-    INFO("positions: " << o.position.count << " differ (" << o.position.off_rim
-                       << " off the rim), worst " << o.position.worst);
-    // PRECONDITIONS: the fixture has the 64-vertex rim, the dab covers all of
+// PRECONDITIONS: the fixture has the 64-vertex rim, the dab covers all of
     // it, and the stroke wrote there — a stroke that never reached the rim
     // would agree for free. Written is not asserted at 64: with the complete
     // ring one rim vertex comes out of preserve-detail unchanged — and so does
     // its dense twin, which the comparison below is what says.
+void require_rim_reached(const SmoothOutcome& o) {
+    INFO("rim " << o.rim << ", " << o.rim_reached << " inside the dab, " << o.rim_moved
+                << " written");
     REQUIRE(o.rim == 64u);
     REQUIRE(o.rim_reached == 64u);
     REQUIRE(o.rim_moved >= 63u);
+}
+
+void check_smooth_agrees(mesh::MultiresSmoothMode mode) {
+    const SmoothOutcome o = smooth_both(mode);
+    require_rim_reached(o);
+    INFO("coefficients: " << o.detail.count << " differ (" << o.detail.off_rim
+                          << " off the rim), worst " << o.detail.worst);
+    INFO("positions: " << o.position.count << " differ (" << o.position.off_rim
+                       << " off the rim), worst " << o.position.worst);
     CHECK(o.detail.count == 0u);
     CHECK(o.position.count == 0u);
 }
