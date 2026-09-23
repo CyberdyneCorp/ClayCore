@@ -123,3 +123,60 @@
 - **The task-symbol gate caught this file.** Writing the seed-store finding as
   the short names save_memory / load_memory failed `check_task_symbols.py` (2 unresolved);
   the full names resolve.
+
+## 7. Independent review
+
+- [x] 7.1 Randomized oracle, `benchmarks/undo_bound_oracle_probe.cpp`: random
+      documents, one deformer step or host Move segment, undo and redo, refill
+      ONLY the reported bound, compare with a rebuild on a saved copy
+- [x] 7.2 The same trials checked against the RAW field (`RV_RAWBOUND`): every
+      sample that moved within the band must lie in the bound dilated by the
+      band
+- [x] 7.3 Clamp the head's box into the node's bound instead of intersecting
+      (`head_within`), with a regression test that fails on the intersecting
+      code and passes on main
+- [x] 7.4 `same_link` compares a bend curve's guide and a lattice's cage and
+      placement, so a grab ahead of one in the common tail narrows
+- [x] 7.5 Mutations re-run by hand, library AND test binaries rebuilt each time
+
+## What review found
+
+- **The intersection was unsound; the clamp is not.** The first randomized run
+  (1,500 trials) left a brick stale where the step reported NO bounds: a
+  magnify whose ball missed the node's box by less than the band. The node's
+  bound is reported without the band (every consumer adds it), so the field can
+  change there, and intersecting the ball with that box gave nothing. Fixed in
+  `head_within` (design.md D5); test `a ball that misses the node's box but
+  lies within the band of it is still refilled`.
+- **Against the raw field the rule now holds everywhere it was exercised.** 800
+  trials under `RV_RAWBOUND` (400 plain, 400 with per-axis scales, repeats,
+  intersects, instancing and moved layers): 1,489 undo or redo directions that
+  changed the field, 1,190 of them narrowed, and ZERO samples that moved
+  outside the bound plus the band beyond what main shows. Main shows one: seed
+  5128 (a grab on a node in a blended group) moves the raw field by an ulp
+  outside the node's own influence bound, on main and on this branch alike.
+  That is the node bound's, not this change's.
+- **Some refill-vs-rebuild disagreements remain, and they are the rebuild's.**
+  Of 3,000 trials (1,500 plain, 1,500 rich), five leave 1 to 8 bricks
+  different from a full rebuild that main's node bound would have refilled
+  (a sixth, 5128, leaves 13 on main as well). At every one, the bricks the bound kept match the raw field (`clay_eval_points`)
+  to the fp16 step and the REBUILD does not: a full brick build of the same
+  document disagrees with its own raw field at in-band samples on main too (by
+  up to 0.0105 on seed 933 and 0.189 on seed 5111). main's forward Move --
+  dirtying exactly what `clay_layer_move_surface_regions` reports -- leaves the
+  same 8 bricks on seed 933 and 6 on seed 5229. Undo used to hide that by
+  refilling the whole node; it now refills what the Move itself refilled. The
+  build's in-band disagreement with the raw field is a separate defect, not
+  fixed here.
+- **The lattice and bend-curve payloads were not compared**, so either link
+  anywhere in a chain ended the common tail and the step fell back to the node:
+  216 of 216 bricks for a grab ahead of a lattice, 420 of 420 ahead of a curve.
+- **Mutations** (each rebuilt, library and tests; probe 200 plain + 200 rich
+  trials): dropping the fold dilation fails the C box test and the C++ fold
+  extent; dropping the mirror copies fails the C mirror oracle, the C++ raw
+  check and 17 + 14 probe trials; dropping the displaced end fails the C box
+  test and two C++ cases; dropping the group dilation fails two C++ cases (no C
+  oracle and no probe trial catches it -- margin, as D1 says); comparing no
+  cage fails the C++ payload refusal. None of the dilation drops adds a raw
+  or oracle failure over the unmutated baseline, which is what "margin, not
+  soundness" predicts.
