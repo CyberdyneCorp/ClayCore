@@ -1901,3 +1901,87 @@ The list SHALL be the CALLER'S, so that a repeated operation reuses one rather t
 #### Scenario: An unstored unit is refused rather than invented
 - **WHEN** a unit that stores no samples is read out
 - **THEN** the read fails and the caller's buffer is untouched
+
+### Requirement: Independent sample-bound accumulators preserve exact maxima
+The neighboring-sample bound reduction SHALL partition its comparisons into a fixed number of independent floating-point accumulators while preserving the existing maximum absolute forward-neighbor difference.
+
+#### Scenario: Every sample coordinate contributes
+- GIVEN a stored brick with a differing sample at any lattice coordinate
+- WHEN its bound is measured
+- THEN every in-block forward-neighbor pair SHALL be considered
+- AND partial row tails SHALL be included
+- AND the resulting bound SHALL match the scalar neighbor oracle bit for bit
+
+#### Scenario: Non-finite and signed-zero samples
+- GIVEN samples containing signed zeros, subnormals, finite extremes, infinities or NaNs
+- WHEN absolute differences are accumulated
+- THEN NaN differences SHALL leave the non-NaN maximum unchanged
+- AND all non-NaN maximum bits SHALL match the scalar reduction
+
+#### Scenario: Bounded scratch storage
+- GIVEN any number of materialized bricks
+- WHEN each block's bound is measured
+- THEN the reduction SHALL require only constant stack storage and no heap allocations
+
+### Requirement: Zero-strength relax avoids neighborhood sampling
+When relax strength clamps to zero, the library SHALL preserve stored sample bits
+without constructing or reading a smoothing stencil or evaluating the mask.
+It SHALL retain geometric selected-brick reporting, existing completed-pass band
+handling, and cancellation at pass boundaries. A transaction update SHALL still
+materialize its requested source region and provide the corresponding preview delta.
+
+#### Scenario: Zero or negative strength
+- **WHEN** whole-volume or regional relax runs with zero or negative strength
+- **THEN** no mask or stencil samples are evaluated
+- **AND** stored samples remain bit-identical and the selected region is reported
+
+#### Scenario: Preview priming
+- **WHEN** a fresh Smooth transaction receives a whole-field zero-strength update
+- **THEN** its full requested source field is materialized and available as a preview delta
+- **AND** no persistent document edit is recorded
+
+#### Scenario: Cancellation before a pass
+- **WHEN** a zero-strength relax call receives an already-cancelled token
+- **THEN** it reports cancellation and leaves both samples and band unchanged
+
+#### Scenario: Nonzero strength
+- **WHEN** clamped strength is nonzero
+- **THEN** existing smoothing arithmetic and mask behavior are preserved
+
+### Requirement: Preview priming avoids redundant sample-buffer allocation
+A zero-strength relax pass SHALL NOT copy sample buffers that it cannot read.
+Whole-volume zero-strength relaxation SHALL report the stored set without an
+identity rewrite. Initial materialization covering every slot of an empty lattice
+SHALL reserve final sample storage once; partial and subsequent requests SHALL
+retain amortized storage growth.
+
+#### Scenario: Repeated whole-volume zero-strength passes
+- **GIVEN** a populated volume whose band is already at its minimum and no mask
+- **WHEN** whole-volume zero-strength relaxation runs for multiple iterations
+- **THEN** it allocates no temporary buffers and preserves its samples and reports
+
+#### Scenario: Full initial source materialization
+- **WHEN** one request materializes every slot of an empty lattice
+- **THEN** sample storage is allocated before appending the source blocks
+- **AND** the stored field and materialization report remain unchanged
+
+#### Scenario: Later local source materialization
+- **WHEN** a gesture materializes additional local bricks
+- **THEN** existing materialized values are retained and storage growth remains amortized
+
+### Requirement: Relief displaces along each point's own normal
+Relief SHALL move each point of the accumulated surface along that point's own normal — the gradient of the accumulated field — and not along one direction shared by the stamp. That makes it the field counterpart of the mesh Inflate brush (`CLAY_BRUSH_FRAME_VERTEX_NORMAL`), and only an approximation of the mesh Draw brush and the Standard preset built on it (`CLAY_BRUSH_FRAME_REGION_NORMAL`).
+
+The library SHALL NOT describe Relief as a faithful Standard. Where the normals under a stamp agree, the two frames differ by a small fraction of the amplitude; on a feature narrower than the stamp they differ by the whole amplitude, and the documentation beside the op SHALL say so with measured numbers.
+
+#### Scenario: A thin ridge thickens on both faces
+- **WHEN** one relief stamp of amplitude k covers the top of a fin narrower than the stamp
+- **THEN** where the stamp's weight is full, each face of the fin moves outward by k, as well as the top rising by k
+
+#### Scenario: The per-point-normal displacement lies on the relief surface
+- **WHEN** each surface point in a relief stamp's support, away from the form's corners, is moved along its own normal by the relief's amplitude times its weight
+- **THEN** the moved point lies on the displaced surface
+
+#### Scenario: A shared-direction displacement does not
+- **WHEN** the same points on the faces of a fin narrower than the stamp are moved instead along the stamp's single averaged normal
+- **THEN** they lie at least half the amplitude away from the relief surface

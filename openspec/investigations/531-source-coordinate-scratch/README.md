@@ -24,7 +24,7 @@ The corresponding `engine-*.json` files contain all six fixtures for one- and
 blobs, bounds, tallies and added-brick coordinates. The 32-item full-fill results
 are approximately unchanged, not evidence of a substantial improvement.
 
-Probe: `../../changes/reuse-source-grid-samples/probes/materialization.cpp`.
+Probe: `../../changes/archive/2026-09-22-reuse-source-grid-samples/probes/materialization.cpp`.
 Build separately with each revision's release CPU library and meshoptimizer
 archive, C++20, `-O3 -DNDEBUG`, pthread. Run three alternating process pairs,
 seven samples per fixture, discard the first, affinity CPU 8. Output argument is

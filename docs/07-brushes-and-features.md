@@ -113,7 +113,7 @@ Four consequences worth knowing before using them:
   warp per reached item per dab (700 warps, 8.7× relief's evaluation cost at
   30 dabs over 24 items), and a shared-direction *combine op* cannot exist,
   because it needs the accumulated field at a point other than the sample.
-  `openspec/changes/relief-is-inflate-not-standard` has the measurement.
+  `openspec/changes/archive/2026-09-22-relief-is-inflate-not-standard` has the measurement.
 
 `TransitionLinear`/`TransitionRadial` are **non-local**: their weight is
 non-zero arbitrarily far from both operands, so those items report infinite
@@ -2520,7 +2520,7 @@ second one.
 vertex plane against query time, false-positive touched vertices, normal
 recompute, upload bytes, locality and split/merge cost; the table and the one
 place the decision departs from the rule that chose it are in
-[`design.md`](../openspec/changes/add-extreme-poly-runtime/design.md) D2a and
+[`design.md`](../openspec/changes/archive/2026-09-05-add-extreme-poly-runtime/design.md) D2a and
 the numbers are in
 [`docs/09`](09-brush-latency-and-coverage.md#the-extreme-poly-runtime-measured-add-extreme-poly-runtime).
 

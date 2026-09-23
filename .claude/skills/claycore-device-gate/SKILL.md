@@ -21,8 +21,14 @@ of idle iPad before you start. Raise the cooldown and it grows from there.
 iPads attached and only the reference device is accepted — a run from any other
 model or OS is *refused*, not scored, after a ~10-minute rebuild.
 
-- Reference device: **iPad15,5 (iPad Air 13-inch, M3) on iOS 26.5.2**, listed
-  locally as `iPad (52)`, UDID `00008122-000410410A6B801C`.
+- Reference device: **iPad15,5 (iPad Air 13-inch, M3) on iOS 27.0 (24A437)**,
+  listed locally as `iPad (52)`, UDID `00008122-000410410A6B801C`. It moved from
+  26.5.2 on 2026-09-18 and was re-baselined in PR #625. `check_device_bench.py`
+  refuses a run whose `osVersion` differs from the baseline, so **an OS update
+  on this iPad means a re-baseline before anything can be scored again** — and
+  the release that re-baselines has no `REGRESSION` coverage, because a baseline
+  written from a run is compared against itself. `BUDGET` and `GROWTH` still
+  gate; regression coverage returns with the next same-OS run.
 - Confirm it is above the `== Devices Offline ==` line:
   `xcrun xctrace list devices`
 
@@ -58,6 +64,16 @@ xcrun devicectl device info apps --device <udid> | grep -i claycore
 ```
 
 Treat any `abiVersion` disagreement from `collect_device_bench.py` as this.
+
+**The host app must adopt the scene lifecycle.** An app linked against the iOS
+26 or later SDK with no `UIApplicationSceneManifest` is terminated during
+launch, before the test runner connects: xcodebuild says "Early unexpected exit,
+operation never finished bootstrapping", no test runs, and the console names
+`_UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption`. On 2026-09-18
+that killed session 1/7 twelve seconds in. **There is no thermal event**, which
+is what tells it apart from the heat kill below. Fixed in `tests/device/Host`
+(`Info.plist`, `project.yml` and `AppDelegate.swift`); if a host is ever
+regenerated or replaced, keep the manifest.
 
 **`xcodegen`** must be installed (`brew install xcodegen`); the Xcode project is
 generated from `tests/device/project.yml` and is not committed.
@@ -174,14 +190,26 @@ arrives. It covers a run measured while warm, not one ended for being warm.
 
 ## Watching the device while it runs
 
-**Temperature is readable over the wire**, and it is the only *continuous*
-signal — `Thermal level changed` in the console is a transition, so by the time
-it prints the app is already being killed.
+**There is currently NO continuous temperature signal on the reference
+iPad.** `Thermal level changed` in the console is a transition, so by the time
+it prints the app is already being killed; a temperature reading was the one
+signal that let you act before that, and on iOS 27.0 it is gone.
 
 ```sh
-idevicediagnostics -u <udid> ioregentry AppleSmartBattery   # Temperature, centi-degC
+idevicediagnostics -u <udid> ioregentry AppleSmartBattery   # had Temperature, centi-degC
 ```
 
+On iOS 26.5.2 this returned `Temperature` (centi-degC). **Since the move to iOS
+27.0 (24A437) it returns no `Temperature` key on this device**, with
+libimobiledevice 1.4.0's `idevicediagnostics`. Whether iOS 27 removed the key
+or the tool fell behind the OS is **UNVERIFIED**. The untried alternative is
+`pymobiledevice3`, whose diagnostics commands include an IORegistry query —
+nobody here has run it, so take the exact invocation from its `--help` rather
+than from this file. Try it before concluding the reading is gone for good, and correct this section with what it says. Until
+then, what is left is the console filter below, which only reports the
+transition, and cooldowns long enough that you do not need the number.
+
+What the reading meant when it worked, kept for when it works again:
 `Temperature = 3350` is 33.50 °C. On the reference iPad: lifetime average 24 °C,
 lifetime maximum 37.9 °C, ~30 °C idle, and it fell from a session's heat back to
 30 °C in about twelve minutes. A gate run that stays under ~33 °C completes.
@@ -210,11 +238,12 @@ genuinely cold start — and still climbed to 32.5-32.6 degC by session 3 with t
 default 900 s cooldowns, then crossed into `Warn` and lost
 `testStrokeRefreshInsideAGroup` to the kill above at 21:19:04. Sessions 1 and 2
 had passed. So the starting temperature tells you whether session 1 is safe and
-nothing more: watch the number BETWEEN sessions, and if it is not falling back
+nothing more: watch the number BETWEEN sessions (where a probe still returns
+one — see above), and if it is not falling back
 under ~30 degC, raise `CLAY_DEVICE_COOLDOWN` before session 3 rather than after
 the failure.
 
-Reading the probe: the temperature is nested under the `IORegistry` key, not at
+Reading the probe (iOS 26.5.2): the temperature is nested under the `IORegistry` key, not at
 the top level — `plistlib.loads(out)['IORegistry']['Temperature']`. A top-level
 read returns `None`, which looks like an unsupported device rather than a wrong
 key.

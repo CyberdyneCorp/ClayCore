@@ -10,7 +10,9 @@ and the parity gates are written in, which is why its coverage is held EQUAL to
 the C ABI's rather than allowed to be a convenience subset —
 `check_binding_parity` fails on a capability reachable from one and not the
 other.
+
 ## Requirements
+
 ### Requirement: pyclay module
 The library SHALL ship a nanobind extension module `pyclay` exposing: document/layer construction (`Document`, `add_sdf_layer`, `add_voxel_layer`), the full edit vocabulary (primitives, ops, blends, transforms, deformers, mirrors, strokes) with Pythonic parameter names, field evaluation (`eval`, `gradients`), meshing with resolution/decimation/backend selection, mesh predicates (`is_watertight()` etc.), and save/load of `.clayspace` plus mesh export (OBJ/FBX/PLY/glTF).
 
@@ -878,6 +880,16 @@ pyclay SHALL expose `Layer.magnify_surface` and `Layer.magnify_surface_preview` 
 - **WHEN** the same patch is merged six times
 - **THEN** the item count is what it was after the first
 
+The executing result SHALL include `box`, the actual sampled region, alongside
+`bounds` and costs describing the installed volume including retained storage.
+Compatible retained-volume maintenance SHALL report `whole_layer` as false.
+Planning assumes the source volume's spacing and band; execution with different
+settings SHALL report the actual conservative whole-root plan.
+
+#### Scenario: Local maintenance reports its actual work
+- **WHEN** a script repeatedly moves and merges a patch of an isolated compatible volume using its existing sampling settings
+- **THEN** the result's `box` matches the planned patch, neighbouring roots remain, and installed `bounds` include retained samples
+
 ### Requirement: Mesh layers from Python
 The module SHALL expose attaching a loaded mesh to a document as a layer, listing and fetching mesh layers, the mesh's bounds, and the combined export that appends every visible mesh layer to the meshed field. A fetched mesh SHALL be borrowed from the document and SHALL expose its buffers through the module's existing numpy exchange rather than a copy per read.
 
@@ -966,3 +978,39 @@ This is what lets an example assert the allocation discipline against the shippe
 - **WHEN** an example runs a stroke and reads the arena's growth count before and after its warm-up
 - **THEN** the count stops rising, and the example fails loudly if it does not
 
+### Requirement: Adaptive-surface undo from Python
+The module SHALL expose a `TopologyDelta` class with `revert(sculptor)`, `apply(sculptor)`, `clear()`, a `stats` mapping carrying the same fields as the C statistics struct, `serialize()` and a static `deserialize(bytes)`. `DynamicSculptor.stamp` SHALL accept a `record` argument that accumulates into a `TopologyDelta`. The binding parity gate SHALL map the class to the `clay_dynamic_delta_` calls. The gate reads members, not keyword arguments, so the pairing of `record` with `clay_dynamic_sculptor_stamp_recorded` SHALL be held by tests on both sides instead.
+
+A replay the engine refuses SHALL raise, and SHALL leave the surface unchanged.
+
+#### Scenario: Undo and redo from Python match the exports
+- **WHEN** a script records an adaptive stroke, reverts it, and applies it again
+- **THEN** `to_mesh` equals the pre-stroke export after the revert and the post-stroke export after the apply, and `validate()` passes at both ends
+
+#### Scenario: A refused replay raises
+- **WHEN** a script reverts an older record while a newer one is applied
+- **THEN** the call raises, and the surface's revisions are unchanged
+
+### Requirement: An adaptive stroke is reachable from Python
+`pyclay` SHALL expose `DynamicSculptor.apply_stroke` and `DynamicSculptor.apply_preset`, mirroring `MeshSculptor`'s stroke calls and mapping to `clay_dynamic_sculptor_apply_stroke` and `clay_dynamic_sculptor_apply_preset`, so the binding-parity gate passes without an alias or an exemption.
+
+Samples SHALL keep the `(N, K)` convention with `K` from 3 to 8, so a sixth column carries the azimuth. A Layer stroke SHALL raise with the reason the adaptive stamp already gives, rather than returning zero.
+
+#### Scenario: Parity holds against a built module
+- **WHEN** `tools/check_binding_parity.py` runs with an imported `pyclay` after this change
+- **THEN** both adaptive stroke calls are matched to their C counterparts, and the gate reports that it imported the module rather than parsing its source
+
+#### Scenario: A Layer stroke raises
+- **WHEN** a script applies a Layer stroke to an adaptive surface
+- **THEN** the call raises and the surface is unchanged
+
+### Requirement: An adaptive stroke records from Python
+`DynamicSculptor.apply_stroke` and `DynamicSculptor.apply_preset` SHALL accept a `record` argument, a `TopologyDelta`, capturing the whole stroke as one replayable step with the same semantics as the C recorded stroke calls. A record that does not end where the surface is SHALL raise `ValueError` and apply nothing. The binding parity gate reads members rather than keyword arguments, so the pairing of `record` with `clay_dynamic_sculptor_apply_stroke_recorded` and `clay_dynamic_sculptor_apply_preset_recorded` SHALL be held by tests on both sides.
+
+#### Scenario: A recorded Python stroke undoes and redoes to the exports
+- **WHEN** a script applies a stroke with `record=`, reverts the record and applies it again
+- **THEN** `to_mesh` equals the pre-stroke export after the revert and the post-stroke export after the apply, and `validate()` passes at both ends
+
+#### Scenario: A stale record raises and applies nothing
+- **WHEN** a script records a stroke, stamps without the record, and strokes again with the same record
+- **THEN** the call raises `ValueError` and the surface's revisions are unchanged

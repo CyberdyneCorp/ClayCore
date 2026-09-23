@@ -58,5 +58,5 @@ These current-baseline results do not establish a cross-release trend from the
 earlier timings above. Full preview preparation and mesh rebuilding still need
 substantial work to meet 16 ms across all actions.
 
-See [source-grid validation](changes/reuse-source-grid-samples/validation.md)
+See [source-grid validation](changes/archive/2026-09-22-reuse-source-grid-samples/validation.md)
 for all brush medians, observed tails, exactness checks and build identities.
